@@ -1,0 +1,6 @@
+[submodule "core/extern/XGBoost-FastForest"]
+	path = core/extern/XGBoost-FastForest
+	url = https://github.com/guitargeek/XGBoost-FastForest.git
+[submodule "core/extern/correctionlib"]
+	path = core/extern/correctionlib
+	url = git@github.com:cms-nanoAOD/correctionlib.git

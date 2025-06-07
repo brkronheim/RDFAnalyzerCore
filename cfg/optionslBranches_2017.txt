@@ -1,0 +1,23 @@
+# types:  unsigned int=0, int=1, float=2, double=3, bool=4, char=5
+#     RVec +6;
+
+name=optionalBranch type=2 default=-1
+name=optionalBranchVec type=8 default=-1
+name=HLT_PFMET120_PFMHT120_IDTight type=4 default=0
+name=HLT_PFMET120_PFMHT120_IDTight_PFHT60 type=4 default=0
+name=HLT_Ele32_WPTight_Gsf type=4 default=0
+name=HLT_Ele32_WPTight_Gsf_L1DoubleEG type=4 default=0
+name=HLT_IsoMu27 type=4 default=0
+name=HLT_Mu17_TrkIsoVVL_Mu8_TrkIsoVVL_DZ_Mass3p8 type=4 default=0
+name=HLT_Mu17_TrkIsoVVL_Mu8_TrkIsoVVL_DZ_Mass8 type=4 default=0
+name=HLT_Ele23_Ele12_CaloIdL_TrackIdL_IsoVL type=4 default=0
+name=Flag_goodVertices type=4 default=1
+name=Flag_globalSuperTightHalo2016Filter type=4 default=1
+name=Flag_HBHENoiseFilter type=4 default=1
+name=Flag_HBHENoiseIsoFilter type=4 default=1
+name=Flag_EcalDeadCellTriggerPrimitiveFilter type=4 default=1
+name=Flag_BadPFMuonFilter type=4 default=1
+name=Flag_BadPFMuonDzFilter type=4 default=1
+name=Flag_eeBadScFilter type=4 default=1
+name=Flag_hfNoisyHitsFilter type=4 default=1
+name=Flag_ecalBadCalibFilter type=4 default=1

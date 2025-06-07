@@ -1,0 +1,32 @@
+# types:  unsigned int=0, int=1, unsigned short=2, short=3, unsigned char=4, char=5 float=6, double=7, bool=8
+#     RVec +10;
+
+name=GenPart_pt type=16 default=-1
+name=GenPart_eta type=16 default=-1
+name=GenPart_phi type=16 default=-1
+name=GenPart_mass type=16 default=-1
+name=GenPart_status type=11 default=-1
+name=GenPart_statusFlags type=12 default=0
+name=GenPart_genPartIdxMother type=13 default=-1
+name=GenPart_pdgId type=11 default=-1
+
+name=GenDressedLepton_eta type=16 default=-1
+name=GenDressedLepton_phi type=16 default=-1
+name=GenJet_pt type=16 default=-1
+name=GenJet_eta type=16 default=-1
+name=GenJet_phi type=16 default=-1
+name=GenJet_mass type=16 default=-1
+name=GenJet_hadronFlavour type=14 default=-1
+
+name=LHE_AlphaS type=6 default=-1
+name=LHE_HT type=6 default=-1
+name=LHE_Vpt type=6 default=-1
+name=LHE_NpNLO type=4 default=-1
+
+name=genWeight type=6 default=1
+name=Generator_x1 type=1 default=1
+name=Generator_x2 type=1 default=1
+name=Generator_id1 type=1 default=1
+name=Generator_id2 type=1 default=1
+
+

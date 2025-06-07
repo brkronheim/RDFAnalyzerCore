@@ -1,0 +1,2 @@
+file=aux/Run3/JME/2022_Summer22EE/jetvetomaps.json correctionName=Summer22EE_23Sep2023_RunEFG_V1 name=jetVeto inputVariables=Jet_eta,Jet_phi
+

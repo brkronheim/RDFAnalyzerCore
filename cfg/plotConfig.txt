@@ -1,0 +1,3 @@
+directory=/home/brkronheim/dataMCComp/
+saveFile=shapes.root
+threads=-1
