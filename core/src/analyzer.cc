@@ -9,14 +9,44 @@
 
 #include <unordered_map>
 #include <unordered_set>
-#include <xgboostEvaluator.h>
 #include <analyzer.h>
-#include <systematics.h>
 #include <util.h>
 #include <iostream>
 #include <correction.h>
+#include <systematics.h>
 
 //#include <Pythia8Plugins/JetMatching.h>s
+
+template<typename T>
+ROOT::RDF::RNode saveVar(T var, std::string name, ROOT::RDF::RNode df){
+    auto storeVar = [var](unsigned int, const ROOT::RDF::RSampleInfo) -> T {
+                                    return(var);
+                                };
+    auto newDf = df.DefinePerSample(name, storeVar);
+    return(newDf);
+}
+
+
+
+
+ROOT::RDF::RNode addConstants(ROOT::RDF::RNode df, std::unordered_map<std::string, std::string> &configMap){
+    if(configMap.find("floatConfig")!=configMap.end()){
+        std::string floatFile = configMap.at("floatConfig");
+        auto floatConfig = readConfig(floatFile);
+        for(auto &pair : floatConfig){
+            df = saveVar<Float_t>(std::stof(pair.second), pair.first, df);
+        }
+    }
+    if(configMap.find("intConfig")!=configMap.end()){
+        std::string intFile = configMap.at("intConfig");
+        auto intConfig = readConfig(intFile);
+        for(auto &pair : intConfig){
+            df = saveVar<Int_t>(std::stof(pair.second), pair.first, df);
+        }
+    }
+    return(df);
+}
+
 
 Analyzer::Analyzer(std::string configFile):
     configMap_m(processConfig(configFile)),
@@ -726,6 +756,8 @@ void Analyzer::addBDT(std::string key, std::string fileName, std::vector<std::st
 }
 
 
+
+
 void Analyzer::addCorrection(std::string key, std::string fileName, std::string correctionName, std::vector<std::string> featureList){
    
     // load correction object from json
@@ -740,6 +772,7 @@ void Analyzer::addCorrection(std::string key, std::string fileName, std::string 
 
 
 
+
 // Static variable declaration
 std::unordered_map<std::string, std::unique_ptr<TH1F>> Analyzer::th1f_m;
 std::unordered_map<std::string, std::unique_ptr<TH2F>> Analyzer::th2f_m;
@@ -747,3 +780,5 @@ std::unordered_map<std::string, std::unique_ptr<TH1D>> Analyzer::th1d_m;
 std::unordered_map<std::string, std::unique_ptr<TH2D>> Analyzer::th2d_m;
 std::unordered_map<std::string, fastforest::FastForest> Analyzer::bdts_m;
 std::unordered_map<std::string, correction::Correction::Ref> Analyzer::corrections_m;
+
+

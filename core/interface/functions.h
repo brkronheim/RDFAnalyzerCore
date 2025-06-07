@@ -165,16 +165,6 @@ T absDiff(T val1, T val2){
     return(fabs(val1-val2));
 }
 
-/*
-template<typename T>
-ROOT::RDF::RNode saveVar(T var, std::string name, ROOT::RDF::RNode df){
-    auto storeVar = [var](unsigned int, const ROOT::RDF::RSampleInfo) -> T {
-                                    return(var);
-                                };
-    auto newDf = df.DefinePerSample(name, storeVar);
-    return(newDf);
-}
-*/
 
 template<typename T>
 T EvalDeltaPhi(T phi0, T phi1){

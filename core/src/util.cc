@@ -20,7 +20,7 @@
 // Fill a TChain with all the files in a directory containing anything in globs, and skipping anything in antiglobs.
 // This is not done recursively, it only checks one level
 // Returns the number files found
-int scan(TChain &chain, std::string directory, std::vector<std::string> globs, std::vector<std::string> antiglobs, bool base){
+int scan(TChain &chain, const std::string &directory, const std::vector<std::string> &globs, const std::vector<std::string> &antiglobs, bool base){
     std::cout << "Checking " << directory << std::endl;
     int filesFound = 0;
     
@@ -73,7 +73,7 @@ int scan(TChain &chain, std::string directory, std::vector<std::string> globs, s
 }
 
 // Read a config file, return a map between the variables in it and their values
-std::unordered_map<std::string, std::string> readConfig(std::string configFile){
+std::unordered_map<std::string, std::string> readConfig(const std::string &configFile){
     
     std::unordered_map<std::string, std::string> configMap;
 
@@ -98,7 +98,7 @@ std::unordered_map<std::string, std::string> readConfig(std::string configFile){
 
 
 // Split a string based on a delimiter into a vector of substrings
-std::vector<std::string> splitString(std::string input, std::string delimiter){
+std::vector<std::string> splitString(std::string input, const std::string &delimiter){
     std::vector<std::string> splitStringVector;
     // get size of delimiter
     const int delimSize = delimiter.size();
@@ -126,7 +126,7 @@ std::vector<std::string> splitString(std::string input, std::string delimiter){
 }
 
 // Do basic config processing and execution setup
-std::unordered_map<std::string, std::string> processConfig(std::string configFile){
+std::unordered_map<std::string, std::string> processConfig(const std::string &configFile){
     // Global Root setting
     gROOT->ProcessLine( "gErrorIgnoreLevel = 2001;");
 
@@ -153,7 +153,7 @@ std::unordered_map<std::string, std::string> processConfig(std::string configFil
     return(configMap);
 }
 
-std::vector<std::string> configToVector(std::string configFile){
+std::vector<std::string> configToVector(const std::string &configFile){
     std::vector<std::string> configVector;
 
     // iterate over the config file
@@ -173,7 +173,7 @@ std::vector<std::string> configToVector(std::string configFile){
 }
 
 // Make a basic dataframe and return it based on a config map
-std::unique_ptr<TChain> makeTChain(std::unordered_map<std::string, std::string> &configMap){
+std::unique_ptr<TChain> makeTChain(const std::unordered_map<std::string, std::string> &configMap){
     std::string directory;
     std::string fileList;
     Int_t mode = 0;
@@ -208,12 +208,12 @@ std::unique_ptr<TChain> makeTChain(std::unordered_map<std::string, std::string> 
     std::unique_ptr<TChain> chain(new TChain("Events"));
     int fileNum = 0;
     if(mode==1){
-	auto fileListVec = splitString(fileList, ",");
+	    auto fileListVec = splitString(fileList, ",");
         fileNum = fileListVec.size();
-        for(const auto file : fileListVec){
-	    std::cout << "Adding file " << file << std::endl;
+        for(const auto &file : fileListVec){
+            std::cout << "Adding file " << file << std::endl;
             chain->Add(file.c_str());
-	}
+	    }
 
     } else if(mode==2){
         fileNum = scan(*chain, directory, globs, antiGlobs);
@@ -225,7 +225,8 @@ std::unique_ptr<TChain> makeTChain(std::unordered_map<std::string, std::string> 
 }
 
 // Save content of a DF
-ROOT::RDF::RNode saveDF(ROOT::RDF::RNode df, std::unordered_map<std::string, std::string> &configMap, std::unordered_map<std::string, std::unordered_set<std::string>> &variableToSystematicMap){
+ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df, const std::unordered_map<std::string, std::string> &configMap, 
+    const std::unordered_map<std::string, std::unordered_set<std::string>> &variableToSystematicMap){
     std::string saveConfig;
     std::string saveFile;
     std::string saveTree;
@@ -280,23 +281,7 @@ ROOT::RDF::RNode saveDF(ROOT::RDF::RNode df, std::unordered_map<std::string, std
     return(df);
 }
 
-ROOT::RDF::RNode addConstants(ROOT::RDF::RNode df, std::unordered_map<std::string, std::string> &configMap){
-    if(configMap.find("floatConfig")!=configMap.end()){
-        std::string floatFile = configMap.at("floatConfig");
-        auto floatConfig = readConfig(floatFile);
-        for(auto &pair : floatConfig){
-            df = saveVar<Float_t>(std::stof(pair.second), pair.first, df);
-        }
-    }
-    if(configMap.find("intConfig")!=configMap.end()){
-        std::string intFile = configMap.at("intConfig");
-        auto intConfig = readConfig(intFile);
-        for(auto &pair : intConfig){
-            df = saveVar<Int_t>(std::stof(pair.second), pair.first, df);
-        }
-    }
-    return(df);
-}
+
 
 
 // Save multi dimensional histograms and their metadata

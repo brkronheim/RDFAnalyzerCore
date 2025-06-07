@@ -248,12 +248,12 @@ class Analyzer{
             
             // Save hists under hists
             //std::cout << df_m.Count().GetValue() << " Events processed" << std::endl; // Trigger execution
-            const Int_t histNumber = histos_m.size();
-            const Int_t axisNumber = allRegionNames.size()+1;
+            //const Int_t histNumber = histos_m.size();
+            //const Int_t axisNumber = allRegionNames.size()+1;
             std::vector<Int_t> commonAxisSize = {};
 
 
-            for(const auto regionNameList : allRegionNames){
+            for(const auto &regionNameList : allRegionNames){
                 commonAxisSize.push_back(regionNameList.size());
 
             }
@@ -263,11 +263,11 @@ class Analyzer{
             std::unordered_set<std::string> dirSet;
             for(auto &histo_m : histos_m){
                 auto hist = histo_m.GetPtr();
-                const Int_t finalAxisSize = allBins[histIndex];
+                //const Int_t finalAxisSize = allBins[histIndex];
                 const Int_t currentHistogramSize = hist->GetNbins();
-                Int_t indices[commonAxisSize.size()+1];
+                std::vector<Int_t> indices(commonAxisSize.size()+1);
                 for(int i = 0; i<currentHistogramSize; i++){
-                    Float_t content = hist->GetBinContent(i,indices);
+                    Float_t content = hist->GetBinContent(i,indices.data());
                     if(content==0){
                         continue;
                     }
@@ -279,17 +279,18 @@ class Analyzer{
                     std::cout << std::endl;*/
 
                     std::string dirName = "";
-                    //std::cout << "histName: " << histName;
-                    for(int i =0; i<commonAxisSize.size()-2; i++){
+                    //std::cout << "histName: " << histName
+                    const Int_t size =commonAxisSize.size()-2;
+                    for(int i =0; i<size; i++){
                         dirName += allRegionNames[i][indices[i]-1]+"/";
                         //std::cout << "histName: " << histName;
                     }
 
                     dirName += allRegionNames[commonAxisSize.size()-2][indices[commonAxisSize.size()-2]-1];
                     std::string histName = allVariables[histIndex];
-                    bool isNominal=false;
+                    //bool isNominal=false;
                     if(allRegionNames[commonAxisSize.size()-1][indices[commonAxisSize.size()-1]-1]=="Nominal"){
-                        isNominal= true;
+                        //isNominal= true;
                     } else {
                         histName+="_"+allRegionNames[commonAxisSize.size()-1][indices[commonAxisSize.size()-1]-1];
                     }
@@ -305,101 +306,6 @@ class Analyzer{
                 
                 histIndex++;
 
-                /*std::vector<Int_t> currentIndex = {};
-                
-                Int_t counter = 0;
-                for(int i =0; i<commonAxisSize.size();i++){
-                    currentIndex.push_back(0);
-                }
-                bool notFinished = true;
-                while(notFinished){
-                    // std::cout << currentIndex[0] << commonAxisSize[0]+1 << std::endl;
-                    // check if we are in an overflow bin
-                    bool hasNoData = true;
-                    while(hasNoData){
-                        hasNoData = false;
-                        for(int i =0; i<currentIndex.size();i++){
-                            if(currentIndex[i]==0 || currentIndex[i]==1+commonAxisSize[i]){
-                                hasNoData = true;
-                                break;
-                            }
-                        }
-                        if(hasNoData){
-                            for(int i=currentIndex.size()-1; i>=0; i--){
-                                if(currentIndex[i]==commonAxisSize[i]+1){
-                                    if(i!=0){
-                                        currentIndex[i] = 0;
-                                    }
-                                } else {
-                                    currentIndex[i]++;
-                                    //std::cout << "Increment axis " << i << std::endl;
-                                    break;
-                                }
-                            }
-                            counter += finalAxisSize+2;
-                        }
-                    }
-
-                    
-                    std::string dirName = "";
-                    //std::cout << "histName: " << histName;
-                    for(int i =0; i<commonAxisSize.size()-2; i++){
-                        dirName += allRegionNames[i][currentIndex[i]-1]+"/";
-                        //std::cout << "histName: " << histName;
-                    }
-
-                    dirName += allRegionNames[commonAxisSize.size()-2][currentIndex[commonAxisSize.size()-2]-1];
-                    std::string histName = allVariables[histIndex];
-                    bool isNominal=false;
-                    if(allRegionNames[commonAxisSize.size()-1][currentIndex[commonAxisSize.size()-1]-1]=="Nominal"){
-                        isNominal= true;
-                    } else {
-                        histName+="_"+allRegionNames[commonAxisSize.size()-1][currentIndex[commonAxisSize.size()-1]-1];
-                    }
-                    //std::cout << "histName: " << histName << std::endl;
-                    //std::cout << "Counter: " << counter << std::endl;
-                    
-                    TH1F subHist(allVariables[histIndex].c_str(),(allVariables[histIndex]+";"+allVariables[histIndex]+";Counts").c_str(),
-                    allBins[histIndex],allLowerBounds[histIndex],allUpperBounds[histIndex]);
-                    for(int i = 0; i<allBins[histIndex]+2;i++){
-                        subHist.SetBinContent(i, hist->GetBinContent(counter));
-                        subHist.SetBinError(i, hist->GetBinError(counter));
-                        counter+=1;
-                    }
-                    
-                    if(histIndex==0 and isNominal){
-                        saveFile.mkdir(dirName.c_str());
-                    }
-                    saveFile.cd(dirName.c_str());
-                    subHist.Write();
-                    saveFile.cd();
-
-                    
-
-                    // move to the next histogram
-                    for(int i=currentIndex.size()-1; i>=0; i--){
-                        if(currentIndex[i]==commonAxisSize[i]+1){
-                            if(i!=0){
-                                currentIndex[i] = 0;
-                            }
-                        } else {
-                            currentIndex[i]++;
-                            //std::cout << "Increment axis " << i << std::endl;
-                            break;
-                        }
-                    }
-                    notFinished = false;
-                    for(int i=currentIndex.size()-1; i>=0; i--){
-                        if(currentIndex[i]<commonAxisSize[i]){
-                            //std::cout << currentIndex[i] << ", " << commonAxisSize[i]+1 << std::endl;
-                            notFinished=true;
-                        }
-                    }
-                    
-                    //counter += finalAxisSize+2;
-                }
-                histIndex++;
-                */
             }
             
             saveFile.cd();
