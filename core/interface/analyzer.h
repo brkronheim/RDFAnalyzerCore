@@ -21,7 +21,6 @@
 #include <plots.h>
 
 
-
 class Analyzer{
     public:
         Analyzer(std::string configFile);
@@ -411,7 +410,9 @@ class Analyzer{
         
     private:
 
-	//Pythia8::JetMatchingMadgraph jetMatch;
+        UInt_t verbosityLevel_m;
+
+
         std::unordered_map<std::string, std::string> configMap_m;
         static std::unordered_map<std::string, fastforest::FastForest> bdts_m;
         std::unordered_map<std::string, std::vector<std::string>> bdt_features_m;
@@ -479,6 +480,8 @@ class Analyzer{
         void DefinePerSample_m(std::string name, F f){
             df_m = df_m.DefinePerSample(name, f);
         }
+
+        void registerConstants();
 
         void registerAliases();
 

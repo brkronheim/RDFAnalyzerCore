@@ -33,5 +33,12 @@ std::unique_ptr<TChain> makeTChain(const std::unordered_map<std::string, std::st
 ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df, const std::unordered_map<std::string, std::string> &configMap, 
     const std::unordered_map<std::string, std::unordered_set<std::string>> &variableToSystematicMap);
 
+
+std::vector<std::string> parseConfigVector(const std::unordered_map<std::string, std::string> &configMap, std::string key);
+
+
+std::vector<std::unordered_map<std::string, std::string>> parseConfig(const std::unordered_map<std::string, std::string> &configMap, std::string key, 
+                                                                      const std::vector<std::string> &requiredEntryKeys);
+
 # endif
 

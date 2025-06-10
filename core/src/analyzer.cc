@@ -15,72 +15,488 @@
 #include <correction.h>
 #include <systematics.h>
 
-//#include <Pythia8Plugins/JetMatching.h>s
 
-template<typename T>
-ROOT::RDF::RNode saveVar(T var, std::string name, ROOT::RDF::RNode df){
-    auto storeVar = [var](unsigned int, const ROOT::RDF::RSampleInfo) -> T {
-                                    return(var);
-                                };
-    auto newDf = df.DefinePerSample(name, storeVar);
-    return(newDf);
-}
-
-
-
-
-ROOT::RDF::RNode addConstants(ROOT::RDF::RNode df, std::unordered_map<std::string, std::string> &configMap){
-    if(configMap.find("floatConfig")!=configMap.end()){
-        std::string floatFile = configMap.at("floatConfig");
-        auto floatConfig = readConfig(floatFile);
-        for(auto &pair : floatConfig){
-            df = saveVar<Float_t>(std::stof(pair.second), pair.first, df);
-        }
-    }
-    if(configMap.find("intConfig")!=configMap.end()){
-        std::string intFile = configMap.at("intConfig");
-        auto intConfig = readConfig(intFile);
-        for(auto &pair : intConfig){
-            df = saveVar<Int_t>(std::stof(pair.second), pair.first, df);
-        }
-    }
-    return(df);
-}
-
-
+/**
+ * @brief Construct a new Analyzer object
+ * 
+ * @param configFile File containing the configuration information for this analyzer
+ */
 Analyzer::Analyzer(std::string configFile):
     configMap_m(processConfig(configFile)),
     chain_m(makeTChain(configMap_m)),
     df_m(ROOT::RDataFrame(*chain_m)){
 
-    // Display a progress bar
-    // TODO: Make this depend on ROOT version
-    
-    
+    // Set verbosity level
+    if(configMap_m.find("verbosity")==configMap_m.end()){
+        verbosityLevel_m = std::stoi(configMap_m["verbosity"]);
+    } else {
+        verbosityLevel_m = 1;
+    }
+
+
+    // Display a progress bar depending on batch status and ROOT version
     #if defined(HAS_ROOT_PROGRESS_BAR)
         if(configMap_m.find("batch")==configMap_m.end()){
             ROOT::RDF::Experimental::AddProgressBar(df_m);
         } else if (configMap_m["batch"]!="True"){
             ROOT::RDF::Experimental::AddProgressBar(df_m);
         } else {
-            std::cout << "Batch mode, no progress bar" << std::endl;
+            if(verbosityLevel_m >= 1){
+                std::cout << "Batch mode, no progress bar" << std::endl;
+            }
         }
     #else
-        std::cout << "ROOT version does not support progress bar, update to at least 6.28 to get it." << std::endl;
+        if(verbosityLevel_m >= 1){
+            std::cout << "ROOT version does not support progress bar, update to at least 6.28 to get it." << std::endl;
+        }
     #endif
 
-    df_m = addConstants(df_m, configMap_m);
+    
+
+    registerConstants();
     registerAliases();
-    registerHistograms();
     registerOptionalBranches();
+    registerHistograms();
     registerCorrectionlib();
-    registerSystematics();
     registerExistingSystematics();
     registerBDTs();
     registerTriggers();
-    std::cout << "Done creating Analyzer object" << std::endl;
+    
+    if(verbosityLevel_m >= 1){
+        std::cout << "Done creating Analyzer object" << std::endl;
+    }
 
 }
+
+
+/**
+ * @brief Read floatConfig and intConfig to register constant ints and floats.
+ * 
+ *
+ * These are registered in the main config files as:
+ * floatConfig=cfg/floats.txt
+ * intConfig=cfg/ints.txt
+ *
+ * Within each of the files a constant is added like
+ *
+ * newConstant=3
+ * 
+ */
+void Analyzer::registerConstants(){
+    if(configMap_m.find("floatConfig")!=configMap_m.end()){
+        const std::string floatFile = configMap_m.at("floatConfig");
+        auto floatConfig = readConfig(floatFile);
+        for(auto &pair : floatConfig){
+            SaveVar<Float_t>(std::stof(pair.second), pair.first);
+        }
+    }
+    if(configMap_m.find("intConfig")!=configMap_m.end()){
+        const std::string intFile = configMap_m.at("intConfig");
+        auto intConfig = readConfig(intFile);
+        for(auto &pair : intConfig){
+            SaveVar<Int_t>(std::stof(pair.second), pair.first);
+        }
+    }
+}
+
+
+/**
+ * @brief Read aliasConfig to register aliases.
+ * 
+ * This is registered in the main config files as:
+ * aliasConfig=cfg/alias.txt
+ *
+ * Within each of the files an alias is added like
+ *
+ * newName=ptNew existingName=ptOld
+ */
+void Analyzer::registerAliases(){
+
+    auto aliasConfig = parseConfig(configMap_m, "aliasConfig", {"existingName", "newName"});
+
+    for(const auto &entryKeys : aliasConfig){
+        df_m = df_m.Alias(entryKeys.at("newName"), entryKeys.at("existingName"));
+    }
+}
+
+
+
+/**
+ * @brief Read optionalBranchesConfig to register aliases.
+ * 
+ * This is registered in the main config files as:
+ * optionalBranchesConfig=cfg/optionalBranches.txt
+ *
+ * Within each of the files an optional branch is added like
+ *
+ * name=ptNew type=6 default=3.2
+ *
+ * The types are set as
+ * types:  unsigned int=0, int=1, unsigned short=2, short=3, unsigned char=4, char=5, float=6, double=7, bool=8
+ *            RVec +10;
+ *
+ * When using ROOT >=6.34 this will use DefaultValueFor which allows the mixing of exisiting and non existing branches.
+ * Otherwise, it checks if the branch exists and defines it, thus it won't work if it's only defined for some branches.
+ */
+void Analyzer::registerOptionalBranches(){
+
+    const auto aliasConfig = parseConfig(configMap_m, "optionalBranchesConfig", {"name", "type", "default"});
+
+
+    #if defined(HAS_DEFAULT_VALUE_FOR)
+
+        for(const auto &entryKeys : aliasConfig){
+            const int varType = std::stoi(entryKeys.at("type"));
+            
+            const auto defaultValStr = entryKeys.at("default");
+            const auto varName = entryKeys.at("name");
+            const Bool_t defaultBool = defaultValStr=="1" || defaultValStr=="true" || defaultValStr=="True";
+
+            switch(varType){
+                case 0:
+                    df_m = df_m.DefaultValueFor<UInt_t>(varName, std::stoul(defaultValStr));
+                    break;
+                case 1:
+                    df_m = df_m.DefaultValueFor<Int_t>(varName, std::stoi(defaultValStr));
+                    break;
+                case 2:
+                    df_m = df_m.DefaultValueFor<UShort_t>(varName, std::stoul(defaultValStr));
+                    break;
+                case 3:
+                    df_m = df_m.DefaultValueFor<Short_t>(varName, std::stoi(defaultValStr));
+                    break;
+                case 4:
+                    df_m = df_m.DefaultValueFor<UChar_t>(varName, UChar_t(std::stoul(defaultValStr)));
+                    break;
+                case 5:
+                    df_m = df_m.DefaultValueFor<Char_t>(varName, Char_t(std::stoi(defaultValStr)));
+                    break;
+                case 6:
+                    df_m = df_m.DefaultValueFor<Float_t>(varName, std::stof(defaultValStr));
+                    break;
+                case 7:
+                    df_m = df_m.DefaultValueFor<Double_t>(varName, std::stod(defaultValStr));
+                    break;
+                case 8:
+                    df_m = df_m.DefaultValueFor<Bool_t>(varName, defaultBool);
+                    break;
+                case 10:
+                    df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UInt_t>>(varName, {static_cast<UInt_t>(std::stoul(defaultValStr))});
+                    break;
+                case 11:
+                    df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Int_t>>(varName, {std::stoi(defaultValStr)});
+                    break;
+                case 12:
+                    df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UShort_t>>(varName, {static_cast<UShort_t>(std::stoul(defaultValStr))});
+                    break;
+                case 13:
+                    df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Short_t>>(varName, {static_cast<Short_t>(std::stoi(defaultValStr))});
+                    break;
+                case 14:
+                    df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UChar_t>>(varName, {UChar_t(std::stoul(defaultValStr))});
+                    break;
+                case 15:
+                    df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Char_t>>(varName, {Char_t(std::stoi(defaultValStr))});
+                    break;
+                case 16:
+                    df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Float_t>>(varName, {std::stof(defaultValStr)});
+                    break;
+                case 17:
+                    df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Double_t>>(varName, {std::stod(defaultValStr)});
+                    break;
+                case 18:
+                    df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Bool_t>>(varName, {defaultBool});
+                    break;
+
+            }
+        }
+    #else 
+        const auto columnNames = df_m.GetColumnNames();
+        std::unordered_set<std::string> columnSet;
+        for( auto &column : columnNames){
+            columnSet.insert(column);
+        }
+
+        for(const auto &entryKeys : aliasConfig){
+            if(columnSet.find(entryKeys.at("name")) == columnSet.end()){ // Add the branch if it doesn't exist
+                const int varType = std::stoi(entryKeys.at("type"));
+                
+                // types:  unsigned int=0, int=1, unsigned short=2, short=3, unsigned char=4, char=5, float=6, double=7, bool=8
+                //     RVec +10;
+
+                const auto defaultValStr = entryKeys.at("default");
+                const auto varName = entryKeys.at("name");
+                const Bool_t defaultBool = defaultValStr=="1" || defaultValStr=="true" || defaultValStr=="True";
+
+                switch(varType){
+                    case 0:
+                        SaveVar<UInt_t>(std::stoul(defaultValStr), varName);
+                        break;
+                    case 1:
+                        SaveVar<Int_t>(std::stoi(defaultValStr), varName);
+                        break;
+                    case 2:
+                        SaveVar<UShort_t>(std::stoul(defaultValStr), varName);
+                        break;
+                    case 3:
+                        SaveVar<Short_t>(std::stoi(defaultValStr), varName);
+                        break;
+                    case 4:
+                        SaveVar<UChar_t>(UChar_t(std::stoul(defaultValStr)), varName);
+                        break;
+                    case 5:
+                        SaveVar<Char_t>(Char_t(std::stoi(defaultValStr)), varName);
+                        break;
+                    case 6:
+                        SaveVar<Float_t>(std::stof(defaultValStr), varName);
+                        break;
+                    case 7:
+                        SaveVar<Double_t>(std::stod(defaultValStr),varName);
+                        break;
+                    case 8:
+                        SaveVar<Bool_t>(defaultBool, varName);
+                        break;
+                    case 10:
+                        SaveVar<ROOT::VecOps::RVec<UInt_t>>({static_cast<UInt_t>(std::stoul(defaultValStr))}, varName);
+                        break;
+                    case 11:
+                        SaveVar<ROOT::VecOps::RVec<Int_t>>({std::stoi(defaultValStr)}, varName);
+                        break;
+                    case 12:
+                        SaveVar<ROOT::VecOps::RVec<UShort_t>>({static_cast<UShort_t>(std::stoul(defaultValStr))}, varName);
+                        break;
+                    case 13:
+                        SaveVar<ROOT::VecOps::RVec<Short_t>>({static_cast<Short_t>(std::stoi(defaultValStr))}, varName);
+                        break;
+                    case 14:
+                        SaveVar<ROOT::VecOps::RVec<UChar_t>>({UChar_t(std::stoul(defaultValStr))}, varName);
+                        break;
+                    case 15:
+                        SaveVar<ROOT::VecOps::RVec<Char_t>>({Char_t(std::stoi(defaultValStr))}, varName);
+                        break;
+                    case 16:
+                        SaveVar<ROOT::VecOps::RVec<Float_t>>({std::stof(defaultValStr)}, varName);
+                        break;
+                    case 17:
+                        SaveVar<ROOT::VecOps::RVec<Double_t>>({std::stod(defaultValStr)}, varName);
+                        break;
+                    case 18:
+                        SaveVar<ROOT::VecOps::RVec<Bool_t>>({defaultBool}, varName);
+                        break;
+
+                }
+            }
+
+        }
+    #endif
+}
+
+
+
+/**
+ * @brief Read histConfig to register ROOT histograms.
+ * 
+ * This is registered in the main config files as:
+ * histConfig=cfg/hists.txt
+ *
+ * Within each of the files a histogram is added like
+ *
+ * file=aux/hists.root hists=TH2D:NLO_stitch_22:NLO_stitch_22
+ *
+ * The hists can be TH1F, TH2F, TH1D, or TH2D. The colons separate the histogram type, the name of the histogram in the file
+ * and the name that will be used to access the histogram in RDFAnalyzer
+ *
+ * This will likely be replaced by Correctionlib in the future
+ */
+void Analyzer::registerHistograms(){
+
+    const auto histConfig = parseConfig(configMap_m, "histConfig", {"file", "hists"});
+
+    for(const auto &entryKeys : histConfig){
+        
+        TFile* file( TFile::Open(entryKeys.at("file").c_str()));
+        auto histVector = splitString(entryKeys.at("hists"),",");
+        
+        for(auto hist : histVector){
+		    auto histData = splitString(hist,":");
+            if(histData.size()==3){
+                if(histData[0]=="TH1F"){
+                    TH1F *histPtr = file->Get<TH1F>(histData[1].c_str());
+                    histPtr->SetDirectory(0);
+                    th1f_m.emplace(histData[2], histPtr);
+                } else if(histData[0]=="TH2F") {
+                    TH2F *histPtr = file->Get<TH2F>(histData[1].c_str());
+                    histPtr->SetDirectory(0);
+                    th2f_m.emplace(histData[2], histPtr);
+                }  else if(histData[0]=="TH1D") {
+                    TH1D *histPtr = file->Get<TH1D>(histData[1].c_str());
+                    histPtr->SetDirectory(0);
+                    th1d_m.emplace(histData[2], histPtr);
+                }  else if(histData[0]=="TH2D") {
+                    TH2D *histPtr = file->Get<TH2D>(histData[1].c_str());
+                    histPtr->SetDirectory(0);
+                    th2d_m.emplace(histData[2], histPtr);
+                }
+            }
+        }
+        
+        delete file;
+    }
+}
+
+/**
+ * @brief Read correctionlibConfig to register correctionlib corrections.
+ * 
+ * This is registered in the main config files as:
+ * correctionlibConfig=cfg/corrections.txt
+ *
+ * Within each of the files a correction is added like
+ *
+ * file=aux/hists.root hists=TH2D:NLO_stitch_22:NLO_stitch_22
+ *
+ * The hists can be TH1F, TH2F, TH1D, or TH2D. The colons separate the histogram type, the name of the histogram in the file
+ * and the name that will be used to access the histogram in RDFAnalyzer
+ *
+ * This will likely be replaced by Correctionlib in the future
+ *
+ * TODO: Fix this documentation
+ */
+void Analyzer::registerCorrectionlib(){
+
+    const auto correctionConfig = parseConfig(configMap_m, "correctionlibConfig", {"file", "correctionName", "name", "inputVariables"});
+
+    for(const auto &entryKeys : correctionConfig){
+        // Split the variable list on commas, save to vector
+        auto inputVariableVector = splitString(entryKeys.at("inputVariables"),",");
+        // register as a correction
+        addCorrection(entryKeys.at("name"), entryKeys.at("file"), entryKeys.at("correctionName"), inputVariableVector);
+    }
+    
+}
+
+/**
+ * @brief Read existingSystematicsConfig to register existing systematic corrections.
+ * 
+ * This is registered in the main config files as:
+ * existingSystematicsConfig=cfg/existingSystematics.txt
+ *
+ * Within each of the files each line contains just the name of an existing systematic.
+ * For example if there are MassScaleUp and MassScaleDown systematics, you would enter
+ * 
+ * MassScale
+ * 
+ * on its own line in the config file. This code will find all variables affected by this systematic and register them.
+ * Note that if only looks for the Up systematics, so both Up and Down need to be defined, and this won't be checked.
+ */
+void Analyzer::registerExistingSystematics(){
+
+    const auto systConfig = parseConfigVector(configMap_m, "existingSystematicsConfig");
+    const auto columnList = df_m.GetColumnNames();    
+    
+    for( auto &syst : systConfig){ // process each line as a systematic
+        
+        const std::string upSyst = syst+"Up"; // Up version of systematic
+        
+        // Process a line if it has non zero length
+        if(syst.size()>0){
+
+            std::unordered_set<std::string> systVariableSet;
+
+            // Register the systematic with the analyzer by checking all the existing branches for variations of this systematic
+            for(const auto &existingVars : columnList){
+                
+                const size_t index = existingVars.find(upSyst);
+                
+                // Determine if the start of the upSyst is the correct distance from the end of the string name
+                if(index!=std::string::npos && index+upSyst.size()==existingVars.size() && index!=0){
+                    
+                    // Get the base variable name
+                    const std::string systVar = existingVars.substr(0,index-1);
+                    
+                    // register the systematics
+                    if(variableToSystematicMap_m.find(systVar)!= variableToSystematicMap_m.end()){
+                        variableToSystematicMap_m[systVar].insert(syst);
+                    } else {
+                        variableToSystematicMap_m[systVar] = {syst};
+                    }
+                    
+                    systVariableSet.insert(systVar);
+                }
+            }
+            systematicToVariableMap_m[syst] = systVariableSet;
+        }
+    }
+}
+
+/**
+ * @brief Read bdtConfig to register BDTs.
+ * 
+ * This is registered in the main config files as:
+ * bdtConfig=cfg/bdts.txt
+ *
+ * Within each of the files a BDT is added like
+ *
+ * file=aux/hists.root name= inputVariables= runVar=
+ *
+ * The hists can be TH1F, TH2F, TH1D, or TH2D. The colons separate the histogram type, the name of the histogram in the file
+ * and the name that will be used to access the histogram in RDFAnalyzer
+ *
+ * This will likely be replaced by Correctionlib in the future
+ *
+ * TODO: Fix this documentation
+ */
+void Analyzer::registerBDTs(){
+
+    const auto bdtConfig = parseConfig(configMap_m, "bdtConfig", {"file", "name", "inputVariables", "runVar"});
+
+    for(const auto &entryKeys : bdtConfig){
+        // Split the variable list on commas, save to vector
+        auto inputVariableVector = splitString(entryKeys.at("inputVariables"),",");
+        // Add BDT
+        addBDT(entryKeys.at("name"), entryKeys.at("file"), inputVariableVector, entryKeys.at("runVar")); // Register all of this as a BDT
+    }
+}
+
+
+
+void Analyzer::registerTriggers(){
+    // Check if there is a BDT config, process if there is
+    if(configMap_m.find("triggerConfig")!=configMap_m.end()){
+        
+        // Get each line of the file in a vector
+        auto bdtConfig =  configToVector(configMap_m["triggerConfig"]);
+        for( auto &entry : bdtConfig){ // process each line as a trigger
+            
+            auto splitEntry = splitString(entry, " "); // split line on white space
+            std::unordered_map<std::string, std::string> entryKeys; // map to hold keys and values
+            for( auto &pair: splitEntry){ // iterate over each split entry
+                
+                auto splitPair = splitString(pair, "=");
+                if(splitPair.size()==2){ // split entry on an equal sign, if two pieces the first is the key, the second is the value
+                    entryKeys[splitPair[0]] =  splitPair[1];
+                }
+            }
+
+            // Check that there is a file, a name, and an input variable list for each BDT entry
+            if(entryKeys.find("name")!=entryKeys.end() && entryKeys.find("sample")!=entryKeys.end() && entryKeys.find("triggers")!=entryKeys.end()){//} && entryKeys.find("flags")!=entryKeys.end()){
+                std::cout << "Adding trigger " << entryKeys["name"] << std::endl;                
+                // Split the variable list on commas, save to vector
+                auto triggerList = splitString(entryKeys["triggers"],",");
+	        if(entryKeys.find("triggerVetos")!=entryKeys.end()){
+                    auto triggerVetoList = splitString(entryKeys["triggerVetos"],",");
+		    trigger_vetos_m.emplace(entryKeys["name"], triggerVetoList);
+		} else {
+                    trigger_vetos_m[entryKeys["name"]] = {};
+	        }
+		//auto sampleName = entryKeys.find("name");
+                triggers_m.emplace(entryKeys["name"], triggerList);
+                trigger_samples_m.emplace(entryKeys["sample"],entryKeys["name"]);
+            }
+        }
+    }
+}
+
+
 
 Analyzer* Analyzer::DefineVector(std::string name, const std::vector<std::string> &columns, std::string type){
     // Find all systematics that affect this new variable
@@ -383,361 +799,10 @@ correction::Correction::Ref Analyzer::correctionMap(std::string key){
 
 }
 
-void Analyzer::registerOptionalBranches(){
-    if(configMap_m.find("optionalBranchesConfig")!=configMap_m.end()){
-        auto columnNames = df_m.GetColumnNames();
-        std::unordered_set<std::string> columnSet;
-        for( auto &column : columnNames){
-            columnSet.insert(column);
-        }
-        // Get each line of the file in a vector
-        auto branchConfig =  configToVector(configMap_m["optionalBranchesConfig"]);
-        for( auto &branch : branchConfig){ // process each line as a variable
-            
-            auto splitEntry = splitString(branch, " "); // split line on white space
-            std::unordered_map<std::string, std::string> entryKeys; // map to hold keys and values
-            for( auto &pair: splitEntry){ // iterate over each split entry
-                
-                auto splitPair = splitString(pair, "=");
-                if(splitPair.size()==2){ // split entry on an equal sign, if two pieces the first is the key, the second is the value
-                    entryKeys[splitPair[0]] =  splitPair[1];
-                }
-            }
-
-            // Check that there is a name, a type, and a default for each baranch
-            if(entryKeys.find("name")!=entryKeys.end() && entryKeys.find("type")!=entryKeys.end() && entryKeys.find("default")!=entryKeys.end()){
-                if(columnSet.find(entryKeys["name"])==columnSet.end()){ // Add the branch if it doesn't exist
-                    const int varType = std::stoi(entryKeys["type"]);
-                    
-                    // types:  unsigned int=0, int=1, float=2, double=3, bool=4, char=5
-                    //     RVec +6;
-
-                    Bool_t defaultBool = false;
-                    auto defaultValStr = entryKeys["default"];
-                    if(defaultValStr=="1" || defaultValStr=="true" || defaultValStr=="True"){
-                        defaultBool = true;
-                    }
-
-                    switch(varType){
-                        case 0:
-                            SaveVar<UInt_t>(std::stoul(defaultValStr), entryKeys["name"]);
-                            break;
-                        case 1:
-                            SaveVar<Int_t>(std::stoi(defaultValStr), entryKeys["name"]);
-                            break;
-			            case 2:
-                            SaveVar<UShort_t>(std::stoul(defaultValStr), entryKeys["name"]);
-                            break;
-                        case 3:
-                            SaveVar<Short_t>(std::stoi(defaultValStr), entryKeys["name"]);
-                            break;
-			            case 4:
-                            SaveVar<UChar_t>(UChar_t(std::stoul(entryKeys["default"])), entryKeys["name"]);
-                            break;
-                        case 5:
-                            SaveVar<Char_t>(Char_t(std::stoi(entryKeys["default"])), entryKeys["name"]);
-                            break;
-                        case 6:
-                            SaveVar<Float_t>(std::stof(defaultValStr), entryKeys["name"]);
-                            break;
-                        case 7:
-                            SaveVar<Double_t>(std::stod(defaultValStr), entryKeys["name"]);
-                            break;
-                        case 8:
-                            SaveVar<Bool_t>(defaultBool, entryKeys["name"]);
-                            break;
-                        case 10:
-                            SaveVar<ROOT::VecOps::RVec<UInt_t>>({static_cast<UInt_t>(std::stoul(defaultValStr))}, entryKeys["name"]);
-                            break;
-                        case 11:
-                            SaveVar<ROOT::VecOps::RVec<Int_t>>({std::stoi(defaultValStr)}, entryKeys["name"]);
-                            break;
-                        case 12:
-                            SaveVar<ROOT::VecOps::RVec<UShort_t>>({static_cast<UShort_t>(std::stoul(defaultValStr))}, entryKeys["name"]);
-                            break;
-                        case 13:
-                            SaveVar<ROOT::VecOps::RVec<Short_t>>({static_cast<Short_t>(std::stoi(defaultValStr))}, entryKeys["name"]);
-                            break;
-                        case 14:
-                            SaveVar<ROOT::VecOps::RVec<UChar_t>>({UChar_t(std::stoul(entryKeys["default"]))}, entryKeys["name"]);
-                            break;
-                        case 15:
-                            SaveVar<ROOT::VecOps::RVec<Char_t>>({Char_t(std::stoi(entryKeys["default"]))}, entryKeys["name"]);
-                            break;
-                        case 16:
-                            SaveVar<ROOT::VecOps::RVec<Float_t>>({std::stof(defaultValStr)}, entryKeys["name"]);
-                            break;
-                        case 17:
-                            SaveVar<ROOT::VecOps::RVec<Double_t>>({std::stod(defaultValStr)}, entryKeys["name"]);
-                            break;
-                        case 18:
-                            SaveVar<ROOT::VecOps::RVec<Bool_t>>({defaultBool}, entryKeys["name"]);
-                            break;
-
-                    }
-                }
-            
-            }
-        }
-    }
-}
-
-void Analyzer::registerSystematics(){
-    // Check if there is a systematic config, process if there is
-    if(configMap_m.find("systematicsConfig")!=configMap_m.end()){
-
-        // Get each line of the file in a vector
-        auto systConfig =  configToVector(configMap_m["systematicsConfig"]);
-        for( auto &syst : systConfig){ // process each line as a systematic
-            
-            // Process a line if it has exactly one equal sign
-            auto splitSyst = splitString(syst, "=");
-            if(splitSyst.size()==2){
-                
-                // left side of equal sign is the name of the systematic, the right side has the affected branches
-                auto systName = splitSyst[0];
-                auto systVariables = splitString(splitSyst[1],",");
-                std::unordered_set<std::string> systVariableSet;
-                
-                
-                // Register the systematic with the analyzer
-                for(auto systVar : systVariables){
-                    if(variableToSystematicMap_m.find(systVar)!= variableToSystematicMap_m.end()){
-                        variableToSystematicMap_m[systVar].insert(systName);
-                    } else {
-                        variableToSystematicMap_m[systVar] = {systName};
-                    }
-                    systVariableSet.insert(systVar);
-                }
-                systematicToVariableMap_m[systName] = systVariableSet;
-                // Apply the systematic
-                df_m = applySystematic(df_m, systName,systVariables);
-            }
-        }
-    }
-}
-
-void Analyzer::registerExistingSystematics(){
-    // Check if there is a systematic config, process if there is
-    if(configMap_m.find("existingSystematicsConfig")!=configMap_m.end()){
-
-        // Get each line of the file in a vector
-        auto systConfig =  configToVector(configMap_m["existingSystematicsConfig"]);
-        const auto columnList = df_m.GetColumnNames();
-        for( auto &syst : systConfig){ // process each line as a systematic
-            std::string upSyst = syst+"Up"; // Up version of systematic
-            // Process a line if it has non zero length
-            if(syst.size()>0){
-
-                std::unordered_set<std::string> systVariableSet;
-
-
-                // Register the systematic with the analyzer by checking all the existing branches for variations of this systematic
-                for(auto existingVars : columnList){
-                    const size_t index = existingVars.find(upSyst);
-                    if(index!=std::string::npos && index+upSyst.size()==existingVars.size() && index!=0){
-                        const std::string systVar = existingVars.substr(0,index-1);
-                        if(variableToSystematicMap_m.find(systVar)!= variableToSystematicMap_m.end()){
-                            variableToSystematicMap_m[systVar].insert(syst);
-                        } else {
-                            variableToSystematicMap_m[systVar] = {syst};
-                        }
-                        systVariableSet.insert(systVar);
-                    }
-                }
-                systematicToVariableMap_m[syst] = systVariableSet;
-            }
-        }
-    }
-}
-
-void Analyzer::registerBDTs(){
-    // Check if there is a BDT config, process if there is
-    if(configMap_m.find("bdtConfig")!=configMap_m.end()){
-        
-        // Get each line of the file in a vector
-        auto bdtConfig =  configToVector(configMap_m["bdtConfig"]);
-        for( auto &entry : bdtConfig){ // process each line as a bdt
-            
-            auto splitEntry = splitString(entry, " "); // split line on white space
-            std::unordered_map<std::string, std::string> entryKeys; // map to hold keys and values
-            for( auto &pair: splitEntry){ // iterate over each split entry
-                
-                auto splitPair = splitString(pair, "=");
-                if(splitPair.size()==2){ // split entry on an equal sign, if two pieces the first is the key, the second is the value
-                    entryKeys[splitPair[0]] =  splitPair[1];
-                }
-            }
-
-            // Check that there is a file, a name, and an input variable list for each BDT entry
-            if(entryKeys.find("file")!=entryKeys.end() && entryKeys.find("name")!=entryKeys.end() && entryKeys.find("inputVariables")!=entryKeys.end() && entryKeys.find("runVar")!=entryKeys.end()){
-                
-                // Split the variable list on commas, save to vector
-                auto inputVariableVector = splitString(entryKeys["inputVariables"],",");
-                addBDT(entryKeys["name"], entryKeys["file"], inputVariableVector, entryKeys["runVar"]); // Register all of this as a BDT
-            }
-        }
-    }
-}
 
 
 
-void Analyzer::registerTriggers(){
-    // Check if there is a BDT config, process if there is
-    if(configMap_m.find("triggerConfig")!=configMap_m.end()){
-        
-        // Get each line of the file in a vector
-        auto bdtConfig =  configToVector(configMap_m["triggerConfig"]);
-        for( auto &entry : bdtConfig){ // process each line as a trigger
-            
-            auto splitEntry = splitString(entry, " "); // split line on white space
-            std::unordered_map<std::string, std::string> entryKeys; // map to hold keys and values
-            for( auto &pair: splitEntry){ // iterate over each split entry
-                
-                auto splitPair = splitString(pair, "=");
-                if(splitPair.size()==2){ // split entry on an equal sign, if two pieces the first is the key, the second is the value
-                    entryKeys[splitPair[0]] =  splitPair[1];
-                }
-            }
 
-            // Check that there is a file, a name, and an input variable list for each BDT entry
-            if(entryKeys.find("name")!=entryKeys.end() && entryKeys.find("sample")!=entryKeys.end() && entryKeys.find("triggers")!=entryKeys.end()){//} && entryKeys.find("flags")!=entryKeys.end()){
-                std::cout << "Adding trigger " << entryKeys["name"] << std::endl;                
-                // Split the variable list on commas, save to vector
-                auto triggerList = splitString(entryKeys["triggers"],",");
-	        if(entryKeys.find("triggerVetos")!=entryKeys.end()){
-                    auto triggerVetoList = splitString(entryKeys["triggerVetos"],",");
-		    trigger_vetos_m.emplace(entryKeys["name"], triggerVetoList);
-		} else {
-                    trigger_vetos_m[entryKeys["name"]] = {};
-	        }
-		//auto sampleName = entryKeys.find("name");
-                triggers_m.emplace(entryKeys["name"], triggerList);
-                trigger_samples_m.emplace(entryKeys["sample"],entryKeys["name"]);
-            }
-        }
-    }
-}
-
-
-void Analyzer::registerCorrectionlib(){
-    // Check if there is a BDT config, process if there is
-    if(configMap_m.find("correctionlibConfig")!=configMap_m.end()){
-        
-        // Get each line of the file in a vector
-        auto correctionConfig =  configToVector(configMap_m["correctionlibConfig"]);
-        for( auto &entry : correctionConfig){ // process each line as a bdt
-            
-            auto splitEntry = splitString(entry, " "); // split line on white space
-            std::unordered_map<std::string, std::string> entryKeys; // map to hold keys and values
-            for( auto &pair: splitEntry){ // iterate over each split entry
-                
-                auto splitPair = splitString(pair, "=");
-                if(splitPair.size()==2){ // split entry on an equal sign, if two pieces the first is the key, the second is the value
-                    entryKeys[splitPair[0]] =  splitPair[1];
-                }
-            }
-
-            // Check that there is a file, a name, and an input variable list for each BDT entry
-            if(entryKeys.find("file")!=entryKeys.end() && entryKeys.find("correctionName")!=entryKeys.end() && entryKeys.find("name")!=entryKeys.end() && entryKeys.find("inputVariables")!=entryKeys.end()){
-                
-                // Split the variable list on commas, save to vector
-                auto inputVariableVector = splitString(entryKeys["inputVariables"],",");
-                addCorrection(entryKeys["name"], entryKeys["file"], entryKeys["correctionName"], inputVariableVector); // Register all of this as a BDT
-            }
-        }
-    }
-}
-
-void Analyzer::registerAliases(){
-    // Check if there is a BDT config, process if there is
-    if(configMap_m.find("aliasConfig")!=configMap_m.end()){
-	std::cout << "Found alias config" << std::endl;
-        // Get each line of the file in a vector
-        auto aliasConfig =  configToVector(configMap_m["aliasConfig"]);
-        for( auto &entry : aliasConfig){ // process each line as a bdt
-            
-            auto splitEntry = splitString(entry, " "); // split line on white space
-            std::unordered_map<std::string, std::string> entryKeys; // map to hold keys and values
-            for( auto &pair: splitEntry){ // iterate over each split entry
-                
-                auto splitPair = splitString(pair, "=");
-                if(splitPair.size()==2){ // split entry on an equal sign, if two pieces the first is the key, the second is the value
-                    entryKeys[splitPair[0]] =  splitPair[1];
-                }
-            }
-
-            // Check that there is an existing name and a new name
-            if(entryKeys.find("existingName")!=entryKeys.end() && entryKeys.find("newName")!=entryKeys.end()){
-                // Apply the alias
-		std::cout <<  entryKeys["existingName"] << " is now accesible from " << entryKeys["newName"] << std::endl;
-                df_m = df_m.Alias(entryKeys["newName"], entryKeys["existingName"]);
-
-            }
-        }
-    }
-}
-
-void Analyzer::registerHistograms(){
-    // Check if there is a hist config, process if there is
-    if(configMap_m.find("histConfig")!=configMap_m.end()){
-        
-        // Get each line of the file in a vector
-        auto histConfig =  configToVector(configMap_m["histConfig"]);
-        for( auto &entry : histConfig){ // process each line as the BDTs from a file
-            
-            auto splitEntry = splitString(entry, " "); // split line on white space
-            std::unordered_map<std::string, std::string> entryKeys; // map to hold keys and values
-            for( auto &pair: splitEntry){ // iterate over each split entry
-                
-                auto splitPair = splitString(pair, "=");
-                if(splitPair.size()==2){ // split entry on an equal sign, if two pieces the first is the key, the second is the value
-                    entryKeys[splitPair[0]] =  splitPair[1];
-                }
-            }
-
-            // Check that there is a file, a name, and an input variable list for each BDT entry
-            if(entryKeys.find("file")!=entryKeys.end() && entryKeys.find("hists")!=entryKeys.end()){
-	        std::cout << "Opening file " << entryKeys["file"] << std::endl;
-                // Open file with histograms
-                TFile* file( TFile::Open(entryKeys["file"].c_str()) );
-		std::cout << "Hist line: " << entryKeys["hists"] << std::endl;
-                // Split the variable list on commas, save to vector
-                auto histVector = splitString(entryKeys["hists"],",");
-                for(auto hist : histVector){
-		    std::cout << "Checking hist " << hist << std::endl;
-                    auto histData = splitString(hist,":");
-                    if(histData.size()==3){
-                        if(histData[0]=="TH1F"){
-                            TH1F *histPtr = file->Get<TH1F>(histData[1].c_str());
-                            histPtr->SetDirectory(0);
-                            th1f_m.emplace(histData[2], histPtr);
-			    std::cout << "Adding th1f " << histData[2] << std::endl;
-                        } else if(histData[0]=="TH2F") {
-                            TH2F *histPtr = file->Get<TH2F>(histData[1].c_str());
-                            histPtr->SetDirectory(0);
-                            th2f_m.emplace(histData[2], histPtr);
-			    std::cout << "Adding th2f " << histData[2] << std::endl;
-                        }  else if(histData[0]=="TH1D") {
-                            TH1D *histPtr = file->Get<TH1D>(histData[1].c_str());
-                            histPtr->SetDirectory(0);
-                            th1d_m.emplace(histData[2], histPtr);
-			    std::cout << "Adding th1d " << histData[2] << std::endl;
-                        }  else if(histData[0]=="TH2D") {
-                            TH2D *histPtr = file->Get<TH2D>(histData[1].c_str());
-                            histPtr->SetDirectory(0);
-                            th2d_m.emplace(histData[2], histPtr);
-			    std::cout << "Adding th2d " << histData[2] << std::endl;
-                        }
-                    }
-                }
-                delete file;
-
-            }
-        }
-        std::cout << "Done adding histograms" << std::endl;
-    }
-}
 
 void Analyzer::addBDT(std::string key, std::string fileName, std::vector<std::string> featureList, std::string runVar){
     // make the feature list (f0, f1, f2, ...)

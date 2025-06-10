@@ -17,6 +17,7 @@
 #include <plots.h>
 #include <functions.h>
 
+
 // Fill a TChain with all the files in a directory containing anything in globs, and skipping anything in antiglobs.
 // This is not done recursively, it only checks one level
 // Returns the number files found
@@ -383,3 +384,63 @@ void save(std::vector<std::vector<histInfo>> &fullHistList, histHolder &hists, s
     histData.Write();
     regionData.Write();
 }
+
+
+std::vector<std::string> parseConfigVector(const std::unordered_map<std::string, std::string> &configMap, std::string key){
+    
+    std::vector<std::string> parsedConfig;
+    
+    // check if the config exists and obtain it
+    if(configMap.find(key)!=configMap.end()){
+        
+        parsedConfig = configToVector(configMap.at(key));
+        
+    }
+
+    return(parsedConfig);
+    
+}
+
+
+std::vector<std::unordered_map<std::string, std::string>> parseConfig(const std::unordered_map<std::string, std::string> &configMap, std::string key, 
+                                                                      const std::vector<std::string> &requiredEntryKeys){
+    
+    std::vector<std::unordered_map<std::string, std::string>> parsedConfig;
+    
+    auto config = parseConfigVector(configMap, key);
+
+    for( auto &entry : config){ // process each line as a separate entity
+        
+        auto splitEntry = splitString(entry, " "); // split line on white space
+        std::unordered_map<std::string, std::string> entryKeys; // map to hold keys and values
+        
+        for( auto &pair: splitEntry){ // iterate over each split entry
+            
+            auto splitPair = splitString(pair, "=");
+        
+            if(splitPair.size()==2){ // split entry on an equal sign, if two pieces the first is the key, the second is the value
+                entryKeys[splitPair[0]] =  splitPair[1];
+            }
+        
+        }
+
+        bool allEntryKeysFound = true;
+        for(const auto &entryKey : requiredEntryKeys){
+            if(entryKeys.find(entryKey)==entryKeys.end()){
+                allEntryKeysFound = false;
+                break;
+            }
+        }
+
+
+        // Check that all of the required keys were found
+        if(allEntryKeysFound){
+            parsedConfig.push_back(entryKeys);
+        }
+    }
+
+    return(parsedConfig);
+    
+}
+
+
