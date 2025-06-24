@@ -1,4 +1,0 @@
-name=Muon sample=1 triggers=HLT_Mu17_TrkIsoVVL_Mu8_TrkIsoVVL_DZ_Mass3p8,HLT_IsoMu24
-name=MET sample=3 triggers=HLT_PFMET120_PFMHT120_IDTight triggerVetos=HLT_Mu17_TrkIsoVVL_Mu8_TrkIsoVVL_DZ_Mass3p8,HLT_IsoMu24
-name=EGamma sample=4 triggers=HLT_Ele30_WPTight_Gsf,HLT_Ele23_Ele12_CaloIdL_TrackIdL_IsoVL triggerVetos=HLT_Mu17_TrkIsoVVL_Mu8_TrkIsoVVL_DZ_Mass3p8,HLT_IsoMu24,HLT_PFMET120_PFMHT120_IDTight
-

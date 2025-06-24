@@ -28,7 +28,7 @@ std::unordered_map<std::string, std::string> processConfig(const std::string &co
 
 std::vector<std::string> configToVector(const std::string &configFile);
 
-std::unique_ptr<TChain> makeTChain(const std::unordered_map<std::string, std::string> &configMap);
+std::vector<std::unique_ptr<TChain>> makeTChain(std::unordered_map<std::string, std::string> &configMap);
 
 ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df, const std::unordered_map<std::string, std::string> &configMap, 
     const std::unordered_map<std::string, std::unordered_set<std::string>> &variableToSystematicMap);

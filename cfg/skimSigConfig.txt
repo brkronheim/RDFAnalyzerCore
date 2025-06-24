@@ -1,7 +1,0 @@
-# directory=/home/brkronheim/cernbox/vhbb/skim2017/boosted/
-directory=/eos/cms/store/group/phys_higgs/hbb/ntuples/VHbb_UL_2017_11062023/systRun2017/BDT/
-saveFile=/eos/user/b/bkronhei/vhbb/skim2017/histsAT.root
-# saveFile=/home/brkronheim/cernbox/vhbb/skim2017/histsRDF.root
-threads=-1
-intConfig=cfg/ints_plots.txt
-floatConfig=cfg/floats_plots.txt

@@ -1,0 +1,3 @@
+#existingName=nPixelClusters.first.first newName=bCrossing
+#existingName=nPixelClusters.first.second newName=moduleNumber
+#existingName=nPixelClusters.second newName=nClusters

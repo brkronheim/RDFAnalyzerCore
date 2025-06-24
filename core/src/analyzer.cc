@@ -13,7 +13,6 @@
 #include <util.h>
 #include <iostream>
 #include <correction.h>
-#include <systematics.h>
 
 
 /**
@@ -23,11 +22,11 @@
  */
 Analyzer::Analyzer(std::string configFile):
     configMap_m(processConfig(configFile)),
-    chain_m(makeTChain(configMap_m)),
-    df_m(ROOT::RDataFrame(*chain_m)){
+    chain_vec_m(makeTChain(configMap_m)),
+    df_m(ROOT::RDataFrame(*chain_vec_m[0])){
 
     // Set verbosity level
-    if(configMap_m.find("verbosity")==configMap_m.end()){
+    if(configMap_m.find("verbosity")!=configMap_m.end()){
         verbosityLevel_m = std::stoi(configMap_m["verbosity"]);
     } else {
         verbosityLevel_m = 1;
@@ -51,8 +50,6 @@ Analyzer::Analyzer(std::string configFile):
         }
     #endif
 
-    
-
     registerConstants();
     registerAliases();
     registerOptionalBranches();
@@ -66,6 +63,330 @@ Analyzer::Analyzer(std::string configFile):
         std::cout << "Done creating Analyzer object" << std::endl;
     }
 
+}
+
+
+Analyzer* Analyzer::ApplyBDT(std::string BDTName){
+    Float_t eval(ROOT::VecOps::RVec<Float_t> &inputVector);
+    
+    // Get a vector of teh BDT inputs
+    DefineVector("input_"+BDTName,bdt_features_m[BDTName], "Float_t");
+
+    // Get the BDT and make an execution lambda
+    //auto bdt = bdts_m[BDTName];
+    auto bdtLambda = [BDTName](ROOT::VecOps::RVec<Float_t> &inputVector, bool runVar) -> Float_t {
+        if(runVar){
+            return(1./(1. + std::exp(-bdts_m[BDTName](inputVector.data()))));
+        } else {
+            return(-1);
+        }
+        
+    };
+
+    // Define the BDT output
+    Define(BDTName,bdtLambda, {"input_"+BDTName, bdt_runVars_m[BDTName]});
+    return(this);
+}
+
+Analyzer* Analyzer::ApplyAllBDTs(){
+    for(auto &pair : bdts_m){
+        ApplyBDT(pair.first);
+    }
+    return(this);
+}
+
+
+Analyzer* Analyzer::readHistVals(std::string histName, std::string outputBranchName, std::vector<std::string> inputBranchNames){
+    if(inputBranchNames.size()==1){ 
+        if(th1f_m.find(histName)!=th1f_m.end()){
+            auto histLambda = [histName](Float_t val1)-> Float_t {
+                auto bin1 = th1f_m[histName]->GetXaxis()->FindBin(val1);
+                return(th1f_m[histName]->GetBinContent(bin1));
+            };
+            Define(outputBranchName,histLambda, inputBranchNames);
+        } else if(th1d_m.find(histName)!=th1d_m.end()){
+            auto histLambda = [histName](Float_t val1)-> Float_t {
+                auto bin1 = th1d_m[histName]->GetXaxis()->FindBin(val1);
+                return(th1d_m[histName]->GetBinContent(bin1));
+            };
+            Define(outputBranchName,histLambda, inputBranchNames);
+        } else {
+            std::cerr << "th1 val error" << std::endl;
+        }
+    } else if(inputBranchNames.size()==2){
+        if(th2f_m.find(histName)!=th2f_m.end()){
+            auto histLambda = [histName](Float_t val1, Float_t val2) -> Float_t {
+                auto bin1 = th2f_m[histName]->GetXaxis()->FindBin(val1);
+                auto bin2 = th2f_m[histName]->GetYaxis()->FindBin(val2);
+                return(th2f_m[histName]->GetBinContent(bin1, bin2));
+            };
+            Define(outputBranchName,histLambda, inputBranchNames);
+        } else if(th2d_m.find(histName)!=th2d_m.end()){
+            auto histLambda = [histName](Float_t val1, Float_t val2) -> Float_t {
+                auto bin1 = th2d_m[histName]->GetXaxis()->FindBin(val1);
+                auto bin2 = th2d_m[histName]->GetYaxis()->FindBin(val2);
+                return(th2d_m[histName]->GetBinContent(bin1, bin2));
+            };
+            Define(outputBranchName,histLambda, inputBranchNames);
+        } else {
+            std::cerr << "th2 val error" << std::endl;
+        }
+    } else {
+        std::cerr << "Error! Access of histogram " << histName << " attempted with invalid branche combination" << std::endl; 
+    }
+    return(this);
+}
+
+
+inline bool passTriggerAndVeto(ROOT::VecOps::RVec<Bool_t> trigger, ROOT::VecOps::RVec<Bool_t> triggerVeto){
+    for(const auto &trig : triggerVeto){
+        if(trig){
+            return(false);
+        }
+    }
+    for(const auto &trig : trigger){
+        if(trig){
+            return(true);
+        }
+    }
+    return(false);
+}
+
+
+inline bool passTrigger(ROOT::VecOps::RVec<Bool_t> trigger){
+    for(const auto &trig : trigger){
+        if(trig){
+            return(true);
+        }
+    }
+    return(false);
+}
+
+
+
+
+Analyzer* Analyzer::ApplyAllTriggers(){
+    
+    if(trigger_samples_m.find(configMap_m["type"])!=configMap_m.end()){ // data, need to account for duplicate events from different datasets
+	std::cout << "looking for trigger for " << configMap_m["type"] << std::endl;
+	std::string triggerName = trigger_samples_m.at(configMap_m["type"]);
+	std::cout << "trigger is " << triggerName << std::endl;
+
+        for(const auto &trig : triggers_m[triggerName]){
+            std::cout << "Keep Data trigger: " << trig << std::endl;
+        }
+
+	for(const auto &trig : trigger_vetos_m[triggerName]){
+            std::cout << "Veto Data trigger: " << trig << std::endl;
+        }
+
+        if(trigger_vetos_m[triggerName].size()==0){
+            std::cout << "No veto" << std::endl;
+
+	    DefineVector("allTriggersPassVector",triggers_m[triggerName], "Bool_t");
+            Filter("applyTrigger", passTrigger, {"allTriggersPassVector"});
+
+	} else {
+            DefineVector(triggerName + "passVector", triggers_m[triggerName], "Bool_t");
+            DefineVector(triggerName + "vetoVector", trigger_vetos_m[triggerName], "Bool_t");
+
+
+            Filter("applyTrigger", passTriggerAndVeto, {triggerName +"pass vector", triggerName+" veto vector"});
+       }
+    } else { // MC, no duplicate events
+        std::vector<std::string> allTriggers; // merge all the triggers
+        for(const auto &pair: triggers_m){
+            allTriggers.insert( allTriggers.end(), pair.second.begin(), pair.second.end() );
+        }
+
+         for(const auto &trig : allTriggers){
+            std::cout << "Keep MC trigger: " << trig << std::endl;
+        }
+
+
+        DefineVector("allTriggersPassVector",allTriggers, "Bool_t");
+        Filter("applyTrigger", passTrigger, {"allTriggersPassVector"});
+
+    }
+    return(this);
+}
+
+ROOT::RDF::RNode Analyzer::getDF(){
+    return(df_m);
+}
+
+std::string Analyzer::configMap(std::string key){
+    if(configMap_m.find(key)!=configMap_m.end()){
+        return(configMap_m[key]);
+    } else {
+        return("");
+    }
+} 
+
+
+
+
+Analyzer* Analyzer::DefineVector(std::string name, const std::vector<std::string> &columns, std::string type){
+    // Find all systematics that affect this new variable
+    std::unordered_set<std::string> systsToApply;
+    for(auto &variable : columns){
+        if(variableToSystematicMap_m.find(variable)!=variableToSystematicMap_m.end()){
+            for(auto &syst : variableToSystematicMap_m.at(variable)){
+                
+                // register syst to process, register variable with systematics
+                systsToApply.insert(syst);
+                variableToSystematicMap_m[name].insert(syst);
+                systematicToVariableMap_m[syst].insert(name); 
+            }
+        }
+    }
+    
+    // Define nominal variation
+    Define_m(name, columns, type);
+    
+    // If systematics were found, define a new variable for each up and down variation.
+    for(auto &syst : systsToApply){
+        std::vector<std::string> systColumnsUp;
+        std::vector<std::string> systColumnsDown;
+        for(auto var : columns){ // check all variables in column, replace ones affected by systematics
+            if(systematicToVariableMap_m[syst].find(var)==systematicToVariableMap_m[syst].end()){
+                systColumnsUp.push_back(var);
+                systColumnsDown.push_back(var);
+            } else {
+                systColumnsUp.push_back(var+"_"+syst+"Up");
+                systColumnsDown.push_back(var+"_"+syst+"Down");
+            }
+        }
+        // Define up and down variations for current systematic
+
+        // Define nominal variation
+        Define_m(name+"_"+syst+"Up", systColumnsUp, type);
+        // Define nominal variation
+        Define_m(name+"_"+syst+"Down", systColumnsDown, type);
+    }
+    
+    return(this);
+}
+
+
+
+
+Analyzer* Analyzer::ApplyCorrection(std::string correctionName, std::vector<std::string> stringArguments){
+    Float_t eval(ROOT::VecOps::RVec<Float_t> &inputVector);
+    
+    // Get a vector of teh BDT inputs
+    DefineVector("input_"+correctionName,correction_features_m[correctionName], "double");
+
+    // Get the BDT and make an execution lambda
+    //auto bdt = bdts_m[BDTName];
+    //
+    /*int i = 0;
+    for( const auto &val : corrections_m[correctionName]->inputs().typeStr()){
+        std::cout << "input " << i << " is " << val << std::endl;
+	i++;
+    }*/
+
+
+    auto correctionLambda = [correctionName, stringArguments](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
+        std::vector<std::variant<int, double, std::string>> values;
+
+        auto stringArgIt = stringArguments.begin();
+	    auto doubleArgIt = inputVector.begin();
+
+
+        for(const auto &varType : corrections_m[correctionName]->inputs()){
+            if(varType.typeStr() == "string"){
+                values.push_back(*stringArgIt);
+		stringArgIt++;
+		
+	    } else if(varType.typeStr() == "int"){
+                values.push_back(int(*doubleArgIt));
+		doubleArgIt++;
+	    } else {
+                values.push_back(*doubleArgIt);
+                doubleArgIt++;
+	    }
+
+	}
+
+	
+
+        return(corrections_m[correctionName]->evaluate(values));
+        
+    };
+
+    // Define the BDT output
+    Define(correctionName, correctionLambda, {"input_"+correctionName});
+    
+    return(this);
+}
+
+
+
+
+/**
+ * @brief Save all the requested branches
+ * 
+ * @return Analyzer* Returns a pointer to this object
+ */
+Analyzer* Analyzer::save(){
+    saveDF(df_m, configMap_m, variableToSystematicMap_m);
+    return(this);
+}
+
+/**
+ * @brief 
+ * 
+ * @param histName 
+ * @param outputBranchName 
+ * @param inputBranchNames 
+ * @return Analyzer* 
+ */
+Analyzer* Analyzer::readHistBins(std::string histName, std::string outputBranchName, std::vector<std::string> inputBranchNames){
+    if(inputBranchNames.size()==1){ 
+        if(th1f_m.find(histName)!=th1f_m.end()){
+            auto histLambda = [histName](Int_t bin1)-> Float_t {
+                return(th1f_m[histName]->GetBinContent(bin1+1));
+            };
+            Define(outputBranchName,histLambda, inputBranchNames);
+        } else if(th1d_m.find(histName)!=th1d_m.end()){
+            auto histLambda = [histName](Int_t bin1)-> Float_t {
+                return(th1d_m[histName]->GetBinContent(bin1+1));
+            };
+            Define(outputBranchName,histLambda, inputBranchNames);
+        } else {
+            std::cerr << "th1 bin error" << std::endl;
+        }
+    } else if(inputBranchNames.size()==2){
+        if(th2f_m.find(histName)!=th2f_m.end()){
+            auto histLambda = [histName](Int_t bin1, Int_t bin2)-> Float_t {
+                return(th2f_m[histName]->GetBinContent(bin1+1, bin2+1));
+            };
+            Define(outputBranchName,histLambda, inputBranchNames);
+        } else if(th2d_m.find(histName)!=th2d_m.end()){
+                auto histLambda = [histName](Int_t bin1, Int_t bin2)-> Float_t {
+                return(th2d_m[histName]->GetBinContent(bin1+1, bin2+1));
+            };
+            Define(outputBranchName,histLambda, inputBranchNames);
+        } else {
+            std::cerr << "th2 bin error" << std::endl;
+        }
+    } else {
+        std::cerr << "Error. Access of histogram " << histName << " attempted with invalid branch combination" << std::endl; 
+    }
+    return(this);
+}
+
+
+/**
+ * @brief Get the correcionlib correction at key
+ * 
+ * @param key Key for the correctionlib object
+ * @return correction::Correction::Ref shared pointer to a correctionlib object
+ */
+correction::Correction::Ref Analyzer::correctionMap(std::string key){
+    auto correction = corrections_m.at(key);	
+    return(correction);
 }
 
 
@@ -113,6 +434,12 @@ void Analyzer::registerConstants(){
 void Analyzer::registerAliases(){
 
     auto aliasConfig = parseConfig(configMap_m, "aliasConfig", {"existingName", "newName"});
+
+    const auto columnNames = df_m.GetColumnNames();
+    
+    for( auto &column : columnNames){
+        std::cout << column << ": " << df_m.GetColumnType(column) << std::endl;
+    }
 
     for(const auto &entryKeys : aliasConfig){
         df_m = df_m.Alias(entryKeys.at("newName"), entryKeys.at("existingName"));
@@ -366,10 +693,20 @@ void Analyzer::registerCorrectionlib(){
     const auto correctionConfig = parseConfig(configMap_m, "correctionlibConfig", {"file", "correctionName", "name", "inputVariables"});
 
     for(const auto &entryKeys : correctionConfig){
+
         // Split the variable list on commas, save to vector
         auto inputVariableVector = splitString(entryKeys.at("inputVariables"),",");
+
         // register as a correction
-        addCorrection(entryKeys.at("name"), entryKeys.at("file"), entryKeys.at("correctionName"), inputVariableVector);
+
+        // load correction object from json
+        auto correctionF = correction::CorrectionSet::from_file(entryKeys.at("file"));
+        auto correction = correctionF->at(entryKeys.at("correctionName"));
+
+        // Add the correction and feature list to their maps
+        std::cout << "Adding correction " << entryKeys.at("name") << "!" << std::endl;
+        corrections_m.emplace(entryKeys.at("name"), correction);
+        correction_features_m.emplace(entryKeys.at("name"), inputVariableVector);
     }
     
 }
@@ -450,389 +787,355 @@ void Analyzer::registerBDTs(){
     const auto bdtConfig = parseConfig(configMap_m, "bdtConfig", {"file", "name", "inputVariables", "runVar"});
 
     for(const auto &entryKeys : bdtConfig){
+        
         // Split the variable list on commas, save to vector
         auto inputVariableVector = splitString(entryKeys.at("inputVariables"),",");
+        
         // Add BDT
-        addBDT(entryKeys.at("name"), entryKeys.at("file"), inputVariableVector, entryKeys.at("runVar")); // Register all of this as a BDT
+
+        std::vector<std::string> features;
+        for(long unsigned int i = 0; i<inputVariableVector.size(); i++){
+            features.push_back("f"+std::to_string(i));
+        }
+
+        // Load the BDT
+        auto bdt = fastforest::load_txt(entryKeys.at("file"), features);
+
+        // Add the BDT and feature list to their maps
+        bdts_m.emplace(entryKeys.at("name"), bdt);
+        bdt_features_m.emplace(entryKeys.at("name"), inputVariableVector);
+        bdt_runVars_m.emplace(entryKeys.at("name"), entryKeys.at("runVar"));
     }
 }
 
 
 
+/**
+ * @brief Read bdtConfig to register BDTs.
+ * 
+ * This is registered in the main config files as:
+ * bdtConfig=cfg/bdts.txt
+ *
+ * Within each of the files a BDT is added like
+ *
+ * file=aux/hists.root name= inputVariables= runVar=
+ *
+ * The hists can be TH1F, TH2F, TH1D, or TH2D. The colons separate the histogram type, the name of the histogram in the file
+ * and the name that will be used to access the histogram in RDFAnalyzer
+ *
+ * This will likely be replaced by Correctionlib in the future
+ *
+ * TODO: Fix this documentation
+ */
 void Analyzer::registerTriggers(){
-    // Check if there is a BDT config, process if there is
-    if(configMap_m.find("triggerConfig")!=configMap_m.end()){
-        
-        // Get each line of the file in a vector
-        auto bdtConfig =  configToVector(configMap_m["triggerConfig"]);
-        for( auto &entry : bdtConfig){ // process each line as a trigger
+
+    const auto triggerConfig = parseConfig(configMap_m, "triggerConfig", {"name", "sample", "triggers"});
+
+    for(const auto &entryKeys : triggerConfig){
+
+        auto triggerList = splitString(entryKeys.at("triggers"), ",");
+
+        if(entryKeys.find("triggerVetos")!=entryKeys.end()){
+            auto triggerVetoList = splitString(entryKeys.at("triggerVetos"),",");
+		    trigger_vetos_m.emplace(entryKeys.at("name"), triggerVetoList);
+		} else {
+            trigger_vetos_m[entryKeys.at("name")] = {};
+        }
+
+		triggers_m.emplace(entryKeys.at("name"), triggerList);
+        trigger_samples_m.emplace(entryKeys.at("sample"), entryKeys.at("name"));
+         
+    }
+}
+
+
+
+void Analyzer::bookND(std::vector<histInfo> &infos, std::vector<selectionInfo> &selection, std::string suffix, std::vector<std::vector<std::string>> &allRegionNames){
             
-            auto splitEntry = splitString(entry, " "); // split line on white space
-            std::unordered_map<std::string, std::string> entryKeys; // map to hold keys and values
-            for( auto &pair: splitEntry){ // iterate over each split entry
+            // Store the selection info in some vectors
+            std::vector<int> binVectorBase;
+            std::vector<double> lowerBoundVectorBase;
+            std::vector<double> upperBoundVectorBase;
+            std::vector<std::string> varVectorBase;
+
+            for(auto const &selectionInfo : selection){
+                binVectorBase.push_back(selectionInfo.bins());
+                lowerBoundVectorBase.push_back(selectionInfo.lowerBound());
+                upperBoundVectorBase.push_back(selectionInfo.upperBound());
+                varVectorBase.push_back(selectionInfo.variable());
+            }
+
+            
+            for(auto const &info : infos){
+                std::string newName = info.name()+"."+suffix; // name of hist info
+                std::vector<int> binVector(binVectorBase); // vectors from selectionInfos
+                std::vector<double> lowerBoundVector(lowerBoundVectorBase);
+                std::vector<double> upperBoundVector(upperBoundVectorBase);
+                std::vector<std::string> varVector(varVectorBase);
+                // add selection info from the histInfos object
+                binVector.push_back(info.bins());
+                lowerBoundVector.push_back(info.lowerBound());
+                upperBoundVector.push_back(info.upperBound());
+                varVector.push_back(info.variable());
+                varVector.push_back(info.weight());
+
+                // Book the THnSparseD histo
+                //const ROOT::RDF::THnSparseDModel tempModel(newName.c_str(), newName.c_str(), selection.size()+1,binVector.data(), lowerBoundVector.data(), upperBoundVector.data());
+                //
+                Int_t numFills = 1;
+                std::vector<std::string> systVector(varVector);
+                for(const auto &syst : allRegionNames[allRegionNames.size()-1] ){
+                    std::cout << syst << std::endl;
+                    std::string systBase = syst;
+                    if(syst.find("Up")!=std::string::npos){
+                        systBase = systBase.substr(0,syst.find("Up"));
+                    }
+                    if(syst.find("Down")!=std::string::npos){
+                        systBase = systBase.substr(0,syst.find("Down"));
+                    }
+                    if(syst=="Nominal"){
+                        continue;
+                    }
+                    const auto varSet = systematicToVariableMap_m[systBase];
+                    std::cout << "Affected variables for "  << systBase << ": " << std::endl;
+                    for(const auto &var : varSet){
+                        std::cout << var << std::endl;
+                    }
+                    Int_t affectedVariables = 0;
+                    std::vector<std::string> newVec;
+                    for(const auto &branch : varVector){
+                        
+                        if(varSet.count(branch)!=0){
+                            affectedVariables +=1 ;
+                            std::cout << branch+"_"+syst << std::endl;
+                            newVec.push_back(branch+"_"+syst);
+                        } else {
+                            std::cout << branch << std::endl;
+                            newVec.push_back(branch);
+                        }
+                    }
+                    if(affectedVariables>1){
+                        systVector.insert(systVector.end(), newVec.begin(), newVec.end());
+                        numFills++;
+                    }
+                }
                 
-                auto splitPair = splitString(pair, "=");
-                if(splitPair.size()==2){ // split entry on an equal sign, if two pieces the first is the key, the second is the value
-                    entryKeys[splitPair[0]] =  splitPair[1];
+                
+                std::string branchName = info.name()+"_"+suffix+"inputDoubleVector";
+                this->DefineVector(branchName, systVector, "Double_t");
+                THnMulti tempModel(df_m.GetNSlots(), newName.c_str(), newName.c_str(), selection.size()+1, numFills, binVector, lowerBoundVector, upperBoundVector);
+                histos_m.push_back(df_m.Book<ROOT::VecOps::RVec<Double_t>>(std::move(tempModel), {branchName}));
+                
+                // (newName+"inputDoubleVector").c_str()
+                //tempModel.Exe
+
+                
+                //histos_m.emplace(histos_m.end(), df.HistoND<types..., float>(tempModel, varVector));
+                
+            }
+        }
+
+        void Analyzer::save_hists(std::vector<std::vector<histInfo>> &fullHistList, std::vector<std::vector<std::string>> &allRegionNames){
+            std::string fileName = configMap("saveFile");
+            std::vector<std::string> allNames;
+            std::vector<std::string> allVariables;
+            std::vector<std::string> allLabels;
+            std::vector<int> allBins;
+            std::vector<float> allLowerBounds;
+            std::vector<float> allUpperBounds;
+            // Get vectors of the hist names, variables, lables, bins, and bounds
+            for(auto const &histList : fullHistList){
+                for(auto const &info : histList){
+                    allNames.push_back(info.name());
+                    allVariables.push_back(info.variable());
+                    allLabels.push_back(info.label());
+                    allBins.push_back(info.bins());
+                    allLowerBounds.push_back(info.lowerBound());
+                    allUpperBounds.push_back(info.upperBound());
                 }
             }
-
-            // Check that there is a file, a name, and an input variable list for each BDT entry
-            if(entryKeys.find("name")!=entryKeys.end() && entryKeys.find("sample")!=entryKeys.end() && entryKeys.find("triggers")!=entryKeys.end()){//} && entryKeys.find("flags")!=entryKeys.end()){
-                std::cout << "Adding trigger " << entryKeys["name"] << std::endl;                
-                // Split the variable list on commas, save to vector
-                auto triggerList = splitString(entryKeys["triggers"],",");
-	        if(entryKeys.find("triggerVetos")!=entryKeys.end()){
-                    auto triggerVetoList = splitString(entryKeys["triggerVetos"],",");
-		    trigger_vetos_m.emplace(entryKeys["name"], triggerVetoList);
-		} else {
-                    trigger_vetos_m[entryKeys["name"]] = {};
-	        }
-		//auto sampleName = entryKeys.find("name");
-                triggers_m.emplace(entryKeys["name"], triggerList);
-                trigger_samples_m.emplace(entryKeys["sample"],entryKeys["name"]);
-            }
-        }
-    }
-}
-
-
-
-Analyzer* Analyzer::DefineVector(std::string name, const std::vector<std::string> &columns, std::string type){
-    // Find all systematics that affect this new variable
-    std::unordered_set<std::string> systsToApply;
-    for(auto &variable : columns){
-        if(variableToSystematicMap_m.find(variable)!=variableToSystematicMap_m.end()){
-            for(auto &syst : variableToSystematicMap_m.at(variable)){
                 
-                // register syst to process, register variable with systematics
-                systsToApply.insert(syst);
-                variableToSystematicMap_m[name].insert(syst);
-                systematicToVariableMap_m[syst].insert(name); 
+            // Open file
+            TFile saveFile(fileName.c_str(), "RECREATE");
+            
+            // Save hists under hists
+            //std::cout << df_m.Count().GetValue() << " Events processed" << std::endl; // Trigger execution
+            //const Int_t histNumber = histos_m.size();
+            //const Int_t axisNumber = allRegionNames.size()+1;
+            std::vector<Int_t> commonAxisSize = {};
+
+
+            for(const auto &regionNameList : allRegionNames){
+                commonAxisSize.push_back(regionNameList.size());
+
             }
-        }
-    }
-    
-    // Define nominal variation
-    Define_m(name, columns, type);
-    
-    // If systematics were found, define a new variable for each up and down variation.
-    for(auto &syst : systsToApply){
-        std::vector<std::string> systColumnsUp;
-        std::vector<std::string> systColumnsDown;
-        for(auto var : columns){ // check all variables in column, replace ones affected by systematics
-            if(systematicToVariableMap_m[syst].find(var)==systematicToVariableMap_m[syst].end()){
-                systColumnsUp.push_back(var);
-                systColumnsDown.push_back(var);
-            } else {
-                systColumnsUp.push_back(var+"_"+syst+"Up");
-                systColumnsDown.push_back(var+"_"+syst+"Down");
+            
+            int histIndex = 0;
+            std::unordered_map<std::string, TH1F> histMap;
+            std::unordered_set<std::string> dirSet;
+            for(auto &histo_m : histos_m){
+                auto hist = histo_m.GetPtr();
+                //const Int_t finalAxisSize = allBins[histIndex];
+                const Int_t currentHistogramSize = hist->GetNbins();
+                std::vector<Int_t> indices(commonAxisSize.size()+1);
+                for(int i = 0; i<currentHistogramSize; i++){
+                    Float_t content = hist->GetBinContent(i,indices.data());
+                    if(content==0){
+                        continue;
+                    }
+                    Float_t error = hist->GetBinError2(i);
+                    /*std::cout << "Bin: " << indices << ": " << content << ", " << error  << ": ";
+                    for(int j = 0; j< commonAxisSize.size()+1; j++){
+                        std::cout << indices[j] << ", ";
+                    }
+                    std::cout << std::endl;*/
+
+                    std::string dirName = "";
+                    //std::cout << "histName: " << histName
+                    const Int_t size =commonAxisSize.size()-2;
+                    for(int i =0; i<size; i++){
+                        dirName += allRegionNames[i][indices[i]-1]+"/";
+                        //std::cout << "histName: " << histName;
+                    }
+
+                    dirName += allRegionNames[commonAxisSize.size()-2][indices[commonAxisSize.size()-2]-1];
+                    std::string histName = allVariables[histIndex];
+                    //bool isNominal=false;
+                    if(allRegionNames[commonAxisSize.size()-1][indices[commonAxisSize.size()-1]-1]=="Nominal"){
+                        //isNominal= true;
+                    } else {
+                        histName+="_"+allRegionNames[commonAxisSize.size()-1][indices[commonAxisSize.size()-1]-1];
+                    }
+                    if(histMap.count(dirName+"/"+histName)==0){
+                        histMap[dirName+"/"+histName] = TH1F(histName.c_str(),(allVariables[histIndex]+";"+allVariables[histIndex]+";Counts").c_str(),
+                                        allBins[histIndex],allLowerBounds[histIndex],allUpperBounds[histIndex]);
+                        dirSet.emplace(dirName);
+                    }
+                    histMap[dirName+"/"+histName].SetBinContent(indices[commonAxisSize.size()], content);
+                    histMap[dirName+"/"+histName].SetBinError(indices[commonAxisSize.size()], sqrt(error));
+                    
+                }
+                
+                histIndex++;
+
             }
-        }
-        // Define up and down variations for current systematic
+            
+            saveFile.cd();
+            for(const auto &dirName: dirSet){
+                std::string newDir(dirName);
+                newDir[dirName.find('/')] = '_';
+                saveFile.mkdir(newDir.c_str());
+            }
+            std::unordered_map<std::string, std::map<std::string, std::pair<Float_t, Float_t>>> systNormalizations;
+             // store the nominal and sytematic normalization for each control region
+             for(const auto &pair: histMap){
+                if(pair.first.find("Systematic")==std::string::npos){ // Want the sytematic histogram
+                    continue;
+                }
+                std::string dirName = pair.first.substr(0, pair.first.find_last_of("/"));
+                auto regionSplit = splitString(pair.first,"/");
+                std::string region = regionSplit[0] + "_" + regionSplit[2]; //  dirName.substr(0,dirName.find("/"));
+                std::string histName = regionSplit[regionSplit.size()-1]; //pair.first.substr(pair.first.find_last_of("/")+1);
+                std::string nominalName = histName;
+                std::string systName = "nominal";
+                if(histName.find("Up")!=std::string::npos || histName.find("Down")!=std::string::npos){
+                    systName = nominalName.substr(nominalName.find_last_of("_")+1);
+                    nominalName = nominalName.substr(0,nominalName.find_last_of("_"));
+                }
+                std::cout << nominalName << ", " << systName << std::endl;
+                nominalName = dirName+"/"+nominalName;
+                auto nominalHist = histMap[nominalName];
+                Float_t nominalIntegral = nominalHist.Integral();
+                Float_t systIntegral = pair.second.Integral();
+                if(systNormalizations[region].count(systName)==0){
+                    systNormalizations[region][systName].first = nominalIntegral;
+                    systNormalizations[region][systName].second = systIntegral;
+                } else {
+                    systNormalizations[region][systName].first += nominalIntegral;
+                    systNormalizations[region][systName].second += systIntegral;
+                }
+            }
+            
+            
+            for(const auto &pair: histMap){
+                std::string dirName = pair.first.substr(0, pair.first.find_last_of("/"));
+                auto regionSplit = splitString(pair.first,"/");
+                std::string region = regionSplit[0] + "_" + regionSplit[2]; //  dirName.substr(0,dirName.find("/"));
+                std::string histName = regionSplit[regionSplit.size()-1]; //pair.first.substr(pair.first.find_last_of("/")+1);
+                std::string nominalName = histName;
+                std::string systName = "nominal";
+                if(histName.find("Up")!=std::string::npos || histName.find("Down")!=std::string::npos){
+                    systName = nominalName.substr(nominalName.find_last_of("_")+1);
+                    nominalName = nominalName.substr(0,nominalName.find_last_of("_"));
+                }
+                nominalName = dirName+"/"+nominalName;
+                std::cout << histName << ", " << systName << std::endl;
+                std::string newDir(dirName);
+                newDir[dirName.find('/')] = '_';
+                saveFile.cd(newDir.c_str());
+                pair.second.Write();
+                //(pair.second*(systNormalizations[region][systName].first/systNormalizations[region][systName].second)).Write(); // Need to group this normalization the way combine wants it
+                saveFile.cd();
+            }
 
-        // Define nominal variation
-        Define_m(name+"_"+syst+"Up", systColumnsUp, type);
-        // Define nominal variation
-        Define_m(name+"_"+syst+"Down", systColumnsDown, type);
-    }
+        }
+
+/**
+ * @brief Make a systematic variation which is an indexing value for each systematic. Return the names of all of these branches
+ * 
+ * @param branchName The base name for the systematic branch
+ * @return std::vector<std::string> A list of all of the systematic names
+ */
+std::vector<std::string> Analyzer::makeSystList(std::string branchName){
     
-    return(this);
+    // Always have a nominal branch
+    std::vector<std::string> systList = {"Nominal"};
+    Int_t var = 0;
+    this->SaveVar<Float_t>(var,branchName);
+
+    // For each systematic add the Up and Down variations to the list and add branches for them
+    // Register these as systematics
+    for(const auto &pair : systematicToVariableMap_m){
+        systList.push_back(pair.first+"Up");
+        systList.push_back(pair.first+"Down");
+        var++;
+        this->SaveVar<Float_t>(var,branchName+"_"+pair.first+"Up");
+        var++;
+        this->SaveVar<Float_t>(var,branchName+"_"+pair.first+"Down");
+        systematicToVariableMap_m[pair.first].insert(branchName);
+        variableToSystematicMap_m[branchName].insert(pair.first);
+    }
+
+    return(systList);
 }
 
-
-Analyzer* Analyzer::ApplyBDT(std::string BDTName){
-    Float_t eval(ROOT::VecOps::RVec<Float_t> &inputVector);
-    
-    // Get a vector of teh BDT inputs
-    DefineVector("input_"+BDTName,bdt_features_m[BDTName], "Float_t");
-
-    // Get the BDT and make an execution lambda
-    //auto bdt = bdts_m[BDTName];
-    auto bdtLambda = [BDTName](ROOT::VecOps::RVec<Float_t> &inputVector, bool runVar) -> Float_t {
-        if(runVar){
-            return(1./(1. + std::exp(-bdts_m[BDTName](inputVector.data()))));
-        } else {
-            return(-1);
-        }
         
-    };
+/**
+ * @brief Map syst to affected variables and vice versa
+ * 
+ * @param syst Name of syst (for PtScaleUp and PtScaleDown it would be PtScale)
+ * @param affectedVariables List of all branches that have variations from this systematic
+ */
+void Analyzer::bookSystematic(std::string syst, std::vector<std::string> &affectedVariables){
 
-    // Define the BDT output
-    Define(BDTName,bdtLambda, {"input_"+BDTName, bdt_runVars_m[BDTName]});
-    return(this);
-}
+    std::unordered_set<std::string> systVariableSet;
+ 
+    for(const auto &systVar : affectedVariables){
 
-Analyzer* Analyzer::ApplyCorrection(std::string correctionName, std::vector<std::string> stringArguments){
-    Float_t eval(ROOT::VecOps::RVec<Float_t> &inputVector);
-    
-    // Get a vector of teh BDT inputs
-    DefineVector("input_"+correctionName,correction_features_m[correctionName], "double");
+        // Register the affected variable as one affected by this systematic
+        systVariableSet.insert(systVar);
 
-    // Get the BDT and make an execution lambda
-    //auto bdt = bdts_m[BDTName];
-    //
-    /*int i = 0;
-    for( const auto &val : corrections_m[correctionName]->inputs().typeStr()){
-        std::cout << "input " << i << " is " << val << std::endl;
-	i++;
-    }*/
-
-
-    auto correctionLambda = [correctionName, stringArguments](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
-        std::vector<std::variant<int, double, std::string>> values;
-
-        auto stringArgIt = stringArguments.begin();
-	    auto doubleArgIt = inputVector.begin();
-
-
-        for(const auto &varType : corrections_m[correctionName]->inputs()){
-            if(varType.typeStr() == "string"){
-                values.push_back(*stringArgIt);
-		stringArgIt++;
-		
-	    } else if(varType.typeStr() == "int"){
-                values.push_back(int(*doubleArgIt));
-		doubleArgIt++;
-	    } else {
-                values.push_back(*doubleArgIt);
-                doubleArgIt++;
-	    }
-
-	}
-
-	
-
-        return(corrections_m[correctionName]->evaluate(values));
-        
-    };
-
-    // Define the BDT output
-    Define(correctionName, correctionLambda, {"input_"+correctionName});
-    
-    return(this);
-}
-
-Analyzer* Analyzer::ApplyAllBDTs(){
-    for(auto &pair : bdts_m){
-        ApplyBDT(pair.first);
-    }
-    return(this);
-}
-
-inline bool passTriggerAndVeto(ROOT::VecOps::RVec<Bool_t> trigger, ROOT::VecOps::RVec<Bool_t> triggerVeto){
-    for(const auto &trig : triggerVeto){
-        if(trig){
-            return(false);
-        }
-    }
-    for(const auto &trig : trigger){
-        if(trig){
-            return(true);
-        }
-    }
-    return(false);
-}
-
-
-inline bool passTrigger(ROOT::VecOps::RVec<Bool_t> trigger){
-    for(const auto &trig : trigger){
-        if(trig){
-            return(true);
-        }
-    }
-    return(false);
-}
-
-
-Analyzer* Analyzer::ApplyAllTriggers(){
-    
-    if(trigger_samples_m.find(configMap_m["type"])!=configMap_m.end()){ // data, need to account for duplicate events from different datasets
-	std::cout << "looking for trigger for " << configMap_m["type"] << std::endl;
-	std::string triggerName = trigger_samples_m.at(configMap_m["type"]);
-	std::cout << "trigger is " << triggerName << std::endl;
-
-        for(const auto &trig : triggers_m[triggerName]){
-            std::cout << "Keep Data trigger: " << trig << std::endl;
-        }
-
-	for(const auto &trig : trigger_vetos_m[triggerName]){
-            std::cout << "Veto Data trigger: " << trig << std::endl;
-        }
-
-        if(trigger_vetos_m[triggerName].size()==0){
-            std::cout << "No veto" << std::endl;
-
-	    DefineVector("allTriggersPassVector",triggers_m[triggerName], "Bool_t");
-            Filter("applyTrigger", passTrigger, {"allTriggersPassVector"});
-
-	} else {
-            DefineVector(triggerName + "passVector", triggers_m[triggerName], "Bool_t");
-            DefineVector(triggerName + "vetoVector", trigger_vetos_m[triggerName], "Bool_t");
-
-
-            Filter("applyTrigger", passTriggerAndVeto, {triggerName +"pass vector", triggerName+" veto vector"});
-       }
-    } else { // MC, no duplicate events
-        std::vector<std::string> allTriggers; // merge all the triggers
-        for(const auto &pair: triggers_m){
-            allTriggers.insert( allTriggers.end(), pair.second.begin(), pair.second.end() );
-        }
-
-         for(const auto &trig : allTriggers){
-            std::cout << "Keep MC trigger: " << trig << std::endl;
-        }
-
-
-        DefineVector("allTriggersPassVector",allTriggers, "Bool_t");
-        Filter("applyTrigger", passTrigger, {"allTriggersPassVector"});
-
-    }
-    return(this);
-}
-
-Analyzer* Analyzer::save(){
-    saveDF(df_m, configMap_m, variableToSystematicMap_m);
-    return(this);
-}
-
-Analyzer* Analyzer::readHistBins(std::string histName, std::string outputBranchName, std::vector<std::string> inputBranchNames){
-    if(inputBranchNames.size()==1){ 
-        if(th1f_m.find(histName)!=th1f_m.end()){
-            auto histLambda = [histName](Int_t bin1)-> Float_t {
-                return(th1f_m[histName]->GetBinContent(bin1+1));
-            };
-            Define(outputBranchName,histLambda, inputBranchNames);
-        } else if(th1d_m.find(histName)!=th1d_m.end()){
-            auto histLambda = [histName](Int_t bin1)-> Float_t {
-                return(th1d_m[histName]->GetBinContent(bin1+1));
-            };
-            Define(outputBranchName,histLambda, inputBranchNames);
+        // Add this systematic as one affecting the variable
+        if(variableToSystematicMap_m.find(systVar)!= variableToSystematicMap_m.end()){
+            variableToSystematicMap_m[systVar].insert(syst);
         } else {
-            std::cerr << "th1 bin error" << std::endl;
-}
-    } else if(inputBranchNames.size()==2){
-        if(th2f_m.find(histName)!=th2f_m.end()){
-            auto histLambda = [histName](Int_t bin1, Int_t bin2)-> Float_t {
-                return(th2f_m[histName]->GetBinContent(bin1+1, bin2+1));
-            };
-            Define(outputBranchName,histLambda, inputBranchNames);
-        } else if(th2d_m.find(histName)!=th2d_m.end()){
-                auto histLambda = [histName](Int_t bin1, Int_t bin2)-> Float_t {
-                return(th2d_m[histName]->GetBinContent(bin1+1, bin2+1));
-            };
-            Define(outputBranchName,histLambda, inputBranchNames);
-        } else {
-            std::cerr << "th2 bin error" << std::endl;
+            variableToSystematicMap_m[systVar] = {syst};
         }
-    } else {
-        std::cerr << "Error! Access of histogram " << histName << " attempted with invalid branche combination" << std::endl; 
-    }
-    return(this);
-}
-
-Analyzer* Analyzer::readHistVals(std::string histName, std::string outputBranchName, std::vector<std::string> inputBranchNames){
-    if(inputBranchNames.size()==1){ 
-        if(th1f_m.find(histName)!=th1f_m.end()){
-            auto histLambda = [histName](Float_t val1)-> Float_t {
-                auto bin1 = th1f_m[histName]->GetXaxis()->FindBin(val1);
-                return(th1f_m[histName]->GetBinContent(bin1));
-            };
-            Define(outputBranchName,histLambda, inputBranchNames);
-        } else if(th1d_m.find(histName)!=th1d_m.end()){
-            auto histLambda = [histName](Float_t val1)-> Float_t {
-                auto bin1 = th1d_m[histName]->GetXaxis()->FindBin(val1);
-                return(th1d_m[histName]->GetBinContent(bin1));
-            };
-            Define(outputBranchName,histLambda, inputBranchNames);
-        } else {
-            std::cerr << "th1 val error" << std::endl;
-        }
-    } else if(inputBranchNames.size()==2){
-        if(th2f_m.find(histName)!=th2f_m.end()){
-            auto histLambda = [histName](Float_t val1, Float_t val2) -> Float_t {
-                auto bin1 = th2f_m[histName]->GetXaxis()->FindBin(val1);
-                auto bin2 = th2f_m[histName]->GetYaxis()->FindBin(val2);
-                return(th2f_m[histName]->GetBinContent(bin1, bin2));
-            };
-            Define(outputBranchName,histLambda, inputBranchNames);
-        } else if(th2d_m.find(histName)!=th2d_m.end()){
-            auto histLambda = [histName](Float_t val1, Float_t val2) -> Float_t {
-                auto bin1 = th2d_m[histName]->GetXaxis()->FindBin(val1);
-                auto bin2 = th2d_m[histName]->GetYaxis()->FindBin(val2);
-                return(th2d_m[histName]->GetBinContent(bin1, bin2));
-            };
-            Define(outputBranchName,histLambda, inputBranchNames);
-        } else {
-            std::cerr << "th2 val error" << std::endl;
-        }
-    } else {
-        std::cerr << "Error! Access of histogram " << histName << " attempted with invalid branche combination" << std::endl; 
-    }
-    return(this);
-}
-
-ROOT::RDF::RNode Analyzer::getDF(){
-    return(df_m);
-}
-
-std::string Analyzer::configMap(std::string key){
-    if(configMap_m.find(key)!=configMap_m.end()){
-        return(configMap_m[key]);
-    } else {
-        return("");
-    }
-} 
-
-
-correction::Correction::Ref Analyzer::correctionMap(std::string key){
-    
-    std::cout << "Getting correction " << key << std::endl;
-    auto correction = corrections_m.at(key);	
-    std::cout << "got correction" << std::endl;
-    return(correction);
-    /*if(){
-        
-    } else {
-        Thr
-    }*/
-
-}
-
-
-
-
-
-
-void Analyzer::addBDT(std::string key, std::string fileName, std::vector<std::string> featureList, std::string runVar){
-    // make the feature list (f0, f1, f2, ...)
-    std::vector<std::string> features;
-    for(long unsigned int i = 0; i<featureList.size(); i++){
-        features.push_back("f"+std::to_string(i));
     }
 
-    // Load the BDT
-    auto bdt = fastforest::load_txt(fileName, features);
+    // Set all variables affected by this systematic
+    systematicToVariableMap_m[syst] = systVariableSet;
 
-    // Add the BDT and feature list to their maps
-    bdts_m.emplace(key, bdt);
-    bdt_features_m.emplace(key, featureList);
-    bdt_runVars_m.emplace(key, runVar);
-}
-
-
-
-
-void Analyzer::addCorrection(std::string key, std::string fileName, std::string correctionName, std::vector<std::string> featureList){
-   
-    // load correction object from json
-    auto correctionF = correction::CorrectionSet::from_file(fileName);
-    auto correction = correctionF->at(correctionName);
-
-    // Add the correction and feature list to their maps
-    std::cout << "Adding correction " << key << "!" << std::endl;
-    corrections_m.emplace(key, correction);
-    correction_features_m.emplace(key, featureList);
 }
 
 

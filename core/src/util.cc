@@ -174,7 +174,7 @@ std::vector<std::string> configToVector(const std::string &configFile){
 }
 
 // Make a basic dataframe and return it based on a config map
-std::unique_ptr<TChain> makeTChain(const std::unordered_map<std::string, std::string> &configMap){
+std::vector<std::unique_ptr<TChain>> makeTChain(std::unordered_map<std::string, std::string> &configMap){
     std::string directory;
     std::string fileList;
     Int_t mode = 0;
@@ -182,12 +182,20 @@ std::unique_ptr<TChain> makeTChain(const std::unordered_map<std::string, std::st
     // Read the directory from the config. It needs to exist
     if(configMap.find("fileList")!=configMap.end()){
         fileList = configMap.at("fileList");
-	mode = 1;
+	    mode = 1;
     } else if(configMap.find("directory")!=configMap.end()){
         directory = configMap.at("directory");
-	mode = 2;
+	    mode = 2;
     } else {
-        std::cerr << "Error: No input directory provided. Please include one in the config file." << std::endl;
+        std::cerr << "Error!!!!! No input directory provided. Please include one in the config file, for example with fileList=pathToFile.root" << std::endl;
+    }
+
+    std::string treeList = "Events";
+    // Read the directory from the config. It needs to exist
+    if(configMap.find("treeList")!=configMap.end()){
+        treeList = configMap.at("treeList");
+    } else {
+        std::cout << "No treeList found, using default Events" << std::endl;
     }
     
     // Determine if there is a glob list. If not the default is ".root"
@@ -196,33 +204,62 @@ std::unique_ptr<TChain> makeTChain(const std::unordered_map<std::string, std::st
         globs = splitString(configMap.at("globs"),",");
     }
 
+    
+
     // Determine if there is an anti glob list. If not the default is for it to be just "FAIL"
     std::vector<std::string> antiGlobs = {"FAIL"};
     if(configMap.find("antiglobs")!=configMap.end()){
         antiGlobs = splitString(configMap.at("antiglobs"),",");
     }
-    //std::cout << "antiglobs: " << std::endl;
-    //for(auto glob : antiGlobs){
-    //    std::cout << glob << std::endl;
-    //}
+
+    std::vector<std::unique_ptr<TChain>> tchainVector;
+
+    auto treeListVec = splitString(treeList, ",");
+    for(const auto &tree : treeListVec){
+        tchainVector.emplace_back(new TChain(tree.c_str()));
+        //std::unique_ptr<TChain> chain();
+    }
+
     // Get all the events
-    std::unique_ptr<TChain> chain(new TChain("Events"));
+    
+    //std::unique_ptr<TChain> friendChain(new TChain("CollectionTree"));
+    // this chain will be a memory leak, but it can't be deleted yet
+    // TODO: store this somewhere safe
+    //auto *friendChain = new TChain("CollectionTree");
+    
+
     int fileNum = 0;
     if(mode==1){
 	    auto fileListVec = splitString(fileList, ",");
         fileNum = fileListVec.size();
-        for(const auto &file : fileListVec){
-            std::cout << "Adding file " << file << std::endl;
-            chain->Add(file.c_str());
-	    }
+        for(const auto file : fileListVec){
+	        std::cout << "Adding file " << file << std::endl;
+            for(auto &chain : tchainVector){
+                chain->Add(file.c_str());
+            }
+            //chain->Add(file.c_str());
+            //chain->Add((file + "/POOLCollectionTree").c_str());
+            //chain->Add((file + "/CollectionTree")    .c_str());
+            //friendChain->Add(file.c_str());
+        }
+        //chain->AddFriend(friendChain);
 
     } else if(mode==2){
-        fileNum = scan(*chain, directory, globs, antiGlobs);
+        for(auto &chain : tchainVector){
+            //chain->Add(file.c_str());
+            fileNum = scan(*(tchainVector[0].get()), directory, globs, antiGlobs);
+        }
+       
     }
+
+    for(int i =1; i<tchainVector.size(); i++){
+        tchainVector[0]->AddFriend(tchainVector[1].get());
+    }
+
     std::cout << fileNum << " files found" << std::endl;
 
     // Return the dataframe
-    return(chain);
+    return(tchainVector);
 }
 
 // Save content of a DF

@@ -1,0 +1,8 @@
+directory=/home/brkronheim/testRootFile/
+treeList=lumi/tree
+saveFile=/home/brkronheim/testRootFile/output.root
+saveTree=Events
+threads=-1
+antiglobs=output.root,hists.root
+saveConfig=analyses/Plotter/cfg/output.txt
+aliasConfig=analyses/Plotter/cfg/alias.txt

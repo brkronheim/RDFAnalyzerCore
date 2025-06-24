@@ -1,1 +1,0 @@
-file=aux/NLO_Run3_stitch.root hists=TH2D:NLO_stitch_22:NLO_stitch_22,TH2D:NLO_stitch_22EE:NLO_stitch_22EE,TH2D:NLO_stitch_23:NLO_stitch_23,TH2D:NLO_stitch_23BPix:NLO_stitch_23BPix

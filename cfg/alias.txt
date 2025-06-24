@@ -1,5 +1,0 @@
-existingName=MET_pt newName=MET_Pt_corr
-existingName=MET_phi newName=MET_Phi_corr
-existingName=Electron_mvaIso_WP80 newName=Electron_mvaFall17V2Iso_WP80
-existingName=Electron_mvaIso_WP90 newName=Electron_mvaFall17V2Iso_WP90
-existingName=Jet_pt newName=Jet_PtReg
