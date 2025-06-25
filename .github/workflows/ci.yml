@@ -22,11 +22,13 @@ jobs:
     - name: Download and extract ROOT
       run: |
         wget https://root.cern/download/root_v6.36.00.Linux-ubuntu24.04-x86_64-gcc13.3.tar.gz
+        echo "Untarring ROOT"
         tar -xzf root_v6.36.00.Linux-ubuntu24.04-x86_64-gcc13.3.tar.gz
+        echo "Removing tar file"
         rm root_v6.36.00.Linux-ubuntu24.04-x86_64-gcc13.3.tar.gz
-        echo "$(pwd)/root/bin" >> $GITHUB_PATH
-        echo "ROOTSYS=$(pwd)/root" >> $GITHUB_ENV
-        echo "source $(pwd)/root/bin/thisroot.sh" >> $GITHUB_ENV
+        echo "Adding ROOT to PATH"
+        source root/bin/thisroot.sh
+    
 
     - name: Configure CMake
       run: cmake -S . -B build
