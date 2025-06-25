@@ -24,3 +24,4 @@ condorSub*
 *__afs*
 aux/Run3/*
 aux/Run2/*
+docs/doxygen/*
