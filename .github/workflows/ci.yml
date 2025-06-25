@@ -17,7 +17,7 @@ jobs:
         submodules: recursive
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y cmake g++ make zlib1g-dev wget libvdt-dev
+      run: sudo apt-get update && sudo apt-get install -y cmake g++ make zlib1g-dev wget libvdt-dev libtbb12 libtbb-dev
 
     - name: Download and extract ROOT
       run: |
