@@ -1,4 +1,3 @@
-
 #include <RtypesCore.h>
 #include <analyzer.h>
 #include <plots.h>
@@ -41,7 +40,7 @@ int main(int argc, char **argv) {
   std::vector<std::vector<histInfo>> fullHistList = {histInfos};
 
   // get syst information, store to branch Systematic
-  const std::vector<std::string> systList = an.makeSystList("Systematic");
+  const std::vector<std::string> systList = an.getDataManager().makeSystList("Systematic");
 
   // Define selection categories: branchName, numBins, lowerBound, upperBound
   selectionInfo channelBounds("channel", 1, 0.0, 1.0);
@@ -64,10 +63,10 @@ int main(int argc, char **argv) {
 
   // Book all the histograms, provide a suffix of "All" to these. This can be
   // called multiple times
-  an.bookND(histInfos, selection, "All", allRegionNames);
+  an.getNDHistogramManager().BookND(histInfos, selection, "All", allRegionNames);
 
   // Trigger the execution loop and save the histograms
-  an.save_hists(fullHistList, allRegionNames);
+  an.getNDHistogramManager().SaveHists(fullHistList, allRegionNames);
 
   return (0);
 }

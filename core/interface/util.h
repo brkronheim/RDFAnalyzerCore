@@ -20,6 +20,9 @@
 #include <ROOT/RDataFrame.hxx>
 #include <TChain.h>
 
+#include <ConfigurationManager.h>
+#include <DataManager.h>
+
 #include <plots.h>
 
 /**
@@ -38,7 +41,7 @@ int scan(TChain &chain, const std::string &directory,
 
 /**
  * @brief Create TChain objects from configuration
- * 
+ *
  * Creates and configures TChain objects based on the configuration map.
  * Handles both file list and directory-based input methods.
  *
@@ -46,28 +49,15 @@ int scan(TChain &chain, const std::string &directory,
  * @return Vector of unique_ptr to configured TChain objects
  */
 std::vector<std::unique_ptr<TChain>>
-makeTChain(std::unordered_map<std::string, std::string> &configMap);
+makeTChain(const ConfigurationManager &configManager);
 
 void save(std::vector<std::vector<histInfo>> &fullHistList,
           const histHolder &hists,
           const std::vector<std::vector<std::string>> &allRegionNames,
           const std::string &fileName);
 
-
-ROOT::RDF::RNode
-saveDF(ROOT::RDF::RNode &df,
-       const std::unordered_map<std::string, std::string> &configMap,
-       const std::unordered_map<std::string, std::unordered_set<std::string>>
-           &variableToSystematicMap);
-
-
-
-
-
-
-
-
-
-
+ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df,
+                        const ConfigurationManager &configManager,
+                        const DataManager &dataManager);
 
 #endif

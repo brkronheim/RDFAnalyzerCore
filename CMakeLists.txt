@@ -9,6 +9,8 @@ set(CMAKE_MODULE_PATH "cmake/" ${CMAKE_MODULE_PATH})
 
 project(RDFAnalyzer)
 
+enable_testing()
+
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads)
 find_package(ZLIB)

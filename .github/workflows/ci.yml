@@ -38,6 +38,8 @@ jobs:
     - name: Build
       run: cmake --build build
 
-    # Optional: Run tests if you have them
-    # - name: Run tests
-    #   run: ctest --test-dir build 
+    - name: Run tests
+      run: |
+        ROOTDIR=$(pwd)/root
+        source $ROOTDIR/bin/thisroot.sh
+        ctest --test-dir build --output-on-failure 

@@ -32,15 +32,15 @@ template <typename T> Float_t getSignFloat(T val) {
 }
 
 /**
- * @brief Clips an integer value to the specified lower and upper bounds (inclusive).
+ * @brief Clips an integer value to the specified lower and upper bounds
+ * (inclusive).
  * @tparam T Numeric type (typically integer)
  * @tparam lower Lower bound (inclusive)
  * @tparam upper Upper bound (inclusive)
  * @param val Value to clip
  * @return Value clipped to the range [lower, upper]
  */
-template <typename T, int lower, int upper>
-T clipIntBounds(T val) {
+template <typename T, int lower, int upper> T clipIntBounds(T val) {
   val = val > T(upper) ? T(upper) : val;
   val = val < T(lower) ? T(lower) : val;
   return (val);
@@ -91,8 +91,7 @@ template <typename T> T absDiff(T val1, T val2) { return (fabs(val1 - val2)); }
  * @tparam index The integer value to return
  * @return The value of index
  */
-template <Int_t index>
-Int_t constantInteger() { return (index); }
+template <Int_t index> Int_t constantInteger() { return (index); }
 
 /**
  * @brief Casts a value to another type.
@@ -118,7 +117,8 @@ template <typename T> ROOT::VecOps::RVec<T> defineVector(T val1) {
 // =========================
 
 /**
- * @brief Returns the value at a fixed (compile-time) index in a vector, or -9999.0 if out of bounds.
+ * @brief Returns the value at a fixed (compile-time) index in a vector, or
+ * -9999.0 if out of bounds.
  * @tparam T Type of the vector elements
  * @tparam index Index to access (compile-time constant)
  * @param vector Input vector
@@ -153,7 +153,8 @@ ROOT::VecOps::RVec<Int_t> selectTop(ROOT::VecOps::RVec<T> &vector) {
 }
 
 /**
- * @brief Returns the value at a given index in a vector, or -9999.0 if out of bounds.
+ * @brief Returns the value at a given index in a vector, or -9999.0 if out of
+ * bounds.
  * @tparam T Type of the vector elements
  * @tparam S Type of the index
  * @param vector Input vector
@@ -169,7 +170,8 @@ T indexVector(ROOT::VecOps::RVec<T> &vector, S index) {
 }
 
 /**
- * @brief Returns a vector containing the element-wise maximum of two input vectors.
+ * @brief Returns a vector containing the element-wise maximum of two input
+ * vectors.
  * @tparam T Type of the vector elements
  * @param val1 First input vector
  * @param val2 Second input vector
@@ -187,7 +189,8 @@ ROOT::VecOps::RVec<T> maximumVector(ROOT::VecOps::RVec<T> &val1,
 }
 
 /**
- * @brief Takes elements from a vector at specified indices, pads with -9999.0 if out of bounds.
+ * @brief Takes elements from a vector at specified indices, pads with -9999.0
+ * if out of bounds.
  * @tparam T Type of the vector elements
  * @tparam S Type of the index vector elements
  * @param vector Input vector

@@ -170,9 +170,12 @@ private:
 
 /**
  * @class histInfo
- * @brief Stores metadata for a histogram, including name, variable, label, weight, binning, and bounds.
+ * @brief Stores metadata for a histogram, including name, variable, label,
+ * weight, binning, and bounds.
  *
- * This class encapsulates the information needed to define a histogram, such as its name, the variable it represents, its label, weight expression, number of bins, and the lower and upper bounds of the histogram.
+ * This class encapsulates the information needed to define a histogram, such as
+ * its name, the variable it represents, its label, weight expression, number of
+ * bins, and the lower and upper bounds of the histogram.
  */
 class histInfo {
 public:
@@ -254,7 +257,9 @@ private:
  * @class selectionInfo
  * @brief Holds selection information for applying cuts to histograms.
  *
- * This class is used to define a set of selection criteria (cuts) that can be applied to a predefined set of histograms. It stores the variable, binning, and bounds for the selection.
+ * This class is used to define a set of selection criteria (cuts) that can be
+ * applied to a predefined set of histograms. It stores the variable, binning,
+ * and bounds for the selection.
  */
 class selectionInfo {
 public:
@@ -307,9 +312,11 @@ private:
 
 /**
  * @class histHolder
- * @brief Holds and manages multiple histograms, providing booking and saving utilities.
+ * @brief Holds and manages multiple histograms, providing booking and saving
+ * utilities.
  *
- * This class manages a collection of histograms, allowing for booking N-dimensional histograms and saving them to file.
+ * This class manages a collection of histograms, allowing for booking
+ * N-dimensional histograms and saving them to file.
  */
 class histHolder {
 public:

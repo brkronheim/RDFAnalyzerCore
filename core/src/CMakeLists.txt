@@ -1,22 +1,24 @@
-set(INTERFACE_DIR "${CoreDirectory}/interface")
+# core/src/CMakeLists.txt
 
-include_directories(PUBLIC "${CoreDirectory}/extern/XGBoost-FastForest/include" "${CoreDirectory}/extern/correctionlib/include" "${CoreDirectory}/interface")
+# Gather all source files in this directory
+file(GLOB CORE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/*.cc")
 
-add_library(plots OBJECT plots.cc)
-target_compile_features(plots PUBLIC cxx_std_17)
-target_link_libraries(plots PRIVATE  ROOT::ROOTDataFrame ROOT::ROOTVecOps ROOT::Core ROOT::Hist ROOT::MathCore)
+add_library(core STATIC ${CORE_SRC})
 
-add_library(configParser OBJECT configParser.cc)
-target_compile_features(configParser PUBLIC cxx_std_17)
-target_link_libraries(configParser PRIVATE plots ROOT::ROOTDataFrame ROOT::ROOTVecOps ROOT::Core ROOT::Hist ROOT::MathCore)
+target_compile_features(core PUBLIC cxx_std_17)
 
+target_include_directories(core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../interface
+    ${CMAKE_CURRENT_SOURCE_DIR}/../extern/XGBoost-FastForest/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../extern/correctionlib/include
+)
 
-add_library(util OBJECT util.cc)
-target_compile_features(util PUBLIC cxx_std_17)
-target_link_libraries(util PRIVATE plots configParser ROOT::ROOTDataFrame ROOT::ROOTVecOps ROOT::Core ROOT::Hist ROOT::MathCore)
-
-
-
-add_library(analyzer OBJECT analyzer.cc)
-target_compile_features(analyzer PUBLIC cxx_std_17)
-target_link_libraries(analyzer PRIVATE configParser plots fastforest correctionlib plots ROOT::ROOTDataFrame ROOT::ROOTVecOps ROOT::Core ROOT::Hist ROOT::MathCore) 
+target_link_libraries(core PUBLIC
+    fastforest
+    correctionlib
+    ROOT::ROOTDataFrame
+    ROOT::ROOTVecOps
+    ROOT::Core
+    ROOT::Hist
+    ROOT::MathCore
+)

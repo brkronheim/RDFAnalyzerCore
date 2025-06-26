@@ -1,4 +1,5 @@
-add_executable(testPlots testPlots.cc)
-target_compile_features(testPlots PRIVATE cxx_std_17)
-find_package(ROOT)
-target_link_libraries(testPlots PRIVATE plots ${ROOT_LIBRARIES}) # ROOT::ROOTDataFrame ROOT::ROOTVecOps ROOT::Core ROOT::Hist ROOT::MathCore)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../extern/gtest/googletest/include)
+
+add_executable(testConfigurationManager testConfigurationManager.cc)
+target_link_libraries(testConfigurationManager core gtest gtest_main)
+add_test(NAME ConfigurationManagerTest COMMAND testConfigurationManager)
