@@ -5,15 +5,16 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <api/ISystematicManager.h>
 
 /**
  * @brief SystematicManager: Handles tracking and applying systematic
- * variations.
+ * variations. Implements ISystematicManager.
  *
  * This manager registers systematics, tracks affected variables, and provides
- * interfaces for systematic-aware operations. It is owned by DataManager.
+ * interfaces for systematic-aware operations. It is intended to be injected and owned at a high level (e.g., Analyzer), not by DataManager.
  */
-class SystematicManager {
+class SystematicManager : public ISystematicManager {
 public:
   /**
    * @brief Register a systematic and its affected variables

@@ -1,6 +1,9 @@
 #ifndef CORRECTIONMANAGER_H_INCLUDED
 #define CORRECTIONMANAGER_H_INCLUDED
 
+#include <api/IConfigurationProvider.h>
+#include <api/IDataFrameProvider.h>
+#include <api/ICorrectionManager.h>
 #include <NamedObjectManager.h>
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
@@ -11,66 +14,40 @@
 #include <unordered_map>
 #include <vector>
 
-class ConfigurationManager;
-
 /**
- * @brief CorrectionManager: Handles loading and applying corrections
- * (correctionlib).
+ * @class CorrectionManager
+ * @brief Handles loading and applying corrections (correctionlib).
+ *
+ * This manager encapsulates the logic for managing corrections using correctionlib,
+ * including loading from configuration, storing, and applying them to data.
+ * Implements the ICorrectionManager interface for dependency injection.
  */
 class CorrectionManager
-    : public NamedObjectManager<correction::Correction::Ref> {
+    : public NamedObjectManager<correction::Correction::Ref>,
+      public ICorrectionManager {
 public:
   /**
    * @brief Construct a new CorrectionManager object
-   * @param configManager Reference to the ConfigurationManager
+   * @param configProvider Reference to the configuration provider
    */
-  CorrectionManager(const ConfigurationManager &configManager);
+  CorrectionManager(const IConfigurationProvider &configProvider);
 
   /**
-   * @brief Apply a correction to a set of input features
+   * @brief Apply a correction to the given dataframe provider
+   * @param dataFrameProvider Reference to the dataframe provider
    * @param correctionName Name of the correction
-   * @param stringArguments String arguments for the correction
-   * @param inputFeatures Input features for the correction
-   * @param defineVector Function to define a vector
-   * @param define Function to define the correction
+   * @param stringArguments String arguments
    */
-  template <typename DefineVectorFunc, typename DefineFunc>
-  void applyCorrection(const std::string &correctionName,
-                       const std::vector<std::string> &stringArguments,
-                       const std::vector<std::string> &inputFeatures,
-                       DefineVectorFunc defineVector, DefineFunc define) {
-    defineVector("input_" + correctionName, inputFeatures, "double");
-    auto correction = this->objects_m.at(correctionName);
-    auto stringArgs = stringArguments;
-    auto correctionLambda =
-        [correction,
-         stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
-      std::vector<std::variant<int, double, std::string>> values;
-      auto stringArgIt = stringArgs.begin();
-      auto doubleArgIt = inputVector.begin();
-      for (const auto &varType : correction->inputs()) {
-        if (varType.typeStr() == "string") {
-          values.push_back(*stringArgIt);
-          ++stringArgIt;
-        } else if (varType.typeStr() == "int") {
-          values.push_back(int(*doubleArgIt));
-          ++doubleArgIt;
-        } else {
-          values.push_back(*doubleArgIt);
-          ++doubleArgIt;
-        }
-      }
-      return correction->evaluate(values);
-    };
-    define(correctionName, correctionLambda, {"input_" + correctionName});
-  }
+  void applyCorrection(IDataFrameProvider& dataFrameProvider,
+                      const std::string &correctionName,
+                      const std::vector<std::string> &stringArguments);
 
   /**
    * @brief Get a correction object by key
    * @param key Correction key
    * @return Correction reference
    */
-  correction::Correction::Ref getCorrection(const std::string &key) const;
+  correction::Correction::Ref getCorrection(const std::string &key) const override;
 
   /**
    * @brief Get the features for a correction by key
@@ -78,14 +55,14 @@ public:
    * @return Reference to the vector of feature names
    */
   const std::vector<std::string> &
-  getCorrectionFeatures(const std::string &key) const;
+  getCorrectionFeatures(const std::string &key) const override;
 
 private:
   /**
    * @brief Register corrections from correctionlib using the configuration
-   * @param configManager Reference to the ConfigurationManager
+   * @param configProvider Reference to the configuration provider
    */
-  void registerCorrectionlib(const ConfigurationManager &configManager);
+  void registerCorrectionlib(const IConfigurationProvider &configProvider);
 };
 
 #endif // CORRECTIONMANAGER_H_INCLUDED

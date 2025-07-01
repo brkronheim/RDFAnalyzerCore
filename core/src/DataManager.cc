@@ -1,15 +1,22 @@
-#include <ConfigurationManager.h>
+#include <api/IConfigurationProvider.h>
 #include <DataManager.h>
 #include <TChain.h>
 #include <util.h>
 
 /**
  * @brief Construct a new DataManager object
- * @param configManager Reference to the ConfigurationManager
+ * @param configProvider Reference to the configuration provider
  */
-DataManager::DataManager(const ConfigurationManager &configManager)
-    : chain_vec_m(makeTChain(configManager)),
+DataManager::DataManager(const IConfigurationProvider &configProvider)
+    : chain_vec_m(makeTChain(configProvider)),
       df_m(ROOT::RDataFrame(*chain_vec_m[0])) {}
+
+/**
+ * @brief Construct a new DataManager object for testing with an in-memory RDataFrame
+ * @param nEntries Number of entries for the in-memory RDataFrame
+ */
+DataManager::DataManager(size_t nEntries)
+    : chain_vec_m(), df_m(ROOT::RDataFrame(nEntries)) {}
 
 /**
  * @brief Get the current RDataFrame node
@@ -37,79 +44,110 @@ TChain *DataManager::getChain() const { return chain_vec_m[0].get(); }
  */
 void DataManager::DefineVector(std::string name,
                                const std::vector<std::string> &columns,
-                               std::string type) {
+                               std::string type,
+                               ISystematicManager &systematicManager) {
+  std::cout << "Defining vector " << name << "!" << std::endl;
+  
+  // Store column names in a local variable to avoid multiple calls to GetColumnNames()
+  const auto columnNames = df_m.GetColumnNames();
+  
+  // Check if all required columns exist
+  std::vector<std::string> missingColumns;
+  for (const auto &column : columns) {
+    std::cout << "Column: " << column << std::endl;
+    if (std::find(columnNames.begin(), columnNames.end(), column) == columnNames.end()) {
+      std::cout << "Column " << column << " not found!" << std::endl;
+      missingColumns.push_back(column);
+    }
+  }
+  
+  // If any columns are missing, throw an exception
+  if (!missingColumns.empty()) {
+    std::string errorMsg = "Missing columns in dataframe: ";
+    for (size_t i = 0; i < missingColumns.size(); ++i) {
+      if (i > 0) errorMsg += ", ";
+      errorMsg += missingColumns[i];
+    }
+    throw std::runtime_error(errorMsg);
+  }
+  
   std::string arrayString = "ROOT::VecOps::RVec<" + type + ">({";
-  // ... implementation ...
+  for (long unsigned int i = 0; i < columns.size() - 1; i++) {
+    arrayString += +"static_cast<" + type + ">(" + columns[i] + "),";
+  }
+
+  arrayString += columns[columns.size() - 1] + "})";
+  df_m = df_m.Define(name, arrayString);
+  
+
+  std::cout << "Defined vector " << name << "!" << std::endl;
 }
 
 /**
  * @brief Make a list of systematic variations for a branch
  * @param branchName Name of the branch
+ * @param systematicManager Pointer to the systematic manager
  * @return Vector of systematic variation names
  */
 std::vector<std::string>
-DataManager::makeSystList(const std::string &branchName) {
+DataManager::makeSystList(const std::string &branchName, ISystematicManager &systematicManager) {
   std::vector<std::string> systList = {"Nominal"};
   int var = 0;
-  DefinePerSample_m(branchName,
+  DefinePerSample_m("Nominal",
                     [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
                       return var;
                     });
-  for (const auto &syst : systematicManager_m.getSystematics()) {
-    systList.push_back(syst + "Up");
-    systList.push_back(syst + "Down");
-    var++;
-    DefinePerSample_m(
-        branchName + "_" + syst + "Up",
-        [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-          return var;
-        });
-    var++;
-    DefinePerSample_m(
-        branchName + "_" + syst + "Down",
-        [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-          return var;
-        });
+  if (systematicManager) {
+    for (const auto &syst : systematicManager->getSystematics()) {
+      systList.push_back(syst + "Up");
+      systList.push_back(syst + "Down");
+      var++;
+      DefinePerSample_m(
+          syst + "Up",
+          [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
+            return var;
+          });
+      var++;
+      DefinePerSample_m(
+          syst + "Down",
+          [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
+            return var;
+          });
+    }
   }
   return systList;
 }
 
+
 /**
  * @brief Register constant variables from configuration
- * @param configManager Reference to the ConfigurationManager
+ * @param configProvider Reference to the configuration provider
  */
-void DataManager::registerConstants(const ConfigurationManager &configManager) {
-  std::string floatFile = configManager.get("floatConfig");
+void DataManager::registerConstants(const IConfigurationProvider &configProvider) {
+  std::string floatFile = configProvider.get("floatConfig");
   if (!floatFile.empty()) {
-    auto floatConfig = configManager.parsePairBasedConfig(floatFile);
+    auto floatConfig = configProvider.parsePairBasedConfig(floatFile);
     for (auto &pair : floatConfig) {
       float val = std::stof(pair.second);
-      DefinePerSample_m(
-          pair.first,
-          [val](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-            return val;
-          });
+      defineConstant(pair.first, val);
     }
   }
-  std::string intFile = configManager.get("intConfig");
+  std::string intFile = configProvider.get("intConfig");
   if (!intFile.empty()) {
-    auto intConfig = configManager.parsePairBasedConfig(intFile);
+    auto intConfig = configProvider.parsePairBasedConfig(intFile);
     for (auto &pair : intConfig) {
       int val = std::stoi(pair.second);
-      DefinePerSample_m(
-          pair.first, [val](unsigned int, const ROOT::RDF::RSampleInfo) -> int {
-            return val;
-          });
+      defineConstant(pair.first, val);
     }
   }
 }
 
 /**
  * @brief Register aliases from configuration
- * @param configManager Reference to the ConfigurationManager
+ * @param configProvider Reference to the configuration provider
  */
-void DataManager::registerAliases(const ConfigurationManager &configManager) {
-  auto aliasConfig = configManager.parseMultiKeyConfig(
+void DataManager::registerAliases(const IConfigurationProvider &configProvider) {
+  auto aliasConfig = configProvider.parseMultiKeyConfig(
       "aliasConfig", {"existingName", "newName"});
   const auto columnNames = df_m.GetColumnNames();
   for (const auto &entryKeys : aliasConfig) {
@@ -119,11 +157,11 @@ void DataManager::registerAliases(const ConfigurationManager &configManager) {
 
 /**
  * @brief Register optional branches from configuration
- * @param configManager Reference to the ConfigurationManager
+ * @param configProvider Reference to the configuration provider
  */
 void DataManager::registerOptionalBranches(
-    const ConfigurationManager &configManager) {
-  const auto aliasConfig = configManager.parseMultiKeyConfig(
+    const IConfigurationProvider &configProvider) {
+  const auto aliasConfig = configProvider.parseMultiKeyConfig(
       "optionalBranchesConfig", {"name", "type", "default"});
 #if defined(HAS_DEFAULT_VALUE_FOR)
   for (const auto &entryKeys : aliasConfig) {
@@ -285,10 +323,10 @@ void DataManager::registerOptionalBranches(
 
 /**
  * @brief Finalize setup after all configuration is loaded
- * @param configManager Reference to the ConfigurationManager
+ * @param configProvider Reference to the configuration provider
  */
-void DataManager::finalizeSetup(const ConfigurationManager &configManager) {
-  registerConstants(configManager);
-  registerAliases(configManager);
-  registerOptionalBranches(configManager);
+void DataManager::finalizeSetup(const IConfigurationProvider &configProvider) {
+  registerConstants(configProvider);
+  registerAliases(configProvider);
+  registerOptionalBranches(configProvider);
 }

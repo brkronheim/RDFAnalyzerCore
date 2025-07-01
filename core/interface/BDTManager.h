@@ -1,6 +1,9 @@
 #ifndef BDTMANAGER_H_INCLUDED
 #define BDTMANAGER_H_INCLUDED
 
+#include <api/IConfigurationProvider.h>
+#include <api/IDataFrameProvider.h>
+#include <api/IBDTManager.h>
 #include <NamedObjectManager.h>
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
@@ -11,80 +14,70 @@
 #include <unordered_map>
 #include <vector>
 
-class ConfigurationManager;
-
 /**
- * @brief BDTManager: Handles loading, storing, and applying BDTs.
+ * @class BDTManager
+ * @brief Handles loading, storing, and applying BDTs.
+ *
+ * This manager encapsulates the logic for managing Boosted Decision Trees (BDTs),
+ * including loading from configuration, storing, and applying them to data.
+ * Implements the IBDTManager interface for dependency injection.
  */
 class BDTManager
-    : public NamedObjectManager<std::shared_ptr<fastforest::FastForest>> {
-public: // TODO: add doxygen documentation for all of these functions
+    : public NamedObjectManager<std::shared_ptr<fastforest::FastForest>>,
+      public IBDTManager {
+public:
   /**
    * @brief Construct a new BDTManager object
-   * @param configManager Reference to the ConfigurationManager
+   * @param configProvider Reference to the configuration provider
    */
-  BDTManager(const ConfigurationManager &configManager);
+  BDTManager(const IConfigurationProvider &configProvider);
 
   /**
-   * @brief Apply a BDT to the input features
+   * @brief Apply a BDT to the given dataframe provider
+   * @param dataFrameProvider Reference to the dataframe provider
    * @param bdtName Name of the BDT
-   * @param inputFeatures Vector of input feature names
-   * @param runVar Name of the run variable which is used to determine if the
-   * BDT should be applied
-   * @param defineVector Function to define the input vector
-   * @param define Function to define the BDT
    */
-  template <typename DefineVectorFunc, typename DefineFunc>
-  void applyBDT(const std::string &bdtName,
-                const std::vector<std::string> &inputFeatures,
-                const std::string &runVar, DefineVectorFunc defineVector,
-                DefineFunc define) {
-    defineVector("input_" + bdtName, inputFeatures, "Float_t");
-    auto bdt = this->objects_m.at(bdtName);
-    auto bdtLambda = [bdt](ROOT::VecOps::RVec<Float_t> &inputVector,
-                           bool runVar) -> Float_t {
-      if (runVar) {
-        return (1. / (1. + std::exp(-((*bdt.get())(inputVector.data())))));
-      } else {
-        return (-1);
-      }
-    };
-    define(bdtName, bdtLambda, {"input_" + bdtName, runVar});
-  }
+  void applyBDT(IDataFrameProvider& dataFrameProvider,
+                const std::string &bdtName);
+  
+
 
   /**
    * @brief Get a BDT object by key
    * @param key BDT key
    * @return Shared pointer to the FastForest object
    */
-  std::shared_ptr<fastforest::FastForest> getBDT(const std::string &key) const;
+  std::shared_ptr<fastforest::FastForest> getBDT(const std::string &key) const override;
 
   /**
    * @brief Get the features for a BDT by key
    * @param key BDT key
    * @return Reference to the vector of feature names
    */
-  const std::vector<std::string> &getBDTFeatures(const std::string &key) const;
+  const std::vector<std::string> &getBDTFeatures(const std::string &key) const override;
 
   /**
    * @brief Get the run variable for a BDT
    * @param bdtName Name of the BDT
    * @return Reference to the run variable string
    */
-  const std::string &getRunVar(const std::string &bdtName) const;
+  const std::string &getRunVar(const std::string &bdtName) const override;
 
   /**
    * @brief Get all BDT names
    * @return Vector of all BDT names
    */
-  std::vector<std::string> getAllBDTNames() const;
+  std::vector<std::string> getAllBDTNames() const override;
 
 private:
   /**
    * @brief Register BDTs from the configuration
-   * @param configManager Reference to the ConfigurationManager
+   * @param configProvider Reference to the configuration provider
    */
-  void registerBDTs(const ConfigurationManager &configManager);
+  void registerBDTs(const IConfigurationProvider &configProvider);
+  /**
+   * @brief Map from BDT name to run variable name.
+   */
   std::unordered_map<std::string, std::string> bdt_runVars_m;
 };
 

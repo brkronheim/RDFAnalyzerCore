@@ -30,33 +30,33 @@
 
 /**
  * @brief Get list of tree names from config
- * @param configManager Configuration manager to search
+ * @param configProvider Configuration provider to search
  * @return Vector of tree names (defaults to {"Events"} if not found)
  */
 static std::vector<std::string>
-getTreeList(const ConfigurationManager &configManager) {
-  return configManager.getList("treeList", {"Events"});
+getTreeList(const IConfigurationProvider &configProvider) {
+  return configProvider.getList("treeList", {"Events"});
 }
 
 /**
  * @brief Get list of file paths from config
- * @param configManager Configuration manager to search
+ * @param configProvider Configuration provider to search
  * @return Vector of file paths (empty if not found)
  */
 static std::vector<std::string>
-getFileList(const ConfigurationManager &configManager) {
-  return configManager.getList("fileList");
+getFileList(const IConfigurationProvider &configProvider) {
+  return configProvider.getList("fileList");
 }
 
 /**
  * @brief Get directory path from config
- * @param configManager Configuration manager to search
+ * @param configProvider Configuration provider to search
  * @return Directory path string (empty if not found)
  */
-static std::string getDirectory(const ConfigurationManager &configManager) {
-  if (configManager.getConfigMap().find("directory") !=
-      configManager.getConfigMap().end()) {
-    return configManager.getConfigMap().at("directory");
+static std::string getDirectory(const IConfigurationProvider &configProvider) {
+  if (configProvider.getConfigMap().find("directory") !=
+      configProvider.getConfigMap().end()) {
+    return configProvider.getConfigMap().at("directory");
   }
   return "";
 }
@@ -109,7 +109,7 @@ static int scanDirectory(TChain &chain, const std::string &directory,
   int filesFound = 0;
   DIR *dr = opendir(directory.c_str());
   if (dr == nullptr && base) {
-    std::cerr << "Error: No directory found. Returning" << std::endl;
+    throw std::runtime_error("Error: No directory found for scanning.");
     return filesFound;
   }
   struct dirent *en;
@@ -132,17 +132,17 @@ static int scanDirectory(TChain &chain, const std::string &directory,
 
 /**
  * @brief Setup ROOT thread configuration based on config map
- * @param configManager Configuration manager containing thread settings
+ * @param configProvider Configuration provider containing thread settings
  *
  * If threads > 1, enables that many threads.
  * If threads = 1, runs single-threaded.
  * If threads < 1 or not specified, enables maximum number of threads.
  */
-static void setupROOTThreads(const ConfigurationManager &configManager) {
+static void setupROOTThreads(const IConfigurationProvider &configProvider) {
   int threads = -1;
-  if (configManager.getConfigMap().find("threads") !=
-      configManager.getConfigMap().end()) {
-    threads = std::stoi(configManager.getConfigMap().at("threads"));
+  if (configProvider.getConfigMap().find("threads") !=
+      configProvider.getConfigMap().end()) {
+    threads = std::stoi(configProvider.getConfigMap().at("threads"));
   }
   if (threads > 1) {
     ROOT::EnableImplicitMT(threads);
@@ -175,7 +175,7 @@ int scan(TChain &chain, const std::string &directory,
   std::cout << "Checking " << directory << std::endl;
   int filesFound = scanDirectory(chain, directory, globs, antiglobs, base);
   if (filesFound == 0 && base) {
-    std::cerr << "Error: No files found. Returning" << std::endl;
+    throw std::runtime_error("Error: No files found for TChain.");
   }
   return filesFound;
 }
@@ -186,29 +186,29 @@ int scan(TChain &chain, const std::string &directory,
  * Creates and configures TChain objects based on the configuration map.
  * Handles both file list and directory-based input methods.
  *
- * @param configManager Configuration manager containing input settings
+ * @param configProvider Configuration provider containing input settings
  * @return Vector of unique_ptr to configured TChain objects
  */
 std::vector<std::unique_ptr<TChain>>
-makeTChain(const ConfigurationManager &configManager) {
+makeTChain(const IConfigurationProvider &configProvider) {
 
-  // const auto configMap = configManager.getConfigMap();
+
 
   // setup ROOT threads now before any dataframes are created
-  setupROOTThreads(configManager);
+  setupROOTThreads(configProvider);
 
   std::vector<std::unique_ptr<TChain>> tchainVector;
-  auto treeListVec = getTreeList(configManager);
+  auto treeListVec = getTreeList(configProvider);
   for (const auto &tree : treeListVec) {
     tchainVector.emplace_back(new TChain(tree.c_str()));
   }
 
-  std::vector<std::string> globs = configManager.getList("globs", {".root"});
+  std::vector<std::string> globs = configProvider.getList("globs", {".root"});
   std::vector<std::string> antiGlobs =
-      configManager.getList("antiglobs", {"FAIL"});
+      configProvider.getList("antiglobs", {"FAIL"});
 
   int fileNum = 0;
-  auto fileListVec = getFileList(configManager);
+  auto fileListVec = getFileList(configProvider);
   if (!fileListVec.empty()) {
     fileNum = fileListVec.size();
     for (const auto &file : fileListVec) {
@@ -218,16 +218,15 @@ makeTChain(const ConfigurationManager &configManager) {
       }
     }
   } else {
-    std::string directory = getDirectory(configManager);
+    std::string directory = getDirectory(configProvider);
     if (!directory.empty()) {
       for (auto &chain : tchainVector) {
         fileNum = scan(*(tchainVector[0].get()), directory, globs, antiGlobs);
       }
     } else {
-      std::cerr
-          << "Error!!!!! No input directory provided. Please include one "
-             "in the config file, for example with fileList=pathToFile.root"
-          << std::endl;
+      throw std::runtime_error(
+          "Error: No input directory provided. Please include one in the "
+          "config file, for example with fileList=pathToFile.root");
     }
   }
 
@@ -245,50 +244,49 @@ makeTChain(const ConfigurationManager &configManager) {
  * systematic variations of variables.
  *
  * @param df DataFrame to save
- * @param configManager Configuration manager containing save settings
- * @param dataManager DataManager for systematic information
+ * @param configProvider Configuration provider containing save settings
+ * @param dataFrameProvider DataFrame provider for systematic information
+ * @param systematicManager Systematic manager for systematic variations
  * @return Updated DataFrame after saving
  */
 ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df,
-                        const ConfigurationManager &configManager,
-                        const DataManager &dataManager) {
+                        const IConfigurationProvider &configProvider,
+                        const IDataFrameProvider &dataFrameProvider,
+                        const ISystematicManager *systematicManager) {
   std::string saveConfig;
   std::string saveFile;
   std::string saveTree;
   // Read saveConfig, saveFile, and saveTree from the config. It needs to exist
-  if (configManager.getConfigMap().find("saveConfig") !=
-      configManager.getConfigMap().end()) {
-    saveConfig = configManager.getConfigMap().at("saveConfig");
+  if (configProvider.getConfigMap().find("saveConfig") !=
+      configProvider.getConfigMap().end()) {
+    saveConfig = configProvider.getConfigMap().at("saveConfig");
   } else {
-    std::cerr << "Error: No saveConfig provided. Please include one in the "
-                 "config file."
-              << std::endl;
+    throw std::runtime_error("Error: No saveConfig provided. Please include "
+                             "one in the config file.");
     return (df);
   }
 
-  if (configManager.getConfigMap().find("saveFile") !=
-      configManager.getConfigMap().end()) {
-    saveFile = configManager.getConfigMap().at("saveFile");
+  if (configProvider.getConfigMap().find("saveFile") !=
+      configProvider.getConfigMap().end()) {
+    saveFile = configProvider.getConfigMap().at("saveFile");
   } else {
-    std::cerr
-        << "Error: No saveFile provided. Please include one in the config file."
-        << std::endl;
+    throw std::runtime_error(
+        "Error: No saveFile provided. Please include one in the config file.");
     return (df);
   }
 
-  if (configManager.getConfigMap().find("saveTree") !=
-      configManager.getConfigMap().end()) {
-    saveTree = configManager.getConfigMap().at("saveTree");
+  if (configProvider.getConfigMap().find("saveTree") !=
+      configProvider.getConfigMap().end()) {
+    saveTree = configProvider.getConfigMap().at("saveTree");
   } else {
-    std::cerr
-        << "Error: No saveTree provided. Please include one in the config file."
-        << std::endl;
+    throw std::runtime_error(
+        "Error: No saveTree provided. Please include one in the config file.");
     return (df);
   }
 
   // Get the list of branches to save
   std::vector<std::string> saveVectorInit =
-      configManager.parseVectorConfig(saveConfig);
+      configProvider.parseVectorConfig(saveConfig);
   std::vector<std::string> saveVector;
   for (auto val : saveVectorInit) {
     val = val.substr(0, val.find(" ")); // drop everything after the space
@@ -297,14 +295,15 @@ ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df,
     }
   }
 
-  // Add systematic variations for each branch
-  const auto &systManager = dataManager.getSystematicManager();
-  const unsigned int vecSize = saveVector.size();
-  for (unsigned int i = 0; i < vecSize; i++) {
-    const auto &systs = systManager.getSystematicsForVariable(saveVector[i]);
-    for (const auto &syst : systs) {
-      saveVector.push_back(saveVector[i] + "_" + syst + "Up");
-      saveVector.push_back(saveVector[i] + "_" + syst + "Down");
+  // Add systematic variations for each branch if systematicManager is provided
+  if (systematicManager) {
+    const unsigned int vecSize = saveVector.size();
+    for (unsigned int i = 0; i < vecSize; i++) {
+      const auto &systs = systematicManager->getSystematicsForVariable(saveVector[i]);
+      for (const auto &syst : systs) {
+        saveVector.push_back(saveVector[i] + "_" + syst + "Up");
+        saveVector.push_back(saveVector[i] + "_" + syst + "Down");
+      }
     }
   }
 

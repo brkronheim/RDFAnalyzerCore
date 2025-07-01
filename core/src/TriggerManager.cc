@@ -1,30 +1,30 @@
-#include <ConfigurationManager.h>
+#include <api/IConfigurationProvider.h>
 #include <TriggerManager.h>
 
 /**
  * @brief Construct a new TriggerManager object
- * @param configManager Reference to the configuration manager
+ * @param configProvider Reference to the configuration provider
  */
-TriggerManager::TriggerManager(const ConfigurationManager &configManager) {
-  registerTriggers(configManager);
+TriggerManager::TriggerManager(const IConfigurationProvider &configProvider) {
+  registerTriggers(configProvider);
 }
 
 /**
  * @brief Register triggers and vetoes from the configuration
- * @param configManager Reference to the configuration manager
+ * @param configProvider Reference to the configuration provider
  */
 void TriggerManager::registerTriggers(
-    const ConfigurationManager &configManager) {
-  const auto triggerConfig = configManager.parseMultiKeyConfig(
-      "triggerConfig", {"name", "sample", "triggers"});
+    const IConfigurationProvider &configProvider) {
+  const auto triggerConfig = configProvider.parseMultiKeyConfig(
+      configProvider.get("triggerConfig"), {"name", "sample", "triggers"});
 
   for (const auto &entryKeys : triggerConfig) {
 
-    auto triggerList = configManager.splitString(entryKeys.at("triggers"), ",");
+    auto triggerList = configProvider.splitString(entryKeys.at("triggers"), ",");
 
     if (entryKeys.find("triggerVetos") != entryKeys.end()) {
       auto triggerVetoList =
-          configManager.splitString(entryKeys.at("triggerVetos"), ",");
+          configProvider.splitString(entryKeys.at("triggerVetos"), ",");
       vetoes_m.emplace(entryKeys.at("name"), triggerVetoList);
     } else {
       vetoes_m[entryKeys.at("name")] = {};

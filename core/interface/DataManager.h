@@ -1,6 +1,8 @@
 #ifndef DATAMANAGER_H_INCLUDED
 #define DATAMANAGER_H_INCLUDED
 
+#include <api/IConfigurationProvider.h>
+#include <api/IDataFrameProvider.h>
 #include <ROOT/RDataFrame.hxx>
 #include <SystematicManager.h>
 #include <TChain.h>
@@ -9,27 +11,33 @@
 #include <unordered_map>
 #include <vector>
 
-class ConfigurationManager;
-
 /**
  * @brief DataManager: Handles TChain creation, RDataFrame setup, and data
  * access. Suggested methods: getDataFrame(), getChains(), setupDataFrame(),
  * etc.
+ * 
+ * Implements IDataFrameProvider interface for better dependency injection.
  */
-class DataManager {
+class DataManager : public IDataFrameProvider {
 public:
   /**
    * @brief Construct a new DataManager object
-   * @param configManager Reference to the ConfigurationManager
+   * @param configProvider Reference to the configuration provider
    */
-  DataManager(const ConfigurationManager &configManager);
+  DataManager(const IConfigurationProvider &configProvider);
+
+  /**
+   * @brief Construct a new DataManager object for testing with an in-memory RDataFrame
+   * @param nEntries Number of entries for the in-memory RDataFrame
+   */
+  DataManager(size_t nEntries);
 
   /**
    * @brief Get the current RDataFrame node
    * @return The current RNode
    */
-  ROOT::RDF::RNode getDataFrame();
-  void setDataFrame(const ROOT::RDF::RNode &node);
+  ROOT::RDF::RNode getDataFrame() override;
+  void setDataFrame(const ROOT::RDF::RNode &node) override;
 
   /**
    * @brief Get the main TChain pointer
@@ -39,8 +47,31 @@ public:
 
   template <typename F>
   void Define(std::string name, F f,
-              const std::vector<std::string> &columns = {}) {
-    df_m = df_m.Define(name, f, columns);
+              const std::vector<std::string> &columns = {}, ISystematicManager &systematicManager) override {
+    
+    std::vector<std::string> systList = systematicManager.getSystematics();
+    for (const auto &syst : systList) {
+      Int_t nAffected = 0;
+      std::vector<std::string> newColumnsUp = {};
+      std::vector<std::string> newColumnsDown = {};
+      for (const auto &col : columns) {
+        if(systematicManager.getSystematicsForVariable(col).find(syst) != systematicManager.getSystematicsForVariable(col).end()) {
+          newColumnsUp.push_back(col + "_up");
+          newColumnsDown.push_back(col + "_down");
+          nAffected++;
+        } else {
+          newColumnsUp.push_back(col);
+          newColumnsDown.push_back(col);
+        }
+      }
+      if(nAffected > 0) {
+        df_m = df_m.Define(name + "_up", f, newColumnsUp);
+        df_m = df_m.Define(name + "_down", f, newColumnsDown);
+        systematicManager.registerSystematic(syst, {name});
+      } else {
+        df_m = df_m.Define(name, f, columns);
+      }
+    }
   }
 
   /**
@@ -51,16 +82,8 @@ public:
    */
   void DefineVector(std::string name,
                     const std::vector<std::string> &columns = {},
-                    std::string type = "Float_t");
-
-  /**
-   * @brief Get the systematic manager
-   * @return Reference to the systematic manager
-   */
-  SystematicManager &getSystematicManager() { return systematicManager_m; }
-  const SystematicManager &getSystematicManager() const {
-    return systematicManager_m;
-  }
+                    std::string type = "Float_t",
+                    ISystematicManager &systematicManager) override;
 
   /**
    * @brief Filter the dataframe
@@ -82,6 +105,20 @@ public:
   }
 
   /**
+   * @brief Template function to define a constant value for all samples
+   * @tparam T The type of the constant value
+   * @param name Name of the variable
+   * @param value The constant value to assign
+   */
+  template<typename T>
+  void defineConstant(const std::string& name, const T& value) {
+      df_m = df_m.DefinePerSample(
+      name, [value](unsigned int, const ROOT::RDF::RSampleInfo) -> T {
+        return value;
+      });
+  }
+
+  /**
    * @brief Redefine a variable in the dataframe
    * @param name Name of the variable
    * @param f Function to redefine the variable
@@ -96,38 +133,38 @@ public:
   /**
    * @brief Make a list of systematic variations for a branch
    * @param branchName Name of the branch
+   * @param systematicManager Pointer to the systematic manager (can be nullptr)
    * @return Vector of systematic variation names
    */
-  std::vector<std::string> makeSystList(const std::string &branchName);
+  std::vector<std::string> makeSystList(const std::string &branchName, ISystematicManager &systematicManager);
 
   /**
    * @brief Register constant variables from configuration
-   * @param configManager Reference to the ConfigurationManager
+   * @param configProvider Reference to the configuration provider
    */
-  void registerConstants(const ConfigurationManager &configManager);
+  void registerConstants(const IConfigurationProvider &configProvider);
 
   /**
    * @brief Register aliases from configuration
-   * @param configManager Reference to the ConfigurationManager
+   * @param configProvider Reference to the configuration provider
    */
-  void registerAliases(const ConfigurationManager &configManager);
+  void registerAliases(const IConfigurationProvider &configProvider);
 
   /**
    * @brief Register optional branches from configuration
-   * @param configManager Reference to the ConfigurationManager
+   * @param configProvider Reference to the configuration provider
    */
-  void registerOptionalBranches(const ConfigurationManager &configManager);
+  void registerOptionalBranches(const IConfigurationProvider &configProvider);
 
   /**
    * @brief Finalize setup after all configuration is loaded
-   * @param configManager Reference to the ConfigurationManager
+   * @param configProvider Reference to the configuration provider
    */
-  void finalizeSetup(const ConfigurationManager &configManager);
+  void finalizeSetup(const IConfigurationProvider &configProvider);
 
 private:
   std::vector<std::unique_ptr<TChain>> chain_vec_m;
   ROOT::RDF::RNode df_m;
-  SystematicManager systematicManager_m;
 };
 
 #endif // DATAMANAGER_H_INCLUDED

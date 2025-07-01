@@ -422,7 +422,7 @@ template <typename T>
 ROOT::VecOps::RVec<T> EvalVectorSum_2(ROOT::VecOps::RVec<T> Jet1,
                                       ROOT::VecOps::RVec<T> Jet2) {
   if (Jet1.size() != 4 || Jet2.size() != 4) {
-    std::cerr << "Jet sizes not 4 in EvalVectorSum" << std::endl;
+    throw std::runtime_error("Error: Jet sizes not 4 in EvalVectorSum");
     ROOT::VecOps::RVec<T>({0, 0, 0, 0});
   }
 

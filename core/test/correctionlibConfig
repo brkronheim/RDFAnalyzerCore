@@ -1,0 +1,1 @@
+file=aux/correction.json correctionName=test_correction name=test_correction inputVariables=float_arg,int_arg,str_arg

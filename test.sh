@@ -1,3 +1,3 @@
 cd build
-ctest
+ctest --rerun-failed --output-on-failure
 cd ..

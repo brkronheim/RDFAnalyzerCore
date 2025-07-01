@@ -40,7 +40,11 @@ int main(int argc, char **argv) {
   std::vector<std::vector<histInfo>> fullHistList = {histInfos};
 
   // get syst information, store to branch Systematic
-  const std::vector<std::string> systList = an.getDataManager().makeSystList("Systematic");
+  auto* dataManager = dynamic_cast<DataManager*>(&an.getDataFrameProvider());
+  if (!dataManager) {
+    throw std::runtime_error("DataManager instance required for makeSystList");
+  }
+  const std::vector<std::string> systList = dataManager->makeSystList("Systematic", &an.getSystematicManager());
 
   // Define selection categories: branchName, numBins, lowerBound, upperBound
   selectionInfo channelBounds("channel", 1, 0.0, 1.0);

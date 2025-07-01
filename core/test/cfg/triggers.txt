@@ -1,0 +1,1 @@
+name=test_group sample=test_sample triggers=trigger1,trigger2,trigger3 triggerVetos=veto1,veto2 

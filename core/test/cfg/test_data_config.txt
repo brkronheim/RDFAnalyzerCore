@@ -1,0 +1,22 @@
+directory=test_data  # Test directory to process
+
+saveFile=test_output.root # File to write output data to
+saveDirectory=test_output/ # Directory in which to save output
+saveTree=Events # Name of output tree
+
+threads=1 # Number of threads to use for testing
+
+antiglobs=output.root,hists.root # reject files with these strings
+globs=root,test
+
+saveConfig=cfg/output.txt # Config file with output branches
+
+bdtConfig=cfg/bdts.txt # Config file with bdts
+correctionConfig=cfg/correction.txt # Config file with corrections
+triggerConfig=cfg/triggers.txt # Config file with triggers
+
+floatConfig=cfg/floats.txt # Config file with floats to load into DF
+intConfig=cfg/ints.txt # Config file with integers to load into DF
+
+optionalBranchesConfig=cfg/optionalBranches.txt # Config file with info on branches which may not exist
+aliasConfig=cfg/alias.txt # Config file with aliases 

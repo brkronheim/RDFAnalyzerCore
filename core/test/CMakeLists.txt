@@ -1,5 +1,65 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../extern/gtest/googletest/include)
 
+# Define the test source directory for all test executables
+add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
 add_executable(testConfigurationManager testConfigurationManager.cc)
 target_link_libraries(testConfigurationManager core gtest gtest_main)
 add_test(NAME ConfigurationManagerTest COMMAND testConfigurationManager)
+
+add_executable(testNamedObjectManager testNamedObjectManager.cc)
+target_link_libraries(testNamedObjectManager core gtest gtest_main)
+add_test(NAME NamedObjectManagerTest COMMAND testNamedObjectManager)
+
+add_executable(testSystematicManager testSystematicManager.cc)
+target_link_libraries(testSystematicManager core gtest gtest_main)
+add_test(NAME SystematicManagerTest COMMAND testSystematicManager)
+
+add_executable(testDataManager testDataManager.cc)
+target_link_libraries(testDataManager core gtest gtest_main)
+add_test(NAME DataManagerTest COMMAND testDataManager)
+
+add_executable(testCorrectionManager testCorrectionManager.cc)
+target_link_libraries(testCorrectionManager core gtest gtest_main)
+add_test(NAME CorrectionManagerTest COMMAND testCorrectionManager)
+
+add_executable(testBDTManager testBDTManager.cc)
+target_link_libraries(testBDTManager core gtest gtest_main)
+add_test(NAME BDTManagerTest COMMAND testBDTManager)
+
+# TODO: Fix this test
+# add_executable(testNDHistogramManager testNDHistogramManager.cc)
+# target_link_libraries(testNDHistogramManager core gtest gtest_main)
+# add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
+
+add_executable(testTriggerManager testTriggerManager.cc)
+target_link_libraries(testTriggerManager core gtest gtest_main)
+add_test(NAME TriggerManagerTest COMMAND testTriggerManager)
+
+add_executable(testConfigurationManager_Basic testConfigurationManager_Basic.cc)
+target_link_libraries(testConfigurationManager_Basic core gtest gtest_main)
+add_test(NAME ConfigurationManagerBasicTest COMMAND testConfigurationManager_Basic)
+
+add_executable(testConfigurationManager_StringParsing testConfigurationManager_StringParsing.cc)
+target_link_libraries(testConfigurationManager_StringParsing core gtest gtest_main)
+add_test(NAME ConfigurationManagerStringParsingTest COMMAND testConfigurationManager_StringParsing)
+
+add_executable(testConfigurationManager_ConfigParsing testConfigurationManager_ConfigParsing.cc)
+target_link_libraries(testConfigurationManager_ConfigParsing core gtest gtest_main)
+add_test(NAME ConfigurationManagerConfigParsingTest COMMAND testConfigurationManager_ConfigParsing)
+
+add_executable(testConfigurationManager_ErrorHandling testConfigurationManager_ErrorHandling.cc)
+target_link_libraries(testConfigurationManager_ErrorHandling core gtest gtest_main)
+add_test(NAME ConfigurationManagerErrorHandlingTest COMMAND testConfigurationManager_ErrorHandling)
+
+add_executable(testConfigurationManager_Immutability testConfigurationManager_Immutability.cc)
+target_link_libraries(testConfigurationManager_Immutability core gtest gtest_main)
+add_test(NAME ConfigurationManagerImmutabilityTest COMMAND testConfigurationManager_Immutability)
+
+add_executable(testConfigurationManager_MemoryAndSemantics testConfigurationManager_MemoryAndSemantics.cc)
+target_link_libraries(testConfigurationManager_MemoryAndSemantics core gtest gtest_main)
+add_test(NAME ConfigurationManagerMemoryAndSemanticsTest COMMAND testConfigurationManager_MemoryAndSemantics)
+
+add_executable(testSystematicPropagation testSystematicPropagation.cc)
+target_link_libraries(testSystematicPropagation core gtest gtest_main)
+add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)

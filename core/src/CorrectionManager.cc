@@ -1,14 +1,52 @@
-#include <ConfigurationManager.h>
+#include <api/IConfigurationProvider.h>
+#include <api/IDataFrameProvider.h>
 #include <CorrectionManager.h>
 #include <iostream>
 
 /**
  * @brief Construct a new CorrectionManager object
- * @param configManager Reference to the ConfigurationManager
+ * @param configProvider Reference to the configuration provider
  */
 CorrectionManager::CorrectionManager(
-    const ConfigurationManager &configManager) {
-  registerCorrectionlib(configManager);
+    const IConfigurationProvider &configProvider) {
+  registerCorrectionlib(configProvider);
+}
+
+/**
+ * @brief Apply a correction to a set of input features
+ * @param dataFrameProvider Reference to the dataframe provider for dataframe operations
+ * @param correctionName Name of the correction
+ * @param stringArguments String arguments for the correction
+ * @param inputFeatures Input features for the correction
+ */
+void CorrectionManager::applyCorrection(IDataFrameProvider& dataFrameProvider,
+                                        const std::string &correctionName,
+                                        const std::vector<std::string> &stringArguments) {  
+  const auto &inputFeatures = getCorrectionFeatures(correctionName);
+  dataFrameProvider.DefineVector("input_" + correctionName, inputFeatures, "double");
+  auto correction = this->objects_m.at(correctionName);
+  auto stringArgs = stringArguments;
+  auto correctionLambda =
+      [correction,
+       stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
+    std::vector<std::variant<int, double, std::string>> values;
+    auto stringArgIt = stringArgs.begin();
+    auto doubleArgIt = inputVector.begin();
+    for (const auto &varType : correction->inputs()) {
+      if (varType.typeStr() == "string") {
+        values.push_back(*stringArgIt);
+        ++stringArgIt;
+      } else if (varType.typeStr() == "int") {
+        values.push_back(int(*doubleArgIt));
+        ++doubleArgIt;
+      } else {
+        values.push_back(*doubleArgIt);
+        ++doubleArgIt;
+      }
+    }
+    return correction->evaluate(values);
+  };
+  dataFrameProvider.Define(correctionName, correctionLambda, {"input_" + correctionName});
 }
 
 /**
@@ -33,18 +71,18 @@ CorrectionManager::getCorrectionFeatures(const std::string &key) const {
 
 /**
  * @brief Register corrections from correctionlib using the configuration
- * @param configManager Reference to the ConfigurationManager
+ * @param configProvider Reference to the configuration provider
  */
 void CorrectionManager::registerCorrectionlib(
-    const ConfigurationManager &configManager) {
-  const auto correctionConfig = configManager.parseMultiKeyConfig(
+    const IConfigurationProvider &configProvider) {
+  const auto correctionConfig = configProvider.parseMultiKeyConfig(
       "correctionlibConfig",
       {"file", "correctionName", "name", "inputVariables"});
 
   for (const auto &entryKeys : correctionConfig) {
     // Split the variable list on commas, save to vector
     auto inputVariableVector =
-        configManager.splitString(entryKeys.at("inputVariables"), ",");
+        configProvider.splitString(entryKeys.at("inputVariables"), ",");
 
     // load correction object from json
     auto correctionF =

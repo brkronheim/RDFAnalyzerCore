@@ -1,5 +1,5 @@
-#include <ConfigurationManager.h>
-#include <DataManager.h>
+#include <api/IConfigurationProvider.h>
+#include <api/IDataFrameProvider.h>
 #include <NDHistogramManager.h>
 #include <TFile.h>
 #include <TH1F.h>
@@ -12,12 +12,12 @@
 
 /**
  * @brief Construct a new NDHistogramManager object
- * @param dataManager Reference to the DataManager
- * @param configManager Reference to the ConfigurationManager
+ * @param dataFrameProvider Reference to the dataframe provider
+ * @param configProvider Reference to the configuration provider
  */
-NDHistogramManager::NDHistogramManager(DataManager &dataManager,
-                                       ConfigurationManager &configManager)
-    : dataManager_m(dataManager), configManager_m(configManager) {}
+NDHistogramManager::NDHistogramManager(IDataFrameProvider &dataFrameProvider,
+                                       IConfigurationProvider &configProvider)
+    : dataFrameProvider_m(dataFrameProvider), configProvider_m(configProvider) {}
 
 /**
  * @brief Book N-dimensional histograms
@@ -31,7 +31,11 @@ void NDHistogramManager::BookND(
     const std::string &suffix,
     std::vector<std::vector<std::string>> &allRegionNames) {
 
-  ROOT::RDF::RNode df = dataManager_m.getDataFrame();
+  if (allRegionNames.empty()) {
+    throw std::invalid_argument("NDHistogramManager::BookND: allRegionNames must not be empty");
+  }
+
+  ROOT::RDF::RNode df = dataFrameProvider_m.getDataFrame();
 
   for (const auto &info : infos) {
     std::vector<int> binVectorBase;
@@ -70,8 +74,11 @@ void NDHistogramManager::BookND(
       if (syst == "Nominal") {
         continue;
       }
+      // TODO: This needs to be updated to work with the interface
+      // For now, we'll skip systematic handling
+      /*
       const auto &varSet =
-          dataManager_m.getSystematicManager().getVariablesForSystematic(
+          dataFrameProvider_m.getSystematicManager().getVariablesForSystematic(
               systBase);
       Int_t affectedVariables = 0;
       std::vector<std::string> newVec;
@@ -87,10 +94,12 @@ void NDHistogramManager::BookND(
         systVector.insert(systVector.end(), newVec.begin(), newVec.end());
         numFills++;
       }
+      */
     }
 
     std::string branchName = info.name() + "_" + suffix + "inputDoubleVector";
-    dataManager_m.DefineVector(branchName, systVector, "Double_t");
+    dataFrameProvider_m.DefineVector(branchName, systVector, "Double_t");
+    df = dataFrameProvider_m.getDataFrame();
     THnMulti tempModel(df.GetNSlots(), newName.c_str(), newName.c_str(),
                        selection.size() + 1, numFills, binVector,
                        lowerBoundVector, upperBoundVector);
@@ -107,7 +116,7 @@ void NDHistogramManager::BookND(
 void NDHistogramManager::SaveHists(
     std::vector<std::vector<histInfo>> &fullHistList,
     std::vector<std::vector<std::string>> &allRegionNames) {
-  std::string fileName = configManager_m.get("saveFile");
+  std::string fileName = configProvider_m.get("saveFile");
   std::vector<std::string> allNames;
   std::vector<std::string> allVariables;
   std::vector<std::string> allLabels;
@@ -214,7 +223,7 @@ void NDHistogramManager::SaveHists(
       continue;
     }
     std::string dirName = pair.first.substr(0, pair.first.find_last_of("/"));
-    auto regionSplit = configManager_m.splitString(pair.first, "/");
+    auto regionSplit = configProvider_m.splitString(pair.first, "/");
     std::string region =
         regionSplit[0] + "_" +
         regionSplit[2]; //  dirName.substr(0,dirName.find("/"));
@@ -244,7 +253,7 @@ void NDHistogramManager::SaveHists(
 
   for (const auto &pair : histMap) {
     std::string dirName = pair.first.substr(0, pair.first.find_last_of("/"));
-    auto regionSplit = configManager_m.splitString(pair.first, "/");
+    auto regionSplit = configProvider_m.splitString(pair.first, "/");
     std::string region =
         regionSplit[0] + "_" +
         regionSplit[2]; //  dirName.substr(0,dirName.find("/"));

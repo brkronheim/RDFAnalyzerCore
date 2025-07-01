@@ -1,0 +1,80 @@
+{
+    "schema_version": 2,
+    "corrections": [
+      {
+        "name": "test_correction",
+        "description": "A test correction with float, int, and string arguments.",
+        "version": 1,
+        "inputs": [
+          {"name": "float_arg", "type": "real"},
+          {"name": "int_arg", "type": "int"},
+          {"name": "str_arg", "type": "string"}
+        ],
+        "output": {"name": "output", "type": "real"},
+        "data": {
+          "nodetype": "category",
+          "input": "str_arg",
+          "content": [
+            {
+              "key": "A",
+              "value": {
+                "nodetype": "category",
+                "input": "int_arg",
+                "content": [
+                  {
+                    "key": 1,
+                    "value": {
+                      "nodetype": "binning",
+                      "input": "float_arg",
+                      "edges": [0.0, 1.0, 2.0],
+                      "content": [0.1, 0.2],
+                      "flow": 0.0
+                    }
+                  },
+                  {
+                    "key": 2,
+                    "value": {
+                      "nodetype": "binning",
+                      "input": "float_arg",
+                      "edges": [0.0, 1.0, 2.0],
+                      "content": [0.3, 0.4],
+                      "flow": 0.0
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "key": "B",
+              "value": {
+                "nodetype": "category",
+                "input": "int_arg",
+                "content": [
+                  {
+                    "key": 1,
+                    "value": {
+                      "nodetype": "binning",
+                      "input": "float_arg",
+                      "edges": [0.0, 1.0, 2.0],
+                      "content": [0.5, 0.6],
+                      "flow": 0.0
+                    }
+                  },
+                  {
+                    "key": 2,
+                    "value": {
+                      "nodetype": "binning",
+                      "input": "float_arg",
+                      "edges": [0.0, 1.0, 2.0],
+                      "content": [0.7, 0.8],
+                      "flow": 0.0
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }

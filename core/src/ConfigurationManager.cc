@@ -39,7 +39,13 @@ std::string ConfigurationManager::get(const std::string &key) const {
  */
 void ConfigurationManager::set(const std::string &key,
                                const std::string &value) {
-  configMap_m[key] = value;
+  if (get(key) != "") {
+    throw std::runtime_error(
+        "Error: Key " + key +
+        " already exists. Do not use set to overwrite existing keys.");
+  } else {
+    configMap_m[key] = value;
+  }
 }
 
 /**
@@ -121,7 +127,13 @@ ConfigurationManager::parseEntry(const std::string &entry) const {
   for (auto &pair : splitEntry) {
     auto [key, value] = parsePair(pair, false);
     if (!key.empty() && !value.empty()) {
-      entryKeys[key] = value;
+      if (entryKeys.find(key) != entryKeys.end()) {
+        throw std::runtime_error("Error: Key " + key +
+                                 " already exists in entry. Do not use the "
+                                 "same key twice in the same entry.");
+      } else {
+        entryKeys[key] = value;
+      }
     }
   }
   return entryKeys;
@@ -150,35 +162,68 @@ ConfigurationManager::parsePairBasedConfig(
     std::string line;
     while (std::getline(file, line)) {
       auto [key, value] = parsePair(line, true);
-      if (!key.empty() && !value.empty()) {
-        configMap.emplace(key, value);
+      if (!key.empty()) {
+        if (configMap.find(key) != configMap.end()) {
+          throw std::runtime_error(
+              "Error: Key " + key + " already exists in config " + configFile +
+              ". Do not use the same key twice in the same config.");
+        } else {
+          configMap.emplace(key, value);
+        }
       }
     }
     file.close();
   } else {
-    std::cerr << "Error: Configuration file " << configFile
-              << " could not be opened." << std::endl;
+    throw std::runtime_error("Error: Configuration file " + configFile +
+                             " could not be opened.");
   }
   return configMap;
 }
 
 /**
- * @brief Parse a multi-key configuration entry
- * @param key Key to look up
+ * @brief Parse a multi-key configuration from a file
+ * @param configFile Path to the configuration file to parse
  * @param requiredEntryKeys Vector of required entry keys
  * @return Vector of maps of entry keys and values
  */
 std::vector<std::unordered_map<std::string, std::string>>
 ConfigurationManager::parseMultiKeyConfig(
-    std::string_view key,
+    const std::string &configFile,
     const std::vector<std::string> &requiredEntryKeys) const {
   std::vector<std::unordered_map<std::string, std::string>> parsedConfig;
-  auto config = splitString(configMap_m.count(std::string(key))
-                                ? configMap_m.at(std::string(key))
-                                : "",
-                            "\n");
-  for (auto &entry : config) {
-    auto entryKeys = parseEntry(entry);
+
+  std::ifstream file(configFile);
+  if (!file.is_open()) {
+    throw std::runtime_error("Error: Configuration file " + configFile +
+                             " could not be opened.");
+    return parsedConfig;
+  }
+
+  std::string line;
+  while (std::getline(file, line)) {
+    // Skip empty lines and comments
+    line = trim(line.substr(0, line.find("#")));
+    if (line.empty()) {
+      continue;
+    }
+
+    // Parse semicolon-separated entries
+    std::unordered_map<std::string, std::string> entryKeys;
+    auto splitEntry = splitString(line, " ");
+    for (auto &pair : splitEntry) {
+      auto [key, value] = parsePair(pair, false);
+      if (!key.empty() && !value.empty()) {
+        if (entryKeys.find(key) != entryKeys.end()) {
+          throw std::runtime_error(
+              "Error: Key " + key + " already exists in entry " + line +
+              " in config " + configFile +
+              ". Do not use the same key twice in the same entry.");
+        } else {
+          entryKeys[key] = value;
+        }
+      }
+    }
+
     bool allEntryKeysFound = true;
     for (const auto &entryKey : requiredEntryKeys) {
       if (entryKeys.find(entryKey) == entryKeys.end()) {
@@ -190,21 +235,8 @@ ConfigurationManager::parseMultiKeyConfig(
       parsedConfig.push_back(entryKeys);
     }
   }
-  return parsedConfig;
-}
 
-/**
- * @brief Extract a vector entry from the configuration map
- * @param key Key to look up
- * @return Vector of strings from the entry
- */
-std::vector<std::string>
-ConfigurationManager::extractVectorEntry(std::string_view key) const {
-  std::vector<std::string> parsedConfig;
-  auto it = configMap_m.find(std::string(key));
-  if (it != configMap_m.end()) {
-    parsedConfig = splitString(it->second, "\n");
-  }
+  file.close();
   return parsedConfig;
 }
 
@@ -220,13 +252,15 @@ ConfigurationManager::parseVectorConfig(const std::string &configFile) const {
   if (file.is_open()) {
     std::string line;
     while (std::getline(file, line)) {
-      line = line.substr(0, line.find("#"));
-      configVector.push_back(line);
+      line = trim(line.substr(0, line.find("#")));
+      if (!line.empty()) {
+        configVector.push_back(line);
+      }
     }
     file.close();
   } else {
-    std::cerr << "Error: Configuration file " << configFile
-              << " could not be opened." << std::endl;
+    throw std::runtime_error("Error: Configuration file " + configFile +
+                             " could not be opened.");
   }
   return configVector;
 }
