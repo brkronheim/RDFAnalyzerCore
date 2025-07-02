@@ -24,8 +24,9 @@ std::unique_ptr<ITriggerManager> ManagerFactory::createTriggerManager(
 
 std::unique_ptr<INDHistogramManager> ManagerFactory::createNDHistogramManager(
     IDataFrameProvider& dataFrameProvider,
-    IConfigurationProvider& configProvider) {
-    return std::make_unique<NDHistogramManager>(dataFrameProvider, configProvider);
+    IConfigurationProvider& configProvider,
+    ISystematicManager& systematicManager) {
+    return std::make_unique<NDHistogramManager>(dataFrameProvider, configProvider, systematicManager);
 }
 
 std::unique_ptr<IConfigurationProvider> ManagerFactory::createConfigurationManager(

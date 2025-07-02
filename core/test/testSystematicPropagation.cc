@@ -8,7 +8,11 @@
 #include <vector>
 #include <ROOT/RDataFrame.hxx>
 #include <algorithm>
-
+#include <ConfigurationManager.h>
+#include <CorrectionManager.h>
+#include <NDHistogramManager.h>
+#include <TriggerManager.h>
+#include <BDTManager.h>
 /**
  * @file testSystematicPropagation.cc
  * @brief Full stack integration tests for systematic propagation using Analyzer, DataManager, and SystematicManager.
@@ -20,6 +24,7 @@
 class SystematicPropagationTest : public ::testing::Test {
 protected:
   void SetUp() override {
+    std::cout << "Setting up SystematicPropagationTest" << std::endl;
     ChangeToTestSourceDir();
     // Set up SystematicManager and register a systematic for "energy"
     auto sysMgr = std::make_unique<SystematicManager>();
@@ -28,13 +33,33 @@ protected:
     // Set up DataManager with 5 in-memory entries
     auto dataMgr = std::make_unique<DataManager>(5);
 
+    // Set up dummy ConfigurationManager
+    auto configMgr = std::make_unique<ConfigurationManager>("cfg/test_data_config_minimal.txt");
+
+    // Set up dummy CorrectionManager
+    auto corrMgr = std::make_unique<CorrectionManager>(*configMgr);
+
+    // Set up dummy NDHistogramManager
+    auto ndHistMgr = std::make_unique<NDHistogramManager>(*dataMgr, *configMgr, *sysMgr);
+
+    // Set up dummy TriggerManager
+    auto trigMgr = std::make_unique<TriggerManager>(*configMgr);
+
+    // Set up dummy BDTManager
+    auto bdtMgr = std::make_unique<BDTManager>(*configMgr);
+
     // Transfer ownership to Analyzer
     analyzer = std::make_unique<Analyzer>(
-      nullptr, // configProvider (not needed for this test)
+      std::move(configMgr),
       std::move(dataMgr),
-      nullptr, nullptr, nullptr, nullptr,
+      std::move(bdtMgr),
+      std::move(corrMgr),
+      std::move(trigMgr),
+      std::move(ndHistMgr),
       std::move(sysMgr)
     );
+
+    std::cout << "Analyzer set up" << std::endl;
     // After this, do not use dataMgr or sysMgr
   }
 
@@ -49,13 +74,13 @@ protected:
  * @brief Test that defining a variable with systematics results in systematic variation columns.
  */
 TEST_F(SystematicPropagationTest, DefineWithSystematicsPropagates) {
-  // Use Analyzer's getter to access DataManager and SystematicManager
-  DataManager* dataManager = analyzer->getDataManager();
+  IDataFrameProvider* idata = &analyzer->getDataFrameProvider();
+  auto* dataManager = dynamic_cast<DataManager*>(idata);
   ASSERT_NE(dataManager, nullptr);
-  SystematicManager* sysManager = analyzer->getSystematicManager();
+  ISystematicManager* sysManager = &analyzer->getSystematicManager();
   ASSERT_NE(sysManager, nullptr);
   // Use makeSystList to define systematic index variables for 'energy'
-  dataManager->makeSystList("energy", sysManager);
+  dataManager->makeSystList("energy", *sysManager);
 
   auto df = dataManager->getDataFrame();
   auto columns = df.GetColumnNames();
@@ -69,11 +94,12 @@ TEST_F(SystematicPropagationTest, DefineWithSystematicsPropagates) {
  * @brief Test that filtering on a variable with systematics does not remove systematic columns.
  */
 TEST_F(SystematicPropagationTest, FilterWithSystematicsKeepsSystematicColumns) {
-  DataManager* dataManager = analyzer->getDataManager();
+  IDataFrameProvider* idata = &analyzer->getDataFrameProvider();
+  auto* dataManager = dynamic_cast<DataManager*>(idata);
   ASSERT_NE(dataManager, nullptr);
-  SystematicManager* sysManager = analyzer->getSystematicManager();
+  ISystematicManager* sysManager = &analyzer->getSystematicManager();
   ASSERT_NE(sysManager, nullptr);
-  dataManager->makeSystList("energy", sysManager);
+  dataManager->makeSystList("energy", *sysManager);
   // Apply a filter on the systematic index variable (e.g., energy > -1)
   analyzer->Filter("energy_valid", [](float x) { return x > -1.0f; }, {"energy"});
   auto df = dataManager->getDataFrame();
@@ -86,14 +112,15 @@ TEST_F(SystematicPropagationTest, FilterWithSystematicsKeepsSystematicColumns) {
  * @brief Test that the values in the systematic columns are as expected.
  */
 TEST_F(SystematicPropagationTest, SystematicColumnValuesAreCorrect) {
-  DataManager* dataManager = analyzer->getDataManager();
+  IDataFrameProvider* idata = &analyzer->getDataFrameProvider();
+  auto* dataManager = dynamic_cast<DataManager*>(idata);
   ASSERT_NE(dataManager, nullptr);
-  SystematicManager* sysManager = analyzer->getSystematicManager();
+  ISystematicManager* sysManager = &analyzer->getSystematicManager();
   ASSERT_NE(sysManager, nullptr);
-  dataManager->makeSystList("energy", sysManager);
+  dataManager->makeSystList("Systematic", *sysManager);
   auto df = dataManager->getDataFrame();
-  auto up = df.Take<float>("energy_testSystUp");
-  auto down = df.Take<float>("energy_testSystDown");
+  auto up = df.Take<float>("Systematic_testSystUp");
+  auto down = df.Take<float>("Systematic_testSystDown");
   ASSERT_EQ(up->size(), 5);
   ASSERT_EQ(down->size(), 5);
   for (size_t i = 0; i < 5; ++i) {

@@ -1,1 +1,2 @@
 file=aux/test_bdt.txt name=test_bdt inputVariables=feature1,feature2,feature3 runVar=run_number 
+file=aux/test_bdt2.txt name=test_bdt2 inputVariables=feature4,feature5,feature6 runVar=run_number2 

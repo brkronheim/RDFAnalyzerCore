@@ -84,37 +84,45 @@ void DataManager::DefineVector(std::string name,
 }
 
 /**
- * @brief Make a list of systematic variations for a branch
+ * @brief Make a list of systematic variations and store them in a branch and its systematic variations
  * @param branchName Name of the branch
  * @param systematicManager Pointer to the systematic manager
  * @return Vector of systematic variation names
  */
 std::vector<std::string>
 DataManager::makeSystList(const std::string &branchName, ISystematicManager &systematicManager) {
+
+  std::cout << "Existing columns:" << std::endl;
+  for (const auto &column : df_m.GetColumnNames()) {
+    std::cout << column << std::endl;
+  }
+
   std::vector<std::string> systList = {"Nominal"};
   int var = 0;
-  DefinePerSample_m("Nominal",
+  std::cout << "Defining nominal branch: " << branchName << std::endl;
+  DefinePerSample_m(branchName,
                     [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
                       return var;
                     });
-  if (systematicManager) {
-    for (const auto &syst : systematicManager->getSystematics()) {
-      systList.push_back(syst + "Up");
-      systList.push_back(syst + "Down");
-      var++;
-      DefinePerSample_m(
-          syst + "Up",
-          [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-            return var;
-          });
-      var++;
-      DefinePerSample_m(
-          syst + "Down",
-          [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-            return var;
-          });
-    }
+  
+  for (const auto &syst : systematicManager.getSystematics()) {
+    std::cout << "Defining systematic: " << syst << std::endl;
+    systList.push_back(syst + "Up");
+    systList.push_back(syst + "Down");
+    var++;
+    DefinePerSample_m(
+        branchName + "_" + syst + "Up",
+        [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
+          return var;
+        });
+    var++;
+    DefinePerSample_m(
+        branchName + "_" + syst + "Down",
+        [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
+          return var;
+        });
   }
+
   return systList;
 }
 
@@ -123,8 +131,8 @@ DataManager::makeSystList(const std::string &branchName, ISystematicManager &sys
  * @brief Register constant variables from configuration
  * @param configProvider Reference to the configuration provider
  */
-void DataManager::registerConstants(const IConfigurationProvider &configProvider) {
-  std::string floatFile = configProvider.get("floatConfig");
+void DataManager::registerConstants(const IConfigurationProvider &configProvider, const std::string& floatConfigKey, const std::string& intConfigKey) {
+  std::string floatFile = configProvider.get(floatConfigKey);
   if (!floatFile.empty()) {
     auto floatConfig = configProvider.parsePairBasedConfig(floatFile);
     for (auto &pair : floatConfig) {
@@ -132,7 +140,7 @@ void DataManager::registerConstants(const IConfigurationProvider &configProvider
       defineConstant(pair.first, val);
     }
   }
-  std::string intFile = configProvider.get("intConfig");
+  std::string intFile = configProvider.get(intConfigKey);
   if (!intFile.empty()) {
     auto intConfig = configProvider.parsePairBasedConfig(intFile);
     for (auto &pair : intConfig) {
@@ -146,11 +154,12 @@ void DataManager::registerConstants(const IConfigurationProvider &configProvider
  * @brief Register aliases from configuration
  * @param configProvider Reference to the configuration provider
  */
-void DataManager::registerAliases(const IConfigurationProvider &configProvider) {
+void DataManager::registerAliases(const IConfigurationProvider &configProvider, const std::string& aliasConfigKey) {
   auto aliasConfig = configProvider.parseMultiKeyConfig(
-      "aliasConfig", {"existingName", "newName"});
+      configProvider.get(aliasConfigKey) , {"existingName", "newName"});
   const auto columnNames = df_m.GetColumnNames();
   for (const auto &entryKeys : aliasConfig) {
+    std::cout << "Aliasing " << entryKeys.at("existingName") << " to " << entryKeys.at("newName") << std::endl;
     df_m = df_m.Alias(entryKeys.at("newName"), entryKeys.at("existingName"));
   }
 }
@@ -160,9 +169,11 @@ void DataManager::registerAliases(const IConfigurationProvider &configProvider) 
  * @param configProvider Reference to the configuration provider
  */
 void DataManager::registerOptionalBranches(
-    const IConfigurationProvider &configProvider) {
+    const IConfigurationProvider &configProvider, const std::string& optionalBranchesConfigKey) {
   const auto aliasConfig = configProvider.parseMultiKeyConfig(
-      "optionalBranchesConfig", {"name", "type", "default"});
+      configProvider.get(optionalBranchesConfigKey), {"name", "type", "default"});
+  std::cout << "Optional branches config: " << optionalBranchesConfigKey << std::endl;
+
 #if defined(HAS_DEFAULT_VALUE_FOR)
   for (const auto &entryKeys : aliasConfig) {
     const int varType = std::stoi(entryKeys.at("type"));
@@ -325,8 +336,22 @@ void DataManager::registerOptionalBranches(
  * @brief Finalize setup after all configuration is loaded
  * @param configProvider Reference to the configuration provider
  */
-void DataManager::finalizeSetup(const IConfigurationProvider &configProvider) {
-  registerConstants(configProvider);
-  registerAliases(configProvider);
-  registerOptionalBranches(configProvider);
+void DataManager::finalizeSetup(const IConfigurationProvider &configProvider,
+                                const std::string& floatConfigKey,
+                                const std::string& intConfigKey,
+                                const std::string& aliasConfigKey,
+                                const std::string& optionalBranchesConfigKey) {
+  std::cout << "Finalizing setup" << std::endl;
+  std::cout << "Registering constants" << std::endl;
+  registerConstants(configProvider, floatConfigKey, intConfigKey);
+  std::cout << "Registering aliases" << std::endl;
+  registerAliases(configProvider, aliasConfigKey);
+  std::cout << "Registering optional branches" << std::endl;
+  registerOptionalBranches(configProvider, optionalBranchesConfigKey);
 }
+
+// Add virtual destructor for DataManager
+DataManager::~DataManager() = default;
+
+// Add out-of-line definition for IDataFrameProvider virtual destructor
+IDataFrameProvider::~IDataFrameProvider() = default;

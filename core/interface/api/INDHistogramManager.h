@@ -30,7 +30,8 @@ public:
     virtual void BookND(std::vector<histInfo> &infos,
                         std::vector<selectionInfo> &selection, 
                         const std::string &suffix,
-                        std::vector<std::vector<std::string>> &allRegionNames) = 0;
+                        std::vector<std::vector<std::string>> &allRegionNames,
+                        ISystematicManager &systematicManager) = 0;
     
     /**
      * @brief Save histograms to file

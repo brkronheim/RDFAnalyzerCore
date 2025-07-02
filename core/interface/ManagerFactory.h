@@ -1,14 +1,17 @@
 #ifndef MANAGERFACTORY_H_INCLUDED
 #define MANAGERFACTORY_H_INCLUDED
 
-#include <api/IBDTManager.h>
-#include <api/IConfigurationProvider.h>
-#include <api/ICorrectionManager.h>
-#include <api/IDataFrameProvider.h>
-#include <api/INDHistogramManager.h>
-#include <api/ITriggerManager.h>
-#include <api/ISystematicManager.h>
 #include <memory>
+#include <string>
+
+// Forward declarations
+class IBDTManager;
+class IConfigurationProvider;
+class ICorrectionManager;
+class IDataFrameProvider;
+class INDHistogramManager;
+class ITriggerManager;
+class ISystematicManager;
 
 /**
  * @brief Factory class for creating manager instances
@@ -47,11 +50,13 @@ public:
      * @brief Create an ND histogram manager instance
      * @param dataFrameProvider Reference to the dataframe provider
      * @param configProvider Reference to the configuration provider
+     * @param systematicManager Reference to the systematic manager
      * @return Unique pointer to the ND histogram manager interface
      */
     static std::unique_ptr<INDHistogramManager> createNDHistogramManager(
         IDataFrameProvider& dataFrameProvider,
-        IConfigurationProvider& configProvider);
+        IConfigurationProvider& configProvider,
+        ISystematicManager& systematicManager);
 
     /**
      * @brief Create a configuration manager instance

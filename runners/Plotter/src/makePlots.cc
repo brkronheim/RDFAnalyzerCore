@@ -39,38 +39,29 @@ int main(int argc, char **argv) {
   };
   std::vector<std::vector<histInfo>> fullHistList = {histInfos};
 
-  // get syst information, store to branch Systematic
-  auto* dataManager = dynamic_cast<DataManager*>(&an.getDataFrameProvider());
-  if (!dataManager) {
-    throw std::runtime_error("DataManager instance required for makeSystList");
-  }
-  const std::vector<std::string> systList = dataManager->makeSystList("Systematic", &an.getSystematicManager());
-
   // Define selection categories: branchName, numBins, lowerBound, upperBound
   selectionInfo channelBounds("channel", 1, 0.0, 1.0);
   selectionInfo controlBounds("controlRegion", 1, 0.0, 1.0);
   selectionInfo categoryBounds("sampleCategory", 4, 0.0, 4.0);
-  selectionInfo systematicBounds("Systematic", systList.size(), 0.0,
-                                 systList.size());
 
   // List of all region names, should correspond to the bins of the axes other
   // than the systematic and main variable
   std::vector<std::vector<std::string>> allRegionNames = {
       {"Channel"},
       {"Control Region"},
-      {"data_obs", "Process 1", "Process 2", "Process 3"},
-      systList};
+      {"data_obs", "Process 1", "Process 2", "Process 3"}
+  };
 
   // vector of selection for each ND histogram
   std::vector<selectionInfo> selection = {channelBounds, controlBounds,
-                                          categoryBounds, systematicBounds};
+                                          categoryBounds};
 
   // Book all the histograms, provide a suffix of "All" to these. This can be
   // called multiple times
-  an.getNDHistogramManager().BookND(histInfos, selection, "All", allRegionNames);
+  an.BookND(histInfos, selection, "All", allRegionNames);
 
   // Trigger the execution loop and save the histograms
-  an.getNDHistogramManager().SaveHists(fullHistList, allRegionNames);
+  an.SaveHists(fullHistList, allRegionNames);
 
   return (0);
 }

@@ -40,7 +40,8 @@ public:
    */
   void applyCorrection(IDataFrameProvider& dataFrameProvider,
                       const std::string &correctionName,
-                      const std::vector<std::string> &stringArguments);
+                      const std::vector<std::string> &stringArguments,
+                      ISystematicManager &systematicManager);
 
   /**
    * @brief Get a correction object by key

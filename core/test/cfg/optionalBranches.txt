@@ -1,3 +1,1 @@
-optional_branch1=bool
-optional_branch2=float
-optional_branch3=int 
+name=optional_col type=1 default=42 

@@ -14,10 +14,14 @@
  * @brief Construct a new NDHistogramManager object
  * @param dataFrameProvider Reference to the dataframe provider
  * @param configProvider Reference to the configuration provider
+ * @param systematicManager Reference to the systematic manager
  */
 NDHistogramManager::NDHistogramManager(IDataFrameProvider &dataFrameProvider,
-                                       IConfigurationProvider &configProvider)
-    : dataFrameProvider_m(dataFrameProvider), configProvider_m(configProvider) {}
+                                       IConfigurationProvider &configProvider,
+                                       ISystematicManager &systematicManager)
+    : dataFrameProvider_m(dataFrameProvider), configProvider_m(configProvider) {
+    // You can store a reference to systematicManager if needed
+}
 
 /**
  * @brief Book N-dimensional histograms
@@ -29,7 +33,8 @@ NDHistogramManager::NDHistogramManager(IDataFrameProvider &dataFrameProvider,
 void NDHistogramManager::BookND(
     std::vector<histInfo> &infos, std::vector<selectionInfo> &selection,
     const std::string &suffix,
-    std::vector<std::vector<std::string>> &allRegionNames) {
+    std::vector<std::vector<std::string>> &allRegionNames,
+    ISystematicManager &systematicManager) {
 
   if (allRegionNames.empty()) {
     throw std::invalid_argument("NDHistogramManager::BookND: allRegionNames must not be empty");
@@ -98,7 +103,7 @@ void NDHistogramManager::BookND(
     }
 
     std::string branchName = info.name() + "_" + suffix + "inputDoubleVector";
-    dataFrameProvider_m.DefineVector(branchName, systVector, "Double_t");
+    dataFrameProvider_m.DefineVector(branchName, systVector, "Double_t", systematicManager);
     df = dataFrameProvider_m.getDataFrame();
     THnMulti tempModel(df.GetNSlots(), newName.c_str(), newName.c_str(),
                        selection.size() + 1, numFills, binVector,

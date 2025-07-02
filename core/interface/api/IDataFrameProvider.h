@@ -4,6 +4,7 @@
 #include <ROOT/RDataFrame.hxx>
 #include <string>
 #include <vector>
+#include <api/ISystematicManager.h>
 
 /**
  * @brief Interface for dataframe providers to enable dependency injection
@@ -13,7 +14,7 @@
  */
 class IDataFrameProvider {
 public:
-    virtual ~IDataFrameProvider() = default;
+    virtual ~IDataFrameProvider();
     
     /**
      * @brief Get the current RDataFrame node
@@ -33,9 +34,10 @@ public:
      * @param name Name of the variable
      * @param f Callable to compute the variable
      * @param columns Input columns
+     * @param systematicManager Reference to systematic manager
      */
     template <typename F>
-    void Define(std::string name, F f, const std::vector<std::string> &columns = {}, ISystematicManager &systematicManager) {
+    void Define(std::string name, F f, const std::vector<std::string> &columns, ISystematicManager &systematicManager) {
         auto df = getDataFrame();
         df = df.Define(name, f, columns);
         setDataFrame(df);
@@ -46,10 +48,11 @@ public:
      * @param name Name of the variable
      * @param columns Input columns
      * @param type Data type (default: Float_t)
+     * @param systematicManager Reference to systematic manager
      */
     virtual void DefineVector(std::string name,
-                             const std::vector<std::string> &columns = {},
-                             std::string type = "Float_t",
+                             const std::vector<std::string> &columns,
+                             std::string type,
                              ISystematicManager &systematicManager) = 0;
     
     /**

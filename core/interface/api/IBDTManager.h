@@ -1,12 +1,13 @@
 #ifndef IBDTMANAGER_H_INCLUDED
 #define IBDTMANAGER_H_INCLUDED
 
-#include <api/IDataFrameProvider.h>
 #include <memory>
 #include <string>
 #include <vector>
 
-// Forward declaration
+// Forward declarations
+class IDataFrameProvider;
+class ISystematicManager;
 namespace fastforest {
     class FastForest;
 }
@@ -27,7 +28,8 @@ public:
      * @param BDTName Name of the BDT
      */
     virtual void applyBDT(IDataFrameProvider& dataFrameProvider,
-                          const std::string &BDTName) = 0;
+                          const std::string &BDTName,
+                          ISystematicManager &systematicManager) = 0;
     
     /**
      * @brief Get a BDT object by key

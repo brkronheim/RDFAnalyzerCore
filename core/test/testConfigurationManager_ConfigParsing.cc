@@ -32,16 +32,21 @@ TEST_F(BaseConfigSetup, ParseMultiKeyConfigWorks) {
   auto mapVector = config->parseMultiKeyConfig(
       correctionConfigFile,
       {"file", "correctionName", "name", "inputVariables"});
-  ASSERT_EQ(mapVector.size(), 1);
-  auto map = mapVector.at(0);
-  EXPECT_EQ(map.at("file"), "aux/correction.json");
-  EXPECT_EQ(map.at("correctionName"), "test_correction");
-  EXPECT_EQ(map.at("name"), "test_correction");
-  EXPECT_EQ(map.at("inputVariables"), "float_arg,int_arg,str_arg");
-  auto map2 = config->parseMultiKeyConfig(
+  ASSERT_EQ(mapVector.size(), 2);
+  auto map1 = mapVector.at(0);
+  auto map2 = mapVector.at(1);
+  EXPECT_EQ(map1.at("file"), "aux/correction.json");
+  EXPECT_EQ(map1.at("correctionName"), "test_correction");
+  EXPECT_EQ(map1.at("name"), "test_correction");
+  EXPECT_EQ(map1.at("inputVariables"), "float_arg,int_arg");
+  EXPECT_EQ(map2.at("file"), "aux/correction.json");
+  EXPECT_EQ(map2.at("correctionName"), "test_correction2");
+  EXPECT_EQ(map2.at("name"), "test_correction2");
+  EXPECT_EQ(map2.at("inputVariables"), "float_arg2,int_arg2");
+  auto map2vec = config->parseMultiKeyConfig(
       correctionConfigFile,
       {"file", "correctionName", "name", "inputVariables", "nonexistent"});
-  EXPECT_EQ(map2.size(), 0);
+  EXPECT_EQ(map2vec.size(), 0);
 }
 TEST_F(BaseConfigSetup, ParseMultiKeyConfigMultipleEntries) {
   std::string tempFile = (std::filesystem::current_path() / "temp_multi.txt").string();

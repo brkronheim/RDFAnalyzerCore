@@ -38,7 +38,8 @@ public:
    * @param bdtName Name of the BDT
    */
   void applyBDT(IDataFrameProvider& dataFrameProvider,
-                const std::string &bdtName);
+                const std::string &bdtName,
+                ISystematicManager &systematicManager);
   
 
 

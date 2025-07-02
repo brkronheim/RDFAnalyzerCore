@@ -1,13 +1,14 @@
 #ifndef ICORRECTIONMANAGER_H_INCLUDED
 #define ICORRECTIONMANAGER_H_INCLUDED
 
-#include <api/IDataFrameProvider.h>
 #include <memory>
 #include <string>
 #include <vector>
 #include <correction.h>
 
-// Forward declaration
+// Forward declarations
+class IDataFrameProvider;
+class ISystematicManager;
 namespace correction {
     class Correction;
 }
@@ -30,7 +31,8 @@ public:
      */
     virtual void applyCorrection(IDataFrameProvider& dataFrameProvider,
                                  const std::string &correctionName,
-                                 const std::vector<std::string> &stringArguments) = 0;
+                                 const std::vector<std::string> &stringArguments,
+                                 ISystematicManager &systematicManager) = 0;
     
     /**
      * @brief Get a correction object by key

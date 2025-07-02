@@ -92,4 +92,38 @@ TEST_F(BaseConfigSetup, GetListWithDefaultValue) {
   EXPECT_EQ(config->getList("nonexistent", defaultVal), defaultVal);
   config->set("emptyKey", "");
   EXPECT_EQ(config->getList("emptyKey", defaultVal), (std::vector<std::string>{}));
+}
+
+/**
+ * @brief Test Unicode and special character handling in splitString and getList
+ */
+TEST_F(BaseConfigSetup, UnicodeAndSpecialCharacterHandling) {
+  // Unicode characters in values
+  config->set("unicodeKey", "üñîçødë,测试,テスト,тест");
+  auto unicodeList = config->getList("unicodeKey");
+  EXPECT_EQ(unicodeList, (std::vector<std::string>{"üñîçødë", "测试", "テスト", "тест"}));
+
+  // Unicode in key
+  config->set("ключ", "значение1,значение2");
+  auto cyrillicList = config->getList("ключ");
+  EXPECT_EQ(cyrillicList, (std::vector<std::string>{"значение1", "значение2"}));
+
+  // Special characters in key and value
+  config->set("key with spaces", "value with spaces,another value");
+  auto spaceList = config->getList("key with spaces");
+  EXPECT_EQ(spaceList, (std::vector<std::string>{"value with spaces", "another value"}));
+
+  config->set("key:colon", "val:colon1,val:colon2");
+  auto colonList = config->getList("key:colon");
+  EXPECT_EQ(colonList, (std::vector<std::string>{"val:colon1", "val:colon2"}));
+
+  config->set("key,comma", "val,comma1,val,comma2");
+  auto commaList = config->getList("key,comma");
+  EXPECT_EQ(commaList, (std::vector<std::string>{"val", "comma1", "val", "comma2"}));
+
+  // Unicode and special characters in splitString
+  auto splitUnicode = config->splitString("α,β,γ,δ", ",");
+  EXPECT_EQ(splitUnicode, (std::vector<std::string>{"α", "β", "γ", "δ"}));
+  auto splitEmoji = config->splitString("😀,😃,😄", ",");
+  EXPECT_EQ(splitEmoji, (std::vector<std::string>{"😀", "😃", "😄"}));
 } 

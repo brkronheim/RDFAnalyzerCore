@@ -47,30 +47,37 @@ public:
 
   template <typename F>
   void Define(std::string name, F f,
-              const std::vector<std::string> &columns = {}, ISystematicManager &systematicManager) override {
+              const std::vector<std::string> &columns, ISystematicManager &systematicManager) {
     
-    std::vector<std::string> systList = systematicManager.getSystematics();
-    for (const auto &syst : systList) {
-      Int_t nAffected = 0;
-      std::vector<std::string> newColumnsUp = {};
-      std::vector<std::string> newColumnsDown = {};
-      for (const auto &col : columns) {
-        if(systematicManager.getSystematicsForVariable(col).find(syst) != systematicManager.getSystematicsForVariable(col).end()) {
-          newColumnsUp.push_back(col + "_up");
-          newColumnsDown.push_back(col + "_down");
-          nAffected++;
-        } else {
-          newColumnsUp.push_back(col);
-          newColumnsDown.push_back(col);
+    std::vector<std::string> systList(systematicManager.getSystematics().begin(), systematicManager.getSystematics().end());
+    if(systList.size() > 0) {
+      for (const auto &syst : systList) {
+        Int_t nAffected = 0;
+        std::vector<std::string> newColumnsUp = {};
+        std::vector<std::string> newColumnsDown = {};
+        for (const auto &col : columns) {
+          if(systematicManager.getSystematicsForVariable(col).find(syst) != systematicManager.getSystematicsForVariable(col).end()) {
+            newColumnsUp.push_back(col + "_up");
+            newColumnsDown.push_back(col + "_down");
+            nAffected++;
+          } else {
+            newColumnsUp.push_back(col);
+            newColumnsDown.push_back(col);
+          }
         }
+        if(nAffected > 0) {
+          df_m = df_m.Define(name + "_"+syst+"Up", f, newColumnsUp);
+          df_m = df_m.Define(name + "_"+syst+"Down", f, newColumnsDown);
+          systematicManager.registerSystematic(syst, {name});
+        } 
       }
-      if(nAffected > 0) {
-        df_m = df_m.Define(name + "_up", f, newColumnsUp);
-        df_m = df_m.Define(name + "_down", f, newColumnsDown);
-        systematicManager.registerSystematic(syst, {name});
-      } else {
-        df_m = df_m.Define(name, f, columns);
-      }
+    }
+    // define the nominal column
+    df_m = df_m.Define(name, f, columns);
+
+    std::cout << "All columns:" << std::endl;
+    for (const auto &col : df_m.GetColumnNames()) {
+      std::cout << col << std::endl;
     }
   }
 
@@ -81,8 +88,8 @@ public:
    * @param type Data type (default: Float_t)
    */
   void DefineVector(std::string name,
-                    const std::vector<std::string> &columns = {},
-                    std::string type = "Float_t",
+                    const std::vector<std::string> &columns,
+                    std::string type,
                     ISystematicManager &systematicManager) override;
 
   /**
@@ -101,6 +108,7 @@ public:
    * @param f Function to define the variable
    */
   template <typename F> void DefinePerSample_m(std::string name, F f) {
+    std::cout << "Defining per-sample variable: " << name << std::endl;
     df_m = df_m.DefinePerSample(name, f);
   }
 
@@ -141,26 +149,39 @@ public:
   /**
    * @brief Register constant variables from configuration
    * @param configProvider Reference to the configuration provider
+   * @param configKey The key in the configuration for the constants file (default: "floatConfig")
    */
-  void registerConstants(const IConfigurationProvider &configProvider);
+  void registerConstants(const IConfigurationProvider &configProvider, const std::string& floatConfigKey = "floatConfig", const std::string& intConfigKey = "intConfig");
 
   /**
    * @brief Register aliases from configuration
    * @param configProvider Reference to the configuration provider
+   * @param configKey The key in the configuration for the alias file (default: "aliasConfig")
    */
-  void registerAliases(const IConfigurationProvider &configProvider);
+  void registerAliases(const IConfigurationProvider &configProvider, const std::string& aliasConfigKey = "aliasConfig");
 
   /**
    * @brief Register optional branches from configuration
    * @param configProvider Reference to the configuration provider
+   * @param configKey The key in the configuration for the optional branches file (default: "optionalBranchesConfig")
    */
-  void registerOptionalBranches(const IConfigurationProvider &configProvider);
+  void registerOptionalBranches(const IConfigurationProvider &configProvider, const std::string& optionalBranchesConfigKey = "optionalBranchesConfig");
 
   /**
    * @brief Finalize setup after all configuration is loaded
    * @param configProvider Reference to the configuration provider
+   * @param floatConfigKey The key for float constants (default: "floatConfig")
+   * @param intConfigKey The key for int constants (default: "intConfig")
+   * @param aliasConfigKey The key for aliases (default: "aliasConfig")
+   * @param optionalBranchesConfigKey The key for optional branches (default: "optionalBranchesConfig")
    */
-  void finalizeSetup(const IConfigurationProvider &configProvider);
+  void finalizeSetup(const IConfigurationProvider &configProvider,
+                    const std::string& floatConfigKey = "floatConfig",
+                    const std::string& intConfigKey = "intConfig",
+                    const std::string& aliasConfigKey = "aliasConfig",
+                    const std::string& optionalBranchesConfigKey = "optionalBranchesConfig");
+
+  virtual ~DataManager();
 
 private:
   std::vector<std::unique_ptr<TChain>> chain_vec_m;

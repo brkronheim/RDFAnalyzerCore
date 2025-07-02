@@ -30,7 +30,6 @@
 #include <api/IDataFrameProvider.h>
 #include <api/INDHistogramManager.h>
 #include <api/ITriggerManager.h>
-#include <DataManager.h>
 #include <TChain.h>
 #include <functions.h>
 
@@ -99,7 +98,7 @@ public:
                   const std::vector<std::string> &columns = {}) {
     name = "pass_" + name;
     Define(name, f, columns);
-    dataFrameProvider_m->Filter(passCut, {name}, getSystematicManager());
+    dataFrameProvider_m->Filter(passCut, {name});
     return this;
   }
 
@@ -169,7 +168,9 @@ public:
   Analyzer *ApplyAllBDTs();
 
   /**
-   * @brief Apply all registered triggers to the dataframe.
+   * @brief Apply all registered triggers and vetoes to the dataframe.
+   * Uses the trigger group and veto configuration for the current sample/type.
+   * For MC, merges all triggers from all groups.
    * @return Pointer to this Analyzer (for chaining)
    */
   Analyzer *ApplyAllTriggers();
@@ -243,6 +244,25 @@ public:
    */
   ISystematicManager &getSystematicManager() const { return *systematicManager_m; }
 
+  /**
+   * @brief Book N-dimensional histograms with automatic systematic handling.
+   * @param infos Vector of histogram info objects
+   * @param selection Vector of selection info objects
+   * @param suffix Suffix to append to histogram names
+   * @param allRegionNames Vector of region name vectors
+   */
+  void BookND(std::vector<histInfo> &infos,
+              std::vector<selectionInfo> &selection,
+              const std::string &suffix,
+              std::vector<std::vector<std::string>> &allRegionNames);
+
+  /**
+   * @brief Save histograms to file.
+   * @param fullHistList Vector of vectors of histogram info objects
+   * @param allRegionNames Vector of vectors of region name vectors
+   */
+  void SaveHists(std::vector<std::vector<histInfo>> &fullHistList,
+                 std::vector<std::vector<std::string>> &allRegionNames);
 
 private:
   /**

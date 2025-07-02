@@ -21,9 +21,10 @@ CorrectionManager::CorrectionManager(
  */
 void CorrectionManager::applyCorrection(IDataFrameProvider& dataFrameProvider,
                                         const std::string &correctionName,
-                                        const std::vector<std::string> &stringArguments) {  
+                                        const std::vector<std::string> &stringArguments,
+                                        ISystematicManager &systematicManager) {  
   const auto &inputFeatures = getCorrectionFeatures(correctionName);
-  dataFrameProvider.DefineVector("input_" + correctionName, inputFeatures, "double");
+  dataFrameProvider.DefineVector("input_" + correctionName, inputFeatures, "double", systematicManager);
   auto correction = this->objects_m.at(correctionName);
   auto stringArgs = stringArguments;
   auto correctionLambda =
@@ -46,7 +47,7 @@ void CorrectionManager::applyCorrection(IDataFrameProvider& dataFrameProvider,
     }
     return correction->evaluate(values);
   };
-  dataFrameProvider.Define(correctionName, correctionLambda, {"input_" + correctionName});
+  dataFrameProvider.Define(correctionName, correctionLambda, {"input_" + correctionName}, systematicManager);
 }
 
 /**

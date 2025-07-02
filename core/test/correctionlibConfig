@@ -1,1 +1,2 @@
-file=aux/correction.json correctionName=test_correction name=test_correction inputVariables=float_arg,int_arg,str_arg
+file=aux/correction.json correctionName=test_correction name=test_correction inputVariables=float_arg,int_arg
+file=aux/correction.json correctionName=test_correction2 name=test_correction2 inputVariables=float_arg2,int_arg2

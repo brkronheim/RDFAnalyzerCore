@@ -75,6 +75,23 @@
             }
           ]
         }
+      },
+      {
+        "name": "test_correction2",
+        "description": "A second test correction with different arguments.",
+        "version": 1,
+        "inputs": [
+          {"name": "float_arg2", "type": "real"},
+          {"name": "int_arg2", "type": "int"}
+        ],
+        "output": {"name": "output", "type": "real"},
+        "data": {
+          "nodetype": "binning",
+          "input": "float_arg2",
+          "edges": [0.0, 2.0, 4.0],
+          "content": [1.1, 2.2],
+          "flow": 0.0
+        }
       }
     ]
   }

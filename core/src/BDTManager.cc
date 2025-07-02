@@ -16,10 +16,11 @@ BDTManager::BDTManager(const IConfigurationProvider &configProvider) {
  * @param bdtName Name of the BDT
  */
 void BDTManager::applyBDT(IDataFrameProvider& dataFrameProvider,
-                          const std::string &bdtName) {
+                          const std::string &bdtName,
+                          ISystematicManager &systematicManager) {
   const auto &inputFeatures = getBDTFeatures(bdtName);
   const auto &runVar = getRunVar(bdtName);
-  dataFrameProvider.DefineVector("input_" + bdtName, inputFeatures, "Float_t");
+  dataFrameProvider.DefineVector("input_" + bdtName, inputFeatures, "Float_t", systematicManager);
   auto bdt = this->objects_m.at(bdtName);
   auto bdtLambda = [bdt](ROOT::VecOps::RVec<Float_t> &inputVector,
                          bool runVar) -> Float_t {
@@ -29,7 +30,7 @@ void BDTManager::applyBDT(IDataFrameProvider& dataFrameProvider,
       return (-1);
     }
   };
-  dataFrameProvider.Define(bdtName, bdtLambda, {"input_" + bdtName, runVar});
+  dataFrameProvider.Define(bdtName, bdtLambda, {"input_" + bdtName, runVar}, systematicManager);
 }
 
 /**

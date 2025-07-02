@@ -27,10 +27,9 @@ add_executable(testBDTManager testBDTManager.cc)
 target_link_libraries(testBDTManager core gtest gtest_main)
 add_test(NAME BDTManagerTest COMMAND testBDTManager)
 
-# TODO: Fix this test
-# add_executable(testNDHistogramManager testNDHistogramManager.cc)
-# target_link_libraries(testNDHistogramManager core gtest gtest_main)
-# add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
+#add_executable(testNDHistogramManager testNDHistogramManager.cc)
+#target_link_libraries(testNDHistogramManager core gtest gtest_main)
+#add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
 
 add_executable(testTriggerManager testTriggerManager.cc)
 target_link_libraries(testTriggerManager core gtest gtest_main)
@@ -63,3 +62,7 @@ add_test(NAME ConfigurationManagerMemoryAndSemanticsTest COMMAND testConfigurati
 add_executable(testSystematicPropagation testSystematicPropagation.cc)
 target_link_libraries(testSystematicPropagation core gtest gtest_main)
 add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+
+add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)
+target_link_libraries(testAnalyzer_TriggerLogic core gtest gtest_main)
+add_test(NAME AnalyzerTriggerLogicTest COMMAND testAnalyzer_TriggerLogic)

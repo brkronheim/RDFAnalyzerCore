@@ -23,9 +23,11 @@ public:
    * @brief Construct a new NDHistogramManager object
    * @param dataFrameProvider Reference to the dataframe provider
    * @param configProvider Reference to the configuration provider
+   * @param systematicManager Reference to the systematic manager
    */
   NDHistogramManager(IDataFrameProvider &dataFrameProvider,
-                     IConfigurationProvider &configProvider);
+                     IConfigurationProvider &configProvider,
+                     ISystematicManager &systematicManager);
 
   /**
    * @brief Book N-dimensional histograms
@@ -36,7 +38,8 @@ public:
    */
   void BookND(std::vector<histInfo> &infos,
               std::vector<selectionInfo> &selection, const std::string &suffix,
-              std::vector<std::vector<std::string>> &allRegionNames) override;
+              std::vector<std::vector<std::string>> &allRegionNames,
+              ISystematicManager &systematicManager) override;
 
   /**
    * @brief Save histograms to file

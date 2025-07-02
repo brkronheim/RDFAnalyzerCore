@@ -1,3 +1,4 @@
 alias1=original1
 alias2=original2
-alias3=original3 
+alias3=original3
+existingName=existing_col newName=new_col 
