@@ -4,10 +4,13 @@
 #include <ConfigurationManager.h>
 #include <DataManager.h>
 #include <TriggerManager.h>
-#include "test_util.h"
+#include <test_util.h>
 #include <memory>
 #include <vector>
 #include <string>
+#include <unordered_map>
+#include <api/IPluggableManager.h>
+#include <ManagerRegistry.h>
 
 /**
  * @file testAnalyzer_TriggerLogic.cc
@@ -21,11 +24,17 @@ protected:
         // Use the test_data_config.txt and triggers.txt for config
         configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
         dataManager = ManagerFactory::createDataManager(*configManager);
-        triggerManager = ManagerFactory::createTriggerManager(*configManager);
+        
+        auto tmgr = ManagerRegistry::instance().create("TriggerManager", {configManager.get()});
+        triggerManager = std::unique_ptr<ITriggerManager>(dynamic_cast<ITriggerManager*>(tmgr.release()));
+        
         systematicManager = ManagerFactory::createSystematicManager();
-        bdtManager = ManagerFactory::createBDTManager(*configManager);
-        correctionManager = ManagerFactory::createCorrectionManager(*configManager);
-        ndHistManager = ManagerFactory::createNDHistogramManager(*dataManager, *configManager, *systematicManager);
+        auto bmgr = ManagerRegistry::instance().create("BDTManager", {configManager.get()});
+        bdtManager = std::unique_ptr<IBDTManager>(dynamic_cast<IBDTManager*>(bmgr.release()));
+        auto cmgr = ManagerRegistry::instance().create("CorrectionManager", {configManager.get()});
+        correctionManager = std::unique_ptr<ICorrectionManager>(dynamic_cast<ICorrectionManager*>(cmgr.release()));
+        auto ndmgr = ManagerRegistry::instance().create("NDHistogramManager", {configManager.get()});
+        ndHistManager = std::unique_ptr<INDHistogramManager>(dynamic_cast<INDHistogramManager*>(ndmgr.release()));
     }
     std::unique_ptr<IConfigurationProvider> configManager;
     std::unique_ptr<IDataFrameProvider> dataManager;
@@ -36,23 +45,38 @@ protected:
     std::unique_ptr<INDHistogramManager> ndHistManager;
 };
 
+// Helper to build plugin map for Analyzer
+std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> makeTestPluginMap(
+    std::unique_ptr<IBDTManager> bdt,
+    std::unique_ptr<ICorrectionManager> corr,
+    std::unique_ptr<ITriggerManager> trig,
+    std::unique_ptr<INDHistogramManager> ndh) {
+    std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
+    plugins["bdt"] = std::unique_ptr<IPluggableManager>(dynamic_cast<IPluggableManager*>(bdt.release()));
+    plugins["correction"] = std::unique_ptr<IPluggableManager>(dynamic_cast<IPluggableManager*>(corr.release()));
+    plugins["trigger"] = std::unique_ptr<IPluggableManager>(dynamic_cast<IPluggableManager*>(trig.release()));
+    plugins["ndhist"] = std::unique_ptr<IPluggableManager>(dynamic_cast<IPluggableManager*>(ndh.release()));
+    return plugins;
+}
+
 TEST_F(AnalyzerTriggerLogicTest, DataTriggersAndVetoes) {
     // Set up Analyzer for a data sample
     auto config1 = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
     auto data1 = ManagerFactory::createDataManager(*config1);
-    auto bdt1 = ManagerFactory::createBDTManager(*config1);
-    auto corr1 = ManagerFactory::createCorrectionManager(*config1);
-    auto trig1 = ManagerFactory::createTriggerManager(*config1);
-    auto ndh1 = ManagerFactory::createNDHistogramManager(*data1, *config1, *systematicManager);
+    auto bmgr1 = ManagerRegistry::instance().create("BDTManager", {config1.get()});
+    auto bdt1 = std::unique_ptr<IBDTManager>(dynamic_cast<IBDTManager*>(bmgr1.release()));
+    auto cmgr1 = ManagerRegistry::instance().create("CorrectionManager", {config1.get()});
+    auto corr1 = std::unique_ptr<ICorrectionManager>(dynamic_cast<ICorrectionManager*>(cmgr1.release()));
+    auto tmgr1 = ManagerRegistry::instance().create("TriggerManager", {config1.get()});
+    auto trig1 = std::unique_ptr<ITriggerManager>(dynamic_cast<ITriggerManager*>(tmgr1.release()));
+    auto ndmgr1 = ManagerRegistry::instance().create("NDHistogramManager", {config1.get()});
+    auto ndh1 = std::unique_ptr<INDHistogramManager>(dynamic_cast<INDHistogramManager*>(ndmgr1.release()));
     auto syst1 = ManagerFactory::createSystematicManager();
     config1->set("type", "test_sample");
     Analyzer analyzer(
         std::move(config1),
         std::move(data1),
-        std::move(bdt1),
-        std::move(corr1),
-        std::move(trig1),
-        std::move(ndh1),
+        makeTestPluginMap(std::move(bdt1), std::move(corr1), std::move(trig1), std::move(ndh1)),
         std::move(syst1));
 
     // Define dummy trigger columns (simulate trigger firing)
@@ -70,19 +94,20 @@ TEST_F(AnalyzerTriggerLogicTest, DataTriggersAndVetoes) {
     // Now set a veto to true, should fail
     auto config2 = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
     auto data2 = ManagerFactory::createDataManager(*config2);
-    auto bdt2 = ManagerFactory::createBDTManager(*config2);
-    auto corr2 = ManagerFactory::createCorrectionManager(*config2);
-    auto trig2 = ManagerFactory::createTriggerManager(*config2);
-    auto ndh2 = ManagerFactory::createNDHistogramManager(*data2, *config2, *systematicManager);
+    auto bmgr2 = ManagerRegistry::instance().create("BDTManager", {config2.get()});
+    auto bdt2 = std::unique_ptr<IBDTManager>(dynamic_cast<IBDTManager*>(bmgr2.release()));
+    auto cmgr2 = ManagerRegistry::instance().create("CorrectionManager", {config2.get()});
+    auto corr2 = std::unique_ptr<ICorrectionManager>(dynamic_cast<ICorrectionManager*>(cmgr2.release()));
+    auto tmgr2 = ManagerRegistry::instance().create("TriggerManager", {config2.get()});
+    auto trig2 = std::unique_ptr<ITriggerManager>(dynamic_cast<ITriggerManager*>(tmgr2.release()));
+    auto ndmgr2 = ManagerRegistry::instance().create("NDHistogramManager", {config2.get()});
+    auto ndh2 = std::unique_ptr<INDHistogramManager>(dynamic_cast<INDHistogramManager*>(ndmgr2.release()));
     auto syst2 = ManagerFactory::createSystematicManager();
     config2->set("type", "test_sample");
     Analyzer analyzer2(
         std::move(config2),
         std::move(data2),
-        std::move(bdt2),
-        std::move(corr2),
-        std::move(trig2),
-        std::move(ndh2),
+        makeTestPluginMap(std::move(bdt2), std::move(corr2), std::move(trig2), std::move(ndh2)),
         std::move(syst2));
     analyzer2.Define("trigger1", []() { return true; });
     analyzer2.Define("trigger2", []() { return false; });
@@ -99,19 +124,20 @@ TEST_F(AnalyzerTriggerLogicTest, MCTriggers) {
     // Set up Analyzer for MC (no group for sample type)
     auto config3 = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
     auto data3 = ManagerFactory::createDataManager(*config3);
-    auto bdt3 = ManagerFactory::createBDTManager(*config3);
-    auto corr3 = ManagerFactory::createCorrectionManager(*config3);
-    auto trig3 = ManagerFactory::createTriggerManager(*config3);
-    auto ndh3 = ManagerFactory::createNDHistogramManager(*data3, *config3, *systematicManager);
+    auto bmgr3 = ManagerRegistry::instance().create("BDTManager", {config3.get()});
+    auto bdt3 = std::unique_ptr<IBDTManager>(dynamic_cast<IBDTManager*>(bmgr3.release()));
+    auto cmgr3 = ManagerRegistry::instance().create("CorrectionManager", {config3.get()});
+    auto corr3 = std::unique_ptr<ICorrectionManager>(dynamic_cast<ICorrectionManager*>(cmgr3.release()));
+    auto tmgr3 = ManagerRegistry::instance().create("TriggerManager", {config3.get()});
+    auto trig3 = std::unique_ptr<ITriggerManager>(dynamic_cast<ITriggerManager*>(tmgr3.release()));
+    auto ndmgr3 = ManagerRegistry::instance().create("NDHistogramManager", {config3.get()});
+    auto ndh3 = std::unique_ptr<INDHistogramManager>(dynamic_cast<INDHistogramManager*>(ndmgr3.release()));
     auto syst3 = ManagerFactory::createSystematicManager();
     config3->set("type", "MC");
     Analyzer analyzer(
         std::move(config3),
         std::move(data3),
-        std::move(bdt3),
-        std::move(corr3),
-        std::move(trig3),
-        std::move(ndh3),
+        makeTestPluginMap(std::move(bdt3), std::move(corr3), std::move(trig3), std::move(ndh3)),
         std::move(syst3));
     analyzer.Define("trigger1", []() { return false; });
     analyzer.Define("trigger2", []() { return true; });

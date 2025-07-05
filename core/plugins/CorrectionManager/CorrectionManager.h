@@ -3,7 +3,6 @@
 
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
-#include <api/ICorrectionManager.h>
 #include <NamedObjectManager.h>
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
@@ -23,8 +22,7 @@
  * Implements the ICorrectionManager interface for dependency injection.
  */
 class CorrectionManager
-    : public NamedObjectManager<correction::Correction::Ref>,
-      public ICorrectionManager {
+    : public NamedObjectManager<correction::Correction::Ref> {
 public:
   /**
    * @brief Construct a new CorrectionManager object
@@ -49,7 +47,7 @@ public:
    * @param key Correction key
    * @return Correction reference
    */
-  correction::Correction::Ref getCorrection(const std::string &key) const override;
+  correction::Correction::Ref getCorrection(const std::string &key) const;
 
   /**
    * @brief Get the features for a correction by key
@@ -57,7 +55,12 @@ public:
    * @return Reference to the vector of feature names
    */
   const std::vector<std::string> &
-  getCorrectionFeatures(const std::string &key) const override;
+  getCorrectionFeatures(const std::string &key) const;
+
+  /**
+   * @brief Return the type of the manager
+   */
+  std::string type() const { return "CorrectionManager"; }
 
 private:
   /**
@@ -67,4 +70,4 @@ private:
   void registerCorrectionlib(const IConfigurationProvider &configProvider);
 };
 
-#endif // CORRECTIONMANAGER_H_INCLUDED
+#endif // CORRECTIONMANAGER_H_INCLUDED 

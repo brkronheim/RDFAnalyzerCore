@@ -1,14 +1,14 @@
+#include <CorrectionManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
-#include <CorrectionManager.h>
+#include <api/ISystematicManager.h>
 #include <iostream>
 
 /**
  * @brief Construct a new CorrectionManager object
  * @param configProvider Reference to the configuration provider
  */
-CorrectionManager::CorrectionManager(
-    const IConfigurationProvider &configProvider) {
+CorrectionManager::CorrectionManager(IConfigurationProvider const& configProvider) {
   registerCorrectionlib(configProvider);
 }
 
@@ -20,9 +20,9 @@ CorrectionManager::CorrectionManager(
  * @param inputFeatures Input features for the correction
  */
 void CorrectionManager::applyCorrection(IDataFrameProvider& dataFrameProvider,
+                                        ISystematicManager& systematicManager,
                                         const std::string &correctionName,
-                                        const std::vector<std::string> &stringArguments,
-                                        ISystematicManager &systematicManager) {  
+                                        const std::vector<std::string> &stringArguments) {  
   const auto &inputFeatures = getCorrectionFeatures(correctionName);
   dataFrameProvider.DefineVector("input_" + correctionName, inputFeatures, "double", systematicManager);
   auto correction = this->objects_m.at(correctionName);
@@ -96,4 +96,4 @@ void CorrectionManager::registerCorrectionlib(
     objects_m.emplace(entryKeys.at("name"), correction);
     features_m.emplace(entryKeys.at("name"), inputVariableVector);
   }
-}
+} 

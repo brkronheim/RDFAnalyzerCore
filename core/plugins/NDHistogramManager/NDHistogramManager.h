@@ -3,7 +3,7 @@
 
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
-#include <api/INDHistogramManager.h>
+#include <api/IPluggableManager.h>
 #include <plots.h>
 #include <string>
 #include <vector>
@@ -17,17 +17,12 @@
  * to be used by the Analyzer class and centralizes all histogram-related
  * operations. Implements the INDHistogramManager interface for dependency injection.
  */
-class NDHistogramManager : public INDHistogramManager {
+class NDHistogramManager : public IPluggableManager {
 public:
   /**
    * @brief Construct a new NDHistogramManager object
-   * @param dataFrameProvider Reference to the dataframe provider
-   * @param configProvider Reference to the configuration provider
-   * @param systematicManager Reference to the systematic manager
    */
-  NDHistogramManager(IDataFrameProvider &dataFrameProvider,
-                     IConfigurationProvider &configProvider,
-                     ISystematicManager &systematicManager);
+  NDHistogramManager(const IConfigurationProvider& configProvider);
 
   /**
    * @brief Book N-dimensional histograms
@@ -39,7 +34,8 @@ public:
   void BookND(std::vector<histInfo> &infos,
               std::vector<selectionInfo> &selection, const std::string &suffix,
               std::vector<std::vector<std::string>> &allRegionNames,
-              ISystematicManager &systematicManager) override;
+              IDataFrameProvider &dataFrameProvider,
+              ISystematicManager &systematicManager);
 
   /**
    * @brief Save histograms to file
@@ -47,32 +43,42 @@ public:
    * @param allRegionNames Vector of vectors of region name vectors
    */
   void SaveHists(std::vector<std::vector<histInfo>> &fullHistList,
-                 std::vector<std::vector<std::string>> &allRegionNames) override;
+                 std::vector<std::vector<std::string>> &allRegionNames,
+                 const IConfigurationProvider &configProvider);
 
   /**
    * @brief Get the vector of histogram result pointers
    * @return Reference to the vector of RResultPtr<THnSparseD>
    */
-  std::vector<ROOT::RDF::RResultPtr<THnSparseD>> &GetHistos() override;
+  std::vector<ROOT::RDF::RResultPtr<THnSparseD>> &GetHistos();
 
   /**
    * @brief Clear all stored histograms
    */
-  void Clear() override;
+  void Clear();
+
+  std::string type() const override {
+    return "NDHistogramManager";
+  }
+
+  void setConfigManager(IConfigurationProvider* configManager) override {
+    configManager_m = configManager;
+  }
+  void setDataManager(IDataFrameProvider* dataManager) override {
+    dataManager_m = dataManager;
+  }
+  void setSystematicManager(ISystematicManager* systematicManager) override {
+    systematicManager_m = systematicManager;
+  }
 
 private:
-  /**
-   * @brief Reference to the dataframe provider.
-   */
-  IDataFrameProvider &dataFrameProvider_m;
-  /**
-   * @brief Reference to the configuration provider.
-   */
-  IConfigurationProvider &configProvider_m;
   /**
    * @brief Vector of histogram result pointers.
    */
   std::vector<ROOT::RDF::RResultPtr<THnSparseD>> histos_m;
+  IConfigurationProvider* configManager_m;
+  IDataFrameProvider* dataManager_m;
+  ISystematicManager* systematicManager_m;
 };
 
-#endif // NDHISTOGRAMMANAGER_H_INCLUDED
+#endif // NDHISTOGRAMMANAGER_H_INCLUDED 

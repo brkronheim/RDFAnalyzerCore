@@ -10,7 +10,7 @@
  */
 
 #include <ConfigurationManager.h>
-#include "test_util.h"
+#include <test_util.h>
 #include <DataManager.h>
 #include <ManagerFactory.h>
 #include <ROOT/RDataFrame.hxx>

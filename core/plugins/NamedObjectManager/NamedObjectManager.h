@@ -1,6 +1,10 @@
 #ifndef NAMEDOBJECTMANAGER_H_INCLUDED
 #define NAMEDOBJECTMANAGER_H_INCLUDED
 
+#include <api/IPluggableManager.h>
+#include <api/IConfigurationProvider.h>
+#include <api/IDataFrameProvider.h>
+#include <api/ISystematicManager.h>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -12,7 +16,7 @@
  * @tparam ObjectType The type of object to manage (e.g., Correction,
  * FastForest)
  */
-template <typename ObjectType> class NamedObjectManager {
+template <typename ObjectType> class NamedObjectManager : public IPluggableManager {
 public:
   /**
    * @brief Get an object by key
@@ -40,9 +44,26 @@ public:
     throw std::runtime_error("Features not found: " + key);
   }
 
+  std::string type() const override {
+    return "NamedObjectManager";
+  }
+
+  void setConfigManager(IConfigurationProvider* configManager) override {
+    configManager_m = configManager;
+  }
+  void setDataManager(IDataFrameProvider* dataManager) override {
+    dataManager_m = dataManager;
+  }
+  void setSystematicManager(ISystematicManager* systematicManager) override {
+    systematicManager_m = systematicManager;
+  }
+
 protected:
   std::unordered_map<std::string, ObjectType> objects_m;
   std::unordered_map<std::string, std::vector<std::string>> features_m;
+  IConfigurationProvider* configManager_m;
+  IDataFrameProvider* dataManager_m;
+  ISystematicManager* systematicManager_m;
 };
 
-#endif // NAMEDOBJECTMANAGER_H_INCLUDED
+#endif // NAMEDOBJECTMANAGER_H_INCLUDED 

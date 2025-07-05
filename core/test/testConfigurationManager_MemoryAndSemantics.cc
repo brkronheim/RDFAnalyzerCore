@@ -6,8 +6,8 @@
  * This file contains unit tests for memory management and copy/move semantics in the ConfigurationManager class.
  */
 
-#include "ConfigurationManager.h"
-#include "test_util.h"
+#include <ConfigurationManager.h>
+#include <test_util.h>
 #include <gtest/gtest.h>
 #include <string>
 

@@ -9,8 +9,8 @@
  * correctly.
  */
 
-#include "NamedObjectManager.h"
-#include "test_util.h"
+#include <NamedObjectManager.h>
+#include <test_util.h>
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include <string>

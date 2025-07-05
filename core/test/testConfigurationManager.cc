@@ -9,8 +9,8 @@
  * formats to ensure the manager works correctly in all scenarios.
  */
 
-#include "ConfigurationManager.h"
-#include "test_util.h"
+#include <ConfigurationManager.h>
+#include <test_util.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>

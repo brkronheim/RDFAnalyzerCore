@@ -1,39 +1,13 @@
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../extern/gtest/googletest/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../extern/gtest/googletest/include ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Define the test source directory for all test executables
 add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
+# Basic functionality tests
+
 add_executable(testConfigurationManager testConfigurationManager.cc)
 target_link_libraries(testConfigurationManager core gtest gtest_main)
 add_test(NAME ConfigurationManagerTest COMMAND testConfigurationManager)
-
-add_executable(testNamedObjectManager testNamedObjectManager.cc)
-target_link_libraries(testNamedObjectManager core gtest gtest_main)
-add_test(NAME NamedObjectManagerTest COMMAND testNamedObjectManager)
-
-add_executable(testSystematicManager testSystematicManager.cc)
-target_link_libraries(testSystematicManager core gtest gtest_main)
-add_test(NAME SystematicManagerTest COMMAND testSystematicManager)
-
-add_executable(testDataManager testDataManager.cc)
-target_link_libraries(testDataManager core gtest gtest_main)
-add_test(NAME DataManagerTest COMMAND testDataManager)
-
-add_executable(testCorrectionManager testCorrectionManager.cc)
-target_link_libraries(testCorrectionManager core gtest gtest_main)
-add_test(NAME CorrectionManagerTest COMMAND testCorrectionManager)
-
-add_executable(testBDTManager testBDTManager.cc)
-target_link_libraries(testBDTManager core gtest gtest_main)
-add_test(NAME BDTManagerTest COMMAND testBDTManager)
-
-#add_executable(testNDHistogramManager testNDHistogramManager.cc)
-#target_link_libraries(testNDHistogramManager core gtest gtest_main)
-#add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
-
-add_executable(testTriggerManager testTriggerManager.cc)
-target_link_libraries(testTriggerManager core gtest gtest_main)
-add_test(NAME TriggerManagerTest COMMAND testTriggerManager)
 
 add_executable(testConfigurationManager_Basic testConfigurationManager_Basic.cc)
 target_link_libraries(testConfigurationManager_Basic core gtest gtest_main)
@@ -59,10 +33,57 @@ add_executable(testConfigurationManager_MemoryAndSemantics testConfigurationMana
 target_link_libraries(testConfigurationManager_MemoryAndSemantics core gtest gtest_main)
 add_test(NAME ConfigurationManagerMemoryAndSemanticsTest COMMAND testConfigurationManager_MemoryAndSemantics)
 
-add_executable(testSystematicPropagation testSystematicPropagation.cc)
-target_link_libraries(testSystematicPropagation core gtest gtest_main)
-add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+add_executable(testSystematicManager testSystematicManager.cc)
+target_link_libraries(testSystematicManager core gtest gtest_main)
+add_test(NAME SystematicManagerTest COMMAND testSystematicManager)
+
+add_executable(testDataManager testDataManager.cc)
+target_link_libraries(testDataManager core corePlugins gtest gtest_main)
+add_test(NAME DataManagerTest COMMAND testDataManager)
+
+
+
+
+
+# Plugin tests
+
+add_executable(testManagerRegistry testManagerRegistry.cc)
+target_link_libraries(testManagerRegistry core)
+add_test(NAME ManagerRegistryTest COMMAND testManagerRegistry)
+
+add_executable(testNamedObjectManager testNamedObjectManager.cc)
+target_link_libraries(testNamedObjectManager core gtest gtest_main)
+add_test(NAME NamedObjectManagerTest COMMAND testNamedObjectManager)
+
+add_executable(testCorrectionManager testCorrectionManager.cc)
+target_link_libraries(testCorrectionManager core corePlugins gtest gtest_main)
+add_test(NAME CorrectionManagerTest COMMAND testCorrectionManager)
+
+add_executable(testBDTManager testBDTManager.cc)
+target_link_libraries(testBDTManager core corePlugins gtest gtest_main)
+add_test(NAME BDTManagerTest COMMAND testBDTManager)
+
+add_executable(testNDHistogramManager testNDHistogramManager.cc)
+target_link_libraries(testNDHistogramManager core corePlugins gtest gtest_main)
+add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
+
+add_executable(testTriggerManager testTriggerManager.cc)
+target_link_libraries(testTriggerManager core corePlugins gtest gtest_main)
+add_test(NAME TriggerManagerTest COMMAND testTriggerManager)
+
 
 add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)
-target_link_libraries(testAnalyzer_TriggerLogic core gtest gtest_main)
+target_link_libraries(testAnalyzer_TriggerLogic core corePlugins gtest gtest_main)
 add_test(NAME AnalyzerTriggerLogicTest COMMAND testAnalyzer_TriggerLogic)
+
+
+
+
+# Integration tests
+
+add_executable(testSystematicPropagation testSystematicPropagation.cc)
+target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
+add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+
+
+

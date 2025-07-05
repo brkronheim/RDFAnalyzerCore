@@ -3,7 +3,6 @@
 
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
-#include <api/IBDTManager.h>
 #include <NamedObjectManager.h>
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
@@ -23,8 +22,7 @@
  * Implements the IBDTManager interface for dependency injection.
  */
 class BDTManager
-    : public NamedObjectManager<std::shared_ptr<fastforest::FastForest>>,
-      public IBDTManager {
+    : public NamedObjectManager<std::shared_ptr<fastforest::FastForest>> {
 public:
   /**
    * @brief Construct a new BDTManager object
@@ -35,11 +33,12 @@ public:
   /**
    * @brief Apply a BDT to the given dataframe provider
    * @param dataFrameProvider Reference to the dataframe provider
+   * @param systematicManager Reference to the systematic manager
    * @param bdtName Name of the BDT
    */
   void applyBDT(IDataFrameProvider& dataFrameProvider,
-                const std::string &bdtName,
-                ISystematicManager &systematicManager);
+                ISystematicManager& systematicManager,
+                const std::string &bdtName);
   
 
 
@@ -48,27 +47,32 @@ public:
    * @param key BDT key
    * @return Shared pointer to the FastForest object
    */
-  std::shared_ptr<fastforest::FastForest> getBDT(const std::string &key) const override;
+  std::shared_ptr<fastforest::FastForest> getBDT(const std::string &key) const;
 
   /**
    * @brief Get the features for a BDT by key
    * @param key BDT key
    * @return Reference to the vector of feature names
    */
-  const std::vector<std::string> &getBDTFeatures(const std::string &key) const override;
+  const std::vector<std::string> &getBDTFeatures(const std::string &key) const;
 
   /**
    * @brief Get the run variable for a BDT
    * @param bdtName Name of the BDT
    * @return Reference to the run variable string
    */
-  const std::string &getRunVar(const std::string &bdtName) const override;
+  const std::string &getRunVar(const std::string &bdtName) const;
 
   /**
    * @brief Get all BDT names
    * @return Vector of all BDT names
    */
-  std::vector<std::string> getAllBDTNames() const override;
+  std::vector<std::string> getAllBDTNames() const;
+
+  /**
+   * @brief Return the type of the manager
+   */
+  std::string type() const override { return "BDTManager"; }
 
 private:
   /**
@@ -82,4 +86,4 @@ private:
   std::unordered_map<std::string, std::string> bdt_runVars_m;
 };
 
-#endif // BDTMANAGER_H_INCLUDED
+#endif // BDTMANAGER_H_INCLUDED 

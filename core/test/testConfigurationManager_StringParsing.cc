@@ -7,8 +7,8 @@
  * ConfigurationManager class.
  */
 
-#include "ConfigurationManager.h"
-#include "test_util.h"
+#include <ConfigurationManager.h>
+#include <test_util.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

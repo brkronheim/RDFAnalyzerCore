@@ -1,8 +1,9 @@
-#include "ConfigurationManager.h"
-#include "test_util.h"
-#include "DataManager.h"
-#include "ManagerFactory.h"
+#include <ConfigurationManager.h>
+#include <test_util.h>
+#include <DataManager.h>
+#include <ManagerFactory.h>
 #include <api/INDHistogramManager.h>
+#include <api/IPluggableManager.h>
 #include <ROOT/RDataFrame.hxx>
 #include <TH1D.h>
 #include <TH2D.h>
@@ -13,6 +14,7 @@
 #include <vector>
 #include <plots.h>
 #include <SystematicManager.h>
+#include <ManagerRegistry.h>
 
 class NDHistogramManagerTest : public ::testing::Test {
 protected:
@@ -21,7 +23,18 @@ protected:
     std::string configFile = "cfg/test_data_config_minimal.txt";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     dataManager = ManagerFactory::createDataManager(*configManager);
-    histogramManager = ManagerFactory::createNDHistogramManager(*dataManager, *configManager);
+    
+    // Create manager via plugin system and cast to INDHistogramManager
+    auto pluginManager = ManagerRegistry::instance().create("NDHistogramManager", {configManager.get()});
+    ASSERT_NE(pluginManager, nullptr) << "Failed to create NDHistogramManager plugin";
+    
+    auto* histManager = dynamic_cast<INDHistogramManager*>(pluginManager.get());
+    ASSERT_NE(histManager, nullptr) << "Failed to cast plugin to INDHistogramManager";
+    
+    // Transfer ownership to our unique_ptr
+    pluginManager.release();
+    histogramManager.reset(histManager);
+    
     systematicManager = std::make_unique<SystematicManager>();
   }
 
@@ -39,7 +52,10 @@ TEST_F(NDHistogramManagerTest, ConstructorCreatesValidManager) {
   auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
   auto data = ManagerFactory::createDataManager(*config);
   EXPECT_NO_THROW({
-    auto manager = ManagerFactory::createNDHistogramManager(*data, *config);
+    auto pluginManager = ManagerRegistry::instance().create("NDHistogramManager", {config.get()});
+    ASSERT_NE(pluginManager, nullptr);
+    auto* manager = dynamic_cast<INDHistogramManager*>(pluginManager.get());
+    ASSERT_NE(manager, nullptr);
   });
 }
 
@@ -72,7 +88,7 @@ TEST_F(NDHistogramManagerTest, BookNDBasic) {
   std::vector<selectionInfo> selection = {selectionInfo("sel1", 5, 0.0, 5.0), selectionInfo("sel2", 6, 1.0, 7.0)};
   std::string suffix = "_test";
   std::vector<std::vector<std::string>> regionNames = {{"region1", "region2"}};
-  EXPECT_NO_THROW(histogramManager->BookND(infos, selection, suffix, regionNames, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos, selection, suffix, regionNames, *dataManager, *systematicManager));
   EXPECT_TRUE(true);
 }
 
@@ -81,7 +97,7 @@ TEST_F(NDHistogramManagerTest, BookNDWithEmptyInfos) {
   std::vector<selectionInfo> selection = {selectionInfo("sel1", 5, 0.0, 5.0)};
   std::string suffix = "_test";
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};
-  EXPECT_NO_THROW({ histogramManager->BookND(emptyInfos, selection, suffix, regionNames, *systematicManager); });
+  EXPECT_NO_THROW({ histogramManager->BookND(emptyInfos, selection, suffix, regionNames, *dataManager, *systematicManager); });
   EXPECT_TRUE(true);
 }
 
@@ -92,7 +108,7 @@ TEST_F(NDHistogramManagerTest, BookNDWithEmptySelection) {
   std::vector<selectionInfo> emptySelection;
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};
   std::string suffix = "_test";
-  EXPECT_NO_THROW(histogramManager->BookND(infos, emptySelection, suffix, regionNames, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos, emptySelection, suffix, regionNames, *dataManager, *systematicManager));
   EXPECT_TRUE(true);
 }
 
@@ -101,7 +117,7 @@ TEST_F(NDHistogramManagerTest, BookNDWithEmptyRegionNames) {
   std::vector<selectionInfo> selection = {selectionInfo("sel1", 5, 0.0, 5.0)};
   std::vector<std::vector<std::string>> emptyRegionNames;
   std::string suffix = "_test";
-  EXPECT_THROW(histogramManager->BookND(infos, selection, suffix, emptyRegionNames, *systematicManager), std::invalid_argument);
+  EXPECT_THROW(histogramManager->BookND(infos, selection, suffix, emptyRegionNames, *dataManager, *systematicManager), std::invalid_argument);
   EXPECT_TRUE(true);
 }
 
@@ -113,7 +129,7 @@ TEST_F(NDHistogramManagerTest, BookNDWithEmptySuffix) {
   std::vector<selectionInfo> selection = {selectionInfo("sel1", 5, 0.0, 5.0)};
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};
   std::string emptySuffix = "";
-  EXPECT_NO_THROW(histogramManager->BookND(infos, selection, emptySuffix, regionNames, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos, selection, emptySuffix, regionNames, *dataManager, *systematicManager));
   EXPECT_TRUE(true);
 }
 
@@ -131,7 +147,7 @@ TEST_F(NDHistogramManagerTest, BookNDMultipleHistograms) {
   std::vector<selectionInfo> selection = {selectionInfo("sel1", 5, 0.0, 5.0)};
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};
   std::string suffix = "_test";
-  EXPECT_NO_THROW(histogramManager->BookND(infos, selection, suffix, regionNames, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos, selection, suffix, regionNames, *dataManager, *systematicManager));
   EXPECT_TRUE(true);
 }
 
@@ -145,7 +161,7 @@ TEST_F(NDHistogramManagerTest, BookNDMultipleSelections) {
   std::vector<selectionInfo> selection = {selectionInfo("sel1", 5, 0.0, 5.0), selectionInfo("sel2", 6, 1.0, 7.0), selectionInfo("sel3", 7, 2.0, 8.0)};
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};
   std::string suffix = "_test";
-  EXPECT_NO_THROW({ histogramManager->BookND(infos, selection, suffix, regionNames, *systematicManager); });
+  EXPECT_NO_THROW({ histogramManager->BookND(infos, selection, suffix, regionNames, *dataManager, *systematicManager); });
   EXPECT_TRUE(true);
 }
 
@@ -157,35 +173,35 @@ TEST_F(NDHistogramManagerTest, BookNDMultipleRegions) {
   std::vector<selectionInfo> selection = {selectionInfo("sel1", 5, 0.0, 5.0)};
   std::vector<std::vector<std::string>> regionNames = {{"region1", "region2", "region3"}};
   std::string suffix = "_test";
-  EXPECT_NO_THROW({ histogramManager->BookND(infos, selection, suffix, regionNames, *systematicManager); });
+  EXPECT_NO_THROW({ histogramManager->BookND(infos, selection, suffix, regionNames, *dataManager, *systematicManager); });
   EXPECT_TRUE(true);
 }
 
 TEST_F(NDHistogramManagerTest, SaveHistsBasic) {
   std::vector<std::vector<histInfo>> fullHistList = {{histInfo("hist1", "var1", "label1", "w1", 10, 0.0, 10.0), histInfo("hist2", "var2", "label2", "w2", 20, -5.0, 5.0)}};
   std::vector<std::vector<std::string>> allRegionNames = {{"region1", "region2"}};
-  EXPECT_NO_THROW(histogramManager->SaveHists(fullHistList, allRegionNames));
+  EXPECT_NO_THROW(histogramManager->SaveHists(fullHistList, allRegionNames, *configManager));
   EXPECT_TRUE(true);
 }
 
 TEST_F(NDHistogramManagerTest, SaveHistsWithEmptyHistList) {
   std::vector<std::vector<histInfo>> emptyHistList = {};
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};
-  EXPECT_NO_THROW(histogramManager->SaveHists(emptyHistList, regionNames));
+  EXPECT_NO_THROW(histogramManager->SaveHists(emptyHistList, regionNames, *configManager));
   EXPECT_TRUE(true);
 }
 
 TEST_F(NDHistogramManagerTest, SaveHistsWithEmptyRegionNames) {
   std::vector<std::vector<histInfo>> histList = {{histInfo("hist1", "var1", "label1", "w1", 10, 0.0, 10.0), histInfo("hist2", "var2", "label2", "w2", 20, -5.0, 5.0)}};
   std::vector<std::vector<std::string>> emptyRegionNames = {};
-  EXPECT_NO_THROW(histogramManager->SaveHists(histList, emptyRegionNames));
+  EXPECT_NO_THROW(histogramManager->SaveHists(histList, emptyRegionNames, *configManager));
   EXPECT_TRUE(true);
 }
 
 TEST_F(NDHistogramManagerTest, SaveHistsMultipleHistograms) {
   std::vector<std::vector<histInfo>> histList = {{histInfo("hist1", "var1", "label1", "w1", 10, 0.0, 10.0), histInfo("hist2", "var2", "label2", "w2", 20, -5.0, 5.0), histInfo("hist3", "var3", "label3", "w3", 15, 1.0, 16.0)}};
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};
-  EXPECT_NO_THROW(histogramManager->SaveHists(histList, regionNames));
+  EXPECT_NO_THROW(histogramManager->SaveHists(histList, regionNames, *configManager));
   // Basic check that we can save histograms with empty hist list
   EXPECT_TRUE(true); // If we get here, no exception was thrown
 }
@@ -203,7 +219,7 @@ TEST_F(NDHistogramManagerTest, CompleteWorkflow) {
   auto systAxis = static_cast<DataManager*>(dataManager.get())->makeSystList("Systematic", *systematicManager);
   regionNames.push_back(systAxis);
   std::string suffix = "_workflow";
-  histogramManager->BookND(infos, selection, suffix, regionNames, *systematicManager);
+  histogramManager->BookND(infos, selection, suffix, regionNames, *dataManager, *systematicManager);
   // Debug prints
   std::cout << "histos_m.size(): " << histogramManager->GetHistos().size() << std::endl;
   // Structure fullHistList to match the number of histograms booked (1)
@@ -212,7 +228,7 @@ TEST_F(NDHistogramManagerTest, CompleteWorkflow) {
   };
   std::cout << "fullHistList.size(): " << fullHistList.size() << std::endl;
   std::vector<std::vector<std::string>> allRegionNames = {{"workflow_region1", "workflow_region2"}, systAxis};
-  EXPECT_NO_THROW(histogramManager->SaveHists(fullHistList, allRegionNames));
+  EXPECT_NO_THROW(histogramManager->SaveHists(fullHistList, allRegionNames, *configManager));
   EXPECT_TRUE(true);
 }
 
@@ -238,12 +254,17 @@ TEST_F(NDHistogramManagerTest, ErrorHandling) {
   // Test error handling for invalid operations
   std::vector<std::vector<histInfo>> nonexistentHistList = {{histInfo("nonexistent_hist1", "var1", "label1", "w1", 10, 0.0, 10.0), histInfo("nonexistent_hist2", "var2", "label2", "w2", 20, -5.0, 5.0)}};
   std::vector<std::vector<std::string>> allRegionNames = {{"region1", "region2"}};
-  EXPECT_NO_THROW(histogramManager->SaveHists(nonexistentHistList, allRegionNames));
+  EXPECT_NO_THROW(histogramManager->SaveHists(nonexistentHistList, allRegionNames, *configManager));
   EXPECT_TRUE(true);
 }
 
 TEST_F(NDHistogramManagerTest, MemoryManagement) {
-  std::unique_ptr<INDHistogramManager> localManager = ManagerFactory::createNDHistogramManager(*dataManager, *configManager);
+  auto pluginManager = ManagerRegistry::instance().create("NDHistogramManager", {configManager.get()});
+  ASSERT_NE(pluginManager, nullptr);
+  
+  auto* localManager = dynamic_cast<INDHistogramManager*>(pluginManager.get());
+  ASSERT_NE(localManager, nullptr);
+  
   dataManager->Define("memory_test_sel1", []() { return 1.0; }, {}, *systematicManager);
   dataManager->Define("var1", []() { return 1.0; }, {}, *systematicManager);
   dataManager->Define("w1", []() { return 1.0; }, {}, *systematicManager);
@@ -251,8 +272,8 @@ TEST_F(NDHistogramManagerTest, MemoryManagement) {
   std::vector<selectionInfo> selection = {selectionInfo("memory_test_sel1", 5, 0.0, 5.0)};
   std::vector<std::vector<std::string>> regionNames = {{"memory_test_region1", "memory_test_region2"}};
   std::string suffix = "_memory_test";
-  EXPECT_NO_THROW(localManager->BookND(infos, selection, suffix, regionNames, *systematicManager));
-  localManager = nullptr;
+  EXPECT_NO_THROW(localManager->BookND(infos, selection, suffix, regionNames, *dataManager, *systematicManager));
+  pluginManager = nullptr;
   EXPECT_TRUE(true);
 }
 
@@ -266,14 +287,14 @@ TEST_F(NDHistogramManagerTest, HistogramTypes) {
   std::vector<selectionInfo> selection = {selectionInfo("sel1", 5, 0.0, 5.0)};
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};
   std::string suffix = "_1d";
-  EXPECT_NO_THROW(histogramManager->BookND(hist1d, selection, suffix, regionNames, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(hist1d, selection, suffix, regionNames, *dataManager, *systematicManager));
   // 2D histogram
   dataManager->Define("var2", []() { return 2.0; }, {}, *systematicManager);
   dataManager->Define("w2", []() { return 1.0; }, {}, *systematicManager);
   std::vector<histInfo> hist2d = {histInfo("hist2d_x", "var1", "label1", "w1", 10, 0.0, 10.0),
                                   histInfo("hist2d_y", "var2", "label2", "w2", 20, -5.0, 5.0)};
   suffix = "_2d";
-  EXPECT_NO_THROW(histogramManager->BookND(hist2d, selection, suffix, regionNames, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(hist2d, selection, suffix, regionNames, *dataManager, *systematicManager));
   // 3D histogram
   dataManager->Define("var3", []() { return 3.0; }, {}, *systematicManager);
   dataManager->Define("w3", []() { return 1.0; }, {}, *systematicManager);
@@ -281,7 +302,7 @@ TEST_F(NDHistogramManagerTest, HistogramTypes) {
                                   histInfo("hist3d_y", "var2", "label2", "w2", 20, -5.0, 5.0),
                                   histInfo("hist3d_z", "var3", "label3", "w3", 15, 1.0, 16.0)};
   suffix = "_3d";
-  EXPECT_NO_THROW(histogramManager->BookND(hist3d, selection, suffix, regionNames, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(hist3d, selection, suffix, regionNames, *dataManager, *systematicManager));
   EXPECT_TRUE(true);
 }
 
@@ -295,7 +316,7 @@ TEST_F(NDHistogramManagerTest, HistogramNaming) {
   std::vector<selectionInfo> selection = {selectionInfo("sel1", 5, 0.0, 5.0), selectionInfo("sel2", 6, 1.0, 7.0)};
   std::vector<std::vector<std::string>> regionNames = {{"region1", "region2"}};
   std::string suffix = "_naming_test";
-  EXPECT_NO_THROW(histogramManager->BookND(infos, selection, suffix, regionNames, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos, selection, suffix, regionNames, *dataManager, *systematicManager));
   EXPECT_TRUE(true);
 }
 
@@ -312,7 +333,7 @@ TEST_F(NDHistogramManagerTest, HistogramProperties) {
   std::string suffix = "_prop_test";
 
   EXPECT_NO_THROW(
-      { histogramManager->BookND(infos, selection, suffix, regionNames, *systematicManager); });
+      { histogramManager->BookND(infos, selection, suffix, regionNames, *dataManager, *systematicManager); });
 
   // Basic check that histogram properties are set correctly
   EXPECT_TRUE(true); // If we get here, no exception was thrown
@@ -328,7 +349,7 @@ TEST_F(NDHistogramManagerTest, MultipleBookOperations) {
   std::vector<selectionInfo> selection1 = {selectionInfo("sel1", 5, 0.0, 5.0)};
   std::vector<std::vector<std::string>> regionNames1 = {{"region1"}};
   std::string suffix1 = "_multi1";
-  EXPECT_NO_THROW(histogramManager->BookND(infos1, selection1, suffix1, regionNames1, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos1, selection1, suffix1, regionNames1, *dataManager, *systematicManager));
   // Second booking
   dataManager->Define("var2", []() { return 2.0; }, {}, *systematicManager);
   dataManager->Define("w2", []() { return 1.0; }, {}, *systematicManager);
@@ -337,7 +358,7 @@ TEST_F(NDHistogramManagerTest, MultipleBookOperations) {
   std::vector<selectionInfo> selection2 = {selectionInfo("sel2", 6, 1.0, 7.0)};
   std::vector<std::vector<std::string>> regionNames2 = {{"region2"}};
   std::string suffix2 = "_multi2";
-  EXPECT_NO_THROW(histogramManager->BookND(infos2, selection2, suffix2, regionNames2, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos2, selection2, suffix2, regionNames2, *dataManager, *systematicManager));
   // Third booking
   dataManager->Define("var3", []() { return 3.0; }, {}, *systematicManager);
   dataManager->Define("w3", []() { return 1.0; }, {}, *systematicManager);
@@ -346,7 +367,7 @@ TEST_F(NDHistogramManagerTest, MultipleBookOperations) {
   std::vector<selectionInfo> selection3 = {selectionInfo("sel3", 7, 2.0, 8.0)};
   std::vector<std::vector<std::string>> regionNames3 = {{"region3"}};
   std::string suffix3 = "_multi3";
-  EXPECT_NO_THROW(histogramManager->BookND(infos3, selection3, suffix3, regionNames3, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos3, selection3, suffix3, regionNames3, *dataManager, *systematicManager));
   EXPECT_TRUE(true);
 }
 
@@ -360,7 +381,7 @@ TEST_F(NDHistogramManagerTest, ClearAndReuse) {
   std::vector<selectionInfo> selection1 = {selectionInfo("sel1", 5, 0.0, 5.0)};
   std::vector<std::vector<std::string>> regionNames1 = {{"region1"}};
   std::string suffix1 = "_clear1";
-  EXPECT_NO_THROW(histogramManager->BookND(infos1, selection1, suffix1, regionNames1, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos1, selection1, suffix1, regionNames1, *dataManager, *systematicManager));
   // Clear histograms
   histogramManager->Clear();
   // Second booking after clear
@@ -371,7 +392,7 @@ TEST_F(NDHistogramManagerTest, ClearAndReuse) {
   std::vector<selectionInfo> selection2 = {selectionInfo("sel2", 6, 1.0, 7.0)};
   std::vector<std::vector<std::string>> regionNames2 = {{"region2"}};
   std::string suffix2 = "_clear2";
-  EXPECT_NO_THROW(histogramManager->BookND(infos2, selection2, suffix2, regionNames2, *systematicManager));
+  EXPECT_NO_THROW(histogramManager->BookND(infos2, selection2, suffix2, regionNames2, *dataManager, *systematicManager));
   EXPECT_TRUE(true);
 }
 

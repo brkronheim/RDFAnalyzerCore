@@ -1,12 +1,13 @@
 #include <BDTManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
+#include <api/ISystematicManager.h>
 
 /**
  * @brief Construct a new BDTManager object
  * @param configProvider Reference to the configuration provider
  */
-BDTManager::BDTManager(const IConfigurationProvider &configProvider) {
+BDTManager::BDTManager(IConfigurationProvider const& configProvider) {
   registerBDTs(configProvider);
 }
 
@@ -16,8 +17,8 @@ BDTManager::BDTManager(const IConfigurationProvider &configProvider) {
  * @param bdtName Name of the BDT
  */
 void BDTManager::applyBDT(IDataFrameProvider& dataFrameProvider,
-                          const std::string &bdtName,
-                          ISystematicManager &systematicManager) {
+                          ISystematicManager& systematicManager,
+                          const std::string &bdtName) {
   const auto &inputFeatures = getBDTFeatures(bdtName);
   const auto &runVar = getRunVar(bdtName);
   dataFrameProvider.DefineVector("input_" + bdtName, inputFeatures, "Float_t", systematicManager);
@@ -105,4 +106,4 @@ void BDTManager::registerBDTs(const IConfigurationProvider &configProvider) {
     features_m.emplace(entryKeys.at("name"), inputVariableVector);
     bdt_runVars_m.emplace(entryKeys.at("name"), entryKeys.at("runVar"));
   }
-}
+} 

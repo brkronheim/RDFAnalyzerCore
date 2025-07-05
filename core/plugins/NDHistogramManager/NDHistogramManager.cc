@@ -1,5 +1,6 @@
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
+#include <api/ISystematicManager.h>
 #include <NDHistogramManager.h>
 #include <TFile.h>
 #include <TH1F.h>
@@ -12,16 +13,8 @@
 
 /**
  * @brief Construct a new NDHistogramManager object
- * @param dataFrameProvider Reference to the dataframe provider
- * @param configProvider Reference to the configuration provider
- * @param systematicManager Reference to the systematic manager
  */
-NDHistogramManager::NDHistogramManager(IDataFrameProvider &dataFrameProvider,
-                                       IConfigurationProvider &configProvider,
-                                       ISystematicManager &systematicManager)
-    : dataFrameProvider_m(dataFrameProvider), configProvider_m(configProvider) {
-    // You can store a reference to systematicManager if needed
-}
+NDHistogramManager::NDHistogramManager(IConfigurationProvider const& configProvider) {}
 
 /**
  * @brief Book N-dimensional histograms
@@ -34,13 +27,14 @@ void NDHistogramManager::BookND(
     std::vector<histInfo> &infos, std::vector<selectionInfo> &selection,
     const std::string &suffix,
     std::vector<std::vector<std::string>> &allRegionNames,
+    IDataFrameProvider &dataFrameProvider,
     ISystematicManager &systematicManager) {
 
   if (allRegionNames.empty()) {
     throw std::invalid_argument("NDHistogramManager::BookND: allRegionNames must not be empty");
   }
 
-  ROOT::RDF::RNode df = dataFrameProvider_m.getDataFrame();
+  ROOT::RDF::RNode df = dataFrameProvider.getDataFrame();
 
   for (const auto &info : infos) {
     std::vector<int> binVectorBase;
@@ -103,12 +97,15 @@ void NDHistogramManager::BookND(
     }
 
     std::string branchName = info.name() + "_" + suffix + "inputDoubleVector";
-    dataFrameProvider_m.DefineVector(branchName, systVector, "Double_t", systematicManager);
-    df = dataFrameProvider_m.getDataFrame();
-    THnMulti tempModel(df.GetNSlots(), newName.c_str(), newName.c_str(),
+    dataFrameProvider.DefineVector(branchName, systVector, "Double_t", systematicManager);
+    
+    // Get the updated dataframe after DefineVector
+    ROOT::RDF::RNode updatedDf = dataFrameProvider.getDataFrame();
+    
+    THnMulti tempModel(updatedDf.GetNSlots(), newName.c_str(), newName.c_str(),
                        selection.size() + 1, numFills, binVector,
                        lowerBoundVector, upperBoundVector);
-    histos_m.push_back(df.Book<ROOT::VecOps::RVec<Double_t>>(
+    histos_m.push_back(updatedDf.Book<ROOT::VecOps::RVec<Double_t>>(
         std::move(tempModel), {branchName}));
   }
 }
@@ -120,8 +117,9 @@ void NDHistogramManager::BookND(
  */
 void NDHistogramManager::SaveHists(
     std::vector<std::vector<histInfo>> &fullHistList,
-    std::vector<std::vector<std::string>> &allRegionNames) {
-  std::string fileName = configProvider_m.get("saveFile");
+    std::vector<std::vector<std::string>> &allRegionNames,
+    const IConfigurationProvider &configProvider) {
+  std::string fileName = configProvider.get("saveFile");
   std::vector<std::string> allNames;
   std::vector<std::string> allVariables;
   std::vector<std::string> allLabels;
@@ -177,21 +175,26 @@ void NDHistogramManager::SaveHists(
       // std::cout << "histName: " << histName
       const Int_t size = commonAxisSize.size() - 2;
       for (int i = 0; i < size; i++) {
-        dirName += allRegionNames[i][indices[i] - 1] + "/";
+        if (indices[i] > 0 && i < allRegionNames.size() && indices[i] - 1 < allRegionNames[i].size()) {
+          dirName += allRegionNames[i][indices[i] - 1] + "/";
+        }
         // std::cout << "histName: " << histName;
       }
 
-      dirName += allRegionNames[commonAxisSize.size() - 2]
-                               [indices[commonAxisSize.size() - 2] - 1];
+      // Add bounds checking for the last region name
+      if (commonAxisSize.size() - 2 >= 0 && commonAxisSize.size() - 2 < allRegionNames.size() &&
+          indices[commonAxisSize.size() - 2] > 0 && indices[commonAxisSize.size() - 2] - 1 < allRegionNames[commonAxisSize.size() - 2].size()) {
+        dirName += allRegionNames[commonAxisSize.size() - 2][indices[commonAxisSize.size() - 2] - 1];
+      }
       std::string histName = allVariables[histIndex];
       // bool isNominal=false;
-      if (allRegionNames[commonAxisSize.size() - 1]
-                        [indices[commonAxisSize.size() - 1] - 1] == "Nominal") {
-        // isNominal= true;
-      } else {
-        histName += "_" +
-                    allRegionNames[commonAxisSize.size() - 1]
-                                  [indices[commonAxisSize.size() - 1] - 1];
+      if (commonAxisSize.size() - 1 >= 0 && commonAxisSize.size() - 1 < allRegionNames.size() &&
+          indices[commonAxisSize.size() - 1] > 0 && indices[commonAxisSize.size() - 1] - 1 < allRegionNames[commonAxisSize.size() - 1].size()) {
+        if (allRegionNames[commonAxisSize.size() - 1][indices[commonAxisSize.size() - 1] - 1] == "Nominal") {
+          // isNominal= true;
+        } else {
+          histName += "_" + allRegionNames[commonAxisSize.size() - 1][indices[commonAxisSize.size() - 1] - 1];
+        }
       }
       if (histMap.count(dirName + "/" + histName) == 0) {
         histMap[dirName + "/" + histName] =
@@ -215,7 +218,10 @@ void NDHistogramManager::SaveHists(
   saveFile.cd();
   for (const auto &dirName : dirSet) {
     std::string newDir(dirName);
-    newDir[dirName.find('/')] = '_';
+    size_t slashPos = dirName.find('/');
+    if (slashPos != std::string::npos && slashPos < newDir.size()) {
+      newDir[slashPos] = '_';
+    }
     saveFile.mkdir(newDir.c_str());
   }
   std::unordered_map<std::string,
@@ -228,7 +234,13 @@ void NDHistogramManager::SaveHists(
       continue;
     }
     std::string dirName = pair.first.substr(0, pair.first.find_last_of("/"));
-    auto regionSplit = configProvider_m.splitString(pair.first, "/");
+    auto regionSplit = configProvider.splitString(pair.first, "/");
+    
+    // Add bounds checking for regionSplit
+    if (regionSplit.size() < 3) {
+      continue; // Skip this histogram if we don't have enough region information
+    }
+    
     std::string region =
         regionSplit[0] + "_" +
         regionSplit[2]; //  dirName.substr(0,dirName.find("/"));
@@ -258,7 +270,13 @@ void NDHistogramManager::SaveHists(
 
   for (const auto &pair : histMap) {
     std::string dirName = pair.first.substr(0, pair.first.find_last_of("/"));
-    auto regionSplit = configProvider_m.splitString(pair.first, "/");
+    auto regionSplit = configProvider.splitString(pair.first, "/");
+    
+    // Add bounds checking for regionSplit
+    if (regionSplit.size() < 3) {
+      continue; // Skip this histogram if we don't have enough region information
+    }
+    
     std::string region =
         regionSplit[0] + "_" +
         regionSplit[2]; //  dirName.substr(0,dirName.find("/"));

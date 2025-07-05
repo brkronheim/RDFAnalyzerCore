@@ -18,20 +18,17 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <ROOT/RDFHelpers.hxx>
 #include <ROOT/RDataFrame.hxx>
 
-#include <api/IBDTManager.h>
+
 #include <api/IConfigurationProvider.h>
-#include <api/ICorrectionManager.h>
 #include <api/IDataFrameProvider.h>
-#include <api/INDHistogramManager.h>
-#include <api/ITriggerManager.h>
 #include <TChain.h>
 #include <functions.h>
+#include <api/IPluggableManager.h>
 
 /**
  * @class Analyzer
@@ -49,26 +46,34 @@ public:
    *
    * @param configProvider Unique pointer to the configuration provider
    * @param dataFrameProvider Unique pointer to the dataframe provider
-   * @param bdtManager Unique pointer to the BDT manager interface
-   * @param correctionManager Unique pointer to the correction manager interface
-   * @param triggerManager Unique pointer to the trigger manager interface
-   * @param ndHistManager Unique pointer to the ND histogram manager interface
+   * @param plugins Rvalue reference to a map of plugin role names to pluggable manager instances
    * @param systematicManager Unique pointer to the systematic manager interface
    */
   Analyzer(std::unique_ptr<IConfigurationProvider> configProvider,
            std::unique_ptr<IDataFrameProvider> dataFrameProvider,
-           std::unique_ptr<IBDTManager> bdtManager,
-           std::unique_ptr<ICorrectionManager> correctionManager,
-           std::unique_ptr<ITriggerManager> triggerManager,
-           std::unique_ptr<INDHistogramManager> ndHistManager,
+           std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins,
            std::unique_ptr<ISystematicManager> systematicManager);
 
   /**
    * @brief Construct a new Analyzer object with backward compatibility
    *
    * @param configFile File containing the configuration information for this analyzer
+   * @param pluginSpecs Map of plugin role names to (type, args) for instantiation
    */
-  Analyzer(std::string configFile);
+  Analyzer(std::string configFile,
+           const std::unordered_map<std::string, std::pair<std::string, std::vector<void*>>>& pluginSpecs);
+
+  /**
+   * @brief Construct a new Analyzer object with a config file and optional plugins.
+   *
+   * This constructor creates default configuration, data, and systematic managers using the provided config file.
+   * Plugins can be optionally provided as a map; if omitted, no plugins are set.
+   *
+   * @param configFile Path to the configuration file.
+   * @param plugins Map of plugin role names to pluggable manager instances (default: empty).
+   */
+  Analyzer(std::string configFile,
+           std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins = {});
 
   /**
    * @brief Define a new variable in the dataframe. Systematics are handled automatically.
@@ -142,40 +147,6 @@ public:
                         std::string type = "Float_t");
 
   /**
-   * @brief Apply a Boosted Decision Tree (BDT) to the dataframe.
-   *
-   * This method defines the input vector for the BDT, creates a lambda for BDT
-   * evaluation, and defines the BDT output variable in the dataframe.
-   *
-   * @param BDTName Name of the BDT to apply
-   * @return Pointer to this Analyzer (for chaining)
-   */
-  Analyzer *ApplyBDT(std::string BDTName);
-
-  /**
-   * @brief Apply a correction using correctionlib.
-   * @param correctionName Name of the correction
-   * @param stringArguments Arguments for the correction
-   * @return Pointer to this Analyzer (for chaining)
-   */
-  Analyzer *ApplyCorrection(std::string correctionName,
-                            std::vector<std::string> stringArguments);
-
-  /**
-   * @brief Apply all registered BDTs to the dataframe.
-   * @return Pointer to this Analyzer (for chaining)
-   */
-  Analyzer *ApplyAllBDTs();
-
-  /**
-   * @brief Apply all registered triggers and vetoes to the dataframe.
-   * Uses the trigger group and veto configuration for the current sample/type.
-   * For MC, merges all triggers from all groups.
-   * @return Pointer to this Analyzer (for chaining)
-   */
-  Analyzer *ApplyAllTriggers();
-
-  /**
    * @brief Save the configured branches to the output file and trigger the computation of the dataframe.
    * @return Pointer to this Analyzer (for chaining)
    */
@@ -201,42 +172,6 @@ public:
    */
   correction::Correction::Ref correctionMap(std::string key);
 
-  /**
-   * @brief Access the NDHistogramManager for booking and saving histograms.
-   * @return Reference to NDHistogramManager
-   */
-  INDHistogramManager &getNDHistogramManager() { return *ndHistManager_m; }
-  const INDHistogramManager &getNDHistogramManager() const { return *ndHistManager_m; }
-
-  /**
-   * @brief Get the BDT manager interface
-   * @return Reference to the BDT manager interface
-   */
-  IBDTManager &getBDTManager() const { return *bdtManager_m; }
-
-  /**
-   * @brief Get the correction manager interface
-   * @return Reference to the correction manager interface
-   */
-  ICorrectionManager &getCorrectionManager() const { return *correctionManager_m; }
-
-  /**
-   * @brief Get the trigger manager interface
-   * @return Reference to the trigger manager interface
-   */
-  ITriggerManager &getTriggerManager() const { return *triggerManager_m; }
-
-  /**
-   * @brief Get the configuration provider interface
-   * @return Reference to the configuration provider interface
-   */
-  IConfigurationProvider &getConfigurationProvider() const { return *configProvider_m; }
-
-  /**
-   * @brief Get the dataframe provider interface
-   * @return Reference to the dataframe provider interface
-   */
-  IDataFrameProvider &getDataFrameProvider() const { return *dataFrameProvider_m; }
 
   /**
    * @brief Get the systematic manager interface
@@ -245,24 +180,25 @@ public:
   ISystematicManager &getSystematicManager() const { return *systematicManager_m; }
 
   /**
-   * @brief Book N-dimensional histograms with automatic systematic handling.
-   * @param infos Vector of histogram info objects
-   * @param selection Vector of selection info objects
-   * @param suffix Suffix to append to histogram names
-   * @param allRegionNames Vector of region name vectors
+   * @brief Get a plugin by role name and cast to the desired interface.
+   * @tparam T Interface type to cast to
+   * @param key Role name of the plugin
+   * @return Pointer to the plugin as T, or nullptr if not found or wrong type
    */
-  void BookND(std::vector<histInfo> &infos,
-              std::vector<selectionInfo> &selection,
-              const std::string &suffix,
-              std::vector<std::vector<std::string>> &allRegionNames);
+  template<typename T>
+  T* getPlugin(const std::string& key) const {
+    auto it = plugins.find(key);
+    if (it != plugins.end()) {
+      return dynamic_cast<T*>(it->second.get());
+    }
+    return nullptr;
+  }
 
   /**
-   * @brief Save histograms to file.
-   * @param fullHistList Vector of vectors of histogram info objects
-   * @param allRegionNames Vector of vectors of region name vectors
+   * @brief Get the dataframe provider interface
+   * @return Reference to the dataframe provider interface
    */
-  void SaveHists(std::vector<std::vector<histInfo>> &fullHistList,
-                 std::vector<std::vector<std::string>> &allRegionNames);
+  IDataFrameProvider &getDataFrameProvider() const { return *dataFrameProvider_m; }
 
 private:
   /**
@@ -278,25 +214,13 @@ private:
    */
   std::unique_ptr<IDataFrameProvider> dataFrameProvider_m;
   /**
-   * @brief Unique pointer to the BDT manager interface.
-   */
-  std::unique_ptr<IBDTManager> bdtManager_m;
-  /**
-   * @brief Unique pointer to the correction manager interface.
-   */
-  std::unique_ptr<ICorrectionManager> correctionManager_m;
-  /**
-   * @brief Unique pointer to the trigger manager interface.
-   */
-  std::unique_ptr<ITriggerManager> triggerManager_m;
-  /**
-   * @brief Unique pointer to the ND histogram manager interface.
-   */
-  std::unique_ptr<INDHistogramManager> ndHistManager_m;
-  /**
    * @brief Unique pointer to the systematic manager interface.
    */
   std::unique_ptr<ISystematicManager> systematicManager_m;
+  /**
+   * @brief Map of plugin role names to pluggable manager instances.
+   */
+  std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
   /**
    * @brief Initialize the analyzer with the provided dependencies
    */

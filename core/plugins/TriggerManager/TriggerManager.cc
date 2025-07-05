@@ -5,7 +5,8 @@
  * @brief Construct a new TriggerManager object
  * @param configProvider Reference to the configuration provider
  */
-TriggerManager::TriggerManager(const IConfigurationProvider &configProvider) {
+TriggerManager::TriggerManager(IConfigurationProvider const& configProvider) {
+  // Initialize from configProvider if needed
   registerTriggers(configProvider);
 }
 

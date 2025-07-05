@@ -11,6 +11,7 @@ target_include_directories(makePlots
 target_link_libraries(makePlots
     PRIVATE
         core
+        corePlugins
         ROOT::ROOTDataFrame
         ROOT::ROOTVecOps
         ROOT::Core

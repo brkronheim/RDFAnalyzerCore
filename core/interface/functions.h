@@ -16,6 +16,8 @@
 #include <Math/Math.h>
 #include <Math/Vector4D.h>
 #include <ROOT/RDataFrame.hxx>
+#include <Math/GenVector/LorentzVector.h>
+#include <Math/GenVector/PxPyPzM4D.h>
 
 // =========================
 // General Math Utilities
@@ -452,6 +454,133 @@ template <typename T>
 ROOT::VecOps::RVec<T> Fill4Vec(T pt, T eta, T phi, T mass) {
 
   return (ROOT::VecOps::RVec<T>({pt, eta, phi, mass}));
+}
+
+/**
+ * @brief Returns a ROOT LorentzVector (PxPyPzM) from components.
+ * @param px x-component of momentum
+ * @param py y-component of momentum
+ * @param pz z-component of momentum
+ * @param M  mass
+ * @return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>
+ */
+inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPxPyPzMVector(Float_t px, Float_t py, Float_t pz, Float_t M) {
+  return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>(px, py, pz, M);
+}
+
+/**
+ * @brief Returns a ROOT LorentzVector (PxPyPzM) from vector components at a given index.
+ * @param px Vector of px values
+ * @param py Vector of py values
+ * @param pz Vector of pz values
+ * @param M  Vector of mass values
+ * @param index Index to access
+ * @return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>
+ */
+inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPxPyPzMVectorIndex(const ROOT::VecOps::RVec<Float_t> &px, const ROOT::VecOps::RVec<Float_t> &py, const ROOT::VecOps::RVec<Float_t> &pz, const ROOT::VecOps::RVec<Float_t> &M, Int_t index) {
+  if (index >= px.size()) {
+    return getPxPyPzMVector(0, 0, 0, 0);
+  } else {
+    return getPxPyPzMVector(px[index], py[index], pz[index], M[index]);
+  }
+}
+
+/**
+ * @brief Sums two Lorentz vectors.
+ * @tparam T Lorentz vector type
+ * @param vec1 First Lorentz vector
+ * @param vec2 Second Lorentz vector
+ * @return Sum of the two Lorentz vectors
+ */
+template <typename T>
+T sumLorentzVec(T vec1, T vec2) {
+  return (vec1 + vec2);
+}
+
+/**
+ * @brief Returns the transverse momentum (Pt) of a Lorentz vector.
+ * @tparam T Return type
+ * @tparam S Lorentz vector type
+ * @param vector Lorentz vector
+ * @return Pt value
+ */
+template <typename T, typename S>
+T getLorentzVecPt(S vector) {
+  return vector.Pt();
+}
+
+/**
+ * @brief Returns the pseudorapidity (Eta) of a Lorentz vector.
+ * @tparam T Return type
+ * @tparam S Lorentz vector type
+ * @param vector Lorentz vector
+ * @return Eta value
+ */
+template <typename T, typename S>
+T getLorentzVecEta(S vector) {
+  return vector.Eta();
+}
+
+/**
+ * @brief Returns the azimuthal angle (Phi) of a Lorentz vector.
+ * @tparam T Return type
+ * @tparam S Lorentz vector type
+ * @param vector Lorentz vector
+ * @return Phi value
+ */
+template <typename T, typename S>
+T getLorentzVecPhi(S vector) {
+  return vector.Phi();
+}
+
+/**
+ * @brief Returns the mass (M) of a Lorentz vector.
+ * @tparam T Return type
+ * @tparam S Lorentz vector type
+ * @param vector Lorentz vector
+ * @return Mass value
+ */
+template <typename T, typename S>
+T getLorentzVecM(S vector) {
+  return vector.M();
+}
+
+/**
+ * @brief Computes the transverse momentum from px and py.
+ * @param px x-component of momentum
+ * @param py y-component of momentum
+ * @return sqrt(px^2 + py^2)
+ */
+inline Float_t getPT(Float_t px, Float_t py) {
+  return sqrt(px * px + py * py);
+}
+
+/**
+ * @brief Saves a variable as a new column in a ROOT RDataFrame.
+ * @tparam T Variable type
+ * @param var Variable to save
+ * @param name Name of the new column
+ * @param df Input RDataFrame
+ * @return New RDataFrame with the variable defined
+ */
+template <typename T>
+ROOT::RDF::RNode saveVar(T var, std::string name, ROOT::RDF::RNode df) {
+  auto storeVar = [var](unsigned int, const ROOT::RDF::RSampleInfo &) -> T {
+    return var;
+  };
+  auto newDf = df.DefinePerSample(name, storeVar);
+  return newDf;
+}
+
+/**
+ * @brief Returns the size of a vector as an Int_t.
+ * @tparam T Type of the vector elements
+ * @param vec Input vector
+ * @return Size of the vector
+ */
+template <typename T>
+Int_t countVector(ROOT::VecOps::RVec<T> vec) {
+  return vec.size();
 }
 
 #endif

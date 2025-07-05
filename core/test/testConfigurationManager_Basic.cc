@@ -7,8 +7,8 @@
  * key-value retrieval, setting/getting values, and basic constructor tests.
  */
 
-#include "ConfigurationManager.h"
-#include "test_util.h"
+#include <ConfigurationManager.h>
+#include <test_util.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <filesystem>

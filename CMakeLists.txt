@@ -21,5 +21,5 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 find_package(ROOT REQUIRED)
 
 add_subdirectory(core)
-add_subdirectory(analyses)
 add_subdirectory(runners)
+#add_subdirectory(analyses)

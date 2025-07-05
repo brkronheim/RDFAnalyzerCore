@@ -1,7 +1,7 @@
-#include "analyzer.h"
-#include "DataManager.h"
-#include "SystematicManager.h"
-#include "test_util.h"
+#include <analyzer.h>
+#include <DataManager.h>
+#include <SystematicManager.h>
+#include <test_util.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -13,6 +13,9 @@
 #include <NDHistogramManager.h>
 #include <TriggerManager.h>
 #include <BDTManager.h>
+#include <unordered_map>
+#include <api/IPluggableManager.h>
+#include <ManagerRegistry.h>
 /**
  * @file testSystematicPropagation.cc
  * @brief Full stack integration tests for systematic propagation using Analyzer, DataManager, and SystematicManager.
@@ -20,6 +23,22 @@
  * This test verifies that systematics registered in SystematicManager are correctly propagated through DataManager and Analyzer,
  * and that defining and filtering variables with systematics results in the expected systematic variation columns in the output.
  */
+
+// Helper to build plugin map for Analyzer
+/*
+std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> makeTestPluginMap(
+    std::unique_ptr<IBDTManager> bdt,
+    std::unique_ptr<ICorrectionManager> corr,
+    std::unique_ptr<ITriggerManager> trig,
+    std::unique_ptr<INDHistogramManager> ndh) {
+    std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
+    plugins["bdt"] = std::unique_ptr<IPluggableManager>(dynamic_cast<IPluggableManager*>(bdt.release()));
+    plugins["correction"] = std::unique_ptr<IPluggableManager>(dynamic_cast<IPluggableManager*>(corr.release()));
+    plugins["trigger"] = std::unique_ptr<IPluggableManager>(dynamic_cast<IPluggableManager*>(trig.release()));
+    plugins["ndhist"] = std::unique_ptr<IPluggableManager>(dynamic_cast<IPluggableManager*>(ndh.release()));
+    return plugins;
+}
+*/
 
 class SystematicPropagationTest : public ::testing::Test {
 protected:
@@ -40,22 +59,25 @@ protected:
     auto corrMgr = std::make_unique<CorrectionManager>(*configMgr);
 
     // Set up dummy NDHistogramManager
-    auto ndHistMgr = std::make_unique<NDHistogramManager>(*dataMgr, *configMgr, *sysMgr);
-
+    auto ndHistMgr = ManagerRegistry::instance().create("NDHistogramManager", {configMgr.get()});
+    
     // Set up dummy TriggerManager
-    auto trigMgr = std::make_unique<TriggerManager>(*configMgr);
-
+    auto trigMgr = ManagerRegistry::instance().create("TriggerManager", {configMgr.get()});
+    
     // Set up dummy BDTManager
-    auto bdtMgr = std::make_unique<BDTManager>(*configMgr);
+    auto bdtMgr = ManagerRegistry::instance().create("BDTManager", {configMgr.get()});
+    
+    std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
+    plugins["bdt"] = std::move(bdtMgr);
+    plugins["corr"] = std::move(corrMgr);
+    plugins["trig"] = std::move(trigMgr);
+    plugins["ndhist"] = std::move(ndHistMgr);
 
     // Transfer ownership to Analyzer
     analyzer = std::make_unique<Analyzer>(
       std::move(configMgr),
       std::move(dataMgr),
-      std::move(bdtMgr),
-      std::move(corrMgr),
-      std::move(trigMgr),
-      std::move(ndHistMgr),
+      std::move(plugins),
       std::move(sysMgr)
     );
 

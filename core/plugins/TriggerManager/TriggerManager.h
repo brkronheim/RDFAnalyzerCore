@@ -2,7 +2,6 @@
 #define TRIGGERMANAGER_H_INCLUDED
 
 #include <api/IConfigurationProvider.h>
-#include <api/ITriggerManager.h>
 #include <NamedObjectManager.h>
 #include <string>
 #include <unordered_map>
@@ -16,8 +15,7 @@
  * including loading from configuration, storing, and providing access to them.
  * Implements the ITriggerManager interface for dependency injection.
  */
-class TriggerManager : public NamedObjectManager<std::vector<std::string>>,
-                      public ITriggerManager {
+class TriggerManager : public NamedObjectManager<std::vector<std::string>> {
 public:
   /**
    * @brief Construct a new TriggerManager object
@@ -36,27 +34,31 @@ public:
    * @param group Name of the trigger group
    * @return Reference to the vector of trigger names
    */
-  const std::vector<std::string> &getTriggers(const std::string &group) const override;
+  const std::vector<std::string> &getTriggers(const std::string &group) const;
 
   /**
    * @brief Get the vetoes for a given group
    * @param group Name of the trigger group
    * @return Reference to the vector of veto names
    */
-  const std::vector<std::string> &getVetoes(const std::string &group) const override;
+  const std::vector<std::string> &getVetoes(const std::string &group) const;
 
   /**
    * @brief Get the group for a given sample
    * @param sample Name of the sample
    * @return Name of the group
    */
-  std::string getGroupForSample(const std::string &sample) const override;
+  std::string getGroupForSample(const std::string &sample) const;
 
   /**
    * @brief Get all groups
    * @return Vector of all group names
    */
-  std::vector<std::string> getAllGroups() const override;
+  std::vector<std::string> getAllGroups() const;
+
+  std::string type() const override {
+    return "TriggerManager";
+  }
 
 private:
   /**
@@ -69,4 +71,4 @@ private:
   std::unordered_map<std::string, std::string> sampleToGroup_m;
 };
 
-#endif // TRIGGERMANAGER_H_INCLUDED
+#endif // TRIGGERMANAGER_H_INCLUDED 

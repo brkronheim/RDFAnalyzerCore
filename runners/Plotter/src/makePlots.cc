@@ -1,6 +1,14 @@
 #include <RtypesCore.h>
 #include <analyzer.h>
 #include <plots.h>
+#include <ManagerRegistry.h>
+#include <DataManager.h>
+#include <ConfigurationManager.h>
+#include <SystematicManager.h>
+#include <memory>
+#include <unordered_map>
+#include <string>
+#include <vector>
 
 Size_t size(std::map<std::pair<Int_t, Int_t>, Int_t> &map) {
   // std::cerr << map.size() << std::endl;
@@ -19,7 +27,19 @@ int main(int argc, char **argv) {
     return (1);
   }
 
-  Analyzer an(argv[1]);
+  // Set up core managers
+  auto configProvider = std::make_unique<ConfigurationManager>(argv[1]);
+  auto systematicManager = std::make_unique<SystematicManager>();
+  auto dataFrameProvider = std::make_unique<DataManager>(*configProvider);
+
+  // Set up pluginSpecs for Analyzer
+  std::unordered_map<std::string, std::pair<std::string, std::vector<void*>>> pluginSpecs;
+  pluginSpecs["bdt"] = {"BDTManager", {configProvider.get()}};
+  pluginSpecs["correction"] = {"CorrectionManager", {configProvider.get()}};
+  pluginSpecs["trigger"] = {"TriggerManager", {configProvider.get()}};
+  pluginSpecs["ndhist"] = {"NDHistogramManager", {dataFrameProvider.get(), configProvider.get(), systematicManager.get()}};
+
+  Analyzer an(argv[1], pluginSpecs);
 
   an.Define("channel", return0, {})
       ->Define("controlRegion", return0, {})
