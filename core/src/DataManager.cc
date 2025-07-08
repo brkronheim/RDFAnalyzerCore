@@ -1,7 +1,13 @@
 #include <api/IConfigurationProvider.h>
+#include <type_traits>
+#include <algorithm>
+#include <ROOT/RVec.hxx>
 #include <DataManager.h>
 #include <TChain.h>
 #include <util.h>
+
+//======================================================================
+// No longer needed helper structures retained.
 
 /**
  * @brief Construct a new DataManager object
@@ -46,41 +52,41 @@ void DataManager::DefineVector(std::string name,
                                const std::vector<std::string> &columns,
                                std::string type,
                                ISystematicManager &systematicManager) {
-  std::cout << "Defining vector " << name << "!" << std::endl;
-  
-  // Store column names in a local variable to avoid multiple calls to GetColumnNames()
-  const auto columnNames = df_m.GetColumnNames();
-  
-  // Check if all required columns exist
-  std::vector<std::string> missingColumns;
-  for (const auto &column : columns) {
-    std::cout << "Column: " << column << std::endl;
-    if (std::find(columnNames.begin(), columnNames.end(), column) == columnNames.end()) {
-      std::cout << "Column " << column << " not found!" << std::endl;
-      missingColumns.push_back(column);
+  std::cout << "[DataManager] Defining flattened vector column " << name << std::endl;
+
+  // ------------------------------------------------------------------
+  // Sanity-check that all requested columns exist in the dataframe.
+  // ------------------------------------------------------------------
+  const auto existingColumns = df_m.GetColumnNames();
+  std::vector<std::string> missing;
+  for (const auto &c : columns) {
+    if (std::find(existingColumns.begin(), existingColumns.end(), c) == existingColumns.end()) {
+      missing.push_back(c);
     }
   }
-  
-  // If any columns are missing, throw an exception
-  if (!missingColumns.empty()) {
-    std::string errorMsg = "Missing columns in dataframe: ";
-    for (size_t i = 0; i < missingColumns.size(); ++i) {
-      if (i > 0) errorMsg += ", ";
-      errorMsg += missingColumns[i];
+  if (!missing.empty()) {
+    std::string msg = "DefineVector: missing columns: ";
+    for (const auto &m : missing) {
+      msg += m + " ";
     }
-    throw std::runtime_error(errorMsg);
+    throw std::runtime_error(msg);
   }
-  
+
+  //-------------------------------------------------------------------
+  // Build the string expression for a simple vector (scalar inputs only).
+  //-------------------------------------------------------------------
   std::string arrayString = "ROOT::VecOps::RVec<" + type + ">({";
-  for (long unsigned int i = 0; i < columns.size() - 1; i++) {
-    arrayString += +"static_cast<" + type + ">(" + columns[i] + "),";
+  for (size_t i = 0; i < columns.size(); ++i) {
+    arrayString += "static_cast<" + type + ">(" + columns[i] + ")";
+    if (i + 1 < columns.size()) {
+      arrayString += ",";
+    }
   }
+  arrayString += "})";
 
-  arrayString += columns[columns.size() - 1] + "})";
   df_m = df_m.Define(name, arrayString);
-  
 
-  std::cout << "Defined vector " << name << "!" << std::endl;
+  std::cout << "[DataManager] Vector column " << name << " defined (scalar inputs)." << std::endl;
 }
 
 /**

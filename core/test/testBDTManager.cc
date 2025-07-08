@@ -12,7 +12,6 @@
 #include <vector>
 #include <ManagerFactory.h>
 #include <ManagerRegistry.h>
-#include <api/IBDTManager.h>
 #include <SystematicManager.h>
 #include <ROOT/TThreadExecutor.hxx>
 
@@ -22,18 +21,26 @@ protected:
     ChangeToTestSourceDir();
     std::string configFile = "cfg/test_data_config.txt";
     configManager = ManagerFactory::createConfigurationManager(configFile);
-    //bdtManager = ManagerFactory::createBDTManager(*configManager);
-    auto mgr = ManagerRegistry::instance().create("BDTManager", {configManager.get()});
-    bdtManager = std::unique_ptr<IBDTManager>(dynamic_cast<IBDTManager*>(mgr.release()));
     systematicManager = std::make_unique<SystematicManager>();
+    dataManager = std::make_unique<DataManager>(2);
+    
+    // Create BDTManager and set up its dependencies
+    auto mgr = ManagerRegistry::instance().create("BDTManager", {configManager.get()});
+    bdtManager = std::unique_ptr<BDTManager>(dynamic_cast<BDTManager*>(mgr.release()));
+    
+    // Set up the BDTManager with its dependencies
+    bdtManager->setConfigManager(configManager.get());
+    bdtManager->setDataManager(dataManager.get());
+    bdtManager->setSystematicManager(systematicManager.get());
   }
   void TearDown() override {
     // Using smart pointers, so nothing to delete
     
   }
   std::unique_ptr<IConfigurationProvider> configManager;
-  std::unique_ptr<IBDTManager> bdtManager;
+  std::unique_ptr<BDTManager> bdtManager;
   std::unique_ptr<SystematicManager> systematicManager;
+  std::unique_ptr<DataManager> dataManager;
 };
 
 // Construction
@@ -41,7 +48,7 @@ TEST_F(BDTManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
     auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
     auto mgr = ManagerRegistry::instance().create("BDTManager", {config.get()});
-    auto manager = std::unique_ptr<IBDTManager>(dynamic_cast<IBDTManager*>(mgr.release()));
+    auto manager = std::unique_ptr<BDTManager>(dynamic_cast<BDTManager*>(mgr.release()));
   });
 }
 
@@ -90,30 +97,22 @@ TEST_F(BDTManagerTest, GetAllBDTNames) {
 
 // Base class interface
 TEST_F(BDTManagerTest, BaseClassInterface_Valid) {
-  // Downcast to concrete type for base class interface tests
-  auto* concrete = dynamic_cast<BDTManager*>(bdtManager.get());
-  ASSERT_TRUE(concrete != nullptr);
   EXPECT_NO_THROW({
-    const auto &obj = concrete->getObject("test_bdt");
-    const auto &features = concrete->getFeatures("test_bdt");
+    const auto &obj = bdtManager->getObject("test_bdt");
+    const auto &features = bdtManager->getFeatures("test_bdt");
     EXPECT_TRUE(obj != nullptr);
     EXPECT_EQ(features.size(), 3);
   });
 }
 TEST_F(BDTManagerTest, BaseClassInterface_Invalid) {
-  auto* concrete = dynamic_cast<BDTManager*>(bdtManager.get());
-  ASSERT_TRUE(concrete != nullptr);
-  EXPECT_THROW(concrete->getObject("nonexistent_bdt"), std::runtime_error);
-  EXPECT_THROW(concrete->getFeatures("nonexistent_bdt"), std::runtime_error);
+  EXPECT_THROW(bdtManager->getObject("nonexistent_bdt"), std::runtime_error);
+  EXPECT_THROW(bdtManager->getFeatures("nonexistent_bdt"), std::runtime_error);
 }
 
 // Apply BDT - Invalid case only (valid case requires complex ROOT DataFrame
 // setup)
 TEST_F(BDTManagerTest, ApplyBDT_Invalid) {
-  auto dataManager = ManagerFactory::createDataManager(*configManager);
-  std::vector<std::string> inputFeatures = {"feature1", "feature2", "feature3"};
-  std::string runVar = "run_number";
-  EXPECT_ANY_THROW(bdtManager->applyBDT(*dataManager, *systematicManager, "nonexistent_bdt"));
+  EXPECT_ANY_THROW(bdtManager->applyBDT("nonexistent_bdt"));
 }
 
 /**
@@ -124,12 +123,11 @@ TEST_F(BDTManagerTest, ApplyBDT_Invalid) {
  * input features and the test BDT tree.
  */
 TEST_F(BDTManagerTest, ApplyBDT_Valid) {
-  auto dataManager = std::make_unique<DataManager>(2);
   dataManager->Define("feature1", [](ULong64_t i) -> float { return i == 0 ? 0.0f : 1.0f; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("run_number", [](ULong64_t i) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
-  bdtManager->applyBDT(*dataManager, *systematicManager, "test_bdt");
+  bdtManager->applyBDT("test_bdt");
   auto df = dataManager->getDataFrame();
   auto result = df.Take<float>("test_bdt");
   ASSERT_EQ(result->size(), 2);
@@ -140,16 +138,14 @@ TEST_F(BDTManagerTest, ApplyBDT_Valid) {
 
 // Const correctness
 TEST_F(BDTManagerTest, ConstCorrectness) {
-  const IBDTManager* constManager = bdtManager.get();
+  const BDTManager* constManager = bdtManager.get();
   EXPECT_NO_THROW({
     auto bdt = constManager->getBDT("test_bdt");
     const auto &features = constManager->getBDTFeatures("test_bdt");
     const auto &runVar = constManager->getRunVar("test_bdt");
     const auto &names = constManager->getAllBDTNames();
-    auto* concrete = dynamic_cast<const BDTManager*>(constManager);
-    ASSERT_TRUE(concrete != nullptr);
-    const auto &obj = concrete->getObject("test_bdt");
-    const auto &objFeatures = concrete->getFeatures("test_bdt");
+    const auto &obj = constManager->getObject("test_bdt");
+    const auto &objFeatures = constManager->getFeatures("test_bdt");
     EXPECT_TRUE(bdt != nullptr);
     EXPECT_EQ(features.size(), 3);
     EXPECT_EQ(runVar, "run_number");
@@ -177,7 +173,6 @@ TEST_F(BDTManagerTest, MultipleBDTs) {
   });
 
   // Apply both BDTs to a DataManager
-  auto dataManager = std::make_unique<DataManager>(2);
   dataManager->Define("feature1", [](ULong64_t i) -> float { return i == 0 ? 0.0f : 1.0f; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
@@ -186,8 +181,8 @@ TEST_F(BDTManagerTest, MultipleBDTs) {
   dataManager->Define("feature5", [](ULong64_t i) -> float { return 5.0f; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("feature6", [](ULong64_t i) -> float { return 6.0f; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("run_number2", [](ULong64_t i) -> bool { return false; }, {"rdfentry_"}, *systematicManager);
-  bdtManager->applyBDT(*dataManager, *systematicManager, "test_bdt");
-  bdtManager->applyBDT(*dataManager, *systematicManager, "test_bdt2");
+  bdtManager->applyBDT("test_bdt");
+  bdtManager->applyBDT("test_bdt2");
   auto df = dataManager->getDataFrame();
   auto result1 = df.Take<float>("test_bdt");
   auto result2 = df.Take<float>("test_bdt2");
@@ -201,13 +196,17 @@ TEST_F(BDTManagerTest, ThreadSafetyWithROOTImplicitMT) {
   ASSERT_TRUE(ROOT::IsImplicitMTEnabled());
   int nThreads = ROOT::GetThreadPoolSize();
   EXPECT_GT(nThreads, 1) << "ROOT ImplicitMT is enabled but only one thread is available.";
-  auto dataManager = std::make_unique<DataManager>(100);
-  dataManager->Define("feature1", [](ULong64_t i) -> float { return i % 2 == 0 ? 0.0f : 1.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("run_number", [](ULong64_t i) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
-  bdtManager->applyBDT(*dataManager, *systematicManager, "test_bdt");
-  auto df = dataManager->getDataFrame();
+  
+  // Create a new DataManager for this test
+  auto testDataManager = std::make_unique<DataManager>(100);
+  bdtManager->setDataManager(testDataManager.get());
+  
+  testDataManager->Define("feature1", [](ULong64_t i) -> float { return i % 2 == 0 ? 0.0f : 1.0f; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("run_number", [](ULong64_t i) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  bdtManager->applyBDT("test_bdt");
+  auto df = testDataManager->getDataFrame();
   auto result = df.Take<float>("test_bdt");
   ASSERT_EQ(result->size(), 100);
   // Check that all results are within expected sigmoid range

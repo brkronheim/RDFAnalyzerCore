@@ -11,6 +11,24 @@ class DummyManager : public IPluggableManager {
 public:
     DummyManager(int v) : value(v) {}
     std::string type() const override { return "DummyManager"; }
+    
+    void setConfigManager(IConfigurationProvider* configManager) override {
+        // Dummy implementation
+    }
+    
+    void setDataManager(IDataFrameProvider* dataManager) override {
+        // Dummy implementation
+    }
+    
+    void setSystematicManager(ISystematicManager* systematicManager) override {
+        // Dummy implementation
+    }
+    
+
+    void setupFromConfigFile() override {
+        // Dummy implementation: No action needed for testing purposes.
+    }
+    
     int value;
 };
 

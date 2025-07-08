@@ -56,9 +56,16 @@ public:
    */
   std::vector<std::string> getAllGroups() const;
 
+  /**
+   * @brief Apply all triggers for the current sample type
+   */
+  void applyAllTriggers();
+
   std::string type() const override {
     return "TriggerManager";
   }
+
+  void setupFromConfigFile() override;
 
 private:
   /**

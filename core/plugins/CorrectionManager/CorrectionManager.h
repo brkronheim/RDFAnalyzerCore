@@ -19,7 +19,7 @@
  *
  * This manager encapsulates the logic for managing corrections using correctionlib,
  * including loading from configuration, storing, and applying them to data.
- * Implements the ICorrectionManager interface for dependency injection.
+ * Inherits from NamedObjectManager which provides IPluggableManager functionality.
  */
 class CorrectionManager
     : public NamedObjectManager<correction::Correction::Ref> {
@@ -31,15 +31,11 @@ public:
   CorrectionManager(const IConfigurationProvider &configProvider);
 
   /**
-   * @brief Apply a correction to the given dataframe provider
-   * @param dataFrameProvider Reference to the dataframe provider
-   * @param systematicManager Reference to the systematic manager
+   * @brief Apply a correction to the dataframe provider
    * @param correctionName Name of the correction
    * @param stringArguments String arguments
    */
-  void applyCorrection(IDataFrameProvider& dataFrameProvider,
-                      ISystematicManager& systematicManager,
-                      const std::string &correctionName,
+  void applyCorrection(const std::string &correctionName,
                       const std::vector<std::string> &stringArguments);
 
   /**
@@ -60,7 +56,9 @@ public:
   /**
    * @brief Return the type of the manager
    */
-  std::string type() const { return "CorrectionManager"; }
+  std::string type() const override { return "CorrectionManager"; }
+
+  void setupFromConfigFile() override;
 
 private:
   /**

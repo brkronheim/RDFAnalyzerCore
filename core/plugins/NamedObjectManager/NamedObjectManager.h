@@ -58,6 +58,10 @@ public:
     systematicManager_m = systematicManager;
   }
 
+  void setupFromConfigFile() override {
+    // Do nothing in base class
+  }
+
 protected:
   std::unordered_map<std::string, ObjectType> objects_m;
   std::unordered_map<std::string, std::vector<std::string>> features_m;

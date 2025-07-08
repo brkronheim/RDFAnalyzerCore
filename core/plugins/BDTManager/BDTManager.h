@@ -31,16 +31,15 @@ public:
   BDTManager(const IConfigurationProvider &configProvider);
 
   /**
-   * @brief Apply a BDT to the given dataframe provider
-   * @param dataFrameProvider Reference to the dataframe provider
-   * @param systematicManager Reference to the systematic manager
+   * @brief Apply a BDT to the dataframe provider
    * @param bdtName Name of the BDT
    */
-  void applyBDT(IDataFrameProvider& dataFrameProvider,
-                ISystematicManager& systematicManager,
-                const std::string &bdtName);
-  
+  void applyBDT(const std::string &bdtName);
 
+  /**
+   * @brief Apply all BDTs to the dataframe provider
+   */
+  void applyAllBDTs();
 
   /**
    * @brief Get a BDT object by key
@@ -73,6 +72,8 @@ public:
    * @brief Return the type of the manager
    */
   std::string type() const override { return "BDTManager"; }
+
+  void setupFromConfigFile() override;
 
 private:
   /**

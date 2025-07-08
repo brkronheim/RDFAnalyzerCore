@@ -119,17 +119,36 @@ public:
   void InitTask(TTreeReader *, int) {}
 
   /// Called at every entry.
+  /**
+   * @brief Fill the per-thread histogram for one entry.
+   *
+   * The input vector is expected to contain (dim + 1) consecutive values for
+   * every fill, where the last value in each chunk is the weight.  When the
+   * caller provides a flattened vector originating from per-object branches
+   * (e.g. an RVec of muon pT), the total size of the vector will be
+   * <code>nValidFills * (dim + 1)</code>.
+   *
+   * We therefore derive the actual number of fills on a per-event basis
+   * instead of relying on the constructor-time constant <code>nFills_m</code>.
+   */
   void Exec(unsigned int slot, ROOT::VecOps::RVec<Double_t> &val) {
-    Double_t *array;
-    Double_t weight;
-    for (int i = 0; i < nFills_m; i++) {
-      array = val.data() + i * (dim_m + 1);
-      weight = array[dim_m];
+    const int stride = dim_m + 1;
+    // Guard against malformed inputs.
+    if (stride == 0) {
+      return;
+    }
+
+    const int nValidFills = static_cast<int>(val.size()) / stride;
+
+    for (int i = 0, offset = 0; i < nValidFills; ++i, offset += stride) {
+      Double_t const* array = val.data() + offset;
+      const Double_t weight = array[dim_m];
+
       if (weight == 0.0) {
-        continue;
+        continue; // Skip zero-weight contributions.
       }
 
-      fPerThreadResults[slot]->Fill(array, weight); // Hits
+      fPerThreadResults[slot]->Fill(array, weight);
     }
   }
 

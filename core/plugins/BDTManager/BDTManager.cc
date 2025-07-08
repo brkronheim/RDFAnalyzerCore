@@ -13,15 +13,16 @@ BDTManager::BDTManager(IConfigurationProvider const& configProvider) {
 
 /**
  * @brief Apply a BDT to the input features
- * @param dataFrameProvider Reference to the dataframe provider for dataframe operations
  * @param bdtName Name of the BDT
  */
-void BDTManager::applyBDT(IDataFrameProvider& dataFrameProvider,
-                          ISystematicManager& systematicManager,
-                          const std::string &bdtName) {
+void BDTManager::applyBDT(const std::string &bdtName) {
+  if (!dataManager_m || !systematicManager_m) {
+    throw std::runtime_error("BDTManager: DataManager or SystematicManager not set");
+  }
+  
   const auto &inputFeatures = getBDTFeatures(bdtName);
   const auto &runVar = getRunVar(bdtName);
-  dataFrameProvider.DefineVector("input_" + bdtName, inputFeatures, "Float_t", systematicManager);
+  dataManager_m->DefineVector("input_" + bdtName, inputFeatures, "Float_t", *systematicManager_m);
   auto bdt = this->objects_m.at(bdtName);
   auto bdtLambda = [bdt](ROOT::VecOps::RVec<Float_t> &inputVector,
                          bool runVar) -> Float_t {
@@ -31,7 +32,16 @@ void BDTManager::applyBDT(IDataFrameProvider& dataFrameProvider,
       return (-1);
     }
   };
-  dataFrameProvider.Define(bdtName, bdtLambda, {"input_" + bdtName, runVar}, systematicManager);
+  dataManager_m->Define(bdtName, bdtLambda, {"input_" + bdtName, runVar}, *systematicManager_m);
+}
+
+/**
+ * @brief Apply all BDTs to the dataframe provider
+ */
+void BDTManager::applyAllBDTs() {
+  for (const auto &bdtName : getAllBDTNames()) {
+    applyBDT(bdtName);
+  }
 }
 
 /**
@@ -107,3 +117,32 @@ void BDTManager::registerBDTs(const IConfigurationProvider &configProvider) {
     bdt_runVars_m.emplace(entryKeys.at("name"), entryKeys.at("runVar"));
   }
 } 
+
+void BDTManager::setupFromConfigFile() {
+  if (!configManager_m) {
+    throw std::runtime_error("BDTManager: ConfigManager not set");
+  }
+
+  const auto bdtConfig = configManager_m->parseMultiKeyConfig(
+    configManager_m->get("bdtConfig"),
+    {"file", "name", "inputVariables", "runVar"});
+
+  for (const auto &entryKeys : bdtConfig) {
+
+    // Split the variable list on commas, save to vector
+    auto inputVariableVector =
+      configManager_m->splitString(entryKeys.at("inputVariables"), ",");
+
+    // Add BDT
+    std::vector<std::string> features = inputVariableVector;
+
+    // Load the BDT
+    auto bdt = fastforest::load_txt(entryKeys.at("file"), features);
+
+    // Add the BDT and feature list to their maps
+    objects_m.emplace(entryKeys.at("name"),
+                    std::make_shared<fastforest::FastForest>(bdt));
+    features_m.emplace(entryKeys.at("name"), inputVariableVector);
+    bdt_runVars_m.emplace(entryKeys.at("name"), entryKeys.at("runVar"));
+  }
+}

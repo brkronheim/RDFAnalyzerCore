@@ -26,7 +26,6 @@
 #include <vector>
 #include <ManagerFactory.h>
 #include <ManagerRegistry.h>
-#include <api/ICorrectionManager.h>
 #include <ROOT/TThreadExecutor.hxx>
 #include <ROOT/RDF/RCutFlowReport.hxx>
 #include <ROOT/RDF/RInterface.hxx>
@@ -61,9 +60,17 @@ protected:
     dstFile.close();
     std::string configFile = "cfg/test_data_config_minimal.txt";
     configManager = ManagerFactory::createConfigurationManager(configFile);
-    auto mgr = ManagerRegistry::instance().create("CorrectionManager", {configManager.get()});
-    correctionManager = std::unique_ptr<ICorrectionManager>(dynamic_cast<ICorrectionManager*>(mgr.release()));
     systematicManager = std::make_unique<SystematicManager>();
+    dataManager = std::make_unique<DataManager>(2);
+    
+    // Create CorrectionManager and set up its dependencies
+    auto mgr = ManagerRegistry::instance().create("CorrectionManager", {configManager.get()});
+    correctionManager = std::unique_ptr<CorrectionManager>(dynamic_cast<CorrectionManager*>(mgr.release()));
+    
+    // Set up the CorrectionManager with its dependencies
+    correctionManager->setConfigManager(configManager.get());
+    correctionManager->setDataManager(dataManager.get());
+    correctionManager->setSystematicManager(systematicManager.get());
   }
 
   /**
@@ -76,7 +83,7 @@ protected:
   }
 
   std::unique_ptr<IConfigurationProvider> configManager; ///< The configuration manager instance for testing
-  std::unique_ptr<ICorrectionManager> correctionManager; ///< The correction manager instance for testing
+  std::unique_ptr<CorrectionManager> correctionManager; ///< The correction manager instance for testing
   std::unique_ptr<SystematicManager> systematicManager;
   std::unique_ptr<DataManager> dataManager; ///< The data manager instance for testing
 };
@@ -104,11 +111,9 @@ protected:
  * when attempting to apply a non-existent correction to a dataframe.
  */
 TEST_F(CorrectionManagerTest, ApplyCorrectionThrowsForMissing) {
-  auto dataManager = std::make_unique<DataManager>(2);
   std::vector<std::string> stringArguments = {"test"};
-  std::vector<std::string> inputFeatures = {"float_arg", "int_arg"};
   EXPECT_THROW({
-    correctionManager->applyCorrection(*dataManager, *systematicManager, "nonexistent_correction", stringArguments);
+    correctionManager->applyCorrection("nonexistent_correction", stringArguments);
   }, std::runtime_error);
 }
 
@@ -124,12 +129,10 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionThrowsForMissing) {
  * the input parameters.
  */
 TEST_F(CorrectionManagerTest, ApplyCorrectionPositive) {
-  auto dataManager = std::make_unique<DataManager>(2);
   dataManager->Define("float_arg", [](ULong64_t i) -> double { return i == 0 ? 0.5 : 1.5; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("int_arg", [](ULong64_t i) -> double { return i == 0 ? 1 : 2; }, {"rdfentry_"}, *systematicManager);
   std::vector<std::string> stringArguments = {"A"};
-  std::vector<std::string> inputFeatures = {"float_arg", "int_arg"};
-  correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
+  correctionManager->applyCorrection("test_correction", stringArguments);
   auto df = dataManager->getDataFrame();
   auto result = df.Take<float>("test_correction");
   ASSERT_EQ(result->size(), 2);
@@ -145,12 +148,10 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionPositive) {
  * expected.
  */
 TEST_F(CorrectionManagerTest, ApplyCorrectionWithDifferentStringArguments) {
-  auto dataManager = std::make_unique<DataManager>(2);
   dataManager->Define("float_arg", [](ULong64_t i) -> double { return i == 0 ? 0.5 : 1.5; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("int_arg", [](ULong64_t i) -> double { return i == 0 ? 1 : 2; }, {"rdfentry_"}, *systematicManager);
   std::vector<std::string> stringArguments = {"B"};
-  std::vector<std::string> inputFeatures = {"float_arg", "int_arg"};
-  correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
+  correctionManager->applyCorrection("test_correction", stringArguments);
   auto df = dataManager->getDataFrame();
   auto result = df.Take<float>("test_correction");
   ASSERT_EQ(result->size(), 2);
@@ -169,23 +170,28 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionWithDifferentStringArguments) {
  * values at the edges of bins and extreme values.
  */
 TEST_F(CorrectionManagerTest, ApplyCorrectionWithBoundaryValues) {
-  auto dataManager = std::make_unique<DataManager>(4);
-  dataManager->Define("float_arg",
+  // Create a new DataManager for this test with 4 entries
+  auto testDataManager = std::make_unique<DataManager>(4);
+  correctionManager->setDataManager(testDataManager.get());
+  
+  testDataManager->Define("float_arg",
                 [](ULong64_t i) -> double {
                   return i == 0 ? 0.0 : (i == 1 ? 1.0 : (i == 2 ? 2.0 : 3.0));
                 },
                 {"rdfentry_"}, *systematicManager);
-  dataManager->Define("int_arg", [](ULong64_t i) -> double { return 1; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("int_arg", [](ULong64_t i) -> double { return 1; }, {"rdfentry_"}, *systematicManager);
   std::vector<std::string> stringArguments = {"A"};
-  std::vector<std::string> inputFeatures = {"float_arg", "int_arg"};
-  correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
-  auto df = dataManager->getDataFrame();
+  correctionManager->applyCorrection("test_correction", stringArguments);
+  auto df = testDataManager->getDataFrame();
   auto result = df.Take<float>("test_correction");
   ASSERT_EQ(result->size(), 4);
   EXPECT_NEAR(result->at(0), 0.1, 1e-6); // 0.0 falls in first bin [0.0, 1.0)
   EXPECT_NEAR(result->at(1), 0.2, 1e-6); // 1.0 falls in second bin [1.0, 2.0)
   EXPECT_NEAR(result->at(2), 0.0, 1e-6); // 2.0 is overflow (>=2.0)
   EXPECT_NEAR(result->at(3), 0.0, 1e-6); // 3.0 is overflow (>=2.0)
+  
+  // Restore the original data manager
+  correctionManager->setDataManager(dataManager.get());
 }
 
 /**
@@ -195,16 +201,16 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionWithBoundaryValues) {
  * dataframe, ensuring no crashes or unexpected behavior.
  */
 TEST_F(CorrectionManagerTest, ApplyCorrectionWithEmptyDataframe) {
-  auto dataManager = std::make_unique<DataManager>(0);
+  // Create a new DataManager for this test with 0 entries
+  auto testDataManager = std::make_unique<DataManager>(0);
+  correctionManager->setDataManager(testDataManager.get());
+  
   // Define required columns even for empty dataframe
-  dataManager->Define("float_arg", []() -> double { return 0.5; }, {}, *systematicManager);
-  dataManager->Define("int_arg", []() -> double { return 1; }, {}, *systematicManager);
+  testDataManager->Define("float_arg", []() -> double { return 0.5; }, {}, *systematicManager);
+  testDataManager->Define("int_arg", []() -> double { return 1; }, {}, *systematicManager);
   std::vector<std::string> stringArguments = {"A"};
-  std::vector<std::string> inputFeatures = {"float_arg", "int_arg"};
-  EXPECT_NO_THROW({
-    correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
-  });
-  auto df = dataManager->getDataFrame();
+  correctionManager->applyCorrection("test_correction", stringArguments);
+  auto df = testDataManager->getDataFrame();
   auto result = df.Take<float>("test_correction");
   ASSERT_EQ(result->size(), 0);
 }
@@ -246,8 +252,11 @@ TEST_F(CorrectionManagerTest, ConfigurationFileIntegration) {
  * numeric values correctly without overflow or precision issues.
  */
 TEST_F(CorrectionManagerTest, ExtremeNumericValues) {
-  auto dataManager = std::make_unique<DataManager>(4);
-  dataManager->Define("float_arg",
+  // Create a new DataManager for this test
+  auto testDataManager = std::make_unique<DataManager>(4);
+  correctionManager->setDataManager(testDataManager.get());
+  
+  testDataManager->Define("float_arg",
                 [](ULong64_t i) -> double {
                   return i == 0   ? std::numeric_limits<double>::max()
                          : i == 1 ? std::numeric_limits<double>::min()
@@ -255,13 +264,12 @@ TEST_F(CorrectionManagerTest, ExtremeNumericValues) {
                                   : std::numeric_limits<double>::lowest();
                 },
                 {"rdfentry_"}, *systematicManager);
-  dataManager->Define("int_arg", [](ULong64_t i) -> double { return 1; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("int_arg", [](ULong64_t i) -> double { return 1; }, {"rdfentry_"}, *systematicManager);
   std::vector<std::string> stringArguments = {"A"};
-  std::vector<std::string> inputFeatures = {"float_arg", "int_arg"};
   EXPECT_NO_THROW({
-    correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
+    correctionManager->applyCorrection("test_correction", stringArguments);
   });
-  auto df = dataManager->getDataFrame();
+  auto df = testDataManager->getDataFrame();
   auto result = df.Take<float>("test_correction");
   ASSERT_EQ(result->size(), 4);
   for (size_t i = 0; i < result->size(); ++i) {
@@ -269,6 +277,9 @@ TEST_F(CorrectionManagerTest, ExtremeNumericValues) {
                 std::abs(result->at(i) - 0.1) < 1e-6 ||
                 std::abs(result->at(i) - 0.2) < 1e-6);
   }
+  
+  // Restore the original data manager
+  correctionManager->setDataManager(dataManager.get());
 }
 
 /**
@@ -278,26 +289,31 @@ TEST_F(CorrectionManagerTest, ExtremeNumericValues) {
  * gracefully without crashing or producing undefined behavior.
  */
 TEST_F(CorrectionManagerTest, NaNAndInfinityHandling) {
-  auto dataManager = std::make_unique<DataManager>(3);
-  dataManager->Define("float_arg",
+  // Create a new DataManager for this test
+  auto testDataManager = std::make_unique<DataManager>(3);
+  correctionManager->setDataManager(testDataManager.get());
+  
+  testDataManager->Define("float_arg",
                 [](ULong64_t i) -> double {
                   return i == 0   ? std::numeric_limits<double>::quiet_NaN()
                          : i == 1 ? std::numeric_limits<double>::infinity()
                                   : -std::numeric_limits<double>::infinity();
                 },
                 {"rdfentry_"}, *systematicManager);
-  dataManager->Define("int_arg", [](ULong64_t i) -> double { return 1; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("int_arg", [](ULong64_t i) -> double { return 1; }, {"rdfentry_"}, *systematicManager);
   std::vector<std::string> stringArguments = {"A"};
-  std::vector<std::string> inputFeatures = {"float_arg", "int_arg"};
   EXPECT_NO_THROW({
-    correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
+    correctionManager->applyCorrection("test_correction", stringArguments);
   });
-  auto df = dataManager->getDataFrame();
+  auto df = testDataManager->getDataFrame();
   auto result = df.Take<float>("test_correction");
   ASSERT_EQ(result->size(), 3);
   for (size_t i = 0; i < result->size(); ++i) {
     EXPECT_TRUE(std::isnan(result->at(i)) || std::abs(result->at(i)) < 1e-6);
   }
+  
+  // Restore the original data manager
+  correctionManager->setDataManager(dataManager.get());
 }
 
 /**
@@ -307,21 +323,26 @@ TEST_F(CorrectionManagerTest, NaNAndInfinityHandling) {
  * correctly, especially in edge cases.
  */
 TEST_F(CorrectionManagerTest, ZeroAndNegativeValues) {
-  auto dataManager = std::make_unique<DataManager>(4);
-  dataManager->Define("float_arg",
+  // Create a new DataManager for this test
+  auto testDataManager = std::make_unique<DataManager>(4);
+  correctionManager->setDataManager(testDataManager.get());
+  
+  testDataManager->Define("float_arg",
                 [](ULong64_t i) -> double { return i == 0   ? 0.0 : (i == 1 ? -1.0 : (i == 2 ? -2.0 : 1.0)); },
                 {"rdfentry_"}, *systematicManager);
-  dataManager->Define("int_arg", [](ULong64_t i) -> double { return 1; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("int_arg", [](ULong64_t i) -> double { return 1; }, {"rdfentry_"}, *systematicManager);
   std::vector<std::string> stringArguments = {"A"};
-  std::vector<std::string> inputFeatures = {"float_arg", "int_arg"};
-  correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
-  auto df = dataManager->getDataFrame();
+  correctionManager->applyCorrection("test_correction", stringArguments);
+  auto df = testDataManager->getDataFrame();
   auto result = df.Take<float>("test_correction");
   ASSERT_EQ(result->size(), 4);
   EXPECT_NEAR(result->at(0), 0.1, 1e-6); // 0.0 in first bin
   EXPECT_NEAR(result->at(1), 0.0, 1e-6); // -1.0 is flow
   EXPECT_NEAR(result->at(2), 0.0, 1e-6); // -2.0 is flow
   EXPECT_NEAR(result->at(3), 0.2, 1e-6); // 1.0 in second bin
+  
+  // Restore the original data manager
+  correctionManager->setDataManager(dataManager.get());
 }
 
 // ============================================================================
@@ -343,7 +364,7 @@ TEST_F(CorrectionManagerTest, MismatchedInputFeatureNames) {
   std::vector<std::string> stringArguments = {"A"};
   std::vector<std::string> inputFeatures = {"wrong_feature_name", "int_arg"};
   EXPECT_THROW({
-    correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
+    correctionManager->applyCorrection("test_correction", stringArguments);
   }, std::runtime_error);
 }
 
@@ -367,7 +388,7 @@ TEST_F(CorrectionManagerTest, MissingDataframeColumns) {
 
   // The current implementation should throw a runtime_error when columns are missing
   EXPECT_THROW({
-    correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
+    correctionManager->applyCorrection("test_correction", stringArguments);
   }, std::runtime_error);
 }
 
@@ -384,13 +405,14 @@ TEST_F(CorrectionManagerTest, MultipleCorrections) {
   });
   // Apply both corrections to a DataManager
   auto dataManager = std::make_unique<DataManager>(2);
+  correctionManager->setDataManager(dataManager.get());
   dataManager->Define("float_arg", [](ULong64_t i) -> double { return i == 0 ? 0.5 : 1.5; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("int_arg", [](ULong64_t i) -> double { return i == 0 ? 1 : 2; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("float_arg2", [](ULong64_t i) -> double { return i == 0 ? 1.0 : 3.0; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("int_arg2", [](ULong64_t i) -> double { return i == 0 ? 1 : 2; }, {"rdfentry_"}, *systematicManager);
   std::vector<std::string> stringArguments = {"A"};
-  correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
-  correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction2", {});
+  correctionManager->applyCorrection("test_correction", stringArguments);
+  correctionManager->applyCorrection("test_correction2", {});
   auto df = dataManager->getDataFrame();
   auto result1 = df.Take<float>("test_correction");
   auto result2 = df.Take<float>("test_correction2");
@@ -405,10 +427,11 @@ TEST_F(CorrectionManagerTest, ThreadSafetyWithROOTImplicitMT) {
   int nThreads = ROOT::GetThreadPoolSize();
   EXPECT_GT(nThreads, 1) << "ROOT ImplicitMT is enabled but only one thread is available.";
   auto dataManager = std::make_unique<DataManager>(100);
+  correctionManager->setDataManager(dataManager.get());
   dataManager->Define("float_arg", [](ULong64_t i) -> double { return i % 2 == 0 ? 0.5 : 1.5; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("int_arg", [](ULong64_t i) -> double { return i % 2 == 0 ? 1 : 2; }, {"rdfentry_"}, *systematicManager);
   std::vector<std::string> stringArguments = {"A"};
-  correctionManager->applyCorrection(*dataManager, *systematicManager, "test_correction", stringArguments);
+  correctionManager->applyCorrection("test_correction", stringArguments);
   auto df = dataManager->getDataFrame();
   auto result = df.Take<float>("test_correction");
   ASSERT_EQ(result->size(), 100);

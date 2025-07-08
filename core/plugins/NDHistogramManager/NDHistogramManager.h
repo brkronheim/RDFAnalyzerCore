@@ -25,18 +25,20 @@ public:
   NDHistogramManager(const IConfigurationProvider& configProvider);
 
   /**
-   * @brief Book N-dimensional histograms
-   * @param infos Vector of histogram info objects
+   * @brief Virtual destructor for proper cleanup
+   */
+  virtual ~NDHistogramManager() = default;
+
+  /**
+   * @brief Book a single histogram
+   * @param info Histogram info object
    * @param selection Vector of selection info objects
    * @param suffix Suffix to append to histogram names
-   * @param allRegionNames Vector of region name vectors
+   * @param allRegionNames Vector of region name vectors (last dimension is the systematic variation)
    */
-  void BookND(std::vector<histInfo> &infos,
-              std::vector<selectionInfo> &selection, const std::string &suffix,
-              std::vector<std::vector<std::string>> &allRegionNames,
-              IDataFrameProvider &dataFrameProvider,
-              ISystematicManager &systematicManager);
-
+   void BookSingleHistogram(histInfo &info, std::vector<selectionInfo> &selection, 
+                            std::string suffix, std::vector<std::vector<std::string>> &allRegionNames); 
+    
   /**
    * @brief Save histograms to file
    * @param fullHistList Vector of vectors of histogram info objects
@@ -45,6 +47,26 @@ public:
   void SaveHists(std::vector<std::vector<histInfo>> &fullHistList,
                  std::vector<std::vector<std::string>> &allRegionNames,
                  const IConfigurationProvider &configProvider);
+
+  /**
+   * @brief Book N-dimensional histograms (wrapper for analyzer compatibility)
+   * @param infos Vector of histogram info objects
+   * @param selection Vector of selection info objects
+   * @param suffix Suffix to append to histogram names
+   * @param allRegionNames Vector of region name vectors
+   */
+  void bookND(std::vector<histInfo> &infos,
+              std::vector<selectionInfo> &selection,
+              const std::string &suffix,
+              std::vector<std::vector<std::string>> &allRegionNames);
+
+  /**
+   * @brief Save histograms to file (wrapper for analyzer compatibility)
+   * @param fullHistList Vector of vectors of histogram info objects
+   * @param allRegionNames Vector of vectors of region name vectors
+   */
+  void saveHists(std::vector<std::vector<histInfo>> &fullHistList,
+                 std::vector<std::vector<std::string>> &allRegionNames);
 
   /**
    * @brief Get the vector of histogram result pointers
@@ -70,6 +92,8 @@ public:
   void setSystematicManager(ISystematicManager* systematicManager) override {
     systematicManager_m = systematicManager;
   }
+
+  void setupFromConfigFile() override;
 
 private:
   /**

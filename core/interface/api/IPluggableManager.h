@@ -38,6 +38,11 @@ public:
      * @param systematicManager The systematic manager to set.
      */
     virtual void setSystematicManager(ISystematicManager* systematicManager) = 0;
+
+    /**
+     * @brief Setup the manager from a configuration file.
+     */
+    virtual void setupFromConfigFile() = 0;
 };
 
 #endif // IPLUGGABLEMANAGER_H_INCLUDED 

@@ -225,6 +225,10 @@ private:
    * @brief Initialize the analyzer with the provided dependencies
    */
   void initialize();
+  /**
+   * @brief Wire up plugin manager pointers to core managers
+   */
+  void wirePluginManagers();
 };
 
 #endif // ANALYZER_H_INCLUDED

@@ -14,17 +14,23 @@ CorrectionManager::CorrectionManager(IConfigurationProvider const& configProvide
 
 /**
  * @brief Apply a correction to a set of input features
- * @param dataFrameProvider Reference to the dataframe provider for dataframe operations
  * @param correctionName Name of the correction
  * @param stringArguments String arguments for the correction
- * @param inputFeatures Input features for the correction
  */
-void CorrectionManager::applyCorrection(IDataFrameProvider& dataFrameProvider,
-                                        ISystematicManager& systematicManager,
-                                        const std::string &correctionName,
+void CorrectionManager::applyCorrection(const std::string &correctionName,
                                         const std::vector<std::string> &stringArguments) {  
+  std::cout << "Applying correction " << correctionName << std::endl;
+  if (!dataManager_m || !systematicManager_m) {
+    throw std::runtime_error("CorrectionManager: DataManager or SystematicManager not set");
+  }
+  
+  auto df = dataManager_m->getDataFrame();
+  for (const auto &feature : df.GetColumnNames()) {
+    std::cout << "Feature: " << feature << std::endl;
+  }
+
   const auto &inputFeatures = getCorrectionFeatures(correctionName);
-  dataFrameProvider.DefineVector("input_" + correctionName, inputFeatures, "double", systematicManager);
+  dataManager_m->DefineVector("input_" + correctionName, inputFeatures, "double", *systematicManager_m);
   auto correction = this->objects_m.at(correctionName);
   auto stringArgs = stringArguments;
   auto correctionLambda =
@@ -47,7 +53,7 @@ void CorrectionManager::applyCorrection(IDataFrameProvider& dataFrameProvider,
     }
     return correction->evaluate(values);
   };
-  dataFrameProvider.Define(correctionName, correctionLambda, {"input_" + correctionName}, systematicManager);
+  dataManager_m->Define(correctionName, correctionLambda, {"input_" + correctionName}, *systematicManager_m);
 }
 
 /**
@@ -97,3 +103,30 @@ void CorrectionManager::registerCorrectionlib(
     features_m.emplace(entryKeys.at("name"), inputVariableVector);
   }
 } 
+
+void CorrectionManager::setupFromConfigFile() {
+  if (!configManager_m) {
+    throw std::runtime_error("CorrectionManager: ConfigManager not set");
+  }
+
+  const auto correctionConfig = configManager_m->parseMultiKeyConfig(
+    "correctionlibConfig",
+    {"file", "correctionName", "name", "inputVariables"});
+
+  for (const auto &entryKeys : correctionConfig) {
+    // Split the variable list on commas, save to vector
+    auto inputVariableVector =
+        configManager_m->splitString(entryKeys.at("inputVariables"), ",");
+
+    // load correction object from json
+    auto correctionF =
+      correction::CorrectionSet::from_file(entryKeys.at("file"));
+    auto correction = correctionF->at(entryKeys.at("correctionName"));
+
+    // Add the correction and feature list to their maps
+    std::cout << "Adding correction " << entryKeys.at("name") << "!"
+              << std::endl;
+    objects_m.emplace(entryKeys.at("name"), correction);
+    features_m.emplace(entryKeys.at("name"), inputVariableVector);
+  }
+}

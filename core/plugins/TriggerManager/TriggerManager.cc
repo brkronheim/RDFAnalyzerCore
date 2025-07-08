@@ -1,5 +1,9 @@
 #include <api/IConfigurationProvider.h>
+#include <api/IDataFrameProvider.h>
+#include <api/ISystematicManager.h>
 #include <TriggerManager.h>
+#include <ROOT/RVec.hxx>
+#include <stdexcept>
 
 /**
  * @brief Construct a new TriggerManager object
@@ -84,4 +88,96 @@ std::vector<std::string> TriggerManager::getAllGroups() const {
     groups.push_back(pair.first);
   }
   return groups;
+}
+
+/**
+ * @brief Apply all triggers for the current sample type
+ */
+void TriggerManager::applyAllTriggers() {
+  if (!dataManager_m || !systematicManager_m || !configManager_m) {
+    throw std::runtime_error("TriggerManager: DataManager, SystematicManager, or ConfigManager not set");
+  }
+  
+  std::string sampleType;
+  try {
+    sampleType = configManager_m->get("type");
+  } catch (...) {
+    throw std::runtime_error("Config does not contain 'type' key for trigger logic");
+  }
+  
+  std::string group = getGroupForSample(sampleType);
+  
+  auto passTrigger = [](const ROOT::VecOps::RVec<bool>& triggerVec) {
+    for (bool v : triggerVec) {
+      if (v) return true;
+    }
+    return false;
+  };
+  
+  auto passTriggerAndVeto = [](const ROOT::VecOps::RVec<bool>& passVec, const ROOT::VecOps::RVec<bool>& vetoVec) {
+    bool pass = false;
+    for (bool v : passVec) {
+      if (v) pass = true;
+    }
+    for (bool v : vetoVec) {
+      if (v) return false;
+    }
+    return pass;
+  };
+  
+  if (!group.empty()) {
+    const auto& triggers = getTriggers(group);
+    const auto& vetoes = getVetoes(group);
+    if (vetoes.empty()) {
+      dataManager_m->DefineVector("allTriggersPassVector", triggers, "Bool_t", *systematicManager_m);
+      // Define the filter variable
+      dataManager_m->Define("pass_applyTrigger", passTrigger, {"allTriggersPassVector"}, *systematicManager_m);
+      // Apply the filter
+      dataManager_m->Filter([](bool val) { return val; }, {"pass_applyTrigger"});
+    } else {
+      dataManager_m->DefineVector(group + "_passVector", triggers, "Bool_t", *systematicManager_m);
+      dataManager_m->DefineVector(group + "_vetoVector", vetoes, "Bool_t", *systematicManager_m);
+      // Define the filter variable
+      dataManager_m->Define("pass_applyTrigger", passTriggerAndVeto, {group + "_passVector", group + "_vetoVector"}, *systematicManager_m);
+      // Apply the filter
+      dataManager_m->Filter([](bool val) { return val; }, {"pass_applyTrigger"});
+    }
+  } else {
+    std::vector<std::string> allTriggers;
+    for (const auto& g : getAllGroups()) {
+      const auto& triggers = getTriggers(g);
+      allTriggers.insert(allTriggers.end(), triggers.begin(), triggers.end());
+    }
+    dataManager_m->DefineVector("allTriggersPassVector", allTriggers, "Bool_t", *systematicManager_m);
+    // Define the filter variable
+    dataManager_m->Define("pass_applyTrigger", passTrigger, {"allTriggersPassVector"}, *systematicManager_m);
+    // Apply the filter
+    dataManager_m->Filter([](bool val) { return val; }, {"pass_applyTrigger"});
+  }
+}
+
+
+void TriggerManager::setupFromConfigFile() {
+  if (!configManager_m) {
+    throw std::runtime_error("TriggerManager: ConfigManager not set");
+  }
+
+  const auto triggerConfig = configManager_m->parseMultiKeyConfig(
+    configManager_m->get("triggerConfig"), {"name", "sample", "triggers"});
+
+  for (const auto &entryKeys : triggerConfig) {
+
+    auto triggerList = configManager_m->splitString(entryKeys.at("triggers"), ",");
+
+    if (entryKeys.find("triggerVetos") != entryKeys.end()) {
+      auto triggerVetoList =
+          configManager_m->splitString(entryKeys.at("triggerVetos"), ",");
+      vetoes_m.emplace(entryKeys.at("name"), triggerVetoList);
+    } else {
+      vetoes_m[entryKeys.at("name")] = {};
+    }
+
+    objects_m.emplace(entryKeys.at("name"), triggerList);
+    sampleToGroup_m.emplace(entryKeys.at("sample"), entryKeys.at("name"));
+  }
 }
