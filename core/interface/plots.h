@@ -40,11 +40,33 @@
 #include <TROOT.h>
 #include <TStyle.h>
 
+
+struct histFillInfo {
+  std::string name = "";
+  std::string title = "";
+  Int_t dim = 5;
+  Int_t nSlots = 0;
+  std::vector<Int_t> nbins = {};
+  std::vector<Double_t> xmin = {};
+  std::vector<Double_t> xmax = {};
+  Bool_t channel_hasSystematic = false;
+  Bool_t controlRegion_hasSystematic = false;
+  Bool_t sampleCategory_hasSystematic = false;
+  Bool_t weight_hasSystematic = false;
+  Bool_t hasSystematic = false;
+  Bool_t channel_hasMultiFill = false;
+  Bool_t controlRegion_hasMultiFill = false;
+  Bool_t sampleCategory_hasMultiFill = false;
+  Bool_t systematic_hasMultiFill = false;
+  Bool_t weight_hasMultiFill = false;
+  Bool_t hasMultiFill = false;
+};
+
 /**
  * @class THnMulti
  * @brief Multi-threaded N-dimensional histogram action for ROOT RDataFrame.
  *
- * This class manages a set of THnSparseD histograms, one per thread, and merges
+ * This class manages a set of THnSparseF histograms, one per thread, and merges
  * them at the end of processing. It is used as a custom action in ROOT's
  * RDataFrame for efficient multi-threaded histogramming.
  */
@@ -52,41 +74,58 @@ class THnMulti : public ROOT::Detail::RDF::RActionImpl<THnMulti> {
 
 public:
   /**
-   * @brief Type alias for the result type (THnSparseD)
+   * @brief Type alias for the result type (THnSparseF)
    */
-  using Result_t = THnSparseD;
+  using Result_t = THnSparseF;
+
+  // Define a function pointer type for fill functions
+  using FillFuncType = void (THnMulti::*)(unsigned int,
+    const ROOT::VecOps::RVec<Float_t>&, const ROOT::VecOps::RVec<Float_t>&,
+    const ROOT::VecOps::RVec<Float_t>&, const ROOT::VecOps::RVec<Float_t>&,
+    const ROOT::VecOps::RVec<Float_t>&, const ROOT::VecOps::RVec<Float_t>&,
+    const ROOT::VecOps::RVec<Int_t>&);
 
   /**
    * @brief Construct a new THnMulti object
-   * @param nSlots Number of threads/slots
-   * @param name Histogram name
-   * @param title Histogram title
-   * @param dim Number of dimensions
-   * @param nFills Number of fills per event
-   * @param nbins Number of bins per dimension
-   * @param xmin Minimum value per dimension
-   * @param xmax Maximum value per dimension
+   * @param fillInfo Histogram fill information
    */
-  THnMulti(unsigned int nSlots, std::string name, std::string title, Int_t dim,
-           Int_t nFills, std::vector<Int_t> nbins, std::vector<Double_t> xmin,
-           std::vector<Double_t> xmax) {
-    nSlots_m = nSlots;
-    dim_m = dim;
-    nbins_m = nbins;
-    xmin_m = xmin;
-    xmax_m = xmax;
-    nFills_m = nFills;
-    for (unsigned int i = 0; i < nSlots; i++) {
+  THnMulti(histFillInfo &fillInfo)
+    : nSlots_m(fillInfo.nSlots), dim_m(fillInfo.dim), nbins_m(fillInfo.nbins), xmin_m(fillInfo.xmin), xmax_m(fillInfo.xmax), channel_hasSystematic_m(fillInfo.channel_hasSystematic), controlRegion_hasSystematic_m(fillInfo.controlRegion_hasSystematic), 
+      sampleCategory_hasSystematic_m(fillInfo.sampleCategory_hasSystematic), weight_hasSystematic_m(fillInfo.weight_hasSystematic), hasSystematic_m(fillInfo.hasSystematic), channel_hasMultiFill_m(fillInfo.channel_hasMultiFill), 
+      controlRegion_hasMultiFill_m(fillInfo.controlRegion_hasMultiFill), sampleCategory_hasMultiFill_m(fillInfo.sampleCategory_hasMultiFill), systematic_hasMultiFill_m(fillInfo.systematic_hasMultiFill), weight_hasMultiFill_m(fillInfo.weight_hasMultiFill), 
+      hasMultiFill_m(fillInfo.hasMultiFill), name_m(fillInfo.name), title_m(fillInfo.title) {
 
-      fPerThreadResults.push_back(std::make_shared<THnSparseD>(
-          (name + "_" + std::to_string(i)).c_str(), title.c_str(), dim,
-          nbins.data(), xmin.data(), xmax.data()));
+    
+
+
+    for (unsigned int i = 0; i < nSlots_m; i++) {
+
+      fPerThreadResults.push_back(std::make_shared<THnSparseF>(
+          (name_m + "_" + std::to_string(i)).c_str(), title_m.c_str(), dim_m,
+          nbins_m.data(), xmin_m.data(), xmax_m.data()));
       fPerThreadResults[i]->Sumw2();
     }
     fFinalResult =
-        std::make_shared<Result_t>((name).c_str(), title.c_str(), dim,
-                                   nbins.data(), xmin.data(), xmax.data());
+        std::make_shared<Result_t>((name_m).c_str(), title_m.c_str(), dim_m,
+                                   nbins_m.data(), xmin_m.data(), xmax_m.data());
     // Define all the histograms
+
+    // Set the fill function pointer based on configuration
+    // (This logic can be expanded for more fast paths as needed)
+    if (!channel_hasSystematic_m && !controlRegion_hasSystematic_m && !sampleCategory_hasSystematic_m && !weight_hasSystematic_m && !systematic_hasMultiFill_m &&
+        !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m) {
+      // Fast path: single fill, no systematic
+      fillFunc_ = &THnMulti::SingleNoSystematicFill;
+    } else if (systematic_hasMultiFill_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m) {
+      // Fast path: single systematic fill
+      fillFunc_ = &THnMulti::SingleSystematicFill;
+    } else if (!systematic_hasMultiFill_m && (channel_hasMultiFill_m || controlRegion_hasMultiFill_m || sampleCategory_hasMultiFill_m || weight_hasMultiFill_m)) {
+      // Fast path: multi fill, no systematic
+      fillFunc_ = &THnMulti::MultiNoSystematicFill;
+    } else {
+      // General case
+      fillFunc_ = &THnMulti::GeneralFill;
+    }
   }
 
   /**
@@ -104,7 +143,7 @@ public:
    * @brief Called before the event loop to retrieve the result pointer
    * @return Shared pointer to THnSparseD
    */
-  std::shared_ptr<THnSparseD> GetResultPtr() const { return fFinalResult; }
+  std::shared_ptr<THnSparseF> GetResultPtr() const { return fFinalResult; }
 
   /**
    * @brief Initialize the action (called at the beginning of the event loop)
@@ -120,37 +159,196 @@ public:
 
   /// Called at every entry.
   /**
-   * @brief Fill the per-thread histogram for one entry.
+   * @brief Fill the per-thread histogram for one entry (hot loop).
    *
-   * The input vector is expected to contain (dim + 1) consecutive values for
-   * every fill, where the last value in each chunk is the weight.  When the
-   * caller provides a flattened vector originating from per-object branches
-   * (e.g. an RVec of muon pT), the total size of the vector will be
-   * <code>nValidFills * (dim + 1)</code>.
-   *
-   * We therefore derive the actual number of fills on a per-event basis
-   * instead of relying on the constructor-time constant <code>nFills_m</code>.
+   * This function dispatches to the appropriate fast path fill function based on configuration.
    */
-  void Exec(unsigned int slot, ROOT::VecOps::RVec<Double_t> &val) {
-    const int stride = dim_m + 1;
-    // Guard against malformed inputs.
-    if (stride == 0) {
-      return;
-    }
+  void Exec(unsigned int slot,
+            const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
+            const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation, const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
+            const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
+            const ROOT::VecOps::RVec<Int_t> &__restrict__ nFills) {
+    // Dispatch to the selected fill function for optimal performance
+    (this->*fillFunc_)(slot, baseHistogramValues, baseHistogramWeights,
+                      systematicVariation, sampleCategory, controlRegion, channel, nFills);
+  }
 
-    const int nValidFills = static_cast<int>(val.size()) / stride;
+  void SingleNoSystematicFill(unsigned int slot,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation, // unused
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
+    const ROOT::VecOps::RVec<Int_t>   &__restrict__ nFills) {
 
-    for (int i = 0, offset = 0; i < nValidFills; ++i, offset += stride) {
-      Double_t const* array = val.data() + offset;
-      const Double_t weight = array[dim_m];
+      const Double_t weight = baseHistogramWeights[0];
 
-      if (weight == 0.0) {
-        continue; // Skip zero-weight contributions.
+      // Skip zero-weight entries for efficiency
+      if (weight != 0.0) { // Skip zero-weight contributions.
+        // Prepare the array of values to fill into the histogram.
+        // The array size and contents should match the histogram dimensionality and axis order.
+    
+        fPerThreadResults[slot]->Fill(channel[0], controlRegion[0], sampleCategory[0], systematicVariation[0], baseHistogramValues[0], weight);
+      }
+    
+  }
+
+
+  void SingleSystematicFill(unsigned int slot,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
+    const ROOT::VecOps::RVec<Int_t> &__restrict__ nFills) {
+
+      int weightCounter = 0;
+      int baseFillCounter = 0;
+      int controlRegionCounter = 0;
+      int channelCounter = 0;
+      int sampleCategoryCounter = 0;
+
+      // Main fill loop: iterates over all base histogram values for this event
+      while(baseFillCounter < baseHistogramValues.size()) {
+        const Double_t weight = baseHistogramWeights[weightCounter];
+  
+        // Skip zero-weight entries for efficiency
+        if (weight != 0.0) { // Skip zero-weight contributions.
+          // Prepare the array of values to fill into the histogram.
+          // The array size and contents should match the histogram dimensionality and axis order.
+  
+          fPerThreadResults[slot]->Fill(channel[channelCounter], controlRegion[controlRegionCounter], sampleCategory[sampleCategoryCounter], systematicVariation[baseFillCounter], baseHistogramValues[baseFillCounter], weight);
+        }
+        
+        controlRegionCounter+=controlRegion_hasSystematic_m;
+        sampleCategoryCounter+=sampleCategory_hasSystematic_m;
+        channelCounter+=channel_hasSystematic_m;
+        weightCounter+=weight_hasSystematic_m;
+        baseFillCounter++;
+      }
+    
+  }
+
+
+  void MultiNoSystematicFill(unsigned int slot,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation, // unused
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
+    const ROOT::VecOps::RVec<Int_t> &__restrict__ nFills) {
+
+      int weightCounter = 0;
+      int baseFillCounter = 0;
+      int systematicCounter = 0;
+      int controlRegionCounter = 0;
+      int channelCounter = 0;
+      int sampleCategoryCounter = 0;
+
+      
+      // Main fill loop: iterates over all base histogram values for this event
+      while(baseFillCounter < baseHistogramValues.size()) {
+        const Double_t weight = baseHistogramWeights[weightCounter];
+  
+        // Skip zero-weight entries for efficiency
+        if (weight != 0.0) { // Skip zero-weight contributions.
+          // Prepare the array of values to fill into the histogram.
+          // The array size and contents should match the histogram dimensionality and axis order.
+  
+  
+          fPerThreadResults[slot]->Fill(channel[channelCounter], controlRegion[controlRegionCounter], sampleCategory[sampleCategoryCounter], systematicVariation[systematicCounter], baseHistogramValues[baseFillCounter], weight);
+        }
+        
+        systematicCounter+=systematic_hasMultiFill_m;
+        controlRegionCounter+=controlRegion_hasMultiFill_m;
+        sampleCategoryCounter+=sampleCategory_hasMultiFill_m;
+        channelCounter+=channel_hasMultiFill_m;
+        weightCounter+=weight_hasMultiFill_m;
+        baseFillCounter++;
+      }
+      
+    
+  }
+
+
+
+  void GeneralFill(unsigned int slot,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
+    const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
+    const ROOT::VecOps::RVec<Int_t> &__restrict__ nFills) {
+
+    int weightCounter = 0;
+    int baseFillCounter = 0;
+    int systematicCounter = 0;
+    int controlRegionCounter = 0;
+    int channelCounter = 0;
+    int sampleCategoryCounter = 0;
+    int fillCounter = 0;
+    // Main fill loop: iterates over all base histogram values for this event
+    while(baseFillCounter < baseHistogramValues.size()) {
+      const Double_t weight = baseHistogramWeights[weightCounter];
+
+      // Skip zero-weight entries for efficiency
+      if (weight != 0.0) { // Skip zero-weight contributions.
+        // Prepare the array of values to fill into the histogram.
+        // The array size and contents should match the histogram dimensionality and axis order.
+
+        fPerThreadResults[slot]->Fill(channel[channelCounter], controlRegion[controlRegionCounter], sampleCategory[sampleCategoryCounter], systematicVariation[systematicCounter], baseHistogramValues[baseFillCounter], weight);
       }
 
-      fPerThreadResults[slot]->Fill(array, weight);
+      // Update the counter for everything with multi fill
+      // These counters track the current index for each axis that may require multiple fills per event.
+      baseFillCounter++;
+      fillCounter++;
+      if(channel_hasMultiFill_m) {
+        channelCounter++;
+      }
+      if(controlRegion_hasMultiFill_m) {
+        controlRegionCounter++;
+      }
+      if(sampleCategory_hasMultiFill_m) {
+        sampleCategoryCounter++;
+      }
+      if(systematic_hasMultiFill_m) {
+        systematicCounter++;
+      }
+      if(weight_hasMultiFill_m) {
+        weightCounter++;
+      }
+      // Check if we've completed the required number of fills for the current systematic
+      if(fillCounter >= nFills[systematicCounter]) { // finished fill for the first systematic
+        fillCounter = 0;
+        // Reset or increment counters for each axis depending on systematic/multifill configuration
+        // If the axis does not depend on the systematic, reset its counter; otherwise, increment if not multi-fill
+        if(!channel_hasSystematic_m) {
+          channelCounter = 0;
+        } else if(!channel_hasMultiFill_m) {
+          channelCounter +=1;
+        }
+        if(!controlRegion_hasSystematic_m) {
+          controlRegionCounter = 0;
+        } else if(!controlRegion_hasMultiFill_m) {
+          controlRegionCounter +=1;
+        }
+        if(!sampleCategory_hasSystematic_m) {
+          sampleCategoryCounter = 0;
+        } else if(!sampleCategory_hasMultiFill_m) {
+          sampleCategoryCounter +=1;
+        }
+        if(!weight_hasSystematic_m) {
+          weightCounter = 0;
+        } else if(!weight_hasMultiFill_m) {
+          weightCounter +=1;
+        }
+        // If the systematic axis is not multi-fill, increment its counter
+        if(!systematic_hasMultiFill_m) {
+          systematicCounter +=1;
+        }
+      }
+
+
     }
-  }
+
+}
 
   /**
    * @brief Merge per-thread histograms at the end of the event loop
@@ -170,21 +368,38 @@ public:
 
 private:
   /** @brief Shared pointer to the final merged THnSparseD result. */
-  std::shared_ptr<THnSparseD> fFinalResult = std::make_shared<THnSparseD>();
+  std::shared_ptr<THnSparseF> fFinalResult = std::make_shared<THnSparseF>();
   /** @brief Vector of per-thread THnSparseD histogram pointers. */
-  std::vector<std::shared_ptr<THnSparseD>> fPerThreadResults;
+  std::vector<std::shared_ptr<THnSparseF>> fPerThreadResults;
   /** @brief Number of threads/slots. */
-  unsigned int nSlots_m;
+  const unsigned int nSlots_m;
   /** @brief Number of dimensions. */
-  Int_t dim_m;
+  const Int_t dim_m;
   /** @brief Number of bins per dimension. */
-  std::vector<Int_t> nbins_m;
+  const std::vector<Int_t> nbins_m;
   /** @brief Minimum value per dimension. */
-  std::vector<Double_t> xmin_m;
+  const std::vector<Double_t> xmin_m;
   /** @brief Maximum value per dimension. */
-  std::vector<Double_t> xmax_m;
-  /** @brief Number of fills per event. */
-  Int_t nFills_m;
+  const std::vector<Double_t> xmax_m;
+
+  const std::string name_m;
+  const std::string title_m;
+  
+  const Bool_t channel_hasSystematic_m;
+  const Bool_t controlRegion_hasSystematic_m;
+  const Bool_t sampleCategory_hasSystematic_m;
+  const Bool_t weight_hasSystematic_m;
+  const Bool_t hasSystematic_m;
+
+  const Bool_t channel_hasMultiFill_m;
+  const Bool_t controlRegion_hasMultiFill_m;
+  const Bool_t sampleCategory_hasMultiFill_m;
+  const Bool_t systematic_hasMultiFill_m;
+  const Bool_t weight_hasMultiFill_m;
+  const Bool_t hasMultiFill_m;
+  
+  // Pointer to the selected fill function for fast path dispatch
+  FillFuncType fillFunc_ = nullptr;
 };
 
 /**
@@ -282,6 +497,10 @@ private:
  */
 class selectionInfo {
 public:
+
+  selectionInfo() : variable_m("zero__"), bins_m(1), lowerBound_m(0), upperBound_m(1), regions_m({"Default"}) {}
+
+
   /**
    * @brief Construct a new selectionInfo object.
    * @param variable Variable to apply the selection on.
@@ -290,9 +509,9 @@ public:
    * @param upperBound Upper bound for the selection.
    */
   selectionInfo(std::string variable, int bins, double lowerBound,
-                double upperBound)
+                double upperBound, std::vector<std::string> regions)
       : variable_m(variable), bins_m(bins), lowerBound_m(lowerBound),
-        upperBound_m(upperBound) {}
+        upperBound_m(upperBound), regions_m(regions) {}
 
   /**
    * @brief Get the variable name for the selection.
@@ -318,6 +537,12 @@ public:
    */
   constexpr const float &upperBound() const { return (upperBound_m); }
 
+  /**
+   * @brief Get the regions for the selection.
+   * @return Reference to the regions vector.
+   */
+  constexpr const std::vector<std::string> &regions() const { return (regions_m); }
+
 private:
   /** @brief Variable to apply the selection on. */
   const std::string variable_m;
@@ -327,6 +552,8 @@ private:
   const float lowerBound_m;
   /** @brief Upper bound for the selection. */
   const float upperBound_m;
+  /** @brief Regions for the selection. */
+  const std::vector<std::string> regions_m;
 };
 
 /**

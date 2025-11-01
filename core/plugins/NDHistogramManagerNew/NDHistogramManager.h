@@ -5,8 +5,6 @@
 #include <api/IDataFrameProvider.h>
 #include <api/IPluggableManager.h>
 #include <plots.h>
-#include <string>
-#include <vector>
 
 /**
  * @class NDHistogramManager

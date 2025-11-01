@@ -25,10 +25,10 @@ Analyzer::Analyzer(
     }
     verbosityLevel_m = 1;
     wirePluginManagers();
-    initialize();
+    //initialize();
 }
 
-// Backward-compatible constructor
+// Simple constructor
 Analyzer::Analyzer(std::string configFile,
                    const std::unordered_map<std::string, std::pair<std::string, std::vector<void*>>>& pluginSpecs)
     : configProvider_m(ManagerFactory::createConfigurationManager(configFile)),
@@ -44,7 +44,7 @@ Analyzer::Analyzer(std::string configFile,
     }
     verbosityLevel_m = 1;
     wirePluginManagers();
-    initialize();
+    //initialize();
 }
 
 /**
@@ -68,14 +68,16 @@ Analyzer::Analyzer(std::string configFile,
     }
     verbosityLevel_m = 1;
     wirePluginManagers();
-    initialize();
+    //initialize();
 }
 
+/*
 void Analyzer::initialize() {
     if (verbosityLevel_m >= 1) {
         std::cout << "Analyzer initialized." << std::endl;
     }
 }
+*/
 
 void Analyzer::wirePluginManagers() {
     for (auto& [role, plugin] : plugins) {

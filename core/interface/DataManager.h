@@ -82,10 +82,11 @@ public:
   }
 
   /**
-   * @brief Define a vector variable in the dataframe
+   * @brief Define a vector variable in the dataframe. If all columns are scalars, creates a vector from them. If all columns are RVecs, concatenates and casts them to the target type. Mixed types are not supported and will throw an error at runtime. Uses a JIT lambda for type deduction and concatenation.
    * @param name Name of the variable
-   * @param columns Input columns
+   * @param columns Input columns (scalars or vectors)
    * @param type Data type (default: Float_t)
+   * @param systematicManager Reference to the systematic manager
    */
   void DefineVector(std::string name,
                     const std::vector<std::string> &columns,
@@ -98,7 +99,7 @@ public:
    * @param columns Input columns
    */
   template <typename F>
-  void Filter_m(F f, const std::vector<std::string> &columns = {}) {
+  void Filter(F f, const std::vector<std::string> &columns = {}) {
     df_m = df_m.Filter(f, columns);
   }
 
@@ -107,7 +108,7 @@ public:
    * @param name Name of the variable
    * @param f Function to define the variable
    */
-  template <typename F> void DefinePerSample_m(std::string name, F f) {
+  template <typename F> void DefinePerSample(std::string name, F f) {
     std::cout << "Defining per-sample variable: " << name << std::endl;
     df_m = df_m.DefinePerSample(name, f);
   }
@@ -137,14 +138,6 @@ public:
                 const std::vector<std::string> &columns = {}) {
     df_m = df_m.Redefine(name, f, columns);
   }
-
-  /**
-   * @brief Make a list of systematic variations for a branch
-   * @param branchName Name of the branch
-   * @param systematicManager Pointer to the systematic manager (can be nullptr)
-   * @return Vector of systematic variation names
-   */
-  std::vector<std::string> makeSystList(const std::string &branchName, ISystematicManager &systematicManager);
 
   /**
    * @brief Register constant variables from configuration

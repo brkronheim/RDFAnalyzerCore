@@ -16,10 +16,12 @@ find_package(Threads)
 find_package(ZLIB)
 
 
+
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 find_package(ROOT REQUIRED)
+find_package(Boost REQUIRED CONFIG)
 
 add_subdirectory(core)
-add_subdirectory(runners)
-#add_subdirectory(analyses)
+#add_subdirectory(runners)
+add_subdirectory(analyses)

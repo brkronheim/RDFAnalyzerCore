@@ -59,7 +59,7 @@ protected:
     auto corrMgr = std::make_unique<CorrectionManager>(*configMgr);
 
     // Set up dummy NDHistogramManager
-    auto ndHistMgr = ManagerRegistry::instance().create("NDHistogramManager", {configMgr.get()});
+    //auto ndHistMgr = ManagerRegistry::instance().create("NDHistogramManager", {configMgr.get()});
     
     // Set up dummy TriggerManager
     auto trigMgr = ManagerRegistry::instance().create("TriggerManager", {configMgr.get()});
@@ -71,7 +71,7 @@ protected:
     plugins["bdt"] = std::move(bdtMgr);
     plugins["corr"] = std::move(corrMgr);
     plugins["trig"] = std::move(trigMgr);
-    plugins["ndhist"] = std::move(ndHistMgr);
+    //plugins["ndhist"] = std::move(ndHistMgr);
 
     // Transfer ownership to Analyzer
     analyzer = std::make_unique<Analyzer>(

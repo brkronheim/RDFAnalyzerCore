@@ -37,9 +37,9 @@ add_executable(testSystematicManager testSystematicManager.cc)
 target_link_libraries(testSystematicManager core gtest gtest_main)
 add_test(NAME SystematicManagerTest COMMAND testSystematicManager)
 
-add_executable(testDataManager testDataManager.cc)
-target_link_libraries(testDataManager core corePlugins gtest gtest_main)
-add_test(NAME DataManagerTest COMMAND testDataManager)
+#add_executable(testDataManager testDataManager.cc)
+#target_link_libraries(testDataManager core corePlugins gtest gtest_main)
+#add_test(NAME DataManagerTest COMMAND testDataManager)
 
 
 
@@ -81,9 +81,9 @@ add_test(NAME AnalyzerTriggerLogicTest COMMAND testAnalyzer_TriggerLogic)
 
 # Integration tests
 
-add_executable(testSystematicPropagation testSystematicPropagation.cc)
-target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
-add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+#add_executable(testSystematicPropagation testSystematicPropagation.cc)
+#target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
+#add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
 
 
 

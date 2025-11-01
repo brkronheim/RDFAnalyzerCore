@@ -6,8 +6,8 @@
 #include <TChain.h>
 #include <util.h>
 
-//======================================================================
-// No longer needed helper structures retained.
+#include <ROOT/RDFHelpers.hxx>
+
 
 /**
  * @brief Construct a new DataManager object
@@ -15,7 +15,28 @@
  */
 DataManager::DataManager(const IConfigurationProvider &configProvider)
     : chain_vec_m(makeTChain(configProvider)),
-      df_m(ROOT::RDataFrame(*chain_vec_m[0])) {}
+      df_m(ROOT::RDataFrame(*chain_vec_m[0])) {
+
+    // Display a progress bar depending on batch status and ROOT version
+  #if defined(HAS_ROOT_PROGRESS_BAR)
+    auto batch = configProvider.get("batch");
+    if (batch != "True" && batch != "") {
+      ROOT::RDF::Experimental::AddProgressBar(df_m);
+    } else {
+      //if (verbosityLevel_m >= 1) {
+      std::cout << "Batch mode, no progress bar" << std::endl;
+      //}
+    }
+  #else
+    if (verbosityLevel_m >= 1) {
+      std::cout << "ROOT version does not support progress bar, update to at "
+                  "least 6.28 to get it."
+                << std::endl;
+    }
+  #endif
+
+
+      }
 
 /**
  * @brief Construct a new DataManager object for testing with an in-memory RDataFrame
@@ -43,20 +64,19 @@ void DataManager::setDataFrame(const ROOT::RDF::RNode &node) { df_m = node; }
 TChain *DataManager::getChain() const { return chain_vec_m[0].get(); }
 
 /**
- * @brief Define a vector variable in the dataframe
+ * @brief Define a vector variable in the dataframe. If all columns are scalars, creates a vector from them. If all columns are RVecs, concatenates and casts them to the target type. Mixed types are not supported and will throw an error at runtime. Uses a JIT lambda for type deduction and concatenation.
  * @param name Name of the variable
- * @param columns Input columns
+ * @param columns Input columns (scalars or vectors)
  * @param type Data type (default: Float_t)
+ * @param systematicManager Reference to the systematic manager
  */
 void DataManager::DefineVector(std::string name,
                                const std::vector<std::string> &columns,
                                std::string type,
                                ISystematicManager &systematicManager) {
-  std::cout << "[DataManager] Defining flattened vector column " << name << std::endl;
+  std::cout << "[DataManager] Defining vector column " << name << std::endl;
 
-  // ------------------------------------------------------------------
   // Sanity-check that all requested columns exist in the dataframe.
-  // ------------------------------------------------------------------
   const auto existingColumns = df_m.GetColumnNames();
   std::vector<std::string> missing;
   for (const auto &c : columns) {
@@ -72,65 +92,54 @@ void DataManager::DefineVector(std::string name,
     throw std::runtime_error(msg);
   }
 
-  //-------------------------------------------------------------------
-  // Build the string expression for a simple vector (scalar inputs only).
-  //-------------------------------------------------------------------
-  std::string arrayString = "ROOT::VecOps::RVec<" + type + ">({";
-  for (size_t i = 0; i < columns.size(); ++i) {
-    arrayString += "static_cast<" + type + ">(" + columns[i] + ")";
-    if (i + 1 < columns.size()) {
-      arrayString += ",";
+  // Determine the type of each column (scalar or RVec)
+  std::vector<bool> isRVec;
+  for (const auto& col : columns) {
+    std::string colType = df_m.GetColumnType(col);
+    isRVec.push_back(colType.find("RVec") != std::string::npos);
+  }
+
+  bool allRVec = std::all_of(isRVec.begin(), isRVec.end(), [](bool v){ return v; });
+  bool allScalar = std::none_of(isRVec.begin(), isRVec.end(), [](bool v){ return v; });
+
+  if (!(allRVec || allScalar)) {
+    throw std::runtime_error("DefineVector: Mixed scalar and RVec types are not supported.");
+  }
+
+  if (allScalar) {
+    // Use the original string expression for scalars
+    std::string expr = "ROOT::VecOps::RVec<" + type + ">{";
+    for (size_t i = 0; i < columns.size(); ++i) {
+      expr += columns[i];
+      if (i + 1 < columns.size()) {
+        expr += ", ";
+      }
     }
+    expr += "}";
+    df_m = df_m.Define(name, expr);
+    std::cout << "[DataManager] Vector column " << name << " defined from scalars." << std::endl;
+    return;
+  } else {
+
+    // All are RVecs: generate a JIT lambda string that concatenates and casts
+    std::string expr = "size_t total = 0;\n";
+    for (const auto& col : columns) {
+      expr += "total += " + col + ".size();\n";
+    }
+    expr += "ROOT::VecOps::RVec<" + type + "> out;\n";
+    expr += "out.reserve(total);\n";
+    for (size_t i = 0; i < columns.size(); ++i) {
+      expr += "for (auto& x : " + columns[i] + ") out.push_back(static_cast<" + type + ">(x));\n";
+    }
+    expr += "return out;";
+
+    df_m = df_m.Define(name, expr);
+    std::cout << "[DataManager] Vector column " << name << " defined by concatenating RVecs." << std::endl;
+    std::cout << "Expression: \n" << expr << std::endl;
   }
-  arrayString += "})";
-
-  df_m = df_m.Define(name, arrayString);
-
-  std::cout << "[DataManager] Vector column " << name << " defined (scalar inputs)." << std::endl;
 }
 
-/**
- * @brief Make a list of systematic variations and store them in a branch and its systematic variations
- * @param branchName Name of the branch
- * @param systematicManager Pointer to the systematic manager
- * @return Vector of systematic variation names
- */
-std::vector<std::string>
-DataManager::makeSystList(const std::string &branchName, ISystematicManager &systematicManager) {
 
-  std::cout << "Existing columns:" << std::endl;
-  for (const auto &column : df_m.GetColumnNames()) {
-    std::cout << column << std::endl;
-  }
-
-  std::vector<std::string> systList = {"Nominal"};
-  int var = 0;
-  std::cout << "Defining nominal branch: " << branchName << std::endl;
-  DefinePerSample_m(branchName,
-                    [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-                      return var;
-                    });
-  
-  for (const auto &syst : systematicManager.getSystematics()) {
-    std::cout << "Defining systematic: " << syst << std::endl;
-    systList.push_back(syst + "Up");
-    systList.push_back(syst + "Down");
-    var++;
-    DefinePerSample_m(
-        branchName + "_" + syst + "Up",
-        [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-          return var;
-        });
-    var++;
-    DefinePerSample_m(
-        branchName + "_" + syst + "Down",
-        [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-          return var;
-        });
-  }
-
-  return systList;
-}
 
 
 /**
@@ -361,3 +370,4 @@ DataManager::~DataManager() = default;
 
 // Add out-of-line definition for IDataFrameProvider virtual destructor
 IDataFrameProvider::~IDataFrameProvider() = default;
+

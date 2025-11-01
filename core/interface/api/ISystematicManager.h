@@ -4,6 +4,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <api/IDataFrameProvider.h>
 
 /**
  * @brief Interface for systematic managers to enable dependency injection
@@ -50,6 +51,13 @@ public:
      */
     virtual void registerExistingSystematics(const std::vector<std::string> &systConfig,
                                              const std::vector<std::string> &columnList) = 0;
+
+    /**
+     * @brief Make a list of systematic variations for a branch
+     * @param branchName Name of the branch
+     * @return Vector of systematic variation names
+     */
+    virtual std::vector<std::string> makeSystList(const std::string &branchName, IDataFrameProvider &dataManager) = 0;
 };
 
 #endif // ISYSTEMATICMANAGER_H_INCLUDED 

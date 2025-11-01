@@ -165,12 +165,12 @@ public:
    */
   std::string configMap(std::string key);
 
-  /**
-   * @brief Get a correction object by key.
-   * @param key Correction key
-   * @return Correction reference
-   */
-  correction::Correction::Ref correctionMap(std::string key);
+  ///**
+  // * @brief Get a correction object by key.
+  // * @param key Correction key
+  // * @return Correction reference
+  // */
+  //correction::Correction::Ref correctionMap(std::string key);
 
 
   /**
@@ -221,10 +221,10 @@ private:
    * @brief Map of plugin role names to pluggable manager instances.
    */
   std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
-  /**
-   * @brief Initialize the analyzer with the provided dependencies
-   */
-  void initialize();
+  ///**
+  // * @brief Initialize the analyzer with the provided dependencies
+  // */
+  //void initialize();
   /**
    * @brief Wire up plugin manager pointers to core managers
    */

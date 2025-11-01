@@ -4,7 +4,9 @@
 #include <ROOT/RDataFrame.hxx>
 #include <string>
 #include <vector>
-#include <api/ISystematicManager.h>
+
+
+class ISystematicManager;
 
 /**
  * @brief Interface for dataframe providers to enable dependency injection
@@ -28,6 +30,8 @@ public:
      */
     virtual void setDataFrame(const ROOT::RDF::RNode &node) = 0;
     
+    // TODO: Why are these defined here? Shouldn't they be defined in the final classes?
+
     /**
      * @brief Define a new variable in the dataframe
      * @tparam F Callable type for the variable definition

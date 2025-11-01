@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <api/IDataFrameProvider.h>
 #include <api/ISystematicManager.h>
 
 /**
@@ -54,12 +55,21 @@ public:
   void registerExistingSystematics(const std::vector<std::string> &systConfig,
                                    const std::vector<std::string> &columnList);
 
+  /**
+   * @brief Make a list of systematic variations for a branch
+   * @param branchName Name of the branch
+   * @return Vector of systematic variation names
+   */
+  std::vector<std::string> makeSystList(const std::string &branchName, IDataFrameProvider &dataManager);
+
 private:
   std::set<std::string> systematics_m;
   std::unordered_map<std::string, std::set<std::string>>
       systematicToVariableMap_m;
   std::unordered_map<std::string, std::set<std::string>>
       variableToSystematicMap_m;
+  bool systListDefined_m = false;
+  std::vector<std::string> systList_m;
 };
 
 #endif // SYSTEMATICMANAGER_H_INCLUDED

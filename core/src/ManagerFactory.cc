@@ -12,7 +12,7 @@
 REGISTER_MANAGER_TYPE(BDTManager, IConfigurationProvider)
 REGISTER_MANAGER_TYPE(CorrectionManager, IConfigurationProvider)
 REGISTER_MANAGER_TYPE(TriggerManager, IConfigurationProvider)
-REGISTER_MANAGER_TYPE(NDHistogramManager, IConfigurationProvider)
+//REGISTER_MANAGER_TYPE(NDHistogramManager, IConfigurationProvider)
 
 //std::unique_ptr<IBDTManager> ManagerFactory::createBDTManager(
 //    IConfigurationProvider& configProvider) {

@@ -218,6 +218,61 @@ ROOT::VecOps::RVec<T> addToVector(ROOT::VecOps::RVec<T> vec, T newVal) {
   return (vec);
 }
 
+/**
+ * @brief Flattens a mix of scalar and vector arguments into a single contiguous RVec<Double_t>.
+ * Scalars are broadcast to match the length of the longest vector among the arguments.
+ *
+ * @tparam Args Types of the arguments (scalar or vector-like)
+ * @param args Arguments to flatten
+ * @return RVec<Double_t> containing the flattened values
+ */
+template <typename... Args>
+ROOT::VecOps::RVec<Double_t> FlattenRVec(const Args &... args) {
+  using ROOT::VecOps::RVec;
+  std::size_t nFills = 1U;
+  auto updateSize = [&](auto const &arg) {
+    if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
+      // scalar
+    } else {
+      nFills = std::max<std::size_t>(nFills, arg.size());
+    }
+  };
+  (updateSize(args), ...);
+  const std::size_t stride = sizeof...(Args);
+  RVec<Double_t> out;
+  out.reserve(nFills * stride);
+  for (std::size_t i = 0; i < nFills; ++i) {
+    auto pushVal = [&](auto const &arg) {
+      if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
+        out.emplace_back(static_cast<Double_t>(arg));
+      } else {
+        const auto idx = (i < arg.size()) ? i : arg.size() - 1;
+        out.emplace_back(static_cast<Double_t>(arg[idx]));
+      }
+    };
+    (pushVal(args), ...);
+  }
+  return out;
+}
+
+/**
+ * @brief Flattens a mix of scalar and vector arguments into a single contiguous RVec<T>.
+ * Scalars are broadcast to match the length of the longest vector among the arguments.
+ * The result is cast to the requested type T.
+ *
+ * @tparam T Output type for the RVec
+ * @tparam Args Types of the arguments (scalar or vector-like)
+ * @param args Arguments to flatten
+ * @return RVec<T> containing the flattened and casted values
+ */
+template <typename T, typename... Args>
+ROOT::VecOps::RVec<T> FlattenRVecCast(const Args &... args) {
+  auto doubles = FlattenRVec(args...);
+  ROOT::VecOps::RVec<T> out(doubles.size());
+  for (size_t i = 0; i < doubles.size(); ++i) out[i] = static_cast<T>(doubles[i]);
+  return out;
+}
+
 // =========================
 // Logical Operations
 // =========================

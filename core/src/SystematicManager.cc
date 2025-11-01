@@ -3,6 +3,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <iostream>
+#include <api/IDataFrameProvider.h>
 
 /**
  * @brief Register a systematic and its affected variables
@@ -74,3 +76,48 @@ void SystematicManager::registerExistingSystematics(
     }
   }
 }
+
+
+/**
+ * @brief Make a list of systematic variations and store them in a branch and its systematic variations
+ * @param branchName Name of the branch
+ * @return Vector of systematic variation names
+ */
+ std::vector<std::string>
+ SystematicManager::makeSystList(const std::string &branchName, IDataFrameProvider &dataManager) {
+ 
+   if(systListDefined_m) {
+     return systList_m;
+   }
+ 
+   std::vector<std::string> systList = {"Nominal"};
+   int var = 0;
+   std::cout << "Defining nominal branch: " << branchName << std::endl;
+   dataManager.DefinePerSample(branchName,
+                     [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
+                       return var;
+                     });
+   
+   for (const auto &syst : getSystematics()) {
+     std::cout << "Defining systematic: " << syst << std::endl;
+     systList.push_back(syst + "Up");
+     systList.push_back(syst + "Down");
+     var++;
+     dataManager.DefinePerSample(
+         branchName + "_" + syst + "Up",
+         [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
+           return var;
+         });
+     var++;
+     dataManager.DefinePerSample(
+         branchName + "_" + syst + "Down",
+         [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
+           return var;
+         });
+   }
+ 
+   systListDefined_m = true;
+   systList_m = systList;
+ 
+   return systList;
+ }
