@@ -1,9 +1,8 @@
 #ifndef NDHISTOGRAMMANAGER_H_INCLUDED
 #define NDHISTOGRAMMANAGER_H_INCLUDED
 
-#include <api/IConfigurationProvider.h>
-#include <api/IDataFrameProvider.h>
 #include <api/IPluggableManager.h>
+#include <api/ManagerContext.h>
 #include <plots.h>
 #include <string>
 #include <vector>
@@ -86,14 +85,10 @@ public:
     return "NDHistogramManager";
   }
 
-  void setConfigManager(IConfigurationProvider* configManager) override {
-    configManager_m = configManager;
-  }
-  void setDataManager(IDataFrameProvider* dataManager) override {
-    dataManager_m = dataManager;
-  }
-  void setSystematicManager(ISystematicManager* systematicManager) override {
-    systematicManager_m = systematicManager;
+  void setContext(ManagerContext& ctx) override {
+    configManager_m = &ctx.config;
+    dataManager_m = &ctx.data;
+    systematicManager_m = &ctx.systematics;
   }
 
   void setupFromConfigFile() override;
@@ -103,9 +98,9 @@ private:
    * @brief Vector of histogram result pointers.
    */
   std::vector<ROOT::RDF::RResultPtr<THnSparseF>> histos_m;
-  IConfigurationProvider* configManager_m;
-  IDataFrameProvider* dataManager_m;
-  ISystematicManager* systematicManager_m;
+  IConfigurationProvider* configManager_m = nullptr;
+  IDataFrameProvider* dataManager_m = nullptr;
+  ISystematicManager* systematicManager_m = nullptr;
 };
 
 #endif // NDHISTOGRAMMANAGER_H_INCLUDED 

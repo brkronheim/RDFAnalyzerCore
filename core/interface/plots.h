@@ -514,6 +514,17 @@ public:
         upperBound_m(upperBound), regions_m(regions) {}
 
   /**
+   * @brief Construct a new selectionInfo object with default regions.
+   * @param variable Variable to apply the selection on.
+   * @param bins Number of bins for the selection.
+   * @param lowerBound Lower bound for the selection.
+   * @param upperBound Upper bound for the selection.
+   */
+  selectionInfo(std::string variable, int bins, double lowerBound,
+                double upperBound)
+      : selectionInfo(std::move(variable), bins, lowerBound, upperBound, {"Default"}) {}
+
+  /**
    * @brief Get the variable name for the selection.
    * @return Reference to the variable string.
    */

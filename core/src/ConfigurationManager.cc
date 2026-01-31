@@ -1,12 +1,22 @@
 #include <ConfigurationManager.h>
-#include <fstream>
-#include <iostream>
+#include <TextConfigAdapter.h>
+#include <stdexcept>
 
 /**
  * @brief Construct a new ConfigurationManager object
  * @param configFile Path to the configuration file
  */
-ConfigurationManager::ConfigurationManager(const std::string &configFile) {
+ConfigurationManager::ConfigurationManager(const std::string &configFile)
+    : adapter_m(std::make_shared<TextConfigAdapter>()) {
+  processTopLevelConfig(configFile);
+}
+
+ConfigurationManager::ConfigurationManager(const std::string &configFile,
+                                           std::shared_ptr<IConfigAdapter> adapter)
+    : adapter_m(std::move(adapter)) {
+  if (!adapter_m) {
+    adapter_m = std::make_shared<TextConfigAdapter>();
+  }
   processTopLevelConfig(configFile);
 }
 
@@ -53,15 +63,6 @@ void ConfigurationManager::set(const std::string &key,
  * @param line Input line
  * @return Line with comments removed
  */
-std::string ConfigurationManager::stripComment(const std::string &line) const {
-  return line.substr(0, line.find("#"));
-}
-
-/**
- * @brief Trim whitespace from a string_view
- * @param s Input string_view
- * @return Trimmed string_view
- */
 std::string_view ConfigurationManager::trim(std::string_view s) const {
   size_t first = s.find_first_not_of(" \t\n\r");
   size_t last = s.find_last_not_of(" \t\n\r");
@@ -102,50 +103,13 @@ ConfigurationManager::splitString(std::string_view input,
  * @param stripComments Whether to strip comments
  * @return Pair of key and value strings
  */
-std::pair<std::string, std::string>
-ConfigurationManager::parsePair(const std::string &line,
-                                bool stripComments) const {
-  std::string processedLine = stripComments ? stripComment(line) : line;
-  auto splitIndex = processedLine.find("=");
-  if (splitIndex == std::string::npos) {
-    return {"", ""};
-  }
-  auto key = std::string(trim(processedLine.substr(0, splitIndex)));
-  auto value = std::string(trim(processedLine.substr(splitIndex + 1)));
-  return {key, value};
-}
-
-/**
- * @brief Parse an entry into a map of keys and values
- * @param entry Input entry string
- * @return Map of entry keys and values
- */
-std::unordered_map<std::string, std::string>
-ConfigurationManager::parseEntry(const std::string &entry) const {
-  std::unordered_map<std::string, std::string> entryKeys;
-  auto splitEntry = splitString(entry, " ");
-  for (auto &pair : splitEntry) {
-    auto [key, value] = parsePair(pair, false);
-    if (!key.empty() && !value.empty()) {
-      if (entryKeys.find(key) != entryKeys.end()) {
-        throw std::runtime_error("Error: Key " + key +
-                                 " already exists in entry. Do not use the "
-                                 "same key twice in the same entry.");
-      } else {
-        entryKeys[key] = value;
-      }
-    }
-  }
-  return entryKeys;
-}
-
 /**
  * @brief Process the top-level configuration file
  * @param configFile Path to the configuration file
  */
 void ConfigurationManager::processTopLevelConfig(
     const std::string &configFile) {
-  configMap_m = parsePairBasedConfig(configFile);
+  configMap_m = adapter_m->parsePairBasedConfig(configFile);
 }
 
 /**
@@ -156,28 +120,7 @@ void ConfigurationManager::processTopLevelConfig(
 std::unordered_map<std::string, std::string>
 ConfigurationManager::parsePairBasedConfig(
     const std::string &configFile) const {
-  std::unordered_map<std::string, std::string> configMap;
-  std::ifstream file(configFile);
-  if (file.is_open()) {
-    std::string line;
-    while (std::getline(file, line)) {
-      auto [key, value] = parsePair(line, true);
-      if (!key.empty()) {
-        if (configMap.find(key) != configMap.end()) {
-          throw std::runtime_error(
-              "Error: Key " + key + " already exists in config " + configFile +
-              ". Do not use the same key twice in the same config.");
-        } else {
-          configMap.emplace(key, value);
-        }
-      }
-    }
-    file.close();
-  } else {
-    throw std::runtime_error("Error: Configuration file " + configFile +
-                             " could not be opened.");
-  }
-  return configMap;
+  return adapter_m->parsePairBasedConfig(configFile);
 }
 
 /**
@@ -190,54 +133,7 @@ std::vector<std::unordered_map<std::string, std::string>>
 ConfigurationManager::parseMultiKeyConfig(
     const std::string &configFile,
     const std::vector<std::string> &requiredEntryKeys) const {
-  std::vector<std::unordered_map<std::string, std::string>> parsedConfig;
-
-  std::ifstream file(configFile);
-  if (!file.is_open()) {
-    throw std::runtime_error("Error: Configuration file " + configFile +
-                             " could not be opened.");
-    return parsedConfig;
-  }
-
-  std::string line;
-  while (std::getline(file, line)) {
-    // Skip empty lines and comments
-    line = trim(line.substr(0, line.find("#")));
-    if (line.empty()) {
-      continue;
-    }
-
-    // Parse semicolon-separated entries
-    std::unordered_map<std::string, std::string> entryKeys;
-    auto splitEntry = splitString(line, " ");
-    for (auto &pair : splitEntry) {
-      auto [key, value] = parsePair(pair, false);
-      if (!key.empty() && !value.empty()) {
-        if (entryKeys.find(key) != entryKeys.end()) {
-          throw std::runtime_error(
-              "Error: Key " + key + " already exists in entry " + line +
-              " in config " + configFile +
-              ". Do not use the same key twice in the same entry.");
-        } else {
-          entryKeys[key] = value;
-        }
-      }
-    }
-
-    bool allEntryKeysFound = true;
-    for (const auto &entryKey : requiredEntryKeys) {
-      if (entryKeys.find(entryKey) == entryKeys.end()) {
-        allEntryKeysFound = false;
-        break;
-      }
-    }
-    if (allEntryKeysFound) {
-      parsedConfig.push_back(entryKeys);
-    }
-  }
-
-  file.close();
-  return parsedConfig;
+  return adapter_m->parseMultiKeyConfig(configFile, requiredEntryKeys);
 }
 
 /**
@@ -247,22 +143,7 @@ ConfigurationManager::parseMultiKeyConfig(
  */
 std::vector<std::string>
 ConfigurationManager::parseVectorConfig(const std::string &configFile) const {
-  std::vector<std::string> configVector;
-  std::ifstream file(configFile);
-  if (file.is_open()) {
-    std::string line;
-    while (std::getline(file, line)) {
-      line = trim(line.substr(0, line.find("#")));
-      if (!line.empty()) {
-        configVector.push_back(line);
-      }
-    }
-    file.close();
-  } else {
-    throw std::runtime_error("Error: Configuration file " + configFile +
-                             " could not be opened.");
-  }
-  return configVector;
+  return adapter_m->parseVectorConfig(configFile);
 }
 
 /**

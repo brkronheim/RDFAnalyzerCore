@@ -1,5 +1,4 @@
 #include <api/IConfigurationProvider.h>
-#include <type_traits>
 #include <algorithm>
 #include <ROOT/RVec.hxx>
 #include <DataManager.h>
@@ -110,7 +109,7 @@ void DataManager::DefineVector(std::string name,
     // Use the original string expression for scalars
     std::string expr = "ROOT::VecOps::RVec<" + type + ">{";
     for (size_t i = 0; i < columns.size(); ++i) {
-      expr += columns[i];
+      expr += "static_cast<" + type + ">(" + columns[i] + ")";
       if (i + 1 < columns.size()) {
         expr += ", ";
       }

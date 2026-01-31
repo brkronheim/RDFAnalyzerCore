@@ -15,7 +15,8 @@
 #include <BDTManager.h>
 #include <unordered_map>
 #include <api/IPluggableManager.h>
-#include <ManagerRegistry.h>
+#include <DefaultLogger.h>
+#include <NullOutputSink.h>
 /**
  * @file testSystematicPropagation.cc
  * @brief Full stack integration tests for systematic propagation using Analyzer, DataManager, and SystematicManager.
@@ -59,13 +60,13 @@ protected:
     auto corrMgr = std::make_unique<CorrectionManager>(*configMgr);
 
     // Set up dummy NDHistogramManager
-    //auto ndHistMgr = ManagerRegistry::instance().create("NDHistogramManager", {configMgr.get()});
+    //auto ndHistMgr = std::make_unique<NDHistogramManager>(*configMgr);
     
     // Set up dummy TriggerManager
-    auto trigMgr = ManagerRegistry::instance().create("TriggerManager", {configMgr.get()});
+    auto trigMgr = std::make_unique<TriggerManager>(*configMgr);
     
     // Set up dummy BDTManager
-    auto bdtMgr = ManagerRegistry::instance().create("BDTManager", {configMgr.get()});
+    auto bdtMgr = std::make_unique<BDTManager>(*configMgr);
     
     std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
     plugins["bdt"] = std::move(bdtMgr);
@@ -74,11 +75,18 @@ protected:
     //plugins["ndhist"] = std::move(ndHistMgr);
 
     // Transfer ownership to Analyzer
+    auto logger = std::make_unique<DefaultLogger>();
+    auto skimSink = std::make_unique<NullOutputSink>();
+    auto metaSink = std::make_unique<NullOutputSink>();
+
     analyzer = std::make_unique<Analyzer>(
       std::move(configMgr),
       std::move(dataMgr),
       std::move(plugins),
-      std::move(sysMgr)
+      std::move(sysMgr),
+      std::move(logger),
+      std::move(skimSink),
+      std::move(metaSink)
     );
 
     std::cout << "Analyzer set up" << std::endl;
@@ -102,7 +110,7 @@ TEST_F(SystematicPropagationTest, DefineWithSystematicsPropagates) {
   ISystematicManager* sysManager = &analyzer->getSystematicManager();
   ASSERT_NE(sysManager, nullptr);
   // Use makeSystList to define systematic index variables for 'energy'
-  dataManager->makeSystList("energy", *sysManager);
+  sysManager->makeSystList("energy", *dataManager);
 
   auto df = dataManager->getDataFrame();
   auto columns = df.GetColumnNames();
@@ -121,7 +129,7 @@ TEST_F(SystematicPropagationTest, FilterWithSystematicsKeepsSystematicColumns) {
   ASSERT_NE(dataManager, nullptr);
   ISystematicManager* sysManager = &analyzer->getSystematicManager();
   ASSERT_NE(sysManager, nullptr);
-  dataManager->makeSystList("energy", *sysManager);
+  sysManager->makeSystList("energy", *dataManager);
   // Apply a filter on the systematic index variable (e.g., energy > -1)
   analyzer->Filter("energy_valid", [](float x) { return x > -1.0f; }, {"energy"});
   auto df = dataManager->getDataFrame();
@@ -139,7 +147,7 @@ TEST_F(SystematicPropagationTest, SystematicColumnValuesAreCorrect) {
   ASSERT_NE(dataManager, nullptr);
   ISystematicManager* sysManager = &analyzer->getSystematicManager();
   ASSERT_NE(sysManager, nullptr);
-  dataManager->makeSystList("Systematic", *sysManager);
+  sysManager->makeSystList("Systematic", *dataManager);
   auto df = dataManager->getDataFrame();
   auto up = df.Take<float>("Systematic_testSystUp");
   auto down = df.Take<float>("Systematic_testSystDown");

@@ -4,13 +4,8 @@
 #include <memory>
 #include <string>
 
-// Forward declarations
-class IBDTManager;
 class IConfigurationProvider;
-class ICorrectionManager;
 class IDataFrameProvider;
-class INDHistogramManager;
-class ITriggerManager;
 class ISystematicManager;
 
 /**

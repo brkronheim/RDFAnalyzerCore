@@ -8,7 +8,6 @@
 #include <TChain.h>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 /**
@@ -45,41 +44,6 @@ public:
    */
   TChain *getChain() const;
 
-  template <typename F>
-  void Define(std::string name, F f,
-              const std::vector<std::string> &columns, ISystematicManager &systematicManager) {
-    
-    std::vector<std::string> systList(systematicManager.getSystematics().begin(), systematicManager.getSystematics().end());
-    if(systList.size() > 0) {
-      for (const auto &syst : systList) {
-        Int_t nAffected = 0;
-        std::vector<std::string> newColumnsUp = {};
-        std::vector<std::string> newColumnsDown = {};
-        for (const auto &col : columns) {
-          if(systematicManager.getSystematicsForVariable(col).find(syst) != systematicManager.getSystematicsForVariable(col).end()) {
-            newColumnsUp.push_back(col + "_up");
-            newColumnsDown.push_back(col + "_down");
-            nAffected++;
-          } else {
-            newColumnsUp.push_back(col);
-            newColumnsDown.push_back(col);
-          }
-        }
-        if(nAffected > 0) {
-          df_m = df_m.Define(name + "_"+syst+"Up", f, newColumnsUp);
-          df_m = df_m.Define(name + "_"+syst+"Down", f, newColumnsDown);
-          systematicManager.registerSystematic(syst, {name});
-        } 
-      }
-    }
-    // define the nominal column
-    df_m = df_m.Define(name, f, columns);
-
-    std::cout << "All columns:" << std::endl;
-    for (const auto &col : df_m.GetColumnNames()) {
-      std::cout << col << std::endl;
-    }
-  }
 
   /**
    * @brief Define a vector variable in the dataframe. If all columns are scalars, creates a vector from them. If all columns are RVecs, concatenates and casts them to the target type. Mixed types are not supported and will throw an error at runtime. Uses a JIT lambda for type deduction and concatenation.
@@ -98,20 +62,12 @@ public:
    * @param f Filter function
    * @param columns Input columns
    */
-  template <typename F>
-  void Filter(F f, const std::vector<std::string> &columns = {}) {
-    df_m = df_m.Filter(f, columns);
-  }
 
   /**
    * @brief Define a per-sample variable in the dataframe
    * @param name Name of the variable
    * @param f Function to define the variable
    */
-  template <typename F> void DefinePerSample(std::string name, F f) {
-    std::cout << "Defining per-sample variable: " << name << std::endl;
-    df_m = df_m.DefinePerSample(name, f);
-  }
 
   /**
    * @brief Template function to define a constant value for all samples
@@ -133,11 +89,6 @@ public:
    * @param f Function to redefine the variable
    * @param columns Input columns
    */
-  template <typename F>
-  void Redefine(std::string name, F f,
-                const std::vector<std::string> &columns = {}) {
-    df_m = df_m.Redefine(name, f, columns);
-  }
 
   /**
    * @brief Register constant variables from configuration

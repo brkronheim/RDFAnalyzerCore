@@ -1,18 +1,7 @@
 #include <ManagerFactory.h>
-#include <BDTManager.h>
-#include <CorrectionManager.h>
-#include <TriggerManager.h>
-#include <ManagerRegistry.h>
 #include <ConfigurationManager.h>
 #include <DataManager.h>
 #include <SystematicManager.h>
-#include <NDHistogramManager.h>
-
-// Register managers with the plugin registry
-REGISTER_MANAGER_TYPE(BDTManager, IConfigurationProvider)
-REGISTER_MANAGER_TYPE(CorrectionManager, IConfigurationProvider)
-REGISTER_MANAGER_TYPE(TriggerManager, IConfigurationProvider)
-//REGISTER_MANAGER_TYPE(NDHistogramManager, IConfigurationProvider)
 
 //std::unique_ptr<IBDTManager> ManagerFactory::createBDTManager(
 //    IConfigurationProvider& configProvider) {

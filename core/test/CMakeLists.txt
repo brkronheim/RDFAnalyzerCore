@@ -47,10 +47,6 @@ add_test(NAME SystematicManagerTest COMMAND testSystematicManager)
 
 # Plugin tests
 
-add_executable(testManagerRegistry testManagerRegistry.cc)
-target_link_libraries(testManagerRegistry core)
-add_test(NAME ManagerRegistryTest COMMAND testManagerRegistry)
-
 add_executable(testNamedObjectManager testNamedObjectManager.cc)
 target_link_libraries(testNamedObjectManager core gtest gtest_main)
 add_test(NAME NamedObjectManagerTest COMMAND testNamedObjectManager)
@@ -63,9 +59,9 @@ add_executable(testBDTManager testBDTManager.cc)
 target_link_libraries(testBDTManager core corePlugins gtest gtest_main)
 add_test(NAME BDTManagerTest COMMAND testBDTManager)
 
-#add_executable(testNDHistogramManager testNDHistogramManager.cc)
-#target_link_libraries(testNDHistogramManager core corePlugins gtest gtest_main)
-#add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
+add_executable(testNDHistogramManager testNDHistogramManager.cc)
+target_link_libraries(testNDHistogramManager core corePlugins gtest gtest_main)
+add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
 
 add_executable(testTriggerManager testTriggerManager.cc)
 target_link_libraries(testTriggerManager core corePlugins gtest gtest_main)

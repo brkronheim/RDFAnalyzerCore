@@ -11,7 +11,6 @@
 #include <ConfigurationManager.h>
 #include <test_util.h>
 #include <TriggerManager.h>
-#include <ManagerRegistry.h>
 #include <ManagerFactory.h>
 #include <gtest/gtest.h>
 #include <stdexcept>
@@ -30,8 +29,7 @@ protected:
     ChangeToTestSourceDir();
     std::string configFile = "cfg/test_data_config.txt";
     configManager = ManagerFactory::createConfigurationManager(configFile);
-    auto tmgr = ManagerRegistry::instance().create("TriggerManager", {configManager.get()});
-    triggerManager = std::unique_ptr<TriggerManager>(dynamic_cast<TriggerManager*>(tmgr.release()));
+    triggerManager = std::make_unique<TriggerManager>(*configManager);
   }
   void TearDown() override {
     // Using smart pointers, so nothing to delete
@@ -46,8 +44,7 @@ protected:
 TEST_F(TriggerManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
     auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
-    auto tmgr = ManagerRegistry::instance().create("TriggerManager", {config.get()});
-    auto manager = std::unique_ptr<TriggerManager>(dynamic_cast<TriggerManager*>(tmgr.release()));
+    auto manager = std::make_unique<TriggerManager>(*config);
   });
 }
 
@@ -95,16 +92,11 @@ TEST_F(TriggerManagerTest, SampleGroupMapping) {
  */
 TEST_F(TriggerManagerTest, MemoryManagement) {
   auto localConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
-  auto tmgr1 = ManagerRegistry::instance().create("TriggerManager", {localConfig.get()});
-  auto localManager1 = std::unique_ptr<TriggerManager>(dynamic_cast<TriggerManager*>(tmgr1.release()));
-  auto tmgr2 = ManagerRegistry::instance().create("TriggerManager", {localConfig.get()});
-  auto localManager2 = std::unique_ptr<TriggerManager>(dynamic_cast<TriggerManager*>(tmgr2.release()));
-  auto tmgr3 = ManagerRegistry::instance().create("TriggerManager", {localConfig.get()});
-  auto localManager3 = std::unique_ptr<TriggerManager>(dynamic_cast<TriggerManager*>(tmgr3.release()));
-  auto tmgr4 = ManagerRegistry::instance().create("TriggerManager", {localConfig.get()});
-  auto localManager4 = std::unique_ptr<TriggerManager>(dynamic_cast<TriggerManager*>(tmgr4.release()));
-  auto tmgr5 = ManagerRegistry::instance().create("TriggerManager", {localConfig.get()});
-  auto localManager5 = std::unique_ptr<TriggerManager>(dynamic_cast<TriggerManager*>(tmgr5.release()));
+  auto localManager1 = std::make_unique<TriggerManager>(*localConfig);
+  auto localManager2 = std::make_unique<TriggerManager>(*localConfig);
+  auto localManager3 = std::make_unique<TriggerManager>(*localConfig);
+  auto localManager4 = std::make_unique<TriggerManager>(*localConfig);
+  auto localManager5 = std::make_unique<TriggerManager>(*localConfig);
   EXPECT_TRUE(localManager1 != nullptr);
   EXPECT_TRUE(localManager2 != nullptr);
   EXPECT_TRUE(localManager3 != nullptr);

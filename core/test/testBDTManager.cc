@@ -11,7 +11,9 @@
 #include <unistd.h>
 #include <vector>
 #include <ManagerFactory.h>
-#include <ManagerRegistry.h>
+#include <DefaultLogger.h>
+#include <NullOutputSink.h>
+#include <api/ManagerContext.h>
 #include <SystematicManager.h>
 #include <ROOT/TThreadExecutor.hxx>
 
@@ -24,31 +26,40 @@ protected:
     systematicManager = std::make_unique<SystematicManager>();
     dataManager = std::make_unique<DataManager>(2);
     
+    logger = std::make_unique<DefaultLogger>();
+    skimSink = std::make_unique<NullOutputSink>();
+    metaSink = std::make_unique<NullOutputSink>();
+
     // Create BDTManager and set up its dependencies
-    auto mgr = ManagerRegistry::instance().create("BDTManager", {configManager.get()});
-    bdtManager = std::unique_ptr<BDTManager>(dynamic_cast<BDTManager*>(mgr.release()));
-    
+    bdtManager = std::make_unique<BDTManager>(*configManager);
+
     // Set up the BDTManager with its dependencies
-    bdtManager->setConfigManager(configManager.get());
-    bdtManager->setDataManager(dataManager.get());
-    bdtManager->setSystematicManager(systematicManager.get());
+    ManagerContext ctx{*configManager, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+    bdtManager->setContext(ctx);
   }
   void TearDown() override {
     // Using smart pointers, so nothing to delete
     
   }
+
+  void setContextFor(DataManager& manager) {
+    ManagerContext ctx{*configManager, manager, *systematicManager, *logger, *skimSink, *metaSink};
+    bdtManager->setContext(ctx);
+  }
   std::unique_ptr<IConfigurationProvider> configManager;
   std::unique_ptr<BDTManager> bdtManager;
   std::unique_ptr<SystematicManager> systematicManager;
   std::unique_ptr<DataManager> dataManager;
+  std::unique_ptr<DefaultLogger> logger;
+  std::unique_ptr<NullOutputSink> skimSink;
+  std::unique_ptr<NullOutputSink> metaSink;
 };
 
 // Construction
 TEST_F(BDTManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
     auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
-    auto mgr = ManagerRegistry::instance().create("BDTManager", {config.get()});
-    auto manager = std::unique_ptr<BDTManager>(dynamic_cast<BDTManager*>(mgr.release()));
+    auto manager = std::make_unique<BDTManager>(*config);
   });
 }
 
@@ -199,7 +210,7 @@ TEST_F(BDTManagerTest, ThreadSafetyWithROOTImplicitMT) {
   
   // Create a new DataManager for this test
   auto testDataManager = std::make_unique<DataManager>(100);
-  bdtManager->setDataManager(testDataManager.get());
+  setContextFor(*testDataManager);
   
   testDataManager->Define("feature1", [](ULong64_t i) -> float { return i % 2 == 0 ? 0.0f : 1.0f; }, {"rdfentry_"}, *systematicManager);
   testDataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);

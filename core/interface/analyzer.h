@@ -29,6 +29,9 @@
 #include <TChain.h>
 #include <functions.h>
 #include <api/IPluggableManager.h>
+#include <api/ILogger.h>
+#include <api/IOutputSink.h>
+#include <api/IAnalysisService.h>
 
 /**
  * @class Analyzer
@@ -52,21 +55,15 @@ public:
   Analyzer(std::unique_ptr<IConfigurationProvider> configProvider,
            std::unique_ptr<IDataFrameProvider> dataFrameProvider,
            std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins,
-           std::unique_ptr<ISystematicManager> systematicManager);
-
-  /**
-   * @brief Construct a new Analyzer object with backward compatibility
-   *
-   * @param configFile File containing the configuration information for this analyzer
-   * @param pluginSpecs Map of plugin role names to (type, args) for instantiation
-   */
-  Analyzer(std::string configFile,
-           const std::unordered_map<std::string, std::pair<std::string, std::vector<void*>>>& pluginSpecs);
+           std::unique_ptr<ISystematicManager> systematicManager,
+           std::unique_ptr<ILogger> logger,
+           std::unique_ptr<IOutputSink> skimSink,
+           std::unique_ptr<IOutputSink> metaSink);
 
   /**
    * @brief Construct a new Analyzer object with a config file and optional plugins.
    *
-   * This constructor creates default configuration, data, and systematic managers using the provided config file.
+   * This constructor creates default configuration, data, systematic, logger, and output sinks.
    * Plugins can be optionally provided as a map; if omitted, no plugins are set.
    *
    * @param configFile Path to the configuration file.
@@ -218,9 +215,25 @@ private:
    */
   std::unique_ptr<ISystematicManager> systematicManager_m;
   /**
+   * @brief Unique pointer to the logger.
+   */
+  std::unique_ptr<ILogger> logger_m;
+  /**
+   * @brief Unique pointer to the skim output sink.
+   */
+  std::unique_ptr<IOutputSink> skimSink_m;
+  /**
+   * @brief Unique pointer to the metadata/hist output sink.
+   */
+  std::unique_ptr<IOutputSink> metaSink_m;
+  /**
    * @brief Map of plugin role names to pluggable manager instances.
    */
   std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
+  /**
+   * @brief Optional analysis services (internal only for now).
+   */
+  std::vector<std::unique_ptr<IAnalysisService>> services_m;
   ///**
   // * @brief Initialize the analyzer with the provided dependencies
   // */
@@ -229,6 +242,7 @@ private:
    * @brief Wire up plugin manager pointers to core managers
    */
   void wirePluginManagers();
+  void initializeServices(ManagerContext& ctx);
 };
 
 #endif // ANALYZER_H_INCLUDED

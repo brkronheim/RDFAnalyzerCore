@@ -14,7 +14,9 @@
 #include <vector>
 #include <plots.h>
 #include <SystematicManager.h>
-#include <ManagerRegistry.h>
+#include <DefaultLogger.h>
+#include <NullOutputSink.h>
+#include <api/ManagerContext.h>
 
 class NDHistogramManagerTest : public ::testing::Test {
 protected:
@@ -25,21 +27,15 @@ protected:
     dataManager = ManagerFactory::createDataManager(*configManager);
     systematicManager = std::make_unique<SystematicManager>();
     
-    // Create manager via plugin system and cast to NDHistogramManager
-    auto pluginManager = ManagerRegistry::instance().create("NDHistogramManager", {configManager.get()});
-    ASSERT_NE(pluginManager, nullptr) << "Failed to create NDHistogramManager plugin";
-    
-    auto* histManager = dynamic_cast<NDHistogramManager*>(pluginManager.get());
-    ASSERT_NE(histManager, nullptr) << "Failed to cast plugin to NDHistogramManager";
-    
+    logger = std::make_unique<DefaultLogger>();
+    skimSink = std::make_unique<NullOutputSink>();
+    metaSink = std::make_unique<NullOutputSink>();
+
+    histogramManager = std::make_unique<NDHistogramManager>(*configManager);
+
     // Set up the NDHistogramManager with its dependencies
-    histManager->setConfigManager(configManager.get());
-    histManager->setDataManager(dataManager.get());
-    histManager->setSystematicManager(systematicManager.get());
-    
-    // Transfer ownership to our unique_ptr
-    pluginManager.release();
-    histogramManager.reset(histManager);
+    ManagerContext ctx{*configManager, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+    histogramManager->setContext(ctx);
   }
 
   void TearDown() override {
@@ -50,15 +46,15 @@ protected:
   std::unique_ptr<IDataFrameProvider> dataManager;
   std::unique_ptr<NDHistogramManager> histogramManager;
   std::unique_ptr<SystematicManager> systematicManager;
+  std::unique_ptr<DefaultLogger> logger;
+  std::unique_ptr<NullOutputSink> skimSink;
+  std::unique_ptr<NullOutputSink> metaSink;
 };
 
 TEST_F(NDHistogramManagerTest, ConstructorCreatesValidManager) {
   auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
-  auto data = ManagerFactory::createDataManager(*config);
   EXPECT_NO_THROW({
-    auto pluginManager = ManagerRegistry::instance().create("NDHistogramManager", {config.get()});
-    ASSERT_NE(pluginManager, nullptr);
-    auto* manager = dynamic_cast<NDHistogramManager*>(pluginManager.get());
+    auto manager = std::make_unique<NDHistogramManager>(*config);
     ASSERT_NE(manager, nullptr);
   });
 }
@@ -220,7 +216,7 @@ TEST_F(NDHistogramManagerTest, CompleteWorkflow) {
   std::vector<selectionInfo> selection = {selectionInfo("workflow_sel1", 5, 0.0, 5.0)};
   std::vector<std::vector<std::string>> regionNames = {{"workflow_region1", "workflow_region2"}};
   // Only call makeSystList once and reuse the result
-  auto systAxis = static_cast<DataManager*>(dataManager.get())->makeSystList("Systematic", *systematicManager);
+  auto systAxis = systematicManager->makeSystList("Systematic", *static_cast<DataManager*>(dataManager.get()));
   regionNames.push_back(systAxis);
   std::string suffix = "_workflow";
   histogramManager->bookND(infos, selection, suffix, regionNames);
@@ -263,11 +259,11 @@ TEST_F(NDHistogramManagerTest, ErrorHandling) {
 }
 
 TEST_F(NDHistogramManagerTest, MemoryManagement) {
-  auto pluginManager = ManagerRegistry::instance().create("NDHistogramManager", {configManager.get()});
-  ASSERT_NE(pluginManager, nullptr);
-  
-  auto* localManager = dynamic_cast<NDHistogramManager*>(pluginManager.get());
+  auto localManager = std::make_unique<NDHistogramManager>(*configManager);
   ASSERT_NE(localManager, nullptr);
+
+  ManagerContext ctx{*configManager, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+  localManager->setContext(ctx);
   
   dataManager->Define("memory_test_sel1", []() { return 1.0; }, {}, *systematicManager);
   dataManager->Define("var1", []() { return 1.0; }, {}, *systematicManager);
@@ -277,7 +273,6 @@ TEST_F(NDHistogramManagerTest, MemoryManagement) {
   std::vector<std::vector<std::string>> regionNames = {{"memory_test_region1", "memory_test_region2"}};
   std::string suffix = "_memory_test";
   EXPECT_NO_THROW(localManager->bookND(infos, selection, suffix, regionNames));
-  pluginManager = nullptr;
   EXPECT_TRUE(true);
 }
 

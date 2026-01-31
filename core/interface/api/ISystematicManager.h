@@ -4,7 +4,7 @@
 #include <set>
 #include <string>
 #include <vector>
-#include <api/IDataFrameProvider.h>
+class IDataFrameProvider;
 
 /**
  * @brief Interface for systematic managers to enable dependency injection

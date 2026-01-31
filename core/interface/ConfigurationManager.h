@@ -2,6 +2,8 @@
 #define CONFIGURATIONMANAGER_H_INCLUDED
 
 #include <api/IConfigurationProvider.h>
+#include <api/IConfigAdapter.h>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -22,6 +24,8 @@ public:
    * Tested in test/testConfigurationManager.cc
    */
   ConfigurationManager(const std::string &configFile);
+  ConfigurationManager(const std::string &configFile,
+                       std::shared_ptr<IConfigAdapter> adapter);
 
   /**
    * @brief Get the configuration map
@@ -106,43 +110,9 @@ public:
 
 private:
   std::unordered_map<std::string, std::string> configMap_m;
+  std::shared_ptr<IConfigAdapter> adapter_m;
 
-  /**
-   * @brief Strip comments from a string
-   * @param line Input string
-   * @return String with comments stripped
-   */
-  std::string stripComment(const std::string &line) const;
-
-  /**
-   * @brief Trim whitespace from a string
-   * @param s Input string
-   * @return String with whitespace trimmed
-   */
   std::string_view trim(std::string_view s) const;
-
-  /**
-   * @brief Parse a pair from a string
-   * @param line Input string
-   * @param stripComments Whether to strip comments
-   * @return Pair of strings
-   */
-  std::pair<std::string, std::string> parsePair(const std::string &line,
-                                                bool stripComments) const;
-
-  /**
-   * @brief Parse an entry from a string
-   * @param entry Input string
-   * @return Map of configuration values
-   */
-  std::unordered_map<std::string, std::string>
-  parseEntry(const std::string &entry) const;
-
-  /**
-   * @brief Process the top-level configuration
-   * @param configFile Path to the configuration file
-   *
-   */
   void processTopLevelConfig(const std::string &configFile);
 };
 

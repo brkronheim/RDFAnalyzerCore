@@ -2,9 +2,7 @@
 #define NAMEDOBJECTMANAGER_H_INCLUDED
 
 #include <api/IPluggableManager.h>
-#include <api/IConfigurationProvider.h>
-#include <api/IDataFrameProvider.h>
-#include <api/ISystematicManager.h>
+#include <api/ManagerContext.h>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -48,14 +46,10 @@ public:
     return "NamedObjectManager";
   }
 
-  void setConfigManager(IConfigurationProvider* configManager) override {
-    configManager_m = configManager;
-  }
-  void setDataManager(IDataFrameProvider* dataManager) override {
-    dataManager_m = dataManager;
-  }
-  void setSystematicManager(ISystematicManager* systematicManager) override {
-    systematicManager_m = systematicManager;
+  void setContext(ManagerContext& ctx) override {
+    configManager_m = &ctx.config;
+    dataManager_m = &ctx.data;
+    systematicManager_m = &ctx.systematics;
   }
 
   void setupFromConfigFile() override {
@@ -65,9 +59,9 @@ public:
 protected:
   std::unordered_map<std::string, ObjectType> objects_m;
   std::unordered_map<std::string, std::vector<std::string>> features_m;
-  IConfigurationProvider* configManager_m;
-  IDataFrameProvider* dataManager_m;
-  ISystematicManager* systematicManager_m;
+  IConfigurationProvider* configManager_m = nullptr;
+  IDataFrameProvider* dataManager_m = nullptr;
+  ISystematicManager* systematicManager_m = nullptr;
 };
 
 #endif // NAMEDOBJECTMANAGER_H_INCLUDED 

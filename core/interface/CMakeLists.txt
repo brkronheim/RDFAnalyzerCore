@@ -1,4 +1,8 @@
 set(HEADERS
     IPluggableManager.h
-    ManagerRegistry.h
+    DefaultLogger.h
+    NullOutputSink.h
+    RootOutputSink.h
+    TextConfigAdapter.h
+    CounterService.h
 ) 

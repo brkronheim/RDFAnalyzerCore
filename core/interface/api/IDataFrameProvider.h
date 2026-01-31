@@ -6,7 +6,7 @@
 #include <vector>
 
 
-class ISystematicManager;
+#include <api/ISystematicManager.h>
 
 /**
  * @brief Interface for dataframe providers to enable dependency injection
@@ -43,6 +43,31 @@ public:
     template <typename F>
     void Define(std::string name, F f, const std::vector<std::string> &columns, ISystematicManager &systematicManager) {
         auto df = getDataFrame();
+
+        std::vector<std::string> systList(systematicManager.getSystematics().begin(), systematicManager.getSystematics().end());
+        if (!systList.empty()) {
+            for (const auto &syst : systList) {
+                int nAffected = 0;
+                std::vector<std::string> newColumnsUp;
+                std::vector<std::string> newColumnsDown;
+                for (const auto &col : columns) {
+                    if (systematicManager.getSystematicsForVariable(col).find(syst) != systematicManager.getSystematicsForVariable(col).end()) {
+                        newColumnsUp.push_back(col + "_up");
+                        newColumnsDown.push_back(col + "_down");
+                        nAffected++;
+                    } else {
+                        newColumnsUp.push_back(col);
+                        newColumnsDown.push_back(col);
+                    }
+                }
+                if (nAffected > 0) {
+                    df = df.Define(name + "_" + syst + "Up", f, newColumnsUp);
+                    df = df.Define(name + "_" + syst + "Down", f, newColumnsDown);
+                    systematicManager.registerSystematic(syst, {name});
+                }
+            }
+        }
+
         df = df.Define(name, f, columns);
         setDataFrame(df);
     }

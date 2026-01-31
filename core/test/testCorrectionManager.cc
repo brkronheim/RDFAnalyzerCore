@@ -25,7 +25,9 @@
 #include <unistd.h>
 #include <vector>
 #include <ManagerFactory.h>
-#include <ManagerRegistry.h>
+#include <DefaultLogger.h>
+#include <NullOutputSink.h>
+#include <api/ManagerContext.h>
 #include <ROOT/TThreadExecutor.hxx>
 #include <ROOT/RDF/RCutFlowReport.hxx>
 #include <ROOT/RDF/RInterface.hxx>
@@ -62,15 +64,16 @@ protected:
     configManager = ManagerFactory::createConfigurationManager(configFile);
     systematicManager = std::make_unique<SystematicManager>();
     dataManager = std::make_unique<DataManager>(2);
-    
+    logger = std::make_unique<DefaultLogger>();
+    skimSink = std::make_unique<NullOutputSink>();
+    metaSink = std::make_unique<NullOutputSink>();
+
     // Create CorrectionManager and set up its dependencies
-    auto mgr = ManagerRegistry::instance().create("CorrectionManager", {configManager.get()});
-    correctionManager = std::unique_ptr<CorrectionManager>(dynamic_cast<CorrectionManager*>(mgr.release()));
-    
+    correctionManager = std::make_unique<CorrectionManager>(*configManager);
+
     // Set up the CorrectionManager with its dependencies
-    correctionManager->setConfigManager(configManager.get());
-    correctionManager->setDataManager(dataManager.get());
-    correctionManager->setSystematicManager(systematicManager.get());
+    ManagerContext ctx{*configManager, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+    correctionManager->setContext(ctx);
   }
 
   /**
@@ -82,10 +85,18 @@ protected:
     // Using smart pointers, so nothing to delete
   }
 
+  void setContextFor(DataManager& manager) {
+    ManagerContext ctx{*configManager, manager, *systematicManager, *logger, *skimSink, *metaSink};
+    correctionManager->setContext(ctx);
+  }
+
   std::unique_ptr<IConfigurationProvider> configManager; ///< The configuration manager instance for testing
   std::unique_ptr<CorrectionManager> correctionManager; ///< The correction manager instance for testing
   std::unique_ptr<SystematicManager> systematicManager;
   std::unique_ptr<DataManager> dataManager; ///< The data manager instance for testing
+  std::unique_ptr<DefaultLogger> logger;
+  std::unique_ptr<NullOutputSink> skimSink;
+  std::unique_ptr<NullOutputSink> metaSink;
 };
 
 // ============================================================================
@@ -172,7 +183,7 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionWithDifferentStringArguments) {
 TEST_F(CorrectionManagerTest, ApplyCorrectionWithBoundaryValues) {
   // Create a new DataManager for this test with 4 entries
   auto testDataManager = std::make_unique<DataManager>(4);
-  correctionManager->setDataManager(testDataManager.get());
+  setContextFor(*testDataManager);
   
   testDataManager->Define("float_arg",
                 [](ULong64_t i) -> double {
@@ -191,7 +202,7 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionWithBoundaryValues) {
   EXPECT_NEAR(result->at(3), 0.0, 1e-6); // 3.0 is overflow (>=2.0)
   
   // Restore the original data manager
-  correctionManager->setDataManager(dataManager.get());
+  setContextFor(*dataManager);
 }
 
 /**
@@ -203,7 +214,7 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionWithBoundaryValues) {
 TEST_F(CorrectionManagerTest, ApplyCorrectionWithEmptyDataframe) {
   // Create a new DataManager for this test with 0 entries
   auto testDataManager = std::make_unique<DataManager>(0);
-  correctionManager->setDataManager(testDataManager.get());
+  setContextFor(*testDataManager);
   
   // Define required columns even for empty dataframe
   testDataManager->Define("float_arg", []() -> double { return 0.5; }, {}, *systematicManager);
@@ -254,7 +265,7 @@ TEST_F(CorrectionManagerTest, ConfigurationFileIntegration) {
 TEST_F(CorrectionManagerTest, ExtremeNumericValues) {
   // Create a new DataManager for this test
   auto testDataManager = std::make_unique<DataManager>(4);
-  correctionManager->setDataManager(testDataManager.get());
+  setContextFor(*testDataManager);
   
   testDataManager->Define("float_arg",
                 [](ULong64_t i) -> double {
@@ -279,7 +290,7 @@ TEST_F(CorrectionManagerTest, ExtremeNumericValues) {
   }
   
   // Restore the original data manager
-  correctionManager->setDataManager(dataManager.get());
+  setContextFor(*dataManager);
 }
 
 /**
@@ -291,7 +302,7 @@ TEST_F(CorrectionManagerTest, ExtremeNumericValues) {
 TEST_F(CorrectionManagerTest, NaNAndInfinityHandling) {
   // Create a new DataManager for this test
   auto testDataManager = std::make_unique<DataManager>(3);
-  correctionManager->setDataManager(testDataManager.get());
+  setContextFor(*testDataManager);
   
   testDataManager->Define("float_arg",
                 [](ULong64_t i) -> double {
@@ -313,7 +324,7 @@ TEST_F(CorrectionManagerTest, NaNAndInfinityHandling) {
   }
   
   // Restore the original data manager
-  correctionManager->setDataManager(dataManager.get());
+  setContextFor(*dataManager);
 }
 
 /**
@@ -325,7 +336,7 @@ TEST_F(CorrectionManagerTest, NaNAndInfinityHandling) {
 TEST_F(CorrectionManagerTest, ZeroAndNegativeValues) {
   // Create a new DataManager for this test
   auto testDataManager = std::make_unique<DataManager>(4);
-  correctionManager->setDataManager(testDataManager.get());
+  setContextFor(*testDataManager);
   
   testDataManager->Define("float_arg",
                 [](ULong64_t i) -> double { return i == 0   ? 0.0 : (i == 1 ? -1.0 : (i == 2 ? -2.0 : 1.0)); },
@@ -342,7 +353,7 @@ TEST_F(CorrectionManagerTest, ZeroAndNegativeValues) {
   EXPECT_NEAR(result->at(3), 0.2, 1e-6); // 1.0 in second bin
   
   // Restore the original data manager
-  correctionManager->setDataManager(dataManager.get());
+  setContextFor(*dataManager);
 }
 
 // ============================================================================
@@ -405,7 +416,7 @@ TEST_F(CorrectionManagerTest, MultipleCorrections) {
   });
   // Apply both corrections to a DataManager
   auto dataManager = std::make_unique<DataManager>(2);
-  correctionManager->setDataManager(dataManager.get());
+  setContextFor(*dataManager);
   dataManager->Define("float_arg", [](ULong64_t i) -> double { return i == 0 ? 0.5 : 1.5; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("int_arg", [](ULong64_t i) -> double { return i == 0 ? 1 : 2; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("float_arg2", [](ULong64_t i) -> double { return i == 0 ? 1.0 : 3.0; }, {"rdfentry_"}, *systematicManager);
@@ -427,7 +438,7 @@ TEST_F(CorrectionManagerTest, ThreadSafetyWithROOTImplicitMT) {
   int nThreads = ROOT::GetThreadPoolSize();
   EXPECT_GT(nThreads, 1) << "ROOT ImplicitMT is enabled but only one thread is available.";
   auto dataManager = std::make_unique<DataManager>(100);
-  correctionManager->setDataManager(dataManager.get());
+  setContextFor(*dataManager);
   dataManager->Define("float_arg", [](ULong64_t i) -> double { return i % 2 == 0 ? 0.5 : 1.5; }, {"rdfentry_"}, *systematicManager);
   dataManager->Define("int_arg", [](ULong64_t i) -> double { return i % 2 == 0 ? 1 : 2; }, {"rdfentry_"}, *systematicManager);
   std::vector<std::string> stringArguments = {"A"};
