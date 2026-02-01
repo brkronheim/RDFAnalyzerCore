@@ -4,6 +4,7 @@
 #include <DataManager.h>
 #include <TChain.h>
 #include <util.h>
+#include <filesystem>
 
 #include <ROOT/RDFHelpers.hxx>
 
@@ -173,8 +174,14 @@ void DataManager::registerAliases(const IConfigurationProvider &configProvider, 
       configProvider.get(aliasConfigKey) , {"existingName", "newName"});
   const auto columnNames = df_m.GetColumnNames();
   for (const auto &entryKeys : aliasConfig) {
-    std::cout << "Aliasing " << entryKeys.at("existingName") << " to " << entryKeys.at("newName") << std::endl;
-    df_m = df_m.Alias(entryKeys.at("newName"), entryKeys.at("existingName"));
+    const auto& existing = entryKeys.at("existingName");
+    const auto& alias = entryKeys.at("newName");
+    if (std::find(columnNames.begin(), columnNames.end(), existing) == columnNames.end()) {
+      std::cout << "Alias skipped: missing column " << existing << std::endl;
+      continue;
+    }
+    std::cout << "Aliasing " << existing << " to " << alias << std::endl;
+    df_m = df_m.Alias(alias, existing);
   }
 }
 
@@ -356,12 +363,25 @@ void DataManager::finalizeSetup(const IConfigurationProvider &configProvider,
                                 const std::string& aliasConfigKey,
                                 const std::string& optionalBranchesConfigKey) {
   std::cout << "Finalizing setup" << std::endl;
-  std::cout << "Registering constants" << std::endl;
-  registerConstants(configProvider, floatConfigKey, intConfigKey);
-  std::cout << "Registering aliases" << std::endl;
-  registerAliases(configProvider, aliasConfigKey);
-  std::cout << "Registering optional branches" << std::endl;
-  registerOptionalBranches(configProvider, optionalBranchesConfigKey);
+  const auto floatConfig = configProvider.get(floatConfigKey);
+  const auto intConfig = configProvider.get(intConfigKey);
+  if ((!floatConfig.empty() && std::filesystem::exists(floatConfig)) ||
+      (!intConfig.empty() && std::filesystem::exists(intConfig))) {
+    std::cout << "Registering constants" << std::endl;
+    registerConstants(configProvider, floatConfigKey, intConfigKey);
+  }
+
+  const auto aliasConfig = configProvider.get(aliasConfigKey);
+  if (!aliasConfig.empty() && std::filesystem::exists(aliasConfig)) {
+    std::cout << "Registering aliases" << std::endl;
+    registerAliases(configProvider, aliasConfigKey);
+  }
+
+  const auto optionalBranchesConfig = configProvider.get(optionalBranchesConfigKey);
+  if (!optionalBranchesConfig.empty() && std::filesystem::exists(optionalBranchesConfig)) {
+    std::cout << "Registering optional branches" << std::endl;
+    registerOptionalBranches(configProvider, optionalBranchesConfigKey);
+  }
 }
 
 // Add virtual destructor for DataManager

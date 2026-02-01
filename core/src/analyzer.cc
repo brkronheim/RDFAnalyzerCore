@@ -32,6 +32,9 @@ Analyzer::Analyzer(
         throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
     }
     verbosityLevel_m = 1;
+    if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
+        dataManager->finalizeSetup(*configProvider_m);
+    }
     wirePluginManagers();
     //initialize();
 }
@@ -59,6 +62,9 @@ Analyzer::Analyzer(std::string configFile,
         throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
     }
     verbosityLevel_m = 1;
+    if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
+        dataManager->finalizeSetup(*configProvider_m);
+    }
     wirePluginManagers();
     //initialize();
 }
@@ -110,22 +116,37 @@ Analyzer *Analyzer::save() {
     std::string saveFile;
     std::string saveTree;
 
-    if (configProvider_m->getConfigMap().find("saveConfig") != configProvider_m->getConfigMap().end()) {
-        saveConfig = configProvider_m->getConfigMap().at("saveConfig");
+    std::vector<std::string> missingKeys;
+    const auto& configMap = configProvider_m->getConfigMap();
+
+    if (configMap.find("saveConfig") != configMap.end()) {
+        saveConfig = configMap.at("saveConfig");
     } else {
-        throw std::runtime_error("Error: No saveConfig provided. Please include one in the config file.");
+        missingKeys.emplace_back("saveConfig");
     }
 
-    if (configProvider_m->getConfigMap().find("saveFile") != configProvider_m->getConfigMap().end()) {
-        saveFile = configProvider_m->getConfigMap().at("saveFile");
+    if (configMap.find("saveFile") != configMap.end()) {
+        saveFile = configMap.at("saveFile");
     } else {
-        throw std::runtime_error("Error: No saveFile provided. Please include one in the config file.");
+        missingKeys.emplace_back("saveFile");
     }
 
-    if (configProvider_m->getConfigMap().find("saveTree") != configProvider_m->getConfigMap().end()) {
-        saveTree = configProvider_m->getConfigMap().at("saveTree");
+    if (configMap.find("saveTree") != configMap.end()) {
+        saveTree = configMap.at("saveTree");
     } else {
-        throw std::runtime_error("Error: No saveTree provided. Please include one in the config file.");
+        missingKeys.emplace_back("saveTree");
+    }
+
+    if (!missingKeys.empty()) {
+        std::string msg = "Error: Missing required config keys: ";
+        for (size_t i = 0; i < missingKeys.size(); ++i) {
+            msg += missingKeys[i];
+            if (i + 1 < missingKeys.size()) {
+                msg += ", ";
+            }
+        }
+        msg += ". Please include them in the config file.";
+        throw std::runtime_error(msg);
     }
 
     std::vector<std::string> saveVectorInit = configProvider_m->parseVectorConfig(saveConfig);

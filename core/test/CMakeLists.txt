@@ -37,6 +37,10 @@ add_executable(testSystematicManager testSystematicManager.cc)
 target_link_libraries(testSystematicManager core gtest gtest_main)
 add_test(NAME SystematicManagerTest COMMAND testSystematicManager)
 
+add_executable(testCounterService testCounterService.cc)
+target_link_libraries(testCounterService core gtest gtest_main)
+add_test(NAME CounterServiceTest COMMAND testCounterService)
+
 #add_executable(testDataManager testDataManager.cc)
 #target_link_libraries(testDataManager core corePlugins gtest gtest_main)
 #add_test(NAME DataManagerTest COMMAND testDataManager)

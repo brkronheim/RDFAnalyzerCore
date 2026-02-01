@@ -98,6 +98,13 @@ public:
   template <typename F>
   Analyzer *Filter(std::string name, F f,
                   const std::vector<std::string> &columns = {}) {
+    if (!preFilterNotified_m) {
+      auto df = dataFrameProvider_m->getDataFrame();
+      for (auto& service : services_m) {
+        service->onPreFilter(df);
+      }
+      preFilterNotified_m = true;
+    }
     name = "pass_" + name;
     Define(name, f, columns);
     dataFrameProvider_m->Filter(passCut, {name});
@@ -234,6 +241,7 @@ private:
    * @brief Optional analysis services (internal only for now).
    */
   std::vector<std::unique_ptr<IAnalysisService>> services_m;
+  bool preFilterNotified_m = false;
   ///**
   // * @brief Initialize the analyzer with the provided dependencies
   // */

@@ -140,10 +140,22 @@ static int scanDirectory(TChain &chain, const std::string &directory,
  */
 static void setupROOTThreads(const IConfigurationProvider &configProvider) {
   int threads = -1;
-  if (configProvider.getConfigMap().find("threads") !=
-      configProvider.getConfigMap().end()) {
-    threads = std::stoi(configProvider.getConfigMap().at("threads"));
+  const auto &configMap = configProvider.getConfigMap();
+  auto it = configMap.find("threads");
+  if (it != configMap.end()) {
+    const std::string value = it->second;
+    if (value == "auto" || value == "max") {
+      threads = 0;
+    } else {
+      try {
+        threads = std::stoi(value);
+      } catch (const std::exception &) {
+        std::cout << "Invalid threads value '" << value << "', defaulting to auto" << std::endl;
+        threads = 0;
+      }
+    }
   }
+
   if (threads > 1) {
     ROOT::EnableImplicitMT(threads);
     std::cout << "Running with " << threads << " threads" << std::endl;

@@ -8,7 +8,7 @@ This branch is for active development and may be unstable. The repository provid
 - core: framework code (Analyzer, managers, interfaces, plugins, utilities).
 - analyses: analysis-specific code (kept in separate repos and cloned here).
 - runners: concrete applications that build and execute analyses.
-- python: helper scripts for job submission and orchestration.
+- core/python: helper scripts for job submission and orchestration.
 
 ## Installing
 Clone the repository:
@@ -23,6 +23,19 @@ source env.sh
 ```
 
 Build via the wrapper script:
+```
+source build.sh
+```
+
+## Adding Analyses (Philosophy)
+Analyses are developed in separate repositories and cloned into analyses/. The build automatically discovers and adds any subdirectory in analyses/ that contains a CMakeLists.txt, so users only need to clone their analysis repo into that folder and re-run the build.
+
+Example:
+```
+cd analyses
+git clone <your-analysis-repo> MyAnalysis
+```
+Then rebuild with:
 ```
 source build.sh
 ```
@@ -269,6 +282,71 @@ Typical configuration keys include:
 - metaFile: output file for metadata/histograms.
 - Input file and tree name settings (analysis-specific).
 
+## Counters and Generator-Weight Sums
+The built-in CounterService can log event counts and optional weight sums per sample. Enable it and configure the branches in your config file:
+
+Required:
+- enableCounters: set to 1/true to activate the CounterService.
+
+Optional (weight sums):
+- counterWeightBranch: branch/column name holding per-event generator weights (float/double).
+- counterIntWeightBranch: integer-valued branch/column name to sum (useful for stitching codes or integer-based weights).
+
+Example config:
+```
+enableCounters=true
+counterWeightBranch=genWeight
+counterIntWeightBranch=stitchWeight
+```
+
+Example analysis code to define an integer stitching weight before save():
+```
+analyzer.Define("stitchWeight",
+				[](int nGenJets, int ptBin) { return 100 * nGenJets + ptBin; },
+				{"nGenJets", "ptBin"});
+```
+
+The CounterService runs during Analyzer::save() and logs:
+- total entries
+- sum of counterWeightBranch (if set)
+- sum of counterIntWeightBranch (if set)
+
+When counterIntWeightBranch is configured, the service also writes a TH1D to the
+metadata ROOT output (metaFile, falling back to saveFile if metaFile is unset):
+- histogram name: counter_intWeightSum_<sample>
+- x-axis: integer branch values (one bin per integer value)
+- bin content: sum of counterWeightBranch for events in that bin (or unit weights if counterWeightBranch is unset)
+
+---
+
+# Custom ROOT Dictionaries (Serialization)
+To process custom object types (for example, MiniAOD-style classes), you can provide ROOT dictionary definitions that are built and linked into the framework. The build system exposes cache variables to supply headers, a LinkDef file, include paths, and optional source files.
+
+## What you provide
+- Headers that declare the classes to serialize.
+- A LinkDef.h file with ROOT dictionary directives.
+- Optional source files that implement the classes.
+
+## Configure the build
+Pass the following CMake cache variables when configuring:
+- RDF_CUSTOM_DICT_HEADERS: semicolon-separated list of headers
+- RDF_CUSTOM_DICT_LINKDEF: path to LinkDef.h
+- RDF_CUSTOM_DICT_INCLUDE_DIRS: semicolon-separated include dirs
+- RDF_CUSTOM_DICT_SOURCES: semicolon-separated source files (optional)
+- RDF_CUSTOM_DICT_TARGET: target name for the dictionary library (optional)
+
+Example:
+```
+cmake -S . -B build \
+	-DRDF_CUSTOM_DICT_HEADERS="/path/to/include/MyEvent.h;/path/to/include/MyObject.h" \
+	-DRDF_CUSTOM_DICT_LINKDEF="/path/to/include/MyLinkDef.h" \
+	-DRDF_CUSTOM_DICT_INCLUDE_DIRS="/path/to/include;/path/to/other/includes" \
+	-DRDF_CUSTOM_DICT_SOURCES="/path/to/src/MyEvent.cc;/path/to/src/MyObject.cc" \
+	-DRDF_CUSTOM_DICT_TARGET="MyCustomDict"
+```
+
+The dictionary library is built via ROOT_GENERATE_DICTIONARY and linked into the core library so RDataFrame can read and stream the custom types.
+
 ---
 
 # Tests
@@ -278,6 +356,35 @@ source test.sh
 ```
 
 ---
+
+# Condor Submission Helpers
+The submission scripts in core/python share a common backend (core/python/submission_backend.py) that generates Condor run scripts and submit files. There are two frontends:
+- core/python/generateSubmissionFilesNANO.py (Rucio-based discovery)
+- core/python/generateSubmissionFilesOpenData.py (CERN Open Data discovery)
+
+These scripts are the recommended way to submit analyses to HTCondor from this framework.
+
+## Common options
+- --exe PATH: path to the C++ executable to run
+- --root-setup "CMD": command to source ROOT (optional). If omitted, the job uses only whatever is available on the worker.
+- --stage-inputs: xrdcp input ROOT files to the worker before running
+- --stage-outputs: write outputs locally, then xrdcp to final destination
+- --spool: prepare for condor_submit -spool by copying shared inputs (aux + executable) once per submission
+
+## Shared inputs (aux + executable)
+The submitters now stage the executable and aux directory once per submission under:
+```
+condorSub_<name>/shared/
+```
+Each job transfers those shared inputs and the runscript links them into the working directory at runtime. This reduces the size of staging directories and works with EOS spooling (condor_submit -spool). The executable path is resolved to an absolute path to avoid dangling symlinks in test jobs.
+
+## Output staging details
+When --stage-outputs is enabled, the runscript:
+1) Rewrites saveFile/metaFile in cfg/submit_config.txt to local filenames
+2) Runs the executable
+3) xrdcp’s the local files to the original destinations
+
+This avoids writing outputs directly over xrootd during processing and reduces network load.
 
 # Notes
 - All core managers are plugins. Analyzer does not depend on concrete types.

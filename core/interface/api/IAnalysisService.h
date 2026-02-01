@@ -20,6 +20,13 @@ public:
    * @brief Finalize the service using the current dataframe.
    */
   virtual void finalize(ROOT::RDF::RNode& df) = 0;
+
+  /**
+   * @brief Hook called before the first filter is applied.
+   *
+   * Default implementation is a no-op.
+   */
+  virtual void onPreFilter(ROOT::RDF::RNode&) {}
 };
 
 #endif // IANALYSISSERVICE_H_INCLUDED

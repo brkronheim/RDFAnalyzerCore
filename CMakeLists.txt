@@ -22,6 +22,12 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 find_package(ROOT REQUIRED)
 find_package(Boost REQUIRED CONFIG)
 
+# Optional custom ROOT dictionary support
+set(RDF_CUSTOM_DICT_HEADERS "" CACHE STRING "Semicolon-separated list of headers for custom ROOT dictionary generation")
+set(RDF_CUSTOM_DICT_LINKDEF "" CACHE FILEPATH "Path to LinkDef.h for custom ROOT dictionary generation")
+set(RDF_CUSTOM_DICT_INCLUDE_DIRS "" CACHE STRING "Semicolon-separated list of include dirs for custom ROOT dictionary")
+set(RDF_CUSTOM_DICT_SOURCES "" CACHE STRING "Semicolon-separated list of sources for custom ROOT dictionary library")
+set(RDF_CUSTOM_DICT_TARGET "RDFCustomDict" CACHE STRING "Target name for the custom ROOT dictionary library")
+
 add_subdirectory(core)
-#add_subdirectory(runners)
 add_subdirectory(analyses)

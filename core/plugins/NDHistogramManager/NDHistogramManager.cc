@@ -21,11 +21,40 @@
  */
 NDHistogramManager::NDHistogramManager(IConfigurationProvider const& configProvider) {}
 
+struct ColumnCache {
+  ROOT::RDF::RNode& df;
+  std::vector<std::string> names;
+  std::unordered_map<std::string, std::string> types;
+
+  explicit ColumnCache(ROOT::RDF::RNode& node)
+      : df(node), names(node.GetColumnNames()) {}
+
+  bool Has(const std::string& name) const {
+    return std::find(names.begin(), names.end(), name) != names.end();
+  }
+
+  void Refresh() {
+    names = df.GetColumnNames();
+    types.clear();
+  }
+
+  std::string GetType(const std::string& name) {
+    auto it = types.find(name);
+    if (it != types.end()) {
+      return it->second;
+    }
+    auto type = df.GetColumnType(name);
+    types.emplace(name, type);
+    return type;
+  }
+};
+
 // Helper function to handle per-axis logic for varVector and DefineVector
 static void HandleAxisVarVector(
     ROOT::RDF::RNode& df,
     IDataFrameProvider* dataManager_m,
     ISystematicManager* systematicManager_m,
+    ColumnCache& cache,
     const std::string& variable,
     bool hasSystematic,
     bool hasMultiFill,
@@ -39,16 +68,16 @@ static void HandleAxisVarVector(
       if (refVector.empty()) {
         return column;
       }
-      const std::string colType = df.GetColumnType(column);
+      const std::string colType = cache.GetType(column);
       if (colType.find("RVec") != std::string::npos) {
         return column;
       }
       const std::string expandedName = column + "_FillRVec";
-      const auto colNames = df.GetColumnNames();
-      if (std::find(colNames.begin(), colNames.end(), expandedName) == colNames.end()) {
+      if (!cache.Has(expandedName)) {
         const std::string expr = "ROOT::VecOps::RVec<Float_t>(" + refVector + ".size(), static_cast<Float_t>(" + column + "))";
         df = df.Define(expandedName, expr);
         dataManager_m->setDataFrame(df);
+        cache.Refresh();
       }
       return expandedName;
     };
@@ -67,10 +96,10 @@ static void HandleAxisVarVector(
         }
         systematicVariations.push_back(columnName);
         }
-        const auto columnNames = df.GetColumnNames();
-        if (std::find(columnNames.begin(), columnNames.end(), variable + "_systVector") == columnNames.end()) {
+        if (!cache.Has(variable + "_systVector")) {
             dataManager_m->DefineVector(variable + "_systVector", systematicVariations, "Float_t", *systematicManager_m);
           df = dataManager_m->getDataFrame();
+          cache.Refresh();
         }
         varVector.push_back(variable + "_systVector");
     } else {
@@ -80,10 +109,10 @@ static void HandleAxisVarVector(
         if (!refVector.empty()) {
           varVector.push_back(ensureExpandedVector(variable));
         } else {
-          const auto columnNames = df.GetColumnNames();
-          if (std::find(columnNames.begin(), columnNames.end(), variable + "_RVec") == columnNames.end()) {
+          if (!cache.Has(variable + "_RVec")) {
             dataManager_m->DefineVector(variable + "_RVec", {variable}, "Float_t", *systematicManager_m);
             df = dataManager_m->getDataFrame();
+            cache.Refresh();
           }
           varVector.push_back(variable + "_RVec");
         }
@@ -95,24 +124,29 @@ static std::string buildSystematicVector(
     ROOT::RDF::RNode& df,
     IDataFrameProvider* dataManager_m,
     ISystematicManager* systematicManager_m,
-    const std::vector<std::string>& systList) {
+    const std::vector<std::string>& systList,
+    ColumnCache& cache) {
   const std::string baseName = "SystematicCounter";
   std::vector<std::string> systBranches;
   systBranches.reserve(systList.size());
 
-  const auto existingColumns = df.GetColumnNames();
-  if (std::find(existingColumns.begin(), existingColumns.end(), baseName) == existingColumns.end()) {
-    for (size_t i = 0; i < systList.size(); ++i) {
-      const auto &syst = systList[i];
-      const std::string branchName = (syst == "Nominal") ? baseName : baseName + "_" + syst;
+  bool definedAny = false;
+  for (size_t i = 0; i < systList.size(); ++i) {
+    const auto &syst = systList[i];
+    const std::string branchName = (syst == "Nominal") ? baseName : baseName + "_" + syst;
+    if (!cache.Has(branchName)) {
       const int index = static_cast<int>(i);
       dataManager_m->DefinePerSample(
           branchName,
           [index](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
             return index;
           });
+      definedAny = true;
     }
+  }
+  if (definedAny) {
     df = dataManager_m->getDataFrame();
+    cache.Refresh();
   }
 
   for (const auto& syst : systList) {
@@ -124,12 +158,32 @@ static std::string buildSystematicVector(
   }
 
   const std::string systVectorName = baseName + "_systVector";
-  const auto columnNames = df.GetColumnNames();
-  if (std::find(columnNames.begin(), columnNames.end(), systVectorName) == columnNames.end()) {
+  if (!cache.Has(systVectorName)) {
     dataManager_m->DefineVector(systVectorName, systBranches, "Float_t", *systematicManager_m);
     df = dataManager_m->getDataFrame();
+    cache.Refresh();
   }
   return systVectorName;
+}
+
+static bool HasSystematicColumns(
+    ColumnCache& cache,
+    ISystematicManager* systematicManager_m,
+    const std::string& variable,
+    const std::vector<std::string>& systList) {
+  for (const auto& syst : systList) {
+    if (syst == "Nominal") {
+      continue;
+    }
+    if (systematicManager_m->getVariablesForSystematic(syst).count(variable) == 0) {
+      continue;
+    }
+    const std::string columnName = variable + "_" + syst;
+    if (cache.Has(columnName)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -152,6 +206,7 @@ void NDHistogramManager::BookSingleHistogram(
   }
 
   ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+  ColumnCache cache(df);
 
   // set the basic information
   histFillInfo fillInfo = histFillInfo();
@@ -165,18 +220,17 @@ void NDHistogramManager::BookSingleHistogram(
   fillInfo.xmax = {channelInfo.upperBound(), controlRegionInfo.upperBound(), sampleCategoryInfo.upperBound(), 1.0, info.upperBound()};
 
   // define zero vector if needed
-  std::vector<std::string> dfVariableList = df.GetColumnNames();
-
-  if(std::find(dfVariableList.begin(), dfVariableList.end(), "zero__") == dfVariableList.end()) {
+  if(!cache.Has("zero__")) {
     dataManager_m->Define("zero__", []() -> Float_t { return 0.0f; }, {}, *systematicManager_m);
     df = dataManager_m->getDataFrame();
+    cache.Refresh();
   }
 
 
   // determine if the variables are scalars or vectors
-  const std::string channelType = df.GetColumnType(channelInfo.variable());
-  const std::string controlRegionType = df.GetColumnType(controlRegionInfo.variable());
-  const std::string sampleCategoryType = df.GetColumnType(sampleCategoryInfo.variable());
+  const std::string channelType = cache.GetType(channelInfo.variable());
+  const std::string controlRegionType = cache.GetType(controlRegionInfo.variable());
+  const std::string sampleCategoryType = cache.GetType(sampleCategoryInfo.variable());
 
   if(channelType.find("RVec") != std::string::npos) {
     fillInfo.channel_hasMultiFill = true;
@@ -193,29 +247,36 @@ void NDHistogramManager::BookSingleHistogram(
     fillInfo.hasMultiFill = true;
   }
 
-  const std::string weightType = df.GetColumnType(info.weight());
+  const std::string weightType = cache.GetType(info.weight());
   if(weightType.find("RVec") != std::string::npos) {
     fillInfo.weight_hasMultiFill = true;
     fillInfo.hasMultiFill = true;
   }
 
+  // Build systematic list early for column existence checks
+  const std::vector<std::string> systList = systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+
   // determine if the variables have systematic variations
-  if(systematicManager_m->getSystematicsForVariable(channelInfo.variable()).size() > 0) {
+  if(systematicManager_m->getSystematicsForVariable(channelInfo.variable()).size() > 0 &&
+     HasSystematicColumns(cache, systematicManager_m, channelInfo.variable(), systList)) {
     fillInfo.channel_hasSystematic = true;
     fillInfo.hasSystematic = true;
   }
 
-  if(systematicManager_m->getSystematicsForVariable(controlRegionInfo.variable()).size() > 0) {
+  if(systematicManager_m->getSystematicsForVariable(controlRegionInfo.variable()).size() > 0 &&
+     HasSystematicColumns(cache, systematicManager_m, controlRegionInfo.variable(), systList)) {
     fillInfo.controlRegion_hasSystematic = true;
     fillInfo.hasSystematic = true;
   }
 
-  if(systematicManager_m->getSystematicsForVariable(sampleCategoryInfo.variable()).size() > 0) {
+  if(systematicManager_m->getSystematicsForVariable(sampleCategoryInfo.variable()).size() > 0 &&
+     HasSystematicColumns(cache, systematicManager_m, sampleCategoryInfo.variable(), systList)) {
     fillInfo.sampleCategory_hasSystematic = true;
     fillInfo.hasSystematic = true;
   }
 
-  if(systematicManager_m->getSystematicsForVariable(info.weight()).size() > 0) {
+  if(systematicManager_m->getSystematicsForVariable(info.weight()).size() > 0 &&
+     HasSystematicColumns(cache, systematicManager_m, info.weight(), systList)) {
     fillInfo.weight_hasSystematic = true;
     fillInfo.hasSystematic = true;
   }
@@ -223,7 +284,6 @@ void NDHistogramManager::BookSingleHistogram(
   // For now, we don't support multi-fill for systematic variations
   fillInfo.systematic_hasMultiFill = false;
   
-  const std::vector<std::string> systList = systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
   fillInfo.nbins[3] = static_cast<Int_t>(systList.size());
   fillInfo.xmax[3] = static_cast<Double_t>(systList.size());
 
@@ -236,22 +296,21 @@ void NDHistogramManager::BookSingleHistogram(
   // Build column vectors in the order expected by THnMulti::Exec:
   // baseValues, baseWeights, systematic, sampleCategory, controlRegion, channel, nFills
   std::vector<std::string> baseValsVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, info.variable(), fillInfo.hasSystematic, fillInfo.hasMultiFill, usedSystematics, baseValsVec);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.variable(), fillInfo.hasSystematic, fillInfo.hasMultiFill, usedSystematics, baseValsVec);
   std::vector<std::string> baseWeightsVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, info.weight(), fillInfo.weight_hasSystematic, fillInfo.weight_hasMultiFill, usedSystematics, baseWeightsVec, true, {baseValsVec.front()});
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.weight(), fillInfo.weight_hasSystematic, fillInfo.weight_hasMultiFill, usedSystematics, baseWeightsVec, true, {baseValsVec.front()});
 
-  const std::string systVectorName = buildSystematicVector(df, dataManager_m, systematicManager_m, systList);
+  const std::string systVectorName = buildSystematicVector(df, dataManager_m, systematicManager_m, systList, cache);
 
   std::vector<std::string> sampleCategoryVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, sampleCategoryInfo.variable(), fillInfo.sampleCategory_hasSystematic, fillInfo.sampleCategory_hasMultiFill, usedSystematics, sampleCategoryVec, false, {baseValsVec.front()});
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, sampleCategoryInfo.variable(), fillInfo.sampleCategory_hasSystematic, fillInfo.sampleCategory_hasMultiFill, usedSystematics, sampleCategoryVec, false, {baseValsVec.front()});
   std::vector<std::string> controlRegionVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, controlRegionInfo.variable(), fillInfo.controlRegion_hasSystematic, fillInfo.controlRegion_hasMultiFill, usedSystematics, controlRegionVec, false, {baseValsVec.front()});
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, controlRegionInfo.variable(), fillInfo.controlRegion_hasSystematic, fillInfo.controlRegion_hasMultiFill, usedSystematics, controlRegionVec, false, {baseValsVec.front()});
   std::vector<std::string> channelVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, channelInfo.variable(), fillInfo.channel_hasSystematic, fillInfo.channel_hasMultiFill, usedSystematics, channelVec, false, {baseValsVec.front()});
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, channelInfo.variable(), fillInfo.channel_hasSystematic, fillInfo.channel_hasMultiFill, usedSystematics, channelVec, false, {baseValsVec.front()});
 
   const std::string nFillsName = "SystematicCounter_nFills";
-  const auto columnNames = df.GetColumnNames();
-  if (std::find(columnNames.begin(), columnNames.end(), nFillsName) == columnNames.end()) {
+  if (!cache.Has(nFillsName)) {
     dataManager_m->Define(
         nFillsName,
         [](const ROOT::VecOps::RVec<Float_t>& baseVals,
@@ -270,6 +329,7 @@ void NDHistogramManager::BookSingleHistogram(
         {baseValsVec.front(), systVectorName},
         *systematicManager_m);
       df = dataManager_m->getDataFrame();
+      cache.Refresh();
   }
 
   varVector = {
