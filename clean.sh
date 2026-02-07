@@ -1,2 +1,2 @@
-rm -f Testing/
+rm -rf Testing/
 rm -rf build/

@@ -7,6 +7,7 @@
 #include <filesystem>
 
 #include <ROOT/RDFHelpers.hxx>
+#include <functions.h>
 
 
 /**
@@ -14,8 +15,16 @@
  * @param configProvider Reference to the configuration provider
  */
 DataManager::DataManager(const IConfigurationProvider &configProvider)
-    : chain_vec_m(makeTChain(configProvider)),
-      df_m(ROOT::RDataFrame(*chain_vec_m[0])) {
+    : chain_vec_m(makeTChain(configProvider)), df_m(ROOT::RDataFrame(1)) {
+
+    // Fall back to a small in-memory dataframe (1 entry) if no input files were found
+    // This allows unit tests to define variables and perform simple operations
+    // that expect at least one row.
+    if (!(chain_vec_m.empty()) && chain_vec_m[0]->GetEntries() > 0) {
+      df_m = ROOT::RDataFrame(*chain_vec_m[0]);
+    } else {
+      std::cout << "No input files found; using single-entry in-memory RDataFrame for testing." << std::endl;
+    }
 
     // Display a progress bar depending on batch status and ROOT version
   #if defined(HAS_ROOT_PROGRESS_BAR)
@@ -196,6 +205,11 @@ void DataManager::registerOptionalBranches(
   std::cout << "Optional branches config: " << optionalBranchesConfigKey << std::endl;
 
 #if defined(HAS_DEFAULT_VALUE_FOR)
+  // Precompute existing columns to avoid calling DefaultValueFor on missing
+  // columns (which would throw). If a column does not exist, create it via
+  // saveVar which safely defines a per-sample constant.
+  const auto existingColumns = df_m.GetColumnNames();
+  std::unordered_set<std::string> existingSet(existingColumns.begin(), existingColumns.end());
   for (const auto &entryKeys : aliasConfig) {
     const int varType = std::stoi(entryKeys.at("type"));
     const auto defaultValStr = entryKeys.at("default");
@@ -203,72 +217,122 @@ void DataManager::registerOptionalBranches(
     const Bool_t defaultBool = defaultValStr == "1" ||
                                defaultValStr == "true" ||
                                defaultValStr == "True";
-    switch (varType) {
-    case 0:
-      df_m = df_m.DefaultValueFor<UInt_t>(varName, std::stoul(defaultValStr));
-      break;
-    case 1:
-      df_m = df_m.DefaultValueFor<Int_t>(varName, std::stoi(defaultValStr));
-      break;
-    case 2:
-      df_m = df_m.DefaultValueFor<UShort_t>(varName, std::stoul(defaultValStr));
-      break;
-    case 3:
-      df_m = df_m.DefaultValueFor<Short_t>(varName, std::stoi(defaultValStr));
-      break;
-    case 4:
-      df_m = df_m.DefaultValueFor<UChar_t>(varName,
-                                           UChar_t(std::stoul(defaultValStr)));
-      break;
-    case 5:
-      df_m = df_m.DefaultValueFor<Char_t>(varName,
-                                          Char_t(std::stoi(defaultValStr)));
-      break;
-    case 6:
-      df_m = df_m.DefaultValueFor<Float_t>(varName, std::stof(defaultValStr));
-      break;
-    case 7:
-      df_m = df_m.DefaultValueFor<Double_t>(varName, std::stod(defaultValStr));
-      break;
-    case 8:
-      df_m = df_m.DefaultValueFor<Bool_t>(varName, defaultBool);
-      break;
-    case 10:
-      df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UInt_t>>(
-          varName, {static_cast<UInt_t>(std::stoul(defaultValStr))});
-      break;
-    case 11:
-      df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Int_t>>(
-          varName, {std::stoi(defaultValStr)});
-      break;
-    case 12:
-      df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UShort_t>>(
-          varName, {static_cast<UShort_t>(std::stoul(defaultValStr))});
-      break;
-    case 13:
-      df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Short_t>>(
-          varName, {static_cast<Short_t>(std::stoi(defaultValStr))});
-      break;
-    case 14:
-      df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UChar_t>>(
-          varName, {UChar_t(std::stoul(defaultValStr))});
-      break;
-    case 15:
-      df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Char_t>>(
-          varName, {Char_t(std::stoi(defaultValStr))});
-      break;
-    case 16:
-      df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Float_t>>(
-          varName, {std::stof(defaultValStr)});
-      break;
-    case 17:
-      df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Double_t>>(
-          varName, {std::stod(defaultValStr)});
-      break;
-    case 18:
-      df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Bool_t>>(varName,
-                                                              {defaultBool});
-      break;
+    const bool columnExists = existingSet.find(varName) != existingSet.end();
+    if (columnExists) {
+      switch (varType) {
+      case 0:
+        df_m = df_m.DefaultValueFor<UInt_t>(varName, std::stoul(defaultValStr));
+        break;
+      case 1:
+        df_m = df_m.DefaultValueFor<Int_t>(varName, std::stoi(defaultValStr));
+        break;
+      case 2:
+        df_m = df_m.DefaultValueFor<UShort_t>(varName, std::stoul(defaultValStr));
+        break;
+      case 3:
+        df_m = df_m.DefaultValueFor<Short_t>(varName, std::stoi(defaultValStr));
+        break;
+      case 4:
+        df_m = df_m.DefaultValueFor<UChar_t>(varName, UChar_t(std::stoul(defaultValStr)));
+        break;
+      case 5:
+        df_m = df_m.DefaultValueFor<Char_t>(varName, Char_t(std::stoi(defaultValStr)));
+        break;
+      case 6:
+        df_m = df_m.DefaultValueFor<Float_t>(varName, std::stof(defaultValStr));
+        break;
+      case 7:
+        df_m = df_m.DefaultValueFor<Double_t>(varName, std::stod(defaultValStr));
+        break;
+      case 8:
+        df_m = df_m.DefaultValueFor<Bool_t>(varName, defaultBool);
+        break;
+      case 10:
+        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UInt_t>>(varName, {static_cast<UInt_t>(std::stoul(defaultValStr))});
+        break;
+      case 11:
+        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Int_t>>(varName, {std::stoi(defaultValStr)});
+        break;
+      case 12:
+        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UShort_t>>(varName, {static_cast<UShort_t>(std::stoul(defaultValStr))});
+        break;
+      case 13:
+        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Short_t>>(varName, {static_cast<Short_t>(std::stoi(defaultValStr))});
+        break;
+      case 14:
+        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UChar_t>>(varName, {UChar_t(std::stoul(defaultValStr))});
+        break;
+      case 15:
+        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Char_t>>(varName, {Char_t(std::stoi(defaultValStr))});
+        break;
+      case 16:
+        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Float_t>>(varName, {std::stof(defaultValStr)});
+        break;
+      case 17:
+        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Double_t>>(varName, {std::stod(defaultValStr)});
+        break;
+      case 18:
+        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Bool_t>>(varName, {defaultBool});
+        break;
+      }
+    } else {
+      // Column missing — define it via saveVar
+      switch (varType) {
+      case 0:
+        df_m = saveVar<UInt_t>(std::stoul(defaultValStr), varName, df_m);
+        break;
+      case 1:
+        df_m = saveVar<Int_t>(std::stoi(defaultValStr), varName, df_m);
+        break;
+      case 2:
+        df_m = saveVar<UShort_t>(static_cast<UShort_t>(std::stoul(defaultValStr)), varName, df_m);
+        break;
+      case 3:
+        df_m = saveVar<Short_t>(static_cast<Short_t>(std::stoi(defaultValStr)), varName, df_m);
+        break;
+      case 4:
+        df_m = saveVar<UChar_t>(UChar_t(std::stoul(defaultValStr)), varName, df_m);
+        break;
+      case 5:
+        df_m = saveVar<Char_t>(Char_t(std::stoi(defaultValStr)), varName, df_m);
+        break;
+      case 6:
+        df_m = saveVar<Float_t>(std::stof(defaultValStr), varName, df_m);
+        break;
+      case 7:
+        df_m = saveVar<Double_t>(std::stod(defaultValStr), varName, df_m);
+        break;
+      case 8:
+        df_m = saveVar<Bool_t>(defaultBool, varName, df_m);
+        break;
+      case 10:
+        df_m = saveVar<ROOT::VecOps::RVec<UInt_t>>(ROOT::VecOps::RVec<UInt_t>{static_cast<UInt_t>(std::stoul(defaultValStr))}, varName, df_m);
+        break;
+      case 11:
+        df_m = saveVar<ROOT::VecOps::RVec<Int_t>>(ROOT::VecOps::RVec<Int_t>{std::stoi(defaultValStr)}, varName, df_m);
+        break;
+      case 12:
+        df_m = saveVar<ROOT::VecOps::RVec<UShort_t>>(ROOT::VecOps::RVec<UShort_t>{static_cast<UShort_t>(std::stoul(defaultValStr))}, varName, df_m);
+        break;
+      case 13:
+        df_m = saveVar<ROOT::VecOps::RVec<Short_t>>(ROOT::VecOps::RVec<Short_t>{static_cast<Short_t>(std::stoi(defaultValStr))}, varName, df_m);
+        break;
+      case 14:
+        df_m = saveVar<ROOT::VecOps::RVec<UChar_t>>(ROOT::VecOps::RVec<UChar_t>{UChar_t(std::stoul(defaultValStr))}, varName, df_m);
+        break;
+      case 15:
+        df_m = saveVar<ROOT::VecOps::RVec<Char_t>>(ROOT::VecOps::RVec<Char_t>{Char_t(std::stoi(defaultValStr))}, varName, df_m);
+        break;
+      case 16:
+        df_m = saveVar<ROOT::VecOps::RVec<Float_t>>(ROOT::VecOps::RVec<Float_t>{std::stof(defaultValStr)}, varName, df_m);
+        break;
+      case 17:
+        df_m = saveVar<ROOT::VecOps::RVec<Double_t>>(ROOT::VecOps::RVec<Double_t>{std::stod(defaultValStr)}, varName, df_m);
+        break;
+      case 18:
+        df_m = saveVar<ROOT::VecOps::RVec<Bool_t>>(ROOT::VecOps::RVec<Bool_t>{defaultBool}, varName, df_m);
+        break;
+      }
     }
   }
 #else

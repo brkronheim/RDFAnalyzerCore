@@ -32,6 +32,8 @@
 #include <api/ILogger.h>
 #include <api/IOutputSink.h>
 #include <api/IAnalysisService.h>
+#include <api/ManagerContext.h> // needed for wiring plugins and services
+
 
 /**
  * @class Analyzer
@@ -203,6 +205,29 @@ public:
    * @return Reference to the dataframe provider interface
    */
   IDataFrameProvider &getDataFrameProvider() const { return *dataFrameProvider_m; }
+
+  /**
+   * @brief Register a pluggable manager after construction and immediately wire it.
+   * This will set the manager context and call setupFromConfigFile() for the plugin.
+   * @param role Role name for the plugin (e.g. "histogramManager")
+   * @param plugin Unique pointer to the plugin manager to register
+   * @return Pointer to this Analyzer (for chaining)
+   */
+  Analyzer *addPlugin(const std::string &role, std::unique_ptr<IPluggableManager> plugin);
+
+  /**
+   * @brief Register multiple plugins at once.
+   * @param newPlugins Map of role name -> plugin manager
+   * @return Pointer to this Analyzer (for chaining)
+   */
+  Analyzer *addPlugins(std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& newPlugins);
+
+  /**
+   * @brief Expose the configuration provider used by this Analyzer.
+   * Useful for constructing plugins that require IConfigurationProvider at construction.
+   * @return Reference to the configuration provider
+   */
+  IConfigurationProvider &getConfigurationProvider() const { return *configProvider_m; }
 
 private:
   /**

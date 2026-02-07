@@ -23,6 +23,7 @@ target_link_libraries(corePlugins
     CorrectionManager
     NDHistogramManager
     TriggerManager
+    core
     fastforest
     correctionlib
 )

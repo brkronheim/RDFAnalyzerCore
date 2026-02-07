@@ -4,6 +4,9 @@
 #include <api/IPluggableManager.h>
 #include <api/ManagerContext.h>
 #include <plots.h>
+#include <ROOT/RDataFrame.hxx>
+#include <api/ILogger.h>
+#include <api/IOutputSink.h>
 #include <string>
 #include <vector>
 
@@ -89,6 +92,9 @@ public:
     configManager_m = &ctx.config;
     dataManager_m = &ctx.data;
     systematicManager_m = &ctx.systematics;
+    logger_m = &ctx.logger;
+    skimSink_m = &ctx.skimSink;
+    metaSink_m = &ctx.metaSink;
   }
 
   void setupFromConfigFile() override;
@@ -97,10 +103,15 @@ private:
   /**
    * @brief Vector of histogram result pointers.
    */
+  std::vector<ROOT::RDF::RNode> histNodes_m;
   std::vector<ROOT::RDF::RResultPtr<THnSparseF>> histos_m;
   IConfigurationProvider* configManager_m = nullptr;
   IDataFrameProvider* dataManager_m = nullptr;
   ISystematicManager* systematicManager_m = nullptr;
+  ILogger* logger_m = nullptr;
+  IOutputSink* skimSink_m = nullptr;
+  IOutputSink* metaSink_m = nullptr;
+  bool countersFinalized_m = false;
 };
 
 #endif // NDHISTOGRAMMANAGER_H_INCLUDED 

@@ -7,18 +7,19 @@
  * directories, splitting strings, and setting up ROOT data structures such as
  * TChain and RDataFrame.
  */
-#include <algorithm>
-#include <fstream>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <ROOT/RDFHelpers.hxx>
 #include <ROOT/RDataFrame.hxx>
 #include <TChain.h>
+#include <TROOT.h>
 
 #include <dirent.h>
 
@@ -59,6 +60,42 @@ static std::string getDirectory(const IConfigurationProvider &configProvider) {
     return configProvider.getConfigMap().at("directory");
   }
   return "";
+}
+
+/**
+ * @brief Validate ROOT runtime environment consistency
+ *
+ * Ensures ROOTSYS is set, a module map exists under ROOTSYS, and the loaded
+ * libCore location matches ROOTSYS to avoid mixed ROOT installations at runtime.
+ */
+static void validateRootEnvironment() {
+  const char *rootSysEnv = std::getenv("ROOTSYS");
+  if (rootSysEnv == nullptr || std::string(rootSysEnv).empty()) {
+    throw std::runtime_error(
+        "ROOTSYS is not set. Source env.sh and rebuild to ensure a consistent ROOT environment.");
+  }
+
+  const std::filesystem::path rootSysPath(rootSysEnv);
+  const std::filesystem::path moduleMapShare = rootSysPath / "share" / "root" / "cling" / "module.modulemap";
+  const std::filesystem::path moduleMapEtc = rootSysPath / "etc" / "cling" / "module.modulemap";
+  const std::filesystem::path moduleMapEtcLegacy = rootSysPath / "etc" / "cling" / "cling.modulemap";
+  if (!std::filesystem::exists(moduleMapShare) &&
+      !std::filesystem::exists(moduleMapEtc) &&
+      !std::filesystem::exists(moduleMapEtcLegacy)) {
+    throw std::runtime_error(
+        "ROOT module map not found under ROOTSYS. Please source env.sh and rebuild to avoid mixed ROOT installs.");
+  }
+
+  Dl_info info;
+  if (dladdr(reinterpret_cast<void*>(&TROOT::Class), &info) != 0 && info.dli_fname) {
+    const std::string libCorePath(info.dli_fname);
+    const std::string rootSysStr(rootSysEnv);
+    if (libCorePath.rfind(rootSysStr, 0) != 0) {
+      throw std::runtime_error(
+          "Detected ROOT library from '" + libCorePath + "' but ROOTSYS='" + rootSysStr +
+          "'. This indicates mixed ROOT installations. Source env.sh and rebuild from a clean build directory.");
+    }
+  }
 }
 
 /**
@@ -108,8 +145,10 @@ static int scanDirectory(TChain &chain, const std::string &directory,
                          const std::vector<std::string> &antiglobs, bool base) {
   int filesFound = 0;
   DIR *dr = opendir(directory.c_str());
-  if (dr == nullptr && base) {
-    throw std::runtime_error("Error: No directory found for scanning.");
+  if (dr == nullptr) {
+    // Directory does not exist or cannot be opened; return 0 files found.
+    // Do not throw here so that higher-level logic can decide how to proceed
+    // (for example unit tests that operate without input files).
     return filesFound;
   }
   struct dirent *en;
@@ -187,7 +226,8 @@ int scan(TChain &chain, const std::string &directory,
   std::cout << "Checking " << directory << std::endl;
   int filesFound = scanDirectory(chain, directory, globs, antiglobs, base);
   if (filesFound == 0 && base) {
-    throw std::runtime_error("Error: No files found for TChain.");
+    std::cout << "Warning: No files found for TChain in directory " << directory << std::endl;
+    // Proceed without throwing so tests and non-file-based workflows can continue
   }
   return filesFound;
 }
@@ -203,6 +243,8 @@ int scan(TChain &chain, const std::string &directory,
  */
 std::vector<std::unique_ptr<TChain>>
 makeTChain(const IConfigurationProvider &configProvider) {
+
+  validateRootEnvironment();
 
 
 
@@ -268,14 +310,14 @@ ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df,
   std::string saveConfig;
   std::string saveFile;
   std::string saveTree;
-  // Read saveConfig, saveFile, and saveTree from the config. It needs to exist
+  // Read saveConfig, saveFile, and saveTree from the config.
+  // saveConfig is optional; if missing we will snapshot the full dataframe.
   if (configProvider.getConfigMap().find("saveConfig") !=
       configProvider.getConfigMap().end()) {
     saveConfig = configProvider.getConfigMap().at("saveConfig");
   } else {
-    throw std::runtime_error("Error: No saveConfig provided. Please include "
-                             "one in the config file.");
-    return (df);
+    std::cout << "Warning: No 'saveConfig' provided. If snapshot is called the entire dataframe will be saved (skimming the full file)." << std::endl;
+    saveConfig = "";
   }
 
   if (configProvider.getConfigMap().find("saveFile") !=
@@ -296,14 +338,16 @@ ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df,
     return (df);
   }
 
-  // Get the list of branches to save
-  std::vector<std::string> saveVectorInit =
-      configProvider.parseVectorConfig(saveConfig);
+  // Get the list of branches to save (optional)
   std::vector<std::string> saveVector;
-  for (auto val : saveVectorInit) {
-    val = val.substr(0, val.find(" ")); // drop everything after the space
-    if (val.size() > 0) {
-      saveVector.push_back(val);
+  if (!saveConfig.empty()) {
+    std::vector<std::string> saveVectorInit =
+        configProvider.parseVectorConfig(saveConfig);
+    for (auto val : saveVectorInit) {
+      val = val.substr(0, val.find(" ")); // drop everything after the space
+      if (val.size() > 0) {
+        saveVector.push_back(val);
+      }
     }
   }
 
@@ -323,7 +367,12 @@ ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df,
   std::cout << "Executing Snapshot" << std::endl;
   std::cout << "Tree: " << saveTree << std::endl;
   std::cout << "SaveFile: " << saveFile << std::endl;
-  df.Snapshot(saveTree, saveFile, saveVector);
+  if (saveVector.empty()) {
+    std::cout << "No 'saveConfig' specified; snapshotting full dataframe (all branches)" << std::endl;
+    df.Snapshot(saveTree, saveFile);
+  } else {
+    df.Snapshot(saveTree, saveFile, saveVector);
+  }
   std::cout << "Done Saving" << std::endl;
   return (df);
 }

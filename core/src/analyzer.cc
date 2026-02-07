@@ -10,6 +10,7 @@
 #include <util.h>
 #include <memory>
 #include <SystematicManager.h>
+#include <api/ManagerContext.h> // for wiring plugins and services
 
 // Dependency-injected constructor
 Analyzer::Analyzer(
@@ -55,7 +56,7 @@ Analyzer::Analyzer(std::string configFile,
             systematicManager_m(ManagerFactory::createSystematicManager()),
             logger_m(std::make_unique<DefaultLogger>()),
     skimSink_m(std::make_unique<RootOutputSink>()),
-            metaSink_m(std::make_unique<NullOutputSink>()),
+            metaSink_m(std::make_unique<RootOutputSink>()),
             plugins(std::move(plugins))
 {
         if (!configProvider_m || !dataFrameProvider_m || !systematicManager_m) {
@@ -86,6 +87,23 @@ void Analyzer::wirePluginManagers() {
         }
     }
     initializeServices(ctx);
+}
+
+Analyzer *Analyzer::addPlugin(const std::string &role, std::unique_ptr<IPluggableManager> plugin) {
+    if (!plugin) return this;
+    // Wire the plugin immediately with the same ManagerContext used during construction
+    ManagerContext ctx{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m};
+    plugin->setContext(ctx);
+    plugin->setupFromConfigFile();
+    plugins.emplace(role, std::move(plugin));
+    return this;
+}
+
+Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& newPlugins) {
+    for (auto &kv : newPlugins) {
+        addPlugin(kv.first, std::move(kv.second));
+    }
+    return this;
 }
 
 void Analyzer::initializeServices(ManagerContext& ctx) {

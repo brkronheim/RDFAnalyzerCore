@@ -76,6 +76,14 @@ add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)
 target_link_libraries(testAnalyzer_TriggerLogic core corePlugins gtest gtest_main)
 add_test(NAME AnalyzerTriggerLogicTest COMMAND testAnalyzer_TriggerLogic)
 
+add_executable(testAnalyzer_PluginWiring testAnalyzer_PluginWiring.cc)
+target_link_libraries(testAnalyzer_PluginWiring core corePlugins gtest gtest_main)
+add_test(NAME AnalyzerPluginWiringTest COMMAND testAnalyzer_PluginWiring)
+
+add_executable(testRootEnvironmentGuard testRootEnvironmentGuard.cc)
+target_link_libraries(testRootEnvironmentGuard core gtest gtest_main)
+add_test(NAME RootEnvironmentGuardTest COMMAND testRootEnvironmentGuard)
+
 
 
 

@@ -58,23 +58,31 @@ def _is_int(val: str) -> bool:
 
 def validate_submit_config(config_path: str, mode: str = "auto"):
     errors = []
+    warnings = []
     config_path = os.path.abspath(config_path)
     if not os.path.exists(config_path):
         raise ValidationError(f"Config file not found: {config_path}")
 
     cfg = read_config(config_path)
 
-    required_keys = ["sampleConfig", "saveDirectory", "saveConfig", "saveTree"]
+    # 'saveConfig' is optional: when missing, we will warn and snapshot will save the full dataframe.
+    required_keys = ["sampleConfig", "saveDirectory", "saveTree"]
     for key in required_keys:
         if key not in cfg or not cfg[key].strip():
             errors.append(f"Missing required key '{key}' in submit config")
 
     # File existence checks
-    for key in ["sampleConfig", "saveConfig", "floatConfig", "intConfig"]:
+    for key in ["sampleConfig", "floatConfig", "intConfig"]:
         if key in cfg and cfg[key].strip():
             p = _resolve_path(config_path, cfg[key])
             if not os.path.exists(p):
                 errors.append(f"File not found for '{key}': {p}")
+
+    # saveConfig is optional; if provided, warn if the referenced file doesn't exist
+    if "saveConfig" in cfg and cfg["saveConfig"].strip():
+        p = _resolve_path(config_path, cfg["saveConfig"])
+        if not os.path.exists(p):
+            warnings.append(f"File not found for 'saveConfig': {p}")
 
     # threads validation (optional)
     if "threads" in cfg and cfg["threads"].strip():
@@ -116,7 +124,7 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
                         )
             else:
                 for e in sample_entries:
-                    missing = [k for k in ["das", "xsec", "norm", "type"] if k not in e]
+                    missing = [k for k in ["das", "xsec", "type"] if k not in e]
                     if missing:
                         errors.append(
                             f"NANO sample missing {', '.join(missing)} (line {e['__line__']})"
@@ -125,7 +133,11 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
                         errors.append(
                             f"Invalid float for 'xsec' in sample config (line {e['__line__']})"
                         )
-                    if "norm" in e and not _is_float(e["norm"]):
+                    if "norm" not in e:
+                        warnings.append(
+                            f"Missing 'norm' in sample config (line {e['__line__']}): 'norm' will be calculated on the fly and is deprecated"
+                        )
+                    elif not _is_float(e["norm"]):
                         errors.append(
                             f"Invalid float for 'norm' in sample config (line {e['__line__']})"
                         )
@@ -136,7 +148,7 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
         else:
             errors.append(f"Sample config file not found: {sample_config_path}")
 
-    return errors
+    return errors, warnings
 
 
 def main():
@@ -151,10 +163,15 @@ def main():
     args = parser.parse_args()
 
     try:
-        errors = validate_submit_config(args.config, args.mode)
+        errors, warnings = validate_submit_config(args.config, args.mode)
     except ValidationError as exc:
         print(str(exc))
         raise SystemExit(1)
+
+    if warnings:
+        print("Config validation warnings:")
+        for w in warnings:
+            print(f"- {w}")
 
     if errors:
         print("Config validation failed:")

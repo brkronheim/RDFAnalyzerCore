@@ -1,4 +1,5 @@
 #include <CounterService.h>
+#include <RtypesCore.h>
 #include <api/IConfigurationProvider.h>
 #include <api/ILogger.h>
 #include <algorithm>
@@ -46,20 +47,20 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
 
   auto countResult = targetDf.Count();
 
-  ROOT::RDF::RResultPtr<double> weightSumResult;
+  ROOT::RDF::RResultPtr<Float_t> weightSumResult;
   bool hasWeightSum = false;
-  ROOT::RDF::RResultPtr<long long> weightSignSumResult;
+  ROOT::RDF::RResultPtr<Int_t> weightSignSumResult;
   bool hasWeightSignSum = false;
   ROOT::RDF::RNode signWeightDf = targetDf;
   if (!weightBranch_m.empty()) {
     if (hasColumn(weightBranch_m)) {
-      weightSumResult = targetDf.Sum<double>(weightBranch_m);
+      weightSumResult = targetDf.Sum<Float_t>(weightBranch_m);
       hasWeightSum = true;
 
-      signWeightDf = targetDf.Define("__counter_sign_weight", [](double w) {
-        return static_cast<long long>((w > 0.0) - (w < 0.0));
+      signWeightDf = targetDf.Define("__counter_sign_weight", [](Float_t w) {
+        return Int_t((w > 0.0) - (w < 0.0));
       }, {weightBranch_m});
-      weightSignSumResult = signWeightDf.Sum<long long>("__counter_sign_weight");
+      weightSignSumResult = signWeightDf.Sum<Int_t>("__counter_sign_weight");
       hasWeightSignSum = true;
     } else {
       ctx_m->logger.log(ILogger::Level::Warn,
@@ -67,11 +68,11 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
     }
   }
 
-  ROOT::RDF::RResultPtr<long long> intWeightSumResult;
+  ROOT::RDF::RResultPtr<Int_t> intWeightSumResult;
   bool hasIntWeightSum = false;
   if (!intWeightBranch_m.empty()) {
     if (hasColumn(intWeightBranch_m)) {
-      intWeightSumResult = targetDf.Sum<long long>(intWeightBranch_m);
+      intWeightSumResult = targetDf.Sum<Int_t>(intWeightBranch_m);
       hasIntWeightSum = true;
     } else {
       ctx_m->logger.log(ILogger::Level::Warn,
@@ -106,79 +107,97 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
                       " intWeightSum(" + intWeightBranch_m + ")=" + std::to_string(intWeightValue));
   }
 
-  if (!intWeightBranch_m.empty() && hasColumn(intWeightBranch_m)) {
-    if (countValue == 0) {
-      ctx_m->logger.log(ILogger::Level::Info,
-                        "CounterService: sample=" + sampleName_m +
-                        " no entries for intWeight histogram");
-      return;
-    }
-
-    const auto minVal = targetDf.Min<long long>(intWeightBranch_m).GetValue();
-    const auto maxVal = targetDf.Max<long long>(intWeightBranch_m).GetValue();
-
-    if (maxVal < minVal) {
-      ctx_m->logger.log(ILogger::Level::Warn,
-                        "CounterService: invalid intWeight range for " + intWeightBranch_m);
-      return;
-    }
-
-    const long long binCount = maxVal - minVal + 1;
-    if (binCount <= 0) {
-      ctx_m->logger.log(ILogger::Level::Warn,
-                        "CounterService: empty intWeight histogram for " + intWeightBranch_m);
-      return;
-    }
-
-    std::string fileName = ctx_m->config.get("metaFile");
-    if (fileName.empty()) {
-      fileName = ctx_m->config.get("saveFile");
-    }
-    if (fileName.empty()) {
-      ctx_m->logger.log(ILogger::Level::Warn,
-                        "CounterService: metaFile/saveFile not set, skipping intWeight histogram");
-      return;
-    }
-
-    const std::string histName = "counter_intWeightSum_" + sampleName_m;
-    const std::string histTitle = "Counter intWeightSum;" + intWeightBranch_m + ";sumWeights";
-    ROOT::RDF::TH1DModel model(histName.c_str(), histTitle.c_str(),
-                               static_cast<int>(binCount),
-                               static_cast<double>(minVal) - 0.5,
-                               static_cast<double>(maxVal) + 0.5);
-
-    ROOT::RDF::RResultPtr<TH1D> histResult;
-    if (!weightBranch_m.empty() && hasColumn(weightBranch_m)) {
-      histResult = targetDf.Histo1D(model, intWeightBranch_m, weightBranch_m);
-    } else {
-      if (!weightBranch_m.empty() && !hasColumn(weightBranch_m)) {
-        ctx_m->logger.log(ILogger::Level::Warn,
-                          "CounterService: weight branch missing, using unit weights for intWeight histogram");
+  std::string fileName = ctx_m->config.get("metaFile");
+  if (fileName.empty()) {
+    fileName = ctx_m->config.get("saveFile");
+    if (!fileName.empty()) {
+      const auto pos = fileName.rfind('.');
+      if (pos != std::string::npos) {
+        fileName = fileName.substr(0, pos) + "_meta" + fileName.substr(pos);
+      } else {
+        fileName += "_meta.root";
       }
-      histResult = targetDf.Histo1D(model, intWeightBranch_m);
     }
-
-    auto histPtr = histResult.GetPtr();
+  }
+  if (!fileName.empty()) {
     TFile outFile(fileName.c_str(), "UPDATE");
     if (outFile.IsZombie()) {
       ctx_m->logger.log(ILogger::Level::Error,
                         "CounterService: failed to open meta output file: " + fileName);
       return;
     }
-    histPtr->SetDirectory(&outFile);
-    histPtr->Write(histName.c_str(), TObject::kOverwrite);
+
+    if (hasWeightSum) {
+      auto weightValue = weightSumResult.GetValue();
+      TH1D weightSumHist(("counter_weightSum_" + sampleName_m).c_str(), ("Counter weightSum;" + weightBranch_m + ";sumWeights").c_str(), 1, 0, 1);
+      weightSumHist.SetBinContent(1, weightValue);
+      weightSumHist.SetDirectory(&outFile);
+      weightSumHist.Write("", TObject::kOverwrite);
+    }
 
     if (hasWeightSignSum) {
-      const std::string signHistName = "counter_intWeightSignSum_" + sampleName_m;
-      const std::string signHistTitle = "Counter intWeightSignSum;" + intWeightBranch_m + ";sumSignWeights";
-      ROOT::RDF::TH1DModel signModel(signHistName.c_str(), signHistTitle.c_str(),
-                                     static_cast<int>(binCount),
-                                     static_cast<double>(minVal) - 0.5,
-                                     static_cast<double>(maxVal) + 0.5);
-      auto signHistResult = signWeightDf.Histo1D(signModel, intWeightBranch_m, "__counter_sign_weight");
-      auto signHistPtr = signHistResult.GetPtr();
-      signHistPtr->SetDirectory(&outFile);
-      signHistPtr->Write(signHistName.c_str(), TObject::kOverwrite);
+      auto signWeightValue = weightSignSumResult.GetValue();
+      TH1D weightSignSumHist(("counter_weightSignSum_" + sampleName_m).c_str(), ("Counter weightSignSum;" + weightBranch_m + ";sumSignWeights").c_str(), 1, 0, 1);
+      weightSignSumHist.SetBinContent(1, signWeightValue);
+      weightSignSumHist.SetDirectory(&outFile);
+      weightSignSumHist.Write("", TObject::kOverwrite);
+    }
+
+    if (hasIntWeightSum) {
+      if (countValue == 0) {
+        ctx_m->logger.log(ILogger::Level::Info,
+                          "CounterService: sample=" + sampleName_m +
+                          " no entries for intWeight histogram");
+      } else {
+        const auto minVal = targetDf.Min<Int_t>(intWeightBranch_m).GetValue();
+        const auto maxVal = targetDf.Max<Int_t>(intWeightBranch_m).GetValue();
+
+        if (maxVal < minVal) {
+          ctx_m->logger.log(ILogger::Level::Warn,
+                            "CounterService: invalid intWeight range for " + intWeightBranch_m);
+        } else {
+          const Int_t binCount = maxVal - minVal + 1;
+          if (binCount <= 0) {
+            ctx_m->logger.log(ILogger::Level::Warn,
+                              "CounterService: empty intWeight histogram for " + intWeightBranch_m);
+          } else {
+            const std::string histName = "counter_intWeightSum_" + sampleName_m;
+            const std::string histTitle = "Counter intWeightSum;" + intWeightBranch_m + ";sumWeights";
+            ROOT::RDF::TH1DModel model(histName.c_str(), histTitle.c_str(),
+                                       static_cast<int>(binCount),
+                                       static_cast<double>(minVal) - 0.5,
+                                       static_cast<double>(maxVal) + 0.5);
+
+            ROOT::RDF::RResultPtr<TH1D> histResult;
+            if (!weightBranch_m.empty() && hasColumn(weightBranch_m)) {
+              histResult = targetDf.Histo1D(model, intWeightBranch_m, weightBranch_m);
+            } else {
+              if (!weightBranch_m.empty() && !hasColumn(weightBranch_m)) {
+                ctx_m->logger.log(ILogger::Level::Warn,
+                                  "CounterService: weight branch missing, using unit weights for intWeight histogram");
+              }
+              histResult = targetDf.Histo1D(model, intWeightBranch_m);
+            }
+
+            auto histPtr = histResult.GetPtr();
+            histPtr->SetDirectory(&outFile);
+            histPtr->Write(histName.c_str(), TObject::kOverwrite);
+
+            if (hasWeightSignSum) {
+              const std::string signHistName = "counter_intWeightSignSum_" + sampleName_m;
+              const std::string signHistTitle = "Counter intWeightSignSum;" + intWeightBranch_m + ";sumSignWeights";
+              ROOT::RDF::TH1DModel signModel(signHistName.c_str(), signHistTitle.c_str(),
+                                             static_cast<int>(binCount),
+                                             static_cast<double>(minVal) - 0.5,
+                                             static_cast<double>(maxVal) + 0.5);
+              auto signHistResult = signWeightDf.Histo1D(signModel, intWeightBranch_m, "__counter_sign_weight");
+              auto signHistPtr = signHistResult.GetPtr();
+              signHistPtr->SetDirectory(&outFile);
+              signHistPtr->Write(signHistName.c_str(), TObject::kOverwrite);
+            }
+          }
+        }
+      }
     }
     outFile.Close();
   }

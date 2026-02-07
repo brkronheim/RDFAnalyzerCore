@@ -88,8 +88,20 @@ def get_rucio_client(proxy=None) -> Client:
 
 
 def _link_or_copy_file(src, dst, use_symlink=True):
-    if os.path.islink(dst) or os.path.exists(dst):
-        return
+    if os.path.islink(dst):
+        current = os.readlink(dst)
+        if os.path.abspath(current) == os.path.abspath(src):
+            return
+        os.unlink(dst)
+    elif os.path.exists(dst):
+        if use_symlink:
+            os.remove(dst)
+        else:
+            same_size = os.path.getsize(dst) == os.path.getsize(src)
+            same_mtime = int(os.path.getmtime(dst)) == int(os.path.getmtime(src))
+            if same_size and same_mtime:
+                return
+            os.remove(dst)
     if use_symlink:
         ensure_symlink(src, dst)
     else:
@@ -97,8 +109,16 @@ def _link_or_copy_file(src, dst, use_symlink=True):
 
 
 def _link_or_copy_dir(src, dst, use_symlink=True):
-    if os.path.islink(dst) or os.path.exists(dst):
-        return
+    if os.path.islink(dst):
+        current = os.readlink(dst)
+        if os.path.abspath(current) == os.path.abspath(src):
+            return
+        os.unlink(dst)
+    elif os.path.exists(dst):
+        if use_symlink:
+            shutil.rmtree(dst)
+        else:
+            return
     if use_symlink:
         ensure_symlink(src, dst)
     else:
@@ -270,7 +290,11 @@ def main():
     args = parser.parse_args()
 
     if not args.no_validate:
-        errors = validate_submit_config(args.config, mode="nano")
+        errors, warnings = validate_submit_config(args.config, mode="nano")
+        if warnings:
+            print("Config validation warnings:")
+            for w in warnings:
+                print(f"- {w}")
         if errors:
             print("Config validation failed:")
             for err in errors:
@@ -283,7 +307,13 @@ def main():
     def resolve_path(path_value):
         if not path_value:
             return path_value
-        return path_value if os.path.isabs(path_value) else os.path.join(base_dir, path_value)
+        if os.path.isabs(path_value):
+            return path_value
+        # Prefer provided relative path if it exists in the current working directory
+        if os.path.exists(path_value):
+            return os.path.abspath(path_value)
+        # Otherwise resolve relative to the config's base directory
+        return os.path.abspath(os.path.join(base_dir, path_value))
 
     configDict = read_config(args.config)
     print(configDict.keys())
@@ -291,6 +321,8 @@ def main():
     x509loc = args.x509
     exe_path = resolve_path(args.exe)
     exe_relpath = os.path.basename(exe_path)
+    if not os.path.exists(exe_path):
+        raise SystemExit(f"Executable not found: {exe_path}. Provide a valid path with -e/--exe")
     config = resolve_path(configDict['sampleConfig'])
     saveDirectory = resolve_path(configDict['saveDirectory'])
     Path(saveDirectory).mkdir(parents=True, exist_ok=True)
@@ -310,7 +342,14 @@ def main():
 
     shared_dir = os.path.join(mainDir, "shared")
     Path(shared_dir).mkdir(parents=True, exist_ok=True)
-    _link_or_copy_dir(resolve_path("aux"), os.path.join(shared_dir, "aux"), use_symlink=use_symlink)
+    aux_src = resolve_path("aux")
+    if aux_src and os.path.exists(aux_src):
+        if args.aux or not use_symlink:
+            _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
+        else:
+            _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=True)
+    else:
+        print(f"Warning: 'aux' directory not found at '{aux_src}'; skipping aux link/copy")
     _link_or_copy_file(exe_path, os.path.join(shared_dir, exe_relpath), use_symlink=use_symlink)
     for key in sampleList:
         print("Checking ", key)
@@ -320,7 +359,10 @@ def main():
         das = sample['das']
         xsec = float(sample['xsec'])
         typ = sample['type']
-        norm = float(sample['norm'])
+        if('norm' not in sample):
+            norm = 1.0
+        else:
+            norm = float(sample['norm'])
         kfac  = float(sample['kfac']) if 'kfac' in sample else 1.0
         site  = sample['site'] if 'site' in sample else ''
 
@@ -348,7 +390,14 @@ def main():
                     Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(src, dst)
 
-                _link_or_copy_dir(resolve_path("aux"), os.path.join(test_dir, "aux"), use_symlink=use_symlink)
+                aux_src = resolve_path("aux")
+                if aux_src and os.path.exists(aux_src):
+                    if args.aux or not use_symlink:
+                        _link_or_copy_dir(aux_src, os.path.join(test_dir, "aux"), use_symlink=False)
+                    else:
+                        _link_or_copy_dir(aux_src, os.path.join(test_dir, "aux"), use_symlink=True)
+                else:
+                    print(f"Warning: 'aux' directory not found at '{aux_src}'; skipping aux link/copy")
                 _link_or_copy_file(exe_path, os.path.join(test_dir, exe_relpath), use_symlink=use_symlink)
 
                 test_config = dict(configDict)
@@ -357,8 +406,7 @@ def main():
                 test_config.setdefault("threads", "1")
                 test_config["type"] = typ
                 test_config["saveFile"] = os.path.join(test_dir, "test_output.root")
-                if "metaFile" in test_config:
-                    test_config["metaFile"] = os.path.join(test_dir, "test_meta.root")
+                test_config["metaFile"] = os.path.join(test_dir, "test_output_meta.root")
 
                 normScale = str(extraScale*kfac*lumi*xsec/norm)
 
@@ -405,6 +453,7 @@ def main():
             # determine name of output file
             outputFileName = saveDirectory+"/"+name+"_"+str(sampleIndex)+".root"
             configDict["saveFile"] = outputFileName
+            configDict["metaFile"] = saveDirectory + "/" + name + "_" + str(sampleIndex) + "_meta.root"
             configDict["fileList"] = fileList[subDir]
             #print(subDir, fileList[subDir], configDict["fileList"])
             configDict["batch"] = "True"

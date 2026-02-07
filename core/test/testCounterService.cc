@@ -46,11 +46,11 @@ TEST(CounterServiceTest, UsesPreFilterDataFrameForIntWeightHistogram) {
 
   auto df = dataManager.getDataFrame();
   dataManager.Define("intCode",
-                     [](ULong64_t entry) { return static_cast<long long>(entry % 3); },
+                     [](ULong64_t entry) { return static_cast<Int_t>(entry % 3); },
                      {"rdfentry_"},
                      systematicManager);
   dataManager.Define("genWeight",
-                     [](ULong64_t entry) { return (entry % 2 == 0) ? 1.0 : 2.0; },
+                     [](ULong64_t entry) { return (entry % 2 == 0) ? 1.0f : 2.0f; },
                      {"rdfentry_"},
                      systematicManager);
 
@@ -61,7 +61,7 @@ TEST(CounterServiceTest, UsesPreFilterDataFrameForIntWeightHistogram) {
   auto preFilterDf = dataManager.getDataFrame();
   service.onPreFilter(preFilterDf);
 
-  dataManager.Filter([](long long code) { return code != 1; }, {"intCode"});
+  dataManager.Filter([](Int_t code) { return code != 1; }, {"intCode"});
 
   auto filteredDf = dataManager.getDataFrame();
   service.finalize(filteredDf);

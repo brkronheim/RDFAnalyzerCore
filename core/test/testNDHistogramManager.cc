@@ -24,7 +24,7 @@ protected:
     ChangeToTestSourceDir();
     std::string configFile = "cfg/test_data_config_minimal.txt";
     configManager = ManagerFactory::createConfigurationManager(configFile);
-    dataManager = ManagerFactory::createDataManager(*configManager);
+    dataManager = std::make_unique<DataManager>(1);
     systematicManager = std::make_unique<SystematicManager>();
     
     logger = std::make_unique<DefaultLogger>();
@@ -175,6 +175,22 @@ TEST_F(NDHistogramManagerTest, BookNDMultipleRegions) {
   std::string suffix = "_test";
   EXPECT_NO_THROW({ histogramManager->bookND(infos, selection, suffix, regionNames); });
   EXPECT_TRUE(true);
+}
+
+TEST_F(NDHistogramManagerTest, BookNDNormalizesRegionAxes) {
+  dataManager->Define("var1", []() { return 1.0; }, {}, *systematicManager);
+  dataManager->Define("w1", []() { return 1.0; }, {}, *systematicManager);
+  dataManager->Define("sel1", []() { return 1.0; }, {}, *systematicManager);
+
+  std::vector<histInfo> infos = {histInfo("test_hist", "var1", "label1", "w1", 10, 0.0, 10.0)};
+  std::vector<selectionInfo> selection = {selectionInfo("sel1", 1, 0.0, 1.0, {"all"})};
+  std::vector<std::vector<std::string>> regionNames = {{"all"}};
+
+  EXPECT_NO_THROW(histogramManager->bookND(infos, selection, "", regionNames));
+  ASSERT_GE(regionNames.size(), 4u);
+  EXPECT_EQ(regionNames[0][0], "all");
+  EXPECT_EQ(regionNames[1][0], "Default");
+  EXPECT_EQ(regionNames[2][0], "Default");
 }
 
 TEST_F(NDHistogramManagerTest, SaveHistsBasic) {

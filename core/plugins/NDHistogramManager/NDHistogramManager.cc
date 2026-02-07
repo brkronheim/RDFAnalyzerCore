@@ -4,6 +4,7 @@
 #include <api/IPluggableManager.h>
 #include <DataManager.h>
 #include <NDHistogramManager.h>
+#include <CounterService.h>
 #include <TFile.h>
 #include <TH1F.h>
 #include <THnSparse.h>
@@ -353,6 +354,7 @@ void NDHistogramManager::BookSingleHistogram(
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Int_t>>(
       std::move(tempModel), varVector));
+  histNodes_m.push_back(df);
 }
 
 void NDHistogramManager::bookND(std::vector<histInfo> &infos,
@@ -372,11 +374,26 @@ void NDHistogramManager::bookND(std::vector<histInfo> &infos,
   selectionInfo controlInfo = selection.size() > 1 ? selection[1] : selectionInfo();
   selectionInfo sampleInfo = selection.size() > 2 ? selection[2] : selectionInfo();
 
+  // Normalize region names to match axes: channel, control, sample, systematic
+  std::vector<std::vector<std::string>> normalizedRegionNames;
+  normalizedRegionNames.reserve(4);
+  normalizedRegionNames.emplace_back(allRegionNames.size() > 0 ? allRegionNames[0] : channelInfo.regions());
+  normalizedRegionNames.emplace_back(allRegionNames.size() > 1 ? allRegionNames[1] : controlInfo.regions());
+  normalizedRegionNames.emplace_back(allRegionNames.size() > 2 ? allRegionNames[2] : sampleInfo.regions());
+
   // Append systematic axis info if not already appended
   const std::vector<std::string> systList = systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
-  if (allRegionNames.empty() || allRegionNames.back() != systList) {
-    allRegionNames.emplace_back(systList);
+  if (allRegionNames.size() > 3) {
+    for (size_t i = 3; i < allRegionNames.size(); ++i) {
+      normalizedRegionNames.emplace_back(allRegionNames[i]);
+    }
   }
+  if (normalizedRegionNames.empty() || normalizedRegionNames.back() != systList) {
+    normalizedRegionNames.emplace_back(systList);
+  }
+  allRegionNames = normalizedRegionNames;
+
+  histos_m.reserve(histos_m.size() + infos.size());
 
   for (auto &info : infos) {
     BookSingleHistogram(info,
@@ -393,6 +410,29 @@ void NDHistogramManager::saveHists(std::vector<std::vector<histInfo>> &fullHistL
     throw std::runtime_error("NDHistogramManager: ConfigurationManager not set");
   }
   SaveHists(fullHistList, allRegionNames, *configManager_m);
+
+  if (countersFinalized_m || !logger_m || !skimSink_m || !metaSink_m) {
+    return;
+  }
+
+  const auto& configMap = configManager_m->getConfigMap();
+  auto it = configMap.find("enableCounters");
+  if (it == configMap.end()) {
+    return;
+  }
+  const auto& val = it->second;
+  const bool enabled = (val == "1" || val == "true" || val == "True");
+  if (!enabled) {
+    return;
+  }
+
+  CounterService counterService;
+  ManagerContext ctx{*configManager_m, *dataManager_m, *systematicManager_m,
+                     *logger_m, *skimSink_m, *metaSink_m};
+  counterService.initialize(ctx);
+  auto df = dataManager_m->getDataFrame();
+  counterService.finalize(df);
+  countersFinalized_m = true;
 }
 
 void NDHistogramManager::SaveHists(
@@ -434,7 +474,8 @@ void NDHistogramManager::SaveHists(
   for (auto &histo_m : histos_m) {
     auto hist = histo_m.GetPtr();
     const Int_t currentHistogramSize = hist->GetNbins();
-    std::vector<Int_t> indices(commonAxisSize.size() + 1);
+    const Int_t dim = hist->GetNdimensions();
+    std::vector<Int_t> indices(dim);
     for (int i = 0; i < currentHistogramSize; i++) {
       Float_t content = hist->GetBinContent(i, indices.data());
       if (content == 0) {
@@ -443,7 +484,8 @@ void NDHistogramManager::SaveHists(
       Float_t error = hist->GetBinError2(i);
 
       std::string dirName = "";
-      const Int_t size = commonAxisSize.size() - 2;
+      const Int_t regionAxes = std::min(static_cast<Int_t>(allRegionNames.size()), dim - 1);
+      const Int_t size = regionAxes - 2;
       for (int j = 0; j < size; j++) {
         if (indices[j] > 0 && j < static_cast<Int_t>(allRegionNames.size()) &&
             indices[j] - 1 < static_cast<Int_t>(allRegionNames[j].size())) {
@@ -451,20 +493,20 @@ void NDHistogramManager::SaveHists(
         }
       }
 
-      if (commonAxisSize.size() - 2 >= 0 &&
-          commonAxisSize.size() - 2 < allRegionNames.size() &&
-          indices[commonAxisSize.size() - 2] > 0 &&
-          indices[commonAxisSize.size() - 2] - 1 < allRegionNames[commonAxisSize.size() - 2].size()) {
-        dirName += allRegionNames[commonAxisSize.size() - 2][indices[commonAxisSize.size() - 2] - 1];
+      if (regionAxes - 2 >= 0 &&
+          regionAxes - 2 < static_cast<Int_t>(allRegionNames.size()) &&
+          indices[regionAxes - 2] > 0 &&
+          indices[regionAxes - 2] - 1 < static_cast<Int_t>(allRegionNames[regionAxes - 2].size())) {
+        dirName += allRegionNames[regionAxes - 2][indices[regionAxes - 2] - 1];
       }
 
       std::string histName = allVariables[histIndex];
-      if (commonAxisSize.size() - 1 >= 0 &&
-          commonAxisSize.size() - 1 < allRegionNames.size() &&
-          indices[commonAxisSize.size() - 1] > 0 &&
-          indices[commonAxisSize.size() - 1] - 1 < allRegionNames[commonAxisSize.size() - 1].size()) {
-        if (allRegionNames[commonAxisSize.size() - 1][indices[commonAxisSize.size() - 1] - 1] != "Nominal") {
-          histName += "_" + allRegionNames[commonAxisSize.size() - 1][indices[commonAxisSize.size() - 1] - 1];
+      if (regionAxes - 1 >= 0 &&
+          regionAxes - 1 < static_cast<Int_t>(allRegionNames.size()) &&
+          indices[regionAxes - 1] > 0 &&
+          indices[regionAxes - 1] - 1 < static_cast<Int_t>(allRegionNames[regionAxes - 1].size())) {
+        if (allRegionNames[regionAxes - 1][indices[regionAxes - 1] - 1] != "Nominal") {
+          histName += "_" + allRegionNames[regionAxes - 1][indices[regionAxes - 1] - 1];
         }
       }
 
@@ -478,10 +520,13 @@ void NDHistogramManager::SaveHists(
         dirSet.emplace(dirName);
       }
 
-      histMap[dirName + "/" + histName].SetBinContent(
-          indices[commonAxisSize.size()], content);
-      histMap[dirName + "/" + histName].SetBinError(
-          indices[commonAxisSize.size()], std::sqrt(error));
+        const Int_t valueAxisIndex = regionAxes;
+        if (valueAxisIndex < dim) {
+        histMap[dirName + "/" + histName].SetBinContent(
+          indices[valueAxisIndex], content);
+        histMap[dirName + "/" + histName].SetBinError(
+          indices[valueAxisIndex], std::sqrt(error));
+        }
     }
 
     histIndex++;
@@ -520,7 +565,10 @@ NDHistogramManager::GetHistos() {
 /**
  * @brief Clear all stored histograms
  */
-void NDHistogramManager::Clear() { histos_m.clear(); }
+void NDHistogramManager::Clear() {
+  histos_m.clear();
+  histNodes_m.clear();
+}
 
 /**
  * @brief Setup the manager from a configuration file
