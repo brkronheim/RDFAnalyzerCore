@@ -142,26 +142,9 @@ def _ensure_spool_transfer(main_dir, submit_path, runscript_path, marker="condor
                     break
         if insert_after is None:
             insert_after = 0
-        lines.insert(insert_after + 1, f"transfer_output_files = {marker}")
+        lines.insert(insert_after + 1, "transfer_output_files = ")
         with open(submit_path, "w") as submit_file:
             submit_file.write("\n".join(lines) + "\n")
-
-    with open(runscript_path) as runscript_file:
-        run_lines = runscript_file.read().splitlines()
-
-    if not any(marker in line for line in run_lines):
-        touch_line = f"touch {marker}"
-        insert_idx = None
-        for i, line in enumerate(run_lines):
-            if line.strip() == 'echo "Done!"':
-                insert_idx = i
-                break
-        if insert_idx is None:
-            run_lines.append(touch_line)
-        else:
-            run_lines.insert(insert_idx, touch_line)
-        with open(runscript_path, "w") as runscript_file:
-            runscript_file.write("\n".join(run_lines) + "\n")
 
 
 

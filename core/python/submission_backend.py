@@ -53,13 +53,14 @@ for i, url in enumerate(file_list.split(",")):
     if not url:
         continue
     local_name = f"input_{i}.root"
+    print("xrdcp", "-f", "--nopbar", "--streams", streams, url, local_name)
     subprocess.run(["xrdcp", "-f", "--nopbar", "--streams", streams, url, local_name], check=True)
     local_paths.append(local_name)
 
 cfg["fileList"] = ",".join(local_paths)
 with open("cfg/submit_config.txt", "w") as f:
     for k, v in cfg.items():
-        f.write(f"{k}={v}\n")
+        f.write(f"{k}={v}\\n")
 PY
 """
 
@@ -94,7 +95,7 @@ elif meta_file:
 
 with open("cfg/submit_config.txt", "w") as f:
     for k, v in cfg.items():
-        f.write(f"{k}={v}\n")
+        f.write(f"{k}={v}\\n")
 PY
 """
 
@@ -114,9 +115,13 @@ with open("cfg/submit_config.txt") as f:
         cfg[k.strip()] = v.strip()
 
 def xrdcp_if_exists(local_name, dest, retries=3, timeout=600, streams=None):
+    dest = "root://eosuser.cern.ch/" + dest
+    print(local_name, dest, retries, timeout, streams)
     if not dest:
+        print("no dest")
         return
     if not os.path.exists(local_name):
+        print("local path doesn't exist")
         return
     if os.path.getsize(local_name) == 0:
         raise RuntimeError(f"Refusing to stage out empty file: {local_name}")
@@ -131,13 +136,12 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=600, streams=None):
         str(streams),
         "--retry",
         "3",
-        "--timeout",
-        str(timeout),
         local_name,
         dest,
     ]
     last_exc = None
     for attempt in range(1, retries + 1):
+        print(attempt, cmd)
         try:
             subprocess.run(cmd, check=True, timeout=timeout + 60)
             return
@@ -198,6 +202,9 @@ def generate_condor_runscript(
 {root_block}{pre_block}{x509_block}{shared_block}ls
 ls cfg
 {stage_out_pre}{stage_block}
+echo "Check file existence"
+ls
+
 echo "Starting Analysis"
 ./{exe_relpath} cfg/submit_config.txt
 {stage_out_post}
@@ -263,6 +270,7 @@ transfer_input_files = {transfer_input_files}
 +MaxRuntime={max_runtime}
 max_transfer_input_mb = 10000
 WhenToTransferOutput=On_Exit
+transfer_output_files = 
 
 Output     = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stdout
 Error      = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stderr
