@@ -497,6 +497,20 @@ def main():
             #print(subDir, fileList[subDir], configDict["fileList"])
             configDict["batch"] = "True"
             configDict["type"]=typ
+            if args.stage_inputs:
+                original_list = configDict["fileList"]
+                local_inputs = [
+                    f"input_{i}.root"
+                    for i, item in enumerate(original_list.split(","))
+                    if item.strip()
+                ]
+                configDict["__orig_fileList"] = original_list
+                configDict["fileList"] = ",".join(local_inputs)
+            if args.stage_outputs:
+                configDict["__orig_saveFile"] = configDict["saveFile"]
+                configDict["__orig_metaFile"] = configDict["metaFile"]
+                configDict["saveFile"] = os.path.basename(configDict["saveFile"])
+                configDict["metaFile"] = os.path.basename(configDict["metaFile"])
             # determine normalization scale
             normScale = str(extraScale*kfac*lumi*xsec/norm)
             

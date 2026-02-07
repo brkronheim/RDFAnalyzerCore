@@ -42,7 +42,7 @@ with open("cfg/submit_config.txt") as f:
         k, v = line.split("=", 1)
         cfg[k.strip()] = v.strip()
 
-file_list = cfg.get("fileList", "")
+file_list = cfg.get("__orig_fileList", "") or cfg.get("fileList", "")
 if not file_list:
     raise SystemExit("fileList not found in cfg/submit_config.txt")
 
@@ -80,10 +80,15 @@ with open("cfg/submit_config.txt") as f:
 save_file = cfg.get("saveFile", "")
 meta_file = cfg.get("metaFile", "")
 
-if save_file:
+if "__orig_saveFile" in cfg and cfg.get("__orig_saveFile"):
+    cfg["saveFile"] = os.path.basename(cfg["__orig_saveFile"])
+elif save_file:
     cfg["__orig_saveFile"] = save_file
     cfg["saveFile"] = os.path.basename(save_file)
-if meta_file:
+
+if "__orig_metaFile" in cfg and cfg.get("__orig_metaFile"):
+    cfg["metaFile"] = os.path.basename(cfg["__orig_metaFile"])
+elif meta_file:
     cfg["__orig_metaFile"] = meta_file
     cfg["metaFile"] = os.path.basename(meta_file)
 
