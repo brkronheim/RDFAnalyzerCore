@@ -125,6 +125,45 @@ def _link_or_copy_dir(src, dst, use_symlink=True):
         shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
+def _ensure_spool_transfer(main_dir, submit_path, runscript_path, marker="condor_spool.out"):
+    with open(submit_path) as submit_file:
+        lines = submit_file.read().splitlines()
+
+    if not any(line.strip().startswith("transfer_output_files") for line in lines):
+        insert_after = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("WhenToTransferOutput"):
+                insert_after = i
+                break
+        if insert_after is None:
+            for i, line in enumerate(lines):
+                if line.strip().startswith("transfer_input_files"):
+                    insert_after = i
+                    break
+        if insert_after is None:
+            insert_after = 0
+        lines.insert(insert_after + 1, f"transfer_output_files = {marker}")
+        with open(submit_path, "w") as submit_file:
+            submit_file.write("\n".join(lines) + "\n")
+
+    with open(runscript_path) as runscript_file:
+        run_lines = runscript_file.read().splitlines()
+
+    if not any(marker in line for line in run_lines):
+        touch_line = f"touch {marker}"
+        insert_idx = None
+        for i, line in enumerate(run_lines):
+            if line.strip() == 'echo "Done!"':
+                insert_idx = i
+                break
+        if insert_idx is None:
+            run_lines.append(touch_line)
+        else:
+            run_lines.insert(insert_idx, touch_line)
+        with open(runscript_path, "w") as runscript_file:
+            runscript_file.write("\n".join(run_lines) + "\n")
+
+
 
 
 from rucio.client import Client
@@ -405,8 +444,8 @@ def main():
                 test_config["batch"] = "False"
                 test_config.setdefault("threads", "1")
                 test_config["type"] = typ
-                test_config["saveFile"] = os.path.join(test_dir, "test_output.root")
-                test_config["metaFile"] = os.path.join(test_dir, "test_output_meta.root")
+                test_config["saveFile"] = "test_output.root"
+                test_config["metaFile"] = "test_output_meta.root"
 
                 normScale = str(extraScale*kfac*lumi*xsec/norm)
 
@@ -500,7 +539,11 @@ def main():
         request_cpus=1,
         request_disk=20000,
         use_shared_inputs=True,
+        stream_logs=args.spool,
     )
+    if args.spool:
+        runscript_path = os.path.join(mainDir, "condor_runscript.sh")
+        _ensure_spool_transfer(mainDir, submit_path, runscript_path)
     if(index==1):
         print(index, "job created")
     else:

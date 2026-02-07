@@ -21,8 +21,6 @@
 #include <TChain.h>
 
 #include <api/IConfigurationProvider.h>
-#include <api/IDataFrameProvider.h>
-#include <api/ISystematicManager.h>
 
 #include <plots.h>
 
@@ -56,10 +54,5 @@ void save(std::vector<std::vector<histInfo>> &fullHistList,
           const histHolder &hists,
           const std::vector<std::vector<std::string>> &allRegionNames,
           const std::string &fileName);
-
-ROOT::RDF::RNode saveDF(ROOT::RDF::RNode &df,
-                        const IConfigurationProvider &configProvider,
-                        const IDataFrameProvider &dataFrameProvider,
-                        const ISystematicManager *systematicManager);
 
 #endif

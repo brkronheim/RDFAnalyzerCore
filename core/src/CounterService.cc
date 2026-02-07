@@ -2,6 +2,8 @@
 #include <RtypesCore.h>
 #include <api/IConfigurationProvider.h>
 #include <api/ILogger.h>
+#include <api/IOutputSink.h>
+#include <NullOutputSink.h>
 #include <algorithm>
 #include <TFile.h>
 #include <TH1D.h>
@@ -36,6 +38,10 @@ void CounterService::onPreFilter(ROOT::RDF::RNode& df) {
 void CounterService::finalize(ROOT::RDF::RNode& df) {
   if (!ctx_m) {
     return;
+  }
+
+  if (dynamic_cast<NullOutputSink*>(&ctx_m->metaSink) != nullptr) {
+    throw std::runtime_error("CounterService: meta output sink is null");
   }
 
   ROOT::RDF::RNode targetDf = preFilterDf_m ? preFilterDf_m.value() : df;
@@ -107,18 +113,7 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
                       " intWeightSum(" + intWeightBranch_m + ")=" + std::to_string(intWeightValue));
   }
 
-  std::string fileName = ctx_m->config.get("metaFile");
-  if (fileName.empty()) {
-    fileName = ctx_m->config.get("saveFile");
-    if (!fileName.empty()) {
-      const auto pos = fileName.rfind('.');
-      if (pos != std::string::npos) {
-        fileName = fileName.substr(0, pos) + "_meta" + fileName.substr(pos);
-      } else {
-        fileName += "_meta.root";
-      }
-    }
-  }
+  std::string fileName = ctx_m->metaSink.resolveOutputFile(ctx_m->config, OutputChannel::Meta);
   if (!fileName.empty()) {
     TFile outFile(fileName.c_str(), "UPDATE");
     if (outFile.IsZombie()) {

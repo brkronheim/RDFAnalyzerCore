@@ -5,6 +5,7 @@
 #include <DataManager.h>
 #include <DefaultLogger.h>
 #include <NullOutputSink.h>
+#include <RootOutputSink.h>
 #include <SystematicManager.h>
 
 #include <TFile.h>
@@ -42,7 +43,7 @@ TEST(CounterServiceTest, UsesPreFilterDataFrameForIntWeightHistogram) {
   SystematicManager systematicManager;
   DefaultLogger logger;
   NullOutputSink skimSink;
-  NullOutputSink metaSink;
+  RootOutputSink metaSink;
 
   auto df = dataManager.getDataFrame();
   dataManager.Define("intCode",

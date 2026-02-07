@@ -39,7 +39,16 @@ protected:
   }
 
   void TearDown() override {
-    // Using smart pointers, so nothing to delete
+    if (histogramManager) {
+      histogramManager->Clear();
+    }
+    histogramManager.reset();
+    dataManager.reset();
+    systematicManager.reset();
+    logger.reset();
+    skimSink.reset();
+    metaSink.reset();
+    configManager.reset();
   }
 
   std::unique_ptr<IConfigurationProvider> configManager;
@@ -303,6 +312,8 @@ TEST_F(NDHistogramManagerTest, HistogramTypes) {
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};
   std::string suffix = "_1d";
   EXPECT_NO_THROW(histogramManager->bookND(hist1d, selection, suffix, regionNames));
+  histogramManager->Clear();
+  regionNames = {{"region1"}};
   // 2D histogram
   dataManager->Define("var2", []() { return 2.0; }, {}, *systematicManager);
   dataManager->Define("w2", []() { return 1.0; }, {}, *systematicManager);
@@ -310,6 +321,8 @@ TEST_F(NDHistogramManagerTest, HistogramTypes) {
                                   histInfo("hist2d_y", "var2", "label2", "w2", 20, -5.0, 5.0)};
   suffix = "_2d";
   EXPECT_NO_THROW(histogramManager->bookND(hist2d, selection, suffix, regionNames));
+  histogramManager->Clear();
+  regionNames = {{"region1"}};
   // 3D histogram
   dataManager->Define("var3", []() { return 3.0; }, {}, *systematicManager);
   dataManager->Define("w3", []() { return 1.0; }, {}, *systematicManager);

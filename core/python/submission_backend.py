@@ -32,6 +32,7 @@ def stage_inputs_block():
 echo "Staging input files with xrdcp"
 python3 - << 'PY'
 import subprocess
+import os
 cfg = {}
 with open("cfg/submit_config.txt") as f:
     for line in f:
@@ -46,12 +47,13 @@ if not file_list:
     raise SystemExit("fileList not found in cfg/submit_config.txt")
 
 local_paths = []
+streams = os.environ.get("XRDCP_STREAMS", "4")
 for i, url in enumerate(file_list.split(",")):
     url = url.strip()
     if not url:
         continue
     local_name = f"input_{i}.root"
-    subprocess.run(["xrdcp", "-f", url, local_name], check=True)
+    subprocess.run(["xrdcp", "-f", "--nopbar", "--streams", streams, url, local_name], check=True)
     local_paths.append(local_name)
 
 cfg["fileList"] = ",".join(local_paths)
@@ -93,7 +95,10 @@ PY
 
     post_block = """
 python3 - << 'PY'
-import os, subprocess
+import os
+import subprocess
+import time
+
 cfg = {}
 with open("cfg/submit_config.txt") as f:
     for line in f:
@@ -103,12 +108,38 @@ with open("cfg/submit_config.txt") as f:
         k, v = line.split("=", 1)
         cfg[k.strip()] = v.strip()
 
-def xrdcp_if_exists(local_name, dest):
+def xrdcp_if_exists(local_name, dest, retries=3, timeout=600, streams=None):
     if not dest:
         return
     if not os.path.exists(local_name):
         return
-    subprocess.run(["xrdcp", "-f", local_name, dest], check=True)
+    if os.path.getsize(local_name) == 0:
+        raise RuntimeError(f"Refusing to stage out empty file: {local_name}")
+
+    if streams is None:
+        streams = os.environ.get("XRDCP_STREAMS", "4")
+    cmd = [
+        "xrdcp",
+        "-f",
+        "--nopbar",
+        "--streams",
+        str(streams),
+        "--retry",
+        "3",
+        "--timeout",
+        str(timeout),
+        local_name,
+        dest,
+    ]
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            subprocess.run(cmd, check=True, timeout=timeout + 60)
+            return
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(min(10 * attempt, 30))
+    raise RuntimeError(f"xrdcp failed after {retries} attempts for {local_name} -> {dest}: {last_exc}")
 
 orig_save = cfg.get("__orig_saveFile", "")
 orig_meta = cfg.get("__orig_metaFile", "")
@@ -176,12 +207,13 @@ def generate_condor_submit(
     exe_relpath,
     x509loc=None,
     want_os="el9",
-    max_runtime="3600*4",
+    max_runtime="1200",
     request_memory=2000,
     request_cpus=1,
     request_disk=20000,
     extra_transfer_files=None,
     use_shared_inputs=False,
+    stream_logs=False,
 ):
     Path(main_dir + "/condor_logs").mkdir(parents=True, exist_ok=True)
     if use_shared_inputs:
@@ -200,7 +232,18 @@ def generate_condor_submit(
         transfer_files.append(x509loc)
     if extra_transfer_files:
         transfer_files.extend(extra_transfer_files)
-    transfer_input_files = ",".join(transfer_files)
+    filtered_files = []
+    for path in transfer_files:
+        if "$(" in path:
+            filtered_files.append(path)
+            continue
+        if os.path.exists(path):
+            filtered_files.append(path)
+    transfer_input_files = ",".join(filtered_files)
+
+    stream_block = ""
+    #if stream_logs:
+    #    stream_block = "stream_output = True\nstream_error = True\n"
 
     submit_file = f"""universe = vanilla
 Executable     =  {main_dir}/condor_runscript.sh
@@ -208,7 +251,7 @@ Should_Transfer_Files     = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification     = never
 transfer_input_files = {transfer_input_files}
-MY.WantOS = "{want_os}"
+{stream_block}MY.WantOS = "{want_os}"
 +RequestMemory={request_memory}
 +RequestCpus={request_cpus}
 +RequestDisk={request_disk}
@@ -234,12 +277,13 @@ def write_submit_files(
     x509loc=None,
     pre_setup_lines="",
     want_os="el9",
-    max_runtime="3600*4",
+    max_runtime="1200",
     request_memory=2000,
     request_cpus=1,
     request_disk=20000,
     extra_transfer_files=None,
     use_shared_inputs=False,
+    stream_logs=False,
 ):
     submit_path = os.path.join(main_dir, "condor_submit.sub")
     runscript_path = os.path.join(main_dir, "condor_runscript.sh")
@@ -257,6 +301,7 @@ def write_submit_files(
                 request_disk=request_disk,
                 extra_transfer_files=extra_transfer_files,
                 use_shared_inputs=use_shared_inputs,
+                stream_logs=stream_logs,
             )
         )
     with open(runscript_path, "w") as condor_sub:

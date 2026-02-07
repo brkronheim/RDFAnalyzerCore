@@ -439,9 +439,15 @@ void NDHistogramManager::SaveHists(
     std::vector<std::vector<histInfo>> &fullHistList,
     std::vector<std::vector<std::string>> &allRegionNames,
     const IConfigurationProvider &configProvider) {
-  std::string fileName = configProvider.get("metaFile");
+  std::string fileName;
+  if (metaSink_m) {
+    fileName = metaSink_m->resolveOutputFile(configProvider, OutputChannel::Meta);
+  }
   if (fileName.empty()) {
-    fileName = configProvider.get("saveFile");
+    fileName = configProvider.get("metaFile");
+    if (fileName.empty()) {
+      fileName = configProvider.get("saveFile");
+    }
   }
 
   std::vector<std::string> allNames;

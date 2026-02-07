@@ -130,63 +130,11 @@ Analyzer *Analyzer::DefineVector(std::string name, const std::vector<std::string
 Analyzer *Analyzer::save() {
     auto df = dataFrameProvider_m->getDataFrame();
 
-    std::string saveConfig;
-    std::string saveFile;
-    std::string saveTree;
-
-    std::vector<std::string> missingKeys;
-    const auto& configMap = configProvider_m->getConfigMap();
-
-    if (configMap.find("saveConfig") != configMap.end()) {
-        saveConfig = configMap.at("saveConfig");
-    } else {
-        missingKeys.emplace_back("saveConfig");
-    }
-
-    if (configMap.find("saveFile") != configMap.end()) {
-        saveFile = configMap.at("saveFile");
-    } else {
-        missingKeys.emplace_back("saveFile");
-    }
-
-    if (configMap.find("saveTree") != configMap.end()) {
-        saveTree = configMap.at("saveTree");
-    } else {
-        missingKeys.emplace_back("saveTree");
-    }
-
-    if (!missingKeys.empty()) {
-        std::string msg = "Error: Missing required config keys: ";
-        for (size_t i = 0; i < missingKeys.size(); ++i) {
-            msg += missingKeys[i];
-            if (i + 1 < missingKeys.size()) {
-                msg += ", ";
-            }
-        }
-        msg += ". Please include them in the config file.";
-        throw std::runtime_error(msg);
-    }
-
-    std::vector<std::string> saveVectorInit = configProvider_m->parseVectorConfig(saveConfig);
-    std::vector<std::string> saveVector;
-    for (auto val : saveVectorInit) {
-        val = val.substr(0, val.find(" "));
-        if (!val.empty()) {
-            saveVector.push_back(val);
-        }
-    }
-
-    const unsigned int vecSize = saveVector.size();
-    for (unsigned int i = 0; i < vecSize; i++) {
-        const auto &systs = systematicManager_m->getSystematicsForVariable(saveVector[i]);
-        for (const auto &syst : systs) {
-            saveVector.push_back(saveVector[i] + "_" + syst + "Up");
-            saveVector.push_back(saveVector[i] + "_" + syst + "Down");
-        }
-    }
-
-    OutputSpec spec{saveFile, saveTree, saveVector};
-    skimSink_m->writeDataFrame(df, spec);
+    skimSink_m->writeDataFrame(df,
+                               *configProvider_m,
+                               dataFrameProvider_m.get(),
+                               systematicManager_m.get(),
+                               OutputChannel::Skim);
 
     for (auto& service : services_m) {
         service->finalize(df);

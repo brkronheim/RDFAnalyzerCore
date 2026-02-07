@@ -5,6 +5,18 @@
 #include <string>
 #include <vector>
 
+class IConfigurationProvider;
+class IDataFrameProvider;
+class ISystematicManager;
+
+/**
+ * @brief Output channel selection for sink behavior.
+ */
+enum class OutputChannel {
+  Skim,
+  Meta
+};
+
 /**
  * @brief Output specification for writing a dataframe.
  */
@@ -22,6 +34,15 @@ public:
   virtual ~IOutputSink() = default;
 
   virtual void writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec) = 0;
+
+  virtual void writeDataFrame(ROOT::RDF::RNode& df,
+                              const IConfigurationProvider& configProvider,
+                              const IDataFrameProvider* dataFrameProvider,
+                              const ISystematicManager* systematicManager,
+                              OutputChannel channel) = 0;
+
+  virtual std::string resolveOutputFile(const IConfigurationProvider& configProvider,
+                                        OutputChannel channel) = 0;
 };
 
 #endif // IOUTPUTSINK_H_INCLUDED
