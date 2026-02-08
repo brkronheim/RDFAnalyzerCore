@@ -83,6 +83,15 @@ private:
   void registerModels(const IConfigurationProvider &configProvider);
 
   /**
+   * @brief Load models from parsed configuration
+   * @param configProvider Reference to the configuration provider
+   * @param modelConfig Parsed configuration entries
+   */
+  void loadModelsFromConfig(
+      const IConfigurationProvider &configProvider,
+      const std::vector<std::unordered_map<std::string, std::string>> &modelConfig);
+
+  /**
    * @brief Shared ONNX Runtime environment
    */
   std::shared_ptr<Ort::Env> env_m;

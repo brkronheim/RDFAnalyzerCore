@@ -139,6 +139,18 @@ void OnnxManager::registerModels(const IConfigurationProvider &configProvider) {
       configProvider.get("onnxConfig"),
       {"file", "name", "inputVariables", "runVar"});
 
+  loadModelsFromConfig(configProvider, modelConfig);
+}
+
+/**
+ * @brief Load models from parsed configuration
+ * @param configProvider Reference to the configuration provider
+ * @param modelConfig Parsed configuration entries
+ */
+void OnnxManager::loadModelsFromConfig(
+    const IConfigurationProvider &configProvider,
+    const std::vector<std::unordered_map<std::string, std::string>> &modelConfig) {
+  
   Ort::SessionOptions session_options;
   session_options.SetIntraOpNumThreads(1);
   session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
@@ -188,42 +200,5 @@ void OnnxManager::setupFromConfigFile() {
     configManager_m->get("onnxConfig"),
     {"file", "name", "inputVariables", "runVar"});
 
-  Ort::SessionOptions session_options;
-  session_options.SetIntraOpNumThreads(1);
-  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
-
-  for (const auto &entryKeys : modelConfig) {
-    // Split the variable list on commas, save to vector
-    auto inputVariableVector =
-      configManager_m->splitString(entryKeys.at("inputVariables"), ",");
-
-    // Load the ONNX model
-    auto session = std::make_shared<Ort::Session>(*env_m, entryKeys.at("file").c_str(), session_options);
-
-    // Get input and output names from the model
-    Ort::AllocatorWithDefaultOptions allocator;
-    
-    // Get input names
-    size_t num_input_nodes = session->GetInputCount();
-    std::vector<std::string> input_names;
-    for (size_t i = 0; i < num_input_nodes; i++) {
-      auto input_name = session->GetInputNameAllocated(i, allocator);
-      input_names.push_back(std::string(input_name.get()));
-    }
-    
-    // Get output names
-    size_t num_output_nodes = session->GetOutputCount();
-    std::vector<std::string> output_names;
-    for (size_t i = 0; i < num_output_nodes; i++) {
-      auto output_name = session->GetOutputNameAllocated(i, allocator);
-      output_names.push_back(std::string(output_name.get()));
-    }
-
-    // Add the model and feature list to their maps
-    objects_m.emplace(entryKeys.at("name"), session);
-    features_m.emplace(entryKeys.at("name"), inputVariableVector);
-    model_runVars_m.emplace(entryKeys.at("name"), entryKeys.at("runVar"));
-    model_inputNames_m.emplace(entryKeys.at("name"), input_names);
-    model_outputNames_m.emplace(entryKeys.at("name"), output_names);
-  }
+  loadModelsFromConfig(*configManager_m, modelConfig);
 }
