@@ -22,6 +22,9 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 find_package(ROOT REQUIRED)
 find_package(Boost REQUIRED CONFIG)
 
+# Setup ONNX Runtime
+include(SetupOnnxRuntime)
+
 # Ensure runtime uses the same ROOT installation found at configure time.
 get_target_property(ROOT_CORE_LOCATION ROOT::Core IMPORTED_LOCATION)
 if(NOT ROOT_CORE_LOCATION)
