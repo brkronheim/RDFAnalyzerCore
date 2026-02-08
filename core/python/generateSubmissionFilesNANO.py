@@ -1,41 +1,18 @@
-import subprocess
 import argparse
-import glob
+import os
 import shutil
-
-import os
-
-from pathlib import Path
-
-
-from rucio.client import Client
-
-
-import socket
-import os
 import subprocess
+from pathlib import Path
+import time
 
 import numpy as np
+import requests
+from requests.exceptions import ChunkedEncodingError, RequestException
+import urllib3
+from rucio.client import Client
 
-from submission_backend import (
-    read_config,
-    get_copy_file_list,
-    ensure_symlink,
-    write_submit_files,
-)
+from submission_backend import read_config, get_copy_file_list, write_submit_files
 from validate_config import validate_submit_config
-
-def check_port(port):
-    import socket
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind(("0.0.0.0", port))
-        available = True
-    except Exception:
-        available = False
-    sock.close()
-    return available
 
 
 def get_proxy_path() -> str:
@@ -87,6 +64,49 @@ def get_rucio_client(proxy=None) -> Client:
         raise e
 
 
+def normalize_config_paths(config_dict):
+    normalized = dict(config_dict)
+    for key, value in config_dict.items():
+        if isinstance(value, str) and ".txt" in value and os.path.sep in value:
+            normalized[key] = os.path.basename(value)
+    return normalized
+
+
+def _append_unique_lines(file_path, lines):
+    """Ensure the given `lines` appear exactly once in `file_path`.
+
+    If the file exists, remove duplicate identical lines while preserving the
+    original order of the first occurrence. Then add any missing lines from
+    `lines`. The result overwrites the file so pre-existing duplicate keys are
+    eliminated.
+    """
+    existing_lines = []
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            existing_lines = [ln.rstrip("\n") for ln in f]
+    os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+
+    seen = set()
+    deduped = []
+    for ln in existing_lines:
+        if ln in seen:
+            continue
+        seen.add(ln)
+        deduped.append(ln)
+
+    for line in lines:
+        if not line:
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        deduped.append(line)
+
+    with open(file_path, "w") as f:
+        for ln in deduped:
+            f.write(ln + "\n")
+
+
 def _link_or_copy_file(src, dst, use_symlink=True):
     if os.path.islink(dst):
         current = os.readlink(dst)
@@ -103,7 +123,7 @@ def _link_or_copy_file(src, dst, use_symlink=True):
                 return
             os.remove(dst)
     if use_symlink:
-        ensure_symlink(src, dst)
+        os.symlink(src, dst)
     else:
         shutil.copy2(src, dst)
 
@@ -120,7 +140,7 @@ def _link_or_copy_dir(src, dst, use_symlink=True):
         else:
             return
     if use_symlink:
-        ensure_symlink(src, dst)
+        os.symlink(src, dst)
     else:
         shutil.copytree(src, dst, dirs_exist_ok=True)
 
@@ -149,68 +169,6 @@ def _ensure_spool_transfer(main_dir, submit_path, runscript_path, marker="condor
 
 
 
-from rucio.client import Client
-
-def get_proxy_path() -> str:
-    '''
-    Checks if the VOMS proxy exists and if it is valid
-    for at least 1 hour.
-    If it exists, returns the path of it'''
-    try:
-        subprocess.run("voms-proxy-info -exists -valid 0:20", shell=True, check=True)
-    except subprocess.CalledProcessError:
-        raise Exception(
-            "VOMS proxy expirend or non-existing: please run `voms-proxy-init -voms cms -rfc --valid 168:0`"
-        )
-
-    # Now get the path of the certificate
-    proxy = subprocess.check_output(
-        "voms-proxy-info -path", shell=True, text=True
-    ).strip()
-    return proxy
-
-
-# Rucio needs the default configuration --> taken from CMS cvmfs defaults
-if "RUCIO_HOME" not in os.environ:
-    os.environ["RUCIO_HOME"] = "/cvmfs/cms.cern.ch/rucio/current"
-
-
-def get_rucio_client(proxy=None) -> Client:
-    """
-    Open a client to the CMS rucio server using x509 proxy.
-
-    Parameters
-    ----------
-        proxy : str, optional
-            Use the provided proxy file if given, if not use `voms-proxy-info` to get the current active one.
-
-    Returns
-    -------
-        nativeClient: rucio.Client
-            Rucio client
-    """
-    try:
-        if not proxy:
-            proxy = get_proxy_path()
-        nativeClient = Client()
-        return nativeClient
-
-    except Exception as e:
-        print("Wrong Rucio configuration, impossible to create client")
-        raise e
-
-# Recursively find all lowest level folders with root files
-def findSubFolders(mainDirectory):
-    subDirs = glob.glob(mainDirectory+"/*")
-    segments = set()
-    for subDir in subDirs:
-        if(".root" in subDir and "fail" not in subDir.lower()):
-            segments.add(mainDirectory+"/")
-        segments.update(findSubFolders(subDir))
-    return(segments)
-
-
-
 def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
     runningSize = 0
 
@@ -220,14 +178,48 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
     groupCount = dict()
     groupSizes = dict()
     print("checking Rucio for", directory)
-    rucioOutput = client.list_replicas([{"scope": "cms", "name": directory}])
+
+    # Basic validation of the DAS/Rucio path
+    if not directory or not isinstance(directory, str) or not directory.startswith("/"):
+        print(f"Warning: invalid DAS/Rucio path: '{directory}' - skipping")
+        return {}
+
+    # Robustly call Rucio with retries/backoff to handle intermittent stream errors
+    max_retries = 5
+    backoff = 0.5
+    rucioOutput = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            rucio_gen = client.list_replicas([{"scope": "cms", "name": directory}])
+            rucioOutput = list(rucio_gen)
+            break
+        except (ChunkedEncodingError, RequestException, urllib3.exceptions.ProtocolError) as e:
+            if attempt < max_retries:
+                print(f"Warning: Rucio request failed (attempt {attempt}/{max_retries}): {e}. Retrying in {backoff}s...")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            else:
+                print(f"Error: failed to list replicas for '{directory}' after {max_retries} attempts: {e}")
+                return {}
+        except Exception as e:
+            print(f"Error: unexpected error while listing replicas for '{directory}': {e}")
+            return {}
+
+    if rucioOutput is None:
+        print(f"Error: no response from Rucio for '{directory}'")
+        return {}
+
+    if not rucioOutput:
+        print(f"Warning: no files found for '{directory}'")
+        return {}
+
     print("Output received")
-    rucioOutput = list(rucioOutput)
     print(len(rucioOutput), "files found")
     for filedata in rucioOutput:
          file = filedata["name"]
-         states = filedata["states"]
-         size = filedata["bytes"]*1e-9
+         states = filedata.get("states", {})
+         size = filedata.get("bytes", 0)*1e-9
          redirector="root://xrootd-cms.infn.it/"
          filesFound += 1
          runningSize += size
@@ -304,9 +296,9 @@ def main():
     parser.add_argument('--no-validate', action='store_true', help="skip config validation")
     parser.add_argument('--make-test-job', action='store_true', help="create a local test job using one file")
     parser.add_argument(
-        '--spool',
+        '--eos-sched',
         action='store_true',
-        help='prepare for condor_submit -spool (copy exe/aux instead of symlinks)',
+        help='use EOS scheduling',
     )
 
     args = parser.parse_args()
@@ -340,7 +332,7 @@ def main():
     configDict = read_config(args.config)
     print(configDict.keys())
     fileSplit = args.size
-    x509loc = args.x509
+    # x509loc will be set later
     exe_path = resolve_path(args.exe)
     exe_relpath = os.path.basename(exe_path)
     if not os.path.exists(exe_path):
@@ -360,19 +352,33 @@ def main():
     index = 0
     mainDir = f"condorSub_{args.name}/"
     test_job_created = False
-    use_symlink = not args.spool
 
-    shared_dir = os.path.join(mainDir, "shared")
-    Path(shared_dir).mkdir(parents=True, exist_ok=True)
+    if args.eos_sched:
+        mainDir = os.path.join("/eos/user/b/bkronhei/RDFAnalyzerCore", mainDir)
+
+    x509loc = "x509" if args.x509 else None
+    x509_src = resolve_path(args.x509) if args.x509 else None
     aux_src = resolve_path("aux")
-    if aux_src and os.path.exists(aux_src):
-        if args.aux or not use_symlink:
-            _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
-        else:
-            _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=True)
-    else:
-        print(f"Warning: 'aux' directory not found at '{aux_src}'; skipping aux link/copy")
-    _link_or_copy_file(exe_path, os.path.join(shared_dir, exe_relpath), use_symlink=use_symlink)
+    aux_exists = bool(aux_src and os.path.exists(aux_src))
+    if not aux_exists:
+        print(f"Warning: 'aux' directory not found at '{aux_src}'; skipping aux copy")
+
+    shared_dir_name = "shared_inputs"
+    shared_dir = os.path.join(mainDir, shared_dir_name)
+    Path(shared_dir).mkdir(parents=True, exist_ok=True)
+    _link_or_copy_file(exe_path, os.path.join(shared_dir, exe_relpath), use_symlink=False)
+    if aux_exists:
+        _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
+    if x509_src:
+        shutil.copy2(x509_src, os.path.join(shared_dir, x509loc))
+
+    copy_basenames = sorted({os.path.basename(path) for path in copyList})
+    skip_transfer = {"floats.txt", "ints.txt", "submit_config.txt"}
+    extra_transfer_files = [
+        os.path.join(mainDir, "job_$(Process)", name)
+        for name in copy_basenames
+        if name not in skip_transfer
+    ]
     for key in sampleList:
         print("Checking ", key)
         # get the general information about this sample
@@ -404,121 +410,105 @@ def main():
             if first_file:
                 test_dir = os.path.join(mainDir, "test_job")
                 Path(test_dir).mkdir(parents=True, exist_ok=True)
-                Path(os.path.join(test_dir, "cfg")).mkdir(parents=True, exist_ok=True)
 
                 for file in copyList:
                     src = resolve_path(file)
-                    dst = os.path.join(test_dir, file)
+                    dst = os.path.join(test_dir, os.path.basename(file))
                     Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(src, dst)
 
                 aux_src = resolve_path("aux")
                 if aux_src and os.path.exists(aux_src):
-                    if args.aux or not use_symlink:
-                        _link_or_copy_dir(aux_src, os.path.join(test_dir, "aux"), use_symlink=False)
-                    else:
-                        _link_or_copy_dir(aux_src, os.path.join(test_dir, "aux"), use_symlink=True)
+                    _link_or_copy_dir(aux_src, os.path.join(test_dir, "aux"), use_symlink=False)
                 else:
                     print(f"Warning: 'aux' directory not found at '{aux_src}'; skipping aux link/copy")
-                _link_or_copy_file(exe_path, os.path.join(test_dir, exe_relpath), use_symlink=use_symlink)
+                _link_or_copy_file(exe_path, os.path.join(test_dir, exe_relpath), use_symlink=False)
 
-                test_config = dict(configDict)
+                test_config = normalize_config_paths(dict(configDict))
                 test_config["fileList"] = first_file
                 test_config["batch"] = "False"
                 test_config.setdefault("threads", "1")
                 test_config["type"] = typ
                 test_config["saveFile"] = "test_output.root"
                 test_config["metaFile"] = "test_output_meta.root"
+                test_config["sampleConfig"] = os.path.basename(config)
+                test_config["floatConfig"] = "floats.txt"
+                test_config["intConfig"] = "ints.txt"
 
                 normScale = str(extraScale*kfac*lumi*xsec/norm)
 
-                if('floatConfig' in test_config.keys()):
-                    with open(os.path.join(test_dir, test_config['floatConfig']), "a") as floatFile:
-                        floatFile.write("\nnormScale="+normScale+"\n")
-                        floatFile.write("\nsampleNorm="+str(norm)+"\n")
-                else:
-                    with open(os.path.join(test_dir, "cfg/floats.txt"), "w") as floatFile:
-                        floatFile.write("\nnormScale="+normScale+"\n")
-                        floatFile.write("\nsampleNorm="+str(norm)+"\n")
-                        test_config['floatConfig'] = 'cfg/floats.txt'
+                # Write float keys uniquely (avoid duplicates if file already contains them)
+                float_file = os.path.join(test_dir, test_config.get("floatConfig", "floats.txt"))
+                _append_unique_lines(float_file, ["normScale="+normScale, "sampleNorm="+str(norm)])
+                test_config["floatConfig"] = os.path.basename(float_file)
 
-                if('intConfig' in test_config.keys()):
-                    with open(os.path.join(test_dir, test_config['intConfig']), "a") as intFile:
-                        intFile.write("\ntype="+typ+"\n")
-                else:
-                    with open(os.path.join(test_dir, "cfg/ints.txt"), "w") as intFile:
-                        intFile.write("\ntype="+typ+"\n")
-                        test_config['intConfig'] = 'cfg/ints.txt'
+                int_file = os.path.join(test_dir, test_config.get("intConfig", "ints.txt"))
+                _append_unique_lines(int_file, ["type="+typ])
+                test_config["intConfig"] = os.path.basename(int_file)
 
-                with open(os.path.join(test_dir, "cfg/submit_config.txt"),"w") as file:
+                with open(os.path.join(test_dir, "submit_config.txt"),"w") as file:
                     for cfg_key in test_config.keys():
                         file.write(str(cfg_key)+"="+test_config[cfg_key]+"\n")
 
                 print("Test job created. Run locally with:")
-                print(f"cd {test_dir} && ./{exe_relpath} cfg/submit_config.txt")
+                print(f"cd {test_dir} && ./{exe_relpath} submit_config.txt")
                 test_job_created = True
         for subDir in fileList:
-            
-            # make the submission directory and its cfg sub folder
-            Path(mainDir+"job_"+str(index)).mkdir(parents=True, exist_ok=True)
-            Path(mainDir+"job_"+str(index)+"/cfg").mkdir(parents=True, exist_ok=True)
-            
-            # copy config files into condor submission folder
+            job_dir = os.path.join(mainDir, f"job_{index}")
+            Path(job_dir).mkdir(parents=True, exist_ok=True)
+
+            # copy config files into per-job folder
             for file in copyList:
                 src = resolve_path(file)
-                dst = os.path.join(mainDir+"job_"+str(index), file)
+                dst = os.path.join(job_dir, os.path.basename(file))
                 Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(src, dst)
+
+            # aux/exe/x509 are provided via shared inputs
             #print("linking", os.getcwd()+"/aux", mainDir+"job_"+str(index)+"/aux")
             # aux and executable are provided via shared inputs
 
             # determine name of output file
             outputFileName = saveDirectory+"/"+name+"_"+str(sampleIndex)+".root"
-            configDict["saveFile"] = outputFileName
-            configDict["metaFile"] = saveDirectory + "/" + name + "_" + str(sampleIndex) + "_meta.root"
-            configDict["fileList"] = fileList[subDir]
-            #print(subDir, fileList[subDir], configDict["fileList"])
-            configDict["batch"] = "True"
-            configDict["type"]=typ
+            job_config = normalize_config_paths(dict(configDict))
+            job_config["saveFile"] = outputFileName
+            job_config["metaFile"] = saveDirectory + "/" + name + "_" + str(sampleIndex) + "_meta.root"
+            job_config["fileList"] = fileList[subDir]
+            job_config["batch"] = "True"
+            job_config["type"] = typ
+            job_config["sampleConfig"] = os.path.basename(config)
+            job_config["floatConfig"] = "floats.txt"
+            job_config["intConfig"] = "ints.txt"
             if args.stage_inputs:
-                original_list = configDict["fileList"]
+                original_list = job_config["fileList"]
                 local_inputs = [
                     f"input_{i}.root"
                     for i, item in enumerate(original_list.split(","))
                     if item.strip()
                 ]
-                configDict["__orig_fileList"] = original_list
-                configDict["fileList"] = ",".join(local_inputs)
+                job_config["__orig_fileList"] = original_list
+                job_config["fileList"] = ",".join(local_inputs)
             if args.stage_outputs:
-                configDict["__orig_saveFile"] = configDict["saveFile"]
-                configDict["__orig_metaFile"] = configDict["metaFile"]
-                configDict["saveFile"] = os.path.basename(configDict["saveFile"])
-                configDict["metaFile"] = os.path.basename(configDict["metaFile"])
+                job_config["__orig_saveFile"] = job_config["saveFile"]
+                job_config["__orig_metaFile"] = job_config["metaFile"]
+                job_config["saveFile"] = os.path.basename(job_config["saveFile"])
+                job_config["metaFile"] = os.path.basename(job_config["metaFile"])
             # determine normalization scale
             normScale = str(extraScale*kfac*lumi*xsec/norm)
             
             # augment float and int config files
-            if('floatConfig' in configDict.keys()):
-                with open(mainDir+"job_"+str(index)+"/"+configDict['floatConfig'], "a") as floatFile:
-                    floatFile.write("\nnormScale="+normScale+"\n")
-                    floatFile.write("\nsampleNorm="+str(norm)+"\n")
-            else:
-                with open(mainDir+"job_"+str(index)+"/cfg/floats.txt", "w") as floatFile:
-                    floatFile.write("\nnormScale="+normScale+"\n")
-                    floatFile.write("\nsampleNorm="+str(norm)+"\n")
-                    configDict['floatConfig'] = 'cfg/floats.txt'
+            # Write float keys uniquely (avoid duplicates if file already contains them)
+            float_file = os.path.join(job_dir, job_config.get("floatConfig", "floats.txt"))
+            _append_unique_lines(float_file, ["normScale="+normScale, "sampleNorm="+str(norm)])
+            job_config["floatConfig"] = os.path.basename(float_file)
 
-            if('intConfig' in configDict.keys()):
-                with open(mainDir+"job_"+str(index)+"/"+configDict['intConfig'], "a") as intFile:
-                    intFile.write("\ntype="+typ+"\n")
-            else:
-                with open(mainDir+"job_"+str(index)+"/cfg/ints.txt", "w") as intFile:
-                    intFile.write("\ntype="+typ+"\n")
-                    configDict['intConfig'] = 'cfg/ints.txt'
+            int_file = os.path.join(job_dir, job_config.get("intConfig", "ints.txt"))
+            _append_unique_lines(int_file, ["type="+typ])
+            job_config["intConfig"] = os.path.basename(int_file)
             # make the main config file and update or add the savefile
-            with open(mainDir+"job_"+str(index)+"/cfg/submit_config.txt","w") as file:
-                for key in configDict.keys():
-                    file.write(str(key)+"="+configDict[key]+"\n")
+            with open(os.path.join(job_dir, "submit_config.txt"),"w") as file:
+                for key in job_config.keys():
+                    file.write(str(key)+"="+job_config[key]+"\n")
             index+=1
             sampleIndex+=1
 
@@ -531,25 +521,21 @@ def main():
         args.root_setup,
         x509loc=x509loc,
         want_os="el9",
-        max_runtime="3600*4",
+        max_runtime="1200",
         request_memory=2000,
         request_cpus=1,
         request_disk=20000,
-        use_shared_inputs=True,
-        stream_logs=args.spool,
+        extra_transfer_files=extra_transfer_files,
+        include_aux=aux_exists,
+        shared_dir_name=shared_dir_name,
+        eos_sched=args.eos_sched,
     )
-    if args.spool:
-        runscript_path = os.path.join(mainDir, "condor_runscript.sh")
-        _ensure_spool_transfer(mainDir, submit_path, runscript_path)
     if(index==1):
         print(index, "job created")
     else:
         print(index, "jobs created")
     print("use the following command to submit:")
-    if args.spool:
-        print("condor_submit -spool", submit_path)
-    else:
-        print("condor_submit", submit_path)
+    print("condor_submit", submit_path)
     index+=1
             
 

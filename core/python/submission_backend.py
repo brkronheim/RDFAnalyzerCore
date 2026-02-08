@@ -27,14 +27,15 @@ def ensure_symlink(src, dst):
     os.symlink(src, dst)
 
 
-def stage_inputs_block():
-    return """
+def stage_inputs_block(eos_sched=False):
+    config_file = "submit_config.txt"
+    return f"""
 echo "Staging input files with xrdcp"
 python3 - << 'PY'
 import subprocess
 import os
-cfg = {}
-with open("cfg/submit_config.txt") as f:
+cfg = {{}}
+with open("{config_file}") as f:
     for line in f:
         line = line.split("#")[0].strip()
         if not line or "=" not in line:
@@ -44,7 +45,7 @@ with open("cfg/submit_config.txt") as f:
 
 file_list = cfg.get("__orig_fileList", "") or cfg.get("fileList", "")
 if not file_list:
-    raise SystemExit("fileList not found in cfg/submit_config.txt")
+    raise SystemExit("fileList not found in {config_file}")
 
 local_paths = []
 streams = os.environ.get("XRDCP_STREAMS", "4")
@@ -52,25 +53,26 @@ for i, url in enumerate(file_list.split(",")):
     url = url.strip()
     if not url:
         continue
-    local_name = f"input_{i}.root"
+    local_name = f"input_{{i}}.root"
     print("xrdcp", "-f", "--nopbar", "--streams", streams, url, local_name)
     subprocess.run(["xrdcp", "-f", "--nopbar", "--streams", streams, url, local_name], check=True)
     local_paths.append(local_name)
 
 cfg["fileList"] = ",".join(local_paths)
-with open("cfg/submit_config.txt", "w") as f:
+with open("submit_config.txt", "w") as f:
     for k, v in cfg.items():
-        f.write(f"{k}={v}\\n")
+        f.write(f"{{k}}={{v}}\\n")
 PY
 """
 
 
-def stage_outputs_blocks():
-    pre_block = """
+def stage_outputs_blocks(eos_sched=False):
+    config_file = "submit_config.txt"
+    pre_block = f"""
 python3 - << 'PY'
 import os
-cfg = {}
-with open("cfg/submit_config.txt") as f:
+cfg = {{}}
+with open("{config_file}") as f:
     for line in f:
         line = line.split("#")[0].strip()
         if not line or "=" not in line:
@@ -93,20 +95,20 @@ elif meta_file:
     cfg["__orig_metaFile"] = meta_file
     cfg["metaFile"] = os.path.basename(meta_file)
 
-with open("cfg/submit_config.txt", "w") as f:
+with open("{config_file}", "w") as f:
     for k, v in cfg.items():
-        f.write(f"{k}={v}\\n")
+        f.write(f"{{k}}={{v}}\\n")
 PY
 """
 
-    post_block = """
+    post_block = f"""
 python3 - << 'PY'
 import os
 import subprocess
 import time
 
-cfg = {}
-with open("cfg/submit_config.txt") as f:
+cfg = {{}}
+with open("{config_file}") as f:
     for line in f:
         line = line.split("#")[0].strip()
         if not line or "=" not in line:
@@ -124,7 +126,7 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=600, streams=None):
         print("local path doesn't exist")
         return
     if os.path.getsize(local_name) == 0:
-        raise RuntimeError(f"Refusing to stage out empty file: {local_name}")
+        raise RuntimeError(f"Refusing to stage out empty file: {{local_name}}")
 
     if streams is None:
         streams = os.environ.get("XRDCP_STREAMS", "4")
@@ -148,7 +150,7 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=600, streams=None):
         except Exception as exc:
             last_exc = exc
             time.sleep(min(10 * attempt, 30))
-    raise RuntimeError(f"xrdcp failed after {retries} attempts for {local_name} -> {dest}: {last_exc}")
+    raise RuntimeError(f"xrdcp failed after {{retries}} attempts for {{local_name}} -> {{dest}}: {{last_exc}}")
 
 orig_save = cfg.get("__orig_saveFile", "")
 orig_meta = cfg.get("__orig_metaFile", "")
@@ -173,41 +175,53 @@ def generate_condor_runscript(
     x509loc=None,
     pre_setup_lines="",
     use_shared_inputs=False,
+    eos_sched=False,
+    shared_dir_name=None,
 ):
-    stage_block = stage_inputs_block() if stage_inputs else ""
+    stage_block = stage_inputs_block(eos_sched) if stage_inputs else ""
     stage_out_pre = ""
     stage_out_post = ""
     if stage_outputs:
-        stage_out_pre, stage_out_post = stage_outputs_blocks()
+        stage_out_pre, stage_out_post = stage_outputs_blocks(eos_sched)
     root_block = (root_setup + "\n") if root_setup else ""
     pre_block = pre_setup_lines or ""
-    x509_block = ""
-    if x509loc:
-        x509_block = (
-            f"export X509_USER_PROXY={x509loc}\n"
-            "voms-proxy-info -all\n"
-            f"voms-proxy-info -all -file {x509loc}\n"
-        )
-
+    x509_name = os.path.basename(x509loc) if x509loc else ""
     shared_block = ""
-    if use_shared_inputs:
+    if shared_dir_name:
         shared_block = (
-            "# Link shared inputs into working directory\n"
-            f"if [ -f shared/{exe_relpath} ] && [ ! -e {exe_relpath} ]; then ln -s shared/{exe_relpath} {exe_relpath}; fi\n"
-            "if [ -d shared/aux ] && [ ! -e aux ]; then ln -s shared/aux aux; fi\n"
-            f"if [ -f {exe_relpath} ]; then chmod +x {exe_relpath}; fi\n"
+            f"if [ -f {shared_dir_name}/{exe_relpath} ]; then cp -f {shared_dir_name}/{exe_relpath} .; chmod +x {exe_relpath}; fi\n"
+            f"if [ -d {shared_dir_name}/aux ] && [ ! -e aux ]; then cp -R {shared_dir_name}/aux aux; fi\n"
+        )
+        if x509_name:
+            shared_block += f"if [ -f {shared_dir_name}/{x509_name} ]; then cp -f {shared_dir_name}/{x509_name} .; fi\n"
+
+    x509_block = ""
+    if x509_name:
+        x509_block = (
+            f"export X509_USER_PROXY={x509_name}\n"
+            "voms-proxy-info -all\n"
+            f"voms-proxy-info -all -file {x509_name}\n"
         )
 
     run_script = f"""#!/bin/bash
-{root_block}{pre_block}{x509_block}{shared_block}ls
-ls cfg
+{root_block}{pre_block}{shared_block}{x509_block}ls
+stage_in_start=$(date +%s)
 {stage_out_pre}{stage_block}
+stage_in_end=$(date +%s)
+echo "Stage-in time: $((stage_in_end - stage_in_start))s"
 echo "Check file existence"
 ls
 
+analysis_start=$(date +%s)
 echo "Starting Analysis"
-./{exe_relpath} cfg/submit_config.txt
+./{exe_relpath} submit_config.txt
+analysis_end=$(date +%s)
+echo "Analysis time: $((analysis_end - analysis_start))s"
+
+stage_out_start=$(date +%s)
 {stage_out_post}
+stage_out_end=$(date +%s)
+echo "Stage-out time: $((stage_out_end - stage_out_start))s"
 echo "Done!"
 """
     return run_script
@@ -226,22 +240,30 @@ def generate_condor_submit(
     extra_transfer_files=None,
     use_shared_inputs=False,
     stream_logs=False,
+    eos_sched=False,
+    include_aux=True,
+    shared_dir_name=None,
 ):
     Path(main_dir + "/condor_logs").mkdir(parents=True, exist_ok=True)
-    if use_shared_inputs:
-        transfer_files = [
-            f"{main_dir}/job_$(Process)/cfg",
-            f"{main_dir}/shared/{exe_relpath}",
-            f"{main_dir}/shared/aux",
-        ]
+    transfer_files = [
+        f"{main_dir}/job_$(Process)/submit_config.txt",
+        f"{main_dir}/job_$(Process)/floats.txt",
+        f"{main_dir}/job_$(Process)/ints.txt",
+    ]
+    if shared_dir_name:
+        transfer_files.append(f"{main_dir}/{shared_dir_name}/{exe_relpath}")
+        if include_aux:
+            transfer_files.append(f"{main_dir}/{shared_dir_name}/aux")
+        if x509loc:
+            x509_name = os.path.basename(x509loc)
+            transfer_files.append(f"{main_dir}/{shared_dir_name}/{x509_name}")
     else:
-        transfer_files = [
-            f"{main_dir}/job_$(Process)/{exe_relpath}",
-            f"{main_dir}/job_$(Process)/cfg",
-            f"{main_dir}/job_$(Process)/aux",
-        ]
-    if x509loc:
-        transfer_files.append(x509loc)
+        transfer_files.append(f"{main_dir}/job_$(Process)/{exe_relpath}")
+        if include_aux:
+            transfer_files.append(f"{main_dir}/job_$(Process)/aux")
+        if x509loc:
+            x509_name = os.path.basename(x509loc)
+            transfer_files.append(f"{main_dir}/job_$(Process)/{x509_name}")
     if extra_transfer_files:
         transfer_files.extend(extra_transfer_files)
     filtered_files = []
@@ -257,6 +279,8 @@ def generate_condor_submit(
     #if stream_logs:
     #    stream_block = "stream_output = True\nstream_error = True\n"
 
+    log_name = "log_$(Cluster).log"
+
     submit_file = f"""universe = vanilla
 Executable     =  {main_dir}/condor_runscript.sh
 Should_Transfer_Files     = YES
@@ -270,11 +294,11 @@ transfer_input_files = {transfer_input_files}
 +MaxRuntime={max_runtime}
 max_transfer_input_mb = 10000
 WhenToTransferOutput=On_Exit
-transfer_output_files = 
+transfer_output_files = submit_config.txt
 
 Output     = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stdout
 Error      = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stderr
-Log        = {main_dir}/condor_logs/log_$(Cluster)_$(Process).log
+Log        = {main_dir}/condor_logs/{log_name}
 queue {jobs}
 """
     return submit_file
@@ -297,6 +321,9 @@ def write_submit_files(
     extra_transfer_files=None,
     use_shared_inputs=False,
     stream_logs=False,
+    eos_sched=False,
+    include_aux=True,
+    shared_dir_name=None,
 ):
     submit_path = os.path.join(main_dir, "condor_submit.sub")
     runscript_path = os.path.join(main_dir, "condor_runscript.sh")
@@ -315,6 +342,9 @@ def write_submit_files(
                 extra_transfer_files=extra_transfer_files,
                 use_shared_inputs=use_shared_inputs,
                 stream_logs=stream_logs,
+                eos_sched=eos_sched,
+                include_aux=include_aux,
+                shared_dir_name=shared_dir_name,
             )
         )
     with open(runscript_path, "w") as condor_sub:
@@ -327,6 +357,8 @@ def write_submit_files(
                 x509loc=x509loc,
                 pre_setup_lines=pre_setup_lines,
                 use_shared_inputs=use_shared_inputs,
+                eos_sched=eos_sched,
+                shared_dir_name=shared_dir_name,
             )
         )
     return submit_path
