@@ -152,10 +152,10 @@ TEST_F(SofieManagerTest, ApplyModel_Invalid) {
  * that the resulting values are computed correctly based on the input features.
  */
 TEST_F(SofieManagerTest, ApplyModel_Valid) {
-  dataManager->Define("feature1", [](ULong64_t i) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("run_number", [](ULong64_t i) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature1", [](ULong64_t) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2", [](ULong64_t) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3", [](ULong64_t) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
   sofieManager->applyModel("test_sofie");
   auto df = dataManager->getDataFrame();
   auto result = df.Take<float>("test_sofie");
@@ -169,10 +169,10 @@ TEST_F(SofieManagerTest, ApplyModel_Valid) {
  * @brief Test that model returns -1 when runVar is false
  */
 TEST_F(SofieManagerTest, ApplyModel_RunVarFalse) {
-  dataManager->Define("feature1", [](ULong64_t i) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("run_number", [](ULong64_t i) -> bool { return false; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature1", [](ULong64_t) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2", [](ULong64_t) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3", [](ULong64_t) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number", [](ULong64_t) -> bool { return false; }, {"rdfentry_"}, *systematicManager);
   sofieManager->applyModel("test_sofie");
   auto df = dataManager->getDataFrame();
   auto result = df.Take<float>("test_sofie");
@@ -233,14 +233,14 @@ TEST_F(SofieManagerTest, MultipleModels) {
   });
 
   // Apply both models to a DataManager
-  dataManager->Define("feature1", [](ULong64_t i) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("run_number", [](ULong64_t i) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature4", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature5", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("feature6", [](ULong64_t i) -> float { return 4.0f; }, {"rdfentry_"}, *systematicManager);
-  dataManager->Define("run_number2", [](ULong64_t i) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature1", [](ULong64_t) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2", [](ULong64_t) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3", [](ULong64_t) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature4", [](ULong64_t) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature5", [](ULong64_t) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature6", [](ULong64_t) -> float { return 4.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number2", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
   sofieManager->applyModel("test_sofie");
   sofieManager->applyModel("test_sofie2");
   auto df = dataManager->getDataFrame();
@@ -265,10 +265,10 @@ TEST_F(SofieManagerTest, ThreadSafetyWithROOTImplicitMT) {
   auto testDataManager = std::make_unique<DataManager>(100);
   setContextFor(*testDataManager);
   
-  testDataManager->Define("feature1", [](ULong64_t i) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
-  testDataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
-  testDataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
-  testDataManager->Define("run_number", [](ULong64_t i) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("feature1", [](ULong64_t) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("feature2", [](ULong64_t) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("feature3", [](ULong64_t) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("run_number", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
   sofieManager->applyModel("test_sofie");
   auto df = testDataManager->getDataFrame();
   auto result = df.Take<float>("test_sofie");

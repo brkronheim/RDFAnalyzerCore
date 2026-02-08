@@ -103,6 +103,13 @@ private:
   void registerModels(const IConfigurationProvider &configProvider);
 
   /**
+   * @brief Helper function to parse and store model configuration
+   * @param configProvider Reference to the configuration provider
+   * @param checkExisting If true, only add models that don't already exist
+   */
+  void parseModelConfig(const IConfigurationProvider &configProvider, bool checkExisting);
+
+  /**
    * @brief Map from model name to run variable name.
    */
   std::unordered_map<std::string, std::string> model_runVars_m;
