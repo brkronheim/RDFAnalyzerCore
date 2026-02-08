@@ -153,6 +153,8 @@ void SofieManager::parseModelConfig(const IConfigurationProvider &configProvider
     }
   } catch (const std::exception &e) {
     // sofieConfig is optional - if not present, models can still be registered manually
+    // Exception is intentionally ignored as configuration file may not exist or may not
+    // contain sofieConfig entry, which is a valid use case for manual registration
   }
 }
 

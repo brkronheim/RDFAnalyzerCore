@@ -256,6 +256,9 @@ TEST_F(SofieManagerTest, MultipleModels) {
 
 // Thread safety test using ROOT's implicit multithreading
 TEST_F(SofieManagerTest, ThreadSafetyWithROOTImplicitMT) {
+  // Note: EnableImplicitMT is called in the test rather than in main() to match
+  // the existing test pattern in this codebase (see testBDTManager and testOnnxManager).
+  // This is safe because each test executable runs independently.
   ROOT::EnableImplicitMT();
   ASSERT_TRUE(ROOT::IsImplicitMTEnabled());
   int nThreads = ROOT::GetThreadPoolSize();
