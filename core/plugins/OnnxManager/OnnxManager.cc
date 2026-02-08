@@ -41,7 +41,7 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
   
   if (numOutputs == 1) {
     // Single output case - create one column with the model name
-    auto onnxLambda = [session, inputNames, outputNames, inputFeatures, modelName](
+    auto onnxLambda = [session, inputNames, outputNames](
         ROOT::VecOps::RVec<Float_t> &inputVector,
         bool runVar) -> Float_t {
       if (!runVar) {
@@ -88,7 +88,7 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
     // We need to run inference once and capture all outputs
     
     // Create a lambda that returns a vector of all outputs
-    auto onnxLambdaMulti = [session, inputNames, outputNames, inputFeatures, modelName, numOutputs](
+    auto onnxLambdaMulti = [session, inputNames, outputNames, numOutputs](
         ROOT::VecOps::RVec<Float_t> &inputVector,
         bool runVar) -> ROOT::VecOps::RVec<Float_t> {
       

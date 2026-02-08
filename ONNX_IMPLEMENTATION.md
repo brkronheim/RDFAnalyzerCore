@@ -186,7 +186,7 @@ ctest -R OnnxManagerTest
 ## Future Enhancements
 
 Potential improvements for future work:
-1. ~~Support for multiple output tensors from models~~ ✅ **Implemented**
+1. Support for multiple output tensors from models - **Implemented** ✅
 2. Support for variable-shaped inputs (dynamic batch sizes, ragged arrays)
 3. Batch inference for improved performance
 4. Model caching for faster repeated evaluations
