@@ -20,6 +20,9 @@ Manages Boosted Decision Trees (BDTs) using the FastForest library. Load BDTs fr
 ### OnnxManager
 Manages ONNX machine learning models. Load and evaluate ONNX models on input features. ONNX Runtime is automatically downloaded during the build process, so no manual installation is required.
 
+### SofieManager
+Manages SOFIE (System for Optimized Fast Inference code Emit) models from ROOT TMVA. SOFIE generates optimized C++ code from ONNX models at build time for fast inference. Unlike ONNX models which are loaded at runtime, SOFIE models are compiled directly into the framework.
+
 ### CorrectionManager
 Applies scale factors and corrections using the correctionlib library.
 
@@ -316,6 +319,165 @@ onnx_model, _ = tf2onnx.convert.from_keras(model)
 # Save
 with open("model.onnx", "wb") as f:
     f.write(onnx_model.SerializeToString())
+```
+
+---
+
+# Using SofieManager for Machine Learning Models
+
+SofieManager enables you to use SOFIE (System for Optimized Fast Inference code Emit) models from ROOT TMVA. SOFIE generates optimized C++ inference code from ONNX models at build time, providing faster inference than runtime ONNX evaluation.
+
+## Key Differences from OnnxManager
+
+- **Build-time compilation**: SOFIE models are converted from ONNX to C++ code and compiled with the framework
+- **No runtime file loading**: Models are embedded as compiled code, not loaded from files at runtime
+- **Manual registration**: You must manually register SOFIE inference functions in your code
+- **Better performance**: Generated C++ code is optimized and avoids runtime overhead
+
+## Generating SOFIE Code from ONNX Models
+
+SOFIE requires you to generate C++ inference code from your ONNX models. This is typically done using ROOT's Python interface:
+
+```python
+import ROOT
+from ROOT import TMVA
+
+# Load your ONNX model
+model = TMVA.Experimental.SOFIE.RModelParser_ONNX("model.onnx")
+
+# Generate C++ code
+model.Generate()
+model.OutputGenerated("MyModel.hxx")
+```
+
+This generates a header file containing the inference code that you can include in your project.
+
+## Configuration
+
+Create a configuration file (e.g., `cfg/sofie_models.txt`) with your SOFIE models:
+
+```
+name=dnn_score inputVariables=pt,eta,phi,mass runVar=has_jet
+name=classifier inputVariables=lep_pt,lep_eta,met runVar=pass_presel
+```
+
+Each line specifies:
+- **name**: Name for the model output column in the DataFrame
+- **inputVariables**: Comma-separated list of input feature names (must match DataFrame columns)
+- **runVar**: Boolean column name that controls when the model is evaluated
+
+Add this to your main configuration file:
+```
+sofieConfig=cfg/sofie_models.txt
+```
+
+Note: Unlike ONNX/BDT managers, the configuration does NOT include file paths since SOFIE models are compiled code.
+
+## Using in C++
+
+### Include Generated Headers
+
+First, include the SOFIE-generated headers for your models:
+```cpp
+#include "MyDNNModel.hxx"  // Generated SOFIE code
+```
+
+### Create Wrapper Functions
+
+Create wrapper functions that match the SofieInferenceFunction signature:
+```cpp
+std::vector<float> dnnScoreInference(const std::vector<float>& input) {
+    // Assuming the generated model has a Session class
+    TMVA_SOFIE_MyDNNModel::Session session;
+    std::vector<float> output = session.infer(input.data());
+    return output;
+}
+```
+
+### Instantiate and Register Models
+
+```cpp
+auto sofieManager = std::make_unique<SofieManager>(*configProvider);
+ManagerContext ctx{*configProvider, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+sofieManager->setContext(ctx);
+
+// Register your SOFIE models manually
+auto dnnFunc = std::make_shared<SofieInferenceFunction>(dnnScoreInference);
+std::vector<std::string> dnnFeatures = {"pt", "eta", "phi", "mass"};
+sofieManager->registerModel("dnn_score", dnnFunc, dnnFeatures, "has_jet");
+```
+
+### Apply SOFIE Models
+
+```cpp
+// First, define your input features
+dataManager->Define("pt", [](float x) { return x; }, {"jet_pt"}, *systematicManager);
+dataManager->Define("eta", [](float x) { return x; }, {"jet_eta"}, *systematicManager);
+// ... define all required features ...
+
+// Then apply the models
+sofieManager->applyModel("dnn_score");
+
+// Or apply all configured models
+sofieManager->applyAllModels();
+```
+
+### Access Model Information
+
+```cpp
+// Get the list of all model names
+auto modelNames = sofieManager->getAllModelNames();
+
+// Get input features for a specific model
+const auto& features = sofieManager->getModelFeatures("dnn_score");
+
+// Get the run variable for a model
+const auto& runVar = sofieManager->getRunVar("dnn_score");
+```
+
+## Behavior
+
+- When `runVar` evaluates to `true`, the model inference runs and returns the model output
+- When `runVar` evaluates to `false`, the output is set to `-1.0` (skipping computation)
+- The manager creates an intermediate column `input_<modelName>` containing the input feature vector
+- Models are registered once at setup time and reused for all events
+- **Models are NOT applied automatically** - you must explicitly call `applyModel()` after defining inputs
+
+## Complete Example
+
+```cpp
+#include <SofieManager.h>
+#include "MyGeneratedModel.hxx"
+
+// Wrapper function for SOFIE model
+std::vector<float> myModelInference(const std::vector<float>& input) {
+    TMVA_SOFIE_MyModel::Session session;
+    std::vector<float> output = session.infer(input.data());
+    return output;
+}
+
+// In your analysis code
+auto sofieManager = std::make_unique<SofieManager>(*configProvider);
+ManagerContext ctx{*configProvider, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+sofieManager->setContext(ctx);
+
+// Register the model
+auto inferenceFunc = std::make_shared<SofieInferenceFunction>(myModelInference);
+std::vector<std::string> features = {"var1", "var2", "var3"};
+sofieManager->registerModel("my_model", inferenceFunc, features, "run_model");
+
+// Define input variables
+dataManager->Define("var1", [](float x) { return x; }, {"input1"}, *systematicManager);
+dataManager->Define("var2", [](float x) { return x; }, {"input2"}, *systematicManager);
+dataManager->Define("var3", [](float x) { return x; }, {"input3"}, *systematicManager);
+dataManager->Define("run_model", []() { return true; }, {}, *systematicManager);
+
+// Apply the model
+sofieManager->applyModel("my_model");
+
+// Use the output
+auto df = dataManager->getDataFrame();
+auto result = df.Take<float>("my_model");
 ```
 
 ---

@@ -67,6 +67,10 @@ add_executable(testOnnxManager testOnnxManager.cc)
 target_link_libraries(testOnnxManager core corePlugins gtest gtest_main)
 add_test(NAME OnnxManagerTest COMMAND testOnnxManager)
 
+add_executable(testSofieManager testSofieManager.cc)
+target_link_libraries(testSofieManager core corePlugins gtest gtest_main)
+add_test(NAME SofieManagerTest COMMAND testSofieManager)
+
 add_executable(testNDHistogramManager testNDHistogramManager.cc)
 target_link_libraries(testNDHistogramManager core corePlugins gtest gtest_main)
 add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
