@@ -2,6 +2,7 @@
 #define IDATAFRAMEPROVIDER_H_INCLUDED
 
 #include <ROOT/RDataFrame.hxx>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,10 @@ public:
     template <typename F>
     void Define(std::string name, F f, const std::vector<std::string> &columns, ISystematicManager &systematicManager) {
         auto df = getDataFrame();
+        const auto existingColumns = df.GetColumnNames();
+        if (std::find(existingColumns.begin(), existingColumns.end(), name) != existingColumns.end()) {
+            return;
+        }
 
         std::vector<std::string> systList(systematicManager.getSystematics().begin(), systematicManager.getSystematics().end());
         if (!systList.empty()) {
@@ -61,8 +66,14 @@ public:
                     }
                 }
                 if (nAffected > 0) {
-                    df = df.Define(name + "_" + syst + "Up", f, newColumnsUp);
-                    df = df.Define(name + "_" + syst + "Down", f, newColumnsDown);
+                    const auto upName = name + "_" + syst + "Up";
+                    const auto downName = name + "_" + syst + "Down";
+                    if (std::find(existingColumns.begin(), existingColumns.end(), upName) == existingColumns.end()) {
+                        df = df.Define(upName, f, newColumnsUp);
+                    }
+                    if (std::find(existingColumns.begin(), existingColumns.end(), downName) == existingColumns.end()) {
+                        df = df.Define(downName, f, newColumnsDown);
+                    }
                     systematicManager.registerSystematic(syst, {name});
                 }
             }
@@ -104,6 +115,10 @@ public:
     template <typename F> 
     void DefinePerSample(std::string name, F f) {
         auto df = getDataFrame();
+        const auto existingColumns = df.GetColumnNames();
+        if (std::find(existingColumns.begin(), existingColumns.end(), name) != existingColumns.end()) {
+            return;
+        }
         df = df.DefinePerSample(name, f);
         setDataFrame(df);
     }

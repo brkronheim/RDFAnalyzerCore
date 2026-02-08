@@ -26,7 +26,7 @@ if(NOT ONNXRUNTIME_ROOT_DIR)
     endif()
 
     # ONNX Runtime version
-    set(ONNXRUNTIME_VERSION "1.20.0")
+    set(ONNXRUNTIME_VERSION "1.24.1")
     
     # Construct download URL and filename
     if(ONNX_PLATFORM STREQUAL "linux")

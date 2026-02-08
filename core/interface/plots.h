@@ -15,6 +15,8 @@
 #include <vector>
 
 #include <Math/MinimizerOptions.h>
+#include <cstdlib>
+#include <iostream>
 #include <ROOT/RDataFrame.hxx>
 #include <TAxis.h>
 #include <TCanvas.h>
@@ -168,6 +170,12 @@ public:
             const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation, const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
             const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
             const ROOT::VecOps::RVec<Int_t> &__restrict__ nFills) {
+    if (baseHistogramValues.empty() || baseHistogramWeights.empty() || systematicVariation.empty() ||
+        sampleCategory.empty() || controlRegion.empty() || channel.empty() || nFills.empty()) {
+      LogSizes("empty input vector", slot, baseHistogramValues, baseHistogramWeights,
+               systematicVariation, sampleCategory, controlRegion, channel, nFills);
+      return;
+    }
     // Dispatch to the selected fill function for optimal performance
     (this->*fillFunc_)(slot, baseHistogramValues, baseHistogramWeights,
                       systematicVariation, sampleCategory, controlRegion, channel, nFills);
@@ -179,6 +187,13 @@ public:
     const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
     const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
     const ROOT::VecOps::RVec<Int_t>   &__restrict__ nFills) {
+
+      if (baseHistogramWeights.size() < 1 || channel.size() < 1 || controlRegion.size() < 1 ||
+          sampleCategory.size() < 1 || systematicVariation.size() < 1) {
+        LogSizes("single fill size mismatch", slot, baseHistogramValues, baseHistogramWeights,
+                 systematicVariation, sampleCategory, controlRegion, channel, nFills);
+        return;
+      }
 
       const Double_t weight = baseHistogramWeights[0];
 
@@ -208,6 +223,15 @@ public:
 
       // Main fill loop: iterates over all base histogram values for this event
       while(baseFillCounter < baseHistogramValues.size()) {
+        if (weightCounter >= static_cast<int>(baseHistogramWeights.size()) ||
+            controlRegionCounter >= static_cast<int>(controlRegion.size()) ||
+            channelCounter >= static_cast<int>(channel.size()) ||
+            sampleCategoryCounter >= static_cast<int>(sampleCategory.size()) ||
+            baseFillCounter >= static_cast<int>(systematicVariation.size())) {
+          LogSizes("single systematic size mismatch", slot, baseHistogramValues, baseHistogramWeights,
+                   systematicVariation, sampleCategory, controlRegion, channel, nFills);
+          break;
+        }
         const Double_t weight = baseHistogramWeights[weightCounter];
   
         // Skip zero-weight entries for efficiency
@@ -245,6 +269,15 @@ public:
       
       // Main fill loop: iterates over all base histogram values for this event
       while(baseFillCounter < baseHistogramValues.size()) {
+        if (weightCounter >= static_cast<int>(baseHistogramWeights.size()) ||
+            controlRegionCounter >= static_cast<int>(controlRegion.size()) ||
+            channelCounter >= static_cast<int>(channel.size()) ||
+            sampleCategoryCounter >= static_cast<int>(sampleCategory.size()) ||
+            systematicCounter >= static_cast<int>(systematicVariation.size())) {
+          LogSizes("multi fill size mismatch", slot, baseHistogramValues, baseHistogramWeights,
+                   systematicVariation, sampleCategory, controlRegion, channel, nFills);
+          break;
+        }
         const Double_t weight = baseHistogramWeights[weightCounter];
   
         // Skip zero-weight entries for efficiency
@@ -285,6 +318,16 @@ public:
     int fillCounter = 0;
     // Main fill loop: iterates over all base histogram values for this event
     while(baseFillCounter < baseHistogramValues.size()) {
+      if (weightCounter >= static_cast<int>(baseHistogramWeights.size()) ||
+          controlRegionCounter >= static_cast<int>(controlRegion.size()) ||
+          channelCounter >= static_cast<int>(channel.size()) ||
+          sampleCategoryCounter >= static_cast<int>(sampleCategory.size()) ||
+          systematicCounter >= static_cast<int>(systematicVariation.size()) ||
+          systematicCounter >= static_cast<int>(nFills.size())) {
+        LogSizes("general fill size mismatch", slot, baseHistogramValues, baseHistogramWeights,
+                 systematicVariation, sampleCategory, controlRegion, channel, nFills);
+        break;
+      }
       const Double_t weight = baseHistogramWeights[weightCounter];
 
       // Skip zero-weight entries for efficiency
@@ -315,6 +358,11 @@ public:
         weightCounter++;
       }
       // Check if we've completed the required number of fills for the current systematic
+      if (systematicCounter >= static_cast<int>(nFills.size())) {
+        LogSizes("general fill nFills index", slot, baseHistogramValues, baseHistogramWeights,
+                 systematicVariation, sampleCategory, controlRegion, channel, nFills);
+        break;
+      }
       if(fillCounter >= nFills[systematicCounter]) { // finished fill for the first systematic
         fillCounter = 0;
         // Reset or increment counters for each axis depending on systematic/multifill configuration
@@ -367,6 +415,30 @@ public:
   std::string GetActionName() const { return "THnMulti"; }
 
 private:
+  void LogSizes(const char* reason,
+                unsigned int slot,
+                const ROOT::VecOps::RVec<Float_t> &baseHistogramValues,
+                const ROOT::VecOps::RVec<Float_t> &baseHistogramWeights,
+                const ROOT::VecOps::RVec<Float_t> &systematicVariation,
+                const ROOT::VecOps::RVec<Float_t> &sampleCategory,
+                const ROOT::VecOps::RVec<Float_t> &controlRegion,
+                const ROOT::VecOps::RVec<Float_t> &channel,
+                const ROOT::VecOps::RVec<Int_t> &nFills) const {
+    static const bool enabled = (std::getenv("RDF_NDHIST_DEBUG") != nullptr);
+    if (!enabled) {
+      return;
+    }
+    std::cerr << "[THnMulti] " << reason
+              << " slot=" << slot
+              << " baseVals=" << baseHistogramValues.size()
+              << " baseWts=" << baseHistogramWeights.size()
+              << " syst=" << systematicVariation.size()
+              << " sampleCat=" << sampleCategory.size()
+              << " control=" << controlRegion.size()
+              << " channel=" << channel.size()
+              << " nFills=" << nFills.size()
+              << std::endl;
+  }
   /** @brief Shared pointer to the final merged THnSparseD result. */
   std::shared_ptr<THnSparseF> fFinalResult = std::make_shared<THnSparseF>();
   /** @brief Vector of per-thread THnSparseD histogram pointers. */

@@ -21,6 +21,7 @@
 class NDHistogramManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
+    ROOT::DisableImplicitMT();
     ChangeToTestSourceDir();
     std::string configFile = "cfg/test_data_config_minimal.txt";
     configManager = ManagerFactory::createConfigurationManager(configFile);
