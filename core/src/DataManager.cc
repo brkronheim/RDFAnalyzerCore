@@ -85,8 +85,13 @@ void DataManager::DefineVector(std::string name,
                                ISystematicManager &systematicManager) {
   std::cout << "[DataManager] Defining vector column " << name << std::endl;
 
-  // Sanity-check that all requested columns exist in the dataframe.
   const auto existingColumns = df_m.GetColumnNames();
+  if (std::find(existingColumns.begin(), existingColumns.end(), name) != existingColumns.end()) {
+    std::cout << "[DataManager] Vector column " << name << " already exists, skipping." << std::endl;
+    return;
+  }
+
+  // Sanity-check that all requested columns exist in the dataframe.
   std::vector<std::string> missing;
   for (const auto &c : columns) {
     if (std::find(existingColumns.begin(), existingColumns.end(), c) == existingColumns.end()) {

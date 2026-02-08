@@ -6,6 +6,7 @@ set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/NDHistogramManager
     ${CMAKE_CURRENT_SOURCE_DIR}/TriggerManager
     ${CMAKE_CURRENT_SOURCE_DIR}/NamedObjectManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/OnnxManager
 )
 
 # Create static library
@@ -16,6 +17,7 @@ add_subdirectory(BDTManager)
 add_subdirectory(CorrectionManager)
 add_subdirectory(NDHistogramManager)
 add_subdirectory(TriggerManager)
+add_subdirectory(OnnxManager)
 
 # Link all plugin libraries to corePlugins
 target_link_libraries(corePlugins
@@ -23,7 +25,9 @@ target_link_libraries(corePlugins
     CorrectionManager
     NDHistogramManager
     TriggerManager
+    OnnxManager
     core
     fastforest
     correctionlib
+    OnnxRuntime::OnnxRuntime
 )

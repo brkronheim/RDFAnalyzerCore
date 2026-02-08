@@ -10,6 +10,25 @@ This branch is for active development and may be unstable. The repository provid
 - runners: concrete applications that build and execute analyses.
 - core/python: helper scripts for job submission and orchestration.
 
+## Plugins Overview
+
+The framework includes several plugins for common analysis tasks:
+
+### BDTManager
+Manages Boosted Decision Trees (BDTs) using the FastForest library. Load BDTs from text files and apply them to data with sigmoid activation.
+
+### OnnxManager
+Manages ONNX machine learning models. Load and evaluate ONNX models on input features. ONNX Runtime is automatically downloaded during the build process, so no manual installation is required.
+
+### CorrectionManager
+Applies scale factors and corrections using the correctionlib library.
+
+### TriggerManager
+Handles trigger logic and trigger menu configuration.
+
+### NDHistogramManager
+Books and fills N-dimensional histograms with support for systematics, regions, and categories.
+
 ## Installing
 Clone the repository:
 ```
@@ -147,6 +166,157 @@ IBDTManager* bdt = analyzer.getPlugin<IBDTManager>("bdt");
 - Register it with REGISTER_MANAGER_TYPE (if used by factory creation).
 - Add it to the plugin map when constructing Analyzer.
 - Access it via getPlugin<YourInterface>("your_role").
+
+---
+
+# Using OnnxManager for Machine Learning Models
+
+OnnxManager enables you to load and evaluate ONNX (Open Neural Network Exchange) machine learning models on your data. It works similarly to BDTManager but supports the broader ONNX format, which can represent neural networks and other ML models.
+
+## Setup
+
+ONNX Runtime is automatically downloaded and configured during the CMake build, so no manual installation is needed. The framework downloads pre-built binaries from the official ONNX Runtime releases.
+
+## Configuration
+
+Create a configuration file (e.g., `cfg/onnx_models.txt`) with your ONNX models:
+
+```
+file=path/to/model1.onnx name=dnn_score inputVariables=pt,eta,phi,mass runVar=has_jet
+file=path/to/model2.onnx name=classifier inputVariables=lep_pt,lep_eta,met runVar=pass_presel
+```
+
+Each line specifies:
+- **file**: Path to the ONNX model file
+- **name**: Name for the model output column in the DataFrame
+- **inputVariables**: Comma-separated list of input feature names (must match DataFrame columns)
+- **runVar**: Boolean column name that controls when the model is evaluated
+
+Add this to your main configuration file:
+```
+onnxConfig=cfg/onnx_models.txt
+```
+
+## Using in C++
+
+### Instantiate OnnxManager
+```cpp
+auto onnxManager = std::make_unique<OnnxManager>(*configProvider);
+ManagerContext ctx{*configProvider, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+onnxManager->setContext(ctx);
+```
+
+**Important**: Models are loaded during construction but NOT automatically applied to the DataFrame. You must explicitly call `applyModel()` or `applyAllModels()` after defining all input features.
+
+### Apply ONNX Models
+```cpp
+// First, define your input features
+dataManager->Define("pt", [](float x) { return x; }, {"jet_pt"}, *systematicManager);
+dataManager->Define("eta", [](float x) { return x; }, {"jet_eta"}, *systematicManager);
+// ... define all required features ...
+
+// Then apply the models
+onnxManager->applyModel("dnn_score");
+
+// Or apply all configured models
+onnxManager->applyAllModels();
+```
+
+### Access Model Information
+```cpp
+// Get the list of all model names
+auto modelNames = onnxManager->getAllModelNames();
+
+// Get input features for a specific model
+const auto& features = onnxManager->getModelFeatures("dnn_score");
+
+// Get the run variable for a model
+const auto& runVar = onnxManager->getRunVar("dnn_score");
+
+// Get ONNX input/output names from the model
+const auto& inputNames = onnxManager->getModelInputNames("dnn_score");
+const auto& outputNames = onnxManager->getModelOutputNames("dnn_score");
+```
+
+## Multiple Outputs
+
+Models with multiple outputs are fully supported (e.g., ParticleTransformer with bootstrapped models):
+
+```cpp
+// Apply a multi-output model
+onnxManager->applyModel("particle_transformer");
+
+// Access the individual outputs
+auto df = dataManager->getDataFrame();
+auto output0 = df.Take<float>("particle_transformer_output0");
+auto output1 = df.Take<float>("particle_transformer_output1");
+auto output2 = df.Take<float>("particle_transformer_output2");
+```
+
+For models with multiple outputs:
+- Each output tensor creates a separate column
+- Columns are named `{modelName}_output0`, `{modelName}_output1`, etc.
+- An intermediate column `{modelName}_outputs` contains all outputs as a vector
+
+## Behavior
+
+- When `runVar` evaluates to `true`, the model inference runs and returns the model output(s)
+- When `runVar` evaluates to `false`, the output(s) are set to `-1.0` (skipping computation)
+- The manager creates an intermediate column `input_<modelName>` containing the input feature vector
+- Models are loaded once at construction time and reused for all events
+- **Models are NOT applied automatically** - you must explicitly call `applyModel()` after defining inputs
+
+## Creating ONNX Models
+
+You can create ONNX models from various ML frameworks:
+
+### From scikit-learn
+```python
+from sklearn.ensemble import RandomForestClassifier
+from skl2onnx import convert_sklearn
+from skl2onnx.common.data_types import FloatTensorType
+
+# Train your model
+model = RandomForestClassifier()
+model.fit(X_train, y_train)
+
+# Convert to ONNX
+initial_type = [('float_input', FloatTensorType([None, X_train.shape[1]]))]
+onnx_model = convert_sklearn(model, initial_types=initial_type)
+
+# Save
+with open("model.onnx", "wb") as f:
+    f.write(onnx_model.SerializeToString())
+```
+
+### From PyTorch
+```python
+import torch
+
+# Define and train your model
+model = MyNeuralNetwork()
+# ... train model ...
+
+# Export to ONNX
+dummy_input = torch.randn(1, num_features)
+torch.onnx.export(model, dummy_input, "model.onnx")
+```
+
+### From TensorFlow/Keras
+```python
+import tf2onnx
+import tensorflow.keras as keras
+
+# Load or train your Keras model
+model = keras.models.load_model("model.h5")
+
+# Convert to ONNX
+onnx_model, _ = tf2onnx.convert.from_keras(model)
+
+# Save
+with open("model.onnx", "wb") as f:
+    f.write(onnx_model.SerializeToString())
+```
 
 ---
 

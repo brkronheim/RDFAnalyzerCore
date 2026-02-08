@@ -100,6 +100,12 @@ public:
   void setupFromConfigFile() override;
 
 private:
+  void BookSingleHistogramWithSystList(histInfo &info,
+                                       selectionInfo &&sampleCategoryInfo,
+                                       selectionInfo &&controlRegionInfo,
+                                       selectionInfo &&channelInfo,
+                                       std::string suffix,
+                                       const std::vector<std::string> &systList);
   /**
    * @brief Vector of histogram result pointers.
    */

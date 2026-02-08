@@ -2,6 +2,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <iostream>
 #include <api/IDataFrameProvider.h>
@@ -86,38 +87,50 @@ void SystematicManager::registerExistingSystematics(
  std::vector<std::string>
  SystematicManager::makeSystList(const std::string &branchName, IDataFrameProvider &dataManager) {
  
-   if(systListDefined_m) {
-     return systList_m;
+   std::vector<std::string> systList;
+   if (systListDefined_m) {
+     systList = systList_m;
+   } else {
+     systList = {"Nominal"};
+     for (const auto &syst : getSystematics()) {
+       systList.push_back(syst + "Up");
+       systList.push_back(syst + "Down");
+     }
    }
- 
-   std::vector<std::string> systList = {"Nominal"};
+
+   auto df = dataManager.getDataFrame();
+   const auto existingColumns = df.GetColumnNames();
+   std::unordered_set<std::string> columnSet(existingColumns.begin(), existingColumns.end());
+  auto ensureColumn = [&](const std::string &name, int index) {
+     if (columnSet.find(name) != columnSet.end()) {
+       return;
+     }
+    dataManager.Define(
+        name,
+        [index]() -> float {
+          return index;
+        },
+        {},
+        *this);
+     columnSet.insert(name);
+   };
+
    int var = 0;
    std::cout << "Defining nominal branch: " << branchName << std::endl;
-   dataManager.DefinePerSample(branchName,
-                     [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-                       return var;
-                     });
-   
+   ensureColumn(branchName, var);
+
    for (const auto &syst : getSystematics()) {
      std::cout << "Defining systematic: " << syst << std::endl;
-     systList.push_back(syst + "Up");
-     systList.push_back(syst + "Down");
      var++;
-     dataManager.DefinePerSample(
-         branchName + "_" + syst + "Up",
-         [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-           return var;
-         });
+     ensureColumn(branchName + "_" + syst + "Up", var);
      var++;
-     dataManager.DefinePerSample(
-         branchName + "_" + syst + "Down",
-         [var](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
-           return var;
-         });
+     ensureColumn(branchName + "_" + syst + "Down", var);
    }
- 
-   systListDefined_m = true;
-   systList_m = systList;
- 
+
+   if (!systListDefined_m) {
+     systListDefined_m = true;
+     systList_m = systList;
+   }
+
    return systList;
  }

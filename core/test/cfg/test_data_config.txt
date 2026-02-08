@@ -12,6 +12,7 @@ globs=root,test
 saveConfig=cfg/output.txt # Config file with output branches
 
 bdtConfig=cfg/bdts.txt # Config file with bdts
+onnxConfig=cfg/onnx_models.txt # Config file with ONNX models
 correctionConfig=cfg/correction.txt # Config file with corrections
 triggerConfig=cfg/triggers.txt # Config file with triggers
 
