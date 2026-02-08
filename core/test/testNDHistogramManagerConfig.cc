@@ -209,13 +209,20 @@ TEST_F(NDHistogramManagerConfigTest, MultipleBookCallsWork) {
   configManager->set("histogramConfig", "cfg/test_histograms.txt");
   histogramManager->setupFromConfigFile();
   
-  // Book histograms multiple times (simulating multiple calls)
-  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
-  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+  // Get initial histogram count
+  auto initialCount = histogramManager->GetHistos().size();
   
-  // Multiple calls should book histograms each time
-  auto& histos = histogramManager->GetHistos();
-  EXPECT_GE(histos.size(), 4u);
+  // Book histograms
+  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+  auto countAfterFirstBook = histogramManager->GetHistos().size();
+  
+  // Book again - this should add more histograms (duplicate booking allowed)
+  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+  auto countAfterSecondBook = histogramManager->GetHistos().size();
+  
+  // Verify histograms were booked each time
+  EXPECT_EQ(countAfterFirstBook, initialCount + 4u);  // 4 histograms in test config
+  EXPECT_EQ(countAfterSecondBook, countAfterFirstBook + 4u);  // Another 4 from second call
 }
 
 int main(int argc, char **argv) {

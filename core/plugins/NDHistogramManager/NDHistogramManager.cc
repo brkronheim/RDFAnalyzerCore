@@ -627,6 +627,9 @@ void NDHistogramManager::setupFromConfigFile() {
   std::string histogramConfigFile = configManager_m->get("histogramConfig");
   if (histogramConfigFile.empty()) {
     // No histogram config file specified - this is fine
+    if (logger_m) {
+      logger_m->info("NDHistogramManager: No histogramConfig specified, config-driven histograms disabled");
+    }
     return;
   }
 
@@ -662,14 +665,19 @@ void NDHistogramManager::setupFromConfigFile() {
       // Channel selection info
       auto channelVarIt = entry.find("channelVariable");
       if (channelVarIt != entry.end()) {
-        config.channelVariable = channelVarIt->second;
-        config.channelBins = std::stoi(entry.at("channelBins"));
-        config.channelLowerBound = std::stof(entry.at("channelLowerBound"));
-        config.channelUpperBound = std::stof(entry.at("channelUpperBound"));
-        
-        auto channelRegionsIt = entry.find("channelRegions");
-        if (channelRegionsIt != entry.end()) {
-          config.channelRegions = configManager_m->splitString(channelRegionsIt->second, ",");
+        try {
+          config.channelVariable = channelVarIt->second;
+          config.channelBins = std::stoi(entry.at("channelBins"));
+          config.channelLowerBound = std::stof(entry.at("channelLowerBound"));
+          config.channelUpperBound = std::stof(entry.at("channelUpperBound"));
+          
+          auto channelRegionsIt = entry.find("channelRegions");
+          if (channelRegionsIt != entry.end()) {
+            config.channelRegions = configManager_m->splitString(channelRegionsIt->second, ",");
+          }
+        } catch (const std::exception &e) {
+          throw std::runtime_error("NDHistogramManager: Error parsing channel config for histogram '" + 
+                                 config.name + "': " + e.what());
         }
       } else {
         // Use default "zero__" variable for no channel selection
@@ -683,14 +691,19 @@ void NDHistogramManager::setupFromConfigFile() {
       // Control region selection info
       auto controlRegionVarIt = entry.find("controlRegionVariable");
       if (controlRegionVarIt != entry.end()) {
-        config.controlRegionVariable = controlRegionVarIt->second;
-        config.controlRegionBins = std::stoi(entry.at("controlRegionBins"));
-        config.controlRegionLowerBound = std::stof(entry.at("controlRegionLowerBound"));
-        config.controlRegionUpperBound = std::stof(entry.at("controlRegionUpperBound"));
-        
-        auto controlRegionRegionsIt = entry.find("controlRegionRegions");
-        if (controlRegionRegionsIt != entry.end()) {
-          config.controlRegionRegions = configManager_m->splitString(controlRegionRegionsIt->second, ",");
+        try {
+          config.controlRegionVariable = controlRegionVarIt->second;
+          config.controlRegionBins = std::stoi(entry.at("controlRegionBins"));
+          config.controlRegionLowerBound = std::stof(entry.at("controlRegionLowerBound"));
+          config.controlRegionUpperBound = std::stof(entry.at("controlRegionUpperBound"));
+          
+          auto controlRegionRegionsIt = entry.find("controlRegionRegions");
+          if (controlRegionRegionsIt != entry.end()) {
+            config.controlRegionRegions = configManager_m->splitString(controlRegionRegionsIt->second, ",");
+          }
+        } catch (const std::exception &e) {
+          throw std::runtime_error("NDHistogramManager: Error parsing control region config for histogram '" + 
+                                 config.name + "': " + e.what());
         }
       } else {
         // Use default "zero__" variable for no control region selection
@@ -704,14 +717,19 @@ void NDHistogramManager::setupFromConfigFile() {
       // Sample category selection info
       auto sampleCategoryVarIt = entry.find("sampleCategoryVariable");
       if (sampleCategoryVarIt != entry.end()) {
-        config.sampleCategoryVariable = sampleCategoryVarIt->second;
-        config.sampleCategoryBins = std::stoi(entry.at("sampleCategoryBins"));
-        config.sampleCategoryLowerBound = std::stof(entry.at("sampleCategoryLowerBound"));
-        config.sampleCategoryUpperBound = std::stof(entry.at("sampleCategoryUpperBound"));
-        
-        auto sampleCategoryRegionsIt = entry.find("sampleCategoryRegions");
-        if (sampleCategoryRegionsIt != entry.end()) {
-          config.sampleCategoryRegions = configManager_m->splitString(sampleCategoryRegionsIt->second, ",");
+        try {
+          config.sampleCategoryVariable = sampleCategoryVarIt->second;
+          config.sampleCategoryBins = std::stoi(entry.at("sampleCategoryBins"));
+          config.sampleCategoryLowerBound = std::stof(entry.at("sampleCategoryLowerBound"));
+          config.sampleCategoryUpperBound = std::stof(entry.at("sampleCategoryUpperBound"));
+          
+          auto sampleCategoryRegionsIt = entry.find("sampleCategoryRegions");
+          if (sampleCategoryRegionsIt != entry.end()) {
+            config.sampleCategoryRegions = configManager_m->splitString(sampleCategoryRegionsIt->second, ",");
+          }
+        } catch (const std::exception &e) {
+          throw std::runtime_error("NDHistogramManager: Error parsing sample category config for histogram '" + 
+                                 config.name + "': " + e.what());
         }
       } else {
         // Use default "zero__" variable for no sample category selection
