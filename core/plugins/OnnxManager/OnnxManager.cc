@@ -16,71 +16,146 @@ OnnxManager::OnnxManager(IConfigurationProvider const& configProvider) {
 /**
  * @brief Apply an ONNX model to the input features
  * @param modelName Name of the ONNX model
+ * @param outputSuffix Optional suffix to append to output column names
  */
-void OnnxManager::applyModel(const std::string &modelName) {
+void OnnxManager::applyModel(const std::string &modelName, const std::string &outputSuffix) {
   if (!dataManager_m || !systematicManager_m) {
     throw std::runtime_error("OnnxManager: DataManager or SystematicManager not set");
   }
   
   const auto &inputFeatures = getModelFeatures(modelName);
   const auto &runVar = getRunVar(modelName);
-  
-  // Define the input vector for the model
-  dataManager_m->DefineVector("input_" + modelName, inputFeatures, "Float_t", *systematicManager_m);
-  
   auto session = this->objects_m.at(modelName);
   auto inputNames = model_inputNames_m.at(modelName);
   auto outputNames = model_outputNames_m.at(modelName);
   
-  // Create a lambda that performs ONNX inference
-  auto onnxLambda = [session, inputNames, outputNames](
-      ROOT::VecOps::RVec<Float_t> &inputVector,
-      bool runVar) -> Float_t {
-    if (!runVar) {
-      return -1.0f;
-    }
-    
-    // Create ONNX memory info
-    auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    
-    // Prepare input tensor
-    std::vector<int64_t> input_shape = {1, static_cast<int64_t>(inputVector.size())};
-    std::vector<float> input_data(inputVector.begin(), inputVector.end());
-    
-    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-        memory_info, input_data.data(), input_data.size(),
-        input_shape.data(), input_shape.size());
-    
-    // Prepare input and output names as C strings
-    std::vector<const char*> input_names_cstr;
-    for (const auto& name : inputNames) {
-      input_names_cstr.push_back(name.c_str());
-    }
-    std::vector<const char*> output_names_cstr;
-    for (const auto& name : outputNames) {
-      output_names_cstr.push_back(name.c_str());
-    }
-    
-    // Run inference
-    auto output_tensors = session->Run(
-        Ort::RunOptions{nullptr},
-        input_names_cstr.data(), &input_tensor, 1,
-        output_names_cstr.data(), output_names_cstr.size());
-    
-    // Extract the first output value
-    float* output_data = output_tensors[0].GetTensorMutableData<float>();
-    return output_data[0];
-  };
+  // For models with a single input, create an input vector from the features
+  // For models with multiple inputs, we assume the features are already vectors or scalars
+  if (inputNames.size() == 1) {
+    // Single input: combine all features into one vector
+    dataManager_m->DefineVector("input_" + modelName, inputFeatures, "Float_t", *systematicManager_m);
+  }
   
-  dataManager_m->Define(modelName, onnxLambda, {"input_" + modelName, runVar}, *systematicManager_m);
+  // Determine how many outputs we have
+  size_t numOutputs = outputNames.size();
+  
+  if (numOutputs == 1) {
+    // Single output case - create one column with the model name
+    auto onnxLambda = [session, inputNames, outputNames, inputFeatures, modelName](
+        ROOT::VecOps::RVec<Float_t> &inputVector,
+        bool runVar) -> Float_t {
+      if (!runVar) {
+        return -1.0f;
+      }
+      
+      // Create ONNX memory info
+      auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+      
+      // Prepare input tensor
+      std::vector<int64_t> input_shape = {1, static_cast<int64_t>(inputVector.size())};
+      std::vector<float> input_data(inputVector.begin(), inputVector.end());
+      
+      Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+          memory_info, input_data.data(), input_data.size(),
+          input_shape.data(), input_shape.size());
+      
+      // Prepare input and output names as C strings
+      std::vector<const char*> input_names_cstr;
+      for (const auto& name : inputNames) {
+        input_names_cstr.push_back(name.c_str());
+      }
+      std::vector<const char*> output_names_cstr;
+      for (const auto& name : outputNames) {
+        output_names_cstr.push_back(name.c_str());
+      }
+      
+      // Run inference
+      auto output_tensors = session->Run(
+          Ort::RunOptions{nullptr},
+          input_names_cstr.data(), &input_tensor, 1,
+          output_names_cstr.data(), output_names_cstr.size());
+      
+      // Extract the first (and only) output value
+      float* output_data = output_tensors[0].GetTensorMutableData<float>();
+      return output_data[0];
+    };
+    
+    std::string outputColName = modelName + outputSuffix;
+    dataManager_m->Define(outputColName, onnxLambda, {"input_" + modelName, runVar}, *systematicManager_m);
+    
+  } else {
+    // Multiple outputs case - create separate columns for each output
+    // We need to run inference once and capture all outputs
+    
+    // Create a lambda that returns a vector of all outputs
+    auto onnxLambdaMulti = [session, inputNames, outputNames, inputFeatures, modelName, numOutputs](
+        ROOT::VecOps::RVec<Float_t> &inputVector,
+        bool runVar) -> ROOT::VecOps::RVec<Float_t> {
+      
+      ROOT::VecOps::RVec<Float_t> outputs(numOutputs, -1.0f);
+      
+      if (!runVar) {
+        return outputs;
+      }
+      
+      // Create ONNX memory info
+      auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+      
+      // Prepare input tensor
+      std::vector<int64_t> input_shape = {1, static_cast<int64_t>(inputVector.size())};
+      std::vector<float> input_data(inputVector.begin(), inputVector.end());
+      
+      Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+          memory_info, input_data.data(), input_data.size(),
+          input_shape.data(), input_shape.size());
+      
+      // Prepare input and output names as C strings
+      std::vector<const char*> input_names_cstr;
+      for (const auto& name : inputNames) {
+        input_names_cstr.push_back(name.c_str());
+      }
+      std::vector<const char*> output_names_cstr;
+      for (const auto& name : outputNames) {
+        output_names_cstr.push_back(name.c_str());
+      }
+      
+      // Run inference
+      auto output_tensors = session->Run(
+          Ort::RunOptions{nullptr},
+          input_names_cstr.data(), &input_tensor, 1,
+          output_names_cstr.data(), output_names_cstr.size());
+      
+      // Extract all output values
+      for (size_t i = 0; i < numOutputs; i++) {
+        float* output_data = output_tensors[i].GetTensorMutableData<float>();
+        outputs[i] = output_data[0];
+      }
+      
+      return outputs;
+    };
+    
+    // Define a column that contains all outputs as a vector
+    std::string multiOutputColName = modelName + "_outputs" + outputSuffix;
+    dataManager_m->Define(multiOutputColName, onnxLambdaMulti, {"input_" + modelName, runVar}, *systematicManager_m);
+    
+    // Now define individual columns for each output by indexing into the vector
+    for (size_t i = 0; i < numOutputs; i++) {
+      std::string outputColName = modelName + "_output" + std::to_string(i) + outputSuffix;
+      auto indexLambda = [i](const ROOT::VecOps::RVec<Float_t> &outputs) -> Float_t {
+        return outputs[i];
+      };
+      dataManager_m->Define(outputColName, indexLambda, {multiOutputColName}, *systematicManager_m);
+    }
+  }
 }
 
 /**
  * @brief Apply all ONNX models to the dataframe provider
+ * @param outputSuffix Optional suffix to append to output column names
  */
-void OnnxManager::applyAllModels() {
+void OnnxManager::applyAllModels(const std::string &outputSuffix) {
   for (const auto &modelName : getAllModelNames()) {
-    applyModel(modelName);
+    applyModel(modelName, outputSuffix);
   }
 }
 
@@ -127,6 +202,32 @@ std::vector<std::string> OnnxManager::getAllModelNames() const {
     names.push_back(pair.first);
   }
   return names;
+}
+
+/**
+ * @brief Get the input names for an ONNX model
+ * @param modelName Name of the model
+ * @return Reference to the vector of input names
+ */
+const std::vector<std::string> &OnnxManager::getModelInputNames(const std::string &modelName) const {
+  auto it = model_inputNames_m.find(modelName);
+  if (it != model_inputNames_m.end()) {
+    return it->second;
+  }
+  throw std::runtime_error("Input names not found for ONNX model: " + modelName);
+}
+
+/**
+ * @brief Get the output names for an ONNX model
+ * @param modelName Name of the model
+ * @return Reference to the vector of output names
+ */
+const std::vector<std::string> &OnnxManager::getModelOutputNames(const std::string &modelName) const {
+  auto it = model_outputNames_m.find(modelName);
+  if (it != model_outputNames_m.end()) {
+    return it->second;
+  }
+  throw std::runtime_error("Output names not found for ONNX model: " + modelName);
 }
 
 /**

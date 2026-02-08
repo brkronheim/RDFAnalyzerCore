@@ -206,9 +206,16 @@ ManagerContext ctx{*configProvider, *dataManager, *systematicManager, *logger, *
 onnxManager->setContext(ctx);
 ```
 
+**Important**: Models are loaded during construction but NOT automatically applied to the DataFrame. You must explicitly call `applyModel()` or `applyAllModels()` after defining all input features.
+
 ### Apply ONNX Models
 ```cpp
-// Apply a specific model
+// First, define your input features
+dataManager->Define("pt", [](float x) { return x; }, {"jet_pt"}, *systematicManager);
+dataManager->Define("eta", [](float x) { return x; }, {"jet_eta"}, *systematicManager);
+// ... define all required features ...
+
+// Then apply the models
 onnxManager->applyModel("dnn_score");
 
 // Or apply all configured models
@@ -225,14 +232,39 @@ const auto& features = onnxManager->getModelFeatures("dnn_score");
 
 // Get the run variable for a model
 const auto& runVar = onnxManager->getRunVar("dnn_score");
+
+// Get ONNX input/output names from the model
+const auto& inputNames = onnxManager->getModelInputNames("dnn_score");
+const auto& outputNames = onnxManager->getModelOutputNames("dnn_score");
 ```
+
+## Multiple Outputs
+
+Models with multiple outputs are fully supported (e.g., ParticleTransformer with bootstrapped models):
+
+```cpp
+// Apply a multi-output model
+onnxManager->applyModel("particle_transformer");
+
+// Access the individual outputs
+auto df = dataManager->getDataFrame();
+auto output0 = df.Take<float>("particle_transformer_output0");
+auto output1 = df.Take<float>("particle_transformer_output1");
+auto output2 = df.Take<float>("particle_transformer_output2");
+```
+
+For models with multiple outputs:
+- Each output tensor creates a separate column
+- Columns are named `{modelName}_output0`, `{modelName}_output1`, etc.
+- An intermediate column `{modelName}_outputs` contains all outputs as a vector
 
 ## Behavior
 
-- When `runVar` evaluates to `true`, the model inference runs and returns the model output
-- When `runVar` evaluates to `false`, the output is set to `-1.0` (skipping computation)
+- When `runVar` evaluates to `true`, the model inference runs and returns the model output(s)
+- When `runVar` evaluates to `false`, the output(s) are set to `-1.0` (skipping computation)
 - The manager creates an intermediate column `input_<modelName>` containing the input feature vector
 - Models are loaded once at construction time and reused for all events
+- **Models are NOT applied automatically** - you must explicitly call `applyModel()` after defining inputs
 
 ## Creating ONNX Models
 

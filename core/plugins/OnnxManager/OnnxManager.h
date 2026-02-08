@@ -33,13 +33,19 @@ public:
   /**
    * @brief Apply an ONNX model to the dataframe provider
    * @param modelName Name of the ONNX model
+   * @param outputSuffix Optional suffix to append to output column names (default: empty)
+   * 
+   * For models with multiple outputs, each output tensor creates a separate column:
+   * - Single output: column named "{modelName}{outputSuffix}"
+   * - Multiple outputs: columns named "{modelName}_output0{outputSuffix}", "{modelName}_output1{outputSuffix}", etc.
    */
-  void applyModel(const std::string &modelName);
+  void applyModel(const std::string &modelName, const std::string &outputSuffix = "");
 
   /**
    * @brief Apply all ONNX models to the dataframe provider
+   * @param outputSuffix Optional suffix to append to output column names (default: empty)
    */
-  void applyAllModels();
+  void applyAllModels(const std::string &outputSuffix = "");
 
   /**
    * @brief Get an ONNX session object by key
@@ -67,6 +73,20 @@ public:
    * @return Vector of all model names
    */
   std::vector<std::string> getAllModelNames() const;
+
+  /**
+   * @brief Get the input names for an ONNX model (from the model itself)
+   * @param modelName Name of the model
+   * @return Reference to the vector of input names
+   */
+  const std::vector<std::string> &getModelInputNames(const std::string &modelName) const;
+
+  /**
+   * @brief Get the output names for an ONNX model (from the model itself)
+   * @param modelName Name of the model
+   * @return Reference to the vector of output names
+   */
+  const std::vector<std::string> &getModelOutputNames(const std::string &modelName) const;
 
   /**
    * @brief Return the type of the manager

@@ -26,19 +26,26 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 - Returns -1.0 when runVar is false (to skip unnecessary computation)
 - Thread-safe for use with ROOT's ImplicitMT
 - Follows the same patterns as BDTManager for consistency
+- **Supports multiple outputs** (e.g., ParticleTransformer with bootstrapped models)
+- **Deferred execution**: Models loaded but NOT applied until explicitly invoked
 
 **Key Methods**:
-- `applyModel(modelName)`: Apply a specific model to the dataframe
-- `applyAllModels()`: Apply all configured models
+- `applyModel(modelName, outputSuffix="")`: Apply a specific model to the dataframe
+- `applyAllModels(outputSuffix="")`: Apply all configured models
 - `getModel(key)`: Retrieve ONNX session object
 - `getModelFeatures(key)`: Get input feature names
 - `getRunVar(modelName)`: Get conditional run variable name
 - `getAllModelNames()`: List all loaded models
+- `getModelInputNames(modelName)`: Get ONNX input tensor names
+- `getModelOutputNames(modelName)`: Get ONNX output tensor names
 
 ### 3. Comprehensive Unit Tests
 - **File**: `core/test/testOnnxManager.cc`
 - **Test Configuration**: `core/test/cfg/onnx_models.txt`
-- **Test Models**: `core/test/cfg/test_model.onnx`, `core/test/cfg/test_model2.onnx`
+- **Test Models**: 
+  - `core/test/cfg/test_model.onnx` - Single output model
+  - `core/test/cfg/test_model2.onnx` - Single output model
+  - `core/test/cfg/test_model_multi_output.onnx` - Multi-output model
 
 **Test Coverage**:
 - Constructor and manager creation
@@ -49,8 +56,10 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 - Model application with valid inputs
 - Model application with runVar=false
 - Multiple model support
+- Multi-output model support
 - Thread safety with ROOT ImplicitMT
 - Const correctness
+- Input/output name retrieval
 
 ### 4. Documentation
 - **File**: `README.md`
@@ -78,18 +87,40 @@ onnxConfig=cfg/onnx_models.txt
 
 ## Usage Example
 
+### Single Output Model
 ```cpp
 // Create and configure OnnxManager
 auto onnxManager = std::make_unique<OnnxManager>(*configProvider);
 ManagerContext ctx{*configProvider, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
 onnxManager->setContext(ctx);
 
-// Apply models
+// Define input features first
+dataManager->Define("pt", ...);
+dataManager->Define("eta", ...);
+
+// Then apply models
 onnxManager->applyAllModels();
 
 // Access results in dataframe
 auto df = dataManager->getDataFrame();
 auto predictions = df.Take<float>("model_output");
+```
+
+### Multi-Output Model (ParticleTransformer Style)
+```cpp
+// Define inputs
+dataManager->Define("jet_pt", ...);
+dataManager->Define("jet_eta", ...);
+dataManager->Define("jet_phi", ...);
+
+// Apply multi-output model
+onnxManager->applyModel("particle_transformer");
+
+// Access individual outputs
+auto df = dataManager->getDataFrame();
+auto output0 = df.Take<float>("particle_transformer_output0");  // First output
+auto output1 = df.Take<float>("particle_transformer_output1");  // Second output
+auto output2 = df.Take<float>("particle_transformer_output2");  // Third output
 ```
 
 ## Testing Notes
@@ -134,6 +165,17 @@ ctest -R OnnxManagerTest
    - Avoid thread contention within ONNX Runtime
    - Maintain consistent behavior with other managers
 
+5. **Deferred Execution**: Models are loaded during construction but NOT applied automatically to:
+   - Allow users to define all required input features first
+   - Prevent errors from missing DataFrame columns
+   - Give users full control over when inference happens
+   - Support complex analysis workflows with dependencies
+
+6. **Multiple Outputs**: Full support for models with multiple output tensors to:
+   - Enable ParticleTransformer-style models with bootstrapped outputs
+   - Support ensemble models that return multiple predictions
+   - Create individual DataFrame columns for each output for easy access
+
 ## Security Considerations
 
 - ONNX Runtime binaries are downloaded from official Microsoft GitHub releases
@@ -141,29 +183,31 @@ ctest -R OnnxManagerTest
 - CMake verifies download success before proceeding
 - No external code execution during model loading (only model inference)
 
-## Future Enhancements (Not Implemented)
+## Future Enhancements
 
 Potential improvements for future work:
-1. Support for multiple output tensors from models
-2. Batch inference for improved performance
-3. Model caching for faster repeated evaluations
-4. Support for different ONNX Runtime execution providers (CPU, CUDA, TensorRT)
-5. Model quantization support
-6. Integration with ONNX Model Zoo
+1. ~~Support for multiple output tensors from models~~ ✅ **Implemented**
+2. Support for variable-shaped inputs (dynamic batch sizes, ragged arrays)
+3. Batch inference for improved performance
+4. Model caching for faster repeated evaluations
+5. Support for different ONNX Runtime execution providers (CPU, CUDA, TensorRT)
+6. Model quantization support
+7. Integration with ONNX Model Zoo
 
 ## Compatibility
 
 - **Platform Support**: Linux (x64, aarch64), macOS (x64, arm64)
 - **ONNX Opset**: Compatible with ONNX opset 12+
-- **Model Types**: Linear models, tree ensembles, neural networks, etc.
+- **Model Types**: Linear models, tree ensembles, neural networks, transformers, etc.
 - **ML Frameworks**: Any framework that can export to ONNX format
+- **Multiple Outputs**: Fully supported (e.g., ParticleTransformer with bootstrapped models)
 
 ## Limitations
 
-1. **Single Output**: Currently assumes models have a single output value
-2. **Float Input**: Input features are converted to float32
-3. **1D Input**: Models should expect (1, N) shaped input tensors
-4. **CPU Only**: ONNX Runtime is configured for CPU inference only
+1. **Float Input**: Input features are converted to float32
+2. **Fixed Shape Input**: Currently expects (1, N) shaped input tensors for single input models
+3. **CPU Only**: ONNX Runtime is configured for CPU inference only
+4. **Single Scalar Output Per Tensor**: Each output tensor must produce a single scalar value
 
 ## References
 

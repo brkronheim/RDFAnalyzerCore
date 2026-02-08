@@ -103,9 +103,10 @@ TEST_F(OnnxManagerTest, GetRunVar_Invalid) {
 // All model names
 TEST_F(OnnxManagerTest, GetAllModelNames) {
   const auto &names = onnxManager->getAllModelNames();
-  EXPECT_EQ(names.size(), 2);
+  EXPECT_EQ(names.size(), 3);
   EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model") != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model2") != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_multi") != names.end());
 }
 
 // Base class interface
@@ -178,9 +179,10 @@ TEST_F(OnnxManagerTest, ConstCorrectness) {
     EXPECT_TRUE(model != nullptr);
     EXPECT_EQ(features.size(), 3);
     EXPECT_EQ(runVar, "run_number");
-    EXPECT_EQ(names.size(), 2);
+    EXPECT_EQ(names.size(), 3);
     EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model") != names.end());
     EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model2") != names.end());
+    EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_multi") != names.end());
     EXPECT_TRUE(obj != nullptr);
     EXPECT_EQ(objFeatures.size(), 3);
   });
@@ -245,6 +247,67 @@ TEST_F(OnnxManagerTest, ThreadSafetyWithROOTImplicitMT) {
   for (const auto &val : *result) {
     EXPECT_NE(val, -1.0f);
   }
+}
+
+// Test multi-output model support
+TEST_F(OnnxManagerTest, MultiOutputModel) {
+  // Check that multi-output model is loaded
+  const auto &names = onnxManager->getAllModelNames();
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_multi") != names.end());
+
+  // Check that model has multiple outputs
+  const auto &outputNames = onnxManager->getModelOutputNames("test_model_multi");
+  EXPECT_EQ(outputNames.size(), 2);
+
+  // Apply the model
+  dataManager->Define("feature1", [](ULong64_t i) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number", [](ULong64_t i) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  onnxManager->applyModel("test_model_multi");
+
+  // Check that output columns are created
+  auto df = dataManager->getDataFrame();
+  auto output0 = df.Take<float>("test_model_multi_output0");
+  auto output1 = df.Take<float>("test_model_multi_output1");
+  
+  ASSERT_EQ(output0->size(), 2);
+  ASSERT_EQ(output1->size(), 2);
+  
+  // Verify outputs are not the default -1 value
+  EXPECT_NE(output0->at(0), -1.0f);
+  EXPECT_NE(output1->at(0), -1.0f);
+}
+
+// Test multi-output model with runVar=false
+TEST_F(OnnxManagerTest, MultiOutputModel_RunVarFalse) {
+  dataManager->Define("feature1", [](ULong64_t i) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number", [](ULong64_t i) -> bool { return false; }, {"rdfentry_"}, *systematicManager);
+  onnxManager->applyModel("test_model_multi");
+
+  auto df = dataManager->getDataFrame();
+  auto output0 = df.Take<float>("test_model_multi_output0");
+  auto output1 = df.Take<float>("test_model_multi_output1");
+  
+  ASSERT_EQ(output0->size(), 2);
+  ASSERT_EQ(output1->size(), 2);
+  
+  // Both outputs should be -1 since runVar is false
+  EXPECT_EQ(output0->at(0), -1.0f);
+  EXPECT_EQ(output1->at(0), -1.0f);
+}
+
+// Test getting input and output names
+TEST_F(OnnxManagerTest, GetInputOutputNames) {
+  const auto &inputNames = onnxManager->getModelInputNames("test_model_multi");
+  const auto &outputNames = onnxManager->getModelOutputNames("test_model_multi");
+  
+  EXPECT_EQ(inputNames.size(), 1);
+  EXPECT_EQ(outputNames.size(), 2);
+  EXPECT_EQ(outputNames[0], "output_sum");
+  EXPECT_EQ(outputNames[1], "output_product");
 }
 
 int main(int argc, char **argv) {
