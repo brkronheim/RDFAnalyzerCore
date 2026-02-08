@@ -29,9 +29,9 @@ void SofieManager::applyModel(const std::string &modelName) {
   auto inferenceFunc = this->objects_m.at(modelName);
   
   // Create lambda that calls the SOFIE inference function
-  auto sofieLambda = [inferenceFunc](ROOT::VecOps::RVec<Float_t> &inputVector,
-                                      bool runVar) -> Float_t {
-    if (!runVar) {
+  auto sofieLambda = [inferenceFunc, modelName](ROOT::VecOps::RVec<Float_t> &inputVector,
+                                      bool runFlag) -> Float_t {
+    if (!runFlag) {
       return -1.0f;
     }
     
