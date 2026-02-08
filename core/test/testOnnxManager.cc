@@ -4,11 +4,9 @@
 #include <DataManager.h>
 #include <ROOT/RDataFrame.hxx>
 #include <ROOT/RVec.hxx>
-#include <cstdlib>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
-#include <unistd.h>
 #include <vector>
 #include <ManagerFactory.h>
 #include <DefaultLogger.h>

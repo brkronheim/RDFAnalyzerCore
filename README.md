@@ -273,6 +273,7 @@ torch.onnx.export(model, dummy_input, "model.onnx")
 ### From TensorFlow/Keras
 ```python
 import tf2onnx
+import tensorflow.keras as keras
 
 # Load or train your Keras model
 model = keras.models.load_model("model.h5")

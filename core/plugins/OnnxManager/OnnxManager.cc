@@ -2,7 +2,6 @@
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ISystematicManager.h>
-#include <cstring>
 
 /**
  * @brief Construct a new OnnxManager object
