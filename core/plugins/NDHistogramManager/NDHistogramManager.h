@@ -99,6 +99,15 @@ public:
 
   void setupFromConfigFile() override;
 
+  /**
+   * @brief Book histograms defined in config file
+   * 
+   * This method books all histograms that were loaded from the config file
+   * during setupFromConfigFile(). It should be called after all filters and
+   * defines have been applied to the dataframe, typically right before save().
+   */
+  void bookConfigHistograms();
+
 private:
   void BookSingleHistogramWithSystList(histInfo &info,
                                        selectionInfo &&sampleCategoryInfo,
@@ -106,11 +115,42 @@ private:
                                        selectionInfo &&channelInfo,
                                        std::string suffix,
                                        const std::vector<std::string> &systList);
+
+  /**
+   * @brief Structure to hold parsed histogram configuration
+   */
+  struct HistogramConfig {
+    std::string name;
+    std::string variable;
+    std::string label;
+    std::string weight;
+    int bins;
+    float lowerBound;
+    float upperBound;
+    std::string suffix;
+    std::string channelVariable;
+    int channelBins;
+    float channelLowerBound;
+    float channelUpperBound;
+    std::vector<std::string> channelRegions;
+    std::string controlRegionVariable;
+    int controlRegionBins;
+    float controlRegionLowerBound;
+    float controlRegionUpperBound;
+    std::vector<std::string> controlRegionRegions;
+    std::string sampleCategoryVariable;
+    int sampleCategoryBins;
+    float sampleCategoryLowerBound;
+    float sampleCategoryUpperBound;
+    std::vector<std::string> sampleCategoryRegions;
+  };
+
   /**
    * @brief Vector of histogram result pointers.
    */
   std::vector<ROOT::RDF::RNode> histNodes_m;
   std::vector<ROOT::RDF::RResultPtr<THnSparseF>> histos_m;
+  std::vector<HistogramConfig> configHistograms_m;
   IConfigurationProvider* configManager_m = nullptr;
   IDataFrameProvider* dataManager_m = nullptr;
   ISystematicManager* systematicManager_m = nullptr;
