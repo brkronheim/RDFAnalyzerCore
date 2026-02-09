@@ -92,9 +92,11 @@ Manages ONNX machine learning models from any ML framework.
 
 #### SofieManager
 Manages SOFIE (System for Optimized Fast Inference code Emit) models from ROOT TMVA.
-- Build-time compilation of models for maximum performance
-- Generated C++ code integrated into framework
-- Faster inference than runtime ONNX evaluation
+- Build-time compilation from ONNX for maximum performance
+- Zero runtime overhead (compiled C++ code)
+- 2-3x faster than runtime ONNX evaluation
+- Manual registration required (rebuild for model updates)
+- **See**: [SOFIE Implementation Guide](docs/SOFIE_IMPLEMENTATION.md)
 
 #### CorrectionManager
 Applies scale factors and corrections using correctionlib.
@@ -339,12 +341,13 @@ python core/python/generateSubmissionFilesNANO.py \
 ```
 
 Features:
-- Rucio-based dataset discovery
+- Rucio-based dataset discovery (NANO) or CERN Open Data
 - Automatic input/output staging
 - XRootD support
 - Shared executable staging
+- Configuration validation
 
-See `core/python/` for submission tools.
+**See**: [Batch Submission Guide](docs/BATCH_SUBMISSION.md) for complete documentation.
 
 ### Custom ROOT Dictionaries
 

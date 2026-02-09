@@ -156,7 +156,15 @@ name=sofie_dnn inputVariables=pt,eta,phi,mass runVar=has_jet
 name=sofie_classifier inputVariables=lep_pt,met runVar=pass_selection
 ```
 
-**Note**: SOFIE models must be manually registered via `registerModel()` in C++ code before calling `applyModel()`.
+**Key Differences from ONNX/BDT**:
+- No `file` parameter (models compiled at build time)
+- Must manually register models via `registerModel()` in C++ code
+- Faster inference (2-3x) but less flexible (rebuild required for updates)
+
+**See**: [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for complete usage including:
+- Generating SOFIE C++ code from ONNX
+- Registering models in analysis code
+- When to use SOFIE vs ONNX
 
 ### Correction Manager Configuration
 

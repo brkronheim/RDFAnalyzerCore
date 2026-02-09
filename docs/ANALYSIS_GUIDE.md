@@ -509,7 +509,7 @@ sofieMgr->applyModel("classifier");
 - Need runtime flexibility
 - Want to swap models without recompiling
 
-**See**: [SOFIE Implementation Guide](../docs/SOFIE_IMPLEMENTATION.md) for complete details.
+**See**: [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for complete details.
 
 ### Creating ONNX Models for Analysis
 
