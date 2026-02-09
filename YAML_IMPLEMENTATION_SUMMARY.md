@@ -130,12 +130,19 @@ To migrate existing configs to YAML:
 ### C++ Architecture
 - `YamlConfigAdapter` implements `IConfigAdapter` interface
 - `ConfigurationManager` selects adapter based on file extension
-- Uses standard `yaml-cpp` library for parsing
+- Uses `yaml-cpp` library (automatically downloaded and built via CMake FetchContent)
+- No manual installation of yaml-cpp required
 
 ### Python Architecture
 - `read_config()` function dispatches to format-specific readers
 - `write_config()` function dispatches to format-specific writers
 - Inline Python scripts in condor jobs support both formats
+
+### Build System
+- yaml-cpp 0.8.0 is automatically downloaded from GitHub during CMake configuration
+- Built as a static library with tests/tools disabled
+- Uses CMake FetchContent module (similar to how other dependencies are handled)
+- SetupYamlCpp.cmake handles the download and configuration
 
 ### Format Detection
 Both C++ and Python use the same logic:

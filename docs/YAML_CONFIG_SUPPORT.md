@@ -141,7 +141,7 @@ Specific YAML tests are in `core/test/testConfigurationManager_YamlParsing.cc`.
 
 ### C++ Implementation
 - `YamlConfigAdapter` implements the `IConfigAdapter` interface
-- Uses the `yaml-cpp` library for parsing
+- Uses the `yaml-cpp` library (automatically downloaded and built via CMake FetchContent)
 - Auto-detection in `ConfigurationManager` constructor based on file extension
 
 ### Python Implementation
@@ -153,9 +153,10 @@ Specific YAML tests are in `core/test/testConfigurationManager_YamlParsing.cc`.
 ## Dependencies
 
 ### C++
-- `yaml-cpp` (version 0.8.0 or later)
-  - Ubuntu/Debian: `sudo apt-get install libyaml-cpp-dev`
-  - CentOS/RHEL: `sudo yum install yaml-cpp-devel`
+- `yaml-cpp` (version 0.8.0)
+  - **Automatically downloaded and built** during CMake configuration
+  - No manual installation required
+  - Uses CMake FetchContent from https://github.com/jbeder/yaml-cpp.git
 
 ### Python
 - `PyYAML` (included in most Python distributions)
