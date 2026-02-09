@@ -456,6 +456,61 @@ auto* bdtMgr = analyzer.getPlugin<IBDTManager>("bdt");
 bdtMgr->applyAllModels();
 ```
 
+### Using SOFIE Models (Maximum Performance)
+
+SOFIE (System for Optimized Fast Inference code Emit) generates compiled C++ code from ONNX models for maximum performance.
+
+**Key Difference**: SOFIE models are compiled at build time, not loaded at runtime.
+
+#### 1. Generate SOFIE C++ Code
+
+```python
+import ROOT
+from ROOT import TMVA
+
+# Convert ONNX to SOFIE C++ code
+model = TMVA.Experimental.SOFIE.RModelParser_ONNX("classifier.onnx")
+model.Generate()
+model.OutputGenerated("ClassifierModel.hxx")
+```
+
+#### 2. Create Wrapper Function
+
+```cpp
+#include "ClassifierModel.hxx"  // SOFIE-generated
+
+std::vector<float> classifierInference(const std::vector<float>& input) {
+    static TMVA_SOFIE_ClassifierModel::Session session;
+    return session.infer(input.data());
+}
+```
+
+#### 3. Register and Use Model
+
+```cpp
+auto* sofieMgr = analyzer.getPlugin<ISofieManager>("sofie");
+
+// Register model manually (not auto-loaded like ONNX/BDT)
+auto inferenceFunc = std::make_shared<SofieInferenceFunction>(classifierInference);
+sofieMgr->registerModel("classifier", inferenceFunc, 
+                       {"jet_pt", "jet_eta", "jet_phi"}, "has_jet");
+
+// Apply model
+sofieMgr->applyModel("classifier");
+```
+
+**When to use SOFIE**:
+- Maximum speed is critical
+- Model is finalized (won't change frequently)
+- Can rebuild between updates
+
+**When to use ONNX**:
+- Model still being developed
+- Need runtime flexibility
+- Want to swap models without recompiling
+
+**See**: [SOFIE Implementation Guide](../docs/SOFIE_IMPLEMENTATION.md) for complete details.
+
 ### Creating ONNX Models for Analysis
 
 From a trained scikit-learn model:

@@ -30,12 +30,16 @@ New to RDFAnalyzerCore? Start here:
 ### Framework Features
 
 - **[Machine Learning](ANALYSIS_GUIDE.md#machine-learning-integration)**
-  - ONNX models (PyTorch, TensorFlow, scikit-learn)
-  - BDT models (FastForest)
-  - SOFIE compiled models
+  - **[ONNX Models](ONNX_IMPLEMENTATION.md)** - Runtime ML from any framework (PyTorch, TensorFlow, scikit-learn)
+  - **[SOFIE Models](SOFIE_IMPLEMENTATION.md)** - Build-time compiled models for maximum performance
+  - **[BDT Models](CONFIG_REFERENCE.md#bdt-manager-configuration)** - FastForest boosted decision trees
 
-- **[ONNX Implementation Details](ONNX_IMPLEMENTATION.md)** - Deep dive into ONNX support
-- **[Multi-Output Models](ONNX_MULTI_OUTPUT.md)** - Using models with multiple outputs
+- **ML Implementation Guides**:
+  - [ONNX Implementation](ONNX_IMPLEMENTATION.md) - Deep dive into ONNX support
+  - [ONNX Multi-Output](ONNX_MULTI_OUTPUT.md) - Models with multiple outputs
+  - [SOFIE Implementation](SOFIE_IMPLEMENTATION.md) - Build-time compiled models
+
+- **[Batch Submission](BATCH_SUBMISSION.md)** - HTCondor job submission guide
 
 ### API Reference
 
