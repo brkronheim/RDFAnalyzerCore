@@ -1,13 +1,19 @@
 #include <ConfigurationManager.h>
 #include <TextConfigAdapter.h>
+#include <YamlConfigAdapter.h>
 #include <stdexcept>
 
 /**
  * @brief Construct a new ConfigurationManager object
  * @param configFile Path to the configuration file
  */
-ConfigurationManager::ConfigurationManager(const std::string &configFile)
-    : adapter_m(std::make_shared<TextConfigAdapter>()) {
+ConfigurationManager::ConfigurationManager(const std::string &configFile) {
+  // Auto-detect format based on file extension
+  if (configFile.ends_with(".yaml") || configFile.ends_with(".yml")) {
+    adapter_m = std::make_shared<YamlConfigAdapter>();
+  } else {
+    adapter_m = std::make_shared<TextConfigAdapter>();
+  }
   processTopLevelConfig(configFile);
 }
 
