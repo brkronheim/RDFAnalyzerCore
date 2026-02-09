@@ -463,7 +463,9 @@ python core/python/generateSubmissionFilesNANO.py \
     # ... other options ...
 ```
 
-Creates submission directory in: `/eos/user/b/bkronhei/RDFAnalyzerCore/condorSub_<name>/`
+Creates submission directory in: `/eos/user/<initial>/<username>/RDFAnalyzerCore/condorSub_<name>/`
+
+**Note**: The EOS path is currently hardcoded in the script. For your own use, you may need to modify the script or use your own EOS path.
 
 ## Troubleshooting
 
