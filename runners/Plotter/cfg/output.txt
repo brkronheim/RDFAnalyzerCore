@@ -1,3 +1,0 @@
-timeStamp_begin
-bunchCrossing
-totalClusters

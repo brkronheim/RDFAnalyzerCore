@@ -1,4 +1,105 @@
-add_executable(testPlots testPlots.cc)
-target_compile_features(testPlots PRIVATE cxx_std_17)
-find_package(ROOT)
-target_link_libraries(testPlots PRIVATE plots ${ROOT_LIBRARIES}) # ROOT::ROOTDataFrame ROOT::ROOTVecOps ROOT::Core ROOT::Hist ROOT::MathCore)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../extern/gtest/googletest/include ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Define the test source directory for all test executables
+add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+# Basic functionality tests
+
+add_executable(testConfigurationManager testConfigurationManager.cc)
+target_link_libraries(testConfigurationManager core gtest gtest_main)
+add_test(NAME ConfigurationManagerTest COMMAND testConfigurationManager)
+
+add_executable(testConfigurationManager_Basic testConfigurationManager_Basic.cc)
+target_link_libraries(testConfigurationManager_Basic core gtest gtest_main)
+add_test(NAME ConfigurationManagerBasicTest COMMAND testConfigurationManager_Basic)
+
+add_executable(testConfigurationManager_StringParsing testConfigurationManager_StringParsing.cc)
+target_link_libraries(testConfigurationManager_StringParsing core gtest gtest_main)
+add_test(NAME ConfigurationManagerStringParsingTest COMMAND testConfigurationManager_StringParsing)
+
+add_executable(testConfigurationManager_ConfigParsing testConfigurationManager_ConfigParsing.cc)
+target_link_libraries(testConfigurationManager_ConfigParsing core gtest gtest_main)
+add_test(NAME ConfigurationManagerConfigParsingTest COMMAND testConfigurationManager_ConfigParsing)
+
+add_executable(testConfigurationManager_ErrorHandling testConfigurationManager_ErrorHandling.cc)
+target_link_libraries(testConfigurationManager_ErrorHandling core gtest gtest_main)
+add_test(NAME ConfigurationManagerErrorHandlingTest COMMAND testConfigurationManager_ErrorHandling)
+
+add_executable(testConfigurationManager_Immutability testConfigurationManager_Immutability.cc)
+target_link_libraries(testConfigurationManager_Immutability core gtest gtest_main)
+add_test(NAME ConfigurationManagerImmutabilityTest COMMAND testConfigurationManager_Immutability)
+
+add_executable(testConfigurationManager_MemoryAndSemantics testConfigurationManager_MemoryAndSemantics.cc)
+target_link_libraries(testConfigurationManager_MemoryAndSemantics core gtest gtest_main)
+add_test(NAME ConfigurationManagerMemoryAndSemanticsTest COMMAND testConfigurationManager_MemoryAndSemantics)
+
+add_executable(testSystematicManager testSystematicManager.cc)
+target_link_libraries(testSystematicManager core gtest gtest_main)
+add_test(NAME SystematicManagerTest COMMAND testSystematicManager)
+
+add_executable(testCounterService testCounterService.cc)
+target_link_libraries(testCounterService core gtest gtest_main)
+add_test(NAME CounterServiceTest COMMAND testCounterService)
+
+#add_executable(testDataManager testDataManager.cc)
+#target_link_libraries(testDataManager core corePlugins gtest gtest_main)
+#add_test(NAME DataManagerTest COMMAND testDataManager)
+
+
+
+
+
+# Plugin tests
+
+add_executable(testNamedObjectManager testNamedObjectManager.cc)
+target_link_libraries(testNamedObjectManager core gtest gtest_main)
+add_test(NAME NamedObjectManagerTest COMMAND testNamedObjectManager)
+
+add_executable(testCorrectionManager testCorrectionManager.cc)
+target_link_libraries(testCorrectionManager core corePlugins gtest gtest_main)
+add_test(NAME CorrectionManagerTest COMMAND testCorrectionManager)
+
+add_executable(testBDTManager testBDTManager.cc)
+target_link_libraries(testBDTManager core corePlugins gtest gtest_main)
+add_test(NAME BDTManagerTest COMMAND testBDTManager)
+
+add_executable(testOnnxManager testOnnxManager.cc)
+target_link_libraries(testOnnxManager core corePlugins gtest gtest_main)
+add_test(NAME OnnxManagerTest COMMAND testOnnxManager)
+
+add_executable(testSofieManager testSofieManager.cc)
+target_link_libraries(testSofieManager core corePlugins gtest gtest_main)
+add_test(NAME SofieManagerTest COMMAND testSofieManager)
+
+add_executable(testNDHistogramManager testNDHistogramManager.cc)
+target_link_libraries(testNDHistogramManager core corePlugins gtest gtest_main)
+add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
+
+add_executable(testTriggerManager testTriggerManager.cc)
+target_link_libraries(testTriggerManager core corePlugins gtest gtest_main)
+add_test(NAME TriggerManagerTest COMMAND testTriggerManager)
+
+
+add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)
+target_link_libraries(testAnalyzer_TriggerLogic core corePlugins gtest gtest_main)
+add_test(NAME AnalyzerTriggerLogicTest COMMAND testAnalyzer_TriggerLogic)
+
+add_executable(testAnalyzer_PluginWiring testAnalyzer_PluginWiring.cc)
+target_link_libraries(testAnalyzer_PluginWiring core corePlugins gtest gtest_main)
+add_test(NAME AnalyzerPluginWiringTest COMMAND testAnalyzer_PluginWiring)
+
+add_executable(testRootEnvironmentGuard testRootEnvironmentGuard.cc)
+target_link_libraries(testRootEnvironmentGuard core gtest gtest_main)
+add_test(NAME RootEnvironmentGuardTest COMMAND testRootEnvironmentGuard)
+
+
+
+
+# Integration tests
+
+#add_executable(testSystematicPropagation testSystematicPropagation.cc)
+#target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
+#add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+
+
+

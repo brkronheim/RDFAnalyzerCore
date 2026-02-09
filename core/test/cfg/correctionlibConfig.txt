@@ -1,0 +1,4 @@
+# Correction library configuration for testing
+libraryPath=core/test/aux
+defaultCorrection=test_correction
+correctionType=json 
