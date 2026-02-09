@@ -30,12 +30,8 @@ target_link_libraries(core PUBLIC
     ROOT::Core
     ROOT::Hist
     ROOT::MathCore
+    yaml-cpp
 )
-
-# Link yaml-cpp if available
-if(yaml-cpp_FOUND)
-    target_link_libraries(core PUBLIC yaml-cpp)
-endif()
 
 set(SOURCES
     # ... existing sources ...
