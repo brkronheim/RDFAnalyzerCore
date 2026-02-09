@@ -628,7 +628,7 @@ void NDHistogramManager::setupFromConfigFile() {
   if (histogramConfigFile.empty()) {
     // No histogram config file specified - this is fine
     if (logger_m) {
-      logger_m->info("NDHistogramManager: No histogramConfig specified, config-driven histograms disabled");
+      logger_m->log(ILogger::Level::Info, "NDHistogramManager: No histogramConfig specified, config-driven histograms disabled");
     }
     return;
   }
@@ -747,14 +747,14 @@ void NDHistogramManager::setupFromConfigFile() {
       std::stringstream msg;
       msg << "NDHistogramManager: Loaded " << configHistograms_m.size() 
           << " histogram configurations from " << histogramConfigFile;
-      logger_m->info(msg.str());
+      logger_m->log(ILogger::Level::Info, msg.str());
     }
 
   } catch (const std::exception &e) {
     if (logger_m) {
       std::stringstream msg;
       msg << "NDHistogramManager: Error parsing histogram config file: " << e.what();
-      logger_m->error(msg.str());
+      logger_m->log(ILogger::Level::Error, msg.str());
     }
     throw;
   }
@@ -776,7 +776,7 @@ void NDHistogramManager::bookConfigHistograms() {
     std::stringstream msg;
     msg << "NDHistogramManager: Booking " << configHistograms_m.size() 
         << " histograms from config";
-    logger_m->info(msg.str());
+    logger_m->log(ILogger::Level::Info, msg.str());
   }
 
   for (const auto &config : configHistograms_m) {
@@ -805,6 +805,6 @@ void NDHistogramManager::bookConfigHistograms() {
   }
 
   if (logger_m) {
-    logger_m->info("NDHistogramManager: Successfully booked all config histograms");
+    logger_m->log(ILogger::Level::Info, "NDHistogramManager: Successfully booked all config histograms");
   }
 }
