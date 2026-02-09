@@ -16,6 +16,8 @@
 #include <Math/Math.h>
 #include <Math/Vector4D.h>
 #include <ROOT/RDataFrame.hxx>
+#include <Math/GenVector/LorentzVector.h>
+#include <Math/GenVector/PxPyPzM4D.h>
 
 // =========================
 // General Math Utilities
@@ -32,15 +34,15 @@ template <typename T> Float_t getSignFloat(T val) {
 }
 
 /**
- * @brief Clips an integer value to the specified lower and upper bounds (inclusive).
+ * @brief Clips an integer value to the specified lower and upper bounds
+ * (inclusive).
  * @tparam T Numeric type (typically integer)
  * @tparam lower Lower bound (inclusive)
  * @tparam upper Upper bound (inclusive)
  * @param val Value to clip
  * @return Value clipped to the range [lower, upper]
  */
-template <typename T, int lower, int upper>
-T clipIntBounds(T val) {
+template <typename T, int lower, int upper> T clipIntBounds(T val) {
   val = val > T(upper) ? T(upper) : val;
   val = val < T(lower) ? T(lower) : val;
   return (val);
@@ -91,8 +93,7 @@ template <typename T> T absDiff(T val1, T val2) { return (fabs(val1 - val2)); }
  * @tparam index The integer value to return
  * @return The value of index
  */
-template <Int_t index>
-Int_t constantInteger() { return (index); }
+template <Int_t index> Int_t constantInteger() { return (index); }
 
 /**
  * @brief Casts a value to another type.
@@ -118,7 +119,8 @@ template <typename T> ROOT::VecOps::RVec<T> defineVector(T val1) {
 // =========================
 
 /**
- * @brief Returns the value at a fixed (compile-time) index in a vector, or -9999.0 if out of bounds.
+ * @brief Returns the value at a fixed (compile-time) index in a vector, or
+ * -9999.0 if out of bounds.
  * @tparam T Type of the vector elements
  * @tparam index Index to access (compile-time constant)
  * @param vector Input vector
@@ -153,7 +155,8 @@ ROOT::VecOps::RVec<Int_t> selectTop(ROOT::VecOps::RVec<T> &vector) {
 }
 
 /**
- * @brief Returns the value at a given index in a vector, or -9999.0 if out of bounds.
+ * @brief Returns the value at a given index in a vector, or -9999.0 if out of
+ * bounds.
  * @tparam T Type of the vector elements
  * @tparam S Type of the index
  * @param vector Input vector
@@ -169,7 +172,8 @@ T indexVector(ROOT::VecOps::RVec<T> &vector, S index) {
 }
 
 /**
- * @brief Returns a vector containing the element-wise maximum of two input vectors.
+ * @brief Returns a vector containing the element-wise maximum of two input
+ * vectors.
  * @tparam T Type of the vector elements
  * @param val1 First input vector
  * @param val2 Second input vector
@@ -187,7 +191,8 @@ ROOT::VecOps::RVec<T> maximumVector(ROOT::VecOps::RVec<T> &val1,
 }
 
 /**
- * @brief Takes elements from a vector at specified indices, pads with -9999.0 if out of bounds.
+ * @brief Takes elements from a vector at specified indices, pads with -9999.0
+ * if out of bounds.
  * @tparam T Type of the vector elements
  * @tparam S Type of the index vector elements
  * @param vector Input vector
@@ -211,6 +216,61 @@ template <typename T>
 ROOT::VecOps::RVec<T> addToVector(ROOT::VecOps::RVec<T> vec, T newVal) {
   vec.push_back(newVal);
   return (vec);
+}
+
+/**
+ * @brief Flattens a mix of scalar and vector arguments into a single contiguous RVec<Double_t>.
+ * Scalars are broadcast to match the length of the longest vector among the arguments.
+ *
+ * @tparam Args Types of the arguments (scalar or vector-like)
+ * @param args Arguments to flatten
+ * @return RVec<Double_t> containing the flattened values
+ */
+template <typename... Args>
+ROOT::VecOps::RVec<Double_t> FlattenRVec(const Args &... args) {
+  using ROOT::VecOps::RVec;
+  std::size_t nFills = 1U;
+  auto updateSize = [&](auto const &arg) {
+    if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
+      // scalar
+    } else {
+      nFills = std::max<std::size_t>(nFills, arg.size());
+    }
+  };
+  (updateSize(args), ...);
+  const std::size_t stride = sizeof...(Args);
+  RVec<Double_t> out;
+  out.reserve(nFills * stride);
+  for (std::size_t i = 0; i < nFills; ++i) {
+    auto pushVal = [&](auto const &arg) {
+      if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
+        out.emplace_back(static_cast<Double_t>(arg));
+      } else {
+        const auto idx = (i < arg.size()) ? i : arg.size() - 1;
+        out.emplace_back(static_cast<Double_t>(arg[idx]));
+      }
+    };
+    (pushVal(args), ...);
+  }
+  return out;
+}
+
+/**
+ * @brief Flattens a mix of scalar and vector arguments into a single contiguous RVec<T>.
+ * Scalars are broadcast to match the length of the longest vector among the arguments.
+ * The result is cast to the requested type T.
+ *
+ * @tparam T Output type for the RVec
+ * @tparam Args Types of the arguments (scalar or vector-like)
+ * @param args Arguments to flatten
+ * @return RVec<T> containing the flattened and casted values
+ */
+template <typename T, typename... Args>
+ROOT::VecOps::RVec<T> FlattenRVecCast(const Args &... args) {
+  auto doubles = FlattenRVec(args...);
+  ROOT::VecOps::RVec<T> out(doubles.size());
+  for (size_t i = 0; i < doubles.size(); ++i) out[i] = static_cast<T>(doubles[i]);
+  return out;
 }
 
 // =========================
@@ -419,7 +479,7 @@ template <typename T>
 ROOT::VecOps::RVec<T> EvalVectorSum_2(ROOT::VecOps::RVec<T> Jet1,
                                       ROOT::VecOps::RVec<T> Jet2) {
   if (Jet1.size() != 4 || Jet2.size() != 4) {
-    std::cerr << "Jet sizes not 4 in EvalVectorSum" << std::endl;
+    throw std::runtime_error("Error: Jet sizes not 4 in EvalVectorSum");
     ROOT::VecOps::RVec<T>({0, 0, 0, 0});
   }
 
@@ -449,6 +509,133 @@ template <typename T>
 ROOT::VecOps::RVec<T> Fill4Vec(T pt, T eta, T phi, T mass) {
 
   return (ROOT::VecOps::RVec<T>({pt, eta, phi, mass}));
+}
+
+/**
+ * @brief Returns a ROOT LorentzVector (PxPyPzM) from components.
+ * @param px x-component of momentum
+ * @param py y-component of momentum
+ * @param pz z-component of momentum
+ * @param M  mass
+ * @return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>
+ */
+inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPxPyPzMVector(Float_t px, Float_t py, Float_t pz, Float_t M) {
+  return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>(px, py, pz, M);
+}
+
+/**
+ * @brief Returns a ROOT LorentzVector (PxPyPzM) from vector components at a given index.
+ * @param px Vector of px values
+ * @param py Vector of py values
+ * @param pz Vector of pz values
+ * @param M  Vector of mass values
+ * @param index Index to access
+ * @return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>
+ */
+inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPxPyPzMVectorIndex(const ROOT::VecOps::RVec<Float_t> &px, const ROOT::VecOps::RVec<Float_t> &py, const ROOT::VecOps::RVec<Float_t> &pz, const ROOT::VecOps::RVec<Float_t> &M, Int_t index) {
+  if (index >= px.size()) {
+    return getPxPyPzMVector(0, 0, 0, 0);
+  } else {
+    return getPxPyPzMVector(px[index], py[index], pz[index], M[index]);
+  }
+}
+
+/**
+ * @brief Sums two Lorentz vectors.
+ * @tparam T Lorentz vector type
+ * @param vec1 First Lorentz vector
+ * @param vec2 Second Lorentz vector
+ * @return Sum of the two Lorentz vectors
+ */
+template <typename T>
+T sumLorentzVec(T vec1, T vec2) {
+  return (vec1 + vec2);
+}
+
+/**
+ * @brief Returns the transverse momentum (Pt) of a Lorentz vector.
+ * @tparam T Return type
+ * @tparam S Lorentz vector type
+ * @param vector Lorentz vector
+ * @return Pt value
+ */
+template <typename T, typename S>
+T getLorentzVecPt(S vector) {
+  return vector.Pt();
+}
+
+/**
+ * @brief Returns the pseudorapidity (Eta) of a Lorentz vector.
+ * @tparam T Return type
+ * @tparam S Lorentz vector type
+ * @param vector Lorentz vector
+ * @return Eta value
+ */
+template <typename T, typename S>
+T getLorentzVecEta(S vector) {
+  return vector.Eta();
+}
+
+/**
+ * @brief Returns the azimuthal angle (Phi) of a Lorentz vector.
+ * @tparam T Return type
+ * @tparam S Lorentz vector type
+ * @param vector Lorentz vector
+ * @return Phi value
+ */
+template <typename T, typename S>
+T getLorentzVecPhi(S vector) {
+  return vector.Phi();
+}
+
+/**
+ * @brief Returns the mass (M) of a Lorentz vector.
+ * @tparam T Return type
+ * @tparam S Lorentz vector type
+ * @param vector Lorentz vector
+ * @return Mass value
+ */
+template <typename T, typename S>
+T getLorentzVecM(S vector) {
+  return vector.M();
+}
+
+/**
+ * @brief Computes the transverse momentum from px and py.
+ * @param px x-component of momentum
+ * @param py y-component of momentum
+ * @return sqrt(px^2 + py^2)
+ */
+inline Float_t getPT(Float_t px, Float_t py) {
+  return sqrt(px * px + py * py);
+}
+
+/**
+ * @brief Saves a variable as a new column in a ROOT RDataFrame.
+ * @tparam T Variable type
+ * @param var Variable to save
+ * @param name Name of the new column
+ * @param df Input RDataFrame
+ * @return New RDataFrame with the variable defined
+ */
+template <typename T>
+ROOT::RDF::RNode saveVar(T var, std::string name, ROOT::RDF::RNode df) {
+  auto storeVar = [var](unsigned int, const ROOT::RDF::RSampleInfo &) -> T {
+    return var;
+  };
+  auto newDf = df.DefinePerSample(name, storeVar);
+  return newDf;
+}
+
+/**
+ * @brief Returns the size of a vector as an Int_t.
+ * @tparam T Type of the vector elements
+ * @param vec Input vector
+ * @return Size of the vector
+ */
+template <typename T>
+Int_t countVector(ROOT::VecOps::RVec<T> vec) {
+  return vec.size();
 }
 
 #endif

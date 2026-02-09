@@ -1,0 +1,8 @@
+file(GLOB analyses_children RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "*")
+foreach(child ${analyses_children})
+	if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${child}")
+		if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${child}/CMakeLists.txt")
+			add_subdirectory(${child})
+		endif()
+	endif()
+endforeach()

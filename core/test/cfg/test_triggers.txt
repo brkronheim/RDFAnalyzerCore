@@ -1,0 +1,1 @@
+group=test_group triggers=trigger1,trigger2,trigger3 vetoes=veto1,veto2 samples=sample1,sample2,sample3 

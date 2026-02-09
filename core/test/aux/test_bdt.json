@@ -1,0 +1,22 @@
+{
+  "name": "test_bdt",
+  "version": 1,
+  "features": ["feature1", "feature2", "feature3"],
+  "runVar": "run_number",
+  "model": {
+    "type": "xgboost",
+    "parameters": {
+      "max_depth": 3,
+      "learning_rate": 0.1,
+      "n_estimators": 100
+    },
+    "trees": [
+      {
+        "feature": 0,
+        "threshold": 0.5,
+        "left": 0.1,
+        "right": 0.9
+      }
+    ]
+  }
+} 
