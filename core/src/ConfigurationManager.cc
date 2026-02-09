@@ -3,13 +3,21 @@
 #include <YamlConfigAdapter.h>
 #include <stdexcept>
 
+namespace {
+  // Helper function for C++17 compatibility (ends_with is C++20)
+  bool endsWith(const std::string& str, const std::string& suffix) {
+    if (suffix.size() > str.size()) return false;
+    return str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+  }
+}
+
 /**
  * @brief Construct a new ConfigurationManager object
  * @param configFile Path to the configuration file
  */
 ConfigurationManager::ConfigurationManager(const std::string &configFile) {
   // Auto-detect format based on file extension
-  if (configFile.ends_with(".yaml") || configFile.ends_with(".yml")) {
+  if (endsWith(configFile, ".yaml") || endsWith(configFile, ".yml")) {
     adapter_m = std::make_shared<YamlConfigAdapter>();
   } else {
     adapter_m = std::make_shared<TextConfigAdapter>();
