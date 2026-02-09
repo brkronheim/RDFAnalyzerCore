@@ -1,6 +1,8 @@
 #ifndef YAMLCONFIGADAPTER_H_INCLUDED
 #define YAMLCONFIGADAPTER_H_INCLUDED
 
+#ifdef HAVE_YAML_CPP
+
 #include "api/IConfigAdapter.h"
 #include <string_view>
 
@@ -22,5 +24,7 @@ public:
 private:
   std::string_view trim(std::string_view s) const;
 };
+
+#endif // HAVE_YAML_CPP
 
 #endif // YAMLCONFIGADAPTER_H_INCLUDED

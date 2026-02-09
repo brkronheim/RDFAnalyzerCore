@@ -1,3 +1,5 @@
+#ifdef HAVE_YAML_CPP
+
 #include <YamlConfigAdapter.h>
 #include <yaml-cpp/yaml.h>
 #include <fstream>
@@ -123,3 +125,5 @@ YamlConfigAdapter::parseVectorConfig(const std::string &configFile) const {
   
   return configVector;
 }
+
+#endif // HAVE_YAML_CPP

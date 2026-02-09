@@ -1,6 +1,8 @@
 #include <ConfigurationManager.h>
 #include <TextConfigAdapter.h>
+#ifdef HAVE_YAML_CPP
 #include <YamlConfigAdapter.h>
+#endif
 #include <stdexcept>
 
 /**
@@ -9,11 +11,20 @@
  */
 ConfigurationManager::ConfigurationManager(const std::string &configFile) {
   // Auto-detect format based on file extension
+#ifdef HAVE_YAML_CPP
   if (configFile.ends_with(".yaml") || configFile.ends_with(".yml")) {
     adapter_m = std::make_shared<YamlConfigAdapter>();
   } else {
     adapter_m = std::make_shared<TextConfigAdapter>();
   }
+#else
+  if (configFile.ends_with(".yaml") || configFile.ends_with(".yml")) {
+    throw std::runtime_error(
+        "Error: YAML configuration support not available. "
+        "Rebuild with yaml-cpp library to use YAML configs, or use .txt config files.");
+  }
+  adapter_m = std::make_shared<TextConfigAdapter>();
+#endif
   processTopLevelConfig(configFile);
 }
 

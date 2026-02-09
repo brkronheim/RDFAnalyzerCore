@@ -15,7 +15,14 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads)
 find_package(ZLIB)
 
-
+# Find yaml-cpp for YAML configuration support (optional)
+find_package(yaml-cpp QUIET)
+if(yaml-cpp_FOUND)
+    message(STATUS "yaml-cpp found - YAML configuration support enabled")
+    add_compile_definitions(HAVE_YAML_CPP)
+else()
+    message(STATUS "yaml-cpp not found - YAML configuration support disabled")
+endif()
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
