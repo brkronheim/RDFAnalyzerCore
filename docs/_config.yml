@@ -1,0 +1,48 @@
+theme: jekyll-theme-cayman
+title: RDFAnalyzerCore
+description: A powerful, config-driven framework for building physics analyses with ROOT RDataFrame
+show_downloads: true
+
+# GitHub repository
+github:
+  repository_url: https://github.com/brkronheim/RDFAnalyzerCore
+  repository_name: brkronheim/RDFAnalyzerCore
+
+# Build settings
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+
+# Navigation
+nav_links:
+  - title: Getting Started
+    url: GETTING_STARTED.html
+  - title: Configuration
+    url: CONFIG_REFERENCE.html
+  - title: Analysis Guide
+    url: ANALYSIS_GUIDE.html
+  - title: Architecture
+    url: ARCHITECTURE.html
+  - title: Plugin Development
+    url: PLUGIN_DEVELOPMENT.html
+  - title: API Reference
+    url: API_REFERENCE.html
+
+# Exclude files from build
+exclude:
+  - README.md
+  - Gemfile
+  - Gemfile.lock
+  - vendor
+
+# Include files
+include:
+  - GETTING_STARTED.md
+  - CONFIG_REFERENCE.md
+  - ANALYSIS_GUIDE.md
+  - ARCHITECTURE.md
+  - PLUGIN_DEVELOPMENT.md
+  - API_REFERENCE.md
+  - ONNX_IMPLEMENTATION.md
+  - ONNX_MULTI_OUTPUT.md
