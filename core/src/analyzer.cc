@@ -6,6 +6,7 @@
 #include <NullOutputSink.h>
 #include <RootOutputSink.h>
 #include <CounterService.h>
+#include <NDHistogramManager.h>
 #include <functions.h>
 #include <util.h>
 #include <memory>
@@ -125,6 +126,14 @@ Analyzer *Analyzer::DefineVector(std::string name, const std::vector<std::string
     return this;
 }
 
+Analyzer *Analyzer::bookConfigHistograms() {
+    // Get the NDHistogramManager plugin if it exists
+    auto* histogramManager = getPlugin<NDHistogramManager>("histogramManager");
+    if (histogramManager) {
+        histogramManager->bookConfigHistograms();
+    }
+    return this;
+}
 
 
 Analyzer *Analyzer::save() {
