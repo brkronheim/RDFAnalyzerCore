@@ -14,7 +14,10 @@ def test_import():
     """Test that the module can be imported"""
     try:
         # Add the Python module to the path
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../build/python'))
+        # Navigate from core/bindings/ to repository root, then to build/python
+        repo_root = os.path.join(os.path.dirname(__file__), '../..')
+        module_path = os.path.join(repo_root, 'build/python')
+        sys.path.insert(0, os.path.abspath(module_path))
         import rdfanalyzer
         print("✓ Successfully imported rdfanalyzer module")
         print(f"  Version: {rdfanalyzer.__version__}")

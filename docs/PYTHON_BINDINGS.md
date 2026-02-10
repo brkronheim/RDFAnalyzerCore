@@ -397,11 +397,11 @@ sys.path.insert(0, '/path/to/RDFAnalyzerCore/build/python')
 
 Check that your C++ expressions are valid ROOT syntax:
 ```python
-# Good
+# Good - explicit float literal
 analyzer.DefineJIT("pt_gev", "pt / 1000.0", ["pt"])
 
-# Bad - Python syntax not allowed
-analyzer.DefineJIT("pt_gev", "pt / 1000", ["pt"])  # May work but prefer explicit .0
+# Acceptable - ROOT will handle integer division
+analyzer.DefineJIT("pt_gev", "pt / 1000", ["pt"])  # Works, but 1000.0 is clearer
 ```
 
 ### Numba compilation errors
