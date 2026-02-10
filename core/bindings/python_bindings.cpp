@@ -22,6 +22,9 @@
 #include <ROOT/RDataFrame.hxx>
 #include <ROOT/RVec.hxx>
 
+#include <sstream>
+#include <algorithm>
+
 namespace py = pybind11;
 
 /**
