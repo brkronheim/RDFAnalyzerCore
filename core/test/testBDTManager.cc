@@ -143,9 +143,10 @@ TEST_F(BDTManagerTest, ApplyBDT_Valid) {
   auto result = df.Take<float>("test_bdt");
   ASSERT_EQ(result->size(), 2);
   auto sigmoid = [](float x) { return 1.0f / (1.0f + std::exp(-x)); };
-  EXPECT_NEAR(result->at(0), sigmoid(0.1f), 1e-6);
-  EXPECT_NEAR(result->at(1), sigmoid(0.9f), 1e-6);
-}
+    // The FastForest implementation adds a base_score from the model file
+  // (see aux/test_bdt.txt). The raw scores are therefore leaf_value + base_score.
+  EXPECT_NEAR(result->at(0), sigmoid(0.1f + 0.5f), 1e-6);
+  EXPECT_NEAR(result->at(1), sigmoid(0.9f + 0.5f), 1e-6);}
 
 // Const correctness
 TEST_F(BDTManagerTest, ConstCorrectness) {
