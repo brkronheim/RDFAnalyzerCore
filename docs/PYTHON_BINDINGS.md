@@ -17,7 +17,7 @@ All three methods provide near-native performance while allowing rapid prototypi
 ### Prerequisites
 
 - RDFAnalyzerCore built with Python bindings enabled
-- Python 3.7 or later
+- Python 3.8 or later
 - pybind11, numpy, and numba packages
 
 ### Install Python dependencies

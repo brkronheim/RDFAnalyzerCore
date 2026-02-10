@@ -58,7 +58,7 @@ cd build/analyses/ExampleAnalysis
 - Git
 
 **For Python bindings (optional):**
-- Python 3.7+
+- Python 3.8+
 - pybind11, numpy, numba (install with `pip install pybind11 numpy numba`)
 
 ## Repository Structure

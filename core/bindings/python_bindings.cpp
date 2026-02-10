@@ -24,8 +24,46 @@
 
 #include <sstream>
 #include <algorithm>
+#include <set>
+#include <iostream>
 
 namespace py = pybind11;
+
+// Whitelist of allowed element types for DefineFromVector
+static const std::set<std::string> ALLOWED_ELEMENT_TYPES = {
+    "float", "double", "int", "long", "unsigned int", "unsigned long",
+    "int32_t", "int64_t", "uint32_t", "uint64_t",
+    "Float_t", "Double_t", "Int_t", "Long_t", "UInt_t", "ULong_t"
+};
+
+// Helper function to validate function signature format
+static bool isValidSignature(const std::string& signature) {
+    // Basic validation: should match pattern like "type(type1, type2, ...)"
+    // Must have opening and closing parentheses
+    size_t open_paren = signature.find('(');
+    size_t close_paren = signature.find(')');
+    
+    if (open_paren == std::string::npos || close_paren == std::string::npos) {
+        return false;
+    }
+    
+    if (open_paren >= close_paren) {
+        return false;
+    }
+    
+    // Return type must exist before '('
+    if (open_paren == 0) {
+        return false;
+    }
+    
+    // Should not contain dangerous characters
+    const std::string dangerous_chars = ";{}";
+    if (signature.find_first_of(dangerous_chars) != std::string::npos) {
+        return false;
+    }
+    
+    return true;
+}
 
 /**
  * @brief Wrapper to handle string-based Define calls (ROOT JIT compilation)
@@ -53,6 +91,7 @@ public:
         
         const auto existingColumns = df.GetColumnNames();
         if (std::find(existingColumns.begin(), existingColumns.end(), name) != existingColumns.end()) {
+            std::cerr << "Warning: Column '" << name << "' already exists, skipping Define" << std::endl;
             return *this;
         }
         
@@ -130,6 +169,14 @@ public:
                                              uintptr_t func_ptr,
                                              const std::string& signature,
                                              const std::vector<std::string>& columns = {}) {
+        // Validate signature format to prevent code injection
+        if (!isValidSignature(signature)) {
+            throw std::invalid_argument(
+                "Invalid function signature format: '" + signature + "'. "
+                "Expected format: 'return_type(arg_type1, arg_type2, ...)'"
+            );
+        }
+        
         // Create a JIT string that casts the pointer and calls it
         std::stringstream jit_expr;
         jit_expr << "reinterpret_cast<" << signature << "*>(" 
@@ -162,6 +209,15 @@ public:
                                             uintptr_t data_ptr,
                                             size_t size,
                                             const std::string& element_type = "float") {
+        // Validate element type against whitelist to prevent code injection
+        if (ALLOWED_ELEMENT_TYPES.find(element_type) == ALLOWED_ELEMENT_TYPES.end()) {
+            throw std::invalid_argument(
+                "Invalid element_type: '" + element_type + "'. "
+                "Allowed types: float, double, int, long, unsigned int, unsigned long, "
+                "int32_t, int64_t, uint32_t, uint64_t, Float_t, Double_t, Int_t, Long_t, UInt_t, ULong_t"
+            );
+        }
+        
         // Create an RVec from the pointer and size
         std::stringstream jit_expr;
         jit_expr << "ROOT::VecOps::RVec<" << element_type << ">("
