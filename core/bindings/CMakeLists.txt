@@ -1,10 +1,10 @@
 # core/bindings/CMakeLists.txt
 # Python bindings for RDFAnalyzerCore using pybind11
 
-# Find Python and pybind11
-find_package(Python3 COMPONENTS Interpreter Development)
+# Find Python 3.8 or later
+find_package(Python3 3.8 COMPONENTS Interpreter Development)
 if(NOT Python3_FOUND)
-    message(STATUS "Python3 not found, skipping Python bindings")
+    message(STATUS "Python 3.8+ not found, skipping Python bindings")
     return()
 endif()
 

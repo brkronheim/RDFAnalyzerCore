@@ -96,6 +96,8 @@ public:
         }
         
         // Handle systematics
+        // Note on naming: Input columns use "_up"/"_down" suffixes (e.g., "pt_up", "pt_down")
+        // while output columns include the systematic name (e.g., "newvar_jesUp", "newvar_jesDown")
         std::vector<std::string> systList(sysMgr.getSystematics().begin(), 
                                          sysMgr.getSystematics().end());
         if (!systList.empty()) {
