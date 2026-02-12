@@ -41,29 +41,29 @@ def main():
     print("\nDefining variables...")
     
     # Example 1: Simple arithmetic
-    analyzer.DefineJIT("pt_gev", "pt / 1000.0", ["pt"])
+    analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
     
     # Example 2: Multiple input columns
-    analyzer.DefineJIT("delta_r", 
-                       "sqrt(delta_eta*delta_eta + delta_phi*delta_phi)", 
-                       ["delta_eta", "delta_phi"])
+    analyzer.Define("delta_r", 
+                    "sqrt(delta_eta*delta_eta + delta_phi*delta_phi)", 
+                    ["delta_eta", "delta_phi"])
     
     # Example 3: Vector operations (if working with ROOT::VecOps::RVec)
-    analyzer.DefineJIT("high_pt_jets", "jet_pt > 25000.0", ["jet_pt"])
-    analyzer.DefineJIT("n_high_pt_jets", "Sum(high_pt_jets)", ["high_pt_jets"])
+    analyzer.Define("high_pt_jets", "jet_pt > 25000.0", ["jet_pt"])
+    analyzer.Define("n_high_pt_jets", "Sum(high_pt_jets)", ["high_pt_jets"])
     
     # Apply filters
     print("Applying filters...")
     
     # Example 1: Simple threshold
-    analyzer.FilterJIT("pt_cut", "pt_gev > 20.0", ["pt_gev"])
+    analyzer.Filter("pt_cut", "pt_gev > 20.0", ["pt_gev"])
     
     # Example 2: Multiple conditions
-    analyzer.FilterJIT("quality", "quality_flag == 1 && pt_gev > 25.0", 
-                       ["quality_flag", "pt_gev"])
+    analyzer.Filter("quality", "quality_flag == 1 && pt_gev > 25.0", 
+                    ["quality_flag", "pt_gev"])
     
     # Example 3: Jet multiplicity
-    analyzer.FilterJIT("jet_selection", "n_high_pt_jets >= 4", ["n_high_pt_jets"])
+    analyzer.Filter("jet_selection", "n_high_pt_jets >= 4", ["n_high_pt_jets"])
     
     # Save the results
     print("\nSaving results...")

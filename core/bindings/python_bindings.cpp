@@ -18,6 +18,12 @@
 #include <functions.h>
 #include <api/ISystematicManager.h>
 #include <api/IDataFrameProvider.h>
+#include <OnnxManager.h>
+#include <BDTManager.h>
+#include <CorrectionManager.h>
+#include <TriggerManager.h>
+#include <SofieManager.h>
+#include <NDHistogramManager.h>
 
 #include <ROOT/RDataFrame.hxx>
 #include <ROOT/RVec.hxx>
@@ -26,6 +32,8 @@
 #include <algorithm>
 #include <set>
 #include <iostream>
+#include <cctype>
+#include <unordered_map>
 
 namespace py = pybind11;
 
@@ -75,6 +83,13 @@ class AnalyzerPythonWrapper {
 public:
     AnalyzerPythonWrapper(const std::string& configFile) 
         : analyzer_(configFile) {}
+
+    // C++-style API: Define(name, expression, columns)
+    AnalyzerPythonWrapper& Define(const std::string& name,
+                                  const std::string& expression,
+                                  const std::vector<std::string>& columns = {}) {
+        return DefineJIT(name, expression, columns);
+    }
     
     /**
      * @brief Define a variable using a string expression (ROOT JIT)
@@ -121,18 +136,23 @@ public:
                     const auto downName = name + "_" + syst + "Down";
                     if (std::find(existingColumns.begin(), existingColumns.end(), upName) == 
                         existingColumns.end()) {
-                        df = df.Define(upName, expression, newColumnsUp);
+                        // Use the string-expression overload (only name + expression). Columns are
+                        // used for systematic bookkeeping above, ROOT's string-based Define does
+                        // not accept an explicit columns argument.
+                        df = df.Define(upName, expression);
                     }
                     if (std::find(existingColumns.begin(), existingColumns.end(), downName) == 
                         existingColumns.end()) {
-                        df = df.Define(downName, expression, newColumnsDown);
+                        df = df.Define(downName, expression);
                     }
                     sysMgr.registerSystematic(syst, {name});
                 }
             }
         }
         
-        df = df.Define(name, expression, columns);
+        // Use the string-expression overload for ROOT JIT expressions. The `columns`
+        // parameter is used only for systematic-aware column name generation above.
+        df = df.Define(name, expression);
         analyzer_.getDataFrameProvider().setDataFrame(df);
         return *this;
     }
@@ -151,9 +171,17 @@ public:
         DefineJIT(filterName, expression, columns);
         
         auto df = analyzer_.getDF();
-        df = df.Filter(passCut, {filterName});
+        // Filter by the boolean column created above: keep rows where the column is true.
+        df = df.Filter([](bool v){ return v; }, {filterName});
         analyzer_.getDataFrameProvider().setDataFrame(df);
         return *this;
+    }
+
+    // C++-style API: Filter(name, expression, columns)
+    AnalyzerPythonWrapper& Filter(const std::string& name,
+                                  const std::string& expression,
+                                  const std::vector<std::string>& columns = {}) {
+        return FilterJIT(name, expression, columns);
     }
     
     /**
@@ -179,23 +207,31 @@ public:
             );
         }
         
-        // Create a JIT string that casts the pointer and calls it
+        // Build a proper C++ function pointer type from the simple signature string
+        // e.g. "double(double,double)" -> "double(*)(double,double)" and then
+        // call it: (reinterpret_cast<double(*)(double,double)>(addr))(arg1, arg2)
+        auto toFunctionPointerType = [](const std::string& sig)->std::string {
+            size_t open = sig.find('(');
+            size_t close = sig.rfind(')');
+            std::string ret = (open==std::string::npos) ? sig : sig.substr(0, open);
+            std::string args = (open==std::string::npos || close==std::string::npos) ? "" : sig.substr(open+1, close-open-1);
+            // remove whitespace
+            ret.erase(std::remove_if(ret.begin(), ret.end(), ::isspace), ret.end());
+            args.erase(std::remove_if(args.begin(), args.end(), ::isspace), args.end());
+            return ret + "(*)(" + args + ")";
+        };
+        const auto fptr = toFunctionPointerType(signature);
+
         std::stringstream jit_expr;
-        jit_expr << "reinterpret_cast<" << signature << "*>(" 
-                 << func_ptr << ")";
-        
-        // If columns are provided, append them
-        if (!columns.empty()) {
-            jit_expr << "(";
-            for (size_t i = 0; i < columns.size(); ++i) {
-                if (i > 0) jit_expr << ", ";
-                jit_expr << columns[i];
-            }
-            jit_expr << ")";
-        } else {
-            jit_expr << "()";
+        // Cast the integer address to a function pointer and immediately call it
+        jit_expr << "(reinterpret_cast<" << fptr << ">(" << func_ptr << "))";
+        jit_expr << "(";
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (i > 0) jit_expr << ", ";
+            jit_expr << columns[i];
         }
-        
+        jit_expr << ")";
+
         return DefineJIT(name, jit_expr.str(), columns);
     }
     
@@ -228,12 +264,287 @@ public:
         
         return DefineJIT(name, jit_expr.str(), {});
     }
+
+    // C++-style API name parity with Analyzer::DefineVector
+    AnalyzerPythonWrapper& DefineVector(const std::string& name,
+                                        uintptr_t data_ptr,
+                                        size_t size,
+                                        const std::string& element_type = "float") {
+        return DefineFromVector(name, data_ptr, size, element_type);
+    }
+
+    AnalyzerPythonWrapper& AddPlugin(const std::string& role,
+                                     const std::string& pluginType) {
+        const auto normalized = normalizePluginType(pluginType);
+        auto& cfg = analyzer_.getConfigurationProvider();
+
+        if (normalized == "onnx") {
+            analyzer_.addPlugin(role, std::make_unique<OnnxManager>(cfg));
+        } else if (normalized == "bdt") {
+            analyzer_.addPlugin(role, std::make_unique<BDTManager>(cfg));
+        } else if (normalized == "correction") {
+            analyzer_.addPlugin(role, std::make_unique<CorrectionManager>(cfg));
+        } else if (normalized == "trigger") {
+            analyzer_.addPlugin(role, std::make_unique<TriggerManager>(cfg));
+        } else if (normalized == "sofie") {
+            analyzer_.addPlugin(role, std::make_unique<SofieManager>(cfg));
+        } else if (normalized == "ndhistogram") {
+            analyzer_.addPlugin(role, std::make_unique<NDHistogramManager>(cfg));
+        } else {
+            throw std::invalid_argument(
+                "Unsupported plugin type: '" + pluginType + "'. Supported: "
+                "OnnxManager, BDTManager, CorrectionManager, TriggerManager, SofieManager, NDHistogramManager"
+            );
+        }
+        return *this;
+    }
+
+    AnalyzerPythonWrapper& AddDefaultPlugins() {
+        AddPlugin("onnx", "OnnxManager");
+        AddPlugin("bdt", "BDTManager");
+        AddPlugin("correction", "CorrectionManager");
+        AddPlugin("trigger", "TriggerManager");
+        AddPlugin("sofie", "SofieManager");
+        AddPlugin("hist", "NDHistogramManager");
+        return *this;
+    }
+
+    AnalyzerPythonWrapper& SetupPlugin(const std::string& role) {
+        if (auto* mgr = analyzer_.getPlugin<OnnxManager>(role)) {
+            mgr->setupFromConfigFile();
+            return *this;
+        }
+        if (auto* mgr = analyzer_.getPlugin<BDTManager>(role)) {
+            mgr->setupFromConfigFile();
+            return *this;
+        }
+        if (auto* mgr = analyzer_.getPlugin<CorrectionManager>(role)) {
+            mgr->setupFromConfigFile();
+            return *this;
+        }
+        if (auto* mgr = analyzer_.getPlugin<TriggerManager>(role)) {
+            mgr->setupFromConfigFile();
+            return *this;
+        }
+        if (auto* mgr = analyzer_.getPlugin<SofieManager>(role)) {
+            mgr->setupFromConfigFile();
+            return *this;
+        }
+        if (auto* mgr = analyzer_.getPlugin<NDHistogramManager>(role)) {
+            mgr->setupFromConfigFile();
+            return *this;
+        }
+        throw std::runtime_error("No supported plugin found for role '" + role + "'");
+    }
+
+    std::vector<std::string> GetColumnNames() {
+        auto names = analyzer_.getDF().GetColumnNames();
+        return std::vector<std::string>(names.begin(), names.end());
+    }
+
+    AnalyzerPythonWrapper& registerSystematic(const std::string& syst,
+                                              const std::vector<std::string>& affectedVariables) {
+        analyzer_.getSystematicManager().registerSystematic(
+            syst,
+            std::set<std::string>(affectedVariables.begin(), affectedVariables.end())
+        );
+        return *this;
+    }
+
+    std::vector<std::string> getSystematics() {
+        const auto& setRef = analyzer_.getSystematicManager().getSystematics();
+        return std::vector<std::string>(setRef.begin(), setRef.end());
+    }
+
+    std::vector<std::string> getVariablesForSystematic(const std::string& syst) {
+        const auto& setRef = analyzer_.getSystematicManager().getVariablesForSystematic(syst);
+        return std::vector<std::string>(setRef.begin(), setRef.end());
+    }
+
+    std::vector<std::string> getSystematicsForVariable(const std::string& var) {
+        const auto& setRef = analyzer_.getSystematicManager().getSystematicsForVariable(var);
+        return std::vector<std::string>(setRef.begin(), setRef.end());
+    }
+
+    AnalyzerPythonWrapper& registerExistingSystematics(const std::vector<std::string>& systConfig,
+                                                       const std::vector<std::string>& columnList) {
+        analyzer_.getSystematicManager().registerExistingSystematics(systConfig, columnList);
+        return *this;
+    }
+
+    std::vector<std::string> makeSystList(const std::string& branchName) {
+        return analyzer_.getSystematicManager().makeSystList(branchName, analyzer_.getDataFrameProvider());
+    }
+
+    AnalyzerPythonWrapper& setConfig(const std::string& key, const std::string& value) {
+        analyzer_.getConfigurationProvider().set(key, value);
+        return *this;
+    }
+
+    std::unordered_map<std::string, std::string> getConfigMap() {
+        const auto& cfg = analyzer_.getConfigurationProvider().getConfigMap();
+        return std::unordered_map<std::string, std::string>(cfg.begin(), cfg.end());
+    }
+
+    std::vector<std::string> getConfigList(const std::string& key,
+                                           const std::vector<std::string>& defaultValue = {},
+                                           const std::string& delimiter = ",") {
+        return analyzer_.getConfigurationProvider().getList(key, defaultValue, delimiter);
+    }
+
+    std::unordered_map<std::string, std::string> parsePairBasedConfig(const std::string& configFile) {
+        return analyzer_.getConfigurationProvider().parsePairBasedConfig(configFile);
+    }
+
+    std::vector<std::string> parseVectorConfig(const std::string& configFile) {
+        return analyzer_.getConfigurationProvider().parseVectorConfig(configFile);
+    }
+
+    std::vector<std::unordered_map<std::string, std::string>>
+    parseMultiKeyConfig(const std::string& configFile,
+                        const std::vector<std::string>& requiredEntryKeys) {
+        return analyzer_.getConfigurationProvider().parseMultiKeyConfig(configFile, requiredEntryKeys);
+    }
+
+    AnalyzerPythonWrapper& applyAllOnnxModels(const std::string& role = "onnx",
+                                              const std::string& outputSuffix = "") {
+        requirePlugin<OnnxManager>(role, "OnnxManager").applyAllModels(outputSuffix);
+        return *this;
+    }
+
+    AnalyzerPythonWrapper& applyOnnxModel(const std::string& role,
+                                          const std::string& modelName,
+                                          const std::string& outputSuffix = "") {
+        requirePlugin<OnnxManager>(role, "OnnxManager").applyModel(modelName, outputSuffix);
+        return *this;
+    }
+
+    std::vector<std::string> getOnnxModelNames(const std::string& role = "onnx") {
+        return requirePlugin<OnnxManager>(role, "OnnxManager").getAllModelNames();
+    }
+
+    std::vector<std::string> getOnnxModelFeatures(const std::string& role,
+                                                  const std::string& modelName) {
+        const auto& features = requirePlugin<OnnxManager>(role, "OnnxManager").getModelFeatures(modelName);
+        return std::vector<std::string>(features.begin(), features.end());
+    }
+
+    AnalyzerPythonWrapper& applyAllBDTs(const std::string& role = "bdt") {
+        requirePlugin<BDTManager>(role, "BDTManager").applyAllBDTs();
+        return *this;
+    }
+
+    AnalyzerPythonWrapper& applyBDT(const std::string& role,
+                                    const std::string& bdtName) {
+        requirePlugin<BDTManager>(role, "BDTManager").applyBDT(bdtName);
+        return *this;
+    }
+
+    std::vector<std::string> getBDTNames(const std::string& role = "bdt") {
+        return requirePlugin<BDTManager>(role, "BDTManager").getAllBDTNames();
+    }
+
+    std::vector<std::string> getBDTFeatures(const std::string& role,
+                                            const std::string& bdtName) {
+        const auto& features = requirePlugin<BDTManager>(role, "BDTManager").getBDTFeatures(bdtName);
+        return std::vector<std::string>(features.begin(), features.end());
+    }
+
+    AnalyzerPythonWrapper& applyCorrection(const std::string& role,
+                                           const std::string& correctionName,
+                                           const std::vector<std::string>& stringArguments) {
+        requirePlugin<CorrectionManager>(role, "CorrectionManager").applyCorrection(correctionName, stringArguments);
+        return *this;
+    }
+
+    std::vector<std::string> getCorrectionFeatures(const std::string& role,
+                                                   const std::string& correctionName) {
+        const auto& features = requirePlugin<CorrectionManager>(role, "CorrectionManager").getCorrectionFeatures(correctionName);
+        return std::vector<std::string>(features.begin(), features.end());
+    }
+
+    AnalyzerPythonWrapper& applyAllTriggers(const std::string& role = "trigger") {
+        requirePlugin<TriggerManager>(role, "TriggerManager").applyAllTriggers();
+        return *this;
+    }
+
+    std::vector<std::string> getTriggerGroups(const std::string& role = "trigger") {
+        return requirePlugin<TriggerManager>(role, "TriggerManager").getAllGroups();
+    }
+
+    std::vector<std::string> getTriggers(const std::string& role,
+                                         const std::string& group) {
+        const auto& triggers = requirePlugin<TriggerManager>(role, "TriggerManager").getTriggers(group);
+        return std::vector<std::string>(triggers.begin(), triggers.end());
+    }
+
+    std::vector<std::string> getVetoes(const std::string& role,
+                                       const std::string& group) {
+        const auto& vetoes = requirePlugin<TriggerManager>(role, "TriggerManager").getVetoes(group);
+        return std::vector<std::string>(vetoes.begin(), vetoes.end());
+    }
+
+    std::string getTriggerGroupForSample(const std::string& role,
+                                         const std::string& sample) {
+        return requirePlugin<TriggerManager>(role, "TriggerManager").getGroupForSample(sample);
+    }
+
+    AnalyzerPythonWrapper& applyAllSofieModels(const std::string& role = "sofie") {
+        requirePlugin<SofieManager>(role, "SofieManager").applyAllModels();
+        return *this;
+    }
+
+    AnalyzerPythonWrapper& applySofieModel(const std::string& role,
+                                           const std::string& modelName) {
+        requirePlugin<SofieManager>(role, "SofieManager").applyModel(modelName);
+        return *this;
+    }
+
+    std::vector<std::string> getSofieModelNames(const std::string& role = "sofie") {
+        return requirePlugin<SofieManager>(role, "SofieManager").getAllModelNames();
+    }
+
+    std::vector<std::vector<std::string>> bookNDHistograms(
+        const std::string& role,
+        const std::vector<histInfo>& infos,
+        const std::vector<selectionInfo>& selection,
+        const std::string& suffix = "") {
+        auto infosCopy = infos;
+        auto selectionCopy = selection;
+        std::vector<std::vector<std::string>> regionNames;
+        for (const auto& sel : selectionCopy) {
+            regionNames.push_back(sel.regions());
+        }
+        if (regionNames.empty()) {
+            regionNames.push_back({"Default"});
+        }
+        requirePlugin<NDHistogramManager>(role, "NDHistogramManager")
+            .bookND(infosCopy, selectionCopy, suffix, regionNames);
+        return regionNames;
+    }
+
+    AnalyzerPythonWrapper& saveNDHistograms(
+        const std::string& role,
+        const std::vector<std::vector<histInfo>>& fullHistList,
+        const std::vector<std::vector<std::string>>& allRegionNames) {
+        auto fullHistListCopy = fullHistList;
+        auto allRegionNamesCopy = allRegionNames;
+        requirePlugin<NDHistogramManager>(role, "NDHistogramManager")
+            .saveHists(fullHistListCopy, allRegionNamesCopy);
+        return *this;
+    }
+
+    AnalyzerPythonWrapper& clearNDHistograms(const std::string& role) {
+        requirePlugin<NDHistogramManager>(role, "NDHistogramManager").Clear();
+        return *this;
+    }
     
     /**
      * @brief Save the analysis results
      */
-    void save() {
+    AnalyzerPythonWrapper& save() {
         analyzer_.save();
+        return *this;
     }
     
     /**
@@ -251,11 +562,90 @@ public:
     }
 
 private:
+    template <typename T>
+    T& requirePlugin(const std::string& role, const std::string& typeName) {
+        auto* plugin = analyzer_.getPlugin<T>(role);
+        if (plugin == nullptr) {
+            throw std::runtime_error(
+                "Plugin with role '" + role + "' not found or not of type '" + typeName +
+                "'. Add it first with AddPlugin(role, pluginType)."
+            );
+        }
+        return *plugin;
+    }
+
+    static std::string normalizePluginType(const std::string& pluginType) {
+        std::string normalized;
+        normalized.reserve(pluginType.size());
+        for (char c : pluginType) {
+            normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+        if (normalized == "onnxmanager" || normalized == "onnx") return "onnx";
+        if (normalized == "bdtmanager" || normalized == "bdt") return "bdt";
+        if (normalized == "correctionmanager" || normalized == "correction") return "correction";
+        if (normalized == "triggermanager" || normalized == "trigger") return "trigger";
+        if (normalized == "sofiemanager" || normalized == "sofie") return "sofie";
+        if (normalized == "ndhistogrammanager" || normalized == "ndhistogram" || normalized == "hist") return "ndhistogram";
+        return normalized;
+    }
+
     Analyzer analyzer_;
 };
 
 PYBIND11_MODULE(rdfanalyzer, m) {
     m.doc() = "Python bindings for RDFAnalyzerCore framework";
+
+    py::class_<histInfo>(m, "HistInfo",
+        "Histogram booking descriptor equivalent to C++ histInfo")
+        .def(py::init([](const std::string& name,
+                         const std::string& variable,
+                         const std::string& label,
+                         const std::string& weight,
+                         int bins,
+                         float lowerBound,
+                         float upperBound) {
+                return histInfo(name.c_str(),
+                                variable.c_str(),
+                                label.c_str(),
+                                weight.c_str(),
+                                bins,
+                                lowerBound,
+                                upperBound);
+            }),
+            py::arg("name"),
+            py::arg("variable"),
+            py::arg("label"),
+            py::arg("weight"),
+            py::arg("bins"),
+            py::arg("lowerBound"),
+            py::arg("upperBound"))
+        .def_property_readonly("name", &histInfo::name)
+        .def_property_readonly("variable", &histInfo::variable)
+        .def_property_readonly("label", &histInfo::label)
+        .def_property_readonly("weight", &histInfo::weight)
+        .def_property_readonly("bins", &histInfo::bins)
+        .def_property_readonly("lowerBound", &histInfo::lowerBound)
+        .def_property_readonly("upperBound", &histInfo::upperBound);
+
+    py::class_<selectionInfo>(m, "SelectionInfo",
+        "Selection descriptor equivalent to C++ selectionInfo")
+        .def(py::init<>())
+        .def(py::init<std::string, int, double, double, std::vector<std::string>>(),
+             py::arg("variable"),
+             py::arg("bins"),
+             py::arg("lowerBound"),
+             py::arg("upperBound"),
+             py::arg("regions"))
+        .def(py::init<std::string, int, double, double>(),
+             py::arg("variable"),
+             py::arg("bins"),
+             py::arg("lowerBound"),
+             py::arg("upperBound"))
+        .def_property_readonly("variable", &selectionInfo::variable)
+        .def_property_readonly("bins", &selectionInfo::bins)
+        .def_property_readonly("lowerBound", &selectionInfo::lowerBound)
+        .def_property_readonly("upperBound", &selectionInfo::upperBound)
+        .def_property_readonly("regions", &selectionInfo::regions);
     
     // Bind the AnalyzerPythonWrapper class
     py::class_<AnalyzerPythonWrapper>(m, "Analyzer", 
@@ -299,6 +689,16 @@ PYBIND11_MODULE(rdfanalyzer, m) {
         .def(py::init<const std::string&>(), 
              py::arg("configFile"),
              "Construct an Analyzer from a configuration file")
+           .def("Define", &AnalyzerPythonWrapper::Define,
+               py::arg("name"),
+               py::arg("expression"),
+               py::arg("columns") = std::vector<std::string>(),
+               R"pbdoc(
+               Define a new variable using a C++ expression string.
+
+               This method mirrors the C++ Analyzer::Define naming in Python.
+               )pbdoc",
+               py::return_value_policy::reference_internal)
         .def("DefineJIT", &AnalyzerPythonWrapper::DefineJIT,
              py::arg("name"), 
              py::arg("expression"),
@@ -330,6 +730,16 @@ PYBIND11_MODULE(rdfanalyzer, m) {
              ...                    ["delta_eta", "delta_phi"])
              )pbdoc",
              py::return_value_policy::reference_internal)
+           .def("Filter", &AnalyzerPythonWrapper::Filter,
+               py::arg("name"),
+               py::arg("expression"),
+               py::arg("columns") = std::vector<std::string>(),
+               R"pbdoc(
+               Apply a filter using a C++ expression string.
+
+               This method mirrors the C++ Analyzer::Filter naming in Python.
+               )pbdoc",
+               py::return_value_policy::reference_internal)
         .def("FilterJIT", &AnalyzerPythonWrapper::FilterJIT,
              py::arg("name"),
              py::arg("expression"),
@@ -439,11 +849,150 @@ PYBIND11_MODULE(rdfanalyzer, m) {
              ...                           "float")
              )pbdoc",
              py::return_value_policy::reference_internal)
+           .def("DefineVector", &AnalyzerPythonWrapper::DefineVector,
+               py::arg("name"),
+               py::arg("data_ptr"),
+               py::arg("size"),
+               py::arg("element_type") = "float",
+               R"pbdoc(
+               Define a vector-like variable from raw pointer + size.
+
+               This method mirrors the C++ Analyzer::DefineVector naming in Python.
+               )pbdoc",
+               py::return_value_policy::reference_internal)
         .def("save", &AnalyzerPythonWrapper::save,
-             "Trigger computation and save the analysis results")
+               "Trigger computation and save the analysis results",
+               py::return_value_policy::reference_internal)
         .def("configMap", &AnalyzerPythonWrapper::configMap,
              py::arg("key"),
-             "Get a configuration value by key");
+               "Get a configuration value by key")
+           .def("setConfig", &AnalyzerPythonWrapper::setConfig,
+               py::arg("key"),
+               py::arg("value"),
+               "Set a configuration value by key",
+               py::return_value_policy::reference_internal)
+           .def("getConfigMap", &AnalyzerPythonWrapper::getConfigMap,
+               "Get all configuration key/value pairs")
+           .def("getConfigList", &AnalyzerPythonWrapper::getConfigList,
+               py::arg("key"),
+               py::arg("defaultValue") = std::vector<std::string>(),
+               py::arg("delimiter") = ",",
+               "Get a list-valued configuration entry")
+           .def("parsePairBasedConfig", &AnalyzerPythonWrapper::parsePairBasedConfig,
+               py::arg("configFile"),
+               "Parse a pair-based config file")
+           .def("parseVectorConfig", &AnalyzerPythonWrapper::parseVectorConfig,
+               py::arg("configFile"),
+               "Parse a vector config file")
+           .def("parseMultiKeyConfig", &AnalyzerPythonWrapper::parseMultiKeyConfig,
+               py::arg("configFile"),
+               py::arg("requiredEntryKeys"),
+               "Parse a multi-key config file")
+           .def("registerSystematic", &AnalyzerPythonWrapper::registerSystematic,
+               py::arg("syst"),
+               py::arg("affectedVariables"),
+               "Register a systematic and affected variables",
+               py::return_value_policy::reference_internal)
+           .def("getSystematics", &AnalyzerPythonWrapper::getSystematics,
+               "Get all registered systematic names")
+           .def("getVariablesForSystematic", &AnalyzerPythonWrapper::getVariablesForSystematic,
+               py::arg("syst"),
+               "Get variables affected by a systematic")
+           .def("getSystematicsForVariable", &AnalyzerPythonWrapper::getSystematicsForVariable,
+               py::arg("var"),
+               "Get systematics affecting a variable")
+           .def("registerExistingSystematics", &AnalyzerPythonWrapper::registerExistingSystematics,
+               py::arg("systConfig"),
+               py::arg("columnList"),
+               "Register existing systematics from config",
+               py::return_value_policy::reference_internal)
+           .def("makeSystList", &AnalyzerPythonWrapper::makeSystList,
+               py::arg("branchName"),
+               "Compute systematic variation list for a branch")
+           .def("GetColumnNames", &AnalyzerPythonWrapper::GetColumnNames,
+               "Get current dataframe column names")
+           .def("AddPlugin", &AnalyzerPythonWrapper::AddPlugin,
+               py::arg("role"),
+               py::arg("pluginType"),
+               "Add a plugin manager by role and type",
+               py::return_value_policy::reference_internal)
+           .def("AddDefaultPlugins", &AnalyzerPythonWrapper::AddDefaultPlugins,
+               "Add all standard plugin managers with default roles",
+               py::return_value_policy::reference_internal)
+           .def("SetupPlugin", &AnalyzerPythonWrapper::SetupPlugin,
+               py::arg("role"),
+               "Re-run setupFromConfigFile for a plugin role",
+               py::return_value_policy::reference_internal)
+           .def("applyAllOnnxModels", &AnalyzerPythonWrapper::applyAllOnnxModels,
+               py::arg("role") = "onnx",
+               py::arg("outputSuffix") = "",
+               py::return_value_policy::reference_internal)
+           .def("applyOnnxModel", &AnalyzerPythonWrapper::applyOnnxModel,
+               py::arg("role"),
+               py::arg("modelName"),
+               py::arg("outputSuffix") = "",
+               py::return_value_policy::reference_internal)
+           .def("getOnnxModelNames", &AnalyzerPythonWrapper::getOnnxModelNames,
+               py::arg("role") = "onnx")
+           .def("getOnnxModelFeatures", &AnalyzerPythonWrapper::getOnnxModelFeatures,
+               py::arg("role"),
+               py::arg("modelName"))
+           .def("applyAllBDTs", &AnalyzerPythonWrapper::applyAllBDTs,
+               py::arg("role") = "bdt",
+               py::return_value_policy::reference_internal)
+           .def("applyBDT", &AnalyzerPythonWrapper::applyBDT,
+               py::arg("role"),
+               py::arg("bdtName"),
+               py::return_value_policy::reference_internal)
+           .def("getBDTNames", &AnalyzerPythonWrapper::getBDTNames,
+               py::arg("role") = "bdt")
+           .def("getBDTFeatures", &AnalyzerPythonWrapper::getBDTFeatures,
+               py::arg("role"),
+               py::arg("bdtName"))
+           .def("applyCorrection", &AnalyzerPythonWrapper::applyCorrection,
+               py::arg("role"),
+               py::arg("correctionName"),
+               py::arg("stringArguments"),
+               py::return_value_policy::reference_internal)
+           .def("getCorrectionFeatures", &AnalyzerPythonWrapper::getCorrectionFeatures,
+               py::arg("role"),
+               py::arg("correctionName"))
+           .def("applyAllTriggers", &AnalyzerPythonWrapper::applyAllTriggers,
+               py::arg("role") = "trigger",
+               py::return_value_policy::reference_internal)
+           .def("getTriggerGroups", &AnalyzerPythonWrapper::getTriggerGroups,
+               py::arg("role") = "trigger")
+           .def("getTriggers", &AnalyzerPythonWrapper::getTriggers,
+               py::arg("role"),
+               py::arg("group"))
+           .def("getVetoes", &AnalyzerPythonWrapper::getVetoes,
+               py::arg("role"),
+               py::arg("group"))
+           .def("getTriggerGroupForSample", &AnalyzerPythonWrapper::getTriggerGroupForSample,
+               py::arg("role"),
+               py::arg("sample"))
+           .def("applyAllSofieModels", &AnalyzerPythonWrapper::applyAllSofieModels,
+               py::arg("role") = "sofie",
+               py::return_value_policy::reference_internal)
+           .def("applySofieModel", &AnalyzerPythonWrapper::applySofieModel,
+               py::arg("role"),
+               py::arg("modelName"),
+               py::return_value_policy::reference_internal)
+           .def("getSofieModelNames", &AnalyzerPythonWrapper::getSofieModelNames,
+               py::arg("role") = "sofie")
+           .def("bookNDHistograms", &AnalyzerPythonWrapper::bookNDHistograms,
+               py::arg("role"),
+               py::arg("infos"),
+               py::arg("selection"),
+               py::arg("suffix") = "")
+           .def("saveNDHistograms", &AnalyzerPythonWrapper::saveNDHistograms,
+               py::arg("role"),
+               py::arg("fullHistList"),
+               py::arg("allRegionNames"),
+               py::return_value_policy::reference_internal)
+           .def("clearNDHistograms", &AnalyzerPythonWrapper::clearNDHistograms,
+               py::arg("role"),
+               py::return_value_policy::reference_internal);
     
     // Version info
     m.attr("__version__") = "1.0.0";

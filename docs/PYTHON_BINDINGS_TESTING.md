@@ -39,7 +39,7 @@ python3 core/bindings/test_bindings.py
 
 This runs a suite of tests that verify:
 - Module can be imported
-- All expected methods exist on the Analyzer class
+- All expected methods exist on the Analyzer class (including C++-style names like `Define`/`Filter`)
 - Numpy integration works
 - Numba integration works
 - Basic Analyzer construction
@@ -53,13 +53,14 @@ The best way to test the bindings is to run the provided examples:
 python3 examples/example_string_expressions.py config.txt
 python3 examples/example_numba_functions.py config.txt
 python3 examples/example_numpy_arrays.py config.txt
+python3 examples/example_hist_booking.py config.txt
 ```
 
 ## Test Coverage
 
 ### Core Functionality Tests
 
-1. **String-based expressions (DefineJIT)**
+1. **String-based expressions (`Define` / `DefineJIT`)**
    - Simple arithmetic operations
    - Multiple input columns
    - Vector operations
@@ -71,12 +72,12 @@ python3 examples/example_numpy_arrays.py config.txt
    - Different numeric types
    - Function pointer correctness
 
-3. **Numpy arrays (DefineFromVector)**
+3. **Numpy arrays (`DefineVector` / `DefineFromVector`)**
    - Different dtypes (float32, float64, int32, etc.)
    - Memory pointer passing
    - Size handling
 
-4. **Filter operations (FilterJIT)**
+4. **Filter operations (`Filter` / `FilterJIT`)**
    - Boolean expressions
    - Multiple filters
    - Method chaining
@@ -87,6 +88,7 @@ The examples serve as integration tests:
 - `example_string_expressions.py` - Tests ROOT JIT compilation
 - `example_numba_functions.py` - Tests numba integration
 - `example_numpy_arrays.py` - Tests numpy integration
+- `example_hist_booking.py` - Tests histogram struct bindings and ND histogram helper methods
 
 ## Expected Test Results
 

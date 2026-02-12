@@ -2,6 +2,8 @@
 
 This directory contains example scripts demonstrating the use of RDFAnalyzerCore Python bindings.
 
+Note: the Python API supports C++-style names (`Define`, `Filter`, `DefineVector`) and legacy aliases (`DefineJIT`, `FilterJIT`, `DefineFromVector`).
+
 ## Prerequisites
 
 Before running these examples, ensure you have:
@@ -69,6 +71,21 @@ python examples/example_numpy_arrays.py config.txt
 - Support for multiple dtypes
 - Integration with numpy workflows
 - Event weights and corrections
+
+### 4. Histogram Booking Structs (ND Histogram Manager)
+
+**File:** `example_hist_booking.py`
+
+Demonstrates constructing `HistInfo` and `SelectionInfo` in Python and booking/saving ND histograms via the histogram plugin.
+
+```bash
+python examples/example_hist_booking.py config.txt
+```
+
+**Features:**
+- `HistInfo` and `SelectionInfo` bindings
+- ND histogram plugin setup (`NDHistogramManager`)
+- `bookNDHistograms`, `saveNDHistograms`, and `clearNDHistograms`
 
 ## Configuration File
 

@@ -18,6 +18,10 @@ kramdown:
 nav_links:
   - title: Getting Started
     url: GETTING_STARTED.html
+  - title: Python Bindings
+    url: PYTHON_BINDINGS.html
+  - title: Python Bindings Testing
+    url: PYTHON_BINDINGS_TESTING.html
   - title: Configuration
     url: CONFIG_REFERENCE.html
   - title: Analysis Guide
@@ -39,6 +43,8 @@ exclude:
 # Include files
 include:
   - GETTING_STARTED.md
+  - PYTHON_BINDINGS.md
+  - PYTHON_BINDINGS_TESTING.md
   - CONFIG_REFERENCE.md
   - ANALYSIS_GUIDE.md
   - ARCHITECTURE.md

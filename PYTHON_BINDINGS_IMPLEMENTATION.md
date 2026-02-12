@@ -16,12 +16,24 @@ This document summarizes the implementation of Python bindings for RDFAnalyzerCo
      - Numpy array integration
 
 2. **Methods Exposed to Python**
+   - `Define(name, expression, columns)` - C++-style alias for string-based definitions
+   - `Filter(name, expression, columns)` - C++-style alias for string-based filters
+   - `DefineVector(name, data_ptr, size, element_type)` - C++-style alias for vector definitions
    - `DefineJIT(name, expression, columns)` - Define variables with C++ expressions
    - `FilterJIT(name, expression, columns)` - Apply filters with C++ expressions
    - `DefineFromPointer(name, func_ptr, signature, columns)` - Use numba-compiled functions
    - `DefineFromVector(name, data_ptr, size, element_type)` - Pass numpy arrays
-   - `save()` - Trigger computation and save results
+   - `save()` - Trigger computation and save results (chainable)
    - `configMap(key)` - Access configuration values
+    - `setConfig(key, value)`, `getConfigMap()`, `getConfigList(...)` - Configuration management from Python
+    - `registerSystematic(...)`, `getSystematics()`, `makeSystList(...)` - Systematics management APIs
+    - `AddPlugin(role, pluginType)`, `AddDefaultPlugins()`, `SetupPlugin(role)` - Plugin lifecycle control
+    - Plugin action APIs by role:
+       - `applyAllOnnxModels`, `applyOnnxModel`, `getOnnxModelNames`, `getOnnxModelFeatures`
+       - `applyAllBDTs`, `applyBDT`, `getBDTNames`, `getBDTFeatures`
+       - `applyCorrection`, `getCorrectionFeatures`
+       - `applyAllTriggers`, `getTriggerGroups`, `getTriggers`, `getVetoes`
+       - `applyAllSofieModels`, `applySofieModel`, `getSofieModelNames`
 
 3. **CMake Integration** (`core/bindings/CMakeLists.txt`)
    - Optional build when Python 3.8+ and pybind11 are available
@@ -216,6 +228,18 @@ analyzer.DefineFromVector("weight", weights.ctypes.data, len(weights), "float")
 - Integration with existing workflows
 - Covers all requested functionality
 
+### API Naming Parity Update
+
+To reduce friction between C++ and Python usage, the bindings now expose
+C++-style method names directly in Python:
+
+- `Define(...)` mirrors `Analyzer::Define(...)`
+- `Filter(...)` mirrors `Analyzer::Filter(...)`
+- `DefineVector(...)` mirrors `Analyzer::DefineVector(...)`
+
+Legacy names (`DefineJIT`, `FilterJIT`, `DefineFromVector`) remain available for
+backward compatibility.
+
 ### Why String-based JIT?
 
 - Familiar to ROOT users
@@ -227,10 +251,10 @@ analyzer.DefineFromVector("weight", weights.ctypes.data, len(weights), "float")
 
 ### Current Limitations
 
-1. Plugin managers not yet exposed (BDT, ONNX, etc.)
-2. Direct RDataFrame access not available
-3. Advanced systematic control limited
-4. No callback functions for event processing
+1. Template-based C++ callables (`Analyzer::Define` with arbitrary C++ lambdas) are not directly bindable from Python
+2. Direct `ROOT::RDF::RNode` manipulation is still not exposed
+3. Histogram booking structures (`histInfo`, `selectionInfo`) are not yet bound as Python-native types
+4. Runtime plugin registration currently supports built-in manager types only
 
 ### Future Enhancements
 

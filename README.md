@@ -313,8 +313,8 @@ import rdfanalyzer
 analyzer = rdfanalyzer.Analyzer("config.txt")
 
 # Define variables using C++ expressions (ROOT JIT)
-analyzer.DefineJIT("pt_gev", "pt / 1000.0", ["pt"])
-analyzer.DefineJIT("delta_r", 
+analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
+analyzer.Define("delta_r", 
                    "sqrt(delta_eta*delta_eta + delta_phi*delta_phi)",
                    ["delta_eta", "delta_phi"])
 
@@ -329,7 +329,7 @@ func_ptr = ctypes.cast(convert_to_gev.address, ctypes.c_void_p).value
 analyzer.DefineFromPointer("pt_gev", func_ptr, "double(double)", ["pt"])
 
 # Apply filters and save
-analyzer.FilterJIT("high_pt", "pt_gev > 25.0", ["pt_gev"])
+analyzer.Filter("high_pt", "pt_gev > 25.0", ["pt_gev"])
 analyzer.save()
 ```
 

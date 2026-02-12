@@ -92,6 +92,14 @@ add_executable(testRootEnvironmentGuard testRootEnvironmentGuard.cc)
 target_link_libraries(testRootEnvironmentGuard core gtest gtest_main)
 add_test(NAME RootEnvironmentGuardTest COMMAND testRootEnvironmentGuard)
 
+if(TARGET rdfanalyzer AND Python_EXECUTABLE)
+add_test(NAME PythonBindingsNumbaIntegration
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_bindings.py)
+set_tests_properties(PythonBindingsNumbaIntegration PROPERTIES
+                    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python"
+                    SKIP_RETURN_CODE 77)
+endif()
+
 
 
 

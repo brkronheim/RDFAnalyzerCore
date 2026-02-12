@@ -12,6 +12,47 @@ The Python bindings provide three main ways to interact with the Analyzer:
 
 All three methods provide near-native performance while allowing rapid prototyping in Python.
 
+In addition, the bindings now expose framework-level management APIs:
+
+- C++-style naming parity: `Define`, `Filter`, `DefineVector`
+- Plugin lifecycle and actions: `AddPlugin`, `SetupPlugin`, `applyAllOnnxModels`, `applyAllBDTs`, etc.
+- Configuration APIs: `setConfig`, `getConfigMap`, `getConfigList`, `parse*Config`
+- Systematics APIs: `registerSystematic`, `getSystematics`, `makeSystList`
+- Histogram booking structs and helpers: `HistInfo`, `SelectionInfo`, `bookNDHistograms`
+
+## API Parity Highlights
+
+### C++-style method names
+
+The Python `Analyzer` supports C++-style names directly:
+
+```python
+analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
+analyzer.Filter("pt_cut", "pt_gev > 20.0", ["pt_gev"])
+```
+
+Legacy aliases (`DefineJIT`, `FilterJIT`, `DefineFromVector`) remain available.
+
+### Plugin and framework control
+
+```python
+analyzer.setConfig("onnxConfig", "cfg/onnx_models.txt")
+analyzer.AddPlugin("onnx", "OnnxManager")
+analyzer.applyAllOnnxModels("onnx")
+```
+
+Role-based helpers are available for ONNX, BDT, Correction, Trigger, and SOFIE managers.
+
+### Histogram booking structs from Python
+
+```python
+h = rdfanalyzer.HistInfo("h_pt", "pt", "pT", "weight", 40, 0.0, 200.0)
+s = rdfanalyzer.SelectionInfo("region", 3, 0.0, 3.0, ["SR", "CR", "VR"])
+
+analyzer.AddPlugin("hist", "NDHistogramManager")
+region_names = analyzer.bookNDHistograms("hist", [h], [s], "nominal")
+```
+
 ## Installation
 
 ### Prerequisites
