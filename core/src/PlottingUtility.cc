@@ -7,10 +7,21 @@
 #include <THStack.h>
 #include <TLegend.h>
 #include <TPad.h>
+#include <TROOT.h>
 
+#include <functional>
 #include <future>
+#include <cmath>
 
 namespace {
+constexpr double kMinDenominator = 1e-12;
+constexpr int kCanvasWidth = 900;
+constexpr int kCanvasHeightWithRatio = 900;
+constexpr int kCanvasHeightNoRatio = 700;
+constexpr double kLegendX1 = 0.65;
+constexpr double kLegendY1 = 0.68;
+constexpr double kLegendX2 = 0.88;
+constexpr double kLegendY2 = 0.88;
 
 TH1* getHistogram(TFile& file, const PlotProcessConfig& process) {
   if (process.directory.empty()) {
@@ -34,7 +45,7 @@ double getNormalizationScale(TFile& file, const PlotProcessConfig& process) {
   }
 
   const double norm = normHist->GetBinContent(1);
-  if (norm == 0.0) {
+  if (std::abs(norm) < kMinDenominator) {
     return process.scale;
   }
   return process.scale / norm;
@@ -42,8 +53,8 @@ double getNormalizationScale(TFile& file, const PlotProcessConfig& process) {
 
 } // namespace
 
-std::unique_ptr<TH1D> PlottingUtility::computeRatioHistogram(const TH1& numerator,
-                                                             const TH1& denominator,
+std::unique_ptr<TH1D> PlottingUtility::computeRatioHistogram(const TH1D& numerator,
+                                                             const TH1D& denominator,
                                                              const std::string& name) {
   auto ratio = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(numerator.Clone(name.c_str())));
   if (!ratio) {
@@ -54,7 +65,7 @@ std::unique_ptr<TH1D> PlottingUtility::computeRatioHistogram(const TH1& numerato
   const int binCount = ratio->GetNbinsX();
   for (int i = 1; i <= binCount; ++i) {
     const double denomValue = denominator.GetBinContent(i);
-    if (denomValue == 0.0) {
+    if (std::abs(denomValue) < kMinDenominator) {
       ratio->SetBinContent(i, 0.0);
       ratio->SetBinError(i, 0.0);
       continue;
@@ -77,16 +88,18 @@ PlotResult PlottingUtility::makeStackPlot(const PlotRequest& request) const {
   std::vector<std::unique_ptr<TH1D>> mcHists;
   std::unique_ptr<TH1D> dataHist;
   std::unique_ptr<TH1D> mcSum;
-  TLegend legend(0.65, 0.68, 0.88, 0.88);
+  TLegend legend(kLegendX1, kLegendY1, kLegendX2, kLegendY2);
 
-  for (const auto& process : request.processes) {
+  for (size_t processIndex = 0; processIndex < request.processes.size(); ++processIndex) {
+    const auto& process = request.processes[processIndex];
     TH1* source = getHistogram(file, process);
     if (!source) {
       result.message = "Missing histogram '" + process.histogramName + "'";
       return result;
     }
 
-    auto hist = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(source->Clone()));
+    const std::string cloneName = "plot_hist_" + std::to_string(processIndex);
+    auto hist = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(source->Clone(cloneName.c_str())));
     if (!hist) {
       result.message = "Histogram is not TH1D: '" + process.histogramName + "'";
       return result;
@@ -127,7 +140,15 @@ PlotResult PlottingUtility::makeStackPlot(const PlotRequest& request) const {
     return result;
   }
 
-  TCanvas canvas("canvas", "canvas", 900, request.drawRatio ? 900 : 700);
+  if (mcSum) {
+    result.mcIntegral = mcSum->Integral();
+  }
+  if (dataHist) {
+    result.dataIntegral = dataHist->Integral();
+  }
+
+  TCanvas canvas("canvas", "canvas", kCanvasWidth,
+                 request.drawRatio ? kCanvasHeightWithRatio : kCanvasHeightNoRatio);
   std::unique_ptr<TPad> topPad;
   std::unique_ptr<TPad> ratioPad;
   if (request.drawRatio && dataHist && mcSum) {
@@ -184,11 +205,16 @@ PlottingUtility::makeStackPlots(const std::vector<PlotRequest>& requests,
     return results;
   }
 
+  static const bool threadSafetyEnabled = []() {
+    ROOT::EnableThreadSafety();
+    return true;
+  }();
+  (void)threadSafetyEnabled;
   std::vector<std::future<PlotResult>> futures;
   futures.reserve(requests.size());
-  for (const auto& request : requests) {
-    futures.emplace_back(std::async(std::launch::async, [this, request]() {
-      return makeStackPlot(request);
+  for (size_t i = 0; i < requests.size(); ++i) {
+    futures.emplace_back(std::async(std::launch::async, [this, request = std::cref(requests[i])]() {
+      return makeStackPlot(request.get());
     }));
   }
   for (size_t i = 0; i < futures.size(); ++i) {

@@ -15,7 +15,7 @@ namespace {
 
 void writeTestMetaFile(const std::string& metaPath) {
   TFile file(metaPath.c_str(), "RECREATE");
-  ASSERT_FALSE(file.IsZombie());
+  ASSERT_FALSE(file.IsZombie()) << "Failed to create test meta file at: " << metaPath;
 
   auto* dirA = file.mkdir("procA");
   auto* dirB = file.mkdir("procB");
@@ -35,23 +35,25 @@ void writeTestMetaFile(const std::string& metaPath) {
   dirA->cd();
   TH1D histA("pt", "pt", 2, 0.0, 2.0);
   histA.SetBinContent(1, 10.0);
-  histA.SetBinContent(2, 20.0);
+  histA.SetBinContent(2, 10.0);
   histA.Write();
 
   dirB->cd();
   TH1D histB("pt", "pt", 2, 0.0, 2.0);
-  histB.SetBinContent(1, 20.0);
+  histB.SetBinContent(1, 10.0);
   histB.SetBinContent(2, 20.0);
   histB.Write();
 
   dirData->cd();
   TH1D data("pt", "pt", 2, 0.0, 2.0);
-  data.SetBinContent(1, 2.0);
-  data.SetBinContent(2, 2.0);
+  data.SetBinContent(1, 4.0);
+  data.SetBinContent(2, 4.0);
   data.Write();
+
+  file.Close();
 }
 
-PlotRequest makeRequest(const std::string& metaPath, const std::string& outputPath, bool logY) {
+PlotRequest createTestPlotRequest(const std::string& metaPath, const std::string& outputPath, bool logY) {
   PlotRequest request;
   request.metaFile = metaPath;
   request.outputFile = outputPath;
@@ -84,13 +86,17 @@ TEST(PlottingUtilityTest, CreatesLinearAndLogStackPlotsWithRatio) {
 
   PlottingUtility utility;
   const auto results =
-      utility.makeStackPlots({makeRequest(metaPath, linearPath, false),
-                              makeRequest(metaPath, logPath, true)},
+      utility.makeStackPlots({createTestPlotRequest(metaPath, linearPath, false),
+                              createTestPlotRequest(metaPath, logPath, true)},
                              true);
 
   ASSERT_EQ(results.size(), 2u);
   EXPECT_TRUE(results[0].success) << results[0].message;
   EXPECT_TRUE(results[1].success) << results[1].message;
+  EXPECT_DOUBLE_EQ(results[0].mcIntegral, 8.0);
+  EXPECT_DOUBLE_EQ(results[0].dataIntegral, 8.0);
+  EXPECT_DOUBLE_EQ(results[1].mcIntegral, 8.0);
+  EXPECT_DOUBLE_EQ(results[1].dataIntegral, 8.0);
 
   EXPECT_TRUE(std::filesystem::exists(linearPath));
   EXPECT_TRUE(std::filesystem::exists(logPath));
@@ -108,6 +114,14 @@ TEST(PlottingUtilityTest, CreatesLinearAndLogStackPlotsWithRatio) {
   ASSERT_NE(ratio, nullptr);
   EXPECT_DOUBLE_EQ(ratio->GetBinContent(1), 2.0);
   EXPECT_DOUBLE_EQ(ratio->GetBinContent(2), 2.0);
+
+  TH1D zeroDenominator("zeroDenominator", "zeroDenominator", 2, 0.0, 2.0);
+  auto zeroRatio = PlottingUtility::computeRatioHistogram(numerator, zeroDenominator, "zero_ratio");
+  ASSERT_NE(zeroRatio, nullptr);
+  EXPECT_DOUBLE_EQ(zeroRatio->GetBinContent(1), 0.0);
+  EXPECT_DOUBLE_EQ(zeroRatio->GetBinContent(2), 0.0);
+  EXPECT_DOUBLE_EQ(zeroRatio->GetBinError(1), 0.0);
+  EXPECT_DOUBLE_EQ(zeroRatio->GetBinError(2), 0.0);
 
   std::remove(metaPath.c_str());
   std::remove(linearPath.c_str());

@@ -30,6 +30,8 @@ struct PlotRequest {
 struct PlotResult {
   bool success = false;
   std::string message;
+  double mcIntegral = 0.0;
+  double dataIntegral = 0.0;
 };
 
 class PlottingUtility {
@@ -38,8 +40,8 @@ public:
   std::vector<PlotResult> makeStackPlots(const std::vector<PlotRequest>& requests,
                                          bool parallel = false) const;
 
-  static std::unique_ptr<TH1D> computeRatioHistogram(const TH1& numerator,
-                                                     const TH1& denominator,
+  static std::unique_ptr<TH1D> computeRatioHistogram(const TH1D& numerator,
+                                                     const TH1D& denominator,
                                                      const std::string& name = "ratio");
 };
 
