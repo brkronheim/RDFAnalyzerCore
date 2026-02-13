@@ -28,6 +28,8 @@ target_link_libraries(core PUBLIC
     ROOT::ROOTDataFrame
     ROOT::ROOTVecOps
     ROOT::Core
+    ROOT::Gpad
+    ROOT::Graf
     ROOT::Hist
     ROOT::MathCore
 )

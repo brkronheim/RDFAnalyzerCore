@@ -522,6 +522,12 @@ histogramManager->saveHists(fullHistList, allRegionNames);
 
 The file is chosen using metaFile in the config, with saveFile as a fallback.
 
+### Plotting from Meta Output
+`PlottingUtility` can build compiled-ROOT stack plots directly from the meta output file. It supports:
+- per-process normalization through optional counter histograms (for example `counter_weightSum_<sample>`)
+- linear and log-y stack plots
+- optional data/MC ratio panels
+
 ---
 
 # End-to-End Example: Cuts + Histograms + Outputs
@@ -722,4 +728,3 @@ This avoids writing outputs directly over xrootd during processing and reduces n
 - All core managers are plugins. Analyzer does not depend on concrete types.
 - Wiring is compile-time C++ construction.
 - NDHistogramManager supports multi-fill inputs by expanding scalars to the reference vector length when needed.
-
