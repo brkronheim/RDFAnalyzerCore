@@ -5,7 +5,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(CMAKE_MODULE_PATH "cmake/" ${CMAKE_MODULE_PATH})
+set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 
 project(RDFAnalyzer)
 
@@ -25,6 +25,8 @@ include(SetupYamlCpp)
 
 # Setup ONNX Runtime
 include(SetupOnnxRuntime)
+
+set(PYBIND11_FINDPYTHON ON)
 
 # Ensure runtime uses the same ROOT installation found at configure time.
 get_target_property(ROOT_CORE_LOCATION ROOT::Core IMPORTED_LOCATION)

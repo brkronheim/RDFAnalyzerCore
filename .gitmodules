@@ -8,3 +8,6 @@
 [submodule "core/extern/gtest"]
 	path = core/extern/gtest
 	url = https://github.com/google/googletest.git
+[submodule "core/extern/pybind11"]
+	path = core/extern/pybind11
+	url = https://github.com/pybind/pybind11.git
