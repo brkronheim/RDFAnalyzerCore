@@ -1,8 +1,21 @@
 import os
 from pathlib import Path
+import yaml
 
 
 def read_config(config_file):
+    """
+    Read config file in either text or YAML format.
+    Auto-detects format based on file extension.
+    """
+    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
+        return read_config_yaml(config_file)
+    else:
+        return read_config_text(config_file)
+
+
+def read_config_text(config_file):
+    """Read config file in text format (key=value)."""
     config_dict = {}
     with open(config_file) as file:
         for line in file:
@@ -13,11 +26,52 @@ def read_config(config_file):
     return config_dict
 
 
+def read_config_yaml(config_file):
+    """Read config file in YAML format."""
+    with open(config_file) as file:
+        config_dict = yaml.safe_load(file)
+    # Ensure all values are strings for consistency
+    return {k: str(v) for k, v in config_dict.items()}
+
+
+def write_config(config_dict, output_file):
+    """
+    Write config dict to file in either text or YAML format.
+    Auto-detects format based on file extension.
+    """
+    if output_file.endswith('.yaml') or output_file.endswith('.yml'):
+        write_config_yaml(config_dict, output_file)
+    else:
+        write_config_text(config_dict, output_file)
+
+
+def write_config_text(config_dict, output_file):
+    """Write config dict to text file (key=value format)."""
+    with open(output_file, "w") as file:
+        for key in config_dict.keys():
+            file.write(str(key) + "=" + config_dict[key] + "\n")
+
+
+def write_config_yaml(config_dict, output_file):
+    """Write config dict to YAML file."""
+    with open(output_file, "w") as file:
+        yaml.dump(config_dict, file, default_flow_style=False, sort_keys=False)
+
+
+def get_config_extension(config_file):
+    """Get the extension of a config file."""
+    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
+        return '.yaml'
+    else:
+        return '.txt'
+
+
 def get_copy_file_list(config_dict):
     transfer_list = []
     for key in config_dict:
-        if ".txt" in config_dict[key]:
-            transfer_list.append(config_dict[key])
+        value = config_dict[key]
+        if ".txt" in value or ".yaml" in value or ".yml" in value:
+            transfer_list.append(value)
     return transfer_list
 
 
@@ -27,21 +81,41 @@ def ensure_symlink(src, dst):
     os.symlink(src, dst)
 
 
-def stage_inputs_block(eos_sched=False):
-    config_file = "submit_config.txt"
+def stage_inputs_block(eos_sched=False, config_file="submit_config.txt"):
     return f"""
 echo "Staging input files with xrdcp"
 python3 - << 'PY'
 import subprocess
 import os
-cfg = {{}}
-with open("{config_file}") as f:
-    for line in f:
-        line = line.split("#")[0].strip()
-        if not line or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        cfg[k.strip()] = v.strip()
+
+def read_config(config_file):
+    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
+        import yaml
+        with open(config_file) as f:
+            cfg = yaml.safe_load(f)
+        return {{k: str(v) for k, v in cfg.items()}}
+    else:
+        cfg = {{}}
+        with open(config_file) as f:
+            for line in f:
+                line = line.split("#")[0].strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+        return cfg
+
+def write_config(cfg, config_file):
+    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
+        import yaml
+        with open(config_file, "w") as f:
+            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+    else:
+        with open(config_file, "w") as f:
+            for k, v in cfg.items():
+                f.write(f"{{k}}={{v}}\\n")
+
+cfg = read_config("{config_file}")
 
 file_list = cfg.get("__orig_fileList", "") or cfg.get("fileList", "")
 if not file_list:
@@ -92,26 +166,44 @@ for i, url in enumerate(file_list.split(",")):
         raise RuntimeError(f"xrdcp failed after {{max_attempts}} attempts for {{url}}: {{last_exc}}")
 
 cfg["fileList"] = ",".join(local_paths)
-with open("submit_config.txt", "w") as f:
-    for k, v in cfg.items():
-        f.write(f"{{k}}={{v}}\\n")
+write_config(cfg, "{config_file}")
 PY
 """
 
 
-def stage_outputs_blocks(eos_sched=False):
-    config_file = "submit_config.txt"
+def stage_outputs_blocks(eos_sched=False, config_file="submit_config.txt"):
     pre_block = f"""
 python3 - << 'PY'
 import os
-cfg = {{}}
-with open("{config_file}") as f:
-    for line in f:
-        line = line.split("#")[0].strip()
-        if not line or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        cfg[k.strip()] = v.strip()
+
+def read_config(config_file):
+    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
+        import yaml
+        with open(config_file) as f:
+            cfg = yaml.safe_load(f)
+        return {{k: str(v) for k, v in cfg.items()}}
+    else:
+        cfg = {{}}
+        with open(config_file) as f:
+            for line in f:
+                line = line.split("#")[0].strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+        return cfg
+
+def write_config(cfg, config_file):
+    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
+        import yaml
+        with open(config_file, "w") as f:
+            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+    else:
+        with open(config_file, "w") as f:
+            for k, v in cfg.items():
+                f.write(f"{{k}}={{v}}\\n")
+
+cfg = read_config("{config_file}")
 
 save_file = cfg.get("saveFile", "")
 meta_file = cfg.get("metaFile", "")
@@ -128,9 +220,7 @@ elif meta_file:
     cfg["__orig_metaFile"] = meta_file
     cfg["metaFile"] = os.path.basename(meta_file)
 
-with open("{config_file}", "w") as f:
-    for k, v in cfg.items():
-        f.write(f"{{k}}={{v}}\\n")
+write_config(cfg, "{config_file}")
 PY
 """
 
@@ -140,14 +230,24 @@ import os
 import subprocess
 import time
 
-cfg = {{}}
-with open("{config_file}") as f:
-    for line in f:
-        line = line.split("#")[0].strip()
-        if not line or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        cfg[k.strip()] = v.strip()
+def read_config(config_file):
+    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
+        import yaml
+        with open(config_file) as f:
+            cfg = yaml.safe_load(f)
+        return {{k: str(v) for k, v in cfg.items()}}
+    else:
+        cfg = {{}}
+        with open(config_file) as f:
+            for line in f:
+                line = line.split("#")[0].strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+        return cfg
+
+cfg = read_config("{config_file}")
 
 def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
     dest = "root://eosuser.cern.ch/" + dest
@@ -210,12 +310,13 @@ def generate_condor_runscript(
     use_shared_inputs=False,
     eos_sched=False,
     shared_dir_name=None,
+    config_file="submit_config.txt",
 ):
-    stage_block = stage_inputs_block(eos_sched) if stage_inputs else ""
+    stage_block = stage_inputs_block(eos_sched, config_file) if stage_inputs else ""
     stage_out_pre = ""
     stage_out_post = ""
     if stage_outputs:
-        stage_out_pre, stage_out_post = stage_outputs_blocks(eos_sched)
+        stage_out_pre, stage_out_post = stage_outputs_blocks(eos_sched, config_file)
     root_block = (root_setup + "\n") if root_setup else ""
     pre_block = pre_setup_lines or ""
     x509_name = os.path.basename(x509loc) if x509loc else ""
@@ -295,10 +396,11 @@ def generate_condor_submit(
     eos_sched=False,
     include_aux=True,
     shared_dir_name=None,
+    config_file="submit_config.txt",
 ):
     Path(main_dir + "/condor_logs").mkdir(parents=True, exist_ok=True)
     transfer_files = [
-        f"{main_dir}/job_$(Process)/submit_config.txt",
+        f"{main_dir}/job_$(Process)/{config_file}",
         f"{main_dir}/job_$(Process)/floats.txt",
         f"{main_dir}/job_$(Process)/ints.txt",
     ]
@@ -346,7 +448,7 @@ transfer_input_files = {transfer_input_files}
 +MaxRuntime={max_runtime}
 max_transfer_input_mb = 10000
 WhenToTransferOutput=On_Exit
-transfer_output_files = submit_config.txt
+transfer_output_files = {config_file}
 
 Output     = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stdout
 Error      = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stderr
@@ -376,6 +478,7 @@ def write_submit_files(
     eos_sched=False,
     include_aux=True,
     shared_dir_name=None,
+    config_file="submit_config.txt",
 ):
     submit_path = os.path.join(main_dir, "condor_submit.sub")
     runscript_path = os.path.join(main_dir, "condor_runscript.sh")
@@ -397,6 +500,7 @@ def write_submit_files(
                 eos_sched=eos_sched,
                 include_aux=include_aux,
                 shared_dir_name=shared_dir_name,
+                config_file=config_file,
             )
         )
     with open(runscript_path, "w") as condor_sub:
@@ -411,6 +515,7 @@ def write_submit_files(
                 use_shared_inputs=use_shared_inputs,
                 eos_sched=eos_sched,
                 shared_dir_name=shared_dir_name,
+                config_file=config_file,
             )
         )
     return submit_path

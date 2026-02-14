@@ -1,0 +1,12 @@
+saveDirectory=
+saveTree=Events
+treeList=CollectionTree,POOLCollectionTree
+threads=1
+antiglobs=output.root,hists.root
+saveConfig=output.txt
+saveFile=./Output/example_config_histograms.root
+metaFile=./Output/example_config_histograms_meta.root
+fileList=root://eospublic.cern.ch//eos/opendata/atlas/rucio/mc20_13TeV/DAOD_PHYSLITE.37621415._000030.pool.root.1
+batch=False
+type=10
+histogramConfig=histograms.txt

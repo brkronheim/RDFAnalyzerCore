@@ -30,7 +30,31 @@ Applies scale factors and corrections using the correctionlib library.
 Handles trigger logic and trigger menu configuration.
 
 ### NDHistogramManager
-Books and fills N-dimensional histograms with support for systematics, regions, and categories.
+Books and fills N-dimensional histograms with support for systematics, regions, and categories. Supports both manual histogram booking and config-driven histogram definitions.
+
+**Config-Driven Histograms**: Define histograms in a configuration file for dynamic runtime booking. See `docs/CONFIG_HISTOGRAMS.md` for detailed documentation.
+
+Quick example:
+```cpp
+// Enable histogram manager
+auto histManager = std::make_unique<NDHistogramManager>(analyzer.getConfigurationProvider());
+analyzer.addPlugin("histogramManager", std::move(histManager));
+
+// Define variables and apply filters
+analyzer.Define("jet_pt", computePt, {"jet_px", "jet_py"});
+analyzer.Filter("quality", isGood, {"jet_quality"});
+
+// Book histograms from config file (after all defines/filters)
+analyzer.bookConfigHistograms();
+
+// Save results
+analyzer.save();
+```
+
+Config file format (`histograms.txt`):
+```
+name=pt_hist variable=jet_pt weight=event_weight bins=50 lowerBound=0.0 upperBound=500.0
+```
 
 ## Installing
 Clone the repository:

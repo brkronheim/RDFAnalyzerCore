@@ -13,7 +13,13 @@ from rucio.client import Client
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-from submission_backend import read_config, get_copy_file_list, write_submit_files
+from submission_backend import (
+    read_config, 
+    get_copy_file_list, 
+    write_submit_files,
+    write_config,
+    get_config_extension
+)
 from validate_config import validate_submit_config
 
 
@@ -395,7 +401,7 @@ def main():
         shutil.copy2(x509_src, os.path.join(shared_dir, x509loc))
 
     copy_basenames = sorted({os.path.basename(path) for path in copyList})
-    skip_transfer = {"floats.txt", "ints.txt", "submit_config.txt"}
+    skip_transfer = {"floats.txt", "ints.txt", submit_config_name}
     extra_transfer_files = [
         os.path.join(mainDir, "job_$(Process)", name)
         for name in copy_basenames
@@ -598,6 +604,7 @@ def main():
         include_aux=aux_exists,
         shared_dir_name=shared_dir_name,
         eos_sched=args.eos_sched,
+        config_file=submit_config_name,
     )
     if(index==1):
         print(index, "job created")

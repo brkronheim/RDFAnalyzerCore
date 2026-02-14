@@ -30,6 +30,7 @@ target_link_libraries(core PUBLIC
     ROOT::Core
     ROOT::Hist
     ROOT::MathCore
+    yaml-cpp
 )
 
 set(SOURCES

@@ -153,6 +153,16 @@ public:
                         std::string type = "Float_t");
 
   /**
+   * @brief Book histograms defined in config file
+   * 
+   * This method should be called after all Define and Filter operations
+   * are complete, but before save(). It triggers the NDHistogramManager
+   * to book all histograms that were loaded from the config file.
+   * @return Pointer to this Analyzer (for chaining)
+   */
+  Analyzer *bookConfigHistograms();
+
+  /**
    * @brief Save the configured branches to the output file and trigger the computation of the dataframe.
    * @return Pointer to this Analyzer (for chaining)
    */
