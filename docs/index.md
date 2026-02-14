@@ -27,6 +27,11 @@ New to RDFAnalyzerCore? Start here:
   - Configuration file format
   - Example configurations
 
+### Python Analysis
+
+- **[Python Bindings](PYTHON_BINDINGS.md)** - Full Python API and usage patterns
+- **[Python Bindings Testing](PYTHON_BINDINGS_TESTING.md)** - Validation and troubleshooting guide
+
 ### Framework Features
 
 - **[Machine Learning](ANALYSIS_GUIDE.md#machine-learning-integration)**

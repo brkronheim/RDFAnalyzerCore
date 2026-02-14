@@ -15,6 +15,7 @@ RDFAnalyzerCore provides a core, analysis-agnostic framework for constructing an
 - **Lazy Evaluation**: Leverages RDataFrame's efficient event processing
 - **Systematic Support**: Built-in handling of systematic variations
 - **Analysis Modularity**: Analyses live in separate repositories, automatically discovered at build time
+- **Python Bindings**: Use the framework from Python with numba and numpy integration
 
 ## Quick Start
 
@@ -39,6 +40,7 @@ cd build/analyses/ExampleAnalysis
 - **[Getting Started](docs/GETTING_STARTED.md)** - Installation and first steps
 - **[Configuration Reference](docs/CONFIG_REFERENCE.md)** - Complete config file documentation
 - **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Building analyses step-by-step
+- **[Python Bindings](docs/PYTHON_BINDINGS.md)** - Using the framework from Python
 - **[API Reference](docs/API_REFERENCE.md)** - Detailed API documentation
 
 ### For Developers
@@ -55,6 +57,10 @@ cd build/analyses/ExampleAnalysis
 - C++17 compatible compiler
 - Git
 
+**For Python bindings (optional):**
+- Python 3.8+
+- pybind11, numpy, numba (install with `pip install pybind11 numpy numba`)
+
 ## Repository Structure
 
 ```
@@ -63,9 +69,11 @@ RDFAnalyzerCore/
 │   ├── interface/     # Public headers and interfaces
 │   ├── src/          # Core implementations
 │   ├── plugins/      # Plugin managers (BDT, ONNX, etc.)
+│   ├── bindings/     # Python bindings (pybind11)
 │   ├── python/       # HTCondor submission scripts
 │   └── test/         # Unit tests
 ├── analyses/          # Analysis repositories (git submodules/clones)
+├── examples/          # Python binding examples
 ├── docs/             # Documentation
 ├── cmake/            # CMake modules
 └── build/            # Build artifacts (generated)
@@ -293,6 +301,45 @@ saveConfig=cfg/output_branches.txt
 ```
 
 See [Analysis Guide](docs/ANALYSIS_GUIDE.md) for complete examples.
+
+## Python Bindings
+
+The framework can also be used from Python with high performance:
+
+```python
+import rdfanalyzer
+
+# Create analyzer from config file
+analyzer = rdfanalyzer.Analyzer("config.txt")
+
+# Define variables using C++ expressions (ROOT JIT)
+analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
+analyzer.Define("delta_r", 
+                   "sqrt(delta_eta*delta_eta + delta_phi*delta_phi)",
+                   ["delta_eta", "delta_phi"])
+
+# Or use numba-compiled functions
+import numba, ctypes
+
+@numba.cfunc("float64(float64)")
+def convert_to_gev(pt):
+    return pt / 1000.0
+
+func_ptr = ctypes.cast(convert_to_gev.address, ctypes.c_void_p).value
+analyzer.DefineFromPointer("pt_gev", func_ptr, "double(double)", ["pt"])
+
+# Apply filters and save
+analyzer.Filter("high_pt", "pt_gev > 25.0", ["pt_gev"])
+analyzer.save()
+```
+
+**Key Features:**
+- String-based expressions (ROOT JIT compilation)
+- Numba function pointers for custom logic
+- Numpy array integration
+- Full systematic variation support
+
+See [Python Bindings Guide](docs/PYTHON_BINDINGS.md) for complete documentation and examples.
 
 ## Advanced Features
 
