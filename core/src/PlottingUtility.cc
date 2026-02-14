@@ -100,9 +100,10 @@ RatioSummary PlottingUtility::computeRatioSummary(const TH1D& loHist,
     if (std::abs(nlo) >= kMinDenominator) {
       const double ratio = lo / nlo;
       summary.ratio[i - 1] = ratio;
-      const double relLo = (std::abs(lo) >= kMinDenominator) ? loVar / (lo * lo) : 0.0;
+      const bool loValid = std::abs(lo) >= kMinDenominator;
+      const double relLo = loValid ? loVar / (lo * lo) : 0.0;
       const double relNlo = nloVar / (nlo * nlo);
-      const double relCov = (std::abs(lo) >= kMinDenominator) ? (2.0 * cov / (nlo * lo)) : 0.0;
+      const double relCov = loValid ? (2.0 * cov / (nlo * lo)) : 0.0;
       const double err2 = std::max(0.0, relLo + relNlo - relCov);
       summary.error[i - 1] = std::abs(ratio) * std::sqrt(err2);
     }
@@ -147,7 +148,11 @@ PCAResult PlottingUtility::computePCAEnvelope(const TH1D& nominal,
       const double delta = counts(v, b) - means[b];
       stddev[b] += delta * delta;
     }
-    stddev[b] = std::sqrt(stddev[b] / static_cast<double>(nVariations));
+    if (nVariations > 1) {
+      stddev[b] = std::sqrt(stddev[b] / static_cast<double>(nVariations - 1));
+    } else {
+      stddev[b] = 0.0;
+    }
   }
 
   TMatrixD standardized(nVariations, binCount);
@@ -162,6 +167,7 @@ PCAResult PlottingUtility::computePCAEnvelope(const TH1D& nominal,
   }
 
   TMatrixDSym covariance(binCount);
+  covariance.Zero();
   if (nVariations > 1) {
     for (int i = 0; i < binCount; ++i) {
       for (int j = 0; j < binCount; ++j) {
@@ -199,9 +205,9 @@ PCAResult PlottingUtility::computePCAEnvelope(const TH1D& nominal,
     uncert[b] = stddev[b] * std::sqrt(std::max(0.0, variance));
   }
 
-  result.mean = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(nominal.Clone((baseName + "_mean").c_str())));
-  result.up = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(nominal.Clone((baseName + "_up").c_str())));
-  result.down = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(nominal.Clone((baseName + "_down").c_str())));
+  result.mean = std::unique_ptr<TH1D>(static_cast<TH1D*>(nominal.Clone((baseName + "_mean").c_str())));
+  result.up = std::unique_ptr<TH1D>(static_cast<TH1D*>(nominal.Clone((baseName + "_up").c_str())));
+  result.down = std::unique_ptr<TH1D>(static_cast<TH1D*>(nominal.Clone((baseName + "_down").c_str())));
   if (!result.mean || !result.up || !result.down) {
     result = PCAResult{};
     return result;
@@ -214,10 +220,9 @@ PCAResult PlottingUtility::computePCAEnvelope(const TH1D& nominal,
     result.mean->SetBinContent(b + 1, means[b]);
     result.up->SetBinContent(b + 1, means[b] + uncert[b]);
     result.down->SetBinContent(b + 1, means[b] - uncert[b]);
-    const double meanVar = 0.0;
-    result.mean->SetBinError(b + 1, std::sqrt(meanVar));
-    result.up->SetBinError(b + 1, std::sqrt(meanVar));
-    result.down->SetBinError(b + 1, std::sqrt(meanVar));
+    result.mean->SetBinError(b + 1, 0.0);
+    result.up->SetBinError(b + 1, 0.0);
+    result.down->SetBinError(b + 1, 0.0);
   }
 
   return result;

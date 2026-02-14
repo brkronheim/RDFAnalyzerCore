@@ -12,6 +12,7 @@ makePlots
 Boosted*
 Resolved*
 build/*
+Testing/Temporary/*
 .cache/*
 CMakeFiles
 *.cmake

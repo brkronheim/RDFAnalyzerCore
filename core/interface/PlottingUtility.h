@@ -3,7 +3,6 @@
 
 #include <TH1.h>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 

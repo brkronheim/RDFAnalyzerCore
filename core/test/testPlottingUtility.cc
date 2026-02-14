@@ -128,7 +128,7 @@ TEST(PlottingUtilityTest, CreatesLinearAndLogStackPlotsWithRatio) {
   std::remove(logPath.c_str());
 }
 
-TEST(PlottingUtilityTest, ComputesDetailedRatioSummaryAndPCAEnvelope) {
+TEST(PlottingUtilityTest, ComputesDetailedRatioSummary) {
   TH1D lo("lo", "lo", 3, 0.0, 3.0);
   TH1D nlo("nlo", "nlo", 3, 0.0, 3.0);
   TH1D cov("cov", "cov", 3, 0.0, 3.0);
@@ -155,7 +155,9 @@ TEST(PlottingUtilityTest, ComputesDetailedRatioSummaryAndPCAEnvelope) {
   EXPECT_GT(summary.pull[0], 0.0);
   EXPECT_DOUBLE_EQ(summary.ratio[1], 0.0);
   EXPECT_DOUBLE_EQ(summary.error[1], 0.0);
+}
 
+TEST(PlottingUtilityTest, ComputesPCAEnvelope) {
   TH1D nominal("nominal", "nominal", 2, 0.0, 2.0);
   nominal.SetBinContent(1, 10.0);
   nominal.SetBinContent(2, 20.0);
