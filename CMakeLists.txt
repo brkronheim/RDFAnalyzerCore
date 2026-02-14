@@ -15,12 +15,13 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads)
 find_package(ZLIB)
 
-
-
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 find_package(ROOT REQUIRED)
 find_package(Boost REQUIRED CONFIG)
+
+# Setup yaml-cpp
+include(SetupYamlCpp)
 
 # Setup ONNX Runtime
 include(SetupOnnxRuntime)

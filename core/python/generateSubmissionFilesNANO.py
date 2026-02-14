@@ -11,7 +11,13 @@ from requests.exceptions import ChunkedEncodingError, RequestException
 import urllib3
 from rucio.client import Client
 
-from submission_backend import read_config, get_copy_file_list, write_submit_files
+from submission_backend import (
+    read_config, 
+    get_copy_file_list, 
+    write_submit_files,
+    write_config,
+    get_config_extension
+)
 from validate_config import validate_submit_config
 
 
@@ -331,6 +337,8 @@ def main():
 
     configDict = read_config(args.config)
     print(configDict.keys())
+    config_ext = get_config_extension(args.config)
+    submit_config_name = f"submit_config{config_ext}"
     fileSplit = args.size
     # x509loc will be set later
     exe_path = resolve_path(args.exe)
@@ -373,7 +381,7 @@ def main():
         shutil.copy2(x509_src, os.path.join(shared_dir, x509loc))
 
     copy_basenames = sorted({os.path.basename(path) for path in copyList})
-    skip_transfer = {"floats.txt", "ints.txt", "submit_config.txt"}
+    skip_transfer = {"floats.txt", "ints.txt", submit_config_name}
     extra_transfer_files = [
         os.path.join(mainDir, "job_$(Process)", name)
         for name in copy_basenames
@@ -446,12 +454,10 @@ def main():
                 _append_unique_lines(int_file, ["type="+typ])
                 test_config["intConfig"] = os.path.basename(int_file)
 
-                with open(os.path.join(test_dir, "submit_config.txt"),"w") as file:
-                    for cfg_key in test_config.keys():
-                        file.write(str(cfg_key)+"="+test_config[cfg_key]+"\n")
+                write_config(test_config, os.path.join(test_dir, submit_config_name))
 
                 print("Test job created. Run locally with:")
-                print(f"cd {test_dir} && ./{exe_relpath} submit_config.txt")
+                print(f"cd {test_dir} && ./{exe_relpath} {submit_config_name}")
                 test_job_created = True
         for subDir in fileList:
             job_dir = os.path.join(mainDir, f"job_{index}")
@@ -506,9 +512,7 @@ def main():
             _append_unique_lines(int_file, ["type="+typ])
             job_config["intConfig"] = os.path.basename(int_file)
             # make the main config file and update or add the savefile
-            with open(os.path.join(job_dir, "submit_config.txt"),"w") as file:
-                for key in job_config.keys():
-                    file.write(str(key)+"="+job_config[key]+"\n")
+            write_config(job_config, os.path.join(job_dir, submit_config_name))
             index+=1
             sampleIndex+=1
 
@@ -529,6 +533,7 @@ def main():
         include_aux=aux_exists,
         shared_dir_name=shared_dir_name,
         eos_sched=args.eos_sched,
+        config_file=submit_config_name,
     )
     if(index==1):
         print(index, "job created")
