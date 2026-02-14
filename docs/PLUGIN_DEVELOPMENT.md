@@ -364,14 +364,8 @@ target_link_libraries(RDFCore PUBLIC WeightManager)
 
 Document the configuration format. Create `docs/WEIGHT_MANAGER.md`:
 
+
 ```markdown
-# WeightManager Configuration
-
-## Config File Format
-
-Create a weight configuration file (e.g., `cfg/weights.txt`):
-
-```
 file=path/to/weights.json weightKey=scale_factors name=my_weight inputVariables=pt,eta
 ```
 
@@ -392,7 +386,7 @@ weightConfig=cfg/weights.txt
   }
 }
 ```
-```
+
 
 ### Step 7: Use in Analysis
 
