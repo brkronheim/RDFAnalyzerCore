@@ -52,3 +52,7 @@ target_link_libraries(correctionlib PRIVATE ZLIB::ZLIB Threads::Threads)
 
 
 add_subdirectory(gtest)
+
+add_subdirectory(pybind11)
+
+add_subdirectory(yaml-cpp)

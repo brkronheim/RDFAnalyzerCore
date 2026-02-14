@@ -5,6 +5,7 @@
 #include <ROOT/RResultPtr.hxx>
 #include <optional>
 #include <string>
+#include <chrono>
 
 /**
  * @brief Analysis service for logging per-sample event counts.
@@ -21,6 +22,9 @@ private:
   std::string weightBranch_m;
   std::string intWeightBranch_m;
   std::optional<ROOT::RDF::RNode> preFilterDf_m;
+
+  // start time recorded at initialize(); used to compute processing speed in finalize()
+  std::chrono::steady_clock::time_point startTime_m{};
 };
 
 #endif // COUNTERSERVICE_H_INCLUDED

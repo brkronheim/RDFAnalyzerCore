@@ -3,9 +3,13 @@ include(CMakePrintHelpers)
 cmake_minimum_required(VERSION 3.19.0)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 17)
+# Ensure static libraries are built position-independent so they can be linked
+# into shared objects (Python extension modules) without linker errors.
+# This prevents "recompile with -fPIC" errors in CI where CMake may not set PIC.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(CMAKE_MODULE_PATH "cmake/" ${CMAKE_MODULE_PATH})
+set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 
 project(RDFAnalyzer)
 
@@ -15,15 +19,18 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads)
 find_package(ZLIB)
 
-
-
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 find_package(ROOT REQUIRED)
 find_package(Boost REQUIRED CONFIG)
 
+# Setup yaml-cpp
+# include(SetupYamlCpp)
+
 # Setup ONNX Runtime
 include(SetupOnnxRuntime)
+
+set(PYBIND11_FINDPYTHON ON)
 
 # Ensure runtime uses the same ROOT installation found at configure time.
 get_target_property(ROOT_CORE_LOCATION ROOT::Core IMPORTED_LOCATION)

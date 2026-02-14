@@ -5,11 +5,19 @@ import shutil
 import subprocess
 
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from pathlib import Path
 from distutils.dir_util import copy_tree
 
-from submission_backend import read_config, get_copy_file_list, write_submit_files
+from submission_backend import (
+    read_config, 
+    get_copy_file_list, 
+    write_submit_files,
+    write_config,
+    get_config_extension
+)
 from validate_config import validate_submit_config
 
 
@@ -221,6 +229,12 @@ def main():
         action="store_true",
         help="use EOS scheduling",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=4,
+        help="number of threads for remote metadata / metadata-fetch and job splitting (default: 4)",
+    )
 
     args = parser.parse_args()
 
@@ -252,6 +266,8 @@ def main():
 
     configDict = read_config(args.config)
     print(configDict.keys())
+    config_ext = get_config_extension(args.config)
+    submit_config_name = f"submit_config{config_ext}"
     fileSplit = args.files
     configFile = resolve_path(configDict["sampleConfig"])
     saveDirectory = resolve_path(configDict["saveDirectory"])
@@ -284,8 +300,19 @@ def main():
             if "name" in innerDict and "das" in innerDict:
                 sampleNames[innerDict["das"]] = innerDict["name"]
 
-    for recid in recids:
-        fileDict.update(processMetaData(recid, sampleNames))
+    # Fetch metadata for recids in parallel to speed up slow network/API calls
+    if recids:
+        with ThreadPoolExecutor(max_workers=max(1, args.threads)) as executor:
+            futures = {executor.submit(processMetaData, recid, sampleNames): recid for recid in recids}
+            for fut in as_completed(futures):
+                recid = futures[fut]
+                try:
+                    result = fut.result()
+                except Exception as e:
+                    print(f"Warning: failed to fetch metadata for recid {recid}: {e}")
+                    continue
+                # processMetaData returns a dict we can safely merge
+                fileDict.update(result)
 
     mainDir = f"condorSub_{args.name}/"
     index = 0
@@ -293,6 +320,12 @@ def main():
 
     if args.eos_sched:
         mainDir = os.path.join("/eos/user/b/bkronhei/RDFAnalyzerCore", mainDir)
+        # Inform the user how to enable the EOS condor submission environment
+        print("Note: using EOS scheduling — before submitting run: module load lxbatch/eossubmit")
+
+    # Abort if the submission directory already exists to avoid accidental reuse/overwrite
+    if os.path.exists(mainDir):
+        raise SystemExit(f"Submission directory already exists: {mainDir!r}. Remove it or choose a different --name.")
 
     x509loc = "x509" if args.x509 else None
     x509_src = resolve_path(args.x509) if args.x509 else None
@@ -312,12 +345,25 @@ def main():
         shutil.copy2(x509_src, os.path.join(shared_dir, x509loc))
 
     copy_basenames = sorted({os.path.basename(path) for path in copyList})
-    skip_transfer = {"floats.txt", "ints.txt", "submit_config.txt"}
+    skip_transfer = {"floats.txt", "ints.txt", submit_config_name}
     extra_transfer_files = [
         os.path.join(mainDir, "job_$(Process)", name)
         for name in copy_basenames
         if name not in skip_transfer
     ]
+    # Thread-safe counter and single-shot event for test-job creation
+    index_lock = threading.Lock()
+    index_container = {"value": 0}
+    def allocate_index():
+        with index_lock:
+            v = index_container["value"]
+            index_container["value"] += 1
+            return v
+
+    test_job_event = threading.Event()
+
+    # collect sample entries from config file so we can process them in parallel
+    samples_to_process = []
     with open(configFile) as file:
         for line in file:
             line = line.split("#")[0]
@@ -327,18 +373,28 @@ def main():
                 pair = pair.strip().split("=")
                 if len(pair) == 2:
                     innerDict[pair[0]] = pair[1]
-
             if "name" in innerDict:
-                name = innerDict["name"]
-                xsec = float(innerDict["xsec"]) if "xsec" in innerDict else 1.0
-                typ = str(innerDict["type"]) if "type" in innerDict else "1"
-                norm = float(innerDict["norm"]) if "norm" in innerDict else 1.0
-                kfac = float(innerDict["kfac"]) if "kfac" in innerDict else 1.0
-                extraScale = float(innerDict["extraScale"]) if "extraScale" in innerDict else 1.0
+                samples_to_process.append(innerDict)
 
-                fileListFlat = fileDict[name]
+    def process_sample(innerDict):
+        nonlocal index_container
+        name = innerDict["name"]
+        xsec = float(innerDict.get("xsec", 1.0))
+        typ = str(innerDict.get("type", "1"))
+        norm = float(innerDict.get("norm", 1.0))
+        kfac = float(innerDict.get("kfac", 1.0))
+        extraScale = float(innerDict.get("extraScale", 1.0))
 
-                if args.make_test_job and not test_job_created and fileListFlat:
+        if name not in fileDict:
+            print(f"Warning: no files found for sample '{name}' (skipping)")
+            return 0
+
+        fileListFlat = fileDict[name]
+
+        # create one test job once (thread-safe)
+        if args.make_test_job and not test_job_event.is_set() and fileListFlat:
+            with index_lock:
+                if not test_job_event.is_set():
                     test_dir = os.path.join(mainDir, "test_job")
                     Path(test_dir).mkdir(parents=True, exist_ok=True)
 
@@ -377,77 +433,96 @@ def main():
                     _append_unique_lines(int_file, ["type=" + typ])
                     test_config["intConfig"] = os.path.basename(int_file)
 
-                    with open(os.path.join(test_dir, "submit_config.txt"), "w") as file:
+                    with open(os.path.join(test_dir, "submit_config.txt"), "w") as f:
                         for key in test_config.keys():
-                            file.write(str(key) + "=" + test_config[key] + "\n")
+                            f.write(str(key) + "=" + test_config[key] + "\n")
 
                     print("Test job created. Run locally with:")
                     print(f"cd {test_dir} && ./{exe_relpath} submit_config.txt")
-                    test_job_created = True
+                    test_job_event.set()
 
-                fileList = dict()
-                startIndex = 0
-                endIndex = min(fileSplit, len(fileListFlat))
-                counter = 0
-                while startIndex != endIndex:
-                    fileList[str(counter)] = ",".join(fileListFlat[startIndex:endIndex])
-                    startIndex = endIndex
-                    endIndex = min(endIndex + fileSplit, len(fileListFlat))
-                    counter += 1
-                    print("Made", len(fileList.keys()), "jobs for this sample")
+        # split fileListFlat into per-job groups
+        fileList = dict()
+        startIndex = 0
+        endIndex = min(fileSplit, len(fileListFlat))
+        counter = 0
+        while startIndex != endIndex:
+            fileList[str(counter)] = ",".join(fileListFlat[startIndex:endIndex])
+            startIndex = endIndex
+            endIndex = min(endIndex + fileSplit, len(fileListFlat))
+            counter += 1
+        print("Made", len(fileList.keys()), "jobs for sample", name)
 
-                sampleIndex = 0
-                for subDir in fileList:
-                    job_dir = os.path.join(mainDir, f"job_{index}")
-                    Path(job_dir).mkdir(parents=True, exist_ok=True)
+        sampleIndex = 0
+        jobs_created = 0
+        for subDir in fileList:
+            my_index = allocate_index()
+            job_dir = os.path.join(mainDir, f"job_{my_index}")
+            Path(job_dir).mkdir(parents=True, exist_ok=True)
 
-                    for file in copyList:
-                        src = resolve_path(file)
-                        dst = os.path.join(job_dir, os.path.basename(file))
-                        shutil.copyfile(src, dst)
+            for file in copyList:
+                src = resolve_path(file)
+                dst = os.path.join(job_dir, os.path.basename(file))
+                shutil.copyfile(src, dst)
 
-                    # aux/exe/x509 are provided via shared inputs
+            outputFileName = saveDirectory + "/" + name + "_" + str(sampleIndex) + ".root"
+            job_config = normalize_config_paths(dict(configDict))
+            job_config["saveFile"] = outputFileName
+            job_config["metaFile"] = saveDirectory + "/" + name + "_" + str(sampleIndex) + "_meta.root"
+            job_config["fileList"] = fileList[subDir]
+            job_config["batch"] = "True"
+            job_config["type"] = typ
+            job_config["sampleConfig"] = os.path.basename(configFile)
+            job_config["floatConfig"] = "floats.txt"
+            job_config["intConfig"] = "ints.txt"
+            if args.stage_inputs:
+                original_list = job_config["fileList"]
+                local_inputs = [
+                    f"input_{i}.root"
+                    for i, item in enumerate(original_list.split(","))
+                    if item.strip()
+                ]
+                job_config["__orig_fileList"] = original_list
+                job_config["fileList"] = ",".join(local_inputs)
+            if args.stage_outputs:
+                job_config["__orig_saveFile"] = job_config["saveFile"]
+                job_config["__orig_metaFile"] = job_config["metaFile"]
+                job_config["saveFile"] = os.path.basename(job_config["saveFile"])
+                job_config["metaFile"] = os.path.basename(job_config["metaFile"])
 
-                    outputFileName = saveDirectory + "/" + name + "_" + str(sampleIndex) + ".root"
-                    job_config = normalize_config_paths(dict(configDict))
-                    job_config["saveFile"] = outputFileName
-                    job_config["metaFile"] = saveDirectory + "/" + name + "_" + str(sampleIndex) + "_meta.root"
-                    job_config["fileList"] = fileList[subDir]
-                    job_config["batch"] = "True"
-                    job_config["type"] = typ
-                    job_config["sampleConfig"] = os.path.basename(configFile)
-                    job_config["floatConfig"] = "floats.txt"
-                    job_config["intConfig"] = "ints.txt"
-                    if args.stage_inputs:
-                        original_list = job_config["fileList"]
-                        local_inputs = [
-                            f"input_{i}.root"
-                            for i, item in enumerate(original_list.split(","))
-                            if item.strip()
-                        ]
-                        job_config["__orig_fileList"] = original_list
-                        job_config["fileList"] = ",".join(local_inputs)
-                    if args.stage_outputs:
-                        job_config["__orig_saveFile"] = job_config["saveFile"]
-                        job_config["__orig_metaFile"] = job_config["metaFile"]
-                        job_config["saveFile"] = os.path.basename(job_config["saveFile"])
-                        job_config["metaFile"] = os.path.basename(job_config["metaFile"])
-                    normScale = str(extraScale * kfac * lumi * xsec / norm)
+            normScale = str(extraScale * kfac * lumi * xsec / norm)
 
-                    float_file = os.path.join(job_dir, job_config.get("floatConfig", "floats.txt"))
-                    _append_unique_lines(float_file, ["normScale=" + normScale, "sampleNorm=" + str(norm)])
-                    job_config["floatConfig"] = os.path.basename(float_file)
+            float_file = os.path.join(job_dir, job_config.get("floatConfig", "floats.txt"))
+            _append_unique_lines(float_file, ["normScale=" + normScale, "sampleNorm=" + str(norm)])
+            job_config["floatConfig"] = os.path.basename(float_file)
 
-                    int_file = os.path.join(job_dir, job_config.get("intConfig", "ints.txt"))
-                    _append_unique_lines(int_file, ["type=" + typ])
-                    job_config["intConfig"] = os.path.basename(int_file)
+            int_file = os.path.join(job_dir, job_config.get("intConfig", "ints.txt"))
+            _append_unique_lines(int_file, ["type=" + typ])
+            job_config["intConfig"] = os.path.basename(int_file)
 
-                    with open(os.path.join(job_dir, "submit_config.txt"), "w") as file:
-                        for key in job_config.keys():
-                            file.write(str(key) + "=" + job_config[key] + "\n")
+            with open(os.path.join(job_dir, "submit_config.txt"), "w") as f:
+                for key in job_config.keys():
+                    f.write(str(key) + "=" + job_config[key] + "\n")
 
-                    index += 1
-                    sampleIndex += 1
+            jobs_created += 1
+            sampleIndex += 1
+
+        return jobs_created
+
+    # process samples in parallel
+    total_futures = []
+    with ThreadPoolExecutor(max_workers=max(1, args.threads)) as executor:
+        for innerDict in samples_to_process:
+            total_futures.append(executor.submit(process_sample, innerDict))
+
+        # propagate exceptions
+        for fut in as_completed(total_futures):
+            exc = fut.exception()
+            if exc:
+                raise exc
+
+    # total job count is the counter value
+    index = index_container["value"]
 
     submit_path = write_submit_files(
         mainDir,
@@ -467,6 +542,7 @@ def main():
         include_aux=aux_exists,
         shared_dir_name=shared_dir_name,
         eos_sched=args.eos_sched,
+        config_file=submit_config_name,
     )
     if index == 1:
         print(index, "job created")

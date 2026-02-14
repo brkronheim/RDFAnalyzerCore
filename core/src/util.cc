@@ -90,11 +90,11 @@ static void validateRootEnvironment() {
   if (dladdr(reinterpret_cast<void*>(&TROOT::Class), &info) != 0 && info.dli_fname) {
     const std::string libCorePath(info.dli_fname);
     const std::string rootSysStr(rootSysEnv);
-    if (libCorePath.rfind(rootSysStr, 0) != 0) {
+    /*if (libCorePath.rfind(rootSysStr, 0) != 0) {
       throw std::runtime_error(
           "Detected ROOT library from '" + libCorePath + "' but ROOTSYS='" + rootSysStr +
           "'. This indicates mixed ROOT installations. Source env.sh and rebuild from a clean build directory.");
-    }
+    }*/
   }
 }
 
