@@ -10,6 +10,8 @@ import requests
 from requests.exceptions import ChunkedEncodingError, RequestException
 import urllib3
 from rucio.client import Client
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from submission_backend import (
     read_config, 
@@ -220,8 +222,8 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
         print(f"Warning: no files found for '{directory}'")
         return {}
 
-    print("Output received")
-    print(len(rucioOutput), "files found")
+    #print("Output received")
+    #print(len(rucioOutput), "files found")
     for filedata in rucioOutput:
          file = filedata["name"]
          states = filedata.get("states", {})
@@ -257,9 +259,9 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
              groups[group] = redirector+file
              groupCount[group]=1
              groupSizes[group]=np.round(size,1)
-    print("groupCounts:", groupCount)
-    print("groupSizes:", groupSizes)
-    print(len(groups), "groups found and", filesFound, "files found")
+    #print("groupCounts:", groupCount)
+    #print("groupSizes:", groupSizes)
+    #print(len(groups), "groups found and", filesFound, "files found")
     return(groups)
 
 def getSampleList(configFile):
@@ -306,6 +308,12 @@ def main():
         action='store_true',
         help='use EOS scheduling',
     )
+    parser.add_argument(
+        '--threads',
+        type=int,
+        default=4,
+        help='number of threads for DAS/Rucio queries and job splitting (default: 4)',
+    )
 
     args = parser.parse_args()
 
@@ -336,9 +344,7 @@ def main():
         return os.path.abspath(os.path.join(base_dir, path_value))
 
     configDict = read_config(args.config)
-    print(configDict.keys())
-    config_ext = get_config_extension(args.config)
-    submit_config_name = f"submit_config{config_ext}"
+    #print(configDict.keys())
     fileSplit = args.size
     # x509loc will be set later
     exe_path = resolve_path(args.exe)
@@ -353,16 +359,30 @@ def main():
 
 
     sampleList, baseDirectoryList, lumi, WL, BL = getSampleList(config)
-    print("WL: ", WL)
-    print("BL: ", BL)
+    #print("WL: ", WL)
+    #print("BL: ", BL)
 
-    client = get_rucio_client()
-    index = 0
+    # Create a thread-safe index and a one-time event for the test job
+    index_lock = threading.Lock()
+    index_container = {"value": 0}
+    def allocate_index():
+        with index_lock:
+            v = index_container["value"]
+            index_container["value"] += 1
+            return v
+
+    test_job_event = threading.Event()
+
     mainDir = f"condorSub_{args.name}/"
-    test_job_created = False
 
     if args.eos_sched:
         mainDir = os.path.join("/eos/user/b/bkronhei/RDFAnalyzerCore", mainDir)
+        # Inform the user how to enable the EOS condor submission environment
+        print("Note: using EOS scheduling — before submitting run: module load lxbatch/eossubmit")
+
+    # Abort if the submission directory already exists to avoid accidental reuse/overwrite
+    if os.path.exists(mainDir):
+        raise SystemExit(f"Submission directory already exists: {mainDir!r}. Remove it or choose a different --name.")
 
     x509loc = "x509" if args.x509 else None
     x509_src = resolve_path(args.x509) if args.x509 else None
@@ -387,99 +407,131 @@ def main():
         for name in copy_basenames
         if name not in skip_transfer
     ]
-    for key in sampleList:
-        print("Checking ", key)
-        # get the general information about this sample
-        sample = sampleList[key]
+
+    # worker that processes a single sample (can run in parallel)
+    def process_sample(key, sample):
+        # create a per-thread Rucio client to avoid client thread-safety issues
+        try:
+            client_local = get_rucio_client()
+        except Exception as e:
+            print(f"Warning: cannot create Rucio client for sample {key}: {e}")
+            return 0
+
+        #print("Checking ", key)
         name = sample['name']
         das = sample['das']
         xsec = float(sample['xsec'])
         typ = sample['type']
-        if('norm' not in sample):
-            norm = 1.0
-        else:
-            norm = float(sample['norm'])
-        kfac  = float(sample['kfac']) if 'kfac' in sample else 1.0
-        site  = sample['site'] if 'site' in sample else ''
+        norm = float(sample['norm']) if 'norm' in sample else 1.0
+        kfac = float(sample['kfac']) if 'kfac' in sample else 1.0
+        site = sample.get('site', '')
+        extraScale = float(sample['extraScale']) if 'extraScale' in sample else 1.0
 
-        extraScale  = float(sample['extraScale']) if 'extraScale' in sample else 1.0
-        
-        # Find all the sub directories with root files
-        #subDirs = []
-        #for baseDir in baseDirectoryList:
-        #    subDirs += findSubFolders(baseDir+"/"+directory)
-        # generate submission files for each sub directory
         sampleIndex = 0
 
-        fileList = queryRucio(das, fileSplit, WL, BL, site, client)
-        if args.make_test_job and not test_job_created and fileList:
-            first_group = next(iter(fileList.values()))
+        das_entries = [d.strip() for d in das.split(',') if d and d.strip()]
+        # parallelize queries across DAS entries for this sample
+        groups_result = {}
+        if not das_entries:
+            groups_result = {}
+        elif len(das_entries) == 1:
+            groups_result = queryRucio(das_entries[0], fileSplit, WL, BL, site, client_local)
+        else:
+            # ensure ThreadPoolExecutor gets at least 1 worker
+            workers = max(1, min(len(das_entries), args.threads))
+            with ThreadPoolExecutor(max_workers=workers) as das_executor:
+                das_futures = {das_executor.submit(queryRucio, das_entry, fileSplit, WL, BL, site, client_local): das_entry for das_entry in das_entries}
+                all_files = []
+                for fut in as_completed(das_futures):
+                    res = fut.result()
+                    if not res:
+                        continue
+                    for g in sorted(res.keys()):
+                        grp = res[g]
+                        if not grp:
+                            continue
+                        parts = [p.strip() for p in grp.split(',') if p.strip()]
+                        all_files.extend(parts)
+                # deduplicate while preserving order
+                seen = set()
+                combined = []
+                for f in all_files:
+                    if f in seen:
+                        continue
+                    seen.add(f)
+                    combined.append(f)
+                groups_result = {0: ",".join(combined)} if combined else {}
+
+        # Create a single local test job (race-protected)
+        if args.make_test_job and not test_job_event.is_set() and groups_result:
+            first_group = next(iter(groups_result.values()))
             first_file = first_group.split(",")[0] if first_group else ""
             if first_file:
-                test_dir = os.path.join(mainDir, "test_job")
-                Path(test_dir).mkdir(parents=True, exist_ok=True)
+                with index_lock:
+                    if not test_job_event.is_set():
+                        test_dir = os.path.join(mainDir, "test_job")
+                        Path(test_dir).mkdir(parents=True, exist_ok=True)
 
-                for file in copyList:
-                    src = resolve_path(file)
-                    dst = os.path.join(test_dir, os.path.basename(file))
-                    Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(src, dst)
+                        for file in copyList:
+                            src = resolve_path(file)
+                            dst = os.path.join(test_dir, os.path.basename(file))
+                            Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
+                            shutil.copyfile(src, dst)
 
-                aux_src = resolve_path("aux")
-                if aux_src and os.path.exists(aux_src):
-                    _link_or_copy_dir(aux_src, os.path.join(test_dir, "aux"), use_symlink=False)
-                else:
-                    print(f"Warning: 'aux' directory not found at '{aux_src}'; skipping aux link/copy")
-                _link_or_copy_file(exe_path, os.path.join(test_dir, exe_relpath), use_symlink=False)
+                        aux_src_local = resolve_path("aux")
+                        if aux_src_local and os.path.exists(aux_src_local):
+                            _link_or_copy_dir(aux_src_local, os.path.join(test_dir, "aux"), use_symlink=False)
+                        else:
+                            print(f"Warning: 'aux' directory not found at '{aux_src_local}'; skipping aux link/copy")
+                        _link_or_copy_file(exe_path, os.path.join(test_dir, exe_relpath), use_symlink=False)
 
-                test_config = normalize_config_paths(dict(configDict))
-                test_config["fileList"] = first_file
-                test_config["batch"] = "False"
-                test_config.setdefault("threads", "1")
-                test_config["type"] = typ
-                test_config["saveFile"] = "test_output.root"
-                test_config["metaFile"] = "test_output_meta.root"
-                test_config["sampleConfig"] = os.path.basename(config)
-                test_config["floatConfig"] = "floats.txt"
-                test_config["intConfig"] = "ints.txt"
+                        test_config = normalize_config_paths(dict(configDict))
+                        test_config["fileList"] = first_file
+                        test_config["batch"] = "False"
+                        test_config.setdefault("threads", "1")
+                        test_config["type"] = typ
+                        test_config["saveFile"] = "test_output.root"
+                        test_config["metaFile"] = "test_output_meta.root"
+                        test_config["sampleConfig"] = os.path.basename(config)
+                        test_config["floatConfig"] = "floats.txt"
+                        test_config["intConfig"] = "ints.txt"
 
-                normScale = str(extraScale*kfac*lumi*xsec/norm)
+                        normScale = str(extraScale * kfac * lumi * xsec / norm)
 
-                # Write float keys uniquely (avoid duplicates if file already contains them)
-                float_file = os.path.join(test_dir, test_config.get("floatConfig", "floats.txt"))
-                _append_unique_lines(float_file, ["normScale="+normScale, "sampleNorm="+str(norm)])
-                test_config["floatConfig"] = os.path.basename(float_file)
+                        float_file = os.path.join(test_dir, test_config.get("floatConfig", "floats.txt"))
+                        _append_unique_lines(float_file, ["normScale="+normScale, "sampleNorm="+str(norm)])
+                        test_config["floatConfig"] = os.path.basename(float_file)
 
-                int_file = os.path.join(test_dir, test_config.get("intConfig", "ints.txt"))
-                _append_unique_lines(int_file, ["type="+typ])
-                test_config["intConfig"] = os.path.basename(int_file)
+                        int_file = os.path.join(test_dir, test_config.get("intConfig", "ints.txt"))
+                        _append_unique_lines(int_file, ["type="+typ])
+                        test_config["intConfig"] = os.path.basename(int_file)
 
-                write_config(test_config, os.path.join(test_dir, submit_config_name))
+                        with open(os.path.join(test_dir, "submit_config.txt"), "w") as f:
+                            for cfg_key in test_config.keys():
+                                f.write(str(cfg_key)+"="+test_config[cfg_key]+"\n")
 
-                print("Test job created. Run locally with:")
-                print(f"cd {test_dir} && ./{exe_relpath} {submit_config_name}")
-                test_job_created = True
-        for subDir in fileList:
-            job_dir = os.path.join(mainDir, f"job_{index}")
+                        print("Test job created. Run locally with:")
+                        print(f"cd {test_dir} && ./{exe_relpath} submit_config.txt")
+                        test_job_event.set()
+
+        # create per-job folders for this sample
+        jobs_created = 0
+        for subDir in groups_result:
+            my_index = allocate_index()
+            job_dir = os.path.join(mainDir, f"job_{my_index}")
             Path(job_dir).mkdir(parents=True, exist_ok=True)
 
-            # copy config files into per-job folder
             for file in copyList:
                 src = resolve_path(file)
                 dst = os.path.join(job_dir, os.path.basename(file))
                 Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(src, dst)
 
-            # aux/exe/x509 are provided via shared inputs
-            #print("linking", os.getcwd()+"/aux", mainDir+"job_"+str(index)+"/aux")
-            # aux and executable are provided via shared inputs
-
-            # determine name of output file
-            outputFileName = saveDirectory+"/"+name+"_"+str(sampleIndex)+".root"
+            outputFileName = saveDirectory + "/" + name + "_" + str(sampleIndex) + ".root"
             job_config = normalize_config_paths(dict(configDict))
             job_config["saveFile"] = outputFileName
             job_config["metaFile"] = saveDirectory + "/" + name + "_" + str(sampleIndex) + "_meta.root"
-            job_config["fileList"] = fileList[subDir]
+            job_config["fileList"] = groups_result[subDir]
             job_config["batch"] = "True"
             job_config["type"] = typ
             job_config["sampleConfig"] = os.path.basename(config)
@@ -499,11 +551,9 @@ def main():
                 job_config["__orig_metaFile"] = job_config["metaFile"]
                 job_config["saveFile"] = os.path.basename(job_config["saveFile"])
                 job_config["metaFile"] = os.path.basename(job_config["metaFile"])
-            # determine normalization scale
-            normScale = str(extraScale*kfac*lumi*xsec/norm)
-            
-            # augment float and int config files
-            # Write float keys uniquely (avoid duplicates if file already contains them)
+
+            normScale = str(extraScale * kfac * lumi * xsec / norm)
+
             float_file = os.path.join(job_dir, job_config.get("floatConfig", "floats.txt"))
             _append_unique_lines(float_file, ["normScale="+normScale, "sampleNorm="+str(norm)])
             job_config["floatConfig"] = os.path.basename(float_file)
@@ -511,10 +561,31 @@ def main():
             int_file = os.path.join(job_dir, job_config.get("intConfig", "ints.txt"))
             _append_unique_lines(int_file, ["type="+typ])
             job_config["intConfig"] = os.path.basename(int_file)
-            # make the main config file and update or add the savefile
-            write_config(job_config, os.path.join(job_dir, submit_config_name))
-            index+=1
-            sampleIndex+=1
+
+            with open(os.path.join(job_dir, "submit_config.txt"), "w") as f:
+                for key in job_config.keys():
+                    f.write(str(key)+"="+job_config[key]+"\n")
+
+            jobs_created += 1
+            sampleIndex += 1
+
+        return jobs_created
+
+    # run sample processing in parallel using a thread pool
+    max_workers = max(1, args.threads)
+    futures = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for key, sample in sampleList.items():
+            futures.append(executor.submit(process_sample, key, sample))
+
+        # propagate exceptions from worker threads
+        for fut in as_completed(futures):
+            exc = fut.exception()
+            if exc:
+                raise exc
+
+    # total jobs created
+    index = index_container["value"]
 
     submit_path = write_submit_files(
         mainDir,
@@ -525,7 +596,7 @@ def main():
         args.root_setup,
         x509loc=x509loc,
         want_os="el9",
-        max_runtime="1200",
+        max_runtime="3600",
         request_memory=2000,
         request_cpus=1,
         request_disk=20000,
@@ -541,7 +612,6 @@ def main():
         print(index, "jobs created")
     print("use the following command to submit:")
     print("condor_submit", submit_path)
-    index+=1
             
 
 if(__name__=="__main__"):

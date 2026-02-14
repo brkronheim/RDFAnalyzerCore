@@ -720,12 +720,22 @@ The submission scripts in core/python share a common backend (core/python/submis
 
 These scripts are the recommended way to submit analyses to HTCondor from this framework.
 
+Important: when using `--eos-sched` to create submissions under EOS, you must activate the EOS Condor submission environment before submitting. Run:
+
+```
+module load lxbatch/eossubmit
+```
+
+This ensures `condor_submit` targets the EOS-aware batch system used at your site.
+
 ## Common options
 - --exe PATH: path to the C++ executable to run
 - --root-setup "CMD": command to source ROOT (optional). If omitted, the job uses only whatever is available on the worker.
 - --stage-inputs: xrdcp input ROOT files to the worker before running
+  - When `--stage-inputs` is enabled the submitter will xrdcp URLs to local files before running the job. If a URL contains a site-specific test redirector (e.g. `.../store/test/xrootd/<SITE>//store/mc/...`) the staging step will automatically normalize it to the generic path (`root://xrootd-cms.infn.it/store/mc/...`) for the copy. NOTE: this normalization is applied only for the xrdcp staging step — in-job `xrootd` access paths are left unchanged.
 - --stage-outputs: write outputs locally, then xrdcp to final destination
 - --spool: prepare for condor_submit -spool by copying shared inputs (aux + executable) once per submission
+- --threads N: number of worker threads used for remote-metadata queries and per-sample splitting (default: 4). Applies to both `generateSubmissionFilesNANO.py` and `generateSubmissionFilesOpenData.py` — set to 1 for serial (default-compatible) execution.
 
 ## Shared inputs (aux + executable)
 The submitters now stage the executable and aux directory once per submission under:
