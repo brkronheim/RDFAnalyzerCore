@@ -6,6 +6,9 @@
 #include <TH1D.h>
 #include <THStack.h>
 #include <TLegend.h>
+#include <TMatrixD.h>
+#include <TMatrixDSym.h>
+#include <TMatrixDSymEigen.h>
 #include <TPad.h>
 #include <TROOT.h>
 
@@ -74,6 +77,150 @@ std::unique_ptr<TH1D> PlottingUtility::computeRatioHistogram(const TH1D& numerat
     ratio->SetBinError(i, ratio->GetBinError(i) / denomValue);
   }
   return ratio;
+}
+
+RatioSummary PlottingUtility::computeRatioSummary(const TH1D& loHist,
+                                                  const TH1D& nloHist,
+                                                  const TH1D* covariance,
+                                                  const TH1D* systematic) {
+  RatioSummary summary;
+  const int binCount = loHist.GetNbinsX();
+  summary.ratio.resize(binCount, 0.0);
+  summary.error.resize(binCount, 0.0);
+  summary.pull.resize(binCount, 0.0);
+
+  for (int i = 1; i <= binCount; ++i) {
+    const double lo = loHist.GetBinContent(i);
+    const double nlo = nloHist.GetBinContent(i);
+    const double loVar = std::pow(loHist.GetBinError(i), 2.0);
+    const double nloVar = std::pow(nloHist.GetBinError(i), 2.0);
+    const double cov = covariance ? covariance->GetBinContent(i) : 0.0;
+    const double systVar = systematic ? std::pow(systematic->GetBinContent(i), 2.0) : 0.0;
+
+    if (std::abs(nlo) >= kMinDenominator) {
+      const double ratio = lo / nlo;
+      summary.ratio[i - 1] = ratio;
+      const double relLo = (std::abs(lo) >= kMinDenominator) ? loVar / (lo * lo) : 0.0;
+      const double relNlo = nloVar / (nlo * nlo);
+      const double relCov = (std::abs(lo) >= kMinDenominator) ? (2.0 * cov / (nlo * lo)) : 0.0;
+      const double err2 = std::max(0.0, relLo + relNlo - relCov);
+      summary.error[i - 1] = std::abs(ratio) * std::sqrt(err2);
+    }
+
+    const double denom2 = std::max(0.0, loVar + nloVar - 2.0 * cov + systVar);
+    if (denom2 >= kMinDenominator) {
+      summary.pull[i - 1] = (lo - nlo) / std::sqrt(denom2);
+    }
+  }
+
+  return summary;
+}
+
+PCAResult PlottingUtility::computePCAEnvelope(const TH1D& nominal,
+                                              const std::vector<const TH1D*>& variations,
+                                              const std::string& baseName) {
+  PCAResult result;
+  const int binCount = nominal.GetNbinsX();
+  if (variations.empty() || binCount <= 0) {
+    return result;
+  }
+
+  const int nVariations = static_cast<int>(variations.size());
+  TMatrixD counts(nVariations, binCount);
+  for (int v = 0; v < nVariations; ++v) {
+    if (!variations[v] || variations[v]->GetNbinsX() != binCount) {
+      return result;
+    }
+    for (int b = 0; b < binCount; ++b) {
+      counts(v, b) = variations[v]->GetBinContent(b + 1);
+    }
+  }
+
+  std::vector<double> means(binCount, 0.0);
+  std::vector<double> stddev(binCount, 0.0);
+  for (int b = 0; b < binCount; ++b) {
+    for (int v = 0; v < nVariations; ++v) {
+      means[b] += counts(v, b);
+    }
+    means[b] /= static_cast<double>(nVariations);
+    for (int v = 0; v < nVariations; ++v) {
+      const double delta = counts(v, b) - means[b];
+      stddev[b] += delta * delta;
+    }
+    stddev[b] = std::sqrt(stddev[b] / static_cast<double>(nVariations));
+  }
+
+  TMatrixD standardized(nVariations, binCount);
+  for (int v = 0; v < nVariations; ++v) {
+    for (int b = 0; b < binCount; ++b) {
+      if (stddev[b] < kMinDenominator) {
+        standardized(v, b) = 0.0;
+      } else {
+        standardized(v, b) = (counts(v, b) - means[b]) / stddev[b];
+      }
+    }
+  }
+
+  TMatrixDSym covariance(binCount);
+  if (nVariations > 1) {
+    for (int i = 0; i < binCount; ++i) {
+      for (int j = 0; j < binCount; ++j) {
+        double accum = 0.0;
+        for (int v = 0; v < nVariations; ++v) {
+          accum += standardized(v, i) * standardized(v, j);
+        }
+        covariance(i, j) = accum / static_cast<double>(nVariations - 1);
+      }
+    }
+  }
+
+  TMatrixDSymEigen eigen(covariance);
+  const TVectorD eigenValues = eigen.GetEigenValues();
+  const TMatrixD eigenVectors = eigen.GetEigenVectors();
+
+  result.explainedVariance.resize(binCount, 0.0);
+  double totalEigen = 0.0;
+  for (int i = 0; i < binCount; ++i) {
+    totalEigen += std::max(0.0, eigenValues[i]);
+  }
+  if (totalEigen >= kMinDenominator) {
+    for (int i = 0; i < binCount; ++i) {
+      result.explainedVariance[i] = std::max(0.0, eigenValues[i]) / totalEigen;
+    }
+  }
+
+  std::vector<double> uncert(binCount, 0.0);
+  for (int b = 0; b < binCount; ++b) {
+    double variance = 0.0;
+    for (int i = 0; i < binCount; ++i) {
+      const double lambda = std::max(0.0, eigenValues[i]);
+      variance += eigenVectors(b, i) * eigenVectors(b, i) * lambda;
+    }
+    uncert[b] = stddev[b] * std::sqrt(std::max(0.0, variance));
+  }
+
+  result.mean = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(nominal.Clone((baseName + "_mean").c_str())));
+  result.up = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(nominal.Clone((baseName + "_up").c_str())));
+  result.down = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(nominal.Clone((baseName + "_down").c_str())));
+  if (!result.mean || !result.up || !result.down) {
+    result = PCAResult{};
+    return result;
+  }
+  result.mean->SetDirectory(nullptr);
+  result.up->SetDirectory(nullptr);
+  result.down->SetDirectory(nullptr);
+
+  for (int b = 0; b < binCount; ++b) {
+    result.mean->SetBinContent(b + 1, means[b]);
+    result.up->SetBinContent(b + 1, means[b] + uncert[b]);
+    result.down->SetBinContent(b + 1, means[b] - uncert[b]);
+    const double meanVar = 0.0;
+    result.mean->SetBinError(b + 1, std::sqrt(meanVar));
+    result.up->SetBinError(b + 1, std::sqrt(meanVar));
+    result.down->SetBinError(b + 1, std::sqrt(meanVar));
+  }
+
+  return result;
 }
 
 PlotResult PlottingUtility::makeStackPlot(const PlotRequest& request) const {

@@ -127,3 +127,58 @@ TEST(PlottingUtilityTest, CreatesLinearAndLogStackPlotsWithRatio) {
   std::remove(linearPath.c_str());
   std::remove(logPath.c_str());
 }
+
+TEST(PlottingUtilityTest, ComputesDetailedRatioSummaryAndPCAEnvelope) {
+  TH1D lo("lo", "lo", 3, 0.0, 3.0);
+  TH1D nlo("nlo", "nlo", 3, 0.0, 3.0);
+  TH1D cov("cov", "cov", 3, 0.0, 3.0);
+  TH1D syst("syst", "syst", 3, 0.0, 3.0);
+
+  lo.SetBinContent(1, 12.0);
+  lo.SetBinError(1, 3.0);
+  nlo.SetBinContent(1, 10.0);
+  nlo.SetBinError(1, 2.0);
+  cov.SetBinContent(1, 1.0);
+  syst.SetBinContent(1, 1.5);
+
+  lo.SetBinContent(2, 0.0);
+  lo.SetBinError(2, 0.0);
+  nlo.SetBinContent(2, 5.0);
+  nlo.SetBinError(2, 1.0);
+
+  auto summary = PlottingUtility::computeRatioSummary(lo, nlo, &cov, &syst);
+  ASSERT_EQ(summary.ratio.size(), 3u);
+  ASSERT_EQ(summary.error.size(), 3u);
+  ASSERT_EQ(summary.pull.size(), 3u);
+  EXPECT_NEAR(summary.ratio[0], 1.2, 1e-12);
+  EXPECT_GT(summary.error[0], 0.0);
+  EXPECT_GT(summary.pull[0], 0.0);
+  EXPECT_DOUBLE_EQ(summary.ratio[1], 0.0);
+  EXPECT_DOUBLE_EQ(summary.error[1], 0.0);
+
+  TH1D nominal("nominal", "nominal", 2, 0.0, 2.0);
+  nominal.SetBinContent(1, 10.0);
+  nominal.SetBinContent(2, 20.0);
+
+  TH1D var1("var1", "var1", 2, 0.0, 2.0);
+  TH1D var2("var2", "var2", 2, 0.0, 2.0);
+  TH1D var3("var3", "var3", 2, 0.0, 2.0);
+  var1.SetBinContent(1, 9.0);
+  var1.SetBinContent(2, 19.0);
+  var2.SetBinContent(1, 10.0);
+  var2.SetBinContent(2, 21.0);
+  var3.SetBinContent(1, 11.0);
+  var3.SetBinContent(2, 20.0);
+
+  std::vector<const TH1D*> variations = {&var1, &var2, &var3};
+  auto pca = PlottingUtility::computePCAEnvelope(nominal, variations, "unit");
+  ASSERT_NE(pca.mean, nullptr);
+  ASSERT_NE(pca.up, nullptr);
+  ASSERT_NE(pca.down, nullptr);
+  ASSERT_EQ(pca.explainedVariance.size(), 2u);
+
+  EXPECT_NEAR(pca.mean->GetBinContent(1), 10.0, 1e-12);
+  EXPECT_NEAR(pca.mean->GetBinContent(2), 20.0, 1e-12);
+  EXPECT_GE(pca.up->GetBinContent(1), pca.mean->GetBinContent(1));
+  EXPECT_LE(pca.down->GetBinContent(1), pca.mean->GetBinContent(1));
+}

@@ -527,6 +527,8 @@ The file is chosen using metaFile in the config, with saveFile as a fallback.
 - per-process normalization through optional counter histograms (for example `counter_weightSum_<sample>`)
 - linear and log-y stack plots
 - optional data/MC ratio panels
+- ratio/error/pull summary computation
+- PCA-based mean/up/down envelope construction from variation histograms
 
 ---
 

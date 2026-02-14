@@ -3,6 +3,7 @@
 
 #include <TH1.h>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,19 @@ struct PlotResult {
   double dataIntegral = 0.0;
 };
 
+struct RatioSummary {
+  std::vector<double> ratio;
+  std::vector<double> error;
+  std::vector<double> pull;
+};
+
+struct PCAResult {
+  std::unique_ptr<TH1D> mean;
+  std::unique_ptr<TH1D> up;
+  std::unique_ptr<TH1D> down;
+  std::vector<double> explainedVariance;
+};
+
 class PlottingUtility {
 public:
   PlotResult makeStackPlot(const PlotRequest& request) const;
@@ -43,6 +57,13 @@ public:
   static std::unique_ptr<TH1D> computeRatioHistogram(const TH1D& numerator,
                                                      const TH1D& denominator,
                                                      const std::string& name = "ratio");
+  static RatioSummary computeRatioSummary(const TH1D& loHist,
+                                          const TH1D& nloHist,
+                                          const TH1D* covariance = nullptr,
+                                          const TH1D* systematic = nullptr);
+  static PCAResult computePCAEnvelope(const TH1D& nominal,
+                                      const std::vector<const TH1D*>& variations,
+                                      const std::string& baseName = "pca");
 };
 
 #endif // PLOTTINGUTILITY_H_INCLUDED
