@@ -134,7 +134,7 @@ Manages ONNX machine learning models from any ML framework.
 Manages SOFIE (System for Optimized Fast Inference code Emit) models from ROOT TMVA.
 - Build-time compilation from ONNX for maximum performance
 - Zero runtime overhead (compiled C++ code)
-- 2-3x faster than runtime ONNX evaluation
+- Eliminates runtime model loading overhead compared to ONNX Runtime
 - Manual registration required (rebuild for model updates)
 - **See**: [SOFIE Implementation Guide](docs/SOFIE_IMPLEMENTATION.md)
 
