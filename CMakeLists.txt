@@ -21,7 +21,7 @@ find_package(ROOT REQUIRED)
 find_package(Boost REQUIRED CONFIG)
 
 # Setup yaml-cpp
-include(SetupYamlCpp)
+# include(SetupYamlCpp)
 
 # Setup ONNX Runtime
 include(SetupOnnxRuntime)
