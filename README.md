@@ -134,7 +134,7 @@ Manages ONNX machine learning models from any ML framework.
 Manages SOFIE (System for Optimized Fast Inference code Emit) models from ROOT TMVA.
 - Build-time compilation from ONNX for maximum performance
 - Zero runtime overhead (compiled C++ code)
-- 2-3x faster than runtime ONNX evaluation
+- Eliminates runtime model loading overhead compared to ONNX Runtime
 - Manual registration required (rebuild for model updates)
 - **See**: [SOFIE Implementation Guide](docs/SOFIE_IMPLEMENTATION.md)
 
@@ -462,26 +462,6 @@ For new plugins, see [Plugin Development Guide](docs/PLUGIN_DEVELOPMENT.md).
 ## License
 
 This project is licensed under the terms specified in the repository.
-
-## Citation
-
-Important: when using `--eos-sched` to create submissions under EOS, you must activate the EOS Condor submission environment before submitting. Run:
-
-```
-module load lxbatch/eossubmit
-```
-
-This ensures `condor_submit` targets the EOS-aware batch system used at your site.
-
-## Common options
-- --exe PATH: path to the C++ executable to run
-- --root-setup "CMD": command to source ROOT (optional). If omitted, the job uses only whatever is available on the worker.
-- --stage-inputs: xrdcp input ROOT files to the worker before running
-  - When `--stage-inputs` is enabled the submitter will xrdcp URLs to local files before running the job. If a URL contains a site-specific test redirector (e.g. `.../store/test/xrootd/<SITE>//store/mc/...`) the staging step will automatically normalize it to the generic path (`root://xrootd-cms.infn.it/store/mc/...`) for the copy. NOTE: this normalization is applied only for the xrdcp staging step — in-job `xrootd` access paths are left unchanged.
-- --stage-outputs: write outputs locally, then xrdcp to final destination
-- --spool: prepare for condor_submit -spool by copying shared inputs (aux + executable) once per submission
-- --threads N: number of worker threads used for remote-metadata queries and per-sample splitting (default: 4). Applies to both `generateSubmissionFilesNANO.py` and `generateSubmissionFilesOpenData.py` — set to 1 for serial (default-compatible) execution.
-
 
 ## Acknowledgments
 

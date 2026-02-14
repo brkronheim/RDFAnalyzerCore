@@ -199,6 +199,8 @@ ONNX Runtime is downloaded automatically during build.
 
 Contributions welcome! See [Plugin Development Guide](PLUGIN_DEVELOPMENT.md) to get started.
 
+For implementation details and design notes for major features, see the [DEVELOPMENT](DEVELOPMENT/) directory.
+
 ## License
 
 See repository for license information.

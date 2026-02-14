@@ -148,6 +148,50 @@ python core/python/generateSubmissionFilesNANO.py \
 | `--no-validate` | No | Skip configuration validation | False |
 | `--make-test-job` | No | Create a local test job with one file | False |
 | `--eos-sched` | No | Use EOS scheduling (for special cases) | False |
+| `--spool` | No | Prepare for `condor_submit -spool` by copying shared inputs once | False |
+| `--threads` | No | Number of worker threads for remote-metadata queries and splitting | 4 |
+
+**Important**: When using `--eos-sched` to create submissions under EOS, you must activate the EOS Condor submission environment before submitting:
+
+```bash
+module load lxbatch/eossubmit
+```
+
+This ensures `condor_submit` targets the EOS-aware batch system used at your site.
+
+### Detailed Option Descriptions
+
+#### Input/Output Staging
+
+**`--stage-inputs`**: Copy input ROOT files to the worker before running the analysis.
+- When enabled, the submitter will xrdcp URLs to local files before running the job
+- If a URL contains a site-specific test redirector (e.g., `.../store/test/xrootd/<SITE>//store/mc/...`), the staging step will automatically normalize it to the generic path (`root://xrootd-cms.infn.it/store/mc/...`) for the copy
+- **Note**: This normalization is applied only for the xrdcp staging step — in-job `xrootd` access paths are left unchanged
+- Useful for sites with unreliable XRootD access or when processing many small files
+
+**`--stage-outputs`**: Write outputs locally on the worker, then xrdcp to final destination.
+- Reduces risk of output corruption from network issues
+- Can improve performance on sites with slow network storage
+- Requires sufficient local disk space on worker nodes
+
+**`--spool`**: Prepare for `condor_submit -spool` by copying shared inputs once per submission.
+- Copies auxiliary files and executable to a shared location
+- Each job references the shared files instead of copying individually
+- Significantly reduces scheduler load for large submissions
+- Requires condor's spool directory to be accessible
+
+#### Performance Options
+
+**`--threads N`**: Number of worker threads used for remote-metadata queries and per-sample splitting.
+- Default: 4
+- Applies to both `generateSubmissionFilesNANO.py` and `generateSubmissionFilesOpenData.py`
+- Set to 1 for serial (default-compatible) execution
+- Higher values speed up file discovery but may hit server rate limits
+
+**`--root-setup "CMD"`**: Command to source ROOT environment (optional).
+- Example: `--root-setup "source /cvmfs/sft.cern.ch/lcg/views/LCG_102/x86_64-centos7-gcc11-opt/setup.sh"`
+- If omitted, the job uses whatever ROOT is available on the worker
+- Useful when worker nodes don't have ROOT in the default environment
 
 ### Configuration File Format
 
@@ -261,6 +305,8 @@ python core/python/generateSubmissionFilesOpenData.py \
 | `--no-validate` | No | Skip configuration validation | False |
 | `--make-test-job` | No | Create local test job | False |
 | `--eos-sched` | No | Use EOS scheduling | False |
+| `--spool` | No | Prepare for `condor_submit -spool` | False |
+| `--threads` | No | Number of worker threads for queries/splitting | 4 |
 
 ### Configuration File Format
 

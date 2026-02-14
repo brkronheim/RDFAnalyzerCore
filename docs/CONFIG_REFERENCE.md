@@ -159,7 +159,7 @@ name=sofie_classifier inputVariables=lep_pt,met runVar=pass_selection
 **Key Differences from ONNX/BDT**:
 - No `file` parameter (models compiled at build time)
 - Must manually register models via `registerModel()` in C++ code
-- Faster inference (2-3x) but less flexible (rebuild required for updates)
+- Potentially faster inference (compiled code eliminates runtime overhead) but less flexible (rebuild required for updates)
 
 **See**: [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for complete usage including:
 - Generating SOFIE C++ code from ONNX

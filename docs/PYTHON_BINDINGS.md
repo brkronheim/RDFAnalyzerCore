@@ -251,6 +251,123 @@ analyzer.save()
 | np.uint32   | "unsigned int"      |
 | np.uint64   | "unsigned long"     |
 
+## Plugin Management
+
+The Python bindings expose full plugin lifecycle and action APIs, allowing you to add, configure, and use plugin managers from Python.
+
+### Adding Plugins
+
+```python
+import rdfanalyzer
+
+analyzer = rdfanalyzer.Analyzer("config.txt")
+
+# Add individual plugins
+analyzer.AddPlugin("onnx", "OnnxManager")
+analyzer.AddPlugin("bdt", "BDTManager")
+analyzer.AddPlugin("hist", "NDHistogramManager")
+
+# Or add all default plugins at once
+analyzer.AddDefaultPlugins()
+```
+
+### ONNX Manager
+
+```python
+# Apply all ONNX models from config
+analyzer.setConfig("onnxConfig", "cfg/onnx_models.txt")
+analyzer.AddPlugin("onnx", "OnnxManager")
+analyzer.SetupPlugin("onnx")
+analyzer.applyAllOnnxModels("onnx")
+
+# Apply specific model
+analyzer.applyOnnxModel("onnx", "model_name")
+
+# Get model information
+model_names = analyzer.getOnnxModelNames("onnx")
+features = analyzer.getOnnxModelFeatures("onnx", "model_name")
+```
+
+### BDT Manager
+
+```python
+# Apply all BDT models from config
+analyzer.setConfig("bdtConfig", "cfg/bdts.txt")
+analyzer.AddPlugin("bdt", "BDTManager")
+analyzer.SetupPlugin("bdt")
+analyzer.applyAllBDTs("bdt")
+
+# Apply specific BDT
+analyzer.applyBDT("bdt", "bdt_name")
+
+# Get BDT information
+bdt_names = analyzer.getBDTNames("bdt")
+features = analyzer.getBDTFeatures("bdt", "bdt_name")
+```
+
+### Correction Manager
+
+```python
+# Apply corrections
+analyzer.setConfig("correctionConfig", "cfg/corrections.txt")
+analyzer.AddPlugin("correction", "CorrectionManager")
+analyzer.SetupPlugin("correction")
+
+# Apply specific correction
+analyzer.applyCorrection("correction", "muon_sf", ["muon_pt", "muon_eta"])
+
+# Get correction features
+features = analyzer.getCorrectionFeatures("correction", "muon_sf")
+```
+
+### Trigger Manager
+
+```python
+# Setup trigger management
+analyzer.setConfig("triggerConfig", "cfg/triggers.txt")
+analyzer.AddPlugin("trigger", "TriggerManager")
+analyzer.SetupPlugin("trigger")
+
+# Apply all triggers
+analyzer.applyAllTriggers("trigger")
+
+# Get trigger information
+groups = analyzer.getTriggerGroups("trigger")
+triggers = analyzer.getTriggers("trigger", "group_name")
+vetoes = analyzer.getVetoes("trigger", "group_name")
+```
+
+### SOFIE Manager
+
+```python
+# Apply SOFIE models
+analyzer.setConfig("sofieConfig", "cfg/sofie_models.txt")
+analyzer.AddPlugin("sofie", "SofieManager")
+analyzer.SetupPlugin("sofie")
+
+# Apply all SOFIE models
+analyzer.applyAllSofieModels("sofie")
+
+# Apply specific model
+analyzer.applySofieModel("sofie", "model_name")
+
+# Get model names
+model_names = analyzer.getSofieModelNames("sofie")
+```
+
+### Histogram Manager
+
+```python
+# Setup histogram manager
+analyzer.AddPlugin("hist", "NDHistogramManager")
+
+# Book histograms from Python
+h = rdfanalyzer.HistInfo("h_pt", "pt", "pT [GeV]", "weight", 40, 0.0, 200.0)
+s = rdfanalyzer.SelectionInfo("region", 3, 0.0, 3.0, ["SR", "CR", "VR"])
+
+region_names = analyzer.bookNDHistograms("hist", [h], [s], "nominal")
+```
+
 ## API Reference
 
 ### Analyzer Class
@@ -416,7 +533,7 @@ Complete examples are available in the `examples/` directory:
 
 1. **Template methods**: C++ template methods (Define<F>, Filter<F>) with lambdas are not directly accessible from Python. Use the wrapper methods instead (DefineJIT, FilterJIT, DefineFromPointer).
 
-2. **Plugin access**: Plugin managers are not yet exposed to Python. Future releases will add bindings for BDT, ONNX, Correction, and Histogram managers.
+2. **Plugin access**: Plugin managers ARE exposed to Python with full lifecycle and action APIs. See "Plugin Management" section for details on using `AddPlugin()`, `applyAllOnnxModels()`, `applyAllBDTs()`, `applyCorrection()`, and other plugin methods.
 
 3. **Memory management**: When using DefineFromVector, ensure arrays remain in memory during analysis. The analyzer stores pointers, not copies.
 
