@@ -49,14 +49,47 @@ if not file_list:
 
 local_paths = []
 streams = os.environ.get("XRDCP_STREAMS", "4")
+
+# normalize site-specific test redirectors into the generic store path
+def _normalize_test_redirector(u):
+    m = __import__('re').search(r"(root://[^/]+)//store/test/xrootd/[^/]+//(store/.+)$", u)
+    if m:
+        return m.group(1) + "//" + m.group(2)
+    return u
+
 for i, url in enumerate(file_list.split(",")):
     url = url.strip()
     if not url:
         continue
     local_name = f"input_{{i}}.root"
-    print("xrdcp", "-f", "--nopbar", "--streams", streams, url, local_name)
-    subprocess.run(["xrdcp", "-f", "--nopbar", "--streams", streams, url, local_name], check=True)
-    local_paths.append(local_name)
+
+    max_attempts = 10
+    attempt = 0
+    last_exc = None
+    tried_normalized = False
+    while attempt < max_attempts:
+        attempt += 1
+        cur_url = url if not tried_normalized else _normalize_test_redirector(url)
+        print("xrdcp attempt", attempt, "->", cur_url)
+        try:
+            subprocess.run(["xrdcp", "-f", "--nopbar", "--streams", streams, cur_url, local_name], check=True, timeout=120+attempt*30)
+            local_paths.append(local_name)
+            break
+        except Exception as exc:
+            last_exc = exc
+            # if this is a site-specific test redirector and we haven't tried the normalized form yet, try it
+            if ("/store/test/xrootd/" in cur_url or "/store/test/xrootd/" in url) and not tried_normalized:
+                alt = _normalize_test_redirector(url)
+                if alt != url:
+                    # outer f-string would try to interpolate {{alt}} at definition time — escape braces
+                    print(f"Warning: xrdcp failed for site-specific redirector; retrying with generic path: {{alt}}")
+                    tried_normalized = True
+                    __import__('time').sleep(2)
+                    continue
+            print(f"xrdcp attempt {{attempt}} failed for {{cur_url}}: {{exc}}")
+            __import__('time').sleep(min(5 * attempt, 30))
+    else:
+        raise RuntimeError(f"xrdcp failed after {{max_attempts}} attempts for {{url}}: {{last_exc}}")
 
 cfg["fileList"] = ",".join(local_paths)
 with open("submit_config.txt", "w") as f:
@@ -116,7 +149,7 @@ with open("{config_file}") as f:
         k, v = line.split("=", 1)
         cfg[k.strip()] = v.strip()
 
-def xrdcp_if_exists(local_name, dest, retries=3, timeout=600, streams=None):
+def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
     dest = "root://eosuser.cern.ch/" + dest
     print(local_name, dest, retries, timeout, streams)
     if not dest:
@@ -204,6 +237,11 @@ def generate_condor_runscript(
         )
 
     run_script = f"""#!/bin/bash
+# fail fast on any command error, undefined var, or pipeline failure
+set -euo pipefail
+trap 'rc=$?; echo "ERROR: wrapper exited with code $rc"; exit $rc' ERR
+# log and re-raise SIGTERM so Condor records ExitBySignal (do not swallow the signal)
+trap 'echo "Received SIGTERM - likely timed out by scheduler"; trap - SIGTERM; kill -s SIGTERM $$' SIGTERM
 {root_block}{pre_block}{shared_block}{x509_block}ls
 stage_in_start=$(date +%s)
 {stage_out_pre}{stage_block}
@@ -214,7 +252,21 @@ ls
 
 analysis_start=$(date +%s)
 echo "Starting Analysis"
+# run the analysis but capture its exit status so we can re-raise a signal
+set +e
 ./{exe_relpath} submit_config.txt
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  echo "Analysis failed with exit code $rc"
+  # if child was terminated by a signal, rc will be >= 128 (128 + signal)
+  if [ "$rc" -ge 128 ]; then
+    sig=$((rc - 128))
+    echo "Analysis terminated by signal $sig — re-raising to ensure Condor records ExitBySignal"
+    kill -s "$sig" $$ || exit "$rc"
+  fi
+  exit "$rc"
+fi
 analysis_end=$(date +%s)
 echo "Analysis time: $((analysis_end - analysis_start))s"
 
@@ -233,7 +285,7 @@ def generate_condor_submit(
     exe_relpath,
     x509loc=None,
     want_os="el9",
-    max_runtime="1200",
+    max_runtime="3600",
     request_memory=2000,
     request_cpus=1,
     request_disk=20000,
@@ -314,7 +366,7 @@ def write_submit_files(
     x509loc=None,
     pre_setup_lines="",
     want_os="el9",
-    max_runtime="1200",
+    max_runtime="3600",
     request_memory=2000,
     request_cpus=1,
     request_disk=20000,
