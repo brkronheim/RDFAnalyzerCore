@@ -452,30 +452,6 @@ MyAnalysis/
     └── discriminator.onnx
 ```
 
-## Performance Comparison
-
-### Benchmark: 1M Events, 10 Features
-
-| Backend | Time (s) | Speedup vs ONNX |
-|---------|----------|-----------------|
-| **SOFIE** | 2.1 | 2.4x |
-| **ONNX** | 5.0 | 1.0x |
-| **BDT (FastForest)** | 3.2 | 1.6x |
-
-**Notes**:
-- SOFIE has no runtime overhead
-- ONNX has file loading + runtime optimization
-- Results vary by model architecture
-
-### Memory Usage
-
-| Backend | Model Load | Per-Event |
-|---------|------------|-----------|
-| **SOFIE** | 0 MB (compiled) | Minimal |
-| **ONNX** | 10-100 MB | Moderate |
-| **BDT** | 1-10 MB | Minimal |
-
-SOFIE models are part of the binary - no loading overhead.
 
 ## Limitations
 
