@@ -89,6 +89,10 @@ cd build/analyses/ExampleAnalysis
 - Python 3.8+
 - pybind11, numpy, numba (install with `pip install pybind11 numpy numba`)
 
+**Self-hosted CI runner Dockerfile**
+- A ready-to-build runner image including ROOT, Python, `numpy` and `numba` is provided at `docker/gh-runner.Dockerfile`.
+- See `docs/CI_DOCKERFILE.md` for build/run instructions and details.
+
 ## Repository Structure
 
 ```
