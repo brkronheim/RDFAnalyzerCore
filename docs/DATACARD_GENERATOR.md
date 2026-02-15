@@ -382,9 +382,39 @@ analyzer.save();
 
 The output ROOT file can then be used as input to the datacard generator.
 
+## Running CMS Combine
+
+After generating datacards, you can run CMS Combine for statistical analysis. See the [Combine Integration Guide](COMBINE_INTEGRATION.md) for:
+
+- Building RDFAnalyzerCore with Combine support
+- Complete workflow from analysis to limit extraction
+- Examples of limit setting, fits, and scans
+- Using CombineHarvester for advanced analysis
+
+**Quick Example:**
+
+```bash
+# Build framework with Combine support
+cmake -S . -B build -DBUILD_COMBINE=ON
+cmake --build build -j$(nproc)
+
+# After generating datacards with create_datacards.py
+cd datacards
+COMBINE=../build/external/HiggsAnalysis/CombinedLimit/exe/combine
+
+# Run asymptotic limits
+$COMBINE -M AsymptoticLimits datacard_signal_region.txt
+
+# Run maximum likelihood fit
+$COMBINE -M FitDiagnostics datacard_signal_region.txt
+```
+
+For complete details, see [Combine Integration Guide](COMBINE_INTEGRATION.md).
+
 ## References
 
 - [CMS Combine Documentation](https://cms-analysis.github.io/HiggsAnalysis-CombinedLimit/)
+- [Combine Integration Guide](COMBINE_INTEGRATION.md) - Complete workflow with RDFAnalyzerCore
 - [RDFAnalyzerCore Documentation](https://github.com/brkronheim/RDFAnalyzerCore)
 
 ## Support
