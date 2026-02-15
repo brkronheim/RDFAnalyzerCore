@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
 
 For more sophisticated systematic handling, use the SystematicManager:
 
+{% raw %}
 ```cpp
 #include "analyzer.h"
 #include <NDHistogramManager.h>
@@ -180,6 +181,7 @@ int main(int argc, char** argv) {
     return 0;
 }
 ```
+{% endraw %}
 
 ## Histogram Naming Convention
 
