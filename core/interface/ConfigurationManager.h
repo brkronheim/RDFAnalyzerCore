@@ -111,9 +111,11 @@ public:
 private:
   std::unordered_map<std::string, std::string> configMap_m;
   std::shared_ptr<IConfigAdapter> adapter_m;
+  std::string configBasePath_m; // Directory containing the main config file
 
   std::string_view trim(std::string_view s) const;
   void processTopLevelConfig(const std::string &configFile);
+  std::string resolveConfigPath(const std::string &path) const;
 };
 
 #endif // CONFIGURATIONMANAGER_H_INCLUDED

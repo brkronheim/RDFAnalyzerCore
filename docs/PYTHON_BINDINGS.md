@@ -137,7 +137,7 @@ Use numba to compile Python functions to native code, then pass them as function
 
 **Advantages:**
 - Write analysis logic in Python
-- Near-native performance with numba JIT
+- Good performance with numba JIT compilation
 - Type-safe with explicit signatures
 - Can use numpy operations in functions
 
@@ -507,17 +507,17 @@ See the [Configuration Reference](CONFIG_REFERENCE.md) for complete documentatio
 
 ### String-based expressions (DefineJIT)
 - **Compilation overhead**: First call may be slow (~seconds) while ROOT compiles
-- **Runtime performance**: Near-native C++ speed after compilation
+- **Runtime performance**: Good C++ performance after compilation
 - **Caching**: ROOT caches compiled functions
 - **Best for**: Complex expressions, vector operations, one-time definitions
 
 ### Numba function pointers (DefineFromPointer)
 - **Compilation overhead**: Numba compiles on first function call (milliseconds)
-- **Runtime performance**: Native speed, sometimes faster than ROOT JIT
+- **Runtime performance**: Compiled to native code
 - **Best for**: Custom algorithms, physics calculations, reusable functions
 
 ### Numpy arrays (DefineFromVector)
-- **Memory overhead**: None (uses pointers, no copying)
+- **Memory overhead**: Minimal (uses pointers, no deep copying)
 - **Runtime performance**: Direct memory access
 - **Best for**: Pre-computed weights, lookup tables, corrections
 

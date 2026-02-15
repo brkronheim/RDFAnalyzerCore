@@ -51,7 +51,7 @@ RDFAnalyzerCore is built around several key principles:
 - Plugins are created and wired in C++
 - No runtime type registration or reflection
 - Compiler enforces correct usage
-- Zero runtime overhead for plugin system
+- Minimal runtime overhead for plugin system
 
 ### 5. Framework vs. Library
 
