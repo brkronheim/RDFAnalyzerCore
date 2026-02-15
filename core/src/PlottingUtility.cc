@@ -10,10 +10,12 @@
 #include <TMatrixDSym.h>
 #include <TMatrixDSymEigen.h>
 #include <TPad.h>
+#include <TLine.h>
 #include <TROOT.h>
 
 #include <functional>
 #include <future>
+#include <mutex>
 #include <cmath>
 
 namespace {
@@ -53,6 +55,9 @@ double getNormalizationScale(TFile& file, const PlotProcessConfig& process) {
   }
   return process.scale / norm;
 }
+
+// Mutex to protect ROOT GUI/IO (TCanvas/TPad/SaveAs) which is not safe to run concurrently
+static std::mutex gCanvasMutex;
 
 } // namespace
 
@@ -299,49 +304,208 @@ PlotResult PlottingUtility::makeStackPlot(const PlotRequest& request) const {
     result.dataIntegral = dataHist->Integral();
   }
 
-  TCanvas canvas("canvas", "canvas", kCanvasWidth,
-                 request.drawRatio ? kCanvasHeightWithRatio : kCanvasHeightNoRatio);
-  std::unique_ptr<TPad> topPad;
-  std::unique_ptr<TPad> ratioPad;
-  if (request.drawRatio && dataHist && mcSum) {
-    topPad = std::make_unique<TPad>("topPad", "topPad", 0.0, 0.3, 1.0, 1.0);
-    ratioPad = std::make_unique<TPad>("ratioPad", "ratioPad", 0.0, 0.0, 1.0, 0.3);
-    topPad->SetBottomMargin(0.02);
-    ratioPad->SetTopMargin(0.03);
-    ratioPad->SetBottomMargin(0.30);
-    topPad->Draw();
-    ratioPad->Draw();
-    topPad->cd();
-  }
+  // Serialize all ROOT GUI/IO operations (TCanvas/TPad/SaveAs) because they are not
+  // safe to run concurrently even when ROOT thread-safety is enabled.
+  {
+    std::lock_guard<std::mutex> lock(gCanvasMutex);
 
-  stack.Draw("hist");
-  stack.GetXaxis()->SetTitle(request.xAxisTitle.c_str());
-  stack.GetYaxis()->SetTitle(request.yAxisTitle.c_str());
-  stack.SetTitle(request.title.c_str());
+    // create canvas and stacked layout (top: data+MC, bottom: ratio)
+    TCanvas canvas("canvas", "canvas", kCanvasWidth,
+                   request.drawRatio ? kCanvasHeightWithRatio : kCanvasHeightNoRatio);
 
-  if (request.logY) {
-    gPad->SetLogy(true);
-  }
-
-  if (dataHist) {
-    dataHist->Draw("same e1");
-  }
-  legend.Draw();
-
-  if (ratioPad && dataHist && mcSum) {
-    ratioPad->cd();
-    auto ratio = computeRatioHistogram(*dataHist, *mcSum, "ratio_hist");
-    if (ratio) {
-      ratio->SetStats(false);
-      ratio->GetYaxis()->SetTitle("Data/MC");
-      ratio->GetXaxis()->SetTitle(request.xAxisTitle.c_str());
-      ratio->SetMinimum(0.0);
-      ratio->SetMaximum(2.0);
-      ratio->Draw("e1");
+    std::unique_ptr<TPad> topPad;
+    std::unique_ptr<TPad> ratioPad;
+    if (request.drawRatio && dataHist && mcSum) {
+      // 60% / 40% split (top / ratio) similar to the python layout
+      topPad = std::make_unique<TPad>("topPad", "topPad", 0.0, 0.35, 1.0, 1.0);
+      ratioPad = std::make_unique<TPad>("ratioPad", "ratioPad", 0.0, 0.0, 1.0, 0.35);
+      topPad->SetBottomMargin(0.02);
+      topPad->SetLeftMargin(0.12);
+      topPad->SetRightMargin(0.05);
+      ratioPad->SetTopMargin(0.03);
+      ratioPad->SetBottomMargin(0.30);
+      ratioPad->SetLeftMargin(0.12);
+      ratioPad->SetRightMargin(0.05);
+      topPad->Draw();
+      ratioPad->Draw();
+      topPad->cd();
+    } else {
+      canvas.SetLeftMargin(0.12);
+      canvas.SetRightMargin(0.05);
     }
+
+    // Draw stacked MC and customize appearance
+    stack.Draw("hist");
+    stack.GetXaxis()->SetTitle(request.xAxisTitle.c_str());
+    stack.GetYaxis()->SetTitle(request.yAxisTitle.c_str());
+    stack.SetTitle(request.title.c_str());
+    stack.GetXaxis()->SetTitleSize(0.045);
+    stack.GetYaxis()->SetTitleSize(0.045);
+    stack.GetYaxis()->SetTitleOffset(1.15);
+    stack.GetXaxis()->SetLabelSize(request.drawRatio && dataHist && mcSum ? 0.0 : 0.035);
+
+    // draw MC uncertainty band (use mcSum's bin errors)
+    if (mcSum) {
+      mcSum->Sumw2();
+      // create a copy for the uncertainty band
+      auto mcUnc = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(mcSum->Clone("mc_unc")));
+      if (mcUnc) {
+        mcUnc->SetDirectory(nullptr);
+        mcUnc->SetMarkerSize(0);
+        mcUnc->SetFillColor(kGray+2);
+        mcUnc->SetFillStyle(3354);
+        // draw as uncertainty band on top of stack
+        mcUnc->Draw("E2 same");
+      }
+    }
+
+    // draw data points on top
+    if (dataHist) {
+      dataHist->SetMarkerStyle(20);
+      dataHist->SetMarkerSize(0.9);
+      dataHist->Draw("same e1");
+    }
+
+    // refine legend
+    legend.SetBorderSize(0);
+    legend.SetFillStyle(0);
+    legend.SetTextSize(0.035);
+    legend.Draw();
+
+    // log-scale handling
+    if (request.logY) {
+      topPad ? topPad->cd() : canvas.cd();
+      gPad->SetLogy(true);
+      // ensure a positive minimum for log scale
+      auto ymin = stack.GetHistogram() ? stack.GetHistogram()->GetMinimum(0.0) : 0.0;
+      if (ymin <= 0.0) {
+        stack.SetMinimum(1e-2);
+      }
+    }
+
+    // Ratio pad + Pull pad: draw data/MC points with MC uncertainty band and a pull histogram
+    std::unique_ptr<TPad> pullPad;
+    if (request.drawRatio && dataHist && mcSum) {
+      // create an extra pull pad beneath the ratio pad
+      pullPad = std::make_unique<TPad>("pullPad", "pullPad", 0.0, 0.0, 1.0, 0.18);
+      pullPad->SetTopMargin(0.05);
+      pullPad->SetBottomMargin(0.30);
+      pullPad->SetLeftMargin(0.12);
+      pullPad->SetRightMargin(0.05);
+      pullPad->Draw();
+
+      // RATIO PAD
+      ratioPad->cd();
+      // relative MC uncertainty band (content = 1, error = rel error)
+      auto mcRel = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(mcSum->Clone("mc_rel")));
+      if (mcRel) {
+        const int nBins = mcRel->GetNbinsX();
+        for (int b = 1; b <= nBins; ++b) {
+          const double mcVal = mcSum->GetBinContent(b);
+          const double mcErr = mcSum->GetBinError(b);
+          if (std::abs(mcVal) < kMinDenominator) {
+            mcRel->SetBinContent(b, 1.0);
+            mcRel->SetBinError(b, 0.0);
+          } else {
+            mcRel->SetBinContent(b, 1.0);
+            mcRel->SetBinError(b, mcErr / mcVal);
+          }
+        }
+        mcRel->SetDirectory(nullptr);
+        mcRel->SetFillColor(kGray+2);
+        mcRel->SetFillStyle(3354); // hatched-like pattern
+        mcRel->SetLineColor(kGray+2);
+        mcRel->Draw("E2");
+      }
+
+      auto ratio = computeRatioHistogram(*dataHist, *mcSum, "ratio_hist");
+      if (ratio) {
+        ratio->SetStats(false);
+        ratio->GetYaxis()->SetTitle("Data/MC");
+        ratio->GetXaxis()->SetTitle(request.xAxisTitle.c_str());
+        ratio->GetYaxis()->SetTitleSize(0.12);
+        ratio->GetXaxis()->SetTitleSize(0.12);
+        ratio->GetYaxis()->SetLabelSize(0.10);
+        ratio->GetXaxis()->SetLabelSize(0.10);
+        ratio->GetXaxis()->SetTitleOffset(1.0);
+        ratio->GetYaxis()->SetTitleOffset(0.35);
+        // set sensible default range (close to python behaviour)
+        ratio->SetMinimum(0.59);
+        ratio->SetMaximum(1.41);
+        ratio->Draw("e1 same");
+
+        // horizontal line at 1
+        TLine line(ratio->GetXaxis()->GetXmin(), 1.0, ratio->GetXaxis()->GetXmax(), 1.0);
+        line.SetLineStyle(2);
+        line.SetLineWidth(1);
+        line.Draw("same");
+      }
+
+      ratioPad->SetGridy(true);
+
+      // PULL PAD
+      pullPad->cd();
+      const int nBins = mcSum->GetNbinsX();
+      auto pullHist = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(mcSum->Clone("pull_hist")));
+      if (pullHist) {
+        pullHist->SetDirectory(nullptr);
+        for (int b = 1; b <= nBins; ++b) {
+          const double d = dataHist->GetBinContent(b);
+          const double dErr = dataHist->GetBinError(b);
+          const double m = mcSum->GetBinContent(b);
+          const double mErr = mcSum->GetBinError(b);
+          const double denom = std::sqrt(dErr * dErr + mErr * mErr);
+          const double pull = (std::abs(denom) < kMinDenominator) ? 0.0 : (d - m) / denom;
+          pullHist->SetBinContent(b, pull);
+          pullHist->SetBinError(b, 0.0);
+        }
+
+        // split into positive / negative for hatched bars
+        auto posPull = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(pullHist->Clone("pos_pull")));
+        auto negPull = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(pullHist->Clone("neg_pull")));
+        posPull->SetDirectory(nullptr);
+        negPull->SetDirectory(nullptr);
+        for (int b = 1; b <= nBins; ++b) {
+          const double v = pullHist->GetBinContent(b);
+          posPull->SetBinContent(b, v > 0.0 ? v : 0.0);
+          negPull->SetBinContent(b, v < 0.0 ? -v : 0.0);
+        }
+
+        posPull->SetFillColor(kRed+1);
+        posPull->SetFillStyle(3354);
+        posPull->SetLineColor(kRed+1);
+        negPull->SetFillColor(kBlue+1);
+        negPull->SetFillStyle(3354);
+        negPull->SetLineColor(kBlue+1);
+
+        // determine y-range for pulls
+        double maxPull = 1.5;
+        for (int b = 1; b <= nBins; ++b) {
+          maxPull = std::max(maxPull, std::abs(pullHist->GetBinContent(b)) * 1.2);
+        }
+        pullHist->SetMaximum(maxPull);
+        pullHist->SetMinimum(-maxPull);
+
+        // draw axes and bars
+        pullHist->GetYaxis()->SetTitle("(Data - MC)/Unc");
+        pullHist->GetYaxis()->CenterTitle(true);
+        pullHist->GetYaxis()->SetTitleSize(0.10);
+        pullHist->GetYaxis()->SetLabelSize(0.09);
+        pullHist->GetXaxis()->SetLabelSize(0.10);
+        pullHist->Draw("axis");
+        posPull->Draw("hist same");
+        negPull->Draw("hist same");
+
+        // zero line
+        TLine zline(pullHist->GetXaxis()->GetXmin(), 0.0, pullHist->GetXaxis()->GetXmax(), 0.0);
+        zline.SetLineWidth(1);
+        zline.Draw("same");
+      }
+    }
+
+    canvas.SaveAs(request.outputFile.c_str());
   }
 
-  canvas.SaveAs(request.outputFile.c_str());
   result.success = true;
   return result;
 }

@@ -2,6 +2,10 @@
 *.png
 *.root
 !aux/*.root
+
+# Ignore plotting test output (generated PNGs)
+core/test/aux/test_plotting_*.png
+core/test/aux/test_*.png
 python/*
 !python/*.py
 *.pyc
