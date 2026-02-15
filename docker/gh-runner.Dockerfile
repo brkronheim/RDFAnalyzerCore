@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     libtbb12 \
     libtbb-dev \
     libboost-all-dev \
+    libgif-dev \
     # Python + build deps for numpy/numba
     python3 \
     python3-dev \
