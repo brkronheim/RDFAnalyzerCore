@@ -1,0 +1,11 @@
+# Config-driven histogram definitions for Atlas dimuon analysis
+# Each line defines one histogram with key=value pairs
+
+# Z boson mass histogram
+name=ZBosonMass variable=ZBosonMass weight=normScale bins=60 lowerBound=70.0 upperBound=110.0 label=Z Boson Mass [GeV]
+
+# Leading muon pT histogram
+name=LeadingMuonPt variable=LeadingMuonPt weight=normScale bins=50 lowerBound=20.0 upperBound=150.0 label=Leading Muon p_{T} [GeV]
+
+# Subleading muon pT histogram
+name=SubleadingMuonPt variable=SubleadingMuonPt weight=normScale bins=50 lowerBound=20.0 upperBound=150.0 label=Subleading Muon p_{T} [GeV]
