@@ -190,6 +190,35 @@ auto corrMgr = std::make_unique<CorrectionManager>(an.getConfigurationProvider()
 an.addPlugin("correction", std::move(corrMgr));
 ```
 
+### Statistical Analysis Workflow
+
+After running the analysis and producing histograms, you can perform statistical analysis using CMS Combine:
+
+1. **Generate Datacards**: Use the Python datacard generator script:
+```bash
+python core/python/create_datacards.py example_datacard_config.yaml
+```
+
+2. **Build with Combine Support** (optional):
+```bash
+cmake -S . -B build -DBUILD_COMBINE=ON
+cmake --build build -j$(nproc)
+```
+
+3. **Run Statistical Analysis**:
+```bash
+# Set limits
+combine -M AsymptoticLimits datacard.txt
+
+# Fit signal strength
+combine -M FitDiagnostics datacard.txt
+```
+
+See the complete workflow in:
+- [Complete Analysis Workflow Script](../../examples/complete_analysis_workflow.sh)
+- [Datacard Generator Guide](../../docs/DATACARD_GENERATOR.md)
+- [Combine Integration Guide](../../docs/COMBINE_INTEGRATION.md)
+
 ## References
 
 - [RDFAnalyzerCore Documentation](https://brkronheim.github.io/RDFAnalyzerCore/)
