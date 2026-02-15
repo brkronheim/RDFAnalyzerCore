@@ -71,7 +71,11 @@ cd build/analyses/ExampleAnalysis
 - **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Building analyses step-by-step
 - **[Python Bindings](docs/PYTHON_BINDINGS.md)** - Using the framework from Python
 - **[API Reference](docs/API_REFERENCE.md)** - Detailed API documentation
+
+### Statistical Analysis
+
 - **[Datacard Generator](docs/DATACARD_GENERATOR.md)** - Creating CMS combine datacards
+- **[Systematics Example](docs/DATACARD_SYSTEMATICS_EXAMPLE.md)** - Creating histograms with systematic variations
 - **[Combine Integration](docs/COMBINE_INTEGRATION.md)** - Complete workflow from analysis to statistical inference
 
 ### For Developers
@@ -453,18 +457,27 @@ Histograms automatically include systematic axes.
 Framework includes a Python script for generating CMS combine datacards from analysis outputs:
 
 ```bash
+# Install dependencies (uproot-based, no PyROOT required)
+pip install uproot awkward numpy pyyaml
+
+# Generate datacards
 python core/python/create_datacards.py config.yaml
 ```
 
 Features:
+- **Pure Python**: Uses uproot (no PyROOT dependency)
 - YAML-based configuration for datacards
 - Multiple control region support
 - Sample combination (binned/stitched samples)
-- Observable rebinning
+- Observable rebinning (uniform and variable)
 - Systematic uncertainties (rate and shape)
-- Automatic correlation handling
+- Automatic systematic variation reading from input files
+- Full Combine and CombineHarvester integration
 
-**See**: [Datacard Generator Guide](docs/DATACARD_GENERATOR.md) for complete documentation.
+**See**: 
+- [Datacard Generator Guide](docs/DATACARD_GENERATOR.md) for complete documentation
+- [Systematics Example](docs/DATACARD_SYSTEMATICS_EXAMPLE.md) for creating histograms with systematic variations
+- [Combine Integration](docs/COMBINE_INTEGRATION.md) for complete statistical analysis workflow
 
 ### HTCondor Submission
 
