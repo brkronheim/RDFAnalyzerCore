@@ -9,10 +9,10 @@ github:
   repository_name: brkronheim/RDFAnalyzerCore
 
 # Build settings
-# markdown: kramdown
-# kramdown:
-#  input: GFM
-#  syntax_highlighter: rouge
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
 
 # Navigation
 nav_links:
