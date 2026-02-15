@@ -8,6 +8,9 @@
 #include <TFile.h>
 #include <TH1D.h>
 #include <TObject.h>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
 
 void CounterService::initialize(ManagerContext& ctx) {
   ctx_m = &ctx;
@@ -29,6 +32,9 @@ void CounterService::initialize(ManagerContext& ctx) {
   if (configMap.find("counterIntWeightBranch") != configMap.end()) {
     intWeightBranch_m = configMap.at("counterIntWeightBranch");
   }
+
+  // record start time for processing-speed measurement
+  startTime_m = std::chrono::steady_clock::now();
 }
 
 void CounterService::onPreFilter(ROOT::RDF::RNode& df) {
@@ -86,11 +92,48 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
     }
   }
 
-  auto countValue = countResult.GetValue();
+  // selected entries (pre-filter) — fall back to the provided df if no pre-filter was recorded
+  unsigned long long selectedCountValue = 0;
+  if (preFilterDf_m) {
+    selectedCountValue = preFilterDf_m->Count().GetValue();
+  } else {
+    selectedCountValue = countResult.GetValue();
+  }
+
+  // plotted / final entries (the DataFrame passed to finalize)
+  unsigned long long plottedCountValue = df.Count().GetValue();
+
+  // compute elapsed time from initialize() -> finalize()
+  double elapsed_s = 0.0;
+  {
+    const auto endTime = std::chrono::steady_clock::now();
+    elapsed_s = std::chrono::duration<double>(endTime - startTime_m).count();
+  }
+
+  auto format_khz = [&](unsigned long long n) -> std::string {
+    double khz = 0.0;
+    if (elapsed_s > 0.0) khz = (static_cast<double>(n) / elapsed_s) / 1000.0;
+    std::ostringstream sso;
+    sso << std::fixed << std::setprecision(3) << khz;
+    return sso.str();
+  };
+
+  std::ostringstream ss_elapsed;
+  ss_elapsed << std::fixed << std::setprecision(3) << elapsed_s;
+
+  // log counts and speeds
+  ctx_m->logger.log(ILogger::Level::Info,
+                    "CounterService: sample=" + sampleName_m +
+                    " entries=" + std::to_string(selectedCountValue));
 
   ctx_m->logger.log(ILogger::Level::Info,
                     "CounterService: sample=" + sampleName_m +
-                    " entries=" + std::to_string(countValue));
+                    " processingSpeed_selected=" + format_khz(selectedCountValue) + " kHz (elapsed=" + ss_elapsed.str() + " s)");
+
+  ctx_m->logger.log(ILogger::Level::Info,
+                    "CounterService: sample=" + sampleName_m +
+                    " plottedEntries=" + std::to_string(plottedCountValue) +
+                    " processingSpeed_plotted=" + format_khz(plottedCountValue) + " kHz (elapsed=" + ss_elapsed.str() + " s)");
 
   if (hasWeightSum) {
     auto weightValue = weightSumResult.GetValue();
@@ -139,7 +182,7 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
     }
 
     if (hasIntWeightSum) {
-      if (countValue == 0) {
+      if (selectedCountValue == 0) {
         ctx_m->logger.log(ILogger::Level::Info,
                           "CounterService: sample=" + sampleName_m +
                           " no entries for intWeight histogram");

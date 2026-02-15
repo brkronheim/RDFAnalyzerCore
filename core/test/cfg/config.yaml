@@ -1,0 +1,15 @@
+directory: /home/user/testDir
+saveFile: /home/user/outDir/output.root
+saveDirectory: /home/user/outDir/
+saveTree: Events
+threads: "-1"
+antiglobs: output.root , hists.root
+globs: root,test
+saveConfig: cfg/output.yaml
+bdtConfig: cfg/bdts.txt
+correctionConfig: cfg/correction.yaml
+triggerConfig: cfg/triggers.txt
+floatConfig: cfg/floats.txt
+intConfig: cfg/ints.txt
+optionalBranchesConfig: cfg/optionalBranches.txt
+aliasConfig: cfg/alias.txt
