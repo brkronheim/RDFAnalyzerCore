@@ -8,7 +8,7 @@
 
 ## Overview
 
-SofieManager enables you to use SOFIE (System for Optimized Fast Inference code Emit) models from ROOT TMVA in RDFAnalyzerCore. SOFIE generates optimized C++ inference code from ONNX models at **build time**, providing maximum performance by eliminating runtime overhead.
+SofieManager enables you to use SOFIE (System for Optimized Fast Inference code Emit) models from ROOT TMVA in RDFAnalyzerCore. SOFIE generates optimized C++ inference code from ONNX models at **build time**, which eliminates runtime model loading and interpretation overhead.
 
 ## Key Differences from ONNX/BDT
 
@@ -16,18 +16,18 @@ SofieManager enables you to use SOFIE (System for Optimized Fast Inference code 
 |---------|-------|------|-----|
 | **Model Format** | C++ code (compiled) | ONNX file (runtime) | Text file (runtime) |
 | **Loading** | Build-time compilation | Runtime file loading | Runtime file loading |
-| **Performance** | Fastest (no overhead) | Fast (optimized runtime) | Fast (tree evaluation) |
+| **Performance** | No runtime loading overhead | Optimized runtime execution | Tree evaluation |
 | **Setup** | Manual registration | Auto from config | Auto from config |
 | **Flexibility** | Less (rebuild required) | High (swap files) | High (swap files) |
-| **Best For** | Production, speed-critical | Development, flexibility | Gradient boosted trees |
+| **Best For** | Production, finalized models | Development, flexibility | Gradient boosted trees |
 
 ## When to Use SOFIE
 
 **Use SOFIE when**:
-- Maximum inference speed is critical
-- Model is finalized and won't change frequently
+- Inference performance is important and models are finalized
+- Model is stable and won't change frequently
 - You can rebuild between model updates
-- You want zero runtime model loading overhead
+- You want to eliminate runtime model loading overhead
 
 **Use ONNX when**:
 - Model is still being developed/tuned
@@ -636,7 +636,7 @@ source cleanBuild.sh
 | **Config-driven** | Partial (features only) | Full | Full |
 | **Auto-load models** | No (manual registration) | Yes | Yes |
 | **Runtime flexibility** | Low (rebuild required) | High (swap files) | High (swap files) |
-| **Inference speed** | Fastest | Fast | Fast |
+| **Inference speed** | No loading overhead | Optimized runtime | Tree evaluation |
 | **Memory overhead** | None (compiled in) | Model file size | Model file size |
 | **Supported models** | ONNX-convertible | Any ONNX | Gradient boosted trees |
 | **Thread safety** | Yes | Yes | Yes |
