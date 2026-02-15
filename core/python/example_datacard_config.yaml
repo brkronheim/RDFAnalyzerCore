@@ -1,0 +1,263 @@
+# Example YAML configuration for datacard generation
+# This file demonstrates all available configuration options
+
+# Output directory for datacards and ROOT files
+output_dir: "datacards"
+
+# Input ROOT files from analysis runs
+# Each entry specifies a sample name and its corresponding output file
+input_files:
+  # Data sample
+  data_obs:
+    path: "output/data.root"
+    type: "data"
+  
+  # Signal samples
+  signal_500:
+    path: "output/signal_m500.root"
+    type: "signal"
+  
+  signal_1000:
+    path: "output/signal_m1000.root"
+    type: "signal"
+  
+  # Background samples
+  ttbar:
+    path: "output/ttbar.root"
+    type: "background"
+  
+  wjets_ht100to200:
+    path: "output/wjets_ht100to200.root"
+    type: "background"
+  
+  wjets_ht200to400:
+    path: "output/wjets_ht200to400.root"
+    type: "background"
+  
+  wjets_ht400to600:
+    path: "output/wjets_ht400to600.root"
+    type: "background"
+  
+  zjets:
+    path: "output/zjets.root"
+    type: "background"
+  
+  qcd:
+    path: "output/qcd.root"
+    type: "background"
+
+# Sample combinations - how to combine binned/stitched samples
+sample_combinations:
+  # Stitch W+jets HT-binned samples
+  wjets:
+    method: "sum"  # or "weighted"
+    samples:
+      - wjets_ht100to200
+      - wjets_ht200to400
+      - wjets_ht400to600
+    # Optional weights for weighted combination
+    weights:
+      wjets_ht100to200: 1.0
+      wjets_ht200to400: 1.0
+      wjets_ht400to600: 1.0
+
+# Process definitions
+# Define which samples contribute to each process
+processes:
+  # Signal process
+  signal:
+    samples:
+      - signal_500
+    description: "Signal with mass 500 GeV"
+  
+  # Background processes
+  ttbar:
+    samples:
+      - ttbar
+    description: "Top quark pair production"
+  
+  wjets:
+    samples:
+      - wjets  # References the combined sample above
+    description: "W+jets production"
+  
+  zjets:
+    samples:
+      - zjets
+    description: "Z+jets production"
+  
+  qcd:
+    samples:
+      - qcd
+    description: "QCD multijet production"
+
+# Control regions configuration
+control_regions:
+  # Signal region
+  signal_region:
+    observable: "mT"  # Observable histogram name
+    processes:
+      - signal
+      - ttbar
+      - wjets
+      - zjets
+      - qcd
+    signal_processes:
+      - signal
+    data_process: "data_obs"
+    # Optional: rebinning configuration
+    rebin: 2  # Rebin by factor of 2
+    # Or variable binning:
+    # rebin: [0, 50, 100, 150, 200, 300, 500, 1000]
+    description: "Main signal region with full selection"
+  
+  # Control region 1: ttbar-enriched
+  control_region_ttbar:
+    observable: "nBJets"
+    processes:
+      - ttbar
+      - wjets
+      - zjets
+      - qcd
+    signal_processes: []
+    data_process: "data_obs"
+    rebin: 1  # No rebinning
+    description: "Control region enriched in ttbar events"
+  
+  # Control region 2: W+jets enriched
+  control_region_wjets:
+    observable: "met"
+    processes:
+      - wjets
+      - ttbar
+      - zjets
+      - qcd
+    signal_processes: []
+    data_process: "data_obs"
+    rebin: [0, 50, 100, 150, 200, 250, 300, 400, 600]  # Variable binning
+    description: "Control region enriched in W+jets events"
+
+# Systematic uncertainties
+systematics:
+  # Luminosity uncertainty (rate uncertainty)
+  lumi:
+    type: "rate"
+    distribution: "lnN"
+    value: 1.025  # 2.5% uncertainty
+    applies_to:
+      signal: true
+      ttbar: true
+      wjets: true
+      zjets: true
+      qcd: false  # QCD from data-driven method
+    regions:  # Apply to all regions if not specified
+      - signal_region
+      - control_region_ttbar
+      - control_region_wjets
+    description: "Luminosity uncertainty"
+  
+  # Jet energy scale (shape uncertainty)
+  JES:
+    type: "shape"
+    distribution: "shape"
+    variation: 0.03  # 3% variation for placeholder
+    applies_to:
+      signal: true
+      ttbar: true
+      wjets: true
+      zjets: true
+      qcd: true
+    regions:
+      - signal_region
+      - control_region_ttbar
+      - control_region_wjets
+    correlated: true  # Correlated across regions
+    description: "Jet energy scale uncertainty"
+  
+  # b-tagging efficiency (shape uncertainty)
+  btag:
+    type: "shape"
+    distribution: "shape"
+    variation: 0.05
+    applies_to:
+      signal: true
+      ttbar: true
+      wjets: true
+      zjets: true
+      qcd: false
+    regions:
+      - signal_region
+      - control_region_ttbar
+    correlated: true
+    description: "b-tagging efficiency uncertainty"
+  
+  # ttbar cross section (rate uncertainty)
+  xsec_ttbar:
+    type: "rate"
+    distribution: "lnN"
+    value: 1.06  # 6% uncertainty
+    applies_to:
+      ttbar: true
+    regions:
+      - signal_region
+      - control_region_ttbar
+      - control_region_wjets
+    description: "ttbar cross section uncertainty"
+  
+  # W+jets normalization (rate uncertainty)
+  wjets_norm:
+    type: "rate"
+    distribution: "lnN"
+    value: 1.10  # 10% uncertainty
+    applies_to:
+      wjets: true
+    regions:
+      - signal_region
+      - control_region_wjets
+    description: "W+jets normalization uncertainty"
+  
+  # QCD normalization (rate uncertainty, uncorrelated between regions)
+  qcd_norm_SR:
+    type: "rate"
+    distribution: "lnN"
+    value: 1.30  # 30% uncertainty
+    applies_to:
+      qcd: true
+    regions:
+      - signal_region
+    correlated: false
+    description: "QCD normalization in signal region"
+  
+  qcd_norm_CR:
+    type: "rate"
+    distribution: "lnN"
+    value: 1.30
+    applies_to:
+      qcd: true
+    regions:
+      - control_region_ttbar
+      - control_region_wjets
+    correlated: false
+    description: "QCD normalization in control regions"
+
+# Systematic correlations
+# Specify how systematics are correlated across regions/processes
+correlations:
+  # JES is fully correlated across all regions
+  JES:
+    type: "full"
+    regions: "all"
+    processes: "all"
+  
+  # btag is correlated across signal and ttbar CR
+  btag:
+    type: "full"
+    regions:
+      - signal_region
+      - control_region_ttbar
+    processes: "all"
+  
+  # QCD normalizations are uncorrelated
+  qcd_norm:
+    type: "uncorrelated"
+    regions: "all"
