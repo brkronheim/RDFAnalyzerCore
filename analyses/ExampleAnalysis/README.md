@@ -17,13 +17,15 @@ This analysis selects events with exactly two good muons and reconstructs the Z 
   - Leading muon pT (20-150 GeV)
   - Subleading muon pT (20-150 GeV)
 
-### 2. **Systematic Variations**
-- Demonstrates automatic propagation of systematic uncertainties
-- Two muon momentum scale systematics registered:
-  - `muonScale_up`: +1% momentum scale variation
-  - `muonScale_down`: -1% momentum scale variation
-- Systematics automatically apply to dependent variables
-- Histograms automatically filled for all systematic variations
+### 2. **Systematic Variation Infrastructure**
+- Demonstrates the systematic variation registration API
+- Shows how to declare systematics that affect specific variables
+- Framework infrastructure for propagating systematics through the analysis
+- Example systematics registered (infrastructure only):
+  - `muonScale_up`: Would represent +1% momentum scale variation
+  - `muonScale_down`: Would represent -1% momentum scale variation
+- To fully implement: modify variable definitions to apply actual variations
+- See main README for complete systematic variation examples
 
 ### 3. **Modern Analyzer API**
 - Single `Analyzer` object manages the entire workflow
@@ -112,10 +114,10 @@ Saved in the same ROOT file in `histograms/` directory:
 - `LeadingMuonPt`: Leading muon transverse momentum
 - `SubleadingMuonPt`: Subleading muon transverse momentum
 
-For each histogram, systematic variations are stored as separate histograms:
+For each histogram, if systematic variations are implemented, they would be stored as separate histograms:
 - `<name>_nominal`: Central value
-- `<name>_muonScale_up`: +1% muon momentum scale
-- `<name>_muonScale_down`: -1% muon momentum scale
+- `<name>_muonScale_up`: +1% muon momentum scale (when implemented)
+- `<name>_muonScale_down`: -1% muon momentum scale (when implemented)
 
 ## Analysis Code Structure
 
