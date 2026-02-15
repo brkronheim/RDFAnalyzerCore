@@ -16,6 +16,7 @@ RDFAnalyzerCore provides a core, analysis-agnostic framework for constructing an
 - **Systematic Support**: Built-in handling of systematic variations
 - **Analysis Modularity**: Analyses live in separate repositories, automatically discovered at build time
 - **Python Bindings**: Use the framework from Python with numba and numpy integration
+- **Statistical Analysis**: Optional CMS Combine integration for limit setting and fits
 
 ## Quick Start
 
@@ -71,6 +72,7 @@ cd build/analyses/ExampleAnalysis
 - **[Python Bindings](docs/PYTHON_BINDINGS.md)** - Using the framework from Python
 - **[API Reference](docs/API_REFERENCE.md)** - Detailed API documentation
 - **[Datacard Generator](docs/DATACARD_GENERATOR.md)** - Creating CMS combine datacards
+- **[Combine Integration](docs/COMBINE_INTEGRATION.md)** - Complete workflow from analysis to statistical inference
 
 ### For Developers
 
@@ -204,6 +206,43 @@ source /path/to/root/bin/thisroot.sh
 cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
+
+### Build Options
+
+The framework supports optional features that can be enabled at build time:
+
+```bash
+# Build with all features (default: tests enabled, Combine disabled)
+cmake -S . -B build
+
+# Disable tests (faster build for production)
+cmake -S . -B build -DBUILD_TESTS=OFF
+
+# Enable CMS Combine for statistical analysis
+cmake -S . -B build -DBUILD_COMBINE=ON
+
+# Enable both Combine and CombineHarvester
+cmake -S . -B build \
+    -DBUILD_COMBINE=ON \
+    -DBUILD_COMBINE_HARVESTER=ON
+
+# Complete build with all options
+cmake -S . -B build \
+    -DBUILD_TESTS=ON \
+    -DBUILD_COMBINE=ON \
+    -DBUILD_COMBINE_HARVESTER=ON
+
+cmake --build build -j$(nproc)
+```
+
+**Available Options:**
+- `BUILD_TESTS` (default: `ON`) - Build analysis tests
+- `BUILD_COMBINE` (default: `OFF`) - Build CMS Combine package
+- `BUILD_COMBINE_HARVESTER` (default: `OFF`) - Build CombineHarvester (requires `BUILD_COMBINE=ON`)
+
+**Note**: Building Combine and CombineHarvester takes several minutes and requires an internet connection.
+
+See [Combine Integration Guide](docs/COMBINE_INTEGRATION.md) for complete statistical analysis workflows.
 
 ### Testing
 

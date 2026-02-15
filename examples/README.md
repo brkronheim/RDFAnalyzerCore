@@ -1,6 +1,37 @@
-# Python Bindings Examples
+# Python Bindings Examples and Workflow Scripts
 
-This directory contains example scripts demonstrating the use of RDFAnalyzerCore Python bindings.
+This directory contains example scripts demonstrating the use of RDFAnalyzerCore Python bindings and complete analysis workflows.
+
+## Analysis Workflow Scripts
+
+### Complete Analysis Workflow
+
+**File**: `complete_analysis_workflow.sh`
+
+Template script showing a complete end-to-end analysis:
+1. Run RDFAnalyzerCore analysis to create histograms
+2. Generate CMS Combine datacards
+3. Run statistical analysis with Combine
+4. Extract results
+
+**Usage**:
+```bash
+# First, build with Combine support
+cmake -S . -B build -DBUILD_COMBINE=ON
+cmake --build build -j$(nproc)
+
+# Customize the script for your analysis
+vim examples/complete_analysis_workflow.sh
+
+# Run the workflow
+./examples/complete_analysis_workflow.sh
+```
+
+See [Combine Integration Guide](../docs/COMBINE_INTEGRATION.md) for complete documentation.
+
+---
+
+## Python Bindings Examples
 
 Note: the Python API supports C++-style names (`Define`, `Filter`, `DefineVector`) and legacy aliases (`DefineJIT`, `FilterJIT`, `DefineFromVector`).
 
