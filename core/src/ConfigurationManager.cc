@@ -125,7 +125,8 @@ ConfigurationManager::splitString(std::string_view input,
 void ConfigurationManager::processTopLevelConfig(
     const std::string &configFile) {
   // Store the directory of the config file for resolving relative paths
-  std::filesystem::path configPath(configFile);
+  // Convert to absolute path first to handle relative config file paths correctly
+  std::filesystem::path configPath = std::filesystem::absolute(configFile);
   if (configPath.has_parent_path()) {
     configBasePath_m = configPath.parent_path().string();
   } else {
@@ -154,6 +155,16 @@ std::string ConfigurationManager::resolveConfigPath(const std::string &path) con
   
   // Otherwise, resolve relative to the config base path
   std::filesystem::path resolvedPath = std::filesystem::path(configBasePath_m) / filePath;
+  
+  // Normalize the path to handle '..' and '.' segments
+  // Use weakly_canonical which doesn't require the file to exist
+  try {
+    resolvedPath = std::filesystem::weakly_canonical(resolvedPath);
+  } catch (const std::filesystem::filesystem_error&) {
+    // If weakly_canonical fails, just use the lexically normalized path
+    resolvedPath = resolvedPath.lexically_normal();
+  }
+  
   return resolvedPath.string();
 }
 
