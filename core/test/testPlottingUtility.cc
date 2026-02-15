@@ -19,6 +19,11 @@
 
 namespace {
 
+// Skip message for tests when image library is not available
+constexpr const char* kImageLibrarySkipMessage = 
+    "Skipping PNG file check: ROOT image library (libASImage) not available. "
+    "Install libgif or giflib package to enable full image testing.";
+
 // Check if ROOT's image library (TASImage) is available for saving PNG files
 bool isImageLibraryAvailable() {
   static bool checked = false;
@@ -27,7 +32,8 @@ bool isImageLibraryAvailable() {
   if (!checked) {
     // Try to load the image library
     TCanvas testCanvas("test", "test", 1, 1);
-    std::string testPath = "/tmp/test_image_lib_" + std::to_string(getpid()) + ".png";
+    auto tempDir = std::filesystem::temp_directory_path();
+    std::string testPath = (tempDir / ("test_image_lib_" + std::to_string(getpid()) + ".png")).string();
     testCanvas.SaveAs(testPath.c_str());
     available = std::filesystem::exists(testPath);
     if (available) {
@@ -157,8 +163,7 @@ TEST(PlottingUtilityTest, CreatesLinearAndLogStackPlotsWithRatio) {
     EXPECT_GT(std::filesystem::file_size(linearPath), 0u);
     EXPECT_GT(std::filesystem::file_size(logPath), 0u);
   } else {
-    GTEST_SKIP() << "Skipping PNG file checks: ROOT image library (libASImage) not available. "
-                 << "Install libgif or giflib package to enable full image testing.";
+    GTEST_SKIP() << kImageLibrarySkipMessage;
   }
 
   TH1D numerator("numerator", "numerator", 2, 0.0, 2.0);
@@ -359,8 +364,7 @@ TEST(PlottingUtilityTest, ComputesDetailedRatioSummary) {
   if (isImageLibraryAvailable()) {
     EXPECT_TRUE(std::filesystem::exists(summaryCombinedPath));
   } else {
-    GTEST_SKIP() << "Skipping PNG file check: ROOT image library (libASImage) not available. "
-                 << "Install libgif or giflib package to enable full image testing.";
+    GTEST_SKIP() << kImageLibrarySkipMessage;
   }
 
   // copy/cleanup behavior (keep by default)
@@ -506,8 +510,7 @@ TEST(PlottingUtilityTest, ComputesPCAEnvelope) {
     if (isImageLibraryAvailable()) {
       EXPECT_TRUE(std::filesystem::exists(pcaPanelPath));
     } else {
-      GTEST_SKIP() << "Skipping PNG file check: ROOT image library (libASImage) not available. "
-                   << "Install libgif or giflib package to enable full image testing.";
+      GTEST_SKIP() << kImageLibrarySkipMessage;
     }
 
     // copy PCA plot if requested; keep file by default unless REMOVE_TEST_PLOTS=1
