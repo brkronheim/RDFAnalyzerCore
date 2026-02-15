@@ -138,6 +138,20 @@ control_regions:
     description: "Control region enriched in W+jets events"
 
 # Systematic uncertainties
+# 
+# Shape systematics are read from input ROOT files if available.
+# The script looks for histograms with names: {observable}_{systematic}Up and {observable}_{systematic}Down
+# For example, if observable="mT" and systematic="JES", it looks for:
+#   - mT_JESUp
+#   - mT_JESDown
+# 
+# If systematic variations are not found in input files, placeholder variations
+# are created using the 'variation' parameter (scales nominal by ±variation).
+# 
+# For proper systematic handling in your analysis:
+# 1. Book histograms for each systematic variation in your RDFAnalyzer code
+# 2. Name them with the systematic suffix: {observable}_{systname}Up/Down
+# 3. The datacard generator will automatically use these variations
 systematics:
   # Luminosity uncertainty (rate uncertainty)
   lumi:
@@ -157,10 +171,14 @@ systematics:
     description: "Luminosity uncertainty"
   
   # Jet energy scale (shape uncertainty)
+  # For proper handling, your analysis should produce:
+  #   - mT_JESUp histogram
+  #   - mT_JESDown histogram
+  # in each input ROOT file
   JES:
     type: "shape"
     distribution: "shape"
-    variation: 0.03  # 3% variation for placeholder
+    variation: 0.03  # 3% variation for placeholder (only used if Up/Down not in files)
     applies_to:
       signal: true
       ttbar: true
@@ -175,6 +193,9 @@ systematics:
     description: "Jet energy scale uncertainty"
   
   # b-tagging efficiency (shape uncertainty)
+  # For proper handling, your analysis should produce:
+  #   - mT_btagUp histogram
+  #   - mT_btagDown histogram
   btag:
     type: "shape"
     distribution: "shape"
