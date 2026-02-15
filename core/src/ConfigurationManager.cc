@@ -126,11 +126,21 @@ void ConfigurationManager::processTopLevelConfig(
     const std::string &configFile) {
   // Store the directory of the config file for resolving relative paths
   // Convert to absolute path first to handle relative config file paths correctly
-  std::filesystem::path configPath = std::filesystem::absolute(configFile);
-  if (configPath.has_parent_path()) {
-    configBasePath_m = configPath.parent_path().string();
-  } else {
-    configBasePath_m = ".";
+  try {
+    std::filesystem::path configPath = std::filesystem::absolute(configFile);
+    if (configPath.has_parent_path()) {
+      configBasePath_m = configPath.parent_path().string();
+    } else {
+      configBasePath_m = ".";
+    }
+  } catch (const std::filesystem::filesystem_error& e) {
+    // If absolute path resolution fails, fall back to using the path as-is
+    std::filesystem::path configPath(configFile);
+    if (configPath.has_parent_path()) {
+      configBasePath_m = configPath.parent_path().string();
+    } else {
+      configBasePath_m = ".";
+    }
   }
   
   configMap_m = adapter_m->parsePairBasedConfig(configFile);
@@ -161,7 +171,9 @@ std::string ConfigurationManager::resolveConfigPath(const std::string &path) con
   try {
     resolvedPath = std::filesystem::weakly_canonical(resolvedPath);
   } catch (const std::filesystem::filesystem_error&) {
-    // If weakly_canonical fails, just use the lexically normalized path
+    // If weakly_canonical fails (e.g., due to permission issues or extremely long paths),
+    // fall back to lexically_normal which performs purely syntactic normalization
+    // This is acceptable because the subsequent file operations will catch any real issues
     resolvedPath = resolvedPath.lexically_normal();
   }
   
