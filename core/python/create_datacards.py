@@ -14,11 +14,20 @@ Author: RDFAnalyzerCore
 
 import argparse
 import yaml
-import ROOT
 import os
 import sys
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Any
+
+# Try to import ROOT
+try:
+    import ROOT
+except ImportError:
+    print("Error: ROOT Python bindings not found.")
+    print("Please ensure ROOT is properly installed and sourced.")
+    print("On lxplus: source /cvmfs/sft.cern.ch/lcg/views/LCG_108a/x86_64-el9-gcc15-opt/setup.sh")
+    print("Or source your ROOT installation's thisroot.sh")
+    sys.exit(1)
 
 
 class DatacardGenerator:

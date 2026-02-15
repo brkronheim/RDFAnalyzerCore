@@ -70,6 +70,7 @@ cd build/analyses/ExampleAnalysis
 - **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Building analyses step-by-step
 - **[Python Bindings](docs/PYTHON_BINDINGS.md)** - Using the framework from Python
 - **[API Reference](docs/API_REFERENCE.md)** - Detailed API documentation
+- **[Datacard Generator](docs/DATACARD_GENERATOR.md)** - Creating CMS combine datacards
 
 ### For Developers
 
@@ -407,6 +408,24 @@ analyzer.Define("corrected_pt",
 ```
 
 Histograms automatically include systematic axes.
+
+### CMS Combine Datacard Generation
+
+Framework includes a Python script for generating CMS combine datacards from analysis outputs:
+
+```bash
+python core/python/create_datacards.py config.yaml
+```
+
+Features:
+- YAML-based configuration for datacards
+- Multiple control region support
+- Sample combination (binned/stitched samples)
+- Observable rebinning
+- Systematic uncertainties (rate and shape)
+- Automatic correlation handling
+
+**See**: [Datacard Generator Guide](docs/DATACARD_GENERATOR.md) for complete documentation.
 
 ### HTCondor Submission
 
