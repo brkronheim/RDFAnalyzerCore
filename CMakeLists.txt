@@ -13,6 +13,11 @@ set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 
 project(RDFAnalyzer)
 
+# Build options
+option(BUILD_TESTS "Build analysis tests" ON)
+option(BUILD_COMBINE "Build CMS Combine package for statistical analysis" OFF)
+option(BUILD_COMBINE_HARVESTER "Build CombineHarvester tools (requires BUILD_COMBINE)" OFF)
+
 enable_testing()
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -29,6 +34,11 @@ find_package(Boost REQUIRED CONFIG)
 
 # Setup ONNX Runtime
 include(SetupOnnxRuntime)
+
+# Setup CMS Combine (optional)
+if(BUILD_COMBINE OR BUILD_COMBINE_HARVESTER)
+	include(SetupCombine)
+endif()
 
 set(PYBIND11_FINDPYTHON ON)
 
