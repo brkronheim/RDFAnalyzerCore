@@ -1,7 +1,5 @@
 #include "analyzer.h"
-#include <ManagerFactory.h>
-#include <ConfigurationManager.h>
-#include <DataManager.h>
+#include <NDHistogramManager.h>
 #include <functions.h>
 
 #include <iostream>
@@ -48,6 +46,22 @@ Float_t scaleDown(Float_t mass){
     return(mass/1000.0);
 }
 
+// Extract leading muon pT in GeV
+Float_t getLeadingMuonPt(ROOT::VecOps::RVec<Int_t> &goodMuons, ROOT::VecOps::RVec<Float_t> &muonPt) {
+    if (goodMuons.size() > 0) {
+        return muonPt[goodMuons[0]] / 1000.0; // Convert MeV to GeV
+    }
+    return 0.0;
+}
+
+// Extract subleading muon pT in GeV
+Float_t getSubleadingMuonPt(ROOT::VecOps::RVec<Int_t> &goodMuons, ROOT::VecOps::RVec<Float_t> &muonPt) {
+    if (goodMuons.size() > 1) {
+        return muonPt[goodMuons[1]] / 1000.0; // Convert MeV to GeV
+    }
+    return 0.0;
+}
+
 int main(int argc, char **argv) {
 
     // Main configuration is provided as command-line argument
@@ -59,13 +73,20 @@ int main(int argc, char **argv) {
         return (1);
     }
 
-    auto configProvider = ManagerFactory::createConfigurationManager(argv[1]);
-    auto systematicManager = ManagerFactory::createSystematicManager();
-    auto dataFrameProvider = ManagerFactory::createDataManager(*configProvider);
-    std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
-
+    // Create analyzer from config file
     auto an = Analyzer(argv[1]);
 
+    // Add NDHistogramManager plugin for config-driven histogram booking
+    auto histManager = std::make_unique<NDHistogramManager>(
+        an.getConfigurationProvider());
+    an.addPlugin("histogramManager", std::move(histManager));
+
+    // Register systematic variation for muon momentum scale
+    // This demonstrates how systematics propagate through the analysis
+    an.getSystematicManager().registerSystematic("muonScale_up", {"AnalysisMuonsAuxDyn.pt"});
+    an.getSystematicManager().registerSystematic("muonScale_down", {"AnalysisMuonsAuxDyn.pt"});
+
+    // Define analysis variables and selections
     an.Define("goodMuons", getGoodMuons, {"AnalysisMuonsAuxDyn.DFCommonMuonPassIDCuts",
                                           "AnalysisMuonsAuxDyn.DFCommonMuonPassPreselection",
                                           "AnalysisMuonsAuxDyn.DFCommonJetDr", "AnalysisMuonsAuxDyn.pt"})-> 
@@ -75,10 +96,17 @@ int main(int argc, char **argv) {
         Define("ZBosonVec", sumLorentzVec<ROOT::Math::LorentzVector<ROOT::Math::PtEtaPhiM4D<Float_t>>>, {"LeadingMuonVec", "SubleadingMuonVec"})->
         Define("ZBosonMassScaled", getLorentzVecM<Float_t, ROOT::Math::LorentzVector<ROOT::Math::PtEtaPhiM4D<Float_t>>>, {"ZBosonVec"})->
         Filter("ZBosonMassFilter", massFilter, {"ZBosonMassScaled"})->
-        Define("ZBosonMass", scaleDown, {"ZBosonMassScaled"});
+        Define("ZBosonMass", scaleDown, {"ZBosonMassScaled"})->
+        // Define individual muon pT variables for histogramming
+        Define("LeadingMuonPt", getLeadingMuonPt, {"goodMuons", "AnalysisMuonsAuxDyn.pt"})->
+        Define("SubleadingMuonPt", getSubleadingMuonPt, {"goodMuons", "AnalysisMuonsAuxDyn.pt"});
 
+    // Book histograms from config file
+    // This should be called after all Define and Filter operations
+    an.bookConfigHistograms();
+
+    // Execute the dataframe and save results
     an.save();
-    
 
 }
 

@@ -10,3 +10,4 @@ batch=False
 type=10
 floatConfig=floats.txt
 intConfig=ints.txt
+histogramConfig=histograms.txt
