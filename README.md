@@ -383,6 +383,15 @@ The framework supports multiple ML backends:
 - **BDT**: FastForest-based boosted decision trees
 - **SOFIE**: Build-time compiled models for maximum performance
 
+### Plotting from Meta Output
+`PlottingUtility` can build compiled-ROOT stack plots directly from the meta output file. It supports:
+- per-process normalization through optional counter histograms (for example `counter_weightSum_<sample>`)
+- linear and log-y stack plots
+- optional data/MC ratio panels
+- ratio/error/pull summary computation
+- PCA-based mean/up/down envelope construction from variation histograms
+
+---
 All managers support:
 - Conditional execution (skip expensive inference when not needed)
 - Multi-output models

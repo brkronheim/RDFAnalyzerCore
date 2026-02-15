@@ -92,6 +92,9 @@ add_executable(testRootEnvironmentGuard testRootEnvironmentGuard.cc)
 target_link_libraries(testRootEnvironmentGuard core gtest gtest_main)
 add_test(NAME RootEnvironmentGuardTest COMMAND testRootEnvironmentGuard)
 
+add_executable(testPlottingUtility testPlottingUtility.cc)
+target_link_libraries(testPlottingUtility core gtest gtest_main)
+add_test(NAME PlottingUtilityTest COMMAND testPlottingUtility)
 if(TARGET rdfanalyzer AND Python_EXECUTABLE)
 add_test(NAME PythonBindingsNumbaIntegration
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_bindings.py)
@@ -111,6 +114,5 @@ endif()
 #add_executable(testSystematicPropagation testSystematicPropagation.cc)
 #target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
 #add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
-
 
 
