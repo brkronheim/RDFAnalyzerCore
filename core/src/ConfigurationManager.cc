@@ -155,28 +155,33 @@ std::string ConfigurationManager::resolveConfigPath(const std::string &path) con
   if (path.empty()) {
     return path;
   }
-  
+
   std::filesystem::path filePath(path);
-  
+
   // If it's already absolute, return as-is
   if (filePath.is_absolute()) {
     return path;
   }
-  
-  // Otherwise, resolve relative to the config base path
+
+  // 1) Prefer the path as given (i.e. resolve relative to current working directory)
+  try {
+    if (std::filesystem::exists(filePath)) {
+      return std::filesystem::weakly_canonical(filePath).string();
+    }
+  } catch (const std::filesystem::filesystem_error&) {
+    // ignore and continue to try config-base resolution
+  }
+
+  // 2) Fall back to resolving relative to the config base path
   std::filesystem::path resolvedPath = std::filesystem::path(configBasePath_m) / filePath;
-  
-  // Normalize the path to handle '..' and '.' segments
-  // Use weakly_canonical which doesn't require the file to exist
+
+  // Normalize the path to handle '..' and '.' segments; use weakly_canonical when possible
   try {
     resolvedPath = std::filesystem::weakly_canonical(resolvedPath);
   } catch (const std::filesystem::filesystem_error&) {
-    // If weakly_canonical fails (e.g., due to permission issues or extremely long paths),
-    // fall back to lexically_normal which performs purely syntactic normalization
-    // This is acceptable because the subsequent file operations will catch any real issues
     resolvedPath = resolvedPath.lexically_normal();
   }
-  
+
   return resolvedPath.string();
 }
 

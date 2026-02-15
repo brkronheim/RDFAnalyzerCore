@@ -8,6 +8,7 @@
 #include <TROOT.h>
 #include <TCanvas.h>
 #include <TLegend.h>
+#include <TLine.h>
 
 #include <cstdio>
 #include <filesystem>
