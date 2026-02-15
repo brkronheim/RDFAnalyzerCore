@@ -239,11 +239,13 @@ virtual std::vector<std::pair<std::string, std::string>>
 Parse a config file with key=value pairs.
 
 **Example**:
+{% raw %}
 ```cpp
 // For file with: "const1=1.0\nconst2=2.0"
 auto pairs = config->getPairs("constants.txt");
 // Returns: {{"const1", "1.0"}, {"const2", "2.0"}}
 ```
+{% endraw %}
 
 ```cpp
 virtual std::vector<std::map<std::string, std::string>> 
@@ -253,12 +255,14 @@ virtual std::vector<std::map<std::string, std::string>>
 Parse a config file with multi-key lines (plugin configs).
 
 **Example**:
+{% raw %}
 ```cpp
 // For file with: "file=model.onnx name=score inputVariables=pt,eta"
 auto configs = config->getMultiKeyConfigs("onnx_models.txt");
 // Returns: [{{"file": "model.onnx", "name": "score", 
 //             "inputVariables": "pt,eta"}}]
 ```
+{% endraw %}
 
 ### ConfigurationManager
 
