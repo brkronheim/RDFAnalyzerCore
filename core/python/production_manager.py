@@ -432,9 +432,12 @@ class ProductionManager:
             client = Client(cluster)
             
             # Submit jobs using Python wrapper for C++ executables
-            def run_cpp_job(job_id: int, exe_path: str, config_path: str, 
-                           stage_inputs: bool, stage_outputs: bool) -> dict:
-                """Run a C++ job with proper wrapper and staging"""
+            def run_cpp_job(job_id: int, exe_path: str, config_path: str) -> dict:
+                """Run a C++ job with proper wrapper and staging
+                
+                Note: Input/output staging is handled by DASK cluster configuration
+                and the HTCondor submission, not within this function.
+                """
                 import sys
                 import os
                 from pathlib import Path
@@ -490,9 +493,7 @@ class ProductionManager:
                     run_cpp_job,
                     job_id,
                     str(self.config.exe_path),
-                    job.config_path,
-                    self.config.stage_inputs,
-                    self.config.stage_outputs
+                    job.config_path
                 )
                 futures.append(future)
                 job.status = JobStatus.SUBMITTED

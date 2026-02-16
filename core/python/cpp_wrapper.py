@@ -19,6 +19,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# System library paths to exclude from staging (available on all nodes)
+SYSTEM_LIB_PATHS = ['/lib64/', '/usr/lib64/', '/lib/', '/usr/lib/']
+
 
 def find_shared_libraries(executable_path: str) -> list:
     """
@@ -94,7 +97,7 @@ def stage_shared_libraries(executable_path: str, target_dir: str) -> list:
     for so_path in so_files:
         try:
             # Skip system libraries that should be available on all nodes
-            if any(so_path.startswith(prefix) for prefix in ['/lib64/', '/usr/lib64/', '/lib/', '/usr/lib/']):
+            if any(so_path.startswith(prefix) for prefix in SYSTEM_LIB_PATHS):
                 continue
             
             # Copy library to lib directory
