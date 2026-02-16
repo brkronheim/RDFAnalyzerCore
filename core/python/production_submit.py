@@ -153,6 +153,11 @@ def main():
         default=3,
         help='Maximum number of retry attempts per job (default: 3)'
     )
+    parser.add_argument(
+        '--eos-sched',
+        action='store_true',
+        help='Use EOS scheduling'
+    )
     
     # Action settings
     parser.add_argument(
@@ -224,6 +229,7 @@ def main():
         stage_inputs=args.stage_inputs,
         stage_outputs=args.stage_outputs,
         max_retries=args.max_retries,
+        eos_sched=args.eos_sched,
     )
     
     # Create manager

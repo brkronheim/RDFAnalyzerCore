@@ -35,11 +35,17 @@ The Production Manager is designed to address common challenges in large-scale b
 - Configuration validation before submission
 - Per-job configuration management
 - Shared executable and auxiliary file staging
+- **Automatic shared library (.so) discovery and staging**
+- **C++ executable wrapper for DASK compatibility**
 
 ### Submission Backends
 
 - **HTCondor**: Traditional batch submission with condor_submit
+  - Automatic .so file transfer to worker nodes
+  - LD_LIBRARY_PATH setup on execution nodes
 - **DASK**: Python-based distributed computing with dask-jobqueue
+  - Python wrapper for C++ executables
+  - Shared library staging for remote execution
 
 ### Monitoring and Validation
 
@@ -322,6 +328,48 @@ python core/python/production_submit.py \
 
 Note: When working in EOS, use `--stage-outputs` to avoid issues with worker node access.
 
+Use `--eos-sched` flag when submitting to EOS scheduler:
+
+```bash
+python core/python/production_submit.py \
+    --name my_prod \
+    --work-dir /eos/user/u/username/productions/my_prod \
+    --config cfg/config.txt \
+    --sample-config cfg/samples.txt \
+    --exe ./analyzer \
+    --eos-sched \
+    --stage-outputs
+```
+
+## Shared Library Management
+
+The Production Manager automatically discovers and stages shared libraries (.so files) required by your C++ executable.
+
+### Automatic Discovery
+
+When submitting jobs, the Production Manager:
+1. Uses `ldd` to find all shared library dependencies
+2. Filters out system libraries (already on worker nodes)
+3. Copies custom libraries to `work_dir/lib/`
+4. Transfers them to worker nodes
+5. Sets `LD_LIBRARY_PATH` on execution
+
+### Manual Library Staging
+
+If automatic discovery doesn't work, you can manually stage libraries:
+
+```bash
+# Create lib directory in work dir
+mkdir -p condorSub_my_prod/lib
+
+# Copy your custom libraries
+cp /path/to/libMyLibrary.so condorSub_my_prod/lib/
+cp /path/to/libAnotherLib.so condorSub_my_prod/lib/
+
+# Submit - libraries will be transferred automatically
+python production_submit.py --name my_prod ...
+```
+
 ## Backend Support
 
 ### HTCondor Backend
@@ -339,10 +387,11 @@ Features:
 - Supports input/output staging with xrdcp
 - Integrates with existing resubmit_jobs.py
 - Well-tested and stable
+- **Automatic .so file transfer and LD_LIBRARY_PATH setup**
 
 ### DASK Backend
 
-Experimental backend using DASK distributed:
+Python-based backend using DASK distributed:
 
 ```bash
 # Install DASK first
@@ -358,8 +407,17 @@ Features:
 - Dynamic scaling
 - Better for interactive analysis
 - Integration with Python workflows
+- **Python wrapper for C++ executables (cpp_wrapper.py)**
+- **Automatic shared library discovery and transfer**
+- **Compatible with HTCondor via dask-jobqueue**
 
-Note: DASK backend is experimental and may require additional configuration.
+The DASK backend wraps C++ executables in Python to enable:
+- Proper environment setup on worker nodes
+- Shared library path configuration
+- Error handling and logging
+- Integration with Python-based workflows
+
+Note: DASK backend requires dask-jobqueue package.
 
 ## Examples
 

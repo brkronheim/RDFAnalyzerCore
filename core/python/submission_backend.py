@@ -344,6 +344,13 @@ trap 'rc=$?; echo "ERROR: wrapper exited with code $rc"; exit $rc' ERR
 # log and re-raise SIGTERM so Condor records ExitBySignal (do not swallow the signal)
 trap 'echo "Received SIGTERM - likely timed out by scheduler"; trap - SIGTERM; kill -s SIGTERM $$' SIGTERM
 {root_block}{pre_block}{shared_block}{x509_block}ls
+
+# Setup LD_LIBRARY_PATH for shared libraries
+if [ -d "lib" ]; then
+  export LD_LIBRARY_PATH="$PWD/lib:${{LD_LIBRARY_PATH:-}}"
+  echo "LD_LIBRARY_PATH set to: $LD_LIBRARY_PATH"
+fi
+
 stage_in_start=$(date +%s)
 {stage_out_pre}{stage_block}
 stage_in_end=$(date +%s)
@@ -404,6 +411,12 @@ def generate_condor_submit(
         f"{main_dir}/job_$(Process)/floats.txt",
         f"{main_dir}/job_$(Process)/ints.txt",
     ]
+    
+    # Add lib directory for shared libraries if it exists
+    lib_dir = Path(main_dir) / "lib"
+    if lib_dir.exists() and lib_dir.is_dir():
+        transfer_files.append(f"{main_dir}/lib")
+    
     if shared_dir_name:
         transfer_files.append(f"{main_dir}/{shared_dir_name}/{exe_relpath}")
         if include_aux:

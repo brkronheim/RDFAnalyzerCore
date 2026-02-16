@@ -100,6 +100,7 @@ class ProductionConfig:
     stage_outputs: bool = False
     max_retries: int = 3
     validate_outputs: bool = True
+    eos_sched: bool = False
     state_file: Optional[Path] = None
     
     def __post_init__(self):
@@ -309,9 +310,36 @@ class ProductionManager:
             logger.error(f"Unknown backend: {self.config.backend}")
             return 0
             
+    def _prepare_shared_libraries(self) -> None:
+        """
+        Discover and stage shared libraries required by the executable.
+        Creates a lib/ directory in the work directory with necessary .so files.
+        """
+        try:
+            from cpp_wrapper import stage_shared_libraries
+            
+            logger.info("Discovering shared libraries for executable")
+            staged_libs = stage_shared_libraries(
+                str(self.config.exe_path),
+                str(self.config.work_dir)
+            )
+            
+            if staged_libs:
+                logger.info(f"Staged {len(staged_libs)} shared libraries")
+            else:
+                logger.info("No additional shared libraries needed")
+                
+        except ImportError:
+            logger.warning("cpp_wrapper module not available, skipping .so staging")
+        except Exception as e:
+            logger.warning(f"Failed to stage shared libraries: {e}")
+            
     def _submit_htcondor(self, job_ids: List[int], dry_run: bool) -> int:
         """Submit jobs via HTCondor"""
         from submission_backend import write_submit_files
+        
+        # Prepare shared libraries
+        self._prepare_shared_libraries()
         
         # Generate condor submission files
         submit_path = write_submit_files(
@@ -323,6 +351,7 @@ class ProductionManager:
             "",  # root_setup
             x509loc=None,
             config_file="job_config.txt",
+            eos_sched=self.config.eos_sched,
         )
         
         if dry_run:
@@ -364,7 +393,7 @@ class ProductionManager:
             return 0
             
     def _submit_dask(self, job_ids: List[int], dry_run: bool) -> int:
-        """Submit jobs via DASK"""
+        """Submit jobs via DASK with C++ wrapper support"""
         try:
             from dask.distributed import Client, LocalCluster
             from dask_jobqueue import HTCondorCluster
@@ -377,44 +406,93 @@ class ProductionManager:
             return len(job_ids)
             
         try:
-            # Create DASK cluster
+            # Prepare shared libraries
+            self._prepare_shared_libraries()
+            
+            # Create DASK cluster with file transfers
+            lib_dir = self.config.work_dir / "lib"
+            transfer_files = [str(self.config.exe_path)]
+            
+            # Add lib directory if it exists
+            if lib_dir.exists():
+                transfer_files.append(str(lib_dir))
+            
             cluster = HTCondorCluster(
                 cores=1,
                 memory="2GB",
                 disk="2GB",
                 job_extra={
                     "+MaxRuntime": "3600",
-                }
+                },
+                # Transfer executable and libraries
+                transfer_input_files=transfer_files if transfer_files else None,
             )
             cluster.scale(jobs=len(job_ids))
             
             client = Client(cluster)
             
-            # Submit jobs
-            def run_job(job_id: int, exe_path: str, config_path: str) -> dict:
-                """Run a single job"""
-                import subprocess
-                result = subprocess.run(
-                    [exe_path, config_path],
-                    capture_output=True,
-                    text=True
-                )
-                return {
-                    'job_id': job_id,
-                    'returncode': result.returncode,
-                    'stdout': result.stdout,
-                    'stderr': result.stderr,
-                }
+            # Submit jobs using Python wrapper for C++ executables
+            def run_cpp_job(job_id: int, exe_path: str, config_path: str, 
+                           stage_inputs: bool, stage_outputs: bool) -> dict:
+                """Run a C++ job with proper wrapper and staging"""
+                import sys
+                import os
+                from pathlib import Path
+                
+                # Add cpp_wrapper to path
+                wrapper_dir = Path(__file__).parent
+                if str(wrapper_dir) not in sys.path:
+                    sys.path.insert(0, str(wrapper_dir))
+                
+                try:
+                    from cpp_wrapper import run_cpp_executable
+                    
+                    # Setup working directory
+                    work_dir = os.getcwd()
+                    
+                    # Run with wrapper
+                    result = run_cpp_executable(
+                        exe_path=exe_path,
+                        config_path=config_path,
+                        working_dir=work_dir,
+                        setup_libs=True
+                    )
+                    
+                    return {
+                        'job_id': job_id,
+                        'returncode': result['returncode'],
+                        'stdout': result['stdout'],
+                        'stderr': result['stderr'],
+                        'success': result['success']
+                    }
+                    
+                except ImportError:
+                    # Fallback to direct execution
+                    import subprocess
+                    result = subprocess.run(
+                        [exe_path, config_path],
+                        capture_output=True,
+                        text=True
+                    )
+                    return {
+                        'job_id': job_id,
+                        'returncode': result.returncode,
+                        'stdout': result.stdout,
+                        'stderr': result.stderr,
+                        'success': result.returncode == 0
+                    }
                 
             # Submit all jobs
             futures = []
             for job_id in job_ids:
                 job = self.jobs[job_id]
                 future = client.submit(
-                    run_job,
+                    run_cpp_job,
                     job_id,
                     str(self.config.exe_path),
-                    job.config_path
+                    job.config_path,
+                    self.config.stage_inputs,
+                    self.config.stage_outputs
                 )
                 futures.append(future)
                 job.status = JobStatus.SUBMITTED
