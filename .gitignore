@@ -27,6 +27,9 @@ compile_commands.json
 *swp
 condorSub*
 *__afs*
+production_*
+example_production_work
+example_outputs
 aux/Run3/*
 aux/Run2/*
 docs/doxygen/*
