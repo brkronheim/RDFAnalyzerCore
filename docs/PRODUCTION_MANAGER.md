@@ -400,8 +400,9 @@ python core/python/production_submit.py \
 # Resume by checking status
 python core/python/production_monitor.py status --name my_prod
 
-# Submit any jobs that weren't submitted
-python core/python/production_manager.py submit --name my_prod --work-dir condorSub_my_prod
+# Submit any jobs that weren't submitted (using production_submit.py --submit)
+# Or manually trigger submission:
+cd condorSub_my_prod && condor_submit condor_submit.sub
 
 # Continue monitoring
 python core/python/production_monitor.py monitor --name my_prod
@@ -451,9 +452,11 @@ done
    cat condorSub_my_prod/condor_logs/log_*.stderr
    ```
 
-2. Test job locally:
+2. Test job locally (after generation):
    ```bash
-   python core/python/production_manager.py test --name my_prod --job-id 0
+   # Test by running the job's config directly
+   cd condorSub_my_prod/job_0
+   /path/to/analyzer job_config.txt
    ```
 
 3. Check configuration:

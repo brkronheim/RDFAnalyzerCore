@@ -338,15 +338,12 @@ class ProductionManager:
                 check=True
             )
             
-            # Parse cluster ID from output
+            # Parse cluster ID from output using regex
             cluster_id = None
-            for line in result.stdout.split('\n'):
-                if 'cluster' in line.lower():
-                    parts = line.split()
-                    for part in parts:
-                        if part.isdigit():
-                            cluster_id = part
-                            break
+            import re
+            match = re.search(r'submitted to cluster (\d+)', result.stdout, re.IGNORECASE)
+            if match:
+                cluster_id = match.group(1)
                             
             # Update job statuses
             submit_time = time.time()
@@ -475,7 +472,6 @@ class ProductionManager:
                 logger.warning("Failed to query condor_q")
                 return
                 
-            import json
             queue_data = json.loads(result.stdout)
             
             # Build mapping of condor job ID to status

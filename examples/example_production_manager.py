@@ -4,12 +4,19 @@ Example usage of the Production Manager.
 
 This example shows how to programmatically create and manage a production
 using the ProductionManager API.
+
+Note: This example uses sys.path manipulation for convenience. In production,
+you should either:
+1. Run from the repository root directory, OR
+2. Install the package properly, OR
+3. Add the core/python directory to your PYTHONPATH
 """
 
 import sys
 from pathlib import Path
 
 # Add parent directory to path for imports
+# (Only needed when running example directly; remove in production code)
 sys.path.insert(0, str(Path(__file__).parent.parent / "core" / "python"))
 
 from production_manager import (
