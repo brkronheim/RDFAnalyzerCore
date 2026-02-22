@@ -79,6 +79,10 @@ add_executable(testTriggerManager testTriggerManager.cc)
 target_link_libraries(testTriggerManager core corePlugins gtest gtest_main)
 add_test(NAME TriggerManagerTest COMMAND testTriggerManager)
 
+add_executable(testGoldenJsonManager testGoldenJsonManager.cc)
+target_link_libraries(testGoldenJsonManager core corePlugins gtest gtest_main)
+add_test(NAME GoldenJsonManagerTest COMMAND testGoldenJsonManager)
+
 
 add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)
 target_link_libraries(testAnalyzer_TriggerLogic core corePlugins gtest gtest_main)
