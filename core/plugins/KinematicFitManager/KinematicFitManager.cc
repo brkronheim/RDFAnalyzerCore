@@ -89,27 +89,52 @@ KinFitParticleConfig parseParticleSpec(const std::string &spec) {
 }
 
 /**
- * @brief Parse one constraint specification: "idx1+idx2:targetMass".
+ * @brief Parse one constraint specification.
  *
- * idx1 and idx2 are zero-based indices into the fit's particle list.
+ * Accepted formats:
+ *  - "idx1+idx2:targetMass"         — two-body invariant mass constraint
+ *  - "idx1+idx2+idx3:targetMass"    — three-body invariant mass constraint
+ *                                     (e.g. top: m(b, l, ν) = 173.3 GeV)
+ *  - "pt:idx:targetPt"              — pT constraint on a single particle
+ *                                     (set targetPt=0 for no-MET events)
+ *
+ * Indices are zero-based into the fit's particle list.
  */
 KinFitConstraintConfig parseConstraintSpec(const std::string &spec) {
+  // ── pT constraint: "pt:idx:targetPt" ──────────────────────────────────
+  if (spec.size() >= 3 && spec[0] == 'p' && spec[1] == 't' && spec[2] == ':') {
+    const auto parts = splitBy(spec.substr(3), ':');
+    if (parts.size() != 2) {
+      throw std::runtime_error(
+          "KinematicFitManager: invalid pT constraint spec '" + spec +
+          "' – expected pt:idx:targetPt");
+    }
+    KinFitConstraintConfig con;
+    con.type        = KinFitConstraintConfig::Type::PT;
+    con.idx1        = parseInt(parts[0], "ptConstraintIdx");
+    con.targetValue = parseDouble(parts[1], "ptConstraintTarget");
+    return con;
+  }
+
+  // ── Mass constraint: "idx1+idx2:mass" or "idx1+idx2+idx3:mass" ────────
   const auto colonParts = splitBy(spec, ':');
   if (colonParts.size() != 2) {
     throw std::runtime_error(
         "KinematicFitManager: invalid constraint spec '" + spec +
-        "' – expected idx1+idx2:targetMass");
+        "' – expected idx1+idx2:mass, idx1+idx2+idx3:mass, or pt:idx:targetPt");
   }
   const auto idxParts = splitBy(colonParts[0], '+');
-  if (idxParts.size() != 2) {
+  if (idxParts.size() != 2 && idxParts.size() != 3) {
     throw std::runtime_error(
         "KinematicFitManager: invalid constraint indices in '" + spec +
-        "' – expected two indices separated by '+'");
+        "' – expected two or three indices separated by '+'");
   }
   KinFitConstraintConfig con;
-  con.idx1       = parseInt(idxParts[0], "constraintIdx1");
-  con.idx2       = parseInt(idxParts[1], "constraintIdx2");
-  con.targetMass = parseDouble(colonParts[1], "constraintMass");
+  con.type        = KinFitConstraintConfig::Type::MASS;
+  con.idx1        = parseInt(idxParts[0], "constraintIdx1");
+  con.idx2        = parseInt(idxParts[1], "constraintIdx2");
+  con.idx3        = (idxParts.size() == 3) ? parseInt(idxParts[2], "constraintIdx3") : -1;
+  con.targetValue = parseDouble(colonParts[1], "constraintMass");
   return con;
 }
 
@@ -435,7 +460,14 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
     }
 
     for (const auto &con : cfg.constraints) {
-      fitter.addMassConstraint(con.idx1, con.idx2, con.targetMass);
+      if (con.type == KinFitConstraintConfig::Type::PT) {
+        fitter.addPtConstraint(con.idx1, con.targetValue);
+      } else if (con.idx3 >= 0) {
+        fitter.addThreeBodyMassConstraint(con.idx1, con.idx2, con.idx3,
+                                          con.targetValue);
+      } else {
+        fitter.addMassConstraint(con.idx1, con.idx2, con.targetValue);
+      }
     }
 
     const KinFitResult res = fitter.fit(cfg.maxIterations,
@@ -559,10 +591,20 @@ void KinematicFitManager::registerFits(
     for (const auto &spec : splitBy(entry.at("constraints"), ',')) {
       const auto con = parseConstraintSpec(spec);
       const int n = static_cast<int>(cfg.particles.size());
-      if (con.idx1 < 0 || con.idx1 >= n || con.idx2 < 0 || con.idx2 >= n) {
-        throw std::runtime_error(
-            "KinematicFitManager: constraint particle index out of range in '" +
-            spec + "' for fit '" + entry.at("name") + "'");
+      // Validate all referenced indices are in range
+      auto checkIdx = [&](int idx, const char *role) {
+        if (idx < 0 || idx >= n) {
+          throw std::runtime_error(
+              "KinematicFitManager: " + std::string(role) +
+              " particle index " + std::to_string(idx) +
+              " out of range in '" + spec +
+              "' for fit '" + entry.at("name") + "'");
+        }
+      };
+      checkIdx(con.idx1, "constraint");
+      if (con.type == KinFitConstraintConfig::Type::MASS) {
+        checkIdx(con.idx2, "constraint");
+        if (con.idx3 >= 0) checkIdx(con.idx3, "constraint");
       }
       cfg.constraints.push_back(con);
     }

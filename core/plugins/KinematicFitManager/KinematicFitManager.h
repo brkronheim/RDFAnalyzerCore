@@ -58,12 +58,39 @@ struct KinFitParticleConfig {
 };
 
 /**
- * @brief A single two-body invariant mass constraint.
+ * @brief A single kinematic constraint for the fit.
+ *
+ * Two types of constraint are supported:
+ *
+ * **MASS** – Invariant mass constraint on two or three particles.
+ *   - Two-body (idx3 == -1): m(p_idx1, p_idx2) == targetValue
+ *   - Three-body (idx3 >= 0): m(p_idx1, p_idx2, p_idx3) == targetValue
+ *     Used for top-quark decays: t → b W → b l ν gives
+ *     m(b, l, ν) = 173.3 GeV.
+ *
+ * **PT** – Transverse-momentum constraint on a single particle (idx1 only).
+ *   Constrains pT(p_idx1) == targetValue.  Set targetValue = 0 to remove the
+ *   MET contribution in events where no genuine missing energy is expected
+ *   (e.g. fully hadronic W → jj decays).
+ *
+ * Config syntax:
+ *   @code
+ *   # Two-body mass constraint
+ *   constraints=0+1:91.2
+ *   # Three-body mass constraint (top decay: idx 0=b, 1=lepton, 2=MET/neutrino)
+ *   constraints=0+1+2:173.3
+ *   # pT constraint (particle 3 must have pT = 0 GeV)
+ *   constraints=pt:3:0.0
+ *   @endcode
  */
 struct KinFitConstraintConfig {
-  int    idx1;       ///< Zero-based index of first  particle in particles vector
-  int    idx2;       ///< Zero-based index of second particle in particles vector
-  double targetMass; ///< Target invariant mass [GeV]
+  enum class Type { MASS, PT };
+
+  Type   type       = Type::MASS; ///< Constraint type
+  int    idx1       = -1;  ///< First  particle (mass 2/3-body or pT-only)
+  int    idx2       = -1;  ///< Second particle (mass constraints only)
+  int    idx3       = -1;  ///< Third  particle (three-body mass only; -1 = two-body)
+  double targetValue = 0.0; ///< Target invariant mass [GeV] or target pT [GeV]
 };
 
 /**
@@ -71,7 +98,7 @@ struct KinFitConstraintConfig {
  */
 struct KinFitConfig {
   std::vector<KinFitParticleConfig>   particles;   ///< Ordered list of particles
-  std::vector<KinFitConstraintConfig> constraints; ///< Two-body mass constraints
+  std::vector<KinFitConstraintConfig> constraints; ///< Mass and pT constraints
 
   // ── per-type resolution parameters (with physics-motivated defaults) ──────
   double leptonPtResolution  = 0.02;   ///< Fractional lepton pT resolution
@@ -112,10 +139,18 @@ struct KinFitConfig {
  *   Required:
  *     name            – unique identifier for the fit
  *     particles       – comma-separated list of particle specs (see below)
- *     constraints     – comma-separated two-body mass constraints, each
- *                       @code idx1+idx2:targetMass @endcode
- *                       where idx1/idx2 are zero-based indices into the
- *                       particles list.
+ *     constraints     – comma-separated constraints; three formats supported:
+ *                       @code
+ *                       # Two-body invariant mass: idx1+idx2:targetMass
+ *                       0+1:91.2
+ *                       # Three-body invariant mass: idx1+idx2+idx3:targetMass
+ *                       # Used for top decay: t → b l ν  (idx 0=b, 1=l, 2=ν)
+ *                       0+1+2:173.3
+ *                       # pT (size) constraint on one particle: pt:idx:targetPt
+ *                       # Set targetPt=0 to suppress MET in hadronic events
+ *                       pt:2:0.0
+ *                       @endcode
+ *                       where indices are zero-based into the particles list.
  *     maxIterations        – maximum number of linearisation iterations
  *     convergenceTolerance – convergence criterion on |Δχ²|
  *
@@ -168,11 +203,19 @@ struct KinFitConfig {
  * # ttbar semi-leptonic (lepton + MET + 2 signal jets + hadronic recoil from extra jets)
  * # ExtraJet_* are RVec<Float_t> columns holding all extra QCD jets in the event.
  * # Their multiplicity is variable; the recoil particle absorbs them all.
+ * # Two W mass constraints plus a THREE-BODY top mass constraint on b+l+ν.
  * name=ttbarFit \
- *   particles=lep:lep_pt:lep_eta:lep_phi:lep_mass:lepton,nu:met_pt:_:met_phi:0:met,j1:j1_pt:j1_eta:j1_phi:j1_mass:jet,j2:j2_pt:j2_eta:j2_phi:j2_mass:jet,isr:ExtraJet_pt:ExtraJet_eta:ExtraJet_phi:ExtraJet_mass:recoil \
- *   constraints=0+1:80.4,2+3:80.4 \
+ *   particles=lep:lep_pt:lep_eta:lep_phi:lep_mass:lepton,nu:met_pt:_:met_phi:0:met,j1:j1_pt:j1_eta:j1_phi:j1_mass:jet,j2:j2_pt:j2_eta:j2_phi:j2_mass:jet,bjet:bjet_pt:bjet_eta:bjet_phi:bjet_mass:jet,isr:ExtraJet_pt:ExtraJet_eta:ExtraJet_phi:ExtraJet_mass:recoil \
+ *   constraints=0+1:80.4,2+3:80.4,0+1+4:173.3 \
  *   recoilPtResolution=0.30 recoilEtaResolution=0.10 recoilPhiResolution=0.10 \
  *   maxIterations=50 convergenceTolerance=1e-6
+ *
+ * # Z → jj (hadronic, no real MET expected)
+ * # Constrain dijet mass to Z and also pin MET pT to 0 (no genuine MET).
+ * name=hadZFit \
+ *   particles=j1:jet1_pt:jet1_eta:jet1_phi:jet1_mass:jet,j2:jet2_pt:jet2_eta:jet2_phi:jet2_mass:jet,met:met_pt:_:met_phi:0:met \
+ *   constraints=0+1:91.2,pt:2:0.0 \
+ *   jetPtResolution=0.10 metPtResolution=0.20 maxIterations=50 convergenceTolerance=1e-6
  *
  * # Z+H with jets from a collection (collection-indexed selection)
  * # Jet_* are RVec<Float_t> columns; :0 / :1 pick the leading/sub-leading jet.

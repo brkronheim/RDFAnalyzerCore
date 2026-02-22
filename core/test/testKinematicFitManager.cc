@@ -240,6 +240,77 @@ TEST_F(KinematicFitTest, FitWithVariableJets_FourJets) {
   EXPECT_NEAR(m23, mW, 5.0);
 }
 
+TEST_F(KinematicFitTest, ThreeBodyMassConstraint_Converges) {
+  // t → b l ν: three-body mass constraint m(b, l, ν) = 173.3 GeV
+  const double mTop = 173.3;
+  KinematicFit fitter;
+  fitter.addParticle({55.0,  0.3,  2.0, 4.18,  0.10, 0.05, 0.05}); // b-jet
+  fitter.addParticle({42.0,  0.5,  1.0, 0.106, 0.02, 0.001, 0.001}); // lepton
+  fitter.addParticle({40.0,  0.0, -2.0, 0.0,   0.20, 100.0, 0.05}); // MET/neutrino
+  fitter.addThreeBodyMassConstraint(0, 1, 2, mTop);
+  const auto result = fitter.fit();
+  EXPECT_GE(result.chi2, 0.0);
+  EXPECT_EQ(result.fittedParticles.size(), 3u);
+  // Fitted three-body invariant mass should be close to the top mass
+  const auto &fp = result.fittedParticles;
+  const double E0 = std::sqrt(fp[0].pt*fp[0].pt*std::cosh(fp[0].eta)*std::cosh(fp[0].eta)+fp[0].mass*fp[0].mass);
+  const double E1 = std::sqrt(fp[1].pt*fp[1].pt*std::cosh(fp[1].eta)*std::cosh(fp[1].eta)+fp[1].mass*fp[1].mass);
+  const double E2 = std::sqrt(fp[2].pt*fp[2].pt*std::cosh(fp[2].eta)*std::cosh(fp[2].eta)+fp[2].mass*fp[2].mass);
+  const double px0=fp[0].pt*std::cos(fp[0].phi), py0=fp[0].pt*std::sin(fp[0].phi), pz0=fp[0].pt*std::sinh(fp[0].eta);
+  const double px1=fp[1].pt*std::cos(fp[1].phi), py1=fp[1].pt*std::sin(fp[1].phi), pz1=fp[1].pt*std::sinh(fp[1].eta);
+  const double px2=fp[2].pt*std::cos(fp[2].phi), py2=fp[2].pt*std::sin(fp[2].phi), pz2=fp[2].pt*std::sinh(fp[2].eta);
+  const double sE=E0+E1+E2, sPx=px0+px1+px2, sPy=py0+py1+py2, sPz=pz0+pz1+pz2;
+  const double m2 = sE*sE - sPx*sPx - sPy*sPy - sPz*sPz;
+  EXPECT_NEAR(std::sqrt(std::max(m2, 0.0)), mTop, 10.0);
+}
+
+TEST_F(KinematicFitTest, ThreeBodyPlusTwoBodyConstraint_BothSatisfied) {
+  // Simultaneous two-body W mass + three-body top mass: l+ν = mW, b+l+ν = mTop
+  const double mW   = 80.4;
+  const double mTop = 173.3;
+  KinematicFit fitter;
+  fitter.addParticle({55.0,  0.3,  2.0, 4.18,  0.10, 0.05, 0.05}); // b-jet
+  fitter.addParticle({50.0,  0.5,  1.0, 0.106, 0.02, 0.001, 0.001}); // lepton
+  fitter.addParticle({45.0,  0.0, -2.0, 0.0,   0.20, 100.0, 0.05}); // MET/neutrino
+  fitter.addMassConstraint(1, 2, mW);            // W → l ν
+  fitter.addThreeBodyMassConstraint(0, 1, 2, mTop); // t → b l ν
+  const auto result = fitter.fit();
+  EXPECT_GE(result.chi2, 0.0);
+  EXPECT_EQ(result.fittedParticles.size(), 3u);
+}
+
+TEST_F(KinematicFitTest, PtConstraint_ForcesParticlePt) {
+  // A pT constraint should drive the particle's fitted pT to the target value.
+  KinematicFit fitter;
+  fitter.addParticle({30.0, 0.0, 0.0, 0.0, 0.20, 100.0, 0.05}); // MET
+  fitter.addPtConstraint(0, 0.0); // force MET to 0 (no genuine MET)
+  const auto result = fitter.fit();
+  EXPECT_GE(result.chi2, 0.0);
+  // Fitted pT should be pulled toward 0
+  EXPECT_LT(result.fittedParticles[0].pt, 30.0);
+}
+
+TEST_F(KinematicFitTest, PtConstraintZeroMET_WithMassConstraint) {
+  // Combine a dijet mass constraint with MET pT = 0 (hadronic Z → jj selection).
+  const double mZ = 91.2;
+  KinematicFit fitter;
+  fitter.addParticle({50.0,  0.5,  0.0, 0.0, 0.10, 0.05, 0.05}); // jet1
+  fitter.addParticle({45.0, -0.5,  M_PI, 0.0, 0.10, 0.05, 0.05}); // jet2
+  fitter.addParticle({20.0,  0.0, -1.0, 0.0, 0.20, 100.0, 0.05}); // MET
+  fitter.addMassConstraint(0, 1, mZ);  // Z → jj
+  fitter.addPtConstraint(2, 0.0);      // MET should be 0
+  const auto result = fitter.fit();
+  EXPECT_GE(result.chi2, 0.0);
+  EXPECT_EQ(result.fittedParticles.size(), 3u);
+  // Dijet mass should be close to Z
+  const auto &fp = result.fittedParticles;
+  const double fm = invMass(fp[0].pt, fp[0].eta, fp[0].phi, fp[0].mass,
+                             fp[1].pt, fp[1].eta, fp[1].phi, fp[1].mass);
+  EXPECT_NEAR(fm, mZ, 10.0);
+  // MET should be pulled toward 0
+  EXPECT_LT(fp[2].pt, 20.0);
+}
+
 // ─── KinematicFitManager configuration tests ─────────────────────────────────
 
 class KinematicFitManagerTest : public ::testing::Test {
@@ -302,6 +373,11 @@ protected:
     dataManager->Define("ExtraJet_mass",
         [](ULong64_t) -> ROOT::VecOps::RVec<float> { return {0.0f,  0.0f}; },
         {"rdfentry_"}, *systematicManager);
+    // b-jet for topFullFit (particle 0 in that fit is the b-jet)
+    dataManager->Define("bjet_pt",   [](ULong64_t) -> float { return 55.0f; }, {"rdfentry_"}, *systematicManager);
+    dataManager->Define("bjet_eta",  [](ULong64_t) -> float { return  0.3f; }, {"rdfentry_"}, *systematicManager);
+    dataManager->Define("bjet_phi",  [](ULong64_t) -> float { return  2.0f; }, {"rdfentry_"}, *systematicManager);
+    dataManager->Define("bjet_mass", [](ULong64_t) -> float { return  4.18f; }, {"rdfentry_"}, *systematicManager);
   }
 
   std::unique_ptr<IConfigurationProvider> configManager;
@@ -322,11 +398,13 @@ TEST_F(KinematicFitManagerTest, ConstructorCreatesValidManager) {
 
 TEST_F(KinematicFitManagerTest, GetAllFitNames_ReturnsConfiguredFits) {
   const auto names = fitManager->getAllFitNames();
-  EXPECT_EQ(names.size(), 4u);
+  EXPECT_EQ(names.size(), 6u);
   EXPECT_TRUE(std::find(names.begin(), names.end(), "zhFit")      != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "wjFit")      != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "ttbarFit")   != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "zhCollFit")  != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "topFullFit") != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "hadZFit")    != names.end());
 }
 
 TEST_F(KinematicFitManagerTest, GetFitConfig_Valid) {
@@ -458,6 +536,8 @@ TEST_F(KinematicFitManagerTest, ApplyAllFits_DefinesColumnsForAllFits) {
   EXPECT_TRUE(hasCol("wjFit_chi2"));
   EXPECT_TRUE(hasCol("ttbarFit_chi2"));
   EXPECT_TRUE(hasCol("zhCollFit_chi2"));
+  EXPECT_TRUE(hasCol("topFullFit_chi2"));
+  EXPECT_TRUE(hasCol("hadZFit_chi2"));
 }
 
 // ─── Recoil particle type tests ───────────────────────────────────────────────
@@ -567,6 +647,134 @@ TEST_F(KinematicFitManagerTest, ApplyFit_CollectionIndex_Chi2IsNonNegative) {
   for (const float c : *chi2s) {
     EXPECT_GE(c, 0.0f);
   }
+}
+
+// ─── Three-body mass constraint tests (manager) ───────────────────────────────
+
+TEST_F(KinematicFitManagerTest, GetFitConfig_TopFullFit_HasThreeBodyConstraint) {
+  // topFullFit uses a three-body mass constraint (b + l + ν = top mass).
+  EXPECT_NO_THROW({
+    const auto &cfg = fitManager->getFitConfig("topFullFit");
+    EXPECT_EQ(cfg.particles.size(), 3u);
+    EXPECT_EQ(cfg.constraints.size(), 2u);
+    // Find the three-body constraint
+    bool foundThreeBody = false;
+    for (const auto &con : cfg.constraints) {
+      if (con.type == KinFitConstraintConfig::Type::MASS && con.idx3 >= 0) {
+        foundThreeBody = true;
+        EXPECT_NEAR(con.targetValue, 173.3, 0.1);
+      }
+    }
+    EXPECT_TRUE(foundThreeBody) << "No three-body mass constraint found";
+  });
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_TopFullFit_DefinesOutputColumns) {
+  defineParticleColumns();
+  EXPECT_NO_THROW(fitManager->applyFit("topFullFit"));
+
+  auto df = dataManager->getDataFrame();
+  const auto cols = df.GetColumnNames();
+  auto hasCol = [&](const std::string &name) {
+    return std::find(cols.begin(), cols.end(), name) != cols.end();
+  };
+  EXPECT_TRUE(hasCol("topFullFit_chi2"));
+  EXPECT_TRUE(hasCol("topFullFit_converged"));
+  EXPECT_TRUE(hasCol("topFullFit_bjet_pt_fitted"));
+  EXPECT_TRUE(hasCol("topFullFit_lep_pt_fitted"));
+  EXPECT_TRUE(hasCol("topFullFit_nu_pt_fitted"));
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_TopFullFit_Chi2IsNonNegative) {
+  defineParticleColumns();
+  fitManager->applyFit("topFullFit");
+
+  auto df    = dataManager->getDataFrame();
+  auto chi2s = df.Take<Float_t>("topFullFit_chi2");
+  for (const float c : *chi2s) {
+    EXPECT_GE(c, 0.0f);
+  }
+}
+
+// ─── pT (MET size) constraint tests (manager) ────────────────────────────────
+
+TEST_F(KinematicFitManagerTest, GetFitConfig_HadZFit_HasPtConstraint) {
+  // hadZFit constrains dijet mass to Z and MET pT to 0.
+  EXPECT_NO_THROW({
+    const auto &cfg = fitManager->getFitConfig("hadZFit");
+    EXPECT_EQ(cfg.particles.size(), 3u);
+    EXPECT_EQ(cfg.constraints.size(), 2u);
+    // Find the pT constraint
+    bool foundPt = false;
+    for (const auto &con : cfg.constraints) {
+      if (con.type == KinFitConstraintConfig::Type::PT) {
+        foundPt = true;
+        EXPECT_NEAR(con.targetValue, 0.0, 1e-9);
+        EXPECT_EQ(con.idx1, 2); // MET is particle index 2
+      }
+    }
+    EXPECT_TRUE(foundPt) << "No pT constraint found in hadZFit";
+  });
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_HadZFit_DefinesOutputColumns) {
+  defineParticleColumns();
+  EXPECT_NO_THROW(fitManager->applyFit("hadZFit"));
+
+  auto df = dataManager->getDataFrame();
+  const auto cols = df.GetColumnNames();
+  auto hasCol = [&](const std::string &name) {
+    return std::find(cols.begin(), cols.end(), name) != cols.end();
+  };
+  EXPECT_TRUE(hasCol("hadZFit_chi2"));
+  EXPECT_TRUE(hasCol("hadZFit_converged"));
+  EXPECT_TRUE(hasCol("hadZFit_j1_pt_fitted"));
+  EXPECT_TRUE(hasCol("hadZFit_j2_pt_fitted"));
+  EXPECT_TRUE(hasCol("hadZFit_nu_pt_fitted"));
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_HadZFit_Chi2IsNonNegative) {
+  defineParticleColumns();
+  fitManager->applyFit("hadZFit");
+
+  auto df    = dataManager->getDataFrame();
+  auto chi2s = df.Take<Float_t>("hadZFit_chi2");
+  for (const float c : *chi2s) {
+    EXPECT_GE(c, 0.0f);
+  }
+}
+
+TEST_F(KinematicFitManagerTest, ParseConstraintSpec_ThreeBody_ParsedCorrectly) {
+  // Verify that a three-body constraint is parsed correctly: indices and
+  // target mass are stored in the right fields.
+  const auto &cfg = fitManager->getFitConfig("topFullFit");
+  bool foundThreeBody = false;
+  for (const auto &con : cfg.constraints) {
+    if (con.type == KinFitConstraintConfig::Type::MASS && con.idx3 >= 0) {
+      foundThreeBody = true;
+      EXPECT_EQ(con.idx1, 0);
+      EXPECT_EQ(con.idx2, 1);
+      EXPECT_EQ(con.idx3, 2);
+      EXPECT_NEAR(con.targetValue, 173.3, 0.1);
+    }
+  }
+  EXPECT_TRUE(foundThreeBody);
+}
+
+TEST_F(KinematicFitManagerTest, ParseConstraintSpec_PtConstraint_ParsedCorrectly) {
+  // Verify that a pT constraint is parsed correctly.
+  const auto &cfg = fitManager->getFitConfig("hadZFit");
+  bool foundPt = false;
+  for (const auto &con : cfg.constraints) {
+    if (con.type == KinFitConstraintConfig::Type::PT) {
+      foundPt = true;
+      EXPECT_EQ(con.idx1, 2);
+      EXPECT_EQ(con.idx2, -1);  // unused for pT constraint
+      EXPECT_EQ(con.idx3, -1);  // unused for pT constraint
+      EXPECT_NEAR(con.targetValue, 0.0, 1e-9);
+    }
+  }
+  EXPECT_TRUE(foundPt);
 }
 
 int main(int argc, char **argv) {

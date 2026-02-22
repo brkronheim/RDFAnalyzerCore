@@ -31,12 +31,41 @@ struct KinFitResult {
 };
 
 /**
- * @brief Two-body invariant mass constraint.
+ * @brief Invariant mass constraint for two or three particles.
+ *
+ * When @p idx3 >= 0 the constraint is on the three-body invariant mass
+ *   m(p_idx1, p_idx2, p_idx3) = @p targetMass.
+ * When @p idx3 == -1 the constraint is the standard two-body mass
+ *   m(p_idx1, p_idx2) = @p targetMass.
+ *
+ * Three-body constraints are essential for top-quark decays:
+ *   t → b W → b l ν  ⟹  m(b, l, ν) = 173.3 GeV
+ * or fully hadronic:
+ *   t → b W → b j j  ⟹  m(b, j1, j2) = 173.3 GeV
  */
 struct MassConstraint {
-  int idx1;          ///< Index of the first particle
+  int idx1;          ///< Index of the first  particle
   int idx2;          ///< Index of the second particle
+  int idx3 = -1;     ///< Index of the third  particle; -1 means two-body constraint
   double targetMass; ///< Target invariant mass [GeV]
+};
+
+/**
+ * @brief Transverse-momentum (size) constraint on a single particle.
+ *
+ * Constrains the fitted pT of particle @p idx to equal @p targetPt.
+ * Setting @p targetPt = 0 effectively removes the particle's contribution
+ * to hadronic MET in events where no genuine MET is expected (e.g. fully
+ * hadronic decays).
+ *
+ * Example: constrain MET to 0 in a Z → jj selection:
+ * @code
+ *   fitter.addPtConstraint(metIdx, 0.0);
+ * @endcode
+ */
+struct PtConstraint {
+  int    idx;       ///< Index of the particle whose pT is constrained
+  double targetPt;  ///< Target transverse momentum [GeV]
 };
 
 /// @cond INTERNAL
@@ -101,7 +130,36 @@ public:
    * @param targetMass Target invariant mass [GeV].
    */
   void addMassConstraint(int idx1, int idx2, double targetMass) {
-    constraints_.push_back({idx1, idx2, targetMass});
+    constraints_.push_back({idx1, idx2, -1, targetMass});
+  }
+
+  /**
+   * @brief Add a three-body invariant mass constraint.
+   *
+   * Constrains m(p_idx1, p_idx2, p_idx3) = targetMass.  Typical use case is
+   * the top-quark decay: t → b l ν (or t → b j j), where you want to
+   * constrain the invariant mass of all three decay products to the top mass.
+   * @param idx1       Index of the first  particle.
+   * @param idx2       Index of the second particle.
+   * @param idx3       Index of the third  particle.
+   * @param targetMass Target invariant mass [GeV].
+   */
+  void addThreeBodyMassConstraint(int idx1, int idx2, int idx3,
+                                  double targetMass) {
+    constraints_.push_back({idx1, idx2, idx3, targetMass});
+  }
+
+  /**
+   * @brief Add a transverse-momentum constraint on a single particle.
+   *
+   * Constrains the fitted pT of particle @p idx to equal @p targetPt.
+   * Use @p targetPt = 0.0 to suppress MET in events where no genuine
+   * missing energy is expected (e.g. fully hadronic decays).
+   * @param idx      Index of the particle.
+   * @param targetPt Target pT [GeV].
+   */
+  void addPtConstraint(int idx, double targetPt) {
+    ptConstraints_.push_back({idx, targetPt});
   }
 
   /**
@@ -115,8 +173,9 @@ public:
 private:
   std::vector<KinFitParticle> particles_;
   std::vector<MassConstraint> constraints_;
+  std::vector<PtConstraint>   ptConstraints_;
 
-  // ── helpers ────────────────────────────────────────────────────────────────
+  // ── helpers ────────────────────────────────────────────────────────────────────────────
 
   /// Compute (E, px, py, pz) from (pT, eta, phi, mass).
   static std::array<double, 4> fourMomentum(double pt, double eta, double phi,
@@ -141,58 +200,73 @@ private:
     return dE * dE - dpx * dpx - dpy * dpy - dpz * dpz;
   }
 
+  /// Compute (m123)^2 for three particles in their current state.
+  static double invMass3(const KinFitParticle &p1, const KinFitParticle &p2,
+                          const KinFitParticle &p3) {
+    auto [E1, px1, py1, pz1] = fourMomentum(p1.pt, p1.eta, p1.phi, p1.mass);
+    auto [E2, px2, py2, pz2] = fourMomentum(p2.pt, p2.eta, p2.phi, p2.mass);
+    auto [E3, px3, py3, pz3] = fourMomentum(p3.pt, p3.eta, p3.phi, p3.mass);
+    const double dE  = E1  + E2  + E3;
+    const double dpx = px1 + px2 + px3;
+    const double dpy = py1 + py2 + py3;
+    const double dpz = pz1 + pz2 + pz3;
+    return dE * dE - dpx * dpx - dpy * dpy - dpz * dpz;
+  }
+
   /**
-   * @brief Gradient of (m12)^2 w.r.t. (pT, eta, phi) of particle @p p1,
-   *        given the other particle @p p2 at its current parameters.
+   * @brief Gradient of m_N^2 w.r.t. (pT, eta, phi) of particle @p pk, given
+   *        the total system 4-momentum (sumE, sumPx, sumPy, sumPz) which
+   *        already includes @p pk.
+   *
+   * The invariant mass squared is m_N^2 = (sum E)^2 - |sum p|^2, so
+   *   d(m_N^2)/dx = 2 * [(sum E) * dE_k/dx - (sum p) \u00b7 d(p_k)/dx].
+   * This formula is identical for two-body and three-body (or N-body)
+   * constraints \u2014 only the sums differ.
+   *
+   * @return {d(m_N^2)/dpT, d(m_N^2)/deta, d(m_N^2)/dphi}
+   */
+  static std::array<double, 3> gradMassN(const KinFitParticle &pk,
+                                          double sumE,  double sumPx,
+                                          double sumPy, double sumPz) {
+    const double ch = std::cosh(pk.eta);
+    const double sh = std::sinh(pk.eta);
+    auto [Ek, pxk, pyk, pzk] = fourMomentum(pk.pt, pk.eta, pk.phi, pk.mass);
+    (void)pxk; (void)pyk; (void)pzk;
+
+    const double dEk_dpT  = (Ek > detail::kMinEnergy) ? pk.pt * ch * ch / Ek : 0.0;
+    const double dEk_deta = (Ek > detail::kMinEnergy) ? pk.pt * pk.pt * sh * ch / Ek : 0.0;
+
+    const double d_dpT  = 2.0 * (sumE * dEk_dpT
+                                  - sumPx * std::cos(pk.phi)
+                                  - sumPy * std::sin(pk.phi)
+                                  - sumPz * sh);
+    const double d_deta = 2.0 * (sumE * dEk_deta
+                                  - sumPz * pk.pt * ch);
+    const double d_dphi = 2.0 * (sumPx * pk.pt * std::sin(pk.phi)
+                                  - sumPy * pk.pt * std::cos(pk.phi));
+    return {d_dpT, d_deta, d_dphi};
+  }
+
+  /**
+   * @brief Gradient of (m12)^2 w.r.t. (pT, eta, phi) of particle @p p1.
    * @return {d(m12^2)/dpT1, d(m12^2)/deta1, d(m12^2)/dphi1}
    */
   static std::array<double, 3> gradMass2(const KinFitParticle &p1,
                                           const KinFitParticle &p2) {
-    const double ch1 = std::cosh(p1.eta);
-    const double sh1 = std::sinh(p1.eta);
     auto [E1, px1, py1, pz1] = fourMomentum(p1.pt, p1.eta, p1.phi, p1.mass);
     auto [E2, px2, py2, pz2] = fourMomentum(p2.pt, p2.eta, p2.phi, p2.mass);
-
-    // Partial derivatives of p1's 4-momentum w.r.t. (pT1, eta1, phi1)
-    const double dE1_dpT  = (E1 > detail::kMinEnergy) ? p1.pt * ch1 * ch1 / E1 : 0.0;
-    const double dE1_deta = (E1 > detail::kMinEnergy) ? p1.pt * p1.pt * sh1 * ch1 / E1 : 0.0;
-    const double dE1_dphi = 0.0;
-
-    const double dpx1_dpT  =  std::cos(p1.phi);
-    const double dpx1_deta =  0.0;
-    const double dpx1_dphi = -p1.pt * std::sin(p1.phi);
-
-    const double dpy1_dpT  =  std::sin(p1.phi);
-    const double dpy1_deta =  0.0;
-    const double dpy1_dphi =  p1.pt * std::cos(p1.phi);
-
-    const double dpz1_dpT  =  sh1;
-    const double dpz1_deta =  p1.pt * ch1;
-    const double dpz1_dphi =  0.0;
-
-    // d(m12^2)/dxi = 2*[(E1+E2)*dE1/dxi - (px1+px2)*dpx1/dxi
-    //                  - (py1+py2)*dpy1/dxi - (pz1+pz2)*dpz1/dxi]
-    const double sE  = E1  + E2;
-    const double spx = px1 + px2;
-    const double spy = py1 + py2;
-    const double spz = pz1 + pz2;
-
-    const double d_dpT  = 2.0 * (sE * dE1_dpT  - spx * dpx1_dpT  -
-                                  spy * dpy1_dpT  - spz * dpz1_dpT);
-    const double d_deta = 2.0 * (sE * dE1_deta - spx * dpx1_deta -
-                                  spy * dpy1_deta - spz * dpz1_deta);
-    const double d_dphi = 2.0 * (sE * dE1_dphi - spx * dpx1_dphi -
-                                  spy * dpy1_dphi - spz * dpz1_dphi);
-    return {d_dpT, d_deta, d_dphi};
+    return gradMassN(p1, E1 + E2, px1 + px2, py1 + py2, pz1 + pz2);
   }
-};
+}
 
 // ── KinematicFit::fit implementation (header-only) ────────────────────────
 
 inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
-  const int nParticles   = static_cast<int>(particles_.size());
-  const int nConstraints = static_cast<int>(constraints_.size());
-  const int nParams      = nParticles * 3; // (pT, eta, phi) per particle
+  const int nParticles    = static_cast<int>(particles_.size());
+  const int nMassConstr   = static_cast<int>(constraints_.size());
+  const int nPtConstr     = static_cast<int>(ptConstraints_.size());
+  const int nConstraints  = nMassConstr + nPtConstr;
+  const int nParams       = nParticles * 3; // (pT, eta, phi) per particle
 
   if (nParticles == 0 || nConstraints == 0) {
     return {particles_, 0.0, 0, true};
@@ -219,24 +293,54 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
     // D is (nConstraints × nParams), stored row-major
     std::vector<double> D(nConstraints * nParams, 0.0);
 
-    for (int c = 0; c < nConstraints; ++c) {
+    // Mass constraints (two-body and three-body)
+    for (int c = 0; c < nMassConstr; ++c) {
       const auto &con = constraints_[c];
       const auto &p1  = current[con.idx1];
       const auto &p2  = current[con.idx2];
 
-      f[c] = invMass2(p1, p2) - con.targetMass * con.targetMass;
+      if (con.idx3 < 0) {
+        // ── Two-body mass constraint ──────────────────────────────────────
+        f[c] = invMass2(p1, p2) - con.targetMass * con.targetMass;
 
-      auto g1 = gradMass2(p1, p2);
-      auto g2 = gradMass2(p2, p1); // gradient w.r.t. p2 (swap arguments)
+        auto [E1,px1,py1,pz1] = fourMomentum(p1.pt,p1.eta,p1.phi,p1.mass);
+        auto [E2,px2,py2,pz2] = fourMomentum(p2.pt,p2.eta,p2.phi,p2.mass);
+        const double sE  = E1+E2, sPx = px1+px2, sPy = py1+py2, sPz = pz1+pz2;
+        auto g1 = gradMassN(p1, sE, sPx, sPy, sPz);
+        auto g2 = gradMassN(p2, sE, sPx, sPy, sPz);
 
-      const int i1 = con.idx1 * 3;
-      const int i2 = con.idx2 * 3;
-      D[c * nParams + i1 + 0] = g1[0];
-      D[c * nParams + i1 + 1] = g1[1];
-      D[c * nParams + i1 + 2] = g1[2];
-      D[c * nParams + i2 + 0] = g2[0];
-      D[c * nParams + i2 + 1] = g2[1];
-      D[c * nParams + i2 + 2] = g2[2];
+        const int i1 = con.idx1 * 3, i2 = con.idx2 * 3;
+        D[c * nParams + i1 + 0] = g1[0]; D[c * nParams + i1 + 1] = g1[1]; D[c * nParams + i1 + 2] = g1[2];
+        D[c * nParams + i2 + 0] = g2[0]; D[c * nParams + i2 + 1] = g2[1]; D[c * nParams + i2 + 2] = g2[2];
+      } else {
+        // ── Three-body mass constraint (e.g. top → b l ν) ────────────────
+        const auto &p3 = current[con.idx3];
+        f[c] = invMass3(p1, p2, p3) - con.targetMass * con.targetMass;
+
+        auto [E1,px1,py1,pz1] = fourMomentum(p1.pt,p1.eta,p1.phi,p1.mass);
+        auto [E2,px2,py2,pz2] = fourMomentum(p2.pt,p2.eta,p2.phi,p2.mass);
+        auto [E3,px3,py3,pz3] = fourMomentum(p3.pt,p3.eta,p3.phi,p3.mass);
+        const double sE  = E1+E2+E3, sPx = px1+px2+px3;
+        const double sPy = py1+py2+py3, sPz = pz1+pz2+pz3;
+        auto g1 = gradMassN(p1, sE, sPx, sPy, sPz);
+        auto g2 = gradMassN(p2, sE, sPx, sPy, sPz);
+        auto g3 = gradMassN(p3, sE, sPx, sPy, sPz);
+
+        const int i1 = con.idx1*3, i2 = con.idx2*3, i3 = con.idx3*3;
+        D[c*nParams+i1+0]=g1[0]; D[c*nParams+i1+1]=g1[1]; D[c*nParams+i1+2]=g1[2];
+        D[c*nParams+i2+0]=g2[0]; D[c*nParams+i2+1]=g2[1]; D[c*nParams+i2+2]=g2[2];
+        D[c*nParams+i3+0]=g3[0]; D[c*nParams+i3+1]=g3[1]; D[c*nParams+i3+2]=g3[2];
+      }
+    }
+
+    // pT constraints (linear: f = pT_i - target, d f/d pT_i = 1)
+    for (int k = 0; k < nPtConstr; ++k) {
+      const int c  = nMassConstr + k;
+      const auto &pc = ptConstraints_[k];
+      f[c] = current[pc.idx].pt - pc.targetPt;
+      D[c * nParams + pc.idx * 3 + 0] = 1.0; // d f / d pT = 1
+      // D[c * nParams + pc.idx * 3 + 1] = 0 (d f / d eta = 0, already zero)
+      // D[c * nParams + pc.idx * 3 + 2] = 0 (d f / d phi = 0, already zero)
     }
 
     // ── compute W = D * V * D^T  (nConstraints × nConstraints) ──────────
