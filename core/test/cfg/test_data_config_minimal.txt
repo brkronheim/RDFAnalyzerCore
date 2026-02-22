@@ -14,6 +14,7 @@ saveConfig=cfg/output.txt # Config file with output branches
 bdtConfig=cfg/bdts.txt # Config file with bdts
 correctionConfig=cfg/correction.txt # Config file with corrections
 triggerConfig=cfg/triggers.txt # Config file with triggers
+kinematicFitConfig=cfg/kinematic_fit.txt # Config file with kinematic fits
 
 floatConfig=cfg/floats.txt # Config file with floats to load into DF
 intConfig=cfg/ints.txt # Config file with integers to load into DF
