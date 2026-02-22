@@ -3,6 +3,10 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../extern/gtest/googletest/inclu
 # Define the test source directory for all test executables
 add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
+add_executable(testRootOutputSink testRootOutputSink.cc)
+target_link_libraries(testRootOutputSink core gtest gtest_main)
+add_test(NAME RootOutputSinkTest COMMAND testRootOutputSink)
+
 # Basic functionality tests
 
 add_executable(testConfigurationManager testConfigurationManager.cc)
