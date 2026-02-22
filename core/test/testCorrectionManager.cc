@@ -452,6 +452,129 @@ TEST_F(CorrectionManagerTest, ThreadSafetyWithROOTImplicitMT) {
   }
 }
 
+// ============================================================================
+// Vector Correction Tests
+// ============================================================================
+
+/**
+ * @brief Test basic vector correction (applyCorrectionVec)
+ *
+ * Verifies that applyCorrectionVec correctly evaluates a correction for each
+ * element of per-event RVec input columns and stores the results as an
+ * RVec<Float_t> output column.
+ *
+ * Per-event inputs (2 objects):
+ *   float_arg = {0.5, 1.5}, int_arg = {1, 2}, str_arg = "A"
+ * Expected outputs from correction.json:
+ *   object 0: float=0.5 → bin [0,1), int=1, str=A → 0.1
+ *   object 1: float=1.5 → bin [1,2), int=2, str=A → 0.4
+ */
+TEST_F(CorrectionManagerTest, ApplyVectorCorrectionBasic) {
+  auto testDataManager = std::make_unique<DataManager>(1);
+  setContextFor(*testDataManager);
+
+  testDataManager->Define(
+      "float_arg",
+      []() -> ROOT::VecOps::RVec<double> { return {0.5, 1.5}; }, {},
+      *systematicManager);
+  testDataManager->Define(
+      "int_arg",
+      []() -> ROOT::VecOps::RVec<double> { return {1.0, 2.0}; }, {},
+      *systematicManager);
+
+  correctionManager->applyCorrectionVec("test_correction", {"A"});
+
+  auto df = testDataManager->getDataFrame();
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction");
+  ASSERT_EQ(result->size(), 1u);          // one event
+  ASSERT_EQ((*result)[0].size(), 2u);     // two objects per event
+  EXPECT_NEAR((*result)[0][0], 0.1f, 1e-6f);
+  EXPECT_NEAR((*result)[0][1], 0.4f, 1e-6f);
+
+  setContextFor(*dataManager);
+}
+
+/**
+ * @brief Test vector correction with a different string argument
+ *
+ * Same as ApplyVectorCorrectionBasic but with str_arg = "B".
+ * Expected outputs:
+ *   object 0: float=0.5, int=1, str=B → 0.5
+ *   object 1: float=1.5, int=2, str=B → 0.8
+ */
+TEST_F(CorrectionManagerTest, ApplyVectorCorrectionStringArgB) {
+  auto testDataManager = std::make_unique<DataManager>(1);
+  setContextFor(*testDataManager);
+
+  testDataManager->Define(
+      "float_arg",
+      []() -> ROOT::VecOps::RVec<double> { return {0.5, 1.5}; }, {},
+      *systematicManager);
+  testDataManager->Define(
+      "int_arg",
+      []() -> ROOT::VecOps::RVec<double> { return {1.0, 2.0}; }, {},
+      *systematicManager);
+
+  correctionManager->applyCorrectionVec("test_correction", {"B"});
+
+  auto df = testDataManager->getDataFrame();
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction");
+  ASSERT_EQ(result->size(), 1u);
+  ASSERT_EQ((*result)[0].size(), 2u);
+  EXPECT_NEAR((*result)[0][0], 0.5f, 1e-6f);
+  EXPECT_NEAR((*result)[0][1], 0.8f, 1e-6f);
+
+  setContextFor(*dataManager);
+}
+
+/**
+ * @brief Test vector correction with an empty object collection
+ *
+ * Verifies that applyCorrectionVec handles a per-event RVec with zero elements
+ * without crashing and returns an empty RVec<Float_t>.
+ */
+TEST_F(CorrectionManagerTest, ApplyVectorCorrectionEmptyVector) {
+  auto testDataManager = std::make_unique<DataManager>(1);
+  setContextFor(*testDataManager);
+
+  testDataManager->Define(
+      "float_arg",
+      []() -> ROOT::VecOps::RVec<double> { return {}; }, {},
+      *systematicManager);
+  testDataManager->Define(
+      "int_arg",
+      []() -> ROOT::VecOps::RVec<double> { return {}; }, {},
+      *systematicManager);
+
+  correctionManager->applyCorrectionVec("test_correction", {"A"});
+
+  auto df = testDataManager->getDataFrame();
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction");
+  ASSERT_EQ(result->size(), 1u);
+  EXPECT_EQ((*result)[0].size(), 0u);
+
+  setContextFor(*dataManager);
+}
+
+/**
+ * @brief Test that applyCorrectionVec throws for a non-existent correction
+ */
+TEST_F(CorrectionManagerTest, ApplyVectorCorrectionThrowsForMissing) {
+  EXPECT_THROW(
+      { correctionManager->applyCorrectionVec("nonexistent_correction", {}); },
+      std::runtime_error);
+}
+
+/**
+ * @brief Test that applyCorrectionVec throws when input columns are absent
+ */
+TEST_F(CorrectionManagerTest, ApplyVectorCorrectionThrowsForMissingColumns) {
+  // Do not define float_arg or int_arg: the call should throw.
+  EXPECT_THROW(
+      { correctionManager->applyCorrectionVec("test_correction", {"A"}); },
+      std::runtime_error);
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
