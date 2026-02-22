@@ -481,10 +481,10 @@ private:
  * @brief Multi-threaded N-dimensional histogram action using Boost.Histogram.
  *
  * This class provides an alternative to THnMulti, using Boost.Histogram with
- * weight storage and regular axes as the per-thread accumulator. The filling
- * interface is identical to THnMulti. In Finalize(), the per-thread Boost
- * histograms are merged and converted to a THnSparseF (only non-zero bins are
- * written), preserving full compatibility with the rest of the framework.
+ * sparse storage (only filled bins consume memory) and regular axes as the
+ * per-thread accumulator. The filling interface is identical to THnMulti.
+ * In Finalize(), the per-thread Boost histograms are merged and converted to
+ * a THnSparseF, preserving full compatibility with the rest of the framework.
  *
  * Select this backend by setting histogramBackend=boost in the configuration.
  */
@@ -493,9 +493,9 @@ public:
   /** @brief Result type: ROOT sparse histogram (same as THnMulti) */
   using Result_t = THnSparseF;
 
-  // 5D Boost.Histogram type: regular axes with weighted (sum_w, sum_w2) storage
+  // 5D Boost.Histogram type: regular axes with sparse weighted-sum storage
   using BH5D = decltype(boost::histogram::make_histogram_with(
-      boost::histogram::weight_storage(),
+      boost::histogram::sparse_storage<boost::histogram::accumulators::weighted_sum<>>(),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
@@ -526,7 +526,7 @@ public:
 
     for (unsigned int i = 0; i < nSlots_m; i++) {
       fPerThreadHists.push_back(bh::make_histogram_with(
-          bh::weight_storage(),
+          bh::sparse_storage<bh::accumulators::weighted_sum<>>(),
           bh::axis::regular<>(nbins_m[0], xmin_m[0], xmax_m[0]),
           bh::axis::regular<>(nbins_m[1], xmin_m[1], xmax_m[1]),
           bh::axis::regular<>(nbins_m[2], xmin_m[2], xmax_m[2]),
