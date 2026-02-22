@@ -8,51 +8,60 @@
 #include <vector>
 
 /**
- * @brief Configuration for a single kinematic fit instance.
+ * @brief Configuration for one particle in the kinematic fit.
  *
- * Encapsulates the RDataFrame column names for the input 4-momenta of two
- * leptons and two jets, the target invariant masses for the dilepton and dijet
- * systems, the per-particle momentum resolutions, and the fit convergence
- * parameters.
+ * Specifies the RDataFrame column names for the measured 4-momentum and the
+ * particle type (used to look up the momentum resolution).
+ *
+ * For MET (missing transverse energy), set @p etaCol to an empty string or
+ * "_".  Eta will be fixed at 0 with a very large uncertainty so it is
+ * effectively unconstrained by the fit.  Set @p massCol to "0" or leave it
+ * empty to treat the particle as massless (neutrino).
+ *
+ * @p massCol may also be a numeric literal (e.g. "0.106") instead of a column
+ * name.  In that case, a constant column is defined automatically.
+ */
+struct KinFitParticleConfig {
+  std::string name;     ///< Label used in output column names
+  std::string ptCol;    ///< Column name for transverse momentum [GeV]
+  std::string etaCol;   ///< Column name for pseudorapidity ("" or "_" for MET)
+  std::string phiCol;   ///< Column name for azimuthal angle [rad]
+  std::string massCol;  ///< Column name OR numeric literal for mass [GeV]
+  std::string type;     ///< Particle type: "lepton", "jet", or "met"
+};
+
+/**
+ * @brief A single two-body invariant mass constraint.
+ */
+struct KinFitConstraintConfig {
+  int    idx1;       ///< Index of the first  particle in the particles vector
+  int    idx2;       ///< Index of the second particle in the particles vector
+  double targetMass; ///< Target invariant mass [GeV]
+};
+
+/**
+ * @brief Complete configuration for one kinematic fit instance.
  */
 struct KinFitConfig {
-  // ── input column names ──────────────────────────────────────────────────
-  std::string lepton1Pt;   ///< Column name: lepton-1 pT  [GeV]
-  std::string lepton1Eta;  ///< Column name: lepton-1 eta
-  std::string lepton1Phi;  ///< Column name: lepton-1 phi [rad]
-  std::string lepton1Mass; ///< Column name: lepton-1 mass [GeV]
+  std::vector<KinFitParticleConfig>   particles;   ///< Ordered list of particles
+  std::vector<KinFitConstraintConfig> constraints; ///< Two-body mass constraints
 
-  std::string lepton2Pt;   ///< Column name: lepton-2 pT  [GeV]
-  std::string lepton2Eta;  ///< Column name: lepton-2 eta
-  std::string lepton2Phi;  ///< Column name: lepton-2 phi [rad]
-  std::string lepton2Mass; ///< Column name: lepton-2 mass [GeV]
+  // ── per-type resolution parameters (with physics-motivated defaults) ──────
+  double leptonPtResolution  = 0.02;   ///< Fractional lepton pT resolution
+  double leptonEtaResolution = 0.001;  ///< Absolute lepton eta resolution
+  double leptonPhiResolution = 0.001;  ///< Absolute lepton phi resolution [rad]
 
-  std::string jet1Pt;   ///< Column name: jet-1 pT  [GeV]
-  std::string jet1Eta;  ///< Column name: jet-1 eta
-  std::string jet1Phi;  ///< Column name: jet-1 phi [rad]
-  std::string jet1Mass; ///< Column name: jet-1 mass [GeV]
+  double jetPtResolution     = 0.10;   ///< Fractional jet pT resolution
+  double jetEtaResolution    = 0.05;   ///< Absolute jet eta resolution
+  double jetPhiResolution    = 0.05;   ///< Absolute jet phi resolution [rad]
 
-  std::string jet2Pt;   ///< Column name: jet-2 pT  [GeV]
-  std::string jet2Eta;  ///< Column name: jet-2 eta
-  std::string jet2Phi;  ///< Column name: jet-2 phi [rad]
-  std::string jet2Mass; ///< Column name: jet-2 mass [GeV]
+  double metPtResolution     = 0.20;   ///< Fractional MET pT resolution
+  /// @brief MET eta resolution.  Set very large so eta is effectively free.
+  double metEtaResolution    = 100.0;
+  double metPhiResolution    = 0.05;   ///< Absolute MET phi resolution [rad]
 
-  // ── mass constraints ────────────────────────────────────────────────────
-  double dileptonMassConstraint; ///< Target dilepton mass [GeV] (e.g. 91.2 for Z)
-  double dijetMassConstraint;    ///< Target dijet mass   [GeV] (e.g. 125.0 for H)
-
-  // ── momentum resolutions ────────────────────────────────────────────────
-  double leptonPtResolution;  ///< Fractional lepton pT resolution (sigma_pT/pT)
-  double leptonEtaResolution; ///< Absolute lepton eta resolution
-  double leptonPhiResolution; ///< Absolute lepton phi resolution [rad]
-
-  double jetPtResolution;  ///< Fractional jet pT resolution (sigma_pT/pT)
-  double jetEtaResolution; ///< Absolute jet eta resolution
-  double jetPhiResolution; ///< Absolute jet phi resolution [rad]
-
-  // ── convergence parameters ──────────────────────────────────────────────
-  int    maxIterations;        ///< Maximum fit iterations
-  double convergenceTolerance; ///< Convergence criterion on |delta_chi2|
+  int    maxIterations        = 50;    ///< Maximum linearisation iterations
+  double convergenceTolerance = 1e-6;  ///< Convergence criterion on |Δχ²|
 };
 
 /**
@@ -61,37 +70,56 @@ struct KinFitConfig {
  *        them as new columns to an RDataFrame.
  *
  * Configuration is read from a text file whose path is given by the
- * "kinematicFitConfig" key in the main analysis config.  Each line of the
- * fit config file describes one fit instance.  Required keys per line:
+ * "kinematicFitConfig" key in the main analysis config.  Each line describes
+ * one fit instance with the following keys:
  *
- *   name, lepton1Pt, lepton1Eta, lepton1Phi, lepton1Mass,
- *   lepton2Pt, lepton2Eta, lepton2Phi, lepton2Mass,
- *   jet1Pt,    jet1Eta,    jet1Phi,    jet1Mass,
- *   jet2Pt,    jet2Eta,    jet2Phi,    jet2Mass,
- *   dileptonMassConstraint, dijetMassConstraint,
- *   leptonPtResolution, leptonEtaResolution, leptonPhiResolution,
- *   jetPtResolution,    jetEtaResolution,    jetPhiResolution,
- *   maxIterations, convergenceTolerance
+ *   Required:
+ *     name            – unique identifier for the fit
+ *     particles       – comma-separated list of particle specs, each with
+ *                       the form  label:ptCol:etaCol:phiCol:massCol:type
+ *                         - etaCol: use "_" or "" for MET (eta fixed at 0)
+ *                         - massCol: column name OR numeric literal
+ *                         - type: "lepton", "jet", or "met"
+ *     constraints     – comma-separated two-body mass constraints, each with
+ *                       the form  idx1+idx2:targetMass
+ *                       (idx1/idx2 are zero-based indices into the particles list)
+ *     maxIterations        – maximum number of fit iterations
+ *     convergenceTolerance – convergence criterion on |Δχ²|
  *
- * For each configured fit with a given @p name, the following RDataFrame
- * columns are defined:
- *   - @p {name}_chi2        — chi-square of the fit (Float_t)
- *   - @p {name}_converged   — 1 if converged, 0 otherwise (Float_t)
- *   - @p {name}_l1Pt_fitted, @p {name}_l1Eta_fitted, @p {name}_l1Phi_fitted
- *   - @p {name}_l2Pt_fitted, @p {name}_l2Eta_fitted, @p {name}_l2Phi_fitted
- *   - @p {name}_j1Pt_fitted, @p {name}_j1Eta_fitted, @p {name}_j1Phi_fitted
- *   - @p {name}_j2Pt_fitted, @p {name}_j2Eta_fitted, @p {name}_j2Phi_fitted
+ *   Optional (falling back to built-in defaults if absent):
+ *     leptonPtResolution, leptonEtaResolution, leptonPhiResolution
+ *     jetPtResolution,    jetEtaResolution,    jetPhiResolution
+ *     metPtResolution,    metEtaResolution,    metPhiResolution
  *
- * Example config line (dilepton+dijet system, Z+H):
+ * For each fit named @p N, the following RDataFrame columns are defined:
+ *   - @p N_chi2          — chi-square of the fit (Float_t)
+ *   - @p N_converged     — true if the fit converged (bool)
+ *   - @p N_{label}_pt_fitted  — fitted pT  for each particle (Float_t)
+ *   - @p N_{label}_eta_fitted — fitted eta for each particle (Float_t)
+ *   - @p N_{label}_phi_fitted — fitted phi for each particle (Float_t)
+ *
+ * @par Example config lines
  * @code
+ * # Z+H → ll bb  (2 leptons + 2 jets)
  * name=zhFit \
- *   lepton1Pt=lep1_pt lepton1Eta=lep1_eta lepton1Phi=lep1_phi lepton1Mass=lep1_mass \
- *   lepton2Pt=lep2_pt lepton2Eta=lep2_eta lepton2Phi=lep2_phi lepton2Mass=lep2_mass \
- *   jet1Pt=jet1_pt   jet1Eta=jet1_eta   jet1Phi=jet1_phi   jet1Mass=jet1_mass     \
- *   jet2Pt=jet2_pt   jet2Eta=jet2_eta   jet2Phi=jet2_phi   jet2Mass=jet2_mass     \
- *   dileptonMassConstraint=91.2 dijetMassConstraint=125.0 \
+ *   particles=mu1:mu1_pt:mu1_eta:mu1_phi:mu1_mass:lepton,mu2:mu2_pt:mu2_eta:mu2_phi:mu2_mass:lepton,bjet1:bjet1_pt:bjet1_eta:bjet1_phi:bjet1_mass:jet,bjet2:bjet2_pt:bjet2_eta:bjet2_phi:bjet2_mass:jet \
+ *   constraints=0+1:91.2,2+3:125.0 \
  *   leptonPtResolution=0.02 leptonEtaResolution=0.001 leptonPhiResolution=0.001 \
- *   jetPtResolution=0.10    jetEtaResolution=0.05    jetPhiResolution=0.05       \
+ *   jetPtResolution=0.10    jetEtaResolution=0.05    jetPhiResolution=0.05 \
+ *   maxIterations=50 convergenceTolerance=1e-6
+ *
+ * # W → lν  (1 lepton + MET)
+ * name=wlvFit \
+ *   particles=lep:lep_pt:lep_eta:lep_phi:lep_mass:lepton,nu:met_pt:_:met_phi:0:met \
+ *   constraints=0+1:80.4 \
+ *   leptonPtResolution=0.02 leptonEtaResolution=0.001 leptonPhiResolution=0.001 \
+ *   metPtResolution=0.20 metPhiResolution=0.05 \
+ *   maxIterations=50 convergenceTolerance=1e-6
+ *
+ * # ttbar semi-leptonic (1 lepton + MET + 4 jets, constrain W masses)
+ * name=ttbarFit \
+ *   particles=lep:lep_pt:lep_eta:lep_phi:lep_mass:lepton,nu:met_pt:_:met_phi:0:met,j1:j1_pt:j1_eta:j1_phi:j1_mass:jet,j2:j2_pt:j2_eta:j2_phi:j2_mass:jet,j3:j3_pt:j3_eta:j3_phi:j3_mass:jet,j4:j4_pt:j4_eta:j4_phi:j4_mass:jet \
+ *   constraints=0+1:80.4,2+3:80.4 \
  *   maxIterations=50 convergenceTolerance=1e-6
  * @endcode
  */
@@ -106,8 +134,8 @@ public:
   /**
    * @brief Apply a single kinematic fit to the current RDataFrame.
    *
-   * Defines all output columns (chi2, converged flag, fitted momenta) for
-   * the fit identified by @p fitName.
+   * Defines all output columns (chi2, converged flag, fitted momenta for each
+   * particle) for the fit identified by @p fitName.
    * @param fitName Name of the fit as given in the config file.
    */
   void applyFit(const std::string &fitName);

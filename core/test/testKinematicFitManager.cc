@@ -8,6 +8,7 @@
  *  - Fit config retrieval and error handling
  *  - The KinematicFit algorithm (convergence, chi2, mass constraints)
  *  - Integration with RDataFrame via applyFit / applyAllFits
+ *  - Flexible particle lists including MET
  */
 
 #include <KinematicFit.h>
@@ -145,6 +146,48 @@ TEST_F(KinematicFitTest, FittedMomenta_SatisfyMassConstraint_Tightly) {
   EXPECT_NEAR(fm, mZ, 0.5);
 }
 
+TEST_F(KinematicFitTest, FitWithMET_Converges) {
+  // W -> mu + nu: lepton + MET, constrain to W mass 80.4 GeV
+  const double mW = 80.4;
+  KinematicFit fitter;
+  // Muon
+  fitter.addParticle({42.0, 0.5, 1.0, 0.106, 0.02, 0.001, 0.001});
+  // MET (eta = 0, mass = 0, very large eta resolution so eta is free)
+  fitter.addParticle({40.0, 0.0, -2.0, 0.0, 0.20, 100.0, 0.05});
+  fitter.addMassConstraint(0, 1, mW);
+  const auto result = fitter.fit();
+  EXPECT_GE(result.chi2, 0.0);
+  EXPECT_EQ(result.fittedParticles.size(), 2u);
+  // Fitted invariant mass should be close to the W mass constraint
+  const auto &fp = result.fittedParticles;
+  const double fm = invMass(fp[0].pt, fp[0].eta, fp[0].phi, fp[0].mass,
+                             fp[1].pt, fp[1].eta, fp[1].phi, fp[1].mass);
+  EXPECT_NEAR(fm, mW, 5.0); // within 5 GeV (MET has larger freedom)
+}
+
+TEST_F(KinematicFitTest, FitWithVariableJets_FourJets) {
+  // Test with 4 jets (ttbar-like: constrain j1+j2 to W and j3+j4 to W)
+  const double mW = 80.4;
+  KinematicFit fitter;
+  fitter.addParticle({50.0,  0.5,  0.0, 0.0, 0.10, 0.05, 0.05});
+  fitter.addParticle({45.0, -0.5,  M_PI, 0.0, 0.10, 0.05, 0.05});
+  fitter.addParticle({40.0,  1.0,  1.5, 0.0, 0.10, 0.05, 0.05});
+  fitter.addParticle({38.0, -1.0, -1.5, 0.0, 0.10, 0.05, 0.05});
+  fitter.addMassConstraint(0, 1, mW);
+  fitter.addMassConstraint(2, 3, mW);
+  const auto result = fitter.fit();
+  EXPECT_GE(result.chi2, 0.0);
+  EXPECT_EQ(result.fittedParticles.size(), 4u);
+  // Both dijet masses should be close to the W mass constraint
+  const auto &fp = result.fittedParticles;
+  const double m01 = invMass(fp[0].pt, fp[0].eta, fp[0].phi, fp[0].mass,
+                              fp[1].pt, fp[1].eta, fp[1].phi, fp[1].mass);
+  const double m23 = invMass(fp[2].pt, fp[2].eta, fp[2].phi, fp[2].mass,
+                              fp[3].pt, fp[3].eta, fp[3].phi, fp[3].mass);
+  EXPECT_NEAR(m01, mW, 5.0);
+  EXPECT_NEAR(m23, mW, 5.0);
+}
+
 // ─── KinematicFitManager configuration tests ─────────────────────────────────
 
 class KinematicFitManagerTest : public ::testing::Test {
@@ -188,6 +231,9 @@ protected:
     dataManager->Define("jet2_eta",  [](ULong64_t) -> float { return -1.0f; }, {"rdfentry_"}, *systematicManager);
     dataManager->Define("jet2_phi",  [](ULong64_t) -> float { return static_cast<float>(M_PI); }, {"rdfentry_"}, *systematicManager);
     dataManager->Define("jet2_mass", [](ULong64_t) -> float { return  4.18f; }, {"rdfentry_"}, *systematicManager);
+    // MET (for wjFit)
+    dataManager->Define("met_pt",    [](ULong64_t) -> float { return 38.0f; }, {"rdfentry_"}, *systematicManager);
+    dataManager->Define("met_phi",   [](ULong64_t) -> float { return -0.8f; }, {"rdfentry_"}, *systematicManager);
   }
 
   std::unique_ptr<IConfigurationProvider> configManager;
@@ -210,17 +256,36 @@ TEST_F(KinematicFitManagerTest, GetAllFitNames_ReturnsConfiguredFits) {
   const auto names = fitManager->getAllFitNames();
   EXPECT_EQ(names.size(), 2u);
   EXPECT_TRUE(std::find(names.begin(), names.end(), "zhFit") != names.end());
-  EXPECT_TRUE(std::find(names.begin(), names.end(), "wwFit") != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "wjFit") != names.end());
 }
 
 TEST_F(KinematicFitManagerTest, GetFitConfig_Valid) {
   EXPECT_NO_THROW({
     const auto &cfg = fitManager->getFitConfig("zhFit");
-    EXPECT_NEAR(cfg.dileptonMassConstraint, 91.2, 1e-6);
-    EXPECT_NEAR(cfg.dijetMassConstraint,   125.0, 1e-6);
+    EXPECT_EQ(cfg.particles.size(), 4u);
+    EXPECT_EQ(cfg.constraints.size(), 2u);
+    EXPECT_NEAR(cfg.constraints[0].targetMass, 91.2,  1e-6);
+    EXPECT_NEAR(cfg.constraints[1].targetMass, 125.0, 1e-6);
+    EXPECT_EQ(cfg.particles[0].name,   "mu1");
+    EXPECT_EQ(cfg.particles[0].ptCol,  "lep1_pt");
+    EXPECT_EQ(cfg.particles[0].type,   "lepton");
+    EXPECT_EQ(cfg.particles[2].name,   "bjet1");
+    EXPECT_EQ(cfg.particles[2].ptCol,  "jet1_pt");
+    EXPECT_EQ(cfg.particles[2].type,   "jet");
     EXPECT_EQ(cfg.maxIterations, 50);
-    EXPECT_EQ(cfg.lepton1Pt,   "lep1_pt");
-    EXPECT_EQ(cfg.jet1Pt,      "jet1_pt");
+  });
+}
+
+TEST_F(KinematicFitManagerTest, GetFitConfig_METFit) {
+  EXPECT_NO_THROW({
+    const auto &cfg = fitManager->getFitConfig("wjFit");
+    EXPECT_EQ(cfg.particles.size(), 2u);
+    EXPECT_EQ(cfg.constraints.size(), 1u);
+    EXPECT_NEAR(cfg.constraints[0].targetMass, 80.4, 1e-6);
+    EXPECT_EQ(cfg.particles[1].name,   "nu");
+    EXPECT_EQ(cfg.particles[1].type,   "met");
+    EXPECT_EQ(cfg.particles[1].etaCol, "_");   // MET has no eta column
+    EXPECT_EQ(cfg.particles[1].massCol, "0");  // massless neutrino
   });
 }
 
@@ -243,7 +308,7 @@ TEST_F(KinematicFitManagerTest, ApplyFit_InvalidName_Throws) {
   EXPECT_THROW(fitManager->applyFit("nonexistent"), std::runtime_error);
 }
 
-TEST_F(KinematicFitManagerTest, ApplyFit_DefinesOutputColumns) {
+TEST_F(KinematicFitManagerTest, ApplyFit_DefinesOutputColumns_zh) {
   defineParticleColumns();
   EXPECT_NO_THROW(fitManager->applyFit("zhFit"));
 
@@ -255,12 +320,31 @@ TEST_F(KinematicFitManagerTest, ApplyFit_DefinesOutputColumns) {
 
   EXPECT_TRUE(hasCol("zhFit_chi2"));
   EXPECT_TRUE(hasCol("zhFit_converged"));
-  EXPECT_TRUE(hasCol("zhFit_l1Pt_fitted"));
-  EXPECT_TRUE(hasCol("zhFit_l1Eta_fitted"));
-  EXPECT_TRUE(hasCol("zhFit_l1Phi_fitted"));
-  EXPECT_TRUE(hasCol("zhFit_l2Pt_fitted"));
-  EXPECT_TRUE(hasCol("zhFit_j1Pt_fitted"));
-  EXPECT_TRUE(hasCol("zhFit_j2Pt_fitted"));
+  // Particle-labelled output columns (per particle label from config)
+  EXPECT_TRUE(hasCol("zhFit_mu1_pt_fitted"));
+  EXPECT_TRUE(hasCol("zhFit_mu1_eta_fitted"));
+  EXPECT_TRUE(hasCol("zhFit_mu1_phi_fitted"));
+  EXPECT_TRUE(hasCol("zhFit_mu2_pt_fitted"));
+  EXPECT_TRUE(hasCol("zhFit_bjet1_pt_fitted"));
+  EXPECT_TRUE(hasCol("zhFit_bjet2_pt_fitted"));
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_DefinesOutputColumns_wjFit_WithMET) {
+  defineParticleColumns();
+  EXPECT_NO_THROW(fitManager->applyFit("wjFit"));
+
+  auto df = dataManager->getDataFrame();
+  const auto cols = df.GetColumnNames();
+  auto hasCol = [&](const std::string &name) {
+    return std::find(cols.begin(), cols.end(), name) != cols.end();
+  };
+
+  EXPECT_TRUE(hasCol("wjFit_chi2"));
+  EXPECT_TRUE(hasCol("wjFit_converged"));
+  EXPECT_TRUE(hasCol("wjFit_lep_pt_fitted"));
+  EXPECT_TRUE(hasCol("wjFit_lep_eta_fitted"));
+  EXPECT_TRUE(hasCol("wjFit_nu_pt_fitted"));
+  EXPECT_TRUE(hasCol("wjFit_nu_phi_fitted"));  // MET phi should be fitted
 }
 
 TEST_F(KinematicFitManagerTest, ApplyFit_Chi2IsNonNegative) {
@@ -278,16 +362,16 @@ TEST_F(KinematicFitManagerTest, ApplyFit_FittedPtIsPositive) {
   defineParticleColumns();
   fitManager->applyFit("zhFit");
 
-  auto df = dataManager->getDataFrame();
-  auto l1pts = df.Take<Float_t>("zhFit_l1Pt_fitted");
-  auto l2pts = df.Take<Float_t>("zhFit_l2Pt_fitted");
-  auto j1pts = df.Take<Float_t>("zhFit_j1Pt_fitted");
-  auto j2pts = df.Take<Float_t>("zhFit_j2Pt_fitted");
-  for (std::size_t i = 0; i < l1pts->size(); ++i) {
-    EXPECT_GT((*l1pts)[i], 0.0f);
-    EXPECT_GT((*l2pts)[i], 0.0f);
-    EXPECT_GT((*j1pts)[i], 0.0f);
-    EXPECT_GT((*j2pts)[i], 0.0f);
+  auto df    = dataManager->getDataFrame();
+  auto mu1pt = df.Take<Float_t>("zhFit_mu1_pt_fitted");
+  auto mu2pt = df.Take<Float_t>("zhFit_mu2_pt_fitted");
+  auto j1pt  = df.Take<Float_t>("zhFit_bjet1_pt_fitted");
+  auto j2pt  = df.Take<Float_t>("zhFit_bjet2_pt_fitted");
+  for (std::size_t i = 0; i < mu1pt->size(); ++i) {
+    EXPECT_GT((*mu1pt)[i], 0.0f);
+    EXPECT_GT((*mu2pt)[i], 0.0f);
+    EXPECT_GT((*j1pt)[i],  0.0f);
+    EXPECT_GT((*j2pt)[i],  0.0f);
   }
 }
 
@@ -301,7 +385,7 @@ TEST_F(KinematicFitManagerTest, ApplyAllFits_DefinesColumnsForAllFits) {
     return std::find(cols.begin(), cols.end(), name) != cols.end();
   };
   EXPECT_TRUE(hasCol("zhFit_chi2"));
-  EXPECT_TRUE(hasCol("wwFit_chi2"));
+  EXPECT_TRUE(hasCol("wjFit_chi2"));
 }
 
 int main(int argc, char **argv) {
