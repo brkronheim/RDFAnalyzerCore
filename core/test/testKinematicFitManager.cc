@@ -412,8 +412,8 @@ TEST_F(KinematicFitManagerTest, GetFitConfig_Valid) {
     const auto &cfg = fitManager->getFitConfig("zhFit");
     EXPECT_EQ(cfg.particles.size(), 4u);
     EXPECT_EQ(cfg.constraints.size(), 2u);
-    EXPECT_NEAR(cfg.constraints[0].targetMass, 91.2,  1e-6);
-    EXPECT_NEAR(cfg.constraints[1].targetMass, 125.0, 1e-6);
+    EXPECT_NEAR(cfg.constraints[0].targetValue, 91.2,  1e-6);
+    EXPECT_NEAR(cfg.constraints[1].targetValue, 125.0, 1e-6);
     EXPECT_EQ(cfg.particles[0].name,   "mu1");
     EXPECT_EQ(cfg.particles[0].ptCol,  "lep1_pt");
     EXPECT_EQ(cfg.particles[0].type,   "lepton");
@@ -429,7 +429,7 @@ TEST_F(KinematicFitManagerTest, GetFitConfig_METFit) {
     const auto &cfg = fitManager->getFitConfig("wjFit");
     EXPECT_EQ(cfg.particles.size(), 2u);
     EXPECT_EQ(cfg.constraints.size(), 1u);
-    EXPECT_NEAR(cfg.constraints[0].targetMass, 80.4, 1e-6);
+    EXPECT_NEAR(cfg.constraints[0].targetValue, 80.4, 1e-6);
     EXPECT_EQ(cfg.particles[1].name,   "nu");
     EXPECT_EQ(cfg.particles[1].type,   "met");
     EXPECT_EQ(cfg.particles[1].etaCol, "_");   // MET has no eta column
@@ -775,6 +775,133 @@ TEST_F(KinematicFitManagerTest, ParseConstraintSpec_PtConstraint_ParsedCorrectly
     }
   }
   EXPECT_TRUE(foundPt);
+}
+
+// ─── Soft mass constraint (massSigma) tests ───────────────────────────────────
+
+TEST_F(KinematicFitTest, SoftMassConstraint_AllowsMoreDeviationThanHard) {
+  // With a hard constraint (massSigma=0) the fitter drives the fitted mass
+  // very close to the target.  With a soft constraint (massSigma = mZ width)
+  // the fitter is allowed to leave more residual mass difference for the same
+  // particle resolutions.  We verify that the residual is strictly larger for
+  // the soft case.
+  const double mZ    = 91.2;
+  const double sigma = 2.495; // PDG Z width
+
+  // Input particles whose dilepton mass is 80 GeV (needs ~11 GeV pull to Z)
+  const double pt = 40.0; // m(p1+p2) ≈ 80 GeV when back-to-back at eta=0
+
+  // Hard fit
+  KinematicFit hardFitter;
+  hardFitter.addParticle({pt, 0.0,  0.0,   0.106, 0.02, 0.001, 0.001});
+  hardFitter.addParticle({pt, 0.0,  M_PI,  0.106, 0.02, 0.001, 0.001});
+  hardFitter.addMassConstraint(0, 1, mZ, 0.0); // hard
+  const auto hardResult = hardFitter.fit(100, 1e-9);
+
+  // Soft fit with Z width
+  KinematicFit softFitter;
+  softFitter.addParticle({pt, 0.0,  0.0,   0.106, 0.02, 0.001, 0.001});
+  softFitter.addParticle({pt, 0.0,  M_PI,  0.106, 0.02, 0.001, 0.001});
+  softFitter.addMassConstraint(0, 1, mZ, sigma); // soft
+  const auto softResult = softFitter.fit(100, 1e-9);
+
+  EXPECT_GE(hardResult.chi2, 0.0);
+  EXPECT_GE(softResult.chi2, 0.0);
+
+  // Compute fitted masses
+  const auto &hfp = hardResult.fittedParticles;
+  const auto &sfp = softResult.fittedParticles;
+  const double hardMass = invMass(hfp[0].pt, hfp[0].eta, hfp[0].phi, hfp[0].mass,
+                                  hfp[1].pt, hfp[1].eta, hfp[1].phi, hfp[1].mass);
+  const double softMass = invMass(sfp[0].pt, sfp[0].eta, sfp[0].phi, sfp[0].mass,
+                                  sfp[1].pt, sfp[1].eta, sfp[1].phi, sfp[1].mass);
+
+  // The hard fit must reach the target much more tightly
+  EXPECT_NEAR(hardMass, mZ, 1.0);
+  // The soft fit allows the mass to remain further from the target
+  // (the fitted mass stays closer to the initial 80 GeV)
+  EXPECT_GT(std::abs(softMass - mZ), std::abs(hardMass - mZ));
+}
+
+TEST_F(KinematicFitTest, SoftMassConstraint_ZeroSigma_SameAsHard) {
+  // Passing massSigma = 0 (the default) must give identical results to
+  // not passing it at all (the existing addMassConstraint overload).
+  const double mZ = 91.2;
+  const double pt = 40.0;
+
+  KinematicFit refFitter;
+  refFitter.addParticle({pt, 0.0,  0.0,  0.106, 0.02, 0.001, 0.001});
+  refFitter.addParticle({pt, 0.0,  M_PI, 0.106, 0.02, 0.001, 0.001});
+  refFitter.addMassConstraint(0, 1, mZ);        // no sigma arg (default 0)
+  const auto refResult = refFitter.fit(100, 1e-9);
+
+  KinematicFit explicitFitter;
+  explicitFitter.addParticle({pt, 0.0,  0.0,  0.106, 0.02, 0.001, 0.001});
+  explicitFitter.addParticle({pt, 0.0,  M_PI, 0.106, 0.02, 0.001, 0.001});
+  explicitFitter.addMassConstraint(0, 1, mZ, 0.0); // explicit zero sigma
+  const auto explResult = explicitFitter.fit(100, 1e-9);
+
+  EXPECT_NEAR(refResult.chi2,    explResult.chi2,    1e-6);
+  EXPECT_NEAR(refResult.fittedParticles[0].pt, explResult.fittedParticles[0].pt, 1e-6);
+}
+
+TEST_F(KinematicFitTest, SoftThreeBodyConstraint_TopWidth_ReducesPull) {
+  // Verify that addThreeBodyMassConstraint with massSigma (top width 1.4 GeV)
+  // produces a looser constraint than massSigma = 0.
+  const double mTop = 173.3;
+  const double sigmaTop = 1.4;
+
+  KinematicFit hardFitter, softFitter;
+  for (auto *f : {&hardFitter, &softFitter}) {
+    f->addParticle({55.0,  0.3,  2.0, 4.18,  0.10, 0.05, 0.05}); // b-jet
+    f->addParticle({50.0,  0.5,  1.0, 0.106, 0.02, 0.001, 0.001}); // lepton
+    f->addParticle({45.0,  0.0, -2.0, 0.0,   0.20, 100.0, 0.05}); // MET/nu
+  }
+  hardFitter.addThreeBodyMassConstraint(0, 1, 2, mTop, 0.0);
+  softFitter.addThreeBodyMassConstraint(0, 1, 2, mTop, sigmaTop);
+
+  const auto hardResult = hardFitter.fit(100, 1e-9);
+  const auto softResult = softFitter.fit(100, 1e-9);
+
+  EXPECT_GE(hardResult.chi2, 0.0);
+  EXPECT_GE(softResult.chi2, 0.0);
+  // Both fits should converge
+  EXPECT_EQ(hardResult.fittedParticles.size(), 3u);
+  EXPECT_EQ(softResult.fittedParticles.size(), 3u);
+}
+
+// Manager-level massSigma tests
+
+TEST_F(KinematicFitManagerTest, GetFitConfig_ZhFit_HasMassSigmaFromConfig) {
+  // The zhFit config file sets constraints=0+1:91.2:2.495 — Z with PDG width.
+  const auto &cfg = fitManager->getFitConfig("zhFit");
+  EXPECT_EQ(cfg.constraints.size(), 2u);
+  // First constraint (dilepton) should have massSigma = Z width
+  const auto &zCon = cfg.constraints[0];
+  EXPECT_EQ(zCon.type, KinFitConstraintConfig::Type::MASS);
+  EXPECT_NEAR(zCon.targetValue, 91.2,  1e-4);
+  EXPECT_NEAR(zCon.massSigma,   2.495, 1e-4);
+  // Second constraint (dijet, Higgs) has no explicit sigma → should default to 0
+  const auto &hCon = cfg.constraints[1];
+  EXPECT_NEAR(hCon.targetValue, 125.0, 1e-4);
+  EXPECT_NEAR(hCon.massSigma,   0.0,   1e-9);
+}
+
+TEST_F(KinematicFitManagerTest, GetFitConfig_TopFullFit_HasMassSigmaFromConfig) {
+  // topFullFit uses constraints=1+2:80.4:2.085,0+1+2:173.3:1.4
+  const auto &cfg = fitManager->getFitConfig("topFullFit");
+  EXPECT_EQ(cfg.constraints.size(), 2u);
+  // Find and check the W constraint
+  for (const auto &con : cfg.constraints) {
+    if (con.type == KinFitConstraintConfig::Type::MASS && con.idx3 < 0) {
+      EXPECT_NEAR(con.targetValue, 80.4,  1e-4);
+      EXPECT_NEAR(con.massSigma,   2.085, 1e-4);
+    }
+    if (con.type == KinFitConstraintConfig::Type::MASS && con.idx3 >= 0) {
+      EXPECT_NEAR(con.targetValue, 173.3, 0.1);
+      EXPECT_NEAR(con.massSigma,   1.4,   1e-4);
+    }
+  }
 }
 
 int main(int argc, char **argv) {

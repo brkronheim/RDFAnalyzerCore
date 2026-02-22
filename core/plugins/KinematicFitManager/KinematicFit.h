@@ -42,12 +42,34 @@ struct KinFitResult {
  *   t → b W → b l ν  ⟹  m(b, l, ν) = 173.3 GeV
  * or fully hadronic:
  *   t → b W → b j j  ⟹  m(b, j1, j2) = 173.3 GeV
+ *
+ * **Soft constraint via @p massSigma**
+ *
+ * By default the constraint is applied exactly (hard constraint).  Setting
+ * @p massSigma > 0 converts it into a *soft* (Gaussian-penalty) constraint
+ * that accounts for the intrinsic width of the resonance.  The constraint
+ * residual g_c = m² − m_target² has uncertainty
+ *   σ_{g_c} ≈ 2 · m_target · massSigma,
+ * so the diagonal of the W = DVDᵀ matrix receives an extra term
+ *   W_{cc} += (2 · m_target · massSigma)²,
+ * which relaxes the pull towards m_target by approximately massSigma GeV.
+ *
+ * Typical values:
+ *   - Z boson mass fit:      massSigma ≈ 2.495 GeV  (PDG Z width)
+ *   - W boson mass fit:      massSigma ≈ 2.085 GeV  (PDG W width)
+ *   - top quark mass fit:    massSigma ≈ 1.4   GeV  (PDG top width)
+ *   - Higgs boson mass fit:  massSigma ≈ 0.004 GeV  (PDG H width, ~4 MeV)
+ *
+ * Leave at 0.0 (the default) to enforce the constraint exactly.
  */
 struct MassConstraint {
   int idx1;          ///< Index of the first  particle
   int idx2;          ///< Index of the second particle
   int idx3 = -1;     ///< Index of the third  particle; -1 means two-body constraint
   double targetMass; ///< Target invariant mass [GeV]
+  /// @brief Resonance width / mass uncertainty [GeV].
+  /// Set > 0 to use a soft (Gaussian-penalty) constraint.  See struct docs.
+  double massSigma = 0.0;
 };
 
 /**
@@ -128,9 +150,12 @@ public:
    * @param idx1       Index of the first particle.
    * @param idx2       Index of the second particle.
    * @param targetMass Target invariant mass [GeV].
+   * @param massSigma  Resonance width / mass uncertainty [GeV] (default 0 =
+   *                   hard constraint).  Set to e.g. 2.495 for the Z width.
    */
-  void addMassConstraint(int idx1, int idx2, double targetMass) {
-    constraints_.push_back({idx1, idx2, -1, targetMass});
+  void addMassConstraint(int idx1, int idx2, double targetMass,
+                         double massSigma = 0.0) {
+    constraints_.push_back({idx1, idx2, -1, targetMass, massSigma});
   }
 
   /**
@@ -143,10 +168,13 @@ public:
    * @param idx2       Index of the second particle.
    * @param idx3       Index of the third  particle.
    * @param targetMass Target invariant mass [GeV].
+   * @param massSigma  Resonance width / mass uncertainty [GeV] (default 0 =
+   *                   hard constraint).  Set to e.g. 1.4 for the top width.
    */
   void addThreeBodyMassConstraint(int idx1, int idx2, int idx3,
-                                  double targetMass) {
-    constraints_.push_back({idx1, idx2, idx3, targetMass});
+                                  double targetMass,
+                                  double massSigma = 0.0) {
+    constraints_.push_back({idx1, idx2, idx3, targetMass, massSigma});
   }
 
   /**
@@ -352,6 +380,21 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
           w += D[ci * nParams + k] * var[k] * D[cj * nParams + k];
         }
         W[ci * nConstraints + cj] = w;
+      }
+    }
+
+    // ── soften mass constraints with a Gaussian width (massSigma > 0) ────
+    // For a soft constraint with resonance width σ_m the constraint
+    // residual g_c = m² − m_target² has uncertainty
+    //   σ_{g_c} ≈ 2 · m_target · σ_m  (first-order error propagation),
+    // which is added to the diagonal of W to relax the hard constraint into a
+    // Gaussian penalty of width ~σ_m GeV.  When σ_m = 0 the term is zero and
+    // the original hard constraint is recovered.
+    for (int c = 0; c < nMassConstr; ++c) {
+      if (constraints_[c].massSigma > 0.0) {
+        // residualSigma = σ_{g_c} = 2 · m_target · σ_m
+        const double residualSigma = 2.0 * constraints_[c].targetMass * constraints_[c].massSigma;
+        W[c * nConstraints + c] += residualSigma * residualSigma;
       }
     }
 

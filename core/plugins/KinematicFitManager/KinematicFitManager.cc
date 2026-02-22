@@ -92,12 +92,17 @@ KinFitParticleConfig parseParticleSpec(const std::string &spec) {
  * @brief Parse one constraint specification.
  *
  * Accepted formats:
- *  - "idx1+idx2:targetMass"         — two-body invariant mass constraint
- *  - "idx1+idx2+idx3:targetMass"    — three-body invariant mass constraint
- *                                     (e.g. top: m(b, l, ν) = 173.3 GeV)
- *  - "pt:idx:targetPt"              — pT constraint on a single particle
- *                                     (set targetPt=0 for no-MET events)
+ *  - "idx1+idx2:targetMass"              — two-body hard mass constraint
+ *  - "idx1+idx2:targetMass:massSigma"    — two-body soft mass constraint
+ *                                          (Gaussian penalty with width massSigma)
+ *  - "idx1+idx2+idx3:targetMass"         — three-body hard mass constraint
+ *                                          (e.g. top: m(b, l, ν) = 173.3 GeV)
+ *  - "idx1+idx2+idx3:targetMass:massSigma" — three-body soft mass constraint
+ *  - "pt:idx:targetPt"                   — pT constraint on a single particle
+ *                                          (set targetPt=0 for no-MET events)
  *
+ * For soft mass constraints massSigma is the resonance width in GeV;
+ * typical values: Z = 2.495, W = 2.085, top = 1.4, Higgs ≈ 0.004.
  * Indices are zero-based into the fit's particle list.
  */
 KinFitConstraintConfig parseConstraintSpec(const std::string &spec) {
@@ -116,12 +121,13 @@ KinFitConstraintConfig parseConstraintSpec(const std::string &spec) {
     return con;
   }
 
-  // ── Mass constraint: "idx1+idx2:mass" or "idx1+idx2+idx3:mass" ────────
+  // ── Mass constraint: "idx1+idx2:mass[:sigma]" or "idx1+idx2+idx3:mass[:sigma]"
   const auto colonParts = splitBy(spec, ':');
-  if (colonParts.size() != 2) {
+  if (colonParts.size() != 2 && colonParts.size() != 3) {
     throw std::runtime_error(
         "KinematicFitManager: invalid constraint spec '" + spec +
-        "' – expected idx1+idx2:mass, idx1+idx2+idx3:mass, or pt:idx:targetPt");
+        "' – expected idx1+idx2:mass[:massSigma], "
+        "idx1+idx2+idx3:mass[:massSigma], or pt:idx:targetPt");
   }
   const auto idxParts = splitBy(colonParts[0], '+');
   if (idxParts.size() != 2 && idxParts.size() != 3) {
@@ -135,6 +141,9 @@ KinFitConstraintConfig parseConstraintSpec(const std::string &spec) {
   con.idx2        = parseInt(idxParts[1], "constraintIdx2");
   con.idx3        = (idxParts.size() == 3) ? parseInt(idxParts[2], "constraintIdx3") : -1;
   con.targetValue = parseDouble(colonParts[1], "constraintMass");
+  con.massSigma   = (colonParts.size() == 3)
+                      ? parseDouble(colonParts[2], "constraintMassSigma")
+                      : 0.0;
   return con;
 }
 
@@ -464,9 +473,10 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
         fitter.addPtConstraint(con.idx1, con.targetValue);
       } else if (con.idx3 >= 0) {
         fitter.addThreeBodyMassConstraint(con.idx1, con.idx2, con.idx3,
-                                          con.targetValue);
+                                          con.targetValue, con.massSigma);
       } else {
-        fitter.addMassConstraint(con.idx1, con.idx2, con.targetValue);
+        fitter.addMassConstraint(con.idx1, con.idx2, con.targetValue,
+                                 con.massSigma);
       }
     }
 

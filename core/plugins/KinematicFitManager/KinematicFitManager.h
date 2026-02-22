@@ -73,12 +73,31 @@ struct KinFitParticleConfig {
  *   MET contribution in events where no genuine missing energy is expected
  *   (e.g. fully hadronic W → jj decays).
  *
+ * **Soft mass constraints via massSigma**
+ *
+ * By default mass constraints are hard (exact).  Setting @p massSigma > 0
+ * converts a MASS constraint into a soft Gaussian-penalty constraint that
+ * accounts for the resonance's intrinsic width.  The penalty term added to
+ * the W = DVDᵀ matrix diagonal is (2·targetValue·massSigma)², so the fitter
+ * allows the reconstructed mass to deviate from @p targetValue by roughly
+ * @p massSigma GeV.
+ *
+ * Recommended values (PDG widths):
+ *   - Z boson:   massSigma = 2.495  GeV
+ *   - W boson:   massSigma = 2.085  GeV
+ *   - top quark: massSigma = 1.4    GeV
+ *   - Higgs:     massSigma = 0.004  GeV (~4 MeV)
+ *
+ * massSigma has no effect on PT constraints.
+ *
  * Config syntax:
  *   @code
- *   # Two-body mass constraint
+ *   # Two-body mass constraint (hard)
  *   constraints=0+1:91.2
- *   # Three-body mass constraint (top decay: idx 0=b, 1=lepton, 2=MET/neutrino)
- *   constraints=0+1+2:173.3
+ *   # Two-body mass constraint with Z width (soft)
+ *   constraints=0+1:91.2:2.495
+ *   # Three-body mass constraint with top width (soft)
+ *   constraints=0+1+2:173.3:1.4
  *   # pT constraint (particle 3 must have pT = 0 GeV)
  *   constraints=pt:3:0.0
  *   @endcode
@@ -91,6 +110,10 @@ struct KinFitConstraintConfig {
   int    idx2       = -1;  ///< Second particle (mass constraints only)
   int    idx3       = -1;  ///< Third  particle (three-body mass only; -1 = two-body)
   double targetValue = 0.0; ///< Target invariant mass [GeV] or target pT [GeV]
+  /// @brief Resonance width / mass uncertainty [GeV] for soft mass constraints.
+  /// Set > 0 to soften the constraint (see struct documentation).
+  /// Has no effect on PT constraints.
+  double massSigma  = 0.0;
 };
 
 /**
@@ -141,11 +164,15 @@ struct KinFitConfig {
  *     particles       – comma-separated list of particle specs (see below)
  *     constraints     – comma-separated constraints; three formats supported:
  *                       @code
- *                       # Two-body invariant mass: idx1+idx2:targetMass
+ *                       # Two-body invariant mass (hard): idx1+idx2:targetMass
  *                       0+1:91.2
- *                       # Three-body invariant mass: idx1+idx2+idx3:targetMass
+ *                       # Two-body invariant mass (soft): idx1+idx2:targetMass:massSigma
+ *                       # massSigma = resonance width; allows mass to deviate
+ *                       # by ~massSigma GeV (Gaussian penalty).
+ *                       0+1:91.2:2.495     # Z with PDG width
+ *                       # Three-body invariant mass: idx1+idx2+idx3:targetMass[:massSigma]
  *                       # Used for top decay: t → b l ν  (idx 0=b, 1=l, 2=ν)
- *                       0+1+2:173.3
+ *                       0+1+2:173.3:1.4    # top with PDG width
  *                       # pT (size) constraint on one particle: pt:idx:targetPt
  *                       # Set targetPt=0 to suppress MET in hadronic events
  *                       pt:2:0.0
