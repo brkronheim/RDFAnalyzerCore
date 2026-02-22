@@ -75,6 +75,10 @@ add_executable(testNDHistogramManager testNDHistogramManager.cc)
 target_link_libraries(testNDHistogramManager core corePlugins gtest gtest_main)
 add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
 
+add_executable(testNDHistogramManagerConfig testNDHistogramManagerConfig.cc)
+target_link_libraries(testNDHistogramManagerConfig core corePlugins gtest gtest_main)
+add_test(NAME NDHistogramManagerConfigTest COMMAND testNDHistogramManagerConfig)
+
 add_executable(testTriggerManager testTriggerManager.cc)
 target_link_libraries(testTriggerManager core corePlugins gtest gtest_main)
 add_test(NAME TriggerManagerTest COMMAND testTriggerManager)

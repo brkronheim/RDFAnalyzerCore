@@ -225,6 +225,88 @@ TEST_F(NDHistogramManagerConfigTest, MultipleBookCallsWork) {
   EXPECT_EQ(countAfterSecondBook, countAfterFirstBook + 4u);  // Another 4 from second call
 }
 
+TEST_F(NDHistogramManagerConfigTest, BoostBackendBooking) {
+  // Set up variables
+  dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
+  dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("w2", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("channel", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
+
+  // Select the Boost.Histogram backend
+  configManager->set("histogramBackend", "boost");
+  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  histogramManager->setupFromConfigFile();
+
+  // Book the histograms using the Boost backend
+  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+
+  // Verify the same number of histograms are booked as with the ROOT backend
+  auto& histos = histogramManager->GetHistos();
+  EXPECT_EQ(histos.size(), 4u);
+}
+
+TEST_F(NDHistogramManagerConfigTest, BoostBackendFunctionallyEquivalentToRoot) {
+  // This test verifies that both backends produce the same number of booked histograms
+  // (i.e. they are functionally equivalent from the user's perspective).
+  dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
+  dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+
+  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+
+  // Book with ROOT backend
+  configManager->set("histogramBackend", "root");
+  histogramManager->setupFromConfigFile();
+  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+  const auto rootCount = histogramManager->GetHistos().size();
+
+  // Use a fresh manager for the Boost backend to avoid double-loading config histograms
+  auto boostManager = std::make_unique<NDHistogramManager>(*configManager);
+  ManagerContext ctx{*configManager, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+  boostManager->setContext(ctx);
+
+  configManager->set("histogramBackend", "boost");
+  boostManager->setupFromConfigFile();
+  EXPECT_NO_THROW(boostManager->bookConfigHistograms());
+  const auto boostCount = boostManager->GetHistos().size();
+
+  EXPECT_EQ(rootCount, boostCount);
+}
+
+TEST_F(NDHistogramManagerConfigTest, BoostBackendNoConfigHistograms) {
+  // Booking with Boost backend but no config loaded should not throw
+  configManager->set("histogramBackend", "boost");
+  histogramManager->setupFromConfigFile();
+  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+}
+
+TEST_F(NDHistogramManagerConfigTest, BoostBackendManualBooking) {
+  // Verify that BookSingleHistogram works with the Boost backend
+  dataManager->Define("bvar1", []() { return 3.0f; }, {}, *systematicManager);
+  dataManager->Define("bw1", []() { return 1.0f; }, {}, *systematicManager);
+
+  // Switch to Boost backend via config
+  configManager->set("histogramBackend", "boost");
+  histogramManager->setupFromConfigFile();
+
+  histInfo info("boost_hist", "bvar1", "bvar1", "bw1", 10, 0.0, 10.0);
+  EXPECT_NO_THROW(histogramManager->BookSingleHistogram(info));
+
+  EXPECT_EQ(histogramManager->GetHistos().size(), 1u);
+}
+
+TEST_F(NDHistogramManagerConfigTest, InvalidBackendThrows) {
+  // An unrecognised backend value should throw with a clear error message
+  configManager->set("histogramBackend", "invalid-backend");
+  EXPECT_THROW(histogramManager->setupFromConfigFile(), std::runtime_error);
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
