@@ -429,11 +429,30 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
   dataManager_m->DefineVector(inputsCol, inputCols, "Float_t",
                                *systematicManager_m);
 
+  // ── resolve the run-variable column ───────────────────────────────────────
+  // If no runVar was configured, define a constant-true helper column so the
+  // fit lambda always receives a bool regardless.
+  const std::string &storedRunVar = getRunVar(fitName);
+  std::string runVarCol;
+  if (storedRunVar.empty()) {
+    runVarCol = fitName + "_alwaysRun";
+    dataManager_m->Define(runVarCol,
+        [](ULong64_t) -> bool { return true; },
+        {"rdfentry_"}, *systematicManager_m);
+  } else {
+    runVarCol = storedRunVar;
+  }
+
   // ── per-event fit lambda ──────────────────────────────────────────────────
   // Output layout: [chi2, converged, pT_0, eta_0, phi_0, pT_1, eta_1, phi_1, ...]
+  // When runVar is false the fit is skipped and all outputs are -1.
   auto fitLambda =
-      [cfg, nParticles](ROOT::VecOps::RVec<Float_t> &inputs)
+      [cfg, nParticles](ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
       -> ROOT::VecOps::RVec<Float_t> {
+    if (!runVar) {
+      // Sentinel: chi2 = -1, converged = -1 (→ false), fitted momenta = -1
+      return ROOT::VecOps::RVec<Float_t>(2 + 3 * nParticles, -1.0f);
+    }
     KinematicFit fitter;
 
     for (int i = 0; i < nParticles; ++i) {
@@ -495,7 +514,7 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
   };
 
   const std::string resultsCol = fitName + "_results";
-  dataManager_m->Define(resultsCol, fitLambda, {inputsCol},
+  dataManager_m->Define(resultsCol, fitLambda, {inputsCol, runVarCol},
                          *systematicManager_m);
 
   // ── slice individual output columns ──────────────────────────────────────
@@ -531,6 +550,22 @@ void KinematicFitManager::applyAllFits() {
   for (const auto &name : getAllFitNames()) {
     applyFit(name);
   }
+}
+
+/**
+ * @brief Get the run-variable column name for a named fit.
+ *
+ * Returns an empty string when no runVar was specified in the config, which
+ * applyFit() treats as "always run" (a constant-true helper column is
+ * auto-generated in that case).
+ */
+const std::string &
+KinematicFitManager::getRunVar(const std::string &fitName) const {
+  auto it = kinfit_runVars_m.find(fitName);
+  if (it != kinfit_runVars_m.end()) {
+    return it->second;
+  }
+  throw std::runtime_error("KinematicFitManager: fit not found: " + fitName);
 }
 
 /**
@@ -644,5 +679,13 @@ void KinematicFitManager::registerFits(
     cfg.recoilPhiResolution = getOpt("recoilPhiResolution", cfg.recoilPhiResolution);
 
     objects_m.emplace(entry.at("name"), std::move(cfg));
+
+    // ── optional runVar ────────────────────────────────────────────────────
+    // Store the column name (empty string = always run; applyFit() will
+    // auto-define a constant-true helper column in that case).
+    auto runVarIt = entry.find("runVar");
+    const std::string runVar =
+        (runVarIt != entry.end()) ? runVarIt->second : "";
+    kinfit_runVars_m.emplace(entry.at("name"), runVar);
   }
 }

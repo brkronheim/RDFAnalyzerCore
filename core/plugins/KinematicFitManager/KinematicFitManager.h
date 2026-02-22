@@ -5,6 +5,7 @@
 #include <NamedObjectManager.h>
 #include <api/IConfigurationProvider.h>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 /**
@@ -182,6 +183,12 @@ struct KinFitConfig {
  *     convergenceTolerance – convergence criterion on |Δχ²|
  *
  *   Optional (fall back to built-in defaults if absent):
+ *     runVar               – name of a boolean RDataFrame column; when the
+ *                           column value is false for an event the fit is
+ *                           skipped and all output columns receive -1 (chi2,
+ *                           fitted momenta) or false (converged).  Omit this
+ *                           key to run the fit on every event (equivalent to
+ *                           a constant-true column).
  *     leptonPtResolution, leptonEtaResolution, leptonPhiResolution
  *     jetPtResolution,    jetEtaResolution,    jetPhiResolution
  *     metPtResolution,    metEtaResolution,    metPhiResolution
@@ -215,8 +222,8 @@ struct KinFitConfig {
  *
  * @par Example config lines
  * @code
- * # Z+H → ll bb  (2 leptons + 2 jets, scalar columns)
- * name=zhFit \
+ * # Z+H → ll bb  (2 leptons + 2 jets, scalar columns; only run when isZH is true)
+ * name=zhFit runVar=isZH \
  *   particles=mu1:mu1_pt:mu1_eta:mu1_phi:mu1_mass:lepton,mu2:mu2_pt:mu2_eta:mu2_phi:mu2_mass:lepton,bjet1:bjet1_pt:bjet1_eta:bjet1_phi:bjet1_mass:jet,bjet2:bjet2_pt:bjet2_eta:bjet2_phi:bjet2_mass:jet \
  *   constraints=0+1:91.2,2+3:125.0 \
  *   leptonPtResolution=0.02 jetPtResolution=0.10 maxIterations=50 convergenceTolerance=1e-6
@@ -282,6 +289,18 @@ public:
   const KinFitConfig &getFitConfig(const std::string &fitName) const;
 
   /**
+   * @brief Get the run variable (boolean RDataFrame column) for a named fit.
+   *
+   * Returns the column name stored for @p fitName.  If the fit was configured
+   * without a @p runVar key the returned string is empty, which @c applyFit()
+   * interprets as "always run".
+   *
+   * @param fitName Name of the fit as given in the config file.
+   * @return The run-variable column name, or an empty string if none was set.
+   */
+  const std::string &getRunVar(const std::string &fitName) const;
+
+  /**
    * @brief Get the names of all configured fits.
    * @return Vector of fit names.
    */
@@ -297,6 +316,9 @@ private:
    * @param configProvider Reference to the configuration provider.
    */
   void registerFits(const IConfigurationProvider &configProvider);
+
+  /// Map from fit name to run-variable column name (empty = always run).
+  std::unordered_map<std::string, std::string> kinfit_runVars_m;
 };
 
 #endif // KINEMATICFITMANAGER_H_INCLUDED

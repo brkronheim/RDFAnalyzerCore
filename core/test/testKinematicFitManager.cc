@@ -333,7 +333,9 @@ protected:
   }
 
   /// Helper – define all particle columns needed by the test fits.
-  void defineParticleColumns() {
+  /// @param isZHValue  Value for the boolean @c isZH column used by zhFit's
+  ///                   runVar.  Pass @c false to verify sentinel behaviour.
+  void defineParticleColumns(bool isZHValue = true) {
     // lepton 1
     dataManager->Define("lep1_pt",   [](ULong64_t) -> float { return 46.0f; }, {"rdfentry_"}, *systematicManager);
     dataManager->Define("lep1_eta",  [](ULong64_t) -> float { return  0.5f; }, {"rdfentry_"}, *systematicManager);
@@ -378,6 +380,10 @@ protected:
     dataManager->Define("bjet_eta",  [](ULong64_t) -> float { return  0.3f; }, {"rdfentry_"}, *systematicManager);
     dataManager->Define("bjet_phi",  [](ULong64_t) -> float { return  2.0f; }, {"rdfentry_"}, *systematicManager);
     dataManager->Define("bjet_mass", [](ULong64_t) -> float { return  4.18f; }, {"rdfentry_"}, *systematicManager);
+    // Boolean run-variable used by zhFit (runVar=isZH in config).
+    // Pass false to defineParticleColumns to test the sentinel/skip behaviour.
+    const bool isZH = isZHValue;
+    dataManager->Define("isZH", [isZH](ULong64_t) -> bool { return isZH; }, {"rdfentry_"}, *systematicManager);
   }
 
   std::unique_ptr<IConfigurationProvider> configManager;
@@ -901,6 +907,72 @@ TEST_F(KinematicFitManagerTest, GetFitConfig_TopFullFit_HasMassSigmaFromConfig) 
       EXPECT_NEAR(con.targetValue, 173.3, 0.1);
       EXPECT_NEAR(con.massSigma,   1.4,   1e-4);
     }
+  }
+}
+
+// ─── runVar tests ─────────────────────────────────────────────────────────────
+
+TEST_F(KinematicFitManagerTest, GetRunVar_ReturnsStoredVariable) {
+  // zhFit has runVar=isZH in the config; the stored string should match.
+  EXPECT_EQ(fitManager->getRunVar("zhFit"), "isZH");
+}
+
+TEST_F(KinematicFitManagerTest, GetRunVar_NoRunVarConfigured_ReturnsEmpty) {
+  // wjFit has no runVar in the config; getRunVar should return an empty string.
+  EXPECT_TRUE(fitManager->getRunVar("wjFit").empty());
+}
+
+TEST_F(KinematicFitManagerTest, GetRunVar_NonexistentFit_Throws) {
+  EXPECT_THROW(fitManager->getRunVar("nonexistent"), std::runtime_error);
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_RunVarTrue_FitProducesPositiveChi2) {
+  // When isZH = true the fit should run normally (chi2 >= 0).
+  defineParticleColumns(/*isZHValue=*/true);
+  fitManager->applyFit("zhFit");
+
+  auto df    = dataManager->getDataFrame();
+  auto chi2s = df.Take<Float_t>("zhFit_chi2");
+  for (const float c : *chi2s) {
+    EXPECT_GE(c, 0.0f);
+  }
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_RunVarFalse_ReturnsSentinelValues) {
+  // When isZH = false the fit must be skipped: chi2 == -1, converged == false,
+  // all fitted momenta == -1.  This follows the same sentinel pattern used by
+  // the MVA evaluator plugins (BDTManager, SofieManager, OnnxManager).
+  defineParticleColumns(/*isZHValue=*/false);
+  fitManager->applyFit("zhFit");
+
+  auto df = dataManager->getDataFrame();
+
+  auto chi2s = df.Take<Float_t>("zhFit_chi2");
+  for (const float c : *chi2s) {
+    EXPECT_EQ(c, -1.0f);
+  }
+
+  auto conv = df.Take<bool>("zhFit_converged");
+  for (const bool v : *conv) {
+    EXPECT_FALSE(v);
+  }
+
+  auto mu1pt = df.Take<Float_t>("zhFit_mu1_pt_fitted");
+  for (const float p : *mu1pt) {
+    EXPECT_EQ(p, -1.0f);
+  }
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_NoRunVar_FitAlwaysRuns) {
+  // wjFit has no runVar in the config, so it should always run (chi2 >= 0)
+  // without needing any extra bool column in the dataframe.
+  defineParticleColumns();
+  EXPECT_NO_THROW(fitManager->applyFit("wjFit"));
+
+  auto df    = dataManager->getDataFrame();
+  auto chi2s = df.Take<Float_t>("wjFit_chi2");
+  for (const float c : *chi2s) {
+    EXPECT_GE(c, 0.0f);
   }
 }
 
