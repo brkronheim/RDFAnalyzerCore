@@ -10,32 +10,59 @@
 /**
  * @brief Configuration for one particle in the kinematic fit.
  *
- * Specifies the RDataFrame column names for the measured 4-momentum and the
- * particle type (used to look up the momentum resolution).
+ * Three modes are supported:
  *
- * For MET (missing transverse energy), set @p etaCol to an empty string or
- * "_".  Eta will be fixed at 0 with a very large uncertainty so it is
- * effectively unconstrained by the fit.  Set @p massCol to "0" or leave it
- * empty to treat the particle as massless (neutrino).
+ * **1. Scalar columns** (default, collectionIndex == -1)
+ *   Each of ptCol/etaCol/phiCol/massCol names a scalar (Float_t) RDataFrame
+ *   column. This is the standard mode for pre-selected signal leptons and jets.
  *
- * @p massCol may also be a numeric literal (e.g. "0.106") instead of a column
- * name.  In that case, a constant column is defined automatically.
+ * **2. Collection-indexed** (collectionIndex >= 0)
+ *   ptCol/etaCol/phiCol/massCol name `ROOT::VecOps::RVec<Float_t>` collection
+ *   columns (e.g. `Jet_pt`, `Jet_eta`). The integer @p collectionIndex selects
+ *   which element to use.  If the collection is shorter than the requested
+ *   index the value falls back to 0, so a "missing" jet simply decouples from
+ *   the fit.  Specify the index as the 7th colon-separated field in the
+ *   particle spec string, e.g.:
+ *     @code j1:Jet_pt:Jet_eta:Jet_phi:Jet_mass:jet:0 @endcode
+ *   This mode is useful when the jet collection is stored as a single RVec
+ *   and you want to pick individual jets by position.
+ *
+ * **3. Recoil** (type == "recoil")
+ *   ptCol/etaCol/phiCol/massCol name `RVec<Float_t>` collection columns for
+ *   all jets in the event.  The 4-momenta of every jet in the collection are
+ *   summed into a single effective particle (the hadronic recoil system).
+ *   This particle enters the fit *unconstrained* (no mass constraint is
+ *   applied to it) but participates in the χ² minimisation with a large
+ *   effective uncertainty.  The intended use is to account for additional
+ *   QCD radiation (ISR/FSR jets) whose multiplicity varies event by event:
+ *   all extra jets are captured in one recoil 4-vector regardless of how
+ *   many there are.  When the collection is empty (no extra jets), the recoil
+ *   particle has zero 4-momentum and does not affect the fit.
+ *   Config syntax (no index field required):
+ *     @code isr:ExtraJet_pt:ExtraJet_eta:ExtraJet_phi:ExtraJet_mass:recoil @endcode
+ *
+ * **Special column values**
+ *   - @p etaCol  == "" or "_"  (MET only): a constant η = 0 column is created
+ *     automatically, with a very large σ_η so the MET direction is free in η.
+ *   - @p massCol may be a numeric literal (e.g. "0", "0.106") instead of a
+ *     column name. A constant column is created automatically.
  */
 struct KinFitParticleConfig {
   std::string name;     ///< Label used in output column names
-  std::string ptCol;    ///< Column name for transverse momentum [GeV]
-  std::string etaCol;   ///< Column name for pseudorapidity ("" or "_" for MET)
-  std::string phiCol;   ///< Column name for azimuthal angle [rad]
+  std::string ptCol;    ///< Column name (scalar or RVec) for pT [GeV]
+  std::string etaCol;   ///< Column name for eta; "" or "_" for MET
+  std::string phiCol;   ///< Column name (scalar or RVec) for phi [rad]
   std::string massCol;  ///< Column name OR numeric literal for mass [GeV]
-  std::string type;     ///< Particle type: "lepton", "jet", or "met"
+  std::string type;     ///< "lepton", "jet", "met", or "recoil"
+  int collectionIndex = -1; ///< ≥0: select element from RVec; -1: scalar
 };
 
 /**
  * @brief A single two-body invariant mass constraint.
  */
 struct KinFitConstraintConfig {
-  int    idx1;       ///< Index of the first  particle in the particles vector
-  int    idx2;       ///< Index of the second particle in the particles vector
+  int    idx1;       ///< Zero-based index of first  particle in particles vector
+  int    idx2;       ///< Zero-based index of second particle in particles vector
   double targetMass; ///< Target invariant mass [GeV]
 };
 
@@ -56,9 +83,18 @@ struct KinFitConfig {
   double jetPhiResolution    = 0.05;   ///< Absolute jet phi resolution [rad]
 
   double metPtResolution     = 0.20;   ///< Fractional MET pT resolution
-  /// @brief MET eta resolution.  Set very large so eta is effectively free.
+  /// @brief MET eta resolution. Very large so η is effectively free.
   double metEtaResolution    = 100.0;
   double metPhiResolution    = 0.05;   ///< Absolute MET phi resolution [rad]
+
+  /// @brief Fractional pT resolution for the hadronic recoil system.
+  /// Set large (default 0.30 = 30 %) because the recoil is a composite of
+  /// multiple soft jets and its momentum is poorly measured.
+  double recoilPtResolution  = 0.30;
+  /// @brief Absolute eta resolution for the hadronic recoil.
+  double recoilEtaResolution = 0.10;
+  /// @brief Absolute phi resolution for the hadronic recoil.
+  double recoilPhiResolution = 0.10;
 
   int    maxIterations        = 50;    ///< Maximum linearisation iterations
   double convergenceTolerance = 1e-6;  ///< Convergence criterion on |Δχ²|
@@ -75,51 +111,74 @@ struct KinFitConfig {
  *
  *   Required:
  *     name            – unique identifier for the fit
- *     particles       – comma-separated list of particle specs, each with
- *                       the form  label:ptCol:etaCol:phiCol:massCol:type
- *                         - etaCol: use "_" or "" for MET (eta fixed at 0)
- *                         - massCol: column name OR numeric literal
- *                         - type: "lepton", "jet", or "met"
- *     constraints     – comma-separated two-body mass constraints, each with
- *                       the form  idx1+idx2:targetMass
- *                       (idx1/idx2 are zero-based indices into the particles list)
- *     maxIterations        – maximum number of fit iterations
+ *     particles       – comma-separated list of particle specs (see below)
+ *     constraints     – comma-separated two-body mass constraints, each
+ *                       @code idx1+idx2:targetMass @endcode
+ *                       where idx1/idx2 are zero-based indices into the
+ *                       particles list.
+ *     maxIterations        – maximum number of linearisation iterations
  *     convergenceTolerance – convergence criterion on |Δχ²|
  *
- *   Optional (falling back to built-in defaults if absent):
+ *   Optional (fall back to built-in defaults if absent):
  *     leptonPtResolution, leptonEtaResolution, leptonPhiResolution
  *     jetPtResolution,    jetEtaResolution,    jetPhiResolution
  *     metPtResolution,    metEtaResolution,    metPhiResolution
+ *     recoilPtResolution, recoilEtaResolution, recoilPhiResolution
  *
- * For each fit named @p N, the following RDataFrame columns are defined:
- *   - @p N_chi2          — chi-square of the fit (Float_t)
- *   - @p N_converged     — true if the fit converged (bool)
+ * **Particle spec format**
+ *
+ *   Normal (scalar) particle – 6 colon-separated fields:
+ *   @code label:ptCol:etaCol:phiCol:massCol:type @endcode
+ *
+ *   Collection-indexed particle – 7 fields, 7th is a zero-based integer index:
+ *   @code label:ptCol:etaCol:phiCol:massCol:type:index @endcode
+ *   ptCol/etaCol/phiCol/massCol are RVec<Float_t> columns.  Element @e index
+ *   is extracted per event.  If the collection is shorter than @e index,
+ *   the value falls back to 0 (the particle is effectively absent).
+ *
+ *   Recoil particle – 6 fields, type must be "recoil":
+ *   @code label:ptCol:etaCol:phiCol:massCol:recoil @endcode
+ *   ptCol/etaCol/phiCol/massCol are RVec<Float_t> collections containing
+ *   all extra jets.  Their 4-momenta are summed per event into a single
+ *   effective particle representing the hadronic recoil.  The number of
+ *   jets in the collection may vary event by event; an empty collection
+ *   gives a zero 4-vector that does not affect the fit.
+ *
+ * **Output columns** (per fit named @p N):
+ *   - @p N_chi2             — chi-square of the fit (Float_t)
+ *   - @p N_converged        — true if the fit converged (bool)
  *   - @p N_{label}_pt_fitted  — fitted pT  for each particle (Float_t)
  *   - @p N_{label}_eta_fitted — fitted eta for each particle (Float_t)
  *   - @p N_{label}_phi_fitted — fitted phi for each particle (Float_t)
  *
  * @par Example config lines
  * @code
- * # Z+H → ll bb  (2 leptons + 2 jets)
+ * # Z+H → ll bb  (2 leptons + 2 jets, scalar columns)
  * name=zhFit \
  *   particles=mu1:mu1_pt:mu1_eta:mu1_phi:mu1_mass:lepton,mu2:mu2_pt:mu2_eta:mu2_phi:mu2_mass:lepton,bjet1:bjet1_pt:bjet1_eta:bjet1_phi:bjet1_mass:jet,bjet2:bjet2_pt:bjet2_eta:bjet2_phi:bjet2_mass:jet \
  *   constraints=0+1:91.2,2+3:125.0 \
- *   leptonPtResolution=0.02 leptonEtaResolution=0.001 leptonPhiResolution=0.001 \
- *   jetPtResolution=0.10    jetEtaResolution=0.05    jetPhiResolution=0.05 \
- *   maxIterations=50 convergenceTolerance=1e-6
+ *   leptonPtResolution=0.02 jetPtResolution=0.10 maxIterations=50 convergenceTolerance=1e-6
  *
  * # W → lν  (1 lepton + MET)
  * name=wlvFit \
  *   particles=lep:lep_pt:lep_eta:lep_phi:lep_mass:lepton,nu:met_pt:_:met_phi:0:met \
  *   constraints=0+1:80.4 \
- *   leptonPtResolution=0.02 leptonEtaResolution=0.001 leptonPhiResolution=0.001 \
- *   metPtResolution=0.20 metPhiResolution=0.05 \
+ *   metPtResolution=0.20 maxIterations=50 convergenceTolerance=1e-6
+ *
+ * # ttbar semi-leptonic (lepton + MET + 2 signal jets + hadronic recoil from extra jets)
+ * # ExtraJet_* are RVec<Float_t> columns holding all extra QCD jets in the event.
+ * # Their multiplicity is variable; the recoil particle absorbs them all.
+ * name=ttbarFit \
+ *   particles=lep:lep_pt:lep_eta:lep_phi:lep_mass:lepton,nu:met_pt:_:met_phi:0:met,j1:j1_pt:j1_eta:j1_phi:j1_mass:jet,j2:j2_pt:j2_eta:j2_phi:j2_mass:jet,isr:ExtraJet_pt:ExtraJet_eta:ExtraJet_phi:ExtraJet_mass:recoil \
+ *   constraints=0+1:80.4,2+3:80.4 \
+ *   recoilPtResolution=0.30 recoilEtaResolution=0.10 recoilPhiResolution=0.10 \
  *   maxIterations=50 convergenceTolerance=1e-6
  *
- * # ttbar semi-leptonic (1 lepton + MET + 4 jets, constrain W masses)
- * name=ttbarFit \
- *   particles=lep:lep_pt:lep_eta:lep_phi:lep_mass:lepton,nu:met_pt:_:met_phi:0:met,j1:j1_pt:j1_eta:j1_phi:j1_mass:jet,j2:j2_pt:j2_eta:j2_phi:j2_mass:jet,j3:j3_pt:j3_eta:j3_phi:j3_mass:jet,j4:j4_pt:j4_eta:j4_phi:j4_mass:jet \
- *   constraints=0+1:80.4,2+3:80.4 \
+ * # Z+H with jets from a collection (collection-indexed selection)
+ * # Jet_* are RVec<Float_t> columns; :0 / :1 pick the leading/sub-leading jet.
+ * name=zhCollFit \
+ *   particles=mu1:Lep_pt:Lep_eta:Lep_phi:Lep_mass:lepton:0,mu2:Lep_pt:Lep_eta:Lep_phi:Lep_mass:lepton:1,bjet1:Jet_pt:Jet_eta:Jet_phi:Jet_mass:jet:0,bjet2:Jet_pt:Jet_eta:Jet_phi:Jet_mass:jet:1 \
+ *   constraints=0+1:91.2,2+3:125.0 \
  *   maxIterations=50 convergenceTolerance=1e-6
  * @endcode
  */

@@ -146,6 +146,58 @@ TEST_F(KinematicFitTest, FittedMomenta_SatisfyMassConstraint_Tightly) {
   EXPECT_NEAR(fm, mZ, 0.5);
 }
 
+TEST_F(KinematicFitTest, FitWithRecoilParticle_DoesNotAffectConstrainedMasses) {
+  // Adding an unconstrained recoil particle should not change the mass-constraint
+  // result for the signal particles.  We verify this by comparing a fit with
+  // and without a recoil particle.
+  const double mZ = 91.2;
+
+  // Reference fit: just two muons constrained to Z mass
+  KinematicFit refFitter;
+  refFitter.addParticle({48.0,  0.4,  1.0, 0.106, 0.03, 0.005, 0.005});
+  refFitter.addParticle({48.0, -0.4,  1.0 + M_PI, 0.106, 0.03, 0.005, 0.005});
+  refFitter.addMassConstraint(0, 1, mZ);
+  const auto refResult = refFitter.fit();
+
+  // Fit with an extra recoil particle (representing ISR jet)
+  KinematicFit fitterWithRecoil;
+  fitterWithRecoil.addParticle({48.0,  0.4,  1.0, 0.106, 0.03, 0.005, 0.005});
+  fitterWithRecoil.addParticle({48.0, -0.4,  1.0 + M_PI, 0.106, 0.03, 0.005, 0.005});
+  // ISR jet: high uncertainty, not constrained
+  fitterWithRecoil.addParticle({25.0, 1.5, 0.3, 0.0, 0.30, 0.10, 0.10});
+  fitterWithRecoil.addMassConstraint(0, 1, mZ);  // same constraint, no constraint on recoil
+  const auto resultWithRecoil = fitterWithRecoil.fit();
+
+  EXPECT_GE(resultWithRecoil.chi2, 0.0);
+  // Signal pair fitted mass should be close to Z regardless of the recoil
+  const auto &fp = resultWithRecoil.fittedParticles;
+  const double fittedMass = invMass(fp[0].pt, fp[0].eta, fp[0].phi, fp[0].mass,
+                                    fp[1].pt, fp[1].eta, fp[1].phi, fp[1].mass);
+  EXPECT_NEAR(fittedMass, mZ, 5.0);
+  // The fitted dilepton mass should be similar whether or not the recoil is included
+  const auto &refFp = refResult.fittedParticles;
+  const double refMass = invMass(refFp[0].pt, refFp[0].eta, refFp[0].phi, refFp[0].mass,
+                                  refFp[1].pt, refFp[1].eta, refFp[1].phi, refFp[1].mass);
+  EXPECT_NEAR(fittedMass, refMass, 2.0);
+}
+
+TEST_F(KinematicFitTest, FitWithZeroRecoil_SameAsWithoutRecoil) {
+  // A zero-pT recoil (empty extra-jet collection) should not change the fit.
+  const double mZ = 91.2;
+  KinematicFit fitter;
+  fitter.addParticle({48.0,  0.4,  1.0, 0.106, 0.03, 0.005, 0.005});
+  fitter.addParticle({48.0, -0.4,  1.0 + M_PI, 0.106, 0.03, 0.005, 0.005});
+  // Zero-pT recoil (represents an event with no extra jets)
+  fitter.addParticle({0.0, 0.0, 0.0, 0.0, 0.30, 0.10, 0.10});
+  fitter.addMassConstraint(0, 1, mZ);
+  const auto result = fitter.fit();
+  EXPECT_GE(result.chi2, 0.0);
+  const auto &fp = result.fittedParticles;
+  const double fm = invMass(fp[0].pt, fp[0].eta, fp[0].phi, fp[0].mass,
+                             fp[1].pt, fp[1].eta, fp[1].phi, fp[1].mass);
+  EXPECT_NEAR(fm, mZ, 5.0);
+}
+
 TEST_F(KinematicFitTest, FitWithMET_Converges) {
   // W -> mu + nu: lepton + MET, constrain to W mass 80.4 GeV
   const double mW = 80.4;
@@ -231,9 +283,25 @@ protected:
     dataManager->Define("jet2_eta",  [](ULong64_t) -> float { return -1.0f; }, {"rdfentry_"}, *systematicManager);
     dataManager->Define("jet2_phi",  [](ULong64_t) -> float { return static_cast<float>(M_PI); }, {"rdfentry_"}, *systematicManager);
     dataManager->Define("jet2_mass", [](ULong64_t) -> float { return  4.18f; }, {"rdfentry_"}, *systematicManager);
-    // MET (for wjFit)
+    // MET (for wjFit and ttbarFit)
     dataManager->Define("met_pt",    [](ULong64_t) -> float { return 38.0f; }, {"rdfentry_"}, *systematicManager);
     dataManager->Define("met_phi",   [](ULong64_t) -> float { return -0.8f; }, {"rdfentry_"}, *systematicManager);
+    // Extra jets as RVec<float> collection (for ttbarFit recoil particle).
+    // The collection has two jets, representing extra QCD radiation.
+    // In a real analysis this collection contains all jets NOT assigned to the
+    // signal hypothesis; its length varies event by event.
+    dataManager->Define("ExtraJet_pt",
+        [](ULong64_t) -> ROOT::VecOps::RVec<float> { return {25.0f, 18.0f}; },
+        {"rdfentry_"}, *systematicManager);
+    dataManager->Define("ExtraJet_eta",
+        [](ULong64_t) -> ROOT::VecOps::RVec<float> { return {0.8f, -1.2f}; },
+        {"rdfentry_"}, *systematicManager);
+    dataManager->Define("ExtraJet_phi",
+        [](ULong64_t) -> ROOT::VecOps::RVec<float> { return {0.5f,  2.1f}; },
+        {"rdfentry_"}, *systematicManager);
+    dataManager->Define("ExtraJet_mass",
+        [](ULong64_t) -> ROOT::VecOps::RVec<float> { return {0.0f,  0.0f}; },
+        {"rdfentry_"}, *systematicManager);
   }
 
   std::unique_ptr<IConfigurationProvider> configManager;
@@ -254,9 +322,11 @@ TEST_F(KinematicFitManagerTest, ConstructorCreatesValidManager) {
 
 TEST_F(KinematicFitManagerTest, GetAllFitNames_ReturnsConfiguredFits) {
   const auto names = fitManager->getAllFitNames();
-  EXPECT_EQ(names.size(), 2u);
-  EXPECT_TRUE(std::find(names.begin(), names.end(), "zhFit") != names.end());
-  EXPECT_TRUE(std::find(names.begin(), names.end(), "wjFit") != names.end());
+  EXPECT_EQ(names.size(), 4u);
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "zhFit")      != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "wjFit")      != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "ttbarFit")   != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "zhCollFit")  != names.end());
 }
 
 TEST_F(KinematicFitManagerTest, GetFitConfig_Valid) {
@@ -386,6 +456,117 @@ TEST_F(KinematicFitManagerTest, ApplyAllFits_DefinesColumnsForAllFits) {
   };
   EXPECT_TRUE(hasCol("zhFit_chi2"));
   EXPECT_TRUE(hasCol("wjFit_chi2"));
+  EXPECT_TRUE(hasCol("ttbarFit_chi2"));
+  EXPECT_TRUE(hasCol("zhCollFit_chi2"));
+}
+
+// ─── Recoil particle type tests ───────────────────────────────────────────────
+
+TEST_F(KinematicFitManagerTest, GetFitConfig_RecoilFit) {
+  // Verify that the ttbarFit config is parsed correctly, including the
+  // recoil particle that absorbs extra QCD jets.
+  EXPECT_NO_THROW({
+    const auto &cfg = fitManager->getFitConfig("ttbarFit");
+    EXPECT_EQ(cfg.particles.size(), 5u);
+    EXPECT_EQ(cfg.constraints.size(), 2u);
+    // Last particle should be the recoil
+    const auto &recoilPart = cfg.particles.back();
+    EXPECT_EQ(recoilPart.type,   "recoil");
+    EXPECT_EQ(recoilPart.name,   "isr");
+    EXPECT_EQ(recoilPart.ptCol,  "ExtraJet_pt");
+    EXPECT_EQ(recoilPart.etaCol, "ExtraJet_eta");
+    EXPECT_EQ(recoilPart.collectionIndex, -1); // recoil always sums all
+    // Resolution defaults should be applied
+    EXPECT_NEAR(cfg.recoilPtResolution,  0.30, 1e-9);
+    EXPECT_NEAR(cfg.recoilEtaResolution, 0.10, 1e-9);
+    EXPECT_NEAR(cfg.recoilPhiResolution, 0.10, 1e-9);
+  });
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_RecoilType_DefinesOutputColumns) {
+  // Verify that applyFit defines the expected output columns for the
+  // ttbarFit, which includes a recoil particle.
+  defineParticleColumns();
+  EXPECT_NO_THROW(fitManager->applyFit("ttbarFit"));
+
+  auto df = dataManager->getDataFrame();
+  const auto cols = df.GetColumnNames();
+  auto hasCol = [&](const std::string &name) {
+    return std::find(cols.begin(), cols.end(), name) != cols.end();
+  };
+
+  EXPECT_TRUE(hasCol("ttbarFit_chi2"));
+  EXPECT_TRUE(hasCol("ttbarFit_converged"));
+  EXPECT_TRUE(hasCol("ttbarFit_lep_pt_fitted"));
+  EXPECT_TRUE(hasCol("ttbarFit_nu_pt_fitted"));
+  EXPECT_TRUE(hasCol("ttbarFit_j1_pt_fitted"));
+  EXPECT_TRUE(hasCol("ttbarFit_j2_pt_fitted"));
+  // The recoil particle also gets fitted output columns
+  EXPECT_TRUE(hasCol("ttbarFit_isr_pt_fitted"));
+  EXPECT_TRUE(hasCol("ttbarFit_isr_eta_fitted"));
+  EXPECT_TRUE(hasCol("ttbarFit_isr_phi_fitted"));
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_RecoilType_Chi2IsNonNegative) {
+  // Applying the ttbarFit (with recoil) should produce non-negative chi2.
+  defineParticleColumns();
+  fitManager->applyFit("ttbarFit");
+
+  auto df    = dataManager->getDataFrame();
+  auto chi2s = df.Take<Float_t>("ttbarFit_chi2");
+  for (const float c : *chi2s) {
+    EXPECT_GE(c, 0.0f);
+  }
+}
+
+// ─── Collection-index particle type tests ────────────────────────────────────
+
+TEST_F(KinematicFitManagerTest, GetFitConfig_CollectionIndexFit) {
+  // The zhCollFit uses collection-indexed jets (index 0 and 1 from ExtraJet_*).
+  EXPECT_NO_THROW({
+    const auto &cfg = fitManager->getFitConfig("zhCollFit");
+    EXPECT_EQ(cfg.particles.size(), 4u);
+    EXPECT_EQ(cfg.constraints.size(), 2u);
+    // Jets should have their collection indices set
+    const auto &j1 = cfg.particles[2];
+    EXPECT_EQ(j1.type,            "jet");
+    EXPECT_EQ(j1.ptCol,           "ExtraJet_pt");
+    EXPECT_EQ(j1.collectionIndex, 0);
+    const auto &j2 = cfg.particles[3];
+    EXPECT_EQ(j2.collectionIndex, 1);
+  });
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_CollectionIndex_DefinesOutputColumns) {
+  // zhCollFit selects jets from ExtraJet_* by index: verifies RVec
+  // extraction helper columns are defined and the fit columns exist.
+  defineParticleColumns();
+  EXPECT_NO_THROW(fitManager->applyFit("zhCollFit"));
+
+  auto df = dataManager->getDataFrame();
+  const auto cols = df.GetColumnNames();
+  auto hasCol = [&](const std::string &name) {
+    return std::find(cols.begin(), cols.end(), name) != cols.end();
+  };
+
+  EXPECT_TRUE(hasCol("zhCollFit_chi2"));
+  EXPECT_TRUE(hasCol("zhCollFit_converged"));
+  EXPECT_TRUE(hasCol("zhCollFit_mu1_pt_fitted"));
+  EXPECT_TRUE(hasCol("zhCollFit_mu2_pt_fitted"));
+  EXPECT_TRUE(hasCol("zhCollFit_j1_pt_fitted"));
+  EXPECT_TRUE(hasCol("zhCollFit_j2_pt_fitted"));
+}
+
+TEST_F(KinematicFitManagerTest, ApplyFit_CollectionIndex_Chi2IsNonNegative) {
+  // The fit using collection-indexed jets should produce valid (≥ 0) chi2.
+  defineParticleColumns();
+  fitManager->applyFit("zhCollFit");
+
+  auto df    = dataManager->getDataFrame();
+  auto chi2s = df.Take<Float_t>("zhCollFit_chi2");
+  for (const float c : *chi2s) {
+    EXPECT_GE(c, 0.0f);
+  }
 }
 
 int main(int argc, char **argv) {

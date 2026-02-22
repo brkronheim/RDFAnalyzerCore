@@ -5,6 +5,7 @@
 #include <api/ISystematicManager.h>
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -48,30 +49,42 @@ std::vector<std::string> splitBy(const std::string &s, char delim) {
 }
 
 /**
- * @brief Parse one particle specification: "label:ptCol:etaCol:phiCol:massCol:type".
+ * @brief Parse one particle specification.
  *
- * Fields:
- *  - label   : user-defined name (used in output column names)
- *  - ptCol   : column for pT
- *  - etaCol  : column for eta; use "_" or "" for MET (eta fixed at 0)
- *  - phiCol  : column for phi
- *  - massCol : column name OR numeric literal (e.g. "0", "0.106")
- *  - type    : "lepton", "jet", or "met"
+ * Accepted formats:
+ *  - 6 fields  "label:ptCol:etaCol:phiCol:massCol:type"          (scalar or recoil)
+ *  - 7 fields  "label:ptCol:etaCol:phiCol:massCol:type:index"    (collection index)
+ *
+ * For type == "recoil" the ptCol/etaCol/phiCol/massCol are RVec collection
+ * columns whose entries are summed per event.
+ * For type == "met" set etaCol to "_" to auto-define a η = 0 column.
+ * For numeric massCol (e.g. "0", "0.106") a constant column is created.
+ * For collection-indexed particles, index is the zero-based position in the
+ * RVec; missing jets (index ≥ collection size) resolve to 0.
  */
 KinFitParticleConfig parseParticleSpec(const std::string &spec) {
   const auto parts = splitBy(spec, ':');
-  if (parts.size() != 6) {
+  if (parts.size() != 6 && parts.size() != 7) {
     throw std::runtime_error(
         "KinematicFitManager: invalid particle spec '" + spec +
-        "' – expected label:ptCol:etaCol:phiCol:massCol:type (6 colon-separated fields)");
+        "' – expected label:ptCol:etaCol:phiCol:massCol:type "
+        "or label:ptCol:etaCol:phiCol:massCol:type:index");
   }
   KinFitParticleConfig p;
   p.name    = parts[0];
   p.ptCol   = parts[1];
-  p.etaCol  = parts[2]; // "_" or "" → MET (no eta column)
+  p.etaCol  = parts[2];
   p.phiCol  = parts[3];
-  p.massCol = parts[4]; // column name or numeric literal
-  p.type    = parts[5]; // "lepton", "jet", or "met"
+  p.massCol = parts[4];
+  p.type    = parts[5];
+  p.collectionIndex = (parts.size() == 7) ? parseInt(parts[6], "collectionIndex") : -1;
+
+  if (p.collectionIndex >= 0 && p.type == "recoil") {
+    throw std::runtime_error(
+        "KinematicFitManager: particle '" + p.name +
+        "' has type 'recoil' but also specifies a collection index – "
+        "recoil particles always sum the entire collection.");
+  }
   return p;
 }
 
@@ -100,13 +113,83 @@ KinFitConstraintConfig parseConstraintSpec(const std::string &spec) {
   return con;
 }
 
+// ── recoil 4-vector computation helpers ──────────────────────────────────────
+//
+// These functions sum a collection of jets (given as four RVec<Float_t>
+// columns) into a single effective 4-vector.  They are used to create helper
+// scalar columns that the main fit lambda reads, so the fit lambda always
+// sees ordinary scalar (Float_t) inputs regardless of the source.
+//
+// If the collection is empty, all functions return 0 so the recoil particle
+// has zero 4-momentum and does not affect the kinematic constraints.
+
+using RVecF = ROOT::VecOps::RVec<Float_t>;
+
+/// Cap for the pseudorapidity of the summed recoil vector when θ → 0.
+/// Corresponds to θ ≈ 1e-13 rad, well beyond CMS/ATLAS tracker acceptance.
+static constexpr float kMaxForwardRecoilEta = 25.0f;
+
+static Float_t recoilPt(const RVecF &pt, const RVecF &phi) {
+  double px = 0, py = 0;
+  for (std::size_t k = 0; k < pt.size(); ++k) {
+    px += static_cast<double>(pt[k]) * std::cos(static_cast<double>(phi[k]));
+    py += static_cast<double>(pt[k]) * std::sin(static_cast<double>(phi[k]));
+  }
+  return static_cast<Float_t>(std::sqrt(px * px + py * py));
+}
+
+static Float_t recoilEta(const RVecF &pt, const RVecF &eta,
+                         const RVecF &phi) {
+  double px = 0, py = 0, pz = 0;
+  for (std::size_t k = 0; k < pt.size(); ++k) {
+    const double p = static_cast<double>(pt[k]);
+    const double e = static_cast<double>(eta[k]);
+    const double f = static_cast<double>(phi[k]);
+    px += p * std::cos(f);
+    py += p * std::sin(f);
+    pz += p * std::sinh(e);
+  }
+  const double ptSum = std::sqrt(px * px + py * py);
+  if (ptSum < 1e-9 && std::abs(pz) < 1e-9) return 0.0f;
+  const double theta = std::atan2(ptSum, pz);
+  const double tanHalf = std::tan(theta / 2.0);
+  if (tanHalf < 1e-30) return kMaxForwardRecoilEta; // protect against θ ≈ 0
+  return static_cast<Float_t>(-std::log(tanHalf));
+}
+
+static Float_t recoilPhi(const RVecF &pt, const RVecF &phi) {
+  double px = 0, py = 0;
+  for (std::size_t k = 0; k < pt.size(); ++k) {
+    px += static_cast<double>(pt[k]) * std::cos(static_cast<double>(phi[k]));
+    py += static_cast<double>(pt[k]) * std::sin(static_cast<double>(phi[k]));
+  }
+  return (px == 0.0 && py == 0.0)
+             ? 0.0f
+             : static_cast<Float_t>(std::atan2(py, px));
+}
+
+static Float_t recoilMass(const RVecF &pt, const RVecF &eta,
+                          const RVecF &phi, const RVecF &mass) {
+  double E = 0, px = 0, py = 0, pz = 0;
+  for (std::size_t k = 0; k < pt.size(); ++k) {
+    const double p  = static_cast<double>(pt[k]);
+    const double e  = static_cast<double>(eta[k]);
+    const double f  = static_cast<double>(phi[k]);
+    const double m  = static_cast<double>(mass[k]);
+    const double ch = std::cosh(e);
+    E  += std::sqrt(p * p * ch * ch + m * m);
+    px += p * std::cos(f);
+    py += p * std::sin(f);
+    pz += p * std::sinh(e);
+  }
+  const double m2 = E * E - px * px - py * py - pz * pz;
+  return static_cast<Float_t>(m2 > 0.0 ? std::sqrt(m2) : 0.0);
+}
+
 } // anonymous namespace
 
 // ── constructor ───────────────────────────────────────────────────────────────
 
-/**
- * @brief Construct a KinematicFitManager and load fits from configuration.
- */
 KinematicFitManager::KinematicFitManager(
     const IConfigurationProvider &configProvider) {
   registerFits(configProvider);
@@ -117,20 +200,32 @@ KinematicFitManager::KinematicFitManager(
 /**
  * @brief Apply a single kinematic fit to the current RDataFrame.
  *
- * For each particle in the fit:
- *  - pT, eta, phi, mass are packed into one RVec<Float_t> (4 values/particle).
- *  - For MET (etaCol == "" or "_"), a constant 0 column is defined automatically.
- *  - For numeric massCol literals, a constant column is defined automatically.
+ * For each particle the method resolves the scalar column names that the fit
+ * lambda will read:
  *
- * Output layout (2 + 3*N floats, where N = number of particles):
+ *  - **Normal scalar** (collectionIndex == -1, type != "recoil"):
+ *    The column names are used directly.
+ *  - **Collection-indexed** (collectionIndex >= 0):
+ *    Helper scalar columns are defined that extract element @e index from the
+ *    RVec collection.  If the collection is shorter than @e index, 0 is
+ *    returned so the particle is effectively absent.
+ *  - **Recoil** (type == "recoil"):
+ *    Helper scalar columns are defined that compute (pT, η, φ, m) of the
+ *    vector sum of all jets in the collection.  This captures the full
+ *    hadronic recoil regardless of how many extra jets are present.
+ *
+ * The fit itself sees ordinary (pT, η, φ, m) scalar inputs for every particle
+ * regardless of source.  Thread safety is guaranteed because a fresh
+ * KinematicFit object is created inside the per-event lambda.
+ *
+ * Output layout (2 + 3*N floats, N = number of particles):
  *  [0]          chi2
- *  [1]          converged (1=yes, 0=no)
+ *  [1]          converged (1 = yes, 0 = no)
  *  [2+3i+0..2]  pT, eta, phi of fitted particle i
  *
  * Output RDataFrame columns:
  *  {name}_chi2,  {name}_converged,
  *  {name}_{label}_pt_fitted, {name}_{label}_eta_fitted, {name}_{label}_phi_fitted
- *  (one set per particle in the fit)
  */
 void KinematicFitManager::applyFit(const std::string &fitName) {
   if (!dataManager_m || !systematicManager_m) {
@@ -141,62 +236,166 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
   const KinFitConfig cfg      = getFitConfig(fitName); // copy for lambda capture
   const int          nParticles = static_cast<int>(cfg.particles.size());
 
-  // ── build input column list (4 values per particle: pT, eta, phi, mass) ──
-  std::vector<std::string> inputCols;
-  inputCols.reserve(4 * nParticles);
+  // ── resolve effective scalar column names ─────────────────────────────────
+  // For normal particles these are just the config column names.
+  // For collection-indexed / recoil particles we define helper columns first.
+  std::vector<std::string> ptCols(nParticles), etaCols(nParticles),
+                            phiCols(nParticles), massCols(nParticles);
 
   for (int i = 0; i < nParticles; ++i) {
-    const auto &p = cfg.particles[i];
+    const auto &p   = cfg.particles[i];
+    const std::string pfx = fitName + "_" + p.name + "_kinfit";
 
-    // pT column (always required)
-    inputCols.push_back(p.ptCol);
+    if (p.type == "recoil") {
+      // ── Recoil: define helper columns summing the jet collection ──────────
+      // The collection may have zero entries (no extra jets); in that case
+      // the helpers return 0 and the recoil particle has zero 4-momentum.
+      const std::string tmpPt   = pfx + "_pt";
+      const std::string tmpEta  = pfx + "_eta";
+      const std::string tmpPhi  = pfx + "_phi";
+      const std::string tmpMass = pfx + "_mass";
 
-    // eta column – if absent (MET), define a constant zero column
-    if (p.etaCol.empty() || p.etaCol == "_") {
-      const std::string tmpEta = fitName + "_" + p.name + "_kinfit_eta";
+      dataManager_m->Define(tmpPt,
+          [](const RVecF &pt, const RVecF &phi) { return recoilPt(pt, phi); },
+          {p.ptCol, p.phiCol}, *systematicManager_m);
+
       dataManager_m->Define(tmpEta,
-          [](ULong64_t) -> Float_t { return 0.0f; },
-          {"rdfentry_"}, *systematicManager_m);
-      inputCols.push_back(tmpEta);
-    } else {
-      inputCols.push_back(p.etaCol);
-    }
+          [](const RVecF &pt, const RVecF &eta, const RVecF &phi) {
+            return recoilEta(pt, eta, phi);
+          },
+          {p.ptCol, p.etaCol, p.phiCol}, *systematicManager_m);
 
-    // phi column (always required)
-    inputCols.push_back(p.phiCol);
+      dataManager_m->Define(tmpPhi,
+          [](const RVecF &pt, const RVecF &phi) { return recoilPhi(pt, phi); },
+          {p.ptCol, p.phiCol}, *systematicManager_m);
 
-    // mass column – may be a column name or a numeric literal
-    bool  isMassLiteral = false;
-    float massLiteralVal = 0.0f;
-    if (!p.massCol.empty() && p.massCol != "_") {
-      try {
-        massLiteralVal = std::stof(p.massCol);
-        isMassLiteral  = true;
-      } catch (...) {
-        isMassLiteral  = false;
-      }
-    } else {
-      isMassLiteral = true; // empty / "_" → massless
-    }
-
-    if (isMassLiteral) {
-      const std::string tmpMass = fitName + "_" + p.name + "_kinfit_mass";
-      const float massVal = massLiteralVal;
       dataManager_m->Define(tmpMass,
-          [massVal](ULong64_t) -> Float_t { return massVal; },
-          {"rdfentry_"}, *systematicManager_m);
-      inputCols.push_back(tmpMass);
+          [](const RVecF &pt, const RVecF &eta, const RVecF &phi,
+             const RVecF &mass) { return recoilMass(pt, eta, phi, mass); },
+          {p.ptCol, p.etaCol, p.phiCol, p.massCol}, *systematicManager_m);
+
+      ptCols[i]   = tmpPt;
+      etaCols[i]  = tmpEta;
+      phiCols[i]  = tmpPhi;
+      massCols[i] = tmpMass;
+
+    } else if (p.collectionIndex >= 0) {
+      // ── Collection-indexed: extract element N from an RVec column ─────────
+      // If the collection is shorter than the requested index, return 0 so
+      // the particle is effectively absent from the event.
+      const int idx = p.collectionIndex;
+
+      const std::string tmpPt   = pfx + "_pt";
+      const std::string tmpEta  = pfx + "_eta";
+      const std::string tmpPhi  = pfx + "_phi";
+
+      dataManager_m->Define(tmpPt,
+          [idx](const RVecF &v) -> Float_t {
+            return (idx < static_cast<int>(v.size())) ? v[idx] : 0.0f;
+          },
+          {p.ptCol}, *systematicManager_m);
+
+      dataManager_m->Define(tmpEta,
+          [idx](const RVecF &v) -> Float_t {
+            return (idx < static_cast<int>(v.size())) ? v[idx] : 0.0f;
+          },
+          {p.etaCol}, *systematicManager_m);
+
+      dataManager_m->Define(tmpPhi,
+          [idx](const RVecF &v) -> Float_t {
+            return (idx < static_cast<int>(v.size())) ? v[idx] : 0.0f;
+          },
+          {p.phiCol}, *systematicManager_m);
+
+      ptCols[i]  = tmpPt;
+      etaCols[i] = tmpEta;
+      phiCols[i] = tmpPhi;
+
+      // Mass: may be a collection column, a literal, or "_"/""
+      bool  isMassLiteral  = false;
+      float massLiteralVal = 0.0f;
+      if (!p.massCol.empty() && p.massCol != "_") {
+        try { massLiteralVal = std::stof(p.massCol); isMassLiteral = true; }
+        catch (const std::invalid_argument &) {} // not a numeric literal
+        catch (const std::out_of_range &)     {} // out of float range
+      } else {
+        isMassLiteral = true;
+      }
+
+      if (isMassLiteral) {
+        const std::string tmpMass = pfx + "_mass";
+        const float massVal = massLiteralVal;
+        dataManager_m->Define(tmpMass,
+            [massVal](ULong64_t) -> Float_t { return massVal; },
+            {"rdfentry_"}, *systematicManager_m);
+        massCols[i] = tmpMass;
+      } else {
+        // massCol is an RVec collection → extract element at collectionIndex
+        const std::string tmpMass = pfx + "_mass";
+        dataManager_m->Define(tmpMass,
+            [idx](const RVecF &v) -> Float_t {
+              return (idx < static_cast<int>(v.size())) ? v[idx] : 0.0f;
+            },
+            {p.massCol}, *systematicManager_m);
+        massCols[i] = tmpMass;
+      }
+
     } else {
-      inputCols.push_back(p.massCol);
+      // ── Normal scalar columns (current behaviour) ─────────────────────────
+      ptCols[i] = p.ptCol;
+
+      // eta: absent (MET) → auto-define constant 0
+      if (p.etaCol.empty() || p.etaCol == "_") {
+        const std::string tmpEta = pfx + "_eta";
+        dataManager_m->Define(tmpEta,
+            [](ULong64_t) -> Float_t { return 0.0f; },
+            {"rdfentry_"}, *systematicManager_m);
+        etaCols[i] = tmpEta;
+      } else {
+        etaCols[i] = p.etaCol;
+      }
+
+      phiCols[i] = p.phiCol;
+
+      // mass: literal or column
+      bool  isMassLiteral  = false;
+      float massLiteralVal = 0.0f;
+      if (!p.massCol.empty() && p.massCol != "_") {
+        try { massLiteralVal = std::stof(p.massCol); isMassLiteral = true; }
+        catch (const std::invalid_argument &) {} // not a numeric literal
+        catch (const std::out_of_range &)     {} // out of float range
+      } else {
+        isMassLiteral = true;
+      }
+
+      if (isMassLiteral) {
+        const std::string tmpMass = pfx + "_mass";
+        const float massVal = massLiteralVal;
+        dataManager_m->Define(tmpMass,
+            [massVal](ULong64_t) -> Float_t { return massVal; },
+            {"rdfentry_"}, *systematicManager_m);
+        massCols[i] = tmpMass;
+      } else {
+        massCols[i] = p.massCol;
+      }
     }
   }
 
-  // ── pack all inputs into one RVec<Float_t> ────────────────────────────────
+  // ── pack all scalar inputs into one RVec<Float_t> ─────────────────────────
+  std::vector<std::string> inputCols;
+  inputCols.reserve(4 * nParticles);
+  for (int i = 0; i < nParticles; ++i) {
+    inputCols.push_back(ptCols[i]);
+    inputCols.push_back(etaCols[i]);
+    inputCols.push_back(phiCols[i]);
+    inputCols.push_back(massCols[i]);
+  }
+
   const std::string inputsCol = fitName + "_inputs";
   dataManager_m->DefineVector(inputsCol, inputCols, "Float_t",
                                *systematicManager_m);
 
-  // ── lambda: run the fit per event, return a packed result vector ──────────
+  // ── per-event fit lambda ──────────────────────────────────────────────────
   // Output layout: [chi2, converged, pT_0, eta_0, phi_0, pT_1, eta_1, phi_1, ...]
   auto fitLambda =
       [cfg, nParticles](ROOT::VecOps::RVec<Float_t> &inputs)
@@ -217,9 +416,16 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
         sigPhi = cfg.leptonPhiResolution;
       } else if (p.type == "met") {
         sigPt  = cfg.metPtResolution;
-        sigEta = cfg.metEtaResolution; // very large → eta effectively free
+        sigEta = cfg.metEtaResolution; // very large → eta free
         sigPhi = cfg.metPhiResolution;
-      } else { // "jet" or unrecognised type
+      } else if (p.type == "recoil") {
+        // Large uncertainties: the recoil is soft/composite, poorly known.
+        // No mass constraint is imposed on this particle; it participates in
+        // the fit only to absorb the χ² from the hadronic activity.
+        sigPt  = cfg.recoilPtResolution;
+        sigEta = cfg.recoilEtaResolution;
+        sigPhi = cfg.recoilPhiResolution;
+      } else { // "jet" or unrecognised
         sigPt  = cfg.jetPtResolution;
         sigEta = cfg.jetEtaResolution;
         sigPhi = cfg.jetPhiResolution;
@@ -251,8 +457,6 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
                          *systematicManager_m);
 
   // ── slice individual output columns ──────────────────────────────────────
-  using RVecF = ROOT::VecOps::RVec<Float_t>;
-
   dataManager_m->Define(fitName + "_chi2",
       [](const RVecF &v) -> Float_t { return v[0]; },
       {resultsCol}, *systematicManager_m);
@@ -328,7 +532,8 @@ void KinematicFitManager::setupFromConfigFile() {
  * Optional keys (fall back to struct defaults if absent):
  *   leptonPtResolution, leptonEtaResolution, leptonPhiResolution,
  *   jetPtResolution,    jetEtaResolution,    jetPhiResolution,
- *   metPtResolution,    metEtaResolution,    metPhiResolution
+ *   metPtResolution,    metEtaResolution,    metPhiResolution,
+ *   recoilPtResolution, recoilEtaResolution, recoilPhiResolution
  */
 void KinematicFitManager::registerFits(
     const IConfigurationProvider &configProvider) {
@@ -382,6 +587,9 @@ void KinematicFitManager::registerFits(
     cfg.metPtResolution     = getOpt("metPtResolution",     cfg.metPtResolution);
     cfg.metEtaResolution    = getOpt("metEtaResolution",    cfg.metEtaResolution);
     cfg.metPhiResolution    = getOpt("metPhiResolution",    cfg.metPhiResolution);
+    cfg.recoilPtResolution  = getOpt("recoilPtResolution",  cfg.recoilPtResolution);
+    cfg.recoilEtaResolution = getOpt("recoilEtaResolution", cfg.recoilEtaResolution);
+    cfg.recoilPhiResolution = getOpt("recoilPhiResolution", cfg.recoilPhiResolution);
 
     objects_m.emplace(entry.at("name"), std::move(cfg));
   }
