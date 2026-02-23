@@ -187,6 +187,61 @@ file=aux/scale_factors.json correctionName=muon_id_sf name=muon_sf inputVariable
 file=aux/scale_factors.json correctionName=electron_iso_sf name=electron_sf inputVariables=electron_pt,electron_eta
 ```
 
+#### Applying corrections to a single object per event (`applyCorrection`)
+
+Call `applyCorrection(name, stringArguments)` in your analysis code. The
+`inputVariables` columns must be **scalar** (one value per event). String
+inputs declared in the correctionlib JSON are supplied via `stringArguments`
+in the order they appear in the JSON file.
+
+```cpp
+// Scalar correction – one scale factor per event
+correctionManager.applyCorrection("muon_sf", {"nominal"});
+```
+
+The resulting `muon_sf` column contains a single `Float_t` per event.
+
+#### Applying corrections over a collection of objects per event (`applyCorrectionVec`)
+
+Use `applyCorrectionVec(name, stringArguments)` when you need to evaluate the
+same correction once **per object** in a collection (e.g. all jets in an
+event). The `inputVariables` columns must be **RVec columns** (one vector per
+event, one entry per object).
+
+String inputs are still supplied as plain strings via `stringArguments`; the
+same string value is used for every object in the collection.
+
+```cpp
+// Vector correction – one scale factor per jet, per event
+// Requires jet_pt and jet_eta to be RVec<float> (or similar) columns
+correctionManager.applyCorrectionVec("jet_sf", {"nominal"});
+```
+
+The resulting `jet_sf` column contains a `ROOT::VecOps::RVec<Float_t>` per
+event, with one scale factor for each object.
+
+**Full example** (config + analysis code):
+
+*corrections.txt*:
+```
+file=aux/jet_sf.json correctionName=jet_energy_scale name=jet_sf inputVariables=jet_pt,jet_eta
+```
+
+*Analysis code*:
+```cpp
+// jet_pt and jet_eta are RVec<float> columns (one entry per jet per event)
+correctionManager.applyCorrectionVec("jet_sf", {"nominal"});
+
+// Access the per-jet scale factors downstream
+dataManager.Define("corrected_jet_pt",
+    [](const ROOT::VecOps::RVec<float>& pt,
+       const ROOT::VecOps::RVec<Float_t>& sf) {
+        return pt * sf;
+    },
+    {"jet_pt", "jet_sf"}
+);
+```
+
 ### Trigger Manager Configuration
 
 **Main config option**: `triggerConfig=path/to/triggers.txt`
