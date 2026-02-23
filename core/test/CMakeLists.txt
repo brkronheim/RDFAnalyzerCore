@@ -3,6 +3,10 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../extern/gtest/googletest/inclu
 # Define the test source directory for all test executables
 add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
+add_executable(testRootOutputSink testRootOutputSink.cc)
+target_link_libraries(testRootOutputSink core gtest gtest_main)
+add_test(NAME RootOutputSinkTest COMMAND testRootOutputSink)
+
 # Basic functionality tests
 
 add_executable(testConfigurationManager testConfigurationManager.cc)
@@ -82,6 +86,10 @@ add_test(NAME TriggerManagerTest COMMAND testTriggerManager)
 add_executable(testKinematicFitManager testKinematicFitManager.cc)
 target_link_libraries(testKinematicFitManager core corePlugins gtest gtest_main)
 add_test(NAME KinematicFitManagerTest COMMAND testKinematicFitManager)
+
+add_executable(testGoldenJsonManager testGoldenJsonManager.cc)
+target_link_libraries(testGoldenJsonManager core corePlugins gtest gtest_main)
+add_test(NAME GoldenJsonManagerTest COMMAND testGoldenJsonManager)
 
 
 add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)

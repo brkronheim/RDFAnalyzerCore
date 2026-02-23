@@ -1,0 +1,11 @@
+directory=test_data  # Test directory to process
+
+saveFile=test_output.root # File to write output data to
+saveDirectory=test_output/ # Directory in which to save output
+saveTree=Events # Name of output tree
+
+threads=1 # Number of threads to use for testing
+
+type=MC # Sample type: non-data, golden JSON filter is skipped
+
+goldenJsonConfig=cfg/golden_json_files.txt # Config file listing golden JSON files

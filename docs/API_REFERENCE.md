@@ -599,27 +599,81 @@ sofieMgr->registerModel("my_model", func, {"pt", "eta"}, "run_model");
 sofieMgr->applyModel("my_model");
 ```
 
-### ICorrectionManager
+### CorrectionManager
 
 **Header**: `core/plugins/CorrectionManager/CorrectionManager.h`
 
-Interface for applying scale factors via correctionlib.
+Applies scale factors and other corrections loaded from correctionlib JSON
+files.
+
+#### `applyCorrection`
 
 ```cpp
-class ICorrectionManager : public IPluggableManager {
-public:
-    virtual void applyCorrection(const std::string& correctionName) = 0;
-    virtual void applyAllCorrections() = 0;
-    virtual std::vector<std::string> getCorrectionNames() const = 0;
-};
+void applyCorrection(const std::string& correctionName,
+                     const std::vector<std::string>& stringArguments);
 ```
+
+Evaluates the named correction once per event using **scalar** input columns
+and defines a new `Float_t` column called `correctionName` in the dataframe.
+
+- `correctionName`: Key registered in the configuration (the `name` field).
+- `stringArguments`: Constant string values for all `string`-typed inputs
+  declared in the correctionlib JSON, supplied in the order they appear in the
+  JSON.
 
 **Example**:
 ```cpp
-auto* corrMgr = analyzer.getPlugin<ICorrectionManager>("correction");
-corrMgr->applyAllCorrections();
-// Creates columns for each configured correction
+// muon_pt and muon_eta are scalar float columns
+correctionManager.applyCorrection("muon_sf", {"nominal"});
+// Adds a Float_t column "muon_sf" to the dataframe
 ```
+
+#### `applyCorrectionVec`
+
+```cpp
+void applyCorrectionVec(const std::string& correctionName,
+                        const std::vector<std::string>& stringArguments);
+```
+
+Evaluates the named correction **for every object in a collection** (e.g. all
+jets in an event) and defines a new `ROOT::VecOps::RVec<Float_t>` column
+called `correctionName` in the dataframe.
+
+Use this method instead of `applyCorrection` when the input columns registered
+via `inputVariables` are **RVec** columns (one vector per event, one element
+per object).
+
+- `correctionName`: Key registered in the configuration.
+- `stringArguments`: Constant string values applied to every object in the
+  collection (same semantics as in `applyCorrection`).
+
+The method internally creates a temporary column that packs all per-object
+feature vectors into a `RVec<RVec<double>>`, then applies the correction
+lambda element-wise.
+
+**Example**:
+```cpp
+// jet_pt and jet_eta are RVec<float> columns (one entry per jet per event)
+correctionManager.applyCorrectionVec("jet_sf", {"nominal"});
+// Adds an RVec<Float_t> column "jet_sf" (one scale factor per jet)
+
+// Use the per-jet scale factors downstream:
+analyzer.Define("corrected_jet_pt",
+    [](const ROOT::VecOps::RVec<float>& pt,
+       const ROOT::VecOps::RVec<Float_t>& sf) { return pt * sf; },
+    {"jet_pt", "jet_sf"}
+);
+```
+
+#### `getCorrection` / `getCorrectionFeatures`
+
+```cpp
+correction::Correction::Ref getCorrection(const std::string& key) const;
+const std::vector<std::string>& getCorrectionFeatures(const std::string& key) const;
+```
+
+Low-level accessors for the loaded correction objects and their registered
+input-variable lists. Typically not needed in analysis code.
 
 ### ITriggerManager
 

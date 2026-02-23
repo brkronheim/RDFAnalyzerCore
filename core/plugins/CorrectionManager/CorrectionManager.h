@@ -39,6 +39,40 @@ public:
                       const std::vector<std::string> &stringArguments);
 
   /**
+   * @brief Apply a correction over a vector of objects (e.g., all jets in an
+   *        event) and store the per-object results as an RVec column.
+   *
+   * Use this method when the input variables registered for the correction are
+   * RVec columns (one entry per object per event) rather than plain scalars.
+   * For each event, the correction is evaluated once per object and the results
+   * are collected into a @c ROOT::VecOps::RVec<Float_t> output column whose
+   * name equals @p correctionName.
+   *
+   * The @p stringArguments list works exactly as in @c applyCorrection: string
+   * inputs declared in the correctionlib JSON are taken from this list (in
+   * order) and the same value is used for every object in the collection.
+   *
+   * @param correctionName Name of the correction (must have been loaded via
+   *        the configuration)
+   * @param stringArguments Constant string arguments consumed by the
+   *        correction (in the order the string inputs appear in the JSON)
+   *
+   * @throws std::runtime_error if the DataManager or SystematicManager have
+   *         not been set, if @p correctionName is not registered, or if any
+   *         required input column is missing from the dataframe.
+   *
+   * @code{.cpp}
+   * // Suppose "jet_sf" is configured with inputVariables=jet_pt,jet_eta
+   * // and both columns are RVec<double> (one entry per jet).
+   * correctionManager.applyCorrectionVec("jet_sf", {"nominal"});
+   * // The dataframe now contains a column "jet_sf" of type RVec<Float_t>
+   * // with one scale factor per jet.
+   * @endcode
+   */
+  void applyCorrectionVec(const std::string &correctionName,
+                          const std::vector<std::string> &stringArguments);
+
+  /**
    * @brief Get a correction object by key
    * @param key Correction key
    * @return Correction reference
