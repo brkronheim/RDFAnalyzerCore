@@ -285,7 +285,7 @@ private:
     auto [E2, px2, py2, pz2] = fourMomentum(p2.pt, p2.eta, p2.phi, p2.mass);
     return gradMassN(p1, E1 + E2, px1 + px2, py1 + py2, pz1 + pz2);
   }
-}
+}; // class KinematicFit
 
 // ── KinematicFit::fit implementation (header-only) ────────────────────────
 
