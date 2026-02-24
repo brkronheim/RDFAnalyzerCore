@@ -193,7 +193,14 @@ def read_config(config_file):
                 cfg[k.strip()] = v.strip()
         return cfg
 
-def write_config(cfg, config_file):
+def write_config(config_file):
+
+    cfg = read_config(config_file)
+
+    save_file = cfg.get("saveFile", "")
+    meta_file = cfg.get("metaFile", "")
+
+
     if config_file.endswith('.yaml') or config_file.endswith('.yml'):
         import yaml
         with open(config_file, "w") as f:
@@ -203,24 +210,41 @@ def write_config(cfg, config_file):
             for k, v in cfg.items():
                 f.write(f"{{k}}={{v}}\\n")
 
-cfg = read_config("{config_file}")
 
-save_file = cfg.get("saveFile", "")
-meta_file = cfg.get("metaFile", "")
+    # append Condor process id to local save/meta filenames when available
+    proc = os.environ.get("CONDOR_PROC", "")
 
-if "__orig_saveFile" in cfg and cfg.get("__orig_saveFile"):
-    cfg["saveFile"] = os.path.basename(cfg["__orig_saveFile"])
-elif save_file:
-    cfg["__orig_saveFile"] = save_file
-    cfg["saveFile"] = os.path.basename(save_file)
+    if "__orig_saveFile" in cfg and cfg.get("__orig_saveFile"):
+        base = os.path.basename(cfg["__orig_saveFile"])
+    elif save_file:
+        cfg["__orig_saveFile"] = save_file
+        base = os.path.basename(save_file)
+    else:
+        base = ""
 
-if "__orig_metaFile" in cfg and cfg.get("__orig_metaFile"):
-    cfg["metaFile"] = os.path.basename(cfg["__orig_metaFile"])
-elif meta_file:
-    cfg["__orig_metaFile"] = meta_file
-    cfg["metaFile"] = os.path.basename(meta_file)
+    if base:
+        if proc:
+            name, ext = os.path.splitext(base)
+            cfg["saveFile"] = f"{{name}}_{{proc}}{{ext}}"
+        else:
+            cfg["saveFile"] = base
 
-write_config(cfg, "{config_file}")
+    if "__orig_metaFile" in cfg and cfg.get("__orig_metaFile"):
+        base_meta = os.path.basename(cfg["__orig_metaFile"])
+    elif meta_file:
+        cfg["__orig_metaFile"] = meta_file
+        base_meta = os.path.basename(meta_file)
+    else:
+        base_meta = ""
+
+    if base_meta:
+        if proc:
+            namem, extm = os.path.splitext(base_meta)
+            cfg["metaFile"] = f"{{namem}}_{{proc}}{{extm}}"
+        else:
+            cfg["metaFile"] = base_meta
+
+write_config("{config_file}")
 PY
 """
 
@@ -317,14 +341,30 @@ def generate_condor_runscript(
     stage_out_post = ""
     if stage_outputs:
         stage_out_pre, stage_out_post = stage_outputs_blocks(eos_sched, config_file)
-    root_block = (root_setup + "\n") if root_setup else ""
+    # Wrap user-provided setup commands so 'unbound variable' (nounset)
+    # in sourced scripts doesn't cause the wrapper to exit immediately.
+    # The wrapper sets 'set -euo pipefail' — many site-provided setup scripts
+    # (LCG, module views) reference variables that may be unset. Temporarily
+    # disable 'nounset' for the setup block and then re-enable it.
+    if root_setup:
+        root_block = "set +u\n" + root_setup.rstrip() + "\nset -u\n"
+    else:
+        root_block = ""
     pre_block = pre_setup_lines or ""
     x509_name = os.path.basename(x509loc) if x509loc else ""
     shared_block = ""
     if shared_dir_name:
         shared_block = (
             f"if [ -f {shared_dir_name}/{exe_relpath} ]; then cp -f {shared_dir_name}/{exe_relpath} .; chmod +x {exe_relpath}; fi\n"
+            f"if [ -d {shared_dir_name} ]; then find {shared_dir_name} -maxdepth 1 -type f -exec cp -f {{}} . \\;; fi\n"
             f"if [ -d {shared_dir_name}/aux ] && [ ! -e aux ]; then cp -R {shared_dir_name}/aux aux; fi\n"
+        )
+        shared_block += (
+            f"if [ -d {shared_dir_name}/aux ]; then "
+            f"find {shared_dir_name}/aux -type f -exec cp -f {{}} . \\;; fi\n"
+        )
+        shared_block += (
+            f"if [ -d {shared_dir_name}/lib ] && [ ! -e lib ]; then cp -R {shared_dir_name}/lib lib; fi\n"
         )
         if x509_name:
             shared_block += f"if [ -f {shared_dir_name}/{x509_name} ]; then cp -f {shared_dir_name}/{x509_name} .; fi\n"
@@ -344,6 +384,22 @@ trap 'rc=$?; echo "ERROR: wrapper exited with code $rc"; exit $rc' ERR
 # log and re-raise SIGTERM so Condor records ExitBySignal (do not swallow the signal)
 trap 'echo "Received SIGTERM - likely timed out by scheduler"; trap - SIGTERM; kill -s SIGTERM $$' SIGTERM
 {root_block}{pre_block}{shared_block}{x509_block}ls
+
+# Setup LD_LIBRARY_PATH for staged/shared libraries
+# Prefer a staged lib/ directory (if present), and also include the
+# current working directory when individual .so files were transferred
+# by Condor into the job's base directory.
+if [ -d "lib" ]; then
+  export LD_LIBRARY_PATH="$PWD/lib:${{LD_LIBRARY_PATH:-}}"
+  echo "LD_LIBRARY_PATH set to: $LD_LIBRARY_PATH"
+fi
+# If there are any .so files in the base directory, add $PWD as well
+# (Condor may transfer individual .so files rather than a lib/ directory).
+if compgen -G "*.so" > /dev/null; then
+  export LD_LIBRARY_PATH="$PWD:${{LD_LIBRARY_PATH:-}}"
+  echo "Added $PWD to LD_LIBRARY_PATH (found local .so files)"
+fi
+
 stage_in_start=$(date +%s)
 {stage_out_pre}{stage_block}
 stage_in_end=$(date +%s)
@@ -355,7 +411,7 @@ analysis_start=$(date +%s)
 echo "Starting Analysis"
 # run the analysis but capture its exit status so we can re-raise a signal
 set +e
-./{exe_relpath} submit_config.txt
+./{exe_relpath} {config_file}
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
@@ -399,35 +455,86 @@ def generate_condor_submit(
     config_file="submit_config.txt",
 ):
     Path(main_dir + "/condor_logs").mkdir(parents=True, exist_ok=True)
-    transfer_files = [
-        f"{main_dir}/job_$(Process)/{config_file}",
-        f"{main_dir}/job_$(Process)/floats.txt",
-        f"{main_dir}/job_$(Process)/ints.txt",
-    ]
+    transfer_files = []
+    main_dir_path = Path(main_dir)
+
+    # always consider per-job config files (use job_$(Process) patterns only if
+    # at least one job dir actually contains the file)
+    job_root = Path(main_dir)
+    job_dirs = [p for p in job_root.iterdir() if p.is_dir() and p.name.startswith('job_')]
+
+    def _collect_files_under(directory: Path, relative_to: Path = None) -> list:
+        files = []
+        if not directory.exists() or not directory.is_dir():
+            return files
+        for p in sorted(directory.rglob('*')):
+            if p.is_file():
+                if relative_to is not None:
+                    try:
+                        files.append(p.relative_to(relative_to).as_posix())
+                    except ValueError:
+                        files.append(str(p))
+                else:
+                    files.append(str(p))
+        return files
+
+    def _any_job_has(relpath: str) -> bool:
+        for jd in job_dirs:
+            if (jd / relpath).exists():
+                return True
+        return False
+
+    # job-scoped files in transfer_input_files should be relative to main_dir
+    # and include the job_$(Process) prefix.
+    def _job_scoped(name: str) -> str:
+        return f"job_$(Process)/{name}"
+
+    # Per-job unique files only
+    if _any_job_has(config_file):
+        transfer_files.append(_job_scoped(config_file))
+    if _any_job_has('floats.txt'):
+        transfer_files.append(_job_scoped('floats.txt'))
+    if _any_job_has('ints.txt'):
+        transfer_files.append(_job_scoped('ints.txt'))
+
+    # Shared/common files come from shared_inputs only
     if shared_dir_name:
-        transfer_files.append(f"{main_dir}/{shared_dir_name}/{exe_relpath}")
-        if include_aux:
-            transfer_files.append(f"{main_dir}/{shared_dir_name}/aux")
-        if x509loc:
-            x509_name = os.path.basename(x509loc)
-            transfer_files.append(f"{main_dir}/{shared_dir_name}/{x509_name}")
-    else:
-        transfer_files.append(f"{main_dir}/job_$(Process)/{exe_relpath}")
-        if include_aux:
-            transfer_files.append(f"{main_dir}/job_$(Process)/aux")
-        if x509loc:
-            x509_name = os.path.basename(x509loc)
-            transfer_files.append(f"{main_dir}/job_$(Process)/{x509_name}")
+        shared_dir = main_dir_path / shared_dir_name
+        if shared_dir.exists() and shared_dir.is_dir():
+            transfer_files.extend(_collect_files_under(shared_dir, relative_to=main_dir_path))
+
     if extra_transfer_files:
         transfer_files.extend(extra_transfer_files)
+
+    # filter out plain files/dirs by checking existence in at least one job dir
     filtered_files = []
     for path in transfer_files:
-        if "$(" in path:
+        if '$(' in path:
             filtered_files.append(path)
             continue
-        if os.path.exists(path):
+        p = Path(path)
+        if p.is_absolute():
+            if p.exists():
+                filtered_files.append(path)
+            continue
+        if p.exists():
             filtered_files.append(path)
-    transfer_input_files = ",".join(filtered_files)
+            continue
+        if (main_dir_path / p).exists():
+            filtered_files.append(path)
+            continue
+        if _any_job_has(path):
+            filtered_files.append(path)
+
+    # remove duplicates while preserving order
+    seen = set()
+    deduped = []
+    for item in filtered_files:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    transfer_input_files = ",".join(deduped)
 
     stream_block = ""
     #if stream_logs:
@@ -440,6 +547,8 @@ Executable     =  {main_dir}/condor_runscript.sh
 Should_Transfer_Files     = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification     = never
+initialdir = {main_dir}
+environment = CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)
 transfer_input_files = {transfer_input_files}
 {stream_block}MY.WantOS = "{want_os}"
 +RequestMemory={request_memory}
@@ -449,7 +558,6 @@ transfer_input_files = {transfer_input_files}
 max_transfer_input_mb = 10000
 WhenToTransferOutput=On_Exit
 transfer_output_files = {config_file}
-
 Output     = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stdout
 Error      = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stderr
 Log        = {main_dir}/condor_logs/{log_name}

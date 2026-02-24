@@ -40,7 +40,7 @@ if(BUILD_COMBINE OR BUILD_COMBINE_HARVESTER)
 	include(SetupCombine)
 endif()
 
-set(PYBIND11_FINDPYTHON ON)
+# set(PYBIND11_FINDPYTHON ON)
 
 # Ensure runtime uses the same ROOT installation found at configure time.
 get_target_property(ROOT_CORE_LOCATION ROOT::Core IMPORTED_LOCATION)

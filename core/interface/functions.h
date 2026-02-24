@@ -523,6 +523,22 @@ inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPxPyPzMVecto
   return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>(px, py, pz, M);
 }
 
+
+/**
+ * @brief Returns a ROOT LorentzVector (PxPyPzM) from components.
+ * @param px x-component of momentum
+ * @param py y-component of momentum
+ * @param pz z-component of momentum
+ * @param M  mass
+ * @return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>
+ */
+inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPtEtaPhiMVector(Float_t pt, Float_t eta, Float_t phi, Float_t mass) {
+  auto px = pt * cos(phi);
+  auto py = pt * sin(phi);
+  auto pz = pt * sinh(eta);
+  return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>(px, py, pz, mass);
+}
+
 /**
  * @brief Returns a ROOT LorentzVector (PxPyPzM) from vector components at a given index.
  * @param px Vector of px values
@@ -541,15 +557,33 @@ inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPxPyPzMVecto
 }
 
 /**
+ * @brief Returns a ROOT LorentzVector (PxPyPzM) from vector components at a given index.
+ * @param px Vector of px values
+ * @param py Vector of py values
+ * @param pz Vector of pz values
+ * @param M  Vector of mass values
+ * @param index Index to access
+ * @return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>
+ */
+inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPtEtaPhiMVectorIndex(const ROOT::VecOps::RVec<Float_t> &pt, const ROOT::VecOps::RVec<Float_t> &eta, const ROOT::VecOps::RVec<Float_t> &phi, const ROOT::VecOps::RVec<Float_t> &mass, Int_t index) {
+  if (index >= pt.size()) {
+    return getPxPyPzMVector(0, 0, 0, 0);
+  } else {
+    return getPtEtaPhiMVector(pt[index], eta[index], phi[index], mass[index]);
+  }
+}
+
+/**
  * @brief Sums two Lorentz vectors.
  * @tparam T Lorentz vector type
  * @param vec1 First Lorentz vector
  * @param vec2 Second Lorentz vector
  * @return Sum of the two Lorentz vectors
  */
-template <typename T>
-T sumLorentzVec(T vec1, T vec2) {
-  return (vec1 + vec2);
+
+inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> sumLorentzVec(ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> vec1, ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> vec2) {
+  ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> sumVec = vec1 + vec2;
+  return (sumVec);
 }
 
 /**

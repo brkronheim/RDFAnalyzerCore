@@ -93,7 +93,7 @@ int main(int argc, char **argv) {
         Filter("twoMuons", twoMuons, {"goodMuons"})->
         Define("LeadingMuonVec", getMuon<0>, {"goodMuons", "AnalysisMuonsAuxDyn.pt", "AnalysisMuonsAuxDyn.eta", "AnalysisMuonsAuxDyn.phi"})->
         Define("SubleadingMuonVec", getMuon<1>, {"goodMuons", "AnalysisMuonsAuxDyn.pt", "AnalysisMuonsAuxDyn.eta", "AnalysisMuonsAuxDyn.phi"})->
-        Define("ZBosonVec", sumLorentzVec<ROOT::Math::LorentzVector<ROOT::Math::PtEtaPhiM4D<Float_t>>>, {"LeadingMuonVec", "SubleadingMuonVec"})->
+        Define("ZBosonVec", sumLorentzVec, {"LeadingMuonVec", "SubleadingMuonVec"})->
         Define("ZBosonMassScaled", getLorentzVecM<Float_t, ROOT::Math::LorentzVector<ROOT::Math::PtEtaPhiM4D<Float_t>>>, {"ZBosonVec"})->
         Filter("ZBosonMassFilter", massFilter, {"ZBosonMassScaled"})->
         Define("ZBosonMass", scaleDown, {"ZBosonMassScaled"})->

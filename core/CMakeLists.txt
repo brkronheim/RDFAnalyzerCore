@@ -45,7 +45,7 @@ if(RDF_CUSTOM_DICT_HEADERS AND RDF_CUSTOM_DICT_LINKDEF)
     target_link_libraries(core PUBLIC ${RDF_CUSTOM_DICT_TARGET})
 endif()
 add_subdirectory(plugins)
-add_subdirectory(bindings)
+# add_subdirectory(bindings)
 
 # Only build tests if requested
 if(BUILD_TESTS)

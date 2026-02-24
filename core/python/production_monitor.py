@@ -28,6 +28,138 @@ def format_duration(seconds: float) -> str:
         return f"{seconds/86400:.1f}d"
 
 
+def _condor_paths_for_job(job, work_dir: Path):
+    """Return condor stdout/stderr/log paths for a job based on its condor_job_id.
+
+    Expected layout (created by submission_backend):
+      <work_dir>/condor_logs/log_<Cluster>_<Process>.stdout
+      <work_dir>/condor_logs/log_<Cluster>_<Process>.stderr
+      <work_dir>/condor_logs/log_<Cluster>.log
+    """
+    if not getattr(job, "condor_job_id", None):
+        return None
+    try:
+        cluster, proc = str(job.condor_job_id).split('.')
+    except Exception:
+        return None
+
+    base = Path(work_dir) / "condor_logs"
+    return {
+        'stdout': base / f"log_{cluster}_{proc}.stdout",
+        'stderr': base / f"log_{cluster}_{proc}.stderr",
+        'log': base / f"log_{cluster}.log",
+    }
+
+
+def _parse_condor_log_for_abort_reason(log_path: Path) -> Optional[str]:
+    """Scan a condor cluster log for lines indicating abort/hold/remove/exit reasons.
+
+    Returns a short, human-readable reason string or None if nothing obvious found.
+    """
+    if not log_path or not log_path.exists():
+        return None
+
+    import re
+
+    try:
+        with open(log_path, 'r', errors='ignore') as f:
+            lines = f.readlines()[-500:]
+
+        # Look from the end for the most relevant messages
+        patterns = [
+            r'Hold reason[:=]\s*(.*)',
+            r'Job was aborted',
+            r'Aborted by signal',
+            r'Exited with status\s*(\d+)',
+            r'ExitCode\s*=\s*(\d+)',
+            r'Removed',
+            r'Job was held',
+            r'Job terminated',
+            r'Abnormal termination',
+        ]
+
+        for ln in reversed(lines):
+            for p in patterns:
+                m = re.search(p, ln, re.IGNORECASE)
+                if m:
+                    # Prefer captured group if present
+                    if m.groups():
+                        return m.group(1).strip()
+                    return ln.strip()
+
+        return None
+    except Exception:
+        return None
+
+
+def _parse_stderr_for_failure(stderr_path: Path, max_lines: int = 40) -> Optional[str]:
+    """Return a short excerpt from the stderr file that likely indicates the failure."""
+    if not stderr_path or not stderr_path.exists():
+        return None
+
+    try:
+        with open(stderr_path, 'r', errors='ignore') as f:
+            lines = [l.rstrip('\n') for l in f.readlines()]
+
+        # Prefer last non-empty lines (where errors usually appear)
+        non_empty = [l for l in lines if l.strip()]
+        if not non_empty:
+            return None
+
+        excerpt_lines = non_empty[-max_lines:]
+        excerpt = '\n'.join(excerpt_lines)
+        # Return first meaningful sentence or the last line if short
+        last_line = excerpt_lines[-1]
+        if len(last_line) > 300:
+            return last_line[:300] + '...'
+        if '\n' in excerpt and len(excerpt) > 500:
+            return excerpt[-500:]
+        return excerpt
+    except Exception:
+        return None
+
+
+def _inspect_and_record_failure(manager: ProductionManager, job) -> Optional[str]:
+    """Inspect condor log and stderr for a single job and record job.last_error.
+
+    Returns the discovered reason (or None). If a reason is found it is stored in
+    the Job.last_error field and the manager state is saved.
+    """
+    # If already recorded, return it
+    if getattr(job, 'last_error', None):
+        return job.last_error
+
+    paths = _condor_paths_for_job(job, manager.config.work_dir)
+    if not paths:
+        return None
+
+    reasons = []
+    # Check condor cluster log first (may contain hold/remove/abort messages)
+    log_reason = _parse_condor_log_for_abort_reason(paths.get('log'))
+    if log_reason:
+        reasons.append(f"condor-log: {log_reason}")
+
+    # Check stderr for application-level errors
+    stderr_excerpt = _parse_stderr_for_failure(paths.get('stderr'))
+    if stderr_excerpt:
+        # Shorten to a one-line summary for quick display
+        first_line = stderr_excerpt.splitlines()[-1]
+        reasons.append(f"stderr: {first_line}")
+
+    if reasons:
+        combined = " | ".join(reasons)
+        # store a reasonably sized message
+        job.last_error = combined if len(combined) < 3000 else combined[:3000] + '...'
+        # persist state so the reason is available on next run
+        try:
+            manager._save_state()
+        except Exception:
+            pass
+        return job.last_error
+
+    return None
+
+
 def monitor_continuous(manager: ProductionManager, refresh_interval: int = 30):
     """
     Continuous monitoring with curses interface.
@@ -109,14 +241,14 @@ def monitor_continuous(manager: ProductionManager, refresh_interval: int = 30):
             # Recent jobs
             stdscr.addstr(row, 0, "Recent Jobs:", curses.A_BOLD)
             row += 1
-            
+
             # Show last 10 jobs with their status
             recent_jobs = sorted(
                 manager.jobs.items(),
                 key=lambda x: x[1].submit_time or 0,
                 reverse=True
             )[:10]
-            
+
             for job_id, job in recent_jobs:
                 runtime = ""
                 if job.submit_time:
@@ -125,12 +257,32 @@ def monitor_continuous(manager: ProductionManager, refresh_interval: int = 30):
                     else:
                         duration = time.time() - job.submit_time
                     runtime = f" ({format_duration(duration)})"
-                    
-                line = f"  Job {job_id:4d}: {job.status.value:15s}{runtime}"
-                if len(line) < width:
-                    stdscr.addstr(row, 0, line)
-                    row += 1
-                    
+
+                # If job recently failed/was held and we haven't recorded an error, inspect files
+                if job.status == JobStatus.FAILED and not getattr(job, 'last_error', None):
+                    _inspect_and_record_failure(manager, job)
+
+                # Build display line and append a short error summary when available
+                base_line = f"  Job {job_id:4d}: {job.status.value:15s}{runtime}"
+                error_summary = ''
+                if getattr(job, 'last_error', None):
+                    # show a short, single-line summary in the UI
+                    one_line = str(job.last_error).splitlines()[0]
+                    # truncate to keep screen tidy
+                    max_err_len = max(10, width - len(base_line) - 6)
+                    if len(one_line) > max_err_len:
+                        one_line = one_line[:max_err_len-3] + '...'
+                    error_summary = f"  -> {one_line}"
+
+                line = base_line + (" " + error_summary if error_summary else "")
+
+                # Ensure we don't try to write past the screen width
+                if len(line) > width:
+                    line = line[:width-1]
+
+                stdscr.addstr(row, 0, line)
+                row += 1
+
                 if row >= height - 3:
                     break
             
@@ -174,10 +326,38 @@ def monitor_simple(manager: ProductionManager, refresh_interval: int = 30, max_i
         while max_iterations is None or iteration < max_iterations:
             print(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')}")
             manager.update_status()
+
+            # Inspect newly failed/held jobs and record concise reasons
+            for job_id, job in manager.jobs.items():
+                if job.status == JobStatus.FAILED and not getattr(job, 'last_error', None):
+                    _inspect_and_record_failure(manager, job)
+
             manager.print_progress()
-            
+
+            # Print detailed failure reasons for any failed jobs (useful for --once/status)
+            failed_jobs = [j for j in manager.jobs.values() if j.status == JobStatus.FAILED]
+            if failed_jobs:
+                print("Failed jobs details:")
+                for j in failed_jobs:
+                    reason = getattr(j, 'last_error', None)
+                    print(f"  Job {j.job_id}: {j.condor_job_id or 'no-condor-id'}")
+                    if reason:
+                        print(f"    Reason: {reason}")
+                    else:
+                        # try to show stderr tail if available
+                        paths = _condor_paths_for_job(j, manager.config.work_dir)
+                        stderr_excerpt = None
+                        if paths and paths.get('stderr'):
+                            stderr_excerpt = _parse_stderr_for_failure(paths.get('stderr'), max_lines=10)
+                        if stderr_excerpt:
+                            print("    Stderr (tail):")
+                            for ln in stderr_excerpt.splitlines()[-10:]:
+                                print(f"      {ln}")
+                        else:
+                            print("    No stderr/condor-log available yet.")
+
             iteration += 1
-            
+
             if max_iterations is None or iteration < max_iterations:
                 time.sleep(refresh_interval)
                 
@@ -353,7 +533,31 @@ def main():
             
     elif args.command == 'status':
         manager.update_status()
+
+        # Inspect failed/held jobs and record reasons
+        for job_id, job in manager.jobs.items():
+            if job.status == JobStatus.FAILED and not getattr(job, 'last_error', None):
+                _inspect_and_record_failure(manager, job)
+
         manager.print_progress()
+
+        # Print per-job failure details
+        failed_jobs = [j for j in manager.jobs.values() if j.status == JobStatus.FAILED]
+        if failed_jobs:
+            print("\nFailed jobs details:")
+            for j in failed_jobs:
+                print(f"  Job {j.job_id}: condor_id={j.condor_job_id or 'N/A'}")
+                if getattr(j, 'last_error', None):
+                    print(f"    Reason: {j.last_error}")
+                else:
+                    paths = _condor_paths_for_job(j, manager.config.work_dir)
+                    if paths and paths.get('stderr') and paths['stderr'].exists():
+                        print(f"    Stderr (tail):")
+                        stderr_excerpt = _parse_stderr_for_failure(paths['stderr'], max_lines=20)
+                        for ln in (stderr_excerpt or '').splitlines()[-20:]:
+                            print(f"      {ln}")
+                    else:
+                        print("    No additional logs available yet.")
         
     elif args.command == 'validate':
         print("Validating job outputs...")

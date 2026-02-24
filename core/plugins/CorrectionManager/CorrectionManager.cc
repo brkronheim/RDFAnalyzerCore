@@ -10,6 +10,7 @@
  */
 CorrectionManager::CorrectionManager(IConfigurationProvider const& configProvider) {
   registerCorrectionlib(configProvider);
+  initialized_m = true;
 }
 
 /**
@@ -20,14 +21,12 @@ CorrectionManager::CorrectionManager(IConfigurationProvider const& configProvide
 void CorrectionManager::applyCorrection(const std::string &correctionName,
                                         const std::vector<std::string> &stringArguments) {  
   std::cout << "Applying correction " << correctionName << std::endl;
+
   if (!dataManager_m || !systematicManager_m) {
     throw std::runtime_error("CorrectionManager: DataManager or SystematicManager not set");
   }
-  
+
   auto df = dataManager_m->getDataFrame();
-  for (const auto &feature : df.GetColumnNames()) {
-    std::cout << "Feature: " << feature << std::endl;
-  }
 
   const auto &inputFeatures = getCorrectionFeatures(correctionName);
   dataManager_m->DefineVector("input_" + correctionName, inputFeatures, "double", *systematicManager_m);
@@ -82,8 +81,13 @@ CorrectionManager::getCorrectionFeatures(const std::string &key) const {
  */
 void CorrectionManager::registerCorrectionlib(
     const IConfigurationProvider &configProvider) {
+  auto correctionConfigFile = configProvider.get("correctionConfig");
+  if (correctionConfigFile.empty()) {
+    correctionConfigFile = "correctionlibConfig";
+  }
+
   const auto correctionConfig = configProvider.parseMultiKeyConfig(
-      "correctionlibConfig",
+      correctionConfigFile,
       {"file", "correctionName", "name", "inputVariables"});
 
   for (const auto &entryKeys : correctionConfig) {
@@ -105,12 +109,21 @@ void CorrectionManager::registerCorrectionlib(
 } 
 
 void CorrectionManager::setupFromConfigFile() {
+  if (initialized_m) {
+    return;
+  }
+
   if (!configManager_m) {
     throw std::runtime_error("CorrectionManager: ConfigManager not set");
   }
 
+  auto correctionConfigFile = configManager_m->get("correctionConfig");
+  if (correctionConfigFile.empty()) {
+    correctionConfigFile = "correctionlibConfig";
+  }
+
   const auto correctionConfig = configManager_m->parseMultiKeyConfig(
-    "correctionlibConfig",
+    correctionConfigFile,
     {"file", "correctionName", "name", "inputVariables"});
 
   for (const auto &entryKeys : correctionConfig) {
@@ -129,4 +142,6 @@ void CorrectionManager::setupFromConfigFile() {
     objects_m.emplace(entryKeys.at("name"), correction);
     features_m.emplace(entryKeys.at("name"), inputVariableVector);
   }
+
+  initialized_m = true;
 }

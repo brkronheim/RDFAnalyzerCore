@@ -243,7 +243,6 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
                      #print("Good", site)
                      redirector = "root://xrootd-cms.infn.it/" +  "/store/test/xrootd/"+site+"/"
                      break
-                 """
                  elif(site in BL or "T3" in site or "Tape" in site):
                      continue
                      #print("Bad", site)
@@ -251,8 +250,7 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
                      #
                      #print("Neutral", site)
                      redirector =  "root://xrootd-cms.infn.it/" + "/store/test/xrootd/"+site+"/"
-                """
-                 
+
          if(group in groups):
              groups[group] +=","+redirector+file
              groupCount[group]+=1
@@ -261,8 +259,6 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
              groups[group] = redirector+file
              groupCount[group]=1
              groupSizes[group]=np.round(size,1)
-    #for x in range(len(groups)):
-    #    print("Group", x, "has", groupCount[x], "files with total size", groupSizes[x], "GB")
     #print("groupCounts:", groupCount)
     #print("groupSizes:", groupSizes)
     #print(len(groups), "groups found and", filesFound, "files found")
@@ -299,13 +295,13 @@ def main():
     parser = argparse.ArgumentParser("Generate files for condor submission")
     parser.add_argument('-c', '--config', type=str, required=True, help="config file to process")
     parser.add_argument('-n', '--name', type=str, required=True, help="submissionName")
-    parser.add_argument('-s', '--size', type=int, required=False, default=10, help="GB of data to process per job, default is 10")
-    parser.add_argument('-t', '--time', type=int, required=False, default=3600, help="max runtime per job in seconds, default is 3600 (1 hour)")
+    parser.add_argument('-s', '--size', type=int, required=False, default=30, help="GB of data to process per job, default is 30")
     parser.add_argument('-x', '--x509', type=str, required=True, help="location of x509 proxy to use (such as /afs/cern.ch/user/u/username/private/x509)")
     parser.add_argument('-e', '--exe', type=str, required=True, help="path to the C++ executable to run")
     parser.add_argument('--stage-inputs', action='store_true', help="xrdcp input files to the worker node before running")
     parser.add_argument('--stage-outputs', action='store_true', help="xrdcp outputs to final destination after running")
     parser.add_argument('--root-setup', type=str, default="", help="command to setup ROOT (e.g., 'source /path/to/thisroot.sh')")
+    parser.add_argument('--max-runtime', type=int, default=3600, help='Max runtime (seconds) for Condor jobs (default: 3600)')
     parser.add_argument('--no-validate', action='store_true', help="skip config validation")
     parser.add_argument('--make-test-job', action='store_true', help="create a local test job using one file")
     parser.add_argument(
@@ -406,7 +402,7 @@ def main():
         shutil.copy2(x509_src, os.path.join(shared_dir, x509loc))
 
     copy_basenames = sorted({os.path.basename(path) for path in copyList})
-    skip_transfer = {"floats.txt", "ints.txt", "submit_config.txt"}
+    skip_transfer = {"floats.txt", "ints.txt", submit_config_name}
     extra_transfer_files = [
         os.path.join(mainDir, "job_$(Process)", name)
         for name in copy_basenames
@@ -446,8 +442,7 @@ def main():
             workers = max(1, min(len(das_entries), args.threads))
             with ThreadPoolExecutor(max_workers=workers) as das_executor:
                 das_futures = {das_executor.submit(queryRucio, das_entry, fileSplit, WL, BL, site, client_local): das_entry for das_entry in das_entries}
-                # collect returned groups per DAS entry (preserve group boundaries)
-                all_groups = []
+                all_files = []
                 for fut in as_completed(das_futures):
                     res = fut.result()
                     if not res:
@@ -457,22 +452,16 @@ def main():
                         if not grp:
                             continue
                         parts = [p.strip() for p in grp.split(',') if p.strip()]
-                        all_groups.append(parts)
-
-                # preserve per-dataset groups but remove duplicate files across groups
+                        all_files.extend(parts)
+                # deduplicate while preserving order
                 seen = set()
-                groups_result = {}
-                idx = 0
-                for parts in all_groups:
-                    uniq_parts = []
-                    for f in parts:
-                        if f in seen:
-                            continue
-                        seen.add(f)
-                        uniq_parts.append(f)
-                    if uniq_parts:
-                        groups_result[idx] = ",".join(uniq_parts)
-                        idx += 1
+                combined = []
+                for f in all_files:
+                    if f in seen:
+                        continue
+                    seen.add(f)
+                    combined.append(f)
+                groups_result = {0: ",".join(combined)} if combined else {}
 
         # Create a single local test job (race-protected)
         if args.make_test_job and not test_job_event.is_set() and groups_result:
@@ -559,8 +548,12 @@ def main():
                 job_config["__orig_fileList"] = original_list
                 job_config["fileList"] = ",".join(local_inputs)
             if args.stage_outputs:
-                job_config["__orig_saveFile"] = job_config["saveFile"]
-                job_config["__orig_metaFile"] = job_config["metaFile"]
+                # remote destination should include the job index (process) suffix
+                base, ext = os.path.splitext(job_config["saveFile"])
+                job_config["__orig_saveFile"] = f"{base}_{sampleIndex}{ext}"
+                basem, extm = os.path.splitext(job_config["metaFile"])
+                job_config["__orig_metaFile"] = f"{basem}_{sampleIndex}{extm}"
+                # keep local basenames as before; the runscript will append CONDOR_PROC
                 job_config["saveFile"] = os.path.basename(job_config["saveFile"])
                 job_config["metaFile"] = os.path.basename(job_config["metaFile"])
 
@@ -608,7 +601,7 @@ def main():
         args.root_setup,
         x509loc=x509loc,
         want_os="el9",
-        max_runtime=str(args.time),
+        max_runtime=args.max_runtime,
         request_memory=2000,
         request_cpus=1,
         request_disk=20000,
@@ -616,7 +609,7 @@ def main():
         include_aux=aux_exists,
         shared_dir_name=shared_dir_name,
         eos_sched=args.eos_sched,
-        config_file="submit_config.txt",
+        config_file=submit_config_name,
     )
     if(index==1):
         print(index, "job created")
