@@ -1,11 +1,11 @@
 import argparse
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 import time
 
-import numpy as np
 import requests
 from requests.exceptions import ChunkedEncodingError, RequestException
 import urllib3
@@ -175,6 +175,60 @@ def _ensure_spool_transfer(main_dir, submit_path, runscript_path, marker="condor
             submit_file.write("\n".join(lines) + "\n")
 
 
+def _collect_local_shared_libs(exe_path, repo_root):
+    """Collect shared libraries required by `exe_path` that live under `repo_root`.
+
+    Returns a mapping of staged filename -> source absolute path.
+    """
+    staged = {}
+    try:
+        ldd_output = subprocess.check_output(["ldd", exe_path], text=True, stderr=subprocess.STDOUT)
+    except Exception as err:
+        print(f"Warning: failed to inspect shared-library deps via ldd for '{exe_path}': {err}")
+        return staged
+
+    repo_prefix = os.path.abspath(repo_root)
+    if not repo_prefix.endswith(os.path.sep):
+        repo_prefix += os.path.sep
+
+    for line in ldd_output.splitlines():
+        line = line.strip()
+        if not line or "=> not found" in line:
+            continue
+
+        soname = None
+        resolved = None
+
+        match_arrow = re.match(r"^(\S+)\s*=>\s*(\S+)", line)
+        if match_arrow:
+            soname = os.path.basename(match_arrow.group(1))
+            resolved = match_arrow.group(2)
+        else:
+            match_abs = re.match(r"^(\/\S+)\s+\(", line)
+            if match_abs:
+                resolved = match_abs.group(1)
+                soname = os.path.basename(resolved)
+
+        if not resolved or not os.path.isabs(resolved):
+            continue
+
+        real_path = os.path.realpath(resolved)
+        if not os.path.exists(real_path):
+            continue
+        if not real_path.startswith(repo_prefix):
+            continue
+
+        real_name = os.path.basename(real_path)
+        if ".so" not in real_name:
+            continue
+
+        staged[real_name] = real_path
+        if soname and ".so" in soname:
+            staged[soname] = real_path
+
+    return staged
+
+
 
 
 def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
@@ -256,11 +310,11 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
          if(group in groups):
              groups[group] +=","+redirector+file
              groupCount[group]+=1
-             groupSizes[group]+=np.round(size,1)
+             groupSizes[group]+=round(size,1)
          else:
              groups[group] = redirector+file
              groupCount[group]=1
-             groupSizes[group]=np.round(size,1)
+             groupSizes[group]=round(size,1)
     #for x in range(len(groups)):
     #    print("Group", x, "has", groupCount[x], "files with total size", groupSizes[x], "GB")
     #print("groupCounts:", groupCount)
@@ -305,7 +359,8 @@ def main():
     parser.add_argument('-e', '--exe', type=str, required=True, help="path to the C++ executable to run")
     parser.add_argument('--stage-inputs', action='store_true', help="xrdcp input files to the worker node before running")
     parser.add_argument('--stage-outputs', action='store_true', help="xrdcp outputs to final destination after running")
-    parser.add_argument('--root-setup', type=str, default="", help="command to setup ROOT (e.g., 'source /path/to/thisroot.sh')")
+    parser.add_argument('--root-setup', type=str, default="", help="path to a setup script file; file contents are embedded into the inner worker runscript")
+    parser.add_argument('--container-setup', type=str, default="", help="container setup command, script path, or @script path to run before the main executable")
     parser.add_argument('--no-validate', action='store_true', help="skip config validation")
     parser.add_argument('--make-test-job', action='store_true', help="create a local test job using one file")
     parser.add_argument(
@@ -348,7 +403,30 @@ def main():
         # Otherwise resolve relative to the config's base directory
         return os.path.abspath(os.path.join(base_dir, path_value))
 
+    def read_setup_file(file_value):
+        if not file_value:
+            return ""
+        candidate_path = resolve_path(file_value)
+        if not candidate_path or not os.path.isfile(candidate_path):
+            raise SystemExit(f"--root-setup must point to an existing file. Not found: {file_value}")
+        with open(candidate_path, "r") as setup_file:
+            return setup_file.read().rstrip("\n")
+
+    def resolve_setup_block(setup_value):
+        if not setup_value:
+            return ""
+        candidate = setup_value[1:] if setup_value.startswith("@") else setup_value
+        candidate_path = resolve_path(candidate)
+        if candidate_path and os.path.isfile(candidate_path):
+            with open(candidate_path, "r") as setup_file:
+                return setup_file.read().rstrip("\n")
+        return setup_value.strip()
+
     configDict = read_config(args.config)
+    root_setup_block = read_setup_file(args.root_setup)
+    container_setup_block = args.container_setup
+    #print(container_setup_block)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     #print(configDict.keys())
     fileSplit = args.size
     # x509loc will be set later
@@ -358,7 +436,10 @@ def main():
         raise SystemExit(f"Executable not found: {exe_path}. Provide a valid path with -e/--exe")
     config = resolve_path(configDict['sampleConfig'])
     saveDirectory = resolve_path(configDict['saveDirectory'])
-    Path(saveDirectory).mkdir(parents=True, exist_ok=True)
+    try:
+        Path(saveDirectory).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"Cannot create saveDirectory at {saveDirectory}: {e}")
     copyList = get_copy_file_list(configDict)
 
 
@@ -400,6 +481,13 @@ def main():
     shared_dir = os.path.join(mainDir, shared_dir_name)
     Path(shared_dir).mkdir(parents=True, exist_ok=True)
     _link_or_copy_file(exe_path, os.path.join(shared_dir, exe_relpath), use_symlink=False)
+
+    local_shared_libs = _collect_local_shared_libs(exe_path, repo_root)
+    for staged_name, src_path in sorted(local_shared_libs.items()):
+        _link_or_copy_file(src_path, os.path.join(shared_dir, staged_name), use_symlink=False)
+    if local_shared_libs:
+        print(f"Staged {len(local_shared_libs)} local shared library file(s) into '{shared_dir_name}'")
+
     if aux_exists:
         _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
     if x509_src:
@@ -412,6 +500,10 @@ def main():
         for name in copy_basenames
         if name not in skip_transfer
     ]
+    extra_transfer_files.extend(
+        os.path.join(mainDir, shared_dir_name, staged_name)
+        for staged_name in sorted(local_shared_libs.keys())
+    )
 
     # worker that processes a single sample (can run in parallel)
     def process_sample(key, sample):
@@ -605,9 +697,8 @@ def main():
         exe_relpath,
         args.stage_inputs,
         args.stage_outputs,
-        args.root_setup,
+        root_setup_block,
         x509loc=x509loc,
-        want_os="el9",
         max_runtime=str(args.time),
         request_memory=2000,
         request_cpus=1,
@@ -617,6 +708,7 @@ def main():
         shared_dir_name=shared_dir_name,
         eos_sched=args.eos_sched,
         config_file="submit_config.txt",
+        container_setup=container_setup_block,
     )
     if(index==1):
         print(index, "job created")

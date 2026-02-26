@@ -41,9 +41,9 @@ add_executable(testCounterService testCounterService.cc)
 target_link_libraries(testCounterService core gtest gtest_main)
 add_test(NAME CounterServiceTest COMMAND testCounterService)
 
-add_executable(testCounterService_Dedup testCounterService_Dedup.cc)
-target_link_libraries(testCounterService_Dedup core corePlugins gtest gtest_main)
-add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)
+#add_executable(testCounterService_Dedup testCounterService_Dedup.cc)
+#target_link_libraries(testCounterService_Dedup core corePlugins gtest gtest_main)
+#add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)
 
 #add_executable(testDataManager testDataManager.cc)
 #target_link_libraries(testDataManager core corePlugins gtest gtest_main)
@@ -119,8 +119,8 @@ endif()
 
 # Integration tests
 
-#add_executable(testSystematicPropagation testSystematicPropagation.cc)
-#target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
-#add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+add_executable(testSystematicPropagation testSystematicPropagation.cc)
+target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
+add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
 
 

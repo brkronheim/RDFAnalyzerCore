@@ -1,2 +1,0 @@
-tasks:CreateFile:fetch-output filename log-file print-deps print-output print-status remove-output
-tasks:ProcessFile:acceptance branch branches cancel-jobs cleanup-jobs clear-logs fetch-output htcondor-pool htcondor-scheduler ignore-submission input-file job-workers log-file no-poll output-file parallel-jobs pilot poll-fails poll-interval print-deps print-output print-status remove-output retries shuffle-jobs submission-threads tasks-per-job tolerance transfer-logs walltime workflow

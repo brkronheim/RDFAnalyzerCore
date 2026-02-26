@@ -55,10 +55,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+import glob
 from pathlib import Path
 
 import luigi  # type: ignore
@@ -271,8 +273,70 @@ def _copy_dir(src: str, dst: str) -> None:
         shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
+def _collect_local_shared_libs(exe_path: str, repo_root: str) -> dict[str, str]:
+    """Collect executable shared-library deps that resolve under repo_root."""
+    staged: dict[str, str] = {}
+    try:
+        ldd_output = subprocess.check_output(["ldd", exe_path], text=True, stderr=subprocess.STDOUT)
+    except Exception as err:
+        print(f"Warning: failed to inspect shared-library deps via ldd for '{exe_path}': {err}")
+        return staged
+
+    repo_prefix = os.path.abspath(repo_root)
+    if not repo_prefix.endswith(os.path.sep):
+        repo_prefix += os.path.sep
+
+    for line in ldd_output.splitlines():
+        line = line.strip()
+        if not line or "=> not found" in line:
+            continue
+
+        soname = None
+        resolved = None
+
+        match_arrow = re.match(r"^(\S+)\s*=>\s*(\S+)", line)
+        if match_arrow:
+            soname = os.path.basename(match_arrow.group(1))
+            resolved = match_arrow.group(2)
+        else:
+            match_abs = re.match(r"^(\/\S+)\s+\(", line)
+            if match_abs:
+                resolved = match_abs.group(1)
+                soname = os.path.basename(resolved)
+
+        if not resolved or not os.path.isabs(resolved):
+            continue
+
+        real_path = os.path.realpath(resolved)
+        if not os.path.exists(real_path):
+            continue
+        if not real_path.startswith(repo_prefix):
+            continue
+
+        real_name = os.path.basename(real_path)
+        if ".so" not in real_name:
+            continue
+
+        staged[real_name] = real_path
+        if soname and ".so" in soname:
+            staged[soname] = real_path
+
+    return staged
+
+
 def _eos_file_exists(eos_path: str, timeout: int = 30) -> bool:
     """Return True if *eos_path* can be stat'd on eosuser.cern.ch via xrdfs."""
+    if not eos_path:
+        return False
+
+    eos_path = eos_path.strip()
+    if eos_path.startswith("root://"):
+        parts = eos_path.split("/", 3)
+        if len(parts) >= 4:
+            eos_path = "/" + parts[3].lstrip("/")
+        else:
+            return False
+
     try:
         r = subprocess.run(
             ["xrdfs", "root://eosuser.cern.ch/", "stat", eos_path],
@@ -284,12 +348,8 @@ def _eos_file_exists(eos_path: str, timeout: int = 30) -> bool:
         return False
 
 
-def _condor_q_cluster(cluster_id: str) -> dict[int, int]:
-    """
-    Query condor_q for all jobs still in the queue for *cluster_id*.
-    Returns {proc_id: JobStatus}  (1=Idle, 2=Running, 5=Held).
-    Returns {} if the cluster is gone or condor_q fails.
-    """
+def _condor_q_ads(cluster_id: str) -> dict[int, dict]:
+    """Query condor_q and return raw ads keyed by ProcId."""
     try:
         r = subprocess.run(
             ["condor_q", str(cluster_id), "-json"],
@@ -298,10 +358,50 @@ def _condor_q_cluster(cluster_id: str) -> dict[int, int]:
         if r.returncode != 0 or not r.stdout.strip():
             return {}
         ads = json.loads(r.stdout)
-        return {ad["ProcId"]: ad["JobStatus"] for ad in ads if "ProcId" in ad}
+        return {ad["ProcId"]: ad for ad in ads if "ProcId" in ad}
     except Exception as e:
         print(f"Warning: condor_q failed for cluster {cluster_id}: {e}")
         return {}
+
+
+def _condor_q_cluster(cluster_id: str) -> dict[int, int]:
+    """
+    Query condor_q for all jobs still in the queue for *cluster_id*.
+    Returns {proc_id: JobStatus}  (1=Idle, 2=Running, 5=Held).
+    Returns {} if the cluster is gone or condor_q fails.
+    """
+    ads = _condor_q_ads(cluster_id)
+    return {proc: ad.get("JobStatus") for proc, ad in ads.items() if "JobStatus" in ad}
+
+
+def _condor_rm_job(cluster_id: str, proc_id: int, timeout: int = 30) -> bool:
+    """Remove a specific held/failed condor job from queue."""
+    try:
+        jid = f"{cluster_id}.{proc_id}"
+        r = subprocess.run(["condor_rm", jid], capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _read_failed_job_error(main_dir: str, cluster_id: str, proc_id: int, job_idx: int) -> str:
+    """Return a short stderr tail for a failed job if a log file is available."""
+    candidates = [
+        os.path.join(main_dir, "condor_logs", f"log_{cluster_id}_{proc_id}.stderr"),
+    ]
+    candidates.extend(sorted(glob.glob(os.path.join(main_dir, "condor_logs", f"resub_{job_idx}_{cluster_id}_{proc_id}.stderr"))))
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r") as fh:
+                lines = fh.read().splitlines()
+            tail = "\n".join(lines[-20:]).strip()
+            if tail:
+                return tail
+        except Exception:
+            continue
+    return ""
 
 
 def _condor_history_exit(cluster_id: str) -> dict[int, int]:
@@ -338,6 +438,7 @@ def _submit_single_job(
     shared_dir_name: str,
     config_dict: dict,
     include_aux: bool,
+    shared_lib_names: list[str] | None = None,
 ) -> str | None:
     """
     Create a per-job condor submit file for *job_index* in *main_dir*/resubmissions/
@@ -367,6 +468,14 @@ def _submit_single_job(
         if name not in skip_xfer:
             transfer_files.append(os.path.join(job_dir, name))
 
+    if shared_lib_names:
+        for name in sorted(set(shared_lib_names)):
+            transfer_files.append(os.path.join(main_dir, shared_dir_name, name))
+
+    inner_script = os.path.join(main_dir, "condor_runscript_inner.sh")
+    if os.path.exists(inner_script):
+        transfer_files.append(inner_script)
+
     filtered     = [p for p in transfer_files if "$(" in p or os.path.exists(p)]
     transfer_str = ",".join(filtered)
     log_base     = os.path.join(main_dir, "condor_logs")
@@ -378,7 +487,6 @@ Should_Transfer_Files = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification = never
 transfer_input_files = {transfer_str}
-MY.WantOS = "el9"
 +RequestMemory={request_memory}
 +RequestCpus=1
 +RequestDisk=20000
@@ -444,7 +552,11 @@ class NANOMixin:
     )
     root_setup = luigi.Parameter(
         default="",
-        description="Optional shell command to set up ROOT on the worker (e.g. 'source thisroot.sh')",
+        description="Path to setup script file; its contents are embedded in the worker inner runscript",
+    )
+    container_setup = luigi.Parameter(
+        default="",
+        description="Container setup command used by outer wrapper script (e.g. 'cmssw-el9')",
     )
     max_runtime = luigi.IntParameter(
         default=3600,
@@ -503,6 +615,16 @@ class NANOMixin:
     @property
     def _shared_dir(self):
         return os.path.join(self._main_dir, "shared_inputs")
+
+    @property
+    def _root_setup_content(self):
+        if not self.root_setup:
+            return ""
+        path = self._resolve(self.root_setup)
+        if not path or not os.path.isfile(path):
+            raise RuntimeError(f"root_setup must point to an existing file, got: {self.root_setup!r}")
+        with open(path, "r") as fh:
+            return fh.read().rstrip("\n")
 
 
 # ===========================================================================
@@ -611,7 +733,10 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
         copy_list = get_copy_file_list(config_dict)
 
         save_dir = self._resolve(config_dict["saveDirectory"])
-        Path(save_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            Path(save_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"Cannot create save directory {save_dir!r}: {e}")
 
         sample_base = os.path.join(self._main_dir, "samples", name)
 
@@ -711,13 +836,30 @@ class BuildNANOSubmission(NANOMixin, law.Task):
         }
 
     def run(self):
+        def _iter_loadable_targets(obj):
+            if obj is None:
+                return
+            if hasattr(obj, "load") and callable(getattr(obj, "load")):
+                yield obj
+                return
+            if isinstance(obj, dict):
+                for value in obj.values():
+                    yield from _iter_loadable_targets(value)
+                return
+            if isinstance(obj, (list, tuple, set)):
+                for value in obj:
+                    yield from _iter_loadable_targets(value)
+                return
+            if hasattr(obj, "targets"):
+                yield from _iter_loadable_targets(getattr(obj, "targets"))
+                return
+
         # ---- collect all job dirs from branch outputs --------------------
         job_dirs: list[str] = []
-        branch_coll = self.input()  # SiblingFileCollection or similar
-        # law returns the workflow's outputs as a dict keyed by branch index
-        for branch_idx in sorted(branch_coll.keys()):
-            manifest = branch_coll[branch_idx].load(formatter="json")
-            job_dirs.extend(manifest)
+        for target in _iter_loadable_targets(self.input()):
+            manifest = target.load(formatter="json")
+            if isinstance(manifest, list):
+                job_dirs.extend(manifest)
 
         if not job_dirs:
             raise RuntimeError("No job directories were created by PrepareNANOSample.")
@@ -735,6 +877,14 @@ class BuildNANOSubmission(NANOMixin, law.Task):
 
         Path(shared_dir).mkdir(parents=True, exist_ok=True)
         _copy_file(exe_path, os.path.join(shared_dir, exe_relpath))
+
+        local_shared_libs = _collect_local_shared_libs(exe_path, WORKSPACE)
+        for staged_name, src_path in sorted(local_shared_libs.items()):
+            _copy_file(src_path, os.path.join(shared_dir, staged_name))
+        if local_shared_libs:
+            self.publish_message(
+                f"Staged {len(local_shared_libs)} local shared library file(s) into shared_inputs/."
+            )
 
         aux_src = self._resolve("aux")
         aux_exists = bool(aux_src and os.path.exists(aux_src))
@@ -765,6 +915,10 @@ class BuildNANOSubmission(NANOMixin, law.Task):
             for name in copy_basenames
             if name not in skip_transfer
         ]
+        extra_transfer_files.extend(
+            os.path.join(self._main_dir, "shared_inputs", name)
+            for name in sorted(local_shared_libs.keys())
+        )
 
         main_dir = self._main_dir
         submit_path = write_submit_files(
@@ -773,9 +927,8 @@ class BuildNANOSubmission(NANOMixin, law.Task):
             exe_relpath,
             stage_inputs=self.stage_in,
             stage_outputs=STAGE_OUT,
-            root_setup=self.root_setup,
+            root_setup=self._root_setup_content,
             x509loc=self._x509_loc,
-            want_os="el9",
             max_runtime=str(self.max_runtime),
             request_memory=2000,
             request_cpus=1,
@@ -785,6 +938,7 @@ class BuildNANOSubmission(NANOMixin, law.Task):
             shared_dir_name="shared_inputs",
             eos_sched=EOS_SCHED,
             config_file="submit_config.txt",
+            container_setup=self.container_setup,
         )
 
         self.publish_message(
@@ -972,6 +1126,10 @@ class MonitorNANOJobs(NANOMixin, law.Task):
         config_dict = self._config_dict
         aux_src     = self._resolve("aux")
         aux_exists  = bool(aux_src and os.path.exists(aux_src))
+        shared_lib_names = [
+            name for name in os.listdir(self._shared_dir)
+            if ".so" in name and os.path.isfile(os.path.join(self._shared_dir, name))
+        ] if os.path.isdir(self._shared_dir) else []
 
         # Initialise / restore per-job state ----------------------------
         state = self._load_state()
@@ -1000,10 +1158,14 @@ class MonitorNANOJobs(NANOMixin, law.Task):
 
             # Snapshot: live queue status and history exit codes
             live_status: dict[tuple, int] = {}    # (cluster, proc) → JobStatus
+            live_hold_reason: dict[tuple, str] = {}  # (cluster, proc) → HoldReason
             history_exit: dict[tuple, int] = {}   # (cluster, proc) → ExitCode
             for cid in active_clusters:
-                for proc, jstatus in _condor_q_cluster(cid).items():
-                    live_status[(cid, proc)] = jstatus
+                for proc, ad in _condor_q_ads(cid).items():
+                    if "JobStatus" in ad:
+                        live_status[(cid, proc)] = ad["JobStatus"]
+                    if "HoldReason" in ad and ad.get("HoldReason"):
+                        live_hold_reason[(cid, proc)] = str(ad.get("HoldReason"))
                 for proc, exit_code in _condor_history_exit(cid).items():
                     history_exit[(cid, proc)] = exit_code
 
@@ -1026,14 +1188,25 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                     continue
 
                 if condor_js == 5:   # Held → resubmit
+                    hold_reason = live_hold_reason.get((cid, proc), "held without reported reason")
+                    removed = _condor_rm_job(cid, proc)
+                    if removed:
+                        self.publish_message(f"Job {idx} held and removed from queue: {hold_reason}")
+                    else:
+                        self.publish_message(f"Job {idx} held (could not confirm condor_rm): {hold_reason}")
                     self._try_resubmit(
-                        idx, jstate, job_info, config_dict, aux_exists, reason="held"
+                        idx, jstate, job_info, config_dict, aux_exists, reason=f"held: {hold_reason}"
                     )
                     continue
 
                 if condor_js is None and exit_code is not None:
                     # Job has left the queue
                     if exit_code != 0:
+                        error_tail = _read_failed_job_error(self._main_dir, cid, proc, idx)
+                        if error_tail:
+                            self.publish_message(
+                                f"Job {idx} failed with exit code {exit_code}. stderr tail:\n{error_tail}"
+                            )
                         self._try_resubmit(
                             idx, jstate, job_info, config_dict, aux_exists,
                             reason=f"exit code {exit_code}"
@@ -1045,7 +1218,11 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                 # has already left the queue – check EOS file.
                 if condor_js is None:  # no longer in queue
                     orig_save = job_info[idx]["orig_save"]
-                    if orig_save and _eos_file_exists(orig_save):
+                    orig_meta = job_info[idx]["orig_meta"]
+                    if (
+                        (orig_save and _eos_file_exists(orig_save))
+                        or (orig_meta and _eos_file_exists(orig_meta))
+                    ):
                         jstate["status"] = "done"
                         self.publish_message(f"Job {idx}: output verified on EOS.")
                     elif exit_code == 0:
@@ -1118,6 +1295,12 @@ class MonitorNANOJobs(NANOMixin, law.Task):
             f"Job {idx} failed ({reason}) – resubmitting "
             f"(attempt {retries + 1}/{self.max_retries})."
         )
+
+        shared_lib_names = [
+            name for name in os.listdir(self._shared_dir)
+            if ".so" in name and os.path.isfile(os.path.join(self._shared_dir, name))
+        ] if os.path.isdir(self._shared_dir) else []
+
         new_cluster = _submit_single_job(
             idx,
             self._main_dir,
@@ -1129,6 +1312,7 @@ class MonitorNANOJobs(NANOMixin, law.Task):
             "shared_inputs",
             config_dict,
             aux_exists,
+            shared_lib_names=shared_lib_names,
         )
         if new_cluster:
             jstate.update(

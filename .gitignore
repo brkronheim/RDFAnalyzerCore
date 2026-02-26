@@ -1,6 +1,10 @@
 *.o
 *.png
 *.root
+*/.law
+*/.law/*
+.law
+.law/*
 !aux/*.root
 
 # Ignore plotting test output (generated PNGs)
