@@ -244,6 +244,7 @@ These parameters apply to **all** law submission tasks:
 | `--stage-in` | `False` | xrdcp input files to worker node before running |
 | `--root-setup` | `""` | Path to a setup script; contents embedded in inner runscript |
 | `--container-setup` | `""` | Container setup command (e.g. `cmssw-el9`) |
+| `--python-env` | `""` | Path to Python environment tarball (see below) |
 | `--no-validate` | `False` | Skip submit-config validation |
 
 ### Monitor task parameters
@@ -252,6 +253,74 @@ These parameters apply to **all** law submission tasks:
 |-----------|---------|-------------|
 | `--max-retries` | `3` | Maximum resubmission attempts per failed job |
 | `--poll-interval` | `120` | Seconds between condor_q polling cycles |
+
+---
+
+## Python Environment for Remote Jobs
+
+To use the RDFAnalyzerCore Python bindings (`rdfanalyzer`) or any other Python
+packages on remote condor worker nodes, use `law/setup_python_env.sh` to
+create a portable tarball and pass it to law tasks via `--python-env`.
+
+### Step 1: Set up the environment inside the container
+
+Run the setup script **inside the same container** you use for remote jobs.
+This ensures binary compatibility between local and remote nodes.
+
+```bash
+# Basic usage (packages law, luigi, requests + rdfanalyzer.so)
+cmssw-el9 --command-to-run "bash law/setup_python_env.sh"
+
+# With extra packages
+cmssw-el9 --command-to-run \
+  "bash law/setup_python_env.sh --extras 'numpy uproot numba' --output python_env.tar.gz"
+```
+
+The script installs packages into a staging directory using
+`pip install --target` (no virtual-env activation scripts, fully portable)
+and copies the compiled `rdfanalyzer*.so` module from `build/python/`.
+
+**Setup script options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-o / --output FILE` | `python_env.tar.gz` | Output tarball path |
+| `--extras "pkg1 pkg2 ..."` | `""` | Extra pip packages to install |
+| `--no-rdfanalyzer` | *(off)* | Skip copying the rdfanalyzer module |
+| `--python PYTHON` | `python3` | Python executable to use |
+
+### Step 2: Pass the tarball to law tasks
+
+```bash
+law run MonitorNANOJobs --workers 4 \
+  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --name myRun --x509 x509 \
+  --exe build/analyses/myAnalysis/myanalysis \
+  --container-setup cmssw-el9 \
+  --python-env python_env.tar.gz
+```
+
+The `Build*Submission` task copies the tarball into `condorSub_{name}/shared_inputs/`
+and adds it to `transfer_input_files` so every worker node receives it.
+
+### What happens on the worker node
+
+The condor runscript automatically untars the environment and sets up paths:
+
+```bash
+tar -xzf python_env.tar.gz -C _python_env
+export PYTHONPATH="$PWD/_python_env:${PYTHONPATH:-}"
+export PATH="$PWD/_python_env/bin:${PATH:-}"
+export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
+```
+
+After this, your analysis can use any packaged module:
+
+```python
+import rdfanalyzer
+analyzer = rdfanalyzer.Analyzer("submit_config.txt")
+# ... use Python bindings as usual
+```
 
 ---
 

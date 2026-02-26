@@ -530,6 +530,14 @@ class OpenDataMixin:
         default=False,
         description="Skip submit-config validation",
     )
+    python_env = luigi.Parameter(
+        default="",
+        description=(
+            "Path to a Python environment tarball created by law/setup_python_env.sh. "
+            "The tarball is shipped to every condor worker node and unpacked before the "
+            "analysis runs, making the packaged Python packages available on PYTHONPATH."
+        ),
+    )
 
     # ---- derived helpers ---------------------------------------------------
 
@@ -590,6 +598,18 @@ class OpenDataMixin:
             )
         with open(path) as fh:
             return fh.read().rstrip("\n")
+
+    def _python_env_path(self) -> str | None:
+        """Return the resolved path to the Python environment tarball, or None."""
+        if not self.python_env:
+            return None
+        path = self._resolve(self.python_env)
+        if not path or not os.path.isfile(path):
+            raise RuntimeError(
+                f"python_env must point to an existing tarball, got: {self.python_env!r}\n"
+                "Create one with:  bash law/setup_python_env.sh --output python_env.tar.gz"
+            )
+        return path
 
 
 # ===========================================================================
@@ -828,6 +848,15 @@ class BuildOpenDataSubmission(OpenDataMixin, law.Task):
         if x509_src:
             shutil.copy2(x509_src, os.path.join(shared_dir, self._x509_loc))
 
+        # Handle Python environment tarball --------------------------------
+        python_env_src = self._python_env_path()
+        python_env_staged: str | None = None
+        if python_env_src:
+            tarball_name = os.path.basename(python_env_src)
+            python_env_staged = os.path.join(shared_dir, tarball_name)
+            _copy_file(python_env_src, python_env_staged)
+            self.publish_message(f"Staged Python environment tarball: {tarball_name}")
+
         # Sequential job symlinks ----------------------------------------
         for i, job_dir_abs in enumerate(job_dirs):
             link_path = os.path.join(self._main_dir, f"job_{i}")
@@ -851,6 +880,8 @@ class BuildOpenDataSubmission(OpenDataMixin, law.Task):
             os.path.join(self._main_dir, "shared_inputs", name)
             for name in sorted(local_shared_libs.keys())
         )
+        if python_env_staged:
+            extra_transfer_files.append(python_env_staged)
 
         submit_path = write_submit_files(
             self._main_dir,
@@ -870,6 +901,7 @@ class BuildOpenDataSubmission(OpenDataMixin, law.Task):
             eos_sched=False,
             config_file="submit_config.txt",
             container_setup=self.container_setup,
+            python_env_tarball=python_env_staged,
         )
 
         self.publish_message(
