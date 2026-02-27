@@ -1,11 +1,14 @@
 # LAW Workflows for Batch Submission
 
-This folder contains two LAW-based HTCondor submission workflows:
+This folder contains three LAW-based workflows:
 
 - **[nano_tasks.py](nano_tasks.py)** – CMS NanoAOD data via Rucio
 - **[opendata_tasks.py](opendata_tasks.py)** – CERN Open Data Portal
+- **[combine_tasks.py](combine_tasks.py)** – CMS Combine datacards and fits
 
-Both share the same four-task structure and identical parameter conventions.
+Both the NANO and Open Data workflows share the same four-task structure and
+identical parameter conventions.  The Combine workflow provides two tasks that
+integrate with their outputs.
 
 ---
 
@@ -16,6 +19,7 @@ Both share the same four-task structure and identical parameter conventions.
 - [Environment Setup](#environment-setup)
 - [NANO / Rucio Workflow](#nano--rucio-workflow)
 - [CERN Open Data Workflow](#cern-open-data-workflow)
+- [Combine Workflow](#combine-workflow)
 - [Common Parameters](#common-parameters)
 - [Important Behavior Notes](#important-behavior-notes)
 - [Monitoring and Resubmission](#monitoring-and-resubmission)
@@ -217,6 +221,116 @@ law run MonitorOpenDataJobs --workers 1 \
 | `--files` | `30` | Number of ROOT files per condor job |
 | `--x509` | `""` | Path to x509 proxy (optional) |
 | `--max-runtime` | `1200` | Max job runtime (seconds) |
+
+---
+
+## Combine Workflow
+
+`combine_tasks.py` provides two law tasks for generating CMS Combine datacards
+from analysis outputs and running statistical fits.
+
+### Overview
+
+1. **CreateDatacard** – reads histograms from the ROOT files listed in a YAML
+   configuration file, combines samples, applies systematics, and writes one
+   `datacard_<region>.txt` + `shapes_<region>.root` per control region into
+   `combineRun_<name>/datacards/`.
+
+2. **RunCombine** – discovers the datacards produced by `CreateDatacard` (or
+   accepts an explicit `--datacard-path`) and runs `combine -M <method>` on
+   each one, writing output ROOT files and logs to
+   `combineRun_<name>/combine_results/`.
+
+The YAML config format is documented in
+[docs/DATACARD_GENERATOR.md](../docs/DATACARD_GENERATOR.md).  An example
+configuration is available at
+[core/python/example_datacard_config.yaml](../core/python/example_datacard_config.yaml).
+
+### Prerequisites
+
+```bash
+# Build with Combine support
+cmake -S . -B build -DBUILD_COMBINE=ON
+cmake --build build -j$(nproc)
+
+# Or source a CMSSW environment that provides combine
+```
+
+### Step-by-step
+
+```bash
+source law/env.sh
+
+# 1. Generate datacards from analysis output ROOT files
+law run CreateDatacard \
+  --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
+  --name myRun
+
+# 2. Run Combine fits (automatically runs CreateDatacard first if needed)
+law run RunCombine \
+  --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
+  --name myRun \
+  --method AsymptoticLimits
+
+# Run on a specific datacard file without requiring CreateDatacard
+law run RunCombine \
+  --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
+  --name myRun \
+  --datacard-path combineRun_myRun/datacards/datacard_signal_region.txt \
+  --method FitDiagnostics \
+  --combine-options "--saveShapes --saveWithUncertainties"
+```
+
+Because law tracks task outputs, running `RunCombine` will automatically
+trigger `CreateDatacard` first if it has not yet completed.
+
+### Combine-specific parameters
+
+#### CreateDatacard
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--datacard-config` | *(required)* | Path to the YAML datacard configuration file |
+| `--name` | *(required)* | Run name; outputs go to `combineRun_<name>/datacards/` |
+
+#### RunCombine
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--datacard-config` | *(required)* | Path to the YAML datacard configuration file |
+| `--name` | *(required)* | Run name; results go to `combineRun_<name>/combine_results/` |
+| `--method` | `AsymptoticLimits` | Combine fit method (e.g. `FitDiagnostics`, `Significance`, `MultiDimFit`) |
+| `--datacard-path` | `""` | Run Combine on this specific datacard instead of auto-discovering from `CreateDatacard` output |
+| `--combine-exe` | `""` | Path to the `combine` binary; auto-detected if empty |
+| `--combine-options` | `""` | Extra options forwarded verbatim to `combine` |
+
+### Integration with analysis run tasks
+
+The YAML config passed to `--datacard-config` references the ROOT files
+produced by the NANO or Open Data batch workflows.  A typical config looks
+like:
+
+```yaml
+output_dir: datacards  # overridden by CreateDatacard at runtime
+
+input_files:
+  signal:
+    path: /eos/user/me/myRun22/signal.root
+    type: signal
+  ttbar:
+    path: /eos/user/me/myRun22/ttbar.root
+    type: background
+  data_obs:
+    path: /eos/user/me/myRun22/data.root
+    type: data
+
+control_regions:
+  signal_region:
+    observable: mT
+    processes: [signal, ttbar]
+    signal_processes: [signal]
+    data_process: data_obs
+```
 
 ---
 
