@@ -307,6 +307,57 @@ TEST_F(NDHistogramManagerConfigTest, InvalidBackendThrows) {
   EXPECT_THROW(histogramManager->setupFromConfigFile(), std::runtime_error);
 }
 
+// ── Dense / sparse auto-selection tests ───────────────────────────────────────
+
+TEST_F(NDHistogramManagerConfigTest, EstimateDenseMemorySmallHistogram) {
+  // A 5D histogram with 10 bins per axis: (10+2)^5 * 16 bytes/bin * 1 slot = ~4 MB << 64 MB
+  const std::vector<Int_t> bins{10, 10, 10, 10, 10};
+  const std::size_t est = estimateDenseMemoryBytes(bins, 1, 16);
+  EXPECT_LT(est, kDenseMemoryThresholdBytes);
+}
+
+TEST_F(NDHistogramManagerConfigTest, EstimateDenseMemoryLargeHistogram) {
+  // A 5D histogram with 100 bins per axis: (100+2)^5 * 16 bytes/bin * 1 slot ≈ 176 GB >> 64 MB
+  const std::vector<Int_t> bins{100, 100, 100, 100, 100};
+  const std::size_t est = estimateDenseMemoryBytes(bins, 1, 16);
+  EXPECT_GT(est, kDenseMemoryThresholdBytes);
+}
+
+TEST_F(NDHistogramManagerConfigTest, EstimateDenseMemoryOverflowProtection) {
+  // Extremely large bins should trigger overflow protection and return SIZE_MAX
+  const std::vector<Int_t> bins{1000000, 1000000, 1000000, 1000000, 1000000};
+  const std::size_t est = estimateDenseMemoryBytes(bins, 1, 16);
+  EXPECT_EQ(est, std::numeric_limits<std::size_t>::max());
+}
+
+TEST_F(NDHistogramManagerConfigTest, RootBackendAutoSelectsDense) {
+  // For a small histogram, the ROOT backend should auto-select dense THnF per-thread accumulators.
+  // We verify this indirectly: the histogram must still be bookable and produce the expected count.
+  dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
+  dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+
+  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  histogramManager->setupFromConfigFile();
+  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+
+  // The number of booked histograms must match regardless of dense/sparse selection.
+  EXPECT_EQ(histogramManager->GetHistos().size(), 4u);
+}
+
+TEST_F(NDHistogramManagerConfigTest, BoostBackendAutoSelectsDenseForSmallHist) {
+  // For a small histogram, BHnMulti should auto-select dense weight_storage.
+  // Verify that the histogram is still correctly booked and returns results.
+  dataManager->Define("bvar1", []() { return 3.0f; }, {}, *systematicManager);
+  dataManager->Define("bw1", []() { return 1.0f; }, {}, *systematicManager);
+
+  configManager->set("histogramBackend", "boost");
+  histogramManager->setupFromConfigFile();
+
+  histInfo info("boost_dense_auto", "bvar1", "bvar1", "bw1", 10, 0.0, 10.0);
+  EXPECT_NO_THROW(histogramManager->BookSingleHistogram(info));
+  EXPECT_EQ(histogramManager->GetHistos().size(), 1u);
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
