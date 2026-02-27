@@ -264,6 +264,19 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
 
     if streams is None:
         streams = os.environ.get("XRDCP_STREAMS", "4")
+
+    # Ensure the destination directory exists on EOS before copying
+    eos_path = dest.split("//", 2)[-1] if "//" in dest else dest
+    eos_dir = os.path.dirname("/" + eos_path.lstrip("/"))
+    if eos_dir and eos_dir != "/":
+        try:
+            subprocess.run(
+                ["xrdfs", "root://eosuser.cern.ch/", "mkdir", "-p", eos_dir],
+                capture_output=True, timeout=30,
+            )
+        except Exception as mkdir_exc:
+            print(f"Warning: xrdfs mkdir -p {{eos_dir}} failed (may already exist): {{mkdir_exc}}")
+
     cmd = [
         "xrdcp",
         "-f",

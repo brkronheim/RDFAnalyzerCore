@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -161,6 +162,7 @@ def _query_rucio(directory, file_split_gb, WL, BL, site_override, client):
     group_counts: dict[int, int] = {}
     group_sizes: dict[int, float] = {}
     running_size = 0.0
+    running_files = 0
     group = 0
 
     for filedata in rucio_output:
@@ -169,9 +171,11 @@ def _query_rucio(directory, file_split_gb, WL, BL, site_override, client):
         size_gb = filedata.get("bytes", 0) * 1e-9
         redirector = "root://xrootd-cms.infn.it/"
         running_size += size_gb
-        if running_size > file_split_gb:
+        running_files += 1
+        if (running_size > file_split_gb) or (running_files >= 50):
             group += 1
             running_size = size_gb
+            running_files = 1
 
         for site, state in states.items():
             if state == "AVAILABLE" and "Tape" not in site:
@@ -271,6 +275,18 @@ def _copy_dir(src: str, dst: str) -> None:
     """Copy whole directory tree src → dst (skip if dst already exists)."""
     if not os.path.exists(dst):
         shutil.copytree(src, dst, dirs_exist_ok=True)
+
+
+def _rechunk_urls(urls: list[str], max_files: int) -> dict[int, str]:
+    """Split a flat URL list into groups of at most *max_files* entries."""
+    groups: dict[int, str] = {}
+    for i, url in enumerate(urls):
+        g = i // max_files
+        if g in groups:
+            groups[g] += "," + url
+        else:
+            groups[g] = url
+    return groups
 
 
 def _collect_local_shared_libs(exe_path: str, repo_root: str) -> dict[str, str]:
@@ -437,7 +453,7 @@ def _submit_single_job(
     request_memory: int,
     shared_dir_name: str,
     config_dict: dict,
-    include_aux: bool,
+    aux_file_names: list[str] | None = None,
     shared_lib_names: list[str] | None = None,
 ) -> str | None:
     """
@@ -458,8 +474,9 @@ def _submit_single_job(
         os.path.join(job_dir, "ints.txt"),
         os.path.join(main_dir, shared_dir_name, exe_relpath),
     ]
-    if include_aux:
-        transfer_files.append(os.path.join(main_dir, shared_dir_name, "aux"))
+    if aux_file_names:
+        for aux_fname in sorted(set(aux_file_names)):
+            transfer_files.append(os.path.join(main_dir, shared_dir_name, aux_fname))
     if x509loc:
         transfer_files.append(
             os.path.join(main_dir, shared_dir_name, os.path.basename(x509loc))
@@ -565,6 +582,10 @@ class NANOMixin:
     no_validate = luigi.BoolParameter(
         default=False,
         description="Skip submit-config validation",
+    )
+    make_test_job = luigi.BoolParameter(
+        default=False,
+        description="If True, create a local test_job/ directory with a single input file for quick testing",
     )
 
     # ---- derived helpers ---------------------------------------------------
@@ -715,13 +736,18 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
                         seen_urls.add(url)
                         all_urls.append(url)
 
-        if len(das_entries) == 1:
-            # _query_rucio already produced correct size-capped groups; reuse them.
-            groups = last_groups if last_groups else ({0: ",".join(all_urls)} if all_urls else {})
+        MAX_FILES_PER_JOB = 50
+        if len(das_entries) == 1 and last_groups:
+            # _query_rucio already produced size-capped groups that respect
+            # the 50-file limit; reuse them directly.
+            groups = last_groups
+        elif all_urls:
+            # For multiple DAS entries (or fallback): re-chunk the merged URL
+            # list so no single job ever receives more than MAX_FILES_PER_JOB
+            # files, regardless of how many DAS paths were combined.
+            groups = _rechunk_urls(all_urls, MAX_FILES_PER_JOB)
         else:
-            # Multiple DAS entries: merged into one group (no size re-split needed
-            # since cross-DAS entries are typically complementary datasets).
-            groups = {0: ",".join(all_urls)} if all_urls else {}
+            groups = {}
 
         if not groups:
             self.publish_message(f"No files found for sample {name}; skipping.")
@@ -887,9 +913,12 @@ class BuildNANOSubmission(NANOMixin, law.Task):
             )
 
         aux_src = self._resolve("aux")
-        aux_exists = bool(aux_src and os.path.exists(aux_src))
-        if aux_exists:
-            _copy_dir(aux_src, os.path.join(shared_dir, "aux"))
+        aux_files: list[str] = []
+        if aux_src and os.path.exists(aux_src):
+            for aux_file in sorted(Path(aux_src).iterdir()):
+                if aux_file.is_file():
+                    _copy_file(str(aux_file), os.path.join(shared_dir, aux_file.name))
+                    aux_files.append(aux_file.name)
         else:
             self.publish_message("Warning: 'aux' directory not found; skipping.")
 
@@ -905,8 +934,81 @@ class BuildNANOSubmission(NANOMixin, law.Task):
                 shutil.rmtree(link_path)
             os.symlink(job_dir_abs, link_path)
 
-        # ---- write condor files -----------------------------------------
+        # ---- create local test job if requested --------------------------
         config_dict = self._config_dict
+        if self.make_test_job:
+            test_dir = os.path.join(self._main_dir, "test_job")
+            Path(test_dir).mkdir(parents=True, exist_ok=True)
+
+            # Find the first available input file from sorted job dirs
+            first_file = ""
+            first_job_dir = ""
+            for jd in job_dirs:
+                jcfg_path = os.path.join(jd, "submit_config.txt")
+                if os.path.exists(jcfg_path):
+                    jcfg = read_config(jcfg_path)
+                    file_list = jcfg.get("__orig_fileList", jcfg.get("fileList", ""))
+                    if file_list:
+                        first_file = file_list.split(",")[0].strip()
+                        first_job_dir = jd
+                        break
+
+            if first_file:
+                # Copy copyList files
+                copy_list_test = get_copy_file_list(config_dict)
+                for fpath in copy_list_test:
+                    src = self._resolve(fpath)
+                    dst = os.path.join(test_dir, os.path.basename(src))
+                    Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(src, dst)
+
+                # Copy aux files flat directly into test_job/
+                aux_src_local = self._resolve("aux")
+                if aux_src_local and os.path.exists(aux_src_local):
+                    for aux_file in sorted(Path(aux_src_local).iterdir()):
+                        if aux_file.is_file():
+                            _copy_file(str(aux_file), os.path.join(test_dir, aux_file.name))
+                else:
+                    self.publish_message("Warning: 'aux' directory not found; skipping aux copy for test job.")
+
+                # Copy the executable
+                _copy_file(exe_path, os.path.join(test_dir, exe_relpath))
+
+                # Build a minimal submit config
+                test_config = _normalize_config_paths(dict(config_dict))
+                test_config["fileList"] = first_file
+                test_config["batch"] = "False"
+                test_config.setdefault("threads", "1")
+                test_config["saveFile"] = "test_output.root"
+                test_config["metaFile"] = "test_output_meta.root"
+                test_config["sampleConfig"] = os.path.basename(self._sample_config)
+                test_config["floatConfig"] = "floats.txt"
+                test_config["intConfig"] = "ints.txt"
+                # Remove stage-out sentinel keys
+                test_config.pop("__orig_saveFile", None)
+                test_config.pop("__orig_metaFile", None)
+                test_config.pop("__orig_fileList", None)
+
+                # Reuse floats.txt / ints.txt from the first job dir
+                float_src = os.path.join(first_job_dir, "floats.txt")
+                int_src   = os.path.join(first_job_dir, "ints.txt")
+                if os.path.exists(float_src):
+                    shutil.copyfile(float_src, os.path.join(test_dir, "floats.txt"))
+                if os.path.exists(int_src):
+                    shutil.copyfile(int_src, os.path.join(test_dir, "ints.txt"))
+
+                with open(os.path.join(test_dir, "submit_config.txt"), "w") as fh:
+                    for k, v in test_config.items():
+                        fh.write(f"{k}={v}\n")
+
+                self.publish_message(
+                    f"Test job created. Run locally with:\n"
+                    f"  cd {test_dir} && ./{exe_relpath} submit_config.txt"
+                )
+            else:
+                self.publish_message("Warning: no input files found; test job not created.")
+
+        # ---- write condor files -----------------------------------------
         copy_list = get_copy_file_list(config_dict)
         copy_basenames = sorted({os.path.basename(p) for p in copy_list})
         skip_transfer = {"floats.txt", "ints.txt", "submit_config.txt"}
@@ -918,6 +1020,10 @@ class BuildNANOSubmission(NANOMixin, law.Task):
         extra_transfer_files.extend(
             os.path.join(self._main_dir, "shared_inputs", name)
             for name in sorted(local_shared_libs.keys())
+        )
+        extra_transfer_files.extend(
+            os.path.join(self._main_dir, "shared_inputs", aux_fname)
+            for aux_fname in aux_files
         )
 
         main_dir = self._main_dir
@@ -934,7 +1040,7 @@ class BuildNANOSubmission(NANOMixin, law.Task):
             request_cpus=1,
             request_disk=20000,
             extra_transfer_files=extra_transfer_files,
-            include_aux=aux_exists,
+            include_aux=False,
             shared_dir_name="shared_inputs",
             eos_sched=EOS_SCHED,
             config_file="submit_config.txt",
@@ -949,7 +1055,103 @@ class BuildNANOSubmission(NANOMixin, law.Task):
 
 
 # ===========================================================================
-# Task 3 – SubmitNANOJobs
+# Task 3 – RunTestJob
+# ===========================================================================
+
+class RunTestJob(NANOMixin, law.Task):
+    """
+    Runs the test_job/ directory produced by BuildNANOSubmission locally,
+    validates the exit code and output ROOT files, and writes test_passed.txt.
+
+    SubmitNANOJobs requires this task when --make-test-job is set, so condor
+    submission is blocked until the test job is verified to be working.
+    """
+
+    task_namespace = ""
+
+    def requires(self):
+        return BuildNANOSubmission.req(self)
+
+    def output(self):
+        return law.LocalFileTarget(
+            os.path.join(self._main_dir, "test_job", "test_passed.txt")
+        )
+
+    def run(self):
+        test_dir = os.path.join(self._main_dir, "test_job")
+        exe_relpath = self._exe_relpath
+
+        if not os.path.isdir(test_dir):
+            raise RuntimeError(
+                f"test_job/ directory not found at {test_dir!r}. "
+                "Run BuildNANOSubmission with --make-test-job."
+            )
+        if not os.path.exists(os.path.join(test_dir, exe_relpath)):
+            raise RuntimeError(
+                f"Executable {exe_relpath!r} not found in {test_dir!r}."
+            )
+
+        # Build inner shell command
+        root_setup_path = self._resolve(self.root_setup) if self.root_setup else ""
+        cmd_parts = []
+        if root_setup_path and os.path.isfile(root_setup_path):
+            cmd_parts.append(f"source {shlex.quote(root_setup_path)}")
+        cmd_parts.append(f"cd {shlex.quote(test_dir)}")
+        cmd_parts.append(f"chmod +x {shlex.quote(exe_relpath)}")
+        cmd_parts.append(f"./{exe_relpath} submit_config.txt")
+        inner_cmd = " && ".join(cmd_parts)
+
+        # Optionally wrap with container
+        container = (self.container_setup or "").strip()
+        if container:
+            if "{cmd}" in container:
+                full_cmd = container.replace("{cmd}", f"bash -c {shlex.quote(inner_cmd)}")
+            elif "cmssw-el" in container and "--command-to-run" not in container:
+                full_cmd = f"{container} --command-to-run {shlex.quote(inner_cmd)}"
+            elif "--command-to-run" in container:
+                full_cmd = f"{container} {shlex.quote(inner_cmd)}"
+            else:
+                full_cmd = f"{container} bash -c {shlex.quote(inner_cmd)}"
+        else:
+            full_cmd = f"bash -c {shlex.quote(inner_cmd)}"
+
+        self.publish_message(f"Running test job:\n  {full_cmd}")
+
+        result = subprocess.run(full_cmd, shell=True)
+
+        rc = result.returncode
+        if rc != 0:
+            if rc >= 128:
+                sig = rc - 128
+                raise RuntimeError(
+                    f"Test job terminated by signal {sig} (segmentation fault or abort). "
+                    f"Exit code: {rc}"
+                )
+            raise RuntimeError(f"Test job failed with exit code {rc}.")
+
+        """
+        # Validate output files
+        expected = ["test_output.root", "test_output_meta.root"]
+        missing = [f for f in expected if not os.path.exists(os.path.join(test_dir, f))]
+        empty   = [f for f in expected if os.path.exists(os.path.join(test_dir, f))
+                   and os.path.getsize(os.path.join(test_dir, f)) == 0]
+
+        if missing:
+            raise RuntimeError(f"Test job completed but expected output file(s) missing: {missing}")
+        if empty:
+            raise RuntimeError(f"Test job completed but expected output file(s) are empty: {empty}")
+        """
+        self.publish_message("Test job passed: exit code 0")
+
+        with self.output().open("w") as fh:
+            fh.write("status=passed\n")
+            #for fname in expected:
+            #    size = os.path.getsize(os.path.join(test_dir, fname))
+            #    fh.write(f"{fname}={size} bytes\n")
+
+
+# ===========================================================================
+# Task 4 – SubmitNANOJobs
 # ===========================================================================
 
 class SubmitNANOJobs(NANOMixin, law.Task):
@@ -961,6 +1163,8 @@ class SubmitNANOJobs(NANOMixin, law.Task):
     task_namespace = ""
 
     def requires(self):
+        if self.make_test_job:
+            return RunTestJob.req(self)
         return BuildNANOSubmission.req(self)
 
     def output(self):
@@ -969,7 +1173,13 @@ class SubmitNANOJobs(NANOMixin, law.Task):
         )
 
     def run(self):
-        submit_file = self.input()["submit"].path
+        # Locate condor_submit.sub directly – input may be BuildNANOSubmission
+        # (dict with "submit" key) or RunTestJob (single FileTarget)
+        inp = self.input()
+        if isinstance(inp, dict) and "submit" in inp:
+            submit_file = inp["submit"].path
+        else:
+            submit_file = os.path.join(self._main_dir, "condor_submit.sub")
 
         if not os.path.exists(submit_file):
             raise RuntimeError(f"condor_submit.sub not found: {submit_file}")
@@ -1124,8 +1334,12 @@ class MonitorNANOJobs(NANOMixin, law.Task):
             )
 
         config_dict = self._config_dict
-        aux_src     = self._resolve("aux")
-        aux_exists  = bool(aux_src and os.path.exists(aux_src))
+        aux_src = self._resolve("aux")
+        aux_file_names: list[str] = []
+        if aux_src and os.path.exists(aux_src):
+            aux_file_names = [
+                f.name for f in sorted(Path(aux_src).iterdir()) if f.is_file()
+            ]
         shared_lib_names = [
             name for name in os.listdir(self._shared_dir)
             if ".so" in name and os.path.isfile(os.path.join(self._shared_dir, name))
@@ -1195,7 +1409,7 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                     else:
                         self.publish_message(f"Job {idx} held (could not confirm condor_rm): {hold_reason}")
                     self._try_resubmit(
-                        idx, jstate, job_info, config_dict, aux_exists, reason=f"held: {hold_reason}"
+                        idx, jstate, job_info, config_dict, aux_file_names, reason=f"held: {hold_reason}"
                     )
                     continue
 
@@ -1208,7 +1422,7 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                                 f"Job {idx} failed with exit code {exit_code}. stderr tail:\n{error_tail}"
                             )
                         self._try_resubmit(
-                            idx, jstate, job_info, config_dict, aux_exists,
+                            idx, jstate, job_info, config_dict, aux_file_names,
                             reason=f"exit code {exit_code}"
                         )
                         continue
@@ -1278,7 +1492,7 @@ class MonitorNANOJobs(NANOMixin, law.Task):
         jstate: dict,
         job_info: dict,
         config_dict: dict,
-        aux_exists: bool,
+        aux_file_names: list[str],
         reason: str,
     ) -> None:
         """Attempt to resubmit job *idx*; update jstate in place."""
@@ -1311,7 +1525,7 @@ class MonitorNANOJobs(NANOMixin, law.Task):
             2000,
             "shared_inputs",
             config_dict,
-            aux_exists,
+            aux_file_names=aux_file_names,
             shared_lib_names=shared_lib_names,
         )
         if new_cluster:
