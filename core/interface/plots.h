@@ -441,8 +441,8 @@ public:
   void Finalize() {
     if (useDense_m) {
       // Sum all per-thread dense histograms into the first one
-      for (size_t i = 1; i < fPerThreadDense_m.size(); i++) {
-        fPerThreadDense_m[0]->Add(fPerThreadDense_m[i].get());
+      for (size_t slot = 1; slot < fPerThreadDense_m.size(); slot++) {
+        fPerThreadDense_m[0]->Add(fPerThreadDense_m[slot].get());
       }
       // Convert dense result to sparse: iterate all inner bins and copy non-zero ones
       const Long64_t totalBins = fPerThreadDense_m[0]->GetNbins();
@@ -870,8 +870,8 @@ public:
 
       // Merge all per-thread histograms into the first one
       auto& merged = hists[0];
-      for (size_t i = 1; i < hists.size(); i++) {
-        merged += hists[i];
+      for (size_t slot = 1; slot < hists.size(); slot++) {
+        merged += hists[slot];
       }
 
       // Convert to THnSparseF: iterate only filled (inner) bins
