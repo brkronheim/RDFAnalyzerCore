@@ -45,7 +45,6 @@
 #include <boost/histogram.hpp>
 
 #include <limits>
-#include <variant>
 
 
 /// @brief Estimates the total memory in bytes required for dense per-thread histogram storage.
@@ -570,12 +569,12 @@ private:
  * In Finalize(), the per-thread Boost histograms are merged and converted to
  * a THnSparseF, preserving full compatibility with the rest of the framework.
  *
- * Storage is chosen automatically at construction time:
- * - **Dense** (`weight_storage`): direct O(1) array indexing, faster fills;
- *   used when the expected memory for all per-thread histograms is within
- *   kDenseMemoryThresholdBytes.
- * - **Sparse** (`sparse_storage<weighted_sum<>>`): hash-based, memory-efficient;
- *   used when the dense estimate would exceed the threshold.
+ * Storage used for per-thread histograms:
+ * - On Boost >= 1.76: `sparse_storage<weighted_sum<>>` (hash-based, memory-proportional
+ *   to filled bins only), matching the memory characteristics of THnMulti's sparse path.
+ * - On older Boost: `weight_storage` (dense), same as THnMulti's dense path.
+ *
+ * The final result is always a sparse THnSparseF.
  *
  * Select this backend by setting histogramBackend=boost in the configuration.
  */
@@ -584,23 +583,27 @@ public:
   /** @brief Result type: ROOT sparse histogram (same as THnMulti) */
   using Result_t = THnSparseF;
 
-  // 5D Boost.Histogram type with sparse weighted-sum storage (memory-efficient)
-  using BH5DSparse = decltype(boost::histogram::make_histogram_with(
+#if BOOST_VERSION >= 107600
+  // Boost 1.76+: sparse_storage<weighted_sum<>> is available.
+  // Only filled bins consume memory (same memory characteristics as THnSparseF).
+  using BH5D = decltype(boost::histogram::make_histogram_with(
       boost::histogram::sparse_storage<boost::histogram::accumulators::weighted_sum<>>(),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0)));
-
-  // 5D Boost.Histogram type with dense weight_storage (faster O(1) array access)
-  using BH5DDense = decltype(boost::histogram::make_histogram_with(
+#else
+  // Boost < 1.76: sparse_storage not available; fall back to weight_storage (dense).
+  // The output result is still a sparse THnSparseF.
+  using BH5D = decltype(boost::histogram::make_histogram_with(
       boost::histogram::weight_storage(),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0),
       boost::histogram::axis::regular<>(1, 0.0, 1.0)));
+#endif
 
   // Define a function pointer type for fill functions (same signature as THnMulti)
   using FillFuncType = void (BHnMulti::*)(unsigned int,
@@ -624,35 +627,25 @@ public:
 
     namespace bh = boost::histogram;
 
-    // Auto-select dense vs sparse storage based on expected memory usage.
-    // weight_storage (dense): 2 x double = 16 bytes/bin, O(1) fill.
-    // sparse_storage<weighted_sum> (sparse): hash-based, memory-proportional to filled bins only.
-    const bool useDense = estimateDenseMemoryBytes(nbins_m, nSlots_m, 16) <= kDenseMemoryThresholdBytes;
-
-    if (useDense) {
-      auto& denseVec = fPerThreadHists.emplace<std::vector<BH5DDense>>();
-      denseVec.reserve(nSlots_m);
-      for (unsigned int i = 0; i < nSlots_m; i++) {
-        denseVec.push_back(bh::make_histogram_with(
-            bh::weight_storage(),
-            bh::axis::regular<>(nbins_m[0], xmin_m[0], xmax_m[0]),
-            bh::axis::regular<>(nbins_m[1], xmin_m[1], xmax_m[1]),
-            bh::axis::regular<>(nbins_m[2], xmin_m[2], xmax_m[2]),
-            bh::axis::regular<>(nbins_m[3], xmin_m[3], xmax_m[3]),
-            bh::axis::regular<>(nbins_m[4], xmin_m[4], xmax_m[4])));
-      }
-    } else {
-      auto& sparseVec = fPerThreadHists.emplace<std::vector<BH5DSparse>>();
-      sparseVec.reserve(nSlots_m);
-      for (unsigned int i = 0; i < nSlots_m; i++) {
-        sparseVec.push_back(bh::make_histogram_with(
-            bh::sparse_storage<bh::accumulators::weighted_sum<>>(),
-            bh::axis::regular<>(nbins_m[0], xmin_m[0], xmax_m[0]),
-            bh::axis::regular<>(nbins_m[1], xmin_m[1], xmax_m[1]),
-            bh::axis::regular<>(nbins_m[2], xmin_m[2], xmax_m[2]),
-            bh::axis::regular<>(nbins_m[3], xmin_m[3], xmax_m[3]),
-            bh::axis::regular<>(nbins_m[4], xmin_m[4], xmax_m[4])));
-      }
+    fPerThreadHists.reserve(nSlots_m);
+    for (unsigned int i = 0; i < nSlots_m; i++) {
+#if BOOST_VERSION >= 107600
+      fPerThreadHists.push_back(bh::make_histogram_with(
+          bh::sparse_storage<bh::accumulators::weighted_sum<>>(),
+          bh::axis::regular<>(nbins_m[0], xmin_m[0], xmax_m[0]),
+          bh::axis::regular<>(nbins_m[1], xmin_m[1], xmax_m[1]),
+          bh::axis::regular<>(nbins_m[2], xmin_m[2], xmax_m[2]),
+          bh::axis::regular<>(nbins_m[3], xmin_m[3], xmax_m[3]),
+          bh::axis::regular<>(nbins_m[4], xmin_m[4], xmax_m[4])));
+#else
+      fPerThreadHists.push_back(bh::make_histogram_with(
+          bh::weight_storage(),
+          bh::axis::regular<>(nbins_m[0], xmin_m[0], xmax_m[0]),
+          bh::axis::regular<>(nbins_m[1], xmin_m[1], xmax_m[1]),
+          bh::axis::regular<>(nbins_m[2], xmin_m[2], xmax_m[2]),
+          bh::axis::regular<>(nbins_m[3], xmin_m[3], xmax_m[3]),
+          bh::axis::regular<>(nbins_m[4], xmin_m[4], xmax_m[4])));
+#endif
     }
 
     fFinalResult = std::make_shared<THnSparseF>(
@@ -858,59 +851,54 @@ public:
   /**
    * @brief Merge per-thread Boost histograms and convert to THnSparseF.
    *
-   * Works for both dense (weight_storage) and sparse (sparse_storage<weighted_sum>)
-   * per-thread histograms via std::visit.  Only bins with non-zero content are
-   * written to the result, keeping the output sparse.
+   * Only bins with non-zero content are written to the result, keeping the output sparse.
    */
   void Finalize() {
     namespace bh = boost::histogram;
 
-    std::visit([&](auto& hists) {
-      if (hists.empty()) return;
+    if (fPerThreadHists.empty()) return;
 
-      // Merge all per-thread histograms into the first one
-      auto& merged = hists[0];
-      for (size_t slot = 1; slot < hists.size(); slot++) {
-        merged += hists[slot];
+    // Merge all per-thread histograms into the first one
+    auto& merged = fPerThreadHists[0];
+    for (size_t slot = 1; slot < fPerThreadHists.size(); slot++) {
+      merged += fPerThreadHists[slot];
+    }
+
+    // Convert to THnSparseF: iterate only filled (inner) bins
+    for (auto&& x : bh::indexed(merged, bh::coverage::inner)) {
+      const auto& w = *x;
+      const double content = w.value();
+      const double variance = w.variance();
+      if (content == 0.0 && variance == 0.0) {
+        continue;  // skip empty bins — sparse output
       }
 
-      // Convert to THnSparseF: iterate only filled (inner) bins
-      for (auto&& x : bh::indexed(merged, bh::coverage::inner)) {
-        const auto& w = *x;
-        const double content = w.value();
-        const double variance = w.variance();
-        if (content == 0.0 && variance == 0.0) {
-          continue;  // skip empty bins — sparse output
-        }
-
-        // Compute bin-centre coordinates for each axis
-        std::vector<Double_t> coords(dim_m);
-        for (int d = 0; d < dim_m; d++) {
-          coords[d] = merged.axis(d).bin(x.index(d)).center();
-        }
-
-        // Create bin in THnSparseF and set content/error
-        Long64_t globalBin = fFinalResult->GetBin(coords.data(), true);
-        fFinalResult->SetBinContent(globalBin, content);
-        fFinalResult->SetBinError2(globalBin, variance);
+      // Compute bin-centre coordinates for each axis
+      std::vector<Double_t> coords(dim_m);
+      for (int d = 0; d < dim_m; d++) {
+        coords[d] = merged.axis(d).bin(x.index(d)).center();
       }
-    }, fPerThreadHists);
+
+      // Create bin in THnSparseF and set content/error
+      Long64_t globalBin = fFinalResult->GetBin(coords.data(), true);
+      fFinalResult->SetBinContent(globalBin, content);
+      fFinalResult->SetBinError2(globalBin, variance);
+    }
   }
 
   std::string GetActionName() const { return "BHnMulti"; }
 
 private:
-  /// Fill one bin in whichever per-thread histogram is active (dense or sparse).
+  /// Fill one bin in the per-thread Boost histogram.
   void fillHist_(unsigned int slot, double weight,
                  double ch, double cr, double sc, double sv, double bv) {
-    std::visit([&](auto& hists) {
-      hists[slot](boost::histogram::weight(weight), ch, cr, sc, sv, bv);
-    }, fPerThreadHists);
+    fPerThreadHists[slot](boost::histogram::weight(weight), ch, cr, sc, sv, bv);
   }
 
   std::shared_ptr<THnSparseF> fFinalResult = std::make_shared<THnSparseF>();
-  /// Per-thread histograms: either dense (weight_storage) or sparse (sparse_storage<weighted_sum>).
-  std::variant<std::vector<BH5DSparse>, std::vector<BH5DDense>> fPerThreadHists;
+  /// Per-thread Boost histograms.  On Boost >= 1.76 uses sparse_storage<weighted_sum<>>;
+  /// on older Boost falls back to weight_storage (dense).  Output is always THnSparseF.
+  std::vector<BH5D> fPerThreadHists;
 
   const unsigned int nSlots_m;
   const Int_t dim_m;
