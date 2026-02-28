@@ -108,15 +108,24 @@ TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsWithDefaults) {
   // Set up variables
   dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
   dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("w2", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("channel", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
   
-  // Set histogram config with only a simple histogram
+  // Set histogram config
   configManager->set("histogramConfig", "cfg/test_histograms.txt");
   histogramManager->setupFromConfigFile();
   
   // Book the histograms
   EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
   
-  // At least the first histogram should be booked
+  // All four histograms should be booked
   auto& histos = histogramManager->GetHistos();
   EXPECT_GE(histos.size(), 1u);
 }
@@ -125,6 +134,15 @@ TEST_F(NDHistogramManagerConfigTest, ConfigHistogramsRespectFilters) {
   // Define variables and a filter
   dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
   dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("w2", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("channel", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
   dataManager->Define("pass_filter", []() { return true; }, {}, *systematicManager);
   
   // Apply a filter
@@ -147,6 +165,15 @@ TEST_F(NDHistogramManagerConfigTest, ConfigHistogramsWorkWithSystematics) {
   // Define variables with systematics
   dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
   dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("w2", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("channel", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
   
   // Register a systematic
   systematicManager->registerSystematic("TestSyst", {"var1"});
@@ -188,14 +215,14 @@ TEST_F(NDHistogramManagerConfigTest, MissingRequiredFieldsThrows) {
   std::remove(tempFile.c_str());
 }
 
-TEST_F(NDHistogramManagerConfigTest, BookingWithoutVariablesDefinedDoesNotCrash) {
-  // Set histogram config but don't define the variables
+TEST_F(NDHistogramManagerConfigTest, BookingWithoutVariablesDefinedThrows) {
+  // Set histogram config but don't define the required variables
   configManager->set("histogramConfig", "cfg/test_histograms.txt");
   histogramManager->setupFromConfigFile();
   
-  // Booking should not crash, but may log warnings
-  // The actual booking will fail during dataframe execution
-  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+  // Booking throws a meaningful exception (not a crash/segfault) when required
+  // columns are missing — this is the expected graceful error behaviour.
+  EXPECT_THROW(histogramManager->bookConfigHistograms(), std::exception);
 }
 
 TEST_F(NDHistogramManagerConfigTest, MultipleBookCallsWork) {
@@ -204,6 +231,13 @@ TEST_F(NDHistogramManagerConfigTest, MultipleBookCallsWork) {
   dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
   dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
   dataManager->Define("w2", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("channel", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
   
   // Set histogram config
   configManager->set("histogramConfig", "cfg/test_histograms.txt");
