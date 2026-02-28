@@ -268,9 +268,8 @@ def _copy_file(src: str, dst: str) -> None:
 
 
 def _copy_dir(src: str, dst: str) -> None:
-    """Copy whole directory tree src → dst (skip if dst already exists)."""
-    if not os.path.exists(dst):
-        shutil.copytree(src, dst, dirs_exist_ok=True)
+    """Copy whole directory tree src → dst, syncing any existing destination."""
+    shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
 def _collect_local_shared_libs(exe_path: str, repo_root: str) -> dict[str, str]:

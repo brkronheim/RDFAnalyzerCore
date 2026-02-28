@@ -350,10 +350,10 @@ def generate_condor_runscript(
     if python_env_tarball:
         tarball_name = os.path.basename(python_env_tarball)
         python_env_block = (
-            f"if [ -f {tarball_name} ]; then\n"
+            f"if [ -f \"{tarball_name}\" ]; then\n"
             f"  echo \"Unpacking Python environment from {tarball_name}...\"\n"
             f"  mkdir -p _python_env\n"
-            f"  tar -xzf {tarball_name} -C _python_env\n"
+            f"  tar -xzf \"{tarball_name}\" -C _python_env\n"
             f"  export PYTHONPATH=\"$PWD/_python_env:${{PYTHONPATH:-}}\"\n"
             f"  export PATH=\"$PWD/_python_env/bin:${{PATH:-}}\"\n"
             f"  export LD_LIBRARY_PATH=\"$PWD/_python_env:${{LD_LIBRARY_PATH:-}}\"\n"

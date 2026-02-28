@@ -151,10 +151,9 @@ class TestCreateDatacardTask(unittest.TestCase):
                 mod = importlib.reload(combine_tasks)
                 task2 = mod.CreateDatacard(datacard_config=config_path, name="trun")
 
-                try:
-                    task2.run()
-                except Exception:
-                    pass  # output check may fail; we only care that run() was called
+                task2.run()
+                MockClass.assert_called_once_with(config_path)
+                mock_generator.run.assert_called_once()
 
             shutil.rmtree(task._run_dir, ignore_errors=True)
 

@@ -89,7 +89,7 @@ echo ""
 
 # ---------- install base runtime packages -----------------------------------
 echo "==> Installing base packages (law, luigi, requests) ..."
-"$PYTHON" -m pip install --quiet --target="$PACKAGES_DIR" --no-deps \
+"$PYTHON" -m pip install --quiet --target="$PACKAGES_DIR" \
     law luigi requests
 
 # ---------- install extra packages ------------------------------------------

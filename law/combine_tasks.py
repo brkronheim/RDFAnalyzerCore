@@ -42,6 +42,7 @@ Usage
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -303,7 +304,7 @@ class RunCombine(CombineMixin, law.Task):
 
         # combine writes output ROOT files to the current working directory;
         # we run it from _results_dir so everything lands there.
-        extra_opts = self.combine_options.split() if self.combine_options else []
+        extra_opts = shlex.split(self.combine_options) if self.combine_options else []
 
         all_ok = True
         for datacard in datacards:

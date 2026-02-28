@@ -249,9 +249,8 @@ def _copy_file(src: str, dst: str) -> None:
 
 
 def _copy_dir(src: str, dst: str) -> None:
-    """Copy whole directory tree src → dst."""
-    if not os.path.exists(dst):
-        shutil.copytree(src, dst, dirs_exist_ok=True)
+    """Copy whole directory tree src → dst, syncing any existing destination."""
+    shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
 def _collect_local_shared_libs(exe_path: str, repo_root: str) -> dict[str, str]:
@@ -664,7 +663,6 @@ class PrepareOpenDataSample(OpenDataMixin, law.LocalWorkflow):
         norm        = float(sample.get("norm", 1.0))
         kfac        = float(sample.get("kfac", 1.0))
         extra_scale = float(sample.get("extraScale", 1.0))
-        das_key     = sample.get("das", name)
 
         # Build the das→name mapping for all samples (needed by _process_metadata)
         sample_names = {s.get("das", s["name"]): s["name"] for s in samples.values()}
@@ -1167,6 +1165,18 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
                     ):
                         jstate["status"] = "done"
                         self.publish_message(f"Job {idx}: output verified on EOS.")
+                    elif exit_code == 0:
+                        # Condor reports success but no EOS output found; treat as
+                        # a stage-out failure and retry within max-retries logic.
+                        self.publish_message(
+                            f"Job {idx}: condor reports success (exit 0) but EOS "
+                            "outputs are missing; attempting resubmission."
+                        )
+                        self._try_resubmit(
+                            idx, jstate, job_info, config_dict, aux_exists,
+                            reason="missing_output",
+                        )
+                        continue
 
             self._save_state(state)
             summary   = self._status_summary(state)
