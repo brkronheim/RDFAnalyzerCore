@@ -260,18 +260,21 @@ TEST_F(NDHistogramManagerConfigTest, BoostBackendFunctionallyEquivalentToRoot) {
 
   configManager->set("histogramConfig", "cfg/test_histograms.txt");
 
-  // Book with ROOT backend
-  configManager->set("histogramBackend", "root");
+  // Book with ROOT backend (the default — no explicit set needed)
   histogramManager->setupFromConfigFile();
   EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
   const auto rootCount = histogramManager->GetHistos().size();
 
-  // Use a fresh manager for the Boost backend to avoid double-loading config histograms
-  auto boostManager = std::make_unique<NDHistogramManager>(*configManager);
-  ManagerContext ctx{*configManager, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+  // Use a completely fresh config/manager for the Boost backend to avoid
+  // duplicate-key errors (ConfigurationManager::set() throws on overwrite).
+  auto boostConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+  boostConfig->set("histogramConfig", "cfg/test_histograms.txt");
+  boostConfig->set("histogramBackend", "boost");
+
+  auto boostManager = std::make_unique<NDHistogramManager>(*boostConfig);
+  ManagerContext ctx{*boostConfig, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
   boostManager->setContext(ctx);
 
-  configManager->set("histogramBackend", "boost");
   boostManager->setupFromConfigFile();
   EXPECT_NO_THROW(boostManager->bookConfigHistograms());
   const auto boostCount = boostManager->GetHistos().size();
@@ -345,8 +348,9 @@ TEST_F(NDHistogramManagerConfigTest, RootBackendAutoSelectsDense) {
 }
 
 TEST_F(NDHistogramManagerConfigTest, BoostBackendAutoSelectsDenseForSmallHist) {
-  // For a small histogram, BHnMulti should auto-select dense weight_storage.
-  // Verify that the histogram is still correctly booked and returns results.
+  // For a small histogram that fits within kDenseMemoryThresholdBytes, BHnMulti
+  // auto-selects weight_storage (dense) on Boost >= 1.76, or uses weight_storage
+  // unconditionally on older Boost.  Either way the histogram must be bookable.
   dataManager->Define("bvar1", []() { return 3.0f; }, {}, *systematicManager);
   dataManager->Define("bw1", []() { return 1.0f; }, {}, *systematicManager);
 
