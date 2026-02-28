@@ -3,6 +3,19 @@
 #include <api/IDataFrameProvider.h>
 #include <api/ISystematicManager.h>
 
+namespace {
+/**
+ * @brief Zero-pad a float vector to a target size.
+ * @param data Vector to pad in-place
+ * @param paddingSize Target size; no-op if 0 or already large enough
+ */
+void padInputData(std::vector<float>& data, int64_t paddingSize) {
+  if (paddingSize > 0 && static_cast<int64_t>(data.size()) < paddingSize) {
+    data.resize(paddingSize, 0.0f);
+  }
+}
+} // namespace
+
 /**
  * @brief Construct a new OnnxManager object
  * @param configProvider Reference to the configuration provider
@@ -28,6 +41,7 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
   auto session = this->objects_m.at(modelName);
   auto inputNames = model_inputNames_m.at(modelName);
   auto outputNames = model_outputNames_m.at(modelName);
+  int64_t paddingSize = getPaddingSize(modelName);
   
   // For models with a single input, create an input vector from the features
   // For models with multiple inputs, we assume the features are already vectors or scalars
@@ -41,7 +55,7 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
   
   if (numOutputs == 1) {
     // Single output case - create one column with the model name
-    auto onnxLambda = [session, inputNames, outputNames](
+    auto onnxLambda = [session, inputNames, outputNames, paddingSize](
         ROOT::VecOps::RVec<Float_t> &inputVector,
         bool runVar) -> Float_t {
       if (!runVar) {
@@ -51,9 +65,10 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
       // Create ONNX memory info
       auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
       
-      // Prepare input tensor
-      std::vector<int64_t> input_shape = {1, static_cast<int64_t>(inputVector.size())};
+      // Prepare input data, applying zero-padding if configured
       std::vector<float> input_data(inputVector.begin(), inputVector.end());
+      padInputData(input_data, paddingSize);
+      std::vector<int64_t> input_shape = {1, static_cast<int64_t>(input_data.size())};
       
       Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
           memory_info, input_data.data(), input_data.size(),
@@ -88,7 +103,7 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
     // We need to run inference once and capture all outputs
     
     // Create a lambda that returns a vector of all outputs
-    auto onnxLambdaMulti = [session, inputNames, outputNames, numOutputs](
+    auto onnxLambdaMulti = [session, inputNames, outputNames, numOutputs, paddingSize](
         ROOT::VecOps::RVec<Float_t> &inputVector,
         bool runVar) -> ROOT::VecOps::RVec<Float_t> {
       
@@ -101,9 +116,10 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
       // Create ONNX memory info
       auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
       
-      // Prepare input tensor
-      std::vector<int64_t> input_shape = {1, static_cast<int64_t>(inputVector.size())};
+      // Prepare input data, applying zero-padding if configured
       std::vector<float> input_data(inputVector.begin(), inputVector.end());
+      padInputData(input_data, paddingSize);
+      std::vector<int64_t> input_shape = {1, static_cast<int64_t>(input_data.size())};
       
       Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
           memory_info, input_data.data(), input_data.size(),
@@ -231,6 +247,19 @@ const std::vector<std::string> &OnnxManager::getModelOutputNames(const std::stri
 }
 
 /**
+ * @brief Get the padding size for an ONNX model
+ * @param modelName Name of the model
+ * @return Padding size (0 if no padding configured)
+ */
+int64_t OnnxManager::getPaddingSize(const std::string &modelName) const {
+  auto it = model_paddingSize_m.find(modelName);
+  if (it != model_paddingSize_m.end()) {
+    return it->second;
+  }
+  return 0;
+}
+
+/**
  * @brief Register ONNX models from configuration
  * @param configProvider Reference to the configuration provider
  */
@@ -288,6 +317,20 @@ void OnnxManager::loadModelsFromConfig(
     model_runVars_m.emplace(entryKeys.at("name"), entryKeys.at("runVar"));
     model_inputNames_m.emplace(entryKeys.at("name"), input_names);
     model_outputNames_m.emplace(entryKeys.at("name"), output_names);
+
+    // Parse optional paddingSize
+    int64_t paddingSize = 0;
+    auto paddingIt = entryKeys.find("paddingSize");
+    if (paddingIt != entryKeys.end()) {
+      try {
+        paddingSize = std::stoll(paddingIt->second);
+      } catch (const std::exception &e) {
+        throw std::runtime_error("OnnxManager: Invalid paddingSize value '" +
+                                 paddingIt->second + "' for model '" +
+                                 entryKeys.at("name") + "': " + e.what());
+      }
+    }
+    model_paddingSize_m.emplace(entryKeys.at("name"), paddingSize);
   }
 }
 
