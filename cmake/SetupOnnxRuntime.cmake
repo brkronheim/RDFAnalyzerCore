@@ -121,3 +121,11 @@ endif()
 # Set up RPATH so the library can be found at runtime
 set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH};${ONNXRUNTIME_LIB_DIR}")
 set(CMAKE_BUILD_RPATH "${CMAKE_BUILD_RPATH};${ONNXRUNTIME_LIB_DIR}")
+
+# Export ONNXRUNTIME_USE_CUDA as a preprocessor definition so C++ code can
+# conditionally compile CUDA-specific paths (e.g., in OnnxManager.cc).
+if(ONNXRUNTIME_USE_CUDA)
+    add_compile_definitions(ONNXRUNTIME_USE_CUDA=1)
+else()
+    add_compile_definitions(ONNXRUNTIME_USE_CUDA=0)
+endif()

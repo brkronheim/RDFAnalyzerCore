@@ -308,13 +308,34 @@ void OnnxManager::loadModelsFromConfig(
     auto cudaIt = entryKeys.find("useCuda");
     if (cudaIt != entryKeys.end() && cudaIt->second == "true") {
       useCuda = true;
+#if ONNXRUNTIME_USE_CUDA
       OrtCUDAProviderOptions cuda_options{};
       // Default device_id is 0; configure with cudaDeviceId to override
       auto deviceIt = entryKeys.find("cudaDeviceId");
       if (deviceIt != entryKeys.end()) {
-        cuda_options.device_id = std::stoi(deviceIt->second);
+        int deviceId = 0;
+        try {
+          deviceId = std::stoi(deviceIt->second);
+        } catch (const std::exception &e) {
+          throw std::runtime_error("OnnxManager: Invalid cudaDeviceId value '" +
+                                   deviceIt->second + "' for model '" +
+                                   entryKeys.at("name") + "': " + e.what());
+        }
+        if (deviceId < 0) {
+          throw std::runtime_error("OnnxManager: Invalid cudaDeviceId value '" +
+                                   deviceIt->second + "' for model '" +
+                                   entryKeys.at("name") +
+                                   "': device id must be non-negative");
+        }
+        cuda_options.device_id = deviceId;
       }
       session_options.AppendExecutionProvider_CUDA(cuda_options);
+#else
+      throw std::runtime_error(
+          "OnnxManager: model '" + entryKeys.at("name") +
+          "' requested useCuda=true but ONNX Runtime was not built with CUDA "
+          "support. Reconfigure with -DONNXRUNTIME_USE_CUDA=ON.");
+#endif
     }
 
     // Load the ONNX model
