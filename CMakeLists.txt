@@ -17,6 +17,12 @@ project(RDFAnalyzer)
 option(BUILD_TESTS "Build analysis tests" ON)
 option(BUILD_COMBINE "Build CMS Combine package for statistical analysis" OFF)
 option(BUILD_COMBINE_HARVESTER "Build CombineHarvester tools (requires BUILD_COMBINE)" OFF)
+option(USE_CUDA "Enable CUDA GPU support for kinematic fits" OFF)
+
+if(USE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
 enable_testing()
 

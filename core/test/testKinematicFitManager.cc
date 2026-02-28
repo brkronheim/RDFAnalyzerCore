@@ -976,6 +976,71 @@ TEST_F(KinematicFitManagerTest, ApplyFit_NoRunVar_FitAlwaysRuns) {
   }
 }
 
+// ─── GPU configuration tests ─────────────────────────────────────────────────
+
+TEST_F(KinematicFitManagerTest, GetFitConfig_DefaultUseGpuIsFalse) {
+  // All fits loaded from the standard test config should have useGPU = false
+  // because the config file does not specify the useGPU key.
+  for (const auto &name : fitManager->getAllFitNames()) {
+    const auto &cfg = fitManager->getFitConfig(name);
+    EXPECT_FALSE(cfg.useGPU) << "fit '" << name << "' should have useGPU=false by default";
+  }
+}
+
+TEST_F(KinematicFitManagerTest, ParseUseGpu_TrueValue_SetsFlagCorrectly) {
+  // Load cfg/test_gpu_config.txt which has kinematicFitConfig pointing to
+  // cfg/kinematic_fit_gpu.txt — a single fit with useGPU=true.
+  auto gpuCfgMgr = ManagerFactory::createConfigurationManager(
+      "cfg/test_gpu_config.txt");
+  KinematicFitManager gpuMgr(*gpuCfgMgr);
+
+  const auto names = gpuMgr.getAllFitNames();
+  ASSERT_EQ(names.size(), 1u);
+  const auto &cfg = gpuMgr.getFitConfig(names[0]);
+  EXPECT_TRUE(cfg.useGPU);
+}
+
+TEST_F(KinematicFitManagerTest, ParseUseGpu_FalseIsDefaultInStruct) {
+  // The KinFitConfig default must have useGPU = false so that all existing
+  // configs that omit the key continue to use CPU execution.
+  KinFitConfig defaultCfg;
+  EXPECT_FALSE(defaultCfg.useGPU);
+}
+
+TEST_F(KinematicFitManagerTest, ParseUseGpu_InvalidValue_Throws) {
+  // cfg/test_gpu_invalid_config.txt points to a fit config that has
+  // useGPU=yes, which is not a valid boolean value.  Construction must throw.
+  EXPECT_THROW(
+      {
+        auto mgr = ManagerFactory::createConfigurationManager(
+            "cfg/test_gpu_invalid_config.txt");
+        KinematicFitManager km(*mgr);
+      },
+      std::runtime_error);
+}
+
+#ifndef USE_CUDA
+TEST_F(KinematicFitManagerTest, ApplyFit_UseGpuTrue_WithoutCuda_Throws) {
+  // When the build does NOT include CUDA, calling applyFit on a fit with
+  // useGPU=true must throw a clear std::runtime_error.  This allows users to
+  // detect the missing GPU support at analysis-setup time rather than silently
+  // falling back to the CPU.
+  defineParticleColumns();
+
+  auto gpuCfgMgr = ManagerFactory::createConfigurationManager(
+      "cfg/test_gpu_config.txt");
+  KinematicFitManager gpuMgr(*gpuCfgMgr);
+
+  // Wire up the context so applyFit can proceed as far as the GPU check.
+  ManagerContext ctx{*gpuCfgMgr, *dataManager, *systematicManager,
+                     *logger, *skimSink, *metaSink};
+  gpuMgr.setContext(ctx);
+
+  // applyFit must throw because CUDA is not available in this build.
+  EXPECT_THROW(gpuMgr.applyFit("wjFitGPU"), std::runtime_error);
+}
+#endif // !USE_CUDA
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

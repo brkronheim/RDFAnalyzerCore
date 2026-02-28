@@ -8,3 +8,9 @@ target_link_libraries(KinematicFitManager PUBLIC
     ROOT::ROOTVecOps
     ROOT::Core
 )
+
+if(USE_CUDA)
+    target_sources(KinematicFitManager PRIVATE KinematicFitGPU.cu)
+    target_compile_definitions(KinematicFitManager PUBLIC USE_CUDA)
+    target_link_libraries(KinematicFitManager PUBLIC CUDA::cudart)
+endif()

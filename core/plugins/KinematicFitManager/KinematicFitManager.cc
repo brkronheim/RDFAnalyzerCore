@@ -1,4 +1,5 @@
 #include <KinematicFit.h>
+#include <KinematicFitGPU.h>
 #include <KinematicFitManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
@@ -443,79 +444,183 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
     runVarCol = storedRunVar;
   }
 
-  // ── per-event fit lambda ──────────────────────────────────────────────────
-  // Output layout: [chi2, converged, pT_0, eta_0, phi_0, pT_1, eta_1, phi_1, ...]
-  // When runVar is false the fit is skipped and all outputs are -1.
-  auto fitLambda =
-      [cfg, nParticles](ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
-      -> ROOT::VecOps::RVec<Float_t> {
-    if (!runVar) {
-      // Sentinel: chi2 = -1, converged = -1 (→ false), fitted momenta = -1
-      return ROOT::VecOps::RVec<Float_t>(2 + 3 * nParticles, -1.0f);
+  // ── build per-particle sigma arrays (same for every event) ────────────────
+  // These are pre-computed from the config so that both the CPU and GPU
+  // lambdas can capture them without re-reading cfg each event.
+  std::vector<float> sigmas(static_cast<size_t>(nParticles) * 3);
+  for (int i = 0; i < nParticles; ++i) {
+    const auto &p = cfg.particles[i];
+    float sigPt, sigEta, sigPhi;
+    if (p.type == "lepton") {
+      sigPt  = static_cast<float>(cfg.leptonPtResolution);
+      sigEta = static_cast<float>(cfg.leptonEtaResolution);
+      sigPhi = static_cast<float>(cfg.leptonPhiResolution);
+    } else if (p.type == "met") {
+      sigPt  = static_cast<float>(cfg.metPtResolution);
+      sigEta = static_cast<float>(cfg.metEtaResolution);
+      sigPhi = static_cast<float>(cfg.metPhiResolution);
+    } else if (p.type == "recoil") {
+      sigPt  = static_cast<float>(cfg.recoilPtResolution);
+      sigEta = static_cast<float>(cfg.recoilEtaResolution);
+      sigPhi = static_cast<float>(cfg.recoilPhiResolution);
+    } else { // "jet" or unrecognised
+      sigPt  = static_cast<float>(cfg.jetPtResolution);
+      sigEta = static_cast<float>(cfg.jetEtaResolution);
+      sigPhi = static_cast<float>(cfg.jetPhiResolution);
     }
-    KinematicFit fitter;
+    sigmas[static_cast<size_t>(i) * 3 + 0] = sigPt;
+    sigmas[static_cast<size_t>(i) * 3 + 1] = sigEta;
+    sigmas[static_cast<size_t>(i) * 3 + 2] = sigPhi;
+  }
 
-    for (int i = 0; i < nParticles; ++i) {
-      const auto &p     = cfg.particles[i];
-      const double pt   = static_cast<double>(inputs[i * 4 + 0]);
-      const double eta  = static_cast<double>(inputs[i * 4 + 1]);
-      const double phi  = static_cast<double>(inputs[i * 4 + 2]);
-      const double mass = static_cast<double>(inputs[i * 4 + 3]);
+  // ── build flat constraint arrays captured by the GPU lambda ───────────────
+  const int nConstraints = static_cast<int>(cfg.constraints.size());
+  std::vector<int>   conTypes (static_cast<size_t>(nConstraints));
+  std::vector<int>   conIdx1  (static_cast<size_t>(nConstraints));
+  std::vector<int>   conIdx2  (static_cast<size_t>(nConstraints));
+  std::vector<int>   conIdx3  (static_cast<size_t>(nConstraints));
+  std::vector<float> conTarget(static_cast<size_t>(nConstraints));
+  std::vector<float> conSigma (static_cast<size_t>(nConstraints));
+  for (int c = 0; c < nConstraints; ++c) {
+    const auto &con = cfg.constraints[static_cast<size_t>(c)];
+    conTypes [static_cast<size_t>(c)] = (con.type == KinFitConstraintConfig::Type::PT)
+                                            ? 2
+                                            : (con.idx3 >= 0 ? 1 : 0);
+    conIdx1  [static_cast<size_t>(c)] = con.idx1;
+    conIdx2  [static_cast<size_t>(c)] = con.idx2;
+    conIdx3  [static_cast<size_t>(c)] = con.idx3;
+    conTarget[static_cast<size_t>(c)] = static_cast<float>(con.targetValue);
+    conSigma [static_cast<size_t>(c)] = static_cast<float>(con.massSigma);
+  }
 
-      double sigPt, sigEta, sigPhi;
-      if (p.type == "lepton") {
-        sigPt  = cfg.leptonPtResolution;
-        sigEta = cfg.leptonEtaResolution;
-        sigPhi = cfg.leptonPhiResolution;
-      } else if (p.type == "met") {
-        sigPt  = cfg.metPtResolution;
-        sigEta = cfg.metEtaResolution; // very large → eta free
-        sigPhi = cfg.metPhiResolution;
-      } else if (p.type == "recoil") {
-        // Large uncertainties: the recoil is soft/composite, poorly known.
-        // No mass constraint is imposed on this particle; it participates in
-        // the fit only to absorb the χ² from the hadronic activity.
-        sigPt  = cfg.recoilPtResolution;
-        sigEta = cfg.recoilEtaResolution;
-        sigPhi = cfg.recoilPhiResolution;
-      } else { // "jet" or unrecognised
-        sigPt  = cfg.jetPtResolution;
-        sigEta = cfg.jetEtaResolution;
-        sigPhi = cfg.jetPhiResolution;
-      }
-
-      fitter.addParticle({pt, eta, phi, mass, sigPt, sigEta, sigPhi});
-    }
-
-    for (const auto &con : cfg.constraints) {
-      if (con.type == KinFitConstraintConfig::Type::PT) {
-        fitter.addPtConstraint(con.idx1, con.targetValue);
-      } else if (con.idx3 >= 0) {
-        fitter.addThreeBodyMassConstraint(con.idx1, con.idx2, con.idx3,
-                                          con.targetValue, con.massSigma);
-      } else {
-        fitter.addMassConstraint(con.idx1, con.idx2, con.targetValue,
-                                 con.massSigma);
-      }
-    }
-
-    const KinFitResult res = fitter.fit(cfg.maxIterations,
-                                        cfg.convergenceTolerance);
-
-    ROOT::VecOps::RVec<Float_t> out(2 + 3 * nParticles);
-    out[0] = static_cast<Float_t>(res.chi2);
-    out[1] = static_cast<Float_t>(res.converged ? 1.0f : 0.0f);
-    for (int i = 0; i < nParticles; ++i) {
-      out[2 + i * 3 + 0] = static_cast<Float_t>(res.fittedParticles[i].pt);
-      out[2 + i * 3 + 1] = static_cast<Float_t>(res.fittedParticles[i].eta);
-      out[2 + i * 3 + 2] = static_cast<Float_t>(res.fittedParticles[i].phi);
-    }
-    return out;
-  };
-
+  // ── choose CPU or GPU per-event fit lambda ────────────────────────────────
   const std::string resultsCol = fitName + "_results";
-  dataManager_m->Define(resultsCol, fitLambda, {inputsCol, runVarCol},
-                         *systematicManager_m);
+
+#ifdef USE_CUDA
+  if (cfg.useGPU) {
+    // Validate GPU limits before defining the column so the error is reported
+    // at configuration time rather than during the event loop.
+    if (nParticles > kGPUMaxParticles) {
+      throw std::runtime_error(
+          "KinematicFitManager: fit '" + fitName +
+          "' requests useGPU=true but nParticles (" +
+          std::to_string(nParticles) + ") exceeds kGPUMaxParticles (" +
+          std::to_string(kGPUMaxParticles) + ")");
+    }
+    if (nConstraints > kGPUMaxConstraints) {
+      throw std::runtime_error(
+          "KinematicFitManager: fit '" + fitName +
+          "' requests useGPU=true but nConstraints (" +
+          std::to_string(nConstraints) + ") exceeds kGPUMaxConstraints (" +
+          std::to_string(kGPUMaxConstraints) + ")");
+    }
+
+    // GPU lambda: calls kinFitBatchGPU with nEvents=1 per RDataFrame event.
+    // For maximum GPU throughput, users can call kinFitBatchGPU directly
+    // outside of RDataFrame to process large batches in one kernel launch.
+    auto fitLambdaGPU =
+        [nParticles, nConstraints, sigmas, conTypes, conIdx1, conIdx2,
+         conIdx3, conTarget, conSigma, maxIter = cfg.maxIterations,
+         tol = static_cast<float>(cfg.convergenceTolerance)](
+            ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
+        -> ROOT::VecOps::RVec<Float_t> {
+      if (!runVar) {
+        return ROOT::VecOps::RVec<Float_t>(2 + 3 * nParticles, -1.0f);
+      }
+      const int outSize = 2 + nParticles * 3;
+      ROOT::VecOps::RVec<Float_t> out(outSize);
+      kinFitBatchGPU(inputs.data(), sigmas.data(), nParticles,
+                     conTypes.data(), conIdx1.data(), conIdx2.data(),
+                     conIdx3.data(), conTarget.data(), conSigma.data(),
+                     nConstraints, /*nEvents=*/1, maxIter, tol, out.data());
+      return out;
+    };
+
+    dataManager_m->Define(resultsCol, fitLambdaGPU, {inputsCol, runVarCol},
+                           *systematicManager_m);
+  } else
+#else
+  if (cfg.useGPU) {
+    throw std::runtime_error(
+        "KinematicFitManager: fit '" + fitName +
+        "' requests useGPU=true but this build was compiled without CUDA "
+        "support.  Rebuild the project with -DUSE_CUDA=ON.");
+  }
+#endif
+  { // CPU path (also the else-branch of the USE_CUDA block above)
+    // ── per-event fit lambda ────────────────────────────────────────────────
+    // Output layout: [chi2, converged, pT_0, eta_0, phi_0, pT_1, eta_1, phi_1, ...]
+    // When runVar is false the fit is skipped and all outputs are -1.
+    auto fitLambda =
+        [cfg, nParticles](ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
+        -> ROOT::VecOps::RVec<Float_t> {
+      if (!runVar) {
+        // Sentinel: chi2 = -1, converged = -1 (→ false), fitted momenta = -1
+        return ROOT::VecOps::RVec<Float_t>(2 + 3 * nParticles, -1.0f);
+      }
+      KinematicFit fitter;
+
+      for (int i = 0; i < nParticles; ++i) {
+        const auto &p     = cfg.particles[i];
+        const double pt   = static_cast<double>(inputs[i * 4 + 0]);
+        const double eta  = static_cast<double>(inputs[i * 4 + 1]);
+        const double phi  = static_cast<double>(inputs[i * 4 + 2]);
+        const double mass = static_cast<double>(inputs[i * 4 + 3]);
+
+        double sigPt, sigEta, sigPhi;
+        if (p.type == "lepton") {
+          sigPt  = cfg.leptonPtResolution;
+          sigEta = cfg.leptonEtaResolution;
+          sigPhi = cfg.leptonPhiResolution;
+        } else if (p.type == "met") {
+          sigPt  = cfg.metPtResolution;
+          sigEta = cfg.metEtaResolution; // very large → eta free
+          sigPhi = cfg.metPhiResolution;
+        } else if (p.type == "recoil") {
+          // Large uncertainties: the recoil is soft/composite, poorly known.
+          // No mass constraint is imposed on this particle; it participates in
+          // the fit only to absorb the χ² from the hadronic activity.
+          sigPt  = cfg.recoilPtResolution;
+          sigEta = cfg.recoilEtaResolution;
+          sigPhi = cfg.recoilPhiResolution;
+        } else { // "jet" or unrecognised
+          sigPt  = cfg.jetPtResolution;
+          sigEta = cfg.jetEtaResolution;
+          sigPhi = cfg.jetPhiResolution;
+        }
+
+        fitter.addParticle({pt, eta, phi, mass, sigPt, sigEta, sigPhi});
+      }
+
+      for (const auto &con : cfg.constraints) {
+        if (con.type == KinFitConstraintConfig::Type::PT) {
+          fitter.addPtConstraint(con.idx1, con.targetValue);
+        } else if (con.idx3 >= 0) {
+          fitter.addThreeBodyMassConstraint(con.idx1, con.idx2, con.idx3,
+                                            con.targetValue, con.massSigma);
+        } else {
+          fitter.addMassConstraint(con.idx1, con.idx2, con.targetValue,
+                                   con.massSigma);
+        }
+      }
+
+      const KinFitResult res = fitter.fit(cfg.maxIterations,
+                                          cfg.convergenceTolerance);
+
+      ROOT::VecOps::RVec<Float_t> out(2 + 3 * nParticles);
+      out[0] = static_cast<Float_t>(res.chi2);
+      out[1] = static_cast<Float_t>(res.converged ? 1.0f : 0.0f);
+      for (int i = 0; i < nParticles; ++i) {
+        out[2 + i * 3 + 0] = static_cast<Float_t>(res.fittedParticles[i].pt);
+        out[2 + i * 3 + 1] = static_cast<Float_t>(res.fittedParticles[i].eta);
+        out[2 + i * 3 + 2] = static_cast<Float_t>(res.fittedParticles[i].phi);
+      }
+      return out;
+    };
+
+    dataManager_m->Define(resultsCol, fitLambda, {inputsCol, runVarCol},
+                           *systematicManager_m);
+  }
 
   // ── slice individual output columns ──────────────────────────────────────
   dataManager_m->Define(fitName + "_chi2",
@@ -677,6 +782,26 @@ void KinematicFitManager::registerFits(
     cfg.recoilPtResolution  = getOpt("recoilPtResolution",  cfg.recoilPtResolution);
     cfg.recoilEtaResolution = getOpt("recoilEtaResolution", cfg.recoilEtaResolution);
     cfg.recoilPhiResolution = getOpt("recoilPhiResolution", cfg.recoilPhiResolution);
+
+    // ── optional useGPU flag ───────────────────────────────────────────────
+    // Accepted values: "true" / "false" (case-insensitive).
+    // Default is false (CPU execution) so existing configs are unaffected.
+    {
+      auto it = entry.find("useGPU");
+      if (it != entry.end()) {
+        const std::string &val = it->second;
+        if (val == "true" || val == "1") {
+          cfg.useGPU = true;
+        } else if (val == "false" || val == "0") {
+          cfg.useGPU = false;
+        } else {
+          throw std::runtime_error(
+              "KinematicFitManager: invalid value '" + val +
+              "' for key 'useGPU' in fit '" + entry.at("name") +
+              "' – expected 'true' or 'false'");
+        }
+      }
+    }
 
     objects_m.emplace(entry.at("name"), std::move(cfg));
 
