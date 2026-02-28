@@ -257,6 +257,15 @@ TEST_F(NDHistogramManagerConfigTest, BoostBackendFunctionallyEquivalentToRoot) {
   // (i.e. they are functionally equivalent from the user's perspective).
   dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
   dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("w2", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("channel", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
 
   configManager->set("histogramConfig", "cfg/test_histograms.txt");
 
@@ -338,6 +347,15 @@ TEST_F(NDHistogramManagerConfigTest, RootBackendAutoSelectsDense) {
   // We verify this indirectly: the histogram must still be bookable and produce the expected count.
   dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
   dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("w2", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("channel", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
 
   configManager->set("histogramConfig", "cfg/test_histograms.txt");
   histogramManager->setupFromConfigFile();
