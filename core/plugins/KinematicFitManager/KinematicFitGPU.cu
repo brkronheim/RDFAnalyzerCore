@@ -392,6 +392,16 @@ CudaKinFitContext::CudaKinFitContext(
     const int   *conIdx2,  const int   *conIdx3,
     const float *conTarget, const float *conSigma, int nCon)
     : nParticles(nPart), nConstraints(nCon) {
+  if (nPart <= 0 || nPart > kGPUMaxParticles) {
+    throw std::runtime_error(
+        "CudaKinFitContext: nParticles (" + std::to_string(nPart) +
+        ") must be in [1, " + std::to_string(kGPUMaxParticles) + "]");
+  }
+  if (nCon < 0 || nCon > kGPUMaxConstraints) {
+    throw std::runtime_error(
+        "CudaKinFitContext: nConstraints (" + std::to_string(nCon) +
+        ") must be in [0, " + std::to_string(kGPUMaxConstraints) + "]");
+  }
   try {
     checkCuda(cudaMalloc(&d_sigmas, static_cast<size_t>(nPart) * 3 * sizeof(float)),
               "CudaKinFitContext: malloc sigmas");
@@ -468,8 +478,7 @@ void kinFitRunGPU(const CudaKinFitContext &ctx, const float *inputs,
       gpuDynSlot.d_outputs,
       nParticles, nConstraints, nEvents, maxIter, tolerance);
 
-  checkCuda(cudaGetLastError(),      "kinFitRunGPU: kernel launch");
-  checkCuda(cudaDeviceSynchronize(), "kinFitRunGPU: sync");
+  checkCuda(cudaGetLastError(), "kinFitRunGPU: kernel launch");
 
   checkCuda(cudaMemcpy(outputs, gpuDynSlot.d_outputs, out_bytes, cudaMemcpyDeviceToHost),
             "kinFitRunGPU: D2H outputs");

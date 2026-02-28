@@ -7,6 +7,7 @@
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <memory>
 #include <sstream>
@@ -475,25 +476,37 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
     sigmas[static_cast<size_t>(i) * 3 + 2] = sigPhi;
   }
 
-  // ── build flat constraint arrays captured by the GPU lambda ───────────────
+  // ── build flat constraint arrays — only needed for the GPU path ─────────────
+#ifdef USE_CUDA
   const int nConstraints = static_cast<int>(cfg.constraints.size());
-  std::vector<int>   conTypes (static_cast<size_t>(nConstraints));
-  std::vector<int>   conIdx1  (static_cast<size_t>(nConstraints));
-  std::vector<int>   conIdx2  (static_cast<size_t>(nConstraints));
-  std::vector<int>   conIdx3  (static_cast<size_t>(nConstraints));
-  std::vector<float> conTarget(static_cast<size_t>(nConstraints));
-  std::vector<float> conSigma (static_cast<size_t>(nConstraints));
-  for (int c = 0; c < nConstraints; ++c) {
-    const auto &con = cfg.constraints[static_cast<size_t>(c)];
-    conTypes [static_cast<size_t>(c)] = (con.type == KinFitConstraintConfig::Type::PT)
-                                            ? 2
-                                            : (con.idx3 >= 0 ? 1 : 0);
-    conIdx1  [static_cast<size_t>(c)] = con.idx1;
-    conIdx2  [static_cast<size_t>(c)] = con.idx2;
-    conIdx3  [static_cast<size_t>(c)] = con.idx3;
-    conTarget[static_cast<size_t>(c)] = static_cast<float>(con.targetValue);
-    conSigma [static_cast<size_t>(c)] = static_cast<float>(con.massSigma);
+  std::vector<int>   conTypes;
+  std::vector<int>   conIdx1;
+  std::vector<int>   conIdx2;
+  std::vector<int>   conIdx3;
+  std::vector<float> conTarget;
+  std::vector<float> conSigma;
+  if (cfg.useGPU) {
+    conTypes .resize(static_cast<size_t>(nConstraints));
+    conIdx1  .resize(static_cast<size_t>(nConstraints));
+    conIdx2  .resize(static_cast<size_t>(nConstraints));
+    conIdx3  .resize(static_cast<size_t>(nConstraints));
+    conTarget.resize(static_cast<size_t>(nConstraints));
+    conSigma .resize(static_cast<size_t>(nConstraints));
+    for (int c = 0; c < nConstraints; ++c) {
+      const auto &con = cfg.constraints[static_cast<size_t>(c)];
+      conTypes [static_cast<size_t>(c)] = (con.type == KinFitConstraintConfig::Type::PT)
+                                              ? 2
+                                              : (con.idx3 >= 0 ? 1 : 0);
+      conIdx1  [static_cast<size_t>(c)] = con.idx1;
+      conIdx2  [static_cast<size_t>(c)] = con.idx2;
+      conIdx3  [static_cast<size_t>(c)] = con.idx3;
+      conTarget[static_cast<size_t>(c)] = static_cast<float>(con.targetValue);
+      conSigma [static_cast<size_t>(c)] = static_cast<float>(con.massSigma);
+    }
   }
+#else
+  const int nConstraints = static_cast<int>(cfg.constraints.size());
+#endif
 
   // ── choose CPU or GPU per-event fit lambda ────────────────────────────────
   const std::string resultsCol = fitName + "_results";
