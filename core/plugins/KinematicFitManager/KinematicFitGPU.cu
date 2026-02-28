@@ -33,6 +33,56 @@ constexpr float kMinVariance_g    = 1e-12f;
 constexpr float kSingularityEps_g = 1e-30f;
 constexpr float kMinPt_g          = 1e-4f;
 
+// ── Thread-local per-slot dynamic device buffers ────────────────────────────
+//
+// Each RDataFrame slot runs on its own OS thread.  The first call from a slot
+// allocates input/output device buffers; subsequent calls reuse them.  Buffers
+// grow when a larger event batch is requested and are freed when the thread
+// exits, so no per-event cudaMalloc/cudaFree overhead occurs after warm-up.
+struct GpuDynSlot {
+  float *d_inputs  = nullptr;
+  float *d_outputs = nullptr;
+  size_t cap_in    = 0; // allocated bytes for d_inputs
+  size_t cap_out   = 0; // allocated bytes for d_outputs
+
+  /// Ensure device buffers are large enough; (re-)allocates only when needed.
+  void ensure(size_t need_in, size_t need_out) {
+    if (need_in > cap_in) {
+      cudaFree(d_inputs);
+      d_inputs = nullptr;
+      if (cudaMalloc(&d_inputs, need_in) == cudaSuccess)
+        cap_in = need_in;
+      else
+        cap_in = 0;
+    }
+    if (need_out > cap_out) {
+      cudaFree(d_outputs);
+      d_outputs = nullptr;
+      if (cudaMalloc(&d_outputs, need_out) == cudaSuccess)
+        cap_out = need_out;
+      else
+        cap_out = 0;
+    }
+  }
+
+  ~GpuDynSlot() {
+    // cudaFree is a no-op when the CUDA driver has already been unloaded.
+    cudaFree(d_inputs);
+    cudaFree(d_outputs);
+  }
+};
+
+thread_local GpuDynSlot gpuDynSlot;
+
+// ── CUDA error-checking helper ──────────────────────────────────────────────
+
+void checkCuda(cudaError_t err, const char *location) {
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("CUDA error at ") + location + ": " +
+                             cudaGetErrorString(err));
+  }
+}
+
 } // anonymous namespace
 
 // ── device helper: compute (E, px, py, pz) from (pT, eta, phi, mass) ─────────
@@ -55,6 +105,10 @@ __device__ static void d_fourMomentum(float pt, float eta, float phi, float mass
  * Each thread independently runs the iterative Lagrange-multiplier fit for
  * one event.  Fixed-size arrays (sized by the compile-time limits) hold the
  * fit state so no dynamic device memory is needed.
+ *
+ * chi2 is always recomputed from the final particle state after the iteration
+ * loop, regardless of why the loop ended (convergence, maximum iterations, or
+ * a singular matrix).  This matches the CPU implementation.
  */
 __global__ static void kinFitKernel(
     const float *__restrict__ inputs,    ///< [nEvents * nParticles * 4]
@@ -215,6 +269,8 @@ __global__ static void kinFitKernel(
     }
 
     // ── solve W * lam = -f ───────────────────────────────────────────────────
+    // On singularity we break immediately; chi2 is computed fresh from the
+    // current particle state after the loop, matching the CPU behaviour.
     if (nConstraints == 1) {
       if (fabsf(W[0]) < kSingularityEps_g) break;
       lam[0] = -f[0] / W[0];
@@ -284,7 +340,7 @@ __global__ static void kinFitKernel(
       phi[i] += dphi;
     }
 
-    // ── compute chi2 ─────────────────────────────────────────────────────────
+    // ── compute chi2 from current state ─────────────────────────────────────
     float chi2 = 0.f;
     for (int i = 0; i < nParticles; ++i) {
       const float dpt  = pt [i] - origPt [i];
@@ -304,8 +360,22 @@ __global__ static void kinFitKernel(
   } // for iter
 
   // ── write outputs ─────────────────────────────────────────────────────────
+  // Always recompute chi2 from the final particle state (matches CPU behaviour
+  // where chi2 is computed after the loop regardless of exit reason).  This
+  // also handles the singularity-break case correctly: prevChi2 would be 1e30
+  // if singularity occurred on the first iteration with no particle updates.
+  float finalChi2 = 0.f;
+  for (int i = 0; i < nParticles; ++i) {
+    const float dpt  = pt [i] - origPt [i];
+    const float deta = eta[i] - origEta[i];
+    const float dphi = phi[i] - origPhi[i];
+    finalChi2 += dpt  * dpt  / var[3*i+0];
+    finalChi2 += deta * deta / var[3*i+1];
+    finalChi2 += dphi * dphi / var[3*i+2];
+  }
+
   float *evOut = outputs + ev * outStride;
-  evOut[0] = prevChi2;
+  evOut[0] = finalChi2;
   evOut[1] = converged ? 1.f : 0.f;
   for (int i = 0; i < nParticles; ++i) {
     evOut[2 + i * 3 + 0] = pt [i];
@@ -314,21 +384,98 @@ __global__ static void kinFitKernel(
   }
 }
 
-// ── host batch function ───────────────────────────────────────────────────────
+// ── CudaKinFitContext ─────────────────────────────────────────────────────────
 
-/// @cond INTERNAL
-namespace {
+CudaKinFitContext::CudaKinFitContext(
+    const float *sigmas, int nPart,
+    const int   *conTypes, const int   *conIdx1,
+    const int   *conIdx2,  const int   *conIdx3,
+    const float *conTarget, const float *conSigma, int nCon)
+    : nParticles(nPart), nConstraints(nCon) {
+  try {
+    checkCuda(cudaMalloc(&d_sigmas, static_cast<size_t>(nPart) * 3 * sizeof(float)),
+              "CudaKinFitContext: malloc sigmas");
+    if (nCon > 0) {
+      checkCuda(cudaMalloc(&d_conTypes,  static_cast<size_t>(nCon) * sizeof(int)),   "malloc conTypes");
+      checkCuda(cudaMalloc(&d_conIdx1,   static_cast<size_t>(nCon) * sizeof(int)),   "malloc conIdx1");
+      checkCuda(cudaMalloc(&d_conIdx2,   static_cast<size_t>(nCon) * sizeof(int)),   "malloc conIdx2");
+      checkCuda(cudaMalloc(&d_conIdx3,   static_cast<size_t>(nCon) * sizeof(int)),   "malloc conIdx3");
+      checkCuda(cudaMalloc(&d_conTarget, static_cast<size_t>(nCon) * sizeof(float)), "malloc conTarget");
+      checkCuda(cudaMalloc(&d_conSigma,  static_cast<size_t>(nCon) * sizeof(float)), "malloc conSigma");
+    }
 
-/// Throw a std::runtime_error with CUDA error info if @p err is not cudaSuccess.
-void checkCuda(cudaError_t err, const char *location) {
-  if (err != cudaSuccess) {
-    throw std::runtime_error(std::string("CUDA error at ") + location + ": " +
-                             cudaGetErrorString(err));
+    checkCuda(cudaMemcpy(d_sigmas, sigmas,
+                         static_cast<size_t>(nPart) * 3 * sizeof(float),
+                         cudaMemcpyHostToDevice), "H2D sigmas");
+    if (nCon > 0) {
+      checkCuda(cudaMemcpy(d_conTypes,  conTypes,  static_cast<size_t>(nCon) * sizeof(int),   cudaMemcpyHostToDevice), "H2D conTypes");
+      checkCuda(cudaMemcpy(d_conIdx1,   conIdx1,   static_cast<size_t>(nCon) * sizeof(int),   cudaMemcpyHostToDevice), "H2D conIdx1");
+      checkCuda(cudaMemcpy(d_conIdx2,   conIdx2,   static_cast<size_t>(nCon) * sizeof(int),   cudaMemcpyHostToDevice), "H2D conIdx2");
+      checkCuda(cudaMemcpy(d_conIdx3,   conIdx3,   static_cast<size_t>(nCon) * sizeof(int),   cudaMemcpyHostToDevice), "H2D conIdx3");
+      checkCuda(cudaMemcpy(d_conTarget, conTarget, static_cast<size_t>(nCon) * sizeof(float), cudaMemcpyHostToDevice), "H2D conTarget");
+      checkCuda(cudaMemcpy(d_conSigma,  conSigma,  static_cast<size_t>(nCon) * sizeof(float), cudaMemcpyHostToDevice), "H2D conSigma");
+    }
+  } catch (...) {
+    cudaFree(d_sigmas);   d_sigmas   = nullptr;
+    cudaFree(d_conTypes); d_conTypes = nullptr;
+    cudaFree(d_conIdx1);  d_conIdx1  = nullptr;
+    cudaFree(d_conIdx2);  d_conIdx2  = nullptr;
+    cudaFree(d_conIdx3);  d_conIdx3  = nullptr;
+    cudaFree(d_conTarget); d_conTarget = nullptr;
+    cudaFree(d_conSigma);  d_conSigma  = nullptr;
+    throw;
   }
 }
 
-} // anonymous namespace
-/// @endcond
+CudaKinFitContext::~CudaKinFitContext() {
+  cudaFree(d_sigmas);
+  cudaFree(d_conTypes);
+  cudaFree(d_conIdx1);
+  cudaFree(d_conIdx2);
+  cudaFree(d_conIdx3);
+  cudaFree(d_conTarget);
+  cudaFree(d_conSigma);
+}
+
+// ── kinFitRunGPU ──────────────────────────────────────────────────────────────
+
+void kinFitRunGPU(const CudaKinFitContext &ctx, const float *inputs,
+                  int nEvents, int maxIter, float tolerance, float *outputs) {
+  if (nEvents <= 0) return;
+
+  const int    nParticles   = ctx.nParticles;
+  const int    nConstraints = ctx.nConstraints;
+  const int    outStride    = 2 + nParticles * 3;
+  const size_t in_bytes     = static_cast<size_t>(nEvents) * nParticles * 4 * sizeof(float);
+  const size_t out_bytes    = static_cast<size_t>(nEvents) * outStride * sizeof(float);
+
+  // Ensure thread-local dynamic buffers are large enough.
+  gpuDynSlot.ensure(in_bytes, out_bytes);
+  if (!gpuDynSlot.d_inputs || !gpuDynSlot.d_outputs) {
+    throw std::runtime_error("kinFitRunGPU: failed to allocate device I/O buffers");
+  }
+
+  checkCuda(cudaMemcpy(gpuDynSlot.d_inputs, inputs, in_bytes, cudaMemcpyHostToDevice),
+            "kinFitRunGPU: H2D inputs");
+
+  constexpr int kBlockSize = 256;
+  const int gridSize = (nEvents + kBlockSize - 1) / kBlockSize;
+
+  kinFitKernel<<<gridSize, kBlockSize>>>(
+      gpuDynSlot.d_inputs, ctx.d_sigmas,
+      ctx.d_conTypes, ctx.d_conIdx1, ctx.d_conIdx2, ctx.d_conIdx3,
+      ctx.d_conTarget, ctx.d_conSigma,
+      gpuDynSlot.d_outputs,
+      nParticles, nConstraints, nEvents, maxIter, tolerance);
+
+  checkCuda(cudaGetLastError(),      "kinFitRunGPU: kernel launch");
+  checkCuda(cudaDeviceSynchronize(), "kinFitRunGPU: sync");
+
+  checkCuda(cudaMemcpy(outputs, gpuDynSlot.d_outputs, out_bytes, cudaMemcpyDeviceToHost),
+            "kinFitRunGPU: D2H outputs");
+}
+
+// ── kinFitBatchGPU (standalone / large-batch) ────────────────────────────────
 
 void kinFitBatchGPU(const float *inputs, const float *sigmas, int nParticles,
                     const int *conTypes, const int *conIdx1, const int *conIdx2,
@@ -348,67 +495,9 @@ void kinFitBatchGPU(const float *inputs, const float *sigmas, int nParticles,
   }
   if (nEvents <= 0) return;
 
-  // ── device memory allocation ─────────────────────────────────────────────
-  float *d_inputs   = nullptr;
-  float *d_sigmas   = nullptr;
-  float *d_outputs  = nullptr;
-  int   *d_conTypes = nullptr;
-  int   *d_conIdx1  = nullptr;
-  int   *d_conIdx2  = nullptr;
-  int   *d_conIdx3  = nullptr;
-  float *d_conTarget = nullptr;
-  float *d_conSigma  = nullptr;
-
-  const int outStride = 2 + nParticles * 3;
-
-  checkCuda(cudaMalloc(&d_inputs,    static_cast<size_t>(nEvents) * nParticles * 4 * sizeof(float)),    "cudaMalloc inputs");
-  checkCuda(cudaMalloc(&d_sigmas,    static_cast<size_t>(nParticles) * 3 * sizeof(float)),               "cudaMalloc sigmas");
-  checkCuda(cudaMalloc(&d_outputs,   static_cast<size_t>(nEvents) * outStride * sizeof(float)),           "cudaMalloc outputs");
-  checkCuda(cudaMalloc(&d_conTypes,  static_cast<size_t>(nConstraints) * sizeof(int)),                    "cudaMalloc conTypes");
-  checkCuda(cudaMalloc(&d_conIdx1,   static_cast<size_t>(nConstraints) * sizeof(int)),                    "cudaMalloc conIdx1");
-  checkCuda(cudaMalloc(&d_conIdx2,   static_cast<size_t>(nConstraints) * sizeof(int)),                    "cudaMalloc conIdx2");
-  checkCuda(cudaMalloc(&d_conIdx3,   static_cast<size_t>(nConstraints) * sizeof(int)),                    "cudaMalloc conIdx3");
-  checkCuda(cudaMalloc(&d_conTarget, static_cast<size_t>(nConstraints) * sizeof(float)),                  "cudaMalloc conTarget");
-  checkCuda(cudaMalloc(&d_conSigma,  static_cast<size_t>(nConstraints) * sizeof(float)),                  "cudaMalloc conSigma");
-
-  // ── copy data to device ───────────────────────────────────────────────────
-  checkCuda(cudaMemcpy(d_inputs,    inputs,    static_cast<size_t>(nEvents) * nParticles * 4 * sizeof(float),    cudaMemcpyHostToDevice), "H2D inputs");
-  checkCuda(cudaMemcpy(d_sigmas,    sigmas,    static_cast<size_t>(nParticles) * 3 * sizeof(float),               cudaMemcpyHostToDevice), "H2D sigmas");
-  checkCuda(cudaMemcpy(d_conTypes,  conTypes,  static_cast<size_t>(nConstraints) * sizeof(int),                   cudaMemcpyHostToDevice), "H2D conTypes");
-  checkCuda(cudaMemcpy(d_conIdx1,   conIdx1,   static_cast<size_t>(nConstraints) * sizeof(int),                   cudaMemcpyHostToDevice), "H2D conIdx1");
-  checkCuda(cudaMemcpy(d_conIdx2,   conIdx2,   static_cast<size_t>(nConstraints) * sizeof(int),                   cudaMemcpyHostToDevice), "H2D conIdx2");
-  checkCuda(cudaMemcpy(d_conIdx3,   conIdx3,   static_cast<size_t>(nConstraints) * sizeof(int),                   cudaMemcpyHostToDevice), "H2D conIdx3");
-  checkCuda(cudaMemcpy(d_conTarget, conTarget, static_cast<size_t>(nConstraints) * sizeof(float),                 cudaMemcpyHostToDevice), "H2D conTarget");
-  checkCuda(cudaMemcpy(d_conSigma,  conSigma,  static_cast<size_t>(nConstraints) * sizeof(float),                 cudaMemcpyHostToDevice), "H2D conSigma");
-
-  // ── launch kernel ─────────────────────────────────────────────────────────
-  constexpr int kBlockSize = 256;
-  const int gridSize = (nEvents + kBlockSize - 1) / kBlockSize;
-
-  kinFitKernel<<<gridSize, kBlockSize>>>(
-      d_inputs, d_sigmas,
-      d_conTypes, d_conIdx1, d_conIdx2, d_conIdx3,
-      d_conTarget, d_conSigma,
-      d_outputs,
-      nParticles, nConstraints,
-      nEvents, maxIter, tolerance);
-
-  checkCuda(cudaGetLastError(),    "kernel launch");
-  checkCuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
-
-  // ── copy results back to host ─────────────────────────────────────────────
-  checkCuda(cudaMemcpy(outputs, d_outputs,
-                       static_cast<size_t>(nEvents) * outStride * sizeof(float),
-                       cudaMemcpyDeviceToHost), "D2H outputs");
-
-  // ── free device memory ────────────────────────────────────────────────────
-  cudaFree(d_inputs);
-  cudaFree(d_sigmas);
-  cudaFree(d_outputs);
-  cudaFree(d_conTypes);
-  cudaFree(d_conIdx1);
-  cudaFree(d_conIdx2);
-  cudaFree(d_conIdx3);
-  cudaFree(d_conTarget);
-  cudaFree(d_conSigma);
+  // Build a context (uploads static data) then run; context is freed on scope exit.
+  CudaKinFitContext ctx(sigmas, nParticles, conTypes, conIdx1, conIdx2, conIdx3,
+                        conTarget, conSigma, nConstraints);
+  kinFitRunGPU(ctx, inputs, nEvents, maxIter, tolerance, outputs);
 }
+

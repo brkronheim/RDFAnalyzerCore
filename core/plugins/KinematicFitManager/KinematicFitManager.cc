@@ -6,7 +6,9 @@
 #include <api/ISystematicManager.h>
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
+#include <algorithm>
 #include <cmath>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -445,8 +447,8 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
   }
 
   // ── build per-particle sigma arrays (same for every event) ────────────────
-  // These are pre-computed from the config so that both the CPU and GPU
-  // lambdas can capture them without re-reading cfg each event.
+  // Pre-computed once here and captured by both the CPU and GPU lambdas,
+  // eliminating the per-event particle-type dispatch.
   std::vector<float> sigmas(static_cast<size_t>(nParticles) * 3);
   for (int i = 0; i < nParticles; ++i) {
     const auto &p = cfg.particles[i];
@@ -515,12 +517,19 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
           std::to_string(kGPUMaxConstraints) + ")");
     }
 
-    // GPU lambda: calls kinFitBatchGPU with nEvents=1 per RDataFrame event.
-    // For maximum GPU throughput, users can call kinFitBatchGPU directly
-    // outside of RDataFrame to process large batches in one kernel launch.
+    // Upload static data (resolutions and constraints) to the GPU once.
+    // The context is shared across all events via shared_ptr, so device
+    // memory for static data is allocated only once per fit definition.
+    // Per-event input/output device buffers are managed by kinFitRunGPU()
+    // using thread-local storage that grows on demand and is never freed
+    // until thread exit — no per-event cudaMalloc/cudaFree overhead.
+    auto ctx = std::make_shared<CudaKinFitContext>(
+        sigmas.data(), nParticles,
+        conTypes.data(), conIdx1.data(), conIdx2.data(), conIdx3.data(),
+        conTarget.data(), conSigma.data(), nConstraints);
+
     auto fitLambdaGPU =
-        [nParticles, nConstraints, sigmas, conTypes, conIdx1, conIdx2,
-         conIdx3, conTarget, conSigma, maxIter = cfg.maxIterations,
+        [ctx, nParticles, maxIter = cfg.maxIterations,
          tol = static_cast<float>(cfg.convergenceTolerance)](
             ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
         -> ROOT::VecOps::RVec<Float_t> {
@@ -529,10 +538,7 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
       }
       const int outSize = 2 + nParticles * 3;
       ROOT::VecOps::RVec<Float_t> out(outSize);
-      kinFitBatchGPU(inputs.data(), sigmas.data(), nParticles,
-                     conTypes.data(), conIdx1.data(), conIdx2.data(),
-                     conIdx3.data(), conTarget.data(), conSigma.data(),
-                     nConstraints, /*nEvents=*/1, maxIter, tol, out.data());
+      kinFitRunGPU(*ctx, inputs.data(), /*nEvents=*/1, maxIter, tol, out.data());
       return out;
     };
 
@@ -551,8 +557,9 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
     // ── per-event fit lambda ────────────────────────────────────────────────
     // Output layout: [chi2, converged, pT_0, eta_0, phi_0, pT_1, eta_1, phi_1, ...]
     // When runVar is false the fit is skipped and all outputs are -1.
+    // The precomputed sigmas vector is captured to avoid re-reading cfg per event.
     auto fitLambda =
-        [cfg, nParticles](ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
+        [cfg, nParticles, sigmas](ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
         -> ROOT::VecOps::RVec<Float_t> {
       if (!runVar) {
         // Sentinel: chi2 = -1, converged = -1 (→ false), fitted momenta = -1
@@ -561,34 +568,13 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
       KinematicFit fitter;
 
       for (int i = 0; i < nParticles; ++i) {
-        const auto &p     = cfg.particles[i];
         const double pt   = static_cast<double>(inputs[i * 4 + 0]);
         const double eta  = static_cast<double>(inputs[i * 4 + 1]);
         const double phi  = static_cast<double>(inputs[i * 4 + 2]);
         const double mass = static_cast<double>(inputs[i * 4 + 3]);
-
-        double sigPt, sigEta, sigPhi;
-        if (p.type == "lepton") {
-          sigPt  = cfg.leptonPtResolution;
-          sigEta = cfg.leptonEtaResolution;
-          sigPhi = cfg.leptonPhiResolution;
-        } else if (p.type == "met") {
-          sigPt  = cfg.metPtResolution;
-          sigEta = cfg.metEtaResolution; // very large → eta free
-          sigPhi = cfg.metPhiResolution;
-        } else if (p.type == "recoil") {
-          // Large uncertainties: the recoil is soft/composite, poorly known.
-          // No mass constraint is imposed on this particle; it participates in
-          // the fit only to absorb the χ² from the hadronic activity.
-          sigPt  = cfg.recoilPtResolution;
-          sigEta = cfg.recoilEtaResolution;
-          sigPhi = cfg.recoilPhiResolution;
-        } else { // "jet" or unrecognised
-          sigPt  = cfg.jetPtResolution;
-          sigEta = cfg.jetEtaResolution;
-          sigPhi = cfg.jetPhiResolution;
-        }
-
+        const double sigPt  = static_cast<double>(sigmas[static_cast<size_t>(i) * 3 + 0]);
+        const double sigEta = static_cast<double>(sigmas[static_cast<size_t>(i) * 3 + 1]);
+        const double sigPhi = static_cast<double>(sigmas[static_cast<size_t>(i) * 3 + 2]);
         fitter.addParticle({pt, eta, phi, mass, sigPt, sigEta, sigPhi});
       }
 
@@ -784,21 +770,24 @@ void KinematicFitManager::registerFits(
     cfg.recoilPhiResolution = getOpt("recoilPhiResolution", cfg.recoilPhiResolution);
 
     // ── optional useGPU flag ───────────────────────────────────────────────
-    // Accepted values: "true" / "false" (case-insensitive).
+    // Accepted values: "true" / "false" / "1" / "0" (case-insensitive).
     // Default is false (CPU execution) so existing configs are unaffected.
     {
       auto it = entry.find("useGPU");
       if (it != entry.end()) {
-        const std::string &val = it->second;
+        std::string val = it->second;
+        // Normalize to lowercase for case-insensitive comparison.
+        std::transform(val.begin(), val.end(), val.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
         if (val == "true" || val == "1") {
           cfg.useGPU = true;
         } else if (val == "false" || val == "0") {
           cfg.useGPU = false;
         } else {
           throw std::runtime_error(
-              "KinematicFitManager: invalid value '" + val +
+              "KinematicFitManager: invalid value '" + it->second +
               "' for key 'useGPU' in fit '" + entry.at("name") +
-              "' – expected 'true' or 'false'");
+              "' – expected 'true', 'false', '1', or '0'");
         }
       }
     }

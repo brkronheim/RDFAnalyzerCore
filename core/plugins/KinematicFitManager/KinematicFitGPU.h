@@ -75,11 +75,75 @@ static constexpr int kGPUMaxConstraints =  8;
 #ifdef USE_CUDA
 
 /**
- * @brief Batch kinematic fit on the GPU.
+ * @brief Persistent GPU context for a kinematic fit configuration.
  *
- * Launches a CUDA kernel that processes @p nEvents independent fits in
- * parallel.  All arrays are host (CPU) pointers; the function handles GPU
- * memory allocation, data transfer, kernel execution, and deallocation.
+ * Holds device-side copies of the per-fit static data (per-particle
+ * resolutions and constraint arrays) that are identical for every event.
+ * Creating one context per fit instance and sharing it across all event
+ * evaluations avoids repeated device memory allocations and H2D transfers
+ * for data that never changes between events.
+ *
+ * Thread-safety: the device buffers are read-only after construction and
+ * may be accessed concurrently from multiple CPU threads (RDataFrame slots).
+ * Per-slot dynamic device buffers for the mutable per-event input/output data
+ * are managed internally by kinFitRunGPU() via thread-local storage.
+ *
+ * Construct one context per fit when the analysis is configured (e.g. in
+ * applyFit()), then capture it by shared_ptr in the per-event lambda.
+ */
+class CudaKinFitContext {
+public:
+  float *d_sigmas    = nullptr; ///< Device: [nParticles * 3] (sigPt, sigEta, sigPhi)
+  int   *d_conTypes  = nullptr; ///< Device: [nConstraints] constraint types
+  int   *d_conIdx1   = nullptr; ///< Device: [nConstraints] first particle index
+  int   *d_conIdx2   = nullptr; ///< Device: [nConstraints] second particle index
+  int   *d_conIdx3   = nullptr; ///< Device: [nConstraints] third particle index (-1 if N/A)
+  float *d_conTarget = nullptr; ///< Device: [nConstraints] target mass/pT [GeV]
+  float *d_conSigma  = nullptr; ///< Device: [nConstraints] resonance widths
+  int   nParticles   = 0;
+  int   nConstraints = 0;
+
+  CudaKinFitContext(const float *sigmas, int nPart,
+                    const int   *conTypes, const int   *conIdx1,
+                    const int   *conIdx2,  const int   *conIdx3,
+                    const float *conTarget, const float *conSigma, int nCon);
+  ~CudaKinFitContext();
+
+  CudaKinFitContext(const CudaKinFitContext &) = delete;
+  CudaKinFitContext &operator=(const CudaKinFitContext &) = delete;
+};
+
+/**
+ * @brief Run a batch of kinematic fits using a pre-allocated GPU context.
+ *
+ * Unlike kinFitBatchGPU(), this function reuses the static device buffers
+ * held by @p ctx (resolutions and constraints — constant across events) and
+ * internally maintains thread-local device buffers for the per-event
+ * input/output data.  Thread-local buffers are grown on demand and reused
+ * across calls within the same thread, so successive per-event calls avoid
+ * repeated cudaMalloc / cudaFree overhead entirely.
+ *
+ * Intended use: create a CudaKinFitContext once when the fit is configured,
+ * capture it by shared_ptr in the RDataFrame per-event lambda, and call
+ * kinFitRunGPU() with nEvents=1 each invocation.
+ *
+ * @param ctx       Persistent fit context (static device data).
+ * @param inputs    Host array [nEvents * nParticles * 4].
+ * @param nEvents   Number of events to process.
+ * @param maxIter   Maximum number of linearisation iterations.
+ * @param tolerance Convergence criterion on |Δχ²|.
+ * @param outputs   Host array [nEvents * (2 + nParticles*3)] — written here.
+ */
+void kinFitRunGPU(const CudaKinFitContext &ctx, const float *inputs,
+                  int nEvents, int maxIter, float tolerance, float *outputs);
+
+/**
+ * @brief Batch kinematic fit on the GPU (standalone, allocates per call).
+ *
+ * Allocates and frees all device memory on every call.  Suitable for
+ * standalone or large-batch usage where allocation cost is amortized over
+ * many events per call.  For RDataFrame integration (nEvents=1 per call)
+ * prefer kinFitRunGPU() with a persistent CudaKinFitContext.
  *
  * @param inputs     Host array [nEvents * nParticles * 4] — see layout above.
  * @param sigmas     Host array [nParticles * 3] — per-particle resolutions.
@@ -94,7 +158,7 @@ static constexpr int kGPUMaxConstraints =  8;
  * @param nEvents    Number of events to process in this batch.
  * @param maxIter    Maximum number of linearisation iterations per fit.
  * @param tolerance  Convergence criterion on |Δχ²|.
- * @param outputs    Host array [nEvents * (2 + nParticles*3)] — fit results (written by this function).
+ * @param outputs    Host array [nEvents * (2 + nParticles*3)] — fit results.
  */
 void kinFitBatchGPU(const float *inputs, const float *sigmas, int nParticles,
                     const int *conTypes, const int *conIdx1, const int *conIdx2,
