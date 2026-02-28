@@ -81,6 +81,7 @@ void Analyzer::initialize() {
 
 void Analyzer::wirePluginManagers() {
     for (auto& [role, plugin] : plugins) {
+        std::cout << "Wiring plugin for role: " << role << std::endl;
         if (plugin) {
             plugin->setContext(managerContext_m);
             plugin->setupFromConfigFile();

@@ -488,8 +488,12 @@ def main():
     if local_shared_libs:
         print(f"Staged {len(local_shared_libs)} local shared library file(s) into '{shared_dir_name}'")
 
+    aux_files = []
     if aux_exists:
-        _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
+        for aux_file in sorted(Path(aux_src).iterdir()):
+            if aux_file.is_file():
+                _link_or_copy_file(str(aux_file), os.path.join(shared_dir, aux_file.name), use_symlink=False)
+                aux_files.append(aux_file.name)
     if x509_src:
         shutil.copy2(x509_src, os.path.join(shared_dir, x509loc))
 
@@ -503,6 +507,10 @@ def main():
     extra_transfer_files.extend(
         os.path.join(mainDir, shared_dir_name, staged_name)
         for staged_name in sorted(local_shared_libs.keys())
+    )
+    extra_transfer_files.extend(
+        os.path.join(mainDir, shared_dir_name, aux_fname)
+        for aux_fname in aux_files
     )
 
     # worker that processes a single sample (can run in parallel)
@@ -584,7 +592,9 @@ def main():
 
                         aux_src_local = resolve_path("aux")
                         if aux_src_local and os.path.exists(aux_src_local):
-                            _link_or_copy_dir(aux_src_local, os.path.join(test_dir, "aux"), use_symlink=False)
+                            for aux_file in sorted(Path(aux_src_local).iterdir()):
+                                if aux_file.is_file():
+                                    _link_or_copy_file(str(aux_file), os.path.join(test_dir, aux_file.name), use_symlink=False)
                         else:
                             print(f"Warning: 'aux' directory not found at '{aux_src_local}'; skipping aux link/copy")
                         _link_or_copy_file(exe_path, os.path.join(test_dir, exe_relpath), use_symlink=False)
@@ -704,7 +714,7 @@ def main():
         request_cpus=1,
         request_disk=20000,
         extra_transfer_files=extra_transfer_files,
-        include_aux=aux_exists,
+        include_aux=False,
         shared_dir_name=shared_dir_name,
         eos_sched=args.eos_sched,
         config_file="submit_config.txt",

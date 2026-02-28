@@ -9,6 +9,7 @@
  * @param configProvider Reference to the configuration provider
  */
 CorrectionManager::CorrectionManager(IConfigurationProvider const& configProvider) {
+  std::cout  << "Constructing CorrectionManager with config provider" << std::endl;
   registerCorrectionlib(configProvider);
   initialized_m = true;
 }
@@ -27,8 +28,9 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
   }
 
   auto df = dataManager_m->getDataFrame();
-
+  std::cout << "Getting input features" << std::endl;
   const auto &inputFeatures = getCorrectionFeatures(correctionName);
+  std::cout << "Defining input features for correction " << correctionName << std::endl;
   dataManager_m->DefineVector("input_" + correctionName, inputFeatures, "double", *systematicManager_m);
   auto correction = this->objects_m.at(correctionName);
   auto stringArgs = stringArguments;
@@ -82,6 +84,7 @@ CorrectionManager::getCorrectionFeatures(const std::string &key) const {
 void CorrectionManager::registerCorrectionlib(
     const IConfigurationProvider &configProvider) {
   auto correctionConfigFile = configProvider.get("correctionConfig");
+  std::cout << "CorrectionManager: Registering corrections from config file: " << correctionConfigFile << std::endl;
   if (correctionConfigFile.empty()) {
     correctionConfigFile = "correctionlibConfig";
   }
@@ -89,6 +92,8 @@ void CorrectionManager::registerCorrectionlib(
   const auto correctionConfig = configProvider.parseMultiKeyConfig(
       correctionConfigFile,
       {"file", "correctionName", "name", "inputVariables"});
+  
+  std::cout << "CorrectionManager: Found " << correctionConfig.size() << " corrections in config file." << std::endl;
 
   for (const auto &entryKeys : correctionConfig) {
     // Split the variable list on commas, save to vector
