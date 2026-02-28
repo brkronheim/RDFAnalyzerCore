@@ -343,6 +343,23 @@ TEST_F(OnnxManagerTest, ApplyModel_WithPadding) {
 }
 
 /**
+ * @brief Test that useCuda defaults to false for models without the useCuda config key
+ */
+TEST_F(OnnxManagerTest, GetUseCuda_DefaultFalse) {
+  EXPECT_FALSE(onnxManager->getUseCuda("test_model"));
+  EXPECT_FALSE(onnxManager->getUseCuda("test_model2"));
+  EXPECT_FALSE(onnxManager->getUseCuda("test_model_multi"));
+  EXPECT_FALSE(onnxManager->getUseCuda("test_model_padded"));
+}
+
+/**
+ * @brief Test that getUseCuda returns false for an unknown model name
+ */
+TEST_F(OnnxManagerTest, GetUseCuda_UnknownModel) {
+  EXPECT_FALSE(onnxManager->getUseCuda("nonexistent_model"));
+}
+
+/**
  * @brief Test that a padded model returns -1 when runVar is false
  */
 TEST_F(OnnxManagerTest, ApplyModel_WithPadding_RunVarFalse) {

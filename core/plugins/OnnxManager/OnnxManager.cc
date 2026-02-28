@@ -260,6 +260,19 @@ int64_t OnnxManager::getPaddingSize(const std::string &modelName) const {
 }
 
 /**
+ * @brief Get whether an ONNX model uses the CUDA execution provider
+ * @param modelName Name of the model
+ * @return true if the model uses CUDA, false otherwise
+ */
+bool OnnxManager::getUseCuda(const std::string &modelName) const {
+  auto it = model_useCuda_m.find(modelName);
+  if (it != model_useCuda_m.end()) {
+    return it->second;
+  }
+  return false;
+}
+
+/**
  * @brief Register ONNX models from configuration
  * @param configProvider Reference to the configuration provider
  */
@@ -280,14 +293,29 @@ void OnnxManager::loadModelsFromConfig(
     const IConfigurationProvider &configProvider,
     const std::vector<std::unordered_map<std::string, std::string>> &modelConfig) {
   
-  Ort::SessionOptions session_options;
-  session_options.SetIntraOpNumThreads(1);
-  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
-
   for (const auto &entryKeys : modelConfig) {
     // Split the variable list on commas, save to vector
     auto inputVariableVector =
         configProvider.splitString(entryKeys.at("inputVariables"), ",");
+
+    // Build per-model session options
+    Ort::SessionOptions session_options;
+    session_options.SetIntraOpNumThreads(1);
+    session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+
+    // Parse optional useCuda flag
+    bool useCuda = false;
+    auto cudaIt = entryKeys.find("useCuda");
+    if (cudaIt != entryKeys.end() && cudaIt->second == "true") {
+      useCuda = true;
+      OrtCUDAProviderOptions cuda_options{};
+      // Default device_id is 0; configure with cudaDeviceId to override
+      auto deviceIt = entryKeys.find("cudaDeviceId");
+      if (deviceIt != entryKeys.end()) {
+        cuda_options.device_id = std::stoi(deviceIt->second);
+      }
+      session_options.AppendExecutionProvider_CUDA(cuda_options);
+    }
 
     // Load the ONNX model
     auto session = std::make_shared<Ort::Session>(*env_m, entryKeys.at("file").c_str(), session_options);
@@ -317,6 +345,7 @@ void OnnxManager::loadModelsFromConfig(
     model_runVars_m.emplace(entryKeys.at("name"), entryKeys.at("runVar"));
     model_inputNames_m.emplace(entryKeys.at("name"), input_names);
     model_outputNames_m.emplace(entryKeys.at("name"), output_names);
+    model_useCuda_m.emplace(entryKeys.at("name"), useCuda);
 
     // Parse optional paddingSize
     int64_t paddingSize = 0;
