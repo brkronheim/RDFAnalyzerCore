@@ -38,6 +38,10 @@ public:
    * For models with multiple outputs, each output tensor creates a separate column:
    * - Single output: column named "{modelName}{outputSuffix}"
    * - Multiple outputs: columns named "{modelName}_output0{outputSuffix}", "{modelName}_output1{outputSuffix}", etc.
+   *
+   * If a paddingSize is configured for the model, the input vector is zero-padded
+   * to that size before inference (e.g. for transformers with a fixed number of
+   * attention particles).
    */
   void applyModel(const std::string &modelName, const std::string &outputSuffix = "");
 
@@ -89,6 +93,13 @@ public:
   const std::vector<std::string> &getModelOutputNames(const std::string &modelName) const;
 
   /**
+   * @brief Get the padding size for an ONNX model
+   * @param modelName Name of the model
+   * @return Padding size (0 if no padding configured)
+   */
+  int64_t getPaddingSize(const std::string &modelName) const;
+
+  /**
    * @brief Return the type of the manager
    */
   std::string type() const override { return "OnnxManager"; }
@@ -130,6 +141,11 @@ private:
    * @brief Map from model name to output names (for ONNX runtime)
    */
   std::unordered_map<std::string, std::vector<std::string>> model_outputNames_m;
+
+  /**
+   * @brief Map from model name to padding size (0 = no padding)
+   */
+  std::unordered_map<std::string, int64_t> model_paddingSize_m;
 };
 
 #endif // ONNXMANAGER_H_INCLUDED

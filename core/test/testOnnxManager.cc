@@ -103,10 +103,11 @@ TEST_F(OnnxManagerTest, GetRunVar_Invalid) {
 // All model names
 TEST_F(OnnxManagerTest, GetAllModelNames) {
   const auto &names = onnxManager->getAllModelNames();
-  EXPECT_EQ(names.size(), 3);
+  EXPECT_EQ(names.size(), 4);
   EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model") != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model2") != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_multi") != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_padded") != names.end());
 }
 
 // Base class interface
@@ -179,10 +180,11 @@ TEST_F(OnnxManagerTest, ConstCorrectness) {
     EXPECT_TRUE(model != nullptr);
     EXPECT_EQ(features.size(), 3);
     EXPECT_EQ(runVar, "run_number");
-    EXPECT_EQ(names.size(), 3);
+    EXPECT_EQ(names.size(), 4);
     EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model") != names.end());
     EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model2") != names.end());
     EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_multi") != names.end());
+    EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_padded") != names.end());
     EXPECT_TRUE(obj != nullptr);
     EXPECT_EQ(objFeatures.size(), 3);
   });
@@ -308,6 +310,52 @@ TEST_F(OnnxManagerTest, GetInputOutputNames) {
   EXPECT_EQ(outputNames.size(), 2);
   EXPECT_EQ(outputNames[0], "output_sum");
   EXPECT_EQ(outputNames[1], "output_product");
+}
+
+/**
+ * @brief Test that paddingSize is stored and retrieved correctly
+ */
+TEST_F(OnnxManagerTest, GetPaddingSize_WithPadding) {
+  EXPECT_EQ(onnxManager->getPaddingSize("test_model_padded"), 5);
+}
+
+TEST_F(OnnxManagerTest, GetPaddingSize_NoPadding) {
+  EXPECT_EQ(onnxManager->getPaddingSize("test_model"), 0);
+}
+
+/**
+ * @brief Test that a padded model produces valid output when fewer features
+ *        are provided than the configured paddingSize.
+ */
+TEST_F(OnnxManagerTest, ApplyModel_WithPadding) {
+  // Provide only 3 features; model expects 5 - the remaining 2 are zero-padded
+  dataManager->Define("feature1", [](ULong64_t i) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number", [](ULong64_t i) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  onnxManager->applyModel("test_model_padded");
+  auto df = dataManager->getDataFrame();
+  auto result = df.Take<float>("test_model_padded");
+  ASSERT_EQ(result->size(), 2);
+  // The padded model sums all 5 inputs: 1+2+3+0+0 = 6
+  EXPECT_FLOAT_EQ(result->at(0), 6.0f);
+  EXPECT_FLOAT_EQ(result->at(1), 6.0f);
+}
+
+/**
+ * @brief Test that a padded model returns -1 when runVar is false
+ */
+TEST_F(OnnxManagerTest, ApplyModel_WithPadding_RunVarFalse) {
+  dataManager->Define("feature1", [](ULong64_t i) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2", [](ULong64_t i) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3", [](ULong64_t i) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number", [](ULong64_t i) -> bool { return false; }, {"rdfentry_"}, *systematicManager);
+  onnxManager->applyModel("test_model_padded");
+  auto df = dataManager->getDataFrame();
+  auto result = df.Take<float>("test_model_padded");
+  ASSERT_EQ(result->size(), 2);
+  EXPECT_EQ(result->at(0), -1.0f);
+  EXPECT_EQ(result->at(1), -1.0f);
 }
 
 int main(int argc, char **argv) {
