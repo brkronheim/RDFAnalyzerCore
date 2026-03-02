@@ -378,7 +378,8 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   }
 
   df = dataManager_m->getDataFrame();
-  THnMulti tempModel(fillInfo);
+  if (histogramBackend_m == "boost") {
+    BHnMulti tempModel(fillInfo);
     histos_m.push_back(df.Book<
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
@@ -388,6 +389,18 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Int_t>>(
       std::move(tempModel), varVector));
+  } else {
+    THnMulti tempModel(fillInfo);
+    histos_m.push_back(df.Book<
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Int_t>>(
+      std::move(tempModel), varVector));
+  }
   histNodes_m.push_back(df);
 }
 
@@ -622,7 +635,18 @@ void NDHistogramManager::setupFromConfigFile() {
   if (!configManager_m) {
     throw std::runtime_error("NDHistogramManager: ConfigManager not set");
   }
-  
+
+  // Read optional histogram backend selection (default: "root", option: "boost")
+  const std::string backend = configManager_m->get("histogramBackend");
+  if (!backend.empty()) {
+    if (backend != "root" && backend != "boost") {
+      throw std::runtime_error(
+          "NDHistogramManager: invalid histogramBackend '" + backend +
+          "'. Valid values are 'root' (default) or 'boost'.");
+    }
+    histogramBackend_m = backend;
+  }
+
   // Parse histogram configuration if present
   std::string histogramConfigFile = configManager_m->get("histogramConfig");
   if (histogramConfigFile.empty()) {

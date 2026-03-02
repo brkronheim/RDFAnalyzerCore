@@ -158,6 +158,7 @@ private:
   IOutputSink* skimSink_m = nullptr;
   IOutputSink* metaSink_m = nullptr;
   bool countersFinalized_m = false;
+  std::string histogramBackend_m = "root";
 };
 
 #endif // NDHISTOGRAMMANAGER_H_INCLUDED 
