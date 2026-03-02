@@ -199,8 +199,9 @@ TEST_F(NDHistogramManagerConfigTest, InvalidConfigFileThrows) {
   EXPECT_THROW(histogramManager->setupFromConfigFile(), std::exception);
 }
 
-TEST_F(NDHistogramManagerConfigTest, MissingRequiredFieldsThrows) {
-  // Create a config file with missing required fields
+TEST_F(NDHistogramManagerConfigTest, MissingRequiredFieldsSkipped) {
+  // An entry missing required fields (weight, lowerBound, upperBound) is silently
+  // skipped by parseMultiKeyConfig rather than causing a throw.
   std::string tempFile = "/tmp/invalid_histogram_config.txt";
   std::ofstream out(tempFile);
   out << "name=test_hist variable=var1 bins=10\n";  // Missing weight, lowerBound, upperBound
@@ -208,8 +209,11 @@ TEST_F(NDHistogramManagerConfigTest, MissingRequiredFieldsThrows) {
   
   configManager->set("histogramConfig", tempFile);
   
-  // Setup should throw
-  EXPECT_THROW(histogramManager->setupFromConfigFile(), std::exception);
+  // Setup completes without throwing; the incomplete entry is skipped.
+  EXPECT_NO_THROW(histogramManager->setupFromConfigFile());
+  // No histograms should be loaded (the incomplete entry was discarded).
+  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+  EXPECT_EQ(histogramManager->GetHistos().size(), 0u);
   
   // Clean up
   std::remove(tempFile.c_str());
