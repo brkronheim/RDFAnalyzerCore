@@ -275,7 +275,7 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
                 capture_output=True, timeout=30,
             )
         except Exception as mkdir_exc:
-            print(f"Warning: xrdfs mkdir -p {{eos_dir}} failed (may already exist): {{mkdir_exc}}")
+            print(f"Warning: xrdfs mkdir -p {eos_dir} failed (may already exist): {mkdir_exc}")
 
     cmd = [
         "xrdcp",

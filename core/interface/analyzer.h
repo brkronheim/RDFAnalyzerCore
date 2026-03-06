@@ -238,8 +238,6 @@ public:
     auto it = plugins.find(key);
     if (it != plugins.end()) {
       return dynamic_cast<T*>(it->second.get());
-    } else {
-      throw std::runtime_error("Plugin with key '" + key + "' not found, please make sure to register it with addPlugin() or addPlugins().");
     }
     return nullptr;
   }

@@ -45,7 +45,6 @@ def _is_float(val: str) -> bool:
         float(val)
         return True
     except Exception:
-        print(f"Value '{val}' is not a valid float")
         return False
 
 
