@@ -1,676 +1,477 @@
 # HTCondor Batch Submission Guide
 
-This guide explains how to submit RDFAnalyzerCore analyses to HTCondor batch systems using the provided Python scripts.
+This guide explains how to submit RDFAnalyzerCore analyses to HTCondor using
+the **law-based workflows** in the `law/` directory.  All batch submission is
+managed through [law](https://github.com/riga/law) (Luigi Analysis Workflow),
+which provides dependency tracking, automatic resubmission, and restart-safe
+monitoring.
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Submission Scripts](#submission-scripts)
+- [Quick Start](#quick-start)
 - [Prerequisites](#prerequisites)
-- [NANO/Rucio Submission](#nanorucio-submission)
+- [Environment Setup](#environment-setup)
+- [NANO / Rucio Submission](#nanorucio-submission)
 - [CERN Open Data Submission](#cern-open-data-submission)
-- [Configuration Validation](#configuration-validation)
+- [Common Parameters](#common-parameters)
+- [Configuration File Format](#configuration-file-format)
+- [Monitoring and Resubmission](#monitoring-and-resubmission)
 - [Advanced Features](#advanced-features)
 - [Troubleshooting](#troubleshooting)
 
+---
+
 ## Overview
 
-RDFAnalyzerCore provides two submission scripts for different data sources:
+RDFAnalyzerCore provides two law-based submission workflows:
 
-1. **generateSubmissionFilesNANO.py** - For CMS NanoAOD data via Rucio
-2. **generateSubmissionFilesOpenData.py** - For CERN Open Data
+| Workflow | Module | Data Source |
+|----------|--------|-------------|
+| NANO / Rucio | `law/nano_tasks.py` | CMS NanoAOD via Rucio |
+| CERN Open Data | `law/opendata_tasks.py` | CERN Open Data Portal |
 
-Both scripts share common functionality through `submission_backend.py` and include configuration validation via `validate_config.py`.
+Each workflow consists of four law tasks that run in sequence:
 
-### What the Scripts Do
+1. **Prepare\*Sample** – discovers input files and creates per-job configuration
+   directories (one branch per sample, runs in parallel).
+2. **Build\*Submission** – assembles `condor_submit.sub`, run scripts, and
+   stages the executable, `aux/`, x509 proxy, and local shared libraries into
+   `shared_inputs/`.
+3. **Submit\*Jobs** – runs `condor_submit` and records the cluster ID.
+4. **Monitor\*Jobs** – blocking polling loop that verifies EOS outputs,
+   resubmits held/failed jobs, and writes `all_outputs_verified.txt`.
 
-1. Parse your analysis configuration
-2. Discover input files from Rucio or CERN Open Data
-3. Split data into manageable job chunks
-4. Generate HTCondor submission files
-5. Create per-job configuration files
-6. Stage auxiliary files and executables
+Law tracks task outputs so you can run the final task directly and earlier
+steps execute automatically if not yet complete.
 
-## Submission Scripts
+---
 
-### generateSubmissionFilesNANO.py
+## Quick Start
 
-**Purpose**: Submit analyses using CMS NanoAOD datasets discovered via Rucio.
+```bash
+# 1. Set up the law environment (run once per session from the repo root)
+source law/env.sh
 
-**Location**: `core/python/generateSubmissionFilesNANO.py`
+# 2. Index the task registry (run once, or after adding new modules)
+law index
 
-**Key Features**:
-- Rucio client integration for dataset discovery
-- Automatic file grouping by size (GB)
-- Site-based XRootD redirector selection
-- X509 proxy authentication
-- Input/output staging support
+# 3. Run the full NANO workflow (PrepareNANOSample → BuildNANOSubmission →
+#    SubmitNANOJobs are run automatically as dependencies)
+law run MonitorNANOJobs --workers 4 \
+  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --name myRun \
+  --x509 x509 \
+  --exe build/analyses/myAnalysis/myanalysis
+```
 
-### generateSubmissionFilesOpenData.py
-
-**Purpose**: Submit analyses using CERN Open Data datasets.
-
-**Location**: `core/python/generateSubmissionFilesOpenData.py`
-
-**Key Features**:
-- CERN Open Data API integration
-- Record ID (recid) based file discovery
-- Simpler configuration (no proxy required)
-- File grouping by count
-
-### submission_backend.py
-
-**Purpose**: Shared functionality for both submission scripts.
-
-**Location**: `core/python/submission_backend.py`
-
-**Provides**:
-- HTCondor submit file generation
-- HTCondor run script generation
-- Input staging logic (xrdcp)
-- Output staging logic (xrdcp)
-- Configuration file reading
-- Shared directory management
-
-### validate_config.py
-
-**Purpose**: Validate analysis configuration before submission.
-
-**Location**: `core/python/validate_config.py`
-
-**Checks**:
-- Required configuration keys present
-- File paths exist
-- Configuration format correctness
-- Mode-specific requirements (NANO vs OpenData)
+---
 
 ## Prerequisites
 
-### For NANO/Rucio Submissions
+### Common requirements
 
-1. **VOMS Proxy**
-   ```bash
-   voms-proxy-init -voms cms -rfc --valid 168:0
-   ```
-   The script checks for a valid proxy (minimum 20 minutes remaining).
+- **Python 3.8+**
+- **law** and **luigi**:
+  ```bash
+  pip install --user law luigi requests
+  ```
+- **HTCondor** environment (available on LXPLUS and compatible clusters)
+- **Compiled analysis executable** (see [Analysis Guide](ANALYSIS_GUIDE.md))
 
-2. **Rucio Client**
-   - Automatically configured from CVMFS: `/cvmfs/cms.cern.ch/rucio/current`
-   - Set via `RUCIO_HOME` environment variable
+### For NANO / Rucio submissions
 
-3. **X509 Certificate**
-   ```bash
-   # Store your proxy in a permanent location
-   cp /tmp/x509up_u$(id -u) ~/.globus/x509_proxy
-   ```
+- **VOMS proxy** (minimum 20 minutes validity):
+  ```bash
+  voms-proxy-init -voms cms -rfc --valid 168:0
+  ```
+- **Rucio** (configured automatically from CVMFS):
+  ```bash
+  # Rucio home is set automatically; no manual setup needed
+  ```
 
-### For Open Data Submissions
+### For Open Data submissions
 
-1. **cernopendata-client** (optional but recommended)
-   ```bash
-   pip install cernopendata-client
-   ```
-   Falls back to REST API if not available.
+- **No authentication required** – Open Data is public.
+- Optionally install `cernopendata-client` for faster metadata fetching:
+  ```bash
+  pip install --user cernopendata-client
+  ```
 
-2. **No authentication required** - Open Data is public
+---
 
-### Common Requirements
-
-- **HTCondor** submission environment
-- **Python 3.6+**
-- **Analysis executable** (compiled C++ program)
-- **Configuration files** properly formatted
-
-## NANO/Rucio Submission
-
-### Basic Usage
+## Environment Setup
 
 ```bash
-python core/python/generateSubmissionFilesNANO.py \
-    -c config/submit_config.txt \
-    -n MyJobName \
-    -x ~/.globus/x509_proxy \
-    -e build/analyses/MyAnalysis/myanalysis
+# Source the law environment from the repository root (sets PYTHONPATH,
+# LAW_HOME, and LAW_CONFIG_FILE automatically)
+source law/env.sh
+
+# Index the task registry
+law index
 ```
 
-### Command-Line Options
+---
 
-| Option | Required | Description | Default |
-|--------|----------|-------------|---------|
-| `-c, --config` | Yes | Path to submit configuration file | - |
-| `-n, --name` | Yes | Job submission name (creates `condorSub_<name>/`) | - |
-| `-e, --exe` | Yes | Path to compiled executable | - |
-| `-x, --x509` | Yes | Path to X509 proxy certificate | - |
-| `-s, --size` | No | GB of data per job | 30 |
-| `--stage-inputs` | No | Copy input files to worker before running | False |
-| `--stage-outputs` | No | Copy outputs to destination after running | False |
-| `--root-setup` | No | Command to setup ROOT (e.g., `source /path/to/thisroot.sh`) | "" |
-| `--no-validate` | No | Skip configuration validation | False |
-| `--make-test-job` | No | Create a local test job with one file | False |
-| `--eos-sched` | No | Use EOS scheduling (for special cases) | False |
-| `--spool` | No | Prepare for `condor_submit -spool` by copying shared inputs once | False |
-| `--threads` | No | Number of worker threads for remote-metadata queries and splitting | 4 |
+## NANO / Rucio Submission
 
-**Important**: When using `--eos-sched` to create submissions under EOS, you must activate the EOS Condor submission environment before submitting:
+### Sample config format
 
-```bash
-module load lxbatch/eossubmit
 ```
+# Luminosity in pb^-1
+lumi=59700
 
-This ensures `condor_submit` targets the EOS-aware batch system used at your site.
-
-### Detailed Option Descriptions
-
-#### Input/Output Staging
-
-**`--stage-inputs`**: Copy input ROOT files to the worker before running the analysis.
-- When enabled, the submitter will xrdcp URLs to local files before running the job
-- If a URL contains a site-specific test redirector (e.g., `.../store/test/xrootd/<SITE>//store/mc/...`), the staging step will automatically normalize it to the generic path (`root://xrootd-cms.infn.it/store/mc/...`) for the copy
-- **Note**: This normalization is applied only for the xrdcp staging step — in-job `xrootd` access paths are left unchanged
-- Useful for sites with unreliable XRootD access or when processing many small files
-
-**`--stage-outputs`**: Write outputs locally on the worker, then xrdcp to final destination.
-- Reduces risk of output corruption from network issues
-- Can improve performance on sites with slow network storage
-- Requires sufficient local disk space on worker nodes
-
-**`--spool`**: Prepare for `condor_submit -spool` by copying shared inputs once per submission.
-- Copies auxiliary files and executable to a shared location
-- Each job references the shared files instead of copying individually
-- Significantly reduces scheduler load for large submissions
-- Requires condor's spool directory to be accessible
-
-#### Performance Options
-
-**`--threads N`**: Number of worker threads used for remote-metadata queries and per-sample splitting.
-- Default: 4
-- Applies to both `generateSubmissionFilesNANO.py` and `generateSubmissionFilesOpenData.py`
-- Set to 1 for serial (default-compatible) execution
-- Higher values speed up file discovery but may hit server rate limits
-
-**`--root-setup "CMD"`**: Command to source ROOT environment (optional).
-- Example: `--root-setup "source /cvmfs/sft.cern.ch/lcg/views/LCG_102/x86_64-centos7-gcc11-opt/setup.sh"`
-- If omitted, the job uses whatever ROOT is available on the worker
-- Useful when worker nodes don't have ROOT in the default environment
-
-### Configuration File Format
-
-**Main Config** (`config/submit_config.txt`):
-```
-# Core settings
-saveDirectory=/eos/user/u/username/output
-sampleConfig=config/samples.txt
-
-# Analysis settings
-bdtConfig=config/bdts.txt
-onnxConfig=config/onnx_models.txt
-# ... other plugin configs ...
-```
-
-**Sample Config** (`config/samples.txt`):
-```
-# Luminosity
-lumi=138000
-
-# Site whitelist (optional)
+# Optional site whitelist / blacklist (comma-separated CMS site names)
 WL=T2_US_MIT,T2_US_Wisconsin
-
-# Site blacklist (optional)
 BL=T3_US_FNALLPC
 
-# Samples
-name=ttbar das=/TTToSemiLeptonic_TuneCP5_13TeV-powheg-pythia8/RunIISummer20UL18NanoAODv9-106X_upgrade2018_realistic_v16_L1v1-v1/NANOAODSIM xsec=831.76 type=0 norm=1.0 kfac=1.0
-name=wjets das=/WJetsToLNu_TuneCP5_13TeV-madgraphMLM-pythia8/RunIISummer20UL18NanoAODv9-106X_upgrade2018_realistic_v16_L1v1-v1/NANOAODSIM xsec=61526.7 type=1 norm=1.0 kfac=1.0
+# One line per sample
+name=ttbar das=/TTToSemiLeptonic.../NANOAODSIM xsec=831.76 type=0 norm=1.0 kfac=1.0
+name=wjets das=/WJetsToLNu.../NANOAODSIM     xsec=61526.7 type=1 norm=1.0 kfac=1.0
 ```
 
-**Sample Configuration Fields**:
-- `name`: Sample identifier (used in output filenames)
-- `das`: DAS path for Rucio discovery
-- `xsec`: Cross-section in pb
-- `type`: Sample type integer (analysis-specific)
-- `norm`: Normalization factor
-- `kfac`: K-factor for corrections
-- `extraScale`: Additional scaling factor (optional)
-- `site`: Preferred site for this sample (optional)
+**Sample fields**:
 
-### Example: Full Submission
+| Field | Description |
+|-------|-------------|
+| `name` | Sample identifier (used in output filenames) |
+| `das` | DAS path for Rucio file discovery |
+| `xsec` | Cross-section in pb |
+| `type` | Sample type integer (analysis-specific) |
+| `norm` | Normalization factor |
+| `kfac` | K-factor |
+| `extraScale` | Additional scaling factor (optional) |
+| `site` | Preferred site for this sample (optional) |
+
+### Running the workflow
 
 ```bash
-# 1. Ensure proxy is valid
-voms-proxy-info -all
-
-# 2. Generate submission files
-python core/python/generateSubmissionFilesNANO.py \
-    -c config/submit_config.txt \
-    -n ttbar_analysis_v1 \
-    -x ~/.globus/x509_proxy \
-    -e build/analyses/MyAnalysis/myanalysis \
-    -s 50 \
-    --stage-outputs \
-    --make-test-job
-
-# 3. Test locally first
-cd condorSub_ttbar_analysis_v1/test_job
-./myanalysis submit_config.txt
-
-# 4. If test passes, submit
-condor_submit condorSub_ttbar_analysis_v1/condor_submit.sub
-
-# 5. Monitor jobs
-condor_q
-watch -n 30 condor_q
+# Run all four tasks in sequence (law resolves dependencies automatically)
+law run MonitorNANOJobs --workers 4 \
+  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --name myRun22 \
+  --x509 x509 \
+  --exe build/analyses/myAnalysis/myanalysis \
+  --root-setup env.sh \
+  --container-setup cmssw-el9 \
+  --stage-in \
+  --size 30
 ```
 
-### How File Discovery Works
+To run only up to the submission file generation (without submitting):
 
-1. **Query Rucio**: Script queries Rucio for files in the DAS path
-2. **Filter Sites**: Applies whitelist/blacklist to available replicas
-3. **Group by Size**: Groups files to reach target size per job (e.g., 30 GB)
-4. **Generate Redirectors**: Creates XRootD URLs with appropriate redirectors
+```bash
+law run BuildNANOSubmission --workers 4 \
+  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --name myRun22 --x509 x509 \
+  --exe build/analyses/myAnalysis/myanalysis
+```
 
-Example output:
-```
-checking Rucio for /TTToSemiLeptonic.../NANOAODSIM
-Output received
-250 files found
-groupCounts: {0: 12, 1: 11, 2: 13, ...}
-groupSizes: {0: 29.8, 1: 30.1, 2: 30.3, ...}
-21 groups found and 250 files found
-```
+### NANO-specific parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--x509` | *(required)* | Path to VOMS x509 proxy file |
+| `--size` | `30` | GB of data per condor job |
+| `--max-runtime` | `3600` | Maximum job runtime in seconds |
+
+---
 
 ## CERN Open Data Submission
 
-### Basic Usage
+### Sample config format
 
-```bash
-python core/python/generateSubmissionFilesOpenData.py \
-    -c config/submit_config.txt \
-    -n OpenDataAnalysis \
-    -e build/analyses/MyAnalysis/myanalysis
 ```
-
-### Command-Line Options
-
-| Option | Required | Description | Default |
-|--------|----------|-------------|---------|
-| `-c, --config` | Yes | Path to submit configuration file | - |
-| `-n, --name` | Yes | Job submission name | - |
-| `-e, --exe` | Yes | Path to compiled executable | - |
-| `-f, --files` | No | Number of ROOT files per job | 30 |
-| `-x, --x509` | No | Path to X509 proxy (optional) | "" |
-| `-a, --aux` | No | Copy aux directory into job folders | False |
-| `--stage-inputs` | No | Copy input files to worker | False |
-| `--stage-outputs` | No | Copy outputs to destination | False |
-| `--root-setup` | No | Command to setup ROOT | "" |
-| `--no-validate` | No | Skip configuration validation | False |
-| `--make-test-job` | No | Create local test job | False |
-| `--eos-sched` | No | Use EOS scheduling | False |
-| `--spool` | No | Prepare for `condor_submit -spool` | False |
-| `--threads` | No | Number of worker threads for queries/splitting | 4 |
-
-### Configuration File Format
-
-**Sample Config** for Open Data:
-```
-# Luminosity
+# Luminosity in pb^-1
 lumi=11580
 
-# Record IDs from CERN Open Data
+# Record IDs from the CERN Open Data Portal
 recids=24119,24120
 
-# Samples
+# One line per sample (das= must match the key in the Open Data file index)
 name=ZMuMu das=SMZee_0 type=10 xsec=1.0 norm=1.0
-name=ZEE das=SMZee_1 type=11 xsec=1.0 norm=1.0
+name=ZEE   das=SMZee_1 type=11 xsec=1.0 norm=1.0
 ```
 
 **Fields**:
-- `recids`: Comma-separated CERN Open Data record IDs
-- `das`: Dataset identifier in the Open Data records
-- Other fields same as NANO submission
 
-### Example: Open Data Submission
+| Field | Description |
+|-------|-------------|
+| `recids` | Comma-separated CERN Open Data record IDs |
+| `das` | Dataset key as it appears in the Open Data file index |
+| `name`, `xsec`, `type`, `norm`, `kfac`, `extraScale` | Same as NANO |
 
-```bash
-# 1. Generate submission files
-python core/python/generateSubmissionFilesOpenData.py \
-    -c config/opendata_config.txt \
-    -n zmumu_opendata \
-    -e build/analyses/ExampleAnalysis/example \
-    -f 10 \
-    --make-test-job
-
-# 2. Test locally
-cd condorSub_zmumu_opendata/test_job
-./example submit_config.txt
-
-# 3. Submit
-condor_submit condorSub_zmumu_opendata/condor_submit.sub
-```
-
-## Configuration Validation
-
-Both scripts automatically validate your configuration before generating jobs.
-
-### What's Validated
-
-**NANO Mode**:
-- `saveDirectory` exists and is writable
-- `sampleConfig` file exists
-- Executable exists and is executable
-- All referenced config files exist
-
-**OpenData Mode**:
-- Same as NANO mode
-- Record IDs are valid
-
-### Validation Output
-
-**Warnings** (non-fatal):
-```
-Config validation warnings:
-- Optional config file 'config/bdts.txt' not found (may be okay)
-```
-
-**Errors** (fatal):
-```
-Config validation failed:
-- Required field 'saveDirectory' missing from config
-- Executable not found: build/analyses/MyAnalysis/myanalysis
-```
-
-### Skipping Validation
+### Running the workflow
 
 ```bash
-python core/python/generateSubmissionFilesNANO.py \
-    --no-validate \
-    # ... other options ...
+law run MonitorOpenDataJobs --workers 4 \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --name openDataRun \
+  --exe build/analyses/myAnalysis/myanalysis \
+  --files 20 \
+  --container-setup cmssw-el8
 ```
 
-**Warning**: Only skip validation if you're sure your configuration is correct.
+To run only up to submission file generation:
+
+```bash
+law run BuildOpenDataSubmission --workers 4 \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --name openDataRun \
+  --exe build/analyses/myAnalysis/myanalysis \
+  --files 20
+```
+
+### Open Data-specific parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--files` | `30` | Number of ROOT files per condor job |
+| `--x509` | `""` | Path to x509 proxy (optional) |
+| `--max-runtime` | `1200` | Maximum job runtime in seconds |
+
+---
+
+## Common Parameters
+
+These parameters apply to **all** law submission tasks:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--submit-config` | *(required)* | Path to submit config file |
+| `--name` | *(required)* | Submission name; creates `condorSub_{name}/` |
+| `--exe` | *(required)* | Path to the compiled C++ executable |
+| `--stage-in` | `False` | xrdcp input files to worker node before running |
+| `--root-setup` | `""` | Path to a setup script; contents embedded in inner runscript |
+| `--container-setup` | `""` | Container setup command (e.g. `cmssw-el9`) |
+| `--python-env` | `""` | Path to Python environment tarball (see below) |
+| `--no-validate` | `False` | Skip submit-config validation |
+
+### Monitor task parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--max-retries` | `3` | Maximum resubmission attempts per failed job |
+| `--poll-interval` | `120` | Seconds between condor_q polling cycles |
+
+---
+
+## Python Environment for Remote Jobs
+
+To use the RDFAnalyzerCore Python bindings (`rdfanalyzer`) or any other Python
+packages on remote condor worker nodes, use `law/setup_python_env.sh` to
+create a portable tarball and pass it to law tasks via `--python-env`.
+
+### Step 1: Set up the environment inside the container
+
+Run the setup script **inside the same container** you use for remote jobs.
+This ensures binary compatibility between local and remote nodes.
+
+```bash
+# Basic usage (packages law, luigi, requests + rdfanalyzer.so)
+cmssw-el9 --command-to-run "bash law/setup_python_env.sh"
+
+# With extra packages
+cmssw-el9 --command-to-run \
+  "bash law/setup_python_env.sh --extras 'numpy uproot numba' --output python_env.tar.gz"
+```
+
+The script installs packages into a staging directory using
+`pip install --target` (no virtual-env activation scripts, fully portable)
+and copies the compiled `rdfanalyzer*.so` module from `build/python/`.
+
+**Setup script options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-o / --output FILE` | `python_env.tar.gz` | Output tarball path |
+| `--extras "pkg1 pkg2 ..."` | `""` | Extra pip packages to install |
+| `--no-rdfanalyzer` | *(off)* | Skip copying the rdfanalyzer module |
+| `--python PYTHON` | `python3` | Python executable to use |
+
+### Step 2: Pass the tarball to law tasks
+
+```bash
+law run MonitorNANOJobs --workers 4 \
+  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --name myRun --x509 x509 \
+  --exe build/analyses/myAnalysis/myanalysis \
+  --container-setup cmssw-el9 \
+  --python-env python_env.tar.gz
+```
+
+The `Build*Submission` task copies the tarball into `condorSub_{name}/shared_inputs/`
+and adds it to `transfer_input_files` so every worker node receives it.
+
+### What happens on the worker node
+
+The condor runscript automatically untars the environment and sets up paths:
+
+```bash
+tar -xzf python_env.tar.gz -C _python_env
+export PYTHONPATH="$PWD/_python_env:${PYTHONPATH:-}"
+export PATH="$PWD/_python_env/bin:${PATH:-}"
+export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
+```
+
+After this, your analysis can use any packaged module:
+
+```python
+import rdfanalyzer
+analyzer = rdfanalyzer.Analyzer("submit_config.txt")
+# ... use Python bindings as usual
+```
+
+---
+
+## Configuration File Format
+
+### Submit config (`submit_config.txt`)
+
+```
+saveDirectory=/eos/user/u/username/output
+sampleConfig=config/samples.txt
+
+# Optional plugin configs copied to every job
+bdtConfig=config/bdts.txt
+onnxConfig=config/onnx_models.txt
+```
+
+### Main config file
+
+```
+saveDirectory=/eos/user/u/username/output
+saveTree=Events
+treeList=Events
+sampleConfig=config/samples.txt
+enableCounters=true
+enableSkim=false
+```
+
+---
+
+## Monitoring and Resubmission
+
+The `Monitor*Jobs` tasks run a blocking poll loop:
+
+1. Every `--poll-interval` seconds, query `condor_q` and `condor_history`.
+2. **Held jobs**: remove from queue and resubmit automatically.
+3. **Failed jobs** (non-zero exit code): resubmit if `--max-retries` not reached.
+4. **Completed jobs**: verify the expected EOS output exists via `xrdfs stat`.
+5. Write `condorSub_{name}/all_outputs_verified.txt` when all outputs confirmed.
+
+**State persistence**: monitoring state is saved to
+`condorSub_{name}/monitor_state.json` after each poll cycle.  If you interrupt
+the monitor task (Ctrl+C), restart it with the same parameters and it will
+resume from where it left off.
+
+```bash
+# Restart monitoring after an interruption
+law run MonitorNANOJobs --workers 1 \
+  --submit-config ... --name myRun [other params as before]
+```
+
+---
 
 ## Advanced Features
 
-### Input Staging
+### Input staging
 
-Copy input files to the worker node before running:
-
-```bash
-python core/python/generateSubmissionFilesNANO.py \
-    --stage-inputs \
-    # ... other options ...
-```
-
-**Benefits**:
-- Faster data access (local disk vs remote XRootD)
-- Reduces network load during processing
-- More reliable for flaky network connections
-
-**Process**:
-1. Worker node copies files via `xrdcp` before running
-2. Analysis reads from local disk
-3. Files are cleaned up after job completes
-
-**Configuration automatically updated**:
-- Original: `fileList=root://xrootd//path/file.root`
-- Staged: `fileList=input_0.root` (with `__orig_fileList` preserved)
-
-### Output Staging
-
-Copy outputs to final destination after analysis completes:
+Copy input files to the worker node before running the analysis:
 
 ```bash
-python core/python/generateSubmissionFilesNANO.py \
-    --stage-outputs \
-    # ... other options ...
+--stage-in
 ```
 
-**Benefits**:
-- Write to local disk during analysis (faster)
-- Copy to EOS/XRootD only after success
-- Automatic retry logic for failed transfers
+When enabled, input XRootD URLs are xrdcp'd to local disk on the worker.
+The `submit_config.txt` for each job stores the original URLs in
+`__orig_fileList` and uses local filenames (`input_0.root`, …) for the
+analysis.
 
-**Process**:
-1. Analysis writes to local disk (`output.root`)
-2. After completion, `xrdcp` copies to final destination
-3. Retry up to 3 times with backoff
+### Output staging
 
-**Configuration automatically updated**:
-- Original: `saveFile=/eos/user/u/username/output.root`
-- Staged: `saveFile=output.root` (with `__orig_saveFile` preserved)
+Output staging is **always active** in the law workflows.  After each job
+completes, the output ROOT files are xrdcp'd to their final EOS destination.
+The local basenames are stored in `saveFile` / `metaFile` and the EOS paths
+in `__orig_saveFile` / `__orig_metaFile`.
 
-### Test Job Creation
-
-Create a local test job to verify your setup:
+### ROOT and container setup
 
 ```bash
-python core/python/generateSubmissionFilesNANO.py \
-    --make-test-job \
-    # ... other options ...
+# Embed a setup script into the inner runscript
+--root-setup env.sh
+
+# Wrap the inner runscript with a container command
+--container-setup 'cmssw-el9'
 ```
 
-**Creates**: `condorSub_<name>/test_job/` directory with:
-- Single input file
-- All configuration files
-- Executable
-- Auxiliary files
+### Parallel file discovery
 
-**To test**:
-```bash
-cd condorSub_<name>/test_job
-./myanalysis submit_config.txt
-```
-
-**Always test locally before submitting hundreds of jobs!**
-
-### Shared Input Strategy
-
-Both scripts use a **shared inputs** strategy to optimize file transfers:
-
-**Structure**:
-```
-condorSub_<name>/
-├── shared_inputs/          # Staged once
-│   ├── myanalysis         # Executable (copied to all jobs)
-│   ├── aux/               # Auxiliary files (copied to all jobs)
-│   └── x509               # Proxy (copied to all jobs)
-├── job_0/                 # Per-job configs
-│   ├── submit_config.txt
-│   ├── floats.txt
-│   └── ints.txt
-├── job_1/
-│   └── ...
-└── condor_submit.sub
-```
-
-**Benefits**:
-- Executable and aux copied once, not per job
-- Reduces staging directory size
-- Works with `condor_submit -spool` for EOS scheduling
-
-### Custom ROOT Setup
-
-Specify a command to setup ROOT on the worker:
+The Prepare tasks run as law LocalWorkflows with one branch per sample.
+Set `--workers N` to discover files for up to N samples in parallel:
 
 ```bash
-python core/python/generateSubmissionFilesNANO.py \
-    --root-setup "source /cvmfs/sft.cern.ch/lcg/views/LCG_104/x86_64-centos7-gcc11-opt/setup.sh" \
-    # ... other options ...
+law run PrepareNANOSample --workers 8 [other params]
 ```
 
-Inserted into run script before analysis execution.
-
-### EOS Scheduling
-
-For jobs submitted from EOS:
-
-```bash
-python core/python/generateSubmissionFilesNANO.py \
-    --eos-sched \
-    # ... other options ...
-```
-
-Creates submission directory in: `/eos/user/<initial>/<username>/RDFAnalyzerCore/condorSub_<name>/`
-
-**Note**: The EOS path is currently hardcoded in the script. For your own use, you may need to modify the script or use your own EOS path.
+---
 
 ## Troubleshooting
 
-### Common Issues
+### Task outputs not found / law re-runs completed tasks
 
-#### 1. Rucio Connection Errors
-
-**Problem**:
-```
-Error: failed to list replicas for '/TTToSemiLeptonic...' after 5 attempts: ChunkedEncodingError
-```
-
-**Solution**:
-- Check network connection to Rucio
-- Script automatically retries with exponential backoff
-- If persistent, try again later or use different dataset
-
-#### 2. Proxy Expired
-
-**Problem**:
-```
-VOMS proxy expired or non-existing: please run `voms-proxy-init -voms cms -rfc --valid 168:0`
+Delete the offending output and re-run:
+```bash
+rm condorSub_myRun/branch_outputs/sample_0.json
+law run PrepareNANOSample [params]
 ```
 
-**Solution**:
+### law index fails
+
+```bash
+source law/env.sh
+law index
+```
+
+### Rucio connection errors
+
+The law tasks retry Rucio queries with exponential backoff (up to 5 attempts).
+If errors persist, check your network connection and proxy validity.
+
+### Proxy expired
+
 ```bash
 voms-proxy-init -voms cms -rfc --valid 168:0
 ```
 
-#### 3. Executable Not Found
+### No files found for a dataset
 
-**Problem**:
-```
-Executable not found: build/analyses/MyAnalysis/myanalysis
-```
+- Verify the DAS path with `dasgoclient --query="dataset=/DatasetName/..."`.
+- Adjust the `WL` / `BL` lists in the sample config.
 
-**Solution**:
-- Check executable path
-- Ensure analysis is built: `source build.sh`
-- Use absolute path or relative path from submission directory
+### Checking generated files
 
-#### 4. No Files Found for Dataset
-
-**Problem**:
-```
-Warning: no files found for '/Dataset/Path/NANOAODSIM'
+```bash
+ls -la condorSub_myRun/job_0/
+cat condorSub_myRun/job_0/submit_config.txt
+cat condorSub_myRun/condor_runscript.sh
 ```
 
-**Causes**:
-- DAS path is incorrect
-- Dataset not available via Rucio
-- All files on blacklisted sites
+### Job logs
 
-**Solution**:
-- Verify DAS path with `dasgoclient`
-- Check site availability
-- Adjust whitelist/blacklist
-
-#### 5. Configuration Validation Fails
-
-**Problem**:
-```
-Config validation failed:
-- Required field 'saveDirectory' missing
+```bash
+cat condorSub_myRun/condor_logs/log_<cluster>_<process>.stdout
+cat condorSub_myRun/condor_logs/log_<cluster>_<process>.stderr
 ```
 
-**Solution**:
-- Add missing field to configuration
-- Check configuration file syntax
-- Ensure no typos in field names
-
-### Debugging Tips
-
-1. **Enable test job**:
-   ```bash
-   --make-test-job
-   ```
-   Test locally before batch submission.
-
-2. **Check generated files**:
-   ```bash
-   ls -la condorSub_<name>/job_0/
-   cat condorSub_<name>/job_0/submit_config.txt
-   ```
-
-3. **Examine HTCondor script**:
-   ```bash
-   cat condorSub_<name>/condor_runscript.sh
-   ```
-
-4. **Review job logs**:
-   ```bash
-   cat condorSub_<name>/condor_logs/log_<cluster>_<process>.stdout
-   cat condorSub_<name>/condor_logs/log_<cluster>_<process>.stderr
-   ```
-
-5. **Check staging**:
-   If using `--stage-inputs` or `--stage-outputs`, check the run script for staging commands.
-
-### Getting Help
-
-- **Check logs**: HTCondor logs in `condorSub_<name>/condor_logs/`
-- **Test locally**: Always use `--make-test-job` first
-- **Validate config**: Don't skip validation
-- **GitHub Issues**: Report bugs with full error messages
-
-## Best Practices
-
-1. **Always test locally first**
-   ```bash
-   --make-test-job
-   ```
-
-2. **Start small**
-   - Submit a few jobs first
-   - Verify outputs are correct
-   - Then submit full dataset
-
-3. **Use output staging for EOS**
-   ```bash
-   --stage-outputs
-   ```
-   More reliable than writing directly to EOS during analysis.
-
-4. **Monitor proxy lifetime**
-   ```bash
-   voms-proxy-info -timeleft
-   ```
-   Jobs fail if proxy expires during execution.
-
-5. **Check disk quotas**
-   ```bash
-   eos quota /eos/user/u/username
-   ```
-   Ensure sufficient space before submitting.
-
-6. **Use appropriate job size**
-   - Too small: Many jobs, high overhead
-   - Too large: Long jobs, higher failure risk
-   - Recommended: 30-50 GB per job (1-4 hours runtime)
-
-7. **Organize output directories**
-   ```
-   /eos/user/u/username/
-   ├── analysis_v1/
-   ├── analysis_v2/
-   └── analysis_v3/
-   ```
-
-8. **Version your submissions**
-   ```bash
-   -n my_analysis_v3
-   ```
+---
 
 ## See Also
 
-- [Configuration Reference](CONFIG_REFERENCE.md) - Configuration file formats
-- [Analysis Guide](ANALYSIS_GUIDE.md) - Building analyses
-- [Getting Started](GETTING_STARTED.md) - Setup and installation
+- [law/README.md](../law/README.md) – law workflow quick reference
+- [Configuration Reference](CONFIG_REFERENCE.md) – config file formats
+- [Analysis Guide](ANALYSIS_GUIDE.md) – building analyses
+- [Getting Started](GETTING_STARTED.md) – setup and installation
 
 ---
 

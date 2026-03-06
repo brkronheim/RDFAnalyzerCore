@@ -325,6 +325,7 @@ def generate_condor_runscript(
     eos_sched=False,
     shared_dir_name=None,
     config_file="submit_config.txt",
+    python_env_tarball=None,
 ):
     stage_block = stage_inputs_block(eos_sched, config_file) if stage_inputs else ""
     stage_out_pre = ""
@@ -358,13 +359,30 @@ def generate_condor_runscript(
             f"voms-proxy-info -all -file {x509_name}\n"
         )
 
+    python_env_block = ""
+    if python_env_tarball:
+        tarball_name = os.path.basename(python_env_tarball)
+        python_env_block = (
+            f"if [ -f \"{tarball_name}\" ]; then\n"
+            f"  echo \"Unpacking Python environment from {tarball_name}...\"\n"
+            f"  mkdir -p _python_env\n"
+            f"  tar -xzf \"{tarball_name}\" -C _python_env\n"
+            f"  export PYTHONPATH=\"$PWD/_python_env:${{PYTHONPATH:-}}\"\n"
+            f"  export PATH=\"$PWD/_python_env/bin:${{PATH:-}}\"\n"
+            f"  export LD_LIBRARY_PATH=\"$PWD/_python_env:${{LD_LIBRARY_PATH:-}}\"\n"
+            f"  echo \"Python environment ready (PYTHONPATH=$PYTHONPATH)\"\n"
+            f"else\n"
+            f"  echo \"WARNING: Python environment tarball {tarball_name} not found\"\n"
+            f"fi\n"
+        )
+
     run_script = f"""#!/bin/bash
 # fail fast on any command error, undefined var, or pipeline failure
 set -euo pipefail
 trap 'rc=$?; echo "ERROR: wrapper exited with code $rc"; exit $rc' ERR
 # log and re-raise SIGTERM so Condor records ExitBySignal (do not swallow the signal)
 trap 'echo "Received SIGTERM - likely timed out by scheduler"; trap - SIGTERM; kill -s SIGTERM $$' SIGTERM
-{root_block}{pre_block}{shared_block}{x509_block}ls
+{root_block}{pre_block}{shared_block}{x509_block}{python_env_block}ls
 stage_in_start=$(date +%s)
 {stage_out_pre}{stage_block}
 stage_in_end=$(date +%s)
@@ -531,6 +549,7 @@ def write_submit_files(
     shared_dir_name=None,
     config_file="submit_config.txt",
     container_setup="",
+    python_env_tarball=None,
 ):
     submit_path = os.path.join(main_dir, "condor_submit.sub")
     runscript_path = os.path.join(main_dir, "condor_runscript.sh")
@@ -556,6 +575,7 @@ def write_submit_files(
                     eos_sched=eos_sched,
                     shared_dir_name=shared_dir_name,
                     config_file=config_file,
+                    python_env_tarball=python_env_tarball,
                 )
             )
         with open(runscript_path, "w") as condor_sub:
@@ -574,6 +594,7 @@ def write_submit_files(
                     eos_sched=eos_sched,
                     shared_dir_name=shared_dir_name,
                     config_file=config_file,
+                    python_env_tarball=python_env_tarball,
                 )
             )
 
