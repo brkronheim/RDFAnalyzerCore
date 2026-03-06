@@ -32,6 +32,7 @@ target_link_libraries(core PUBLIC
     ROOT::Graf
     ROOT::Hist
     ROOT::MathCore
+    ${RDF_ROOT_TRANSITIVE_LIBS}
     yaml-cpp
 )
 

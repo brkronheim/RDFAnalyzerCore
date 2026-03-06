@@ -28,6 +28,7 @@ Analyzer::Analyzer(
       logger_m(std::move(logger)),
       skimSink_m(std::move(skimSink)),
       metaSink_m(std::move(metaSink)),
+      managerContext_m{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m},
       plugins(std::move(plugins))
 {
     if (!configProvider_m || !dataFrameProvider_m || !systematicManager_m || !logger_m || !skimSink_m || !metaSink_m) {
@@ -57,8 +58,7 @@ Analyzer::Analyzer(std::string configFile,
             systematicManager_m(ManagerFactory::createSystematicManager()),
             logger_m(std::make_unique<DefaultLogger>()),
     skimSink_m(std::make_unique<RootOutputSink>()),
-            metaSink_m(std::make_unique<RootOutputSink>()),
-            plugins(std::move(plugins))
+            metaSink_m(std::make_unique<RootOutputSink>()),            managerContext_m{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m},            plugins(std::move(plugins))
 {
         if (!configProvider_m || !dataFrameProvider_m || !systematicManager_m) {
         throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
@@ -80,21 +80,20 @@ void Analyzer::initialize() {
 */
 
 void Analyzer::wirePluginManagers() {
-    ManagerContext ctx{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m};
     for (auto& [role, plugin] : plugins) {
+        std::cout << "Wiring plugin for role: " << role << std::endl;
         if (plugin) {
-            plugin->setContext(ctx);
+            plugin->setContext(managerContext_m);
             plugin->setupFromConfigFile();
         }
     }
-    initializeServices(ctx);
+    initializeServices(managerContext_m);
 }
 
 Analyzer *Analyzer::addPlugin(const std::string &role, std::unique_ptr<IPluggableManager> plugin) {
     if (!plugin) return this;
-    // Wire the plugin immediately with the same ManagerContext used during construction
-    ManagerContext ctx{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m};
-    plugin->setContext(ctx);
+    // Wire the plugin immediately with the persisted ManagerContext
+    plugin->setContext(managerContext_m);
     plugin->setupFromConfigFile();
     plugins.emplace(role, std::move(plugin));
     return this;
@@ -135,6 +134,17 @@ Analyzer *Analyzer::bookConfigHistograms() {
     return this;
 }
 
+Analyzer *Analyzer::bookCounterIntHistogram(const std::string& branch, int nBins,
+                                             double low, double high) {
+    auto df = dataFrameProvider_m->getDataFrame();
+    for (auto& service : services_m) {
+        if (auto* cs = dynamic_cast<CounterService*>(service.get())) {
+            cs->bookIntWeightHistogram(df, branch, nBins, low, high);
+        }
+    }
+    return this;
+}
+
 
 Analyzer *Analyzer::save() {
     auto df = dataFrameProvider_m->getDataFrame();
@@ -145,6 +155,35 @@ Analyzer *Analyzer::save() {
                                systematicManager_m.get(),
                                OutputChannel::Skim);
 
+    for (auto& service : services_m) {
+        service->finalize(df);
+    }
+    return this;
+}
+
+Analyzer *Analyzer::run() {
+    auto df = dataFrameProvider_m->getDataFrame();
+
+    // Conditionally write a skim when enableSkim=1/true/True is set in config
+    const auto& cfgMap = configProvider_m->getConfigMap();
+    const auto skimIt = cfgMap.find("enableSkim");
+    if (skimIt != cfgMap.end()) {
+        const auto& val = skimIt->second;
+        if (val == "1" || val == "true" || val == "True") {
+            skimSink_m->writeDataFrame(df,
+                                       *configProvider_m,
+                                       dataFrameProvider_m.get(),
+                                       systematicManager_m.get(),
+                                       OutputChannel::Skim);
+        }
+    }
+
+    // Save ND histograms (uses internally tracked histInfo / regionNames)
+    if (auto* histogramManager = getPlugin<NDHistogramManager>("histogramManager")) {
+        histogramManager->saveHists();
+    }
+
+    // Finalize all analysis services (CounterService writes to meta sink here)
     for (auto& service : services_m) {
         service->finalize(df);
     }

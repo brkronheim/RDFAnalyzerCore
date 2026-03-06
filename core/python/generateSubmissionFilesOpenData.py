@@ -223,6 +223,7 @@ def main():
         help="xrdcp outputs to final destination after running",
     )
     parser.add_argument("--root-setup", type=str, default="", help="command to setup ROOT (e.g., 'source /path/to/thisroot.sh')")
+    parser.add_argument('--max-runtime', type=int, default=3600, help='Max runtime (seconds) for Condor jobs (default: 3600)')
     parser.add_argument("-x", "--x509", type=str, default="", help="path to x509 proxy (optional)")
     parser.add_argument(
         "--eos-sched",
@@ -485,8 +486,12 @@ def main():
                 job_config["__orig_fileList"] = original_list
                 job_config["fileList"] = ",".join(local_inputs)
             if args.stage_outputs:
-                job_config["__orig_saveFile"] = job_config["saveFile"]
-                job_config["__orig_metaFile"] = job_config["metaFile"]
+                # remote destination should include the job index (process) suffix
+                base, ext = os.path.splitext(job_config["saveFile"])
+                job_config["__orig_saveFile"] = f"{base}_{sampleIndex}{ext}"
+                basem, extm = os.path.splitext(job_config["metaFile"])
+                job_config["__orig_metaFile"] = f"{basem}_{sampleIndex}{extm}"
+                # keep local basenames as before; the runscript will append CONDOR_PROC
                 job_config["saveFile"] = os.path.basename(job_config["saveFile"])
                 job_config["metaFile"] = os.path.basename(job_config["metaFile"])
 

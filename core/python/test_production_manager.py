@@ -86,7 +86,9 @@ class TestProductionConfig(unittest.TestCase):
             self.assertEqual(config.name, "test_prod")
             self.assertEqual(config.backend, "htcondor")
             self.assertEqual(config.max_retries, 3)
+            self.assertEqual(config.max_runtime, 3600)
             self.assertTrue(config.validate_outputs)
+            self.assertIsNone(config.x509)
 
 
 class TestProductionManager(unittest.TestCase):
@@ -110,6 +112,11 @@ class TestProductionManager(unittest.TestCase):
         with open(self.config.base_config, 'w') as f:
             f.write("threads=1\n")
             f.write("batch=False\n")
+
+        # Ensure the executable path exists (tests expect submission to be possible)
+        exe_path = Path(self.config.exe_path)
+        exe_path.write_text('#!/bin/sh\necho test')
+        exe_path.chmod(0o755)
             
     def tearDown(self):
         """Clean up test fixtures"""
@@ -144,6 +151,96 @@ class TestProductionManager(unittest.TestCase):
             job_dir = self.work_dir / f"job_{job_id}"
             self.assertTrue(job_dir.exists())
             self.assertTrue((job_dir / "job_config.txt").exists())
+
+    def test_generated_remote_output_paths_include_process(self):
+        """Remote (__orig_saveFile/__orig_metaFile) and manager job paths include process id suffix"""
+        manager = ProductionManager(self.config)
+        manager.generate_jobs(["a.root"])
+        job = manager.jobs[0]
+        # manager stored output paths should include the job/process id suffix
+        self.assertTrue(job.output_path.endswith("output_0_0.root"))
+        self.assertTrue(job.meta_output_path.endswith("output_0_meta_0.root"))
+        # job_config on disk should contain the __orig_saveFile with the same suffix
+        cfg_text = (self.work_dir / 'job_0' / 'job_config.txt').read_text()
+        self.assertIn('__orig_saveFile=', cfg_text)
+        self.assertIn('output_0_0.root', cfg_text)
+        self.assertIn('__orig_metaFile=', cfg_text)
+        self.assertIn('output_0_meta_0.root', cfg_text)
+
+    def test_generate_jobs_writes_float_int_files(self):
+        """When extra_config contains inline float/int content, files are created."""
+        manager = ProductionManager(self.config)
+
+        file_lists = ["fileA.root"]
+        extra_cfg = {
+            'floatConfig': 'normScale=3.14\nsampleNorm=2.0',
+            'intConfig': 'type=42',
+            'type': '42'
+        }
+
+        count = manager.generate_jobs(file_lists, [extra_cfg])
+        self.assertEqual(count, 1)
+
+        job_dir = self.work_dir / 'job_0'
+        # floats.txt and ints.txt should exist and contain the provided lines
+        float_path = job_dir / 'floats.txt'
+        int_path = job_dir / 'ints.txt'
+        self.assertTrue(float_path.exists(), 'floats.txt missing')
+        self.assertTrue(int_path.exists(), 'ints.txt missing')
+
+        float_text = float_path.read_text().splitlines()
+        self.assertIn('normScale=3.14', float_text)
+        self.assertIn('sampleNorm=2.0', float_text)
+
+        int_text = int_path.read_text().splitlines()
+        self.assertIn('type=42', int_text)
+
+        # job_config.txt must reference the filenames (not embed the content)
+        cfg_text = (job_dir / 'job_config.txt').read_text()
+        self.assertIn('floatConfig=floats.txt', cfg_text)
+        self.assertIn('intConfig=ints.txt', cfg_text)
+
+    def test_generate_jobs_copies_base_float_and_int_files(self):
+        """If the base config points to existing float/int files, they are copied into jobs."""
+        # prepare a cfg/ directory next to the base config and place floats/ints there
+        base_cfg_dir = Path(self.config.base_config).parent
+        cfg_dir = base_cfg_dir / 'cfg'
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+
+        # create floats.txt and ints.txt referenced by the base config
+        floats_src = cfg_dir / 'floats.txt'
+        floats_src.write_text('from_base=1.23\nsampleNorm=7.0\n')
+        ints_src = cfg_dir / 'ints.txt'
+        ints_src.write_text('type=99\n')
+
+        # rewrite base config to reference the cfg files
+        with open(self.config.base_config, 'w') as f:
+            f.write('threads=1\n')
+            f.write('batch=False\n')
+            f.write('floatConfig=cfg/floats.txt\n')
+            f.write('intConfig=cfg/ints.txt\n')
+
+        manager = ProductionManager(self.config)
+        count = manager.generate_jobs(["fileX.root"])
+        self.assertEqual(count, 1)
+
+        job_dir = self.work_dir / 'job_0'
+        float_path = job_dir / 'floats.txt'
+        int_path = job_dir / 'ints.txt'
+        self.assertTrue(float_path.exists(), 'floats.txt missing from job dir')
+        self.assertTrue(int_path.exists(), 'ints.txt missing from job dir')
+
+        float_lines = float_path.read_text().splitlines()
+        self.assertIn('from_base=1.23', float_lines)
+        self.assertIn('sampleNorm=7.0', float_lines)
+
+        int_lines = int_path.read_text().splitlines()
+        self.assertIn('type=99', int_lines)
+
+        # job_config.txt should reference the basename only
+        cfg_text = (job_dir / 'job_config.txt').read_text()
+        self.assertIn('floatConfig=floats.txt', cfg_text)
+        self.assertIn('intConfig=ints.txt', cfg_text)
             
     def test_state_persistence(self):
         """Test that state is saved and loaded correctly"""
@@ -257,7 +354,92 @@ class TestProductionManager(unittest.TestCase):
         # Note: Without ROOT, validation will skip file integrity check
         # but should at least confirm files exist and are non-empty
         self.assertEqual(len(results), 1)
-        
+
+    def test_create_test_job(self):
+        """ProductionManager can create a local test job directory mirroring a job."""
+        manager = ProductionManager(self.config)
+
+        # Generate a job with inline float/int content so files are created
+        file_lists = ["fileA.root,fileB.root"]
+        extra_cfg = {
+            'floatConfig': 'normScale=3.14\nsampleNorm=2.0',
+            'intConfig': 'type=42',
+            'type': '42'
+        }
+        manager.generate_jobs(file_lists, [extra_cfg])
+
+        # Ensure the exe file exists so it can be copied into the test dir
+        exe_path = self.config.exe_path
+        exe_path.write_text('#!/bin/sh\necho test')
+        exe_path.chmod(0o755)
+
+        test_dir = manager.create_test_job(0)
+        self.assertTrue(test_dir.exists())
+        self.assertTrue((test_dir / 'submit_config.txt').exists())
+
+        # Read the generated submit_config and assert it's a test config
+        from submission_backend import read_config
+        cfg = read_config(str(test_dir / 'submit_config.txt'))
+        self.assertEqual(cfg.get('batch'), 'False')
+        self.assertEqual(cfg.get('threads'), '1')
+        self.assertEqual(cfg.get('saveFile'), 'test_output.root')
+        # fileList should be reduced to the first input
+        self.assertTrue(cfg.get('fileList', '').startswith('fileA.root'))
+        # exe should be copied
+        self.assertTrue((test_dir / exe_path.name).exists())        
+
+    def test_create_test_job_includes_x509(self):
+        """create_test_job copies configured x509 proxy into the test dir"""
+        manager = ProductionManager(self.config)
+
+        # create a dummy x509 proxy and set it in the config
+        x509_src = Path(self.tmpdir) / 'proxy'
+        x509_src.write_text('dummy')
+        manager.config.x509 = str(x509_src)
+
+        # generate a job and create test job
+        file_lists = ["file1.root"]
+        manager.generate_jobs(file_lists)
+        test_dir = manager.create_test_job(0)
+
+        # x509 should be copied into the test directory
+        self.assertTrue((test_dir / x509_src.name).exists())
+
+    @patch('submission_backend.write_submit_files')
+    @patch('production_manager.subprocess.run')
+    def test_htcondor_submission_with_x509(self, mock_run, mock_write_submit):
+        """HTCondor submission forwards x509 location to submit-file generator"""
+        manager = ProductionManager(self.config)
+
+        # create x509 file and attach to manager config
+        x509_src = Path(self.tmpdir) / 'proxy'
+        x509_src.write_text('proxy')
+        manager.config.x509 = str(x509_src)
+
+        # Generate jobs
+        file_lists = ["file1.root", "file2.root"]
+        manager.generate_jobs(file_lists)
+
+        # Mock write_submit_files and condor submit
+        mock_write_submit.return_value = str(self.work_dir / 'submit.sub')
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "1 job(s) submitted to cluster 12345.\n"
+        mock_run.return_value = mock_result
+
+        count = manager.submit_jobs(dry_run=False)
+        self.assertEqual(count, 2)
+
+        # Ensure write_submit_files received the x509 path
+        _, kwargs = mock_write_submit.call_args
+        self.assertEqual(kwargs.get('x509loc'), manager.config.x509)
+        # Ensure write_submit_files is told to use shared_inputs
+        self.assertEqual(kwargs.get('shared_dir_name'), 'shared_inputs')
+
+        # The proxy should have been copied into work_dir/shared_inputs
+        x509_name = Path(manager.config.x509).name
+        self.assertTrue((manager.config.work_dir / 'shared_inputs' / x509_name).exists())
+
     def test_resubmit_failed(self):
         """Test resubmitting failed jobs"""
         manager = ProductionManager(self.config)

@@ -1,0 +1,5 @@
+enableCounters=true
+counterWeightBranch=genWeight
+counterIntWeightBranch=intCode
+metaFile=/home/bkronhei/RDFAnalyzerCore/core/test/aux/test_counter_meta.root
+sample=TestSample

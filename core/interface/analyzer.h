@@ -163,10 +163,42 @@ public:
   Analyzer *bookConfigHistograms();
 
   /**
+   * @brief Book an integer-branch counter histogram on the CounterService.
+   *
+   * Call this after the integer branch (e.g. a stitching code) has been defined
+   * via Define(), and before the event loop runs (before save()). The histogram
+   * range must be known in advance. This forwards to CounterService and keeps
+   * all result pointers alive so the event loop executes only once.
+   *
+   * @param branch Column name of the integer branch (e.g. "stitchBinNLO").
+   * @param nBins  Number of histogram bins.
+   * @param low    Lower edge of the histogram x-axis.
+   * @param high   Upper edge of the histogram x-axis.
+   * @return Pointer to this Analyzer (for chaining).
+   */
+  Analyzer *bookCounterIntHistogram(const std::string& branch, int nBins,
+                                    double low, double high);
+
+  /**
    * @brief Save the configured branches to the output file and trigger the computation of the dataframe.
    * @return Pointer to this Analyzer (for chaining)
    */
   Analyzer *save();
+
+  /**
+   * @brief Unified run/save entry point.
+   *
+   * Triggers the event loop exactly once. This method:
+   *  - Writes a skim only when @c enableSkim=1 (or @c true/@c True) is present in the config.
+   *  - Saves all histograms booked on the NDHistogramManager (if one is registered).
+   *  - Finalizes all analysis services (e.g. CounterService).
+   *
+   * Use this instead of manually calling save() followed by a separate
+   * NDHistogramManager::saveHists() call.
+   *
+   * @return Pointer to this Analyzer (for chaining)
+   */
+  Analyzer *run();
 
   /**
    * @brief Get the underlying RDataFrame node.
@@ -268,6 +300,13 @@ private:
    * @brief Unique pointer to the metadata/hist output sink.
    */
   std::unique_ptr<IOutputSink> metaSink_m;
+  /**
+   * @brief Persisted ManagerContext for wiring plugins/services. Stored here so
+   * services can keep a pointer/reference to a context that outlives stack
+   * temporaries.
+   */
+  ManagerContext managerContext_m;
+
   /**
    * @brief Map of plugin role names to pluggable manager instances.
    */
