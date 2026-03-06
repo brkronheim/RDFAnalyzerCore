@@ -8,6 +8,7 @@
 #include <RtypesCore.h>
 #include <onnxruntime_cxx_api.h>
 #include <memory>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -146,6 +147,26 @@ private:
    * @brief Map from model name to padding size (0 = no padding)
    */
   std::unordered_map<std::string, int64_t> model_paddingSize_m;
+
+  /**
+   * @brief Map from model name to resolved ONNX input shapes.
+   */
+  std::unordered_map<std::string, std::vector<std::vector<int64_t>>> model_inputShapes_m;
+
+  /**
+   * @brief Map from model name to flattened element count per ONNX input tensor.
+   */
+  std::unordered_map<std::string, std::vector<int64_t>> model_inputElementCounts_m;
+
+  /**
+   * @brief Cached C-string pointers for ONNX input names (to avoid per-event allocation).
+   */
+  std::unordered_map<std::string, std::vector<const char *>> model_inputNamePtrs_m;
+
+  /**
+   * @brief Cached C-string pointers for ONNX output names (to avoid per-event allocation).
+   */
+  std::unordered_map<std::string, std::vector<const char *>> model_outputNamePtrs_m;
 };
 
 #endif // ONNXMANAGER_H_INCLUDED
