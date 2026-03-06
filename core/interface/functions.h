@@ -580,10 +580,9 @@ inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPtEtaPhiMVec
  * @param vec2 Second Lorentz vector
  * @return Sum of the two Lorentz vectors
  */
-
-inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> sumLorentzVec(ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> vec1, ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> vec2) {
-  ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> sumVec = vec1 + vec2;
-  return (sumVec);
+template <typename T>
+inline T sumLorentzVec(const T &vec1, const T &vec2) {
+  return vec1 + vec2;
 }
 
 /**
