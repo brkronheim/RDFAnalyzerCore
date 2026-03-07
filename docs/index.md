@@ -11,6 +11,18 @@ New to RDFAnalyzerCore? Start here:
 
 ## User Documentation
 
+### New Features
+
+- **[New Features Guide](NEW_FEATURES.md)** - Recent additions and enhancements
+  - KinematicFitManager plugin for decay reconstruction
+  - GoldenJsonManager for data certification
+  - ONNX input padding for transformer models
+  - Glob patterns for output selection
+  - Vector corrections support
+  - Boost histogram backend
+  - Python plotting bindings
+  - Law workflow integration
+
 ### Building Analyses
 
 - **[Analysis Guide](ANALYSIS_GUIDE.md)** - Comprehensive guide to building analyses
