@@ -368,6 +368,73 @@ s = rdfanalyzer.SelectionInfo("region", 3, 0.0, 3.0, ["SR", "CR", "VR"])
 region_names = analyzer.bookNDHistograms("hist", [h], [s], "nominal")
 ```
 
+### PlottingUtility
+
+The `PlottingUtility` class provides Python bindings for creating ROOT stack plots directly from Python with the full C++ plotting functionality.
+
+```python
+import rdfanalyzer
+
+# Configure a process (sample)
+proc = rdfanalyzer.PlotProcessConfig()
+proc.directory = "signal"
+proc.histogramName = "pt"
+proc.legendLabel = "Signal MC"
+proc.color = 2
+proc.normalizationHistogram = "counter_weightSum_signal"
+
+# Create plot request
+req = rdfanalyzer.PlotRequest()
+req.metaFile = "meta.root"
+req.outputFile = "pt.pdf"
+req.xAxisTitle = "p_{T} [GeV]"
+req.yAxisTitle = "Events"
+req.logY = False
+req.drawRatio = True
+req.processes = [proc]
+
+# Generate plot
+result = rdfanalyzer.PlottingUtility().makeStackPlot(req)
+assert result.success, result.message
+```
+
+**Features**:
+- Stack plots with data/MC ratio panels
+- Log-y scale support via `logY` parameter
+- Automatic normalization using `normalizationHistogram`
+- PCA-based systematic envelopes
+- Parallel batch plotting support
+
+**Configuration Classes**:
+
+- `PlotProcessConfig`: Configures a single process (sample) in the plot
+  - `directory`: Directory in ROOT file containing histograms
+  - `histogramName`: Name of histogram to plot
+  - `legendLabel`: Label for legend entry
+  - `color`: ROOT color code
+  - `normalizationHistogram`: Histogram name for normalization (optional)
+
+- `PlotRequest`: Complete plot configuration
+  - `metaFile`: Input ROOT file with histograms
+  - `outputFile`: Output plot file (PDF, PNG, etc.)
+  - `xAxisTitle`, `yAxisTitle`: Axis labels
+  - `logY`: Logarithmic y-axis (default: False)
+  - `drawRatio`: Draw data/MC ratio panel (default: False)
+  - `processes`: List of `PlotProcessConfig` objects
+
+**Batch Plotting**:
+
+```python
+# Generate multiple plots in parallel
+requests = [req1, req2, req3, ...]
+for req in requests:
+    result = rdfanalyzer.PlottingUtility().makeStackPlot(req)
+    if not result.success:
+        print(f"Failed: {result.message}")
+```
+
+See [Production Manager Guide](PRODUCTION_MANAGER.md) for integration with Law workflow tasks.
+
 ## API Reference
 
 ### Analyzer Class

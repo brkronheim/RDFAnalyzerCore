@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 namespace {
 

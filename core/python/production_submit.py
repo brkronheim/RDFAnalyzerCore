@@ -19,6 +19,19 @@ from generateSubmissionFilesNANO import (
 from validate_config import validate_submit_config
 
 
+def _resolve_cli_path(path_value: str, repo_root: Path) -> Path:
+    path_obj = Path(path_value)
+    if path_obj.is_absolute():
+        return path_obj
+    cwd_candidate = (Path.cwd() / path_obj)
+    if cwd_candidate.exists():
+        return cwd_candidate.resolve()
+    repo_candidate = (repo_root / path_obj)
+    if repo_candidate.exists():
+        return repo_candidate.resolve()
+    return cwd_candidate.resolve()
+
+
 def generate_production_from_nano(
     manager: ProductionManager,
     sample_config: str,
@@ -27,61 +40,115 @@ def generate_production_from_nano(
 ) -> int:
     """
     Generate jobs for a production using NANO/Rucio data discovery.
-    
+
+    This implementation parallelizes work at two levels, mirroring
+    generateSubmissionFilesNANO.py:
+      - samples are processed in parallel (up to `threads` workers)
+      - DAS/Rucio entries for a single sample are queried in parallel
+
     Args:
         manager: ProductionManager instance
         sample_config: Path to sample configuration file
         file_split_gb: GB of data per job
         threads: Number of parallel threads for Rucio queries
-        
+
     Returns:
         Number of jobs created
     """
-    # Get samples from config
+    # Read sample list and topology
     sample_list, base_dirs, lumi, WL, BL = getSampleList(sample_config)
-    
-    # Get Rucio client
-    client = get_rucio_client()
-    
-    # Process each sample
-    file_lists = []
-    job_configs = []
-    
-    for sample_name, sample_data in sample_list.items():
-        print(f"Processing sample: {sample_name}")
-        
+
+    # Thread-safe accumulators
+    file_lists: list = []
+    job_configs: list = []
+
+    def _process_sample(sample_name, sample_data):
+        """Process a single sample (runs in a worker thread)."""
+        try:
+            client_local = get_rucio_client()
+        except Exception as e:
+            print(f"Warning: cannot create Rucio client for sample {sample_name}: {e}")
+            return []
+
         das = sample_data['das']
-        xsec = float(sample_data['xsec'])
+        xsec = float(sample_data.get('xsec', 0.0))
         typ = sample_data['type']
         norm = float(sample_data.get('norm', 1.0))
         kfac = float(sample_data.get('kfac', 1.0))
         site = sample_data.get('site', '')
         extra_scale = float(sample_data.get('extraScale', 1.0))
-        
-        # Query Rucio for files
+
         das_entries = [d.strip() for d in das.split(',') if d and d.strip()]
-        
-        for das_entry in das_entries:
-            groups = queryRucio(das_entry, file_split_gb, WL, BL, site, client)
-            
-            # Create a job for each group
-            for group_id, file_list in groups.items():
-                norm_scale = extra_scale * kfac * lumi * xsec / norm
-                
-                job_config = {
-                    'type': typ,
-                    'floatConfig': f'normScale={norm_scale}\nsampleNorm={norm}',
-                    'intConfig': f'type={typ}',
-                }
-                
+        if not das_entries:
+            return []
+
+        # If there are multiple DAS entries, query them in parallel
+        if len(das_entries) == 1:
+            groups_result = queryRucio(das_entries[0], file_split_gb, WL, BL, site, client_local)
+        else:
+            workers = max(1, min(len(das_entries), threads))
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            all_files = []
+            with ThreadPoolExecutor(max_workers=workers) as das_executor:
+                das_futures = {das_executor.submit(queryRucio, e, file_split_gb, WL, BL, site, client_local): e for e in das_entries}
+                for fut in as_completed(das_futures):
+                    try:
+                        res = fut.result()
+                    except Exception:
+                        continue
+                    if not res:
+                        continue
+                    for g in sorted(res.keys()):
+                        grp = res[g]
+                        parts = [p.strip() for p in grp.split(',') if p.strip()]
+                        all_files.extend(parts)
+
+            # deduplicate while preserving order
+            seen = set()
+            combined = []
+            for f in all_files:
+                if f in seen:
+                    continue
+                seen.add(f)
+                combined.append(f)
+            groups_result = {0: ",".join(combined)} if combined else {}
+
+        # Convert groups_result into (file_list, job_config) entries
+        entries = []
+        for group_id, file_list in groups_result.items():
+            norm_scale = extra_scale * kfac * lumi * xsec / norm
+            job_config = {
+                'type': typ,
+                'floatConfig': f'normScale={norm_scale}\nsampleNorm={norm}',
+                'intConfig': f'type={typ}',
+            }
+            entries.append((file_list, job_config))
+
+        return entries
+
+    # Process samples in parallel
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    max_workers = max(1, threads)
+    futures = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for sample_name, sample_data in sample_list.items():
+            futures.append(executor.submit(_process_sample, sample_name, sample_data))
+
+        for fut in as_completed(futures):
+            res = fut.result()
+            if not res:
+                continue
+            for file_list, job_cfg in res:
                 file_lists.append(file_list)
-                job_configs.append(job_config)
-    
+                job_configs.append(job_cfg)
+
     # Generate jobs in manager
     return manager.generate_jobs(file_lists, job_configs)
 
 
 def main():
+    repo_root = Path(__file__).resolve().parents[2]
+
     parser = argparse.ArgumentParser(
         description="Submit RDFAnalyzerCore production with ProductionManager"
     )
@@ -108,6 +175,12 @@ def main():
         help='Path to analysis executable'
     )
     parser.add_argument(
+        '-x', '--x509',
+        type=str,
+        default="",
+        help='Path to x509 proxy (optional)'
+    )
+    parser.add_argument(
         '--output-dir', '-o',
         help='Output directory (default: based on config saveDirectory)'
     )
@@ -128,6 +201,23 @@ def main():
         type=int,
         default=4,
         help='Number of threads for Rucio queries (default: 4)'
+    )
+    parser.add_argument(
+        '--root-setup',
+        type=str,
+        default="",
+        help="command to setup ROOT (e.g., 'source /path/to/thisroot.sh')"
+    )
+    parser.add_argument(
+        '--max-runtime',
+        type=int,
+        default=3600,
+        help='Max runtime (seconds) for Condor jobs (default: 3600)'
+    )
+    parser.add_argument(
+        '--make-test-job',
+        action='store_true',
+        help='create a local test job for the first generated job (writes test_job/submit_config.txt)'
     )
     
     # Submission settings
@@ -178,6 +268,12 @@ def main():
     
     args = parser.parse_args()
     
+    args.config = str(_resolve_cli_path(args.config, repo_root))
+    args.sample_config = str(_resolve_cli_path(args.sample_config, repo_root))
+    args.exe = str(_resolve_cli_path(args.exe, repo_root))
+    if args.x509:
+        args.x509 = str(_resolve_cli_path(args.x509, repo_root))
+
     # Validate configuration
     if not args.no_validate:
         print("Validating configuration...")
@@ -199,13 +295,13 @@ def main():
     # Read base config to get output directory
     base_config = read_config(args.config)
     if args.output_dir:
-        output_dir = Path(args.output_dir)
+        output_dir = Path(_resolve_cli_path(args.output_dir, repo_root))
     else:
         output_dir = Path(base_config.get('saveDirectory', f'outputs_{args.name}'))
     
     # Set work directory
     if args.work_dir:
-        work_dir = Path(args.work_dir)
+        work_dir = Path(_resolve_cli_path(args.work_dir, repo_root))
     else:
         work_dir = Path(f'condorSub_{args.name}')
     
@@ -230,6 +326,9 @@ def main():
         stage_outputs=args.stage_outputs,
         max_retries=args.max_retries,
         eos_sched=args.eos_sched,
+        root_setup=args.root_setup,
+        x509=args.x509 or None,
+        max_runtime=args.max_runtime,
     )
     
     # Create manager
@@ -239,7 +338,16 @@ def main():
     if not manager.jobs:
         print("Generating jobs from NANO/Rucio...")
         try:
-            proxy = get_proxy_path()
+            # prefer explicit proxy passed on CLI; otherwise use current proxy
+            if args.x509:
+                proxy = str(Path(args.x509))
+                if not Path(proxy).exists():
+                    raise Exception(f"x509 proxy not found: {proxy}")
+            else:
+                proxy = get_proxy_path()
+
+            # ensure manager knows which proxy to stage
+            manager.config.x509 = str(proxy)
             print(f"Using proxy: {proxy}")
         except Exception as e:
             print(f"Error: {e}")
@@ -258,7 +366,19 @@ def main():
     
     # Print current status
     manager.print_progress()
-    
+
+    # Optionally create a local test job for quick verification
+    if args.make_test_job:
+        if manager.jobs:
+            try:
+                test_dir = manager.create_test_job(0)
+                print(f"\nTest job created at: {test_dir}")
+                print(f"Run locally: cd {test_dir} && ./{os.path.basename(prod_config.exe_path)} submit_config.txt")
+            except Exception as e:
+                print(f"Failed to create test job: {e}")
+        else:
+            print("No jobs available to create a test job")
+
     # Submit if requested
     if args.submit and not args.dry_run:
         print("\nSubmitting jobs...")

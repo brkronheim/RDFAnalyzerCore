@@ -24,6 +24,7 @@ std::string writeConfig(const std::string& path, const std::string& metaFile) {
   out << "counterIntWeightBranch=intCode\n";
   out << "metaFile=" << metaFile << "\n";
   out << "sample=TestSample\n";
+  out << "fileList=\n";  // Empty fileList to satisfy DataManager requirement
   out.close();
   return path;
 }

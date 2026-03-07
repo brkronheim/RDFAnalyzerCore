@@ -149,6 +149,20 @@ struct KinFitConfig {
 
   int    maxIterations        = 50;    ///< Maximum linearisation iterations
   double convergenceTolerance = 1e-6;  ///< Convergence criterion on |Δχ²|
+
+  /// @brief Whether to run this fit on the GPU.
+  ///
+  /// When @p true the fit is dispatched to the GPU via the CUDA implementation
+  /// in KinematicFitGPU.cu.  The project must be compiled with
+  /// @c -DUSE_CUDA=ON; if it is not, setting @p useGPU = true throws a
+  /// std::runtime_error at applyFit() time with a clear diagnostic message.
+  ///
+  /// GPU execution processes events in a batch for maximum throughput.  Set
+  /// this to @p true for computationally expensive fits (many particles,
+  /// tight convergence) on large datasets.
+  ///
+  /// Config key: @c useGPU=true / @c useGPU=false  (default: false)
+  bool useGPU = false;
 };
 
 /**

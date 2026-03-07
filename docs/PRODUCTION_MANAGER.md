@@ -588,11 +588,155 @@ The Production Manager integrates with existing RDFAnalyzerCore tools:
 - **resubmit_jobs.py**: Can still be used for manual resubmission
 - **validate_config.py**: Automatic configuration validation
 
+## Law Workflow Integration
+
+The Production Manager integrates with the Law (Luigi Analysis Workflow) task framework for managing complex analysis workflows on batch systems. Law provides a powerful task-based workflow system with automatic dependency resolution, retry logic, and progress tracking.
+
+### Available Law Tasks
+
+#### NANO Analysis Tasks
+
+Law tasks for CMS NanoAOD analysis workflow:
+
+- **`SubmitNANOJobs`**: Submit analysis jobs to HTCondor or DASK
+  - Automatically discovers input datasets
+  - Generates per-file job configurations
+  - Stages shared libraries and executables
+  - Tracks job submission status
+
+- **`MonitorNANOJobs`**: Monitor running jobs
+  - Queries batch system for job status
+  - Reports progress and completion rate
+  - Identifies failed jobs for resubmission
+
+- **`ValidateNANOOutputs`**: Validate ROOT output files
+  - Checks file integrity (ROOT file structure)
+  - Verifies expected trees and branches exist
+  - Reports validation failures
+
+#### Plotting Tasks
+
+Law tasks for creating physics plots:
+
+- **`MakePlot`**: Generate a single stack plot
+  - Uses PlottingUtility Python bindings
+  - Supports data/MC ratio panels
+  - Configurable via PlotRequest objects
+
+- **`MakePlots`**: Batch plotting from configuration
+  - Generates multiple plots in parallel
+  - Reads plot specifications from config files
+  - Automatic output organization
+
+#### Combine Datacard Tasks
+
+Law tasks for CMS combine statistical analysis:
+
+- **`CreateDatacard`**: Generate CMS combine datacards
+  - Extracts histograms from analysis outputs
+  - Formats systematic uncertainties
+  - Writes datacard in combine format
+
+- **`RunCombine`**: Execute statistical fits
+  - Runs combine tool with specified method
+  - Supports AsymptoticLimits, FitDiagnostics, etc.
+  - Collects fit results
+
+### Example Law Workflows
+
+#### Basic NANO Analysis
+
+```bash
+# Submit analysis jobs
+law run SubmitNANOJobs \
+    --config cfg/analysis.txt \
+    --dataset /DoubleMuon/Run2022*/NANOAOD \
+    --backend htcondor \
+    --work-dir condorSub_myanalysis
+
+# Monitor progress
+law run MonitorNANOJobs \
+    --work-dir condorSub_myanalysis
+
+# Validate outputs
+law run ValidateNANOOutputs \
+    --work-dir condorSub_myanalysis
+```
+
+#### Statistical Analysis Workflow
+
+```bash
+# Create datacards from analysis outputs
+law run CreateDatacard \
+    --datacard-config cfg/datacard.yaml \
+    --name myRun \
+    --input-dir outputs/
+
+# Run combine fit
+law run RunCombine \
+    --name myRun \
+    --method AsymptoticLimits \
+    --datacard datacards/myRun.txt
+```
+
+#### Plotting Workflow
+
+```bash
+# Single plot
+law run MakePlot \
+    --meta-file outputs/meta.root \
+    --output-file plots/pt.pdf \
+    --histogram-name jet_pt
+
+# Batch plotting from config
+law run MakePlots \
+    --plot-config cfg/plots.yaml \
+    --output-dir plots/
+```
+
+### Law Task Dependencies
+
+Law automatically manages task dependencies. For example, `ValidateNANOOutputs` depends on `SubmitNANOJobs`, so running:
+
+```bash
+law run ValidateNANOOutputs --config cfg/analysis.txt
+```
+
+Will automatically:
+1. Submit jobs (if not already done)
+2. Wait for jobs to complete
+3. Validate outputs
+
+### Task Configuration
+
+Law tasks use the same configuration files as the Production Manager:
+
+```
+# analysis.txt - Same format as before
+fileList=/path/to/inputs/*.root
+saveFile=output.root
+threads=-1
+```
+
+Additional Law-specific configuration can be provided via command-line parameters or Law config files (`law.cfg`).
+
+### Integration Benefits
+
+Using Law with the Production Manager provides:
+
+- **Dependency Management**: Automatic task ordering and execution
+- **Retry Logic**: Failed tasks are automatically retried
+- **Caching**: Completed tasks are not re-executed unnecessarily
+- **Parallel Execution**: Independent tasks run in parallel
+- **Progress Tracking**: Built-in status reporting and logging
+- **Workflow Visualization**: Generate workflow graphs with `law run --print-status`
+
+See [Combine Integration](COMBINE_INTEGRATION.md) for detailed datacard and statistical analysis workflows.
+
 ## Future Enhancements
 
 Planned improvements:
 
-- [ ] LAW (Luigi Analysis Workflow) integration
 - [ ] Automatic output merging
 - [ ] Email notifications for completion/failures
 - [ ] Web-based monitoring dashboard

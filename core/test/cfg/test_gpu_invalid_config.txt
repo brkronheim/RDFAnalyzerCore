@@ -1,0 +1,1 @@
+kinematicFitConfig=cfg/kinematic_fit_gpu_invalid.txt

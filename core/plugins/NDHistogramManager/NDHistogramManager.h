@@ -74,6 +74,15 @@ public:
                  std::vector<std::vector<std::string>> &allRegionNames);
 
   /**
+   * @brief Save all histograms booked via bookND without supplying lists again.
+   *
+   * Histogram metadata and region names are accumulated internally each time
+   * bookND() is called. This overload replays that stored information so the
+   * caller does not need to manage separate tracking vectors.
+   */
+  void saveHists();
+
+  /**
    * @brief Get the vector of histogram result pointers
    * @return Reference to the vector of RResultPtr<THnSparseD>
    */
@@ -151,6 +160,9 @@ private:
   std::vector<ROOT::RDF::RNode> histNodes_m;
   std::vector<ROOT::RDF::RResultPtr<THnSparseF>> histos_m;
   std::vector<HistogramConfig> configHistograms_m;
+  // Accumulated metadata from each bookND() call — used by the no-args saveHists()
+  std::vector<std::vector<histInfo>> trackedHistInfos_m;
+  std::vector<std::vector<std::string>> trackedRegionNames_m;
   IConfigurationProvider* configManager_m = nullptr;
   IDataFrameProvider* dataManager_m = nullptr;
   ISystematicManager* systematicManager_m = nullptr;
@@ -158,6 +170,7 @@ private:
   IOutputSink* skimSink_m = nullptr;
   IOutputSink* metaSink_m = nullptr;
   bool countersFinalized_m = false;
+  std::string histogramBackend_m = "root";
 };
 
 #endif // NDHISTOGRAMMANAGER_H_INCLUDED 

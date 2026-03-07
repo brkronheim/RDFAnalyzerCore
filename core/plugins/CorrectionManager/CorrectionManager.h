@@ -100,6 +100,8 @@ private:
    * @param configProvider Reference to the configuration provider
    */
   void registerCorrectionlib(const IConfigurationProvider &configProvider);
+
+  bool initialized_m = false;
 };
 
 #endif // CORRECTIONMANAGER_H_INCLUDED 

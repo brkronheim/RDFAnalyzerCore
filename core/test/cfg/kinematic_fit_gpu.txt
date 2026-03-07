@@ -1,0 +1,1 @@
+name=wjFitGPU useGPU=true particles=lep:lep1_pt:lep1_eta:lep1_phi:lep1_mass:lepton,nu:met_pt:_:met_phi:0:met constraints=0+1:80.4:2.085 leptonPtResolution=0.02 leptonEtaResolution=0.001 leptonPhiResolution=0.001 metPtResolution=0.20 metPhiResolution=0.05 maxIterations=50 convergenceTolerance=1e-6

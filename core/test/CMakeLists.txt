@@ -45,6 +45,10 @@ add_executable(testCounterService testCounterService.cc)
 target_link_libraries(testCounterService core gtest gtest_main)
 add_test(NAME CounterServiceTest COMMAND testCounterService)
 
+#add_executable(testCounterService_Dedup testCounterService_Dedup.cc)
+#target_link_libraries(testCounterService_Dedup core corePlugins gtest gtest_main)
+#add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)
+
 #add_executable(testDataManager testDataManager.cc)
 #target_link_libraries(testDataManager core corePlugins gtest gtest_main)
 #add_test(NAME DataManagerTest COMMAND testDataManager)
@@ -79,6 +83,10 @@ add_executable(testNDHistogramManager testNDHistogramManager.cc)
 target_link_libraries(testNDHistogramManager core corePlugins gtest gtest_main)
 add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
 
+add_executable(testNDHistogramManagerConfig testNDHistogramManagerConfig.cc)
+target_link_libraries(testNDHistogramManagerConfig core corePlugins gtest gtest_main)
+add_test(NAME NDHistogramManagerConfigTest COMMAND testNDHistogramManagerConfig)
+
 add_executable(testTriggerManager testTriggerManager.cc)
 target_link_libraries(testTriggerManager core corePlugins gtest gtest_main)
 add_test(NAME TriggerManagerTest COMMAND testTriggerManager)
@@ -99,6 +107,10 @@ add_test(NAME AnalyzerTriggerLogicTest COMMAND testAnalyzer_TriggerLogic)
 add_executable(testAnalyzer_PluginWiring testAnalyzer_PluginWiring.cc)
 target_link_libraries(testAnalyzer_PluginWiring core corePlugins gtest gtest_main)
 add_test(NAME AnalyzerPluginWiringTest COMMAND testAnalyzer_PluginWiring)
+
+add_executable(testAnalyzer_ManagerContextPersistence testAnalyzer_ManagerContextPersistence.cc)
+target_link_libraries(testAnalyzer_ManagerContextPersistence core corePlugins gtest gtest_main)
+add_test(NAME AnalyzerManagerContextPersistenceTest COMMAND testAnalyzer_ManagerContextPersistence)
 
 add_executable(testRootEnvironmentGuard testRootEnvironmentGuard.cc)
 target_link_libraries(testRootEnvironmentGuard core gtest gtest_main)
@@ -123,8 +135,8 @@ endif()
 
 # Integration tests
 
-#add_executable(testSystematicPropagation testSystematicPropagation.cc)
-#target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
-#add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+add_executable(testSystematicPropagation testSystematicPropagation.cc)
+target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
+add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
 
 
