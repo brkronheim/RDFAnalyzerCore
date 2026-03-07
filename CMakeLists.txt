@@ -9,7 +9,17 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
+# Ensure our custom modules directory is always on the search path.  
+# Use list(APPEND) so the value isnt accidentally cached/overwritten by previous
+# configurations (a common source of "cannot find requested file" errors).
+# We use CMAKE_SOURCE_DIR rather than CURRENT_SOURCE_DIR because the former
+# always refers to the top-level project root even when this file is included
+# from a subdirectory (e.g. via add_subdirectory).
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
+# Print the module path during configuration to aid debugging if modules are
+# mysteriously not found.
+message(STATUS "CMAKE_MODULE_PATH = ${CMAKE_MODULE_PATH}")
 
 project(RDFAnalyzer)
 
@@ -39,11 +49,17 @@ find_package(Boost REQUIRED CONFIG)
 # include(SetupYamlCpp)
 
 # Setup ONNX Runtime
-include(SetupOnnxRuntime)
+# include() looks in CMAKE_MODULE_PATH; use an explicit absolute path to
+# avoid problems with stale cached module paths in existing build directories.
+include("${CMAKE_SOURCE_DIR}/cmake/SetupOnnxRuntime.cmake")
 
 # Setup CMS Combine (optional)
 if(BUILD_COMBINE OR BUILD_COMBINE_HARVESTER)
-	include(SetupCombine)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/cmake/SetupCombine.cmake")
+        message(FATAL_ERROR "Requested BUILD_COMBINE or BUILD_COMBINE_HARVESTER,\n"
+                            "but could not find cmake/SetupCombine.cmake in the source tree")
+    endif()
+    include("${CMAKE_SOURCE_DIR}/cmake/SetupCombine.cmake")
 endif()
 
 set(PYBIND11_FINDPYTHON ON)

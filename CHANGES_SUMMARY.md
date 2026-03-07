@@ -12,7 +12,7 @@ Three new CMake options have been added to `CMakeLists.txt`:
 
 - **`BUILD_TESTS`** (default: `ON`) - Control whether analysis tests are built
 - **`BUILD_COMBINE`** (default: `OFF`) - Build CMS Combine package
-- **`BUILD_COMBINE_HARVESTER`** (default: `OFF`) - Build CombineHarvester tools (requires `BUILD_COMBINE=ON`)
+- **`BUILD_COMBINE_HARVESTER`** (default: `OFF`) - Build CombineHarvester libraries and tools (requires `BUILD_COMBINE=ON`)
 
 ### 2. CMake Infrastructure
 
@@ -21,6 +21,7 @@ Three new CMake options have been added to `CMakeLists.txt`:
 - Uses CMake's ExternalProject_Add to clone and build external repositories
 - Creates targets `CombineTool` and `CombineHarvester`
 - Exports paths for easy access after building
+- Applies compatibility patches needed for newer ROOT releases when building CombineHarvester standalone
 
 **Modified: `CMakeLists.txt`**
 - Added option definitions at the top
@@ -96,7 +97,7 @@ cmake -S . -B build -DBUILD_COMBINE=ON
 cmake --build build -j$(nproc)
 
 # Combine executable will be at:
-# build/external/HiggsAnalysis/CombinedLimit/exe/combine
+# build/external/HiggsAnalysis/CombinedLimit/bin/combine
 ```
 
 ### Building With All Features
@@ -129,7 +130,7 @@ Generates CMS Combine datacards and shape files.
 ### 3. Run Statistical Analysis
 ```bash
 cd datacards
-../build/external/HiggsAnalysis/CombinedLimit/exe/combine \
+../build/external/HiggsAnalysis/CombinedLimit/bin/combine \
     -M AsymptoticLimits datacard_signal_region.txt
 ```
 Calculates limits, performs fits, extracts results.
@@ -148,6 +149,7 @@ Calculates limits, performs fits, extracts results.
 - Combine requires ROOT (already a framework dependency)
 - CombineHarvester requires Combine
 - All dependencies handled automatically by CMake
+- Standalone CombineHarvester build installs libraries to `build/external/CombineHarvester/lib`
 
 ## Backward Compatibility
 
@@ -215,7 +217,7 @@ source env.sh  # or your ROOT setup
 cmake -S . -B build_combine -DBUILD_COMBINE=ON
 cmake --build build_combine
 # Should download and build Combine
-# Verify: ls build_combine/external/HiggsAnalysis/CombinedLimit/exe/combine
+# Verify: ls build_combine/external/HiggsAnalysis/CombinedLimit/bin/combine
 ```
 
 ### 4. Test Complete Workflow (manual)
@@ -243,7 +245,7 @@ For help with:
 
 All requested features have been implemented:
 - ✅ Optional Combine building with `BUILD_COMBINE` flag
-- ✅ Optional CombineHarvester building with `BUILD_COMBINE_HARVESTER` flag
+- ✅ Optional CombineHarvester build with `BUILD_COMBINE_HARVESTER` flag
 - ✅ Configurable test building with `BUILD_TESTS` flag
 - ✅ Complete documentation showing full analysis workflow
 - ✅ Example scripts demonstrating usage

@@ -1,0 +1,17 @@
+directory=test_data
+saveFile=test_output.root
+saveDirectory=test_output/
+saveTree=Events
+threads=1
+antiglobs=output.root,hists.root
+globs=root,test
+saveConfig=cfg/output.txt
+bdtConfig=cfg/bdts.txt
+onnxConfig=cfg/onnx_models_gpu_invalid_device.txt
+correctionConfig=cfg/correction.txt
+triggerConfig=cfg/triggers.txt
+kinematicFitConfig=cfg/kinematic_fit.txt
+floatConfig=cfg/floats.txt
+intConfig=cfg/ints.txt
+optionalBranchesConfig=cfg/optionalBranches.txt
+aliasConfig=cfg/alias.txt

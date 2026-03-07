@@ -23,7 +23,6 @@ build/*
 Testing/Temporary/*
 .cache/*
 CMakeFiles
-*.cmake
 Makefile
 CMakeCache.txt
 python/index.html

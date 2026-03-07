@@ -5,8 +5,25 @@
 #include <unistd.h>
 #include <string>
 #include <filesystem>
+#include <dlfcn.h>
 #include <TFile.h>
+#include <TROOT.h>
 #include <TTree.h>
+
+inline void EnsureConsistentRootTestEnvironment() {
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void*>(&TROOT::Class), &info) == 0 || info.dli_fname == nullptr) {
+        return;
+    }
+
+    std::filesystem::path libCorePath(info.dli_fname);
+    std::filesystem::path rootPrefix = libCorePath.parent_path();
+    if (!std::filesystem::exists(rootPrefix)) {
+        return;
+    }
+
+    setenv("ROOTSYS", rootPrefix.c_str(), 1);
+}
 
 /**
  * @brief Change to the test source directory using TEST_SOURCE_DIR macro.
@@ -15,6 +32,8 @@
  *        Fails the test if the directory change is unsuccessful.
  */
 inline void ChangeToTestSourceDir() {
+    EnsureConsistentRootTestEnvironment();
+
     if (chdir(TEST_SOURCE_DIR) != 0) {
         FAIL() << "Failed to change directory to " << TEST_SOURCE_DIR;
     }

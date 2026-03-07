@@ -2,6 +2,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../extern/gtest/googletest/inclu
 
 # Define the test source directory for all test executables
 add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_compile_definitions(TEST_BINARY_DIR="${CMAKE_BINARY_DIR}")
 
 add_executable(testRootOutputSink testRootOutputSink.cc)
 target_link_libraries(testRootOutputSink core gtest gtest_main)
@@ -95,6 +96,12 @@ add_executable(testKinematicFitManager testKinematicFitManager.cc)
 target_link_libraries(testKinematicFitManager core corePlugins gtest gtest_main)
 add_test(NAME KinematicFitManagerTest COMMAND testKinematicFitManager)
 
+if(USE_CUDA)
+add_executable(testKinematicFitManagerGpu testKinematicFitManagerGpu.cc)
+target_link_libraries(testKinematicFitManagerGpu core corePlugins gtest gtest_main)
+add_test(NAME KinematicFitManagerGpuIntegrationTest COMMAND testKinematicFitManagerGpu)
+endif()
+
 add_executable(testGoldenJsonManager testGoldenJsonManager.cc)
 target_link_libraries(testGoldenJsonManager core corePlugins gtest gtest_main)
 add_test(NAME GoldenJsonManagerTest COMMAND testGoldenJsonManager)
@@ -119,6 +126,13 @@ add_test(NAME RootEnvironmentGuardTest COMMAND testRootEnvironmentGuard)
 add_executable(testPlottingUtility testPlottingUtility.cc)
 target_link_libraries(testPlottingUtility core gtest gtest_main)
 add_test(NAME PlottingUtilityTest COMMAND testPlottingUtility)
+
+if(ONNXRUNTIME_USE_CUDA)
+add_executable(testOnnxManagerGpu testOnnxManagerGpu.cc)
+target_link_libraries(testOnnxManagerGpu core corePlugins gtest gtest_main)
+add_test(NAME OnnxManagerGpuIntegrationTest COMMAND testOnnxManagerGpu)
+endif()
+
 if(TARGET rdfanalyzer AND Python_EXECUTABLE)
 add_test(NAME PythonBindingsNumbaIntegration
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_bindings.py)
@@ -138,5 +152,29 @@ endif()
 add_executable(testSystematicPropagation testSystematicPropagation.cc)
 target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
 add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+
+if(BUILD_COMBINE)
+add_test(
+    NAME CombineConfigurationTest
+    COMMAND ${CMAKE_COMMAND}
+        -DCOMBINE_PREFIX=${COMBINE_PREFIX}
+        -DCOMBINE_EXECUTABLE=${COMBINE_EXECUTABLE}
+        -DCOMBINE_BIN_DIR=${COMBINE_BIN_DIR}
+        -DCOMBINE_LIBRARY_DIR=${COMBINE_LIBRARY_DIR}
+        -DCOMBINE_PYTHON_DIR=${COMBINE_PYTHON_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyCombineConfig.cmake)
+endif()
+
+if(BUILD_COMBINE_HARVESTER)
+add_test(
+    NAME CombineHarvesterConfigurationTest
+    COMMAND ${CMAKE_COMMAND}
+        -DCOMBINEHARVESTER_ROOT_DIR=${COMBINEHARVESTER_ROOT_DIR}
+        -DCOMBINEHARVESTER_TOOLS_DIR=${COMBINEHARVESTER_TOOLS_DIR}
+        -DCOMBINEHARVESTER_PYTHON_DIR=${COMBINEHARVESTER_PYTHON_DIR}
+        -DCOMBINEHARVESTER_PDFS_DIR=${COMBINEHARVESTER_PDFS_DIR}
+        -DCOMBINEHARVESTER_LIBRARY_DIR=${COMBINEHARVESTER_LIBRARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyCombineHarvesterConfig.cmake)
+endif()
 
 

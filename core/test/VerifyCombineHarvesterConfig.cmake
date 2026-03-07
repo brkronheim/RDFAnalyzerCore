@@ -1,0 +1,37 @@
+function(assert_exists path description)
+  if(NOT EXISTS "${path}")
+    message(FATAL_ERROR "${description} missing: ${path}")
+  endif()
+endfunction()
+
+function(assert_under_root path root description)
+  string(FIND "${path}" "${root}" root_pos)
+  if(NOT root_pos EQUAL 0)
+    message(FATAL_ERROR "${description} must live under ${root}, got ${path}")
+  endif()
+endfunction()
+
+if(NOT DEFINED COMBINEHARVESTER_ROOT_DIR OR COMBINEHARVESTER_ROOT_DIR STREQUAL "")
+  message(FATAL_ERROR "COMBINEHARVESTER_ROOT_DIR was not provided to VerifyCombineHarvesterConfig.cmake")
+endif()
+
+assert_exists("${COMBINEHARVESTER_ROOT_DIR}" "CombineHarvester root directory")
+assert_exists("${COMBINEHARVESTER_TOOLS_DIR}" "CombineHarvester tools directory")
+assert_exists("${COMBINEHARVESTER_PYTHON_DIR}" "CombineHarvester python directory")
+assert_exists("${COMBINEHARVESTER_PDFS_DIR}" "CombineHarvester PDF helper directory")
+assert_exists("${COMBINEHARVESTER_LIBRARY_DIR}" "CombineHarvester library directory")
+
+assert_under_root("${COMBINEHARVESTER_TOOLS_DIR}" "${COMBINEHARVESTER_ROOT_DIR}" "CombineHarvester tools directory")
+assert_under_root("${COMBINEHARVESTER_PYTHON_DIR}" "${COMBINEHARVESTER_ROOT_DIR}" "CombineHarvester python directory")
+assert_under_root("${COMBINEHARVESTER_PDFS_DIR}" "${COMBINEHARVESTER_ROOT_DIR}" "CombineHarvester PDF helper directory")
+assert_under_root("${COMBINEHARVESTER_LIBRARY_DIR}" "${COMBINEHARVESTER_ROOT_DIR}" "CombineHarvester library directory")
+
+file(GLOB _combineharvester_libs "${COMBINEHARVESTER_LIBRARY_DIR}/*CombineHarvester*")
+if(NOT _combineharvester_libs)
+  message(FATAL_ERROR "CombineHarvester library directory does not contain built libraries: ${COMBINEHARVESTER_LIBRARY_DIR}")
+endif()
+
+file(GLOB _combineharvester_tools "${COMBINEHARVESTER_TOOLS_DIR}/*")
+if(NOT _combineharvester_tools)
+  message(FATAL_ERROR "CombineHarvester tools directory is empty: ${COMBINEHARVESTER_TOOLS_DIR}")
+endif()

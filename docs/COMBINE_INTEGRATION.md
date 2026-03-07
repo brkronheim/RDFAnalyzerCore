@@ -73,7 +73,7 @@ After building, Combine and CombineHarvester will be available at:
 
 ```bash
 # Combine executable
-build/external/HiggsAnalysis/CombinedLimit/exe/combine
+build/external/HiggsAnalysis/CombinedLimit/bin/combine
 
 # CombineHarvester tools
 build/external/CombineHarvester/CombineTools/bin/
@@ -241,7 +241,7 @@ Calculate expected and observed limits using the asymptotic CLs method:
 cd datacards
 
 # Set path to combine executable
-COMBINE=../build/external/HiggsAnalysis/CombinedLimit/exe/combine
+COMBINE=../build/external/HiggsAnalysis/CombinedLimit/bin/combine
 
 # Run asymptotic limit calculation
 $COMBINE -M AsymptoticLimits datacard_signal_region.txt \
@@ -432,7 +432,7 @@ python core/python/create_datacards.py datacard_config.yaml
 # Step 3: Run Combine
 echo "Step 3: Running statistical analysis..."
 cd datacards
-COMBINE=../build/external/HiggsAnalysis/CombinedLimit/exe/combine
+COMBINE=../build/external/HiggsAnalysis/CombinedLimit/bin/combine
 
 # Asymptotic limits
 echo "  -> Calculating asymptotic limits..."
@@ -548,7 +548,7 @@ If combine executable is not found:
 
 ```bash
 # Check build
-ls -la build/external/HiggsAnalysis/CombinedLimit/exe/combine
+ls -la build/external/HiggsAnalysis/CombinedLimit/bin/combine
 
 # Rebuild if necessary
 cmake --build build --target combine_build
