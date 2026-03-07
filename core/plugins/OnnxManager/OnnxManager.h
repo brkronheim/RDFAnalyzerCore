@@ -101,6 +101,13 @@ public:
   int64_t getPaddingSize(const std::string &modelName) const;
 
   /**
+   * @brief Get whether an ONNX model is configured to use the CUDA runtime
+   * @param modelName Name of the model
+   * @return true if the model uses the CUDA execution provider, false otherwise
+   */
+  bool getUseCuda(const std::string &modelName) const;
+
+  /**
    * @brief Return the type of the manager
    */
   std::string type() const override { return "OnnxManager"; }
@@ -148,6 +155,11 @@ private:
    */
   std::unordered_map<std::string, int64_t> model_paddingSize_m;
 
+  /**
+   * @brief Map from model name to CUDA runtime usage flag
+   */
+  std::unordered_map<std::string, bool> model_useCuda_m;
+  
   /**
    * @brief Map from model name to resolved ONNX input shapes.
    */

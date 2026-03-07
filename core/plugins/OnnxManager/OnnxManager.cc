@@ -392,6 +392,19 @@ int64_t OnnxManager::getPaddingSize(const std::string &modelName) const {
 }
 
 /**
+ * @brief Get whether an ONNX model uses the CUDA execution provider
+ * @param modelName Name of the model
+ * @return true if the model uses CUDA, false otherwise
+ */
+bool OnnxManager::getUseCuda(const std::string &modelName) const {
+  auto it = model_useCuda_m.find(modelName);
+  if (it != model_useCuda_m.end()) {
+    return it->second;
+  }
+  return false;
+}
+
+/**
  * @brief Register ONNX models from configuration
  * @param configProvider Reference to the configuration provider
  */
@@ -422,6 +435,47 @@ void OnnxManager::loadModelsFromConfig(
     auto inputVariableVector =
         configProvider.splitString(entryKeys.at("inputVariables"), ",");
 
+    // Build per-model session options
+    Ort::SessionOptions session_options;
+    session_options.SetIntraOpNumThreads(1);
+    session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+
+    // Parse optional useCuda flag
+    bool useCuda = false;
+    auto cudaIt = entryKeys.find("useCuda");
+    if (cudaIt != entryKeys.end() && cudaIt->second == "true") {
+      useCuda = true;
+#if ONNXRUNTIME_USE_CUDA
+      OrtCUDAProviderOptions cuda_options{};
+      // Default device_id is 0; configure with cudaDeviceId to override
+      auto deviceIt = entryKeys.find("cudaDeviceId");
+      if (deviceIt != entryKeys.end()) {
+        int deviceId = 0;
+        try {
+          deviceId = std::stoi(deviceIt->second);
+        } catch (const std::exception &e) {
+          throw std::runtime_error("OnnxManager: Invalid cudaDeviceId value '" +
+                                   deviceIt->second + "' for model '" +
+                                   entryKeys.at("name") + "': " + e.what());
+        }
+        if (deviceId < 0) {
+          throw std::runtime_error("OnnxManager: Invalid cudaDeviceId value '" +
+                                   deviceIt->second + "' for model '" +
+                                   entryKeys.at("name") +
+                                   "': device id must be non-negative");
+        }
+        cuda_options.device_id = deviceId;
+      }
+      session_options.AppendExecutionProvider_CUDA(cuda_options);
+#else
+      throw std::runtime_error(
+          "OnnxManager: model '" + entryKeys.at("name") +
+          "' requested useCuda=true but ONNX Runtime was not built with CUDA "
+          "support. Reconfigure with -DONNXRUNTIME_USE_CUDA=ON.");
+#endif
+    }
+
+    // Load the ONNX model
     int64_t paddingSize = 0;
     auto paddingIt = entryKeys.find("paddingSize");
     if (paddingIt != entryKeys.end()) {
@@ -493,6 +547,8 @@ void OnnxManager::loadModelsFromConfig(
     model_paddingSize_m.emplace(modelName, paddingSize);
     model_inputShapes_m.emplace(modelName, resolvedInputShapes);
     model_inputElementCounts_m.emplace(modelName, inputElementCounts);
+    model_useCuda_m.emplace(modelName, useCuda);
+
 
     const auto &storedInputNames = model_inputNames_m.at(modelName);
     std::vector<const char *> inputNamePtrs;
