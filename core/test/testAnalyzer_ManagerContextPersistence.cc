@@ -17,6 +17,7 @@ static std::string writeConfig(const std::string& path, const std::string& metaF
   out << "counterIntWeightBranch=intCode\n";
   out << "metaFile=" << metaFile << "\n";
   out << "sample=TestSample\n";
+  out << "fileList=\n";  // Empty fileList to satisfy Analyzer requirement
   out.close();
   return path;
 }

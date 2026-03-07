@@ -52,12 +52,28 @@ The main configuration file controls the overall behavior of the framework. It's
 |--------|------|-------------|
 | `saveConfig` | Path | Configuration file listing branches to save in output tree |
 
-The `saveConfig` file contains one branch name per line:
+The `saveConfig` file contains one branch name per line. It also supports **glob patterns** for flexible column selection:
+
 ```
+# Exact column names
 branch1
 branch2
 branch3
+
+# Glob patterns
+Muon_*           # All Muon columns
+Electron_*       # All Electron columns
+*_phi            # All phi columns
+Jet_pt           # Specific column
+Jet_eta          # Specific column
 ```
+
+**Glob Pattern Behavior**:
+- Patterns with `*` or `?` are expanded against available DataFrame columns
+- Exact column names continue to work unchanged
+- Overlapping patterns are automatically deduplicated
+- Non-matching patterns are silently skipped (no error)
+- Mix exact names and glob patterns in the same file
 
 ### Data Loading Helpers
 

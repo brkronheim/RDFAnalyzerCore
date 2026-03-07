@@ -675,6 +675,151 @@ const std::vector<std::string>& getCorrectionFeatures(const std::string& key) co
 Low-level accessors for the loaded correction objects and their registered
 input-variable lists. Typically not needed in analysis code.
 
+### IKinematicFitManager
+
+**Header**: `core/plugins/KinematicFitManager/KinematicFitManager.h`
+
+Interface for kinematic fitting of reconstructed decay topologies.
+
+Performs kinematic fitting using mass, momentum, and recoil constraints to improve four-momentum resolution of reconstructed particles. Supports flexible constraint configuration, collection-indexed particle selection, and optional resonance width (soft mass constraints).
+
+#### Configuration
+
+Create a kinematic fit configuration file with particle definitions and constraints:
+
+```
+# kfit.txt
+name=VH_fit outputPrefix=kfit_
+particles=lep1,lep2,jet1,jet2,MET
+lep1.type=collection lep1.collection=Muon lep1.index=0
+lep2.type=collection lep2.collection=Muon lep2.index=1
+jet1.type=collection jet1.collection=Jet jet1.index=0
+jet2.type=collection jet2.collection=Jet jet2.index=1
+MET.type=recoil MET.collection=MET
+
+# Mass constraints
+constraint1.type=mass constraint1.particles=lep1,lep2
+constraint1.targetMass=91188.0 constraint1.massSigma=2495.0
+constraint2.type=mass constraint2.particles=jet1,jet2
+constraint2.targetMass=125090.0 constraint2.massSigma=3000.0
+
+# Run control
+runVar=do_kfit
+```
+
+**Configuration Parameters**:
+- `name`: Fit name (identifier)
+- `outputPrefix`: Prefix for output columns
+- `particles`: Comma-separated list of particle names
+- `{particle}.type`: Either `collection` (from branch) or `recoil` (MET)
+- `{particle}.collection`: Branch name to read from
+- `{particle}.index`: Collection index (for collection-type particles)
+- `constraint{N}.type`: Constraint type (`mass`, `pT`, or `recoil`)
+- `constraint{N}.particles`: Particles involved in constraint
+- `constraint{N}.targetMass`: Target mass value (MeV)
+- `constraint{N}.massSigma`: Resonance width for soft mass constraints (optional)
+- `runVar`: Optional column name to control per-event fit execution
+
+#### Methods
+
+```cpp
+class IKinematicFitManager : public IPluggableManager {
+public:
+    virtual void applyAllFits() = 0;
+    virtual void applyFit(const std::string& fitName) = 0;
+    virtual std::vector<std::string> getAllFitNames() const = 0;
+};
+```
+
+#### Usage
+
+```cpp
+#include <KinematicFitManager.h>
+
+// Add plugin
+auto kfitMgr = std::make_unique<KinematicFitManager>(
+    analyzer.getConfigurationProvider()
+);
+analyzer.addPlugin("kinematicFit", std::move(kfitMgr));
+
+// Apply fits (defines output columns)
+analyzer.getPlugin<IKinematicFitManager>("kinematicFit")->applyAllFits();
+
+// Fitted four-momentum columns are now available:
+// kfit_lep1_pt, kfit_lep1_eta, kfit_lep1_phi, kfit_lep1_mass, etc.
+// Also: kfit_chi2, kfit_status
+```
+
+#### Output Columns
+
+For each fit with `outputPrefix={prefix}`, the following columns are defined:
+- `{prefix}{particle}_pt` - Fitted transverse momentum
+- `{prefix}{particle}_eta` - Fitted pseudorapidity
+- `{prefix}{particle}_phi` - Fitted azimuthal angle
+- `{prefix}{particle}_mass` - Fitted mass
+- `{prefix}chi2` - Fit χ² value
+- `{prefix}status` - Fit status (0 = success)
+
+### IGoldenJsonManager
+
+**Header**: `core/plugins/GoldenJsonManager/GoldenJsonManager.h`
+
+Interface for CMS golden JSON certification filtering.
+
+Filters data events based on run/luminosity-section validity from CMS golden JSON certification files. Automatically skips MC (when `type != "data"`). Supports multiple JSON files for different eras with automatic merging.
+
+#### Configuration
+
+Create a file listing paths to golden JSON files:
+
+```
+# golden_json_files.txt
+cfg/Cert_2022.json
+cfg/Cert_2023.json
+```
+
+Reference this file in your main configuration:
+
+```
+# config.txt
+type=data
+goldenJsonConfig=cfg/golden_json_files.txt
+```
+
+#### Methods
+
+```cpp
+class IGoldenJsonManager : public IPluggableManager {
+public:
+    virtual void applyGoldenJson() = 0;
+    virtual bool isGoodLumiSection(unsigned int run,
+                                  unsigned int lumiSection) const = 0;
+};
+```
+
+#### Usage
+
+```cpp
+#include <GoldenJsonManager.h>
+
+// Add plugin
+auto goldenJson = std::make_unique<GoldenJsonManager>(
+    analyzer.getConfigurationProvider()
+);
+analyzer.addPlugin("goldenJson", std::move(goldenJson));
+
+// Apply filter (automatic - reads run/luminosityBlock branches)
+analyzer.getPlugin<IGoldenJsonManager>("goldenJson")->applyGoldenJson();
+```
+
+The plugin automatically filters events where `(run, luminosityBlock)` is not certified. For MC samples (when config has `type != "data"`), the plugin does nothing.
+
+**Features**:
+- Data-only filtering (automatic MC skip)
+- Multi-file support (per-era JSONs merged automatically)
+- Embedded JSON parser (no external dependencies)
+- Fast lookup via hash-based data structure
+
 ### ITriggerManager
 
 **Header**: `core/plugins/TriggerManager/TriggerManager.h`
