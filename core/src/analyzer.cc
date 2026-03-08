@@ -12,6 +12,8 @@
 #include <memory>
 #include <SystematicManager.h>
 #include <api/ManagerContext.h> // for wiring plugins and services
+#include <queue>
+#include <stdexcept>
 
 // Dependency-injected constructor
 Analyzer::Analyzer(
@@ -81,21 +83,95 @@ void Analyzer::initialize() {
 
 void Analyzer::wirePluginManagers() {
     ManagerContext ctx{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m};
+
+    // ------------------------------------------------------------------
+    // Phase 1: validate that all declared dependencies are registered
+    // ------------------------------------------------------------------
     for (auto& [role, plugin] : plugins) {
-        if (plugin) {
-            plugin->setContext(ctx);
-            plugin->setupFromConfigFile();
+        if (!plugin) continue;
+        for (const auto& dep : plugin->getDependencies()) {
+            if (plugins.find(dep) == plugins.end()) {
+                throw std::runtime_error(
+                    "Plugin '" + role + "' declares dependency on '" + dep +
+                    "' which is not registered");
+            }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Phase 2: topological sort (Kahn's algorithm) to respect ordering
+    // ------------------------------------------------------------------
+    // Build adjacency: dep -> dependents (plugins that need dep to be ready first)
+    std::unordered_map<std::string, std::vector<std::string>> dependents;
+    std::unordered_map<std::string, int> inDegree;
+    for (auto& [role, plugin] : plugins) {
+        if (!inDegree.count(role)) inDegree[role] = 0;
+        if (!plugin) continue;
+        for (const auto& dep : plugin->getDependencies()) {
+            dependents[dep].push_back(role);
+            inDegree[role]++;
+        }
+    }
+
+    std::queue<std::string> ready;
+    for (auto& [role, deg] : inDegree) {
+        if (deg == 0) ready.push(role);
+    }
+
+    std::vector<std::string> initOrder;
+    while (!ready.empty()) {
+        std::string cur = ready.front();
+        ready.pop();
+        initOrder.push_back(cur);
+        for (const auto& dep : dependents[cur]) {
+            if (--inDegree[dep] == 0) ready.push(dep);
+        }
+    }
+
+    if (initOrder.size() != plugins.size()) {
+        throw std::runtime_error(
+            "Analyzer: circular dependency detected among registered plugins");
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 3: inject context and load config in dependency order
+    // ------------------------------------------------------------------
+    for (const auto& role : initOrder) {
+        auto it = plugins.find(role);
+        if (it == plugins.end() || !it->second) continue;
+        it->second->setContext(ctx);
+        it->second->setupFromConfigFile();
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 4: call initialize() on all plugins (in dependency order)
+    // ------------------------------------------------------------------
+    for (const auto& role : initOrder) {
+        auto it = plugins.find(role);
+        if (it == plugins.end() || !it->second) continue;
+        it->second->initialize();
+    }
+
     initializeServices(ctx);
 }
 
 Analyzer *Analyzer::addPlugin(const std::string &role, std::unique_ptr<IPluggableManager> plugin) {
     if (!plugin) return this;
+
+    // Validate that all declared dependencies are already registered
+    for (const auto& dep : plugin->getDependencies()) {
+        if (plugins.find(dep) == plugins.end()) {
+            throw std::runtime_error(
+                "Plugin '" + role + "' declares dependency on '" + dep +
+                "' which is not registered");
+        }
+    }
+
     // Wire the plugin immediately with the same ManagerContext used during construction
     ManagerContext ctx{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m};
     plugin->setContext(ctx);
     plugin->setupFromConfigFile();
+    plugin->initialize();
     plugins.emplace(role, std::move(plugin));
     return this;
 }
@@ -139,6 +215,11 @@ Analyzer *Analyzer::bookConfigHistograms() {
 Analyzer *Analyzer::save() {
     auto df = dataFrameProvider_m->getDataFrame();
 
+    // Notify plugins that execution is about to start
+    for (auto& [role, plugin] : plugins) {
+        if (plugin) plugin->execute();
+    }
+
     skimSink_m->writeDataFrame(df,
                                *configProvider_m,
                                dataFrameProvider_m.get(),
@@ -147,6 +228,14 @@ Analyzer *Analyzer::save() {
 
     for (auto& service : services_m) {
         service->finalize(df);
+    }
+
+    // Post-execution lifecycle hooks
+    for (auto& [role, plugin] : plugins) {
+        if (plugin) plugin->finalize();
+    }
+    for (auto& [role, plugin] : plugins) {
+        if (plugin) plugin->reportMetadata();
     }
     return this;
 }
