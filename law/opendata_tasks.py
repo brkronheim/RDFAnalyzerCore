@@ -449,28 +449,16 @@ def _submit_single_job(
     resub_dir = os.path.join(main_dir, "resubmissions")
     Path(resub_dir).mkdir(parents=True, exist_ok=True)
 
-    copy_list   = get_copy_file_list(config_dict)
-    copy_bnames = sorted({os.path.basename(p) for p in copy_list})
-    skip_xfer   = {"floats.txt", "ints.txt", "submit_config.txt"}
-
+    # Transfer the three per-job files + the whole shared_inputs/ directory.
+    # Everything else (exe, .so libs, aux files, x509, config files) lives in
+    # shared_inputs/ which HTCondor transfers as a unit – no shared filesystem
+    # access required on the remote worker.
     transfer_files = [
         os.path.join(job_dir, "submit_config.txt"),
         os.path.join(job_dir, "floats.txt"),
         os.path.join(job_dir, "ints.txt"),
-        os.path.join(main_dir, shared_dir_name, exe_relpath),
+        os.path.join(main_dir, shared_dir_name),
     ]
-    if include_aux:
-        transfer_files.append(os.path.join(main_dir, shared_dir_name, "aux"))
-    if x509loc:
-        transfer_files.append(
-            os.path.join(main_dir, shared_dir_name, os.path.basename(x509loc))
-        )
-    for name in copy_bnames:
-        if name not in skip_xfer:
-            transfer_files.append(os.path.join(job_dir, name))
-    if shared_lib_names:
-        for name in sorted(set(shared_lib_names)):
-            transfer_files.append(os.path.join(main_dir, shared_dir_name, name))
 
     inner_script = os.path.join(main_dir, "condor_runscript_inner.sh")
     if os.path.exists(inner_script):
@@ -487,6 +475,7 @@ Should_Transfer_Files = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification = never
 transfer_input_files = {transfer_str}
+environment = CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)
 +RequestMemory={request_memory}
 +RequestCpus=1
 +RequestDisk=20000
@@ -774,7 +763,8 @@ class PrepareOpenDataSample(OpenDataMixin, law.LocalWorkflow):
             self.output().dump([], formatter="json")
             return
 
-        copy_list = get_copy_file_list(config_dict)
+        # Config files are staged to shared_inputs/ once by BuildOpenDataSubmission;
+        # they must NOT be copied per-job to avoid N redundant copies on disk.
         save_dir  = self._resolve(config_dict["saveDirectory"])
         try:
             Path(save_dir).mkdir(parents=True, exist_ok=True)
@@ -793,13 +783,6 @@ class PrepareOpenDataSample(OpenDataMixin, law.LocalWorkflow):
         for sub_idx, group_files in groups.items():
             job_dir = os.path.join(sample_base, f"job_{sub_idx}")
             Path(job_dir).mkdir(parents=True, exist_ok=True)
-
-            # Copy auxiliary config files --------------------------------
-            for fpath in copy_list:
-                src = self._resolve(fpath)
-                dst = os.path.join(job_dir, os.path.basename(src))
-                Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(src, dst)
 
             # Build per-job submit config --------------------------------
             job_config = _normalize_config_paths(dict(config_dict))
@@ -958,22 +941,21 @@ class BuildOpenDataSubmission(OpenDataMixin, law.Task):
                 shutil.rmtree(link_path)
             os.symlink(job_dir_abs, link_path)
 
-        # Write condor files ---------------------------------------------
+        # Copy common config files to shared_inputs/ once (transferred as a
+        # directory to all workers, eliminating per-job duplicates).
         config_dict    = self._config_dict
         copy_list      = get_copy_file_list(config_dict)
-        copy_basenames = sorted({os.path.basename(p) for p in copy_list})
-        skip_transfer  = {"floats.txt", "ints.txt", "submit_config.txt"}
-        extra_transfer_files = [
-            os.path.join(self._main_dir, "job_$(Process)", name)
-            for name in copy_basenames
-            if name not in skip_transfer
-        ]
-        extra_transfer_files.extend(
-            os.path.join(self._main_dir, "shared_inputs", name)
-            for name in sorted(local_shared_libs.keys())
-        )
-        if python_env_staged:
-            extra_transfer_files.append(python_env_staged)
+        for fpath in copy_list:
+            src = self._resolve(fpath)
+            if src and os.path.exists(src):
+                dst = os.path.join(shared_dir, os.path.basename(src))
+                if not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+
+        # Write condor files ---------------------------------------------
+        # shared_inputs/ directory is transferred as a whole; no individual
+        # extra entries are needed.
+        extra_transfer_files: list[str] = []
 
         submit_path = write_submit_files(
             self._main_dir,
@@ -1165,17 +1147,6 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
             )
 
         config_dict = self._config_dict
-        aux_src     = self._resolve("aux")
-        aux_exists  = bool(aux_src and os.path.exists(aux_src))
-        shared_lib_names = (
-            [
-                name for name in os.listdir(self._shared_dir)
-                if ".so" in name
-                and os.path.isfile(os.path.join(self._shared_dir, name))
-            ]
-            if os.path.isdir(self._shared_dir)
-            else []
-        )
 
         state = self._load_state()
         for idx in job_info:
@@ -1235,7 +1206,7 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
                     else:
                         self.publish_message(f"Job {idx} held (could not confirm condor_rm): {hold_reason}")
                     self._try_resubmit(
-                        idx, jstate, job_info, config_dict, aux_exists,
+                        idx, jstate, job_info, config_dict,
                         reason=f"held: {hold_reason}",
                     )
                     continue
@@ -1248,7 +1219,7 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
                                 f"Job {idx} failed (exit {exit_code}). stderr tail:\n{error_tail}"
                             )
                         self._try_resubmit(
-                            idx, jstate, job_info, config_dict, aux_exists,
+                            idx, jstate, job_info, config_dict,
                             reason=f"exit code {exit_code}",
                         )
                         continue
@@ -1270,7 +1241,7 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
                             "outputs are missing; attempting resubmission."
                         )
                         self._try_resubmit(
-                            idx, jstate, job_info, config_dict, aux_exists,
+                            idx, jstate, job_info, config_dict,
                             reason="missing_output",
                         )
                         continue
@@ -1319,7 +1290,6 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
         jstate: dict,
         job_info: dict,
         config_dict: dict,
-        aux_exists: bool,
         reason: str,
     ) -> None:
         """Attempt to resubmit job idx; update jstate in place."""
@@ -1337,16 +1307,6 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
             f"(attempt {retries + 1}/{self.max_retries})."
         )
 
-        shared_lib_names = (
-            [
-                name for name in os.listdir(self._shared_dir)
-                if ".so" in name
-                and os.path.isfile(os.path.join(self._shared_dir, name))
-            ]
-            if os.path.isdir(self._shared_dir)
-            else []
-        )
-
         new_cluster = _submit_single_job(
             idx,
             self._main_dir,
@@ -1357,8 +1317,6 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
             2000,
             "shared_inputs",
             config_dict,
-            aux_exists,
-            shared_lib_names=shared_lib_names,
         )
         if new_cluster:
             jstate.update(
