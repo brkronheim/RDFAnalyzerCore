@@ -39,6 +39,8 @@ inline void ChangeToTestSourceDir() {
     }
 
     // Ensure minimal test data directories exist and contain a small ROOT file
+    // The file contains 2 events so that tests asserting on counts (e.g.
+    // trigger-logic tests that expect 2 passing events) behave correctly.
     auto make_minimal_root = [](const std::string &dir) {
         if (!std::filesystem::exists(dir)) {
             std::filesystem::create_directory(dir);
@@ -49,6 +51,7 @@ inline void ChangeToTestSourceDir() {
             TTree t("Events", "Events");
             int dummy = 1;
             t.Branch("dummy", &dummy, "dummy/I");
+            t.Fill();
             t.Fill();
             f.Write();
             f.Close();
