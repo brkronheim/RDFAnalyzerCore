@@ -84,6 +84,7 @@ from submission_backend import (  # noqa: E402
     read_config,
     get_copy_file_list,
     write_submit_files,
+    ensure_xrootd_redirector,
 )
 from validate_config import validate_submit_config  # noqa: E402
 from dataset_manifest import DatasetManifest  # noqa: E402
@@ -96,6 +97,19 @@ STAGE_OUT = True   # always stage outputs to EOS
 EOS_SCHED = True   # submission dir lives on EOS
 WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
 EOS_BASE = WORKSPACE  # root of the submission dir tree
+
+# Default XRootD redirector used when Rucio does not supply a site-specific one
+NANO_REDIRECTOR = "root://xrootd-cms.infn.it/"
+
+
+def _ensure_xrootd_redirector(uri: str, redirector: str = NANO_REDIRECTOR) -> str:
+    """Thin wrapper around the shared ``ensure_xrootd_redirector`` utility.
+
+    Uses ``NANO_REDIRECTOR`` as the default so callers don't need to spell out
+    the CMS redirector URL, while delegating all logic to
+    ``submission_backend``.
+    """
+    return ensure_xrootd_redirector(uri, redirector)
 
 # ===========================================================================
 # Utility functions
@@ -170,7 +184,7 @@ def _query_rucio(directory, file_split_gb, WL, BL, site_override, client):
         fname = filedata["name"]
         states = filedata.get("states", {})
         size_gb = filedata.get("bytes", 0) * 1e-9
-        redirector = "root://xrootd-cms.infn.it/"
+        redirector = NANO_REDIRECTOR
         running_size += size_gb
         running_files += 1
         if (running_size > file_split_gb) or (running_files >= 50):
@@ -189,7 +203,7 @@ def _query_rucio(directory, file_split_gb, WL, BL, site_override, client):
                 else:
                     redirector = "root://xrootd-cms.infn.it//store/test/xrootd/" + clean_site + "/"
 
-        url = redirector + fname
+        url = ensure_xrootd_redirector(fname, redirector)
         if group in groups:
             groups[group] += "," + url
             group_counts[group] += 1

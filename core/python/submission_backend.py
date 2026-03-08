@@ -76,6 +76,33 @@ def get_copy_file_list(config_dict):
     return transfer_list
 
 
+def ensure_xrootd_redirector(uri, redirector="root://eospublic.cern.ch/"):
+    """Ensure *uri* is addressed via an XRootD redirector.
+
+    If the URI already starts with ``root://`` it is returned unchanged.
+    A bare EOS path (starting with ``/``) is prefixed with *redirector* so
+    that the file can be accessed from any worker node regardless of whether
+    the EOS file system is locally mounted.  This decouples the storage
+    location from the job running location.
+
+    Args:
+        uri:        File URI as returned by the CERN Open Data API or Rucio.
+        redirector: XRootD redirector to prepend when the URI has no scheme.
+                    Defaults to ``root://eospublic.cern.ch/``.
+
+    Returns:
+        URI guaranteed to start with ``root://``, or the original value if
+        it has no leading ``/`` and is not a ``root://`` URI.
+    """
+    if not uri:
+        return uri
+    if uri.startswith("root://"):
+        return uri
+    if uri.startswith("/"):
+        return redirector.rstrip("/") + "/" + uri.lstrip("/")
+    return uri
+
+
 def ensure_symlink(src, dst):
     if os.path.islink(dst) or os.path.exists(dst):
         return

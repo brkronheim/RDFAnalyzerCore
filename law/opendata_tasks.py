@@ -82,6 +82,7 @@ from submission_backend import (  # noqa: E402
     read_config,
     get_copy_file_list,
     write_submit_files,
+    ensure_xrootd_redirector,
 )
 from validate_config import validate_submit_config  # noqa: E402
 from dataset_manifest import DatasetManifest  # noqa: E402
@@ -93,10 +94,24 @@ STAGE_OUT = True   # always stage outputs
 WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
 EOS_BASE  = WORKSPACE
 
+# Default XRootD redirector for CERN Open Data files
+OPENDATA_REDIRECTOR = "root://eospublic.cern.ch/"
+
 
 # ===========================================================================
 # Utility functions
 # ===========================================================================
+
+
+def _ensure_xrootd_redirector(uri: str, redirector: str = OPENDATA_REDIRECTOR) -> str:
+    """Thin wrapper around the shared ``ensure_xrootd_redirector`` utility.
+
+    Defaults the redirector to :data:`OPENDATA_REDIRECTOR` for CERN Open Data
+    files and delegates all logic to the shared implementation in
+    ``submission_backend``.
+    """
+    return ensure_xrootd_redirector(uri, redirector)
+
 
 def _load_file_indices(recid):
     """Fetch _file_indices metadata for a CERN Open Data record.
@@ -167,7 +182,7 @@ def _process_metadata(recid, sample_names):
     file_dict: dict[str, list[str]] = {}
     for entry in result:
         for data in entry.get("files", []):
-            uri = data["uri"]
+            uri = _ensure_xrootd_redirector(data["uri"])
             key = data["key"].split("_file_index")[0]
             if key not in sample_names:
                 continue
