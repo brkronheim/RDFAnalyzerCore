@@ -90,6 +90,7 @@ from submission_backend import (  # noqa: E402
 from validate_config import validate_submit_config  # noqa: E402
 from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
 from dataset_manifest import DatasetManifest  # noqa: E402
+from partition_utils import _make_partitions, _query_tree_entries  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +147,13 @@ def _get_rucio_client(proxy=None):
         raise RuntimeError(f"Cannot create Rucio client: {e}") from e
 
 
-def _query_rucio(directory, file_split_gb, WL, BL, site_override, client):
-    """Return a dict {group_idx: 'url1,url2,...'}."""
+def _query_rucio(directory, file_split_gb, WL, BL, site_override, client,
+                 max_files_per_group: int = 50):
+    """Return a dict {group_idx: 'url1,url2,...'}.
+
+    Files are grouped so that each group contains at most
+    *max_files_per_group* files and at most *file_split_gb* GB of data.
+    """
     if not directory or not isinstance(directory, str) or not directory.startswith("/"):
         print(f"Warning: invalid DAS path: {directory!r} – skipping")
         return {}
@@ -189,7 +195,7 @@ def _query_rucio(directory, file_split_gb, WL, BL, site_override, client):
         redirector = NANO_REDIRECTOR
         running_size += size_gb
         running_files += 1
-        if (running_size > file_split_gb) or (running_files >= 50):
+        if (running_size > file_split_gb) or (running_files >= max_files_per_group):
             group += 1
             running_size = size_gb
             running_files = 1
@@ -603,6 +609,32 @@ class NANOMixin:
         default=30,
         description="GB of data per condor job (default: 30)",
     )
+    partition = luigi.Parameter(
+        default="file_group",
+        description=(
+            "Partitioning mode for splitting each dataset across jobs.  "
+            "One of: 'file_group' (default – group files by count and size), "
+            "'file' (one file per job), "
+            "'entry_range' (split files by TTree entry ranges; requires uproot "
+            "and --entries-per-job)."
+        ),
+    )
+    files_per_job = luigi.IntParameter(
+        default=50,
+        description=(
+            "Maximum number of files per job in 'file_group' mode (default: 50). "
+            "Ignored for 'file' and 'entry_range' modes."
+        ),
+    )
+    entries_per_job = luigi.IntParameter(
+        default=100_000,
+        description=(
+            "Maximum TTree entries per job in 'entry_range' mode "
+            "(default: 100000).  "
+            "Requires uproot (pip install uproot).  "
+            "Ignored for 'file_group' and 'file' modes."
+        ),
+    )
     x509 = luigi.Parameter(
         description="Path to the VOMS x509 proxy file",
     )
@@ -796,7 +828,7 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
         sample = sample_list[sample_key]
 
         name = sample["name"]
-        das = sample["das"]
+        das = sample.get("das", sample.get("fileList", ""))
         xsec = float(sample["xsec"])
         typ = sample["type"]
         norm = float(sample.get("norm", 1))
@@ -804,54 +836,68 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
         extra_scale = float(sample.get("extraScale", 1))
         site_override = sample.get("site", "")
 
-        # Query Rucio --------------------------------------------------------
-        try:
-            client = _get_rucio_client()
-        except Exception as e:
-            raise RuntimeError(f"Cannot open Rucio client: {e}") from e
+        # Determine the primary TTree name for entry-range queries
+        tree_name = config_dict.get("treeList", "Events").split(",")[0].strip() or "Events"
 
-        das_entries = [d.strip() for d in das.split(",") if d.strip()]
-        if not das_entries:
-            self.publish_message(f"No DAS entries for sample {name}; creating empty output.")
+        # Collect all file URLs -------------------------------------------
+        all_urls: list[str] = []
+        seen_urls: set[str] = set()
+
+        # Check for an explicit file list from the manifest (files field)
+        explicit_files = [
+            f.strip() for f in sample.get("fileList", "").split(",") if f.strip()
+        ]
+        if explicit_files:
+            for url in explicit_files:
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_urls.append(ensure_xrootd_redirector(url))
+        elif das:
+            # Query Rucio ----------------------------------------------------
+            try:
+                client = _get_rucio_client()
+            except Exception as e:
+                raise RuntimeError(f"Cannot open Rucio client: {e}") from e
+
+            das_entries = [d.strip() for d in das.split(",") if d.strip()]
+            if not das_entries:
+                self.publish_message(f"No DAS entries for sample {name}; creating empty output.")
+                Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
+                self.output().dump([], formatter="json")
+                return
+
+            # Query Rucio sequentially for each DAS entry and merge URLs
+            for das_entry in das_entries:
+                partial = _query_rucio(
+                    das_entry, self.size, WL, BL, site_override, client,
+                    max_files_per_group=self.files_per_job,
+                )
+                for gkey in sorted(partial.keys()):
+                    for url in partial[gkey].split(","):
+                        url = url.strip()
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            all_urls.append(url)
+        else:
+            self.publish_message(f"No DAS entries or explicit files for sample {name}; creating empty output.")
             Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
             self.output().dump([], formatter="json")
             return
 
-        # Query Rucio sequentially for each DAS entry and merge URLs into a
-        # single deduplicated list.  Law's branch dispatch provides all the
-        # inter-sample parallelism; no threading is used here.
-        all_urls: list[str] = []
-        seen_urls: set[str] = set()
-        last_groups: dict[int, str] = {}   # retains size-split groups for single-DAS case
-
-        for das_entry in das_entries:
-            partial = _query_rucio(das_entry, self.size, WL, BL, site_override, client)
-            last_groups = partial            # for the single-entry fast path below
-            for gkey in sorted(partial.keys()):
-                for url in partial[gkey].split(","):
-                    url = url.strip()
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        all_urls.append(url)
-
-        MAX_FILES_PER_JOB = 50
-        if len(das_entries) == 1 and last_groups:
-            # _query_rucio already produced size-capped groups that respect
-            # the 50-file limit; reuse them directly.
-            groups = last_groups
-        elif all_urls:
-            # For multiple DAS entries (or fallback): re-chunk the merged URL
-            # list so no single job ever receives more than MAX_FILES_PER_JOB
-            # files, regardless of how many DAS paths were combined.
-            groups = _rechunk_urls(all_urls, MAX_FILES_PER_JOB)
-        else:
-            groups = {}
-
-        if not groups:
+        if not all_urls:
             self.publish_message(f"No files found for sample {name}; skipping.")
             Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
             self.output().dump([], formatter="json")
             return
+
+        # Apply partitioning -------------------------------------------------
+        partitions = _make_partitions(
+            all_urls,
+            mode=self.partition,
+            files_per_job=self.files_per_job,
+            entries_per_job=self.entries_per_job,
+            tree_name=tree_name,
+        )
 
         # Copy-list files that should travel with every job ---------------
         copy_list = get_copy_file_list(config_dict)
@@ -867,7 +913,7 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
         norm_scale = str(extra_scale * kfac * lumi * xsec / norm)
         created_dirs: list[str] = []
 
-        for sub_idx, group_key in enumerate(sorted(groups.keys())):
+        for sub_idx, partition in enumerate(partitions):
             job_dir = os.path.join(sample_base, f"job_{sub_idx}")
             Path(job_dir).mkdir(parents=True, exist_ok=True)
 
@@ -886,12 +932,17 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
             job_config["metaFile"] = os.path.join(
                 save_dir, f"{name}_{sub_idx}_meta.root"
             )
-            job_config["fileList"] = groups[group_key]
+            job_config["fileList"] = partition["files"]
             job_config["batch"] = "True"
             job_config["type"] = typ
             job_config["sampleConfig"] = os.path.basename(self._sample_config)
             job_config["floatConfig"] = "floats.txt"
             job_config["intConfig"] = "ints.txt"
+
+            # Write entry-range keys when in entry_range partition mode ----
+            if partition["first_entry"] > 0 or partition["last_entry"] > 0:
+                job_config["firstEntry"] = str(partition["first_entry"])
+                job_config["lastEntry"] = str(partition["last_entry"])
 
             if self.stage_in:
                 original_list = job_config["fileList"]
