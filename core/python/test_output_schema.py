@@ -39,14 +39,18 @@ from output_schema import (
     PROVENANCE_REQUIRED_KEYS,
     SCHEMA_REGISTRY,
     SKIM_SCHEMA_VERSION,
+    ArtifactResolutionStatus,
     CutflowSchema,
     HistogramAxisSpec,
     HistogramSchema,
     LawArtifactSchema,
     MetadataSchema,
     OutputManifest,
+    ProvenanceRecord,
     SchemaVersionError,
     SkimSchema,
+    resolve_artifact,
+    resolve_manifest,
 )
 
 
@@ -745,3 +749,351 @@ class TestOutputManifestVersionCheck:
         msg = str(exc_info.value)
         assert "skim" in msg
         assert "histograms" in msg
+
+
+# ---------------------------------------------------------------------------
+# ProvenanceRecord
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceRecord:
+    def test_defaults(self):
+        p = ProvenanceRecord()
+        assert p.framework_hash is None
+        assert p.user_repo_hash is None
+        assert p.config_mtime is None
+
+    def test_fields_set(self):
+        p = ProvenanceRecord(
+            framework_hash="fw1",
+            user_repo_hash="ur1",
+            config_mtime="2024-01-01T00:00:00+00:00",
+        )
+        assert p.framework_hash == "fw1"
+        assert p.user_repo_hash == "ur1"
+        assert p.config_mtime == "2024-01-01T00:00:00+00:00"
+
+    def test_matches_identical(self):
+        p1 = ProvenanceRecord(framework_hash="fw1", user_repo_hash="ur1")
+        p2 = ProvenanceRecord(framework_hash="fw1", user_repo_hash="ur1")
+        assert p1.matches(p2)
+
+    def test_matches_different_hashes(self):
+        p1 = ProvenanceRecord(framework_hash="fw1", user_repo_hash="ur1")
+        p2 = ProvenanceRecord(framework_hash="fw2", user_repo_hash="ur1")
+        assert not p1.matches(p2)
+
+    def test_matches_none_fields_ignored(self):
+        p1 = ProvenanceRecord(framework_hash="fw1", user_repo_hash=None)
+        p2 = ProvenanceRecord(framework_hash="fw1", user_repo_hash="ur2")
+        assert p1.matches(p2)
+
+    def test_matches_both_none_fields_ignored(self):
+        p1 = ProvenanceRecord(framework_hash=None)
+        p2 = ProvenanceRecord(framework_hash=None)
+        assert p1.matches(p2)
+
+    def test_matches_config_mtime(self):
+        p1 = ProvenanceRecord(config_mtime="2024-01-01T00:00:00+00:00")
+        p2 = ProvenanceRecord(config_mtime="2024-06-01T00:00:00+00:00")
+        assert not p1.matches(p2)
+
+    def test_to_dict(self):
+        p = ProvenanceRecord(framework_hash="fw1", user_repo_hash="ur1")
+        d = p.to_dict()
+        assert d["framework_hash"] == "fw1"
+        assert d["user_repo_hash"] == "ur1"
+        assert d["config_mtime"] is None
+
+    def test_from_dict_round_trip(self):
+        p = ProvenanceRecord(
+            framework_hash="fw1",
+            user_repo_hash="ur1",
+            config_mtime="2024-01-01T00:00:00+00:00",
+        )
+        p2 = ProvenanceRecord.from_dict(p.to_dict())
+        assert p2.framework_hash == "fw1"
+        assert p2.user_repo_hash == "ur1"
+        assert p2.config_mtime == "2024-01-01T00:00:00+00:00"
+
+    def test_from_dict_empty(self):
+        p = ProvenanceRecord.from_dict({})
+        assert p.framework_hash is None
+        assert p.user_repo_hash is None
+        assert p.config_mtime is None
+
+
+# ---------------------------------------------------------------------------
+# ArtifactResolutionStatus enum
+# ---------------------------------------------------------------------------
+
+
+class TestArtifactResolutionStatus:
+    def test_values_exist(self):
+        assert ArtifactResolutionStatus.COMPATIBLE.value == "compatible"
+        assert ArtifactResolutionStatus.STALE.value == "stale"
+        assert ArtifactResolutionStatus.MUST_REGENERATE.value == "must_regenerate"
+
+
+# ---------------------------------------------------------------------------
+# resolve_artifact
+# ---------------------------------------------------------------------------
+
+
+class TestResolveArtifact:
+    def test_compatible_no_provenance(self):
+        artifact = SkimSchema(output_file="s.root")
+        status = resolve_artifact(artifact)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_must_regenerate_version_mismatch(self):
+        artifact = SkimSchema(output_file="s.root")
+        artifact.schema_version = 999
+        status = resolve_artifact(artifact)
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_must_regenerate_object_without_current_version(self):
+        class BareArtifact:
+            schema_version = 1
+        status = resolve_artifact(BareArtifact())
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_compatible_matching_provenance(self):
+        artifact = SkimSchema(output_file="s.root")
+        recorded = ProvenanceRecord(framework_hash="fw1", user_repo_hash="ur1")
+        current = ProvenanceRecord(framework_hash="fw1", user_repo_hash="ur1")
+        status = resolve_artifact(artifact, recorded, current)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_stale_changed_framework_hash(self):
+        artifact = SkimSchema(output_file="s.root")
+        recorded = ProvenanceRecord(framework_hash="fw_old")
+        current = ProvenanceRecord(framework_hash="fw_new")
+        status = resolve_artifact(artifact, recorded, current)
+        assert status == ArtifactResolutionStatus.STALE
+
+    def test_stale_changed_user_repo_hash(self):
+        artifact = HistogramSchema(output_file="h.root")
+        recorded = ProvenanceRecord(user_repo_hash="ur_old")
+        current = ProvenanceRecord(user_repo_hash="ur_new")
+        status = resolve_artifact(artifact, recorded, current)
+        assert status == ArtifactResolutionStatus.STALE
+
+    def test_stale_changed_config_mtime(self):
+        artifact = CutflowSchema(output_file="c.root")
+        recorded = ProvenanceRecord(config_mtime="2024-01-01T00:00:00+00:00")
+        current = ProvenanceRecord(config_mtime="2025-01-01T00:00:00+00:00")
+        status = resolve_artifact(artifact, recorded, current)
+        assert status == ArtifactResolutionStatus.STALE
+
+    def test_compatible_when_only_recorded_provenance_given(self):
+        artifact = SkimSchema(output_file="s.root")
+        recorded = ProvenanceRecord(framework_hash="fw1")
+        status = resolve_artifact(artifact, recorded_provenance=recorded)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_compatible_when_only_current_provenance_given(self):
+        artifact = SkimSchema(output_file="s.root")
+        current = ProvenanceRecord(framework_hash="fw1")
+        status = resolve_artifact(artifact, current_provenance=current)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_must_regenerate_takes_priority_over_provenance(self):
+        artifact = SkimSchema(output_file="s.root")
+        artifact.schema_version = 999
+        recorded = ProvenanceRecord(framework_hash="fw1")
+        current = ProvenanceRecord(framework_hash="fw1")
+        status = resolve_artifact(artifact, recorded, current)
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_law_artifact_compatible(self):
+        artifact = LawArtifactSchema(
+            artifact_type="submit_jobs",
+            path_pattern="submitted.txt",
+            format="text",
+        )
+        status = resolve_artifact(artifact)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_metadata_schema_compatible(self):
+        artifact = MetadataSchema(output_file="meta.root")
+        status = resolve_artifact(artifact)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+
+# ---------------------------------------------------------------------------
+# resolve_manifest
+# ---------------------------------------------------------------------------
+
+
+class TestResolveManifest:
+    def test_empty_manifest(self):
+        m = OutputManifest()
+        assert resolve_manifest(m) == {}
+
+    def test_skim_only_compatible(self):
+        m = OutputManifest(skim=SkimSchema(output_file="s.root"))
+        statuses = resolve_manifest(m)
+        assert statuses["skim"] == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_all_schemas_compatible_no_provenance(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            histograms=HistogramSchema(output_file="h.root"),
+            metadata=MetadataSchema(output_file="meta.root"),
+            cutflow=CutflowSchema(output_file="meta.root"),
+        )
+        statuses = resolve_manifest(m)
+        for role, status in statuses.items():
+            assert status == ArtifactResolutionStatus.COMPATIBLE, role
+
+    def test_stale_when_hash_changes(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            framework_hash="fw_old",
+        )
+        current = ProvenanceRecord(framework_hash="fw_new")
+        statuses = resolve_manifest(m, current_provenance=current)
+        assert statuses["skim"] == ArtifactResolutionStatus.STALE
+
+    def test_must_regenerate_version_mismatch(self):
+        s = SkimSchema(output_file="s.root")
+        s.schema_version = 999
+        m = OutputManifest(skim=s)
+        statuses = resolve_manifest(m)
+        assert statuses["skim"] == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_law_artifacts_indexed_roles(self):
+        law1 = LawArtifactSchema(
+            artifact_type="prepare_sample",
+            path_pattern="branch_outputs/sample_*.json",
+            format="json",
+        )
+        law2 = LawArtifactSchema(
+            artifact_type="submit_jobs",
+            path_pattern="submitted.txt",
+            format="text",
+        )
+        m = OutputManifest(
+            metadata=MetadataSchema(output_file="meta.root"),
+            law_artifacts=[law1, law2],
+        )
+        statuses = resolve_manifest(m)
+        assert "law_artifacts[0]" in statuses
+        assert "law_artifacts[1]" in statuses
+        assert statuses["law_artifacts[0]"] == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_none_schemas_not_included(self):
+        m = OutputManifest(skim=SkimSchema(output_file="s.root"))
+        statuses = resolve_manifest(m)
+        assert "histograms" not in statuses
+        assert "metadata" not in statuses
+        assert "cutflow" not in statuses
+
+    def test_mixed_statuses(self):
+        s = SkimSchema(output_file="s.root")
+        s.schema_version = 999
+        m = OutputManifest(
+            skim=s,
+            histograms=HistogramSchema(output_file="h.root"),
+            framework_hash="fw_old",
+        )
+        current = ProvenanceRecord(framework_hash="fw_new")
+        statuses = resolve_manifest(m, current_provenance=current)
+        assert statuses["skim"] == ArtifactResolutionStatus.MUST_REGENERATE
+        assert statuses["histograms"] == ArtifactResolutionStatus.STALE
+
+
+# ---------------------------------------------------------------------------
+# OutputManifest.provenance() and resolve()
+# ---------------------------------------------------------------------------
+
+
+class TestOutputManifestProvenance:
+    def test_provenance_returns_record(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            framework_hash="fw1",
+            user_repo_hash="ur1",
+            config_mtime="2024-01-01T00:00:00+00:00",
+        )
+        p = m.provenance()
+        assert isinstance(p, ProvenanceRecord)
+        assert p.framework_hash == "fw1"
+        assert p.user_repo_hash == "ur1"
+        assert p.config_mtime == "2024-01-01T00:00:00+00:00"
+
+    def test_provenance_nones_when_not_set(self):
+        m = OutputManifest()
+        p = m.provenance()
+        assert p.framework_hash is None
+        assert p.user_repo_hash is None
+        assert p.config_mtime is None
+
+    def test_resolve_delegates_to_resolve_manifest(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            framework_hash="fw_old",
+        )
+        current = ProvenanceRecord(framework_hash="fw_new")
+        statuses = m.resolve(current_provenance=current)
+        assert statuses["skim"] == ArtifactResolutionStatus.STALE
+
+    def test_resolve_without_provenance(self):
+        m = OutputManifest(skim=SkimSchema(output_file="s.root"))
+        statuses = m.resolve()
+        assert statuses["skim"] == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_provenance_fields_round_trip_via_yaml(self, tmp_path):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            framework_hash="fw1",
+            user_repo_hash="ur1",
+            config_mtime="2024-06-01T12:00:00+00:00",
+        )
+        path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(path)
+        m2 = OutputManifest.load_yaml(path)
+        assert m2.framework_hash == "fw1"
+        assert m2.user_repo_hash == "ur1"
+        assert m2.config_mtime == "2024-06-01T12:00:00+00:00"
+
+    def test_provenance_fields_default_none_in_yaml(self, tmp_path):
+        m = OutputManifest(skim=SkimSchema(output_file="s.root"))
+        path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(path)
+        m2 = OutputManifest.load_yaml(path)
+        assert m2.framework_hash is None
+        assert m2.config_mtime is None
+
+    def test_full_resolution_workflow(self, tmp_path):
+        """End-to-end: produce manifest, then resolve with updated env."""
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            histograms=HistogramSchema(output_file="h.root"),
+            framework_hash="fw_old",
+            user_repo_hash="ur1",
+            config_mtime="2024-01-01T00:00:00+00:00",
+        )
+        path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(path)
+
+        m2 = OutputManifest.load_yaml(path)
+
+        # Same environment - all COMPATIBLE.
+        same = ProvenanceRecord(
+            framework_hash="fw_old",
+            user_repo_hash="ur1",
+            config_mtime="2024-01-01T00:00:00+00:00",
+        )
+        for status in m2.resolve(same).values():
+            assert status == ArtifactResolutionStatus.COMPATIBLE
+
+        # Updated framework hash - all STALE.
+        updated = ProvenanceRecord(
+            framework_hash="fw_new",
+            user_repo_hash="ur1",
+            config_mtime="2024-01-01T00:00:00+00:00",
+        )
+        for status in m2.resolve(updated).values():
+            assert status == ArtifactResolutionStatus.STALE

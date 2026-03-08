@@ -67,10 +67,30 @@ Build a manifest from configuration and validate it::
     # Load back and verify the versions have not diverged from the current code.
     loaded = OutputManifest.load_yaml("output_manifest.yaml")
     OutputManifest.check_version_compatibility(loaded)
+
+Provenance and version resolution (canonical API)::
+
+    from output_schema import (
+        OutputManifest,
+        ProvenanceRecord,
+        resolve_artifact,
+        resolve_manifest,
+        ArtifactResolutionStatus,
+    )
+
+    current = ProvenanceRecord(
+        framework_hash="new_hash",
+        user_repo_hash="user_hash",
+    )
+    manifest = OutputManifest.load_yaml("job_42/output_manifest.yaml")
+    recorded = manifest.provenance()
+    statuses = resolve_manifest(manifest, current_provenance=current)
+    # statuses is a dict of role -> ArtifactResolutionStatus
 """
 
 from __future__ import annotations
 
+import enum
 import os
 from dataclasses import dataclass, field, asdict, fields
 from typing import Any, ClassVar, Dict, List, Optional
@@ -143,6 +163,135 @@ LAW_ARTIFACT_TYPES: List[str] = [
     "run_job",
     "monitor_state",
 ]
+
+# ---------------------------------------------------------------------------
+# Provenance and resolution types
+# ---------------------------------------------------------------------------
+
+
+class ArtifactResolutionStatus(enum.Enum):
+    """Resolution status returned by the canonical version-resolution API.
+
+    Use :func:`resolve_artifact` or :func:`resolve_manifest` to obtain a
+    status for one or all schemas in a manifest.
+
+    Attributes
+    ----------
+    COMPATIBLE:
+        The schema version matches ``CURRENT_VERSION`` **and** the recorded
+        provenance matches the current provenance (or no current provenance
+        was supplied for comparison).  No regeneration is needed.
+    STALE:
+        The schema version is current, but the recorded provenance differs
+        from the current provenance (e.g. a newer git commit or updated
+        config file exists).  The artifact *can* still be used but should be
+        regenerated when convenient.
+    MUST_REGENERATE:
+        The schema version does **not** match ``CURRENT_VERSION``.  The
+        artifact is incompatible with the current codebase and **must** be
+        regenerated before use.
+    """
+
+    COMPATIBLE = "compatible"
+    STALE = "stale"
+    MUST_REGENERATE = "must_regenerate"
+
+
+class ProvenanceRecord:
+    """Snapshot of the versioning context at the time an artifact was produced.
+
+    A ``ProvenanceRecord`` captures the information needed to decide whether
+    a previously produced artifact is still up-to-date:
+
+    * **framework_hash** - git commit hash of the RDFAnalyzerCore framework.
+    * **user_repo_hash** - git commit hash of the user analysis repository.
+    * **config_mtime** - UTC modification time (ISO 8601) of the job
+      configuration file that triggered the job.
+
+    Any field may be ``None`` when the information is unavailable.  Two
+    records are considered *matching* when every field that is non-``None`` in
+    **both** records has the same value.
+
+    Parameters
+    ----------
+    framework_hash:
+        Git hash of the RDFAnalyzerCore framework, or ``None``.
+    user_repo_hash:
+        Git hash of the user analysis repository, or ``None``.
+    config_mtime:
+        UTC modification time of the configuration file in ISO 8601 format,
+        or ``None``.
+
+    Examples
+    --------
+    Compare a manifest's recorded provenance with the current environment::
+
+        recorded = manifest.provenance()
+        current = ProvenanceRecord(framework_hash="new_fw_hash")
+        if not recorded.matches(current):
+            print("Artifact is stale - consider regenerating")
+    """
+
+    def __init__(
+        self,
+        framework_hash: Optional[str] = None,
+        user_repo_hash: Optional[str] = None,
+        config_mtime: Optional[str] = None,
+    ) -> None:
+        self.framework_hash: Optional[str] = framework_hash
+        self.user_repo_hash: Optional[str] = user_repo_hash
+        self.config_mtime: Optional[str] = config_mtime
+
+    def matches(self, other: "ProvenanceRecord") -> bool:
+        """Return ``True`` when all comparable fields agree.
+
+        A field is *comparable* when it is non-``None`` in **both** records.
+        Fields that are ``None`` in either record are ignored (treated as
+        "unknown") and do not cause a mismatch.
+
+        Parameters
+        ----------
+        other:
+            Another :class:`ProvenanceRecord` to compare against.
+
+        Returns
+        -------
+        bool
+            ``True`` if no comparable field differs between *self* and *other*.
+        """
+        for attr in ("framework_hash", "user_repo_hash", "config_mtime"):
+            self_val = getattr(self, attr)
+            other_val = getattr(other, attr)
+            if self_val is not None and other_val is not None:
+                if self_val != other_val:
+                    return False
+        return True
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON/YAML-serialisable dictionary representation."""
+        return {
+            "framework_hash": self.framework_hash,
+            "user_repo_hash": self.user_repo_hash,
+            "config_mtime": self.config_mtime,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ProvenanceRecord":
+        """Deserialise from a dict produced by :meth:`to_dict`."""
+        return cls(
+            framework_hash=d.get("framework_hash"),
+            user_repo_hash=d.get("user_repo_hash"),
+            config_mtime=d.get("config_mtime"),
+        )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"ProvenanceRecord("
+            f"framework_hash={self.framework_hash!r}, "
+            f"user_repo_hash={self.user_repo_hash!r}, "
+            f"config_mtime={self.config_mtime!r})"
+        )
+
 
 # ---------------------------------------------------------------------------
 # SkimSchema
@@ -561,6 +710,15 @@ class OutputManifest:
         Schema for the cutflow output, if applicable.
     law_artifacts : list[LawArtifactSchema]
         Schemas for any LAW task artifacts produced by this job.
+    framework_hash : str or None
+        Git commit hash of the RDFAnalyzerCore framework at job-submission
+        time.  Used by :meth:`provenance` and :func:`resolve_manifest` to
+        detect environment drift.
+    user_repo_hash : str or None
+        Git commit hash of the user analysis repository at job-submission
+        time.
+    config_mtime : str or None
+        UTC modification time (ISO 8601) of the job configuration file.
     """
 
     CURRENT_VERSION: ClassVar[int] = OUTPUT_MANIFEST_VERSION
@@ -573,6 +731,9 @@ class OutputManifest:
         metadata: Optional[MetadataSchema] = None,
         cutflow: Optional[CutflowSchema] = None,
         law_artifacts: Optional[List[LawArtifactSchema]] = None,
+        framework_hash: Optional[str] = None,
+        user_repo_hash: Optional[str] = None,
+        config_mtime: Optional[str] = None,
     ) -> None:
         self.manifest_version: int = manifest_version
         self.skim: Optional[SkimSchema] = skim
@@ -580,6 +741,9 @@ class OutputManifest:
         self.metadata: Optional[MetadataSchema] = metadata
         self.cutflow: Optional[CutflowSchema] = cutflow
         self.law_artifacts: List[LawArtifactSchema] = law_artifacts or []
+        self.framework_hash: Optional[str] = framework_hash
+        self.user_repo_hash: Optional[str] = user_repo_hash
+        self.config_mtime: Optional[str] = config_mtime
 
     # ------------------------------------------------------------------ I/O
 
@@ -598,6 +762,9 @@ class OutputManifest:
                 self.cutflow.to_dict() if self.cutflow is not None else None
             ),
             "law_artifacts": [a.to_dict() for a in self.law_artifacts],
+            "framework_hash": self.framework_hash,
+            "user_repo_hash": self.user_repo_hash,
+            "config_mtime": self.config_mtime,
         }
 
     @classmethod
@@ -634,6 +801,9 @@ class OutputManifest:
             metadata=metadata,
             cutflow=cutflow,
             law_artifacts=law_artifacts,
+            framework_hash=data.get("framework_hash"),
+            user_repo_hash=data.get("user_repo_hash"),
+            config_mtime=data.get("config_mtime"),
         )
 
     def save_yaml(self, path: str) -> None:
@@ -775,6 +945,51 @@ class OutputManifest:
         ]
         return f"OutputManifest({', '.join(parts)})"
 
+    # ------------------------------------------------------------------ provenance
+
+    def provenance(self) -> "ProvenanceRecord":
+        """Return the provenance recorded in this manifest.
+
+        Constructs a :class:`ProvenanceRecord` from the
+        ``framework_hash``, ``user_repo_hash``, and ``config_mtime``
+        fields stored in the manifest.
+
+        Returns
+        -------
+        ProvenanceRecord
+            The provenance snapshot recorded when this manifest was written.
+            Fields that were not recorded will be ``None``.
+        """
+        return ProvenanceRecord(
+            framework_hash=self.framework_hash,
+            user_repo_hash=self.user_repo_hash,
+            config_mtime=self.config_mtime,
+        )
+
+    def resolve(
+        self,
+        current_provenance: Optional["ProvenanceRecord"] = None,
+    ) -> Dict[str, "ArtifactResolutionStatus"]:
+        """Resolve all schemas using the canonical version-resolution model.
+
+        This is a convenience wrapper around :func:`resolve_manifest` that
+        uses the provenance stored in *this* manifest as the recorded
+        provenance.
+
+        Parameters
+        ----------
+        current_provenance:
+            A :class:`ProvenanceRecord` representing the current state of
+            the environment (e.g. current git hashes).  When ``None`` the
+            resolution only considers schema-version compatibility.
+
+        Returns
+        -------
+        dict[str, ArtifactResolutionStatus]
+            Mapping of schema role to its :class:`ArtifactResolutionStatus`.
+        """
+        return resolve_manifest(self, current_provenance=current_provenance)
+
 
 # ---------------------------------------------------------------------------
 # SchemaVersionError
@@ -788,3 +1003,114 @@ class SchemaVersionError(RuntimeError):
     :class:`RuntimeError` exceptions allows callers to apply migration logic
     or emit clear user-facing messages about incompatible output formats.
     """
+
+
+# ---------------------------------------------------------------------------
+# Canonical resolution API
+# ---------------------------------------------------------------------------
+
+
+def resolve_artifact(
+    artifact: Any,
+    recorded_provenance: Optional[ProvenanceRecord] = None,
+    current_provenance: Optional[ProvenanceRecord] = None,
+) -> ArtifactResolutionStatus:
+    """Determine whether a single schema artifact is compatible, stale, or must be regenerated.
+
+    This is the **canonical API** for artifact version resolution.  It is
+    designed to be called by LAW tasks, caching layers, validation tools, and
+    any downstream consumer that needs to decide whether to reuse or
+    regenerate an artifact.
+
+    Resolution rules (applied in order):
+
+    1. **MUST_REGENERATE** - the artifact's ``schema_version`` does not match
+       its ``CURRENT_VERSION`` class attribute.  The artifact is incompatible
+       with the current codebase and **must** be regenerated.
+    2. **STALE** - the schema version is current, but *recorded_provenance*
+       and *current_provenance* are both provided and
+       :meth:`ProvenanceRecord.matches` returns ``False``.  The artifact can
+       still be used but should be regenerated when convenient.
+    3. **COMPATIBLE** - the schema version is current and either no provenance
+       comparison was requested or the provenances match.
+
+    Parameters
+    ----------
+    artifact:
+        A schema object with ``schema_version`` and ``CURRENT_VERSION``
+        attributes (e.g. :class:`SkimSchema`, :class:`HistogramSchema`,
+        :class:`LawArtifactSchema`).
+    recorded_provenance:
+        The :class:`ProvenanceRecord` that was captured when the artifact was
+        produced (e.g. extracted from :meth:`OutputManifest.provenance`).
+        May be ``None`` to skip provenance comparison.
+    current_provenance:
+        A :class:`ProvenanceRecord` representing the current environment
+        state.  May be ``None`` to skip provenance comparison.
+
+    Returns
+    -------
+    ArtifactResolutionStatus
+        One of :attr:`~ArtifactResolutionStatus.COMPATIBLE`,
+        :attr:`~ArtifactResolutionStatus.STALE`, or
+        :attr:`~ArtifactResolutionStatus.MUST_REGENERATE`.
+    """
+    current_version = getattr(artifact, "CURRENT_VERSION", None)
+    schema_version = getattr(artifact, "schema_version", None)
+    if current_version is None or schema_version != current_version:
+        return ArtifactResolutionStatus.MUST_REGENERATE
+
+    if (
+        recorded_provenance is not None
+        and current_provenance is not None
+        and not recorded_provenance.matches(current_provenance)
+    ):
+        return ArtifactResolutionStatus.STALE
+
+    return ArtifactResolutionStatus.COMPATIBLE
+
+
+def resolve_manifest(
+    manifest: "OutputManifest",
+    current_provenance: Optional[ProvenanceRecord] = None,
+) -> Dict[str, ArtifactResolutionStatus]:
+    """Resolve all schemas in a manifest using the canonical resolution model.
+
+    Iterates over every schema in *manifest* and calls
+    :func:`resolve_artifact` for each one, using the provenance stored in the
+    manifest as the *recorded_provenance*.
+
+    Parameters
+    ----------
+    manifest:
+        The :class:`OutputManifest` whose schemas should be resolved.
+    current_provenance:
+        A :class:`ProvenanceRecord` representing the current environment
+        state.  When ``None`` the resolution only considers schema-version
+        compatibility (provenance staleness is not checked).
+
+    Returns
+    -------
+    dict[str, ArtifactResolutionStatus]
+        Mapping of schema role to its :class:`ArtifactResolutionStatus`.
+        The roles used are ``"skim"``, ``"histograms"``, ``"metadata"``,
+        ``"cutflow"``, and ``"law_artifacts[N]"`` for the Nth LAW artifact.
+    """
+    recorded = manifest.provenance()
+    statuses: Dict[str, ArtifactResolutionStatus] = {}
+
+    for role, schema in (
+        ("skim", manifest.skim),
+        ("histograms", manifest.histograms),
+        ("metadata", manifest.metadata),
+        ("cutflow", manifest.cutflow),
+    ):
+        if schema is not None:
+            statuses[role] = resolve_artifact(schema, recorded, current_provenance)
+
+    for i, artifact in enumerate(manifest.law_artifacts):
+        statuses[f"law_artifacts[{i}]"] = resolve_artifact(
+            artifact, recorded, current_provenance
+        )
+
+    return statuses
