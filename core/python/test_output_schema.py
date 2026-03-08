@@ -16,7 +16,7 @@ import tempfile
 import pytest
 
 # Ensure core/python is importable regardless of working directory.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from output_schema import (
     MANIFEST_FILENAME,
