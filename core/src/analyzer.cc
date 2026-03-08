@@ -6,6 +6,7 @@
 #include <NullOutputSink.h>
 #include <RootOutputSink.h>
 #include <CounterService.h>
+#include <ProvenanceService.h>
 #include <NDHistogramManager.h>
 #include <functions.h>
 #include <util.h>
@@ -95,6 +96,10 @@ Analyzer *Analyzer::addPlugin(const std::string &role, std::unique_ptr<IPluggabl
     // Wire the plugin immediately with the persisted ManagerContext
     plugin->setContext(managerContext_m);
     plugin->setupFromConfigFile();
+    // Record provenance entry for the newly added plugin
+    if (provenanceService_m) {
+        provenanceService_m->addEntry("plugin." + role, plugin->type());
+    }
     plugins.emplace(role, std::move(plugin));
     return this;
 }
@@ -107,6 +112,20 @@ Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::unique_ptr<I
 }
 
 void Analyzer::initializeServices(ManagerContext& ctx) {
+    // ProvenanceService: always enabled
+    {
+        auto svc = std::make_unique<ProvenanceService>();
+        svc->initialize(ctx);
+        // Record provenance for all plugins wired so far
+        for (const auto& [role, plugin] : plugins) {
+            if (plugin) {
+                svc->addEntry("plugin." + role, plugin->type());
+            }
+        }
+        provenanceService_m = svc.get();
+        services_m.emplace_back(std::move(svc));
+    }
+
     const auto& configMap = configProvider_m->getConfigMap();
     auto it = configMap.find("enableCounters");
     if (it != configMap.end()) {

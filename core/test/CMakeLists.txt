@@ -8,6 +8,10 @@ add_executable(testRootOutputSink testRootOutputSink.cc)
 target_link_libraries(testRootOutputSink core gtest gtest_main)
 add_test(NAME RootOutputSinkTest COMMAND testRootOutputSink)
 
+add_executable(testProvenanceService testProvenanceService.cc)
+target_link_libraries(testProvenanceService core gtest gtest_main)
+add_test(NAME ProvenanceServiceTest COMMAND testProvenanceService)
+
 # Basic functionality tests
 
 add_executable(testConfigurationManager testConfigurationManager.cc)
