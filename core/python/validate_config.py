@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from submission_backend import read_config
+from dataset_manifest import DatasetManifest
 
 
 class ValidationError(Exception):
@@ -56,6 +57,92 @@ def _is_int(val: str) -> bool:
         return False
 
 
+def _validate_yaml_sample_config(sample_config_path: str, mode: str = "auto"):
+    """Validate a YAML dataset manifest used as a sample config.
+
+    Uses :class:`~dataset_manifest.DatasetManifest` to load and intrinsically
+    validate the manifest (duplicate names, missing parent references, etc.),
+    then applies mode-specific field checks.
+
+    Parameters
+    ----------
+    sample_config_path : str
+        Absolute path to the ``.yaml`` / ``.yml`` manifest file.
+    mode : str
+        ``"nano"``, ``"opendata"``, or ``"auto"`` (default).  In ``"auto"``
+        mode the function infers the mode from the manifest content: if any
+        entry carries a ``das`` field that looks like a CERN Open Data record
+        ID (purely numeric) it is treated as ``"opendata"``; otherwise
+        ``"nano"``.
+
+    Returns
+    -------
+    tuple[list[str], list[str]]
+        ``(errors, warnings)`` lists.
+    """
+    errors = []
+    warnings = []
+
+    try:
+        manifest = DatasetManifest.load_yaml(sample_config_path)
+    except Exception as exc:
+        errors.append(f"Failed to parse YAML sample config: {exc}")
+        return errors, warnings
+
+    # Run the manifest's own internal consistency checks
+    for msg in manifest.validate():
+        if msg.startswith("Warning:"):
+            warnings.append(msg)
+        else:
+            errors.append(msg)
+
+    if not manifest.datasets:
+        errors.append("Sample config (YAML manifest) contains no dataset entries")
+        return errors, warnings
+
+    # Auto-detect mode: if any entry's das field looks like a numeric record ID
+    # (CERN Open Data) rather than a DAS path (starts with "/"), use opendata.
+    mode_local = mode.lower()
+    if mode_local == "auto":
+        def _looks_like_recid(das_str):
+            if not das_str:
+                return False
+            return all(part.strip().isdigit() for part in das_str.split(",") if part.strip())
+        has_recids = any(
+            _looks_like_recid(e.das) for e in manifest.datasets if e.das
+        )
+        mode_local = "opendata" if has_recids else "nano"
+
+    if mode_local == "opendata":
+        # For Open Data, each entry's das field should contain record IDs
+        entries_with_das = [e for e in manifest.datasets if e.das]
+        if not entries_with_das:
+            errors.append("OpenData mode: no dataset entries have a 'das' (record ID) field")
+        for entry in manifest.datasets:
+            if not entry.das:
+                warnings.append(
+                    f"OpenData dataset {entry.name!r} has no 'das' (record ID) field"
+                )
+    else:
+        # NANO mode: each entry should have a file source (das or files) and xsec (for MC)
+        for entry in manifest.datasets:
+            if not entry.das and not entry.files:
+                warnings.append(
+                    f"NANO dataset {entry.name!r} has neither 'das' nor 'files'"
+                )
+            if entry.dtype == "mc" and entry.xsec is None:
+                warnings.append(
+                    f"NANO MC dataset {entry.name!r} is missing 'xsec'"
+                )
+            if entry.sum_weights is None:
+                warnings.append(
+                    f"NANO dataset {entry.name!r} has no 'sum_weights': "
+                    "normalization will be calculated on the fly"
+                )
+
+    return errors, warnings
+
+
 def validate_submit_config(config_path: str, mode: str = "auto"):
     errors = []
     warnings = []
@@ -94,57 +181,64 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
     if sample_config:
         sample_config_path = _resolve_path(config_path, sample_config)
         if os.path.exists(sample_config_path):
-            entries = _parse_sample_config(sample_config_path)
-            has_recids = any("recids" in e for e in entries)
-            mode_local = mode.lower()
-            if mode_local == "auto":
-                mode_local = "opendata" if has_recids else "nano"
-
-            sample_entries = [e for e in entries if "name" in e]
-            if not sample_entries:
-                errors.append("Sample config has no entries with 'name='")
-
-            if mode_local == "opendata":
-                recid_entries = [e for e in entries if "recids" in e]
-                if not recid_entries:
-                    errors.append("OpenData mode: missing 'recids' entry in sample config")
-                for e in sample_entries:
-                    if "das" not in e:
-                        errors.append(
-                            f"OpenData sample missing 'das' (line {e['__line__']})"
-                        )
-                    for key in ["xsec", "norm", "kfac", "extraScale", "lumi"]:
-                        if key in e and not _is_float(e[key]):
-                            errors.append(
-                                f"Invalid float for '{key}' in sample config (line {e['__line__']})"
-                            )
-                    if "type" in e and not _is_int(e["type"]):
-                        errors.append(
-                            f"Invalid int for 'type' in sample config (line {e['__line__']})"
-                        )
+            ext = os.path.splitext(sample_config_path)[1].lower()
+            if ext in (".yaml", ".yml"):
+                # Validate as a DatasetManifest YAML file
+                errs, warns = _validate_yaml_sample_config(sample_config_path, mode)
+                errors.extend(errs)
+                warnings.extend(warns)
             else:
-                for e in sample_entries:
-                    missing = [k for k in ["das", "xsec", "type"] if k not in e]
-                    if missing:
-                        errors.append(
-                            f"NANO sample missing {', '.join(missing)} (line {e['__line__']})"
-                        )
-                    if "xsec" in e and not _is_float(e["xsec"]):
-                        errors.append(
-                            f"Invalid float for 'xsec' in sample config (line {e['__line__']})"
-                        )
-                    if "norm" not in e:
-                        warnings.append(
-                            f"Missing 'norm' in sample config (line {e['__line__']}): 'norm' will be calculated on the fly and is deprecated"
-                        )
-                    elif not _is_float(e["norm"]):
-                        errors.append(
-                            f"Invalid float for 'norm' in sample config (line {e['__line__']})"
-                        )
-                    if "type" in e and not _is_int(e["type"]):
-                        errors.append(
-                            f"Invalid int for 'type' in sample config (line {e['__line__']})"
-                        )
+                entries = _parse_sample_config(sample_config_path)
+                has_recids = any("recids" in e for e in entries)
+                mode_local = mode.lower()
+                if mode_local == "auto":
+                    mode_local = "opendata" if has_recids else "nano"
+
+                sample_entries = [e for e in entries if "name" in e]
+                if not sample_entries:
+                    errors.append("Sample config has no entries with 'name='")
+
+                if mode_local == "opendata":
+                    recid_entries = [e for e in entries if "recids" in e]
+                    if not recid_entries:
+                        errors.append("OpenData mode: missing 'recids' entry in sample config")
+                    for e in sample_entries:
+                        if "das" not in e:
+                            errors.append(
+                                f"OpenData sample missing 'das' (line {e['__line__']})"
+                            )
+                        for key in ["xsec", "norm", "kfac", "extraScale", "lumi"]:
+                            if key in e and not _is_float(e[key]):
+                                errors.append(
+                                    f"Invalid float for '{key}' in sample config (line {e['__line__']})"
+                                )
+                        if "type" in e and not _is_int(e["type"]):
+                            errors.append(
+                                f"Invalid int for 'type' in sample config (line {e['__line__']})"
+                            )
+                else:
+                    for e in sample_entries:
+                        missing = [k for k in ["das", "xsec", "type"] if k not in e]
+                        if missing:
+                            errors.append(
+                                f"NANO sample missing {', '.join(missing)} (line {e['__line__']})"
+                            )
+                        if "xsec" in e and not _is_float(e["xsec"]):
+                            errors.append(
+                                f"Invalid float for 'xsec' in sample config (line {e['__line__']})"
+                            )
+                        if "norm" not in e:
+                            warnings.append(
+                                f"Missing 'norm' in sample config (line {e['__line__']}): 'norm' will be calculated on the fly and is deprecated"
+                            )
+                        elif not _is_float(e["norm"]):
+                            errors.append(
+                                f"Invalid float for 'norm' in sample config (line {e['__line__']})"
+                            )
+                        if "type" in e and not _is_int(e["type"]):
+                            errors.append(
+                                f"Invalid int for 'type' in sample config (line {e['__line__']})"
+                            )
         else:
             errors.append(f"Sample config file not found: {sample_config_path}")
 

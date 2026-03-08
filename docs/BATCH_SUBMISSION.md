@@ -117,6 +117,65 @@ law index
 
 ### Sample config format
 
+The sample configuration describes the datasets to process and is referenced
+by the `sampleConfig` key inside the main submit config.  Two formats are
+accepted:
+
+#### Preferred format – YAML dataset manifest
+
+Use a YAML manifest for production workflows.  It provides richer metadata,
+supports multi-year analyses, and is validated by the framework at submission
+time.  See `core/python/example_dataset_manifest.yaml` for a fully annotated
+example.
+
+```yaml
+# Luminosity in fb^-1 (used as default; lumi_by_year takes precedence when set)
+lumi: 59.7
+
+# Optional per-year luminosities
+lumi_by_year:
+  2022: 38.01
+  2023: 21.69
+
+# Optional Rucio site whitelist / blacklist
+whitelist: []
+blacklist: []
+
+datasets:
+  - name: ttbar_powheg_2022
+    year: 2022
+    process: ttbar
+    group: ttbar
+    dtype: mc
+    das: /TTto2L2Nu_TuneCP5_13p6TeV_powheg-pythia8/Run3Summer22NanoAODv12-130X.../NANOAODSIM
+    xsec: 98.34
+    kfac: 1.0
+    sum_weights: ~      # computed on the fly if omitted
+  - name: wjets_ht_0to70_2022
+    year: 2022
+    process: wjets
+    group: wjets_ht
+    dtype: mc
+    das: /WtoLNu-0Jets.../NANOAODSIM
+    xsec: 54000.0
+    stitch_id: 0
+```
+
+Pass the manifest as `sampleConfig` in the submit config file:
+
+```
+sampleConfig=analyses/myAnalysis/cfg/samples.yaml
+```
+
+#### Legacy format – key=value text file
+
+The legacy flat text format is still fully supported for backward
+compatibility.  Each line contains space-separated `key=value` pairs.
+
+> **Note on luminosity units**: The YAML manifest uses **fb^-1** for the `lumi`
+> field, while the legacy text format uses **pb^-1**.  Ensure you use the
+> correct unit for the format you choose.
+
 ```
 # Luminosity in pb^-1
 lumi=59700
@@ -130,7 +189,7 @@ name=ttbar das=/TTToSemiLeptonic.../NANOAODSIM xsec=831.76 type=0 norm=1.0 kfac=
 name=wjets das=/WJetsToLNu.../NANOAODSIM     xsec=61526.7 type=1 norm=1.0 kfac=1.0
 ```
 
-**Sample fields**:
+**Sample fields** (legacy format):
 
 | Field | Description |
 |-------|-------------|
@@ -181,6 +240,34 @@ law run BuildNANOSubmission --workers 4 \
 
 ### Sample config format
 
+The same two formats accepted by NANO submission are supported here.
+
+#### Preferred format – YAML dataset manifest
+
+For Open Data workflows, each entry's `das` field stores a comma-separated
+list of CERN Open Data **record IDs** (instead of DAS paths).
+
+```yaml
+lumi: 11.58   # fb^-1
+
+datasets:
+  - name: ZMuMu
+    dtype: mc
+    das: "24119"          # CERN Open Data record ID
+    xsec: 1.0
+    sum_weights: ~
+  - name: ZEE
+    dtype: mc
+    das: "24120"
+    xsec: 1.0
+```
+
+#### Legacy format – key=value text file
+
+> **Note on luminosity units**: The YAML manifest uses **fb^-1** for the `lumi`
+> field, while the legacy text format uses **pb^-1**.  Ensure you use the
+> correct unit for the format you choose.
+
 ```
 # Luminosity in pb^-1
 lumi=11580
@@ -193,7 +280,7 @@ name=ZMuMu das=SMZee_0 type=10 xsec=1.0 norm=1.0
 name=ZEE   das=SMZee_1 type=11 xsec=1.0 norm=1.0
 ```
 
-**Fields**:
+**Fields** (legacy format):
 
 | Field | Description |
 |-------|-------------|
