@@ -49,9 +49,11 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 
 import luigi  # type: ignore
@@ -59,10 +61,29 @@ import law  # type: ignore
 from law.workflow.base import BaseWorkflow, BaseWorkflowProxy
 from law.contrib.htcondor import HTCondorWorkflow  # noqa: F401  – re-exported for callers
 
-# Performance recording is imported lazily inside _run_analysis_job so that
-# this module remains picklable for Dask workers that may not have the full
-# law/ directory on their PYTHONPATH.  The import is attempted at call time;
-# if it fails, performance recording is silently skipped.
+# ---------------------------------------------------------------------------
+# Optional performance recording (best-effort; skipped if not importable).
+#
+# This try/except runs once at module-import time.  On Dask workers the same
+# code path executes, so performance_recorder.py must be accessible on their
+# filesystem (typically via the shared EOS/NFS mount that also holds the
+# analysis executables and job directories).  If the import fails on a worker,
+# recording is silently skipped – the analysis job still runs normally.
+# ---------------------------------------------------------------------------
+_here = os.path.dirname(os.path.abspath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+
+try:
+    from performance_recorder import (  # type: ignore
+        PerformanceRecorder as _PerformanceRecorder,
+        estimate_job_input_bytes as _estimate_job_input_bytes,
+        perf_path_for as _perf_path_for,
+    )
+except ImportError:
+    _PerformanceRecorder = None  # type: ignore[assignment,misc]
+    _estimate_job_input_bytes = None  # type: ignore[assignment]
+    _perf_path_for = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +106,14 @@ def _run_analysis_job(
 
     Performance metrics (wall time, peak RSS, throughput) are recorded to
     ``job.perf.json`` inside *job_dir* via
-    :class:`performance_recorder.PerformanceRecorder`.
+    :class:`performance_recorder.PerformanceRecorder`.  The job directory is
+    on a shared filesystem (EOS/NFS), so ``job.perf.json`` is accessible from
+    both the worker node and the submit node after the job completes.
+
+    For **Dask** jobs, :class:`DaskWorkflowProxy` reads this file after the
+    future resolves and copies it to the branch output location
+    (``job_outputs/job_N.perf.json``) so all execution paths produce
+    performance data at a consistent location.
 
     Parameters
     ----------
@@ -149,26 +177,11 @@ def _run_analysis_job(
     else:
         full_cmd = f"bash -c {shlex.quote(inner_cmd)}"
 
-    # ------------------------------------------------------------------
-    # Attempt to import performance recording (optional, best-effort).
-    # ------------------------------------------------------------------
-    _rec_cls = None
-    _est_fn = None
-    try:
-        _here = os.path.dirname(os.path.abspath(__file__))
-        if _here not in sys.path:
-            sys.path.insert(0, _here)
-        from performance_recorder import PerformanceRecorder, estimate_job_input_bytes
-        _rec_cls = PerformanceRecorder
-        _est_fn = estimate_job_input_bytes
-    except ImportError:
-        pass
-
     task_label = f"analysis_job:{os.path.basename(job_dir)}"
 
-    if _rec_cls is not None:
-        input_bytes = _est_fn(job_dir) if _est_fn else 0
-        with _rec_cls(task_label) as rec:
+    if _PerformanceRecorder is not None:
+        input_bytes = _estimate_job_input_bytes(job_dir) if _estimate_job_input_bytes else 0
+        with _PerformanceRecorder(task_label) as rec:
             proc = subprocess.Popen(
                 full_cmd,
                 shell=True,
@@ -185,7 +198,6 @@ def _run_analysis_job(
         try:
             rec.save(os.path.join(job_dir, "job.perf.json"))
         except OSError as exc:
-            import warnings
             warnings.warn(
                 f"Could not write job.perf.json in {job_dir!r}: {exc}",
                 RuntimeWarning,
@@ -223,6 +235,14 @@ class DaskWorkflowProxy(BaseWorkflowProxy):
     incomplete branch to obtain a ``(callable, args, kwargs)`` triple, which it
     submits to the Dask cluster.  When the future resolves, the proxy writes
     the branch output file so that LAW considers the branch complete.
+
+    Performance recording
+    ---------------------
+    After each future resolves the proxy reads ``job.perf.json`` from the job
+    directory (written on the Dask worker by :func:`_run_analysis_job`) and
+    copies it to the branch output directory alongside the ``.done`` file,
+    so performance data is available at a consistent location for all execution
+    backends (local, HTCondor, Dask).
 
     See :class:`DaskWorkflow` for the full documentation.
     """
@@ -290,6 +310,20 @@ class DaskWorkflowProxy(BaseWorkflowProxy):
                     Path(out.path).parent.mkdir(parents=True, exist_ok=True)
                     with open(out.path, "w") as fh:
                         fh.write(f"status=done\n{result_text}\n")
+
+                    # Copy job.perf.json from the job directory (written on the
+                    # Dask worker via _run_analysis_job) to alongside the .done
+                    # file so downstream tools find performance data at the
+                    # standard location even for Dask-dispatched jobs.
+                    if _perf_path_for is not None and result_text.startswith("done:"):
+                        job_dir = result_text[len("done:"):]
+                        src_perf = os.path.join(job_dir, "job.perf.json")
+                        if os.path.isfile(src_perf):
+                            try:
+                                shutil.copy2(src_perf, _perf_path_for(out.path))
+                            except OSError:
+                                pass
+
                     task.publish_message(
                         f"Branch {branch_num}: complete ({result_text})."
                     )

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -536,6 +537,96 @@ class TestRunAnalysisJobPerformanceOutput(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 _run_analysis_job(exe_path=exe, job_dir=tmpdir)
+
+
+# ===========================================================================
+# DaskWorkflowProxy performance-copy behaviour (unit-testable without Dask)
+# ===========================================================================
+
+class TestDaskPerfCopy(unittest.TestCase):
+    """
+    Verify that DaskWorkflowProxy copies job.perf.json from the job directory
+    to the branch output directory.
+
+    These tests unit-test the copying logic directly, without requiring a
+    real Dask cluster or law/luigi imports.
+    """
+
+    def _simulate_dask_perf_copy(self, result_text: str, out_path: str) -> None:
+        """Replicate the perf-copy logic from DaskWorkflowProxy.run()."""
+        from performance_recorder import perf_path_for as _ppf
+        if result_text.startswith("done:"):
+            job_dir = result_text[len("done:"):]
+            src_perf = os.path.join(job_dir, "job.perf.json")
+            if os.path.isfile(src_perf):
+                try:
+                    shutil.copy2(src_perf, _ppf(out_path))
+                except OSError:
+                    pass
+
+    def test_perf_copied_to_done_location(self):
+        """job.perf.json is copied alongside the .done file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_dir = os.path.join(tmpdir, "job_7")
+            os.makedirs(job_dir)
+            src_perf = os.path.join(job_dir, "job.perf.json")
+            rec = PerformanceRecorder("test_copy")
+            with rec:
+                pass
+            rec.save(src_perf)
+
+            out_dir = os.path.join(tmpdir, "job_outputs")
+            os.makedirs(out_dir)
+            out_path = os.path.join(out_dir, "job_7.done")
+
+            self._simulate_dask_perf_copy(f"done:{job_dir}", out_path)
+
+            expected_perf = os.path.join(out_dir, "job_7.perf.json")
+            self.assertTrue(
+                os.path.isfile(expected_perf),
+                "job.perf.json should be copied alongside the .done file",
+            )
+
+    def test_copied_perf_valid_json(self):
+        """The copied .perf.json contains valid JSON with expected keys."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_dir = os.path.join(tmpdir, "job_3")
+            os.makedirs(job_dir)
+            src_perf = os.path.join(job_dir, "job.perf.json")
+            rec = PerformanceRecorder("test_json_copy")
+            with rec:
+                pass
+            rec.save(src_perf)
+
+            out_path = os.path.join(tmpdir, "job_3.done")
+            self._simulate_dask_perf_copy(f"done:{job_dir}", out_path)
+
+            dst_perf = os.path.join(tmpdir, "job_3.perf.json")
+            self.assertTrue(os.path.isfile(dst_perf))
+            with open(dst_perf) as fh:
+                data = json.load(fh)
+            self.assertIn("wall_time_s", data)
+            self.assertIn("task_name", data)
+
+    def test_no_copy_when_src_missing(self):
+        """No error and no file created when job.perf.json is absent."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_dir = os.path.join(tmpdir, "empty_job")
+            os.makedirs(job_dir)
+            out_path = os.path.join(tmpdir, "job_0.done")
+
+            # Should not raise; src is absent
+            self._simulate_dask_perf_copy(f"done:{job_dir}", out_path)
+
+            self.assertFalse(os.path.isfile(os.path.join(tmpdir, "job_0.perf.json")))
+
+    def test_no_copy_for_non_done_result(self):
+        """No copy is attempted for result_text that does not start with 'done:'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "job_0.done")
+            # Should not raise
+            self._simulate_dask_perf_copy("error:something", out_path)
+            self.assertFalse(os.path.isfile(os.path.join(tmpdir, "job_0.perf.json")))
 
 
 if __name__ == "__main__":
