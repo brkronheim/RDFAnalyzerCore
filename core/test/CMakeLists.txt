@@ -111,6 +111,53 @@ set_tests_properties(PythonBindingsNumbaIntegration PROPERTIES
 endif()
 
 
+# -----------------------------------------------------------------------
+# Pure-Python tests (pytest-based, no C++ build artefacts needed)
+# -----------------------------------------------------------------------
+# Use Python_EXECUTABLE set by pybind11/FindPython above; fall back to an
+# explicit find_package so the tests are registered even when the Python
+# bindings are disabled or pybind11 was not found.
+if(NOT Python_EXECUTABLE)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_FOUND)
+        set(Python_EXECUTABLE "${Python3_EXECUTABLE}")
+    endif()
+endif()
+
+if(Python_EXECUTABLE)
+    set(CORE_PYTHON_DIR "${CMAKE_SOURCE_DIR}/core/python")
+
+    # Thin wrapper copied to the build directory: runs pytest and exits with
+    # code 77 (CTest SKIP) when pytest itself is not installed on the runner.
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_pytest.py.in
+        ${CMAKE_CURRENT_BINARY_DIR}/run_pytest.py
+        COPYONLY
+    )
+
+    # Helper macro to register a single pytest test with a consistent set of
+    # properties.  Each test prepends CORE_PYTHON_DIR to PYTHONPATH so that
+    # all modules in core/python/ are importable without installation.
+    macro(add_pytest_test TEST_NAME TEST_FILE)
+        add_test(
+            NAME ${TEST_NAME}
+            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/run_pytest.py
+                    ${TEST_FILE} -v --tb=short -p no:cacheprovider
+        )
+        set_tests_properties(${TEST_NAME} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${CORE_PYTHON_DIR}:$ENV{PYTHONPATH}"
+            SKIP_RETURN_CODE 77
+        )
+    endmacro()
+
+    # Output-schema tests (core/python/test_output_schema.py)
+    add_pytest_test(PythonOutputSchemaTest
+                    ${CORE_PYTHON_DIR}/test_output_schema.py)
+
+    # YAML/text config-parsing tests (core/test/test_yaml_config.py)
+    add_pytest_test(PythonYamlConfigTest
+                    ${CMAKE_CURRENT_SOURCE_DIR}/test_yaml_config.py)
+endif()
 
 
 # Integration tests

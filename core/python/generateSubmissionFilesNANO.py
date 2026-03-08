@@ -22,6 +22,7 @@ from submission_backend import (
 )
 from validate_config import validate_submit_config
 from version_info import get_version_info, write_version_info_json
+from output_schema import emit_output_manifest, OutputManifest, SkimSchema, HistogramSchema, MANIFEST_FILENAME
 
 
 def get_proxy_path() -> str:
@@ -399,6 +400,22 @@ def main():
     shared_dir = os.path.join(mainDir, shared_dir_name)
     Path(shared_dir).mkdir(parents=True, exist_ok=True)
     write_version_info_json(os.path.join(mainDir, "version_info.json"), version_info)
+    # Emit a submission-level schema manifest so that downstream tools can
+    # discover the schema versions used by every job in this batch without
+    # reading individual per-job manifests.
+    _submission_manifest = OutputManifest(
+        framework_hash=version_info.get("framework_hash"),
+        user_repo_hash=version_info.get("user_repo_hash"),
+    )
+    _submission_manifest.add_artifact(
+        "batch_skim_schema",
+        SkimSchema(path=str(resolve_path(configDict.get("saveDirectory", "")))),
+    )
+    _submission_manifest.add_artifact(
+        "batch_histogram_schema",
+        HistogramSchema(path=str(resolve_path(configDict.get("saveDirectory", "")))),
+    )
+    _submission_manifest.write(os.path.join(mainDir, MANIFEST_FILENAME))
     _link_or_copy_file(exe_path, os.path.join(shared_dir, exe_relpath), use_symlink=False)
     if aux_exists:
         _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
@@ -584,6 +601,16 @@ def main():
             with open(os.path.join(job_dir, "submit_config.txt"), "w") as f:
                 for key in job_config.keys():
                     f.write(str(key)+"="+job_config[key]+"\n")
+
+            # Emit a per-job output manifest so downstream tasks can discover
+            # and validate the schema of each job's outputs without custom logic.
+            emit_output_manifest(
+                job_dir,
+                skim_path=job_config.get("__orig_saveFile", job_config.get("saveFile", "")),
+                histogram_path=job_config.get("__orig_metaFile", job_config.get("metaFile", "")),
+                framework_hash=version_info.get("framework_hash"),
+                user_repo_hash=version_info.get("user_repo_hash"),
+            )
 
             jobs_created += 1
             sampleIndex += 1

@@ -1,0 +1,15 @@
+"""Thin pytest runner written to the build directory by CMake.
+
+Exits with code 77 (CTest SKIP_RETURN_CODE) when pytest is not installed on
+the runner so that the test is marked as skipped rather than failed.  All
+command-line arguments are forwarded to pytest.main().
+"""
+import sys
+
+try:
+    import pytest
+except ImportError:
+    print("SKIP: pytest is not installed")
+    sys.exit(77)
+
+sys.exit(pytest.main(sys.argv[1:]))
