@@ -313,6 +313,219 @@ class TestNanoDatasetFilter(unittest.TestCase):
 class TestSubmitSingleJobRemoteIndependence(unittest.TestCase):
     """Verify _submit_single_job generates a submit file that transfers
     the whole shared_inputs/ directory rather than individual files."""
+    
+
+class TestMakePartitions(unittest.TestCase):
+    """Tests for the _make_partitions utility in partition_utils."""
+
+    def _import(self):
+        import partition_utils
+        return partition_utils
+
+    # ------------------------------------------------------------------
+    # file mode
+    # ------------------------------------------------------------------
+
+    def test_file_mode_one_partition_per_file(self):
+        """'file' mode creates exactly one partition per unique URL."""
+        mod = self._import()
+        urls = ["root://x//a.root", "root://x//b.root", "root://x//c.root"]
+        parts = mod._make_partitions(urls, mode="file", files_per_job=50, entries_per_job=100)
+        self.assertEqual(len(parts), 3)
+        for p in parts:
+            self.assertEqual(len(p["files"].split(",")), 1)
+            self.assertEqual(p["first_entry"], 0)
+            self.assertEqual(p["last_entry"], 0)
+
+    def test_file_mode_sorted_order(self):
+        """'file' mode returns partitions in sorted URL order."""
+        mod = self._import()
+        urls = ["root://x//c.root", "root://x//a.root", "root://x//b.root"]
+        parts = mod._make_partitions(urls, mode="file", files_per_job=50, entries_per_job=100)
+        self.assertEqual([p["files"] for p in parts],
+                         ["root://x//a.root", "root://x//b.root", "root://x//c.root"])
+
+    def test_file_mode_deduplicates_urls(self):
+        """'file' mode deduplicates the input URL list."""
+        mod = self._import()
+        urls = ["root://x//a.root", "root://x//a.root", "root://x//b.root"]
+        parts = mod._make_partitions(urls, mode="file", files_per_job=50, entries_per_job=100)
+        self.assertEqual(len(parts), 2)
+
+    # ------------------------------------------------------------------
+    # file_group mode
+    # ------------------------------------------------------------------
+
+    def test_file_group_respects_files_per_job(self):
+        """'file_group' mode groups up to files_per_job files per partition."""
+        mod = self._import()
+        urls = [f"root://x//file{i}.root" for i in range(10)]
+        parts = mod._make_partitions(urls, mode="file_group", files_per_job=3, entries_per_job=100)
+        # 10 files ÷ 3 = 3 full groups + 1 partial
+        self.assertEqual(len(parts), 4)
+        for p in parts[:-1]:
+            self.assertEqual(len(p["files"].split(",")), 3)
+        # Last group has remaining files (10 % 3 == 1)
+        self.assertEqual(len(parts[-1]["files"].split(",")), 1)
+
+    def test_file_group_no_entry_range_keys(self):
+        """'file_group' partitions have first_entry == last_entry == 0."""
+        mod = self._import()
+        urls = ["root://x//a.root", "root://x//b.root"]
+        parts = mod._make_partitions(urls, mode="file_group", files_per_job=5, entries_per_job=100)
+        for p in parts:
+            self.assertEqual(p["first_entry"], 0)
+            self.assertEqual(p["last_entry"], 0)
+
+    def test_file_group_single_file(self):
+        """'file_group' with one file produces one partition."""
+        mod = self._import()
+        parts = mod._make_partitions(
+            ["root://x//only.root"], mode="file_group", files_per_job=50, entries_per_job=100
+        )
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0]["files"], "root://x//only.root")
+
+    def test_file_group_exactly_files_per_job(self):
+        """Exactly files_per_job files fit in one group."""
+        mod = self._import()
+        urls = [f"root://x//f{i}.root" for i in range(5)]
+        parts = mod._make_partitions(urls, mode="file_group", files_per_job=5, entries_per_job=100)
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(len(parts[0]["files"].split(",")), 5)
+
+    def test_file_group_sorted_within_groups(self):
+        """File URLs within each group are in sorted order."""
+        mod = self._import()
+        urls = ["root://x//z.root", "root://x//a.root", "root://x//m.root"]
+        parts = mod._make_partitions(urls, mode="file_group", files_per_job=5, entries_per_job=100)
+        self.assertEqual(len(parts), 1)
+        files = parts[0]["files"].split(",")
+        self.assertEqual(files, sorted(files))
+
+    def test_file_group_deterministic(self):
+        """Calling _make_partitions twice yields the same result."""
+        mod = self._import()
+        urls = ["root://x//c.root", "root://x//a.root", "root://x//b.root"]
+        p1 = mod._make_partitions(urls, mode="file_group", files_per_job=2, entries_per_job=100)
+        p2 = mod._make_partitions(urls, mode="file_group", files_per_job=2, entries_per_job=100)
+        self.assertEqual(p1, p2)
+
+    # ------------------------------------------------------------------
+    # entry_range mode
+    # ------------------------------------------------------------------
+
+    def test_entry_range_requires_uproot(self):
+        """'entry_range' mode raises RuntimeError when uproot is absent."""
+        import sys
+        import unittest.mock as mock
+        mod = self._import()
+
+        # Remove uproot from sys.modules (if present) so the lazy import inside
+        # _query_tree_entries() sees it as missing.
+        saved = sys.modules.pop("uproot", None)
+        try:
+            with mock.patch.dict(sys.modules, {"uproot": None}):
+                with self.assertRaises(RuntimeError) as ctx:
+                    mod._query_tree_entries("fake.root", "Events")
+            self.assertIn("uproot", str(ctx.exception).lower())
+        finally:
+            if saved is not None:
+                sys.modules["uproot"] = saved
+
+    def test_entry_range_splits_correctly(self):
+        """'entry_range' mode produces correct ranges for a known entry count."""
+        mod = self._import()
+        import unittest.mock as mock
+
+        # 250 entries split into chunks of 100 → 3 partitions
+        with mock.patch.object(mod, "_query_tree_entries", return_value=250):
+            parts = mod._make_partitions(
+                ["root://x//a.root"],
+                mode="entry_range",
+                files_per_job=50,
+                entries_per_job=100,
+            )
+
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(parts[0]["first_entry"], 0)
+        self.assertEqual(parts[0]["last_entry"], 100)
+        self.assertEqual(parts[1]["first_entry"], 100)
+        self.assertEqual(parts[1]["last_entry"], 200)
+        self.assertEqual(parts[2]["first_entry"], 200)
+        self.assertEqual(parts[2]["last_entry"], 250)
+
+    def test_entry_range_exact_multiple(self):
+        """'entry_range' mode handles entry count that is an exact multiple."""
+        mod = self._import()
+        import unittest.mock as mock
+
+        with mock.patch.object(mod, "_query_tree_entries", return_value=200):
+            parts = mod._make_partitions(
+                ["root://x//a.root"],
+                mode="entry_range",
+                files_per_job=50,
+                entries_per_job=100,
+            )
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[0]["last_entry"], 100)
+        self.assertEqual(parts[1]["last_entry"], 200)
+
+    def test_entry_range_single_chunk(self):
+        """A file smaller than entries_per_job produces one partition."""
+        mod = self._import()
+        import unittest.mock as mock
+
+        with mock.patch.object(mod, "_query_tree_entries", return_value=50):
+            parts = mod._make_partitions(
+                ["root://x//small.root"],
+                mode="entry_range",
+                files_per_job=50,
+                entries_per_job=100,
+            )
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0]["first_entry"], 0)
+        self.assertEqual(parts[0]["last_entry"], 50)
+
+    def test_entry_range_per_file_partitions(self):
+        """Each file in 'entry_range' mode gets its own independent partitions."""
+        mod = self._import()
+        import unittest.mock as mock
+
+        # Two files with different entry counts
+        def _fake_entries(url, tree_name="Events"):
+            return 150 if "a" in url else 80
+
+        with mock.patch.object(mod, "_query_tree_entries", side_effect=_fake_entries):
+            parts = mod._make_partitions(
+                ["root://x//a.root", "root://x//b.root"],
+                mode="entry_range",
+                files_per_job=50,
+                entries_per_job=100,
+            )
+
+        # a.root: 150 entries → 2 partitions (0-100, 100-150)
+        # b.root:  80 entries → 1 partition  (0-80)
+        self.assertEqual(len(parts), 3)
+        a_parts = [p for p in parts if "a.root" in p["files"]]
+        b_parts = [p for p in parts if "b.root" in p["files"]]
+        self.assertEqual(len(a_parts), 2)
+        self.assertEqual(len(b_parts), 1)
+
+    # ------------------------------------------------------------------
+    # invalid mode
+    # ------------------------------------------------------------------
+
+    def test_invalid_mode_raises_value_error(self):
+        """An unrecognised mode raises ValueError."""
+        mod = self._import()
+        with self.assertRaises(ValueError):
+            mod._make_partitions([], mode="nonsense", files_per_job=10, entries_per_job=100)
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestNANOMixinPartitionParams(unittest.TestCase):
+    """Tests that NANOMixin exposes the new partitioning parameters."""
 
     def _import(self):
         import nano_tasks
@@ -408,6 +621,64 @@ class TestSubmitSingleJobRemoteIndependence(unittest.TestCase):
 
             self.assertIn("CONDOR_PROC=$(Process)", content)
             self.assertIn("CONDOR_CLUSTER=$(Cluster)", content)
+    def test_partition_param_exists(self):
+        """NANOMixin has a 'partition' luigi Parameter."""
+        mod = self._import()
+        self.assertTrue(hasattr(mod.NANOMixin, "partition"))
+
+    def test_files_per_job_param_exists(self):
+        """NANOMixin has a 'files_per_job' luigi Parameter."""
+        mod = self._import()
+        self.assertTrue(hasattr(mod.NANOMixin, "files_per_job"))
+
+    def test_entries_per_job_param_exists(self):
+        """NANOMixin has an 'entries_per_job' luigi Parameter."""
+        mod = self._import()
+        self.assertTrue(hasattr(mod.NANOMixin, "entries_per_job"))
+
+    def test_partition_default_is_file_group(self):
+        """The default partition mode is 'file_group'."""
+        mod = self._import()
+        import luigi
+        default = mod.NANOMixin.partition.task_value(
+            mod.PrepareNANOSample.get_task_family(), "partition"
+        )
+        self.assertEqual(default, "file_group")
+
+    def test_files_per_job_default_is_50(self):
+        """The default files_per_job is 50."""
+        mod = self._import()
+        default = mod.NANOMixin.files_per_job.task_value(
+            mod.PrepareNANOSample.get_task_family(), "files_per_job"
+        )
+        self.assertEqual(default, 50)
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestOpenDataMixinPartitionParams(unittest.TestCase):
+    """Tests that OpenDataMixin exposes the new partitioning parameters."""
+
+    def _import(self):
+        import opendata_tasks
+        return opendata_tasks
+
+    def test_partition_param_exists(self):
+        """OpenDataMixin has a 'partition' luigi Parameter."""
+        mod = self._import()
+        self.assertTrue(hasattr(mod.OpenDataMixin, "partition"))
+
+    def test_entries_per_job_param_exists(self):
+        """OpenDataMixin has an 'entries_per_job' luigi Parameter."""
+        mod = self._import()
+        self.assertTrue(hasattr(mod.OpenDataMixin, "entries_per_job"))
+
+    def test_partition_default_is_file_group(self):
+        """The default partition mode for OpenData is 'file_group'."""
+        mod = self._import()
+        default = mod.OpenDataMixin.partition.task_value(
+            mod.PrepareOpenDataSample.get_task_family(), "partition"
+        )
+        self.assertEqual(default, "file_group")
 
 
 if __name__ == "__main__":
