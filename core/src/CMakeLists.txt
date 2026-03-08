@@ -20,6 +20,7 @@ target_include_directories(core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/SystematicManager
     ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/TriggerManager
     ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/NamedObjectManager
+    ${CMAKE_BINARY_DIR}/include  # for generated GitVersion.h
 )
 
 target_link_libraries(core PUBLIC

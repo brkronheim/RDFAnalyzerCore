@@ -23,6 +23,51 @@ message(STATUS "CMAKE_MODULE_PATH = ${CMAKE_MODULE_PATH}")
 
 project(RDFAnalyzer)
 
+# ---------------------------------------------------------------------------
+# Capture git provenance information at configure time and write GitVersion.h
+# ---------------------------------------------------------------------------
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" rev-parse HEAD
+        OUTPUT_VARIABLE RDFANALYZER_GIT_HASH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _git_hash_result
+    )
+    if(NOT _git_hash_result EQUAL 0)
+        set(RDFANALYZER_GIT_HASH "unknown")
+    endif()
+
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" status --porcelain
+        OUTPUT_VARIABLE _git_dirty_output
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_git_dirty_output)
+        set(RDFANALYZER_GIT_DIRTY true)
+    else()
+        set(RDFANALYZER_GIT_DIRTY false)
+    endif()
+else()
+    set(RDFANALYZER_GIT_HASH "unknown")
+    set(RDFANALYZER_GIT_DIRTY false)
+endif()
+
+string(TIMESTAMP RDFANALYZER_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
+set(RDFANALYZER_COMPILER "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/GitVersion.h.in"
+    "${CMAKE_BINARY_DIR}/include/GitVersion.h"
+    @ONLY
+)
+
+message(STATUS "Framework git hash:       ${RDFANALYZER_GIT_HASH}")
+message(STATUS "Framework git dirty:      ${RDFANALYZER_GIT_DIRTY}")
+message(STATUS "Framework build compiler: ${RDFANALYZER_COMPILER}")
+
 # Build options
 option(BUILD_TESTS "Build analysis tests" ON)
 option(BUILD_COMBINE "Build CMS Combine package for statistical analysis" OFF)
