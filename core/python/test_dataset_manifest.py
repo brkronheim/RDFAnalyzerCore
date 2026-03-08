@@ -626,3 +626,39 @@ class TestDatasetManifestValidate:
     def test_empty_manifest_valid(self):
         m = DatasetManifest()
         assert m.validate() == []
+
+
+# ---------------------------------------------------------------------------
+# New feature: file_hash()
+# ---------------------------------------------------------------------------
+
+class TestDatasetManifestFileHash:
+
+    def test_file_hash_returns_hex_string(self, tmp_path):
+        content = "lumi: 59.7\ndatasets:\n  - name: s\n"
+        p = tmp_path / "m.yaml"
+        p.write_text(content)
+        h = DatasetManifest.file_hash(str(p))
+        assert isinstance(h, str)
+        # SHA-256 produces a 64-character hex digest
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+    def test_file_hash_stable_same_content(self, tmp_path):
+        content = "lumi: 59.7\ndatasets:\n  - name: s\n"
+        p1 = tmp_path / "m1.yaml"
+        p2 = tmp_path / "m2.yaml"
+        p1.write_text(content)
+        p2.write_text(content)
+        assert DatasetManifest.file_hash(str(p1)) == DatasetManifest.file_hash(str(p2))
+
+    def test_file_hash_different_for_different_content(self, tmp_path):
+        p1 = tmp_path / "m1.yaml"
+        p2 = tmp_path / "m2.yaml"
+        p1.write_text("lumi: 59.7\ndatasets: []\n")
+        p2.write_text("lumi: 1.0\ndatasets: []\n")
+        assert DatasetManifest.file_hash(str(p1)) != DatasetManifest.file_hash(str(p2))
+
+    def test_file_hash_not_found_returns_placeholder(self, tmp_path):
+        h = DatasetManifest.file_hash(str(tmp_path / "nonexistent.yaml"))
+        assert h == "<not found>"

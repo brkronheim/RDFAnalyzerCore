@@ -148,6 +148,9 @@ PROVENANCE_OPTIONAL_KEYS: List[str] = [
     "analysis.git_dirty",
     "env.container_tag",
     "filelist.hash",
+    "dataset_manifest.file_hash",
+    "dataset_manifest.query_params",
+    "dataset_manifest.resolved_entries",
 ]
 
 # ---------------------------------------------------------------------------
@@ -290,6 +293,109 @@ class ProvenanceRecord:
             f"framework_hash={self.framework_hash!r}, "
             f"user_repo_hash={self.user_repo_hash!r}, "
             f"config_mtime={self.config_mtime!r})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# DatasetManifestProvenance
+# ---------------------------------------------------------------------------
+
+
+class DatasetManifestProvenance:
+    """Identity and selection record for a dataset manifest used in a task.
+
+    Records enough information to reproduce the exact dataset selection that
+    was used when a workflow task ran:
+
+    * **manifest_path** – path to the manifest file on disk.
+    * **manifest_hash** – SHA-256 hex digest of the manifest file, as
+      returned by :meth:`DatasetManifest.file_hash`.  Uniquely identifies
+      the manifest revision.
+    * **query_params** – keyword arguments passed to
+      :meth:`DatasetManifest.query` (e.g. ``{"year": 2022, "dtype": "mc"}``).
+      When ``None``, the full manifest was used (no query filter was applied).
+    * **resolved_entry_names** – ordered list of :attr:`DatasetEntry.name`
+      values that were selected by the query.  Given the manifest hash and
+      query parameters, this list should be fully reproducible, but it is
+      recorded explicitly for immediate human inspection.
+
+    Any field may be ``None`` when the information is unavailable.
+
+    Parameters
+    ----------
+    manifest_path:
+        Path to the dataset manifest file, or ``None``.
+    manifest_hash:
+        SHA-256 hex digest of the manifest file, or ``None``.
+    query_params:
+        Dict of keyword arguments passed to ``DatasetManifest.query()``,
+        or ``None`` when the full manifest was used.
+    resolved_entry_names:
+        Ordered list of dataset entry names selected by the query,
+        or ``None``.
+
+    Examples
+    --------
+    Record the manifest used for a specific query::
+
+        from dataset_manifest import DatasetManifest
+        from output_schema import DatasetManifestProvenance, OutputManifest
+
+        manifest = DatasetManifest.load("datasets.yaml")
+        query = {"year": 2022, "dtype": "mc", "process": "ttbar"}
+        entries = manifest.query(**query)
+
+        prov = DatasetManifestProvenance(
+            manifest_path="datasets.yaml",
+            manifest_hash=DatasetManifest.file_hash("datasets.yaml"),
+            query_params=query,
+            resolved_entry_names=[e.name for e in entries],
+        )
+        output = OutputManifest(
+            skim=...,
+            dataset_manifest_provenance=prov,
+        )
+    """
+
+    def __init__(
+        self,
+        manifest_path: Optional[str] = None,
+        manifest_hash: Optional[str] = None,
+        query_params: Optional[Dict[str, Any]] = None,
+        resolved_entry_names: Optional[List[str]] = None,
+    ) -> None:
+        self.manifest_path: Optional[str] = manifest_path
+        self.manifest_hash: Optional[str] = manifest_hash
+        self.query_params: Optional[Dict[str, Any]] = query_params
+        self.resolved_entry_names: Optional[List[str]] = resolved_entry_names
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON/YAML-serialisable dictionary representation."""
+        return {
+            "manifest_path": self.manifest_path,
+            "manifest_hash": self.manifest_hash,
+            "query_params": self.query_params,
+            "resolved_entry_names": self.resolved_entry_names,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "DatasetManifestProvenance":
+        """Deserialise from a dict produced by :meth:`to_dict`."""
+        return cls(
+            manifest_path=d.get("manifest_path"),
+            manifest_hash=d.get("manifest_hash"),
+            query_params=d.get("query_params"),
+            resolved_entry_names=d.get("resolved_entry_names"),
+        )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        entry_count = len(self.resolved_entry_names) if self.resolved_entry_names is not None else None
+        return (
+            f"DatasetManifestProvenance("
+            f"manifest_path={self.manifest_path!r}, "
+            f"manifest_hash={self.manifest_hash!r}, "
+            f"query_params={self.query_params!r}, "
+            f"resolved_entry_names=<{entry_count} entries>)"
         )
 
 
@@ -719,6 +825,12 @@ class OutputManifest:
         time.
     config_mtime : str or None
         UTC modification time (ISO 8601) of the job configuration file.
+    dataset_manifest_provenance : DatasetManifestProvenance or None
+        Identity and selection record for the dataset manifest used in this
+        job.  Records the manifest file hash, the query parameters applied
+        to select a subset of datasets, and the names of the resolved
+        dataset entries.  ``None`` when no dataset manifest was used or the
+        information was not captured.
     """
 
     CURRENT_VERSION: ClassVar[int] = OUTPUT_MANIFEST_VERSION
@@ -734,6 +846,7 @@ class OutputManifest:
         framework_hash: Optional[str] = None,
         user_repo_hash: Optional[str] = None,
         config_mtime: Optional[str] = None,
+        dataset_manifest_provenance: Optional["DatasetManifestProvenance"] = None,
     ) -> None:
         self.manifest_version: int = manifest_version
         self.skim: Optional[SkimSchema] = skim
@@ -744,6 +857,9 @@ class OutputManifest:
         self.framework_hash: Optional[str] = framework_hash
         self.user_repo_hash: Optional[str] = user_repo_hash
         self.config_mtime: Optional[str] = config_mtime
+        self.dataset_manifest_provenance: Optional[DatasetManifestProvenance] = (
+            dataset_manifest_provenance
+        )
 
     # ------------------------------------------------------------------ I/O
 
@@ -765,6 +881,11 @@ class OutputManifest:
             "framework_hash": self.framework_hash,
             "user_repo_hash": self.user_repo_hash,
             "config_mtime": self.config_mtime,
+            "dataset_manifest_provenance": (
+                self.dataset_manifest_provenance.to_dict()
+                if self.dataset_manifest_provenance is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -794,6 +915,12 @@ class OutputManifest:
             LawArtifactSchema.from_dict(a)
             for a in data.get("law_artifacts", [])
         ]
+        dmp_data = data.get("dataset_manifest_provenance")
+        dataset_manifest_provenance = (
+            DatasetManifestProvenance.from_dict(dmp_data)
+            if dmp_data is not None
+            else None
+        )
         return cls(
             manifest_version=data.get("manifest_version", OUTPUT_MANIFEST_VERSION),
             skim=skim,
@@ -804,6 +931,7 @@ class OutputManifest:
             framework_hash=data.get("framework_hash"),
             user_repo_hash=data.get("user_repo_hash"),
             config_mtime=data.get("config_mtime"),
+            dataset_manifest_provenance=dataset_manifest_provenance,
         )
 
     def save_yaml(self, path: str) -> None:
