@@ -39,6 +39,8 @@ inline void ChangeToTestSourceDir() {
     }
 
     // Ensure minimal test data directories exist and contain a small ROOT file
+    // with 2 events so tests that check exact event counts (e.g. trigger tests)
+    // work correctly.
     auto make_minimal_root = [](const std::string &dir) {
         if (!std::filesystem::exists(dir)) {
             std::filesystem::create_directory(dir);
@@ -49,6 +51,7 @@ inline void ChangeToTestSourceDir() {
             TTree t("Events", "Events");
             int dummy = 1;
             t.Branch("dummy", &dummy, "dummy/I");
+            t.Fill();
             t.Fill();
             f.Write();
             f.Close();

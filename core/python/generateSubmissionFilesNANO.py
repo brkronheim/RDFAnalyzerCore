@@ -21,6 +21,7 @@ from submission_backend import (
     get_config_extension
 )
 from validate_config import validate_submit_config
+from dataset_manifest import DatasetManifest
 
 
 def get_proxy_path() -> str:
@@ -323,6 +324,25 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
     return(groups)
 
 def getSampleList(configFile):
+    """Parse a sample config file and return ``(sampleDict, baseDirectoryList, lumi, WL, BL)``.
+
+    Accepts both the legacy key=value text format **and** the new YAML manifest
+    format (detected by ``.yaml`` / ``.yml`` extension).  When a YAML manifest
+    is supplied the returned ``sampleDict`` contains all :class:`DatasetEntry`
+    objects converted to legacy dicts, and ``lumi`` / ``WL`` / ``BL`` are
+    taken from the manifest's global settings.
+    """
+    ext = os.path.splitext(configFile)[1].lower()
+    if ext in (".yaml", ".yml"):
+        manifest = DatasetManifest.load_yaml(configFile)
+        return (
+            manifest.to_legacy_sample_dict(),
+            [],
+            manifest.lumi,
+            manifest.whitelist,
+            manifest.blacklist,
+        )
+
     configDict = dict()
     baseDirectoryList = []
     lumi = 1
