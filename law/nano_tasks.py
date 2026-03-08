@@ -90,6 +90,7 @@ from submission_backend import (  # noqa: E402
 from validate_config import validate_submit_config  # noqa: E402
 from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
 from dataset_manifest import DatasetManifest  # noqa: E402
+from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +781,12 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
     # ------------------------------------------------------------------ run
 
     def run(self):
+        task_label = f"PrepareNANOSample[branch={self.branch}]"
+        with PerformanceRecorder(task_label) as rec:
+            self._run_impl()
+        rec.save(perf_path_for(self.output().path))
+
+    def _run_impl(self):
         if not self.no_validate and self.branch == 0:
             errors, warnings = validate_submit_config(self.submit_config, mode="nano")
             if warnings:
@@ -960,6 +967,11 @@ class BuildNANOSubmission(NANOMixin, law.Task):
         }
 
     def run(self):
+        with PerformanceRecorder("BuildNANOSubmission") as rec:
+            self._run_impl()
+        rec.save(os.path.join(self._main_dir, "build_submission.perf.json"))
+
+    def _run_impl(self):
         def _iter_loadable_targets(obj):
             if obj is None:
                 return
@@ -1226,9 +1238,16 @@ class RunTestJob(NANOMixin, law.Task):
 
         self.publish_message(f"Running test job:\n  {full_cmd}")
 
-        result = subprocess.run(full_cmd, shell=True)
+        with PerformanceRecorder("RunTestJob") as rec:
+            # stdout/stderr intentionally inherit from parent so the test
+            # job output is visible to the user running the workflow.
+            proc = subprocess.Popen(full_cmd, shell=True)
+            rec.monitor_process(proc.pid)
+            proc.wait()
+            rc = proc.returncode
 
-        rc = result.returncode
+        rec.save(perf_path_for(self.output().path))
+
         if rc != 0:
             if rc >= 128:
                 sig = rc - 128
@@ -1282,54 +1301,57 @@ class SubmitNANOJobs(NANOMixin, law.Task):
         )
 
     def run(self):
-        # Locate condor_submit.sub directly – input may be BuildNANOSubmission
-        # (dict with "submit" key) or RunTestJob (single FileTarget)
-        inp = self.input()
-        if isinstance(inp, dict) and "submit" in inp:
-            submit_file = inp["submit"].path
-        else:
-            submit_file = os.path.join(self._main_dir, "condor_submit.sub")
+        with PerformanceRecorder("SubmitNANOJobs") as rec:
+            # Locate condor_submit.sub directly – input may be BuildNANOSubmission
+            # (dict with "submit" key) or RunTestJob (single FileTarget)
+            inp = self.input()
+            if isinstance(inp, dict) and "submit" in inp:
+                submit_file = inp["submit"].path
+            else:
+                submit_file = os.path.join(self._main_dir, "condor_submit.sub")
 
-        if not os.path.exists(submit_file):
-            raise RuntimeError(f"condor_submit.sub not found: {submit_file}")
+            if not os.path.exists(submit_file):
+                raise RuntimeError(f"condor_submit.sub not found: {submit_file}")
 
-        result = subprocess.run(
-            ["condor_submit", submit_file],
-            capture_output=True, text=True, check=True,
-        )
-        stdout = result.stdout.strip()
-        self.publish_message(stdout)
+            result = subprocess.run(
+                ["condor_submit", submit_file],
+                capture_output=True, text=True, check=True,
+            )
+            stdout = result.stdout.strip()
+            self.publish_message(stdout)
 
-        # Extract cluster ID from condor_submit output
-        cluster_id = ""
-        for line in stdout.splitlines():
-            if "cluster" in line.lower():
-                parts = line.split()
-                for i, p in enumerate(parts):
-                    if p.lower().rstrip(".") == "cluster" and i + 1 < len(parts):
-                        cluster_id = parts[i + 1].rstrip(".")
-                        break
+            # Extract cluster ID from condor_submit output
+            cluster_id = ""
+            for line in stdout.splitlines():
+                if "cluster" in line.lower():
+                    parts = line.split()
+                    for i, p in enumerate(parts):
+                        if p.lower().rstrip(".") == "cluster" and i + 1 < len(parts):
+                            cluster_id = parts[i + 1].rstrip(".")
+                            break
 
-        # Count total jobs from the "queue N" line in the submit file
-        n_jobs = 0
-        sub_text = Path(submit_file).read_text()
-        for line in sub_text.splitlines():
-            stripped = line.strip()
-            if stripped.lower().startswith("queue"):
-                try:
-                    n_jobs = int(stripped.split()[1])
-                except (IndexError, ValueError):
-                    pass
+            # Count total jobs from the "queue N" line in the submit file
+            n_jobs = 0
+            sub_text = Path(submit_file).read_text()
+            for line in sub_text.splitlines():
+                stripped = line.strip()
+                if stripped.lower().startswith("queue"):
+                    try:
+                        n_jobs = int(stripped.split()[1])
+                    except (IndexError, ValueError):
+                        pass
 
-        with self.output().open("w") as fh:
-            fh.write(f"cluster_id={cluster_id}\n")
-            fh.write(f"n_jobs={n_jobs}\n")
-            fh.write(f"submit_file={submit_file}\n")
-            fh.write(stdout + "\n")
+            with self.output().open("w") as fh:
+                fh.write(f"cluster_id={cluster_id}\n")
+                fh.write(f"n_jobs={n_jobs}\n")
+                fh.write(f"submit_file={submit_file}\n")
+                fh.write(stdout + "\n")
 
-        self.publish_message(
-            f"Submitted cluster {cluster_id} with {n_jobs} job(s)."
-        )
+            self.publish_message(
+                f"Submitted cluster {cluster_id} with {n_jobs} job(s)."
+            )
+
+        rec.save(perf_path_for(self.output().path))
 
 
 # ===========================================================================
@@ -1763,13 +1785,16 @@ class RunNANOJobs(NANOMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWorkflow):
                 "Run BuildNANOSubmission first."
             )
 
-        result_text = _run_analysis_job(
-            exe_path=exe_path,
-            job_dir=job_dir,
-            root_setup=self._root_setup_content,
-            container_setup=self.container_setup or "",
-        )
+        task_label = f"RunNANOJobs[branch={self.branch}]"
+        with PerformanceRecorder(task_label) as rec:
+            result_text = _run_analysis_job(
+                exe_path=exe_path,
+                job_dir=job_dir,
+                root_setup=self._root_setup_content,
+                container_setup=self.container_setup or "",
+            )
 
+        rec.save(perf_path_for(self.output().path))
         self.publish_message(f"Branch {self.branch}: {result_text}")
         Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
         with self.output().open("w") as fh:

@@ -82,6 +82,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _BUILD_PYTHON = os.path.abspath(os.path.join(_HERE, "..", "build", "python"))
 if _BUILD_PYTHON not in sys.path:
     sys.path.insert(0, _BUILD_PYTHON)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
 
 
 def _build_plot_request(
@@ -200,8 +204,12 @@ class MakePlot(PlotTask):
             rdfanalyzer=rdfanalyzer,
         )
 
-        pu = rdfanalyzer.PlottingUtility()
-        result = pu.makeStackPlot(req)
+        with PerformanceRecorder("MakePlot") as rec:
+            pu = rdfanalyzer.PlottingUtility()
+            result = pu.makeStackPlot(req)
+
+        rec.save(perf_path_for(self.output().path))
+
         if not result.success:
             raise RuntimeError(f"PlottingUtility failed: {result.message}")
 
@@ -291,8 +299,12 @@ class MakePlots(PlotTask, law.LocalWorkflow):
             rdfanalyzer=rdfanalyzer,
         )
 
-        pu = rdfanalyzer.PlottingUtility()
-        result = pu.makeStackPlot(req)
+        with PerformanceRecorder(f"MakePlots[branch={self.branch}]") as rec:
+            pu = rdfanalyzer.PlottingUtility()
+            result = pu.makeStackPlot(req)
+
+        rec.save(perf_path_for(self.output().path))
+
         if not result.success:
             raise RuntimeError(f"PlottingUtility failed: {result.message}")
 
