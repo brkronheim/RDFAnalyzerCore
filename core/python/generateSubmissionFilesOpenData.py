@@ -16,7 +16,8 @@ from submission_backend import (
     get_copy_file_list, 
     write_submit_files,
     write_config,
-    get_config_extension
+    get_config_extension,
+    ensure_xrootd_redirector,
 )
 from validate_config import validate_submit_config
 
@@ -184,7 +185,7 @@ def processMetaData(recid, sampleNames):
     fileDict = dict()
     for entry in result:
         for data in entry["files"]:
-            uri = data["uri"]
+            uri = ensure_xrootd_redirector(data["uri"])
             key = data["key"].split("_file_index")[0]
             if key not in sampleNames:
                 break
