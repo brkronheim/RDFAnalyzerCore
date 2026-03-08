@@ -21,6 +21,7 @@ from submission_backend import (
     get_config_extension
 )
 from validate_config import validate_submit_config
+from version_info import get_version_info, write_version_info_json
 
 
 def get_proxy_path() -> str:
@@ -345,6 +346,9 @@ def main():
 
     configDict = read_config(args.config)
     #print(configDict.keys())
+    config_ext = get_config_extension(args.config)
+    submit_config_name = f"submit_config{config_ext}"
+    version_info = get_version_info(args.config)
     fileSplit = args.size
     # x509loc will be set later
     exe_path = resolve_path(args.exe)
@@ -394,6 +398,7 @@ def main():
     shared_dir_name = "shared_inputs"
     shared_dir = os.path.join(mainDir, shared_dir_name)
     Path(shared_dir).mkdir(parents=True, exist_ok=True)
+    write_version_info_json(os.path.join(mainDir, "version_info.json"), version_info)
     _link_or_copy_file(exe_path, os.path.join(shared_dir, exe_relpath), use_symlink=False)
     if aux_exists:
         _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
@@ -506,6 +511,13 @@ def main():
                         _append_unique_lines(int_file, ["type="+typ])
                         test_config["intConfig"] = os.path.basename(int_file)
 
+                        if version_info.get("framework_hash"):
+                            test_config["__framework_hash"] = version_info["framework_hash"]
+                        if version_info.get("user_repo_hash"):
+                            test_config["__user_repo_hash"] = version_info["user_repo_hash"]
+                        if version_info.get("config_mtime"):
+                            test_config["__config_mtime"] = version_info["config_mtime"]
+
                         with open(os.path.join(test_dir, "submit_config.txt"), "w") as f:
                             for cfg_key in test_config.keys():
                                 f.write(str(cfg_key)+"="+test_config[cfg_key]+"\n")
@@ -561,6 +573,13 @@ def main():
             int_file = os.path.join(job_dir, job_config.get("intConfig", "ints.txt"))
             _append_unique_lines(int_file, ["type="+typ])
             job_config["intConfig"] = os.path.basename(int_file)
+
+            if version_info.get("framework_hash"):
+                job_config["__framework_hash"] = version_info["framework_hash"]
+            if version_info.get("user_repo_hash"):
+                job_config["__user_repo_hash"] = version_info["user_repo_hash"]
+            if version_info.get("config_mtime"):
+                job_config["__config_mtime"] = version_info["config_mtime"]
 
             with open(os.path.join(job_dir, "submit_config.txt"), "w") as f:
                 for key in job_config.keys():
