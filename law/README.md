@@ -343,6 +343,7 @@ These parameters apply to **both** NANO and Open Data workflows:
 | `--submit-config` | *(required)* | Path to submit config file |
 | `--name` | *(required)* | Submission name; creates `condorSub_{name}/` |
 | `--exe` | *(required)* | Path to the compiled C++ executable |
+| `--dataset` | `""` | Restrict to a single named dataset (see [Per-dataset execution](#per-dataset-execution)) |
 | `--stage-in` | `False` | xrdcp input files to worker before running |
 | `--root-setup` | `""` | Path to a setup script; contents embedded in inner runscript |
 | `--container-setup` | `""` | Container command for outer wrapper (e.g. `cmssw-el9`) |
@@ -355,6 +356,68 @@ These parameters apply to **both** NANO and Open Data workflows:
 |-----------|---------|-------------|
 | `--max-retries` | `3` | Max resubmission attempts per failed job |
 | `--poll-interval` | `120` | Seconds between condor_q polls |
+
+---
+
+## Per-dataset execution
+
+By default, every dataset listed in the `sampleConfig` file is prepared and
+submitted as part of a single workflow run.  For large campaigns it is often
+preferable to submit each dataset as its own independent Law task so that:
+
+* datasets can be scheduled, monitored, and retried independently;
+* a failure in one dataset does not block the others;
+* the overall workload scales more easily across batch systems.
+
+Use the `--dataset <name>` parameter to restrict a pipeline run to a single
+named dataset.  The dataset name must exactly match the `name=` field in the
+sample config (or the YAML dataset `name` key).
+
+When `--dataset` is supplied, outputs are written to a dedicated directory
+`condorSub_{name}_{dataset}/` so that concurrent per-dataset runs never
+overwrite each other's symlinks or condor submit files.
+
+### Example: running each dataset in parallel
+
+Given a sample config with datasets `ttbar`, `wjets`, and `dy`:
+
+```bash
+# Run each dataset independently (can be launched in parallel)
+for DS in ttbar wjets dy; do
+  law run RunNANOJobs \
+    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --name myRun22 \
+    --dataset "$DS" \
+    --x509 x509 \
+    --exe build/analyses/myAnalysis/myanalysis \
+    --workflow local &
+done
+wait
+```
+
+Or submit all three as HTCondor workflow tasks simultaneously:
+
+```bash
+for DS in ttbar wjets dy; do
+  law run RunNANOJobs \
+    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --name myRun22 \
+    --dataset "$DS" \
+    --x509 x509 \
+    --exe build/analyses/myAnalysis/myanalysis \
+    --workflow htcondor &
+done
+wait
+```
+
+Each run produces its own self-contained submission directory
+`condorSub_myRun22_ttbar/`, `condorSub_myRun22_wjets/`, etc.
+
+### Backward compatibility
+
+Omitting `--dataset` preserves the original behavior: all datasets in the
+sample config are processed together in one submission directory
+`condorSub_{name}/`.
 
 ---
 
