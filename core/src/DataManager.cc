@@ -3,6 +3,7 @@
 #include <ROOT/RVec.hxx>
 #include <DataManager.h>
 #include <TChain.h>
+#include <iostream>
 #include <util.h>
 #include <filesystem>
 
@@ -22,6 +23,29 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
     // that expect at least one row.
     if (!(chain_vec_m.empty()) && chain_vec_m[0]->GetEntries() > 0) {
       df_m = ROOT::RDataFrame(*chain_vec_m[0]);
+
+      // Apply optional entry-range restriction.
+      // Written by law tasks when partition='entry_range' is selected.
+      // Both keys must be present; if only one is set the range is ignored.
+      // Note: Range() disables implicit multi-threading (ImplicitMT) when
+      // used with ROOT < 6.28.  In entry_range partition mode each condor
+      // job is a separate process, so per-job parallelism is unaffected;
+      // only the in-process thread count is restricted to 1 on older ROOT.
+      const std::string firstEntryStr = configProvider.get("firstEntry");
+      const std::string lastEntryStr  = configProvider.get("lastEntry");
+      if (!firstEntryStr.empty() && !lastEntryStr.empty()) {
+        const ULong64_t firstEntry = std::stoull(firstEntryStr);
+        const ULong64_t lastEntry  = std::stoull(lastEntryStr);
+        if (lastEntry > firstEntry) {
+          df_m = df_m.Range(firstEntry, lastEntry);
+          std::cout << "Entry range applied: [" << firstEntry << ", "
+                    << lastEntry << ")" << std::endl;
+        } else {
+          std::cerr << "Warning: firstEntry (" << firstEntry
+                    << ") >= lastEntry (" << lastEntry
+                    << "); entry range ignored." << std::endl;
+        }
+      }
     } else {
       std::cout << "No input files found; using single-entry in-memory RDataFrame for testing." << std::endl;
     }
@@ -347,6 +371,7 @@ void DataManager::registerOptionalBranches(
     columnSet.insert(column);
   }
   for (const auto &entryKeys : aliasConfig) {
+    std::cout << "Processing optional branch " << entryKeys.at("name") << std::endl;
     if (columnSet.find(entryKeys.at("name")) == columnSet.end()) {
       const int varType = std::stoi(entryKeys.at("type"));
       const auto defaultValStr = entryKeys.at("default");
@@ -354,67 +379,61 @@ void DataManager::registerOptionalBranches(
       const Bool_t defaultBool = defaultValStr == "1" ||
                                  defaultValStr == "true" ||
                                  defaultValStr == "True";
+      std::cout << "Defining optional branch " << varName << " with default " << defaultValStr << " and type number " << varType << std::endl;
       switch (varType) {
       case 0:
-        SaveVar<UInt_t>(std::stoul(defaultValStr), varName);
+        df_m = saveVar<UInt_t>(std::stoul(defaultValStr), varName, df_m);
         break;
       case 1:
-        SaveVar<Int_t>(std::stoi(defaultValStr), varName);
+        df_m = saveVar<Int_t>(std::stoi(defaultValStr), varName, df_m);
         break;
       case 2:
-        SaveVar<UShort_t>(std::stoul(defaultValStr), varName);
+        df_m = saveVar<UShort_t>(std::stoul(defaultValStr), varName, df_m);
         break;
       case 3:
-        SaveVar<Short_t>(std::stoi(defaultValStr), varName);
+        df_m = saveVar<Short_t>(std::stoi(defaultValStr), varName, df_m);
         break;
       case 4:
-        SaveVar<UChar_t>(UChar_t(std::stoul(defaultValStr)), varName);
+        df_m = saveVar<UChar_t>(UChar_t(std::stoul(defaultValStr)), varName, df_m);
         break;
       case 5:
-        SaveVar<Char_t>(Char_t(std::stoi(defaultValStr)), varName);
+        df_m = saveVar<Char_t>(Char_t(std::stoi(defaultValStr)), varName, df_m);
         break;
       case 6:
-        SaveVar<Float_t>(std::stof(defaultValStr), varName);
+        df_m = saveVar<Float_t>(std::stof(defaultValStr), varName, df_m);
         break;
       case 7:
-        SaveVar<Double_t>(std::stod(defaultValStr), varName);
+        df_m = saveVar<Double_t>(std::stod(defaultValStr), varName, df_m);
         break;
       case 8:
-        SaveVar<Bool_t>(defaultBool, varName);
+        df_m = saveVar<Bool_t>(defaultBool, varName, df_m);
         break;
       case 10:
-        SaveVar<ROOT::VecOps::RVec<UInt_t>>(
-            {static_cast<UInt_t>(std::stoul(defaultValStr))}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<UInt_t>>(ROOT::VecOps::RVec<UInt_t>{static_cast<UInt_t>(std::stoul(defaultValStr))}, varName, df_m);
         break;
       case 11:
-        SaveVar<ROOT::VecOps::RVec<Int_t>>({std::stoi(defaultValStr)}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Int_t>>(ROOT::VecOps::RVec<Int_t>{std::stoi(defaultValStr)}, varName, df_m);
         break;
       case 12:
-        SaveVar<ROOT::VecOps::RVec<UShort_t>>(
-            {static_cast<UShort_t>(std::stoul(defaultValStr))}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<UShort_t>>(ROOT::VecOps::RVec<UShort_t>{static_cast<UShort_t>(std::stoul(defaultValStr))}, varName, df_m);
         break;
       case 13:
-        SaveVar<ROOT::VecOps::RVec<Short_t>>(
-            {static_cast<Short_t>(std::stoi(defaultValStr))}, varName);
+        df_m =  saveVar<ROOT::VecOps::RVec<Short_t>>(ROOT::VecOps::RVec<Short_t>{static_cast<Short_t>(std::stoi(defaultValStr))}, varName, df_m);
         break;
       case 14:
-        SaveVar<ROOT::VecOps::RVec<UChar_t>>(
-            {UChar_t(std::stoul(defaultValStr))}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<UChar_t>>(ROOT::VecOps::RVec<UChar_t>{UChar_t(std::stoul(defaultValStr))}, varName, df_m);
         break;
       case 15:
-        SaveVar<ROOT::VecOps::RVec<Char_t>>({Char_t(std::stoi(defaultValStr))},
-                                            varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Char_t>>(ROOT::VecOps::RVec<Char_t>{Char_t(std::stoi(defaultValStr))}, varName, df_m);
         break;
       case 16:
-        SaveVar<ROOT::VecOps::RVec<Float_t>>({std::stof(defaultValStr)},
-                                             varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Float_t>>(ROOT::VecOps::RVec<Float_t>{std::stof(defaultValStr)}, varName, df_m);
         break;
       case 17:
-        SaveVar<ROOT::VecOps::RVec<Double_t>>({std::stod(defaultValStr)},
-                                              varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Double_t>>(ROOT::VecOps::RVec<Double_t>{std::stod(defaultValStr)}, varName, df_m);
         break;
       case 18:
-        SaveVar<ROOT::VecOps::RVec<Bool_t>>({defaultBool}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Bool_t>>(ROOT::VecOps::RVec<Bool_t>{defaultBool}, varName, df_m);
         break;
       }
     }

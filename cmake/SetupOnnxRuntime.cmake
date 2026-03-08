@@ -1,6 +1,12 @@
 # SetupOnnxRuntime.cmake
 # Downloads and sets up ONNX Runtime for use in the project
 
+# Option to download the GPU-enabled (CUDA) build of ONNX Runtime.
+# The GPU package includes libonnxruntime_providers_cuda.so and
+# libonnxruntime_providers_shared.so required for the CUDA execution provider.
+# Only supported on Linux x64.
+option(ONNXRUNTIME_USE_CUDA "Download and use the GPU-enabled (CUDA) ONNX Runtime build" OFF)
+
 if(NOT ONNXRUNTIME_ROOT_DIR)
     # Determine the platform
     if(UNIX AND NOT APPLE)
@@ -25,18 +31,30 @@ if(NOT ONNXRUNTIME_ROOT_DIR)
         message(FATAL_ERROR "Unsupported platform")
     endif()
 
+    # CUDA execution provider is only available in the Linux x64 GPU package
+    if(ONNXRUNTIME_USE_CUDA AND NOT (ONNX_PLATFORM STREQUAL "linux" AND ONNX_ARCH STREQUAL "x64"))
+        message(FATAL_ERROR "ONNXRUNTIME_USE_CUDA is only supported on Linux x64")
+    endif()
+
     # ONNX Runtime version
     set(ONNXRUNTIME_VERSION "1.24.1")
     
-    # Construct download URL and filename
-    if(ONNX_PLATFORM STREQUAL "linux")
+    # Construct download URL and filename.
+    # The GPU package (onnxruntime-linux-x64-gpu-<ver>.tgz) ships all CUDA
+    # provider libraries in addition to the core library.
+    if(ONNXRUNTIME_USE_CUDA)
+        set(ONNX_FILENAME "onnxruntime-linux-x64-gpu-${ONNXRUNTIME_VERSION}.tgz")
+    elseif(ONNX_PLATFORM STREQUAL "linux")
         set(ONNX_FILENAME "onnxruntime-linux-${ONNX_ARCH}-${ONNXRUNTIME_VERSION}.tgz")
     elseif(ONNX_PLATFORM STREQUAL "osx")
         set(ONNX_FILENAME "onnxruntime-osx-${ONNX_ARCH}-${ONNXRUNTIME_VERSION}.tgz")
     endif()
+
+    # Derive the extracted directory name from the archive name (strip .tgz)
+    string(REGEX REPLACE "\\.tgz$" "" ONNX_DIR_NAME "${ONNX_FILENAME}")
     
     set(ONNX_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${ONNX_FILENAME}")
-    set(ONNXRUNTIME_ROOT_DIR "${CMAKE_BINARY_DIR}/onnxruntime-${ONNX_PLATFORM}-${ONNX_ARCH}-${ONNXRUNTIME_VERSION}")
+    set(ONNXRUNTIME_ROOT_DIR "${CMAKE_BINARY_DIR}/${ONNX_DIR_NAME}")
     
     # Download and extract if not already present
     if(NOT EXISTS "${ONNXRUNTIME_ROOT_DIR}")
@@ -103,3 +121,11 @@ endif()
 # Set up RPATH so the library can be found at runtime
 set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH};${ONNXRUNTIME_LIB_DIR}")
 set(CMAKE_BUILD_RPATH "${CMAKE_BUILD_RPATH};${ONNXRUNTIME_LIB_DIR}")
+
+# Export ONNXRUNTIME_USE_CUDA as a preprocessor definition so C++ code can
+# conditionally compile CUDA-specific paths (e.g., in OnnxManager.cc).
+if(ONNXRUNTIME_USE_CUDA)
+    add_compile_definitions(ONNXRUNTIME_USE_CUDA=1)
+else()
+    add_compile_definitions(ONNXRUNTIME_USE_CUDA=0)
+endif()

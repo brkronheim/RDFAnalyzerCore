@@ -2,7 +2,9 @@
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ISystematicManager.h>
+#include <fnmatch.h>
 #include <iostream>
+#include <unordered_set>
 
 static std::string makeMetaFileName(const std::string& saveFile) {
   if (saveFile.empty()) {
@@ -15,7 +17,12 @@ static std::string makeMetaFileName(const std::string& saveFile) {
   return saveFile + "_meta.root";
 }
 
-static std::vector<std::string> parseSaveColumns(const IConfigurationProvider& configProvider) {
+static bool isGlobPattern(const std::string& val) {
+  return val.find('*') != std::string::npos || val.find('?') != std::string::npos;
+}
+
+static std::vector<std::string> parseSaveColumns(const IConfigurationProvider& configProvider,
+                                                  const std::vector<std::string>& availableColumns) {
   const auto& configMap = configProvider.getConfigMap();
   auto it = configMap.find("saveConfig");
   if (it == configMap.end()) {
@@ -23,10 +30,20 @@ static std::vector<std::string> parseSaveColumns(const IConfigurationProvider& c
   }
 
   std::vector<std::string> saveVector;
+  std::unordered_set<std::string> seen;
   const auto saveVectorInit = configProvider.parseVectorConfig(it->second);
   for (auto val : saveVectorInit) {
     val = val.substr(0, val.find(" "));
-    if (!val.empty()) {
+    if (val.empty()) {
+      continue;
+    }
+    if (isGlobPattern(val)) {
+      for (const auto& col : availableColumns) {
+        if (fnmatch(val.c_str(), col.c_str(), 0) == 0 && seen.insert(col).second) {
+          saveVector.push_back(col);
+        }
+      }
+    } else if (seen.insert(val).second) {
       saveVector.push_back(val);
     }
   }
@@ -86,7 +103,7 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df,
     throw std::runtime_error("RootOutputSink: outputFile is empty");
   }
 
-  std::vector<std::string> columns = parseSaveColumns(configProvider);
+  std::vector<std::string> columns = parseSaveColumns(configProvider, df.GetColumnNames());
   expandSystematicColumns(columns, systematicManager);
 
   if (columns.empty() && configMap.find("saveConfig") == configMap.end()) {

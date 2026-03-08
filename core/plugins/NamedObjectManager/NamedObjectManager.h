@@ -2,6 +2,7 @@
 #define NAMEDOBJECTMANAGER_H_INCLUDED
 
 #include <api/IPluggableManager.h>
+#include <api/ILogger.h>
 #include <api/ManagerContext.h>
 #include <stdexcept>
 #include <string>
@@ -50,6 +51,7 @@ public:
     configManager_m = &ctx.config;
     dataManager_m = &ctx.data;
     systematicManager_m = &ctx.systematics;
+    logger_m = &ctx.logger;
   }
 
   void setupFromConfigFile() override {
@@ -62,6 +64,7 @@ protected:
   IConfigurationProvider* configManager_m = nullptr;
   IDataFrameProvider* dataManager_m = nullptr;
   ISystematicManager* systematicManager_m = nullptr;
+  ILogger* logger_m = nullptr;
 };
 
 #endif // NAMEDOBJECTMANAGER_H_INCLUDED 

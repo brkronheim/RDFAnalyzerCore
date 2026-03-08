@@ -474,7 +474,7 @@ python core/python/create_datacards.py my_config.yaml
 cd datacards
 
 # Run Combine (if built with framework)
-../build/external/HiggsAnalysis/CombinedLimit/exe/combine \
+../build/external/HiggsAnalysis/CombinedLimit/bin/combine \
     -M AsymptoticLimits datacard_signal_region.txt
 
 # Or use system Combine installation
@@ -561,7 +561,7 @@ python core/python/create_datacards.py analysis_datacards.yaml
 
 # 4. Run Combine
 cd datacards
-COMBINE=../build/external/HiggsAnalysis/CombinedLimit/exe/combine
+COMBINE=../build/external/HiggsAnalysis/CombinedLimit/bin/combine
 
 # Set limits
 $COMBINE -M AsymptoticLimits datacard_signal_region.txt -n _MyAnalysis

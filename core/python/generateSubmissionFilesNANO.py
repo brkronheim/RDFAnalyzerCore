@@ -1,11 +1,11 @@
 import argparse
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 import time
 
-import numpy as np
 import requests
 from requests.exceptions import ChunkedEncodingError, RequestException
 import urllib3
@@ -18,11 +18,11 @@ from submission_backend import (
     get_copy_file_list, 
     write_submit_files,
     write_config,
-    get_config_extension
+    get_config_extension,
+    ensure_xrootd_redirector,
 )
 from validate_config import validate_submit_config
-from version_info import get_version_info, write_version_info_json
-from output_schema import emit_output_manifest, OutputManifest, SkimSchema, HistogramSchema, MANIFEST_FILENAME
+from dataset_manifest import DatasetManifest
 
 
 def get_proxy_path() -> str:
@@ -177,6 +177,60 @@ def _ensure_spool_transfer(main_dir, submit_path, runscript_path, marker="condor
             submit_file.write("\n".join(lines) + "\n")
 
 
+def _collect_local_shared_libs(exe_path, repo_root):
+    """Collect shared libraries required by `exe_path` that live under `repo_root`.
+
+    Returns a mapping of staged filename -> source absolute path.
+    """
+    staged = {}
+    try:
+        ldd_output = subprocess.check_output(["ldd", exe_path], text=True, stderr=subprocess.STDOUT)
+    except Exception as err:
+        print(f"Warning: failed to inspect shared-library deps via ldd for '{exe_path}': {err}")
+        return staged
+
+    repo_prefix = os.path.abspath(repo_root)
+    if not repo_prefix.endswith(os.path.sep):
+        repo_prefix += os.path.sep
+
+    for line in ldd_output.splitlines():
+        line = line.strip()
+        if not line or "=> not found" in line:
+            continue
+
+        soname = None
+        resolved = None
+
+        match_arrow = re.match(r"^(\S+)\s*=>\s*(\S+)", line)
+        if match_arrow:
+            soname = os.path.basename(match_arrow.group(1))
+            resolved = match_arrow.group(2)
+        else:
+            match_abs = re.match(r"^(\/\S+)\s+\(", line)
+            if match_abs:
+                resolved = match_abs.group(1)
+                soname = os.path.basename(resolved)
+
+        if not resolved or not os.path.isabs(resolved):
+            continue
+
+        real_path = os.path.realpath(resolved)
+        if not os.path.exists(real_path):
+            continue
+        if not real_path.startswith(repo_prefix):
+            continue
+
+        real_name = os.path.basename(real_path)
+        if ".so" not in real_name:
+            continue
+
+        staged[real_name] = real_path
+        if soname and ".so" in soname:
+            staged[soname] = real_path
+
+    return staged
+
+
 
 
 def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
@@ -245,6 +299,7 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
                      #print("Good", site)
                      redirector = "root://xrootd-cms.infn.it/" +  "/store/test/xrootd/"+site+"/"
                      break
+                 """
                  elif(site in BL or "T3" in site or "Tape" in site):
                      continue
                      #print("Bad", site)
@@ -252,21 +307,43 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
                      #
                      #print("Neutral", site)
                      redirector =  "root://xrootd-cms.infn.it/" + "/store/test/xrootd/"+site+"/"
-
+                """
+                 
          if(group in groups):
-             groups[group] +=","+redirector+file
+             groups[group] +=","+ensure_xrootd_redirector(file, redirector)
              groupCount[group]+=1
-             groupSizes[group]+=np.round(size,1)
+             groupSizes[group]+=round(size,1)
          else:
-             groups[group] = redirector+file
+             groups[group] = ensure_xrootd_redirector(file, redirector)
              groupCount[group]=1
-             groupSizes[group]=np.round(size,1)
+             groupSizes[group]=round(size,1)
+    #for x in range(len(groups)):
+    #    print("Group", x, "has", groupCount[x], "files with total size", groupSizes[x], "GB")
     #print("groupCounts:", groupCount)
     #print("groupSizes:", groupSizes)
     #print(len(groups), "groups found and", filesFound, "files found")
     return(groups)
 
 def getSampleList(configFile):
+    """Parse a sample config file and return ``(sampleDict, baseDirectoryList, lumi, WL, BL)``.
+
+    Accepts both the legacy key=value text format **and** the new YAML manifest
+    format (detected by ``.yaml`` / ``.yml`` extension).  When a YAML manifest
+    is supplied the returned ``sampleDict`` contains all :class:`DatasetEntry`
+    objects converted to legacy dicts, and ``lumi`` / ``WL`` / ``BL`` are
+    taken from the manifest's global settings.
+    """
+    ext = os.path.splitext(configFile)[1].lower()
+    if ext in (".yaml", ".yml"):
+        manifest = DatasetManifest.load_yaml(configFile)
+        return (
+            manifest.to_legacy_sample_dict(),
+            [],
+            manifest.lumi,
+            manifest.whitelist,
+            manifest.blacklist,
+        )
+
     configDict = dict()
     baseDirectoryList = []
     lumi = 1
@@ -297,12 +374,14 @@ def main():
     parser = argparse.ArgumentParser("Generate files for condor submission")
     parser.add_argument('-c', '--config', type=str, required=True, help="config file to process")
     parser.add_argument('-n', '--name', type=str, required=True, help="submissionName")
-    parser.add_argument('-s', '--size', type=int, required=False, default=30, help="GB of data to process per job, default is 30")
+    parser.add_argument('-s', '--size', type=int, required=False, default=10, help="GB of data to process per job, default is 10")
+    parser.add_argument('-t', '--time', type=int, required=False, default=3600, help="max runtime per job in seconds, default is 3600 (1 hour)")
     parser.add_argument('-x', '--x509', type=str, required=True, help="location of x509 proxy to use (such as /afs/cern.ch/user/u/username/private/x509)")
     parser.add_argument('-e', '--exe', type=str, required=True, help="path to the C++ executable to run")
     parser.add_argument('--stage-inputs', action='store_true', help="xrdcp input files to the worker node before running")
     parser.add_argument('--stage-outputs', action='store_true', help="xrdcp outputs to final destination after running")
-    parser.add_argument('--root-setup', type=str, default="", help="command to setup ROOT (e.g., 'source /path/to/thisroot.sh')")
+    parser.add_argument('--root-setup', type=str, default="", help="path to a setup script file; file contents are embedded into the inner worker runscript")
+    parser.add_argument('--container-setup', type=str, default="", help="container setup command, script path, or @script path to run before the main executable")
     parser.add_argument('--no-validate', action='store_true', help="skip config validation")
     parser.add_argument('--make-test-job', action='store_true', help="create a local test job using one file")
     parser.add_argument(
@@ -345,11 +424,31 @@ def main():
         # Otherwise resolve relative to the config's base directory
         return os.path.abspath(os.path.join(base_dir, path_value))
 
+    def read_setup_file(file_value):
+        if not file_value:
+            return ""
+        candidate_path = resolve_path(file_value)
+        if not candidate_path or not os.path.isfile(candidate_path):
+            raise SystemExit(f"--root-setup must point to an existing file. Not found: {file_value}")
+        with open(candidate_path, "r") as setup_file:
+            return setup_file.read().rstrip("\n")
+
+    def resolve_setup_block(setup_value):
+        if not setup_value:
+            return ""
+        candidate = setup_value[1:] if setup_value.startswith("@") else setup_value
+        candidate_path = resolve_path(candidate)
+        if candidate_path and os.path.isfile(candidate_path):
+            with open(candidate_path, "r") as setup_file:
+                return setup_file.read().rstrip("\n")
+        return setup_value.strip()
+
     configDict = read_config(args.config)
+    root_setup_block = read_setup_file(args.root_setup)
+    container_setup_block = args.container_setup
+    #print(container_setup_block)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     #print(configDict.keys())
-    config_ext = get_config_extension(args.config)
-    submit_config_name = f"submit_config{config_ext}"
-    version_info = get_version_info(args.config)
     fileSplit = args.size
     # x509loc will be set later
     exe_path = resolve_path(args.exe)
@@ -358,7 +457,10 @@ def main():
         raise SystemExit(f"Executable not found: {exe_path}. Provide a valid path with -e/--exe")
     config = resolve_path(configDict['sampleConfig'])
     saveDirectory = resolve_path(configDict['saveDirectory'])
-    Path(saveDirectory).mkdir(parents=True, exist_ok=True)
+    try:
+        Path(saveDirectory).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"Cannot create saveDirectory at {saveDirectory}: {e}")
     copyList = get_copy_file_list(configDict)
 
 
@@ -399,36 +501,34 @@ def main():
     shared_dir_name = "shared_inputs"
     shared_dir = os.path.join(mainDir, shared_dir_name)
     Path(shared_dir).mkdir(parents=True, exist_ok=True)
-    write_version_info_json(os.path.join(mainDir, "version_info.json"), version_info)
-    # Emit a submission-level schema manifest so that downstream tools can
-    # discover the schema versions used by every job in this batch without
-    # reading individual per-job manifests.
-    _submission_manifest = OutputManifest(
-        framework_hash=version_info.get("framework_hash"),
-        user_repo_hash=version_info.get("user_repo_hash"),
-    )
-    _submission_manifest.add_artifact(
-        "batch_skim_schema",
-        SkimSchema(path=str(resolve_path(configDict.get("saveDirectory", "")))),
-    )
-    _submission_manifest.add_artifact(
-        "batch_histogram_schema",
-        HistogramSchema(path=str(resolve_path(configDict.get("saveDirectory", "")))),
-    )
-    _submission_manifest.write(os.path.join(mainDir, MANIFEST_FILENAME))
     _link_or_copy_file(exe_path, os.path.join(shared_dir, exe_relpath), use_symlink=False)
+
+    local_shared_libs = _collect_local_shared_libs(exe_path, repo_root)
+    for staged_name, src_path in sorted(local_shared_libs.items()):
+        _link_or_copy_file(src_path, os.path.join(shared_dir, staged_name), use_symlink=False)
+    if local_shared_libs:
+        print(f"Staged {len(local_shared_libs)} local shared library file(s) into '{shared_dir_name}'")
+
+    aux_files = []
     if aux_exists:
-        _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
+        for aux_file in sorted(Path(aux_src).iterdir()):
+            if aux_file.is_file():
+                _link_or_copy_file(str(aux_file), os.path.join(shared_dir, aux_file.name), use_symlink=False)
+                aux_files.append(aux_file.name)
     if x509_src:
         shutil.copy2(x509_src, os.path.join(shared_dir, x509loc))
 
-    copy_basenames = sorted({os.path.basename(path) for path in copyList})
-    skip_transfer = {"floats.txt", "ints.txt", submit_config_name}
-    extra_transfer_files = [
-        os.path.join(mainDir, "job_$(Process)", name)
-        for name in copy_basenames
-        if name not in skip_transfer
-    ]
+    # Copy common config files to shared_inputs/ once (transferred as a directory
+    # to all workers, eliminating per-job duplicates and reducing storage footprint).
+    for _cfg_file in copyList:
+        _src = resolve_path(_cfg_file)
+        if _src and os.path.exists(_src):
+            _dst = os.path.join(shared_dir, os.path.basename(_src))
+            if not os.path.exists(_dst):
+                shutil.copy2(_src, _dst)
+
+    # shared_inputs/ directory is transferred as a whole; no individual file entries needed.
+    extra_transfer_files = []
 
     # worker that processes a single sample (can run in parallel)
     def process_sample(key, sample):
@@ -463,7 +563,8 @@ def main():
             workers = max(1, min(len(das_entries), args.threads))
             with ThreadPoolExecutor(max_workers=workers) as das_executor:
                 das_futures = {das_executor.submit(queryRucio, das_entry, fileSplit, WL, BL, site, client_local): das_entry for das_entry in das_entries}
-                all_files = []
+                # collect returned groups per DAS entry (preserve group boundaries)
+                all_groups = []
                 for fut in as_completed(das_futures):
                     res = fut.result()
                     if not res:
@@ -473,16 +574,22 @@ def main():
                         if not grp:
                             continue
                         parts = [p.strip() for p in grp.split(',') if p.strip()]
-                        all_files.extend(parts)
-                # deduplicate while preserving order
+                        all_groups.append(parts)
+
+                # preserve per-dataset groups but remove duplicate files across groups
                 seen = set()
-                combined = []
-                for f in all_files:
-                    if f in seen:
-                        continue
-                    seen.add(f)
-                    combined.append(f)
-                groups_result = {0: ",".join(combined)} if combined else {}
+                groups_result = {}
+                idx = 0
+                for parts in all_groups:
+                    uniq_parts = []
+                    for f in parts:
+                        if f in seen:
+                            continue
+                        seen.add(f)
+                        uniq_parts.append(f)
+                    if uniq_parts:
+                        groups_result[idx] = ",".join(uniq_parts)
+                        idx += 1
 
         # Create a single local test job (race-protected)
         if args.make_test_job and not test_job_event.is_set() and groups_result:
@@ -502,7 +609,9 @@ def main():
 
                         aux_src_local = resolve_path("aux")
                         if aux_src_local and os.path.exists(aux_src_local):
-                            _link_or_copy_dir(aux_src_local, os.path.join(test_dir, "aux"), use_symlink=False)
+                            for aux_file in sorted(Path(aux_src_local).iterdir()):
+                                if aux_file.is_file():
+                                    _link_or_copy_file(str(aux_file), os.path.join(test_dir, aux_file.name), use_symlink=False)
                         else:
                             print(f"Warning: 'aux' directory not found at '{aux_src_local}'; skipping aux link/copy")
                         _link_or_copy_file(exe_path, os.path.join(test_dir, exe_relpath), use_symlink=False)
@@ -528,13 +637,6 @@ def main():
                         _append_unique_lines(int_file, ["type="+typ])
                         test_config["intConfig"] = os.path.basename(int_file)
 
-                        if version_info.get("framework_hash"):
-                            test_config["__framework_hash"] = version_info["framework_hash"]
-                        if version_info.get("user_repo_hash"):
-                            test_config["__user_repo_hash"] = version_info["user_repo_hash"]
-                        if version_info.get("config_mtime"):
-                            test_config["__config_mtime"] = version_info["config_mtime"]
-
                         with open(os.path.join(test_dir, "submit_config.txt"), "w") as f:
                             for cfg_key in test_config.keys():
                                 f.write(str(cfg_key)+"="+test_config[cfg_key]+"\n")
@@ -549,12 +651,6 @@ def main():
             my_index = allocate_index()
             job_dir = os.path.join(mainDir, f"job_{my_index}")
             Path(job_dir).mkdir(parents=True, exist_ok=True)
-
-            for file in copyList:
-                src = resolve_path(file)
-                dst = os.path.join(job_dir, os.path.basename(file))
-                Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(src, dst)
 
             outputFileName = saveDirectory + "/" + name + "_" + str(sampleIndex) + ".root"
             job_config = normalize_config_paths(dict(configDict))
@@ -591,26 +687,9 @@ def main():
             _append_unique_lines(int_file, ["type="+typ])
             job_config["intConfig"] = os.path.basename(int_file)
 
-            if version_info.get("framework_hash"):
-                job_config["__framework_hash"] = version_info["framework_hash"]
-            if version_info.get("user_repo_hash"):
-                job_config["__user_repo_hash"] = version_info["user_repo_hash"]
-            if version_info.get("config_mtime"):
-                job_config["__config_mtime"] = version_info["config_mtime"]
-
             with open(os.path.join(job_dir, "submit_config.txt"), "w") as f:
                 for key in job_config.keys():
                     f.write(str(key)+"="+job_config[key]+"\n")
-
-            # Emit a per-job output manifest so downstream tasks can discover
-            # and validate the schema of each job's outputs without custom logic.
-            emit_output_manifest(
-                job_dir,
-                skim_path=job_config.get("__orig_saveFile", job_config.get("saveFile", "")),
-                histogram_path=job_config.get("__orig_metaFile", job_config.get("metaFile", "")),
-                framework_hash=version_info.get("framework_hash"),
-                user_repo_hash=version_info.get("user_repo_hash"),
-            )
 
             jobs_created += 1
             sampleIndex += 1
@@ -639,18 +718,18 @@ def main():
         exe_relpath,
         args.stage_inputs,
         args.stage_outputs,
-        args.root_setup,
+        root_setup_block,
         x509loc=x509loc,
-        want_os="el9",
-        max_runtime="3600",
+        max_runtime=str(args.time),
         request_memory=2000,
         request_cpus=1,
         request_disk=20000,
         extra_transfer_files=extra_transfer_files,
-        include_aux=aux_exists,
+        include_aux=False,
         shared_dir_name=shared_dir_name,
         eos_sched=args.eos_sched,
-        config_file=submit_config_name,
+        config_file="submit_config.txt",
+        container_setup=container_setup_block,
     )
     if(index==1):
         print(index, "job created")

@@ -378,7 +378,8 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   }
 
   df = dataManager_m->getDataFrame();
-  THnMulti tempModel(fillInfo);
+  if (histogramBackend_m == "boost") {
+    BHnMulti tempModel(fillInfo);
     histos_m.push_back(df.Book<
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
@@ -388,6 +389,18 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Int_t>>(
       std::move(tempModel), varVector));
+  } else {
+    THnMulti tempModel(fillInfo);
+    histos_m.push_back(df.Book<
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Int_t>>(
+      std::move(tempModel), varVector));
+  }
   histNodes_m.push_back(df);
 }
 
@@ -431,6 +444,10 @@ void NDHistogramManager::bookND(std::vector<histInfo> &infos,
   }
   allRegionNames = normalizedRegionNames;
 
+  // Track booked infos and region names for the no-args saveHists() overload.
+  trackedHistInfos_m.push_back(infos);
+  trackedRegionNames_m = normalizedRegionNames;
+
   histos_m.reserve(histos_m.size() + infos.size());
 
   for (auto &info : infos) {
@@ -440,6 +457,27 @@ void NDHistogramManager::bookND(std::vector<histInfo> &infos,
                                     selectionInfo(channelInfo),
                                     suffix,
                                     systList);
+  }
+}
+
+void NDHistogramManager::saveHists() {
+  if (!configManager_m) {
+    throw std::runtime_error("NDHistogramManager: ConfigurationManager not set");
+  }
+  if (trackedHistInfos_m.empty()) {
+    return;
+  }
+  SaveHists(trackedHistInfos_m, trackedRegionNames_m, *configManager_m);
+
+  if (countersFinalized_m || !logger_m || !skimSink_m || !metaSink_m) {
+    return;
+  }
+  const auto& configMap = configManager_m->getConfigMap();
+  auto cit = configMap.find("enableCounters");
+  if (cit == configMap.end()) { return; }
+  const auto& val = cit->second;
+  if (val == "1" || val == "true" || val == "True") {
+    countersFinalized_m = true;
   }
 }
 
@@ -465,12 +503,9 @@ void NDHistogramManager::saveHists(std::vector<std::vector<histInfo>> &fullHistL
     return;
   }
 
-  CounterService counterService;
-  ManagerContext ctx{*configManager_m, *dataManager_m, *systematicManager_m,
-                     *logger_m, *skimSink_m, *metaSink_m};
-  counterService.initialize(ctx);
-  auto df = dataManager_m->getDataFrame();
-  counterService.finalize(df);
+  // Counters are enabled globally and managed by Analyzer. Do not run a local
+  // CounterService here (that would cause duplicate counting); mark counters
+  // as finalized for this manager so subsequent calls are no-ops.
   countersFinalized_m = true;
 }
 
@@ -497,6 +532,7 @@ void NDHistogramManager::SaveHists(
   std::vector<float> allUpperBounds;
   for (auto const &histList : fullHistList) {
     for (auto const &info : histList) {
+      //std::cout << "Storing histogram: " << info.name() << std::endl;
       allNames.push_back(info.name());
       allVariables.push_back(info.variable());
       allLabels.push_back(info.label());
@@ -506,7 +542,9 @@ void NDHistogramManager::SaveHists(
     }
   }
 
-  TFile saveFile(fileName.c_str(), "RECREATE");
+  // Open the meta file for update so we don't clobber histograms (e.g. counters)
+  // written by Analyzer/CounterService earlier.
+  TFile saveFile(fileName.c_str(), "UPDATE");
 
   std::vector<Int_t> commonAxisSize = {};
   for (const auto &regionNameList : allRegionNames) {
@@ -516,11 +554,15 @@ void NDHistogramManager::SaveHists(
   int histIndex = 0;
   std::unordered_map<std::string, TH1F> histMap;
   std::unordered_set<std::string> dirSet;
+  std::cout << "Processing " << histos_m.size() << " histograms for saving..." << std::endl;
   for (auto &histo_m : histos_m) {
     auto hist = histo_m.GetPtr();
     const Int_t currentHistogramSize = hist->GetNbins();
     const Int_t dim = hist->GetNdimensions();
     std::vector<Int_t> indices(dim);
+      
+    std::string histName = allNames[histIndex];
+    //std::cout << "Processing histogram name: " << histName << std::endl;
     for (int i = 0; i < currentHistogramSize; i++) {
       Float_t content = hist->GetBinContent(i, indices.data());
       if (content == 0) {
@@ -545,7 +587,8 @@ void NDHistogramManager::SaveHists(
         dirName += allRegionNames[regionAxes - 2][indices[regionAxes - 2] - 1];
       }
 
-      std::string histName = allVariables[histIndex];
+      
+      
       if (regionAxes - 1 >= 0 &&
           regionAxes - 1 < static_cast<Int_t>(allRegionNames.size()) &&
           indices[regionAxes - 1] > 0 &&
@@ -556,17 +599,19 @@ void NDHistogramManager::SaveHists(
       }
 
       if (histMap.count(dirName + "/" + histName) == 0) {
+        // std::cout << "Booking histogram: " << dirName + "/" + histName << std::endl;
         histMap[dirName + "/" + histName] =
             TH1F(histName.c_str(),
-                 (allVariables[histIndex] + ";" + allVariables[histIndex] +
+                 (allNames[histIndex] + ";" + allNames[histIndex] +
                   ";Counts").c_str(),
                  allBins[histIndex], allLowerBounds[histIndex],
                  allUpperBounds[histIndex]);
         dirSet.emplace(dirName);
       }
 
-        const Int_t valueAxisIndex = regionAxes;
-        if (valueAxisIndex < dim) {
+      const Int_t valueAxisIndex = regionAxes;
+      if (valueAxisIndex < dim) {
+        // std::cout << "Booking histogram: " << dirName + "/" + histName << std::endl;
         histMap[dirName + "/" + histName].SetBinContent(
           indices[valueAxisIndex], content);
         histMap[dirName + "/" + histName].SetBinError(
@@ -588,6 +633,7 @@ void NDHistogramManager::SaveHists(
       saveFile.cd(newDir.c_str());
     }
     for (auto &pair : histMap) {
+      //std::cout << "Saving histogram: " << pair.first << std::endl;
       if (pair.first.rfind(dirName + "/", 0) == 0) {
         pair.second.Write();
       }
@@ -622,7 +668,18 @@ void NDHistogramManager::setupFromConfigFile() {
   if (!configManager_m) {
     throw std::runtime_error("NDHistogramManager: ConfigManager not set");
   }
-  
+
+  // Read optional histogram backend selection (default: "root", option: "boost")
+  const std::string backend = configManager_m->get("histogramBackend");
+  if (!backend.empty()) {
+    if (backend != "root" && backend != "boost") {
+      throw std::runtime_error(
+          "NDHistogramManager: invalid histogramBackend '" + backend +
+          "'. Valid values are 'root' (default) or 'boost'.");
+    }
+    histogramBackend_m = backend;
+  }
+
   // Parse histogram configuration if present
   std::string histogramConfigFile = configManager_m->get("histogramConfig");
   if (histogramConfigFile.empty()) {
@@ -807,4 +864,17 @@ void NDHistogramManager::bookConfigHistograms() {
   if (logger_m) {
     logger_m->log(ILogger::Level::Info, "NDHistogramManager: Successfully booked all config histograms");
   }
+}
+void NDHistogramManager::initialize() {
+  std::cout << "NDHistogramManager: initialized with "
+            << configHistograms_m.size() << " config histogram(s)."
+            << std::endl;
+}
+
+void NDHistogramManager::reportMetadata() {
+  if (!logger_m) return;
+  logger_m->log(ILogger::Level::Info,
+                "NDHistogramManager: " +
+                std::to_string(configHistograms_m.size()) +
+                " config histogram(s) defined.");
 }

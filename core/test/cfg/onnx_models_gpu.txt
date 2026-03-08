@@ -1,0 +1,1 @@
+file=cfg/test_model.onnx name=test_model_gpu inputVariables=feature1,feature2,feature3 runVar=run_number useCuda=true cudaDeviceId=0

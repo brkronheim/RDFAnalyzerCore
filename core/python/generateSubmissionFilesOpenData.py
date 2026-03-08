@@ -16,11 +16,11 @@ from submission_backend import (
     get_copy_file_list, 
     write_submit_files,
     write_config,
-    get_config_extension
+    get_config_extension,
+    ensure_xrootd_redirector,
 )
 from validate_config import validate_submit_config
-from version_info import get_version_info, write_version_info_json
-from output_schema import emit_output_manifest, OutputManifest, SkimSchema, HistogramSchema, MANIFEST_FILENAME
+from dataset_manifest import DatasetManifest
 
 
 def _load_file_indices(recid):
@@ -186,7 +186,7 @@ def processMetaData(recid, sampleNames):
     fileDict = dict()
     for entry in result:
         for data in entry["files"]:
-            uri = data["uri"]
+            uri = ensure_xrootd_redirector(data["uri"])
             key = data["key"].split("_file_index")[0]
             if key not in sampleNames:
                 break
@@ -196,6 +196,58 @@ def processMetaData(recid, sampleNames):
             else:
                 fileDict[key] = [uri]
     return fileDict
+
+
+def _parse_opendata_config(config_file):
+    """Parse a sample config file for Open Data submissions.
+
+    Accepts both the legacy key=value text format **and** the new YAML manifest
+    format (detected by ``.yaml`` / ``.yml`` extension).  When a YAML manifest
+    is provided, ``recids`` are collected from the ``das`` field of each entry
+    (comma-separated record IDs stored there by convention for open-data
+    samples).
+
+    Returns:
+        samples    dict[str, dict]  – {name: legacy_dict}
+        recids     list[str]        – record IDs to query
+        lumi       float            – luminosity
+    """
+    ext = os.path.splitext(config_file)[1].lower()
+    if ext in (".yaml", ".yml"):
+        manifest = DatasetManifest.load_yaml(config_file)
+        samples = manifest.to_legacy_sample_dict()
+        recids = []
+        for entry in manifest.datasets:
+            if entry.das:
+                for r in entry.das.split(","):
+                    r = r.strip()
+                    if r and r not in recids:
+                        recids.append(r)
+        return samples, recids, manifest.lumi
+
+    samples = {}
+    recids = []
+    lumi = 1.0
+
+    with open(config_file) as fh:
+        for line in fh:
+            line = line.split("#")[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            inner = {}
+            for part in parts:
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    inner[k.strip()] = v.strip()
+            if "lumi" in inner:
+                lumi = float(inner["lumi"])
+            if "recids" in inner:
+                recids += [r.strip() for r in inner["recids"].split(",") if r.strip()]
+            if "name" in inner:
+                samples[inner["name"]] = inner
+
+    return samples, recids, lumi
 
 
 def main():
@@ -225,6 +277,7 @@ def main():
         help="xrdcp outputs to final destination after running",
     )
     parser.add_argument("--root-setup", type=str, default="", help="command to setup ROOT (e.g., 'source /path/to/thisroot.sh')")
+    parser.add_argument('--max-runtime', type=int, default=3600, help='Max runtime (seconds) for Condor jobs (default: 3600)')
     parser.add_argument("-x", "--x509", type=str, default="", help="path to x509 proxy (optional)")
     parser.add_argument(
         "--eos-sched",
@@ -270,7 +323,6 @@ def main():
     print(configDict.keys())
     config_ext = get_config_extension(args.config)
     submit_config_name = f"submit_config{config_ext}"
-    version_info = get_version_info(args.config)
     fileSplit = args.files
     configFile = resolve_path(configDict["sampleConfig"])
     saveDirectory = resolve_path(configDict["saveDirectory"])
@@ -281,27 +333,17 @@ def main():
 
     Path(saveDirectory).mkdir(parents=True, exist_ok=True)
     copyList = get_copy_file_list(configDict)
-    lumi = 1
-    recids = []
-    sampleNames = dict()
-    fileDict = dict()
 
-    with open(configFile) as file:
-        for line in file:
-            storeLine = line[:-1]
-            line = line.split("#")[0]
-            line = line.strip().split()
-            innerDict = dict()
-            for pair in line:
-                pair = pair.strip().split("=")
-                if len(pair) == 2:
-                    innerDict[pair[0]] = pair[1]
-            if "lumi" in innerDict:
-                lumi = float(innerDict["lumi"])
-            if "recids" in innerDict:
-                recids += innerDict["recids"].strip().split(",")
-            if "name" in innerDict and "das" in innerDict:
-                sampleNames[innerDict["das"]] = innerDict["name"]
+    # Parse the sample config (supports both legacy text and YAML manifest)
+    samples, recids, lumi = _parse_opendata_config(configFile)
+
+    # Build das-key → sample-name mapping for processMetaData
+    sampleNames = {
+        sample_dict["das"]: name
+        for name, sample_dict in samples.items()
+        if sample_dict.get("das")
+    }
+    fileDict = {}
 
     # Fetch metadata for recids in parallel to speed up slow network/API calls
     if recids:
@@ -341,36 +383,23 @@ def main():
     shared_dir_name = "shared_inputs"
     shared_dir = os.path.join(mainDir, shared_dir_name)
     Path(shared_dir).mkdir(parents=True, exist_ok=True)
-    write_version_info_json(os.path.join(mainDir, "version_info.json"), version_info)
-    # Emit a submission-level schema manifest so that downstream tools can
-    # discover the schema versions used by every job in this batch without
-    # reading individual per-job manifests.
-    _submission_manifest = OutputManifest(
-        framework_hash=version_info.get("framework_hash"),
-        user_repo_hash=version_info.get("user_repo_hash"),
-    )
-    _submission_manifest.add_artifact(
-        "batch_skim_schema",
-        SkimSchema(path=saveDirectory),
-    )
-    _submission_manifest.add_artifact(
-        "batch_histogram_schema",
-        HistogramSchema(path=saveDirectory),
-    )
-    _submission_manifest.write(os.path.join(mainDir, MANIFEST_FILENAME))
     _link_or_copy_file(exe_path, os.path.join(shared_dir, exe_relpath), use_symlink=False)
     if aux_exists:
         _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
     if x509_src:
         shutil.copy2(x509_src, os.path.join(shared_dir, x509loc))
 
-    copy_basenames = sorted({os.path.basename(path) for path in copyList})
-    skip_transfer = {"floats.txt", "ints.txt", submit_config_name}
-    extra_transfer_files = [
-        os.path.join(mainDir, "job_$(Process)", name)
-        for name in copy_basenames
-        if name not in skip_transfer
-    ]
+    # Copy common config files to shared_inputs/ once (transferred as a directory
+    # to all workers, eliminating per-job duplicates and reducing storage footprint).
+    for _cfg_file in copyList:
+        _src = resolve_path(_cfg_file)
+        if _src and os.path.exists(_src):
+            _dst = os.path.join(shared_dir, os.path.basename(_src))
+            if not os.path.exists(_dst):
+                shutil.copy2(_src, _dst)
+
+    # shared_inputs/ directory is transferred as a whole; no individual file entries needed.
+    extra_transfer_files = []
     # Thread-safe counter and single-shot event for test-job creation
     index_lock = threading.Lock()
     index_container = {"value": 0}
@@ -382,19 +411,8 @@ def main():
 
     test_job_event = threading.Event()
 
-    # collect sample entries from config file so we can process them in parallel
-    samples_to_process = []
-    with open(configFile) as file:
-        for line in file:
-            line = line.split("#")[0]
-            line = line.strip().split()
-            innerDict = dict()
-            for pair in line:
-                pair = pair.strip().split("=")
-                if len(pair) == 2:
-                    innerDict[pair[0]] = pair[1]
-            if "name" in innerDict:
-                samples_to_process.append(innerDict)
+    # build the list of sample dicts to process (already parsed by _parse_opendata_config)
+    samples_to_process = list(samples.values())
 
     def process_sample(innerDict):
         nonlocal index_container
@@ -453,13 +471,6 @@ def main():
                     _append_unique_lines(int_file, ["type=" + typ])
                     test_config["intConfig"] = os.path.basename(int_file)
 
-                    if version_info.get("framework_hash"):
-                        test_config["__framework_hash"] = version_info["framework_hash"]
-                    if version_info.get("user_repo_hash"):
-                        test_config["__user_repo_hash"] = version_info["user_repo_hash"]
-                    if version_info.get("config_mtime"):
-                        test_config["__config_mtime"] = version_info["config_mtime"]
-
                     with open(os.path.join(test_dir, "submit_config.txt"), "w") as f:
                         for key in test_config.keys():
                             f.write(str(key) + "=" + test_config[key] + "\n")
@@ -487,11 +498,6 @@ def main():
             job_dir = os.path.join(mainDir, f"job_{my_index}")
             Path(job_dir).mkdir(parents=True, exist_ok=True)
 
-            for file in copyList:
-                src = resolve_path(file)
-                dst = os.path.join(job_dir, os.path.basename(file))
-                shutil.copyfile(src, dst)
-
             outputFileName = saveDirectory + "/" + name + "_" + str(sampleIndex) + ".root"
             job_config = normalize_config_paths(dict(configDict))
             job_config["saveFile"] = outputFileName
@@ -512,8 +518,12 @@ def main():
                 job_config["__orig_fileList"] = original_list
                 job_config["fileList"] = ",".join(local_inputs)
             if args.stage_outputs:
-                job_config["__orig_saveFile"] = job_config["saveFile"]
-                job_config["__orig_metaFile"] = job_config["metaFile"]
+                # remote destination should include the job index (process) suffix
+                base, ext = os.path.splitext(job_config["saveFile"])
+                job_config["__orig_saveFile"] = f"{base}_{sampleIndex}{ext}"
+                basem, extm = os.path.splitext(job_config["metaFile"])
+                job_config["__orig_metaFile"] = f"{basem}_{sampleIndex}{extm}"
+                # keep local basenames as before; the runscript will append CONDOR_PROC
                 job_config["saveFile"] = os.path.basename(job_config["saveFile"])
                 job_config["metaFile"] = os.path.basename(job_config["metaFile"])
 
@@ -527,26 +537,9 @@ def main():
             _append_unique_lines(int_file, ["type=" + typ])
             job_config["intConfig"] = os.path.basename(int_file)
 
-            if version_info.get("framework_hash"):
-                job_config["__framework_hash"] = version_info["framework_hash"]
-            if version_info.get("user_repo_hash"):
-                job_config["__user_repo_hash"] = version_info["user_repo_hash"]
-            if version_info.get("config_mtime"):
-                job_config["__config_mtime"] = version_info["config_mtime"]
-
             with open(os.path.join(job_dir, "submit_config.txt"), "w") as f:
                 for key in job_config.keys():
                     f.write(str(key) + "=" + job_config[key] + "\n")
-
-            # Emit a per-job output manifest so downstream tasks can discover
-            # and validate the schema of each job's outputs without custom logic.
-            emit_output_manifest(
-                job_dir,
-                skim_path=job_config.get("__orig_saveFile", job_config.get("saveFile", "")),
-                histogram_path=job_config.get("__orig_metaFile", job_config.get("metaFile", "")),
-                framework_hash=version_info.get("framework_hash"),
-                user_repo_hash=version_info.get("user_repo_hash"),
-            )
 
             jobs_created += 1
             sampleIndex += 1

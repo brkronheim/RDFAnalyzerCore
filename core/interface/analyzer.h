@@ -34,6 +34,8 @@
 #include <api/IAnalysisService.h>
 #include <api/ManagerContext.h> // needed for wiring plugins and services
 
+class ProvenanceService; // forward declare to avoid header pollution
+
 
 /**
  * @class Analyzer
@@ -163,10 +165,42 @@ public:
   Analyzer *bookConfigHistograms();
 
   /**
+   * @brief Book an integer-branch counter histogram on the CounterService.
+   *
+   * Call this after the integer branch (e.g. a stitching code) has been defined
+   * via Define(), and before the event loop runs (before save()). The histogram
+   * range must be known in advance. This forwards to CounterService and keeps
+   * all result pointers alive so the event loop executes only once.
+   *
+   * @param branch Column name of the integer branch (e.g. "stitchBinNLO").
+   * @param nBins  Number of histogram bins.
+   * @param low    Lower edge of the histogram x-axis.
+   * @param high   Upper edge of the histogram x-axis.
+   * @return Pointer to this Analyzer (for chaining).
+   */
+  Analyzer *bookCounterIntHistogram(const std::string& branch, int nBins,
+                                    double low, double high);
+
+  /**
    * @brief Save the configured branches to the output file and trigger the computation of the dataframe.
    * @return Pointer to this Analyzer (for chaining)
    */
   Analyzer *save();
+
+  /**
+   * @brief Unified run/save entry point.
+   *
+   * Triggers the event loop exactly once. This method:
+   *  - Writes a skim only when @c enableSkim=1 (or @c true/@c True) is present in the config.
+   *  - Saves all histograms booked on the NDHistogramManager (if one is registered).
+   *  - Finalizes all analysis services (e.g. CounterService).
+   *
+   * Use this instead of manually calling save() followed by a separate
+   * NDHistogramManager::saveHists() call.
+   *
+   * @return Pointer to this Analyzer (for chaining)
+   */
+  Analyzer *run();
 
   /**
    * @brief Get the underlying RDataFrame node.
@@ -269,6 +303,13 @@ private:
    */
   std::unique_ptr<IOutputSink> metaSink_m;
   /**
+   * @brief Persisted ManagerContext for wiring plugins/services. Stored here so
+   * services can keep a pointer/reference to a context that outlives stack
+   * temporaries.
+   */
+  ManagerContext managerContext_m;
+
+  /**
    * @brief Map of plugin role names to pluggable manager instances.
    */
   std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
@@ -276,18 +317,19 @@ private:
    * @brief Optional analysis services (internal only for now).
    */
   std::vector<std::unique_ptr<IAnalysisService>> services_m;
+  /**
+   * @brief Non-owning pointer to the ProvenanceService (owned by services_m).
+   * Kept separately so addPlugin() can register plugin provenance entries
+   * after initializeServices() has run.
+   */
+  ProvenanceService* provenanceService_m = nullptr;
   bool preFilterNotified_m = false;
   ///**
   // * @brief Initialize the analyzer with the provided dependencies
   // */
   //void initialize();
   /**
-   * @brief Wire up plugin manager pointers to core managers.
-   *
-   * Validates declared dependencies, sorts plugins in dependency order via
-   * topological sort, then calls setContext() and setupFromConfigFile() followed
-   * by initialize() on each plugin. Throws std::runtime_error on missing
-   * dependencies or circular dependency graphs.
+   * @brief Wire up plugin manager pointers to core managers
    */
   void wirePluginManagers();
   void initializeServices(ManagerContext& ctx);

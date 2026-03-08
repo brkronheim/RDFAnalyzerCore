@@ -1,0 +1,17 @@
+# Python dependencies for RDFAnalyzerCore Production Manager
+#
+# Core dependencies (required)
+pyyaml>=5.4
+
+# LAW / Luigi integration (required for law/ workflow tasks)
+law>=0.1.0
+luigi>=3.0.0
+
+# For DASK backend (optional – required only for --workflow dask)
+# Install with: pip install dask[distributed]
+# dask[distributed]>=2021.0.0
+
+# Note: Other dependencies are either:
+# - Provided by ROOT/CMSSW environment (e.g., numpy, requests)
+# - Part of Python standard library (e.g., json, pathlib, subprocess)
+# - Optional and detected at runtime (e.g., curses, rucio)

@@ -9,14 +9,75 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
+# Ensure our custom modules directory is always on the search path.  
+# Use list(APPEND) so the value isnt accidentally cached/overwritten by previous
+# configurations (a common source of "cannot find requested file" errors).
+# We use CMAKE_SOURCE_DIR rather than CURRENT_SOURCE_DIR because the former
+# always refers to the top-level project root even when this file is included
+# from a subdirectory (e.g. via add_subdirectory).
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
+# Print the module path during configuration to aid debugging if modules are
+# mysteriously not found.
+message(STATUS "CMAKE_MODULE_PATH = ${CMAKE_MODULE_PATH}")
 
 project(RDFAnalyzer)
+
+# ---------------------------------------------------------------------------
+# Capture git provenance information at configure time and write GitVersion.h
+# ---------------------------------------------------------------------------
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" rev-parse HEAD
+        OUTPUT_VARIABLE RDFANALYZER_GIT_HASH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _git_hash_result
+    )
+    if(NOT _git_hash_result EQUAL 0)
+        set(RDFANALYZER_GIT_HASH "unknown")
+    endif()
+
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" status --porcelain
+        OUTPUT_VARIABLE _git_dirty_output
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_git_dirty_output)
+        set(RDFANALYZER_GIT_DIRTY true)
+    else()
+        set(RDFANALYZER_GIT_DIRTY false)
+    endif()
+else()
+    set(RDFANALYZER_GIT_HASH "unknown")
+    set(RDFANALYZER_GIT_DIRTY false)
+endif()
+
+string(TIMESTAMP RDFANALYZER_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
+set(RDFANALYZER_COMPILER "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/GitVersion.h.in"
+    "${CMAKE_BINARY_DIR}/include/GitVersion.h"
+    @ONLY
+)
+
+message(STATUS "Framework git hash:       ${RDFANALYZER_GIT_HASH}")
+message(STATUS "Framework git dirty:      ${RDFANALYZER_GIT_DIRTY}")
+message(STATUS "Framework build compiler: ${RDFANALYZER_COMPILER}")
 
 # Build options
 option(BUILD_TESTS "Build analysis tests" ON)
 option(BUILD_COMBINE "Build CMS Combine package for statistical analysis" OFF)
 option(BUILD_COMBINE_HARVESTER "Build CombineHarvester tools (requires BUILD_COMBINE)" OFF)
+option(USE_CUDA "Enable CUDA GPU support for kinematic fits" OFF)
+
+if(USE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
 enable_testing()
 
@@ -33,14 +94,25 @@ find_package(Boost REQUIRED CONFIG)
 # include(SetupYamlCpp)
 
 # Setup ONNX Runtime
-include(SetupOnnxRuntime)
+# include() looks in CMAKE_MODULE_PATH; use an explicit absolute path to
+# avoid problems with stale cached module paths in existing build directories.
+include("${CMAKE_SOURCE_DIR}/cmake/SetupOnnxRuntime.cmake")
 
 # Setup CMS Combine (optional)
 if(BUILD_COMBINE OR BUILD_COMBINE_HARVESTER)
-	include(SetupCombine)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/cmake/SetupCombine.cmake")
+        message(FATAL_ERROR "Requested BUILD_COMBINE or BUILD_COMBINE_HARVESTER,\n"
+                            "but could not find cmake/SetupCombine.cmake in the source tree")
+    endif()
+    include("${CMAKE_SOURCE_DIR}/cmake/SetupCombine.cmake")
 endif()
 
 set(PYBIND11_FINDPYTHON ON)
+
+# Extra transitive dependencies that some ROOT builds require at link/runtime
+# (e.g. libImt -> libtbb, libTMVA -> libgslcblas/openblas).
+set(RDF_ROOT_TRANSITIVE_LIBS "")
+set(RDF_ROOT_TRANSITIVE_RPATH_DIRS "")
 
 # Ensure runtime uses the same ROOT installation found at configure time.
 get_target_property(ROOT_CORE_LOCATION ROOT::Core IMPORTED_LOCATION)
@@ -62,6 +134,54 @@ if(ROOT_CORE_LOCATION)
 	set(CMAKE_BUILD_RPATH "${ROOT_LIB_DIR}")
 	set(CMAKE_INSTALL_RPATH "${ROOT_LIB_DIR}")
 	set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+
+	# xxhash is a transitive dep of ROOT that is not bundled in ROOT's lib dir
+	# and not a system package in el9. Find it and bake its path into RPATH
+	# so binaries work on batch nodes without needing LD_LIBRARY_PATH to be set.
+	find_library(XXHASH_LIB NAMES xxhash)
+	if(XXHASH_LIB)
+		get_filename_component(XXHASH_LIB_DIR "${XXHASH_LIB}" DIRECTORY)
+		list(APPEND CMAKE_BUILD_RPATH "${XXHASH_LIB_DIR}")
+		list(APPEND CMAKE_INSTALL_RPATH "${XXHASH_LIB_DIR}")
+		message(STATUS "Found xxhash: ${XXHASH_LIB}")
+	else()
+		message(WARNING "xxhash library not found — runtime loading of ROOT may fail. Add libxxhash.so.0 to LD_LIBRARY_PATH or CMAKE_PREFIX_PATH.")
+	endif()
+
+	# Some ROOT binaries depend on libtbb/libgslcblas that may not be in system paths
+	# on cmssw-el9 worker nodes. Resolve them at configure time and propagate both link
+	# libraries and RPATH entries.
+	find_library(RDF_TBB_LIB NAMES tbb)
+	if(RDF_TBB_LIB)
+		get_filename_component(RDF_TBB_LIB_DIR "${RDF_TBB_LIB}" DIRECTORY)
+		list(APPEND RDF_ROOT_TRANSITIVE_LIBS "${RDF_TBB_LIB}")
+		list(APPEND RDF_ROOT_TRANSITIVE_RPATH_DIRS "${RDF_TBB_LIB_DIR}")
+		message(STATUS "Found ROOT transitive dep tbb: ${RDF_TBB_LIB}")
+	else()
+		message(WARNING "Could not find libtbb for ROOT::Imt. Link failures may occur if libImt.so is used.")
+	endif()
+
+	find_library(RDF_CBLAS_LIB NAMES gslcblas openblas cblas blas)
+	if(RDF_CBLAS_LIB)
+		get_filename_component(RDF_CBLAS_LIB_DIR "${RDF_CBLAS_LIB}" DIRECTORY)
+		list(APPEND RDF_ROOT_TRANSITIVE_LIBS "${RDF_CBLAS_LIB}")
+		list(APPEND RDF_ROOT_TRANSITIVE_RPATH_DIRS "${RDF_CBLAS_LIB_DIR}")
+		message(STATUS "Found ROOT transitive dep CBLAS: ${RDF_CBLAS_LIB}")
+	else()
+		message(WARNING "Could not find libgslcblas/openblas for ROOT::TMVA. Link failures may occur if libTMVA.so is used.")
+	endif()
+
+	if(RDF_ROOT_TRANSITIVE_RPATH_DIRS)
+		list(APPEND CMAKE_BUILD_RPATH ${RDF_ROOT_TRANSITIVE_RPATH_DIRS})
+		list(APPEND CMAKE_INSTALL_RPATH ${RDF_ROOT_TRANSITIVE_RPATH_DIRS})
+	endif()
+
+	if(CMAKE_BUILD_RPATH)
+		list(REMOVE_DUPLICATES CMAKE_BUILD_RPATH)
+	endif()
+	if(CMAKE_INSTALL_RPATH)
+		list(REMOVE_DUPLICATES CMAKE_INSTALL_RPATH)
+	endif()
 
 	if(DEFINED ENV{ROOTSYS})
 		file(TO_CMAKE_PATH "$ENV{ROOTSYS}" ROOTSYS_PATH)

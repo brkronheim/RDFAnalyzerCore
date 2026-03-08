@@ -1,6 +1,7 @@
 #include <SofieManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
+#include <api/ILogger.h>
 #include <api/ISystematicManager.h>
 
 /**
@@ -177,4 +178,21 @@ void SofieManager::setupFromConfigFile() {
   }
 
   parseModelConfig(*configManager_m, true);
+}
+
+void SofieManager::initialize() {
+  std::cout << "SofieManager: initialized with " << model_runVars_m.size()
+            << " SOFIE model(s)." << std::endl;
+}
+
+void SofieManager::reportMetadata() {
+  if (!logger_m) return;
+  std::string msg = "SofieManager loaded models: ";
+  bool first = true;
+  for (const auto& kv : model_runVars_m) {
+    if (!first) msg += ", ";
+    msg += kv.first;
+    first = false;
+  }
+  logger_m->log(ILogger::Level::Info, msg);
 }

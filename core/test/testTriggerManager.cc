@@ -130,3 +130,39 @@ int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle hook tests
+// ---------------------------------------------------------------------------
+
+#include <DefaultLogger.h>
+#include <NullOutputSink.h>
+#include <DataManager.h>
+#include <SystematicManager.h>
+#include <api/ManagerContext.h>
+
+TEST_F(TriggerManagerTest, InitializeIsCallable) {
+  // initialize() should not throw even without a context set
+  EXPECT_NO_THROW(triggerManager->initialize());
+}
+
+TEST_F(TriggerManagerTest, ReportMetadataIsCallable) {
+  auto dataManager = std::make_unique<DataManager>(1);
+  auto systematicManager = std::make_unique<SystematicManager>();
+  auto logger = std::make_unique<DefaultLogger>();
+  auto skimSink = std::make_unique<NullOutputSink>();
+  auto metaSink = std::make_unique<NullOutputSink>();
+  ManagerContext ctx{*configManager, *dataManager, *systematicManager,
+                     *logger, *skimSink, *metaSink};
+  triggerManager->setContext(ctx);
+  EXPECT_NO_THROW(triggerManager->reportMetadata());
+}
+
+TEST_F(TriggerManagerTest, ExecuteAndFinalizeAreNoOps) {
+  EXPECT_NO_THROW(triggerManager->execute());
+  EXPECT_NO_THROW(triggerManager->finalize());
+}
+
+TEST_F(TriggerManagerTest, GetDependenciesReturnsEmpty) {
+  EXPECT_TRUE(triggerManager->getDependencies().empty());
+}
