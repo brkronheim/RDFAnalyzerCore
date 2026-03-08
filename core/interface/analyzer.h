@@ -282,7 +282,12 @@ private:
   // */
   //void initialize();
   /**
-   * @brief Wire up plugin manager pointers to core managers
+   * @brief Wire up plugin manager pointers to core managers.
+   *
+   * Validates declared dependencies, sorts plugins in dependency order via
+   * topological sort, then calls setContext() and setupFromConfigFile() followed
+   * by initialize() on each plugin. Throws std::runtime_error on missing
+   * dependencies or circular dependency graphs.
    */
   void wirePluginManagers();
   void initializeServices(ManagerContext& ctx);
