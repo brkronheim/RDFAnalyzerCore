@@ -71,12 +71,13 @@ from requests.exceptions import RequestException
 law.contrib.load("htcondor")
 
 # ---------------------------------------------------------------------------
-# Make sure core/python is importable regardless of how the script is invoked
+# Make sure core/python and law/ are importable regardless of invocation path
 # ---------------------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CORE_PYTHON = os.path.abspath(os.path.join(_HERE, "..", "core", "python"))
-if _CORE_PYTHON not in sys.path:
-    sys.path.insert(0, _CORE_PYTHON)
+for _p in (_HERE, _CORE_PYTHON):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from submission_backend import (  # noqa: E402
     read_config,
@@ -85,6 +86,7 @@ from submission_backend import (  # noqa: E402
     ensure_xrootd_redirector,
 )
 from validate_config import validate_submit_config  # noqa: E402
+from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
 from dataset_manifest import DatasetManifest  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -570,6 +572,23 @@ class OpenDataMixin:
             "Path to a Python environment tarball created by law/setup_python_env.sh. "
             "The tarball is shipped to every condor worker node and unpacked before the "
             "analysis runs, making the packaged Python packages available on PYTHONPATH."
+        ),
+    )
+    dask_scheduler = luigi.Parameter(
+        default="",
+        significant=False,
+        description=(
+            "Dask scheduler address for --workflow dask "
+            "(e.g. tcp://scheduler-host:8786). "
+            "Leave empty to start a local Dask cluster."
+        ),
+    )
+    dask_workers = luigi.IntParameter(
+        default=1,
+        significant=False,
+        description=(
+            "Number of workers for the local Dask cluster when "
+            "--dask-scheduler is empty (default: 1)."
         ),
     )
 
@@ -1307,3 +1326,197 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
             )
         else:
             jstate["status"] = "perm_fail"
+
+
+# ===========================================================================
+# Task 5 – RunOpenDataJobs  (local / htcondor / dask executor)
+# ===========================================================================
+
+class RunOpenDataJobs(OpenDataMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWorkflow):
+    """
+    Workflow task that executes prepared Open Data analysis jobs via a
+    selectable executor.
+
+    This task requires ``BuildOpenDataSubmission`` to have been run first (which
+    creates the ``job_N`` symlinks and shared inputs).  Each branch corresponds
+    to one prepared job directory.
+
+    Select the executor with the ``--workflow`` flag:
+
+    * ``--workflow local``     – run every job sequentially via a local
+                                 subprocess (default).
+    * ``--workflow htcondor``  – dispatch each job to an HTCondor cluster using
+                                 LAW's native HTCondor workflow mechanism.
+    * ``--workflow dask``      – run jobs concurrently on a Dask distributed
+                                 cluster; set the scheduler address with
+                                 ``--dask-scheduler tcp://host:8786``.
+
+    All three modes produce the same output files
+    (``condorSub_<name>/job_outputs/job_<N>.done``) and accept identical
+    command-line parameters, making them trivially interchangeable.
+
+    Examples
+    --------
+    ::
+
+        # Prepare and build
+        law run PrepareOpenDataSample   --submit-config cfg/submit.txt --name myRun \\
+            --exe build/myexe
+        law run BuildOpenDataSubmission --submit-config cfg/submit.txt --name myRun \\
+            --exe build/myexe
+
+        # Execute with local workers
+        law run RunOpenDataJobs --submit-config cfg/submit.txt --name myRun \\
+            --exe build/myexe --workflow local
+
+        # Execute on HTCondor (via LAW's htcondor workflow)
+        law run RunOpenDataJobs --submit-config cfg/submit.txt --name myRun \\
+            --exe build/myexe --workflow htcondor
+
+        # Execute on a Dask cluster
+        law run RunOpenDataJobs --submit-config cfg/submit.txt --name myRun \\
+            --exe build/myexe --workflow dask --dask-scheduler tcp://scheduler:8786
+    """
+
+    task_namespace = ""
+
+    # Parameters not meaningful at the individual-branch level
+    exclude_params_branch = getattr(DaskWorkflow, "exclude_params_branch", set())
+
+    # ------------------------------------------------------------------
+    # Branch map
+    # ------------------------------------------------------------------
+
+    def create_branch_map(self):
+        jobs: dict[int, str] = {}
+        i = 0
+        while True:
+            link = os.path.join(self._main_dir, f"job_{i}")
+            if not (os.path.exists(link) or os.path.islink(link)):
+                break
+            jobs[i] = os.path.realpath(link)
+            i += 1
+        return jobs
+
+    # ------------------------------------------------------------------
+    # Requirements
+    # ------------------------------------------------------------------
+
+    def workflow_requires(self):
+        """The build step must complete before any job can run."""
+        reqs = super().workflow_requires()
+        reqs["build"] = BuildOpenDataSubmission.req(self)
+        return reqs
+
+    def requires(self):
+        return BuildOpenDataSubmission.req(self)
+
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
+
+    def output(self):
+        return law.LocalFileTarget(
+            os.path.join(self._main_dir, "job_outputs", f"job_{self.branch}.done")
+        )
+
+    # ------------------------------------------------------------------
+    # run()
+    # ------------------------------------------------------------------
+
+    def run(self):
+        """Execute one analysis job (one branch)."""
+        job_dir = self.branch_data
+        exe_path = os.path.join(self._shared_dir, self._exe_relpath)
+
+        if not os.path.isfile(exe_path):
+            raise RuntimeError(
+                f"Executable not found at {exe_path!r}. "
+                "Run BuildOpenDataSubmission first."
+            )
+        if not os.path.isdir(job_dir):
+            raise RuntimeError(
+                f"Job directory not found: {job_dir!r}. "
+                "Run BuildOpenDataSubmission first."
+            )
+
+        result_text = _run_analysis_job(
+            exe_path=exe_path,
+            job_dir=job_dir,
+            root_setup=self._root_setup_content,
+            container_setup=self.container_setup or "",
+        )
+
+        self.publish_message(f"Branch {self.branch}: {result_text}")
+        Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
+        with self.output().open("w") as fh:
+            fh.write(f"status=done\n{result_text}\n")
+
+    # ------------------------------------------------------------------
+    # HTCondor workflow configuration
+    # ------------------------------------------------------------------
+
+    def htcondor_output_directory(self):
+        return law.LocalDirectoryTarget(
+            os.path.join(self._main_dir, "law_htcondor")
+        )
+
+    def htcondor_log_directory(self):
+        return law.LocalDirectoryTarget(
+            os.path.join(self._main_dir, "law_htcondor_logs")
+        )
+
+    def htcondor_bootstrap_file(self):
+        bootstrap_path = os.path.join(_HERE, "htcondor_bootstrap.sh")
+        if os.path.isfile(bootstrap_path):
+            from law.job.base import JobInputFile  # type: ignore
+            return JobInputFile(bootstrap_path, copy=True, render_local=False)
+        return None
+
+    def htcondor_job_config(self, config, job_num, branches):
+        if not hasattr(config, "custom_content") or config.custom_content is None:
+            config.custom_content = []
+        config.custom_content.extend([
+            ("+RequestMemory", str(2000)),
+            ("+MaxRuntime", str(self.max_runtime)),
+            ("request_cpus", "1"),
+            ("request_disk", "20000"),
+        ])
+        python_env_src = self._python_env_path()
+        if python_env_src:
+            tarball_name = os.path.basename(python_env_src)
+            staged = os.path.join(self._shared_dir, tarball_name)
+            if os.path.isfile(staged):
+                existing = dict(
+                    item for item in config.custom_content
+                    if isinstance(item, (list, tuple)) and len(item) == 2
+                )
+                xfer = existing.get("transfer_input_files", "")
+                if xfer:
+                    config.custom_content.append(
+                        ("transfer_input_files", f"{xfer},{staged}")
+                    )
+                else:
+                    config.custom_content.append(("transfer_input_files", staged))
+        return config
+
+    def htcondor_workflow_requires(self):
+        from law.util import DotDict  # type: ignore
+        return DotDict(build=BuildOpenDataSubmission.req(self))
+
+    # ------------------------------------------------------------------
+    # Dask workflow configuration
+    # ------------------------------------------------------------------
+
+    def get_dask_work(self, branch_num: int, branch_data: str) -> tuple:
+        """
+        Return the (callable, args, kwargs) triple for Dask job submission.
+        Workers need access to the shared filesystem where shared_inputs/ and
+        job directories live.
+        """
+        exe_path = os.path.join(self._shared_dir, self._exe_relpath)
+        return (
+            _run_analysis_job,
+            [exe_path, branch_data, self._root_setup_content, self.container_setup or ""],
+            {},
+        )
