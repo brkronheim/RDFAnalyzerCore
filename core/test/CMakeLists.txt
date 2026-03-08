@@ -72,6 +72,10 @@ add_executable(testNamedObjectManager testNamedObjectManager.cc)
 target_link_libraries(testNamedObjectManager core gtest gtest_main)
 add_test(NAME NamedObjectManagerTest COMMAND testNamedObjectManager)
 
+add_executable(testPhysicsObjectCollection testPhysicsObjectCollection.cc)
+target_link_libraries(testPhysicsObjectCollection core gtest gtest_main)
+add_test(NAME PhysicsObjectCollectionTest COMMAND testPhysicsObjectCollection)
+
 add_executable(testCorrectionManager testCorrectionManager.cc)
 target_link_libraries(testCorrectionManager core corePlugins gtest gtest_main)
 add_test(NAME CorrectionManagerTest COMMAND testCorrectionManager)
