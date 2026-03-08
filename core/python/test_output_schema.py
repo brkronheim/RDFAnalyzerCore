@@ -45,13 +45,16 @@ from output_schema import (
     HistogramAxisSpec,
     HistogramSchema,
     LawArtifactSchema,
+    MergeInputValidationError,
     MetadataSchema,
     OutputManifest,
     ProvenanceRecord,
     SchemaVersionError,
     SkimSchema,
+    merge_manifests,
     resolve_artifact,
     resolve_manifest,
+    validate_merge_inputs,
 )
 
 
@@ -1291,3 +1294,310 @@ class TestOutputManifestDatasetManifestProvenance:
         assert "dataset_manifest.file_hash" in PROVENANCE_OPTIONAL_KEYS
         assert "dataset_manifest.query_params" in PROVENANCE_OPTIONAL_KEYS
         assert "dataset_manifest.resolved_entries" in PROVENANCE_OPTIONAL_KEYS
+
+
+# ---------------------------------------------------------------------------
+# validate_merge_inputs
+# ---------------------------------------------------------------------------
+
+
+class TestValidateMergeInputs:
+    """Tests for the validate_merge_inputs() function."""
+
+    def _make_skim_manifest(self, output_file="out.root"):
+        return OutputManifest(skim=SkimSchema(output_file=output_file))
+
+    def _make_histogram_manifest(self, output_file="meta.root"):
+        return OutputManifest(histograms=HistogramSchema(output_file=output_file))
+
+    def _make_full_manifest(self, skim_file="out.root", meta_file="meta.root"):
+        return OutputManifest(
+            skim=SkimSchema(output_file=skim_file),
+            histograms=HistogramSchema(output_file=meta_file),
+            metadata=MetadataSchema(output_file=meta_file),
+            cutflow=CutflowSchema(output_file=meta_file),
+        )
+
+    # -- empty input --
+
+    def test_no_manifests_returns_error(self):
+        errors = validate_merge_inputs([])
+        assert len(errors) == 1
+        assert "no manifests provided" in errors[0]
+
+    # -- single valid manifest --
+
+    def test_single_valid_manifest(self):
+        m = self._make_skim_manifest()
+        assert validate_merge_inputs([m]) == []
+
+    # -- per-manifest structural errors --
+
+    def test_empty_manifest_reported(self):
+        m = OutputManifest()  # no schemas — fails validate()
+        errors = validate_merge_inputs([m])
+        assert any("manifest[0]" in e for e in errors)
+
+    def test_malformed_artifact_reported(self):
+        m = OutputManifest(skim=SkimSchema(output_file=""))  # empty output_file
+        errors = validate_merge_inputs([m])
+        assert any("manifest[0]" in e for e in errors)
+
+    # -- version compatibility errors --
+
+    def test_incompatible_schema_version_reported(self):
+        s = SkimSchema(output_file="out.root")
+        s.schema_version = 999
+        m = OutputManifest(skim=s)
+        errors = validate_merge_inputs([m])
+        assert any("incompatible schema version" in e for e in errors)
+
+    # -- role consistency across manifests --
+
+    def test_two_compatible_skim_manifests(self):
+        m1 = self._make_skim_manifest("a.root")
+        m2 = self._make_skim_manifest("b.root")
+        assert validate_merge_inputs([m1, m2]) == []
+
+    def test_inconsistent_role_presence_reported(self):
+        m1 = self._make_skim_manifest()
+        m2 = self._make_histogram_manifest()  # skim absent, histograms present
+        errors = validate_merge_inputs([m1, m2])
+        # skim present in m1 but absent in m2; histograms absent in m1 but present in m2
+        assert any("skim" in e for e in errors)
+        assert any("histograms" in e for e in errors)
+
+    def test_inconsistent_schema_version_reported(self):
+        m1 = self._make_skim_manifest()
+        m2 = OutputManifest(skim=SkimSchema(output_file="b.root"))
+        m2.skim.schema_version = 999  # tweak after construction to bypass version check
+        errors = validate_merge_inputs([m1, m2])
+        # Both version-incompatibility (rule 3) and version mismatch (rule 5) fire.
+        assert len(errors) > 0
+
+    def test_multiple_manifests_all_valid(self):
+        manifests = [self._make_full_manifest(f"out_{i}.root", f"meta_{i}.root") for i in range(5)]
+        assert validate_merge_inputs(manifests) == []
+
+    # -- law_artifacts consistency --
+
+    def _make_law_manifest(self, artifact_type="prepare_sample"):
+        return OutputManifest(
+            metadata=MetadataSchema(output_file="meta.root"),
+            law_artifacts=[
+                LawArtifactSchema(
+                    artifact_type=artifact_type,
+                    path_pattern="branch_outputs/sample_*.json",
+                    format="json",
+                )
+            ],
+        )
+
+    def test_law_artifacts_count_mismatch_reported(self):
+        m1 = self._make_law_manifest()
+        m2 = OutputManifest(
+            metadata=MetadataSchema(output_file="meta.root"),
+            law_artifacts=[],
+        )
+        errors = validate_merge_inputs([m1, m2])
+        assert any("law_artifacts count" in e for e in errors)
+
+    def test_law_artifacts_version_mismatch_reported(self):
+        m1 = self._make_law_manifest()
+        m2 = self._make_law_manifest()
+        m2.law_artifacts[0].schema_version = 999
+        errors = validate_merge_inputs([m1, m2])
+        assert any("law_artifacts[0]" in e for e in errors)
+
+    def test_law_artifacts_compatible(self):
+        m1 = self._make_law_manifest()
+        m2 = self._make_law_manifest()
+        assert validate_merge_inputs([m1, m2]) == []
+
+    # -- required_roles enforcement --
+
+    def test_required_role_present(self):
+        m = self._make_skim_manifest()
+        assert validate_merge_inputs([m], required_roles=["skim"]) == []
+
+    def test_required_role_absent_reported(self):
+        m = self._make_histogram_manifest()
+        errors = validate_merge_inputs([m], required_roles=["skim"])
+        assert any("required role 'skim'" in e for e in errors)
+
+    def test_required_law_artifacts_present(self):
+        m = self._make_law_manifest()
+        assert validate_merge_inputs([m], required_roles=["law_artifacts"]) == []
+
+    def test_required_law_artifacts_empty_reported(self):
+        m = self._make_histogram_manifest()
+        errors = validate_merge_inputs([m], required_roles=["law_artifacts"])
+        assert any("law_artifacts" in e for e in errors)
+
+    def test_unknown_required_role_reported(self):
+        m = self._make_skim_manifest()
+        errors = validate_merge_inputs([m], required_roles=["nonexistent_role"])
+        assert any("Unknown required role" in e for e in errors)
+
+    def test_required_roles_checked_for_every_manifest(self):
+        m1 = self._make_skim_manifest()
+        m2 = OutputManifest(histograms=HistogramSchema(output_file="meta.root"))
+        # Both manifests should be checked; m2 missing skim
+        errors = validate_merge_inputs([m1, m2], required_roles=["skim"])
+        skim_errors = [e for e in errors if "required role 'skim'" in e]
+        # m2 at index 1 should be reported
+        assert any("manifest[1]" in e for e in skim_errors)
+
+
+# ---------------------------------------------------------------------------
+# merge_manifests
+# ---------------------------------------------------------------------------
+
+
+class TestMergeManifests:
+    """Tests for the merge_manifests() function."""
+
+    def _make_skim_manifest(self, output_file="out.root"):
+        return OutputManifest(skim=SkimSchema(output_file=output_file))
+
+    def _make_full_manifest(self, skim_file="out.root", meta_file="meta.root"):
+        return OutputManifest(
+            skim=SkimSchema(output_file=skim_file),
+            histograms=HistogramSchema(output_file=meta_file),
+            metadata=MetadataSchema(output_file=meta_file),
+            cutflow=CutflowSchema(output_file=meta_file),
+        )
+
+    # -- happy path --
+
+    def test_merge_single_manifest(self):
+        m = self._make_skim_manifest()
+        result = merge_manifests([m])
+        assert isinstance(result, OutputManifest)
+        assert result.skim is not None
+
+    def test_merge_two_skim_manifests(self):
+        m1 = self._make_skim_manifest("a.root")
+        m2 = self._make_skim_manifest("b.root")
+        result = merge_manifests([m1, m2])
+        assert result.skim is not None
+        assert result.histograms is None
+
+    def test_merge_preserves_schema_structure(self):
+        manifests = [self._make_full_manifest(f"o{i}.root", f"m{i}.root") for i in range(3)]
+        result = merge_manifests(manifests)
+        assert result.skim is not None
+        assert result.histograms is not None
+        assert result.metadata is not None
+        assert result.cutflow is not None
+
+    def test_merge_copies_schema_from_first_input(self):
+        m1 = OutputManifest(
+            skim=SkimSchema(output_file="first.root", tree_name="MyTree", branches=["pt"])
+        )
+        m2 = OutputManifest(
+            skim=SkimSchema(output_file="second.root", tree_name="MyTree", branches=["pt"])
+        )
+        result = merge_manifests([m1, m2])
+        assert result.skim.output_file == "first.root"
+        assert result.skim.tree_name == "MyTree"
+        assert result.skim.branches == ["pt"]
+
+    def test_merge_sets_framework_hash(self):
+        m = self._make_skim_manifest()
+        result = merge_manifests([m], framework_hash="fw_merged")
+        assert result.framework_hash == "fw_merged"
+
+    def test_merge_sets_user_repo_hash(self):
+        m = self._make_skim_manifest()
+        result = merge_manifests([m], user_repo_hash="ur_merged")
+        assert result.user_repo_hash == "ur_merged"
+
+    def test_merge_hashes_none_by_default(self):
+        m = self._make_skim_manifest()
+        result = merge_manifests([m])
+        assert result.framework_hash is None
+        assert result.user_repo_hash is None
+
+    def test_merge_with_law_artifacts(self):
+        def make_law():
+            return OutputManifest(
+                metadata=MetadataSchema(output_file="meta.root"),
+                law_artifacts=[
+                    LawArtifactSchema(
+                        artifact_type="prepare_sample",
+                        path_pattern="branch_outputs/sample_*.json",
+                        format="json",
+                    )
+                ],
+            )
+
+        result = merge_manifests([make_law(), make_law()])
+        assert len(result.law_artifacts) == 1
+        assert result.law_artifacts[0].artifact_type == "prepare_sample"
+
+    def test_merged_manifest_is_valid(self):
+        manifests = [self._make_full_manifest(f"o{i}.root", f"m{i}.root") for i in range(3)]
+        result = merge_manifests(manifests)
+        assert result.validate() == []
+
+    def test_merged_manifest_output_file_can_be_updated(self):
+        m1 = self._make_skim_manifest("a.root")
+        m2 = self._make_skim_manifest("b.root")
+        result = merge_manifests([m1, m2])
+        # Callers update the output_file after running hadd etc.
+        result.skim.output_file = "merged.root"
+        assert result.skim.output_file == "merged.root"
+        assert result.validate() == []
+
+    # -- error cases --
+
+    def test_merge_empty_list_raises(self):
+        with pytest.raises(MergeInputValidationError, match="no manifests provided"):
+            merge_manifests([])
+
+    def test_merge_incompatible_roles_raises(self):
+        m1 = self._make_skim_manifest()
+        m2 = OutputManifest(histograms=HistogramSchema(output_file="meta.root"))
+        with pytest.raises(MergeInputValidationError):
+            merge_manifests([m1, m2])
+
+    def test_merge_incompatible_version_raises(self):
+        m1 = self._make_skim_manifest()
+        m2 = OutputManifest(skim=SkimSchema(output_file="b.root"))
+        m2.skim.schema_version = 999
+        with pytest.raises(MergeInputValidationError):
+            merge_manifests([m1, m2])
+
+    def test_merge_required_role_missing_raises(self):
+        m = OutputManifest(histograms=HistogramSchema(output_file="meta.root"))
+        with pytest.raises(MergeInputValidationError, match="required role"):
+            merge_manifests([m], required_roles=["skim"])
+
+    def test_merge_input_validation_error_is_runtime_error(self):
+        assert issubclass(MergeInputValidationError, RuntimeError)
+
+    def test_merge_error_message_contains_diagnostics(self):
+        m1 = self._make_skim_manifest()
+        m2 = OutputManifest(histograms=HistogramSchema(output_file="meta.root"))
+        with pytest.raises(MergeInputValidationError) as exc_info:
+            merge_manifests([m1, m2])
+        msg = str(exc_info.value)
+        assert "skim" in msg
+
+    # -- YAML round-trip --
+
+    def test_merged_manifest_yaml_round_trip(self, tmp_path):
+        manifests = [self._make_full_manifest(f"o{i}.root", f"m{i}.root") for i in range(2)]
+        result = merge_manifests(manifests, framework_hash="fw_hash")
+        result.skim.output_file = "merged.root"
+        result.histograms.output_file = "merged_meta.root"
+        result.metadata.output_file = "merged_meta.root"
+        result.cutflow.output_file = "merged_meta.root"
+        path = str(tmp_path / "merged_manifest.yaml")
+        result.save_yaml(path)
+        loaded = OutputManifest.load_yaml(path)
+        assert loaded.framework_hash == "fw_hash"
+        assert loaded.skim.output_file == "merged.root"
+        assert loaded.histograms.output_file == "merged_meta.root"
+        assert loaded.validate() == []

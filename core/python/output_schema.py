@@ -1242,3 +1242,269 @@ def resolve_manifest(
         )
 
     return statuses
+
+
+# ---------------------------------------------------------------------------
+# Schema-aware merge and validation contracts
+# ---------------------------------------------------------------------------
+
+
+class MergeInputValidationError(RuntimeError):
+    """Raised when one or more merge inputs fail schema validation.
+
+    This exception bundles all diagnostics from all invalid inputs so that
+    callers can report every problem in a single error message rather than
+    surfacing failures one at a time.
+
+    Catching :class:`MergeInputValidationError` separately from other
+    :class:`RuntimeError` exceptions allows callers to apply fallback logic
+    or emit structured user-facing messages about incompatible merge inputs.
+    """
+
+
+def validate_merge_inputs(
+    manifests: List["OutputManifest"],
+    required_roles: Optional[List[str]] = None,
+) -> List[str]:
+    """Validate a collection of manifests for merge compatibility.
+
+    This is the **canonical pre-merge validation API**.  Call this function
+    before executing any merge or reduction step (e.g. ``hadd``, histogram
+    addition) to ensure that all inputs agree on schema versions and artifact
+    structure.  If the returned list is non-empty, the merge must not proceed.
+
+    Checks performed (in order):
+
+    1. At least one manifest is provided.
+    2. Every manifest passes its own :meth:`OutputManifest.validate` check
+       (no empty or malformed manifests).
+    3. Every manifest passes :meth:`OutputManifest.check_version_compatibility`
+       (no schema versions that differ from the current code).
+    4. All manifests expose the **same set** of scalar artifact roles
+       (``skim``, ``histograms``, ``metadata``, ``cutflow``): a role that is
+       present in one manifest must be present in all of them.
+    5. For each shared scalar role, all manifests carry the **same**
+       ``schema_version`` value.
+    6. All manifests contain the **same number** of ``law_artifacts``.
+    7. Corresponding ``law_artifacts`` entries share the same
+       ``schema_version``.
+    8. If *required_roles* is supplied, every listed role must be present in
+       every manifest.
+
+    Parameters
+    ----------
+    manifests:
+        Sequence of :class:`OutputManifest` objects to validate before
+        merging.  Must be non-empty.
+    required_roles:
+        Optional list of role names that must be present in every manifest.
+        Valid scalar role names are ``"skim"``, ``"histograms"``,
+        ``"metadata"``, ``"cutflow"``.  Use ``"law_artifacts"`` to require
+        at least one LAW artifact in every manifest.
+
+    Returns
+    -------
+    list[str]
+        A (possibly empty) list of human-readable error strings.  An empty
+        list means all inputs are compatible and the merge may proceed.
+
+    Examples
+    --------
+    Validate before merging histogram outputs::
+
+        from output_schema import validate_merge_inputs, MergeInputValidationError
+
+        errors = validate_merge_inputs(manifests, required_roles=["histograms"])
+        if errors:
+            raise MergeInputValidationError(
+                "Pre-merge validation failed:\n" + "\n".join(errors)
+            )
+        # safe to proceed with hadd / histogram addition
+    """
+    errors: List[str] = []
+
+    if not manifests:
+        errors.append("validate_merge_inputs: no manifests provided.")
+        return errors
+
+    # ------------------------------------------------------------------
+    # Rule 2: per-manifest structural validation
+    # ------------------------------------------------------------------
+    for i, m in enumerate(manifests):
+        per_errors = m.validate()
+        for e in per_errors:
+            errors.append(f"manifest[{i}]: {e}")
+
+    # ------------------------------------------------------------------
+    # Rule 3: per-manifest schema version compatibility
+    # ------------------------------------------------------------------
+    for i, m in enumerate(manifests):
+        try:
+            OutputManifest.check_version_compatibility(m)
+        except SchemaVersionError as exc:
+            errors.append(
+                f"manifest[{i}] has incompatible schema version(s): {exc}"
+            )
+
+    # ------------------------------------------------------------------
+    # Rules 4–5: scalar role consistency
+    # ------------------------------------------------------------------
+    _scalar_roles = ("skim", "histograms", "metadata", "cutflow")
+    ref = manifests[0]
+
+    for role in _scalar_roles:
+        ref_schema = getattr(ref, role)
+        ref_present = ref_schema is not None
+        for i, m in enumerate(manifests[1:], start=1):
+            m_schema = getattr(m, role)
+            m_present = m_schema is not None
+            if ref_present != m_present:
+                errors.append(
+                    f"Inconsistent presence of '{role}' across inputs: "
+                    f"manifest[0]={'present' if ref_present else 'absent'}, "
+                    f"manifest[{i}]={'present' if m_present else 'absent'}."
+                )
+            elif ref_present and m_present:
+                if ref_schema.schema_version != m_schema.schema_version:
+                    errors.append(
+                        f"Inconsistent schema_version for '{role}': "
+                        f"manifest[0]={ref_schema.schema_version}, "
+                        f"manifest[{i}]={m_schema.schema_version}."
+                    )
+
+    # ------------------------------------------------------------------
+    # Rules 6–7: law_artifacts count and version consistency
+    # ------------------------------------------------------------------
+    ref_count = len(ref.law_artifacts)
+    for i, m in enumerate(manifests[1:], start=1):
+        if len(m.law_artifacts) != ref_count:
+            errors.append(
+                f"Inconsistent law_artifacts count: "
+                f"manifest[0]={ref_count}, manifest[{i}]={len(m.law_artifacts)}."
+            )
+        else:
+            for j, (ref_a, m_a) in enumerate(
+                zip(ref.law_artifacts, m.law_artifacts)
+            ):
+                if ref_a.schema_version != m_a.schema_version:
+                    errors.append(
+                        f"Inconsistent schema_version for law_artifacts[{j}]: "
+                        f"manifest[0]={ref_a.schema_version}, "
+                        f"manifest[{i}]={m_a.schema_version}."
+                    )
+
+    # ------------------------------------------------------------------
+    # Rule 8: required roles
+    # ------------------------------------------------------------------
+    if required_roles:
+        _valid_scalar = set(_scalar_roles)
+        for i, m in enumerate(manifests):
+            for role in required_roles:
+                if role in _valid_scalar:
+                    if getattr(m, role) is None:
+                        errors.append(
+                            f"manifest[{i}]: required role '{role}' is not present."
+                        )
+                elif role == "law_artifacts":
+                    if not m.law_artifacts:
+                        errors.append(
+                            f"manifest[{i}]: required role 'law_artifacts' is empty."
+                        )
+                else:
+                    errors.append(
+                        f"Unknown required role '{role}'. "
+                        f"Valid roles: {sorted(_valid_scalar | {'law_artifacts'})}."
+                    )
+
+    return errors
+
+
+def merge_manifests(
+    manifests: List["OutputManifest"],
+    framework_hash: Optional[str] = None,
+    user_repo_hash: Optional[str] = None,
+    required_roles: Optional[List[str]] = None,
+) -> "OutputManifest":
+    """Build a merged :class:`OutputManifest` from a collection of validated inputs.
+
+    Validates all inputs with :func:`validate_merge_inputs` before proceeding.
+    The merged manifest carries the same schema definitions as the inputs
+    (schema types and versions must all agree) and is tagged with the supplied
+    provenance information.
+
+    The schema definitions (including ``output_file`` path patterns) are
+    copied from the **first** manifest.  After the merge operation (e.g.
+    ``hadd``) has written its output files, callers should update the
+    ``output_file`` fields on the returned manifest's schemas to point to the
+    merged output path before serialising the manifest.
+
+    Parameters
+    ----------
+    manifests:
+        Non-empty sequence of :class:`OutputManifest` objects to merge.
+        Every manifest must pass :func:`validate_merge_inputs`; if any
+        validation check fails a :exc:`MergeInputValidationError` is raised
+        **before** any merge is attempted.
+    framework_hash:
+        Git hash to record in the merged manifest's provenance, or ``None``.
+    user_repo_hash:
+        User-repository git hash for the merged manifest's provenance,
+        or ``None``.
+    required_roles:
+        Forwarded to :func:`validate_merge_inputs`.  Use this to assert that
+        specific artifact types (e.g. ``"histograms"``) must be present in
+        every input.
+
+    Returns
+    -------
+    OutputManifest
+        A new manifest describing the merged output.  Schema definitions are
+        copied from the first input (all inputs must agree on schema versions
+        after validation).
+
+    Raises
+    ------
+    MergeInputValidationError
+        If :func:`validate_merge_inputs` returns any errors.
+
+    Examples
+    --------
+    Merge histogram manifests from multiple batch jobs::
+
+        from output_schema import (
+            OutputManifest, merge_manifests, MergeInputValidationError
+        )
+
+        manifests = [OutputManifest.load_yaml(p) for p in manifest_paths]
+        try:
+            merged = merge_manifests(
+                manifests,
+                framework_hash=current_fw_hash,
+                required_roles=["histograms"],
+            )
+        except MergeInputValidationError as exc:
+            print(f"Cannot merge: {exc}")
+            raise
+        # Now run hadd / histogram addition …
+        merged.histograms.output_file = "merged_meta.root"
+        merged.save_yaml("merged/output_manifest.yaml")
+    """
+    errors = validate_merge_inputs(manifests, required_roles=required_roles)
+    if errors:
+        raise MergeInputValidationError(
+            "Merge inputs failed schema validation:\n"
+            + "\n".join(f"  {e}" for e in errors)
+        )
+
+    # Use the first manifest as the structural template — all inputs have
+    # agreed on schema versions and roles after validation above.
+    source = manifests[0]
+    return OutputManifest(
+        skim=source.skim,
+        histograms=source.histograms,
+        metadata=source.metadata,
+        cutflow=source.cutflow,
+        law_artifacts=list(source.law_artifacts),
+        framework_hash=framework_hash,
+        user_repo_hash=user_repo_hash,
+    )
