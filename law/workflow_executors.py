@@ -12,6 +12,12 @@ This module provides:
   _run_analysis_job  – a pure, picklable function that executes one analysis
                        job on a remote worker (used by the Dask proxy).
 
+The Dask proxy integrates with :mod:`failure_handler` to classify each branch
+failure, apply per-category retry policies, and collect a
+:class:`~failure_handler.DiagnosticSummary` that is printed at the end of the
+run.  See :mod:`failure_handler` for details on failure categories and retry
+policies.
+
 Usage in a task file
 --------------------
 ::
@@ -51,12 +57,23 @@ import os
 import shlex
 import subprocess
 import tempfile
+import traceback
 from pathlib import Path
 
 import luigi  # type: ignore
 import law  # type: ignore
 from law.workflow.base import BaseWorkflow, BaseWorkflowProxy
 from law.contrib.htcondor import HTCondorWorkflow  # noqa: F401  – re-exported for callers
+
+from failure_handler import (  # noqa: E402
+    DiagnosticSummary,
+    FailureCategory,
+    FailureRecord,
+    RetryPolicy,
+    DEFAULT_RETRY_POLICIES,
+    classify_failure,
+    run_with_retries,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +205,10 @@ class DaskWorkflowProxy(BaseWorkflowProxy):
 
         task = self.task
         scheduler: str = getattr(task, "dask_scheduler", "") or ""
+        # Allow the task to supply custom retry policies; fall back to defaults.
+        retry_policies: dict[FailureCategory, RetryPolicy] = getattr(
+            task, "dask_retry_policies", DEFAULT_RETRY_POLICIES
+        )
 
         if scheduler:
             client = Client(scheduler)
@@ -209,7 +230,7 @@ class DaskWorkflowProxy(BaseWorkflowProxy):
 
                 func, args, kwargs = task.get_dask_work(branch_num, branch_data)
                 future = client.submit(func, *args, **kwargs, pure=False)
-                futures_to_branch[future] = (branch_num, branch_task)
+                futures_to_branch[future] = (branch_num, branch_task, func, args, kwargs)
 
             if not futures_to_branch:
                 task.publish_message("All branches are already complete.")
@@ -220,11 +241,43 @@ class DaskWorkflowProxy(BaseWorkflowProxy):
                 f"scheduler {scheduler or '(local)'}."
             )
 
+            summary = DiagnosticSummary()
             errors: list[str] = []
+
             for future in dask_ac(list(futures_to_branch.keys())):
-                branch_num, branch_task = futures_to_branch[future]
+                branch_num, branch_task, func, args, kwargs = futures_to_branch[future]
                 try:
-                    result_text = future.result()
+                    # Retrieve the result from the completed future; if it
+                    # failed, run_with_retries will classify and retry it
+                    # locally (re-submitting to Dask for each retry).
+                    def _submit_and_wait(f, a, k, _client=client):
+                        fut = _client.submit(f, *a, **k, pure=False)
+                        return fut.result()
+
+                    try:
+                        result_text = future.result()
+                    except Exception as first_exc:  # noqa: BLE001
+                        # The initial future failed; use smart retry for
+                        # subsequent attempts, submitting new futures to Dask.
+                        result_text = run_with_retries(
+                            fn=_submit_and_wait,
+                            args=[func, args, kwargs],
+                            branch_num=branch_num,
+                            summary=summary,
+                            policies=retry_policies,
+                        )
+                        # Record the first failure manually (run_with_retries
+                        # only records retried attempts).
+                        stderr = ""
+                        msg_str = str(first_exc)
+                        if "\nstderr:\n" in msg_str:
+                            stderr = msg_str.split("\nstderr:\n", 1)[1]
+                        category = classify_failure(first_exc, stderr=stderr)
+                        task.publish_message(
+                            f"Branch {branch_num}: classified failure as "
+                            f"{category.value!r}; retrying…"
+                        )
+
                     # Write the branch output so LAW marks the branch complete
                     out = branch_task.output()
                     Path(out.path).parent.mkdir(parents=True, exist_ok=True)
@@ -233,19 +286,17 @@ class DaskWorkflowProxy(BaseWorkflowProxy):
                     task.publish_message(
                         f"Branch {branch_num}: complete ({result_text})."
                     )
-                except (RuntimeError, ValueError, OSError) as exc:
-                    # Expected failure types from analysis jobs or file I/O
-                    import traceback
-                    msg = f"Branch {branch_num} failed: {exc}"
-                    errors.append(msg)
-                    task.publish_message(f"ERROR: {msg}")
                 except Exception as exc:  # noqa: BLE001
-                    # Unexpected failure – include traceback for debugging
-                    import traceback
                     tb = traceback.format_exc()
-                    msg = f"Branch {branch_num} failed unexpectedly: {exc}\n{tb}"
+                    msg = f"Branch {branch_num} failed: {exc}"
+                    if tb and tb.strip() != "NoneType: None":
+                        msg = f"{msg}\n{tb}"
                     errors.append(msg)
                     task.publish_message(f"ERROR: {msg}")
+
+            # Always emit the diagnostic summary so operators can inspect it.
+            if summary.total_failures() > 0:
+                task.publish_message(summary.report())
 
             if errors:
                 raise RuntimeError(
@@ -276,6 +327,11 @@ class DaskWorkflow(BaseWorkflow):
     ``dask_workflow_requires()``
         Additional task requirements that must be satisfied before Dask
         submission begins.
+
+    ``dask_retry_policies``
+        A ``dict[FailureCategory, RetryPolicy]`` attribute (not a method) that
+        overrides the per-category retry policies used by the Dask proxy.
+        Defaults to :data:`~failure_handler.DEFAULT_RETRY_POLICIES`.
 
     Parameters
     ----------
@@ -353,6 +409,16 @@ class DaskWorkflow(BaseWorkflow):
             "--dask-scheduler is empty (default: 1)."
         ),
     )
+
+    #: Per-category retry policies used by :class:`DaskWorkflowProxy`.
+    #: Override in a subclass to customise retry behaviour, e.g.::
+    #:
+    #:     from failure_handler import DEFAULT_RETRY_POLICIES, FailureCategory, RetryPolicy
+    #:     dask_retry_policies = {
+    #:         **DEFAULT_RETRY_POLICIES,
+    #:         FailureCategory.TRANSIENT_IO: RetryPolicy(max_retries=10, base_delay=5.0),
+    #:     }
+    dask_retry_policies: dict[FailureCategory, RetryPolicy] = DEFAULT_RETRY_POLICIES
 
     # These parameters must not propagate to branch tasks.
     # Subclasses that extend exclude_params_branch should merge rather than
