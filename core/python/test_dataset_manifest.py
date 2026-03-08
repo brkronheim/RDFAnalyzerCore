@@ -424,3 +424,205 @@ class TestDatasetManifestLegacyText:
         data = m.query(dtype="data")
         assert len(data) == 1
         assert data[0].name == "data_2022C"
+
+
+# ---------------------------------------------------------------------------
+# New feature: multi-value query
+# ---------------------------------------------------------------------------
+
+class TestDatasetManifestMultiValueQuery:
+
+    def _make_manifest(self):
+        return DatasetManifest(datasets=[
+            DatasetEntry("ttbar_2022",   year=2022, dtype="mc",   process="ttbar",  era=None),
+            DatasetEntry("ttbar_2023",   year=2023, dtype="mc",   process="ttbar",  era=None),
+            DatasetEntry("wjets_2022",   year=2022, dtype="mc",   process="wjets",  era=None),
+            DatasetEntry("data_2022C",   year=2022, dtype="data", process="data",   era="C"),
+            DatasetEntry("data_2022D",   year=2022, dtype="data", process="data",   era="D"),
+            DatasetEntry("data_2023C",   year=2023, dtype="data", process="data",   era="C"),
+        ])
+
+    def test_query_multi_year_list(self):
+        m = self._make_manifest()
+        result = m.query(year=[2022, 2023])
+        assert len(result) == len(m.datasets)  # all have year 2022 or 2023
+
+    def test_query_multi_year_list_filtered(self):
+        m = self._make_manifest()
+        result = m.query(year=[2022, 2023], dtype="mc")
+        assert len(result) == 3
+        assert all(e.dtype == "mc" for e in result)
+        assert {e.name for e in result} == {"ttbar_2022", "ttbar_2023", "wjets_2022"}
+
+    def test_query_multi_era_list(self):
+        m = self._make_manifest()
+        result = m.query(era=["C", "D"])
+        assert len(result) == 3  # data_2022C, data_2022D, data_2023C
+        assert all(e.era in ("C", "D") for e in result)
+
+    def test_query_multi_process_list(self):
+        m = self._make_manifest()
+        result = m.query(process=["ttbar", "wjets"])
+        assert len(result) == 3
+        assert all(e.process in ("ttbar", "wjets") for e in result)
+
+    def test_query_multi_dtype_list(self):
+        m = self._make_manifest()
+        result = m.query(dtype=["mc", "data"])
+        assert len(result) == len(m.datasets)
+
+    def test_query_single_element_list_behaves_as_scalar(self):
+        m = self._make_manifest()
+        result_list = m.query(year=[2022])
+        result_scalar = m.query(year=2022)
+        assert {e.name for e in result_list} == {e.name for e in result_scalar}
+
+
+# ---------------------------------------------------------------------------
+# New feature: get_eras / get_eras_for_year
+# ---------------------------------------------------------------------------
+
+class TestDatasetManifestEras:
+
+    def _make_manifest(self):
+        return DatasetManifest(datasets=[
+            DatasetEntry("d_2022C", year=2022, era="C", dtype="data"),
+            DatasetEntry("d_2022D", year=2022, era="D", dtype="data"),
+            DatasetEntry("d_2023B", year=2023, era="B", dtype="data"),
+            DatasetEntry("mc_2022", year=2022, era=None, dtype="mc"),
+        ])
+
+    def test_get_eras(self):
+        m = self._make_manifest()
+        eras = m.get_eras()
+        assert eras == ["B", "C", "D"]
+        assert eras == sorted(eras)
+
+    def test_get_eras_empty(self):
+        m = DatasetManifest(datasets=[DatasetEntry("mc", era=None)])
+        assert m.get_eras() == []
+
+    def test_get_eras_for_year(self):
+        m = self._make_manifest()
+        assert m.get_eras_for_year(2022) == ["C", "D"]
+        assert m.get_eras_for_year(2023) == ["B"]
+
+    def test_get_eras_for_year_no_eras(self):
+        m = self._make_manifest()
+        # MC samples have era=None, so only data eras are returned
+        assert m.get_eras_for_year(2022) == ["C", "D"]
+
+    def test_get_eras_for_year_unknown_year(self):
+        m = self._make_manifest()
+        assert m.get_eras_for_year(9999) == []
+
+
+# ---------------------------------------------------------------------------
+# New feature: lumi_for / lumi_by_year
+# ---------------------------------------------------------------------------
+
+class TestDatasetManifestLumiByYear:
+
+    def test_lumi_for_no_by_year(self):
+        m = DatasetManifest(lumi=59.7)
+        assert m.lumi_for() == 59.7
+        assert m.lumi_for(year=2022) == 59.7
+
+    def test_lumi_for_with_by_year(self):
+        m = DatasetManifest(lumi=100.0, lumi_by_year={2022: 38.01, 2023: 27.01})
+        assert m.lumi_for(year=2022) == 38.01
+        assert m.lumi_for(year=2023) == 27.01
+
+    def test_lumi_for_year_not_in_map_falls_back(self):
+        m = DatasetManifest(lumi=100.0, lumi_by_year={2022: 38.01})
+        assert m.lumi_for(year=2023) == 100.0
+
+    def test_lumi_for_no_year_arg(self):
+        m = DatasetManifest(lumi=100.0, lumi_by_year={2022: 38.01})
+        assert m.lumi_for() == 100.0
+
+    def test_lumi_for_era_arg_accepted(self):
+        """era parameter is accepted for forward-compatibility (not used in lookup)."""
+        m = DatasetManifest(lumi=100.0, lumi_by_year={2022: 38.01})
+        assert m.lumi_for(year=2022, era="C") == 38.01
+
+    def test_lumi_by_year_yaml_round_trip(self, tmp_path):
+        original = DatasetManifest(
+            datasets=[DatasetEntry("ttbar", year=2022)],
+            lumi=100.0,
+            lumi_by_year={2022: 38.01, 2023: 27.01},
+        )
+        path = str(tmp_path / "manifest.yaml")
+        original.save_yaml(path)
+        loaded = DatasetManifest.load_yaml(path)
+        assert loaded.lumi == 100.0
+        assert loaded.lumi_by_year == {2022: 38.01, 2023: 27.01}
+        assert loaded.lumi_for(year=2022) == 38.01
+        assert loaded.lumi_for(year=2023) == 27.01
+
+    def test_lumi_by_year_not_in_yaml_gives_empty_dict(self, tmp_path):
+        content = "lumi: 59.7\ndatasets:\n  - name: s\n"
+        p = tmp_path / "m.yaml"
+        p.write_text(content)
+        m = DatasetManifest.load_yaml(str(p))
+        assert m.lumi_by_year == {}
+        assert m.lumi_for(year=2022) == 59.7
+
+    def test_save_yaml_omits_lumi_by_year_when_empty(self, tmp_path):
+        import yaml as _yaml
+        m = DatasetManifest(datasets=[DatasetEntry("s")], lumi=1.0)
+        path = str(tmp_path / "out.yaml")
+        m.save_yaml(path)
+        with open(path) as fh:
+            raw = _yaml.safe_load(fh)
+        assert "lumi_by_year" not in raw
+
+
+# ---------------------------------------------------------------------------
+# New feature: validate()
+# ---------------------------------------------------------------------------
+
+class TestDatasetManifestValidate:
+
+    def test_valid_manifest_returns_empty(self):
+        m = DatasetManifest(datasets=[
+            DatasetEntry("a", year=2022),
+            DatasetEntry("b", year=2022, parent="a"),
+        ])
+        assert m.validate() == []
+
+    def test_duplicate_name_detected(self):
+        m = DatasetManifest(datasets=[
+            DatasetEntry("a"),
+            DatasetEntry("a"),
+        ])
+        errors = m.validate()
+        assert any("Duplicate" in e and "'a'" in e for e in errors)
+
+    def test_missing_parent_detected(self):
+        m = DatasetManifest(datasets=[
+            DatasetEntry("child", parent="nonexistent"),
+        ])
+        errors = m.validate()
+        assert any("parent" in e and "'nonexistent'" in e for e in errors)
+
+    def test_valid_parent_reference_ok(self):
+        m = DatasetManifest(datasets=[
+            DatasetEntry("parent_ds"),
+            DatasetEntry("child_ds", parent="parent_ds"),
+        ])
+        assert m.validate() == []
+
+    def test_lumi_by_year_unknown_year_warns(self):
+        m = DatasetManifest(
+            datasets=[DatasetEntry("s", year=2022)],
+            lumi_by_year={2022: 38.01, 2099: 999.0},  # 2099 has no datasets
+        )
+        errors = m.validate()
+        assert any("Warning" in e and "2099" in e for e in errors)
+        # 2022 is valid and should not generate a warning
+        assert not any("2022" in e for e in errors)
+
+    def test_empty_manifest_valid(self):
+        m = DatasetManifest()
+        assert m.validate() == []

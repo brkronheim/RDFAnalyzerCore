@@ -22,8 +22,20 @@ Load a YAML manifest and query it::
     # Query all 2022 MC ttbar samples
     samples = manifest.query(year=2022, dtype="mc", process="ttbar")
 
+    # Query datasets across multiple years at once
+    multi_year = manifest.query(year=[2022, 2023], dtype="mc", process="ttbar")
+
     # Query an entire stitched group
     wjets = manifest.query(group="wjets_ht")
+
+    # Get the luminosity for a specific year (uses lumi_by_year if available)
+    lumi_2022 = manifest.lumi_for(year=2022)
+
+    # Validate the manifest for duplicate names and missing parent references
+    errors = manifest.validate()
+    if errors:
+        for err in errors:
+            print(err)
 
     # Convert to the legacy key=value dict expected by submission scripts
     for sample in samples:
@@ -35,7 +47,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, fields, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
@@ -205,8 +217,17 @@ class DatasetManifest:
     datasets : list[DatasetEntry]
         All registered datasets.
     lumi : float
-        Integrated luminosity in fb^-1.  Used when computing event
-        weights inside submission scripts.
+        Integrated luminosity in fb^-1.  Used as the default when computing
+        event weights inside submission scripts.  When *no* year is specified
+        in a ``lumi_for()`` call (or the requested year is absent from
+        ``lumi_by_year``), this global value is returned.  If ``lumi_by_year``
+        contains an entry for a given year, ``lumi_for(year=...)`` returns that
+        value instead.
+    lumi_by_year : dict[int, float]
+        Optional per-year luminosity mapping (year → fb^-1).  Takes precedence
+        over the global ``lumi`` when querying via ``lumi_for()``.  Useful for
+        multi-year analyses where each year has a distinct luminosity (e.g.
+        ``{2022: 38.01, 2023: 62.32}``).
     whitelist : list[str]
         Site whitelist passed to Rucio queries (empty = all sites allowed).
     blacklist : list[str]
@@ -219,11 +240,13 @@ class DatasetManifest:
         lumi: float = 1.0,
         whitelist: Optional[List[str]] = None,
         blacklist: Optional[List[str]] = None,
+        lumi_by_year: Optional[Dict[int, float]] = None,
     ) -> None:
         self.datasets: List[DatasetEntry] = datasets or []
         self.lumi: float = lumi
         self.whitelist: List[str] = whitelist or []
         self.blacklist: List[str] = blacklist or []
+        self.lumi_by_year: Dict[int, float] = lumi_by_year or {}
 
     # ------------------------------------------------------------------ I/O
 
@@ -251,7 +274,10 @@ class DatasetManifest:
 
         The expected top-level structure is::
 
-            lumi: 59.7          # optional
+            lumi: 59.7          # optional (global / fallback luminosity)
+            lumi_by_year:       # optional per-year luminosities
+              2022: 38.01
+              2023: 27.01
             whitelist: []       # optional
             blacklist: []       # optional
             datasets:
@@ -276,6 +302,10 @@ class DatasetManifest:
         whitelist = raw.get("whitelist") or []
         blacklist = raw.get("blacklist") or []
 
+        # lumi_by_year: {year (int): lumi (float)} – optional per-year luminosities
+        raw_lumi_by_year = raw.get("lumi_by_year") or {}
+        lumi_by_year: Dict[int, float] = {int(k): float(v) for k, v in raw_lumi_by_year.items()}
+
         entries: List[DatasetEntry] = []
         for item in raw.get("datasets", []):
             if not isinstance(item, dict):
@@ -284,7 +314,7 @@ class DatasetManifest:
                 )
             entries.append(DatasetEntry.from_dict(item))
 
-        return cls(datasets=entries, lumi=lumi, whitelist=whitelist, blacklist=blacklist)
+        return cls(datasets=entries, lumi=lumi, whitelist=whitelist, blacklist=blacklist, lumi_by_year=lumi_by_year)
 
     @classmethod
     def load_text(cls, path: str) -> "DatasetManifest":
@@ -352,6 +382,8 @@ class DatasetManifest:
             "blacklist": self.blacklist,
             "datasets": [e.to_dict() for e in self.datasets],
         }
+        if self.lumi_by_year:
+            raw["lumi_by_year"] = dict(self.lumi_by_year)
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w") as fh:
             yaml.dump(raw, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
@@ -369,56 +401,65 @@ class DatasetManifest:
     def query(
         self,
         *,
-        year: Optional[int] = None,
-        era: Optional[str] = None,
-        campaign: Optional[str] = None,
-        process: Optional[str] = None,
-        group: Optional[str] = None,
-        dtype: Optional[str] = None,
-        parent: Optional[str] = None,
+        year: Optional[Union[int, List[int]]] = None,
+        era: Optional[Union[str, List[str]]] = None,
+        campaign: Optional[Union[str, List[str]]] = None,
+        process: Optional[Union[str, List[str]]] = None,
+        group: Optional[Union[str, List[str]]] = None,
+        dtype: Optional[Union[str, List[str]]] = None,
+        parent: Optional[Union[str, List[str]]] = None,
     ) -> List[DatasetEntry]:
         """Filter datasets by metadata criteria.
 
         All supplied keyword arguments are combined with logical AND; omitting
-        a keyword means *don't filter on that field*.
+        a keyword means *don't filter on that field*.  Each argument may be a
+        single value **or a list of values** — a list matches any entry whose
+        field is contained in that list (logical OR within the field).
 
         Parameters
         ----------
-        year : int, optional
-            Require ``entry.year == year``.
-        era : str, optional
-            Require ``entry.era == era``.
-        campaign : str, optional
-            Require ``entry.campaign == campaign``.
-        process : str, optional
-            Require ``entry.process == process``.
-        group : str, optional
-            Require ``entry.group == group``.
-        dtype : str, optional
-            Require ``entry.dtype == dtype`` (``"mc"`` or ``"data"``).
-        parent : str, optional
-            Require ``entry.parent == parent``.
+        year : int or list[int], optional
+            Require ``entry.year == year``, or ``entry.year in year``.
+        era : str or list[str], optional
+            Require ``entry.era == era``, or ``entry.era in era``.
+        campaign : str or list[str], optional
+            Require ``entry.campaign == campaign``, or ``entry.campaign in campaign``.
+        process : str or list[str], optional
+            Require ``entry.process == process``, or ``entry.process in process``.
+        group : str or list[str], optional
+            Require ``entry.group == group``, or ``entry.group in group``.
+        dtype : str or list[str], optional
+            Require ``entry.dtype == dtype`` (``"mc"`` or ``"data"``), or
+            ``entry.dtype in dtype``.
+        parent : str or list[str], optional
+            Require ``entry.parent == parent``, or ``entry.parent in parent``.
 
         Returns
         -------
         list[DatasetEntry]
             Matching entries (empty list if none match).
         """
+        def _matches(entry_val, filter_val):
+            """Return True if *entry_val* satisfies *filter_val* (scalar or list)."""
+            if isinstance(filter_val, list):
+                return entry_val in filter_val
+            return entry_val == filter_val
+
         result = []
         for entry in self.datasets:
-            if year is not None and entry.year != year:
+            if year is not None and not _matches(entry.year, year):
                 continue
-            if era is not None and entry.era != era:
+            if era is not None and not _matches(entry.era, era):
                 continue
-            if campaign is not None and entry.campaign != campaign:
+            if campaign is not None and not _matches(entry.campaign, campaign):
                 continue
-            if process is not None and entry.process != process:
+            if process is not None and not _matches(entry.process, process):
                 continue
-            if group is not None and entry.group != group:
+            if group is not None and not _matches(entry.group, group):
                 continue
-            if dtype is not None and entry.dtype != dtype:
+            if dtype is not None and not _matches(entry.dtype, dtype):
                 continue
-            if parent is not None and entry.parent != parent:
+            if parent is not None and not _matches(entry.parent, parent):
                 continue
             result.append(entry)
         return result
@@ -434,6 +475,97 @@ class DatasetManifest:
     def get_years(self) -> List[int]:
         """Return a sorted list of unique years."""
         return sorted({e.year for e in self.datasets if e.year is not None})
+
+    def get_eras(self) -> List[str]:
+        """Return a sorted list of unique era labels across all datasets."""
+        return sorted({e.era for e in self.datasets if e.era is not None})
+
+    def get_eras_for_year(self, year: int) -> List[str]:
+        """Return a sorted list of unique era labels for the given *year*.
+
+        Parameters
+        ----------
+        year : int
+            The data-taking year to filter on (e.g. 2022).
+
+        Returns
+        -------
+        list[str]
+            Sorted unique eras that appear in datasets with ``entry.year == year``.
+        """
+        return sorted({e.era for e in self.datasets if e.year == year and e.era is not None})
+
+    def lumi_for(self, year: Optional[int] = None, era: Optional[str] = None) -> float:
+        """Return the luminosity in fb^-1 for the given year (and optional era).
+
+        Look-up order:
+
+        1. If *year* is given and present in ``lumi_by_year``, return that value.
+        2. Otherwise fall back to the global ``lumi`` (including when no arguments
+           are passed).
+
+        .. note::
+           The *era* parameter is reserved for a future per-era luminosity
+           look-up and is **not** currently used in the resolution logic.
+           Passing it has no effect on the returned value.
+
+        Parameters
+        ----------
+        year : int, optional
+            Data-taking year.  If ``None`` or not in ``lumi_by_year``, the
+            global ``lumi`` is returned.
+        era : str, optional
+            Run era.  Reserved for future per-era look-up; currently ignored.
+
+        Returns
+        -------
+        float
+            Luminosity in fb^-1.
+        """
+        if year is not None and year in self.lumi_by_year:
+            return self.lumi_by_year[year]
+        return self.lumi
+
+    def validate(self) -> List[str]:
+        """Check the manifest for consistency and return a list of error messages.
+
+        The following checks are performed:
+
+        * **Duplicate names** — every ``DatasetEntry.name`` must be unique.
+        * **Missing parent references** — if ``entry.parent`` is set, a
+          ``DatasetEntry`` with that name must exist in the manifest.
+        * **Unknown lumi_by_year keys** — years in ``lumi_by_year`` that do not
+          appear in any dataset are reported as warnings (prefixed with
+          ``"Warning:"``).
+
+        Returns
+        -------
+        list[str]
+            Error / warning messages.  An empty list means the manifest is
+            consistent.
+        """
+        errors: List[str] = []
+        names: set = set()
+        all_names: set = {e.name for e in self.datasets}
+
+        for entry in self.datasets:
+            if entry.name in names:
+                errors.append(f"Duplicate dataset name: {entry.name!r}")
+            names.add(entry.name)
+            if entry.parent is not None and entry.parent not in all_names:
+                errors.append(
+                    f"Dataset {entry.name!r}: parent {entry.parent!r} not found in manifest"
+                )
+
+        # Warn about lumi_by_year entries that have no matching datasets
+        dataset_years = {e.year for e in self.datasets if e.year is not None}
+        for yr in self.lumi_by_year:
+            if yr not in dataset_years:
+                errors.append(
+                    f"Warning: lumi_by_year contains year {yr} but no dataset has that year"
+                )
+
+        return errors
 
     # ------------------------------------------------------------------ conversion
 
@@ -451,6 +583,7 @@ class DatasetManifest:
     def __repr__(self) -> str:  # pragma: no cover
         return (
             f"DatasetManifest(datasets={len(self.datasets)}, lumi={self.lumi}, "
+            f"lumi_by_year={self.lumi_by_year!r}, "
             f"whitelist={self.whitelist!r}, blacklist={self.blacklist!r})"
         )
 
