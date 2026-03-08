@@ -114,6 +114,16 @@ public:
 
   void setupFromConfigFile() override;
 
+  /**
+   * @brief Post-wiring initialization: logs the number of loaded ONNX models.
+   */
+  void initialize() override;
+
+  /**
+   * @brief Metadata hook: reports loaded model names to the logger.
+   */
+  void reportMetadata() override;
+
 private:
   /**
    * @brief Register ONNX models from the configuration

@@ -429,3 +429,24 @@ int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle hook tests
+// ---------------------------------------------------------------------------
+
+TEST_F(NDHistogramManagerTest, InitializeIsCallable) {
+  EXPECT_NO_THROW(histogramManager->initialize());
+}
+
+TEST_F(NDHistogramManagerTest, ReportMetadataIsCallable) {
+  EXPECT_NO_THROW(histogramManager->reportMetadata());
+}
+
+TEST_F(NDHistogramManagerTest, ExecuteAndFinalizeAreNoOps) {
+  EXPECT_NO_THROW(histogramManager->execute());
+  EXPECT_NO_THROW(histogramManager->finalize());
+}
+
+TEST_F(NDHistogramManagerTest, GetDependenciesReturnsEmpty) {
+  EXPECT_TRUE(histogramManager->getDependencies().empty());
+}

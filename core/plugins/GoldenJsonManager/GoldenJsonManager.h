@@ -4,6 +4,7 @@
 #include <api/IPluggableManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
+#include <api/ILogger.h>
 #include <api/ISystematicManager.h>
 #include <api/ManagerContext.h>
 #include <string>
@@ -70,6 +71,16 @@ public:
    */
   void setupFromConfigFile() override;
 
+  /**
+   * @brief Post-wiring initialization: logs the number of loaded run entries.
+   */
+  void initialize() override;
+
+  /**
+   * @brief Metadata hook: reports the number of certified runs to the logger.
+   */
+  void reportMetadata() override;
+
 private:
   /// run number -> list of [lumi_start, lumi_end] inclusive ranges
   std::unordered_map<unsigned int,
@@ -79,6 +90,7 @@ private:
   IConfigurationProvider *configManager_m = nullptr;
   IDataFrameProvider *dataManager_m = nullptr;
   ISystematicManager *systematicManager_m = nullptr;
+  ILogger *logger_m = nullptr;
 
   /**
    * @brief Parse one golden JSON file and merge its contents into

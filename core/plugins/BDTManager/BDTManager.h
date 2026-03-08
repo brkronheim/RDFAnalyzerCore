@@ -75,6 +75,16 @@ public:
 
   void setupFromConfigFile() override;
 
+  /**
+   * @brief Post-wiring initialization: logs loaded BDT names.
+   */
+  void initialize() override;
+
+  /**
+   * @brief Metadata hook: reports the list of loaded BDTs to the logger.
+   */
+  void reportMetadata() override;
+
 private:
   /**
    * @brief Register BDTs from the configuration

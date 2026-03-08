@@ -324,6 +324,16 @@ public:
 
   void setupFromConfigFile() override;
 
+  /**
+   * @brief Post-wiring initialization: logs the number of loaded fits.
+   */
+  void initialize() override;
+
+  /**
+   * @brief Metadata hook: reports loaded fit names to the logger.
+   */
+  void reportMetadata() override;
+
 private:
   /**
    * @brief Parse and register fits from the configuration provider.

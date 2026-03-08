@@ -1,6 +1,7 @@
 #include <OnnxManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
+#include <api/ILogger.h>
 #include <api/ISystematicManager.h>
 
 #include <algorithm>
@@ -578,4 +579,21 @@ void OnnxManager::setupFromConfigFile() {
     {"file", "name", "inputVariables", "runVar"});
 
   loadModelsFromConfig(*configManager_m, modelConfig);
+}
+
+void OnnxManager::initialize() {
+  std::cout << "OnnxManager: initialized with " << model_runVars_m.size()
+            << " ONNX model(s)." << std::endl;
+}
+
+void OnnxManager::reportMetadata() {
+  if (!logger_m) return;
+  std::string msg = "OnnxManager loaded models: ";
+  bool first = true;
+  for (const auto& name : getAllModelNames()) {
+    if (!first) msg += ", ";
+    msg += name;
+    first = false;
+  }
+  logger_m->log(ILogger::Level::Info, msg);
 }

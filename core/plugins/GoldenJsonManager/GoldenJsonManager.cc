@@ -1,4 +1,5 @@
 #include <GoldenJsonManager.h>
+#include <api/ILogger.h>
 
 #include <cctype>
 #include <fstream>
@@ -137,6 +138,7 @@ void GoldenJsonManager::setContext(ManagerContext &ctx) {
   configManager_m = &ctx.config;
   dataManager_m = &ctx.data;
   systematicManager_m = &ctx.systematics;
+  logger_m = &ctx.logger;
 }
 
 void GoldenJsonManager::setupFromConfigFile() {
@@ -236,4 +238,16 @@ void GoldenJsonManager::applyGoldenJson() {
         return false;
       },
       {"run", "luminosityBlock"});
+}
+
+void GoldenJsonManager::initialize() {
+  std::cout << "GoldenJsonManager: initialized with " << validLumis_m.size()
+            << " certified run(s)." << std::endl;
+}
+
+void GoldenJsonManager::reportMetadata() {
+  if (!logger_m) return;
+  logger_m->log(ILogger::Level::Info,
+                "GoldenJsonManager: " + std::to_string(validLumis_m.size()) +
+                " certified run(s) loaded.");
 }

@@ -67,6 +67,16 @@ public:
 
   void setupFromConfigFile() override;
 
+  /**
+   * @brief Post-wiring initialization: logs loaded trigger groups.
+   */
+  void initialize() override;
+
+  /**
+   * @brief Metadata hook: reports trigger groups to the logger.
+   */
+  void reportMetadata() override;
+
 private:
   /**
    * @brief Map from group name to vetoes.

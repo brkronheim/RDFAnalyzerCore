@@ -11,6 +11,8 @@
 #include <functions.h>
 #include <util.h>
 #include <memory>
+#include <queue>
+#include <stdexcept>
 #include <SystematicManager.h>
 #include <api/ManagerContext.h> // for wiring plugins and services
 
@@ -81,21 +83,92 @@ void Analyzer::initialize() {
 */
 
 void Analyzer::wirePluginManagers() {
+    // -----------------------------------------------------------------
+    // 1. Validate that all declared dependencies are registered.
+    // -----------------------------------------------------------------
     for (auto& [role, plugin] : plugins) {
-        std::cout << "Wiring plugin for role: " << role << std::endl;
-        if (plugin) {
-            plugin->setContext(managerContext_m);
-            plugin->setupFromConfigFile();
+        if (!plugin) continue;
+        for (const auto& dep : plugin->getDependencies()) {
+            if (plugins.find(dep) == plugins.end()) {
+                throw std::runtime_error(
+                    "Plugin '" + role + "' declares dependency '" + dep +
+                    "' which is not registered.");
+            }
         }
     }
+
+    // -----------------------------------------------------------------
+    // 2. Topological sort via Kahn's algorithm.
+    // -----------------------------------------------------------------
+    // Build in-degree map and adjacency list (role -> roles that depend on it).
+    std::unordered_map<std::string, int> inDegree;
+    std::unordered_map<std::string, std::vector<std::string>> dependents;
+    for (auto& [role, plugin] : plugins) {
+        if (!inDegree.count(role)) inDegree[role] = 0;
+        if (!plugin) continue;
+        for (const auto& dep : plugin->getDependencies()) {
+            inDegree[role]++;
+            dependents[dep].push_back(role);
+        }
+    }
+
+    std::queue<std::string> ready;
+    for (auto& [role, deg] : inDegree) {
+        if (deg == 0) ready.push(role);
+    }
+
+    std::vector<std::string> order;
+    while (!ready.empty()) {
+        std::string cur = ready.front();
+        ready.pop();
+        order.push_back(cur);
+        for (const auto& dep : dependents[cur]) {
+            if (--inDegree[dep] == 0) ready.push(dep);
+        }
+    }
+
+    if (order.size() != plugins.size()) {
+        throw std::runtime_error(
+            "Analyzer: circular dependency detected among registered plugins.");
+    }
+
+    // -----------------------------------------------------------------
+    // 3. setContext + setupFromConfigFile in topological order.
+    // -----------------------------------------------------------------
+    for (const auto& role : order) {
+        auto& plugin = plugins.at(role);
+        if (!plugin) continue;
+        std::cout << "Wiring plugin for role: " << role << std::endl;
+        plugin->setContext(managerContext_m);
+        plugin->setupFromConfigFile();
+    }
+
     initializeServices(managerContext_m);
+
+    // -----------------------------------------------------------------
+    // 4. initialize() in topological order.
+    // -----------------------------------------------------------------
+    for (const auto& role : order) {
+        auto& plugin = plugins.at(role);
+        if (!plugin) continue;
+        plugin->initialize();
+    }
 }
 
 Analyzer *Analyzer::addPlugin(const std::string &role, std::unique_ptr<IPluggableManager> plugin) {
     if (!plugin) return this;
+    // Validate that all declared dependencies are already registered.
+    for (const auto& dep : plugin->getDependencies()) {
+        if (plugins.find(dep) == plugins.end()) {
+            throw std::runtime_error(
+                "Plugin '" + role + "' declares dependency '" + dep +
+                "' which is not registered.");
+        }
+    }
     // Wire the plugin immediately with the persisted ManagerContext
     plugin->setContext(managerContext_m);
     plugin->setupFromConfigFile();
+    plugin->initialize();
     // Record provenance entry for the newly added plugin
     if (provenanceService_m) {
         provenanceService_m->addEntry("plugin." + role, plugin->type());
@@ -168,6 +241,11 @@ Analyzer *Analyzer::bookCounterIntHistogram(const std::string& branch, int nBins
 Analyzer *Analyzer::save() {
     auto df = dataFrameProvider_m->getDataFrame();
 
+    // Pre-execution hook
+    for (auto& [role, plugin] : plugins) {
+        if (plugin) plugin->execute();
+    }
+
     skimSink_m->writeDataFrame(df,
                                *configProvider_m,
                                dataFrameProvider_m.get(),
@@ -177,11 +255,24 @@ Analyzer *Analyzer::save() {
     for (auto& service : services_m) {
         service->finalize(df);
     }
+
+    // Post-execution hooks
+    for (auto& [role, plugin] : plugins) {
+        if (plugin) plugin->finalize();
+    }
+    for (auto& [role, plugin] : plugins) {
+        if (plugin) plugin->reportMetadata();
+    }
     return this;
 }
 
 Analyzer *Analyzer::run() {
     auto df = dataFrameProvider_m->getDataFrame();
+
+    // Pre-execution hook
+    for (auto& [role, plugin] : plugins) {
+        if (plugin) plugin->execute();
+    }
 
     // Conditionally write a skim when enableSkim=1/true/True is set in config
     const auto& cfgMap = configProvider_m->getConfigMap();
@@ -205,6 +296,14 @@ Analyzer *Analyzer::run() {
     // Finalize all analysis services (CounterService writes to meta sink here)
     for (auto& service : services_m) {
         service->finalize(df);
+    }
+
+    // Post-execution hooks
+    for (auto& [role, plugin] : plugins) {
+        if (plugin) plugin->finalize();
+    }
+    for (auto& [role, plugin] : plugins) {
+        if (plugin) plugin->reportMetadata();
     }
     return this;
 }

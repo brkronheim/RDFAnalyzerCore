@@ -865,3 +865,16 @@ void NDHistogramManager::bookConfigHistograms() {
     logger_m->log(ILogger::Level::Info, "NDHistogramManager: Successfully booked all config histograms");
   }
 }
+void NDHistogramManager::initialize() {
+  std::cout << "NDHistogramManager: initialized with "
+            << configHistograms_m.size() << " config histogram(s)."
+            << std::endl;
+}
+
+void NDHistogramManager::reportMetadata() {
+  if (!logger_m) return;
+  logger_m->log(ILogger::Level::Info,
+                "NDHistogramManager: " +
+                std::to_string(configHistograms_m.size()) +
+                " config histogram(s) defined.");
+}

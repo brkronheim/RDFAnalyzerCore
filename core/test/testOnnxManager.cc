@@ -379,3 +379,24 @@ int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle hook tests
+// ---------------------------------------------------------------------------
+
+TEST_F(OnnxManagerTest, InitializeIsCallable) {
+  EXPECT_NO_THROW(onnxManager->initialize());
+}
+
+TEST_F(OnnxManagerTest, ReportMetadataIsCallable) {
+  EXPECT_NO_THROW(onnxManager->reportMetadata());
+}
+
+TEST_F(OnnxManagerTest, ExecuteAndFinalizeAreNoOps) {
+  EXPECT_NO_THROW(onnxManager->execute());
+  EXPECT_NO_THROW(onnxManager->finalize());
+}
+
+TEST_F(OnnxManagerTest, GetDependenciesReturnsEmpty) {
+  EXPECT_TRUE(onnxManager->getDependencies().empty());
+}

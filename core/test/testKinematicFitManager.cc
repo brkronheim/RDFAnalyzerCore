@@ -1045,3 +1045,24 @@ int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle hook tests
+// ---------------------------------------------------------------------------
+
+TEST_F(KinematicFitManagerTest, InitializeIsCallable) {
+  EXPECT_NO_THROW(fitManager->initialize());
+}
+
+TEST_F(KinematicFitManagerTest, ReportMetadataIsCallable) {
+  EXPECT_NO_THROW(fitManager->reportMetadata());
+}
+
+TEST_F(KinematicFitManagerTest, ExecuteAndFinalizeAreNoOps) {
+  EXPECT_NO_THROW(fitManager->execute());
+  EXPECT_NO_THROW(fitManager->finalize());
+}
+
+TEST_F(KinematicFitManagerTest, GetDependenciesReturnsEmpty) {
+  EXPECT_TRUE(fitManager->getDependencies().empty());
+}

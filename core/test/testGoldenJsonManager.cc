@@ -237,6 +237,42 @@ TEST_F(GoldenJsonManagerTest, TypeStringReturnsExpectedValue) {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Lifecycle hook tests
+// ---------------------------------------------------------------------------
+
+TEST_F(GoldenJsonManagerTest, InitializeIsCallable) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeManager(*configData, *dm);
+  EXPECT_NO_THROW(mgr->initialize());
+}
+
+TEST_F(GoldenJsonManagerTest, ReportMetadataIsCallable) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeManager(*configData, *dm);
+  EXPECT_NO_THROW(mgr->reportMetadata());
+}
+
+TEST_F(GoldenJsonManagerTest, ExecuteAndFinalizeAreNoOps) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeManager(*configData, *dm);
+  EXPECT_NO_THROW(mgr->execute());
+  EXPECT_NO_THROW(mgr->finalize());
+}
+
+TEST_F(GoldenJsonManagerTest, GetDependenciesReturnsEmpty) {
+  GoldenJsonManager mgr;
+  EXPECT_TRUE(mgr.getDependencies().empty());
+}
+
+TEST_F(GoldenJsonManagerTest, InitializeReflectsLoadedRuns) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeManager(*configData, *dm);
+  // After setup, some runs should be loaded and initialize should succeed
+  EXPECT_GT(mgr->numRuns(), 0UL);
+  EXPECT_NO_THROW(mgr->initialize());
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
