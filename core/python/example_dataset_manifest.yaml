@@ -5,8 +5,18 @@
 #
 # Global settings
 # ---------------
-# lumi: integrated luminosity in fb^-1 used for normalisation
-lumi: 59.7
+# lumi: integrated luminosity in fb^-1 used as the default for normalisation.
+#        For multi-year analyses, use lumi_by_year for per-year granularity.
+#        When lumi_by_year covers all years, this value equals the combined
+#        total (e.g. 38.01 + 27.01 = 65.02 below) and serves as a fallback.
+lumi: 65.02
+
+# lumi_by_year: optional per-year luminosity mapping (year -> fb^-1).
+# When present, DatasetManifest.lumi_for(year=...) returns the year-specific
+# value instead of the global lumi above.
+lumi_by_year:
+  2022: 38.01
+  2023: 27.01
 
 # whitelist / blacklist: Rucio site filtering (empty list = no restriction)
 whitelist: []
@@ -63,6 +73,25 @@ datasets:
     stitch_id: ~
     parent: ~
 
+  # ---- ttbar (MC, 2023) -------------------------------------------------------
+  # Same process / group as the 2022 entry – the manifest allows multi-year
+  # analyses to query across years: manifest.query(year=[2022, 2023], process="ttbar")
+  - name: ttbar_powheg_2023
+    year: 2023
+    era: ~
+    campaign: Run3Summer23NanoAODv12
+    process: ttbar
+    group: ttbar
+    dtype: mc
+    das: /TTto2L2Nu_TuneCP5_13p6TeV_powheg-pythia8/Run3Summer23NanoAODv12-130X_mcRun3_2023_realistic_v14-v2/NANOAODSIM
+    xsec: 98.34
+    filter_efficiency: 1.0
+    kfac: 1.0
+    extra_scale: 1.0
+    sum_weights: ~
+    stitch_id: ~
+    parent: ~
+
   # ---- W+jets HT-stitched samples (MC, 2022) ----------------------------------
   # All share group: wjets_ht and carry a stitch_id that maps to the
   # counterIntWeightBranch value written by the generator.
@@ -115,7 +144,11 @@ datasets:
     stitch_id: 2
     parent: ~
 
-  # ---- Real data (2022, era C) ------------------------------------------------
+  # ---- Real data (2022, eras C and D) -----------------------------------------
+  # Multiple eras within a year are linked by sharing the same group label.
+  # Query all 2022 data: manifest.query(year=2022, dtype="data")
+  # Query just era C:    manifest.query(year=2022, era="C")
+  # Query C or D:        manifest.query(year=2022, era=["C", "D"])
   - name: data_singlemuon_2022C
     year: 2022
     era: C
@@ -140,6 +173,24 @@ datasets:
     group: data_2022
     dtype: data
     das: /SingleMuon/Run2022D-22Sep2023-v1/NANOAOD
+    xsec: ~
+    filter_efficiency: ~
+    kfac: ~
+    extra_scale: ~
+    sum_weights: ~
+    stitch_id: ~
+    parent: ~
+
+  # ---- Real data (2023, era C) ------------------------------------------------
+  # Cross-year data queries: manifest.query(year=[2022, 2023], dtype="data")
+  - name: data_singlemuon_2023C
+    year: 2023
+    era: C
+    campaign: ~
+    process: data
+    group: data_2023
+    dtype: data
+    das: /SingleMuon/Run2023C-22Sep2023-v1/NANOAOD
     xsec: ~
     filter_efficiency: ~
     kfac: ~
