@@ -18,7 +18,8 @@ from submission_backend import (
     get_copy_file_list, 
     write_submit_files,
     write_config,
-    get_config_extension
+    get_config_extension,
+    ensure_xrootd_redirector,
 )
 from validate_config import validate_submit_config
 from dataset_manifest import DatasetManifest
@@ -309,11 +310,11 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
                 """
                  
          if(group in groups):
-             groups[group] +=","+redirector+file
+             groups[group] +=","+ensure_xrootd_redirector(file, redirector)
              groupCount[group]+=1
              groupSizes[group]+=round(size,1)
          else:
-             groups[group] = redirector+file
+             groups[group] = ensure_xrootd_redirector(file, redirector)
              groupCount[group]=1
              groupSizes[group]=round(size,1)
     #for x in range(len(groups)):
