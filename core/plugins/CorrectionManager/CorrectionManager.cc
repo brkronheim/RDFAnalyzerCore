@@ -1,6 +1,7 @@
 #include <CorrectionManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
+#include <api/ILogger.h>
 #include <api/ISystematicManager.h>
 #include <iostream>
 
@@ -251,4 +252,20 @@ void CorrectionManager::setupFromConfigFile() {
   }
 
   initialized_m = true;
+}
+void CorrectionManager::initialize() {
+  std::cout << "CorrectionManager: initialized with " << objects_m.size()
+            << " correction(s)." << std::endl;
+}
+
+void CorrectionManager::reportMetadata() {
+  if (!logger_m) return;
+  std::string msg = "CorrectionManager loaded corrections: ";
+  bool first = true;
+  for (const auto& kv : objects_m) {
+    if (!first) msg += ", ";
+    msg += kv.first;
+    first = false;
+  }
+  logger_m->log(ILogger::Level::Info, msg);
 }

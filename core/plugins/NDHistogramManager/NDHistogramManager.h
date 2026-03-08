@@ -109,6 +109,16 @@ public:
   void setupFromConfigFile() override;
 
   /**
+   * @brief Post-wiring initialization: logs the number of config histograms.
+   */
+  void initialize() override;
+
+  /**
+   * @brief Metadata hook: reports booked histogram counts to the logger.
+   */
+  void reportMetadata() override;
+
+  /**
    * @brief Book histograms defined in config file
    * 
    * This method books all histograms that were loaded from the config file

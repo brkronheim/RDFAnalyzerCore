@@ -579,3 +579,24 @@ int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle hook tests
+// ---------------------------------------------------------------------------
+
+TEST_F(CorrectionManagerTest, InitializeIsCallable) {
+  EXPECT_NO_THROW(correctionManager->initialize());
+}
+
+TEST_F(CorrectionManagerTest, ReportMetadataIsCallable) {
+  EXPECT_NO_THROW(correctionManager->reportMetadata());
+}
+
+TEST_F(CorrectionManagerTest, ExecuteAndFinalizeAreNoOps) {
+  EXPECT_NO_THROW(correctionManager->execute());
+  EXPECT_NO_THROW(correctionManager->finalize());
+}
+
+TEST_F(CorrectionManagerTest, GetDependenciesReturnsEmpty) {
+  EXPECT_TRUE(correctionManager->getDependencies().empty());
+}

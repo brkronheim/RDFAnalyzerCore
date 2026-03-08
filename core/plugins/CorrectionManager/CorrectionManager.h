@@ -94,6 +94,16 @@ public:
 
   void setupFromConfigFile() override;
 
+  /**
+   * @brief Post-wiring initialization: logs loaded correction names.
+   */
+  void initialize() override;
+
+  /**
+   * @brief Metadata hook: reports the list of loaded corrections to the logger.
+   */
+  void reportMetadata() override;
+
 private:
   /**
    * @brief Register corrections from correctionlib using the configuration

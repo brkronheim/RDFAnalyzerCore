@@ -3,6 +3,7 @@
 #include <KinematicFitManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
+#include <api/ILogger.h>
 #include <api/ISystematicManager.h>
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
@@ -815,4 +816,21 @@ void KinematicFitManager::registerFits(
         (runVarIt != entry.end()) ? runVarIt->second : "";
     kinfit_runVars_m.emplace(entry.at("name"), runVar);
   }
+}
+
+void KinematicFitManager::initialize() {
+  std::cout << "KinematicFitManager: initialized with "
+            << kinfit_runVars_m.size() << " fit(s)." << std::endl;
+}
+
+void KinematicFitManager::reportMetadata() {
+  if (!logger_m) return;
+  std::string msg = "KinematicFitManager loaded fits: ";
+  bool first = true;
+  for (const auto& name : getAllFitNames()) {
+    if (!first) msg += ", ";
+    msg += name;
+    first = false;
+  }
+  logger_m->log(ILogger::Level::Info, msg);
 }

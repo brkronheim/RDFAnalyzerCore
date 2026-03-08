@@ -64,6 +64,10 @@ add_test(NAME CounterServiceTest COMMAND testCounterService)
 
 # Plugin tests
 
+add_executable(testPluginLifecycle testPluginLifecycle.cc)
+target_link_libraries(testPluginLifecycle core corePlugins gtest gtest_main)
+add_test(NAME PluginLifecycleTest COMMAND testPluginLifecycle)
+
 add_executable(testNamedObjectManager testNamedObjectManager.cc)
 target_link_libraries(testNamedObjectManager core gtest gtest_main)
 add_test(NAME NamedObjectManagerTest COMMAND testNamedObjectManager)
