@@ -148,10 +148,8 @@ void BDTManager::setupFromConfigFile() {
   }
 }
 void BDTManager::initialize() {
-  if (configManager_m) {
-    std::cout << "BDTManager: initialized with " << bdt_runVars_m.size()
-              << " BDT(s)." << std::endl;
-  }
+  std::cout << "BDTManager: initialized with " << bdt_runVars_m.size()
+            << " BDT(s)." << std::endl;
 }
 
 void BDTManager::reportMetadata() {
