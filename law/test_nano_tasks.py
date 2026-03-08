@@ -310,6 +310,11 @@ class TestNanoDatasetFilter(unittest.TestCase):
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestSubmitSingleJobRemoteIndependence(unittest.TestCase):
+    """Verify _submit_single_job generates a submit file that transfers
+    the whole shared_inputs/ directory rather than individual files."""
+    
+
 class TestMakePartitions(unittest.TestCase):
     """Tests for the _make_partitions utility in partition_utils."""
 
@@ -526,6 +531,96 @@ class TestNANOMixinPartitionParams(unittest.TestCase):
         import nano_tasks
         return nano_tasks
 
+    def test_shared_inputs_dir_in_transfer(self):
+        """transfer_input_files should reference shared_inputs/ as a directory,
+        not individual files inside it."""
+        import tempfile
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            main_dir    = tmp
+            shared_dir  = os.path.join(main_dir, "shared_inputs")
+            os.makedirs(shared_dir)
+            job_dir     = os.path.join(main_dir, "job_0")
+            os.makedirs(job_dir)
+            for fname in ("submit_config.txt", "floats.txt", "ints.txt"):
+                open(os.path.join(job_dir, fname), "w").close()
+            open(os.path.join(shared_dir, "myexe"), "w").close()
+
+            # Capture sub_path written by _submit_single_job
+            import io
+            from unittest.mock import patch, MagicMock
+
+            written_content = {}
+            real_open = open
+            def fake_open(path, mode="r", *a, **kw):
+                if "resub_job0.sub" in path and "w" in mode:
+                    buf = io.StringIO()
+                    # intercept write; use __enter__/__exit__ wrapper
+                    class _Wrapper:
+                        def write(self, s): buf.write(s)
+                        def __enter__(self): return self
+                        def __exit__(self, *_): written_content["sub"] = buf.getvalue()
+                    return _Wrapper()
+                return real_open(path, mode, *a, **kw)
+
+            with patch("builtins.open", side_effect=fake_open):
+                with patch("nano_tasks.subprocess.run") as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0, stdout="1 job(s) submitted to cluster 99.")
+                    mod._submit_single_job(
+                        job_index=0,
+                        main_dir=main_dir,
+                        exe_relpath="myexe",
+                        x509loc=None,
+                        stage_inputs=False,
+                        max_runtime=3600,
+                        request_memory=2000,
+                        shared_dir_name="shared_inputs",
+                        config_dict={},
+                    )
+
+            sub_text = written_content.get("sub", "")
+            self.assertIn(shared_dir, sub_text,
+                          "shared_inputs directory should appear in transfer_input_files")
+            # Individual files inside shared_inputs must NOT be listed separately
+            self.assertNotIn(os.path.join(shared_dir, "myexe"), sub_text)
+
+    def test_condor_proc_env_in_resubmission(self):
+        """Resubmission submit file must include CONDOR_PROC environment variable."""
+        import tempfile
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            main_dir   = tmp
+            shared_dir = os.path.join(main_dir, "shared_inputs")
+            os.makedirs(shared_dir)
+            job_dir    = os.path.join(main_dir, "job_0")
+            os.makedirs(job_dir)
+            for fname in ("submit_config.txt", "floats.txt", "ints.txt"):
+                open(os.path.join(job_dir, fname), "w").close()
+
+            sub_path = os.path.join(main_dir, "resubmissions", "resub_job0.sub")
+            from unittest.mock import patch, MagicMock
+
+            with patch("nano_tasks.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="submitted to cluster 99.")
+                mod._submit_single_job(
+                    job_index=0,
+                    main_dir=main_dir,
+                    exe_relpath="myexe",
+                    x509loc=None,
+                    stage_inputs=False,
+                    max_runtime=3600,
+                    request_memory=2000,
+                    shared_dir_name="shared_inputs",
+                    config_dict={},
+                )
+
+            with open(sub_path) as fh:
+                content = fh.read()
+
+            self.assertIn("CONDOR_PROC=$(Process)", content)
+            self.assertIn("CONDOR_CLUSTER=$(Cluster)", content)
     def test_partition_param_exists(self):
         """NANOMixin has a 'partition' luigi Parameter."""
         mod = self._import()

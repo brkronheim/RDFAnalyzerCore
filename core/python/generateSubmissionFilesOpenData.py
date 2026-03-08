@@ -389,13 +389,17 @@ def main():
     if x509_src:
         shutil.copy2(x509_src, os.path.join(shared_dir, x509loc))
 
-    copy_basenames = sorted({os.path.basename(path) for path in copyList})
-    skip_transfer = {"floats.txt", "ints.txt", submit_config_name}
-    extra_transfer_files = [
-        os.path.join(mainDir, "job_$(Process)", name)
-        for name in copy_basenames
-        if name not in skip_transfer
-    ]
+    # Copy common config files to shared_inputs/ once (transferred as a directory
+    # to all workers, eliminating per-job duplicates and reducing storage footprint).
+    for _cfg_file in copyList:
+        _src = resolve_path(_cfg_file)
+        if _src and os.path.exists(_src):
+            _dst = os.path.join(shared_dir, os.path.basename(_src))
+            if not os.path.exists(_dst):
+                shutil.copy2(_src, _dst)
+
+    # shared_inputs/ directory is transferred as a whole; no individual file entries needed.
+    extra_transfer_files = []
     # Thread-safe counter and single-shot event for test-job creation
     index_lock = threading.Lock()
     index_container = {"value": 0}
@@ -493,11 +497,6 @@ def main():
             my_index = allocate_index()
             job_dir = os.path.join(mainDir, f"job_{my_index}")
             Path(job_dir).mkdir(parents=True, exist_ok=True)
-
-            for file in copyList:
-                src = resolve_path(file)
-                dst = os.path.join(job_dir, os.path.basename(file))
-                shutil.copyfile(src, dst)
 
             outputFileName = saveDirectory + "/" + name + "_" + str(sampleIndex) + ".root"
             job_config = normalize_config_paths(dict(configDict))

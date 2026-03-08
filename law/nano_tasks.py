@@ -506,30 +506,16 @@ def _submit_single_job(
     resub_dir = os.path.join(main_dir, "resubmissions")
     Path(resub_dir).mkdir(parents=True, exist_ok=True)
 
-    copy_list   = get_copy_file_list(config_dict)
-    copy_bnames = sorted({os.path.basename(p) for p in copy_list})
-    skip_xfer   = {"floats.txt", "ints.txt", "submit_config.txt"}
-
+    # Transfer the three per-job files + the whole shared_inputs/ directory.
+    # Everything else (exe, .so libs, aux files, x509, config files) lives in
+    # shared_inputs/ which HTCondor transfers as a unit – no shared filesystem
+    # access required on the remote worker.
     transfer_files = [
         os.path.join(job_dir, "submit_config.txt"),
         os.path.join(job_dir, "floats.txt"),
         os.path.join(job_dir, "ints.txt"),
-        os.path.join(main_dir, shared_dir_name, exe_relpath),
+        os.path.join(main_dir, shared_dir_name),
     ]
-    if aux_file_names:
-        for aux_fname in sorted(set(aux_file_names)):
-            transfer_files.append(os.path.join(main_dir, shared_dir_name, aux_fname))
-    if x509loc:
-        transfer_files.append(
-            os.path.join(main_dir, shared_dir_name, os.path.basename(x509loc))
-        )
-    for name in copy_bnames:
-        if name not in skip_xfer:
-            transfer_files.append(os.path.join(job_dir, name))
-
-    if shared_lib_names:
-        for name in sorted(set(shared_lib_names)):
-            transfer_files.append(os.path.join(main_dir, shared_dir_name, name))
 
     inner_script = os.path.join(main_dir, "condor_runscript_inner.sh")
     if os.path.exists(inner_script):
@@ -546,6 +532,7 @@ Should_Transfer_Files = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification = never
 transfer_input_files = {transfer_str}
+environment = CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)
 +RequestMemory={request_memory}
 +RequestCpus=1
 +RequestDisk=20000
@@ -897,6 +884,8 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
             self.output().dump([], formatter="json")
             return
 
+        # Config files are staged to shared_inputs/ once by BuildNANOSubmission;
+        # they must NOT be copied per-job to avoid N redundant copies on disk.
         # Apply partitioning -------------------------------------------------
         partitions = _make_partitions(
             all_urls,
@@ -923,13 +912,6 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
         for sub_idx, partition in enumerate(partitions):
             job_dir = os.path.join(sample_base, f"job_{sub_idx}")
             Path(job_dir).mkdir(parents=True, exist_ok=True)
-
-            # Copy auxiliary config files (floats.txt, ints.txt, etc.) ----
-            for fpath in copy_list:
-                src = self._resolve(fpath)
-                dst = os.path.join(job_dir, os.path.basename(src))
-                Path(os.path.dirname(dst)).mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(src, dst)
 
             # Build job-specific submit config ----------------------------
             job_config = _normalize_config_paths(dict(config_dict))
@@ -1179,25 +1161,19 @@ class BuildNANOSubmission(NANOMixin, law.Task):
             else:
                 self.publish_message("Warning: no input files found; test job not created.")
 
-        # ---- write condor files -----------------------------------------
+        # ---- copy common config files to shared_inputs/ (once for all jobs) ---
         copy_list = get_copy_file_list(config_dict)
-        copy_basenames = sorted({os.path.basename(p) for p in copy_list})
-        skip_transfer = {"floats.txt", "ints.txt", "submit_config.txt"}
-        extra_transfer_files = [
-            os.path.join(self._main_dir, "job_$(Process)", name)
-            for name in copy_basenames
-            if name not in skip_transfer
-        ]
-        extra_transfer_files.extend(
-            os.path.join(self._main_dir, "shared_inputs", name)
-            for name in sorted(local_shared_libs.keys())
-        )
-        extra_transfer_files.extend(
-            os.path.join(self._main_dir, "shared_inputs", aux_fname)
-            for aux_fname in aux_files
-        )
-        if python_env_staged:
-            extra_transfer_files.append(python_env_staged)
+        for fpath in copy_list:
+            src = self._resolve(fpath)
+            if src and os.path.exists(src):
+                dst = os.path.join(shared_dir, os.path.basename(src))
+                if not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+
+        # ---- write condor files -----------------------------------------
+        # shared_inputs/ directory is transferred as a whole by write_submit_files;
+        # no extra per-file entries are needed (python env tarball is inside shared_inputs/).
+        extra_transfer_files: list[str] = []
 
         main_dir = self._main_dir
         submit_path = write_submit_files(
@@ -1518,16 +1494,6 @@ class MonitorNANOJobs(NANOMixin, law.Task):
             )
 
         config_dict = self._config_dict
-        aux_src = self._resolve("aux")
-        aux_file_names: list[str] = []
-        if aux_src and os.path.exists(aux_src):
-            aux_file_names = [
-                f.name for f in sorted(Path(aux_src).iterdir()) if f.is_file()
-            ]
-        shared_lib_names = [
-            name for name in os.listdir(self._shared_dir)
-            if ".so" in name and os.path.isfile(os.path.join(self._shared_dir, name))
-        ] if os.path.isdir(self._shared_dir) else []
 
         # Initialise / restore per-job state ----------------------------
         state = self._load_state()
@@ -1593,7 +1559,7 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                     else:
                         self.publish_message(f"Job {idx} held (could not confirm condor_rm): {hold_reason}")
                     self._try_resubmit(
-                        idx, jstate, job_info, config_dict, aux_file_names, reason=f"held: {hold_reason}"
+                        idx, jstate, job_info, config_dict, reason=f"held: {hold_reason}"
                     )
                     continue
 
@@ -1606,7 +1572,7 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                                 f"Job {idx} failed with exit code {exit_code}. stderr tail:\n{error_tail}"
                             )
                         self._try_resubmit(
-                            idx, jstate, job_info, config_dict, aux_file_names,
+                            idx, jstate, job_info, config_dict,
                             reason=f"exit code {exit_code}"
                         )
                         continue
@@ -1676,7 +1642,6 @@ class MonitorNANOJobs(NANOMixin, law.Task):
         jstate: dict,
         job_info: dict,
         config_dict: dict,
-        aux_file_names: list[str],
         reason: str,
     ) -> None:
         """Attempt to resubmit job *idx*; update jstate in place."""
@@ -1694,11 +1659,6 @@ class MonitorNANOJobs(NANOMixin, law.Task):
             f"(attempt {retries + 1}/{self.max_retries})."
         )
 
-        shared_lib_names = [
-            name for name in os.listdir(self._shared_dir)
-            if ".so" in name and os.path.isfile(os.path.join(self._shared_dir, name))
-        ] if os.path.isdir(self._shared_dir) else []
-
         new_cluster = _submit_single_job(
             idx,
             self._main_dir,
@@ -1709,8 +1669,6 @@ class MonitorNANOJobs(NANOMixin, law.Task):
             2000,
             "shared_inputs",
             config_dict,
-            aux_file_names=aux_file_names,
-            shared_lib_names=shared_lib_names,
         )
         if new_cluster:
             jstate.update(

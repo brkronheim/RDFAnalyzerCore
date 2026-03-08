@@ -248,6 +248,14 @@ elif meta_file:
     cfg["__orig_metaFile"] = meta_file
     cfg["metaFile"] = os.path.basename(meta_file)
 
+proc_id = os.environ.get("CONDOR_PROC", "")
+if proc_id and cfg.get("saveFile"):
+    base, ext = os.path.splitext(cfg["saveFile"])
+    cfg["saveFile"] = f"{{base}}_{{proc_id}}{{ext}}"
+if proc_id and cfg.get("metaFile"):
+    base, ext = os.path.splitext(cfg["metaFile"])
+    cfg["metaFile"] = f"{{base}}_{{proc_id}}{{ext}}"
+
 write_config(cfg, "{config_file}")
 PY
 """
@@ -302,7 +310,7 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
                 capture_output=True, timeout=30,
             )
         except Exception as mkdir_exc:
-            print(f"Warning: xrdfs mkdir -p {eos_dir} failed (may already exist): {mkdir_exc}")
+            print(f"Warning: xrdfs mkdir -p {{eos_dir}} failed (may already exist): {{mkdir_exc}}")
 
     cmd = [
         "xrdcp",
@@ -373,6 +381,7 @@ def generate_condor_runscript(
             f"if [ -f {shared_dir_name}/{exe_relpath} ]; then cp -f {shared_dir_name}/{exe_relpath} .; chmod +x {exe_relpath}; fi\n"
             f"if [ -d {shared_dir_name}/aux ] && [ ! -e aux ]; then cp -R {shared_dir_name}/aux aux; fi\n"
             f"if compgen -G \"{shared_dir_name}/*.so*\" > /dev/null; then cp -f {shared_dir_name}/*.so* .; fi\n"
+            f"for _shared_f in {shared_dir_name}/*; do [ -f \"$_shared_f\" ] && cp -n \"$_shared_f\" . 2>/dev/null || true; done\n"
             f"export LD_LIBRARY_PATH=\"$PWD/{shared_dir_name}:$PWD:${{LD_LIBRARY_PATH:-}}\"\n"
         )
         if x509_name:
@@ -500,12 +509,7 @@ def generate_condor_submit(
         f"{main_dir}/job_$(Process)/ints.txt",
     ]
     if shared_dir_name:
-        transfer_files.append(f"{main_dir}/{shared_dir_name}/{exe_relpath}")
-        if include_aux:
-            transfer_files.append(f"{main_dir}/{shared_dir_name}/aux")
-        if x509loc:
-            x509_name = os.path.basename(x509loc)
-            transfer_files.append(f"{main_dir}/{shared_dir_name}/{x509_name}")
+        transfer_files.append(f"{main_dir}/{shared_dir_name}")
     else:
         transfer_files.append(f"{main_dir}/job_$(Process)/{exe_relpath}")
         if include_aux:
@@ -538,6 +542,7 @@ Should_Transfer_Files     = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification     = never
 transfer_input_files = {transfer_input_files}
+environment = CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)
 {stream_block}{want_os_block}+RequestMemory={request_memory}
 +RequestCpus={request_cpus}
 +RequestDisk={request_disk}
