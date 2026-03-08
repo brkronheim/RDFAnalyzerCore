@@ -412,22 +412,21 @@ class TestMakePartitions(unittest.TestCase):
 
     def test_entry_range_requires_uproot(self):
         """'entry_range' mode raises RuntimeError when uproot is absent."""
-        import builtins
-        import importlib
+        import sys
+        import unittest.mock as mock
         mod = self._import()
 
-        real_import = builtins.__import__
-
-        def _mock_import(name, *args, **kwargs):
-            if name == "uproot":
-                raise ImportError("uproot not installed")
-            return real_import(name, *args, **kwargs)
-
-        import unittest.mock as mock
-        with mock.patch("builtins.__import__", side_effect=_mock_import):
-            with self.assertRaises(RuntimeError) as ctx:
-                mod._query_tree_entries("fake.root", "Events")
-        self.assertIn("uproot", str(ctx.exception).lower())
+        # Remove uproot from sys.modules (if present) so the lazy import inside
+        # _query_tree_entries() sees it as missing.
+        saved = sys.modules.pop("uproot", None)
+        try:
+            with mock.patch.dict(sys.modules, {"uproot": None}):
+                with self.assertRaises(RuntimeError) as ctx:
+                    mod._query_tree_entries("fake.root", "Events")
+            self.assertIn("uproot", str(ctx.exception).lower())
+        finally:
+            if saved is not None:
+                sys.modules["uproot"] = saved
 
     def test_entry_range_splits_correctly(self):
         """'entry_range' mode produces correct ranges for a known entry count."""

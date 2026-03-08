@@ -828,7 +828,7 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
         sample = sample_list[sample_key]
 
         name = sample["name"]
-        das = sample.get("das", sample.get("fileList", ""))
+        das_path = sample.get("das", "")
         xsec = float(sample["xsec"])
         typ = sample["type"]
         norm = float(sample.get("norm", 1))
@@ -852,14 +852,14 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     all_urls.append(ensure_xrootd_redirector(url))
-        elif das:
+        elif das_path:
             # Query Rucio ----------------------------------------------------
             try:
                 client = _get_rucio_client()
             except Exception as e:
                 raise RuntimeError(f"Cannot open Rucio client: {e}") from e
 
-            das_entries = [d.strip() for d in das.split(",") if d.strip()]
+            das_entries = [d.strip() for d in das_path.split(",") if d.strip()]
             if not das_entries:
                 self.publish_message(f"No DAS entries for sample {name}; creating empty output.")
                 Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
@@ -940,7 +940,9 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
             job_config["intConfig"] = "ints.txt"
 
             # Write entry-range keys when in entry_range partition mode ----
-            if partition["first_entry"] > 0 or partition["last_entry"] > 0:
+            # last_entry > 0 is the sentinel: file_group/file modes use 0
+            # for both fields, while entry_range mode always sets last_entry > 0.
+            if partition["last_entry"] > 0:
                 job_config["firstEntry"] = str(partition["first_entry"])
                 job_config["lastEntry"] = str(partition["last_entry"])
 

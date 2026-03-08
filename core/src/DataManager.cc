@@ -27,6 +27,10 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
       // Apply optional entry-range restriction.
       // Written by law tasks when partition='entry_range' is selected.
       // Both keys must be present; if only one is set the range is ignored.
+      // Note: Range() disables implicit multi-threading (ImplicitMT) when
+      // used with ROOT < 6.28.  In entry_range partition mode each condor
+      // job is a separate process, so per-job parallelism is unaffected;
+      // only the in-process thread count is restricted to 1 on older ROOT.
       const std::string firstEntryStr = configProvider.get("firstEntry");
       const std::string lastEntryStr  = configProvider.get("lastEntry");
       if (!firstEntryStr.empty() && !lastEntryStr.empty()) {

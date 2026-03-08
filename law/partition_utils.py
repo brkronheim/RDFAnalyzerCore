@@ -158,7 +158,10 @@ def _make_partitions(
         for u in sorted_urls:
             n_entries = _query_tree_entries(u, tree_name)
             if n_entries <= 0:
-                # Empty or unreadable file: single partition covering all entries
+                # File is empty or entry count is unavailable.  Emit a single
+                # partition with last_entry=0 so the C++ job will process the
+                # file in full (no Range() applied), which is a safe no-op for
+                # an empty file and avoids silently discarding the file.
                 partitions.append({"files": u, "first_entry": 0, "last_entry": 0})
                 continue
             n_parts = max(1, (n_entries + entries_per_job - 1) // entries_per_job)

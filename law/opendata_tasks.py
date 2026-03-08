@@ -835,7 +835,9 @@ class PrepareOpenDataSample(OpenDataMixin, law.LocalWorkflow):
             job_config["intConfig"]    = "ints.txt"
 
             # Write entry-range keys when in entry_range partition mode ----
-            if partition["first_entry"] > 0 or partition["last_entry"] > 0:
+            # last_entry > 0 is the sentinel: file_group/file modes use 0
+            # for both fields, while entry_range mode always sets last_entry > 0.
+            if partition["last_entry"] > 0:
                 job_config["firstEntry"] = str(partition["first_entry"])
                 job_config["lastEntry"] = str(partition["last_entry"])
 
