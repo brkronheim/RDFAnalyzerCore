@@ -488,6 +488,38 @@ Features:
 - [Systematics Example](docs/DATACARD_SYSTEMATICS_EXAMPLE.md) for creating histograms with systematic variations
 - [Combine Integration](docs/COMBINE_INTEGRATION.md) for complete statistical analysis workflow
 
+### Production Manager
+
+Unified production management system for batch analyses:
+
+```bash
+# Create and submit a production
+python core/python/production_submit.py \
+    --name my_analysis \
+    --config cfg/config.txt \
+    --sample-config cfg/samples.txt \
+    --exe build/analyses/MyAnalysis/myanalysis \
+    --submit
+
+# Monitor progress
+python core/python/production_monitor.py monitor --name my_analysis
+
+# Validate outputs and resubmit failures
+python core/python/production_monitor.py validate --name my_analysis
+python core/python/production_monitor.py resubmit --name my_analysis
+```
+
+Features:
+- Unified job lifecycle management (generation, submission, monitoring, validation)
+- State persistence (resilient to connection failures)
+- Real-time progress monitoring
+- Automatic output validation
+- Failure recovery and resubmission
+- HTCondor and DASK backend support
+- Works in AFS/EOS storage areas
+
+**See**: [Production Manager Guide](docs/PRODUCTION_MANAGER.md) for complete documentation.
+
 ### HTCondor Submission
 
 Framework includes Python scripts for batch submission:

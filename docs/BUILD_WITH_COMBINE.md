@@ -32,10 +32,11 @@ These should already be available if you're on lxplus or have a proper ROOT inst
 
 After building with `BUILD_COMBINE=ON`:
 - CMS Combine is cloned and built in: `build/external/HiggsAnalysis/CombinedLimit/`
-- The `combine` executable is at: `build/external/HiggsAnalysis/CombinedLimit/exe/combine`
+- The `combine` executable is at: `build/external/HiggsAnalysis/CombinedLimit/bin/combine`
 
 After building with `BUILD_COMBINE_HARVESTER=ON`:
-- CombineHarvester is cloned and built in: `build/external/CombineHarvester/`
+- CombineHarvester is cloned, patched for modern ROOT compatibility, and built in: `build/external/CombineHarvester/`
+- Libraries are at: `build/external/CombineHarvester/lib/`
 - Tools are at: `build/external/CombineHarvester/CombineTools/bin/`
 
 ## Usage
@@ -44,13 +45,13 @@ After building, run combine directly:
 
 ```bash
 # From datacards directory
-../build/external/HiggsAnalysis/CombinedLimit/exe/combine -M AsymptoticLimits datacard.txt
+../build/external/HiggsAnalysis/CombinedLimit/bin/combine -M AsymptoticLimits datacard.txt
 ```
 
 Or add to your PATH:
 
 ```bash
-export PATH="$PWD/build/external/HiggsAnalysis/CombinedLimit/exe:$PATH"
+export PATH="$PWD/build/external/HiggsAnalysis/CombinedLimit/bin:$PATH"
 combine -M AsymptoticLimits datacards/datacard.txt
 ```
 

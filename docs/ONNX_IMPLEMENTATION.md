@@ -92,6 +92,37 @@ Add to main config:
 onnxConfig=cfg/onnx_models.txt
 ```
 
+### Input Padding for Fixed-Size Models
+
+ONNX models with fixed-size inputs (e.g., transformer attention mechanisms) now support automatic zero-padding. This is particularly useful for models that require a specific input size but process variable-length sequences.
+
+**Configuration**:
+
+Add `paddingSize` parameter to your model configuration:
+
+```
+# onnx_models.txt
+file=transformer.onnx name=ParT inputVariables=pt,eta,phi paddingSize=128
+```
+
+**Behavior**:
+- Input vectors shorter than `paddingSize` are zero-padded to the specified size
+- Input vectors longer than `paddingSize` are truncated to the specified size
+- Omitting `paddingSize` preserves existing behavior (no padding/truncation)
+
+**Example**:
+
+```cpp
+// Configuration: paddingSize=128
+// Input: RVec<float>{1.0, 2.0, 3.0}  (size 3)
+// After padding: RVec<float>{1.0, 2.0, 3.0, 0.0, 0.0, ..., 0.0}  (size 128)
+
+// Input: RVec<float>{...300 elements...}  (size 300)
+// After truncation: RVec<float>{...first 128 elements...}  (size 128)
+```
+
+This feature enables the use of transformer-based models (ParticleNet, ParT, etc.) that require fixed-size attention masks and positional encodings.
+
 ## Usage Example
 
 ### Single Output Model

@@ -25,11 +25,6 @@ import numpy as np
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Any, Union
 
-# Import the output schema module for manifest emission.
-# output_schema.py lives alongside this script in core/python/.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from output_schema import emit_output_manifest, LawArtifactSchema, MANIFEST_FILENAME
-
 # Try to import required packages
 try:
     import uproot
@@ -155,9 +150,6 @@ class DatacardGenerator:
         
         # Store histogram data
         self.histograms = {}
-
-        # Track artifacts emitted during this run for manifest emission.
-        self._generated_artifacts: Dict[str, LawArtifactSchema] = {}
         
     def read_histograms(self) -> None:
         """Read histograms from input ROOT files using uproot."""
@@ -396,15 +388,6 @@ class DatacardGenerator:
         datacard_filename = os.path.join(self.output_dir, f"datacard_{region}.txt")
         self._write_datacard_file(datacard_filename, region, process_hists, root_filename)
         print(f"  Created datacard: {datacard_filename}")
-
-        # Record the artifacts generated for this region so they can be
-        # included in the output manifest emitted at the end of run().
-        self._generated_artifacts[f"shapes_{region}"] = LawArtifactSchema(
-            path=root_filename, artifact_type="shapes"
-        )
-        self._generated_artifacts[f"datacard_{region}"] = LawArtifactSchema(
-            path=datacard_filename, artifact_type="datacard"
-        )
     
     def _write_root_file(self, filename: str, process_hists: Dict[str, Histogram1D], region: str) -> None:
         """
@@ -701,15 +684,6 @@ class DatacardGenerator:
         
         self.read_histograms()
         self.generate_all_datacards()
-
-        # Emit an output manifest listing all generated LAW artifacts so that
-        # downstream tasks can discover and validate them without custom logic.
-        if self._generated_artifacts:
-            manifest_path = emit_output_manifest(
-                self.output_dir,
-                extra_artifacts=self._generated_artifacts,
-            )
-            print(f"  Schema manifest written: {manifest_path}")
         
         print("=" * 80)
         print(f"Datacard generation complete. Output in: {self.output_dir}")

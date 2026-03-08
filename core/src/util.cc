@@ -9,7 +9,6 @@
  */
 #include <cstdlib>
 #include <dlfcn.h>
-#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -65,36 +64,23 @@ static std::string getDirectory(const IConfigurationProvider &configProvider) {
 /**
  * @brief Validate ROOT runtime environment consistency
  *
- * Ensures ROOTSYS is set, a module map exists under ROOTSYS, and the loaded
- * libCore location matches ROOTSYS to avoid mixed ROOT installations at runtime.
+ * Ensures the loaded ROOT libraries are consistent with ROOTSYS when ROOTSYS
+ * is set, avoiding mixed ROOT installations at runtime.
  */
 static void validateRootEnvironment() {
-  const char *rootSysEnv = std::getenv("ROOTSYS");
-  if (rootSysEnv == nullptr || std::string(rootSysEnv).empty()) {
-    throw std::runtime_error(
-        "ROOTSYS is not set. Source env.sh and rebuild to ensure a consistent ROOT environment.");
-  }
-
-  const std::filesystem::path rootSysPath(rootSysEnv);
-  const std::filesystem::path moduleMapShare = rootSysPath / "share" / "root" / "cling" / "module.modulemap";
-  const std::filesystem::path moduleMapEtc = rootSysPath / "etc" / "cling" / "module.modulemap";
-  const std::filesystem::path moduleMapEtcLegacy = rootSysPath / "etc" / "cling" / "cling.modulemap";
-  if (!std::filesystem::exists(moduleMapShare) &&
-      !std::filesystem::exists(moduleMapEtc) &&
-      !std::filesystem::exists(moduleMapEtcLegacy)) {
-    throw std::runtime_error(
-        "ROOT module map not found under ROOTSYS. Please source env.sh and rebuild to avoid mixed ROOT installs.");
-  }
-
   Dl_info info;
   if (dladdr(reinterpret_cast<void*>(&TROOT::Class), &info) != 0 && info.dli_fname) {
     const std::string libCorePath(info.dli_fname);
+    const char *rootSysEnv = std::getenv("ROOTSYS");
+    if (rootSysEnv == nullptr || std::string(rootSysEnv).empty()) {
+      return;
+    }
     const std::string rootSysStr(rootSysEnv);
-    /*if (libCorePath.rfind(rootSysStr, 0) != 0) {
+    if (libCorePath.rfind(rootSysStr, 0) != 0) {
       throw std::runtime_error(
           "Detected ROOT library from '" + libCorePath + "' but ROOTSYS='" + rootSysStr +
           "'. This indicates mixed ROOT installations. Source env.sh and rebuild from a clean build directory.");
-    }*/
+    }
   }
 }
 

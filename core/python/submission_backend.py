@@ -1,4 +1,5 @@
 import os
+import shlex
 from pathlib import Path
 import yaml
 
@@ -73,6 +74,33 @@ def get_copy_file_list(config_dict):
         if ".txt" in value or ".yaml" in value or ".yml" in value:
             transfer_list.append(value)
     return transfer_list
+
+
+def ensure_xrootd_redirector(uri, redirector="root://eospublic.cern.ch/"):
+    """Ensure *uri* is addressed via an XRootD redirector.
+
+    If the URI already starts with ``root://`` it is returned unchanged.
+    A bare EOS path (starting with ``/``) is prefixed with *redirector* so
+    that the file can be accessed from any worker node regardless of whether
+    the EOS file system is locally mounted.  This decouples the storage
+    location from the job running location.
+
+    Args:
+        uri:        File URI as returned by the CERN Open Data API or Rucio.
+        redirector: XRootD redirector to prepend when the URI has no scheme.
+                    Defaults to ``root://eospublic.cern.ch/``.
+
+    Returns:
+        URI guaranteed to start with ``root://``, or the original value if
+        it has no leading ``/`` and is not a ``root://`` URI.
+    """
+    if not uri:
+        return uri
+    if uri.startswith("root://"):
+        return uri
+    if uri.startswith("/"):
+        return redirector.rstrip("/") + "/" + uri.lstrip("/")
+    return uri
 
 
 def ensure_symlink(src, dst):
@@ -263,6 +291,19 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
 
     if streams is None:
         streams = os.environ.get("XRDCP_STREAMS", "4")
+
+    # Ensure the destination directory exists on EOS before copying
+    eos_path = dest.split("//", 2)[-1] if "//" in dest else dest
+    eos_dir = os.path.dirname("/" + eos_path.lstrip("/"))
+    if eos_dir and eos_dir != "/":
+        try:
+            subprocess.run(
+                ["xrdfs", "root://eosuser.cern.ch/", "mkdir", "-p", eos_dir],
+                capture_output=True, timeout=30,
+            )
+        except Exception as mkdir_exc:
+            print(f"Warning: xrdfs mkdir -p {eos_dir} failed (may already exist): {mkdir_exc}")
+
     cmd = [
         "xrdcp",
         "-f",
@@ -311,13 +352,19 @@ def generate_condor_runscript(
     eos_sched=False,
     shared_dir_name=None,
     config_file="submit_config.txt",
+    python_env_tarball=None,
 ):
     stage_block = stage_inputs_block(eos_sched, config_file) if stage_inputs else ""
     stage_out_pre = ""
     stage_out_post = ""
     if stage_outputs:
         stage_out_pre, stage_out_post = stage_outputs_blocks(eos_sched, config_file)
-    root_block = (root_setup + "\n") if root_setup else ""
+    def _setup_block(setup_text):
+        if not setup_text:
+            return ""
+        return "set +u\n" + setup_text.rstrip() + "\nset -u\n"
+
+    root_block = _setup_block(root_setup)
     pre_block = pre_setup_lines or ""
     x509_name = os.path.basename(x509loc) if x509loc else ""
     shared_block = ""
@@ -325,6 +372,8 @@ def generate_condor_runscript(
         shared_block = (
             f"if [ -f {shared_dir_name}/{exe_relpath} ]; then cp -f {shared_dir_name}/{exe_relpath} .; chmod +x {exe_relpath}; fi\n"
             f"if [ -d {shared_dir_name}/aux ] && [ ! -e aux ]; then cp -R {shared_dir_name}/aux aux; fi\n"
+            f"if compgen -G \"{shared_dir_name}/*.so*\" > /dev/null; then cp -f {shared_dir_name}/*.so* .; fi\n"
+            f"export LD_LIBRARY_PATH=\"$PWD/{shared_dir_name}:$PWD:${{LD_LIBRARY_PATH:-}}\"\n"
         )
         if x509_name:
             shared_block += f"if [ -f {shared_dir_name}/{x509_name} ]; then cp -f {shared_dir_name}/{x509_name} .; fi\n"
@@ -337,13 +386,30 @@ def generate_condor_runscript(
             f"voms-proxy-info -all -file {x509_name}\n"
         )
 
+    python_env_block = ""
+    if python_env_tarball:
+        tarball_name = os.path.basename(python_env_tarball)
+        python_env_block = (
+            f"if [ -f \"{tarball_name}\" ]; then\n"
+            f"  echo \"Unpacking Python environment from {tarball_name}...\"\n"
+            f"  mkdir -p _python_env\n"
+            f"  tar -xzf \"{tarball_name}\" -C _python_env\n"
+            f"  export PYTHONPATH=\"$PWD/_python_env:${{PYTHONPATH:-}}\"\n"
+            f"  export PATH=\"$PWD/_python_env/bin:${{PATH:-}}\"\n"
+            f"  export LD_LIBRARY_PATH=\"$PWD/_python_env:${{LD_LIBRARY_PATH:-}}\"\n"
+            f"  echo \"Python environment ready (PYTHONPATH=$PYTHONPATH)\"\n"
+            f"else\n"
+            f"  echo \"WARNING: Python environment tarball {tarball_name} not found\"\n"
+            f"fi\n"
+        )
+
     run_script = f"""#!/bin/bash
 # fail fast on any command error, undefined var, or pipeline failure
 set -euo pipefail
 trap 'rc=$?; echo "ERROR: wrapper exited with code $rc"; exit $rc' ERR
 # log and re-raise SIGTERM so Condor records ExitBySignal (do not swallow the signal)
 trap 'echo "Received SIGTERM - likely timed out by scheduler"; trap - SIGTERM; kill -s SIGTERM $$' SIGTERM
-{root_block}{pre_block}{shared_block}{x509_block}ls
+{root_block}{pre_block}{shared_block}{x509_block}{python_env_block}ls
 stage_in_start=$(date +%s)
 {stage_out_pre}{stage_block}
 stage_in_end=$(date +%s)
@@ -380,12 +446,41 @@ echo "Done!"
     return run_script
 
 
+def generate_container_wrapper(container_setup, inner_script_name):
+    setup = (container_setup or "").strip()
+    inner_cmd = f"bash {shlex.quote('./' + inner_script_name)}"
+
+    if "{cmd}" in setup:
+        launch_cmd = setup.replace("{cmd}", inner_cmd)
+    elif "cmssw-el" in setup and "--command-to-run" not in setup:
+        launch_cmd = f'{setup} --command-to-run "{inner_cmd}"'
+    elif "--command-to-run" in setup:
+        launch_cmd = f'{setup} "{inner_cmd}"'
+    else:
+        launch_cmd = f"{setup} {inner_cmd}"
+
+    wrapper = f"""#!/bin/bash
+set -euo pipefail
+trap 'rc=$?; echo "ERROR: wrapper exited with code $rc"; exit $rc' ERR
+trap 'echo "Received SIGTERM - likely timed out by scheduler"; trap - SIGTERM; kill -s SIGTERM $$' SIGTERM
+
+if [ ! -f ./{inner_script_name} ]; then
+  echo "ERROR: missing inner runscript ./{inner_script_name}"
+  exit 2
+fi
+chmod +x ./{inner_script_name}
+
+{launch_cmd}
+"""
+    return wrapper
+
+
 def generate_condor_submit(
     main_dir,
     jobs,
     exe_relpath,
     x509loc=None,
-    want_os="el9",
+    want_os="",
     max_runtime="3600",
     request_memory=2000,
     request_cpus=1,
@@ -435,14 +530,15 @@ def generate_condor_submit(
 
     log_name = "log_$(Cluster).log"
 
+    want_os_block = f'MY.WantOS = "{want_os}"\n' if want_os else ""
+
     submit_file = f"""universe = vanilla
 Executable     =  {main_dir}/condor_runscript.sh
 Should_Transfer_Files     = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification     = never
 transfer_input_files = {transfer_input_files}
-{stream_block}MY.WantOS = "{want_os}"
-+RequestMemory={request_memory}
+{stream_block}{want_os_block}+RequestMemory={request_memory}
 +RequestCpus={request_cpus}
 +RequestDisk={request_disk}
 +MaxRuntime={max_runtime}
@@ -467,7 +563,7 @@ def write_submit_files(
     root_setup,
     x509loc=None,
     pre_setup_lines="",
-    want_os="el9",
+    want_os="",
     max_runtime="3600",
     request_memory=2000,
     request_cpus=1,
@@ -479,9 +575,56 @@ def write_submit_files(
     include_aux=True,
     shared_dir_name=None,
     config_file="submit_config.txt",
+    container_setup="",
+    python_env_tarball=None,
 ):
     submit_path = os.path.join(main_dir, "condor_submit.sub")
     runscript_path = os.path.join(main_dir, "condor_runscript.sh")
+
+    submit_extra_transfer_files = list(extra_transfer_files) if extra_transfer_files else []
+    inner_script_name = "condor_runscript_inner.sh"
+    inner_runscript_path = os.path.join(main_dir, inner_script_name)
+
+    if container_setup:
+        submit_extra_transfer_files.append(inner_runscript_path)
+
+    if container_setup:
+        with open(inner_runscript_path, "w") as condor_sub:
+            condor_sub.write(
+                generate_condor_runscript(
+                    exe_relpath,
+                    stage_inputs,
+                    stage_outputs,
+                    root_setup,
+                    x509loc=x509loc,
+                    pre_setup_lines=pre_setup_lines,
+                    use_shared_inputs=use_shared_inputs,
+                    eos_sched=eos_sched,
+                    shared_dir_name=shared_dir_name,
+                    config_file=config_file,
+                    python_env_tarball=python_env_tarball,
+                )
+            )
+        with open(runscript_path, "w") as condor_sub:
+            condor_sub.write(generate_container_wrapper(container_setup, inner_script_name))
+    else:
+        with open(runscript_path, "w") as condor_sub:
+            condor_sub.write(
+                generate_condor_runscript(
+                    exe_relpath,
+                    stage_inputs,
+                    stage_outputs,
+                    root_setup,
+                    x509loc=x509loc,
+                    pre_setup_lines=pre_setup_lines,
+                    use_shared_inputs=use_shared_inputs,
+                    eos_sched=eos_sched,
+                    shared_dir_name=shared_dir_name,
+                    config_file=config_file,
+                    python_env_tarball=python_env_tarball,
+                )
+            )
+
     with open(submit_path, "w") as condor_sub:
         condor_sub.write(
             generate_condor_submit(
@@ -494,26 +637,11 @@ def write_submit_files(
                 request_memory=request_memory,
                 request_cpus=request_cpus,
                 request_disk=request_disk,
-                extra_transfer_files=extra_transfer_files,
+                extra_transfer_files=submit_extra_transfer_files,
                 use_shared_inputs=use_shared_inputs,
                 stream_logs=stream_logs,
                 eos_sched=eos_sched,
                 include_aux=include_aux,
-                shared_dir_name=shared_dir_name,
-                config_file=config_file,
-            )
-        )
-    with open(runscript_path, "w") as condor_sub:
-        condor_sub.write(
-            generate_condor_runscript(
-                exe_relpath,
-                stage_inputs,
-                stage_outputs,
-                root_setup,
-                x509loc=x509loc,
-                pre_setup_lines=pre_setup_lines,
-                use_shared_inputs=use_shared_inputs,
-                eos_sched=eos_sched,
                 shared_dir_name=shared_dir_name,
                 config_file=config_file,
             )

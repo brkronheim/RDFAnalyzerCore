@@ -1,0 +1,24 @@
+# Example submit config for law-based batch submission.
+# Replace the placeholder values with your actual paths and settings.
+#
+# saveDirectory: EOS or local output directory for processed files
+saveDirectory=/eos/user/<initial>/<username>/your_analysis_output/
+saveTree=Events
+treeList=Events
+sampleConfig=samples.txt
+enableCounters=true
+enableSkim=false
+# counterWeightBranch: branch name for event weights (optional)
+# counterWeightBranch=Generator_weight
+# counterIntWeightBranch: branch name for integer stitching weights (optional)
+# counterIntWeightBranch=stitchBinNLO
+correctionConfig=corrections.txt
+year=22
+saveFile=output.root
+metaFile=output_meta.root
+# fileList: comma-separated list of input ROOT files or XRootD URLs
+# fileList=input_0.root,input_1.root
+batch=True
+type=sample_type
+floatConfig=floats.txt
+intConfig=ints.txt

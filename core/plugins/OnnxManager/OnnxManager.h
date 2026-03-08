@@ -8,6 +8,7 @@
 #include <RtypesCore.h>
 #include <onnxruntime_cxx_api.h>
 #include <memory>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -38,6 +39,10 @@ public:
    * For models with multiple outputs, each output tensor creates a separate column:
    * - Single output: column named "{modelName}{outputSuffix}"
    * - Multiple outputs: columns named "{modelName}_output0{outputSuffix}", "{modelName}_output1{outputSuffix}", etc.
+   *
+   * If a paddingSize is configured for the model, the input vector is zero-padded
+   * to that size before inference (e.g. for transformers with a fixed number of
+   * attention particles).
    */
   void applyModel(const std::string &modelName, const std::string &outputSuffix = "");
 
@@ -89,6 +94,20 @@ public:
   const std::vector<std::string> &getModelOutputNames(const std::string &modelName) const;
 
   /**
+   * @brief Get the padding size for an ONNX model
+   * @param modelName Name of the model
+   * @return Padding size (0 if no padding configured)
+   */
+  int64_t getPaddingSize(const std::string &modelName) const;
+
+  /**
+   * @brief Get whether an ONNX model is configured to use the CUDA runtime
+   * @param modelName Name of the model
+   * @return true if the model uses the CUDA execution provider, false otherwise
+   */
+  bool getUseCuda(const std::string &modelName) const;
+
+  /**
    * @brief Return the type of the manager
    */
   std::string type() const override { return "OnnxManager"; }
@@ -130,6 +149,36 @@ private:
    * @brief Map from model name to output names (for ONNX runtime)
    */
   std::unordered_map<std::string, std::vector<std::string>> model_outputNames_m;
+
+  /**
+   * @brief Map from model name to padding size (0 = no padding)
+   */
+  std::unordered_map<std::string, int64_t> model_paddingSize_m;
+
+  /**
+   * @brief Map from model name to CUDA runtime usage flag
+   */
+  std::unordered_map<std::string, bool> model_useCuda_m;
+  
+  /**
+   * @brief Map from model name to resolved ONNX input shapes.
+   */
+  std::unordered_map<std::string, std::vector<std::vector<int64_t>>> model_inputShapes_m;
+
+  /**
+   * @brief Map from model name to flattened element count per ONNX input tensor.
+   */
+  std::unordered_map<std::string, std::vector<int64_t>> model_inputElementCounts_m;
+
+  /**
+   * @brief Cached C-string pointers for ONNX input names (to avoid per-event allocation).
+   */
+  std::unordered_map<std::string, std::vector<const char *>> model_inputNamePtrs_m;
+
+  /**
+   * @brief Cached C-string pointers for ONNX output names (to avoid per-event allocation).
+   */
+  std::unordered_map<std::string, std::vector<const char *>> model_outputNamePtrs_m;
 };
 
 #endif // ONNXMANAGER_H_INCLUDED

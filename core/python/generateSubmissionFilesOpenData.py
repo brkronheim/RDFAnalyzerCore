@@ -16,11 +16,10 @@ from submission_backend import (
     get_copy_file_list, 
     write_submit_files,
     write_config,
-    get_config_extension
+    get_config_extension,
+    ensure_xrootd_redirector,
 )
 from validate_config import validate_submit_config
-from version_info import get_version_info, write_version_info_json
-from output_schema import emit_output_manifest, OutputManifest, SkimSchema, HistogramSchema, MANIFEST_FILENAME
 
 
 def _load_file_indices(recid):
@@ -186,7 +185,7 @@ def processMetaData(recid, sampleNames):
     fileDict = dict()
     for entry in result:
         for data in entry["files"]:
-            uri = data["uri"]
+            uri = ensure_xrootd_redirector(data["uri"])
             key = data["key"].split("_file_index")[0]
             if key not in sampleNames:
                 break
@@ -225,6 +224,7 @@ def main():
         help="xrdcp outputs to final destination after running",
     )
     parser.add_argument("--root-setup", type=str, default="", help="command to setup ROOT (e.g., 'source /path/to/thisroot.sh')")
+    parser.add_argument('--max-runtime', type=int, default=3600, help='Max runtime (seconds) for Condor jobs (default: 3600)')
     parser.add_argument("-x", "--x509", type=str, default="", help="path to x509 proxy (optional)")
     parser.add_argument(
         "--eos-sched",
@@ -270,7 +270,6 @@ def main():
     print(configDict.keys())
     config_ext = get_config_extension(args.config)
     submit_config_name = f"submit_config{config_ext}"
-    version_info = get_version_info(args.config)
     fileSplit = args.files
     configFile = resolve_path(configDict["sampleConfig"])
     saveDirectory = resolve_path(configDict["saveDirectory"])
@@ -341,23 +340,6 @@ def main():
     shared_dir_name = "shared_inputs"
     shared_dir = os.path.join(mainDir, shared_dir_name)
     Path(shared_dir).mkdir(parents=True, exist_ok=True)
-    write_version_info_json(os.path.join(mainDir, "version_info.json"), version_info)
-    # Emit a submission-level schema manifest so that downstream tools can
-    # discover the schema versions used by every job in this batch without
-    # reading individual per-job manifests.
-    _submission_manifest = OutputManifest(
-        framework_hash=version_info.get("framework_hash"),
-        user_repo_hash=version_info.get("user_repo_hash"),
-    )
-    _submission_manifest.add_artifact(
-        "batch_skim_schema",
-        SkimSchema(path=saveDirectory),
-    )
-    _submission_manifest.add_artifact(
-        "batch_histogram_schema",
-        HistogramSchema(path=saveDirectory),
-    )
-    _submission_manifest.write(os.path.join(mainDir, MANIFEST_FILENAME))
     _link_or_copy_file(exe_path, os.path.join(shared_dir, exe_relpath), use_symlink=False)
     if aux_exists:
         _link_or_copy_dir(aux_src, os.path.join(shared_dir, "aux"), use_symlink=False)
@@ -453,13 +435,6 @@ def main():
                     _append_unique_lines(int_file, ["type=" + typ])
                     test_config["intConfig"] = os.path.basename(int_file)
 
-                    if version_info.get("framework_hash"):
-                        test_config["__framework_hash"] = version_info["framework_hash"]
-                    if version_info.get("user_repo_hash"):
-                        test_config["__user_repo_hash"] = version_info["user_repo_hash"]
-                    if version_info.get("config_mtime"):
-                        test_config["__config_mtime"] = version_info["config_mtime"]
-
                     with open(os.path.join(test_dir, "submit_config.txt"), "w") as f:
                         for key in test_config.keys():
                             f.write(str(key) + "=" + test_config[key] + "\n")
@@ -512,8 +487,12 @@ def main():
                 job_config["__orig_fileList"] = original_list
                 job_config["fileList"] = ",".join(local_inputs)
             if args.stage_outputs:
-                job_config["__orig_saveFile"] = job_config["saveFile"]
-                job_config["__orig_metaFile"] = job_config["metaFile"]
+                # remote destination should include the job index (process) suffix
+                base, ext = os.path.splitext(job_config["saveFile"])
+                job_config["__orig_saveFile"] = f"{base}_{sampleIndex}{ext}"
+                basem, extm = os.path.splitext(job_config["metaFile"])
+                job_config["__orig_metaFile"] = f"{basem}_{sampleIndex}{extm}"
+                # keep local basenames as before; the runscript will append CONDOR_PROC
                 job_config["saveFile"] = os.path.basename(job_config["saveFile"])
                 job_config["metaFile"] = os.path.basename(job_config["metaFile"])
 
@@ -527,26 +506,9 @@ def main():
             _append_unique_lines(int_file, ["type=" + typ])
             job_config["intConfig"] = os.path.basename(int_file)
 
-            if version_info.get("framework_hash"):
-                job_config["__framework_hash"] = version_info["framework_hash"]
-            if version_info.get("user_repo_hash"):
-                job_config["__user_repo_hash"] = version_info["user_repo_hash"]
-            if version_info.get("config_mtime"):
-                job_config["__config_mtime"] = version_info["config_mtime"]
-
             with open(os.path.join(job_dir, "submit_config.txt"), "w") as f:
                 for key in job_config.keys():
                     f.write(str(key) + "=" + job_config[key] + "\n")
-
-            # Emit a per-job output manifest so downstream tasks can discover
-            # and validate the schema of each job's outputs without custom logic.
-            emit_output_manifest(
-                job_dir,
-                skim_path=job_config.get("__orig_saveFile", job_config.get("saveFile", "")),
-                histogram_path=job_config.get("__orig_metaFile", job_config.get("metaFile", "")),
-                framework_hash=version_info.get("framework_hash"),
-                user_repo_hash=version_info.get("user_repo_hash"),
-            )
 
             jobs_created += 1
             sampleIndex += 1

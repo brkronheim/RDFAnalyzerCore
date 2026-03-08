@@ -1,31 +1,72 @@
-"""Output schema definitions for RDFAnalyzerCore workflow artifacts.
+"""
+Output schema definitions for RDFAnalyzerCore.
 
-All production stages (batch submission scripts, datacard generation) call
-:func:`emit_output_manifest` to write an ``output_manifest.json`` file
-alongside their outputs.  Downstream consumers call
-:func:`OutputManifest.load` to read the manifest and
-:meth:`OutputManifest.validate` to check that schema versions match the
-current :data:`SCHEMA_REGISTRY` — without any custom discovery logic.
+Provides explicit, versioned schema definitions for all framework output types:
 
-Typical producer usage::
+  - **Skims** – ROOT TTree event-level data written by ``RootOutputSink``.
+  - **Histograms** – ROOT ``THnSparseF`` objects saved by ``NDHistogramManager``.
+  - **Metadata / provenance** – ``TNamed`` objects in the ``"provenance"``
+    ``TDirectory`` of the meta-output ROOT file, written by ``ProvenanceService``.
+  - **Cutflows** – Event-count histograms written by ``CounterService``.
+  - **LAW artifacts** – Task output files produced by the law workflow tasks
+    in ``law/nano_tasks.py`` and ``law/opendata_tasks.py``.
 
-    from output_schema import emit_output_manifest
+Each schema class carries a ``CURRENT_VERSION`` class attribute (integer).
+Bumping this integer is the canonical way to signal a breaking change in that
+output's structure.  The ``schema_version`` *instance* field on every persisted
+schema must equal ``CURRENT_VERSION``; a mismatch is surfaced by
+:meth:`OutputManifest.check_version_compatibility`.
 
-    emit_output_manifest(
-        job_dir,
-        skim_path="output/sample_0.root",
-        histogram_path="output/sample_0_meta.root",
-        framework_hash=version_info.get("framework_hash"),
-        user_repo_hash=version_info.get("user_repo_hash"),
+Version history
+---------------
+.. list-table::
+   :header-rows: 1
+
+   * - Schema
+     - Version
+     - Notes
+   * - ``SkimSchema``
+     - 1
+     - Initial definition: output_file, tree_name, branches.
+   * - ``HistogramSchema``
+     - 1
+     - Initial definition: output_file, histogram_names, axes.
+   * - ``MetadataSchema``
+     - 1
+     - Initial definition: output_file, provenance_dir, required/optional keys.
+   * - ``CutflowSchema``
+     - 1
+     - Initial definition: output_file, counter_keys.
+   * - ``LawArtifactSchema``
+     - 1
+     - Initial definition: artifact_type, path_pattern, format.
+   * - ``OutputManifest``
+     - 1
+     - Initial definition: combines all schema types.
+
+Usage
+-----
+Build a manifest from configuration and validate it::
+
+    from output_schema import (
+        OutputManifest, SkimSchema, HistogramSchema, MetadataSchema,
+        CutflowSchema, LawArtifactSchema,
     )
 
-Typical consumer usage::
+    manifest = OutputManifest(
+        skim=SkimSchema(output_file="output.root", tree_name="Events"),
+        metadata=MetadataSchema(output_file="output_meta.root"),
+    )
+    errors = manifest.validate()
+    if errors:
+        raise ValueError("Output schema validation failed:\\n" + "\\n".join(errors))
 
-    from output_schema import OutputManifest
+    # Persist the manifest so downstream tools can read the format contract.
+    manifest.save_yaml("output_manifest.yaml")
 
-    manifest = OutputManifest.load("job_42/output_manifest.json")
-    manifest.validate()
-    hist_artifacts = manifest.find_artifacts("histogram")
+    # Load back and verify the versions have not diverged from the current code.
+    loaded = OutputManifest.load_yaml("output_manifest.yaml")
+    OutputManifest.check_version_compatibility(loaded)
 
 Provenance and version resolution (canonical API)::
 
@@ -41,7 +82,7 @@ Provenance and version resolution (canonical API)::
         framework_hash="new_hash",
         user_repo_hash="user_hash",
     )
-    manifest = OutputManifest.load("job_42/output_manifest.json")
+    manifest = OutputManifest.load_yaml("job_42/output_manifest.yaml")
     recorded = manifest.provenance()
     statuses = resolve_manifest(manifest, current_provenance=current)
     # statuses is a dict of role -> ArtifactResolutionStatus
@@ -49,39 +90,79 @@ Provenance and version resolution (canonical API)::
 
 from __future__ import annotations
 
-import datetime
 import enum
-import json
 import os
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field, asdict, fields
+from typing import Any, ClassVar, Dict, List, Optional
+
+import yaml
+
 
 # ---------------------------------------------------------------------------
-# Schema registry
+# Schema version constants
+# Bump a constant here (and add a note to the version table above) whenever
+# you make a breaking change to the corresponding output format.
 # ---------------------------------------------------------------------------
 
-#: Maps artifact type name -> current schema version.
-#: Bump a version here whenever the corresponding output format changes in an
-#: incompatible way so that older consumers can detect the mismatch.
-SCHEMA_REGISTRY: Dict[str, str] = {
-    "skim": "1.0.0",
-    "histogram": "1.0.0",
-    "metadata": "1.0.0",
-    "cutflow": "1.0.0",
-    "law_artifact": "1.0.0",
+#: Current version of :class:`SkimSchema`.
+SKIM_SCHEMA_VERSION: int = 1
+#: Current version of :class:`HistogramSchema`.
+HISTOGRAM_SCHEMA_VERSION: int = 1
+#: Current version of :class:`MetadataSchema`.
+METADATA_SCHEMA_VERSION: int = 1
+#: Current version of :class:`CutflowSchema`.
+CUTFLOW_SCHEMA_VERSION: int = 1
+#: Current version of :class:`LawArtifactSchema`.
+LAW_ARTIFACT_SCHEMA_VERSION: int = 1
+#: Current version of :class:`OutputManifest`.
+OUTPUT_MANIFEST_VERSION: int = 1
+
+#: Registry mapping schema name → current version for programmatic queries.
+SCHEMA_REGISTRY: Dict[str, int] = {
+    "skim": SKIM_SCHEMA_VERSION,
+    "histogram": HISTOGRAM_SCHEMA_VERSION,
+    "metadata": METADATA_SCHEMA_VERSION,
+    "cutflow": CUTFLOW_SCHEMA_VERSION,
+    "law_artifact": LAW_ARTIFACT_SCHEMA_VERSION,
+    "output_manifest": OUTPUT_MANIFEST_VERSION,
 }
 
-#: Fixed file-name written by :func:`emit_output_manifest` and read by
-#: :meth:`OutputManifest.load`.
-MANIFEST_FILENAME: str = "output_manifest.json"
+# ---------------------------------------------------------------------------
+# Known provenance keys (from ProvenanceService)
+# ---------------------------------------------------------------------------
 
-#: Version of the *manifest format itself* — independent of per-artifact
-#: schema versions.
-MANIFEST_FORMAT_VERSION: str = "1.0.0"
+#: Provenance keys that ProvenanceService always writes.
+PROVENANCE_REQUIRED_KEYS: List[str] = [
+    "framework.git_hash",
+    "framework.git_dirty",
+    "framework.build_timestamp",
+    "framework.compiler",
+    "root.version",
+    "config.hash",
+    "executor.num_threads",
+]
 
+#: Provenance keys written by ProvenanceService when available.
+PROVENANCE_OPTIONAL_KEYS: List[str] = [
+    "analysis.git_hash",
+    "analysis.git_dirty",
+    "env.container_tag",
+    "filelist.hash",
+]
 
-class SchemaVersionError(Exception):
-    """Raised when a manifest artifact version does not match the registry."""
+# ---------------------------------------------------------------------------
+# Known LAW artifact types
+# ---------------------------------------------------------------------------
 
+#: Recognised values for :attr:`LawArtifactSchema.artifact_type`.
+LAW_ARTIFACT_TYPES: List[str] = [
+    "prepare_sample",
+    "build_submission",
+    "submit_jobs",
+    "monitor_jobs",
+    "run_job",
+    "monitor_state",
+]
 
 # ---------------------------------------------------------------------------
 # Provenance and resolution types
@@ -92,21 +173,21 @@ class ArtifactResolutionStatus(enum.Enum):
     """Resolution status returned by the canonical version-resolution API.
 
     Use :func:`resolve_artifact` or :func:`resolve_manifest` to obtain a
-    status for one or all artifacts in a manifest.
+    status for one or all schemas in a manifest.
 
     Attributes
     ----------
     COMPATIBLE:
-        The artifact's schema version matches the registry **and** the
-        recorded provenance matches the current provenance (or no current
-        provenance was supplied for comparison).  No regeneration is needed.
+        The schema version matches ``CURRENT_VERSION`` **and** the recorded
+        provenance matches the current provenance (or no current provenance
+        was supplied for comparison).  No regeneration is needed.
     STALE:
-        The artifact's schema version matches the registry, but the recorded
-        provenance differs from the current provenance (e.g. a newer git
-        commit or updated config file exists).  The artifact *can* still be
-        used but should be regenerated when convenient.
+        The schema version is current, but the recorded provenance differs
+        from the current provenance (e.g. a newer git commit or updated
+        config file exists).  The artifact *can* still be used but should be
+        regenerated when convenient.
     MUST_REGENERATE:
-        The artifact's schema version does **not** match the registry.  The
+        The schema version does **not** match ``CURRENT_VERSION``.  The
         artifact is incompatible with the current codebase and **must** be
         regenerated before use.
     """
@@ -122,9 +203,9 @@ class ProvenanceRecord:
     A ``ProvenanceRecord`` captures the information needed to decide whether
     a previously produced artifact is still up-to-date:
 
-    * **framework_hash** — git commit hash of the RDFAnalyzerCore framework.
-    * **user_repo_hash** — git commit hash of the user analysis repository.
-    * **config_mtime** — UTC modification time (ISO 8601) of the job
+    * **framework_hash** - git commit hash of the RDFAnalyzerCore framework.
+    * **user_repo_hash** - git commit hash of the user analysis repository.
+    * **config_mtime** - UTC modification time (ISO 8601) of the job
       configuration file that triggered the job.
 
     Any field may be ``None`` when the information is unavailable.  Two
@@ -143,21 +224,12 @@ class ProvenanceRecord:
 
     Examples
     --------
-    Build a record from the current environment::
-
-        from version_info import get_version_info
-        info = get_version_info(config_file)
-        current = ProvenanceRecord(
-            framework_hash=info["framework_hash"],
-            user_repo_hash=info["user_repo_hash"],
-            config_mtime=info["config_mtime"],
-        )
-
-    Compare with a previously recorded manifest::
+    Compare a manifest's recorded provenance with the current environment::
 
         recorded = manifest.provenance()
+        current = ProvenanceRecord(framework_hash="new_fw_hash")
         if not recorded.matches(current):
-            print("Artifact is stale — consider regenerating")
+            print("Artifact is stale - consider regenerating")
     """
 
     def __init__(
@@ -169,10 +241,6 @@ class ProvenanceRecord:
         self.framework_hash: Optional[str] = framework_hash
         self.user_repo_hash: Optional[str] = user_repo_hash
         self.config_mtime: Optional[str] = config_mtime
-
-    # ------------------------------------------------------------------
-    # Comparison
-    # ------------------------------------------------------------------
 
     def matches(self, other: "ProvenanceRecord") -> bool:
         """Return ``True`` when all comparable fields agree.
@@ -199,12 +267,8 @@ class ProvenanceRecord:
                     return False
         return True
 
-    # ------------------------------------------------------------------
-    # Serialisation
-    # ------------------------------------------------------------------
-
     def to_dict(self) -> Dict[str, Any]:
-        """Return a JSON-serialisable dictionary representation."""
+        """Return a JSON/YAML-serialisable dictionary representation."""
         return {
             "framework_hash": self.framework_hash,
             "user_repo_hash": self.user_repo_hash,
@@ -230,268 +294,393 @@ class ProvenanceRecord:
 
 
 # ---------------------------------------------------------------------------
-# Artifact schema classes
+# SkimSchema
 # ---------------------------------------------------------------------------
 
 
-class ArtifactSchema:
-    """Describes a single output artifact and the schema version it follows.
+@dataclass
+class SkimSchema:
+    """Schema definition for ROOT skim output files.
 
-    Parameters
+    A *skim* is a ROOT ``TTree`` written by ``RootOutputSink`` that contains
+    one row per selected event.  This schema records the expected file name,
+    tree name, and (optionally) the set of branches that must be present.
+
+    Attributes
     ----------
-    schema_type:
-        Identifier string that must be a key in :data:`SCHEMA_REGISTRY`
-        (e.g. ``"skim"``, ``"histogram"``).
-    schema_version:
-        Semantic version string for this artifact's schema.
-    path:
-        Absolute or relative path to the artifact file.
+    schema_version : int
+        Schema format version.  Must equal :attr:`CURRENT_VERSION`.
+    output_file : str
+        Path (or pattern) of the output ROOT file.
+    tree_name : str
+        Name of the ``TTree`` inside the ROOT file. Defaults to ``"Events"``.
+    branches : list[str]
+        Expected branch names.  An empty list means *all* branches are
+        accepted and no branch-level validation is performed.
     """
 
-    def __init__(self, schema_type: str, schema_version: str, path: str) -> None:
-        self.schema_type: str = schema_type
-        self.schema_version: str = schema_version
-        self.path: str = path
+    CURRENT_VERSION: ClassVar[int] = SKIM_SCHEMA_VERSION
 
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
+    schema_version: int = SKIM_SCHEMA_VERSION
+    output_file: str = ""
+    tree_name: str = "Events"
+    branches: List[str] = field(default_factory=list)
 
-    def validate_version(self) -> None:
-        """Raise :exc:`SchemaVersionError` if the version is not current.
-
-        Checks ``self.schema_version`` against the value in
-        :data:`SCHEMA_REGISTRY` for ``self.schema_type``.
-        """
-        expected = SCHEMA_REGISTRY.get(self.schema_type)
-        if expected is None:
-            raise SchemaVersionError(
-                f"Unknown schema type {self.schema_type!r}. "
-                f"Known types: {sorted(SCHEMA_REGISTRY)}"
-            )
-        if self.schema_version != expected:
-            raise SchemaVersionError(
-                f"Schema version mismatch for {self.schema_type!r}: "
-                f"manifest has {self.schema_version!r} "
-                f"but registry expects {expected!r}."
-            )
-
-    # ------------------------------------------------------------------
-    # Serialisation
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ I/O
 
     def to_dict(self) -> Dict[str, Any]:
-        """Return a JSON-serialisable dictionary representation."""
-        return {
-            "schema_type": self.schema_type,
+        """Serialise to a plain Python dict."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SkimSchema":
+        """Construct a :class:`SkimSchema` from a dict, ignoring unknown keys."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    # ------------------------------------------------------------------ validation
+
+    def validate(self) -> List[str]:
+        """Return a list of validation error strings (empty = valid)."""
+        errors: List[str] = []
+        if self.schema_version != self.CURRENT_VERSION:
+            errors.append(
+                f"SkimSchema version mismatch: file has {self.schema_version}, "
+                f"code expects {self.CURRENT_VERSION}."
+            )
+        if not self.output_file:
+            errors.append("SkimSchema.output_file must not be empty.")
+        if not self.tree_name:
+            errors.append("SkimSchema.tree_name must not be empty.")
+        return errors
+
+
+# ---------------------------------------------------------------------------
+# HistogramAxisSpec
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HistogramAxisSpec:
+    """Axis specification for a single dimension of a histogram.
+
+    Attributes
+    ----------
+    variable : str
+        Name of the branch / column used to fill this axis.
+    bins : int
+        Number of bins.
+    lower_bound : float
+        Lower edge of the axis range.
+    upper_bound : float
+        Upper edge of the axis range.
+    label : str
+        Human-readable axis label.
+    """
+
+    variable: str = ""
+    bins: int = 0
+    lower_bound: float = 0.0
+    upper_bound: float = 1.0
+    label: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "HistogramAxisSpec":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if not self.variable:
+            errors.append("HistogramAxisSpec.variable must not be empty.")
+        if self.bins <= 0:
+            errors.append(
+                f"HistogramAxisSpec.bins must be > 0 (got {self.bins})."
+            )
+        if self.lower_bound >= self.upper_bound:
+            errors.append(
+                f"HistogramAxisSpec.lower_bound ({self.lower_bound}) must be "
+                f"less than upper_bound ({self.upper_bound})."
+            )
+        return errors
+
+
+# ---------------------------------------------------------------------------
+# HistogramSchema
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HistogramSchema:
+    """Schema definition for ROOT histogram output files.
+
+    ``NDHistogramManager`` saves N-dimensional ``THnSparseF`` objects into the
+    *meta* output ROOT file.  This schema records the expected file name, the
+    histogram names, and the axis specifications that downstream tools can
+    rely on.
+
+    Attributes
+    ----------
+    schema_version : int
+        Schema format version.  Must equal :attr:`CURRENT_VERSION`.
+    output_file : str
+        Path (or pattern) of the meta-output ROOT file that contains the
+        histograms.
+    histogram_names : list[str]
+        Names of the ``THnSparseF`` objects expected in the file.
+    axes : list[HistogramAxisSpec]
+        Axis specifications shared across all histograms in this schema.
+        Individual histograms may add extra axes; these represent the common
+        (required) axes.
+    """
+
+    CURRENT_VERSION: ClassVar[int] = HISTOGRAM_SCHEMA_VERSION
+
+    schema_version: int = HISTOGRAM_SCHEMA_VERSION
+    output_file: str = ""
+    histogram_names: List[str] = field(default_factory=list)
+    axes: List[HistogramAxisSpec] = field(default_factory=list)
+
+    # ------------------------------------------------------------------ I/O
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {
             "schema_version": self.schema_version,
-            "path": self.path,
+            "output_file": self.output_file,
+            "histogram_names": list(self.histogram_names),
+            "axes": [ax.to_dict() for ax in self.axes],
         }
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "ArtifactSchema":
-        """Deserialise from the dict produced by :meth:`to_dict`.
-
-        Returns an instance of the most specific subclass matching
-        ``d["schema_type"]``, falling back to :class:`ArtifactSchema` for
-        unknown types.
-        """
-        _type_map: Dict[str, type] = {
-            "skim": SkimSchema,
-            "histogram": HistogramSchema,
-            "metadata": MetadataSchema,
-            "cutflow": CutflowSchema,
-            "law_artifact": LawArtifactSchema,
-        }
-        schema_type = d.get("schema_type", "")
-        klass = _type_map.get(schema_type, cls)
-        return klass._from_dict(d)
-
-    @classmethod
-    def _from_dict(cls, d: Dict[str, Any]) -> "ArtifactSchema":
-        return cls(
-            schema_type=d["schema_type"],
-            schema_version=d["schema_version"],
-            path=d.get("path", ""),
-        )
-
-    def __repr__(self) -> str:  # pragma: no cover
-        return (
-            f"{self.__class__.__name__}("
-            f"schema_type={self.schema_type!r}, "
-            f"schema_version={self.schema_version!r}, "
-            f"path={self.path!r})"
-        )
-
-
-class SkimSchema(ArtifactSchema):
-    """Schema for a skim output (ROOT file containing a TTree).
-
-    Parameters
-    ----------
-    path:
-        Path to the skim ROOT file.
-    tree_name:
-        Name of the TTree inside the file (default: ``"Events"``).
-    schema_version:
-        Override the schema version (defaults to the registry value).
-    """
-
-    def __init__(
-        self,
-        path: str,
-        tree_name: str = "Events",
-        schema_version: Optional[str] = None,
-    ) -> None:
-        super().__init__(
-            schema_type="skim",
-            schema_version=schema_version or SCHEMA_REGISTRY["skim"],
-            path=path,
-        )
-        self.tree_name: str = tree_name
-
-    def to_dict(self) -> Dict[str, Any]:
-        d = super().to_dict()
-        d["tree_name"] = self.tree_name
         return d
 
     @classmethod
-    def _from_dict(cls, d: Dict[str, Any]) -> "SkimSchema":
+    def from_dict(cls, data: Dict[str, Any]) -> "HistogramSchema":
+        axes = [
+            HistogramAxisSpec.from_dict(ax)
+            for ax in data.get("axes", [])
+        ]
         return cls(
-            path=d.get("path", ""),
-            tree_name=d.get("tree_name", "Events"),
-            schema_version=d.get("schema_version"),
+            schema_version=data.get("schema_version", HISTOGRAM_SCHEMA_VERSION),
+            output_file=data.get("output_file", ""),
+            histogram_names=list(data.get("histogram_names", [])),
+            axes=axes,
         )
 
+    # ------------------------------------------------------------------ validation
 
-class HistogramSchema(ArtifactSchema):
-    """Schema for a histogram output (ROOT file with TH1/TH2 objects).
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if self.schema_version != self.CURRENT_VERSION:
+            errors.append(
+                f"HistogramSchema version mismatch: file has {self.schema_version}, "
+                f"code expects {self.CURRENT_VERSION}."
+            )
+        if not self.output_file:
+            errors.append("HistogramSchema.output_file must not be empty.")
+        for i, ax in enumerate(self.axes):
+            for e in ax.validate():
+                errors.append(f"HistogramSchema.axes[{i}]: {e}")
+        return errors
 
-    Parameters
+
+# ---------------------------------------------------------------------------
+# MetadataSchema
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MetadataSchema:
+    """Schema definition for the provenance metadata output.
+
+    ``ProvenanceService`` writes ``TNamed`` objects into a ``TDirectory``
+    named ``"provenance"`` inside the meta-output ROOT file.  This schema
+    records the expected file name, directory name, and required/optional
+    provenance keys.
+
+    Attributes
     ----------
-    path:
-        Path to the histogram ROOT file.
-    schema_version:
-        Override the schema version (defaults to the registry value).
+    schema_version : int
+        Schema format version.  Must equal :attr:`CURRENT_VERSION`.
+    output_file : str
+        Path (or pattern) of the meta-output ROOT file.
+    provenance_dir : str
+        Name of the ``TDirectory`` that holds the provenance objects.
+        Defaults to ``"provenance"``.
+    required_keys : list[str]
+        Provenance keys that must be present.  Defaults to
+        :data:`PROVENANCE_REQUIRED_KEYS`.
+    optional_keys : list[str]
+        Provenance keys that may be present.  Defaults to
+        :data:`PROVENANCE_OPTIONAL_KEYS`.
     """
 
-    def __init__(
-        self,
-        path: str,
-        schema_version: Optional[str] = None,
-    ) -> None:
-        super().__init__(
-            schema_type="histogram",
-            schema_version=schema_version or SCHEMA_REGISTRY["histogram"],
-            path=path,
-        )
+    CURRENT_VERSION: ClassVar[int] = METADATA_SCHEMA_VERSION
 
-    @classmethod
-    def _from_dict(cls, d: Dict[str, Any]) -> "HistogramSchema":
-        return cls(
-            path=d.get("path", ""),
-            schema_version=d.get("schema_version"),
-        )
+    schema_version: int = METADATA_SCHEMA_VERSION
+    output_file: str = ""
+    provenance_dir: str = "provenance"
+    required_keys: List[str] = field(
+        default_factory=lambda: list(PROVENANCE_REQUIRED_KEYS)
+    )
+    optional_keys: List[str] = field(
+        default_factory=lambda: list(PROVENANCE_OPTIONAL_KEYS)
+    )
 
-
-class MetadataSchema(ArtifactSchema):
-    """Schema for a metadata output (JSON or ROOT file with provenance/run info).
-
-    Parameters
-    ----------
-    path:
-        Path to the metadata file.
-    schema_version:
-        Override the schema version (defaults to the registry value).
-    """
-
-    def __init__(
-        self,
-        path: str,
-        schema_version: Optional[str] = None,
-    ) -> None:
-        super().__init__(
-            schema_type="metadata",
-            schema_version=schema_version or SCHEMA_REGISTRY["metadata"],
-            path=path,
-        )
-
-    @classmethod
-    def _from_dict(cls, d: Dict[str, Any]) -> "MetadataSchema":
-        return cls(
-            path=d.get("path", ""),
-            schema_version=d.get("schema_version"),
-        )
-
-
-class CutflowSchema(ArtifactSchema):
-    """Schema for a cutflow output.
-
-    Parameters
-    ----------
-    path:
-        Path to the cutflow file.
-    schema_version:
-        Override the schema version (defaults to the registry value).
-    """
-
-    def __init__(
-        self,
-        path: str,
-        schema_version: Optional[str] = None,
-    ) -> None:
-        super().__init__(
-            schema_type="cutflow",
-            schema_version=schema_version or SCHEMA_REGISTRY["cutflow"],
-            path=path,
-        )
-
-    @classmethod
-    def _from_dict(cls, d: Dict[str, Any]) -> "CutflowSchema":
-        return cls(
-            path=d.get("path", ""),
-            schema_version=d.get("schema_version"),
-        )
-
-
-class LawArtifactSchema(ArtifactSchema):
-    """Schema for a LAW workflow artifact (e.g. Combine datacard, shapes ROOT file).
-
-    Parameters
-    ----------
-    path:
-        Path to the artifact file.
-    artifact_type:
-        Human-readable sub-type (e.g. ``"datacard"``, ``"shapes"``).
-    schema_version:
-        Override the schema version (defaults to the registry value).
-    """
-
-    def __init__(
-        self,
-        path: str,
-        artifact_type: str = "",
-        schema_version: Optional[str] = None,
-    ) -> None:
-        super().__init__(
-            schema_type="law_artifact",
-            schema_version=schema_version or SCHEMA_REGISTRY["law_artifact"],
-            path=path,
-        )
-        self.artifact_type: str = artifact_type
+    # ------------------------------------------------------------------ I/O
 
     def to_dict(self) -> Dict[str, Any]:
-        d = super().to_dict()
-        d["artifact_type"] = self.artifact_type
-        return d
+        return asdict(self)
 
     @classmethod
-    def _from_dict(cls, d: Dict[str, Any]) -> "LawArtifactSchema":
-        return cls(
-            path=d.get("path", ""),
-            artifact_type=d.get("artifact_type", ""),
-            schema_version=d.get("schema_version"),
-        )
+    def from_dict(cls, data: Dict[str, Any]) -> "MetadataSchema":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    # ------------------------------------------------------------------ validation
+
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if self.schema_version != self.CURRENT_VERSION:
+            errors.append(
+                f"MetadataSchema version mismatch: file has {self.schema_version}, "
+                f"code expects {self.CURRENT_VERSION}."
+            )
+        if not self.output_file:
+            errors.append("MetadataSchema.output_file must not be empty.")
+        if not self.provenance_dir:
+            errors.append("MetadataSchema.provenance_dir must not be empty.")
+        return errors
+
+
+# ---------------------------------------------------------------------------
+# CutflowSchema
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CutflowSchema:
+    """Schema definition for cutflow / event-count output.
+
+    ``CounterService`` books and writes event-count histograms for each
+    registered sample.  The cutflow schema records the expected output file,
+    and the ordered list of counter keys that downstream tools expect to
+    find (e.g. ``"<sample>.total"``, ``"<sample>.weighted"``).
+
+    Attributes
+    ----------
+    schema_version : int
+        Schema format version.  Must equal :attr:`CURRENT_VERSION`.
+    output_file : str
+        Path (or pattern) of the ROOT file that contains the counter objects.
+        This is typically the same as the meta-output file.
+    counter_keys : list[str]
+        Ordered counter key names expected in the output.  An empty list
+        means no key-level validation is performed.
+    """
+
+    CURRENT_VERSION: ClassVar[int] = CUTFLOW_SCHEMA_VERSION
+
+    schema_version: int = CUTFLOW_SCHEMA_VERSION
+    output_file: str = ""
+    counter_keys: List[str] = field(default_factory=list)
+
+    # ------------------------------------------------------------------ I/O
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CutflowSchema":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    # ------------------------------------------------------------------ validation
+
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if self.schema_version != self.CURRENT_VERSION:
+            errors.append(
+                f"CutflowSchema version mismatch: file has {self.schema_version}, "
+                f"code expects {self.CURRENT_VERSION}."
+            )
+        if not self.output_file:
+            errors.append("CutflowSchema.output_file must not be empty.")
+        return errors
+
+
+# ---------------------------------------------------------------------------
+# LawArtifactSchema
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LawArtifactSchema:
+    """Schema definition for a single LAW task artifact.
+
+    Law workflow tasks (``PrepareNANOSample``, ``BuildNANOSubmission``,
+    ``SubmitNANOJobs``, ``MonitorNANOJobs``, ``RunNANOAnalysisJob``, …)
+    each produce one or more output files.  This schema records the expected
+    artifact type, path pattern, and serialisation format.
+
+    Attributes
+    ----------
+    schema_version : int
+        Schema format version.  Must equal :attr:`CURRENT_VERSION`.
+    artifact_type : str
+        Logical type of the artifact.  Must be one of
+        :data:`LAW_ARTIFACT_TYPES`.
+    path_pattern : str
+        Glob-compatible path pattern for the expected output file(s),
+        e.g. ``"branch_outputs/sample_*.json"``.
+    format : str
+        Serialisation format of the artifact file.  One of
+        ``"json"``, ``"text"``, ``"shell"``, or ``"root"``.
+    """
+
+    CURRENT_VERSION: ClassVar[int] = LAW_ARTIFACT_SCHEMA_VERSION
+
+    schema_version: int = LAW_ARTIFACT_SCHEMA_VERSION
+    artifact_type: str = ""
+    path_pattern: str = ""
+    format: str = "text"  # noqa: A003 (shadows built-in 'format')
+
+    # ------------------------------------------------------------------ I/O
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LawArtifactSchema":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    # ------------------------------------------------------------------ validation
+
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if self.schema_version != self.CURRENT_VERSION:
+            errors.append(
+                f"LawArtifactSchema version mismatch: file has {self.schema_version}, "
+                f"code expects {self.CURRENT_VERSION}."
+            )
+        if not self.artifact_type:
+            errors.append("LawArtifactSchema.artifact_type must not be empty.")
+        elif self.artifact_type not in LAW_ARTIFACT_TYPES:
+            errors.append(
+                f"LawArtifactSchema.artifact_type '{self.artifact_type}' is not "
+                f"a recognised type.  Known types: {LAW_ARTIFACT_TYPES}."
+            )
+        if not self.path_pattern:
+            errors.append("LawArtifactSchema.path_pattern must not be empty.")
+        valid_formats = {"json", "text", "shell", "root"}
+        if self.format not in valid_formats:
+            errors.append(
+                f"LawArtifactSchema.format '{self.format}' is not recognised.  "
+                f"Valid formats: {sorted(valid_formats)}."
+            )
+        return errors
 
 
 # ---------------------------------------------------------------------------
@@ -500,124 +689,263 @@ class LawArtifactSchema(ArtifactSchema):
 
 
 class OutputManifest:
-    """Aggregates artifact schemas into a single, discoverable manifest file.
+    r"""Manifest that combines the schema definitions for a single analysis job.
 
-    The manifest is written as :data:`MANIFEST_FILENAME` (``output_manifest.json``)
-    at a well-known location so that downstream tasks can find it without any
-    custom discovery logic.
+    An :class:`OutputManifest` can be serialised to YAML so that downstream
+    tools (datacards, plotting scripts, statistical frameworks) can discover
+    the exact format contract of the outputs they consume.
 
-    Example — producer::
-
-        manifest = OutputManifest(framework_hash="abc123")
-        manifest.add_artifact("skim", SkimSchema(path="sample_0.root"))
-        manifest.add_artifact("histogram", HistogramSchema(path="sample_0_meta.root"))
-        manifest.write("job_0/output_manifest.json")
-
-    Example — consumer::
-
-        manifest = OutputManifest.load("job_0/output_manifest.json")
-        manifest.validate()
-        for artifact in manifest.find_artifacts("histogram"):
-            process(artifact.path)
-
-    Example — provenance resolution::
-
-        manifest = OutputManifest.load("job_0/output_manifest.json")
-        current = ProvenanceRecord(framework_hash="new_fw_hash")
-        statuses = manifest.resolve(current)
-        # statuses: {"skim": ArtifactResolutionStatus.STALE, ...}
-
-    Parameters
+    Attributes
     ----------
-    created_at:
-        ISO 8601 timestamp; defaults to the current UTC time.
-    framework_hash:
-        Git hash of the RDFAnalyzerCore framework.
-    user_repo_hash:
-        Git hash of the user analysis repository.
-    config_mtime:
-        UTC modification time (ISO 8601) of the job configuration file that
-        triggered the job, or ``None``.
+    manifest_version : int
+        Manifest container version (not a per-schema version).  Must equal
+        :attr:`CURRENT_VERSION`.
+    skim : SkimSchema or None
+        Schema for the skim ROOT file, if this job produces one.
+    histograms : HistogramSchema or None
+        Schema for the histogram ROOT file, if applicable.
+    metadata : MetadataSchema or None
+        Schema for the provenance metadata, if applicable.
+    cutflow : CutflowSchema or None
+        Schema for the cutflow output, if applicable.
+    law_artifacts : list[LawArtifactSchema]
+        Schemas for any LAW task artifacts produced by this job.
+    framework_hash : str or None
+        Git commit hash of the RDFAnalyzerCore framework at job-submission
+        time.  Used by :meth:`provenance` and :func:`resolve_manifest` to
+        detect environment drift.
+    user_repo_hash : str or None
+        Git commit hash of the user analysis repository at job-submission
+        time.
+    config_mtime : str or None
+        UTC modification time (ISO 8601) of the job configuration file.
     """
+
+    CURRENT_VERSION: ClassVar[int] = OUTPUT_MANIFEST_VERSION
 
     def __init__(
         self,
-        created_at: Optional[str] = None,
+        manifest_version: int = OUTPUT_MANIFEST_VERSION,
+        skim: Optional[SkimSchema] = None,
+        histograms: Optional[HistogramSchema] = None,
+        metadata: Optional[MetadataSchema] = None,
+        cutflow: Optional[CutflowSchema] = None,
+        law_artifacts: Optional[List[LawArtifactSchema]] = None,
         framework_hash: Optional[str] = None,
         user_repo_hash: Optional[str] = None,
         config_mtime: Optional[str] = None,
     ) -> None:
-        self.format_version: str = MANIFEST_FORMAT_VERSION
-        self.created_at: str = (
-            created_at
-            or datetime.datetime.now(datetime.timezone.utc).isoformat()
-        )
+        self.manifest_version: int = manifest_version
+        self.skim: Optional[SkimSchema] = skim
+        self.histograms: Optional[HistogramSchema] = histograms
+        self.metadata: Optional[MetadataSchema] = metadata
+        self.cutflow: Optional[CutflowSchema] = cutflow
+        self.law_artifacts: List[LawArtifactSchema] = law_artifacts or []
         self.framework_hash: Optional[str] = framework_hash
         self.user_repo_hash: Optional[str] = user_repo_hash
         self.config_mtime: Optional[str] = config_mtime
-        #: role (str) -> :class:`ArtifactSchema`
-        self.artifacts: Dict[str, ArtifactSchema] = {}
 
-    # ------------------------------------------------------------------
-    # Mutation
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ I/O
 
-    def add_artifact(self, role: str, artifact: ArtifactSchema) -> None:
-        """Register *artifact* under the given *role*.
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialise the manifest to a plain Python dict."""
+        return {
+            "manifest_version": self.manifest_version,
+            "skim": self.skim.to_dict() if self.skim is not None else None,
+            "histograms": (
+                self.histograms.to_dict() if self.histograms is not None else None
+            ),
+            "metadata": (
+                self.metadata.to_dict() if self.metadata is not None else None
+            ),
+            "cutflow": (
+                self.cutflow.to_dict() if self.cutflow is not None else None
+            ),
+            "law_artifacts": [a.to_dict() for a in self.law_artifacts],
+            "framework_hash": self.framework_hash,
+            "user_repo_hash": self.user_repo_hash,
+            "config_mtime": self.config_mtime,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "OutputManifest":
+        """Construct an :class:`OutputManifest` from a plain dict."""
+        skim = (
+            SkimSchema.from_dict(data["skim"])
+            if data.get("skim") is not None
+            else None
+        )
+        histograms = (
+            HistogramSchema.from_dict(data["histograms"])
+            if data.get("histograms") is not None
+            else None
+        )
+        metadata = (
+            MetadataSchema.from_dict(data["metadata"])
+            if data.get("metadata") is not None
+            else None
+        )
+        cutflow = (
+            CutflowSchema.from_dict(data["cutflow"])
+            if data.get("cutflow") is not None
+            else None
+        )
+        law_artifacts = [
+            LawArtifactSchema.from_dict(a)
+            for a in data.get("law_artifacts", [])
+        ]
+        return cls(
+            manifest_version=data.get("manifest_version", OUTPUT_MANIFEST_VERSION),
+            skim=skim,
+            histograms=histograms,
+            metadata=metadata,
+            cutflow=cutflow,
+            law_artifacts=law_artifacts,
+            framework_hash=data.get("framework_hash"),
+            user_repo_hash=data.get("user_repo_hash"),
+            config_mtime=data.get("config_mtime"),
+        )
+
+    def save_yaml(self, path: str) -> None:
+        """Serialise the manifest to a YAML file.
 
         Parameters
         ----------
-        role:
-            Logical name for this artifact in the manifest (e.g. ``"skim"``,
-            ``"histogram"``, ``"datacard_sr"``).
-        artifact:
-            An :class:`ArtifactSchema` (or subclass) instance.
+        path : str
+            Destination file path (created or overwritten).
         """
-        self.artifacts[role] = artifact
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w") as fh:
+            yaml.dump(
+                self.to_dict(),
+                fh,
+                default_flow_style=False,
+                sort_keys=False,
+                allow_unicode=True,
+            )
 
-    # ------------------------------------------------------------------
-    # Query
-    # ------------------------------------------------------------------
-
-    def find_artifacts(self, schema_type: str) -> List[ArtifactSchema]:
-        """Return all artifacts whose ``schema_type`` matches *schema_type*.
+    @classmethod
+    def load_yaml(cls, path: str) -> "OutputManifest":
+        """Load an :class:`OutputManifest` from a YAML file.
 
         Parameters
         ----------
-        schema_type:
-            One of the keys in :data:`SCHEMA_REGISTRY`
-            (e.g. ``"skim"``, ``"histogram"``).
+        path : str
+            Path to the manifest YAML file.
+
+        Raises
+        ------
+        ValueError
+            If the file content is not a YAML mapping.
+        """
+        with open(path) as fh:
+            raw = yaml.safe_load(fh)
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"Output manifest '{path}' must be a YAML mapping at the top level."
+            )
+        return cls.from_dict(raw)
+
+    # ------------------------------------------------------------------ validation
+
+    def validate(self) -> List[str]:
+        """Validate all contained schemas.
 
         Returns
         -------
-        list[ArtifactSchema]
-            Possibly empty list of matching artifacts.
+        list[str]
+            A (possibly empty) list of error strings.  An empty list means
+            the manifest is valid.
         """
-        return [
-            a
-            for a in self.artifacts.values()
-            if isinstance(a, ArtifactSchema) and a.schema_type == schema_type
-        ]
+        errors: List[str] = []
 
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
+        if self.manifest_version != self.CURRENT_VERSION:
+            errors.append(
+                f"OutputManifest version mismatch: file has {self.manifest_version}, "
+                f"code expects {self.CURRENT_VERSION}."
+            )
 
-    def validate(self) -> None:
-        """Validate every artifact's schema version against the registry.
+        if all(
+            x is None
+            for x in (self.skim, self.histograms, self.metadata, self.cutflow)
+        ) and not self.law_artifacts:
+            errors.append(
+                "OutputManifest must define at least one output schema "
+                "(skim, histograms, metadata, cutflow, or law_artifacts)."
+            )
+
+        for schema in (self.skim, self.histograms, self.metadata, self.cutflow):
+            if schema is not None:
+                errors.extend(schema.validate())
+
+        for i, artifact in enumerate(self.law_artifacts):
+            for e in artifact.validate():
+                errors.append(f"law_artifacts[{i}]: {e}")
+
+        return errors
+
+    @staticmethod
+    def check_version_compatibility(manifest: "OutputManifest") -> None:
+        """Raise :class:`SchemaVersionError` if any schema in the manifest has
+        a version that does not match the current code.
+
+        This is intended to be called when loading an existing manifest before
+        consuming its outputs, so that version mismatches are surfaced clearly
+        rather than silently ignored.
+
+        Parameters
+        ----------
+        manifest : OutputManifest
+            The loaded manifest to check.
 
         Raises
         ------
         SchemaVersionError
-            On the first version mismatch found.
+            If any schema version does not match the corresponding
+            ``CURRENT_VERSION``.
         """
-        for role, artifact in self.artifacts.items():
-            if isinstance(artifact, ArtifactSchema):
-                artifact.validate_version()
+        mismatches: List[str] = []
 
-    # ------------------------------------------------------------------
-    # Provenance
-    # ------------------------------------------------------------------
+        if manifest.manifest_version != OutputManifest.CURRENT_VERSION:
+            mismatches.append(
+                f"OutputManifest: stored={manifest.manifest_version}, "
+                f"current={OutputManifest.CURRENT_VERSION}"
+            )
+        for name, schema, current in (
+            ("skim", manifest.skim, SKIM_SCHEMA_VERSION),
+            ("histograms", manifest.histograms, HISTOGRAM_SCHEMA_VERSION),
+            ("metadata", manifest.metadata, METADATA_SCHEMA_VERSION),
+            ("cutflow", manifest.cutflow, CUTFLOW_SCHEMA_VERSION),
+        ):
+            if schema is not None and schema.schema_version != current:
+                mismatches.append(
+                    f"{name}: stored={schema.schema_version}, current={current}"
+                )
+        for i, artifact in enumerate(manifest.law_artifacts):
+            if artifact.schema_version != LAW_ARTIFACT_SCHEMA_VERSION:
+                mismatches.append(
+                    f"law_artifacts[{i}]: stored={artifact.schema_version}, "
+                    f"current={LAW_ARTIFACT_SCHEMA_VERSION}"
+                )
+
+        if mismatches:
+            raise SchemaVersionError(
+                "Output schema version mismatch(es) detected:\n"
+                + "\n".join(f"  {m}" for m in mismatches)
+            )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        parts = [
+            f"manifest_version={self.manifest_version}",
+            f"skim={'set' if self.skim else 'None'}",
+            f"histograms={'set' if self.histograms else 'None'}",
+            f"metadata={'set' if self.metadata else 'None'}",
+            f"cutflow={'set' if self.cutflow else 'None'}",
+            f"law_artifacts={len(self.law_artifacts)}",
+        ]
+        return f"OutputManifest({', '.join(parts)})"
+
+    # ------------------------------------------------------------------ provenance
 
     def provenance(self) -> "ProvenanceRecord":
         """Return the provenance recorded in this manifest.
@@ -642,7 +970,7 @@ class OutputManifest:
         self,
         current_provenance: Optional["ProvenanceRecord"] = None,
     ) -> Dict[str, "ArtifactResolutionStatus"]:
-        """Resolve all artifacts using the canonical version-resolution model.
+        """Resolve all schemas using the canonical version-resolution model.
 
         This is a convenience wrapper around :func:`resolve_manifest` that
         uses the provenance stored in *this* manifest as the recorded
@@ -658,71 +986,23 @@ class OutputManifest:
         Returns
         -------
         dict[str, ArtifactResolutionStatus]
-            Mapping of artifact role to its :class:`ArtifactResolutionStatus`.
+            Mapping of schema role to its :class:`ArtifactResolutionStatus`.
         """
         return resolve_manifest(self, current_provenance=current_provenance)
 
-    # ------------------------------------------------------------------
-    # Serialisation
-    # ------------------------------------------------------------------
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Return a JSON-serialisable dictionary representation."""
-        return {
-            "format_version": self.format_version,
-            "created_at": self.created_at,
-            "framework_hash": self.framework_hash,
-            "user_repo_hash": self.user_repo_hash,
-            "config_mtime": self.config_mtime,
-            "artifacts": {
-                role: (
-                    artifact.to_dict()
-                    if isinstance(artifact, ArtifactSchema)
-                    else artifact
-                )
-                for role, artifact in self.artifacts.items()
-            },
-        }
+# ---------------------------------------------------------------------------
+# SchemaVersionError
+# ---------------------------------------------------------------------------
 
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "OutputManifest":
-        """Deserialise from the dict produced by :meth:`to_dict`."""
-        manifest = cls(
-            created_at=d.get("created_at"),
-            framework_hash=d.get("framework_hash"),
-            user_repo_hash=d.get("user_repo_hash"),
-            config_mtime=d.get("config_mtime"),
-        )
-        manifest.format_version = d.get("format_version", MANIFEST_FORMAT_VERSION)
-        for role, artifact_dict in d.get("artifacts", {}).items():
-            if isinstance(artifact_dict, dict) and "schema_type" in artifact_dict:
-                manifest.artifacts[role] = ArtifactSchema.from_dict(artifact_dict)
-            else:
-                manifest.artifacts[role] = artifact_dict  # type: ignore[assignment]
-        return manifest
 
-    def write(self, path: str) -> None:
-        """Write the manifest as JSON to *path*.
+class SchemaVersionError(RuntimeError):
+    """Raised when a loaded schema version does not match the current code.
 
-        Parent directories are created automatically.
-        """
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
-            f.write("\n")
-
-    @classmethod
-    def load(cls, path: str) -> "OutputManifest":
-        """Load and return an :class:`OutputManifest` from *path*.
-
-        Parameters
-        ----------
-        path:
-            Path to an ``output_manifest.json`` file.
-        """
-        with open(path) as f:
-            d = json.load(f)
-        return cls.from_dict(d)
+    Catching :class:`SchemaVersionError` separately from other
+    :class:`RuntimeError` exceptions allows callers to apply migration logic
+    or emit clear user-facing messages about incompatible output formats.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -731,11 +1011,11 @@ class OutputManifest:
 
 
 def resolve_artifact(
-    artifact: ArtifactSchema,
+    artifact: Any,
     recorded_provenance: Optional[ProvenanceRecord] = None,
     current_provenance: Optional[ProvenanceRecord] = None,
 ) -> ArtifactResolutionStatus:
-    """Determine whether a single artifact is compatible, stale, or must be regenerated.
+    """Determine whether a single schema artifact is compatible, stale, or must be regenerated.
 
     This is the **canonical API** for artifact version resolution.  It is
     designed to be called by LAW tasks, caching layers, validation tools, and
@@ -744,21 +1024,22 @@ def resolve_artifact(
 
     Resolution rules (applied in order):
 
-    1. **MUST_REGENERATE** — the artifact's :attr:`~ArtifactSchema.schema_version`
-       does not match the value in :data:`SCHEMA_REGISTRY` for the artifact's
-       :attr:`~ArtifactSchema.schema_type`.  The artifact is incompatible with
-       the current codebase and **must** be regenerated.
-    2. **STALE** — the schema version is current, but *recorded_provenance*
+    1. **MUST_REGENERATE** - the artifact's ``schema_version`` does not match
+       its ``CURRENT_VERSION`` class attribute.  The artifact is incompatible
+       with the current codebase and **must** be regenerated.
+    2. **STALE** - the schema version is current, but *recorded_provenance*
        and *current_provenance* are both provided and
        :meth:`ProvenanceRecord.matches` returns ``False``.  The artifact can
        still be used but should be regenerated when convenient.
-    3. **COMPATIBLE** — the schema version is current and either no provenance
+    3. **COMPATIBLE** - the schema version is current and either no provenance
        comparison was requested or the provenances match.
 
     Parameters
     ----------
     artifact:
-        The :class:`ArtifactSchema` (or subclass) to evaluate.
+        A schema object with ``schema_version`` and ``CURRENT_VERSION``
+        attributes (e.g. :class:`SkimSchema`, :class:`HistogramSchema`,
+        :class:`LawArtifactSchema`).
     recorded_provenance:
         The :class:`ProvenanceRecord` that was captured when the artifact was
         produced (e.g. extracted from :meth:`OutputManifest.provenance`).
@@ -774,8 +1055,9 @@ def resolve_artifact(
         :attr:`~ArtifactResolutionStatus.STALE`, or
         :attr:`~ArtifactResolutionStatus.MUST_REGENERATE`.
     """
-    expected = SCHEMA_REGISTRY.get(artifact.schema_type)
-    if expected is None or artifact.schema_version != expected:
+    current_version = getattr(artifact, "CURRENT_VERSION", None)
+    schema_version = getattr(artifact, "schema_version", None)
+    if current_version is None or schema_version != current_version:
         return ArtifactResolutionStatus.MUST_REGENERATE
 
     if (
@@ -789,19 +1071,19 @@ def resolve_artifact(
 
 
 def resolve_manifest(
-    manifest: OutputManifest,
+    manifest: "OutputManifest",
     current_provenance: Optional[ProvenanceRecord] = None,
 ) -> Dict[str, ArtifactResolutionStatus]:
-    """Resolve all artifacts in a manifest using the canonical resolution model.
+    """Resolve all schemas in a manifest using the canonical resolution model.
 
-    Iterates over every :class:`ArtifactSchema` in *manifest* and calls
+    Iterates over every schema in *manifest* and calls
     :func:`resolve_artifact` for each one, using the provenance stored in the
     manifest as the *recorded_provenance*.
 
     Parameters
     ----------
     manifest:
-        The :class:`OutputManifest` whose artifacts should be resolved.
+        The :class:`OutputManifest` whose schemas should be resolved.
     current_provenance:
         A :class:`ProvenanceRecord` representing the current environment
         state.  When ``None`` the resolution only considers schema-version
@@ -810,82 +1092,25 @@ def resolve_manifest(
     Returns
     -------
     dict[str, ArtifactResolutionStatus]
-        Mapping of artifact role (str) to its :class:`ArtifactResolutionStatus`.
-        Only roles whose value is an :class:`ArtifactSchema` instance are
-        included; raw dict entries stored under a role are skipped.
+        Mapping of schema role to its :class:`ArtifactResolutionStatus`.
+        The roles used are ``"skim"``, ``"histograms"``, ``"metadata"``,
+        ``"cutflow"``, and ``"law_artifacts[N]"`` for the Nth LAW artifact.
     """
     recorded = manifest.provenance()
     statuses: Dict[str, ArtifactResolutionStatus] = {}
-    for role, artifact in manifest.artifacts.items():
-        if isinstance(artifact, ArtifactSchema):
-            statuses[role] = resolve_artifact(
-                artifact,
-                recorded_provenance=recorded,
-                current_provenance=current_provenance,
-            )
+
+    for role, schema in (
+        ("skim", manifest.skim),
+        ("histograms", manifest.histograms),
+        ("metadata", manifest.metadata),
+        ("cutflow", manifest.cutflow),
+    ):
+        if schema is not None:
+            statuses[role] = resolve_artifact(schema, recorded, current_provenance)
+
+    for i, artifact in enumerate(manifest.law_artifacts):
+        statuses[f"law_artifacts[{i}]"] = resolve_artifact(
+            artifact, recorded, current_provenance
+        )
+
     return statuses
-
-
-# ---------------------------------------------------------------------------
-# Convenience helper for production stages
-# ---------------------------------------------------------------------------
-
-
-def emit_output_manifest(
-    output_dir: str,
-    skim_path: Optional[str] = None,
-    histogram_path: Optional[str] = None,
-    tree_name: str = "Events",
-    framework_hash: Optional[str] = None,
-    user_repo_hash: Optional[str] = None,
-    config_mtime: Optional[str] = None,
-    extra_artifacts: Optional[Dict[str, ArtifactSchema]] = None,
-) -> str:
-    """Build and write an :data:`MANIFEST_FILENAME` in *output_dir*.
-
-    This is the primary entry-point for production stages.  Call it once per
-    job directory (or output directory) to make schema information
-    discoverable.
-
-    Parameters
-    ----------
-    output_dir:
-        Directory in which ``output_manifest.json`` will be written.
-    skim_path:
-        Path (absolute or relative) to the skim ROOT file, if produced.
-    histogram_path:
-        Path (absolute or relative) to the histogram/meta ROOT file, if
-        produced.
-    tree_name:
-        Name of the TTree inside the skim file (default: ``"Events"``).
-    framework_hash:
-        Git hash of the RDFAnalyzerCore framework.
-    user_repo_hash:
-        Git hash of the user analysis repository.
-    config_mtime:
-        UTC modification time (ISO 8601) of the job configuration file,
-        used by downstream provenance resolution to detect staleness.
-    extra_artifacts:
-        Additional ``role -> ArtifactSchema`` mappings to include in the
-        manifest (e.g. cutflow or LAW artifacts).
-
-    Returns
-    -------
-    str
-        Absolute path to the written manifest file.
-    """
-    manifest = OutputManifest(
-        framework_hash=framework_hash,
-        user_repo_hash=user_repo_hash,
-        config_mtime=config_mtime,
-    )
-    if skim_path:
-        manifest.add_artifact("skim", SkimSchema(path=skim_path, tree_name=tree_name))
-    if histogram_path:
-        manifest.add_artifact("histogram", HistogramSchema(path=histogram_path))
-    if extra_artifacts:
-        for role, artifact in extra_artifacts.items():
-            manifest.add_artifact(role, artifact)
-    manifest_path = os.path.join(output_dir, MANIFEST_FILENAME)
-    manifest.write(manifest_path)
-    return manifest_path

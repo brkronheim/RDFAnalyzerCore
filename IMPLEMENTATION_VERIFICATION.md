@@ -9,13 +9,14 @@ This document verifies that all requirements have been properly implemented.
 - [x] SetupCombine.cmake module created
 - [x] ExternalProject_Add configured to clone and build Combine
 - [x] Build location: `build/external/HiggsAnalysis/CombinedLimit/`
-- [x] Combine executable at: `build/external/HiggsAnalysis/CombinedLimit/exe/combine`
+- [x] Combine executable at: `build/external/HiggsAnalysis/CombinedLimit/bin/combine`
 
 ### 2. Optional Building of CombineHarvester
 - [x] CMake option `BUILD_COMBINE_HARVESTER` added (default: OFF)
 - [x] Depends on BUILD_COMBINE being enabled
-- [x] ExternalProject_Add configured to clone and build CombineHarvester
+- [x] ExternalProject_Add configured to clone, patch, build, and install CombineHarvester
 - [x] Build location: `build/external/CombineHarvester/`
+- [x] Libraries available at: `build/external/CombineHarvester/lib/`
 - [x] Tools available at: `build/external/CombineHarvester/CombineTools/bin/`
 
 ### 3. Control Test Building
@@ -121,11 +122,11 @@ This document verifies that all requirements have been properly implemented.
 ### Build Testing (requires ROOT environment)
 - [ ] Default build (tests only)
 - [ ] Build with Combine
-- [ ] Build with CombineHarvester
+- [x] Build with CombineHarvester
 - [ ] Build with all features
 - [ ] Build without tests
 
-*Note: Full build testing requires ROOT environment not available in current context*
+*Note: CombineHarvester standalone build was validated in a ROOT-enabled environment. The remaining unchecked items were not rerun in this pass.*
 
 ## ✅ Integration Points
 
@@ -154,7 +155,7 @@ This document verifies that all requirements have been properly implemented.
 All requirements from the problem statement have been successfully implemented:
 
 ✅ **Optional CMS Combine building** - Controlled by BUILD_COMBINE flag
-✅ **Optional CombineHarvester building** - Controlled by BUILD_COMBINE_HARVESTER flag  
+✅ **Optional CombineHarvester build** - Controlled by BUILD_COMBINE_HARVESTER flag  
 ✅ **Configurable test building** - Controlled by BUILD_TESTS flag
 ✅ **Complete workflow documentation** - 590 line integration guide
 ✅ **Usage examples** - Multiple examples and template scripts
@@ -167,7 +168,7 @@ All requirements from the problem statement have been successfully implemented:
 - **Documentation pages**: 3 new + 3 updated
 - **Example scripts**: 1
 - **CMake options**: 3
-- **Build targets**: 2 (CombineTool, CombineHarvester)
+- **Build targets**: 2 external targets plus standalone CombineHarvester libraries and tool binaries
 
 ## 🚀 Next Steps
 
