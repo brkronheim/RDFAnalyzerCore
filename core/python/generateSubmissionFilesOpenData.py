@@ -20,6 +20,7 @@ from submission_backend import (
     ensure_xrootd_redirector,
 )
 from validate_config import validate_submit_config
+from dataset_manifest import DatasetManifest
 
 
 def _load_file_indices(recid):
@@ -197,6 +198,58 @@ def processMetaData(recid, sampleNames):
     return fileDict
 
 
+def _parse_opendata_config(config_file):
+    """Parse a sample config file for Open Data submissions.
+
+    Accepts both the legacy key=value text format **and** the new YAML manifest
+    format (detected by ``.yaml`` / ``.yml`` extension).  When a YAML manifest
+    is provided, ``recids`` are collected from the ``das`` field of each entry
+    (comma-separated record IDs stored there by convention for open-data
+    samples).
+
+    Returns:
+        samples    dict[str, dict]  – {name: legacy_dict}
+        recids     list[str]        – record IDs to query
+        lumi       float            – luminosity
+    """
+    ext = os.path.splitext(config_file)[1].lower()
+    if ext in (".yaml", ".yml"):
+        manifest = DatasetManifest.load_yaml(config_file)
+        samples = manifest.to_legacy_sample_dict()
+        recids = []
+        for entry in manifest.datasets:
+            if entry.das:
+                for r in entry.das.split(","):
+                    r = r.strip()
+                    if r and r not in recids:
+                        recids.append(r)
+        return samples, recids, manifest.lumi
+
+    samples = {}
+    recids = []
+    lumi = 1.0
+
+    with open(config_file) as fh:
+        for line in fh:
+            line = line.split("#")[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            inner = {}
+            for part in parts:
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    inner[k.strip()] = v.strip()
+            if "lumi" in inner:
+                lumi = float(inner["lumi"])
+            if "recids" in inner:
+                recids += [r.strip() for r in inner["recids"].split(",") if r.strip()]
+            if "name" in inner:
+                samples[inner["name"]] = inner
+
+    return samples, recids, lumi
+
+
 def main():
     parser = argparse.ArgumentParser("Generate files for condor submission")
     parser.add_argument("-c", "--config", type=str, required=True, help="config file to process")
@@ -280,27 +333,17 @@ def main():
 
     Path(saveDirectory).mkdir(parents=True, exist_ok=True)
     copyList = get_copy_file_list(configDict)
-    lumi = 1
-    recids = []
-    sampleNames = dict()
-    fileDict = dict()
 
-    with open(configFile) as file:
-        for line in file:
-            storeLine = line[:-1]
-            line = line.split("#")[0]
-            line = line.strip().split()
-            innerDict = dict()
-            for pair in line:
-                pair = pair.strip().split("=")
-                if len(pair) == 2:
-                    innerDict[pair[0]] = pair[1]
-            if "lumi" in innerDict:
-                lumi = float(innerDict["lumi"])
-            if "recids" in innerDict:
-                recids += innerDict["recids"].strip().split(",")
-            if "name" in innerDict and "das" in innerDict:
-                sampleNames[innerDict["das"]] = innerDict["name"]
+    # Parse the sample config (supports both legacy text and YAML manifest)
+    samples, recids, lumi = _parse_opendata_config(configFile)
+
+    # Build das-key → sample-name mapping for processMetaData
+    sampleNames = {
+        sample_dict["das"]: name
+        for name, sample_dict in samples.items()
+        if sample_dict.get("das")
+    }
+    fileDict = {}
 
     # Fetch metadata for recids in parallel to speed up slow network/API calls
     if recids:
@@ -364,19 +407,8 @@ def main():
 
     test_job_event = threading.Event()
 
-    # collect sample entries from config file so we can process them in parallel
-    samples_to_process = []
-    with open(configFile) as file:
-        for line in file:
-            line = line.split("#")[0]
-            line = line.strip().split()
-            innerDict = dict()
-            for pair in line:
-                pair = pair.strip().split("=")
-                if len(pair) == 2:
-                    innerDict[pair[0]] = pair[1]
-            if "name" in innerDict:
-                samples_to_process.append(innerDict)
+    # build the list of sample dicts to process (already parsed by _parse_opendata_config)
+    samples_to_process = list(samples.values())
 
     def process_sample(innerDict):
         nonlocal index_container
