@@ -58,6 +58,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _CORE_PYTHON = os.path.abspath(os.path.join(_HERE, "..", "core", "python"))
 if _CORE_PYTHON not in sys.path:
     sys.path.insert(0, _CORE_PYTHON)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
 
@@ -193,7 +197,11 @@ class CreateDatacard(CombineMixin, law.Task):
         Path(self._datacard_dir).mkdir(parents=True, exist_ok=True)
 
         self.publish_message(f"Generating datacards in: {self._datacard_dir}")
-        generator.run()
+
+        with PerformanceRecorder("CreateDatacard") as rec:
+            generator.run()
+
+        rec.save(os.path.join(self._datacard_dir, "create_datacard.perf.json"))
 
         # Verify at least one datacard was produced
         datacards = list(Path(self._datacard_dir).glob("datacard_*.txt"))
@@ -307,33 +315,36 @@ class RunCombine(CombineMixin, law.Task):
         extra_opts = shlex.split(self.combine_options) if self.combine_options else []
 
         all_ok = True
-        for datacard in datacards:
-            tag = Path(datacard).stem.replace("datacard_", "")
-            cmd = (
-                [combine_bin, "-M", self.method, datacard, "-n", f"_{tag}"]
-                + extra_opts
-            )
-            self.publish_message("Running: " + " ".join(cmd))
+        with PerformanceRecorder(f"RunCombine[method={self.method}]") as rec:
+            for datacard in datacards:
+                tag = Path(datacard).stem.replace("datacard_", "")
+                cmd = (
+                    [combine_bin, "-M", self.method, datacard, "-n", f"_{tag}"]
+                    + extra_opts
+                )
+                self.publish_message("Running: " + " ".join(cmd))
 
-            log_path = os.path.join(self._results_dir, f"combine_{tag}.log")
-            with open(log_path, "w") as log_fh:
-                result = subprocess.run(
-                    cmd,
-                    stdout=log_fh,
-                    stderr=subprocess.STDOUT,
-                    cwd=self._results_dir,
-                )
+                log_path = os.path.join(self._results_dir, f"combine_{tag}.log")
+                with open(log_path, "w") as log_fh:
+                    result = subprocess.run(
+                        cmd,
+                        stdout=log_fh,
+                        stderr=subprocess.STDOUT,
+                        cwd=self._results_dir,
+                    )
 
-            if result.returncode != 0:
-                self.publish_message(
-                    f"ERROR: combine failed for {datacard!r} (exit {result.returncode}).  "
-                    f"See log: {log_path}"
-                )
-                all_ok = False
-            else:
-                self.publish_message(
-                    f"Combine finished for {tag}.  Log: {log_path}"
-                )
+                if result.returncode != 0:
+                    self.publish_message(
+                        f"ERROR: combine failed for {datacard!r} (exit {result.returncode}).  "
+                        f"See log: {log_path}"
+                    )
+                    all_ok = False
+                else:
+                    self.publish_message(
+                        f"Combine finished for {tag}.  Log: {log_path}"
+                    )
+
+        rec.save(os.path.join(self._results_dir, "run_combine.perf.json"))
 
         # Write a summary file listing all outputs
         output_roots = sorted(Path(self._results_dir).glob("higgsCombine*.root"))

@@ -58,6 +58,11 @@ import law  # type: ignore
 from law.workflow.base import BaseWorkflow, BaseWorkflowProxy
 from law.contrib.htcondor import HTCondorWorkflow  # noqa: F401  – re-exported for callers
 
+# Performance recording is imported lazily inside _run_analysis_job so that
+# this module remains picklable for Dask workers that may not have the full
+# law/ directory on their PYTHONPATH.  The import is attempted at call time;
+# if it fails, performance recording is silently skipped.
+
 
 # ---------------------------------------------------------------------------
 # Pure function: execute one analysis job (picklable → usable on Dask workers)
@@ -76,6 +81,10 @@ def _run_analysis_job(
     This function is intentionally free of LAW/Luigi imports so that it can be
     pickled and sent to a remote Dask worker without shipping the full task
     graph.
+
+    Performance metrics (wall time, peak RSS, throughput) are recorded to
+    ``job.perf.json`` inside *job_dir* via
+    :class:`performance_recorder.PerformanceRecorder`.
 
     Parameters
     ----------
@@ -139,14 +148,60 @@ def _run_analysis_job(
     else:
         full_cmd = f"bash -c {shlex.quote(inner_cmd)}"
 
-    result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
+    # ------------------------------------------------------------------
+    # Attempt to import performance recording (optional, best-effort).
+    # ------------------------------------------------------------------
+    _rec_cls = None
+    _est_fn = None
+    try:
+        import sys as _sys
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in _sys.path:
+            _sys.path.insert(0, _here)
+        from performance_recorder import PerformanceRecorder, estimate_job_input_bytes
+        _rec_cls = PerformanceRecorder
+        _est_fn = estimate_job_input_bytes
+    except ImportError:
+        pass
 
-    if result.returncode != 0:
-        stderr_tail = result.stderr[-2000:] if result.stderr else ""
-        raise RuntimeError(
-            f"Analysis job failed (exit {result.returncode}) in {job_dir!r}."
-            + (f"\nstderr:\n{stderr_tail}" if stderr_tail else "")
-        )
+    task_label = f"analysis_job:{os.path.basename(job_dir)}"
+
+    if _rec_cls is not None:
+        input_bytes = _est_fn(job_dir) if _est_fn else 0
+        with _rec_cls(task_label) as rec:
+            proc = subprocess.Popen(
+                full_cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            rec.monitor_process(proc.pid)
+            stdout_data, stderr_data = proc.communicate()
+            returncode = proc.returncode
+            rec.set_throughput(input_bytes)
+
+        # Write performance metrics (best-effort: ignore I/O errors)
+        try:
+            rec.save(os.path.join(job_dir, "job.perf.json"))
+        except OSError:
+            pass
+
+        if returncode != 0:
+            stderr_tail = stderr_data[-2000:] if stderr_data else ""
+            raise RuntimeError(
+                f"Analysis job failed (exit {returncode}) in {job_dir!r}."
+                + (f"\nstderr:\n{stderr_tail}" if stderr_tail else "")
+            )
+    else:
+        # Fallback: original subprocess.run path (no performance recording)
+        result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            stderr_tail = result.stderr[-2000:] if result.stderr else ""
+            raise RuntimeError(
+                f"Analysis job failed (exit {result.returncode}) in {job_dir!r}."
+                + (f"\nstderr:\n{stderr_tail}" if stderr_tail else "")
+            )
 
     return f"done:{job_dir}"
 
