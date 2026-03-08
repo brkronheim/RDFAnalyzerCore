@@ -86,6 +86,7 @@ from submission_backend import (  # noqa: E402
     write_submit_files,
 )
 from validate_config import validate_submit_config  # noqa: E402
+from dataset_manifest import DatasetManifest  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +203,25 @@ def _query_rucio(directory, file_split_gb, WL, BL, site_override, client):
 
 
 def _get_sample_list(config_file):
-    """Parse the sample config and return (sampleDict, baseDirectoryList, lumi, WL, BL)."""
+    """Parse the sample config and return (sampleDict, baseDirectoryList, lumi, WL, BL).
+
+    Accepts both the legacy key=value text format **and** the new YAML manifest
+    format (detected by ``.yaml`` / ``.yml`` extension).  When a YAML manifest
+    is supplied the returned ``sampleDict`` contains all :class:`DatasetEntry`
+    objects converted to legacy dicts, and ``lumi`` / ``WL`` / ``BL`` are
+    taken from the manifest's global settings.
+    """
+    ext = os.path.splitext(config_file)[1].lower()
+    if ext in (".yaml", ".yml"):
+        manifest = DatasetManifest.load_yaml(config_file)
+        return (
+            manifest.to_legacy_sample_dict(),
+            [],
+            manifest.lumi,
+            manifest.whitelist,
+            manifest.blacklist,
+        )
+
     config_dict: dict[str, dict] = {}
     base_dirs = []
     lumi = 1.0
