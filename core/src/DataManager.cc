@@ -23,6 +23,29 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
     // that expect at least one row.
     if (!(chain_vec_m.empty()) && chain_vec_m[0]->GetEntries() > 0) {
       df_m = ROOT::RDataFrame(*chain_vec_m[0]);
+
+      // Apply optional entry-range restriction.
+      // Written by law tasks when partition='entry_range' is selected.
+      // Both keys must be present; if only one is set the range is ignored.
+      // Note: Range() disables implicit multi-threading (ImplicitMT) when
+      // used with ROOT < 6.28.  In entry_range partition mode each condor
+      // job is a separate process, so per-job parallelism is unaffected;
+      // only the in-process thread count is restricted to 1 on older ROOT.
+      const std::string firstEntryStr = configProvider.get("firstEntry");
+      const std::string lastEntryStr  = configProvider.get("lastEntry");
+      if (!firstEntryStr.empty() && !lastEntryStr.empty()) {
+        const ULong64_t firstEntry = std::stoull(firstEntryStr);
+        const ULong64_t lastEntry  = std::stoull(lastEntryStr);
+        if (lastEntry > firstEntry) {
+          df_m = df_m.Range(firstEntry, lastEntry);
+          std::cout << "Entry range applied: [" << firstEntry << ", "
+                    << lastEntry << ")" << std::endl;
+        } else {
+          std::cerr << "Warning: firstEntry (" << firstEntry
+                    << ") >= lastEntry (" << lastEntry
+                    << "); entry range ignored." << std::endl;
+        }
+      }
     } else {
       std::cout << "No input files found; using single-entry in-memory RDataFrame for testing." << std::endl;
     }

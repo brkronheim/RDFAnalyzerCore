@@ -88,6 +88,7 @@ from submission_backend import (  # noqa: E402
 from validate_config import validate_submit_config  # noqa: E402
 from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
 from dataset_manifest import DatasetManifest  # noqa: E402
+from partition_utils import _make_partitions, _query_tree_entries  # noqa: E402
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -551,6 +552,27 @@ class OpenDataMixin:
         default=30,
         description="Number of ROOT files per condor job (default: 30)",
     )
+    partition = luigi.Parameter(
+        default="file_group",
+        description=(
+            "Partitioning mode for splitting each dataset across jobs.  "
+            "One of: 'file_group' (default – group files by count), "
+            "'file' (one file per job), "
+            "'entry_range' (split files by TTree entry ranges; requires uproot "
+            "and --entries-per-job).  "
+            "In 'file_group' mode the --files parameter controls the max files "
+            "per job."
+        ),
+    )
+    entries_per_job = luigi.IntParameter(
+        default=100_000,
+        description=(
+            "Maximum TTree entries per job in 'entry_range' mode "
+            "(default: 100000).  "
+            "Requires uproot (pip install uproot).  "
+            "Ignored for 'file_group' and 'file' modes."
+        ),
+    )
     exe = luigi.Parameter(
         description="Path to the compiled C++ executable to run on workers",
     )
@@ -785,12 +807,19 @@ class PrepareOpenDataSample(OpenDataMixin, law.LocalWorkflow):
         norm_scale  = str(extra_scale * kfac * lumi * xsec / norm)
         created_dirs: list[str] = []
 
-        # Split file list into groups of self.files
-        groups: dict[int, list[str]] = {}
-        for idx in range(0, len(file_list), self.files):
-            groups[len(groups)] = file_list[idx: idx + self.files]
+        # Determine TTree name for entry-range queries
+        tree_name = config_dict.get("treeList", "Events").split(",")[0].strip() or "Events"
 
-        for sub_idx, group_files in groups.items():
+        # Apply partitioning
+        partitions = _make_partitions(
+            file_list,
+            mode=self.partition,
+            files_per_job=self.files,
+            entries_per_job=self.entries_per_job,
+            tree_name=tree_name,
+        )
+
+        for sub_idx, partition in enumerate(partitions):
             job_dir = os.path.join(sample_base, f"job_{sub_idx}")
             Path(job_dir).mkdir(parents=True, exist_ok=True)
 
@@ -805,12 +834,19 @@ class PrepareOpenDataSample(OpenDataMixin, law.LocalWorkflow):
             job_config = _normalize_config_paths(dict(config_dict))
             job_config["saveFile"] = os.path.join(save_dir, f"{name}_{sub_idx}.root")
             job_config["metaFile"] = os.path.join(save_dir, f"{name}_{sub_idx}_meta.root")
-            job_config["fileList"] = ",".join(group_files)
+            job_config["fileList"] = partition["files"]
             job_config["batch"]    = "True"
             job_config["type"]     = typ
             job_config["sampleConfig"] = os.path.basename(self._sample_config)
             job_config["floatConfig"]  = "floats.txt"
             job_config["intConfig"]    = "ints.txt"
+
+            # Write entry-range keys when in entry_range partition mode ----
+            # last_entry > 0 is the sentinel: file_group/file modes use 0
+            # for both fields, while entry_range mode always sets last_entry > 0.
+            if partition["last_entry"] > 0:
+                job_config["firstEntry"] = str(partition["first_entry"])
+                job_config["lastEntry"] = str(partition["last_entry"])
 
             if self.stage_in:
                 original_list = job_config["fileList"]
