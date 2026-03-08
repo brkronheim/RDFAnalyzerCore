@@ -110,6 +110,10 @@ target_link_libraries(testKinematicFitManagerGpu core corePlugins gtest gtest_ma
 add_test(NAME KinematicFitManagerGpuIntegrationTest COMMAND testKinematicFitManagerGpu)
 endif()
 
+add_executable(testCutflowManager testCutflowManager.cc)
+target_link_libraries(testCutflowManager core corePlugins gtest gtest_main)
+add_test(NAME CutflowManagerTest COMMAND testCutflowManager)
+
 add_executable(testGoldenJsonManager testGoldenJsonManager.cc)
 target_link_libraries(testGoldenJsonManager core corePlugins gtest gtest_main)
 add_test(NAME GoldenJsonManagerTest COMMAND testGoldenJsonManager)
