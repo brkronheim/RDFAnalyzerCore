@@ -224,6 +224,110 @@ class TestOpendataTasksModule(unittest.TestCase):
         ):
             self.assertEqual(cls.task_namespace, "")
 
+    def test_opendata_mixin_has_dataset_parameter(self):
+        """OpenDataMixin exposes the 'dataset' luigi parameter."""
+        import opendata_tasks
+        self.assertTrue(
+            hasattr(opendata_tasks.OpenDataMixin, "dataset"),
+            "OpenDataMixin is missing the 'dataset' parameter",
+        )
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestOpendataDatasetFilter(unittest.TestCase):
+    """Tests for the per-dataset execution feature in opendata_tasks."""
+
+    def _import(self):
+        import opendata_tasks
+        return opendata_tasks
+
+    def _make_samples(self, names):
+        """Return a minimal fake samples dict keyed by dataset name."""
+        return {n: {"name": n, "das": "cms_dataset", "xsec": "1.0", "type": "0",
+                    "norm": "1.0", "kfac": "1.0", "extraScale": "1.0"}
+                for n in names}
+
+    # ------------------------------------------------------------------
+    # _main_dir path logic
+    # ------------------------------------------------------------------
+
+    def test_main_dir_without_dataset_uses_name_only(self):
+        """When --dataset is empty, _main_dir is condorSub_{name}."""
+        mod = self._import()
+        mixin = mod.OpenDataMixin()
+        mixin.name = "myRun"
+        mixin.dataset = ""
+        self.assertTrue(mixin._main_dir.endswith("condorSub_myRun"))
+
+    def test_main_dir_with_dataset_includes_dataset(self):
+        """When --dataset is set, _main_dir is condorSub_{name}_{dataset}."""
+        mod = self._import()
+        mixin = mod.OpenDataMixin()
+        mixin.name = "myRun"
+        mixin.dataset = "dy"
+        expected_suffix = "condorSub_myRun_dy"
+        self.assertTrue(
+            mixin._main_dir.endswith(expected_suffix),
+            f"Expected _main_dir to end with {expected_suffix!r}, got {mixin._main_dir!r}",
+        )
+
+    def test_main_dir_different_datasets_are_different_dirs(self):
+        """Two different --dataset values produce two different _main_dir paths."""
+        mod = self._import()
+        mixin1 = mod.OpenDataMixin()
+        mixin1.name = "run16"
+        mixin1.dataset = "signal"
+        mixin2 = mod.OpenDataMixin()
+        mixin2.name = "run16"
+        mixin2.dataset = "background"
+        self.assertNotEqual(mixin1._main_dir, mixin2._main_dir)
+
+    # ------------------------------------------------------------------
+    # create_branch_map filtering
+    # ------------------------------------------------------------------
+
+    def test_branch_map_without_dataset_returns_all(self):
+        """When --dataset is empty, create_branch_map returns all samples."""
+        mod = self._import()
+        samples = self._make_samples(["alpha", "beta", "gamma"])
+        from unittest.mock import patch, PropertyMock
+        task = mod.PrepareOpenDataSample.__new__(mod.PrepareOpenDataSample)
+        task.dataset = ""
+        with patch.object(mod.OpenDataMixin, "_sample_config", new_callable=PropertyMock,
+                          return_value="fake.txt"):
+            with patch("opendata_tasks._parse_opendata_config",
+                       return_value=(samples, [], 1.0)):
+                branch_map = task.create_branch_map()
+        self.assertEqual(set(branch_map.values()), {"alpha", "beta", "gamma"})
+
+    def test_branch_map_with_dataset_returns_single_entry(self):
+        """When --dataset is set, create_branch_map returns only that sample."""
+        mod = self._import()
+        samples = self._make_samples(["alpha", "beta", "gamma"])
+        from unittest.mock import patch, PropertyMock
+        task = mod.PrepareOpenDataSample.__new__(mod.PrepareOpenDataSample)
+        task.dataset = "gamma"
+        with patch.object(mod.OpenDataMixin, "_sample_config", new_callable=PropertyMock,
+                          return_value="fake.txt"):
+            with patch("opendata_tasks._parse_opendata_config",
+                       return_value=(samples, [], 1.0)):
+                branch_map = task.create_branch_map()
+        self.assertEqual(branch_map, {0: "gamma"})
+
+    def test_branch_map_unknown_dataset_raises(self):
+        """When --dataset names a dataset not in the config, ValueError is raised."""
+        mod = self._import()
+        samples = self._make_samples(["alpha", "beta"])
+        from unittest.mock import patch, PropertyMock
+        task = mod.PrepareOpenDataSample.__new__(mod.PrepareOpenDataSample)
+        task.dataset = "nonexistent"
+        with patch.object(mod.OpenDataMixin, "_sample_config", new_callable=PropertyMock,
+                          return_value="fake.txt"):
+            with patch("opendata_tasks._parse_opendata_config",
+                       return_value=(samples, [], 1.0)):
+                with self.assertRaises(ValueError):
+                    task.create_branch_map()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

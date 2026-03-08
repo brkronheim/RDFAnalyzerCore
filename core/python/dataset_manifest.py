@@ -45,6 +45,7 @@ Load a YAML manifest and query it::
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass, field, fields, asdict
 from typing import Any, Dict, List, Optional, Union
@@ -247,6 +248,44 @@ class DatasetManifest:
         self.whitelist: List[str] = whitelist or []
         self.blacklist: List[str] = blacklist or []
         self.lumi_by_year: Dict[int, float] = lumi_by_year or {}
+
+    # ------------------------------------------------------------------ identity / provenance
+
+    @staticmethod
+    def file_hash(path: str) -> str:
+        """Return the SHA-256 hex digest of the manifest file at *path*.
+
+        The hash is computed over the raw file bytes and can be used to
+        uniquely identify the manifest version used in a workflow task.
+        Recording this alongside the selected query parameters and the
+        resolved entry names makes the dataset selection fully reproducible.
+
+        Parameters
+        ----------
+        path : str
+            Path to the manifest file (YAML or legacy text).
+
+        Returns
+        -------
+        str
+            64-character lowercase hex digest, or ``"<not found>"`` if the
+            file cannot be opened.
+
+        Example
+        -------
+        ::
+
+            h = DatasetManifest.file_hash("datasets.yaml")
+            # "3a5f2b..." – stable identifier for this manifest revision
+        """
+        try:
+            h = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(65536), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return "<not found>"
 
     # ------------------------------------------------------------------ I/O
 

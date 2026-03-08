@@ -99,8 +99,8 @@ bool ProvenanceService::looksLikeFilePath(const std::string& value) {
         value.find(';') != std::string::npos) {
         return false;
     }
-    static const std::array<const char*, 7> kExts = {
-        ".json", ".root", ".onnx", ".bdt", ".pt", ".pb", ".xml"};
+    static const std::array<const char*, 9> kExts = {
+        ".json", ".root", ".onnx", ".bdt", ".pt", ".pb", ".xml", ".yaml", ".yml"};
     for (const char* ext : kExts) {
         const std::string_view sv(ext);
         if (value.size() > sv.size() &&
@@ -176,6 +176,16 @@ void ProvenanceService::finalize(ROOT::RDF::RNode& /*df*/) {
 
 void ProvenanceService::addEntry(const std::string& key, const std::string& value) {
     provenance_m[key] = value;
+}
+
+void ProvenanceService::recordDatasetManifestProvenance(
+    const std::string& manifestFileHash,
+    const std::string& queryParamsJson,
+    const std::string& resolvedEntries
+) {
+    provenance_m["dataset_manifest.file_hash"]        = manifestFileHash;
+    provenance_m["dataset_manifest.query_params"]     = queryParamsJson;
+    provenance_m["dataset_manifest.resolved_entries"] = resolvedEntries;
 }
 
 const std::unordered_map<std::string, std::string>&

@@ -41,6 +41,7 @@ from output_schema import (
     SKIM_SCHEMA_VERSION,
     ArtifactResolutionStatus,
     CutflowSchema,
+    DatasetManifestProvenance,
     HistogramAxisSpec,
     HistogramSchema,
     LawArtifactSchema,
@@ -1097,3 +1098,196 @@ class TestOutputManifestProvenance:
         )
         for status in m2.resolve(updated).values():
             assert status == ArtifactResolutionStatus.STALE
+
+
+# ---------------------------------------------------------------------------
+# DatasetManifestProvenance
+# ---------------------------------------------------------------------------
+
+
+class TestDatasetManifestProvenance:
+    def test_defaults(self):
+        p = DatasetManifestProvenance()
+        assert p.manifest_path is None
+        assert p.manifest_hash is None
+        assert p.query_params is None
+        assert p.resolved_entry_names is None
+
+    def test_full_construction(self):
+        p = DatasetManifestProvenance(
+            manifest_path="datasets.yaml",
+            manifest_hash="abc123",
+            query_params={"year": 2022, "dtype": "mc"},
+            resolved_entry_names=["ttbar_2022", "wjets_2022"],
+        )
+        assert p.manifest_path == "datasets.yaml"
+        assert p.manifest_hash == "abc123"
+        assert p.query_params == {"year": 2022, "dtype": "mc"}
+        assert p.resolved_entry_names == ["ttbar_2022", "wjets_2022"]
+
+    def test_to_dict_contains_all_fields(self):
+        p = DatasetManifestProvenance(
+            manifest_path="d.yaml",
+            manifest_hash="deadbeef",
+            query_params={"year": 2023},
+            resolved_entry_names=["a", "b"],
+        )
+        d = p.to_dict()
+        assert d["manifest_path"] == "d.yaml"
+        assert d["manifest_hash"] == "deadbeef"
+        assert d["query_params"] == {"year": 2023}
+        assert d["resolved_entry_names"] == ["a", "b"]
+
+    def test_to_dict_none_fields(self):
+        p = DatasetManifestProvenance()
+        d = p.to_dict()
+        assert d["manifest_path"] is None
+        assert d["manifest_hash"] is None
+        assert d["query_params"] is None
+        assert d["resolved_entry_names"] is None
+
+    def test_from_dict_round_trip(self):
+        p = DatasetManifestProvenance(
+            manifest_path="datasets.yaml",
+            manifest_hash="abc123",
+            query_params={"year": 2022},
+            resolved_entry_names=["ttbar"],
+        )
+        p2 = DatasetManifestProvenance.from_dict(p.to_dict())
+        assert p2.manifest_path == p.manifest_path
+        assert p2.manifest_hash == p.manifest_hash
+        assert p2.query_params == p.query_params
+        assert p2.resolved_entry_names == p.resolved_entry_names
+
+    def test_from_dict_partial(self):
+        d = {"manifest_hash": "xyz"}
+        p = DatasetManifestProvenance.from_dict(d)
+        assert p.manifest_hash == "xyz"
+        assert p.manifest_path is None
+        assert p.query_params is None
+        assert p.resolved_entry_names is None
+
+    def test_from_dict_empty(self):
+        p = DatasetManifestProvenance.from_dict({})
+        assert p.manifest_path is None
+        assert p.manifest_hash is None
+
+    def test_query_params_multi_value(self):
+        """query_params may contain list values (multi-year queries)."""
+        p = DatasetManifestProvenance(
+            manifest_hash="h",
+            query_params={"year": [2022, 2023], "dtype": "mc"},
+            resolved_entry_names=["a", "b", "c"],
+        )
+        d = p.to_dict()
+        p2 = DatasetManifestProvenance.from_dict(d)
+        assert p2.query_params["year"] == [2022, 2023]
+
+
+# ---------------------------------------------------------------------------
+# OutputManifest – dataset_manifest_provenance integration
+# ---------------------------------------------------------------------------
+
+
+class TestOutputManifestDatasetManifestProvenance:
+    def _make_prov(self):
+        return DatasetManifestProvenance(
+            manifest_path="datasets.yaml",
+            manifest_hash="abc123",
+            query_params={"year": 2022, "dtype": "mc"},
+            resolved_entry_names=["ttbar_2022", "wjets_2022"],
+        )
+
+    def test_default_is_none(self):
+        m = OutputManifest(skim=SkimSchema(output_file="out.root"))
+        assert m.dataset_manifest_provenance is None
+
+    def test_set_on_construction(self):
+        prov = self._make_prov()
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            dataset_manifest_provenance=prov,
+        )
+        assert m.dataset_manifest_provenance is prov
+
+    def test_to_dict_includes_provenance(self):
+        prov = self._make_prov()
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            dataset_manifest_provenance=prov,
+        )
+        d = m.to_dict()
+        assert d["dataset_manifest_provenance"] is not None
+        assert d["dataset_manifest_provenance"]["manifest_hash"] == "abc123"
+        assert d["dataset_manifest_provenance"]["query_params"] == {"year": 2022, "dtype": "mc"}
+        assert d["dataset_manifest_provenance"]["resolved_entry_names"] == [
+            "ttbar_2022", "wjets_2022"
+        ]
+
+    def test_to_dict_none_provenance(self):
+        m = OutputManifest(skim=SkimSchema(output_file="out.root"))
+        d = m.to_dict()
+        assert d["dataset_manifest_provenance"] is None
+
+    def test_from_dict_round_trip_with_provenance(self):
+        prov = self._make_prov()
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            dataset_manifest_provenance=prov,
+        )
+        m2 = OutputManifest.from_dict(m.to_dict())
+        assert m2.dataset_manifest_provenance is not None
+        assert m2.dataset_manifest_provenance.manifest_hash == "abc123"
+        assert m2.dataset_manifest_provenance.query_params == {"year": 2022, "dtype": "mc"}
+        assert m2.dataset_manifest_provenance.resolved_entry_names == [
+            "ttbar_2022", "wjets_2022"
+        ]
+
+    def test_from_dict_no_provenance_field_returns_none(self):
+        """Old manifests without the field should deserialise cleanly."""
+        d = {
+            "manifest_version": OUTPUT_MANIFEST_VERSION,
+            "skim": {"schema_version": SKIM_SCHEMA_VERSION, "output_file": "out.root",
+                     "tree_name": "Events", "branches": []},
+        }
+        m = OutputManifest.from_dict(d)
+        assert m.dataset_manifest_provenance is None
+
+    def test_yaml_round_trip_with_provenance(self, tmp_path):
+        prov = DatasetManifestProvenance(
+            manifest_path="datasets.yaml",
+            manifest_hash="deadbeef",
+            query_params={"year": 2022},
+            resolved_entry_names=["s1", "s2"],
+        )
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            dataset_manifest_provenance=prov,
+        )
+        path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(path)
+        m2 = OutputManifest.load_yaml(path)
+        assert m2.dataset_manifest_provenance is not None
+        assert m2.dataset_manifest_provenance.manifest_hash == "deadbeef"
+        assert m2.dataset_manifest_provenance.query_params == {"year": 2022}
+        assert m2.dataset_manifest_provenance.resolved_entry_names == ["s1", "s2"]
+
+    def test_yaml_round_trip_none_provenance(self, tmp_path):
+        m = OutputManifest(skim=SkimSchema(output_file="out.root"))
+        path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(path)
+        m2 = OutputManifest.load_yaml(path)
+        assert m2.dataset_manifest_provenance is None
+
+    def test_validate_passes_with_provenance(self):
+        prov = self._make_prov()
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            dataset_manifest_provenance=prov,
+        )
+        assert m.validate() == []
+
+    def test_provenance_optional_keys_include_manifest_keys(self):
+        assert "dataset_manifest.file_hash" in PROVENANCE_OPTIONAL_KEYS
+        assert "dataset_manifest.query_params" in PROVENANCE_OPTIONAL_KEYS
+        assert "dataset_manifest.resolved_entries" in PROVENANCE_OPTIONAL_KEYS

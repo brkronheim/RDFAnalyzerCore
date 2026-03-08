@@ -589,6 +589,17 @@ class NANOMixin:
     name = luigi.Parameter(
         description="Submission name; output dir will be condorSub_{name}",
     )
+    dataset = luigi.Parameter(
+        default="",
+        description=(
+            "Optional: restrict processing to a single named dataset from the "
+            "sampleConfig file.  When set, only that dataset is prepared and "
+            "executed, and outputs are written to condorSub_{name}_{dataset}/ "
+            "so that multiple datasets can be processed independently without "
+            "interfering with each other.  Leave empty (default) to process "
+            "all datasets in the sampleConfig as a single workflow."
+        ),
+    )
     size = luigi.IntParameter(
         default=30,
         description="GB of data per condor job (default: 30)",
@@ -666,9 +677,17 @@ class NANOMixin:
 
     @property
     def _main_dir(self):
-        """Absolute path to the condor submission directory."""
-        base = os.path.join(EOS_BASE, f"condorSub_{self.name}")
-        return base
+        """Absolute path to the condor submission directory.
+
+        When ``--dataset`` is set the directory is named
+        ``condorSub_{name}_{dataset}`` so that independent per-dataset
+        pipeline runs do not overwrite each other's symlinks or submit files.
+        When ``--dataset`` is empty the original ``condorSub_{name}`` path is
+        used, preserving full backward compatibility.
+        """
+        if self.dataset:
+            return os.path.join(EOS_BASE, f"condorSub_{self.name}_{self.dataset}")
+        return os.path.join(EOS_BASE, f"condorSub_{self.name}")
 
     @property
     def _config_dict(self):
@@ -742,6 +761,14 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
 
     def create_branch_map(self):
         sample_list, _, _, _, _ = _get_sample_list(self._sample_config)
+        if self.dataset:
+            if self.dataset not in sample_list:
+                raise ValueError(
+                    f"Dataset {self.dataset!r} not found in sample config "
+                    f"{self._sample_config!r}. "
+                    f"Available datasets: {sorted(sample_list.keys())}"
+                )
+            return {0: self.dataset}
         return {i: key for i, key in enumerate(sorted(sample_list.keys()))}
 
     def output(self):
