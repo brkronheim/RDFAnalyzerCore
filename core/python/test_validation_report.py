@@ -1,0 +1,776 @@
+"""
+Tests for core/python/validation_report.py.
+
+Covers:
+- ReportSeverity enum values
+- EventCountEntry auto-efficiency computation
+- CutflowEntry construction
+- MissingBranchEntry.is_complete property
+- ConfigMismatchEntry to_dict / from_dict round-trips
+- SystematicEntry.is_complete property
+- WeightSummaryEntry construction
+- OutputIntegrityEntry.is_ok property
+- ValidationReport adder methods and summary properties (has_errors, has_warnings)
+- ValidationReport to_dict / to_yaml / to_json / to_text round-trips
+- ValidationReport save_yaml / save_json / save_text / load_yaml / load_json file I/O
+- ValidationReport.from_dict round-trip
+- generate_report_from_manifest with various manifest configurations
+- CLI main() behaviour (via subprocess-free invocation with patched sys.argv)
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import textwrap
+
+import pytest
+import yaml
+
+# Make core/python importable when running from repo root
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from validation_report import (
+    VALIDATION_REPORT_VERSION,
+    ConfigMismatchEntry,
+    CutflowEntry,
+    EventCountEntry,
+    MissingBranchEntry,
+    OutputIntegrityEntry,
+    ReportSeverity,
+    SystematicEntry,
+    ValidationReport,
+    WeightSummaryEntry,
+    generate_report_from_manifest,
+)
+from output_schema import (
+    CutflowSchema,
+    HistogramSchema,
+    IntermediateArtifactSchema,
+    LawArtifactSchema,
+    MetadataSchema,
+    OutputManifest,
+    SkimSchema,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _minimal_manifest(**kwargs) -> OutputManifest:
+    """Return a minimal valid OutputManifest."""
+    return OutputManifest(
+        skim=SkimSchema(output_file="out.root", tree_name="Events"),
+        **kwargs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ReportSeverity
+# ---------------------------------------------------------------------------
+
+
+class TestReportSeverity:
+    def test_values(self):
+        assert ReportSeverity.INFO.value == "info"
+        assert ReportSeverity.WARNING.value == "warning"
+        assert ReportSeverity.ERROR.value == "error"
+
+    def test_is_str_subclass(self):
+        # ReportSeverity inherits str so it serialises naturally in JSON/YAML
+        assert isinstance(ReportSeverity.INFO, str)
+
+
+# ---------------------------------------------------------------------------
+# EventCountEntry
+# ---------------------------------------------------------------------------
+
+
+class TestEventCountEntry:
+    def test_auto_efficiency(self):
+        e = EventCountEntry(sample="ttbar", stage="presel", total_events=1000, selected_events=250)
+        assert e.efficiency == pytest.approx(0.25)
+
+    def test_no_efficiency_when_none_selected(self):
+        e = EventCountEntry(sample="ttbar", stage="presel", total_events=1000)
+        assert e.efficiency is None
+
+    def test_no_efficiency_when_total_zero(self):
+        e = EventCountEntry(sample="ttbar", stage="presel", total_events=0, selected_events=0)
+        assert e.efficiency is None
+
+    def test_explicit_efficiency_not_overwritten(self):
+        e = EventCountEntry(
+            sample="ttbar", stage="presel", total_events=1000, selected_events=100, efficiency=0.99
+        )
+        assert e.efficiency == pytest.approx(0.99)
+
+    def test_asdict_round_trip(self):
+        from dataclasses import asdict
+        e = EventCountEntry(sample="s", stage="st", total_events=100, selected_events=50)
+        d = asdict(e)
+        assert d["sample"] == "s"
+        assert d["total_events"] == 100
+        assert d["efficiency"] == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# CutflowEntry
+# ---------------------------------------------------------------------------
+
+
+class TestCutflowEntry:
+    def test_construction(self):
+        c = CutflowEntry(cut_name="trigger", events_passed=900, events_cumulative=900)
+        assert c.cut_name == "trigger"
+        assert c.events_cumulative == 900
+
+    def test_optional_fields_none(self):
+        c = CutflowEntry(cut_name="baseline", events_passed=500)
+        assert c.events_cumulative is None
+        assert c.relative_efficiency is None
+        assert c.cumulative_efficiency is None
+
+
+# ---------------------------------------------------------------------------
+# MissingBranchEntry
+# ---------------------------------------------------------------------------
+
+
+class TestMissingBranchEntry:
+    def test_is_complete_true(self):
+        m = MissingBranchEntry(
+            artifact_role="skim",
+            expected_branches=["pt", "eta"],
+            missing_branches=[],
+        )
+        assert m.is_complete is True
+
+    def test_is_complete_false(self):
+        m = MissingBranchEntry(
+            artifact_role="skim",
+            expected_branches=["pt", "eta"],
+            missing_branches=["eta"],
+        )
+        assert m.is_complete is False
+
+
+# ---------------------------------------------------------------------------
+# ConfigMismatchEntry
+# ---------------------------------------------------------------------------
+
+
+class TestConfigMismatchEntry:
+    def test_to_dict(self):
+        c = ConfigMismatchEntry(key="tree_name", expected="Events", actual="Skimmed")
+        d = c.to_dict()
+        assert d["key"] == "tree_name"
+        assert d["expected"] == "Events"
+        assert d["actual"] == "Skimmed"
+        assert d["severity"] == "error"
+
+    def test_from_dict_round_trip(self):
+        c = ConfigMismatchEntry(
+            key="schema_version", expected=1, actual=2, severity=ReportSeverity.WARNING
+        )
+        restored = ConfigMismatchEntry.from_dict(c.to_dict())
+        assert restored.key == c.key
+        assert restored.expected == c.expected
+        assert restored.actual == c.actual
+        assert restored.severity == ReportSeverity.WARNING
+
+    def test_default_severity_is_error(self):
+        c = ConfigMismatchEntry(key="x", expected=1, actual=2)
+        assert c.severity == ReportSeverity.ERROR
+
+
+# ---------------------------------------------------------------------------
+# SystematicEntry
+# ---------------------------------------------------------------------------
+
+
+class TestSystematicEntry:
+    def test_is_complete_true(self):
+        s = SystematicEntry(systematic_name="JES", has_up=True, has_down=True)
+        assert s.is_complete is True
+
+    def test_is_complete_false_missing_down(self):
+        s = SystematicEntry(systematic_name="JES", has_up=True, has_down=False)
+        assert s.is_complete is False
+
+    def test_extra_variations_default_empty(self):
+        s = SystematicEntry(systematic_name="PU")
+        assert s.extra_variations == []
+
+
+# ---------------------------------------------------------------------------
+# WeightSummaryEntry
+# ---------------------------------------------------------------------------
+
+
+class TestWeightSummaryEntry:
+    def test_construction(self):
+        w = WeightSummaryEntry(
+            sample="ttbar",
+            sum_weights=500_000.0,
+            n_events=1_000_000,
+            n_negative_weights=0,
+            min_weight=-1.5,
+            max_weight=3.2,
+        )
+        assert w.sum_weights == 500_000.0
+        assert w.n_negative_weights == 0
+
+    def test_optional_fields_default_none(self):
+        w = WeightSummaryEntry(sample="data", sum_weights=100.0)
+        assert w.n_events is None
+        assert w.min_weight is None
+
+
+# ---------------------------------------------------------------------------
+# OutputIntegrityEntry
+# ---------------------------------------------------------------------------
+
+
+class TestOutputIntegrityEntry:
+    def test_is_ok_true(self):
+        e = OutputIntegrityEntry(artifact_role="skim", path="out.root", exists=True, size_bytes=1024)
+        assert e.is_ok is True
+
+    def test_is_ok_false_missing(self):
+        e = OutputIntegrityEntry(artifact_role="skim", path="missing.root", exists=False)
+        assert e.is_ok is False
+
+    def test_is_ok_unchecked_is_ok(self):
+        # exists=None means "not checked" – not an error
+        e = OutputIntegrityEntry(artifact_role="skim", path="out.root", exists=None)
+        assert e.is_ok is True
+
+    def test_is_ok_false_with_issues(self):
+        e = OutputIntegrityEntry(
+            artifact_role="cutflow", path="meta.root", exists=True, issues=["Tree not found"]
+        )
+        assert e.is_ok is False
+
+
+# ---------------------------------------------------------------------------
+# ValidationReport – basic construction and adders
+# ---------------------------------------------------------------------------
+
+
+class TestValidationReportConstruction:
+    def test_default_attributes(self):
+        r = ValidationReport(stage="test")
+        assert r.stage == "test"
+        assert r.report_version == VALIDATION_REPORT_VERSION
+        assert r.event_counts == []
+        assert r.errors == []
+        assert r.warnings == []
+        assert r.has_errors is False
+        assert r.has_warnings is False
+
+    def test_timestamp_auto(self):
+        r = ValidationReport(stage="test")
+        assert r.timestamp  # non-empty string
+
+    def test_timestamp_explicit(self):
+        r = ValidationReport(stage="test", timestamp="2024-01-01T00:00:00")
+        assert r.timestamp == "2024-01-01T00:00:00"
+
+    def test_add_error(self):
+        r = ValidationReport(stage="x")
+        r.add_error("something broke")
+        assert "something broke" in r.errors
+        assert r.has_errors is True
+
+    def test_add_warning(self):
+        r = ValidationReport(stage="x")
+        r.add_warning("minor issue")
+        assert "minor issue" in r.warnings
+        assert r.has_warnings is True
+
+    def test_add_event_count(self):
+        r = ValidationReport(stage="presel")
+        r.add_event_count(EventCountEntry(sample="s", stage="presel", total_events=100))
+        assert len(r.event_counts) == 1
+
+    def test_add_cutflow_step(self):
+        r = ValidationReport(stage="skim")
+        r.add_cutflow_step(CutflowEntry(cut_name="trigger", events_passed=900))
+        assert len(r.cutflow) == 1
+
+    def test_add_missing_branches(self):
+        r = ValidationReport(stage="x")
+        r.add_missing_branches(
+            MissingBranchEntry("skim", ["pt", "eta"], ["eta"])
+        )
+        assert len(r.missing_branches) == 1
+        assert r.has_errors is True  # missing branches → error
+
+    def test_add_config_mismatch_error(self):
+        r = ValidationReport(stage="x")
+        r.add_config_mismatch(
+            ConfigMismatchEntry("tree", "Events", "Skimmed", ReportSeverity.ERROR)
+        )
+        assert r.has_errors is True
+
+    def test_add_config_mismatch_warning(self):
+        r = ValidationReport(stage="x")
+        r.add_config_mismatch(
+            ConfigMismatchEntry("k", "a", "b", ReportSeverity.WARNING)
+        )
+        assert r.has_warnings is True
+        assert r.has_errors is False
+
+    def test_add_systematic(self):
+        r = ValidationReport(stage="x")
+        r.add_systematic(SystematicEntry("JES", has_up=True, has_down=False))
+        assert len(r.systematics) == 1
+        assert r.has_warnings is True  # incomplete systematic → warning
+
+    def test_add_weight_summary(self):
+        r = ValidationReport(stage="x")
+        r.add_weight_summary(WeightSummaryEntry("ttbar", 500_000.0))
+        assert len(r.weight_summaries) == 1
+
+    def test_add_output_integrity_ok(self):
+        r = ValidationReport(stage="x")
+        r.add_output_integrity(OutputIntegrityEntry("skim", "out.root", exists=True))
+        assert r.has_errors is False
+
+    def test_add_output_integrity_unchecked_not_error(self):
+        r = ValidationReport(stage="x")
+        r.add_output_integrity(OutputIntegrityEntry("skim", "out.root", exists=None))
+        assert r.has_errors is False
+
+    def test_add_output_integrity_fail(self):
+        r = ValidationReport(stage="x")
+        r.add_output_integrity(OutputIntegrityEntry("skim", "out.root", exists=False))
+        assert r.has_errors is True
+
+
+# ---------------------------------------------------------------------------
+# ValidationReport – serialisation round-trips
+# ---------------------------------------------------------------------------
+
+
+class TestValidationReportSerialisation:
+    def _full_report(self) -> ValidationReport:
+        r = ValidationReport(stage="full_test", timestamp="2024-06-01T12:00:00")
+        r.add_error("a critical error")
+        r.add_warning("a minor warning")
+        r.add_event_count(EventCountEntry("ttbar", "presel", 1_000_000, 250_000))
+        r.add_cutflow_step(CutflowEntry("trigger", 900_000, 900_000, 0.9, 0.9))
+        r.add_missing_branches(MissingBranchEntry("skim", ["pt", "eta"], ["eta"]))
+        r.add_config_mismatch(
+            ConfigMismatchEntry("tree_name", "Events", "Skimmed", ReportSeverity.ERROR)
+        )
+        r.add_systematic(SystematicEntry("JES", has_up=True, has_down=True))
+        r.add_weight_summary(
+            WeightSummaryEntry("ttbar", 500_000.0, n_events=1_000_000, n_negative_weights=10)
+        )
+        r.add_output_integrity(
+            OutputIntegrityEntry("skim", "out.root", exists=True, size_bytes=2048)
+        )
+        return r
+
+    def test_to_dict_keys(self):
+        r = self._full_report()
+        d = r.to_dict()
+        assert "report_version" in d
+        assert "stage" in d
+        assert "timestamp" in d
+        assert "summary" in d
+        assert "event_counts" in d
+        assert "cutflow" in d
+        assert "missing_branches" in d
+        assert "config_mismatches" in d
+        assert "systematics" in d
+        assert "weight_summaries" in d
+        assert "output_integrity" in d
+        assert "errors" in d
+        assert "warnings" in d
+
+    def test_summary_fields(self):
+        r = self._full_report()
+        d = r.to_dict()
+        s = d["summary"]
+        assert s["n_event_count_entries"] == 1
+        assert s["n_cutflow_steps"] == 1
+        assert s["n_systematics"] == 1
+        assert s["n_errors"] == 1
+        assert s["n_warnings"] == 1
+
+    def test_from_dict_round_trip(self):
+        original = self._full_report()
+        restored = ValidationReport.from_dict(original.to_dict())
+        assert restored.stage == original.stage
+        assert restored.timestamp == original.timestamp
+        assert restored.errors == original.errors
+        assert restored.warnings == original.warnings
+        assert len(restored.event_counts) == 1
+        assert restored.event_counts[0].sample == "ttbar"
+        assert len(restored.cutflow) == 1
+        assert len(restored.missing_branches) == 1
+        assert len(restored.config_mismatches) == 1
+        assert len(restored.systematics) == 1
+        assert len(restored.weight_summaries) == 1
+        assert len(restored.output_integrity) == 1
+
+    def test_to_yaml_is_valid_yaml(self):
+        r = self._full_report()
+        raw = r.to_yaml()
+        parsed = yaml.safe_load(raw)
+        assert isinstance(parsed, dict)
+        assert parsed["stage"] == "full_test"
+
+    def test_to_json_is_valid_json(self):
+        r = self._full_report()
+        raw = r.to_json()
+        parsed = json.loads(raw)
+        assert isinstance(parsed, dict)
+        assert parsed["stage"] == "full_test"
+
+    def test_to_text_contains_stage(self):
+        r = self._full_report()
+        text = r.to_text()
+        assert "full_test" in text
+        assert "VALIDATION REPORT" in text
+
+    def test_to_text_status_failed(self):
+        r = self._full_report()
+        assert "FAILED" in r.to_text()
+
+    def test_to_text_status_ok(self):
+        r = ValidationReport(stage="clean", timestamp="2024-01-01T00:00:00")
+        r.add_event_count(EventCountEntry("s", "clean", 100, 100))
+        assert "OK" in r.to_text()
+
+    def test_to_text_status_warnings(self):
+        r = ValidationReport(stage="partial", timestamp="2024-01-01T00:00:00")
+        r.add_warning("minor")
+        assert "WARNINGS" in r.to_text()
+
+    def test_to_text_contains_event_counts(self):
+        r = ValidationReport(stage="x", timestamp="2024-01-01T00:00:00")
+        r.add_event_count(EventCountEntry("my_sample", "x", 1000, 500))
+        text = r.to_text()
+        assert "my_sample" in text
+        assert "EVENT COUNTS" in text
+
+    def test_to_text_contains_cutflow(self):
+        r = ValidationReport(stage="x", timestamp="2024-01-01T00:00:00")
+        r.add_cutflow_step(CutflowEntry("mycut", 900))
+        text = r.to_text()
+        assert "mycut" in text
+        assert "CUTFLOW" in text
+
+    def test_to_text_contains_systematics(self):
+        r = ValidationReport(stage="x", timestamp="2024-01-01T00:00:00")
+        r.add_systematic(SystematicEntry("JES", has_up=True, has_down=True))
+        text = r.to_text()
+        assert "JES" in text
+        assert "SYSTEMATIC" in text
+
+    def test_to_text_contains_weight_summaries(self):
+        r = ValidationReport(stage="x", timestamp="2024-01-01T00:00:00")
+        r.add_weight_summary(WeightSummaryEntry("ttbar", 123456.0))
+        text = r.to_text()
+        assert "ttbar" in text
+        assert "WEIGHT" in text
+
+    def test_to_text_contains_output_integrity(self):
+        r = ValidationReport(stage="x", timestamp="2024-01-01T00:00:00")
+        r.add_output_integrity(OutputIntegrityEntry("skim", "/data/out.root", exists=True))
+        text = r.to_text()
+        assert "/data/out.root" in text
+        assert "OUTPUT INTEGRITY" in text
+
+    def test_to_text_contains_missing_branches(self):
+        r = ValidationReport(stage="x", timestamp="2024-01-01T00:00:00")
+        r.add_missing_branches(MissingBranchEntry("skim", ["pt"], ["pt"]))
+        text = r.to_text()
+        assert "pt" in text
+        assert "MISSING BRANCHES" in text
+
+
+# ---------------------------------------------------------------------------
+# ValidationReport – file I/O
+# ---------------------------------------------------------------------------
+
+
+class TestValidationReportFileIO:
+    def test_save_and_load_yaml(self, tmp_path):
+        r = ValidationReport(stage="io_test", timestamp="2024-01-01T00:00:00")
+        r.add_error("test error")
+        path = str(tmp_path / "report.yaml")
+        r.save_yaml(path)
+        loaded = ValidationReport.load_yaml(path)
+        assert loaded.stage == "io_test"
+        assert loaded.errors == ["test error"]
+
+    def test_save_and_load_json(self, tmp_path):
+        r = ValidationReport(stage="io_test", timestamp="2024-01-01T00:00:00")
+        r.add_warning("test warning")
+        path = str(tmp_path / "report.json")
+        r.save_json(path)
+        loaded = ValidationReport.load_json(path)
+        assert loaded.stage == "io_test"
+        assert loaded.warnings == ["test warning"]
+
+    def test_save_text(self, tmp_path):
+        r = ValidationReport(stage="io_test", timestamp="2024-01-01T00:00:00")
+        path = str(tmp_path / "report.txt")
+        r.save_text(path)
+        with open(path, encoding="utf-8") as fh:
+            content = fh.read()
+        assert "io_test" in content
+        assert "VALIDATION REPORT" in content
+
+    def test_save_creates_parent_dirs(self, tmp_path):
+        r = ValidationReport(stage="nested", timestamp="2024-01-01T00:00:00")
+        path = str(tmp_path / "deep" / "nested" / "report.yaml")
+        r.save_yaml(path)
+        assert os.path.exists(path)
+
+    def test_load_yaml_invalid_content(self, tmp_path):
+        path = tmp_path / "bad.yaml"
+        path.write_text("- item1\n- item2\n")  # list, not dict
+        with pytest.raises(ValueError, match="YAML mapping"):
+            ValidationReport.load_yaml(str(path))
+
+    def test_load_json_invalid_content(self, tmp_path):
+        path = tmp_path / "bad.json"
+        path.write_text("[1,2,3]")  # array, not object
+        with pytest.raises(ValueError, match="JSON object"):
+            ValidationReport.load_json(str(path))
+
+
+# ---------------------------------------------------------------------------
+# generate_report_from_manifest
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateReportFromManifest:
+    def test_minimal_manifest_no_errors(self):
+        m = _minimal_manifest()
+        report = generate_report_from_manifest(m, stage="skim")
+        assert report.stage == "skim"
+        # A valid manifest with all files unchecked should produce no errors from
+        # the schema validation alone (output_file exists).
+        assert not report.errors  # no structural errors in a valid manifest
+
+    def test_invalid_manifest_adds_errors(self):
+        # An empty manifest (no schemas at all) is invalid
+        m = OutputManifest()  # no schemas set → validate() returns errors
+        report = generate_report_from_manifest(m, stage="test")
+        assert report.errors  # should contain manifest validation errors
+
+    def test_output_integrity_entries_from_skim(self):
+        m = _minimal_manifest()
+        report = generate_report_from_manifest(m, stage="skim")
+        roles = [e.artifact_role for e in report.output_integrity]
+        assert "skim" in roles
+
+    def test_output_integrity_entries_from_all_schemas(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="skim.root"),
+            histograms=HistogramSchema(output_file="hist.root"),
+            metadata=MetadataSchema(output_file="meta.root"),
+            cutflow=CutflowSchema(output_file="cutflow.root"),
+        )
+        report = generate_report_from_manifest(m, stage="full")
+        roles = {e.artifact_role for e in report.output_integrity}
+        assert roles == {"skim", "histograms", "metadata", "cutflow"}
+
+    def test_output_integrity_entries_from_law_artifact(self):
+        m = OutputManifest(
+            law_artifacts=[
+                LawArtifactSchema(
+                    artifact_type="run_job",
+                    path_pattern="outputs/*.root",
+                    format="root",
+                )
+            ]
+        )
+        report = generate_report_from_manifest(m, stage="law")
+        roles = [e.artifact_role for e in report.output_integrity]
+        assert "law_artifacts[0]" in roles
+
+    def test_output_integrity_entries_from_intermediate_artifact(self):
+        m = OutputManifest(
+            intermediate_artifacts=[
+                IntermediateArtifactSchema(
+                    artifact_kind="preselection",
+                    output_file="presel.root",
+                )
+            ]
+        )
+        report = generate_report_from_manifest(m, stage="presel")
+        roles = [e.artifact_role for e in report.output_integrity]
+        assert "intermediate_artifacts[0]" in roles
+
+    def test_missing_branches_stub_from_skim_branches(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root", branches=["pt", "eta", "phi"])
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        mb_roles = [e.artifact_role for e in report.missing_branches]
+        assert "skim" in mb_roles
+        skim_mb = next(e for e in report.missing_branches if e.artifact_role == "skim")
+        assert set(skim_mb.expected_branches) == {"pt", "eta", "phi"}
+        # No actual file check → missing list is empty (caller fills it in)
+        assert skim_mb.missing_branches == []
+
+    def test_no_missing_branch_entry_when_branches_empty(self):
+        m = _minimal_manifest()  # branches=[] by default
+        report = generate_report_from_manifest(m, stage="skim")
+        assert report.missing_branches == []
+
+    def test_missing_branches_from_intermediate_artifact(self):
+        m = OutputManifest(
+            intermediate_artifacts=[
+                IntermediateArtifactSchema(
+                    artifact_kind="column_snapshot",
+                    output_file="snap.root",
+                    columns=["MET", "HT"],
+                )
+            ]
+        )
+        report = generate_report_from_manifest(m, stage="snap")
+        mb = [e for e in report.missing_branches if e.artifact_role == "intermediate_artifacts[0]"]
+        assert mb
+        assert set(mb[0].expected_branches) == {"MET", "HT"}
+
+    def test_cutflow_steps_from_counter_keys(self):
+        m = OutputManifest(
+            cutflow=CutflowSchema(
+                output_file="meta.root",
+                counter_keys=["total", "trigger", "baseline"],
+            )
+        )
+        report = generate_report_from_manifest(m, stage="cutflow")
+        cut_names = [e.cut_name for e in report.cutflow]
+        assert cut_names == ["total", "trigger", "baseline"]
+
+    def test_no_cutflow_steps_when_no_cutflow_schema(self):
+        m = _minimal_manifest()
+        report = generate_report_from_manifest(m, stage="skim")
+        assert report.cutflow == []
+
+    def test_version_mismatch_recorded_as_config_mismatch(self):
+        # Build a manifest with a manually altered schema_version to trigger a mismatch
+        m = _minimal_manifest()
+        m.skim.schema_version = 999  # force mismatch
+        report = generate_report_from_manifest(m, stage="skim")
+        keys = [e.key for e in report.config_mismatches]
+        assert any("skim" in k for k in keys)
+
+    def test_check_files_false_by_default(self, tmp_path):
+        """When check_files=False, existence is not tested (exists=None stub)."""
+        m = _minimal_manifest()
+        report = generate_report_from_manifest(m, stage="skim", check_files=False)
+        # All entries should have exists=None (not checked)
+        for e in report.output_integrity:
+            assert e.exists is None
+
+    def test_check_files_true_existing_file(self, tmp_path):
+        path = str(tmp_path / "real.root")
+        with open(path, "wb") as fh:
+            fh.write(b"FAKE_ROOT_CONTENT")
+        m = OutputManifest(skim=SkimSchema(output_file=path))
+        report = generate_report_from_manifest(m, stage="skim", check_files=True)
+        skim_entry = next(e for e in report.output_integrity if e.artifact_role == "skim")
+        assert skim_entry.exists is True
+        assert skim_entry.size_bytes == len(b"FAKE_ROOT_CONTENT")
+
+    def test_check_files_true_missing_file(self, tmp_path):
+        m = OutputManifest(
+            skim=SkimSchema(output_file=str(tmp_path / "nonexistent.root"))
+        )
+        report = generate_report_from_manifest(m, stage="skim", check_files=True)
+        skim_entry = next(e for e in report.output_integrity if e.artifact_role == "skim")
+        assert skim_entry.exists is False
+
+    def test_check_files_empty_file_adds_issue(self, tmp_path):
+        path = str(tmp_path / "empty.root")
+        open(path, "wb").close()  # create 0-byte file
+        m = OutputManifest(skim=SkimSchema(output_file=path))
+        report = generate_report_from_manifest(m, stage="skim", check_files=True)
+        skim_entry = next(e for e in report.output_integrity if e.artifact_role == "skim")
+        assert skim_entry.exists is True
+        assert skim_entry.size_bytes == 0
+        assert any("empty" in issue.lower() or "0" in issue for issue in skim_entry.issues)
+
+
+# ---------------------------------------------------------------------------
+# CLI main() – basic invocation tests
+# ---------------------------------------------------------------------------
+
+
+class TestCLIMain:
+    """Test the CLI main() function without forking a subprocess."""
+
+    def _run_main(self, argv):
+        """Invoke main() with given argv, capturing SystemExit code."""
+        import validation_report as vr
+        sys.argv = ["validation_report"] + argv
+        with pytest.raises(SystemExit) as exc_info:
+            vr.main()
+        return exc_info.value.code
+
+    def test_valid_manifest_exits_0(self, tmp_path):
+        m = _minimal_manifest()
+        manifest_path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(manifest_path)
+        code = self._run_main([manifest_path, "--stage", "skim"])
+        assert code == 0
+
+    def test_invalid_manifest_exits_1(self, tmp_path):
+        # A manifest with an empty output_file is invalid
+        m = OutputManifest(skim=SkimSchema(output_file=""))
+        manifest_path = str(tmp_path / "bad_manifest.yaml")
+        m.save_yaml(manifest_path)
+        code = self._run_main([manifest_path, "--stage", "skim"])
+        assert code == 1
+
+    def test_missing_manifest_file_exits_1(self, tmp_path):
+        code = self._run_main([str(tmp_path / "nonexistent.yaml"), "--stage", "x"])
+        assert code == 1
+
+    def test_out_yaml_written(self, tmp_path):
+        m = _minimal_manifest()
+        manifest_path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(manifest_path)
+        out_yaml = str(tmp_path / "report.yaml")
+        self._run_main([manifest_path, "--out-yaml", out_yaml])
+        assert os.path.exists(out_yaml)
+        with open(out_yaml) as fh:
+            content = yaml.safe_load(fh)
+        assert "stage" in content
+
+    def test_out_json_written(self, tmp_path):
+        m = _minimal_manifest()
+        manifest_path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(manifest_path)
+        out_json = str(tmp_path / "report.json")
+        self._run_main([manifest_path, "--out-json", out_json])
+        assert os.path.exists(out_json)
+        with open(out_json) as fh:
+            content = json.load(fh)
+        assert "stage" in content
+
+    def test_out_text_written(self, tmp_path):
+        m = _minimal_manifest()
+        manifest_path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(manifest_path)
+        out_text = str(tmp_path / "report.txt")
+        self._run_main([manifest_path, "--out-text", out_text])
+        assert os.path.exists(out_text)
+        with open(out_text) as fh:
+            content = fh.read()
+        assert "VALIDATION REPORT" in content
