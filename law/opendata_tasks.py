@@ -86,6 +86,7 @@ from submission_backend import (  # noqa: E402
 )
 from validate_config import validate_submit_config  # noqa: E402
 from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
+from dataset_manifest import DatasetManifest  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -180,11 +181,30 @@ def _process_metadata(recid, sample_names):
 def _parse_opendata_config(config_file):
     """Parse a sample config file for Open Data submissions.
 
+    Accepts both the legacy key=value text format **and** the new YAML manifest
+    format (detected by ``.yaml`` / ``.yml`` extension).  When a YAML manifest
+    is provided, ``recids`` are collected from the ``das`` field of each entry
+    (comma-separated record IDs stored there by convention for open-data
+    samples).
+
     Returns:
-        samples    dict[str, dict]  – {name: {name, das, xsec, type, norm, kfac, extraScale}}
+        samples    dict[str, dict]  – {name: legacy_dict}
         recids     list[str]        – record IDs to query
         lumi       float            – luminosity
     """
+    ext = os.path.splitext(config_file)[1].lower()
+    if ext in (".yaml", ".yml"):
+        manifest = DatasetManifest.load_yaml(config_file)
+        samples = manifest.to_legacy_sample_dict()
+        recids: list[str] = []
+        for entry in manifest.datasets:
+            if entry.das:
+                for r in entry.das.split(","):
+                    r = r.strip()
+                    if r and r not in recids:
+                        recids.append(r)
+        return samples, recids, manifest.lumi
+
     samples: dict[str, dict] = {}
     recids: list[str] = []
     lumi = 1.0

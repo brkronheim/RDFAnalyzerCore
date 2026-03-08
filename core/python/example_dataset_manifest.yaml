@@ -1,0 +1,168 @@
+# Example dataset manifest for RDFAnalyzerCore.
+#
+# This file demonstrates the rich metadata model supported by the
+# DatasetManifest class (core/python/dataset_manifest.py).
+#
+# Global settings
+# ---------------
+# lumi: integrated luminosity in fb^-1 used for normalisation
+lumi: 59.7
+
+# whitelist / blacklist: Rucio site filtering (empty list = no restriction)
+whitelist: []
+blacklist: []
+
+# datasets
+# --------
+# Each entry is a DatasetEntry.  All fields except 'name' are optional.
+#
+# Required fields:
+#   name         – unique identifier used by submission scripts and law tasks
+#
+# Metadata fields (all optional, but strongly recommended):
+#   year         – data-taking / MC-production year   (int, e.g. 2022)
+#   era          – run era within the year            (str, e.g. "C"; None for MC)
+#   campaign     – MC production campaign tag         (str, e.g. "Run3Summer22NanoAODv12")
+#   process      – physics process label              (str, e.g. "ttbar")
+#   group        – stitching / grouping label         (str, e.g. "wjets_ht")
+#   stitch_id    – integer code for stitching weights (int; maps to counterIntWeightBranch)
+#
+# Normalisation fields (all optional):
+#   xsec             – cross-section in pb      (float; omit for data)
+#   filter_efficiency – gen-level filter eff.   (float, default 1.0)
+#   kfac             – QCD k-factor             (float, default 1.0)
+#   extra_scale      – extra scale factor       (float, default 1.0)
+#   sum_weights      – sum of generator weights (float; computed at run-time if omitted)
+#
+# Type field:
+#   dtype  – "mc" (default) or "data"
+#
+# File discovery (at least one should be provided):
+#   das    – comma-separated DAS path(s) for CMS Rucio discovery
+#   files  – explicit list of ROOT file paths or XRootD URLs
+#
+# Provenance:
+#   parent – name of the DatasetEntry this dataset was derived from (skims etc.)
+
+datasets:
+
+  # ---- ttbar (MC, 2022) -------------------------------------------------------
+  - name: ttbar_powheg_2022
+    year: 2022
+    era: ~                          # None for MC
+    campaign: Run3Summer22NanoAODv12
+    process: ttbar
+    group: ttbar
+    dtype: mc
+    das: /TTto2L2Nu_TuneCP5_13p6TeV_powheg-pythia8/Run3Summer22NanoAODv12-130X_mcRun3_2022_realistic_v5-v2/NANOAODSIM
+    xsec: 98.34
+    filter_efficiency: 1.0
+    kfac: 1.0
+    extra_scale: 1.0
+    sum_weights: ~                  # computed at run-time from counterWeightBranch
+    stitch_id: ~
+    parent: ~
+
+  # ---- W+jets HT-stitched samples (MC, 2022) ----------------------------------
+  # All share group: wjets_ht and carry a stitch_id that maps to the
+  # counterIntWeightBranch value written by the generator.
+
+  - name: wjets_ht_0to70_2022
+    year: 2022
+    era: ~
+    campaign: Run3Summer22NanoAODv12
+    process: wjets
+    group: wjets_ht
+    dtype: mc
+    das: /WtoLNu-0Jets_TuneCP5_13p6TeV_amcatnloFXFX-pythia8/Run3Summer22NanoAODv12-130X_mcRun3_2022_realistic_v5-v2/NANOAODSIM
+    xsec: 54000.0
+    filter_efficiency: 1.0
+    kfac: 1.0
+    extra_scale: 1.0
+    sum_weights: ~
+    stitch_id: 0
+    parent: ~
+
+  - name: wjets_ht_70to100_2022
+    year: 2022
+    era: ~
+    campaign: Run3Summer22NanoAODv12
+    process: wjets
+    group: wjets_ht
+    dtype: mc
+    das: /WtoLNu-1Jets_HT-70to100_TuneCP5_13p6TeV_amcatnloFXFX-pythia8/Run3Summer22NanoAODv12-130X_mcRun3_2022_realistic_v5-v2/NANOAODSIM
+    xsec: 1292.0
+    filter_efficiency: 1.0
+    kfac: 1.0
+    extra_scale: 1.0
+    sum_weights: ~
+    stitch_id: 1
+    parent: ~
+
+  - name: wjets_ht_100to400_2022
+    year: 2022
+    era: ~
+    campaign: Run3Summer22NanoAODv12
+    process: wjets
+    group: wjets_ht
+    dtype: mc
+    das: /WtoLNu-1Jets_HT-100to400_TuneCP5_13p6TeV_amcatnloFXFX-pythia8/Run3Summer22NanoAODv12-130X_mcRun3_2022_realistic_v5-v2/NANOAODSIM
+    xsec: 960.0
+    filter_efficiency: 1.0
+    kfac: 1.0
+    extra_scale: 1.0
+    sum_weights: ~
+    stitch_id: 2
+    parent: ~
+
+  # ---- Real data (2022, era C) ------------------------------------------------
+  - name: data_singlemuon_2022C
+    year: 2022
+    era: C
+    campaign: ~                     # None for data
+    process: data
+    group: data_2022
+    dtype: data
+    das: /SingleMuon/Run2022C-22Sep2023-v1/NANOAOD
+    xsec: ~                         # not applicable for data
+    filter_efficiency: ~
+    kfac: ~
+    extra_scale: ~
+    sum_weights: ~
+    stitch_id: ~
+    parent: ~
+
+  - name: data_singlemuon_2022D
+    year: 2022
+    era: D
+    campaign: ~
+    process: data
+    group: data_2022
+    dtype: data
+    das: /SingleMuon/Run2022D-22Sep2023-v1/NANOAOD
+    xsec: ~
+    filter_efficiency: ~
+    kfac: ~
+    extra_scale: ~
+    sum_weights: ~
+    stitch_id: ~
+    parent: ~
+
+  # ---- Derived (skimmed) dataset -----------------------------------------------
+  - name: ttbar_skim_2022
+    year: 2022
+    era: ~
+    campaign: Run3Summer22NanoAODv12
+    process: ttbar
+    group: ttbar
+    dtype: mc
+    files:
+      - root://eoscms.cern.ch//eos/cms/store/user/myuser/ttbar_skim_2022/output_0.root
+      - root://eoscms.cern.ch//eos/cms/store/user/myuser/ttbar_skim_2022/output_1.root
+    xsec: 98.34
+    filter_efficiency: 0.45         # skim efficiency
+    kfac: 1.0
+    extra_scale: 1.0
+    sum_weights: ~
+    stitch_id: ~
+    parent: ttbar_powheg_2022       # derived from this parent dataset

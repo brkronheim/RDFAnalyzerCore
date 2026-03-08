@@ -34,6 +34,8 @@
 #include <api/IAnalysisService.h>
 #include <api/ManagerContext.h> // needed for wiring plugins and services
 
+class ProvenanceService; // forward declare to avoid header pollution
+
 
 /**
  * @class Analyzer
@@ -315,6 +317,12 @@ private:
    * @brief Optional analysis services (internal only for now).
    */
   std::vector<std::unique_ptr<IAnalysisService>> services_m;
+  /**
+   * @brief Non-owning pointer to the ProvenanceService (owned by services_m).
+   * Kept separately so addPlugin() can register plugin provenance entries
+   * after initializeServices() has run.
+   */
+  ProvenanceService* provenanceService_m = nullptr;
   bool preFilterNotified_m = false;
   ///**
   // * @brief Initialize the analyzer with the provided dependencies

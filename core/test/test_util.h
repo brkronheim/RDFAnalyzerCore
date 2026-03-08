@@ -39,8 +39,8 @@ inline void ChangeToTestSourceDir() {
     }
 
     // Ensure minimal test data directories exist and contain a small ROOT file
-    // The file contains 2 events so that tests asserting on counts (e.g.
-    // trigger-logic tests that expect 2 passing events) behave correctly.
+    // with 2 events so tests that check exact event counts (e.g. trigger tests)
+    // work correctly.
     auto make_minimal_root = [](const std::string &dir) {
         if (!std::filesystem::exists(dir)) {
             std::filesystem::create_directory(dir);
