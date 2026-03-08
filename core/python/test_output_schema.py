@@ -32,6 +32,8 @@ from output_schema import (
     CACHE_SIDECAR_SUFFIX,
     CUTFLOW_SCHEMA_VERSION,
     HISTOGRAM_SCHEMA_VERSION,
+    INTERMEDIATE_ARTIFACT_KINDS,
+    INTERMEDIATE_ARTIFACT_SCHEMA_VERSION,
     LAW_ARTIFACT_SCHEMA_VERSION,
     LAW_ARTIFACT_TYPES,
     METADATA_SCHEMA_VERSION,
@@ -46,6 +48,7 @@ from output_schema import (
     DatasetManifestProvenance,
     HistogramAxisSpec,
     HistogramSchema,
+    IntermediateArtifactSchema,
     LawArtifactSchema,
     MergeInputValidationError,
     MetadataSchema,
@@ -76,6 +79,7 @@ class TestConstants:
             "metadata",
             "cutflow",
             "law_artifact",
+            "intermediate_artifact",
             "output_manifest",
         }
         assert set(SCHEMA_REGISTRY.keys()) == expected
@@ -86,6 +90,7 @@ class TestConstants:
         assert SCHEMA_REGISTRY["metadata"] == METADATA_SCHEMA_VERSION
         assert SCHEMA_REGISTRY["cutflow"] == CUTFLOW_SCHEMA_VERSION
         assert SCHEMA_REGISTRY["law_artifact"] == LAW_ARTIFACT_SCHEMA_VERSION
+        assert SCHEMA_REGISTRY["intermediate_artifact"] == INTERMEDIATE_ARTIFACT_SCHEMA_VERSION
         assert SCHEMA_REGISTRY["output_manifest"] == OUTPUT_MANIFEST_VERSION
 
     def test_provenance_required_keys_non_empty(self):
@@ -101,6 +106,13 @@ class TestConstants:
         assert len(LAW_ARTIFACT_TYPES) > 0
         assert "prepare_sample" in LAW_ARTIFACT_TYPES
         assert "submit_jobs" in LAW_ARTIFACT_TYPES
+
+    def test_intermediate_artifact_kinds_non_empty(self):
+        assert len(INTERMEDIATE_ARTIFACT_KINDS) > 0
+        assert "preselection" in INTERMEDIATE_ARTIFACT_KINDS
+        assert "reduced_skim" in INTERMEDIATE_ARTIFACT_KINDS
+        assert "column_snapshot" in INTERMEDIATE_ARTIFACT_KINDS
+        assert "enriched_skim" in INTERMEDIATE_ARTIFACT_KINDS
 
 
 # ---------------------------------------------------------------------------
@@ -1895,3 +1907,460 @@ class TestCheckCacheValidity:
 
         # Strict mode with updated framework → MUST_REGENERATE
         assert check_cache_validity(artifact, new_fw, strict=True) == ArtifactResolutionStatus.MUST_REGENERATE
+
+
+# ---------------------------------------------------------------------------
+# IntermediateArtifactSchema
+# ---------------------------------------------------------------------------
+
+
+class TestIntermediateArtifactSchema:
+    def test_defaults(self):
+        s = IntermediateArtifactSchema()
+        assert s.schema_version == INTERMEDIATE_ARTIFACT_SCHEMA_VERSION
+        assert s.artifact_kind == ""
+        assert s.output_file == ""
+        assert s.tree_name == "Events"
+        assert s.columns == []
+
+    def test_current_version_matches_constant(self):
+        assert IntermediateArtifactSchema.CURRENT_VERSION == INTERMEDIATE_ARTIFACT_SCHEMA_VERSION
+
+    def test_custom_construction_preselection(self):
+        s = IntermediateArtifactSchema(
+            artifact_kind="preselection",
+            output_file="presel.root",
+            tree_name="Events",
+            columns=["pt", "eta", "phi"],
+        )
+        assert s.artifact_kind == "preselection"
+        assert s.output_file == "presel.root"
+        assert s.columns == ["pt", "eta", "phi"]
+
+    def test_custom_construction_reduced_skim(self):
+        s = IntermediateArtifactSchema(
+            artifact_kind="reduced_skim",
+            output_file="reduced.root",
+        )
+        assert s.artifact_kind == "reduced_skim"
+
+    def test_custom_construction_column_snapshot(self):
+        s = IntermediateArtifactSchema(
+            artifact_kind="column_snapshot",
+            output_file="snapshot.root",
+            columns=["MET_pt", "nJet"],
+        )
+        assert s.artifact_kind == "column_snapshot"
+        assert s.columns == ["MET_pt", "nJet"]
+
+    def test_custom_construction_enriched_skim(self):
+        s = IntermediateArtifactSchema(
+            artifact_kind="enriched_skim",
+            output_file="enriched.root",
+        )
+        assert s.artifact_kind == "enriched_skim"
+
+    def test_validate_valid(self):
+        for kind in INTERMEDIATE_ARTIFACT_KINDS:
+            s = IntermediateArtifactSchema(artifact_kind=kind, output_file="out.root")
+            assert s.validate() == [], f"Expected no errors for kind={kind!r}"
+
+    def test_validate_empty_artifact_kind(self):
+        s = IntermediateArtifactSchema(output_file="out.root")
+        errors = s.validate()
+        assert any("artifact_kind" in e for e in errors)
+
+    def test_validate_invalid_artifact_kind(self):
+        s = IntermediateArtifactSchema(artifact_kind="unknown_kind", output_file="out.root")
+        errors = s.validate()
+        assert any("recognised" in e for e in errors)
+
+    def test_validate_empty_output_file(self):
+        s = IntermediateArtifactSchema(artifact_kind="preselection")
+        errors = s.validate()
+        assert any("output_file" in e for e in errors)
+
+    def test_validate_empty_tree_name(self):
+        s = IntermediateArtifactSchema(
+            artifact_kind="preselection", output_file="out.root", tree_name=""
+        )
+        errors = s.validate()
+        assert any("tree_name" in e for e in errors)
+
+    def test_validate_version_mismatch(self):
+        s = IntermediateArtifactSchema(artifact_kind="preselection", output_file="out.root")
+        s.schema_version = 999
+        errors = s.validate()
+        assert any("version mismatch" in e for e in errors)
+
+    def test_to_dict_round_trip(self):
+        s = IntermediateArtifactSchema(
+            artifact_kind="column_snapshot",
+            output_file="snap.root",
+            tree_name="Events",
+            columns=["pt", "eta"],
+        )
+        d = s.to_dict()
+        s2 = IntermediateArtifactSchema.from_dict(d)
+        assert s2.artifact_kind == s.artifact_kind
+        assert s2.output_file == s.output_file
+        assert s2.tree_name == s.tree_name
+        assert s2.columns == s.columns
+        assert s2.schema_version == s.schema_version
+
+    def test_from_dict_ignores_unknown_keys(self):
+        d = {
+            "schema_version": INTERMEDIATE_ARTIFACT_SCHEMA_VERSION,
+            "artifact_kind": "preselection",
+            "output_file": "x.root",
+            "tree_name": "Events",
+            "columns": [],
+            "future_unknown_field": "value",
+        }
+        s = IntermediateArtifactSchema.from_dict(d)
+        assert s.output_file == "x.root"
+        assert s.artifact_kind == "preselection"
+
+
+# ---------------------------------------------------------------------------
+# ProvenanceRecord.dataset_manifest_hash
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceRecordDatasetHash:
+    def test_default_dataset_manifest_hash_is_none(self):
+        p = ProvenanceRecord()
+        assert p.dataset_manifest_hash is None
+
+    def test_set_dataset_manifest_hash(self):
+        p = ProvenanceRecord(dataset_manifest_hash="abc123")
+        assert p.dataset_manifest_hash == "abc123"
+
+    def test_to_dict_includes_dataset_manifest_hash(self):
+        p = ProvenanceRecord(framework_hash="fw1", dataset_manifest_hash="dm1")
+        d = p.to_dict()
+        assert "dataset_manifest_hash" in d
+        assert d["dataset_manifest_hash"] == "dm1"
+
+    def test_from_dict_round_trip(self):
+        p = ProvenanceRecord(
+            framework_hash="fw1",
+            dataset_manifest_hash="dm_hash_abc",
+        )
+        p2 = ProvenanceRecord.from_dict(p.to_dict())
+        assert p2.dataset_manifest_hash == "dm_hash_abc"
+
+    def test_from_dict_missing_key_gives_none(self):
+        p = ProvenanceRecord.from_dict({"framework_hash": "fw1"})
+        assert p.dataset_manifest_hash is None
+
+    def test_matches_same_hash(self):
+        p1 = ProvenanceRecord(dataset_manifest_hash="dm1")
+        p2 = ProvenanceRecord(dataset_manifest_hash="dm1")
+        assert p1.matches(p2)
+
+    def test_matches_different_hash(self):
+        p1 = ProvenanceRecord(dataset_manifest_hash="dm_old")
+        p2 = ProvenanceRecord(dataset_manifest_hash="dm_new")
+        assert not p1.matches(p2)
+
+    def test_matches_none_ignored(self):
+        p1 = ProvenanceRecord(dataset_manifest_hash=None)
+        p2 = ProvenanceRecord(dataset_manifest_hash="dm_new")
+        # None in p1 means the field is unknown, so no mismatch
+        assert p1.matches(p2)
+
+
+# ---------------------------------------------------------------------------
+# OutputManifest with intermediate_artifacts
+# ---------------------------------------------------------------------------
+
+
+class TestOutputManifestIntermediateArtifacts:
+    def _make_intermediate(self, kind="preselection", output_file="presel.root"):
+        return IntermediateArtifactSchema(artifact_kind=kind, output_file=output_file)
+
+    def test_defaults_empty_intermediate_artifacts(self):
+        m = OutputManifest(skim=SkimSchema(output_file="s.root"))
+        assert m.intermediate_artifacts == []
+
+    def test_construct_with_intermediate_artifacts(self):
+        ia = self._make_intermediate()
+        m = OutputManifest(intermediate_artifacts=[ia])
+        assert len(m.intermediate_artifacts) == 1
+        assert m.intermediate_artifacts[0].artifact_kind == "preselection"
+
+    def test_validate_only_intermediate_artifacts_valid(self):
+        ia = self._make_intermediate()
+        m = OutputManifest(intermediate_artifacts=[ia])
+        errors = m.validate()
+        assert errors == []
+
+    def test_validate_with_invalid_intermediate_artifact(self):
+        ia = IntermediateArtifactSchema(artifact_kind="bad_kind", output_file="out.root")
+        m = OutputManifest(intermediate_artifacts=[ia])
+        errors = m.validate()
+        assert any("intermediate_artifacts[0]" in e for e in errors)
+
+    def test_validate_empty_manifest_still_fails_without_any_schema(self):
+        m = OutputManifest()
+        errors = m.validate()
+        assert any("intermediate_artifacts" in e for e in errors)
+
+    def test_to_dict_includes_intermediate_artifacts(self):
+        ia = self._make_intermediate(kind="column_snapshot", output_file="snap.root")
+        m = OutputManifest(intermediate_artifacts=[ia])
+        d = m.to_dict()
+        assert "intermediate_artifacts" in d
+        assert len(d["intermediate_artifacts"]) == 1
+        assert d["intermediate_artifacts"][0]["artifact_kind"] == "column_snapshot"
+
+    def test_from_dict_round_trip_with_intermediate_artifacts(self):
+        ia = self._make_intermediate(kind="enriched_skim", output_file="enr.root")
+        m = OutputManifest(intermediate_artifacts=[ia], framework_hash="fw1")
+        m2 = OutputManifest.from_dict(m.to_dict())
+        assert len(m2.intermediate_artifacts) == 1
+        assert m2.intermediate_artifacts[0].artifact_kind == "enriched_skim"
+        assert m2.intermediate_artifacts[0].output_file == "enr.root"
+
+    def test_from_dict_empty_intermediate_artifacts(self):
+        m = OutputManifest(skim=SkimSchema(output_file="s.root"))
+        m2 = OutputManifest.from_dict(m.to_dict())
+        assert m2.intermediate_artifacts == []
+
+    def test_yaml_round_trip_with_intermediate_artifacts(self, tmp_path):
+        ia = IntermediateArtifactSchema(
+            artifact_kind="reduced_skim",
+            output_file="reduced.root",
+            columns=["pt", "eta"],
+        )
+        m = OutputManifest(intermediate_artifacts=[ia], framework_hash="fw1")
+        path = str(tmp_path / "manifest.yaml")
+        m.save_yaml(path)
+        m2 = OutputManifest.load_yaml(path)
+        assert len(m2.intermediate_artifacts) == 1
+        assert m2.intermediate_artifacts[0].artifact_kind == "reduced_skim"
+        assert m2.intermediate_artifacts[0].columns == ["pt", "eta"]
+
+    def test_check_version_compatibility_intermediate_artifacts(self):
+        ia = self._make_intermediate()
+        m = OutputManifest(intermediate_artifacts=[ia])
+        # Should not raise
+        OutputManifest.check_version_compatibility(m)
+
+    def test_check_version_compatibility_mismatch_raises(self):
+        ia = self._make_intermediate()
+        ia.schema_version = 999
+        m = OutputManifest(intermediate_artifacts=[ia])
+        with pytest.raises(SchemaVersionError, match="intermediate_artifacts"):
+            OutputManifest.check_version_compatibility(m)
+
+    def test_resolve_manifest_includes_intermediate_artifacts(self):
+        ia = self._make_intermediate()
+        m = OutputManifest(intermediate_artifacts=[ia], framework_hash="fw1")
+        statuses = resolve_manifest(m)
+        assert "intermediate_artifacts[0]" in statuses
+        assert statuses["intermediate_artifacts[0]"] == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_resolve_manifest_intermediate_stale_on_hash_change(self):
+        ia = self._make_intermediate()
+        m = OutputManifest(intermediate_artifacts=[ia], framework_hash="fw_old")
+        current = ProvenanceRecord(framework_hash="fw_new")
+        statuses = resolve_manifest(m, current_provenance=current)
+        assert statuses["intermediate_artifacts[0]"] == ArtifactResolutionStatus.STALE
+
+    def test_resolve_manifest_intermediate_must_regenerate_on_version_mismatch(self):
+        ia = self._make_intermediate()
+        ia.schema_version = 999
+        m = OutputManifest(intermediate_artifacts=[ia])
+        statuses = resolve_manifest(m)
+        assert statuses["intermediate_artifacts[0]"] == ArtifactResolutionStatus.MUST_REGENERATE
+
+
+# ---------------------------------------------------------------------------
+# OutputManifest.provenance() with DatasetManifestProvenance
+# ---------------------------------------------------------------------------
+
+
+class TestOutputManifestProvenanceDataset:
+    def test_provenance_includes_dataset_manifest_hash(self):
+        dmp = DatasetManifestProvenance(
+            manifest_path="datasets.yaml",
+            manifest_hash="ds_hash_abc",
+        )
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            framework_hash="fw1",
+            dataset_manifest_provenance=dmp,
+        )
+        p = m.provenance()
+        assert p.dataset_manifest_hash == "ds_hash_abc"
+
+    def test_provenance_dataset_manifest_hash_none_when_no_dmp(self):
+        m = OutputManifest(skim=SkimSchema(output_file="s.root"), framework_hash="fw1")
+        p = m.provenance()
+        assert p.dataset_manifest_hash is None
+
+    def test_provenance_dataset_manifest_hash_none_when_dmp_hash_is_none(self):
+        dmp = DatasetManifestProvenance(manifest_path="datasets.yaml", manifest_hash=None)
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            dataset_manifest_provenance=dmp,
+        )
+        p = m.provenance()
+        assert p.dataset_manifest_hash is None
+
+    def test_dataset_hash_triggers_stale_status(self):
+        """Changed dataset manifest hash causes STALE resolution."""
+        dmp = DatasetManifestProvenance(manifest_hash="ds_old")
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            framework_hash="fw1",
+            dataset_manifest_provenance=dmp,
+        )
+        current = ProvenanceRecord(framework_hash="fw1", dataset_manifest_hash="ds_new")
+        statuses = resolve_manifest(m, current_provenance=current)
+        assert statuses["skim"] == ArtifactResolutionStatus.STALE
+
+    def test_matching_dataset_hash_gives_compatible(self):
+        """Same dataset manifest hash gives COMPATIBLE resolution."""
+        dmp = DatasetManifestProvenance(manifest_hash="ds_hash_v1")
+        m = OutputManifest(
+            skim=SkimSchema(output_file="s.root"),
+            framework_hash="fw1",
+            dataset_manifest_provenance=dmp,
+        )
+        current = ProvenanceRecord(framework_hash="fw1", dataset_manifest_hash="ds_hash_v1")
+        statuses = resolve_manifest(m, current_provenance=current)
+        assert statuses["skim"] == ArtifactResolutionStatus.COMPATIBLE
+
+
+# ---------------------------------------------------------------------------
+# Cache validity with dataset manifest hash
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCacheValidityDatasetHash:
+    def _make_manifest(self, fw_hash=None, ds_hash=None):
+        dmp = DatasetManifestProvenance(manifest_hash=ds_hash) if ds_hash else None
+        return OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            framework_hash=fw_hash,
+            dataset_manifest_provenance=dmp,
+        )
+
+    def _write(self, artifact, manifest):
+        open(artifact, "w").close()
+        write_cache_sidecar(artifact, manifest)
+        return artifact
+
+    def test_stale_when_dataset_manifest_changes(self, tmp_path):
+        """Dataset manifest hash change → STALE."""
+        artifact = str(tmp_path / "out.root")
+        self._write(artifact, self._make_manifest(fw_hash="fw1", ds_hash="ds_old"))
+        current = ProvenanceRecord(framework_hash="fw1", dataset_manifest_hash="ds_new")
+        status = check_cache_validity(artifact, current_provenance=current)
+        assert status == ArtifactResolutionStatus.STALE
+
+    def test_compatible_when_dataset_manifest_matches(self, tmp_path):
+        """Same dataset manifest hash → COMPATIBLE."""
+        artifact = str(tmp_path / "out.root")
+        self._write(artifact, self._make_manifest(fw_hash="fw1", ds_hash="ds_v1"))
+        current = ProvenanceRecord(framework_hash="fw1", dataset_manifest_hash="ds_v1")
+        status = check_cache_validity(artifact, current_provenance=current)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_strict_dataset_hash_change_must_regenerate(self, tmp_path):
+        """Strict mode: dataset hash change → MUST_REGENERATE."""
+        artifact = str(tmp_path / "out.root")
+        self._write(artifact, self._make_manifest(fw_hash="fw1", ds_hash="ds_old"))
+        current = ProvenanceRecord(framework_hash="fw1", dataset_manifest_hash="ds_new")
+        status = check_cache_validity(artifact, current_provenance=current, strict=True)
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_no_dataset_hash_in_current_ignores_dataset_check(self, tmp_path):
+        """If current provenance has no dataset_manifest_hash, no staleness from that field."""
+        artifact = str(tmp_path / "out.root")
+        self._write(artifact, self._make_manifest(fw_hash="fw1", ds_hash="ds_old"))
+        current = ProvenanceRecord(framework_hash="fw1")
+        status = check_cache_validity(artifact, current_provenance=current)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_intermediate_artifact_cache_with_dataset_hash(self, tmp_path):
+        """End-to-end: intermediate artifact sidecar checked against dataset hash."""
+        artifact = str(tmp_path / "presel.root")
+        dmp = DatasetManifestProvenance(manifest_hash="ds_v1")
+        m = OutputManifest(
+            intermediate_artifacts=[
+                IntermediateArtifactSchema(
+                    artifact_kind="preselection",
+                    output_file="presel.root",
+                )
+            ],
+            framework_hash="fw1",
+            user_repo_hash="ur1",
+            dataset_manifest_provenance=dmp,
+        )
+        open(artifact, "w").close()
+        write_cache_sidecar(artifact, m)
+
+        # Same environment → COMPATIBLE
+        same = ProvenanceRecord(
+            framework_hash="fw1",
+            user_repo_hash="ur1",
+            dataset_manifest_hash="ds_v1",
+        )
+        assert check_cache_validity(artifact, same) == ArtifactResolutionStatus.COMPATIBLE
+
+        # Changed dataset → STALE
+        changed_ds = ProvenanceRecord(
+            framework_hash="fw1",
+            user_repo_hash="ur1",
+            dataset_manifest_hash="ds_v2",
+        )
+        assert check_cache_validity(artifact, changed_ds) == ArtifactResolutionStatus.STALE
+
+
+# ---------------------------------------------------------------------------
+# validate_merge_inputs with intermediate_artifacts
+# ---------------------------------------------------------------------------
+
+
+class TestValidateMergeInputsIntermediateArtifacts:
+    def _make_manifest_with_ia(self, kind="preselection"):
+        ia = IntermediateArtifactSchema(artifact_kind=kind, output_file="presel.root")
+        return OutputManifest(intermediate_artifacts=[ia])
+
+    def test_two_compatible_intermediate_manifests(self):
+        m1 = self._make_manifest_with_ia()
+        m2 = self._make_manifest_with_ia()
+        errors = validate_merge_inputs([m1, m2])
+        assert errors == []
+
+    def test_intermediate_artifacts_count_mismatch(self):
+        ia1 = IntermediateArtifactSchema(artifact_kind="preselection", output_file="p.root")
+        ia2 = IntermediateArtifactSchema(artifact_kind="reduced_skim", output_file="r.root")
+        m1 = OutputManifest(intermediate_artifacts=[ia1])
+        m2 = OutputManifest(intermediate_artifacts=[ia1, ia2])
+        errors = validate_merge_inputs([m1, m2])
+        assert any("intermediate_artifacts count" in e for e in errors)
+
+    def test_intermediate_artifacts_version_mismatch(self):
+        ia1 = IntermediateArtifactSchema(artifact_kind="preselection", output_file="p.root")
+        ia2 = IntermediateArtifactSchema(artifact_kind="preselection", output_file="p.root")
+        ia2.schema_version = 999
+        m1 = OutputManifest(intermediate_artifacts=[ia1])
+        m2 = OutputManifest(intermediate_artifacts=[ia2])
+        errors = validate_merge_inputs([m1, m2])
+        assert any("intermediate_artifacts" in e for e in errors)
+
+    def test_required_intermediate_artifacts_present(self):
+        m1 = self._make_manifest_with_ia()
+        m2 = self._make_manifest_with_ia()
+        errors = validate_merge_inputs([m1, m2], required_roles=["intermediate_artifacts"])
+        assert errors == []
+
+    def test_required_intermediate_artifacts_empty_reported(self):
+        m1 = OutputManifest(skim=SkimSchema(output_file="s.root"))
+        errors = validate_merge_inputs([m1], required_roles=["intermediate_artifacts"])
+        assert any("intermediate_artifacts" in e for e in errors)

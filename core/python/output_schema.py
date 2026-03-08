@@ -10,6 +10,9 @@ Provides explicit, versioned schema definitions for all framework output types:
   - **Cutflows** – Event-count histograms written by ``CounterService``.
   - **LAW artifacts** – Task output files produced by the law workflow tasks
     in ``law/nano_tasks.py`` and ``law/opendata_tasks.py``.
+  - **Intermediate artifacts** – Cached intermediate results such as
+    preselection outputs, reduced skims, column snapshots, and
+    object-enriched skims that can be reused across workflow stages.
 
 Each schema class carries a ``CURRENT_VERSION`` class attribute (integer).
 Bumping this integer is the canonical way to signal a breaking change in that
@@ -40,6 +43,9 @@ Version history
    * - ``LawArtifactSchema``
      - 1
      - Initial definition: artifact_type, path_pattern, format.
+   * - ``IntermediateArtifactSchema``
+     - 1
+     - Initial definition: artifact_kind, output_file, tree_name, columns.
    * - ``OutputManifest``
      - 1
      - Initial definition: combines all schema types.
@@ -115,6 +121,8 @@ METADATA_SCHEMA_VERSION: int = 1
 CUTFLOW_SCHEMA_VERSION: int = 1
 #: Current version of :class:`LawArtifactSchema`.
 LAW_ARTIFACT_SCHEMA_VERSION: int = 1
+#: Current version of :class:`IntermediateArtifactSchema`.
+INTERMEDIATE_ARTIFACT_SCHEMA_VERSION: int = 1
 #: Current version of :class:`OutputManifest`.
 OUTPUT_MANIFEST_VERSION: int = 1
 
@@ -125,6 +133,7 @@ SCHEMA_REGISTRY: Dict[str, int] = {
     "metadata": METADATA_SCHEMA_VERSION,
     "cutflow": CUTFLOW_SCHEMA_VERSION,
     "law_artifact": LAW_ARTIFACT_SCHEMA_VERSION,
+    "intermediate_artifact": INTERMEDIATE_ARTIFACT_SCHEMA_VERSION,
     "output_manifest": OUTPUT_MANIFEST_VERSION,
 }
 
@@ -166,6 +175,14 @@ LAW_ARTIFACT_TYPES: List[str] = [
     "monitor_jobs",
     "run_job",
     "monitor_state",
+]
+
+#: Recognised values for :attr:`IntermediateArtifactSchema.artifact_kind`.
+INTERMEDIATE_ARTIFACT_KINDS: List[str] = [
+    "preselection",
+    "reduced_skim",
+    "column_snapshot",
+    "enriched_skim",
 ]
 
 # ---------------------------------------------------------------------------
@@ -241,10 +258,12 @@ class ProvenanceRecord:
         framework_hash: Optional[str] = None,
         user_repo_hash: Optional[str] = None,
         config_mtime: Optional[str] = None,
+        dataset_manifest_hash: Optional[str] = None,
     ) -> None:
         self.framework_hash: Optional[str] = framework_hash
         self.user_repo_hash: Optional[str] = user_repo_hash
         self.config_mtime: Optional[str] = config_mtime
+        self.dataset_manifest_hash: Optional[str] = dataset_manifest_hash
 
     def matches(self, other: "ProvenanceRecord") -> bool:
         """Return ``True`` when all comparable fields agree.
@@ -263,7 +282,7 @@ class ProvenanceRecord:
         bool
             ``True`` if no comparable field differs between *self* and *other*.
         """
-        for attr in ("framework_hash", "user_repo_hash", "config_mtime"):
+        for attr in ("framework_hash", "user_repo_hash", "config_mtime", "dataset_manifest_hash"):
             self_val = getattr(self, attr)
             other_val = getattr(other, attr)
             if self_val is not None and other_val is not None:
@@ -277,6 +296,7 @@ class ProvenanceRecord:
             "framework_hash": self.framework_hash,
             "user_repo_hash": self.user_repo_hash,
             "config_mtime": self.config_mtime,
+            "dataset_manifest_hash": self.dataset_manifest_hash,
         }
 
     @classmethod
@@ -286,6 +306,7 @@ class ProvenanceRecord:
             framework_hash=d.get("framework_hash"),
             user_repo_hash=d.get("user_repo_hash"),
             config_mtime=d.get("config_mtime"),
+            dataset_manifest_hash=d.get("dataset_manifest_hash"),
         )
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -791,6 +812,94 @@ class LawArtifactSchema:
 
 
 # ---------------------------------------------------------------------------
+# IntermediateArtifactSchema
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class IntermediateArtifactSchema:
+    """Schema definition for intermediate cached artifacts.
+
+    Intermediate artifacts are materialised mid-pipeline results that can be
+    reused across workflow stages without re-running expensive upstream steps.
+    Examples include preselection outputs, reduced skims written after an
+    initial event filter, column snapshots that cache derived quantities, and
+    object-enriched skims that carry pre-computed physics objects.
+
+    Each artifact is versioned against framework code, analysis code,
+    configuration, and dataset metadata via the :class:`OutputManifest` that
+    wraps it.  Use :func:`write_cache_sidecar` to persist the associated
+    sidecar and :func:`check_cache_validity` to decide whether the cached
+    file can be reused.
+
+    Attributes
+    ----------
+    schema_version : int
+        Schema format version.  Must equal :attr:`CURRENT_VERSION`.
+    artifact_kind : str
+        Logical kind of the intermediate artifact.  Must be one of
+        :data:`INTERMEDIATE_ARTIFACT_KINDS`.
+    output_file : str
+        Path (or pattern) of the output ROOT file.
+    tree_name : str
+        Name of the ``TTree`` inside the ROOT file.  Defaults to ``"Events"``.
+    columns : list[str]
+        Column/branch names materialised in this snapshot.  An empty list
+        means all columns are included and no column-level validation is
+        performed.
+    """
+
+    CURRENT_VERSION: ClassVar[int] = INTERMEDIATE_ARTIFACT_SCHEMA_VERSION
+
+    schema_version: int = INTERMEDIATE_ARTIFACT_SCHEMA_VERSION
+    artifact_kind: str = ""
+    output_file: str = ""
+    tree_name: str = "Events"
+    columns: List[str] = field(default_factory=list)
+
+    # ------------------------------------------------------------------ I/O
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialise to a plain Python dict."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "IntermediateArtifactSchema":
+        """Construct from a dict, ignoring unknown keys."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    # ------------------------------------------------------------------ validation
+
+    def validate(self) -> List[str]:
+        """Return a list of validation error strings (empty = valid)."""
+        errors: List[str] = []
+        if self.schema_version != self.CURRENT_VERSION:
+            errors.append(
+                f"IntermediateArtifactSchema version mismatch: file has "
+                f"{self.schema_version}, code expects {self.CURRENT_VERSION}."
+            )
+        if not self.artifact_kind:
+            errors.append(
+                "IntermediateArtifactSchema.artifact_kind must not be empty."
+            )
+        elif self.artifact_kind not in INTERMEDIATE_ARTIFACT_KINDS:
+            errors.append(
+                f"IntermediateArtifactSchema.artifact_kind "
+                f"'{self.artifact_kind}' is not a recognised kind.  "
+                f"Known kinds: {INTERMEDIATE_ARTIFACT_KINDS}."
+            )
+        if not self.output_file:
+            errors.append(
+                "IntermediateArtifactSchema.output_file must not be empty."
+            )
+        if not self.tree_name:
+            errors.append(
+                "IntermediateArtifactSchema.tree_name must not be empty."
+            )
+        return errors
+
+# ---------------------------------------------------------------------------
 # OutputManifest
 # ---------------------------------------------------------------------------
 
@@ -817,6 +926,10 @@ class OutputManifest:
         Schema for the cutflow output, if applicable.
     law_artifacts : list[LawArtifactSchema]
         Schemas for any LAW task artifacts produced by this job.
+    intermediate_artifacts : list[IntermediateArtifactSchema]
+        Schemas for any intermediate cached artifacts produced by this job
+        (preselection outputs, reduced skims, column snapshots, enriched
+        skims).  May be empty.
     framework_hash : str or None
         Git commit hash of the RDFAnalyzerCore framework at job-submission
         time.  Used by :meth:`provenance` and :func:`resolve_manifest` to
@@ -844,6 +957,7 @@ class OutputManifest:
         metadata: Optional[MetadataSchema] = None,
         cutflow: Optional[CutflowSchema] = None,
         law_artifacts: Optional[List[LawArtifactSchema]] = None,
+        intermediate_artifacts: Optional[List["IntermediateArtifactSchema"]] = None,
         framework_hash: Optional[str] = None,
         user_repo_hash: Optional[str] = None,
         config_mtime: Optional[str] = None,
@@ -855,6 +969,7 @@ class OutputManifest:
         self.metadata: Optional[MetadataSchema] = metadata
         self.cutflow: Optional[CutflowSchema] = cutflow
         self.law_artifacts: List[LawArtifactSchema] = law_artifacts or []
+        self.intermediate_artifacts: List[IntermediateArtifactSchema] = intermediate_artifacts or []
         self.framework_hash: Optional[str] = framework_hash
         self.user_repo_hash: Optional[str] = user_repo_hash
         self.config_mtime: Optional[str] = config_mtime
@@ -879,6 +994,9 @@ class OutputManifest:
                 self.cutflow.to_dict() if self.cutflow is not None else None
             ),
             "law_artifacts": [a.to_dict() for a in self.law_artifacts],
+            "intermediate_artifacts": [
+                a.to_dict() for a in self.intermediate_artifacts
+            ],
             "framework_hash": self.framework_hash,
             "user_repo_hash": self.user_repo_hash,
             "config_mtime": self.config_mtime,
@@ -916,6 +1034,10 @@ class OutputManifest:
             LawArtifactSchema.from_dict(a)
             for a in data.get("law_artifacts", [])
         ]
+        intermediate_artifacts = [
+            IntermediateArtifactSchema.from_dict(a)
+            for a in data.get("intermediate_artifacts", [])
+        ]
         dmp_data = data.get("dataset_manifest_provenance")
         dataset_manifest_provenance = (
             DatasetManifestProvenance.from_dict(dmp_data)
@@ -929,6 +1051,7 @@ class OutputManifest:
             metadata=metadata,
             cutflow=cutflow,
             law_artifacts=law_artifacts,
+            intermediate_artifacts=intermediate_artifacts,
             framework_hash=data.get("framework_hash"),
             user_repo_hash=data.get("user_repo_hash"),
             config_mtime=data.get("config_mtime"),
@@ -997,10 +1120,11 @@ class OutputManifest:
         if all(
             x is None
             for x in (self.skim, self.histograms, self.metadata, self.cutflow)
-        ) and not self.law_artifacts:
+        ) and not self.law_artifacts and not self.intermediate_artifacts:
             errors.append(
                 "OutputManifest must define at least one output schema "
-                "(skim, histograms, metadata, cutflow, or law_artifacts)."
+                "(skim, histograms, metadata, cutflow, law_artifacts, or "
+                "intermediate_artifacts)."
             )
 
         for schema in (self.skim, self.histograms, self.metadata, self.cutflow):
@@ -1010,6 +1134,10 @@ class OutputManifest:
         for i, artifact in enumerate(self.law_artifacts):
             for e in artifact.validate():
                 errors.append(f"law_artifacts[{i}]: {e}")
+
+        for i, artifact in enumerate(self.intermediate_artifacts):
+            for e in artifact.validate():
+                errors.append(f"intermediate_artifacts[{i}]: {e}")
 
         return errors
 
@@ -1057,6 +1185,13 @@ class OutputManifest:
                     f"current={LAW_ARTIFACT_SCHEMA_VERSION}"
                 )
 
+        for i, artifact in enumerate(manifest.intermediate_artifacts):
+            if artifact.schema_version != INTERMEDIATE_ARTIFACT_SCHEMA_VERSION:
+                mismatches.append(
+                    f"intermediate_artifacts[{i}]: stored={artifact.schema_version}, "
+                    f"current={INTERMEDIATE_ARTIFACT_SCHEMA_VERSION}"
+                )
+
         if mismatches:
             raise SchemaVersionError(
                 "Output schema version mismatch(es) detected:\n"
@@ -1080,8 +1215,9 @@ class OutputManifest:
         """Return the provenance recorded in this manifest.
 
         Constructs a :class:`ProvenanceRecord` from the
-        ``framework_hash``, ``user_repo_hash``, and ``config_mtime``
-        fields stored in the manifest.
+        ``framework_hash``, ``user_repo_hash``, ``config_mtime``, and
+        (when available) the ``manifest_hash`` stored in
+        ``dataset_manifest_provenance``.
 
         Returns
         -------
@@ -1089,10 +1225,16 @@ class OutputManifest:
             The provenance snapshot recorded when this manifest was written.
             Fields that were not recorded will be ``None``.
         """
+        dmp_hash = (
+            self.dataset_manifest_provenance.manifest_hash
+            if self.dataset_manifest_provenance is not None
+            else None
+        )
         return ProvenanceRecord(
             framework_hash=self.framework_hash,
             user_repo_hash=self.user_repo_hash,
             config_mtime=self.config_mtime,
+            dataset_manifest_hash=dmp_hash,
         )
 
     def resolve(
@@ -1239,6 +1381,11 @@ def resolve_manifest(
 
     for i, artifact in enumerate(manifest.law_artifacts):
         statuses[f"law_artifacts[{i}]"] = resolve_artifact(
+            artifact, recorded, current_provenance
+        )
+
+    for i, artifact in enumerate(manifest.intermediate_artifacts):
+        statuses[f"intermediate_artifacts[{i}]"] = resolve_artifact(
             artifact, recorded, current_provenance
         )
 
@@ -1395,6 +1542,29 @@ def validate_merge_inputs(
                     )
 
     # ------------------------------------------------------------------
+    # Rules 6b–7b: intermediate_artifacts count and version consistency
+    # ------------------------------------------------------------------
+    ref_ia_count = len(ref.intermediate_artifacts)
+    for i, m in enumerate(manifests[1:], start=1):
+        if len(m.intermediate_artifacts) != ref_ia_count:
+            errors.append(
+                f"Inconsistent intermediate_artifacts count: "
+                f"manifest[0]={ref_ia_count}, "
+                f"manifest[{i}]={len(m.intermediate_artifacts)}."
+            )
+        else:
+            for j, (ref_a, m_a) in enumerate(
+                zip(ref.intermediate_artifacts, m.intermediate_artifacts)
+            ):
+                if ref_a.schema_version != m_a.schema_version:
+                    errors.append(
+                        f"Inconsistent schema_version for "
+                        f"intermediate_artifacts[{j}]: "
+                        f"manifest[0]={ref_a.schema_version}, "
+                        f"manifest[{i}]={m_a.schema_version}."
+                    )
+
+    # ------------------------------------------------------------------
     # Rule 8: required roles
     # ------------------------------------------------------------------
     if required_roles:
@@ -1411,10 +1581,15 @@ def validate_merge_inputs(
                         errors.append(
                             f"manifest[{i}]: required role 'law_artifacts' is empty."
                         )
+                elif role == "intermediate_artifacts":
+                    if not m.intermediate_artifacts:
+                        errors.append(
+                            f"manifest[{i}]: required role 'intermediate_artifacts' is empty."
+                        )
                 else:
                     errors.append(
                         f"Unknown required role '{role}'. "
-                        f"Valid roles: {sorted(_valid_scalar | {'law_artifacts'})}."
+                        f"Valid roles: {sorted(_valid_scalar | {'law_artifacts', 'intermediate_artifacts'})}."
                     )
 
     return errors
@@ -1506,6 +1681,7 @@ def merge_manifests(
         metadata=source.metadata,
         cutflow=source.cutflow,
         law_artifacts=list(source.law_artifacts),
+        intermediate_artifacts=list(source.intermediate_artifacts),
         framework_hash=framework_hash,
         user_repo_hash=user_repo_hash,
     )
