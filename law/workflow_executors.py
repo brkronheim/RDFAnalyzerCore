@@ -50,6 +50,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -154,10 +155,9 @@ def _run_analysis_job(
     _rec_cls = None
     _est_fn = None
     try:
-        import sys as _sys
         _here = os.path.dirname(os.path.abspath(__file__))
-        if _here not in _sys.path:
-            _sys.path.insert(0, _here)
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
         from performance_recorder import PerformanceRecorder, estimate_job_input_bytes
         _rec_cls = PerformanceRecorder
         _est_fn = estimate_job_input_bytes
@@ -181,11 +181,16 @@ def _run_analysis_job(
             returncode = proc.returncode
             rec.set_throughput(input_bytes)
 
-        # Write performance metrics (best-effort: ignore I/O errors)
+        # Write performance metrics (best-effort; log a warning on failure)
         try:
             rec.save(os.path.join(job_dir, "job.perf.json"))
-        except OSError:
-            pass
+        except OSError as exc:
+            import warnings
+            warnings.warn(
+                f"Could not write job.perf.json in {job_dir!r}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         if returncode != 0:
             stderr_tail = stderr_data[-2000:] if stderr_data else ""

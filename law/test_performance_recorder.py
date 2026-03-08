@@ -260,8 +260,6 @@ class TestMonitorProcess(unittest.TestCase):
 
     def test_monitor_process_noop_on_non_linux(self):
         """On non-Linux platforms monitor_process() should not raise."""
-        # Patch sys.platform temporarily if needed
-        import sys
         orig = sys.platform
         try:
             sys.platform = "darwin"

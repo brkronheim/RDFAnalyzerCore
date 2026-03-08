@@ -1212,6 +1212,8 @@ class RunTestJob(NANOMixin, law.Task):
         self.publish_message(f"Running test job:\n  {full_cmd}")
 
         with PerformanceRecorder("RunTestJob") as rec:
+            # stdout/stderr intentionally inherit from parent so the test
+            # job output is visible to the user running the workflow.
             proc = subprocess.Popen(full_cmd, shell=True)
             rec.monitor_process(proc.pid)
             proc.wait()
