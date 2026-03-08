@@ -60,7 +60,9 @@ void CutflowManager::execute() {
   //   applying cut j's column as a filter yields the count after cuts 0..j.
   cutflowCountResults_m.clear();
   for (const auto &cut : cuts_m) {
-    auto filtered = cut.dfNode.Filter(passBoolCut, {cut.column});
+    // Copy to a non-const local: RNode::Filter() is not const-qualified.
+    ROOT::RDF::RNode dfNode = cut.dfNode;
+    auto filtered = dfNode.Filter(passBoolCut, {cut.column});
     cutflowCountResults_m.push_back(filtered.Count());
   }
 
