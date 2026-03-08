@@ -36,7 +36,17 @@
  *                              its role (e.g. plugin.histogramManager).
  *  - file.hash.<cfg_key>     : MD5 digest of any configuration value that looks
  *                              like a file path with a recognised extension
- *                              (.json, .root, .onnx, .bdt, .pt, .pb, .xml).
+ *                              (.json, .root, .onnx, .bdt, .pt, .pb, .xml,
+ *                               .yaml, .yml).
+ *
+ * Dataset manifest identity can be recorded explicitly via
+ * recordDatasetManifestProvenance():
+ *
+ *  - dataset_manifest.file_hash        : hash of the manifest file.
+ *  - dataset_manifest.query_params     : JSON-encoded query filter applied to
+ *                                        the manifest.
+ *  - dataset_manifest.resolved_entries : comma-separated list of selected
+ *                                        dataset entry names.
  *
  * Additional entries can be injected at any time before finalize() via addEntry().
  *
@@ -63,6 +73,35 @@ public:
      * @param value Provenance value.
      */
     void addEntry(const std::string& key, const std::string& value);
+
+    /**
+     * @brief Record dataset manifest identity for framework provenance.
+     *
+     * Stores the following entries in the provenance map so that the exact
+     * dataset selection used by a workflow task is fully reproducible:
+     *
+     *  - dataset_manifest.file_hash    : SHA-256 / MD5 digest of the manifest
+     *                                    file (empty string if not available).
+     *  - dataset_manifest.query_params : JSON-serialised query parameters that
+     *                                    were passed to DatasetManifest.query()
+     *                                    (empty string if the full manifest was
+     *                                    used without filtering).
+     *  - dataset_manifest.resolved_entries : comma-separated list of dataset
+     *                                    entry names that were selected by the
+     *                                    query (empty string if not available).
+     *
+     * Any of the three parameters may be an empty string when the corresponding
+     * information is not available.
+     *
+     * @param manifestFileHash   File hash (e.g. from DatasetManifest.file_hash).
+     * @param queryParamsJson    JSON string representing the query parameters.
+     * @param resolvedEntries    Comma-separated dataset entry names.
+     */
+    void recordDatasetManifestProvenance(
+        const std::string& manifestFileHash,
+        const std::string& queryParamsJson,
+        const std::string& resolvedEntries
+    );
 
     /**
      * @brief Read-only access to the collected provenance map.
