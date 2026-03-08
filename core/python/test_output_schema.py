@@ -29,6 +29,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from output_schema import (
+    CACHE_SIDECAR_SUFFIX,
     CUTFLOW_SCHEMA_VERSION,
     HISTOGRAM_SCHEMA_VERSION,
     LAW_ARTIFACT_SCHEMA_VERSION,
@@ -40,6 +41,7 @@ from output_schema import (
     SCHEMA_REGISTRY,
     SKIM_SCHEMA_VERSION,
     ArtifactResolutionStatus,
+    CachedArtifact,
     CutflowSchema,
     DatasetManifestProvenance,
     HistogramAxisSpec,
@@ -51,10 +53,13 @@ from output_schema import (
     ProvenanceRecord,
     SchemaVersionError,
     SkimSchema,
+    check_cache_validity,
     merge_manifests,
+    read_cache_sidecar,
     resolve_artifact,
     resolve_manifest,
     validate_merge_inputs,
+    write_cache_sidecar,
 )
 
 
@@ -1601,3 +1606,292 @@ class TestMergeManifests:
         assert loaded.skim.output_file == "merged.root"
         assert loaded.histograms.output_file == "merged_meta.root"
         assert loaded.validate() == []
+
+
+# ---------------------------------------------------------------------------
+# CachedArtifact
+# ---------------------------------------------------------------------------
+
+
+class TestCachedArtifact:
+    def _make_manifest(self, fw_hash=None):
+        return OutputManifest(
+            skim=SkimSchema(output_file="presel.root"),
+            framework_hash=fw_hash,
+        )
+
+    def test_construction_defaults(self):
+        m = self._make_manifest()
+        ca = CachedArtifact(artifact_path="presel.root", manifest=m)
+        assert ca.artifact_path == "presel.root"
+        assert ca.manifest is m
+        assert ca.cached_at  # non-empty ISO timestamp
+
+    def test_explicit_cached_at(self):
+        ts = "2024-06-01T12:00:00+00:00"
+        m = self._make_manifest()
+        ca = CachedArtifact(artifact_path="presel.root", manifest=m, cached_at=ts)
+        assert ca.cached_at == ts
+
+    def test_to_dict_contains_expected_keys(self):
+        m = self._make_manifest(fw_hash="abc123")
+        ca = CachedArtifact(artifact_path="presel.root", manifest=m, cached_at="2024-01-01T00:00:00+00:00")
+        d = ca.to_dict()
+        assert d["artifact_path"] == "presel.root"
+        assert d["cached_at"] == "2024-01-01T00:00:00+00:00"
+        assert "manifest" in d
+        assert d["manifest"]["skim"]["output_file"] == "presel.root"
+
+    def test_from_dict_round_trip(self):
+        m = self._make_manifest(fw_hash="abc123")
+        ca = CachedArtifact(
+            artifact_path="presel.root",
+            manifest=m,
+            cached_at="2024-06-01T12:00:00+00:00",
+        )
+        ca2 = CachedArtifact.from_dict(ca.to_dict())
+        assert ca2.artifact_path == ca.artifact_path
+        assert ca2.cached_at == ca.cached_at
+        assert ca2.manifest.skim.output_file == "presel.root"
+        assert ca2.manifest.framework_hash == "abc123"
+
+    def test_from_dict_empty_artifact_path(self):
+        m = self._make_manifest()
+        d = CachedArtifact(artifact_path="x.root", manifest=m).to_dict()
+        del d["artifact_path"]
+        ca = CachedArtifact.from_dict(d)
+        assert ca.artifact_path == ""
+
+
+# ---------------------------------------------------------------------------
+# CACHE_SIDECAR_SUFFIX constant
+# ---------------------------------------------------------------------------
+
+
+class TestCacheSidecarSuffix:
+    def test_suffix_is_string(self):
+        assert isinstance(CACHE_SIDECAR_SUFFIX, str)
+
+    def test_suffix_starts_with_dot(self):
+        assert CACHE_SIDECAR_SUFFIX.startswith(".")
+
+    def test_suffix_ends_with_yaml(self):
+        assert CACHE_SIDECAR_SUFFIX.endswith(".yaml")
+
+
+# ---------------------------------------------------------------------------
+# write_cache_sidecar / read_cache_sidecar
+# ---------------------------------------------------------------------------
+
+
+class TestWriteReadCacheSidecar:
+    def _make_manifest(self, fw_hash="fw1"):
+        return OutputManifest(
+            skim=SkimSchema(output_file="presel.root"),
+            framework_hash=fw_hash,
+        )
+
+    def test_write_creates_sidecar(self, tmp_path):
+        artifact = str(tmp_path / "presel.root")
+        open(artifact, "w").close()
+        m = self._make_manifest()
+        sidecar_path = write_cache_sidecar(artifact, m)
+        assert os.path.isfile(sidecar_path)
+        assert sidecar_path == artifact + CACHE_SIDECAR_SUFFIX
+
+    def test_write_returns_sidecar_path(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        open(artifact, "w").close()
+        m = self._make_manifest()
+        result = write_cache_sidecar(artifact, m)
+        assert result == artifact + CACHE_SIDECAR_SUFFIX
+
+    def test_read_returns_cached_artifact(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        open(artifact, "w").close()
+        m = self._make_manifest(fw_hash="xyz")
+        write_cache_sidecar(artifact, m)
+        ca = read_cache_sidecar(artifact)
+        assert ca.artifact_path == artifact
+        assert ca.manifest.framework_hash == "xyz"
+        assert ca.manifest.skim.output_file == "presel.root"
+
+    def test_read_raises_when_no_sidecar(self, tmp_path):
+        artifact = str(tmp_path / "missing.root")
+        with pytest.raises(FileNotFoundError, match="cache sidecar"):
+            read_cache_sidecar(artifact)
+
+    def test_read_raises_on_invalid_yaml(self, tmp_path):
+        artifact = str(tmp_path / "bad.root")
+        sidecar = artifact + CACHE_SIDECAR_SUFFIX
+        with open(sidecar, "w") as fh:
+            fh.write("- item1\n- item2\n")
+        with pytest.raises(ValueError, match="mapping"):
+            read_cache_sidecar(artifact)
+
+    def test_round_trip_preserves_all_schema_types(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        open(artifact, "w").close()
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            histograms=HistogramSchema(output_file="meta.root"),
+            metadata=MetadataSchema(output_file="meta.root"),
+            cutflow=CutflowSchema(output_file="meta.root"),
+            framework_hash="abc123",
+            user_repo_hash="ur1",
+        )
+        write_cache_sidecar(artifact, m)
+        ca = read_cache_sidecar(artifact)
+        assert ca.manifest.skim.output_file == "out.root"
+        assert ca.manifest.histograms.output_file == "meta.root"
+        assert ca.manifest.metadata.output_file == "meta.root"
+        assert ca.manifest.cutflow.output_file == "meta.root"
+        assert ca.manifest.framework_hash == "abc123"
+        assert ca.manifest.user_repo_hash == "ur1"
+
+    def test_sidecar_is_valid_yaml_file(self, tmp_path):
+        import yaml as _yaml
+        artifact = str(tmp_path / "out.root")
+        open(artifact, "w").close()
+        m = self._make_manifest()
+        sidecar_path = write_cache_sidecar(artifact, m)
+        with open(sidecar_path) as fh:
+            data = _yaml.safe_load(fh)
+        assert isinstance(data, dict)
+        assert "artifact_path" in data
+        assert "cached_at" in data
+        assert "manifest" in data
+
+    def test_write_with_explicit_cached_at(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        open(artifact, "w").close()
+        ts = "2024-01-01T00:00:00+00:00"
+        m = self._make_manifest()
+        write_cache_sidecar(artifact, m, cached_at=ts)
+        ca = read_cache_sidecar(artifact)
+        assert ca.cached_at == ts
+
+    def test_write_creates_parent_dirs(self, tmp_path):
+        artifact = str(tmp_path / "deep" / "subdir" / "out.root")
+        os.makedirs(os.path.dirname(artifact), exist_ok=True)
+        open(artifact, "w").close()
+        m = self._make_manifest()
+        sidecar_path = write_cache_sidecar(artifact, m)
+        assert os.path.isfile(sidecar_path)
+
+
+# ---------------------------------------------------------------------------
+# check_cache_validity
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCacheValidity:
+    def _make_manifest(self, fw_hash=None):
+        return OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            framework_hash=fw_hash,
+        )
+
+    def _write(self, artifact, manifest, tmp_path=None):
+        """Write empty artifact + sidecar, return artifact path."""
+        open(artifact, "w").close()
+        write_cache_sidecar(artifact, manifest)
+        return artifact
+
+    def test_compatible_no_provenance(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        self._write(artifact, self._make_manifest())
+        status = check_cache_validity(artifact)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_compatible_matching_provenance(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        self._write(artifact, self._make_manifest(fw_hash="fw1"))
+        current = ProvenanceRecord(framework_hash="fw1")
+        status = check_cache_validity(artifact, current_provenance=current)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_stale_changed_framework_hash(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        self._write(artifact, self._make_manifest(fw_hash="fw_old"))
+        current = ProvenanceRecord(framework_hash="fw_new")
+        status = check_cache_validity(artifact, current_provenance=current)
+        assert status == ArtifactResolutionStatus.STALE
+
+    def test_must_regenerate_missing_artifact(self, tmp_path):
+        artifact = str(tmp_path / "nonexistent.root")
+        status = check_cache_validity(artifact)
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_must_regenerate_missing_sidecar(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        open(artifact, "w").close()
+        # No sidecar written
+        status = check_cache_validity(artifact)
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_must_regenerate_schema_version_mismatch(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        m = self._make_manifest()
+        m.skim.schema_version = 999  # force mismatch
+        self._write(artifact, m)
+        status = check_cache_validity(artifact)
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_strict_mode_promotes_stale_to_must_regenerate(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        self._write(artifact, self._make_manifest(fw_hash="fw_old"))
+        current = ProvenanceRecord(framework_hash="fw_new")
+        status = check_cache_validity(artifact, current_provenance=current, strict=True)
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_strict_mode_compatible_stays_compatible(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        self._write(artifact, self._make_manifest(fw_hash="fw1"))
+        current = ProvenanceRecord(framework_hash="fw1")
+        status = check_cache_validity(artifact, current_provenance=current, strict=True)
+        assert status == ArtifactResolutionStatus.COMPATIBLE
+
+    def test_must_regenerate_on_corrupt_sidecar(self, tmp_path):
+        artifact = str(tmp_path / "out.root")
+        open(artifact, "w").close()
+        sidecar = artifact + CACHE_SIDECAR_SUFFIX
+        with open(sidecar, "w") as fh:
+            fh.write("- not\n- a\n- mapping\n")
+        status = check_cache_validity(artifact)
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_schema_version_error_causes_must_regenerate(self, tmp_path):
+        """Any schema mismatch across multiple schemas → MUST_REGENERATE."""
+        artifact = str(tmp_path / "out.root")
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            histograms=HistogramSchema(output_file="meta.root"),
+            framework_hash="fw_old",
+        )
+        m.skim.schema_version = 999  # force mismatch on skim only
+        self._write(artifact, m)
+        current = ProvenanceRecord(framework_hash="fw_new")
+        status = check_cache_validity(artifact, current_provenance=current)
+        assert status == ArtifactResolutionStatus.MUST_REGENERATE
+
+    def test_end_to_end_workflow(self, tmp_path):
+        """Full workflow: write sidecar, validate under same env, update env."""
+        artifact = str(tmp_path / "presel.root")
+        m = OutputManifest(
+            skim=SkimSchema(output_file="presel.root"),
+            framework_hash="fw_v1",
+            user_repo_hash="ur_v1",
+        )
+        self._write(artifact, m)
+
+        # Same environment → COMPATIBLE
+        same_env = ProvenanceRecord(framework_hash="fw_v1", user_repo_hash="ur_v1")
+        assert check_cache_validity(artifact, same_env) == ArtifactResolutionStatus.COMPATIBLE
+
+        # Updated framework → STALE
+        new_fw = ProvenanceRecord(framework_hash="fw_v2", user_repo_hash="ur_v1")
+        assert check_cache_validity(artifact, new_fw) == ArtifactResolutionStatus.STALE
+
+        # Strict mode with updated framework → MUST_REGENERATE
+        assert check_cache_validity(artifact, new_fw, strict=True) == ArtifactResolutionStatus.MUST_REGENERATE

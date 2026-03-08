@@ -90,6 +90,7 @@ Provenance and version resolution (canonical API)::
 
 from __future__ import annotations
 
+import datetime
 import enum
 import os
 from dataclasses import dataclass, field, asdict, fields
@@ -1508,3 +1509,257 @@ def merge_manifests(
         framework_hash=framework_hash,
         user_repo_hash=user_repo_hash,
     )
+
+
+# ---------------------------------------------------------------------------
+# Cached artifact sidecar format
+# ---------------------------------------------------------------------------
+
+#: Filename suffix appended to any artifact path to form its cache sidecar.
+#: For example, ``"presel.root"`` gets a sidecar at ``"presel.root.cache.yaml"``.
+CACHE_SIDECAR_SUFFIX: str = ".cache.yaml"
+
+
+class CachedArtifact:
+    """A cached artifact with attached schema and provenance metadata.
+
+    Represents an intermediate result that has been written to disk alongside
+    a sidecar file recording its schema type, version, and the provenance
+    context at the time of caching.  Use :func:`write_cache_sidecar` to
+    persist and :func:`read_cache_sidecar` to reload.
+
+    Cache validity is determined by :func:`check_cache_validity`, which
+    checks **both** schema-version compatibility and provenance/version
+    compatibility — not only file timestamps or filenames.
+
+    Parameters
+    ----------
+    artifact_path:
+        Absolute or relative path to the cached artifact file.
+    manifest:
+        :class:`OutputManifest` describing the schemas of all artifacts
+        produced in the same job/task as this cached artifact.
+    cached_at:
+        ISO 8601 timestamp string (UTC) recording when the artifact was
+        cached.  Defaults to the current UTC time when ``None``.
+
+    Examples
+    --------
+    Write a cache entry after producing an intermediate artifact::
+
+        from output_schema import (
+            OutputManifest, SkimSchema, ProvenanceRecord,
+            write_cache_sidecar, check_cache_validity,
+            ArtifactResolutionStatus,
+        )
+
+        manifest = OutputManifest(
+            skim=SkimSchema(output_file="presel.root"),
+            framework_hash="abc123",
+        )
+        write_cache_sidecar("presel.root", manifest)
+
+        # Later, check whether the cache is still valid:
+        current = ProvenanceRecord(framework_hash="abc123")
+        status = check_cache_validity("presel.root", current_provenance=current)
+        if status == ArtifactResolutionStatus.COMPATIBLE:
+            pass  # reuse the cache
+        elif status == ArtifactResolutionStatus.MUST_REGENERATE:
+            pass  # must regenerate
+    """
+
+    def __init__(
+        self,
+        artifact_path: str,
+        manifest: "OutputManifest",
+        cached_at: Optional[str] = None,
+    ) -> None:
+        self.artifact_path: str = artifact_path
+        self.manifest: OutputManifest = manifest
+        self.cached_at: str = (
+            cached_at
+            or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON/YAML-serialisable dictionary representation."""
+        return {
+            "artifact_path": self.artifact_path,
+            "cached_at": self.cached_at,
+            "manifest": self.manifest.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CachedArtifact":
+        """Construct from a dict produced by :meth:`to_dict`."""
+        manifest = OutputManifest.from_dict(data["manifest"])
+        return cls(
+            artifact_path=data.get("artifact_path", ""),
+            manifest=manifest,
+            cached_at=data.get("cached_at"),
+        )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"CachedArtifact("
+            f"artifact_path={self.artifact_path!r}, "
+            f"cached_at={self.cached_at!r})"
+        )
+
+
+def write_cache_sidecar(
+    artifact_path: str,
+    manifest: "OutputManifest",
+    cached_at: Optional[str] = None,
+) -> str:
+    """Write a schema-and-provenance sidecar file alongside a cached artifact.
+
+    Records the artifact's schema and provenance metadata in a YAML sidecar
+    file at ``{artifact_path}{CACHE_SIDECAR_SUFFIX}`` so that downstream
+    consumers can validate the cache without relying on file timestamps or
+    filenames alone.
+
+    Parameters
+    ----------
+    artifact_path:
+        Path to the artifact file.  The sidecar is written to
+        ``{artifact_path}{CACHE_SIDECAR_SUFFIX}`` (e.g.
+        ``"output/sample_0.root.cache.yaml"``).
+    manifest:
+        :class:`OutputManifest` describing the schemas and provenance for
+        the artifact.
+    cached_at:
+        Optional ISO 8601 UTC timestamp string for the cache entry.
+        Defaults to the current UTC time.
+
+    Returns
+    -------
+    str
+        The absolute path of the written sidecar file.
+    """
+    entry = CachedArtifact(
+        artifact_path=artifact_path,
+        manifest=manifest,
+        cached_at=cached_at,
+    )
+    sidecar_path = artifact_path + CACHE_SIDECAR_SUFFIX
+    os.makedirs(os.path.dirname(os.path.abspath(sidecar_path)), exist_ok=True)
+    with open(sidecar_path, "w") as fh:
+        yaml.dump(
+            entry.to_dict(),
+            fh,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+    return sidecar_path
+
+
+def read_cache_sidecar(artifact_path: str) -> "CachedArtifact":
+    """Read the cache sidecar for an artifact.
+
+    Parameters
+    ----------
+    artifact_path:
+        Path to the artifact file.  The sidecar is expected at
+        ``{artifact_path}{CACHE_SIDECAR_SUFFIX}``.
+
+    Returns
+    -------
+    CachedArtifact
+        The cached artifact metadata loaded from the sidecar.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no sidecar file exists for *artifact_path*.
+    ValueError
+        If the sidecar file content is not a valid YAML mapping.
+    """
+    sidecar_path = artifact_path + CACHE_SIDECAR_SUFFIX
+    if not os.path.exists(sidecar_path):
+        raise FileNotFoundError(
+            f"No cache sidecar found for {artifact_path!r}. "
+            f"Expected sidecar at {sidecar_path!r}."
+        )
+    with open(sidecar_path) as fh:
+        data = yaml.safe_load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Cache sidecar {sidecar_path!r} must be a YAML mapping at the "
+            f"top level."
+        )
+    return CachedArtifact.from_dict(data)
+
+
+def check_cache_validity(
+    artifact_path: str,
+    current_provenance: Optional["ProvenanceRecord"] = None,
+    strict: bool = False,
+) -> "ArtifactResolutionStatus":
+    """Check whether a cached artifact is still valid.
+
+    Reads the cache sidecar for *artifact_path* and uses the canonical
+    resolution model (:func:`resolve_manifest`) to determine whether the
+    artifact is compatible, stale, or must be regenerated.  Cache validity
+    depends on **both** schema-version compatibility and provenance/version
+    compatibility — not only file timestamps or filenames.
+
+    If no sidecar or artifact file exists the result is
+    :attr:`~ArtifactResolutionStatus.MUST_REGENERATE`.
+
+    Resolution rules (applied in order):
+
+    1. **MUST_REGENERATE** – the artifact file or its sidecar does not exist.
+    2. **MUST_REGENERATE** – any schema version recorded in the sidecar does
+       not match the current code's ``CURRENT_VERSION``.
+    3. **STALE** – all schema versions are current, but the recorded
+       provenance does not match *current_provenance*.
+    4. **COMPATIBLE** – all schema versions are current and provenance
+       matches (or no *current_provenance* was supplied).
+
+    When *strict* is ``True``, :attr:`~ArtifactResolutionStatus.STALE` is
+    promoted to :attr:`~ArtifactResolutionStatus.MUST_REGENERATE`, so callers
+    that require exact provenance matching will re-generate stale caches.
+
+    Parameters
+    ----------
+    artifact_path:
+        Path to the artifact file.
+    current_provenance:
+        A :class:`ProvenanceRecord` representing the current environment
+        state (e.g. current git hashes).  When ``None`` only schema-version
+        compatibility is checked; provenance staleness is not reported.
+    strict:
+        When ``True``, treat :attr:`~ArtifactResolutionStatus.STALE` as
+        :attr:`~ArtifactResolutionStatus.MUST_REGENERATE`.
+
+    Returns
+    -------
+    ArtifactResolutionStatus
+        One of :attr:`~ArtifactResolutionStatus.COMPATIBLE`,
+        :attr:`~ArtifactResolutionStatus.STALE`, or
+        :attr:`~ArtifactResolutionStatus.MUST_REGENERATE`.
+    """
+    if not os.path.exists(artifact_path):
+        return ArtifactResolutionStatus.MUST_REGENERATE
+
+    try:
+        entry = read_cache_sidecar(artifact_path)
+    except (FileNotFoundError, ValueError):
+        return ArtifactResolutionStatus.MUST_REGENERATE
+
+    statuses = resolve_manifest(entry.manifest, current_provenance=current_provenance)
+
+    if not statuses:
+        return ArtifactResolutionStatus.MUST_REGENERATE
+
+    if any(s == ArtifactResolutionStatus.MUST_REGENERATE for s in statuses.values()):
+        return ArtifactResolutionStatus.MUST_REGENERATE
+
+    if any(s == ArtifactResolutionStatus.STALE for s in statuses.values()):
+        if strict:
+            return ArtifactResolutionStatus.MUST_REGENERATE
+        return ArtifactResolutionStatus.STALE
+
+    return ArtifactResolutionStatus.COMPATIBLE
