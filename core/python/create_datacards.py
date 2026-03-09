@@ -33,6 +33,15 @@ except ImportError:
     print("Please install it with: pip install uproot")
     sys.exit(1)
 
+# Optional nuisance group registry – imported lazily so that the module is
+# still usable when nuisance_groups.py is not on the path.
+try:
+    from nuisance_groups import NuisanceGroupRegistry
+    _NUISANCE_GROUPS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    NuisanceGroupRegistry = None  # type: ignore[assignment,misc]
+    _NUISANCE_GROUPS_AVAILABLE = False
+
 
 class Histogram1D:
     """Simple 1D histogram class for storing and manipulating histograms."""
@@ -144,6 +153,25 @@ class DatacardGenerator:
         self.processes = self.config.get('processes', {})
         self.systematics = self.config.get('systematics', {})
         self.sample_combinations = self.config.get('sample_combinations', {})
+
+        # Build a NuisanceGroupRegistry from the config when available.
+        # A top-level ``nuisance_groups`` key (list of group dicts) is
+        # preferred; if absent the flat ``systematics`` dict is used as a
+        # fallback so that every existing config benefits from group-aware
+        # filtering without any migration effort.
+        if _NUISANCE_GROUPS_AVAILABLE:
+            if "nuisance_groups" in self.config:
+                self.nuisance_registry: Optional[NuisanceGroupRegistry] = (
+                    NuisanceGroupRegistry.from_config(self.config)
+                )
+            elif self.systematics:
+                self.nuisance_registry = NuisanceGroupRegistry.from_config(
+                    {"systematics": self.systematics}
+                )
+            else:
+                self.nuisance_registry = NuisanceGroupRegistry()
+        else:
+            self.nuisance_registry = None
         
         # Create output directory
         os.makedirs(self.output_dir, exist_ok=True)
@@ -518,6 +546,10 @@ class DatacardGenerator:
     def _get_systematics_for_process(self, process: str, region: str) -> Dict:
         """
         Get systematics that apply to a specific process and region.
+
+        When a :class:`~nuisance_groups.NuisanceGroupRegistry` is available it
+        is used as the authoritative source for applicability; the flat
+        ``systematics`` dict is used as a fallback.
         
         Args:
             process: Process name
@@ -526,6 +558,25 @@ class DatacardGenerator:
         Returns:
             Dictionary of applicable systematics
         """
+        # Registry-aware path: query by process, region, and datacard usage.
+        if self.nuisance_registry is not None:
+            syst_map = self.nuisance_registry.get_systematics_for_process_and_region(
+                process, region, output_usage="datacard"
+            )
+            applicable_systematics = {}
+            for syst_name in syst_map:
+                if syst_name in self.systematics:
+                    applicable_systematics[syst_name] = self.systematics[syst_name]
+                else:
+                    # Synthesise a minimal config entry from the group metadata.
+                    group = syst_map[syst_name]
+                    applicable_systematics[syst_name] = {
+                        "type": group.group_type,
+                        "distribution": "shape" if group.group_type == "shape" else "lnN",
+                    }
+            return applicable_systematics
+
+        # Fallback: original flat-dict logic.
         applicable_systematics = {}
         
         for syst_name, syst_config in self.systematics.items():
@@ -542,6 +593,55 @@ class DatacardGenerator:
             applicable_systematics[syst_name] = syst_config
         
         return applicable_systematics
+
+    def validate_coverage(
+        self, available_variations: Optional[Dict[str, List[str]]] = None
+    ) -> List[str]:
+        """Validate that all declared systematics have up and down shifts.
+
+        Uses the :class:`~nuisance_groups.NuisanceGroupRegistry` when
+        available, otherwise checks the flat ``systematics`` dictionary.
+
+        Parameters
+        ----------
+        available_variations : dict[str, list[str]] or None
+            Mapping from base systematic name to the list of histogram/column
+            names found in the output.  When ``None`` an empty dict is used
+            (all systematics will be reported as missing).
+
+        Returns
+        -------
+        list[str]
+            Human-readable issue descriptions.  An empty list means all
+            declared systematics have complete coverage.
+        """
+        avail = available_variations or {}
+        messages: List[str] = []
+
+        if self.nuisance_registry is not None:
+            from nuisance_groups import CoverageSeverity
+            issues = self.nuisance_registry.validate_coverage(avail)
+            for issue in issues:
+                prefix = "ERROR" if issue.severity == CoverageSeverity.ERROR else "WARNING"
+                messages.append(f"[{prefix}] {issue.group_name}/{issue.systematic_name}: {issue.message}")
+            return messages
+
+        # Fallback: check flat systematics dict.
+        for syst_name in self.systematics:
+            variations = avail.get(syst_name, [])
+            up_names = {v.lower() for v in variations}
+            has_up = (syst_name.lower() + "up") in up_names
+            has_down = (syst_name.lower() + "down") in up_names
+            if syst_name not in avail:
+                messages.append(
+                    f"[ERROR] {syst_name}: not present in available variations."
+                )
+            elif not has_up:
+                messages.append(f"[ERROR] {syst_name}: missing Up variation.")
+            elif not has_down:
+                messages.append(f"[ERROR] {syst_name}: missing Down variation.")
+
+        return messages
     
     def _write_datacard_file(self, filename: str, region: str, 
                             process_hists: Dict[str, Histogram1D], root_filename: str) -> None:
@@ -649,6 +749,10 @@ class DatacardGenerator:
     def _get_systematics_for_region(self, region: str) -> Dict:
         """
         Get all systematics for a specific region.
+
+        When a :class:`~nuisance_groups.NuisanceGroupRegistry` is available it
+        is used as the authoritative source; the flat ``systematics`` dict is
+        used as a fallback.
         
         Args:
             region: Control region name
@@ -656,6 +760,25 @@ class DatacardGenerator:
         Returns:
             Dictionary of systematics
         """
+        if self.nuisance_registry is not None:
+            # Collect all systematics in groups that apply to this region
+            # and are intended for datacard output.
+            applicable_systematics = {}
+            for group in self.nuisance_registry.get_groups_for_output("datacard"):
+                if not group.applies_to_region(region):
+                    continue
+                for syst_name in group.systematics:
+                    if syst_name not in applicable_systematics:
+                        if syst_name in self.systematics:
+                            applicable_systematics[syst_name] = self.systematics[syst_name]
+                        else:
+                            applicable_systematics[syst_name] = {
+                                "type": group.group_type,
+                                "distribution": "shape" if group.group_type == "shape" else "lnN",
+                            }
+            return applicable_systematics
+
+        # Fallback: original flat-dict logic.
         applicable_systematics = {}
         
         for syst_name, syst_config in self.systematics.items():

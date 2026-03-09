@@ -49,6 +49,9 @@ Version history
    * - ``RegionDefinition``
      - 1
      - Initial definition: name, filter_column, parent, description.
+   * - ``NuisanceGroupDefinition``
+     - 1
+     - Initial definition: name, group_type, systematics, processes, regions, output_usage.
    * - ``OutputManifest``
      - 1
      - Initial definition: combines all schema types.
@@ -128,6 +131,8 @@ LAW_ARTIFACT_SCHEMA_VERSION: int = 1
 INTERMEDIATE_ARTIFACT_SCHEMA_VERSION: int = 1
 #: Current version of :class:`RegionDefinition`.
 REGION_DEFINITION_VERSION: int = 1
+#: Current version of :class:`NuisanceGroupDefinition`.
+NUISANCE_GROUP_DEFINITION_VERSION: int = 1
 #: Current version of :class:`OutputManifest`.
 OUTPUT_MANIFEST_VERSION: int = 1
 
@@ -140,6 +145,7 @@ SCHEMA_REGISTRY: Dict[str, int] = {
     "law_artifact": LAW_ARTIFACT_SCHEMA_VERSION,
     "intermediate_artifact": INTERMEDIATE_ARTIFACT_SCHEMA_VERSION,
     "region_definition": REGION_DEFINITION_VERSION,
+    "nuisance_group_definition": NUISANCE_GROUP_DEFINITION_VERSION,
     "output_manifest": OUTPUT_MANIFEST_VERSION,
 }
 
@@ -1058,6 +1064,155 @@ def validate_region_hierarchy(regions: "List[RegionDefinition]") -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# NuisanceGroupDefinition
+# ---------------------------------------------------------------------------
+
+#: Valid group type strings for :attr:`NuisanceGroupDefinition.group_type`.
+NUISANCE_GROUP_TYPES: List[str] = ["shape", "rate", "normalization", "other"]
+
+#: Valid output usage strings for
+#: :attr:`NuisanceGroupDefinition.output_usage` entries.
+NUISANCE_GROUP_OUTPUT_USAGES: List[str] = ["histogram", "datacard", "plot"]
+
+
+@dataclass
+class NuisanceGroupDefinition:
+    """Schema definition for a single nuisance / systematic group.
+
+    A nuisance group collects related systematic variations and carries
+    metadata about which physics processes, analysis regions, and downstream
+    tools it applies to.
+
+    Attributes
+    ----------
+    schema_version : int
+        Schema format version.  Must equal :attr:`CURRENT_VERSION`.
+    name : str
+        Unique group name (e.g. ``"jet_energy_scale"``).
+    group_type : str
+        One of ``"shape"``, ``"rate"``, ``"normalization"``, ``"other"``.
+    systematics : list[str]
+        Base names of the systematic variations in this group (e.g.
+        ``["JES", "JER"]``).  Each is expected to have ``Up`` and ``Down``
+        shifts in the analysis output.
+    processes : list[str]
+        Physics processes / samples this group applies to.  An empty list
+        means the group applies to all processes.
+    regions : list[str]
+        Analysis regions this group applies to.  An empty list means the
+        group applies to all regions.
+    output_usage : list[str]
+        Downstream tools that should use this group (``"histogram"``,
+        ``"datacard"``, ``"plot"``).  An empty list means the group is used
+        by all outputs.
+    description : str
+        Optional human-readable description.
+    correlation_group : str
+        Optional label grouping correlated systematics across
+        NuisanceGroupDefinitions.  Empty string means no correlation labelling.
+    """
+
+    CURRENT_VERSION: ClassVar[int] = NUISANCE_GROUP_DEFINITION_VERSION
+
+    schema_version: int = NUISANCE_GROUP_DEFINITION_VERSION
+    name: str = ""
+    group_type: str = "shape"
+    systematics: List[str] = field(default_factory=list)
+    processes: List[str] = field(default_factory=list)
+    regions: List[str] = field(default_factory=list)
+    output_usage: List[str] = field(default_factory=list)
+    description: str = ""
+    correlation_group: str = ""
+
+    # ------------------------------------------------------------------ I/O
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialise to a plain Python dict."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "NuisanceGroupDefinition":
+        """Construct from a dict, ignoring unknown keys."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    # ------------------------------------------------------------------ validation
+
+    def validate(self) -> List[str]:
+        """Return a list of validation error strings (empty = valid)."""
+        errors: List[str] = []
+        if self.schema_version != self.CURRENT_VERSION:
+            errors.append(
+                f"NuisanceGroupDefinition version mismatch: file has "
+                f"{self.schema_version}, code expects {self.CURRENT_VERSION}."
+            )
+        if not self.name:
+            errors.append("NuisanceGroupDefinition.name must not be empty.")
+        if self.group_type not in NUISANCE_GROUP_TYPES:
+            errors.append(
+                f"NuisanceGroupDefinition '{self.name}': group_type "
+                f"'{self.group_type}' is not one of {NUISANCE_GROUP_TYPES}."
+            )
+        for usage in self.output_usage:
+            if usage not in NUISANCE_GROUP_OUTPUT_USAGES:
+                errors.append(
+                    f"NuisanceGroupDefinition '{self.name}': output_usage "
+                    f"entry '{usage}' is not one of {NUISANCE_GROUP_OUTPUT_USAGES}."
+                )
+        return errors
+
+
+def validate_nuisance_coverage(
+    groups: "List[NuisanceGroupDefinition]",
+    available_variations: "Dict[str, List[str]]",
+) -> List[str]:
+    """Validate that all declared systematics have up and down shifts present.
+
+    Parameters
+    ----------
+    groups : list[NuisanceGroupDefinition]
+        Nuisance group definitions to check.
+    available_variations : dict[str, list[str]]
+        Mapping of base systematic name to the list of actual variation
+        names found in the output (e.g. ``{"JES": ["JESUp", "JESDown"]}``).
+
+    Returns
+    -------
+    list[str]
+        Validation error / warning strings.  An empty list means all
+        declared systematics have complete up+down coverage.
+    """
+    errors: List[str] = []
+    for group in groups:
+        if not group.systematics:
+            errors.append(
+                f"NuisanceGroupDefinition '{group.name}' has no systematics declared."
+            )
+            continue
+        for syst in group.systematics:
+            variations = available_variations.get(syst, [])
+            up_names = {v.lower() for v in variations}
+            has_up = (syst.lower() + "up") in up_names
+            has_down = (syst.lower() + "down") in up_names
+            if syst not in available_variations:
+                errors.append(
+                    f"Systematic '{syst}' in group '{group.name}' is not present "
+                    f"in the available variations."
+                )
+            elif not has_up:
+                errors.append(
+                    f"Systematic '{syst}' in group '{group.name}' is missing the "
+                    f"Up variation."
+                )
+            elif not has_down:
+                errors.append(
+                    f"Systematic '{syst}' in group '{group.name}' is missing the "
+                    f"Down variation."
+                )
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # OutputManifest
 # ---------------------------------------------------------------------------
 
@@ -1091,6 +1246,9 @@ class OutputManifest:
     regions : list[RegionDefinition]
         Definitions of all named analysis regions declared by
         ``RegionManager``.  May be empty when no regions are used.
+    nuisance_groups : list[NuisanceGroupDefinition]
+        Definitions of all nuisance / systematic groups declared for this
+        job.  May be empty when no groups are configured.
     framework_hash : str or None
         Git commit hash of the RDFAnalyzerCore framework at job-submission
         time.  Used by :meth:`provenance` and :func:`resolve_manifest` to
@@ -1120,6 +1278,7 @@ class OutputManifest:
         law_artifacts: Optional[List[LawArtifactSchema]] = None,
         intermediate_artifacts: Optional[List["IntermediateArtifactSchema"]] = None,
         regions: Optional[List["RegionDefinition"]] = None,
+        nuisance_groups: Optional[List["NuisanceGroupDefinition"]] = None,
         framework_hash: Optional[str] = None,
         user_repo_hash: Optional[str] = None,
         config_mtime: Optional[str] = None,
@@ -1133,6 +1292,7 @@ class OutputManifest:
         self.law_artifacts: List[LawArtifactSchema] = law_artifacts or []
         self.intermediate_artifacts: List[IntermediateArtifactSchema] = intermediate_artifacts or []
         self.regions: List[RegionDefinition] = regions or []
+        self.nuisance_groups: List[NuisanceGroupDefinition] = nuisance_groups or []
         self.framework_hash: Optional[str] = framework_hash
         self.user_repo_hash: Optional[str] = user_repo_hash
         self.config_mtime: Optional[str] = config_mtime
@@ -1161,6 +1321,7 @@ class OutputManifest:
                 a.to_dict() for a in self.intermediate_artifacts
             ],
             "regions": [r.to_dict() for r in self.regions],
+            "nuisance_groups": [ng.to_dict() for ng in self.nuisance_groups],
             "framework_hash": self.framework_hash,
             "user_repo_hash": self.user_repo_hash,
             "config_mtime": self.config_mtime,
@@ -1206,6 +1367,10 @@ class OutputManifest:
             RegionDefinition.from_dict(r)
             for r in data.get("regions", [])
         ]
+        nuisance_groups = [
+            NuisanceGroupDefinition.from_dict(ng)
+            for ng in data.get("nuisance_groups", [])
+        ]
         dmp_data = data.get("dataset_manifest_provenance")
         dataset_manifest_provenance = (
             DatasetManifestProvenance.from_dict(dmp_data)
@@ -1221,6 +1386,7 @@ class OutputManifest:
             law_artifacts=law_artifacts,
             intermediate_artifacts=intermediate_artifacts,
             regions=regions,
+            nuisance_groups=nuisance_groups,
             framework_hash=data.get("framework_hash"),
             user_repo_hash=data.get("user_repo_hash"),
             config_mtime=data.get("config_mtime"),
@@ -1317,6 +1483,17 @@ class OutputManifest:
         hierarchy_errors = validate_region_hierarchy(self.regions)
         errors.extend(hierarchy_errors)
 
+        # Validate nuisance group definitions.
+        seen_group_names: set = set()
+        for i, ng in enumerate(self.nuisance_groups):
+            for e in ng.validate():
+                errors.append(f"nuisance_groups[{i}]: {e}")
+            if ng.name in seen_group_names:
+                errors.append(
+                    f"nuisance_groups[{i}]: duplicate group name '{ng.name}'."
+                )
+            seen_group_names.add(ng.name)
+
         return errors
 
     @staticmethod
@@ -1375,6 +1552,13 @@ class OutputManifest:
                 mismatches.append(
                     f"regions[{i}]: stored={region.schema_version}, "
                     f"current={REGION_DEFINITION_VERSION}"
+                )
+
+        for i, ng in enumerate(manifest.nuisance_groups):
+            if ng.schema_version != NUISANCE_GROUP_DEFINITION_VERSION:
+                mismatches.append(
+                    f"nuisance_groups[{i}]: stored={ng.schema_version}, "
+                    f"current={NUISANCE_GROUP_DEFINITION_VERSION}"
                 )
 
         if mismatches:

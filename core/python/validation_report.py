@@ -340,6 +340,48 @@ class RegionEntry:
     issues: List[str] = field(default_factory=list)
 
 
+@dataclass
+class NuisanceGroupCoverageEntry:
+    """Coverage record for a single nuisance group.
+
+    Attributes
+    ----------
+    group_name : str
+        Name of the nuisance group (e.g. ``"jet_energy_scale"``).
+    group_type : str
+        Type of the group (``"shape"``, ``"rate"``, etc.).
+    systematics : list[str]
+        Base names of the systematic variations belonging to this group.
+    processes : list[str]
+        Physics processes this group applies to.  An empty list means all.
+    regions : list[str]
+        Analysis regions this group applies to.  An empty list means all.
+    output_usage : list[str]
+        Downstream tools that consume this group.  An empty list means all.
+    missing_up : list[str]
+        Systematics missing the Up variation.
+    missing_down : list[str]
+        Systematics missing the Down variation.
+    not_found : list[str]
+        Systematics not present in the output at all.
+    """
+
+    group_name: str
+    group_type: str = "shape"
+    systematics: List[str] = field(default_factory=list)
+    processes: List[str] = field(default_factory=list)
+    regions: List[str] = field(default_factory=list)
+    output_usage: List[str] = field(default_factory=list)
+    missing_up: List[str] = field(default_factory=list)
+    missing_down: List[str] = field(default_factory=list)
+    not_found: List[str] = field(default_factory=list)
+
+    @property
+    def is_complete(self) -> bool:
+        """Return ``True`` when all systematics have both up and down shifts."""
+        return not self.missing_up and not self.missing_down and not self.not_found
+
+
 # ---------------------------------------------------------------------------
 # ValidationReport
 # ---------------------------------------------------------------------------
@@ -382,6 +424,8 @@ class ValidationReport:
         Integrity records per output artifact.
     regions : list[RegionEntry]
         Validation records for declared analysis regions.
+    nuisance_group_coverage : list[NuisanceGroupCoverageEntry]
+        Coverage validation records for declared nuisance groups.
     errors : list[str]
         Free-form error messages not captured by a specific section.
     warnings : list[str]
@@ -407,6 +451,7 @@ class ValidationReport:
         self.weight_summaries: List[WeightSummaryEntry] = []
         self.output_integrity: List[OutputIntegrityEntry] = []
         self.regions: List[RegionEntry] = []
+        self.nuisance_group_coverage: List[NuisanceGroupCoverageEntry] = []
         self.errors: List[str] = []
         self.warnings: List[str] = []
 
@@ -444,6 +489,10 @@ class ValidationReport:
         """Append a :class:`RegionEntry` to the report."""
         self.regions.append(entry)
 
+    def add_nuisance_group_coverage(self, entry: "NuisanceGroupCoverageEntry") -> None:
+        """Append a :class:`NuisanceGroupCoverageEntry` to the report."""
+        self.nuisance_group_coverage.append(entry)
+
     def add_error(self, message: str) -> None:
         """Append a free-form error message."""
         self.errors.append(message)
@@ -466,6 +515,8 @@ class ValidationReport:
         if any(e.missing_branches for e in self.missing_branches):
             return True
         if any(not e.is_valid for e in self.regions):
+            return True
+        if any(not e.is_complete for e in self.nuisance_group_coverage):
             return True
         return False
 
@@ -508,6 +559,7 @@ class ValidationReport:
                 "n_weight_summaries": len(self.weight_summaries),
                 "n_output_integrity_entries": len(self.output_integrity),
                 "n_regions": len(self.regions),
+                "n_nuisance_group_coverage": len(self.nuisance_group_coverage),
                 "n_errors": len(self.errors),
                 "n_warnings": len(self.warnings),
             },
@@ -519,6 +571,7 @@ class ValidationReport:
             "weight_summaries": [asdict(e) for e in self.weight_summaries],
             "output_integrity": [asdict(e) for e in self.output_integrity],
             "regions": [asdict(e) for e in self.regions],
+            "nuisance_group_coverage": [asdict(e) for e in self.nuisance_group_coverage],
             "errors": list(self.errors),
             "warnings": list(self.warnings),
         }
@@ -762,6 +815,31 @@ class ValidationReport:
                 for issue in e.issues:
                     lines.append(f"      issue: {issue}")
 
+        # Nuisance group coverage
+        if self.nuisance_group_coverage:
+            _header("NUISANCE GROUP COVERAGE")
+            col_w = (24, 14, 8)
+            header = (
+                f"  {'Group':<{col_w[0]}}"
+                f"{'Type':<{col_w[1]}}"
+                f"{'Complete':>{col_w[2]}}"
+            )
+            lines.append(header)
+            lines.append("  " + "-" * sum(col_w))
+            for e in self.nuisance_group_coverage:
+                complete_str = "yes" if e.is_complete else "FAIL"
+                lines.append(
+                    f"  {e.group_name:<{col_w[0]}}"
+                    f"{e.group_type:<{col_w[1]}}"
+                    f"{complete_str:>{col_w[2]}}"
+                )
+                for syst in e.not_found:
+                    lines.append(f"      not found:    {syst}")
+                for syst in e.missing_up:
+                    lines.append(f"      missing Up:   {syst}")
+                for syst in e.missing_down:
+                    lines.append(f"      missing Down: {syst}")
+
         lines.append("")
         lines.append("=" * 60)
         lines.append("  END OF REPORT")
@@ -904,6 +982,21 @@ class ValidationReport:
                     parent=raw.get("parent", ""),
                     is_valid=raw.get("is_valid", True),
                     issues=list(raw.get("issues", [])),
+                )
+            )
+
+        for raw in data.get("nuisance_group_coverage", []):
+            report.nuisance_group_coverage.append(
+                NuisanceGroupCoverageEntry(
+                    group_name=raw["group_name"],
+                    group_type=raw.get("group_type", "shape"),
+                    systematics=list(raw.get("systematics", [])),
+                    processes=list(raw.get("processes", [])),
+                    regions=list(raw.get("regions", [])),
+                    output_usage=list(raw.get("output_usage", [])),
+                    missing_up=list(raw.get("missing_up", [])),
+                    missing_down=list(raw.get("missing_down", [])),
+                    not_found=list(raw.get("not_found", [])),
                 )
             )
 
