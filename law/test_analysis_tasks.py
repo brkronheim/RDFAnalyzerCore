@@ -92,6 +92,19 @@ def _write_submit_config_template(tmpdir: str, extra: dict | None = None) -> str
     return path
 
 
+def _make_preselection_manifest(skim_file: str):
+    """Build a minimal OutputManifest with one preselection IntermediateArtifactSchema."""
+    from output_schema import OutputManifest, IntermediateArtifactSchema
+    return OutputManifest(
+        intermediate_artifacts=[
+            IntermediateArtifactSchema(
+                artifact_kind="preselection",
+                output_file=skim_file,
+            )
+        ]
+    )
+
+
 # ===========================================================================
 # _write_job_config
 # ===========================================================================
@@ -914,6 +927,655 @@ class TestStitchingDerivationTask(unittest.TestCase):
 
 
 # ===========================================================================
+# Cache producer/consumer helpers
+# ===========================================================================
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestBuildTaskProvenance(unittest.TestCase):
+    """Tests for the _build_task_provenance helper."""
+
+    def _import(self):
+        import analysis_tasks
+        return analysis_tasks
+
+    def test_returns_provenance_record(self):
+        """_build_task_provenance always returns a ProvenanceRecord."""
+        mod = self._import()
+        from output_schema import ProvenanceRecord
+        prov = mod._build_task_provenance()
+        self.assertIsInstance(prov, ProvenanceRecord)
+
+    def test_config_mtime_set_for_existing_file(self):
+        """config_mtime is populated when submit_config_path points to a real file."""
+        mod = self._import()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("key=val\n")
+            path = f.name
+        try:
+            prov = mod._build_task_provenance(submit_config_path=path)
+            self.assertIsNotNone(prov.config_mtime)
+            # Should be a valid ISO 8601 timestamp
+            import datetime
+            datetime.datetime.fromisoformat(prov.config_mtime)
+        finally:
+            os.unlink(path)
+
+    def test_config_mtime_none_for_missing_file(self):
+        """config_mtime is None when submit_config_path does not exist."""
+        mod = self._import()
+        prov = mod._build_task_provenance(submit_config_path="/nonexistent/cfg.txt")
+        self.assertIsNone(prov.config_mtime)
+
+    def test_manifest_hash_set_for_existing_manifest(self):
+        """dataset_manifest_hash is populated when manifest file exists."""
+        mod = self._import()
+        import yaml
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            yaml.dump({"datasets": [], "lumi": 1.0}, f)
+            path = f.name
+        try:
+            prov = mod._build_task_provenance(dataset_manifest_path=path)
+            self.assertIsNotNone(prov.dataset_manifest_hash)
+            self.assertIsInstance(prov.dataset_manifest_hash, str)
+            self.assertGreater(len(prov.dataset_manifest_hash), 0)
+        finally:
+            os.unlink(path)
+
+    def test_manifest_hash_none_for_missing_manifest(self):
+        """dataset_manifest_hash is None when manifest path does not exist."""
+        mod = self._import()
+        prov = mod._build_task_provenance(
+            dataset_manifest_path="/nonexistent/manifest.yaml"
+        )
+        self.assertIsNone(prov.dataset_manifest_hash)
+
+    def test_no_args_returns_partial_provenance(self):
+        """Called with no arguments returns a ProvenanceRecord (fields may be None)."""
+        mod = self._import()
+        from output_schema import ProvenanceRecord
+        prov = mod._build_task_provenance()
+        self.assertIsInstance(prov, ProvenanceRecord)
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestBuildSkimManifest(unittest.TestCase):
+    """Tests for the _build_skim_manifest helper."""
+
+    def _import(self):
+        import analysis_tasks
+        return analysis_tasks
+
+    def test_returns_output_manifest(self):
+        """_build_skim_manifest returns an OutputManifest."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+        from output_schema import OutputManifest
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = os.path.join(tmpdir, "manifest.yaml")
+            with open(manifest_path, "w") as fh:
+                yaml.dump({"datasets": [{"name": "ttbar", "files": ["f.root"]}], "lumi": 1.0}, fh)
+            config_path = os.path.join(tmpdir, "cfg.txt")
+            Path(config_path).write_text("key=val\n")
+            skim_file = os.path.join(tmpdir, "skim.root")
+
+            entry = DatasetEntry(name="ttbar", files=["f.root"])
+            manifest = mod._build_skim_manifest(
+                dataset=entry,
+                submit_config_path=config_path,
+                dataset_manifest_path=manifest_path,
+                skim_output_file=skim_file,
+            )
+
+        self.assertIsInstance(manifest, OutputManifest)
+
+    def test_contains_intermediate_artifact(self):
+        """Manifest includes one IntermediateArtifactSchema of kind 'preselection'."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+        from output_schema import IntermediateArtifactSchema
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = os.path.join(tmpdir, "manifest.yaml")
+            with open(manifest_path, "w") as fh:
+                yaml.dump({"datasets": [{"name": "ttbar", "files": ["f.root"]}], "lumi": 1.0}, fh)
+            config_path = os.path.join(tmpdir, "cfg.txt")
+            Path(config_path).write_text("key=val\n")
+            skim_file = os.path.join(tmpdir, "skim.root")
+
+            entry = DatasetEntry(name="ttbar", files=["f.root"])
+            manifest = mod._build_skim_manifest(
+                dataset=entry,
+                submit_config_path=config_path,
+                dataset_manifest_path=manifest_path,
+                skim_output_file=skim_file,
+            )
+
+        self.assertEqual(len(manifest.intermediate_artifacts), 1)
+        artifact = manifest.intermediate_artifacts[0]
+        self.assertIsInstance(artifact, IntermediateArtifactSchema)
+        self.assertEqual(artifact.artifact_kind, "preselection")
+        self.assertEqual(artifact.output_file, skim_file)
+
+    def test_contains_dataset_manifest_provenance(self):
+        """Manifest records DatasetManifestProvenance with the dataset entry name."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+        from output_schema import DatasetManifestProvenance
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = os.path.join(tmpdir, "manifest.yaml")
+            with open(manifest_path, "w") as fh:
+                yaml.dump({"datasets": [{"name": "ttbar", "files": ["f.root"]}], "lumi": 1.0}, fh)
+            config_path = os.path.join(tmpdir, "cfg.txt")
+            Path(config_path).write_text("key=val\n")
+            skim_file = os.path.join(tmpdir, "skim.root")
+
+            entry = DatasetEntry(name="ttbar", files=["f.root"])
+            manifest = mod._build_skim_manifest(
+                dataset=entry,
+                submit_config_path=config_path,
+                dataset_manifest_path=manifest_path,
+                skim_output_file=skim_file,
+            )
+
+        dmp = manifest.dataset_manifest_provenance
+        self.assertIsNotNone(dmp)
+        self.assertIsInstance(dmp, DatasetManifestProvenance)
+        self.assertIn("ttbar", dmp.resolved_entry_names)
+        self.assertIsNotNone(dmp.manifest_hash)
+
+
+# ===========================================================================
+# SkimTask – cache producer integration
+# ===========================================================================
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestSkimTaskCacheProducer(unittest.TestCase):
+    """Integration tests for SkimTask's cache producer behaviour."""
+
+    def test_run_writes_cache_sidecar(self):
+        """SkimTask.run() writes a .cache.yaml sidecar alongside skim.root."""
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+        from output_schema import CACHE_SIDECAR_SUFFIX
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exe_path = os.path.join(tmpdir, "exe")
+            Path(exe_path).write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(exe_path, 0o755)
+
+            template = _write_submit_config_template(tmpdir)
+            manifest_path = _write_manifest(
+                tmpdir, [{"name": "ttbar", "files": ["f.root"]}]
+            )
+
+            entry = DatasetEntry(name="ttbar", files=["f.root"])
+            task = analysis_tasks.SkimTask(
+                exe=exe_path,
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="testSkim",
+                branch=0,
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                # Create a fake skim.root so the sidecar write path triggers
+                out_dir = os.path.join(tmpdir, "skimRun_testSkim", "outputs", "ttbar")
+                Path(out_dir).mkdir(parents=True)
+                skim_file = os.path.join(out_dir, "skim.root")
+                Path(skim_file).write_text("fake ROOT")
+
+                with patch.object(
+                    type(task), "branch_data",
+                    new_callable=PropertyMock, return_value=entry
+                ):
+                    with patch("analysis_tasks._run_analysis_job",
+                               return_value="done:job"):
+                        task.run()
+
+                sidecar_path = skim_file + CACHE_SIDECAR_SUFFIX
+                self.assertTrue(
+                    os.path.exists(sidecar_path),
+                    f"Cache sidecar not found at {sidecar_path}",
+                )
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_run_sidecar_is_valid_cache_artifact(self):
+        """The written sidecar can be read back as a CachedArtifact."""
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+        from output_schema import CACHE_SIDECAR_SUFFIX, read_cache_sidecar, CachedArtifact
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exe_path = os.path.join(tmpdir, "exe")
+            Path(exe_path).write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(exe_path, 0o755)
+
+            template = _write_submit_config_template(tmpdir)
+            manifest_path = _write_manifest(
+                tmpdir, [{"name": "ttbar", "files": ["f.root"]}]
+            )
+
+            entry = DatasetEntry(name="ttbar", files=["f.root"])
+            task = analysis_tasks.SkimTask(
+                exe=exe_path,
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="testSkim",
+                branch=0,
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                out_dir = os.path.join(tmpdir, "skimRun_testSkim", "outputs", "ttbar")
+                Path(out_dir).mkdir(parents=True)
+                skim_file = os.path.join(out_dir, "skim.root")
+                Path(skim_file).write_text("fake ROOT")
+
+                with patch.object(
+                    type(task), "branch_data",
+                    new_callable=PropertyMock, return_value=entry
+                ):
+                    with patch("analysis_tasks._run_analysis_job",
+                               return_value="done:job"):
+                        task.run()
+
+                cached = read_cache_sidecar(skim_file)
+                self.assertIsInstance(cached, CachedArtifact)
+                self.assertEqual(cached.artifact_path, skim_file)
+                self.assertEqual(
+                    len(cached.manifest.intermediate_artifacts), 1
+                )
+                self.assertEqual(
+                    cached.manifest.intermediate_artifacts[0].artifact_kind,
+                    "preselection",
+                )
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_complete_returns_true_for_compatible_cache(self):
+        """complete() returns True when .done file exists and cache is COMPATIBLE."""
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+        from output_schema import (
+            write_cache_sidecar,
+            ArtifactResolutionStatus,
+        )
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir)
+            manifest_path = _write_manifest(
+                tmpdir, [{"name": "ttbar", "files": ["f.root"]}]
+            )
+
+            entry = DatasetEntry(name="ttbar", files=["f.root"])
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="testSkim",
+                branch=0,
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                # Write the .done marker
+                done_dir = os.path.join(
+                    tmpdir, "skimRun_testSkim", "job_outputs"
+                )
+                Path(done_dir).mkdir(parents=True)
+                done_file = os.path.join(done_dir, "ttbar.done")
+                Path(done_file).write_text("status=done\n")
+
+                # Write the skim artifact and its sidecar
+                out_dir = os.path.join(
+                    tmpdir, "skimRun_testSkim", "outputs", "ttbar"
+                )
+                Path(out_dir).mkdir(parents=True)
+                skim_file = os.path.join(out_dir, "skim.root")
+                Path(skim_file).write_text("fake ROOT")
+
+                write_cache_sidecar(skim_file, _make_preselection_manifest(skim_file))
+
+                with patch.object(
+                    type(task), "branch_data",
+                    new_callable=PropertyMock, return_value=entry
+                ):
+                    with patch(
+                        "analysis_tasks.check_cache_validity",
+                        return_value=ArtifactResolutionStatus.COMPATIBLE,
+                    ):
+                        result = task.complete()
+
+                self.assertTrue(result)
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_complete_invalidates_stale_cache(self):
+        """complete() removes .done and returns False when cache is STALE."""
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+        from output_schema import ArtifactResolutionStatus
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir)
+            manifest_path = _write_manifest(
+                tmpdir, [{"name": "ttbar", "files": ["f.root"]}]
+            )
+
+            entry = DatasetEntry(name="ttbar", files=["f.root"])
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="testSkim",
+                branch=0,
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                done_dir = os.path.join(
+                    tmpdir, "skimRun_testSkim", "job_outputs"
+                )
+                Path(done_dir).mkdir(parents=True)
+                done_file = os.path.join(done_dir, "ttbar.done")
+                Path(done_file).write_text("status=done\n")
+
+                with patch.object(
+                    type(task), "branch_data",
+                    new_callable=PropertyMock, return_value=entry
+                ):
+                    with patch(
+                        "analysis_tasks.check_cache_validity",
+                        return_value=ArtifactResolutionStatus.STALE,
+                    ):
+                        with patch.object(task, "publish_message"):
+                            result = task.complete()
+
+                self.assertFalse(result)
+                self.assertFalse(
+                    os.path.exists(done_file),
+                    "The .done marker should be removed for stale caches.",
+                )
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_complete_invalidates_must_regenerate_cache(self):
+        """complete() removes .done and returns False when MUST_REGENERATE."""
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+        from output_schema import ArtifactResolutionStatus
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir)
+            manifest_path = _write_manifest(
+                tmpdir, [{"name": "ttbar", "files": ["f.root"]}]
+            )
+
+            entry = DatasetEntry(name="ttbar", files=["f.root"])
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="testSkim",
+                branch=0,
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                done_dir = os.path.join(
+                    tmpdir, "skimRun_testSkim", "job_outputs"
+                )
+                Path(done_dir).mkdir(parents=True)
+                done_file = os.path.join(done_dir, "ttbar.done")
+                Path(done_file).write_text("status=done\n")
+
+                with patch.object(
+                    type(task), "branch_data",
+                    new_callable=PropertyMock, return_value=entry
+                ):
+                    with patch(
+                        "analysis_tasks.check_cache_validity",
+                        return_value=ArtifactResolutionStatus.MUST_REGENERATE,
+                    ):
+                        with patch.object(task, "publish_message"):
+                            result = task.complete()
+
+                self.assertFalse(result)
+                self.assertFalse(os.path.exists(done_file))
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+
+# ===========================================================================
+# HistFillTask – cache consumer integration
+# ===========================================================================
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestHistFillTaskCacheConsumer(unittest.TestCase):
+    """Integration tests for HistFillTask's cache consumer behaviour."""
+
+    def _make_task_in_tmpdir(self, tmpdir, skim_name="mySkimRun", **extra):
+        import analysis_tasks
+        exe_path = os.path.join(tmpdir, "exe")
+        Path(exe_path).write_text("#!/bin/sh\nexit 0\n")
+        os.chmod(exe_path, 0o755)
+
+        template = _write_submit_config_template(tmpdir)
+        manifest_path = _write_manifest(
+            tmpdir, [{"name": "wjets", "files": ["f.root"]}]
+        )
+
+        task = analysis_tasks.HistFillTask(
+            exe=exe_path,
+            submit_config=template,
+            dataset_manifest=manifest_path,
+            name="testHist",
+            branch=0,
+            skim_name=skim_name,
+            **extra,
+        )
+        return task, manifest_path
+
+    def test_run_reports_compatible_cache(self):
+        """run() reports 'cache compatible' when the skim sidecar is COMPATIBLE."""
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+        from output_schema import (
+            ArtifactResolutionStatus,
+            OutputManifest, IntermediateArtifactSchema,
+            write_cache_sidecar,
+        )
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task, manifest_path = self._make_task_in_tmpdir(tmpdir)
+
+            skim_dir = os.path.join(tmpdir, "skimRun_mySkimRun", "outputs", "wjets")
+            Path(skim_dir).mkdir(parents=True)
+            skim_file = os.path.join(skim_dir, "skim.root")
+            Path(skim_file).write_text("fake ROOT")
+
+            # Write a sidecar so cache check can succeed
+            from output_schema import write_cache_sidecar
+            write_cache_sidecar(skim_file, _make_preselection_manifest(skim_file))
+
+            orig_run = analysis_tasks.HistFillTask._run_dir.fget
+            orig_skim = analysis_tasks.HistFillTask._skim_run_dir.fget
+            analysis_tasks.HistFillTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"histRun_{self.name}")
+            )
+            analysis_tasks.HistFillTask._skim_run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.skim_name}")
+            )
+
+            messages = []
+
+            entry = DatasetEntry(name="wjets", files=["f.root"])
+            try:
+                with patch.object(
+                    type(task), "branch_data",
+                    new_callable=PropertyMock, return_value=entry
+                ):
+                    with patch("analysis_tasks._run_analysis_job",
+                               return_value="done:job"):
+                        with patch(
+                            "analysis_tasks.check_cache_validity",
+                            return_value=ArtifactResolutionStatus.COMPATIBLE,
+                        ):
+                            with patch.object(
+                                task, "publish_message",
+                                side_effect=messages.append,
+                            ):
+                                task.run()
+            finally:
+                analysis_tasks.HistFillTask._run_dir = property(orig_run)
+                analysis_tasks.HistFillTask._skim_run_dir = property(orig_skim)
+
+            compatible_msgs = [m for m in messages if "compatible" in m.lower()]
+            self.assertTrue(
+                len(compatible_msgs) >= 1,
+                f"Expected a 'compatible' message; got: {messages}",
+            )
+
+    def test_run_warns_on_stale_cache(self):
+        """run() emits a WARNING message when the skim sidecar is STALE."""
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+        from output_schema import ArtifactResolutionStatus
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task, _ = self._make_task_in_tmpdir(tmpdir)
+
+            skim_dir = os.path.join(tmpdir, "skimRun_mySkimRun", "outputs", "wjets")
+            Path(skim_dir).mkdir(parents=True)
+            skim_file = os.path.join(skim_dir, "skim.root")
+            Path(skim_file).write_text("fake ROOT")
+
+            orig_run = analysis_tasks.HistFillTask._run_dir.fget
+            orig_skim = analysis_tasks.HistFillTask._skim_run_dir.fget
+            analysis_tasks.HistFillTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"histRun_{self.name}")
+            )
+            analysis_tasks.HistFillTask._skim_run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.skim_name}")
+            )
+
+            messages = []
+            entry = DatasetEntry(name="wjets", files=["f.root"])
+            try:
+                with patch.object(
+                    type(task), "branch_data",
+                    new_callable=PropertyMock, return_value=entry
+                ):
+                    with patch("analysis_tasks._run_analysis_job",
+                               return_value="done:job"):
+                        with patch(
+                            "analysis_tasks.check_cache_validity",
+                            return_value=ArtifactResolutionStatus.STALE,
+                        ):
+                            with patch.object(
+                                task, "publish_message",
+                                side_effect=messages.append,
+                            ):
+                                task.run()
+            finally:
+                analysis_tasks.HistFillTask._run_dir = property(orig_run)
+                analysis_tasks.HistFillTask._skim_run_dir = property(orig_skim)
+
+            warning_msgs = [m for m in messages if "stale" in m.lower() or "warning" in m.lower()]
+            self.assertTrue(
+                len(warning_msgs) >= 1,
+                f"Expected a stale/warning message; got: {messages}",
+            )
+
+    def test_run_warns_on_must_regenerate_cache(self):
+        """run() emits a warning (not an error) when cache status is MUST_REGENERATE."""
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+        from output_schema import ArtifactResolutionStatus
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task, _ = self._make_task_in_tmpdir(tmpdir)
+
+            skim_dir = os.path.join(tmpdir, "skimRun_mySkimRun", "outputs", "wjets")
+            Path(skim_dir).mkdir(parents=True)
+            skim_file = os.path.join(skim_dir, "skim.root")
+            Path(skim_file).write_text("fake ROOT")
+
+            orig_run = analysis_tasks.HistFillTask._run_dir.fget
+            orig_skim = analysis_tasks.HistFillTask._skim_run_dir.fget
+            analysis_tasks.HistFillTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"histRun_{self.name}")
+            )
+            analysis_tasks.HistFillTask._skim_run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.skim_name}")
+            )
+
+            messages = []
+            entry = DatasetEntry(name="wjets", files=["f.root"])
+            try:
+                with patch.object(
+                    type(task), "branch_data",
+                    new_callable=PropertyMock, return_value=entry
+                ):
+                    with patch("analysis_tasks._run_analysis_job",
+                               return_value="done:job"):
+                        with patch(
+                            "analysis_tasks.check_cache_validity",
+                            return_value=ArtifactResolutionStatus.MUST_REGENERATE,
+                        ):
+                            with patch.object(
+                                task, "publish_message",
+                                side_effect=messages.append,
+                            ):
+                                # Should NOT raise; only warn
+                                task.run()
+            finally:
+                analysis_tasks.HistFillTask._run_dir = property(orig_run)
+                analysis_tasks.HistFillTask._skim_run_dir = property(orig_skim)
+
+            warning_msgs = [
+                m for m in messages
+                if "warning" in m.lower() or "unverifiable" in m.lower()
+            ]
+            self.assertTrue(
+                len(warning_msgs) >= 1,
+                f"Expected a warning message; got: {messages}",
+            )
+
+
+# ===========================================================================
 # Module smoke tests
 # ===========================================================================
 
@@ -936,6 +1598,8 @@ class TestAnalysisTasksModule(unittest.TestCase):
             "_read_intweight_sign_hist",
             "_derive_stitch_weights",
             "_build_correctionlib_cset",
+            "_build_task_provenance",
+            "_build_skim_manifest",
         ):
             self.assertTrue(hasattr(analysis_tasks, name), f"{name} not defined")
 
