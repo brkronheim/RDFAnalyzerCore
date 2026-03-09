@@ -24,7 +24,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from dataset_manifest import DatasetEntry, DatasetManifest
+from dataset_manifest import DatasetEntry, DatasetManifest, FriendTreeConfig
 
 
 # ---------------------------------------------------------------------------
@@ -662,3 +662,170 @@ class TestDatasetManifestFileHash:
     def test_file_hash_not_found_returns_placeholder(self, tmp_path):
         h = DatasetManifest.file_hash(str(tmp_path / "nonexistent.yaml"))
         assert h == "<not found>"
+
+
+# ---------------------------------------------------------------------------
+# FriendTreeConfig tests
+# ---------------------------------------------------------------------------
+
+class TestFriendTreeConfig:
+    """Tests for the FriendTreeConfig dataclass."""
+
+    def test_defaults(self):
+        cfg = FriendTreeConfig(alias="calib")
+        assert cfg.alias == "calib"
+        assert cfg.tree_name == "Events"
+        assert cfg.files == []
+        assert cfg.directory is None
+        assert cfg.globs == [".root"]
+        assert cfg.antiglobs == []
+        assert cfg.index_branches == []
+
+    def test_explicit_files(self):
+        cfg = FriendTreeConfig(
+            alias="taggers",
+            tree_name="BTagging",
+            files=["/data/tag1.root", "root://server//tag2.root"],
+        )
+        assert cfg.alias == "taggers"
+        assert cfg.tree_name == "BTagging"
+        assert len(cfg.files) == 2
+        assert cfg.files[1] == "root://server//tag2.root"
+
+    def test_directory_based(self):
+        cfg = FriendTreeConfig(
+            alias="derived",
+            directory="/path/to/derived",
+            globs=[".root"],
+            antiglobs=["output.root"],
+        )
+        assert cfg.directory == "/path/to/derived"
+        assert cfg.globs == [".root"]
+        assert cfg.antiglobs == ["output.root"]
+
+    def test_index_branches(self):
+        cfg = FriendTreeConfig(
+            alias="calib",
+            files=["/data/calib.root"],
+            index_branches=["run", "luminosityBlock"],
+        )
+        assert cfg.index_branches == ["run", "luminosityBlock"]
+
+    def test_to_dict_round_trip(self):
+        cfg = FriendTreeConfig(
+            alias="calib",
+            tree_name="Calibrations",
+            files=["/data/calib.root"],
+            index_branches=["run", "event"],
+        )
+        d = cfg.to_dict()
+        assert d["alias"] == "calib"
+        assert d["tree_name"] == "Calibrations"
+        assert d["files"] == ["/data/calib.root"]
+        assert d["index_branches"] == ["run", "event"]
+        # Round-trip via from_dict
+        cfg2 = FriendTreeConfig.from_dict(d)
+        assert cfg2 == cfg
+
+    def test_from_dict_ignores_unknown_keys(self):
+        d = {"alias": "x", "tree_name": "Events", "unknown_future_key": 42}
+        cfg = FriendTreeConfig.from_dict(d)
+        assert cfg.alias == "x"
+        assert not hasattr(cfg, "unknown_future_key")
+
+
+# ---------------------------------------------------------------------------
+# DatasetEntry + FriendTreeConfig integration tests
+# ---------------------------------------------------------------------------
+
+class TestDatasetEntryFriendTrees:
+    """Tests for the friend_trees field on DatasetEntry."""
+
+    def test_default_is_empty(self):
+        entry = DatasetEntry("ds")
+        assert entry.friend_trees == []
+
+    def test_set_friend_trees(self):
+        ft = FriendTreeConfig(alias="calib", files=["/data/calib.root"])
+        entry = DatasetEntry("ds", friend_trees=[ft])
+        assert len(entry.friend_trees) == 1
+        assert entry.friend_trees[0].alias == "calib"
+
+    def test_to_dict_includes_friend_trees(self):
+        ft = FriendTreeConfig(
+            alias="calib",
+            files=["/data/calib.root"],
+            index_branches=["run", "luminosityBlock"],
+        )
+        entry = DatasetEntry("ds", friend_trees=[ft])
+        d = entry.to_dict()
+        assert "friend_trees" in d
+        assert len(d["friend_trees"]) == 1
+        assert d["friend_trees"][0]["alias"] == "calib"
+
+    def test_from_dict_deserialises_friend_trees(self):
+        d = {
+            "name": "ds",
+            "friend_trees": [
+                {
+                    "alias": "calib",
+                    "tree_name": "Events",
+                    "files": ["/data/calib.root"],
+                    "directory": None,
+                    "globs": [".root"],
+                    "antiglobs": [],
+                    "index_branches": ["run", "luminosityBlock"],
+                }
+            ],
+        }
+        entry = DatasetEntry.from_dict(d)
+        assert len(entry.friend_trees) == 1
+        ft = entry.friend_trees[0]
+        assert isinstance(ft, FriendTreeConfig)
+        assert ft.alias == "calib"
+        assert ft.index_branches == ["run", "luminosityBlock"]
+
+    def test_yaml_round_trip_with_friend_trees(self, tmp_path):
+        ft = FriendTreeConfig(
+            alias="calib",
+            tree_name="Calibrations",
+            files=["/data/calib_2022.root"],
+            index_branches=["run", "luminosityBlock"],
+        )
+        entry = DatasetEntry(
+            name="ttbar_2022",
+            year=2022,
+            dtype="mc",
+            friend_trees=[ft],
+        )
+        manifest = DatasetManifest(datasets=[entry], lumi=38.01)
+
+        yaml_path = tmp_path / "manifest.yaml"
+        manifest.save_yaml(str(yaml_path))
+
+        loaded = DatasetManifest.load_yaml(str(yaml_path))
+        assert len(loaded.datasets) == 1
+        loaded_entry = loaded.datasets[0]
+        assert len(loaded_entry.friend_trees) == 1
+        loaded_ft = loaded_entry.friend_trees[0]
+        assert isinstance(loaded_ft, FriendTreeConfig)
+        assert loaded_ft.alias == "calib"
+        assert loaded_ft.tree_name == "Calibrations"
+        assert loaded_ft.files == ["/data/calib_2022.root"]
+        assert loaded_ft.index_branches == ["run", "luminosityBlock"]
+
+    def test_entry_without_friend_trees_yaml_round_trip(self, tmp_path):
+        """Entries without friend_trees should round-trip without errors."""
+        entry = DatasetEntry("plain_ds", year=2022, dtype="mc")
+        manifest = DatasetManifest(datasets=[entry])
+        yaml_path = tmp_path / "m.yaml"
+        manifest.save_yaml(str(yaml_path))
+        loaded = DatasetManifest.load_yaml(str(yaml_path))
+        assert loaded.datasets[0].friend_trees == []
+
+    def test_legacy_dict_does_not_include_friend_trees(self):
+        """to_legacy_dict() should not serialise friend_trees (unsupported format)."""
+        ft = FriendTreeConfig(alias="calib", files=["/data/calib.root"])
+        entry = DatasetEntry("ds", friend_trees=[ft])
+        d = entry.to_legacy_dict()
+        assert "friend_trees" not in d

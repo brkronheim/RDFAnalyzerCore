@@ -22,6 +22,8 @@
 
 #include <dirent.h>
 
+#include <yaml-cpp/yaml.h>
+
 #include <functions.h>
 #include <plots.h>
 #include <util.h>
@@ -275,5 +277,100 @@ makeTChain(const IConfigurationProvider &configProvider) {
   }
   std::cout << fileNum << " files found" << std::endl;
   return tchainVector;
+}
+
+/**
+ * @brief Parse a friend-tree YAML configuration file into a list of specs.
+ *
+ * Expected YAML structure:
+ * @code{.yaml}
+ * friends:
+ *   - alias: calib
+ *     treeName: Events          # optional, defaults to "Events"
+ *     fileList:                 # explicit file list (local or XRootD)
+ *       - /path/to/calib.root
+ *       - root://server//path/to/remote.root
+ *     indexBranches:            # optional; enables index-based event matching
+ *       - run
+ *       - luminosityBlock
+ *   - alias: taggers
+ *     treeName: BTagging
+ *     directory: /path/to/dir  # scan a directory instead of explicit files
+ *     globs: [.root]
+ *     antiglobs: [output.root]
+ * @endcode
+ *
+ * @param configFile Path to the YAML configuration file.
+ * @return Vector of parsed FriendTreeSpec objects.
+ * @throws std::runtime_error on YAML parse errors.
+ */
+std::vector<FriendTreeSpec>
+parseFriendTreeConfig(const std::string &configFile) {
+  std::vector<FriendTreeSpec> specs;
+
+  YAML::Node root;
+  try {
+    root = YAML::LoadFile(configFile);
+  } catch (const YAML::Exception &e) {
+    throw std::runtime_error("Error parsing friend tree config '" + configFile +
+                             "': " + e.what());
+  }
+
+  auto friendsNode = root["friends"];
+  if (!friendsNode || !friendsNode.IsSequence()) {
+    return specs;
+  }
+
+  for (const auto &entry : friendsNode) {
+    if (!entry.IsMap()) {
+      continue;
+    }
+    if (!entry["alias"]) {
+      std::cerr << "Warning: friend tree entry missing required 'alias' field; skipping."
+                << std::endl;
+      continue;
+    }
+
+    FriendTreeSpec spec;
+    spec.alias = entry["alias"].as<std::string>();
+
+    if (entry["treeName"]) {
+      spec.treeName = entry["treeName"].as<std::string>();
+    }
+
+    if (entry["fileList"] && entry["fileList"].IsSequence()) {
+      for (const auto &f : entry["fileList"]) {
+        spec.files.push_back(f.as<std::string>());
+      }
+    }
+
+    if (entry["directory"]) {
+      spec.directory = entry["directory"].as<std::string>();
+    }
+
+    if (entry["globs"] && entry["globs"].IsSequence()) {
+      spec.globs.clear();
+      for (const auto &g : entry["globs"]) {
+        spec.globs.push_back(g.as<std::string>());
+      }
+    }
+
+    if (entry["antiglobs"] && entry["antiglobs"].IsSequence()) {
+      spec.antiglobs.clear();
+      for (const auto &g : entry["antiglobs"]) {
+        spec.antiglobs.push_back(g.as<std::string>());
+      }
+    }
+
+    if (entry["indexBranches"] && entry["indexBranches"].IsSequence()) {
+      for (const auto &b : entry["indexBranches"]) {
+        spec.indexBranches.push_back(b.as<std::string>());
+      }
+    }
+
+    specs.push_back(std::move(spec));
+  }
+
+  return specs;
 }
 

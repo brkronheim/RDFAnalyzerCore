@@ -18,6 +18,13 @@
 DataManager::DataManager(const IConfigurationProvider &configProvider)
     : chain_vec_m(makeTChain(configProvider)), df_m(ROOT::RDataFrame(1)) {
 
+    // Attach friend trees (from friendConfig) BEFORE wrapping in RDataFrame
+    // so that all friend branches are visible to the RDataFrame at creation.
+    const std::string friendConfigFile = configProvider.get("friendConfig");
+    if (!friendConfigFile.empty() && std::filesystem::exists(friendConfigFile)) {
+      registerFriendTrees(configProvider);
+    }
+
     // Fall back to a small in-memory dataframe (1 entry) if no input files were found
     // This allows unit tests to define variables and perform simple operations
     // that expect at least one row.
@@ -469,6 +476,99 @@ void DataManager::finalizeSetup(const IConfigurationProvider &configProvider,
   if (!optionalBranchesConfig.empty() && std::filesystem::exists(optionalBranchesConfig)) {
     std::cout << "Registering optional branches" << std::endl;
     registerOptionalBranches(configProvider, optionalBranchesConfigKey);
+  }
+}
+
+/**
+ * @brief Attach a single friend tree specified by @p spec to the main TChain.
+ */
+void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
+  auto friendChain = std::make_unique<TChain>(spec.treeName.c_str());
+
+  if (!spec.files.empty()) {
+    for (const auto &f : spec.files) {
+      std::cout << "[DataManager] Adding friend file: " << f << std::endl;
+      friendChain->Add(f.c_str());
+    }
+  } else if (!spec.directory.empty()) {
+    scan(*friendChain, spec.directory, spec.globs, spec.antiglobs);
+  } else {
+    std::cerr << "[DataManager] Warning: friend tree '" << spec.alias
+              << "' has neither fileList nor directory; skipping." << std::endl;
+    return;
+  }
+
+  const Long64_t nFriendEntries = friendChain->GetEntries();
+  if (nFriendEntries == 0) {
+    std::cerr << "[DataManager] Warning: friend tree '" << spec.alias
+              << "' has no entries (files may not exist or tree is empty)."
+              << std::endl;
+  }
+
+  // Build an in-memory event index for non-sequential (identifier-based) matching.
+  if (!spec.indexBranches.empty()) {
+    const std::string &major = spec.indexBranches[0];
+    const std::string minor =
+        spec.indexBranches.size() > 1 ? spec.indexBranches[1] : "0";
+    std::cout << "[DataManager] Building index on '" << major << "' / '"
+              << minor << "' for friend '" << spec.alias << "'" << std::endl;
+    friendChain->BuildIndex(major.c_str(), minor.c_str());
+  }
+
+  if (!chain_vec_m.empty() && chain_vec_m[0]) {
+    chain_vec_m[0]->AddFriend(friendChain.get(), spec.alias.c_str());
+    std::cout << "[DataManager] Attached friend tree '" << spec.alias
+              << "' (tree='" << spec.treeName << "', entries=" << nFriendEntries
+              << ")" << std::endl;
+  } else {
+    std::cerr << "[DataManager] Warning: no main chain available; cannot "
+                 "attach friend tree '"
+              << spec.alias << "'." << std::endl;
+    return;
+  }
+
+  // Retain ownership so the main chain's raw pointer remains valid.
+  friend_chains_m.push_back(std::move(friendChain));
+}
+
+/**
+ * @brief Attach friend trees or sidecar files declared in a YAML config file.
+ */
+void DataManager::registerFriendTrees(
+    const IConfigurationProvider &configProvider,
+    const std::string &friendConfigKey) {
+  const std::string friendConfigFile = configProvider.get(friendConfigKey);
+  if (friendConfigFile.empty()) {
+    return;
+  }
+  if (!std::filesystem::exists(friendConfigFile)) {
+    std::cerr << "[DataManager] Warning: friendConfig file '" << friendConfigFile
+              << "' not found; skipping friend tree registration." << std::endl;
+    return;
+  }
+
+  std::cout << "[DataManager] Loading friend tree config from '"
+            << friendConfigFile << "'" << std::endl;
+
+  const auto specs = parseFriendTreeConfig(friendConfigFile);
+  if (specs.empty()) {
+    std::cout << "[DataManager] No friend trees found in config." << std::endl;
+    return;
+  }
+
+  for (const auto &spec : specs) {
+    attachFriendTree(spec);
+  }
+
+  // Rebuild the RDataFrame so that friend branches are visible.
+  // This is a no-op when called from the constructor (the RDataFrame is
+  // rebuilt immediately after this method returns), but is required when
+  // registerFriendTrees is invoked programmatically after construction.
+  if (!chain_vec_m.empty() && chain_vec_m[0] &&
+      chain_vec_m[0]->GetEntries() > 0) {
+    df_m = ROOT::RDataFrame(*chain_vec_m[0]);
+    std::cout << "[DataManager] RDataFrame rebuilt after attaching "
+              << specs.size() << " friend tree(s)." << std::endl;
   }
 }
 
