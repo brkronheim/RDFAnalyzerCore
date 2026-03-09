@@ -475,22 +475,19 @@ def generate_branch_map(
         return {}
 
     # ---- regions -----------------------------------------------------------
-    regions: List[Optional[str]]
     if BranchingDimension.REGION in active_dims:
         raw_regions: List[str] = []
         if output_manifest is not None and output_manifest.regions:
             raw_regions = sorted(r.name for r in output_manifest.regions if r.name)
-        if raw_regions:
-            regions = raw_regions  # type: ignore[assignment]
-        else:
-            # No regions declared – produce region=None entries so the
-            # branch count stays at D rather than 0.
-            regions = [None]
+        # When no regions are declared, fall back to a single None entry so
+        # the branch count stays at D rather than 0.
+        regions: List[Optional[str]] = (
+            [r for r in raw_regions] if raw_regions else [None]
+        )
     else:
         regions = [None]
 
     # ---- systematic scopes -------------------------------------------------
-    systematic_scopes: List[Optional[str]]
     if BranchingDimension.SYSTEMATIC_SCOPE in active_dims:
         raw_groups: List[str] = []
         if output_manifest is not None and output_manifest.nuisance_groups:
@@ -510,10 +507,9 @@ def generate_branch_map(
                     continue
                 raw_groups.append(ng.name)
         raw_groups.sort()
-        if raw_groups:
-            systematic_scopes = raw_groups  # type: ignore[assignment]
-        else:
-            systematic_scopes = [None]
+        systematic_scopes: List[Optional[str]] = (
+            [g for g in raw_groups] if raw_groups else [None]
+        )
     else:
         systematic_scopes = [None]
 
