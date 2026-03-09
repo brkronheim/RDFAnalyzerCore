@@ -229,9 +229,10 @@ Returns `true` if a feature has been cached under `name`.
 
 ### Cache propagation
 
-The cached-feature store is **not** propagated to collections produced by
-`removeOverlap()` because the indices change after overlap removal.  Rebuild
-cached features on the returned collection if needed.
+> **Warning**: The cached-feature store is **not** propagated to collections
+> produced by `removeOverlap()` because the per-object indices change after
+> overlap removal.  If you need cached features on the cleaned collection,
+> rebuild them explicitly after calling `removeOverlap()`.
 
 ### Example: caching b-tag scores
 
@@ -274,7 +275,8 @@ from `*this` that do not overlap with any object in `other`.
 *j* in `other` with `ΔR(i, j) < deltaRMin` (strictly less-than).
 
 The cached-feature store is **not** copied to the returned collection
-(indices change after removal).
+(indices change after removal).  Rebuild any needed cached features on
+the result if required.
 
 ```cpp
 // Remove jets that are within ΔR < 0.4 of a selected electron

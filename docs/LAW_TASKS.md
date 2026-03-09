@@ -303,8 +303,13 @@ The per-sample, per-bin stitching scale factor is then:
 b_n(k) = C_n(k) / Σ_m C_m(k)
 ```
 
-Bins where all samples contribute zero events are assigned a scale factor of
-0.  Trailing all-zero bins are trimmed to keep the output JSON compact.
+where the sum `Σ_m` runs over **all samples *m* in the same group** (not all
+possible samples globally).
+
+> **Note**: Bins where `Σ_m C_m(k) = 0` (no events from any sample in the
+> group contribute to that stitch bin) are assigned a scale factor of **0**
+> for every sample.  Trailing all-zero bins are trimmed to keep the output
+> JSON compact.
 
 **ROOT file reader**: `uproot` is the preferred reader (no ROOT installation
 required).  PyROOT is used as a fallback in environments such as CMSSW where
