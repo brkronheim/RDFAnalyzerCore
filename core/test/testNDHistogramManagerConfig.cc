@@ -418,6 +418,99 @@ TEST_F(NDHistogramManagerConfigTest, BoostBackendAutoSelectsDenseForSmallHist) {
   EXPECT_EQ(histogramManager->GetHistos().size(), 1u);
 }
 
+// ── Automatic systematic detection tests ─────────────────────────────────────
+
+TEST_F(NDHistogramManagerConfigTest, AutoDetectSystematicsOnBookSingleHistogram) {
+  // Define a variable with systematic variation columns using the naming
+  // convention <var>_<syst>Up / <var>_<syst>Down.  The histogram manager
+  // should auto-detect these and include the systematic in the syst axis.
+  dataManager->Define("myVar",        []() { return 5.0f;  }, {}, *systematicManager);
+  dataManager->Define("myVar_jesUp",  []() { return 5.5f;  }, {}, *systematicManager);
+  dataManager->Define("myVar_jesDown",[]() { return 4.5f;  }, {}, *systematicManager);
+  dataManager->Define("myWeight",     []() { return 1.0f;  }, {}, *systematicManager);
+
+  histogramManager->setupFromConfigFile();
+
+  histInfo info("autodet_hist", "myVar", "myVar", "myWeight", 10, 0.0, 10.0);
+  EXPECT_NO_THROW(histogramManager->BookSingleHistogram(info));
+  EXPECT_EQ(histogramManager->GetHistos().size(), 1u);
+
+  // "jes" should now be registered in the systematic manager
+  const auto& systs = systematicManager->getSystematics();
+  EXPECT_NE(systs.find("jes"), systs.end());
+}
+
+TEST_F(NDHistogramManagerConfigTest, AutoDetectSystematicsOnBookConfigHistograms) {
+  // Same as above but via the config-driven path.
+  dataManager->Define("var1",        []() { return 5.0f;  }, {}, *systematicManager);
+  dataManager->Define("var1_jesUp",  []() { return 5.5f;  }, {}, *systematicManager);
+  dataManager->Define("var1_jesDown",[]() { return 4.5f;  }, {}, *systematicManager);
+  dataManager->Define("w1",          []() { return 1.0f;  }, {}, *systematicManager);
+  dataManager->Define("var2",        []() { return 2.0f;  }, {}, *systematicManager);
+  dataManager->Define("w2",          []() { return 1.0f;  }, {}, *systematicManager);
+  dataManager->Define("var3",        []() { return 7.5f;  }, {}, *systematicManager);
+  dataManager->Define("w3",          []() { return 1.0f;  }, {}, *systematicManager);
+  dataManager->Define("var4",        []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4",          []() { return 1.0f;  }, {}, *systematicManager);
+  dataManager->Define("channel",        []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion",  []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
+
+  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  histogramManager->setupFromConfigFile();
+
+  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+
+  // "jes" should be auto-detected and registered
+  const auto& systs = systematicManager->getSystematics();
+  EXPECT_NE(systs.find("jes"), systs.end());
+
+  // All 4 config histograms should be booked
+  EXPECT_EQ(histogramManager->GetHistos().size(), 4u);
+}
+
+TEST_F(NDHistogramManagerConfigTest, AutoDetectSkippedWhenSystListAlreadyMaterialized) {
+  // If the user has already called makeSystList() (locking the syst list),
+  // ensureSystematicsAutoRegistered() should be a no-op and not add new systs.
+  dataManager->Define("v",        []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("v_xUp",   []() { return 1.1f; }, {}, *systematicManager);
+  dataManager->Define("v_xDown", []() { return 0.9f; }, {}, *systematicManager);
+  dataManager->Define("w",        []() { return 1.0f; }, {}, *systematicManager);
+
+  // Materialise the syst list *before* booking (no systematics registered yet)
+  systematicManager->makeSystList("SystematicCounter", *dataManager);
+
+  histogramManager->setupFromConfigFile();
+
+  histInfo info("locked_hist", "v", "v", "w", 5, 0.0, 5.0);
+  EXPECT_NO_THROW(histogramManager->BookSingleHistogram(info));
+
+  // "x" should NOT be registered (list was already locked)
+  const auto& systs = systematicManager->getSystematics();
+  EXPECT_EQ(systs.find("x"), systs.end());
+}
+
+TEST_F(NDHistogramManagerConfigTest, AutoDetectDoesNotDuplicateManualRegistrations) {
+  // Manually register "jes" before booking; the auto-detect pass should not
+  // create duplicate entries.
+  dataManager->Define("pt",         []() { return 40.0f; }, {}, *systematicManager);
+  dataManager->Define("pt_jesUp",   []() { return 41.0f; }, {}, *systematicManager);
+  dataManager->Define("pt_jesDown", []() { return 39.0f; }, {}, *systematicManager);
+  dataManager->Define("w",          []() { return 1.0f;  }, {}, *systematicManager);
+
+  systematicManager->registerSystematic("jes", {"pt"});
+
+  histogramManager->setupFromConfigFile();
+
+  histInfo info("dedup_hist", "pt", "pt", "w", 10, 0.0, 100.0);
+  EXPECT_NO_THROW(histogramManager->BookSingleHistogram(info));
+
+  // Still exactly one systematic
+  const auto& systs = systematicManager->getSystematics();
+  ASSERT_EQ(systs.size(), 1u);
+  EXPECT_NE(systs.find("jes"), systs.end());
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

@@ -287,6 +287,156 @@ TEST_F(SystematicManagerTest, CanonicalBranchNameConstant) {
   EXPECT_STREQ(ISystematicManager::CANONICAL_SYST_BRANCH_NAME, "SystematicCounter");
 }
 
+// ---------------------------------------------------------------------------
+// autoRegisterSystematics tests
+// ---------------------------------------------------------------------------
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_EmptyColumns) {
+  const auto result = systematicManager->autoRegisterSystematics({});
+  EXPECT_TRUE(result.registered.empty());
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_NoVariationColumns) {
+  // Columns that don't follow the baseVar_systUp/Down pattern
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "eta", "phi", "mass", "weight"});
+  EXPECT_TRUE(result.registered.empty());
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_SingleCompletePair) {
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "pt_jesUp", "pt_jesDown"});
+
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first,  "pt");
+  EXPECT_EQ(result.registered[0].second, "jes");
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+
+  // Systematic should now be registered
+  const auto& systs = systematicManager->getSystematics();
+  ASSERT_EQ(systs.size(), 1u);
+  EXPECT_NE(systs.find("jes"), systs.end());
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("pt", "jes"));
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_MultipleCompletePairs) {
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "pt_jesUp", "pt_jesDown",
+       "eta",
+       "energy", "energy_jerUp", "energy_jerDown",
+       "energy_jesUp", "energy_jesDown"});
+
+  ASSERT_EQ(result.registered.size(), 3u);
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+
+  const auto& systs = systematicManager->getSystematics();
+  EXPECT_NE(systs.find("jes"), systs.end());
+  EXPECT_NE(systs.find("jer"), systs.end());
+
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("pt",     "jes"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("energy", "jer"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("energy", "jes"));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic("pt",    "jer"));
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_MissingDown) {
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "pt_jesUp"});  // no pt_jesDown
+
+  EXPECT_TRUE(result.registered.empty());
+  ASSERT_EQ(result.missingDown.size(), 1u);
+  EXPECT_EQ(result.missingDown[0], "pt_jesUp");
+  EXPECT_TRUE(result.missingUp.empty());
+
+  // Should NOT be registered (incomplete pair)
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_MissingUp) {
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "pt_jesDown"});  // no pt_jesUp
+
+  EXPECT_TRUE(result.registered.empty());
+  EXPECT_TRUE(result.missingDown.empty());
+  ASSERT_EQ(result.missingUp.size(), 1u);
+  EXPECT_EQ(result.missingUp[0], "pt_jesDown");
+
+  // Should NOT be registered
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_MixedCompleteAndIncomplete) {
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "pt_jesUp", "pt_jesDown",   // complete
+       "energy", "energy_jerUp",          // missing Down
+       "mass", "mass_scalDown"});          // missing Up
+
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first,  "pt");
+  EXPECT_EQ(result.registered[0].second, "jes");
+
+  ASSERT_EQ(result.missingDown.size(), 1u);
+  EXPECT_EQ(result.missingDown[0], "energy_jerUp");
+
+  ASSERT_EQ(result.missingUp.size(), 1u);
+  EXPECT_EQ(result.missingUp[0], "mass_scalDown");
+
+  // Only the complete pair is registered
+  const auto& systs = systematicManager->getSystematics();
+  ASSERT_EQ(systs.size(), 1u);
+  EXPECT_NE(systs.find("jes"), systs.end());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_CompoundVariableName) {
+  // Variable names containing underscores
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"my_var_name", "my_var_name_jesUp", "my_var_name_jesDown"});
+
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first,  "my_var_name");
+  EXPECT_EQ(result.registered[0].second, "jes");
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("my_var_name", "jes"));
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_Idempotent) {
+  // Calling auto-register twice should not create duplicate registrations.
+  const std::vector<std::string> cols = {"pt", "pt_jesUp", "pt_jesDown"};
+  systematicManager->autoRegisterSystematics(cols);
+  systematicManager->autoRegisterSystematics(cols);
+
+  ASSERT_EQ(systematicManager->getSystematics().size(), 1u);
+  const auto& vars = systematicManager->getVariablesForSystematic("jes");
+  ASSERT_EQ(vars.size(), 1u);
+  EXPECT_NE(vars.find("pt"), vars.end());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_DoesNotAffectManualRegistrations) {
+  // Pre-register a different systematic manually
+  systematicManager->registerSystematic("btag", {"weight"});
+
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "pt_jesUp", "pt_jesDown"});
+
+  ASSERT_EQ(result.registered.size(), 1u);
+
+  // Both the manual and auto-detected systematics should be present
+  const auto& systs = systematicManager->getSystematics();
+  ASSERT_EQ(systs.size(), 2u);
+  EXPECT_NE(systs.find("btag"), systs.end());
+  EXPECT_NE(systs.find("jes"),  systs.end());
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

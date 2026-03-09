@@ -224,6 +224,23 @@ def run_test() -> int:
         if "jer" not in analyzer.getSystematicsForVariable("dummyExisting"):
             raise AssertionError("registerExistingSystematics/getSystematicsForVariable failed")
 
+        # Test autoRegisterSystematics: provide a pair of Up/Down columns and
+        # verify that the systematic is discovered and registered automatically.
+        auto_result = analyzer.autoRegisterSystematics(
+            ["myPt", "myPt_btagUp", "myPt_btagDown"]
+        )
+        if "myPt:btag" not in auto_result.get("registered", []):
+            raise AssertionError("autoRegisterSystematics failed to detect 'btag' for 'myPt'")
+        if "btag" not in analyzer.getSystematics():
+            raise AssertionError("autoRegisterSystematics did not register 'btag'")
+        if "myPt" not in analyzer.getVariablesForSystematic("btag"):
+            raise AssertionError("autoRegisterSystematics: 'myPt' not affected by 'btag'")
+
+        # An incomplete pair (missing Down) should appear in 'missing_down'
+        orphan_result = analyzer.autoRegisterSystematics(["orphanVar_xUp"])
+        if "orphanVar_xUp" not in orphan_result.get("missing_down", []):
+            raise AssertionError("autoRegisterSystematics did not report missing_down for orphanVar_xUp")
+
         analyzer.AddPlugin("onnx", "OnnxManager")
         analyzer.AddPlugin("bdt", "BDTManager")
         analyzer.AddPlugin("trigger", "TriggerManager")

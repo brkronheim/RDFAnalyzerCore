@@ -184,6 +184,20 @@ private:
                                        const std::string &baseRefVector = "");
 
   /**
+   * @brief Automatically detect and register systematic variations from the
+   *        current dataframe columns before the first histogram booking.
+   *
+   * Scans all available dataframe columns for `baseVar_systUp` /
+   * `baseVar_systDown` pairs and registers them with the SystematicManager.
+   * Incomplete pairs (one direction missing) are reported via the logger.
+   *
+   * This method is a no-op if the canonical SystematicCounter branch has
+   * already been materialised (i.e. makeSystList() was already called),
+   * because the cached syst list cannot be updated after the fact.
+   */
+  void ensureSystematicsAutoRegistered();
+
+  /**
    * @brief Ensure the region membership column is defined on the dataframe.
    *
    * Defines `__rm_region_membership__` as an RVec<Float_t> whose elements are

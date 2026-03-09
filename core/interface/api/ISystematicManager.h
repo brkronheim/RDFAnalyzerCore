@@ -3,8 +3,31 @@
 
 #include <set>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 class IDataFrameProvider;
+
+/**
+ * @brief Result returned by autoRegisterSystematics().
+ *
+ * Summarises which systematic variations were successfully registered from the
+ * available dataframe columns, and which are incomplete (missing Up or Down
+ * counterpart).
+ */
+struct SystematicValidationResult {
+  /// Pairs of (baseVariable, systematicName) that were successfully registered
+  /// (both Up and Down columns were found in the dataframe).
+  std::vector<std::pair<std::string, std::string>> registered;
+
+  /// Column names that end with "Up" for which no corresponding "Down" column
+  /// was found.  Each entry has the form "baseVar_systUp".
+  std::vector<std::string> missingDown;
+
+  /// Column names that end with "Down" for which no corresponding "Up" column
+  /// was found.  Each entry has the form "baseVar_systDown".
+  std::vector<std::string> missingUp;
+};
 
 /**
  * @brief Interface for systematic managers to enable dependency injection
@@ -63,6 +86,27 @@ public:
      */
     virtual void registerExistingSystematics(const std::vector<std::string> &systConfig,
                                              const std::vector<std::string> &columnList) = 0;
+
+    /**
+     * @brief Automatically discover and register systematic variations from column names.
+     *
+     * Scans @p columnNames for pairs of columns that follow the naming convention
+     * `baseVariable_systematicNameUp` / `baseVariable_systematicNameDown`.  For
+     * every complete pair found, the systematic @p systematicName is registered as
+     * affecting @p baseVariable via registerSystematic().  Incomplete pairs (column
+     * exists for one direction but not the other) are reported in the returned
+     * result so callers can emit warnings.
+     *
+     * This method is idempotent: calling it multiple times with overlapping column
+     * lists will not create duplicate registrations (registerSystematic() unions
+     * affected-variable sets).  It is a no-op when @p columnNames is empty.
+     *
+     * @param columnNames  All column names available in the current dataframe.
+     * @return A SystematicValidationResult containing registered pairs and any
+     *         incomplete (missing Up or Down) column names.
+     */
+    virtual SystematicValidationResult autoRegisterSystematics(
+        const std::vector<std::string> &columnNames) = 0;
 
     /**
      * @brief Make a list of systematic variations for a branch
