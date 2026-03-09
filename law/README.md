@@ -15,6 +15,10 @@ integrate with their outputs.
 ## Table of Contents
 
 - [Overview](#overview)
+- [Local Workflow Tasks](#local-workflow-tasks)
+  - [SkimTask](#skimtask)
+  - [HistFillTask](#histfilltask)
+  - [StitchingDerivationTask](#stitchingderivationtask)
 - [Prerequisites](#prerequisites)
 - [Environment Setup](#environment-setup)
 - [NANO / Rucio Workflow](#nano--rucio-workflow)
@@ -23,6 +27,142 @@ integrate with their outputs.
 - [Common Parameters](#common-parameters)
 - [Important Behavior Notes](#important-behavior-notes)
 - [Monitoring and Resubmission](#monitoring-and-resubmission)
+- [Advanced Topics](#advanced-topics)
+  - [Branch Map Policy](#branch-map-policy)
+  - [Dask Executor](#dask-executor)
+  - [Performance Records](#performance-records)
+
+---
+
+## Local Workflow Tasks
+
+`analysis_tasks.py` provides three LAW tasks for running the analysis
+framework **locally** (or dispatching to HTCondor/Dask).  They are simpler
+than the NANO/OpenData batch workflows and are the recommended starting point
+for new analyses.  See [docs/LAW_TASKS.md](../docs/LAW_TASKS.md) for the
+complete parameter reference.
+
+```bash
+source law/env.sh
+law index
+```
+
+### SkimTask
+
+Runs the analysis executable once per dataset entry defined in a dataset
+manifest YAML.  Each branch executes one dataset job and writes a `.done`
+marker file when finished.
+
+**Parameters**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--submit-config` | *(required)* | Path to `submit_config.txt` template |
+| `--exe` | *(required)* | Path to the compiled analysis executable |
+| `--name` | *(required)* | Run name; outputs go to `skimRun_<name>/` |
+| `--dataset-manifest` | *(required)* | Path to the YAML dataset manifest |
+| `--num-workers` | auto | Thread-pool size for the local runner |
+| `--skim-cmd` | `""` | Optional full command override |
+
+**Output structure**
+
+```
+skimRun_<name>/
+  outputs/<dataset_name>/   ← ROOT skim and meta files
+  job_outputs/              ← <dataset_name>.done marker files
+                              <dataset_name>.perf.json performance records
+```
+
+**Example**
+
+```bash
+law run SkimTask \
+  --submit-config law/submit_config.txt \
+  --exe ./build/MyAnalysis \
+  --name myRun \
+  --dataset-manifest datasets.yaml
+```
+
+### HistFillTask
+
+Runs the analysis executable to fill analysis histograms, one branch per
+dataset.  When `--skim-name` is supplied the task declares a LAW dependency
+on the matching `SkimTask` and automatically uses its output directory as the
+input file list for each dataset job.
+
+**Parameters** – identical to `SkimTask`, plus:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--skim-name` | `""` | Name of a completed `SkimTask` run to chain from |
+
+**Examples**
+
+```bash
+# Standalone (no SkimTask dependency)
+law run HistFillTask \
+  --submit-config law/submit_config.txt \
+  --exe ./build/MyHistFill \
+  --name myHist \
+  --dataset-manifest datasets.yaml
+
+# Chained after SkimTask – inputs are taken from skimRun_myRun/outputs/
+law run HistFillTask \
+  --submit-config law/submit_config.txt \
+  --exe ./build/MyHistFill \
+  --name myHist \
+  --dataset-manifest datasets.yaml \
+  --skim-name myRun
+```
+
+Output goes to `histRun_<name>/outputs/` and `histRun_<name>/job_outputs/`.
+
+### StitchingDerivationTask
+
+Derives binwise MC stitching scale factors from the counter histograms written
+by the framework's `CounterService`.  Useful for samples split across multiple
+generators or phase-space slices (e.g. HT-binned W+jets, pT-binned DY).
+
+**Parameters**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--stitch-config` | *(required)* | Path to the YAML stitch configuration file |
+| `--name` | *(required)* | Name for the output directory |
+
+**Stitch config format**
+
+```yaml
+groups:
+  wjets_ht:
+    meta_files:
+      wjets_ht_0: skimRun_myRun/outputs/WJets_HT0to70/meta.root
+      wjets_ht_1: skimRun_myRun/outputs/WJets_HT70to100/meta.root
+      wjets_ht_2: skimRun_myRun/outputs/WJets_HT100to200/meta.root
+```
+
+Each key under `meta_files` is the `sampleName` used by `CounterService` when
+booking `counter_intWeightSignSum_{sampleName}` histograms.
+
+**Output**: `stitchWeights_<name>/stitch_weights.json` — a
+[correctionlib](https://github.com/cms-nanoAOD/correctionlib) `CorrectionSet`
+with one `Correction` per stitching group.
+
+**Algorithm**: reads `counter_intWeightSignSum_*` histograms from each meta
+ROOT file, computes per-bin signed counts `C_n(k) = P_n(k) − N_n(k)`, and
+derives the scale factor:
+
+```
+b_n(k) = C_n(k) / Σ_m C_m(k)
+```
+
+Usage from Python:
+
+```python
+import correctionlib
+cset = correctionlib.CorrectionSet.from_file("stitchWeights_myStitch/stitch_weights.json")
+sf = cset["wjets_ht"].evaluate("wjets_ht_0", stitch_id)
+```
 
 ---
 
@@ -527,3 +667,115 @@ If task discovery fails, re-run:
 ```bash
 law index
 ```
+
+---
+
+## Advanced Topics
+
+### Branch Map Policy
+
+`branch_map_policy.py` controls how LAW branch maps are generated from a
+dataset manifest.  By default tasks branch **only over datasets** (one branch
+per dataset entry).  For large-scale productions additional dimensions can be
+enabled via `BranchingPolicy`.
+
+**Available dimensions** (`BranchingDimension` enum)
+
+| Dimension | Description |
+|-----------|-------------|
+| `DATASET` | One branch per dataset entry (always active) |
+| `REGION` | One branch per named region from `OutputManifest.regions` |
+| `SYSTEMATIC_SCOPE` | One branch per nuisance-group scope from `OutputManifest.nuisance_groups` |
+
+**Factory methods**
+
+```python
+from branch_map_policy import BranchingPolicy
+
+policy = BranchingPolicy.dataset_only()                       # default
+policy = BranchingPolicy.dataset_and_regions()                # D × R branches
+policy = BranchingPolicy.dataset_regions_and_systematics()    # D × R × S branches
+```
+
+**Scaling implications** – the three dimensions multiply.  With 10 datasets,
+5 regions, and 8 systematic groups the total is 400 branches.  Use
+`BranchingPolicy(max_branches=500)` to impose a hard cap.  The default cap
+is `None` (no limit).
+
+> **Note**: multi-dimensional branching is an advanced feature intended for
+> large-scale grid productions.  For most analyses, the default
+> `dataset_only()` policy is sufficient.  See
+> [docs/LAW_TASKS.md](../docs/LAW_TASKS.md) for the full API reference.
+
+### Dask Executor
+
+`workflow_executors.py` provides `DaskWorkflow`, a LAW workflow mixin that
+dispatches branches to a [Dask distributed](https://distributed.dask.org/)
+cluster instead of HTCondor.
+
+**Usage in a task**
+
+```python
+import law
+from workflow_executors import DaskWorkflow, _run_analysis_job
+
+class RunMyJobs(MyMixin, law.LocalWorkflow, law.HTCondorWorkflow, DaskWorkflow):
+
+    def run(self):
+        # Executed for --workflow local  and  --workflow htcondor (per-branch)
+        ...
+
+    def get_dask_work(self, branch_num, branch_data):
+        # Executed for --workflow dask
+        exe = os.path.join(self._shared_dir, self._exe_relpath)
+        return _run_analysis_job, [exe, branch_data, "", ""], {}
+```
+
+**Requirements**
+
+- A running Dask scheduler (e.g. `dask-scheduler` + `dask-worker` processes).
+- The scheduler address must be reachable from the machine running `law run`.
+
+The Dask proxy integrates with `failure_handler.py` to classify each branch
+failure, apply per-category retry policies, and print a
+`DiagnosticSummary` at the end of the run.  Retries happen automatically
+without resubmitting the whole workflow.
+
+### Performance Records
+
+Every branch of `SkimTask` and `HistFillTask` writes a `.perf.json` file
+alongside its `.done` marker in `job_outputs/`.  The file records:
+
+```json
+{
+  "task_name": "SkimTask[branch=3]",
+  "start_time": "2024-05-01T10:00:00+00:00",
+  "end_time":   "2024-05-01T10:03:42+00:00",
+  "wall_time_s": 222.1,
+  "peak_rss_mb": 1843.2,
+  "throughput_mbs": 47.6
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `task_name` | Human-readable task + branch label |
+| `wall_time_s` | Elapsed wall-clock seconds |
+| `peak_rss_mb` | Peak resident-set-size of the analysis subprocess (Linux only; `null` elsewhere) |
+| `throughput_mbs` | Input-data throughput in MB/s (`null` when not computed) |
+
+Aggregate all records for a run to understand production performance:
+
+```bash
+# Print wall times for all branches of a skim run
+python3 -c "
+import json, glob
+for f in sorted(glob.glob('skimRun_myRun/job_outputs/*.perf.json')):
+    d = json.load(open(f))
+    print(f\"{d['task_name']:40s}  {d['wall_time_s']:7.1f}s  {d.get('peak_rss_mb') or 'N/A':>8} MB\")
+"
+```
+
+The helper `perf_path_for(output_path)` (from `performance_recorder.py`)
+derives the `.perf.json` path from any `.done`, `.json`, or `.txt` output
+path.
