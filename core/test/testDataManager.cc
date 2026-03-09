@@ -246,7 +246,7 @@ TEST_F(DataManagerTest, RedefineUpdatesColumn) {
 TEST_F(DataManagerTest, MakeSystListCreatesSystematicColumns) {
   // Register a systematic
   systematicManager->registerSystematic("testSyst", {"branch"});
-  auto systList = dynamic_cast<DataManager*>(dataManager.get())->makeSystList("syst_branch", *systematicManager);
+  auto systList = systematicManager->makeSystList("syst_branch", *dataManager);
   // Check that the returned list includes Nominal, testSystUp, testSystDown
   EXPECT_NE(std::find(systList.begin(), systList.end(), "Nominal"), systList.end());
   EXPECT_NE(std::find(systList.begin(), systList.end(), "testSystUp"), systList.end());
@@ -257,6 +257,59 @@ TEST_F(DataManagerTest, MakeSystListCreatesSystematicColumns) {
   EXPECT_NE(std::find(colNames.begin(), colNames.end(), "syst_branch"), colNames.end());
   EXPECT_NE(std::find(colNames.begin(), colNames.end(), "syst_branch_testSystUp"), colNames.end());
   EXPECT_NE(std::find(colNames.begin(), colNames.end(), "syst_branch_testSystDown"), colNames.end());
+}
+
+/**
+ * @brief Test makeSystList is idempotent when called multiple times with the same branchName
+ *
+ * Verifies that multiple calls with the same branchName return the same list and
+ * do not cause errors (columns are defined only once).
+ */
+TEST_F(DataManagerTest, MakeSystListIdempotentSameBranchName) {
+  systematicManager->registerSystematic("jes", {"pt"});
+  auto list1 = systematicManager->makeSystList(ISystematicManager::CANONICAL_SYST_BRANCH_NAME, *dataManager);
+  // Second call with same branchName should be a no-op and return same list
+  auto list2 = systematicManager->makeSystList(ISystematicManager::CANONICAL_SYST_BRANCH_NAME, *dataManager);
+  EXPECT_EQ(list1, list2);
+  EXPECT_TRUE(systematicManager->isBranchNameMaterialized(ISystematicManager::CANONICAL_SYST_BRANCH_NAME));
+}
+
+/**
+ * @brief Test makeSystList supports multiple branch namespaces safely
+ *
+ * Verifies that two callers using different branchNames each get their own
+ * counter columns without collisions or missing columns.
+ */
+TEST_F(DataManagerTest, MakeSystListMultipleBranchNamesSafe) {
+  systematicManager->registerSystematic("jes", {"pt"});
+  auto list1 = systematicManager->makeSystList("BranchA", *dataManager);
+  auto list2 = systematicManager->makeSystList("BranchB", *dataManager);
+  // Both namespaces return the same ordered variation list
+  EXPECT_EQ(list1, list2);
+  // Both namespaces should be materialized
+  EXPECT_TRUE(systematicManager->isBranchNameMaterialized("BranchA"));
+  EXPECT_TRUE(systematicManager->isBranchNameMaterialized("BranchB"));
+  // An unrelated name should not be materialized
+  EXPECT_FALSE(systematicManager->isBranchNameMaterialized("BranchC"));
+  // All columns for both namespaces should exist in the dataframe
+  auto df = dataManager->getDataFrame();
+  auto colNames = df.GetColumnNames();
+  EXPECT_NE(std::find(colNames.begin(), colNames.end(), "BranchA"), colNames.end());
+  EXPECT_NE(std::find(colNames.begin(), colNames.end(), "BranchA_jesUp"), colNames.end());
+  EXPECT_NE(std::find(colNames.begin(), colNames.end(), "BranchA_jesDown"), colNames.end());
+  EXPECT_NE(std::find(colNames.begin(), colNames.end(), "BranchB"), colNames.end());
+  EXPECT_NE(std::find(colNames.begin(), colNames.end(), "BranchB_jesUp"), colNames.end());
+  EXPECT_NE(std::find(colNames.begin(), colNames.end(), "BranchB_jesDown"), colNames.end());
+}
+
+/**
+ * @brief Test that the canonical branch name constant is "SystematicCounter"
+ *
+ * Verifies that ISystematicManager::CANONICAL_SYST_BRANCH_NAME matches the
+ * value used by NDHistogramManager and other callers.
+ */
+TEST(SystematicManagerCanonicalNameTest, CanonicalBranchNameIsSystematicCounter) {
+  EXPECT_STREQ(ISystematicManager::CANONICAL_SYST_BRANCH_NAME, "SystematicCounter");
 }
 
 /**

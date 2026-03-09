@@ -275,6 +275,18 @@ TEST_F(SystematicManagerTest, GetVariationColumnName) {
   EXPECT_EQ(systematicManager->getVariationColumnName("pt", "unknown"), "pt");
 }
 
+TEST_F(SystematicManagerTest, IsBranchNameMaterializedFalseInitially) {
+  // No branchName should be materialized before any makeSystList call
+  EXPECT_FALSE(systematicManager->isBranchNameMaterialized("SystematicCounter"));
+  EXPECT_FALSE(systematicManager->isBranchNameMaterialized("AnyName"));
+  EXPECT_FALSE(systematicManager->isBranchNameMaterialized(""));
+}
+
+TEST_F(SystematicManagerTest, CanonicalBranchNameConstant) {
+  // The canonical branch name must match the value used by NDHistogramManager
+  EXPECT_STREQ(ISystematicManager::CANONICAL_SYST_BRANCH_NAME, "SystematicCounter");
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
