@@ -1,0 +1,17 @@
+friends:
+  - alias: calib
+    treeName: Events
+    fileList:
+      - /nonexistent/calib1.root
+      - /nonexistent/calib2.root
+    indexBranches:
+      - run
+      - luminosityBlock
+
+  - alias: taggers
+    treeName: BTagging
+    directory: /nonexistent/tagger_dir
+    globs:
+      - .root
+    antiglobs:
+      - output.root

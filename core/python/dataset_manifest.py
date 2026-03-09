@@ -54,6 +54,96 @@ import yaml
 
 
 # ---------------------------------------------------------------------------
+# FriendTreeConfig
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FriendTreeConfig:
+    """Configuration for a friend tree or sidecar input attached to a dataset.
+
+    A friend tree provides additional columns (branches) from one or more
+    separate ROOT files.  The framework attaches the friend TChain to the
+    main chain *before* the RDataFrame is created so that all friend branches
+    are immediately accessible.
+
+    Both local file paths and XRootD remote URLs (``root://...``) are
+    supported for the ``files`` list, enabling use with grid storage.
+
+    Parameters
+    ----------
+    alias : str
+        Alias used to access friend tree branches.  In ROOT, branches from a
+        friend tree registered as ``"calib"`` are accessible as ``calib.pt``,
+        ``calib.eta``, etc.
+    tree_name : str
+        Name of the TTree inside the friend ROOT file(s).  Defaults to
+        ``"Events"``.
+    files : list[str]
+        Explicit list of ROOT file paths or XRootD URLs.  Takes precedence
+        over ``directory`` when both are set.
+    directory : str or None
+        Path to a local directory that will be scanned recursively for ROOT
+        files.  Used when an explicit ``files`` list is not provided.
+    globs : list[str]
+        Filename patterns to *include* when scanning ``directory``
+        (default: ``[".root"]``).
+    antiglobs : list[str]
+        Filename patterns to *exclude* when scanning ``directory``
+        (default: empty).
+    index_branches : list[str]
+        Branch names used as event identifiers for index-based matching.
+        When non-empty, the framework calls ``TChain::BuildIndex`` using the
+        first two entries as the major and minor index keys.  This ensures
+        correct event matching even when file ordering or entry counts differ
+        between the main tree and the friend tree.
+
+        Common configurations:
+
+        * ``["run", "luminosityBlock"]`` — match on run and lumi block
+        * ``["run", "event"]``           — match on run and event number
+
+        Leave empty for position-based (sequential-order) matching, which is
+        the default ROOT friend tree behaviour.
+
+    Example
+    -------
+    ::
+
+        FriendTreeConfig(
+            alias="calib",
+            tree_name="Events",
+            files=[
+                "/data/calib_2022.root",
+                "root://eosserver.cern.ch//eos/data/calib_remote.root",
+            ],
+            index_branches=["run", "luminosityBlock"],
+        )
+    """
+
+    alias: str
+    tree_name: str = "Events"
+    files: List[str] = field(default_factory=list)
+    directory: Optional[str] = None
+    globs: List[str] = field(default_factory=lambda: [".root"])
+    antiglobs: List[str] = field(default_factory=list)
+    index_branches: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the config as a plain Python dict suitable for YAML serialisation."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FriendTreeConfig":
+        """Construct a :class:`FriendTreeConfig` from a plain dict.
+
+        Unknown keys are silently ignored for forward-compatibility.
+        """
+        known = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)
+
+
+# ---------------------------------------------------------------------------
 # DatasetEntry
 # ---------------------------------------------------------------------------
 
@@ -146,6 +236,25 @@ class DatasetEntry:
     # -- provenance ---
     parent: Optional[str] = None
 
+    # -- friend trees / sidecar inputs ---
+    friend_trees: List[FriendTreeConfig] = field(default_factory=list)
+    """Friend tree / sidecar configurations attached to this dataset.
+
+    Each entry describes a separate ROOT file (or set of files) whose
+    branches are merged into the main event stream via ROOT's friend-tree
+    mechanism.  Typical use cases:
+
+    * Per-dataset calibration corrections (e.g. jet energy corrections)
+    * External tagger outputs or auxiliary reconstructions
+    * Derived sidecar files produced by a previous analysis step
+
+    These configurations are serialised into the YAML manifest and can be
+    read back by analysis code to automatically attach the correct sidecar
+    files when building a DataManager.
+
+    See :class:`FriendTreeConfig` for the full list of supported options.
+    """
+
     # ------------------------------------------------------------------ helpers
 
     def to_legacy_dict(self) -> Dict[str, str]:
@@ -202,6 +311,12 @@ class DatasetEntry:
         YAML).  Unknown keys are silently ignored for forward-compatibility."""
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in data.items() if k in known}
+        # Deserialise nested FriendTreeConfig objects
+        if "friend_trees" in filtered and isinstance(filtered["friend_trees"], list):
+            filtered["friend_trees"] = [
+                FriendTreeConfig.from_dict(ft) if isinstance(ft, dict) else ft
+                for ft in filtered["friend_trees"]
+            ]
         return cls(**filtered)
 
 

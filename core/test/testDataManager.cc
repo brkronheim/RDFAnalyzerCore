@@ -22,6 +22,7 @@
 #include <vector>
 #include <unistd.h>
 #include <SystematicManager.h>
+#include <util.h>
 
 /**
  * @brief Test fixture for DataManager tests
@@ -327,6 +328,116 @@ TEST_F(DataManagerTest, FinalizeSetupRegistersAll) {
   EXPECT_NE(std::find(colNames.begin(), colNames.end(), "int1"), colNames.end());
   EXPECT_NE(std::find(colNames.begin(), colNames.end(), "new_col"), colNames.end());
   EXPECT_NE(std::find(colNames.begin(), colNames.end(), "optional_col"), colNames.end());
+}
+
+// ---------------------------------------------------------------------------
+// Friend tree tests
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Test parseFriendTreeConfig parses a valid YAML friend config
+ */
+TEST(FriendTreeConfigTest, ParseValidConfig) {
+  ChangeToTestSourceDir();
+  EXPECT_NO_THROW({
+    auto specs = parseFriendTreeConfig("cfg/test_friend_config.yaml");
+    ASSERT_EQ(specs.size(), 2u);
+
+    // First entry: calib with explicit file list and index branches
+    EXPECT_EQ(specs[0].alias, "calib");
+    EXPECT_EQ(specs[0].treeName, "Events");
+    ASSERT_EQ(specs[0].files.size(), 2u);
+    EXPECT_EQ(specs[0].files[0], "/nonexistent/calib1.root");
+    EXPECT_EQ(specs[0].files[1], "/nonexistent/calib2.root");
+    ASSERT_EQ(specs[0].indexBranches.size(), 2u);
+    EXPECT_EQ(specs[0].indexBranches[0], "run");
+    EXPECT_EQ(specs[0].indexBranches[1], "luminosityBlock");
+    EXPECT_TRUE(specs[0].directory.empty());
+
+    // Second entry: taggers with directory scan settings
+    EXPECT_EQ(specs[1].alias, "taggers");
+    EXPECT_EQ(specs[1].treeName, "BTagging");
+    EXPECT_TRUE(specs[1].files.empty());
+    EXPECT_EQ(specs[1].directory, "/nonexistent/tagger_dir");
+    ASSERT_EQ(specs[1].globs.size(), 1u);
+    EXPECT_EQ(specs[1].globs[0], ".root");
+    ASSERT_EQ(specs[1].antiglobs.size(), 1u);
+    EXPECT_EQ(specs[1].antiglobs[0], "output.root");
+    EXPECT_TRUE(specs[1].indexBranches.empty());
+  });
+}
+
+/**
+ * @brief Test parseFriendTreeConfig returns empty list for missing file
+ */
+TEST(FriendTreeConfigTest, MissingFileThrows) {
+  EXPECT_THROW({
+    parseFriendTreeConfig("/nonexistent/friend_config.yaml");
+  }, std::runtime_error);
+}
+
+/**
+ * @brief Test registerFriendTrees is a no-op when friendConfig key is absent
+ */
+TEST_F(DataManagerTest, RegisterFriendTreesNoOpWhenKeyAbsent) {
+  EXPECT_NO_THROW({
+    auto dm = dynamic_cast<DataManager*>(dataManager.get());
+    dm->registerFriendTrees(*configManager, "nonExistentFriendConfig");
+  });
+}
+
+/**
+ * @brief Test registerFriendTrees is a no-op when the config file does not exist
+ */
+TEST_F(DataManagerTest, RegisterFriendTreesNoOpWhenFileMissing) {
+  configManager->set("friendConfig", "/nonexistent/friends.yaml");
+  EXPECT_NO_THROW({
+    auto dm = dynamic_cast<DataManager*>(dataManager.get());
+    dm->registerFriendTrees(*configManager);
+  });
+}
+
+/**
+ * @brief Test registerFriendTrees parses a real config without crashing
+ *
+ * The referenced friend files do not exist, so no entries are read, but the
+ * parsing and attachment logic should complete without throwing.
+ */
+TEST_F(DataManagerTest, RegisterFriendTreesParsesConfigGracefully) {
+  ChangeToTestSourceDir();
+  configManager->set("friendConfig", "cfg/test_friend_config.yaml");
+  EXPECT_NO_THROW({
+    auto dm = dynamic_cast<DataManager*>(dataManager.get());
+    dm->registerFriendTrees(*configManager);
+  });
+}
+
+/**
+ * @brief Test attachFriendTree with missing files logs a warning but does not throw
+ */
+TEST_F(DataManagerTest, AttachFriendTreeMissingFilesDoesNotThrow) {
+  FriendTreeSpec spec;
+  spec.alias = "test_friend";
+  spec.treeName = "Events";
+  spec.files = {"/nonexistent/file.root"};
+  EXPECT_NO_THROW({
+    auto dm = dynamic_cast<DataManager*>(dataManager.get());
+    dm->attachFriendTree(spec);
+  });
+}
+
+/**
+ * @brief Test attachFriendTree with no files and no directory skips gracefully
+ */
+TEST_F(DataManagerTest, AttachFriendTreeNoSourceSkipsGracefully) {
+  FriendTreeSpec spec;
+  spec.alias = "empty_friend";
+  spec.treeName = "Events";
+  // No files, no directory
+  EXPECT_NO_THROW({
+    auto dm = dynamic_cast<DataManager*>(dataManager.get());
+    dm->attachFriendTree(spec);
+  });
 }
 
 int main(int argc, char **argv) {
