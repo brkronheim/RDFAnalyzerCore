@@ -222,7 +222,7 @@ void NDHistogramManager::ensureSystematicsAutoRegistered() {
     return;
   }
 
-  const auto df = dataManager_m->getDataFrame();
+  auto df = dataManager_m->getDataFrame();
   const auto rawColNames = df.GetColumnNames();
   const std::vector<std::string> columnNames(rawColNames.begin(), rawColNames.end());
 
@@ -243,12 +243,12 @@ void NDHistogramManager::ensureSystematicsAutoRegistered() {
     logger_m->log(ILogger::Level::Info, msg.str());
   }
   for (const auto &col : result.missingDown) {
-    logger_m->log(ILogger::Level::Warning,
+    logger_m->log(ILogger::Level::Warn,
                   "NDHistogramManager: Systematic column '" + col +
                   "' has no corresponding Down variation; this variation will be excluded.");
   }
   for (const auto &col : result.missingUp) {
-    logger_m->log(ILogger::Level::Warning,
+    logger_m->log(ILogger::Level::Warn,
                   "NDHistogramManager: Systematic column '" + col +
                   "' has no corresponding Up variation; this variation will be excluded.");
   }
