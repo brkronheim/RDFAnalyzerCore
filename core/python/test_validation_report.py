@@ -38,6 +38,7 @@ from validation_report import (
     CutflowEntry,
     EventCountEntry,
     MissingBranchEntry,
+    NuisanceGroupCoverageEntry,
     OutputIntegrityEntry,
     RegionEntry,
     RegionReferenceEntry,
@@ -54,7 +55,9 @@ from output_schema import (
     IntermediateArtifactSchema,
     LawArtifactSchema,
     MetadataSchema,
+    NuisanceGroupDefinition,
     OutputManifest,
+    RegionDefinition,
     SkimSchema,
 )
 
@@ -937,3 +940,515 @@ class TestValidationReportRegionReferences:
         )
         assert len(restored.region_references) == 1
         assert restored.region_references[0].referenced_region == "presel"
+
+
+# ---------------------------------------------------------------------------
+# NuisanceGroupCoverageEntry – severity field
+# ---------------------------------------------------------------------------
+
+
+class TestNuisanceGroupCoverageEntry:
+    def test_default_severity_is_error(self):
+        e = NuisanceGroupCoverageEntry(group_name="jes")
+        assert e.severity == ReportSeverity.ERROR.value
+
+    def test_complete_entry(self):
+        e = NuisanceGroupCoverageEntry(
+            group_name="jes",
+            systematics=["JES"],
+        )
+        assert e.is_complete is True
+
+    def test_incomplete_entry_with_not_found(self):
+        e = NuisanceGroupCoverageEntry(
+            group_name="jes",
+            systematics=["JES"],
+            not_found=["JES"],
+        )
+        assert e.is_complete is False
+
+    def test_warn_severity_roundtrip(self):
+        e = NuisanceGroupCoverageEntry(
+            group_name="jes",
+            systematics=["JES"],
+            not_found=["JES"],
+            severity="warn",
+        )
+        r = ValidationReport(stage="x")
+        r.add_nuisance_group_coverage(e)
+        d = r.to_dict()
+        restored = ValidationReport.from_dict(d)
+        assert restored.nuisance_group_coverage[0].severity == "warn"
+
+    def test_from_dict_defaults_severity_to_error(self):
+        """Old serialised entries without severity field default to error."""
+        r = ValidationReport(stage="x")
+        r.add_nuisance_group_coverage(
+            NuisanceGroupCoverageEntry(group_name="g", not_found=["X"])
+        )
+        d = r.to_dict()
+        # Remove the severity key to simulate old format
+        d["nuisance_group_coverage"][0].pop("severity", None)
+        restored = ValidationReport.from_dict(d)
+        assert restored.nuisance_group_coverage[0].severity == ReportSeverity.ERROR.value
+
+
+# ---------------------------------------------------------------------------
+# ValidationReport – has_errors / has_warnings with severity
+# ---------------------------------------------------------------------------
+
+
+class TestHasErrorsWithSeverity:
+    def test_incomplete_error_severity_causes_has_errors(self):
+        r = ValidationReport(stage="x")
+        r.add_nuisance_group_coverage(
+            NuisanceGroupCoverageEntry(
+                group_name="jes",
+                systematics=["JES"],
+                not_found=["JES"],
+                severity=ReportSeverity.ERROR.value,
+            )
+        )
+        assert r.has_errors is True
+        assert r.has_warnings is False
+
+    def test_incomplete_warn_severity_does_not_cause_has_errors(self):
+        r = ValidationReport(stage="x")
+        r.add_nuisance_group_coverage(
+            NuisanceGroupCoverageEntry(
+                group_name="jes",
+                systematics=["JES"],
+                not_found=["JES"],
+                severity=ReportSeverity.WARNING.value,
+            )
+        )
+        assert r.has_errors is False
+        assert r.has_warnings is True
+
+    def test_complete_entry_causes_neither(self):
+        r = ValidationReport(stage="x")
+        r.add_nuisance_group_coverage(
+            NuisanceGroupCoverageEntry(
+                group_name="jes",
+                systematics=["JES"],
+                severity=ReportSeverity.ERROR.value,
+            )
+        )
+        assert r.has_errors is False
+        assert r.has_warnings is False
+
+
+# ---------------------------------------------------------------------------
+# RegionEntry – covered_by field
+# ---------------------------------------------------------------------------
+
+
+class TestRegionEntryCoveredBy:
+    def test_default_covered_by_is_empty(self):
+        e = RegionEntry(region_name="signal", filter_column="is_signal")
+        assert e.covered_by == []
+
+    def test_covered_by_roundtrip(self):
+        e = RegionEntry(
+            region_name="signal",
+            filter_column="is_signal",
+            covered_by=["histograms", "cutflow"],
+        )
+        r = ValidationReport(stage="x")
+        r.add_region(e)
+        d = r.to_dict()
+        restored = ValidationReport.from_dict(d)
+        assert restored.regions[0].covered_by == ["histograms", "cutflow"]
+
+    def test_from_dict_defaults_covered_by_to_empty(self):
+        """Old serialised entries without covered_by default to empty list."""
+        r = ValidationReport(stage="x")
+        r.add_region(RegionEntry("signal", "is_signal", covered_by=["histograms"]))
+        d = r.to_dict()
+        d["regions"][0].pop("covered_by", None)
+        restored = ValidationReport.from_dict(d)
+        assert restored.regions[0].covered_by == []
+
+    def test_to_text_shows_output_coverage_column(self):
+        r = ValidationReport(stage="x")
+        r.add_region(
+            RegionEntry(
+                region_name="signal",
+                filter_column="is_signal",
+                covered_by=["histograms"],
+            )
+        )
+        r.add_region(
+            RegionEntry(
+                region_name="control",
+                filter_column="is_control",
+                covered_by=[],
+            )
+        )
+        text = r.to_text()
+        assert "Output Coverage" in text
+        assert "histograms" in text
+        assert "(none)" in text
+
+
+# ---------------------------------------------------------------------------
+# to_text – nuisance group coverage severity column
+# ---------------------------------------------------------------------------
+
+
+class TestNuisanceCoverageTextOutput:
+    def test_severity_shown_in_text_for_complete_entry(self):
+        r = ValidationReport(stage="x")
+        r.add_nuisance_group_coverage(
+            NuisanceGroupCoverageEntry(
+                group_name="jes",
+                group_type="shape",
+                systematics=["JES"],
+                severity=ReportSeverity.ERROR.value,
+            )
+        )
+        text = r.to_text()
+        assert "ERROR" in text
+
+    def test_severity_shown_in_text_for_warn_entry(self):
+        r = ValidationReport(stage="x")
+        r.add_nuisance_group_coverage(
+            NuisanceGroupCoverageEntry(
+                group_name="jes",
+                group_type="shape",
+                systematics=["JES"],
+                not_found=["JES"],
+                severity=ReportSeverity.WARNING.value,
+            )
+        )
+        text = r.to_text()
+        assert "WARNING" in text
+
+
+# ---------------------------------------------------------------------------
+# generate_report_from_manifest – regions and nuisance groups
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateReportFromManifestRegions:
+    def test_regions_populated_from_manifest(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            regions=[
+                RegionDefinition(name="signal", filter_column="is_signal"),
+                RegionDefinition(name="control", filter_column="is_control"),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        assert len(report.regions) == 2
+        names = {e.region_name for e in report.regions}
+        assert names == {"signal", "control"}
+
+    def test_region_is_valid_when_well_formed(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            regions=[
+                RegionDefinition(name="signal", filter_column="is_signal"),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        assert report.regions[0].is_valid is True
+        assert report.regions[0].issues == []
+
+    def test_region_invalid_when_filter_column_empty(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            regions=[
+                RegionDefinition(name="bad_region", filter_column=""),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        assert report.regions[0].is_valid is False
+        assert report.regions[0].issues  # non-empty
+
+    def test_region_hierarchy_error_reported(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            regions=[
+                RegionDefinition(name="child", filter_column="is_child", parent="nonexistent"),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        assert report.regions[0].is_valid is False
+
+    def test_no_regions_when_manifest_has_none(self):
+        m = OutputManifest(skim=SkimSchema(output_file="out.root"))
+        report = generate_report_from_manifest(m, stage="skim")
+        assert report.regions == []
+
+    def test_region_covered_by_histogram_when_name_in_histogram_names(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            histograms=HistogramSchema(
+                output_file="meta.root",
+                histogram_names=["signal_pt", "signal_eta", "control_pt"],
+            ),
+            regions=[
+                RegionDefinition(name="signal", filter_column="is_signal"),
+                RegionDefinition(name="control", filter_column="is_control"),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="histogram")
+        signal_entry = next(e for e in report.regions if e.region_name == "signal")
+        control_entry = next(e for e in report.regions if e.region_name == "control")
+        assert "histograms" in signal_entry.covered_by
+        assert "histograms" in control_entry.covered_by
+
+    def test_region_not_covered_when_name_absent_from_histograms(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            histograms=HistogramSchema(
+                output_file="meta.root",
+                histogram_names=["pt", "eta"],
+            ),
+            regions=[
+                RegionDefinition(name="signal", filter_column="is_signal"),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="histogram")
+        assert report.regions[0].covered_by == []
+
+    def test_region_covered_by_cutflow_when_name_in_counter_keys(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            cutflow=CutflowSchema(
+                output_file="meta.root",
+                counter_keys=["signal_total", "signal_trigger", "control_baseline"],
+            ),
+            regions=[
+                RegionDefinition(name="signal", filter_column="is_signal"),
+                RegionDefinition(name="control", filter_column="is_control"),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="cutflow")
+        signal_entry = next(e for e in report.regions if e.region_name == "signal")
+        control_entry = next(e for e in report.regions if e.region_name == "control")
+        assert "cutflow" in signal_entry.covered_by
+        assert "cutflow" in control_entry.covered_by
+
+    def test_region_covered_by_both_histogram_and_cutflow(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            histograms=HistogramSchema(
+                output_file="meta.root",
+                histogram_names=["signal_pt"],
+            ),
+            cutflow=CutflowSchema(
+                output_file="meta.root",
+                counter_keys=["signal_total"],
+            ),
+            regions=[
+                RegionDefinition(name="signal", filter_column="is_signal"),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="all")
+        covered = report.regions[0].covered_by
+        assert "histograms" in covered
+        assert "cutflow" in covered
+
+    def test_region_to_text_includes_region_definitions_section(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            regions=[
+                RegionDefinition(name="signal", filter_column="is_signal"),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        text = report.to_text()
+        assert "REGION DEFINITIONS" in text
+        assert "signal" in text
+
+
+class TestGenerateReportFromManifestNuisanceGroups:
+    def test_nuisance_groups_populated_from_manifest(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            nuisance_groups=[
+                NuisanceGroupDefinition(
+                    name="jet_energy",
+                    group_type="shape",
+                    systematics=["JES", "JER"],
+                ),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        assert len(report.nuisance_group_coverage) == 1
+        entry = report.nuisance_group_coverage[0]
+        assert entry.group_name == "jet_energy"
+        assert entry.group_type == "shape"
+        assert set(entry.systematics) == {"JES", "JER"}
+
+    def test_nuisance_group_coverage_stubs_have_no_missing(self):
+        """Stubs from manifest have no coverage gap info (no columns available)."""
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            nuisance_groups=[
+                NuisanceGroupDefinition(
+                    name="jes",
+                    group_type="shape",
+                    systematics=["JES"],
+                ),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        entry = report.nuisance_group_coverage[0]
+        assert entry.missing_up == []
+        assert entry.missing_down == []
+        assert entry.not_found == []
+        assert entry.is_complete is True
+
+    def test_nuisance_group_processes_regions_preserved(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            nuisance_groups=[
+                NuisanceGroupDefinition(
+                    name="btag",
+                    group_type="rate",
+                    systematics=["btagSF"],
+                    processes=["ttbar", "wjets"],
+                    regions=["signal", "control"],
+                    output_usage=["histogram"],
+                ),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        entry = report.nuisance_group_coverage[0]
+        assert entry.processes == ["ttbar", "wjets"]
+        assert entry.regions == ["signal", "control"]
+        assert entry.output_usage == ["histogram"]
+
+    def test_no_nuisance_groups_when_manifest_has_none(self):
+        m = OutputManifest(skim=SkimSchema(output_file="out.root"))
+        report = generate_report_from_manifest(m, stage="skim")
+        assert report.nuisance_group_coverage == []
+
+    def test_multiple_nuisance_groups_all_added(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            nuisance_groups=[
+                NuisanceGroupDefinition(name="jes", systematics=["JES"]),
+                NuisanceGroupDefinition(name="jer", systematics=["JER"]),
+                NuisanceGroupDefinition(name="btag", systematics=["bSF"]),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        assert len(report.nuisance_group_coverage) == 3
+        names = {e.group_name for e in report.nuisance_group_coverage}
+        assert names == {"jes", "jer", "btag"}
+
+    def test_nuisance_group_to_text_includes_coverage_section(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            nuisance_groups=[
+                NuisanceGroupDefinition(name="jes", systematics=["JES"]),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        text = report.to_text()
+        assert "NUISANCE GROUP COVERAGE" in text
+        assert "jes" in text
+
+    def test_nuisance_group_severity_default_is_error(self):
+        m = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            nuisance_groups=[
+                NuisanceGroupDefinition(name="jes", systematics=["JES"]),
+            ],
+        )
+        report = generate_report_from_manifest(m, stage="skim")
+        assert report.nuisance_group_coverage[0].severity == ReportSeverity.ERROR.value
+
+
+# ---------------------------------------------------------------------------
+# VariationOrchestrator – severity propagated to NuisanceGroupCoverageEntry
+# ---------------------------------------------------------------------------
+
+
+class TestVariationOrchestratorSeverityPropagation:
+    """Ensure build_validation_report sets severity field on coverage entries."""
+
+    def test_error_severity_set_on_incomplete_entry(self):
+        from nuisance_groups import NuisanceGroup, NuisanceGroupRegistry
+        from variation_orchestrator import VariationOrchestrator
+
+        group = NuisanceGroup(
+            name="jes",
+            group_type="shape",
+            systematics=["JES"],
+            processes=["signal"],
+            regions=["sr"],
+            output_usage=["histogram"],
+        )
+        registry = NuisanceGroupRegistry([group])
+        orch = VariationOrchestrator(registry, missing_severity="error")
+        report = ValidationReport(stage="test")
+        orch.build_validation_report(
+            report=report,
+            available_columns=[],
+            processes=["signal"],
+            regions=["sr"],
+            output_usage="histogram",
+        )
+        assert len(report.nuisance_group_coverage) == 1
+        entry = report.nuisance_group_coverage[0]
+        assert entry.severity == "error"
+        assert report.has_errors is True
+
+    def test_warn_severity_set_on_incomplete_entry(self):
+        from nuisance_groups import NuisanceGroup, NuisanceGroupRegistry
+        from variation_orchestrator import VariationOrchestrator
+
+        group = NuisanceGroup(
+            name="jes",
+            group_type="shape",
+            systematics=["JES"],
+            processes=["signal"],
+            regions=["sr"],
+            output_usage=["histogram"],
+        )
+        registry = NuisanceGroupRegistry([group])
+        orch = VariationOrchestrator(registry, missing_severity="warn")
+        report = ValidationReport(stage="test")
+        orch.build_validation_report(
+            report=report,
+            available_columns=[],
+            processes=["signal"],
+            regions=["sr"],
+            output_usage="histogram",
+            severity="warn",
+        )
+        assert len(report.nuisance_group_coverage) == 1
+        entry = report.nuisance_group_coverage[0]
+        assert entry.severity == "warn"
+        assert report.has_errors is False
+        assert report.has_warnings is True
+
+    def test_complete_coverage_entry_no_error_regardless_of_severity(self):
+        from nuisance_groups import NuisanceGroup, NuisanceGroupRegistry
+        from variation_orchestrator import VariationOrchestrator
+
+        group = NuisanceGroup(
+            name="jes",
+            group_type="shape",
+            systematics=["JES"],
+            processes=["signal"],
+            regions=["sr"],
+            output_usage=["histogram"],
+        )
+        registry = NuisanceGroupRegistry([group])
+        orch = VariationOrchestrator(registry, missing_severity="error")
+        report = ValidationReport(stage="test")
+        orch.build_validation_report(
+            report=report,
+            available_columns=["JESUp", "JESDown"],
+            processes=["signal"],
+            regions=["sr"],
+            output_usage="histogram",
+        )
+        assert report.has_errors is False
+        assert report.has_warnings is False
