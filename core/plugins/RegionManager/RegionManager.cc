@@ -2,6 +2,7 @@
 #include <NullOutputSink.h>
 #include <TFile.h>
 #include <TNamed.h>
+#include <algorithm>
 #include <api/ILogger.h>
 #include <api/IOutputSink.h>
 #include <sstream>
@@ -75,6 +76,25 @@ void RegionManager::declareRegion(const std::string &name,
 
   regionOrder_m.push_back(name);
   regions_m.emplace(name, RegionEntry{name, filterColumn, parent, filteredNode});
+}
+
+std::vector<std::string>
+RegionManager::getFilterChain(const std::string &name) const {
+  auto it = regions_m.find(name);
+  if (it == regions_m.end()) {
+    throw std::runtime_error(
+        "RegionManager::getFilterChain(): region '" + name +
+        "' has not been declared.");
+  }
+  std::vector<std::string> chain;
+  std::string current = name;
+  while (!current.empty()) {
+    const auto &entry = regions_m.at(current);
+    chain.push_back(entry.filterColumn);
+    current = entry.parent;
+  }
+  std::reverse(chain.begin(), chain.end());
+  return chain;
 }
 
 ROOT::RDF::RNode

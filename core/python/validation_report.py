@@ -382,6 +382,39 @@ class NuisanceGroupCoverageEntry:
         return not self.missing_up and not self.missing_down and not self.not_found
 
 
+@dataclass
+class RegionReferenceEntry:
+    """Validation record for a region reference in a histogram or cutflow config.
+
+    Histogram and cutflow configurations can name analysis regions explicitly
+    (e.g. via ``channelRegions`` or by binding to a :class:`RegionManager`).
+    This entry tracks whether each referenced region name is actually declared
+    in the analysis.
+
+    Attributes
+    ----------
+    config_type : str
+        Kind of config that contains the reference: ``"histogram"`` or
+        ``"cutflow"``.
+    config_name : str
+        Name of the histogram or cutflow entry that references the region.
+    referenced_region : str
+        The region name that was referenced.
+    is_known : bool
+        ``True`` when the region was found in the set of declared regions.
+    """
+
+    config_type: str
+    config_name: str
+    referenced_region: str
+    is_known: bool = True
+
+    @property
+    def is_valid(self) -> bool:
+        """Alias for ``is_known``; follows the naming convention of other entries."""
+        return self.is_known
+
+
 # ---------------------------------------------------------------------------
 # ValidationReport
 # ---------------------------------------------------------------------------
@@ -426,6 +459,10 @@ class ValidationReport:
         Validation records for declared analysis regions.
     nuisance_group_coverage : list[NuisanceGroupCoverageEntry]
         Coverage validation records for declared nuisance groups.
+    region_references : list[RegionReferenceEntry]
+        Validation records for region names referenced in histogram and
+        cutflow configurations.  Entries with ``is_known=False`` indicate
+        references to regions that were never declared.
     errors : list[str]
         Free-form error messages not captured by a specific section.
     warnings : list[str]
@@ -452,6 +489,7 @@ class ValidationReport:
         self.output_integrity: List[OutputIntegrityEntry] = []
         self.regions: List[RegionEntry] = []
         self.nuisance_group_coverage: List[NuisanceGroupCoverageEntry] = []
+        self.region_references: List[RegionReferenceEntry] = []
         self.errors: List[str] = []
         self.warnings: List[str] = []
 
@@ -493,6 +531,10 @@ class ValidationReport:
         """Append a :class:`NuisanceGroupCoverageEntry` to the report."""
         self.nuisance_group_coverage.append(entry)
 
+    def add_region_reference(self, entry: "RegionReferenceEntry") -> None:
+        """Append a :class:`RegionReferenceEntry` to the report."""
+        self.region_references.append(entry)
+
     def add_error(self, message: str) -> None:
         """Append a free-form error message."""
         self.errors.append(message)
@@ -517,6 +559,8 @@ class ValidationReport:
         if any(not e.is_valid for e in self.regions):
             return True
         if any(not e.is_complete for e in self.nuisance_group_coverage):
+            return True
+        if any(not e.is_known for e in self.region_references):
             return True
         return False
 
@@ -560,6 +604,7 @@ class ValidationReport:
                 "n_output_integrity_entries": len(self.output_integrity),
                 "n_regions": len(self.regions),
                 "n_nuisance_group_coverage": len(self.nuisance_group_coverage),
+                "n_region_references": len(self.region_references),
                 "n_errors": len(self.errors),
                 "n_warnings": len(self.warnings),
             },
@@ -572,6 +617,7 @@ class ValidationReport:
             "output_integrity": [asdict(e) for e in self.output_integrity],
             "regions": [asdict(e) for e in self.regions],
             "nuisance_group_coverage": [asdict(e) for e in self.nuisance_group_coverage],
+            "region_references": [asdict(e) for e in self.region_references],
             "errors": list(self.errors),
             "warnings": list(self.warnings),
         }
@@ -840,6 +886,27 @@ class ValidationReport:
                 for syst in e.missing_down:
                     lines.append(f"      missing Down: {syst}")
 
+        # Region references
+        if self.region_references:
+            _header("REGION REFERENCES")
+            col_w = (16, 24, 24, 10)
+            header = (
+                f"  {'Type':<{col_w[0]}}"
+                f"{'Config Name':<{col_w[1]}}"
+                f"{'Referenced Region':<{col_w[2]}}"
+                f"{'Known':>{col_w[3]}}"
+            )
+            lines.append(header)
+            lines.append("  " + "-" * sum(col_w))
+            for e in self.region_references:
+                known_str = "yes" if e.is_known else "UNKNOWN"
+                lines.append(
+                    f"  {e.config_type:<{col_w[0]}}"
+                    f"{e.config_name:<{col_w[1]}}"
+                    f"{e.referenced_region:<{col_w[2]}}"
+                    f"{known_str:>{col_w[3]}}"
+                )
+
         lines.append("")
         lines.append("=" * 60)
         lines.append("  END OF REPORT")
@@ -1000,6 +1067,16 @@ class ValidationReport:
                 )
             )
 
+        for raw in data.get("region_references", []):
+            report.region_references.append(
+                RegionReferenceEntry(
+                    config_type=raw["config_type"],
+                    config_name=raw["config_name"],
+                    referenced_region=raw["referenced_region"],
+                    is_known=raw.get("is_known", True),
+                )
+            )
+
         report.errors = list(data.get("errors", []))
         report.warnings = list(data.get("warnings", []))
         return report
@@ -1050,6 +1127,60 @@ class ValidationReport:
         return (
             f"ValidationReport(stage={self.stage!r}, "
             f"errors={len(self.errors)}, warnings={len(self.warnings)})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helper: validate region references
+# ---------------------------------------------------------------------------
+
+
+def validate_region_references(
+    report: "ValidationReport",
+    known_regions: List[str],
+    referenced: List[Dict[str, str]],
+) -> None:
+    """Populate *report* with :class:`RegionReferenceEntry` records.
+
+    For each ``(config_type, config_name, region_name)`` triple in *referenced*
+    check whether *region_name* is present in *known_regions* and append a
+    :class:`RegionReferenceEntry` to *report*.
+
+    Parameters
+    ----------
+    report : ValidationReport
+        Report to populate.
+    known_regions : list[str]
+        Region names that have been declared (e.g. from a RegionManager).
+    referenced : list[dict]
+        Each dict must have keys ``"config_type"`` (``"histogram"`` or
+        ``"cutflow"``), ``"config_name"``, and ``"region"``.
+
+    Example
+    -------
+    .. code-block:: python
+
+        validate_region_references(
+            report,
+            known_regions=["presel", "signal", "control"],
+            referenced=[
+                {"config_type": "histogram", "config_name": "pt",
+                 "region": "signal"},
+                {"config_type": "histogram", "config_name": "pt",
+                 "region": "unknown_region"},   # will be flagged as ERROR
+            ],
+        )
+    """
+    known_set = set(known_regions)
+    for item in referenced:
+        region_name = item["region"]
+        report.add_region_reference(
+            RegionReferenceEntry(
+                config_type=item["config_type"],
+                config_name=item["config_name"],
+                referenced_region=region_name,
+                is_known=(region_name in known_set),
+            )
         )
 
 

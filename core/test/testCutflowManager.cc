@@ -12,6 +12,7 @@
 #include <DefaultLogger.h>
 #include <ManagerFactory.h>
 #include <NullOutputSink.h>
+#include <RegionManager.h>
 #include <SystematicManager.h>
 #include <api/ManagerContext.h>
 #include <gtest/gtest.h>
@@ -300,8 +301,245 @@ TEST_F(CutflowManagerTest, SingleCutCutflowAndNMinus1) {
 }
 
 // ---------------------------------------------------------------------------
-// collectProvenanceEntries() – returns structured config metadata
+// Helpers shared by region binding tests
 // ---------------------------------------------------------------------------
+
+/// Wire and return a RegionManager backed by *dm*.
+static std::unique_ptr<RegionManager>
+makeRegionMgr(DataManager &dm, IConfigurationProvider &cfg,
+              SystematicManager &sm, DefaultLogger &log, NullOutputSink &skim,
+              NullOutputSink &meta) {
+  auto rm = std::make_unique<RegionManager>();
+  ManagerContext ctx{cfg, dm, sm, log, skim, meta};
+  rm->setContext(ctx);
+  rm->setupFromConfigFile();
+  return rm;
+}
+
+// ---------------------------------------------------------------------------
+// bindToRegionManager() before setContext() is safe (nullptr)
+// ---------------------------------------------------------------------------
+
+TEST_F(CutflowManagerTest, BindToNullptrRegionManagerIsNoOp) {
+  CutflowManager mgr;
+  EXPECT_NO_THROW(mgr.bindToRegionManager(nullptr));
+}
+
+// ---------------------------------------------------------------------------
+// Region binding: single region, single cut
+// ---------------------------------------------------------------------------
+
+TEST_F(CutflowManagerTest, RegionCutflowSingleRegionSingleCut) {
+  // 6 events (0-5).
+  // region "signal": i >= 2 → 4 events (2-5).
+  // cut "ptCut": i < 4 → within region: events 2,3 → 2 events.
+  auto dm = std::make_unique<DataManager>(6);
+  auto cfm = makeMgr(*dm);
+  auto rm  = makeRegionMgr(*dm, *config, *systematicManager, *logger,
+                            *skimSink, *metaSink);
+
+  dm->Define("pass_signal", [](ULong64_t i) { return i >= 2; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("pass_pt",     [](ULong64_t i) { return i < 4; },
+             {"rdfentry_"}, *systematicManager);
+
+  rm->declareRegion("signal", "pass_signal");
+  cfm->addCut("ptCut", "pass_pt");
+  cfm->bindToRegionManager(rm.get());
+
+  cfm->execute();
+  cfm->finalize();
+
+  // Global cutflow: 6 total, 4 pass ptCut.
+  EXPECT_EQ(cfm->getTotalCount(), 6ULL);
+  ASSERT_EQ(cfm->getCutflowCounts().size(), 1u);
+  EXPECT_EQ(cfm->getCutflowCounts()[0].second, 4ULL);
+
+  // Region "signal" has 4 events total; 2 pass ptCut inside the region.
+  EXPECT_EQ(cfm->getRegionTotalCount("signal"), 4ULL);
+  ASSERT_EQ(cfm->getRegionCutflowCounts("signal").size(), 1u);
+  EXPECT_EQ(cfm->getRegionCutflowCounts("signal")[0].second, 2ULL);
+}
+
+// ---------------------------------------------------------------------------
+// Region binding: multiple regions, multiple cuts
+// ---------------------------------------------------------------------------
+
+TEST_F(CutflowManagerTest, RegionCutflowMultipleRegionsTwoCuts) {
+  // 10 events (0-9).
+  // presel:  i >= 1  → 9 events (1-9)
+  // signal:  presel AND i < 5  → events 1-4 → 4 events
+  // cutA: i % 2 == 0 (even)
+  // cutB: i < 7
+  auto dm = std::make_unique<DataManager>(10);
+  auto cfm = makeMgr(*dm);
+  auto rm  = makeRegionMgr(*dm, *config, *systematicManager, *logger,
+                            *skimSink, *metaSink);
+
+  dm->Define("pass_presel", [](ULong64_t i) { return i >= 1; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("pass_signal", [](ULong64_t i) { return i < 5; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("pass_cutA",   [](ULong64_t i) { return i % 2 == 0; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("pass_cutB",   [](ULong64_t i) { return i < 7; },
+             {"rdfentry_"}, *systematicManager);
+
+  rm->declareRegion("presel", "pass_presel");
+  rm->declareRegion("signal", "pass_signal", "presel");
+
+  cfm->addCut("cutA", "pass_cutA");
+  cfm->addCut("cutB", "pass_cutB");
+  cfm->bindToRegionManager(rm.get());
+
+  cfm->execute();
+  cfm->finalize();
+
+  // "presel" region: 9 events (1-9).
+  //   After cutA (even): 2,4,6,8 → 4 events.
+  //   After cutA+cutB (even AND <7): 2,4,6 → 3 events.
+  EXPECT_EQ(cfm->getRegionTotalCount("presel"), 9ULL);
+  ASSERT_EQ(cfm->getRegionCutflowCounts("presel").size(), 2u);
+  EXPECT_EQ(cfm->getRegionCutflowCounts("presel")[0].second, 4ULL); // after cutA
+  EXPECT_EQ(cfm->getRegionCutflowCounts("presel")[1].second, 3ULL); // after cutA+cutB
+
+  // "signal" region: events 1-4 (presel AND i<5), so 1,2,3,4.
+  //   After cutA (even): 2,4 → 2 events.
+  //   After cutA+cutB (even AND <7): 2,4 → 2 events (both < 7 already).
+  EXPECT_EQ(cfm->getRegionTotalCount("signal"), 4ULL);
+  ASSERT_EQ(cfm->getRegionCutflowCounts("signal").size(), 2u);
+  EXPECT_EQ(cfm->getRegionCutflowCounts("signal")[0].second, 2ULL);
+  EXPECT_EQ(cfm->getRegionCutflowCounts("signal")[1].second, 2ULL);
+}
+
+// ---------------------------------------------------------------------------
+// Region binding: N-1 counts per region
+// ---------------------------------------------------------------------------
+
+TEST_F(CutflowManagerTest, RegionNMinusOneCountsPerRegion) {
+  // 8 events (0-7).
+  // region "ctrl": i >= 4 → events 4-7 → 4 events.
+  // cutA: i < 7 (passes 4,5,6 in region → 3 events)
+  // cutB: i % 2 == 0 (passes 4,6 in region → 2 events)
+  // N-1 for cutA (skip cutA, apply cutB): 4,6 → 2 events
+  // N-1 for cutB (skip cutB, apply cutA): 4,5,6 → 3 events
+  auto dm = std::make_unique<DataManager>(8);
+  auto cfm = makeMgr(*dm);
+  auto rm  = makeRegionMgr(*dm, *config, *systematicManager, *logger,
+                            *skimSink, *metaSink);
+
+  dm->Define("pass_ctrl", [](ULong64_t i) { return i >= 4; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("pass_cutA", [](ULong64_t i) { return i < 7; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("pass_cutB", [](ULong64_t i) { return i % 2 == 0; },
+             {"rdfentry_"}, *systematicManager);
+
+  rm->declareRegion("ctrl", "pass_ctrl");
+
+  cfm->addCut("cutA", "pass_cutA");
+  cfm->addCut("cutB", "pass_cutB");
+  cfm->bindToRegionManager(rm.get());
+
+  cfm->execute();
+  cfm->finalize();
+
+  ASSERT_EQ(cfm->getRegionNMinusOneCounts("ctrl").size(), 2u);
+  EXPECT_EQ(cfm->getRegionNMinusOneCounts("ctrl")[0].first,  "cutA");
+  EXPECT_EQ(cfm->getRegionNMinusOneCounts("ctrl")[0].second, 2ULL); // only cutB
+  EXPECT_EQ(cfm->getRegionNMinusOneCounts("ctrl")[1].first,  "cutB");
+  EXPECT_EQ(cfm->getRegionNMinusOneCounts("ctrl")[1].second, 3ULL); // only cutA
+}
+
+// ---------------------------------------------------------------------------
+// Accessors throw for unknown region names
+// ---------------------------------------------------------------------------
+
+TEST_F(CutflowManagerTest, RegionAccessorsThrowForUnknownRegion) {
+  auto dm = std::make_unique<DataManager>(4);
+  auto cfm = makeMgr(*dm);
+  auto rm  = makeRegionMgr(*dm, *config, *systematicManager, *logger,
+                            *skimSink, *metaSink);
+
+  dm->Define("pass_cut", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  dm->Define("pass_r",   [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+
+  rm->declareRegion("r", "pass_r");
+  cfm->addCut("cut", "pass_cut");
+  cfm->bindToRegionManager(rm.get());
+  cfm->execute();
+  cfm->finalize();
+
+  EXPECT_THROW(cfm->getRegionCutflowCounts("no_such_region"),   std::runtime_error);
+  EXPECT_THROW(cfm->getRegionNMinusOneCounts("no_such_region"), std::runtime_error);
+  EXPECT_THROW(cfm->getRegionTotalCount("no_such_region"),      std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Region binding with no cuts: only total counts per region
+// ---------------------------------------------------------------------------
+
+TEST_F(CutflowManagerTest, RegionBindingNoCutsOnlyTotalCounts) {
+  auto dm = std::make_unique<DataManager>(10);
+  auto cfm = makeMgr(*dm);
+  auto rm  = makeRegionMgr(*dm, *config, *systematicManager, *logger,
+                            *skimSink, *metaSink);
+
+  dm->Define("pass_r", [](ULong64_t i) { return i < 6; }, {"rdfentry_"},
+             *systematicManager);
+  rm->declareRegion("r", "pass_r");
+  cfm->bindToRegionManager(rm.get());
+
+  // execute() with empty cuts_m returns early and does not book region actions.
+  cfm->execute();
+  cfm->finalize();
+
+  // No per-region results because execute() returned early (no cuts).
+  EXPECT_TRUE(cfm->getCutflowCounts().empty());
+}
+
+// ---------------------------------------------------------------------------
+// initialize() with a bound RegionManager does not throw
+// ---------------------------------------------------------------------------
+
+TEST_F(CutflowManagerTest, InitializeWithBoundRegionManagerDoesNotThrow) {
+  auto dm = std::make_unique<DataManager>(4);
+  auto cfm = makeMgr(*dm);
+  auto rm  = makeRegionMgr(*dm, *config, *systematicManager, *logger,
+                            *skimSink, *metaSink);
+
+  dm->Define("pass_r", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  rm->declareRegion("r", "pass_r");
+  cfm->bindToRegionManager(rm.get());
+
+  EXPECT_NO_THROW(cfm->initialize());
+}
+
+// ---------------------------------------------------------------------------
+// reportMetadata() with region binding does not throw
+// ---------------------------------------------------------------------------
+
+TEST_F(CutflowManagerTest, ReportMetadataWithRegionBindingDoesNotThrow) {
+  auto dm = std::make_unique<DataManager>(4);
+  auto cfm = makeMgr(*dm);
+  auto rm  = makeRegionMgr(*dm, *config, *systematicManager, *logger,
+                            *skimSink, *metaSink);
+
+  dm->Define("pass_r",   [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  dm->Define("pass_cut", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+
+  rm->declareRegion("r", "pass_r");
+  cfm->addCut("cut", "pass_cut");
+  cfm->bindToRegionManager(rm.get());
+  cfm->execute();
+  cfm->finalize();
+  EXPECT_NO_THROW(cfm->reportMetadata());
+}
 TEST_F(CutflowManagerTest, CollectProvenanceEntriesHasNumCuts) {
   auto dm = std::make_unique<DataManager>(4);
   auto mgr = makeMgr(*dm);
