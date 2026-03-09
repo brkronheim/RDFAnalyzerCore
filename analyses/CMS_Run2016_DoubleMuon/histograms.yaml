@@ -1,0 +1,105 @@
+# =============================================================================
+# histograms.yaml — Config-driven histogram definitions (NDHistogramManager)
+#
+# Format: YAML sequence of maps.  Required keys per entry:
+#   name        : histogram identifier (must be unique)
+#   variable    : RDataFrame column to histogram
+#   weight      : RDataFrame column used as per-event weight
+#   bins        : number of bins
+#   lowerBound  : histogram lower edge [GeV or rad]
+#   upperBound  : histogram upper edge
+# Optional:
+#   label       : ROOT axis title (supports TLatex)
+#
+# Per-jet-bin variables (DimuonMass_0j etc.) hold a sentinel -999 for events
+# outside their category.  Because lowerBound=70.0, those events never fill
+# a visible bin.  This keeps the analysis fully config-driven without
+# duplicating C++ code per jet category.
+#
+# These histograms are read by fit_zpeak.py to build the Voigtian+exponential
+# model and CMS Combine datacards.
+# =============================================================================
+
+# ---- Inclusive dimuon Z peak -----------------------------------------------
+- name: DimuonMass
+  variable: DimuonMass
+  weight: eventWeight
+  bins: 60
+  lowerBound: 70.0
+  upperBound: 110.0
+  label: "Dimuon Invariant Mass [GeV]"
+
+# ---- Dimuon Z peak in bins of jet multiplicity (inputs to Combine fit) ------
+- name: DimuonMass_0j
+  variable: DimuonMass_0j
+  weight: eventWeight
+  bins: 60
+  lowerBound: 70.0
+  upperBound: 110.0
+  label: "Dimuon Mass (0 jets) [GeV]"
+
+- name: DimuonMass_1j
+  variable: DimuonMass_1j
+  weight: eventWeight
+  bins: 60
+  lowerBound: 70.0
+  upperBound: 110.0
+  label: "Dimuon Mass (1 jet) [GeV]"
+
+- name: DimuonMass_2j
+  variable: DimuonMass_2j
+  weight: eventWeight
+  bins: 60
+  lowerBound: 70.0
+  upperBound: 110.0
+  label: "Dimuon Mass (2 jets) [GeV]"
+
+- name: DimuonMass_ge3j
+  variable: DimuonMass_ge3j
+  weight: eventWeight
+  bins: 60
+  lowerBound: 70.0
+  upperBound: 110.0
+  label: "Dimuon Mass (#geq3 jets) [GeV]"
+
+# ---- Jet multiplicity distribution -----------------------------------------
+- name: nGoodJets
+  variable: nGoodJets
+  weight: eventWeight
+  bins: 8
+  lowerBound: -0.5
+  upperBound: 7.5
+  label: "Number of Selected Jets (p_{T}>30 GeV)"
+
+# ---- Muon kinematics --------------------------------------------------------
+- name: LeadMuPt
+  variable: LeadMuPt
+  weight: eventWeight
+  bins: 50
+  lowerBound: 20.0
+  upperBound: 150.0
+  label: "Leading Muon p_{T} [GeV]"
+
+- name: LeadMuEta
+  variable: LeadMuEta
+  weight: eventWeight
+  bins: 50
+  lowerBound: -2.5
+  upperBound: 2.5
+  label: "Leading Muon #eta"
+
+- name: SublMuPt
+  variable: SublMuPt
+  weight: eventWeight
+  bins: 50
+  lowerBound: 20.0
+  upperBound: 150.0
+  label: "Subleading Muon p_{T} [GeV]"
+
+- name: SublMuEta
+  variable: SublMuEta
+  weight: eventWeight
+  bins: 50
+  lowerBound: -2.5
+  upperBound: 2.5
+  label: "Subleading Muon #eta"
