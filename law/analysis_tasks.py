@@ -121,8 +121,10 @@ C++ (via CorrectionManager) or Python::
 
 from __future__ import annotations
 
+import datetime
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -143,8 +145,149 @@ from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E40
 from dataset_manifest import DatasetManifest, DatasetEntry  # noqa: E402
 from submission_backend import read_config  # noqa: E402
 from workflow_executors import _run_analysis_job  # noqa: E402
+from output_schema import (  # noqa: E402
+    ArtifactResolutionStatus,
+    DatasetManifestProvenance,
+    IntermediateArtifactSchema,
+    OutputManifest,
+    ProvenanceRecord,
+    SkimSchema,
+    check_cache_validity,
+    write_cache_sidecar,
+)
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
+
+
+# ===========================================================================
+# Helpers: provenance collection and manifest construction
+# ===========================================================================
+
+
+def _build_task_provenance(
+    submit_config_path: Optional[str] = None,
+    dataset_manifest_path: Optional[str] = None,
+) -> ProvenanceRecord:
+    """Collect a :class:`~output_schema.ProvenanceRecord` for the current task.
+
+    Gathers whichever provenance fields are available in the current
+    environment:
+
+    * **framework_hash** – HEAD commit hash of the repository containing
+      this file, obtained via ``git rev-parse HEAD`` (silently omitted when
+      git is unavailable or the working tree is not inside a git repository).
+    * **config_mtime** – UTC modification timestamp of *submit_config_path*
+      in ISO 8601 format (omitted when the file does not exist).
+    * **dataset_manifest_hash** – SHA-256 hex digest of *dataset_manifest_path*
+      via :meth:`~dataset_manifest.DatasetManifest.file_hash` (omitted when
+      the file does not exist or the hash cannot be computed).
+
+    Parameters
+    ----------
+    submit_config_path:
+        Path to the submit_config.txt template for the current task.
+    dataset_manifest_path:
+        Path to the dataset manifest YAML file for the current task.
+
+    Returns
+    -------
+    ProvenanceRecord
+        Best-effort provenance snapshot; fields that cannot be determined
+        are left as ``None``.
+    """
+    framework_hash: Optional[str] = None
+    try:
+        result = subprocess.run(
+            ["git", "-C", _HERE, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            framework_hash = result.stdout.strip() or None
+    except Exception:
+        pass
+
+    config_mtime: Optional[str] = None
+    if submit_config_path and os.path.isfile(submit_config_path):
+        mtime = os.path.getmtime(submit_config_path)
+        config_mtime = datetime.datetime.fromtimestamp(
+            mtime, tz=datetime.timezone.utc
+        ).isoformat()
+
+    dataset_manifest_hash: Optional[str] = None
+    if dataset_manifest_path and os.path.isfile(dataset_manifest_path):
+        try:
+            dataset_manifest_hash = DatasetManifest.file_hash(dataset_manifest_path)
+        except Exception:
+            pass
+
+    return ProvenanceRecord(
+        framework_hash=framework_hash,
+        config_mtime=config_mtime,
+        dataset_manifest_hash=dataset_manifest_hash,
+    )
+
+
+def _build_skim_manifest(
+    dataset: DatasetEntry,
+    submit_config_path: str,
+    dataset_manifest_path: str,
+    skim_output_file: str,
+) -> OutputManifest:
+    """Build an :class:`~output_schema.OutputManifest` for a skim artifact.
+
+    Constructs the manifest with an :class:`~output_schema.IntermediateArtifactSchema`
+    recording the artifact as a ``"preselection"`` kind, combined with
+    :class:`~output_schema.DatasetManifestProvenance` capturing the dataset
+    selection context and the provenance fields collected by
+    :func:`_build_task_provenance`.
+
+    Parameters
+    ----------
+    dataset:
+        The :class:`~dataset_manifest.DatasetEntry` processed in this branch.
+    submit_config_path:
+        Path to the submit_config.txt template file.
+    dataset_manifest_path:
+        Path to the dataset manifest YAML file.
+    skim_output_file:
+        Absolute path to the produced skim ROOT file.
+
+    Returns
+    -------
+    OutputManifest
+        Manifest suitable for passing to :func:`~output_schema.write_cache_sidecar`.
+    """
+    prov = _build_task_provenance(
+        submit_config_path=submit_config_path,
+        dataset_manifest_path=dataset_manifest_path,
+    )
+
+    manifest_hash: Optional[str] = None
+    if os.path.isfile(dataset_manifest_path):
+        try:
+            manifest_hash = DatasetManifest.file_hash(dataset_manifest_path)
+        except Exception:
+            pass
+
+    dataset_manifest_prov = DatasetManifestProvenance(
+        manifest_path=dataset_manifest_path,
+        manifest_hash=manifest_hash,
+        resolved_entry_names=[dataset.name],
+    )
+
+    artifact = IntermediateArtifactSchema(
+        artifact_kind="preselection",
+        output_file=skim_output_file,
+    )
+
+    return OutputManifest(
+        intermediate_artifacts=[artifact],
+        framework_hash=prov.framework_hash,
+        config_mtime=prov.config_mtime,
+        dataset_manifest_provenance=dataset_manifest_prov,
+    )
 
 
 # ===========================================================================
@@ -327,6 +470,53 @@ class SkimTask(AnalysisMixin, law.LocalWorkflow):
             os.path.join(self._job_outputs_dir, f"{dataset.name}.done")
         )
 
+    def complete(self):
+        """Return True only when the `.done` marker and a valid cache sidecar exist.
+
+        Extends the standard LAW output-existence check with a provenance-based
+        cache validity check on the produced ``skim.root``.  If the cache
+        sidecar is absent, schema-incompatible, or records stale provenance
+        the ``.done`` marker is removed so that LAW will re-run this branch and
+        regenerate the artifact.
+
+        This override only applies at branch level (``self.is_branch() == True``).
+        At the workflow level the standard :meth:`law.LocalWorkflow.complete`
+        behaviour is preserved.
+        """
+        # Delegate non-branch (workflow-level) complete() to LAW.
+        if not self.is_branch():
+            return super().complete()
+
+        # If the standard output doesn't exist the task is not complete.
+        if not super().complete():
+            return False
+
+        dataset: DatasetEntry = self.branch_data
+        skim_file = os.path.join(self._outputs_dir, dataset.name, "skim.root")
+
+        current_prov = _build_task_provenance(
+            submit_config_path=self.submit_config,
+            dataset_manifest_path=self.dataset_manifest,
+        )
+        status = check_cache_validity(
+            skim_file, current_provenance=current_prov, strict=True
+        )
+
+        if status == ArtifactResolutionStatus.COMPATIBLE:
+            return True
+
+        # Cache is stale or incompatible – remove the .done marker so LAW
+        # will schedule a fresh run of this branch.
+        done_path = self.output().path
+        if os.path.exists(done_path):
+            os.remove(done_path)
+        self.publish_message(
+            f"[SkimTask] Cache invalidated for '{dataset.name}' "
+            f"(status={status.value}): the .done marker has been removed "
+            "and the artifact will be regenerated."
+        )
+        return False
+
     def run(self):
         dataset: DatasetEntry = self.branch_data
 
@@ -362,6 +552,21 @@ class SkimTask(AnalysisMixin, law.LocalWorkflow):
 
         Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
         rec.save(perf_path_for(self.output().path))
+
+        # ---- write cache sidecar for the produced skim artifact ------------
+        skim_file = os.path.join(out_dir, "skim.root")
+        if os.path.isfile(skim_file):
+            manifest = _build_skim_manifest(
+                dataset=dataset,
+                submit_config_path=self.submit_config,
+                dataset_manifest_path=self.dataset_manifest,
+                skim_output_file=skim_file,
+            )
+            write_cache_sidecar(skim_file, manifest)
+            self.publish_message(
+                f"[SkimTask] Cache sidecar written for '{dataset.name}': "
+                f"{skim_file}"
+            )
 
         self.publish_message(f"Skim done for '{dataset.name}': {result}")
         with self.output().open("w") as fh:
@@ -477,6 +682,40 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
                     f"Skim output not found for dataset '{dataset.name}': "
                     f"{skim_file!r}.  Run SkimTask --name {self.skim_name!r} first."
                 )
+
+            # ---- validate skim cache before consuming it -------------------
+            current_prov = _build_task_provenance(
+                submit_config_path=self.submit_config,
+                dataset_manifest_path=self.dataset_manifest,
+            )
+            cache_status = check_cache_validity(
+                skim_file, current_provenance=current_prov
+            )
+            if cache_status == ArtifactResolutionStatus.COMPATIBLE:
+                self.publish_message(
+                    f"[HistFillTask] Skim cache compatible for '{dataset.name}': "
+                    f"reusing {skim_file}"
+                )
+            elif cache_status == ArtifactResolutionStatus.STALE:
+                self.publish_message(
+                    f"[HistFillTask] WARNING: Skim cache stale for '{dataset.name}': "
+                    "provenance has changed but schema is current.  "
+                    f"Proceeding with existing skim at {skim_file}.  "
+                    "Re-run SkimTask to regenerate with current provenance."
+                )
+            else:
+                # MUST_REGENERATE – the skim file exists but the sidecar is
+                # absent or records an incompatible schema version.  Warn and
+                # proceed; the file can still be consumed, but provenance
+                # cannot be verified.
+                self.publish_message(
+                    f"[HistFillTask] WARNING: Skim cache unverifiable for "
+                    f"'{dataset.name}' (status={cache_status.value}): "
+                    "no valid cache sidecar found.  "
+                    f"Proceeding with {skim_file}.  "
+                    "Re-run SkimTask to write a provenance sidecar."
+                )
+
             extra_overrides["fileList"] = skim_file
         elif not dataset.files and not dataset.das:
             raise RuntimeError(
