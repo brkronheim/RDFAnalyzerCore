@@ -108,6 +108,23 @@ public:
    */
   std::vector<std::string> validate() const;
 
+  /**
+   * @brief Return the ordered chain of boolean filter columns from the root
+   *        region down to (and including) the named region.
+   *
+   * For a root region "presel" with filterColumn "pass_presel" the chain is
+   * @c {"pass_presel"}.  For a child region "signal" whose parent is "presel"
+   * the chain is @c {"pass_presel", "pass_signal"}.
+   *
+   * The chain can be used to reconstruct the full membership condition for a
+   * region without holding a reference to a filtered RDataFrame node.
+   *
+   * @param name  Name of the declared region.
+   * @return Ordered list of filter column names (root → this region).
+   * @throws std::runtime_error if @p name has not been declared.
+   */
+  std::vector<std::string> getFilterChain(const std::string &name) const;
+
   // -------------------------------------------------------------------------
   // IPluggableManager interface
   // -------------------------------------------------------------------------

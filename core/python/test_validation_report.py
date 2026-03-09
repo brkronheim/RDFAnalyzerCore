@@ -39,11 +39,14 @@ from validation_report import (
     EventCountEntry,
     MissingBranchEntry,
     OutputIntegrityEntry,
+    RegionEntry,
+    RegionReferenceEntry,
     ReportSeverity,
     SystematicEntry,
     ValidationReport,
     WeightSummaryEntry,
     generate_report_from_manifest,
+    validate_region_references,
 )
 from output_schema import (
     CutflowSchema,
@@ -774,3 +777,163 @@ class TestCLIMain:
         with open(out_text) as fh:
             content = fh.read()
         assert "VALIDATION REPORT" in content
+
+
+# ---------------------------------------------------------------------------
+# RegionReferenceEntry
+# ---------------------------------------------------------------------------
+
+
+class TestRegionReferenceEntry:
+    def test_known_reference_is_valid(self):
+        e = RegionReferenceEntry(
+            config_type="histogram",
+            config_name="pt",
+            referenced_region="signal",
+            is_known=True,
+        )
+        assert e.is_valid is True
+        assert e.is_known is True
+
+    def test_unknown_reference_is_not_valid(self):
+        e = RegionReferenceEntry(
+            config_type="cutflow",
+            config_name="my_cutflow",
+            referenced_region="ghost_region",
+            is_known=False,
+        )
+        assert e.is_valid is False
+        assert e.is_known is False
+
+    def test_default_is_known_true(self):
+        e = RegionReferenceEntry(
+            config_type="histogram",
+            config_name="eta",
+            referenced_region="presel",
+        )
+        assert e.is_known is True
+
+
+# ---------------------------------------------------------------------------
+# validate_region_references()
+# ---------------------------------------------------------------------------
+
+
+class TestValidateRegionReferences:
+    def test_all_known_no_errors(self):
+        report = ValidationReport(stage="test")
+        validate_region_references(
+            report,
+            known_regions=["signal", "control", "presel"],
+            referenced=[
+                {"config_type": "histogram", "config_name": "pt",  "region": "signal"},
+                {"config_type": "histogram", "config_name": "eta", "region": "presel"},
+            ],
+        )
+        assert len(report.region_references) == 2
+        assert all(e.is_known for e in report.region_references)
+        assert report.has_errors is False
+
+    def test_unknown_region_causes_has_errors(self):
+        report = ValidationReport(stage="test")
+        validate_region_references(
+            report,
+            known_regions=["signal"],
+            referenced=[
+                {"config_type": "histogram", "config_name": "pt", "region": "ghost"},
+            ],
+        )
+        assert report.has_errors is True
+        assert report.region_references[0].is_known is False
+
+    def test_empty_referenced_list(self):
+        report = ValidationReport(stage="test")
+        validate_region_references(report, known_regions=["signal"], referenced=[])
+        assert len(report.region_references) == 0
+        assert report.has_errors is False
+
+    def test_mixed_known_and_unknown(self):
+        report = ValidationReport(stage="test")
+        validate_region_references(
+            report,
+            known_regions=["signal"],
+            referenced=[
+                {"config_type": "histogram", "config_name": "pt", "region": "signal"},
+                {"config_type": "cutflow", "config_name": "myCF", "region": "missing"},
+            ],
+        )
+        known   = [e for e in report.region_references if e.is_known]
+        unknown = [e for e in report.region_references if not e.is_known]
+        assert len(known) == 1
+        assert len(unknown) == 1
+        assert unknown[0].referenced_region == "missing"
+
+
+# ---------------------------------------------------------------------------
+# ValidationReport: region_references round-trips
+# ---------------------------------------------------------------------------
+
+
+class TestValidationReportRegionReferences:
+    def test_add_region_reference(self):
+        report = ValidationReport(stage="histogram")
+        report.add_region_reference(
+            RegionReferenceEntry("histogram", "pt", "signal", True)
+        )
+        assert len(report.region_references) == 1
+
+    def test_has_errors_unknown_reference(self):
+        report = ValidationReport(stage="x")
+        report.add_region_reference(
+            RegionReferenceEntry("histogram", "pt", "ghost", False)
+        )
+        assert report.has_errors is True
+
+    def test_to_dict_includes_region_references(self):
+        report = ValidationReport(stage="x")
+        report.add_region_reference(
+            RegionReferenceEntry("cutflow", "cf", "signal", True)
+        )
+        d = report.to_dict()
+        assert "region_references" in d
+        assert d["region_references"][0]["referenced_region"] == "signal"
+        assert d["summary"]["n_region_references"] == 1
+
+    def test_from_dict_round_trip(self):
+        report = ValidationReport(stage="x")
+        report.add_region_reference(
+            RegionReferenceEntry("histogram", "eta", "control", False)
+        )
+        d = report.to_dict()
+        restored = ValidationReport.from_dict(d)
+        assert len(restored.region_references) == 1
+        e = restored.region_references[0]
+        assert e.config_type == "histogram"
+        assert e.config_name == "eta"
+        assert e.referenced_region == "control"
+        assert e.is_known is False
+
+    def test_to_text_includes_region_references_section(self):
+        report = ValidationReport(stage="x")
+        report.add_region_reference(
+            RegionReferenceEntry("histogram", "pt", "signal", True)
+        )
+        report.add_region_reference(
+            RegionReferenceEntry("cutflow", "cf", "ghost", False)
+        )
+        text = report.to_text()
+        assert "REGION REFERENCES" in text
+        assert "signal" in text
+        assert "ghost" in text
+        assert "UNKNOWN" in text
+
+    def test_to_yaml_round_trip_preserves_region_references(self):
+        report = ValidationReport(stage="yaml_rt")
+        report.add_region_reference(
+            RegionReferenceEntry("histogram", "mass", "presel", True)
+        )
+        restored = ValidationReport.from_dict(
+            __import__("yaml").safe_load(report.to_yaml())
+        )
+        assert len(restored.region_references) == 1
+        assert restored.region_references[0].referenced_region == "presel"

@@ -4,6 +4,7 @@
 #include <api/IPluggableManager.h>
 #include <DataManager.h>
 #include <NDHistogramManager.h>
+#include <RegionManager.h>
 #include <CounterService.h>
 #include <TFile.h>
 #include <TH1F.h>
@@ -22,6 +23,10 @@
  * @brief Construct a new NDHistogramManager object
  */
 NDHistogramManager::NDHistogramManager(IConfigurationProvider const& configProvider) {}
+
+void NDHistogramManager::bindToRegionManager(RegionManager *rm) {
+  regionManager_m = rm;
+}
 
 struct ColumnCache {
   ROOT::RDF::RNode& df;
@@ -104,7 +109,14 @@ static void HandleAxisVarVector(
         varVector.push_back(systVectorName);
     } else {
         if (hasMultiFill) {
-            varVector.push_back(variable);
+            const std::string colType = cache.GetType(variable);
+            if (colType.find("RVec") == std::string::npos && !refVector.empty()) {
+              // Scalar variable in multi-fill context: expand to match refVector.
+              varVector.push_back(ensureExpandedVector(variable));
+            } else {
+              // Already an RVec, or no refVector to expand against: use as-is.
+              varVector.push_back(variable);
+            }
         } else {
         if (!refVector.empty()) {
           varVector.push_back(ensureExpandedVector(variable));
@@ -221,7 +233,8 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
     selectionInfo &&controlRegionInfo,
     selectionInfo &&channelInfo,
     std::string suffix,
-    const std::vector<std::string> &systList) {
+    const std::vector<std::string> &systList,
+    const std::string &baseRefVector) {
 
   // get the dataframe
   if(dataManager_m == nullptr) {
@@ -317,8 +330,18 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
 
   // Build column vectors in the order expected by THnMulti::Exec:
   // baseValues, baseWeights, systematic, sampleCategory, controlRegion, channel, nFills
+  //
+  // When baseRefVector is non-empty (region-aware booking), scalar base
+  // variables and their systematic variations are expanded to match the size
+  // of the reference (the region membership RVec) so that multi-fill works
+  // correctly without an extra event-loop pass.
   std::vector<std::string> baseValsVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.variable(), fillInfo.hasSystematic, fillInfo.hasMultiFill, usedSystematics, baseValsVec, false, {}, uniqueTag);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.variable(),
+                      fillInfo.hasSystematic, fillInfo.hasMultiFill, usedSystematics,
+                      baseValsVec, false,
+                      baseRefVector.empty() ? std::vector<std::string>{}
+                                            : std::vector<std::string>{baseRefVector},
+                      uniqueTag);
   std::vector<std::string> baseWeightsVec;
   HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.weight(), fillInfo.weight_hasSystematic, fillInfo.weight_hasMultiFill, usedSystematics, baseWeightsVec, true, {baseValsVec.front()}, uniqueTag);
 
@@ -813,7 +836,90 @@ void NDHistogramManager::setupFromConfigFile() {
 }
 
 /**
+ * @brief Ensure the region membership RVec column exists on the dataframe.
+ *
+ * The column `__rm_region_membership__` holds, per event, the 1-indexed float
+ * IDs of every declared region the event belongs to.  A value of 0.0 means
+ * "not in this region" – it maps to the underflow bin (index < 1) and is
+ * therefore silently ignored by the ROOT output code.
+ *
+ * Because DefineVector builds a compact scalar expression, no extra event-loop
+ * pass is triggered; the column is computed lazily alongside everything else.
+ */
+std::string NDHistogramManager::ensureRegionMembershipColumn() {
+  static const std::string kMembershipCol = "__rm_region_membership__";
+  if (!regionManager_m) return kMembershipCol;
+
+  ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+  const auto existingCols = df.GetColumnNames();
+  if (std::find(existingCols.begin(), existingCols.end(), kMembershipCol) !=
+      existingCols.end()) {
+    return kMembershipCol; // already defined
+  }
+
+  const auto &regionNames = regionManager_m->getRegionNames();
+  if (regionNames.empty()) return kMembershipCol;
+
+  // Step 1: For each region, define a boolean column whose value is true when
+  //         the event satisfies the FULL ancestor filter chain.
+  //         These are simple AND-expressions; RDF JIT-compiles them.
+  std::vector<std::string> boolColNames;
+  for (const auto &name : regionNames) {
+    const std::string boolCol = "__rm_in_region_" + name + "__";
+    boolColNames.push_back(boolCol);
+
+    const auto existingNow = dataManager_m->getDataFrame().GetColumnNames();
+    if (std::find(existingNow.begin(), existingNow.end(), boolCol) !=
+        existingNow.end()) {
+      continue; // already defined (e.g. called twice)
+    }
+
+    const auto chain = regionManager_m->getFilterChain(name);
+    std::string expr = chain[0];
+    for (std::size_t j = 1; j < chain.size(); ++j) {
+      expr += " && " + chain[j];
+    }
+    // Wrap as bool cast to be safe with different column types.
+    expr = "static_cast<bool>(" + expr + ")";
+    df = df.Define(boolCol, expr);
+    dataManager_m->setDataFrame(df);
+  }
+
+  // Step 2: For each region, define a float-index column:
+  //         __rm_ridx_<name>__ = bool ? float(i+1) : 0.0f
+  //         (0.0 falls below lowerBound=0.5 → underflow → not counted)
+  std::vector<std::string> idxColNames;
+  for (std::size_t i = 0; i < regionNames.size(); ++i) {
+    const std::string idxCol = "__rm_ridx_" + regionNames[i] + "__";
+    idxColNames.push_back(idxCol);
+
+    const auto existingNow = dataManager_m->getDataFrame().GetColumnNames();
+    if (std::find(existingNow.begin(), existingNow.end(), idxCol) !=
+        existingNow.end()) {
+      continue;
+    }
+
+    const std::string expr =
+        "static_cast<float>(" + boolColNames[i] + ") * " +
+        std::to_string(static_cast<float>(i + 1)) + "f";
+    df = df.Define(idxCol, expr);
+    dataManager_m->setDataFrame(df);
+  }
+
+  // Step 3: Use DefineVector to pack the per-region float indices into a
+  //         single RVec<Float_t>.  DataManager::DefineVector builds a compact
+  //         brace-initializer expression for scalar inputs – no JIT overhead.
+  dataManager_m->DefineVector(kMembershipCol, idxColNames, "Float_t",
+                               *systematicManager_m);
+  return kMembershipCol;
+}
+
+/**
  * @brief Book histograms defined in config file
+ *
+ * When a RegionManager is bound, each config histogram is booked once as a
+ * single large THnSparse with an additional region axis.  All bookings are
+ * lazy, so the event loop runs exactly once.
  */
 void NDHistogramManager::bookConfigHistograms() {
   if (configHistograms_m.empty()) {
@@ -826,34 +932,86 @@ void NDHistogramManager::bookConfigHistograms() {
 
   if (logger_m) {
     std::stringstream msg;
-    msg << "NDHistogramManager: Booking " << configHistograms_m.size() 
+    msg << "NDHistogramManager: Booking " << configHistograms_m.size()
         << " histograms from config";
+    if (regionManager_m && !regionManager_m->getRegionNames().empty()) {
+      msg << " with region axis ("
+          << regionManager_m->getRegionNames().size() << " region(s))";
+    }
     logger_m->log(ILogger::Level::Info, msg.str());
   }
 
+  // Build the region membership column once (no-op if already done or no RM).
+  std::string membershipCol;
+  std::vector<std::string> rmRegionNames;
+  int nRegions = 0;
+  if (regionManager_m && !regionManager_m->getRegionNames().empty()) {
+    membershipCol = ensureRegionMembershipColumn();
+    rmRegionNames = regionManager_m->getRegionNames();
+    nRegions = static_cast<int>(rmRegionNames.size());
+  }
+
+  const std::vector<std::string> systList =
+      systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+
   for (const auto &config : configHistograms_m) {
-    // Create histInfo object
-    histInfo info(config.name.c_str(), config.variable.c_str(), 
+    histInfo info(config.name.c_str(), config.variable.c_str(),
                   config.label.c_str(), config.weight.c_str(),
                   config.bins, config.lowerBound, config.upperBound);
 
-    // Create selectionInfo objects
-    selectionInfo channelInfo(config.channelVariable, config.channelBins,
-                              config.channelLowerBound, config.channelUpperBound,
-                              config.channelRegions);
+    if (nRegions > 0) {
+      // Region-aware path: override the channel axis with the region
+      // membership RVec.  Axis range [0.5, N+0.5] with N bins ensures that
+      // index 0 (event not in this region) falls to underflow (ignored).
+      selectionInfo regionChannelInfo(membershipCol, nRegions,
+                                      0.5f,
+                                      static_cast<float>(nRegions) + 0.5f,
+                                      rmRegionNames);
 
-    selectionInfo controlRegionInfo(config.controlRegionVariable, config.controlRegionBins,
-                                    config.controlRegionLowerBound, config.controlRegionUpperBound,
-                                    config.controlRegionRegions);
+      selectionInfo controlRegionInfo(config.controlRegionVariable,
+                                      config.controlRegionBins,
+                                      config.controlRegionLowerBound,
+                                      config.controlRegionUpperBound,
+                                      config.controlRegionRegions);
 
-    selectionInfo sampleCategoryInfo(config.sampleCategoryVariable, config.sampleCategoryBins,
-                                     config.sampleCategoryLowerBound, config.sampleCategoryUpperBound,
-                                     config.sampleCategoryRegions);
+      selectionInfo sampleCategoryInfo(config.sampleCategoryVariable,
+                                       config.sampleCategoryBins,
+                                       config.sampleCategoryLowerBound,
+                                       config.sampleCategoryUpperBound,
+                                       config.sampleCategoryRegions);
 
-    // Book the histogram
-    BookSingleHistogram(info, std::move(sampleCategoryInfo), 
-                       std::move(controlRegionInfo), std::move(channelInfo),
-                       config.suffix);
+      // Pass the membership column as baseRefVector so that scalar base
+      // variables (and their systematic variations) are expanded to the same
+      // size as the region RVec – required for correct multi-fill behaviour.
+      BookSingleHistogramWithSystList(info,
+                                      std::move(sampleCategoryInfo),
+                                      std::move(controlRegionInfo),
+                                      std::move(regionChannelInfo),
+                                      config.suffix,
+                                      systList,
+                                      membershipCol);
+    } else {
+      // Standard (non-region) path: existing behaviour unchanged.
+      selectionInfo channelInfo(config.channelVariable, config.channelBins,
+                                config.channelLowerBound, config.channelUpperBound,
+                                config.channelRegions);
+      selectionInfo controlRegionInfo(config.controlRegionVariable,
+                                      config.controlRegionBins,
+                                      config.controlRegionLowerBound,
+                                      config.controlRegionUpperBound,
+                                      config.controlRegionRegions);
+      selectionInfo sampleCategoryInfo(config.sampleCategoryVariable,
+                                       config.sampleCategoryBins,
+                                       config.sampleCategoryLowerBound,
+                                       config.sampleCategoryUpperBound,
+                                       config.sampleCategoryRegions);
+      BookSingleHistogramWithSystList(info,
+                                      std::move(sampleCategoryInfo),
+                                      std::move(controlRegionInfo),
+                                      std::move(channelInfo),
+                                      config.suffix,
+                                      systList);
+    }
   }
 
   if (logger_m) {

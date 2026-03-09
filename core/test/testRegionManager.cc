@@ -367,6 +367,97 @@ TEST_F(RegionManagerTest, InitializeAfterValidHierarchyDoesNotThrow) {
   EXPECT_NO_THROW(mgr->initialize());
 }
 
+// ---------------------------------------------------------------------------
+// getFilterChain()
+// ---------------------------------------------------------------------------
+
+TEST_F(RegionManagerTest, GetFilterChainForUnknownRegionThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  EXPECT_THROW(mgr->getFilterChain("nonexistent"), std::runtime_error);
+}
+
+TEST_F(RegionManagerTest, GetFilterChainRootRegionReturnsSingleElement) {
+  auto dm = std::make_unique<DataManager>(4);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("pass_r", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  mgr->declareRegion("r", "pass_r");
+
+  const auto chain = mgr->getFilterChain("r");
+  ASSERT_EQ(chain.size(), 1u);
+  EXPECT_EQ(chain[0], "pass_r");
+}
+
+TEST_F(RegionManagerTest, GetFilterChainChildRegionIncludesAncestors) {
+  auto dm = std::make_unique<DataManager>(4);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("pass_parent", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  dm->Define("pass_child",  [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+
+  mgr->declareRegion("parent", "pass_parent");
+  mgr->declareRegion("child",  "pass_child", "parent");
+
+  const auto chain = mgr->getFilterChain("child");
+  ASSERT_EQ(chain.size(), 2u);
+  EXPECT_EQ(chain[0], "pass_parent"); // root first
+  EXPECT_EQ(chain[1], "pass_child");
+}
+
+TEST_F(RegionManagerTest, GetFilterChainThreeLevels) {
+  auto dm = std::make_unique<DataManager>(4);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("pass_l1", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  dm->Define("pass_l2", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  dm->Define("pass_l3", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+
+  mgr->declareRegion("l1", "pass_l1");
+  mgr->declareRegion("l2", "pass_l2", "l1");
+  mgr->declareRegion("l3", "pass_l3", "l2");
+
+  const auto chain = mgr->getFilterChain("l3");
+  ASSERT_EQ(chain.size(), 3u);
+  EXPECT_EQ(chain[0], "pass_l1");
+  EXPECT_EQ(chain[1], "pass_l2");
+  EXPECT_EQ(chain[2], "pass_l3");
+}
+
+TEST_F(RegionManagerTest, GetFilterChainSiblingRegionsAreIndependent) {
+  auto dm = std::make_unique<DataManager>(4);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("pass_presel",  [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  dm->Define("pass_signal",  [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  dm->Define("pass_control", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+
+  mgr->declareRegion("presel",  "pass_presel");
+  mgr->declareRegion("signal",  "pass_signal",  "presel");
+  mgr->declareRegion("control", "pass_control", "presel");
+
+  // "signal" and "control" share the "presel" prefix but diverge at their own filter.
+  const auto signalChain  = mgr->getFilterChain("signal");
+  const auto controlChain = mgr->getFilterChain("control");
+
+  ASSERT_EQ(signalChain.size(),  2u);
+  EXPECT_EQ(signalChain[0], "pass_presel");
+  EXPECT_EQ(signalChain[1], "pass_signal");
+
+  ASSERT_EQ(controlChain.size(), 2u);
+  EXPECT_EQ(controlChain[0], "pass_presel");
+  EXPECT_EQ(controlChain[1], "pass_control");
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
