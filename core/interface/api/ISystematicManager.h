@@ -17,6 +17,18 @@ public:
     virtual ~ISystematicManager() = default;
 
     /**
+     * @brief Canonical branch name used for systematic counter columns.
+     *
+     * All callers that need a systematic counter branch should pass this
+     * constant to makeSystList() unless they specifically require an
+     * isolated namespace.  Using a shared canonical name means the counter
+     * columns (e.g. "SystematicCounter", "SystematicCounter_jesUp", …) are
+     * defined exactly once in the dataframe regardless of how many plugins or
+     * services call makeSystList().
+     */
+    static constexpr const char* CANONICAL_SYST_BRANCH_NAME = "SystematicCounter";
+
+    /**
      * @brief Register a systematic and its affected variables
      * @param syst Name of the systematic
      * @param affectedVariables Set of affected variable names
@@ -54,10 +66,38 @@ public:
 
     /**
      * @brief Make a list of systematic variations for a branch
-     * @param branchName Name of the branch
-     * @return Vector of systematic variation names
+     *
+     * Defines integer counter columns under @p branchName in @p dataManager
+     * (e.g. @p branchName = 0, @p branchName + "_syst1Up" = 1, …) and
+     * returns the corresponding ordered variation labels.
+     *
+     * The column-definition step is performed only the **first** time this
+     * method is called for a given @p branchName; subsequent calls with the
+     * same name are no-ops for column definition and return the cached list.
+     *
+     * **Canonical usage**: pass ISystematicManager::CANONICAL_SYST_BRANCH_NAME
+     * ("SystematicCounter") unless you need a separate counter namespace.
+     * All callers sharing the same @p branchName will receive an identical
+     * systList that is consistent with the counter columns already in the
+     * dataframe.
+     *
+     * @param branchName Base name for the counter columns (e.g. "SystematicCounter")
+     * @param dataManager Reference to the dataframe provider
+     * @return Ordered vector of variation labels: {"Nominal", "syst1Up", "syst1Down", …}
      */
     virtual std::vector<std::string> makeSystList(const std::string &branchName, IDataFrameProvider &dataManager) = 0;
+
+    /**
+     * @brief Check whether counter columns have already been materialized for branchName
+     *
+     * Returns true once makeSystList() has completed for @p branchName at
+     * least once, indicating that the corresponding counter columns exist in
+     * the dataframe and the associated systList is cached.
+     *
+     * @param branchName The branch namespace to check
+     * @return True if makeSystList has already been called for this branchName
+     */
+    virtual bool isBranchNameMaterialized(const std::string &branchName) const = 0;
 
     /**
      * @brief Check whether a given systematic variation is registered for a variable
