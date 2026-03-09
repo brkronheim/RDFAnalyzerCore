@@ -77,6 +77,97 @@ void SystematicManager::registerExistingSystematics(
   }
 }
 
+/**
+ * @brief Automatically discover and register systematic variations from column names.
+ *
+ * Scans @p columnNames for pairs of columns following the naming convention
+ * `baseVariable_systematicNameUp` / `baseVariable_systematicNameDown`.  For
+ * every complete pair found, registers the systematic as affecting the base
+ * variable.  Incomplete pairs are reported in the returned result.
+ */
+SystematicValidationResult SystematicManager::autoRegisterSystematics(
+    const std::vector<std::string> &columnNames) {
+
+  const std::unordered_set<std::string> colSet(columnNames.begin(), columnNames.end());
+  SystematicValidationResult result;
+
+  // Track (baseVar, systName) keys we have already processed to avoid
+  // reporting or registering the same pair twice.
+  std::unordered_set<std::string> processedPairs;
+
+  // --- Pass 1: scan for columns ending with "Up" ---
+  for (const auto &col : columnNames) {
+    static constexpr std::size_t kUpLen = 2; // "Up"
+    if (col.size() <= kUpLen) {
+      continue;
+    }
+    if (col.compare(col.size() - kUpLen, kUpLen, "Up") != 0) {
+      continue;
+    }
+
+    // prefix = "baseVar_systName"
+    const std::string prefix = col.substr(0, col.size() - kUpLen);
+    const std::size_t lastUnderscore = prefix.rfind('_');
+    if (lastUnderscore == std::string::npos || lastUnderscore == 0) {
+      continue;
+    }
+
+    const std::string baseVar  = prefix.substr(0, lastUnderscore);
+    const std::string systName = prefix.substr(lastUnderscore + 1);
+    if (baseVar.empty() || systName.empty()) {
+      continue;
+    }
+
+    const std::string pairKey = baseVar + "_" + systName;
+    if (processedPairs.count(pairKey)) {
+      continue;
+    }
+    processedPairs.insert(pairKey);
+
+    const std::string downCol = prefix + "Down";
+    if (colSet.count(downCol)) {
+      registerSystematic(systName, {baseVar});
+      result.registered.emplace_back(baseVar, systName);
+    } else {
+      result.missingDown.push_back(col);
+    }
+  }
+
+  // --- Pass 2: scan for orphaned "Down" columns (no matching "Up") ---
+  for (const auto &col : columnNames) {
+    static constexpr std::size_t kDownLen = 4; // "Down"
+    if (col.size() <= kDownLen) {
+      continue;
+    }
+    if (col.compare(col.size() - kDownLen, kDownLen, "Down") != 0) {
+      continue;
+    }
+
+    const std::string prefix = col.substr(0, col.size() - kDownLen);
+    const std::size_t lastUnderscore = prefix.rfind('_');
+    if (lastUnderscore == std::string::npos || lastUnderscore == 0) {
+      continue;
+    }
+
+    const std::string baseVar  = prefix.substr(0, lastUnderscore);
+    const std::string systName = prefix.substr(lastUnderscore + 1);
+    if (baseVar.empty() || systName.empty()) {
+      continue;
+    }
+
+    const std::string pairKey = baseVar + "_" + systName;
+    if (processedPairs.count(pairKey)) {
+      continue; // already handled (complete pair) in Pass 1
+    }
+
+    // Up column does not exist and we haven't processed this key yet.
+    result.missingUp.push_back(col);
+    processedPairs.insert(pairKey); // avoid duplicate missingUp entries
+  }
+
+  return result;
+}
+
 
 /**
  * @brief Make a list of systematic variations and define counter columns for branchName

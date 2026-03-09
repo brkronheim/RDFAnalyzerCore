@@ -56,6 +56,14 @@ public:
                                    const std::vector<std::string> &columnList);
 
   /**
+   * @brief Automatically discover and register systematic variations from column names.
+   *
+   * See ISystematicManager::autoRegisterSystematics for full semantics.
+   */
+  SystematicValidationResult autoRegisterSystematics(
+      const std::vector<std::string> &columnNames) override;
+
+  /**
    * @brief Make a list of systematic variations for a branch
    *
    * See ISystematicManager::makeSystList for full semantics.

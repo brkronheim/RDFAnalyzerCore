@@ -373,6 +373,32 @@ public:
         return *this;
     }
 
+    /// Python-friendly wrapper for autoRegisterSystematics().
+    /// Returns a dict with keys "registered" (list of "baseVar:systName" strings),
+    /// "missing_down" (list of column names), and "missing_up" (list of column names).
+    py::dict autoRegisterSystematics(const std::vector<std::string>& columnList) {
+        const SystematicValidationResult res =
+            analyzer_.getSystematicManager().autoRegisterSystematics(columnList);
+
+        py::list registered;
+        for (const auto& p : res.registered) {
+            registered.append(p.first + ":" + p.second);
+        }
+        py::list missingDown;
+        for (const auto& col : res.missingDown) {
+            missingDown.append(col);
+        }
+        py::list missingUp;
+        for (const auto& col : res.missingUp) {
+            missingUp.append(col);
+        }
+        py::dict result;
+        result["registered"]   = registered;
+        result["missing_down"] = missingDown;
+        result["missing_up"]   = missingUp;
+        return result;
+    }
+
     std::vector<std::string> makeSystList(const std::string& branchName) {
         return analyzer_.getSystematicManager().makeSystList(branchName, analyzer_.getDataFrameProvider());
     }
@@ -907,6 +933,11 @@ PYBIND11_MODULE(rdfanalyzer, m) {
                py::arg("columnList"),
                "Register existing systematics from config",
                py::return_value_policy::reference_internal)
+           .def("autoRegisterSystematics", &AnalyzerPythonWrapper::autoRegisterSystematics,
+               py::arg("columnList"),
+               "Automatically discover and register systematic variations from column names. "
+               "Returns a dict with keys 'registered' (list of 'baseVar:systName' strings), "
+               "'missing_down', and 'missing_up'.")
            .def("makeSystList", &AnalyzerPythonWrapper::makeSystList,
                py::arg("branchName"),
                "Compute systematic variation list for a branch")

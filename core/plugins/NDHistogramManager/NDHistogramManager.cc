@@ -200,12 +200,60 @@ static bool HasSystematicColumns(
 }
 
 /**
- * @brief Book N-dimensional histograms
- * @param infos Vector of histogram info objects
- * @param selection Vector of selection info objects
- * @param suffix Suffix to append to histogram names
- * @param allRegionNames Vector of region name vectors
+ * @brief Automatically detect and register systematic variations from the
+ *        current dataframe columns before the first histogram booking.
+ *
+ * Scans all available dataframe columns for `baseVar_systUp`/`baseVar_systDown`
+ * pairs and registers them with the SystematicManager.  Incomplete pairs are
+ * reported as warnings via the logger.
+ *
+ * This is a no-op if the canonical SystematicCounter branch has already been
+ * materialised (i.e. makeSystList() was already called), because the cached
+ * syst list cannot be extended after the fact.
  */
+void NDHistogramManager::ensureSystematicsAutoRegistered() {
+  if (!systematicManager_m || !dataManager_m) {
+    return;
+  }
+  // If makeSystList() has already been called the syst list is cached; adding
+  // new systematics would be silently ignored.  Skip to avoid confusion.
+  if (systematicManager_m->isBranchNameMaterialized(
+          ISystematicManager::CANONICAL_SYST_BRANCH_NAME)) {
+    return;
+  }
+
+  auto df = dataManager_m->getDataFrame();
+  const auto rawColNames = df.GetColumnNames();
+  const std::vector<std::string> columnNames(rawColNames.begin(), rawColNames.end());
+
+  const SystematicValidationResult result =
+      systematicManager_m->autoRegisterSystematics(columnNames);
+
+  if (!logger_m) {
+    return;
+  }
+
+  if (!result.registered.empty()) {
+    std::stringstream msg;
+    msg << "NDHistogramManager: Auto-detected "
+        << result.registered.size() << " systematic variation(s): ";
+    for (const auto &p : result.registered) {
+      msg << p.second << "(" << p.first << ") ";
+    }
+    logger_m->log(ILogger::Level::Info, msg.str());
+  }
+  for (const auto &col : result.missingDown) {
+    logger_m->log(ILogger::Level::Warn,
+                  "NDHistogramManager: Systematic column '" + col +
+                  "' has no corresponding Down variation; this variation will be excluded.");
+  }
+  for (const auto &col : result.missingUp) {
+    logger_m->log(ILogger::Level::Warn,
+                  "NDHistogramManager: Systematic column '" + col +
+                  "' has no corresponding Up variation; this variation will be excluded.");
+  }
+}
+
 void NDHistogramManager::BookSingleHistogram(
     histInfo &info, // histogram info (name, bins, lowerBound, upperBound)
     selectionInfo &&sampleCategoryInfo, // selection info (variable, bins, lowerBound, upperBound)
@@ -217,6 +265,7 @@ void NDHistogramManager::BookSingleHistogram(
     throw std::runtime_error("NDHistogramManager::BookSingleHistogram: DataManager not set");
   }
 
+  ensureSystematicsAutoRegistered();
   const std::vector<std::string> systList =
       systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
   BookSingleHistogramWithSystList(info,
@@ -449,6 +498,10 @@ void NDHistogramManager::bookND(std::vector<histInfo> &infos,
   normalizedRegionNames.emplace_back(allRegionNames.size() > 0 ? allRegionNames[0] : channelInfo.regions());
   normalizedRegionNames.emplace_back(allRegionNames.size() > 1 ? allRegionNames[1] : controlInfo.regions());
   normalizedRegionNames.emplace_back(allRegionNames.size() > 2 ? allRegionNames[2] : sampleInfo.regions());
+
+  // Auto-detect systematic variations from dataframe columns before building
+  // the syst list for the first time.
+  ensureSystematicsAutoRegistered();
 
   // Append systematic axis info if not already appended
   const std::vector<std::string> systList = systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
@@ -950,6 +1003,10 @@ void NDHistogramManager::bookConfigHistograms() {
     rmRegionNames = regionManager_m->getRegionNames();
     nRegions = static_cast<int>(rmRegionNames.size());
   }
+
+  // Auto-detect systematic variations from dataframe columns before the syst
+  // list is built for the first time.
+  ensureSystematicsAutoRegistered();
 
   const std::vector<std::string> systList =
       systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
