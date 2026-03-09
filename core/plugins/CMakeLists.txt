@@ -11,6 +11,7 @@ set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/NamedObjectManager
     ${CMAKE_CURRENT_SOURCE_DIR}/OnnxManager
     ${CMAKE_CURRENT_SOURCE_DIR}/SofieManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/WeightManager
 )
 
 # Create static library
@@ -26,6 +27,7 @@ add_subdirectory(NDHistogramManager)
 add_subdirectory(TriggerManager)
 add_subdirectory(OnnxManager)
 add_subdirectory(SofieManager)
+add_subdirectory(WeightManager)
 
 # Link all plugin libraries to corePlugins
 target_link_libraries(corePlugins
@@ -38,6 +40,7 @@ target_link_libraries(corePlugins
     TriggerManager
     OnnxManager
     SofieManager
+    WeightManager
     core
     fastforest
     correctionlib
