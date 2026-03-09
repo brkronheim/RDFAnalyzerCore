@@ -46,6 +46,9 @@ Version history
    * - ``IntermediateArtifactSchema``
      - 1
      - Initial definition: artifact_kind, output_file, tree_name, columns.
+   * - ``RegionDefinition``
+     - 1
+     - Initial definition: name, filter_column, parent, description.
    * - ``OutputManifest``
      - 1
      - Initial definition: combines all schema types.
@@ -123,6 +126,8 @@ CUTFLOW_SCHEMA_VERSION: int = 1
 LAW_ARTIFACT_SCHEMA_VERSION: int = 1
 #: Current version of :class:`IntermediateArtifactSchema`.
 INTERMEDIATE_ARTIFACT_SCHEMA_VERSION: int = 1
+#: Current version of :class:`RegionDefinition`.
+REGION_DEFINITION_VERSION: int = 1
 #: Current version of :class:`OutputManifest`.
 OUTPUT_MANIFEST_VERSION: int = 1
 
@@ -134,6 +139,7 @@ SCHEMA_REGISTRY: Dict[str, int] = {
     "cutflow": CUTFLOW_SCHEMA_VERSION,
     "law_artifact": LAW_ARTIFACT_SCHEMA_VERSION,
     "intermediate_artifact": INTERMEDIATE_ARTIFACT_SCHEMA_VERSION,
+    "region_definition": REGION_DEFINITION_VERSION,
     "output_manifest": OUTPUT_MANIFEST_VERSION,
 }
 
@@ -900,6 +906,158 @@ class IntermediateArtifactSchema:
         return errors
 
 # ---------------------------------------------------------------------------
+# RegionDefinition
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RegionDefinition:
+    """Schema definition for a single named analysis region.
+
+    Regions are declared in user analysis code via ``RegionManager`` and
+    describe a named sub-sample of events selected by a boolean filter column.
+    Regions may form a hierarchy: a child region applies its own filter on top
+    of its parent's filtered dataset.
+
+    Attributes
+    ----------
+    schema_version : int
+        Schema format version.  Must equal :attr:`CURRENT_VERSION`.
+    name : str
+        Unique region name (e.g. ``"signal"``, ``"control_wjets"``).
+    filter_column : str
+        Name of the boolean dataframe column that selects events in this
+        region.
+    parent : str
+        Name of the parent region, or empty string for a root region
+        (no inheritance).
+    description : str
+        Optional human-readable description of the region.
+    """
+
+    CURRENT_VERSION: ClassVar[int] = REGION_DEFINITION_VERSION
+
+    schema_version: int = REGION_DEFINITION_VERSION
+    name: str = ""
+    filter_column: str = ""
+    parent: str = ""
+    description: str = ""
+
+    # ------------------------------------------------------------------ I/O
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialise to a plain Python dict."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RegionDefinition":
+        """Construct from a dict, ignoring unknown keys."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    # ------------------------------------------------------------------ validation
+
+    def validate(self) -> List[str]:
+        """Return a list of validation error strings (empty = valid)."""
+        errors: List[str] = []
+        if self.schema_version != self.CURRENT_VERSION:
+            errors.append(
+                f"RegionDefinition version mismatch: file has "
+                f"{self.schema_version}, code expects {self.CURRENT_VERSION}."
+            )
+        if not self.name:
+            errors.append("RegionDefinition.name must not be empty.")
+        if not self.filter_column:
+            errors.append(
+                f"RegionDefinition '{self.name}': filter_column must not be empty."
+            )
+        return errors
+
+
+def validate_region_hierarchy(regions: "List[RegionDefinition]") -> List[str]:
+    """Validate a list of :class:`RegionDefinition` objects as a hierarchy.
+
+    Checks for:
+
+    * Empty or duplicate region names.
+    * Regions that reference an unknown parent.
+    * Cycles in the parent→child graph.
+
+    Parameters
+    ----------
+    regions : list[RegionDefinition]
+        Region definitions to validate.  Order does not matter for cycle
+        detection, but parent regions should be declared before their children
+        for ``RegionManager`` to work correctly.
+
+    Returns
+    -------
+    list[str]
+        Validation error strings.  An empty list means the hierarchy is valid.
+    """
+    errors: List[str] = []
+    known_names: Dict[str, int] = {}
+
+    for i, region in enumerate(regions):
+        errors.extend(f"regions[{i}]: {e}" for e in region.validate())
+        if region.name:
+            if region.name in known_names:
+                errors.append(
+                    f"Duplicate region name '{region.name}' at index {i} "
+                    f"(first seen at index {known_names[region.name]})."
+                )
+            else:
+                known_names[region.name] = i
+
+    # Check parent references only after collecting all names so that forward
+    # references (if any) are also caught.
+    for region in regions:
+        if region.parent and region.parent not in known_names:
+            errors.append(
+                f"Region '{region.name}' references unknown parent "
+                f"'{region.parent}'."
+            )
+
+    # Cycle detection using iterative DFS colouring.
+    parent_map: Dict[str, str] = {
+        r.name: r.parent for r in regions if r.name
+    }
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour: Dict[str, int] = {name: WHITE for name in parent_map}
+
+    def _visit(start: str) -> None:
+        stack = [(start, False)]
+        path: List[str] = []
+        while stack:
+            node, returning = stack.pop()
+            if returning:
+                if colour.get(node) == GREY:
+                    colour[node] = BLACK
+                if path and path[-1] == node:
+                    path.pop()
+                continue
+            if colour.get(node, BLACK) == BLACK:
+                continue
+            if colour.get(node) == GREY:
+                # Cycle detected: node already on current DFS path.
+                cycle_str = " -> ".join(path + [node])
+                errors.append(f"Cycle detected in region hierarchy: {cycle_str}")
+                return
+            colour[node] = GREY
+            path.append(node)
+            stack.append((node, True))  # schedule un-grey on return
+            parent = parent_map.get(node, "")
+            if parent and parent in colour:
+                stack.append((parent, False))
+
+    for name in list(parent_map.keys()):
+        if colour.get(name, BLACK) == WHITE:
+            _visit(name)
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # OutputManifest
 # ---------------------------------------------------------------------------
 
@@ -930,6 +1088,9 @@ class OutputManifest:
         Schemas for any intermediate cached artifacts produced by this job
         (preselection outputs, reduced skims, column snapshots, enriched
         skims).  May be empty.
+    regions : list[RegionDefinition]
+        Definitions of all named analysis regions declared by
+        ``RegionManager``.  May be empty when no regions are used.
     framework_hash : str or None
         Git commit hash of the RDFAnalyzerCore framework at job-submission
         time.  Used by :meth:`provenance` and :func:`resolve_manifest` to
@@ -958,6 +1119,7 @@ class OutputManifest:
         cutflow: Optional[CutflowSchema] = None,
         law_artifacts: Optional[List[LawArtifactSchema]] = None,
         intermediate_artifacts: Optional[List["IntermediateArtifactSchema"]] = None,
+        regions: Optional[List["RegionDefinition"]] = None,
         framework_hash: Optional[str] = None,
         user_repo_hash: Optional[str] = None,
         config_mtime: Optional[str] = None,
@@ -970,6 +1132,7 @@ class OutputManifest:
         self.cutflow: Optional[CutflowSchema] = cutflow
         self.law_artifacts: List[LawArtifactSchema] = law_artifacts or []
         self.intermediate_artifacts: List[IntermediateArtifactSchema] = intermediate_artifacts or []
+        self.regions: List[RegionDefinition] = regions or []
         self.framework_hash: Optional[str] = framework_hash
         self.user_repo_hash: Optional[str] = user_repo_hash
         self.config_mtime: Optional[str] = config_mtime
@@ -997,6 +1160,7 @@ class OutputManifest:
             "intermediate_artifacts": [
                 a.to_dict() for a in self.intermediate_artifacts
             ],
+            "regions": [r.to_dict() for r in self.regions],
             "framework_hash": self.framework_hash,
             "user_repo_hash": self.user_repo_hash,
             "config_mtime": self.config_mtime,
@@ -1038,6 +1202,10 @@ class OutputManifest:
             IntermediateArtifactSchema.from_dict(a)
             for a in data.get("intermediate_artifacts", [])
         ]
+        regions = [
+            RegionDefinition.from_dict(r)
+            for r in data.get("regions", [])
+        ]
         dmp_data = data.get("dataset_manifest_provenance")
         dataset_manifest_provenance = (
             DatasetManifestProvenance.from_dict(dmp_data)
@@ -1052,6 +1220,7 @@ class OutputManifest:
             cutflow=cutflow,
             law_artifacts=law_artifacts,
             intermediate_artifacts=intermediate_artifacts,
+            regions=regions,
             framework_hash=data.get("framework_hash"),
             user_repo_hash=data.get("user_repo_hash"),
             config_mtime=data.get("config_mtime"),
@@ -1139,6 +1308,15 @@ class OutputManifest:
             for e in artifact.validate():
                 errors.append(f"intermediate_artifacts[{i}]: {e}")
 
+        # Validate individual region definitions.
+        for i, region in enumerate(self.regions):
+            for e in region.validate():
+                errors.append(f"regions[{i}]: {e}")
+
+        # Validate the region hierarchy (parent references and cycle detection).
+        hierarchy_errors = validate_region_hierarchy(self.regions)
+        errors.extend(hierarchy_errors)
+
         return errors
 
     @staticmethod
@@ -1192,6 +1370,13 @@ class OutputManifest:
                     f"current={INTERMEDIATE_ARTIFACT_SCHEMA_VERSION}"
                 )
 
+        for i, region in enumerate(manifest.regions):
+            if region.schema_version != REGION_DEFINITION_VERSION:
+                mismatches.append(
+                    f"regions[{i}]: stored={region.schema_version}, "
+                    f"current={REGION_DEFINITION_VERSION}"
+                )
+
         if mismatches:
             raise SchemaVersionError(
                 "Output schema version mismatch(es) detected:\n"
@@ -1206,6 +1391,7 @@ class OutputManifest:
             f"metadata={'set' if self.metadata else 'None'}",
             f"cutflow={'set' if self.cutflow else 'None'}",
             f"law_artifacts={len(self.law_artifacts)}",
+            f"regions={len(self.regions)}",
         ]
         return f"OutputManifest({', '.join(parts)})"
 

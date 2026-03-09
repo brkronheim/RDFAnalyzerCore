@@ -80,6 +80,7 @@ class TestConstants:
             "cutflow",
             "law_artifact",
             "intermediate_artifact",
+            "region_definition",
             "output_manifest",
         }
         assert set(SCHEMA_REGISTRY.keys()) == expected

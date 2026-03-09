@@ -7,6 +7,7 @@ set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/KinematicFitManager
     ${CMAKE_CURRENT_SOURCE_DIR}/GoldenJsonManager
     ${CMAKE_CURRENT_SOURCE_DIR}/NDHistogramManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/RegionManager
     ${CMAKE_CURRENT_SOURCE_DIR}/TriggerManager
     ${CMAKE_CURRENT_SOURCE_DIR}/NamedObjectManager
     ${CMAKE_CURRENT_SOURCE_DIR}/OnnxManager
@@ -24,6 +25,7 @@ add_subdirectory(CutflowManager)
 add_subdirectory(KinematicFitManager)
 add_subdirectory(GoldenJsonManager)
 add_subdirectory(NDHistogramManager)
+add_subdirectory(RegionManager)
 add_subdirectory(TriggerManager)
 add_subdirectory(OnnxManager)
 add_subdirectory(SofieManager)
@@ -37,6 +39,7 @@ target_link_libraries(corePlugins
     KinematicFitManager
     GoldenJsonManager
     NDHistogramManager
+    RegionManager
     TriggerManager
     OnnxManager
     SofieManager

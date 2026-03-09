@@ -118,6 +118,10 @@ add_executable(testCutflowManager testCutflowManager.cc)
 target_link_libraries(testCutflowManager core corePlugins gtest gtest_main)
 add_test(NAME CutflowManagerTest COMMAND testCutflowManager)
 
+add_executable(testRegionManager testRegionManager.cc)
+target_link_libraries(testRegionManager core corePlugins gtest gtest_main)
+add_test(NAME RegionManagerTest COMMAND testRegionManager)
+
 add_executable(testWeightManager testWeightManager.cc)
 target_link_libraries(testWeightManager core corePlugins gtest gtest_main)
 add_test(NAME WeightManagerTest COMMAND testWeightManager)

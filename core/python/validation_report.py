@@ -313,6 +313,33 @@ class OutputIntegrityEntry:
         return len(self.issues) == 0
 
 
+@dataclass
+class RegionEntry:
+    """Validation record for a single declared analysis region.
+
+    Attributes
+    ----------
+    region_name : str
+        The unique name of the region (e.g. ``"signal"``,
+        ``"control_wjets"``).
+    filter_column : str
+        Name of the boolean dataframe column that selects events in this
+        region.
+    parent : str
+        Name of the parent region, or empty string for a root region.
+    is_valid : bool
+        ``True`` when the region definition passed all validation checks.
+    issues : list[str]
+        Validation error or warning strings for this region.
+    """
+
+    region_name: str
+    filter_column: str
+    parent: str = ""
+    is_valid: bool = True
+    issues: List[str] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # ValidationReport
 # ---------------------------------------------------------------------------
@@ -353,6 +380,8 @@ class ValidationReport:
         Weight statistic records per sample.
     output_integrity : list[OutputIntegrityEntry]
         Integrity records per output artifact.
+    regions : list[RegionEntry]
+        Validation records for declared analysis regions.
     errors : list[str]
         Free-form error messages not captured by a specific section.
     warnings : list[str]
@@ -377,6 +406,7 @@ class ValidationReport:
         self.systematics: List[SystematicEntry] = []
         self.weight_summaries: List[WeightSummaryEntry] = []
         self.output_integrity: List[OutputIntegrityEntry] = []
+        self.regions: List[RegionEntry] = []
         self.errors: List[str] = []
         self.warnings: List[str] = []
 
@@ -410,6 +440,10 @@ class ValidationReport:
         """Append an :class:`OutputIntegrityEntry` to the report."""
         self.output_integrity.append(entry)
 
+    def add_region(self, entry: RegionEntry) -> None:
+        """Append a :class:`RegionEntry` to the report."""
+        self.regions.append(entry)
+
     def add_error(self, message: str) -> None:
         """Append a free-form error message."""
         self.errors.append(message)
@@ -430,6 +464,8 @@ class ValidationReport:
         if any(not e.is_ok for e in self.output_integrity):
             return True
         if any(e.missing_branches for e in self.missing_branches):
+            return True
+        if any(not e.is_valid for e in self.regions):
             return True
         return False
 
@@ -471,6 +507,7 @@ class ValidationReport:
                 "n_systematics": len(self.systematics),
                 "n_weight_summaries": len(self.weight_summaries),
                 "n_output_integrity_entries": len(self.output_integrity),
+                "n_regions": len(self.regions),
                 "n_errors": len(self.errors),
                 "n_warnings": len(self.warnings),
             },
@@ -481,6 +518,7 @@ class ValidationReport:
             "systematics": [asdict(e) for e in self.systematics],
             "weight_summaries": [asdict(e) for e in self.weight_summaries],
             "output_integrity": [asdict(e) for e in self.output_integrity],
+            "regions": [asdict(e) for e in self.regions],
             "errors": list(self.errors),
             "warnings": list(self.warnings),
         }
@@ -700,6 +738,30 @@ class ValidationReport:
                 for issue in e.issues:
                     lines.append(f"          issue: {issue}")
 
+        # Region definitions
+        if self.regions:
+            _header("REGION DEFINITIONS")
+            col_w = (20, 24, 16, 10)
+            header = (
+                f"  {'Region':<{col_w[0]}}"
+                f"{'Filter Column':<{col_w[1]}}"
+                f"{'Parent':<{col_w[2]}}"
+                f"{'Valid':>{col_w[3]}}"
+            )
+            lines.append(header)
+            lines.append("  " + "-" * sum(col_w))
+            for e in self.regions:
+                valid_str = "yes" if e.is_valid else "FAIL"
+                parent_str = e.parent if e.parent else "(root)"
+                lines.append(
+                    f"  {e.region_name:<{col_w[0]}}"
+                    f"{e.filter_column:<{col_w[1]}}"
+                    f"{parent_str:<{col_w[2]}}"
+                    f"{valid_str:>{col_w[3]}}"
+                )
+                for issue in e.issues:
+                    lines.append(f"      issue: {issue}")
+
         lines.append("")
         lines.append("=" * 60)
         lines.append("  END OF REPORT")
@@ -830,6 +892,17 @@ class ValidationReport:
                     path=raw["path"],
                     exists=raw.get("exists"),
                     size_bytes=raw.get("size_bytes"),
+                    issues=list(raw.get("issues", [])),
+                )
+            )
+
+        for raw in data.get("regions", []):
+            report.regions.append(
+                RegionEntry(
+                    region_name=raw["region_name"],
+                    filter_column=raw.get("filter_column", ""),
+                    parent=raw.get("parent", ""),
+                    is_valid=raw.get("is_valid", True),
                     issues=list(raw.get("issues", [])),
                 )
             )
