@@ -89,12 +89,7 @@ static void HandleAxisVarVector(
     if (hasSystematic) {
         std::vector<std::string> systematicVariations;
         for (const auto& syst : allSystematics) {
-        std::string columnName = variable;
-        if (systematicManager_m->getVariablesForSystematic(syst).count(variable) != 0) {
-          columnName = variable + "_" + syst;
-            } else {
-          columnName = variable;
-            }
+        std::string columnName = systematicManager_m->getVariationColumnName(variable, syst);
         if (!refVector.empty()) {
           columnName = ensureExpandedVector(columnName);
         }
@@ -181,10 +176,10 @@ static bool HasSystematicColumns(
     if (syst == "Nominal") {
       continue;
     }
-    if (systematicManager_m->getVariablesForSystematic(syst).count(variable) == 0) {
+    if (!systematicManager_m->isVariableAffectedBySystematic(variable, syst)) {
       continue;
     }
-    const std::string columnName = variable + "_" + syst;
+    const std::string columnName = systematicManager_m->getVariationColumnName(variable, syst);
     if (cache.Has(columnName)) {
       return true;
     }
