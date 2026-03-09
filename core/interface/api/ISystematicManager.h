@@ -58,6 +58,37 @@ public:
      * @return Vector of systematic variation names
      */
     virtual std::vector<std::string> makeSystList(const std::string &branchName, IDataFrameProvider &dataManager) = 0;
+
+    /**
+     * @brief Check whether a given systematic variation is registered for a variable
+     * @param variable Name of the variable
+     * @param syst Name of the systematic
+     * @return True if the variable is affected by the systematic, false otherwise
+     */
+    virtual bool isVariableAffectedBySystematic(const std::string &variable,
+                                                const std::string &syst) const {
+        return getVariablesForSystematic(syst).count(variable) != 0;
+    }
+
+    /**
+     * @brief Get the column name for a variable under a given systematic variation
+     *
+     * Returns @p variable + "_" + @p syst when the variable is affected by the
+     * systematic, and @p variable unchanged otherwise.  This consolidates the
+     * repeated conditional column-name computation that would otherwise appear
+     * at every call site.
+     *
+     * @param variable Name of the base variable
+     * @param syst Name of the systematic
+     * @return Column name to use for this variable/systematic combination
+     */
+    virtual std::string getVariationColumnName(const std::string &variable,
+                                               const std::string &syst) const {
+        if (isVariableAffectedBySystematic(variable, syst)) {
+            return variable + "_" + syst;
+        }
+        return variable;
+    }
 };
 
 #endif // ISYSTEMATICMANAGER_H_INCLUDED 

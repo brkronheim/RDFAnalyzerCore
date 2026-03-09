@@ -248,6 +248,33 @@ TEST_F(SystematicManagerTest, OverwriteSystematic) {
   EXPECT_TRUE(varsForSyst.find("var4") != varsForSyst.end());
 }
 
+TEST_F(SystematicManagerTest, IsVariableAffectedBySystematic) {
+  std::set<std::string> affectedVars = {"var1", "var2"};
+  systematicManager->registerSystematic("syst1", affectedVars);
+  systematicManager->registerSystematic("syst2", {"var3"});
+
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("var1", "syst1"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("var2", "syst1"));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic("var3", "syst1"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("var3", "syst2"));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic("var1", "syst2"));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic("var1", "nonexistent"));
+}
+
+TEST_F(SystematicManagerTest, GetVariationColumnName) {
+  systematicManager->registerSystematic("jes", {"pt", "mass"});
+
+  // Affected variable: returns variable + "_" + syst
+  EXPECT_EQ(systematicManager->getVariationColumnName("pt", "jes"), "pt_jes");
+  EXPECT_EQ(systematicManager->getVariationColumnName("mass", "jes"), "mass_jes");
+
+  // Unaffected variable: returns variable unchanged
+  EXPECT_EQ(systematicManager->getVariationColumnName("eta", "jes"), "eta");
+
+  // Unknown systematic: returns variable unchanged
+  EXPECT_EQ(systematicManager->getVariationColumnName("pt", "unknown"), "pt");
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
