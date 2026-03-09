@@ -7,9 +7,22 @@
  *  - A ROOT::Math::LorentzVector (PxPyPzM4D) representing the 4-momentum.
  *  - The object's index in the original full collection.
  *
- * It also provides a generic @ref getValue helper that, given any feature
- * branch (ROOT::VecOps::RVec) from the full collection, returns the values
- * for the selected objects only.
+ * It also provides:
+ *  - A generic @ref getValue helper that maps a full-collection feature branch
+ *    to values for the selected objects only.
+ *  - @ref cacheFeature / @ref getCachedFeature for storing and retrieving
+ *    arbitrary per-collection derived quantities by name.
+ *  - @ref removeOverlap to veto objects within a given ΔR of another
+ *    collection.
+ *
+ * Combinatoric helpers (@ref makePairs, @ref makeCrossPairs,
+ * @ref makeTriplets) build pairs and triplets with their combined 4-vectors.
+ *
+ * @ref TypedPhysicsObjectCollection<T> extends the base class to additionally
+ * store a user-defined object alongside each selected entry.
+ *
+ * @ref PhysicsObjectVariationMap provides a named map of collections for
+ * systematic variations (e.g. "nominal", "JEC_up", "JEC_down").
  *
  * ### Typical usage in a RDataFrame lambda
  * @code
@@ -23,6 +36,17 @@
  *
  * // Later, retrieve b-tag scores for the selected jets
  * auto bscores = goodJets.getValue(Jet_btagScore);
+ *
+ * // Remove jets overlapping with selected electrons (ΔR < 0.4)
+ * auto cleanJets = goodJets.removeOverlap(goodElectrons, 0.4f);
+ *
+ * // Cache a derived feature
+ * goodJets.cacheFeature("btagScores", goodJets.getValue(Jet_btagScore));
+ * auto& scores = goodJets.getCachedFeature<RVec<float>>("btagScores");
+ *
+ * // Build all same-collection pairs
+ * auto pairs = makePairs(goodJets);
+ * for (auto& p : pairs) { float mJJ = p.p4.M(); }
  * @endcode
  */
 #ifndef PHYSICSOBJECTCOLLECTION_H_INCLUDED
@@ -31,8 +55,11 @@
 #include <Math/GenVector/LorentzVector.h>
 #include <Math/GenVector/PxPyPzM4D.h>
 #include <ROOT/RVec.hxx>
+#include <any>
 #include <cmath>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 /**
@@ -218,9 +245,122 @@ public:
         return result;
     }
 
+    // ------------------------------------------------------------------
+    // Cached derived features
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Store an arbitrary derived feature under @p name.
+     *
+     * Any value that can be stored in a @c std::any (e.g. an
+     * @c ROOT::VecOps::RVec<float>) can be cached here for later retrieval
+     * without recomputation.  An existing entry with the same name is
+     * overwritten.
+     *
+     * @tparam T  Type of the value to store.
+     * @param name  Unique feature name.
+     * @param value Value to cache (copied/moved into the internal store).
+     */
+    template <typename T>
+    void cacheFeature(const std::string &name, T value) {
+        cachedFeatures_m[name] = std::move(value);
+    }
+
+    /**
+     * @brief Retrieve a previously cached feature by name.
+     *
+     * @tparam T  Expected type of the stored value.
+     * @param name  Feature name passed to @ref cacheFeature.
+     * @return Const reference to the stored value.
+     * @throws std::runtime_error if the name was not previously cached.
+     * @throws std::bad_any_cast  if @p T does not match the stored type.
+     */
+    template <typename T>
+    const T &getCachedFeature(const std::string &name) const {
+        auto it = cachedFeatures_m.find(name);
+        if (it == cachedFeatures_m.end()) {
+            throw std::runtime_error(
+                "PhysicsObjectCollection: cached feature not found: " + name);
+        }
+        return std::any_cast<const T &>(it->second);
+    }
+
+    /**
+     * @brief Check whether a feature has been cached under @p name.
+     * @param name Feature name.
+     * @return @c true if the feature exists in the cache.
+     */
+    bool hasCachedFeature(const std::string &name) const {
+        return cachedFeatures_m.count(name) != 0;
+    }
+
+    // ------------------------------------------------------------------
+    // Overlap removal
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Return a new collection with objects that overlap with @p other
+     *        removed.
+     *
+     * An object at position @p i is considered to overlap with @p other if
+     * any object in @p other satisfies ΔR(i, j) < @p deltaRMin.  Overlapping
+     * objects are excluded from the returned collection.
+     *
+     * The cached-feature store is *not* propagated to the result because the
+     * indices into the original collection change after the removal.
+     *
+     * @param other      Reference collection to test against.
+     * @param deltaRMin  Minimum ΔR threshold; objects closer than this are
+     *                   considered overlapping (strictly less-than comparison).
+     * @return New @c PhysicsObjectCollection without the overlapping objects.
+     */
+    PhysicsObjectCollection removeOverlap(const PhysicsObjectCollection &other,
+                                          float deltaRMin) const {
+        PhysicsObjectCollection result;
+        for (std::size_t i = 0; i < size(); ++i) {
+            bool overlaps = false;
+            for (std::size_t j = 0; j < other.size(); ++j) {
+                if (deltaR(at(i), other.at(j)) < deltaRMin) {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if (!overlaps) {
+                result.vectors_m.push_back(vectors_m[i]);
+                result.indices_m.push_back(indices_m[i]);
+            }
+        }
+        return result;
+    }
+
+    // ------------------------------------------------------------------
+    // ΔR utility
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Compute ΔR = √(Δη² + Δφ²) between two Lorentz vectors.
+     *
+     * The φ difference is wrapped to (−π, π].
+     *
+     * @param v1 First Lorentz vector.
+     * @param v2 Second Lorentz vector.
+     * @return ΔR between @p v1 and @p v2.
+     */
+    static float deltaR(const LorentzVec &v1, const LorentzVec &v2) {
+        const float dEta = static_cast<float>(v1.Eta() - v2.Eta());
+        float dPhi = static_cast<float>(v1.Phi() - v2.Phi());
+        // Wrap dPhi to (-pi, pi]
+        constexpr float kPi = 3.14159265f;
+        while (dPhi >  kPi) dPhi -= 2.f * kPi;
+        while (dPhi < -kPi) dPhi += 2.f * kPi;
+        return std::sqrt(dEta * dEta + dPhi * dPhi);
+    }
+
 private:
     std::vector<LorentzVec> vectors_m; ///< 4-vectors of selected objects.
     std::vector<Int_t>      indices_m; ///< Original indices of selected objects.
+    /// Cache of arbitrary derived quantities, keyed by user-defined names.
+    std::unordered_map<std::string, std::any> cachedFeatures_m;
 
     /// Build a PxPyPzM LorentzVector from pt, eta, phi, mass.
     static LorentzVec makePtEtaPhiM(Float_t pt, Float_t eta, Float_t phi,
@@ -231,5 +371,272 @@ private:
         return LorentzVec(px, py, pz, mass);
     }
 };
+
+// ============================================================================
+// ObjectPair – two objects from (possibly different) collections
+// ============================================================================
+
+/**
+ * @struct ObjectPair
+ * @brief A pair of physics objects, identified by their within-collection
+ *        indices, together with their combined Lorentz 4-vector.
+ *
+ * Produced by @ref makePairs and @ref makeCrossPairs.
+ */
+struct ObjectPair {
+    /// Lorentz-vector type (re-exported for convenience).
+    using LorentzVec = PhysicsObjectCollection::LorentzVec;
+
+    LorentzVec  p4;     ///< Sum of the two individual 4-vectors.
+    std::size_t first;  ///< Index of the first  object in its source collection.
+    std::size_t second; ///< Index of the second object in its source collection.
+};
+
+// ============================================================================
+// ObjectTriplet – three objects from (possibly different) collections
+// ============================================================================
+
+/**
+ * @struct ObjectTriplet
+ * @brief A triplet of physics objects, identified by their within-collection
+ *        indices, together with their combined Lorentz 4-vector.
+ *
+ * Produced by @ref makeTriplets.
+ */
+struct ObjectTriplet {
+    /// Lorentz-vector type (re-exported for convenience).
+    using LorentzVec = PhysicsObjectCollection::LorentzVec;
+
+    LorentzVec  p4;    ///< Sum of the three individual 4-vectors.
+    std::size_t first;  ///< Index of the first  object in its source collection.
+    std::size_t second; ///< Index of the second object in its source collection.
+    std::size_t third;  ///< Index of the third  object in its source collection.
+};
+
+// ============================================================================
+// Combinatoric builders
+// ============================================================================
+
+/**
+ * @brief Build all unique same-collection pairs from @p col.
+ *
+ * Iterates over all (i, j) pairs with i < j and creates an
+ * @ref ObjectPair for each.
+ *
+ * @param col Source collection.
+ * @return Vector of all unique pairs, ordered by (i, j) with i < j.
+ */
+inline std::vector<ObjectPair> makePairs(const PhysicsObjectCollection &col) {
+    std::vector<ObjectPair> pairs;
+    const std::size_t n = col.size();
+    pairs.reserve(n * (n - 1) / 2);
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = i + 1; j < n; ++j) {
+            pairs.push_back({col.at(i) + col.at(j), i, j});
+        }
+    }
+    return pairs;
+}
+
+/**
+ * @brief Build all cross-collection pairs between @p col1 and @p col2.
+ *
+ * Every object in @p col1 is paired with every object in @p col2.
+ * The @c first index refers to @p col1; @c second refers to @p col2.
+ *
+ * @param col1 First source collection.
+ * @param col2 Second source collection.
+ * @return Vector of all cross pairs.
+ */
+inline std::vector<ObjectPair> makeCrossPairs(const PhysicsObjectCollection &col1,
+                                              const PhysicsObjectCollection &col2) {
+    std::vector<ObjectPair> pairs;
+    pairs.reserve(col1.size() * col2.size());
+    for (std::size_t i = 0; i < col1.size(); ++i) {
+        for (std::size_t j = 0; j < col2.size(); ++j) {
+            pairs.push_back({col1.at(i) + col2.at(j), i, j});
+        }
+    }
+    return pairs;
+}
+
+/**
+ * @brief Build all unique same-collection triplets from @p col.
+ *
+ * Iterates over all (i, j, k) triplets with i < j < k.
+ *
+ * @param col Source collection.
+ * @return Vector of all unique triplets, ordered by (i, j, k).
+ */
+inline std::vector<ObjectTriplet>
+makeTriplets(const PhysicsObjectCollection &col) {
+    std::vector<ObjectTriplet> triplets;
+    const std::size_t n = col.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = i + 1; j < n; ++j) {
+            for (std::size_t k = j + 1; k < n; ++k) {
+                triplets.push_back(
+                    {col.at(i) + col.at(j) + col.at(k), i, j, k});
+            }
+        }
+    }
+    return triplets;
+}
+
+// ============================================================================
+// TypedPhysicsObjectCollection<T>
+// ============================================================================
+
+/**
+ * @class TypedPhysicsObjectCollection
+ * @brief Extends PhysicsObjectCollection to additionally store a
+ *        user-defined object of type @p ObjectType for each selected entry.
+ *
+ * This allows analyses to attach arbitrary per-object data (e.g. custom
+ * calibration structs, resolved-object records, or decorated objects) to the
+ * standard 4-vector + index representation.
+ *
+ * @tparam ObjectType  The user-defined type stored per selected object.
+ *
+ * ### Example
+ * @code
+ * struct JetInfo { float btagScore; int flavour; };
+ *
+ * auto col = TypedPhysicsObjectCollection<JetInfo>(
+ *     pt, eta, phi, mass, mask,
+ *     allJetInfo);   // std::vector<JetInfo> with one entry per jet
+ *
+ * JetInfo& info = col.object(0);
+ * @endcode
+ */
+template <typename ObjectType>
+class TypedPhysicsObjectCollection : public PhysicsObjectCollection {
+public:
+    // ------------------------------------------------------------------
+    // Constructors
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Default constructor – creates an empty typed collection.
+     */
+    TypedPhysicsObjectCollection() = default;
+
+    /**
+     * @brief Build from pt/eta/phi/mass, a boolean mask, and a parallel
+     *        vector of user-defined objects.
+     *
+     * The @p objectsAll vector must have the same length as @p pt.  Only
+     * entries where @p mask is @c true are included.
+     *
+     * @param pt         Transverse momenta of all objects.
+     * @param eta        Pseudorapidities of all objects.
+     * @param phi        Azimuthal angles of all objects.
+     * @param mass       Masses of all objects.
+     * @param mask       Boolean selection mask (same length as @p pt).
+     * @param objectsAll Full vector of user objects (same length as @p pt).
+     * @throws std::runtime_error if @p objectsAll has a different size than
+     *         @p pt, or if the pt/eta/phi/mass vectors are inconsistent.
+     */
+    TypedPhysicsObjectCollection(const ROOT::VecOps::RVec<Float_t> &pt,
+                                 const ROOT::VecOps::RVec<Float_t> &eta,
+                                 const ROOT::VecOps::RVec<Float_t> &phi,
+                                 const ROOT::VecOps::RVec<Float_t> &mass,
+                                 const ROOT::VecOps::RVec<bool>    &mask,
+                                 const std::vector<ObjectType>     &objectsAll)
+        : PhysicsObjectCollection(pt, eta, phi, mass, mask) {
+        if (objectsAll.size() != pt.size()) {
+            throw std::runtime_error(
+                "TypedPhysicsObjectCollection: objects size mismatch");
+        }
+        for (std::size_t i = 0; i < mask.size(); ++i) {
+            if (mask[i]) {
+                objects_m.push_back(objectsAll[i]);
+            }
+        }
+    }
+
+    /**
+     * @brief Build from pt/eta/phi/mass, an explicit index list, and a
+     *        parallel vector of user-defined objects.
+     *
+     * The @p objectsAll vector must have the same length as @p pt.  Only
+     * entries at the given @p indices are included; out-of-bounds indices are
+     * silently skipped (consistent with the base-class behaviour).
+     *
+     * @param pt         Transverse momenta of all objects.
+     * @param eta        Pseudorapidities of all objects.
+     * @param phi        Azimuthal angles of all objects.
+     * @param mass       Masses of all objects.
+     * @param indices    Indices into the full collection to include.
+     * @param objectsAll Full vector of user objects (same length as @p pt).
+     * @throws std::runtime_error if @p objectsAll has a different size than
+     *         @p pt, or if the pt/eta/phi/mass vectors are inconsistent.
+     */
+    TypedPhysicsObjectCollection(const ROOT::VecOps::RVec<Float_t> &pt,
+                                 const ROOT::VecOps::RVec<Float_t> &eta,
+                                 const ROOT::VecOps::RVec<Float_t> &phi,
+                                 const ROOT::VecOps::RVec<Float_t> &mass,
+                                 const ROOT::VecOps::RVec<Int_t>   &indices,
+                                 const std::vector<ObjectType>     &objectsAll)
+        : PhysicsObjectCollection(pt, eta, phi, mass, indices) {
+        if (objectsAll.size() != pt.size()) {
+            throw std::runtime_error(
+                "TypedPhysicsObjectCollection: objects size mismatch");
+        }
+        for (Int_t idx : indices) {
+            if (idx >= 0 &&
+                static_cast<std::size_t>(idx) < objectsAll.size()) {
+                objects_m.push_back(objectsAll[static_cast<std::size_t>(idx)]);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // User-object access
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Access the user-defined object for the @p i -th selected entry.
+     * @param i Index within the collection (0-based).
+     * @return Const reference to the stored user object.
+     * @throws std::out_of_range if @p i is out of bounds.
+     */
+    const ObjectType &object(std::size_t i) const { return objects_m.at(i); }
+
+    /**
+     * @brief Access all stored user-defined objects.
+     * @return Const reference to the internal vector of user objects.
+     */
+    const std::vector<ObjectType> &objects() const { return objects_m; }
+
+private:
+    std::vector<ObjectType> objects_m; ///< User-defined objects for each selected entry.
+};
+
+// ============================================================================
+// PhysicsObjectVariationMap – systematic variation support
+// ============================================================================
+
+/**
+ * @brief A named map of PhysicsObjectCollection instances representing
+ *        systematic variations of the same object type.
+ *
+ * Typical convention:
+ *  - Key @c "nominal" holds the central-value collection.
+ *  - Keys like @c "JEC_up", @c "JEC_down" hold the corresponding varied
+ *    collections.
+ *
+ * ### Example
+ * @code
+ * PhysicsObjectVariationMap jetVariations;
+ * jetVariations["nominal"] = buildJets(pt_nom, eta, phi, mass_nom, mask);
+ * jetVariations["JEC_up"]  = buildJets(pt_up,  eta, phi, mass_up,  mask_up);
+ * jetVariations["JEC_down"]= buildJets(pt_dn,  eta, phi, mass_dn,  mask_dn);
+ *
+ * const auto& jets = jetVariations.at("nominal");
+ * @endcode
+ */
+using PhysicsObjectVariationMap =
+    std::unordered_map<std::string, PhysicsObjectCollection>;
 
 #endif // PHYSICSOBJECTCOLLECTION_H_INCLUDED
