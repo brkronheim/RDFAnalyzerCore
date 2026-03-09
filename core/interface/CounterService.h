@@ -44,6 +44,16 @@ public:
                               const std::string& branch,
                               int nBins, double low, double high);
 
+  /**
+   * @brief Contribute structured provenance metadata for this service.
+   *
+   * Returns:
+   *  - "service.counter.sample"        : sample name from config
+   *  - "service.counter.weight_branch" : weight branch name (empty if unset)
+   */
+  std::unordered_map<std::string, std::string>
+  collectProvenanceEntries() const override;
+
 private:
   ManagerContext* ctx_m = nullptr;
   std::string sampleName_m;

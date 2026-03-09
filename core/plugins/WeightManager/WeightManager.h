@@ -231,6 +231,21 @@ public:
    */
   void reportMetadata() override;
 
+  /**
+   * @brief Contribute structured provenance metadata for this plugin.
+   *
+   * Returns entries describing:
+   *  - "scale_factors": comma-separated "name:column" pairs
+   *  - "normalizations": comma-separated "name:value" pairs
+   *  - "weight_variations": comma-separated variation names
+   *  - "nominal_weight_column": the defined nominal weight column (if set)
+   *
+   * The Analyzer automatically computes "plugin.<role>.config_hash" from
+   * these entries; plugins do not need to compute it themselves.
+   */
+  std::unordered_map<std::string, std::string>
+  collectProvenanceEntries() const override;
+
 private:
   // ---- Registered components ----------------------------------------------
   std::vector<std::pair<std::string, std::string>> scaleFactors_m; ///< name → column

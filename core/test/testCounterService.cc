@@ -87,3 +87,48 @@ TEST(CounterServiceTest, UsesPreFilterDataFrameForIntWeightHistogram) {
   std::remove(cfgPath.c_str());
   std::remove(metaPath.c_str());
 }
+
+// ---------------------------------------------------------------------------
+// collectProvenanceEntries() – returns service runtime settings
+// ---------------------------------------------------------------------------
+TEST(CounterServiceTest, CollectProvenanceEntriesContainsSampleName) {
+  const std::string cfgPath  = std::string(TEST_SOURCE_DIR) + "/aux/counter_prov_cfg.txt";
+  const std::string metaPath = std::string(TEST_SOURCE_DIR) + "/aux/counter_prov_meta.root";
+
+  {
+    std::ofstream out(cfgPath);
+    out << "sample=MySample\n";
+    out << "metaFile=" << metaPath << "\n";
+    out << "fileList=\n";
+  }
+
+  ConfigurationManager config(cfgPath);
+  DataManager          dataManager(3);
+  SystematicManager    systematicManager;
+  DefaultLogger        logger;
+  NullOutputSink       skimSink;
+  NullOutputSink       metaSink;
+
+  ManagerContext ctx{config, dataManager, systematicManager, logger,
+                     skimSink, metaSink};
+
+  CounterService svc;
+  svc.initialize(ctx);
+
+  const auto entries = svc.collectProvenanceEntries();
+
+  auto it_sample = entries.find("service.counter.sample");
+  auto it_weight = entries.find("service.counter.weight_branch");
+
+  ASSERT_NE(it_sample, entries.end())
+      << "service.counter.sample key missing";
+  ASSERT_NE(it_weight, entries.end())
+      << "service.counter.weight_branch key missing";
+
+  EXPECT_EQ(it_sample->second, "MySample");
+  EXPECT_TRUE(it_weight->second.empty())
+      << "weight_branch should be empty when not configured";
+
+  std::remove(cfgPath.c_str());
+  std::remove(metaPath.c_str());
+}

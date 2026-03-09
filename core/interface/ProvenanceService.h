@@ -108,6 +108,18 @@ public:
      */
     const std::unordered_map<std::string, std::string>& getProvenance() const;
 
+    /**
+     * @brief Compute MD5 hex digest of an arbitrary string.
+     *
+     * Exposed as a public static helper so that plugins and services can
+     * produce consistent hashes (e.g. for their own config_hash entries)
+     * without duplicating the hashing logic.
+     *
+     * @param data Arbitrary input string.
+     * @return 32-character lowercase MD5 hex digest.
+     */
+    static std::string hashString(const std::string& data);
+
 private:
     ManagerContext* ctx_m = nullptr;
     std::unordered_map<std::string, std::string> provenance_m;
@@ -117,8 +129,6 @@ private:
 
     /// Compute MD5 hex digest of a file's contents; returns "<not found>" on error.
     static std::string hashFile(const std::string& path);
-    /// Compute MD5 hex digest of an arbitrary string.
-    static std::string hashString(const std::string& data);
     /// Run a shell command and return trimmed stdout; returns "" on failure.
     static std::string runCommand(const std::string& cmd);
     /// Serialise a config map deterministically (sorted keys) for hashing.

@@ -417,3 +417,51 @@ void WeightManager::reportMetadata() {
     logger_m->log(ILogger::Level::Info, ss.str());
   }
 }
+
+// ---------------------------------------------------------------------------
+// collectProvenanceEntries()
+// ---------------------------------------------------------------------------
+
+std::unordered_map<std::string, std::string>
+WeightManager::collectProvenanceEntries() const {
+  std::unordered_map<std::string, std::string> entries;
+
+  // Registered scale factors: "name:column,name:column,..."
+  if (!scaleFactors_m.empty()) {
+    std::ostringstream ss;
+    for (std::size_t i = 0; i < scaleFactors_m.size(); ++i) {
+      if (i > 0) ss << ',';
+      ss << scaleFactors_m[i].first << ':' << scaleFactors_m[i].second;
+    }
+    entries["scale_factors"] = ss.str();
+  }
+
+  // Registered normalization factors: "name:value,name:value,..."
+  if (!normalizations_m.empty()) {
+    std::ostringstream ss;
+    for (std::size_t i = 0; i < normalizations_m.size(); ++i) {
+      if (i > 0) ss << ',';
+      ss << normalizations_m[i].first << ':' << normalizations_m[i].second;
+    }
+    entries["normalizations"] = ss.str();
+  }
+
+  // Registered weight variations: "name(up:col,dn:col),..."
+  if (!variations_m.empty()) {
+    std::ostringstream ss;
+    for (std::size_t i = 0; i < variations_m.size(); ++i) {
+      if (i > 0) ss << ',';
+      ss << variations_m[i].name
+         << "(up:" << variations_m[i].upColumn
+         << ",dn:" << variations_m[i].downColumn << ')';
+    }
+    entries["weight_variations"] = ss.str();
+  }
+
+  // Nominal weight column (if scheduled)
+  if (!nominalOutputColumn_m.empty()) {
+    entries["nominal_weight_column"] = nominalOutputColumn_m;
+  }
+
+  return entries;
+}

@@ -210,3 +210,56 @@ TEST_F(ProvenanceServiceTest, GracefulWhenNoMetaOutputConfigured) {
     ASSERT_NO_THROW(svc.finalize(df))
         << "finalize() must not throw when no meta output is configured";
 }
+
+// ---------------------------------------------------------------------------
+// Test: hashString() is accessible as a public static and is deterministic
+// ---------------------------------------------------------------------------
+TEST(ProvenanceService, HashStringIsPublicStaticAndDeterministic) {
+    const std::string hash1 = ProvenanceService::hashString("hello world");
+    const std::string hash2 = ProvenanceService::hashString("hello world");
+    const std::string hash3 = ProvenanceService::hashString("different");
+
+    EXPECT_FALSE(hash1.empty());
+    EXPECT_EQ(hash1, hash2) << "hashString must be deterministic";
+    EXPECT_NE(hash1, hash3) << "different inputs must produce different hashes";
+    // MD5 hex digest is 32 characters
+    EXPECT_EQ(hash1.size(), 32u);
+}
+
+// ---------------------------------------------------------------------------
+// Test: recordDatasetManifestProvenance stores all three fields
+// ---------------------------------------------------------------------------
+TEST_F(ProvenanceServiceTest, RecordDatasetManifestProvenance) {
+    writeMinimalConfig(cfgPath, metaPath);
+
+    ConfigurationManager config(cfgPath);
+    DataManager dataManager(3);
+    SystematicManager systematicManager;
+    DefaultLogger logger;
+    NullOutputSink skimSink;
+    RootOutputSink metaSink;
+
+    ManagerContext ctx{config, dataManager, systematicManager, logger,
+                       skimSink, metaSink};
+
+    ProvenanceService svc;
+    svc.initialize(ctx);
+    svc.recordDatasetManifestProvenance("abc123", "{\"year\":2023}", "ttbar,wjets");
+
+    const auto& prov = svc.getProvenance();
+
+    auto it_hash    = prov.find("dataset_manifest.file_hash");
+    auto it_params  = prov.find("dataset_manifest.query_params");
+    auto it_entries = prov.find("dataset_manifest.resolved_entries");
+
+    ASSERT_NE(it_hash,    prov.end());
+    ASSERT_NE(it_params,  prov.end());
+    ASSERT_NE(it_entries, prov.end());
+
+    EXPECT_EQ(it_hash->second,    "abc123");
+    EXPECT_EQ(it_params->second,  "{\"year\":2023}");
+    EXPECT_EQ(it_entries->second, "ttbar,wjets");
+
+    auto df = dataManager.getDataFrame();
+    svc.finalize(df);
+}
