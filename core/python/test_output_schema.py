@@ -37,6 +37,9 @@ from output_schema import (
     LAW_ARTIFACT_SCHEMA_VERSION,
     LAW_ARTIFACT_TYPES,
     METADATA_SCHEMA_VERSION,
+    NUISANCE_GROUP_DEFINITION_VERSION,
+    NUISANCE_GROUP_OUTPUT_USAGES,
+    NUISANCE_GROUP_TYPES,
     OUTPUT_MANIFEST_VERSION,
     PROVENANCE_OPTIONAL_KEYS,
     PROVENANCE_REQUIRED_KEYS,
@@ -52,6 +55,7 @@ from output_schema import (
     LawArtifactSchema,
     MergeInputValidationError,
     MetadataSchema,
+    NuisanceGroupDefinition,
     OutputManifest,
     ProvenanceRecord,
     SchemaVersionError,
@@ -62,6 +66,7 @@ from output_schema import (
     resolve_artifact,
     resolve_manifest,
     validate_merge_inputs,
+    validate_nuisance_coverage,
     write_cache_sidecar,
 )
 
@@ -81,6 +86,7 @@ class TestConstants:
             "law_artifact",
             "intermediate_artifact",
             "region_definition",
+            "nuisance_group_definition",
             "output_manifest",
         }
         assert set(SCHEMA_REGISTRY.keys()) == expected
@@ -92,6 +98,7 @@ class TestConstants:
         assert SCHEMA_REGISTRY["cutflow"] == CUTFLOW_SCHEMA_VERSION
         assert SCHEMA_REGISTRY["law_artifact"] == LAW_ARTIFACT_SCHEMA_VERSION
         assert SCHEMA_REGISTRY["intermediate_artifact"] == INTERMEDIATE_ARTIFACT_SCHEMA_VERSION
+        assert SCHEMA_REGISTRY["nuisance_group_definition"] == NUISANCE_GROUP_DEFINITION_VERSION
         assert SCHEMA_REGISTRY["output_manifest"] == OUTPUT_MANIFEST_VERSION
 
     def test_provenance_required_keys_non_empty(self):
