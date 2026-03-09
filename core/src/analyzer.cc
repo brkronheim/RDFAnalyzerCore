@@ -10,8 +10,10 @@
 #include <NDHistogramManager.h>
 #include <functions.h>
 #include <util.h>
+#include <algorithm>
 #include <memory>
 #include <queue>
+#include <sstream>
 #include <stdexcept>
 #include <SystematicManager.h>
 #include <api/ManagerContext.h> // for wiring plugins and services
@@ -238,6 +240,61 @@ Analyzer *Analyzer::bookCounterIntHistogram(const std::string& branch, int nBins
 }
 
 
+Analyzer *Analyzer::setTaskMetadata(const std::string& key, const std::string& value) {
+    taskMetadata_m[key] = value;
+    return this;
+}
+
+void Analyzer::collectAndRegisterProvenance(ROOT::RDF::RNode& df) {
+    if (provenanceService_m) {
+        // Task-level metadata (injected via setTaskMetadata())
+        for (const auto& [k, v] : taskMetadata_m) {
+            provenanceService_m->addEntry("task." + k, v);
+        }
+
+        // Collect structured provenance contributions from each plugin.
+        // Entries are stored under "plugin.<role>.<key>".  A content hash
+        // ("plugin.<role>.config_hash") is auto-computed from the returned
+        // entries so that any configuration change is detectable.
+        for (const auto& [role, plugin] : plugins) {
+            if (!plugin) continue;
+            const auto entries = plugin->collectProvenanceEntries();
+            if (entries.empty()) continue;
+
+            for (const auto& [k, v] : entries) {
+                provenanceService_m->addEntry("plugin." + role + "." + k, v);
+            }
+
+            // Serialize sorted entries for deterministic hashing.
+            std::vector<std::pair<std::string, std::string>> sorted(
+                entries.begin(), entries.end());
+            std::sort(sorted.begin(), sorted.end());
+            std::ostringstream oss;
+            for (const auto& [k, v] : sorted) {
+                oss << k << '=' << v << '\n';
+            }
+            provenanceService_m->addEntry(
+                "plugin." + role + ".config_hash",
+                ProvenanceService::hashString(oss.str()));
+        }
+
+        // Collect structured provenance contributions from non-provenance services.
+        // Services choose their own key namespacing (no prefix is added by the
+        // framework to allow services like CounterService to use descriptive keys).
+        for (const auto& svc : services_m) {
+            if (svc.get() == provenanceService_m) continue;
+            for (const auto& [k, v] : svc->collectProvenanceEntries()) {
+                provenanceService_m->addEntry(k, v);
+            }
+        }
+    }
+
+    // ProvenanceService finalizes last so it captures all contributions.
+    if (provenanceService_m) {
+        provenanceService_m->finalize(df);
+    }
+}
+
 Analyzer *Analyzer::save() {
     auto df = dataFrameProvider_m->getDataFrame();
 
@@ -252,17 +309,27 @@ Analyzer *Analyzer::save() {
                                systematicManager_m.get(),
                                OutputChannel::Skim);
 
+    // Finalize all non-provenance services (e.g. CounterService).
+    // ProvenanceService is finalized last so it captures contributions from
+    // plugins and other services.
     for (auto& service : services_m) {
-        service->finalize(df);
+        if (service.get() != provenanceService_m) {
+            service->finalize(df);
+        }
     }
 
-    // Post-execution hooks
+    // Post-execution plugin hooks
     for (auto& [role, plugin] : plugins) {
         if (plugin) plugin->finalize();
     }
     for (auto& [role, plugin] : plugins) {
         if (plugin) plugin->reportMetadata();
     }
+
+    // Collect structured provenance contributions from plugins and services,
+    // then finalize ProvenanceService so it writes all collected entries.
+    collectAndRegisterProvenance(df);
+
     return this;
 }
 
@@ -293,18 +360,27 @@ Analyzer *Analyzer::run() {
         histogramManager->saveHists();
     }
 
-    // Finalize all analysis services (CounterService writes to meta sink here)
+    // Finalize all non-provenance services (e.g. CounterService).
+    // ProvenanceService is finalized last so it captures contributions from
+    // plugins and other services.
     for (auto& service : services_m) {
-        service->finalize(df);
+        if (service.get() != provenanceService_m) {
+            service->finalize(df);
+        }
     }
 
-    // Post-execution hooks
+    // Post-execution plugin hooks
     for (auto& [role, plugin] : plugins) {
         if (plugin) plugin->finalize();
     }
     for (auto& [role, plugin] : plugins) {
         if (plugin) plugin->reportMetadata();
     }
+
+    // Collect structured provenance contributions from plugins and services,
+    // then finalize ProvenanceService so it writes all collected entries.
+    collectAndRegisterProvenance(df);
+
     return this;
 }
 

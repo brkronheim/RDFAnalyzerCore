@@ -116,6 +116,19 @@ public:
    */
   void reportMetadata() override;
 
+  /**
+   * @brief Contribute structured provenance metadata for this plugin.
+   *
+   * Returns:
+   *  - "cuts": comma-separated "name:boolColumn" pairs for each registered cut
+   *  - "num_cuts": number of registered cuts
+   *
+   * The Analyzer automatically computes "plugin.<role>.config_hash" from
+   * these entries.
+   */
+  std::unordered_map<std::string, std::string>
+  collectProvenanceEntries() const override;
+
 private:
   struct CutEntry {
     std::string name;

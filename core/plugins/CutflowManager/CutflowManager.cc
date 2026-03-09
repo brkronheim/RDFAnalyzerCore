@@ -178,3 +178,25 @@ const std::vector<std::pair<std::string, ULong64_t>> &
 CutflowManager::getNMinusOneCounts() const {
   return nMinusOneCounts_m;
 }
+
+// ---------------------------------------------------------------------------
+// collectProvenanceEntries()
+// ---------------------------------------------------------------------------
+
+std::unordered_map<std::string, std::string>
+CutflowManager::collectProvenanceEntries() const {
+  std::unordered_map<std::string, std::string> entries;
+
+  entries["num_cuts"] = std::to_string(cuts_m.size());
+
+  if (!cuts_m.empty()) {
+    std::ostringstream ss;
+    for (std::size_t i = 0; i < cuts_m.size(); ++i) {
+      if (i > 0) ss << ',';
+      ss << cuts_m[i].name << ':' << cuts_m[i].column;
+    }
+    entries["cuts"] = ss.str();
+  }
+
+  return entries;
+}

@@ -299,6 +299,46 @@ TEST_F(CutflowManagerTest, SingleCutCutflowAndNMinus1) {
   EXPECT_EQ(mgr->getNMinusOneCounts()[0].second, 4ULL);
 }
 
+// ---------------------------------------------------------------------------
+// collectProvenanceEntries() – returns structured config metadata
+// ---------------------------------------------------------------------------
+TEST_F(CutflowManagerTest, CollectProvenanceEntriesHasNumCuts) {
+  auto dm = std::make_unique<DataManager>(4);
+  auto mgr = makeMgr(*dm);
+
+  // Zero cuts registered
+  const auto entries0 = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries0.find("num_cuts"), entries0.end());
+  EXPECT_EQ(entries0.at("num_cuts"), "0");
+
+  dm->Define("pass_pt",  [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  dm->Define("pass_eta", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+
+  mgr->addCut("ptCut",  "pass_pt");
+  mgr->addCut("etaCut", "pass_eta");
+
+  const auto entries2 = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries2.find("num_cuts"), entries2.end());
+  EXPECT_EQ(entries2.at("num_cuts"), "2");
+}
+
+TEST_F(CutflowManagerTest, CollectProvenanceEntriesContainsCuts) {
+  auto dm = std::make_unique<DataManager>(4);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("pass_pt", [](ULong64_t) { return true; }, {"rdfentry_"},
+             *systematicManager);
+  mgr->addCut("ptCut", "pass_pt");
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("cuts"), entries.end());
+  const std::string& cuts = entries.at("cuts");
+  EXPECT_NE(cuts.find("ptCut"),   std::string::npos);
+  EXPECT_NE(cuts.find("pass_pt"), std::string::npos);
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

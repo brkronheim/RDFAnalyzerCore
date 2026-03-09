@@ -423,6 +423,70 @@ TEST_F(WeightManagerTest, ReportMetadataAfterRunDoesNotThrow) {
   EXPECT_NO_THROW(mgr->reportMetadata());
 }
 
+// ---------------------------------------------------------------------------
+// collectProvenanceEntries() – returns structured config metadata
+// ---------------------------------------------------------------------------
+TEST_F(WeightManagerTest, CollectProvenanceEntriesIsEmptyBeforeRegistration) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+
+  // No components registered yet → empty map
+  EXPECT_TRUE(mgr->collectProvenanceEntries().empty());
+}
+
+TEST_F(WeightManagerTest, CollectProvenanceEntriesContainsScaleFactors) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+
+  mgr->addScaleFactor("pileup", "pu_weight");
+  mgr->addScaleFactor("btag",   "btag_weight");
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("scale_factors"), entries.end());
+  const std::string& sf = entries.at("scale_factors");
+  EXPECT_NE(sf.find("pileup"), std::string::npos);
+  EXPECT_NE(sf.find("pu_weight"), std::string::npos);
+  EXPECT_NE(sf.find("btag"), std::string::npos);
+  EXPECT_NE(sf.find("btag_weight"), std::string::npos);
+}
+
+TEST_F(WeightManagerTest, CollectProvenanceEntriesContainsNormalizations) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+
+  mgr->addNormalization("lumi_xsec", 0.0412);
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("normalizations"), entries.end());
+  const std::string& norm = entries.at("normalizations");
+  EXPECT_NE(norm.find("lumi_xsec"), std::string::npos);
+}
+
+TEST_F(WeightManagerTest, CollectProvenanceEntriesContainsVariations) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+
+  mgr->addWeightVariation("pileup", "pu_up", "pu_down");
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("weight_variations"), entries.end());
+  const std::string& vars = entries.at("weight_variations");
+  EXPECT_NE(vars.find("pileup"), std::string::npos);
+  EXPECT_NE(vars.find("pu_up"),  std::string::npos);
+  EXPECT_NE(vars.find("pu_down"), std::string::npos);
+}
+
+TEST_F(WeightManagerTest, CollectProvenanceEntriesContainsNominalColumn) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+
+  mgr->defineNominalWeight("my_weight");
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("nominal_weight_column"), entries.end());
+  EXPECT_EQ(entries.at("nominal_weight_column"), "my_weight");
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

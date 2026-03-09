@@ -2,6 +2,7 @@
 #define IPLUGGABLEMANAGER_H_INCLUDED
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <api/IContextAware.h>
 
@@ -112,6 +113,31 @@ public:
      * information to the metadata output sink or to the logger.
      */
     virtual void reportMetadata() {}
+
+    // -----------------------------------------------------------------------
+    // Structured provenance contribution (default: empty)
+    // -----------------------------------------------------------------------
+
+    /**
+     * @brief Contribute structured provenance metadata for this plugin.
+     *
+     * The framework calls this after reportMetadata(), collects all returned
+     * key-value pairs, and stores them in the ProvenanceService under the
+     * namespace "plugin.<role>.<key>".  It also automatically computes a
+     * content hash ("plugin.<role>.config_hash") from the returned entries so
+     * that any configuration change is detectable from the provenance record.
+     *
+     * Plugins that do not override this method contribute no custom provenance
+     * entries; only their type name (already recorded by the Analyzer) is
+     * stored.
+     *
+     * Keys named "config_hash" are reserved and will be overwritten by the
+     * framework's auto-computed hash.
+     *
+     * @return Map of provenance key-value pairs (without role prefix).
+     */
+    virtual std::unordered_map<std::string, std::string>
+    collectProvenanceEntries() const { return {}; }
 };
 
 #endif // IPLUGGABLEMANAGER_H_INCLUDED 

@@ -273,6 +273,23 @@ public:
    */
   IConfigurationProvider &getConfigurationProvider() const { return *configProvider_m; }
 
+  /**
+   * @brief Inject task-level provenance metadata.
+   *
+   * Stores a key-value pair that is contributed to the ProvenanceService at
+   * finalize time under the namespace "task.<key>".  This allows workflow
+   * orchestration layers (e.g. LAW tasks) to attach task-specific information
+   * (job ID, dataset query hash, submission timestamp, etc.) to the provenance
+   * record without bypassing the provenance interface.
+   *
+   * May be called at any time before save() / run().
+   *
+   * @param key   Metadata key (will be stored as "task.<key>").
+   * @param value Metadata value.
+   * @return Pointer to this Analyzer (for chaining).
+   */
+  Analyzer *setTaskMetadata(const std::string& key, const std::string& value);
+
 private:
   /**
    * @brief Verbosity level for logging and debug output (higher = more verbose)
@@ -323,6 +340,12 @@ private:
    * after initializeServices() has run.
    */
   ProvenanceService* provenanceService_m = nullptr;
+  /**
+   * @brief Task-level provenance metadata contributed via setTaskMetadata().
+   * Entries are stored here until finalize time, then forwarded to the
+   * ProvenanceService under the "task.<key>" namespace.
+   */
+  std::unordered_map<std::string, std::string> taskMetadata_m;
   bool preFilterNotified_m = false;
   ///**
   // * @brief Initialize the analyzer with the provided dependencies
@@ -333,6 +356,15 @@ private:
    */
   void wirePluginManagers();
   void initializeServices(ManagerContext& ctx);
+  /**
+   * @brief Collect structured provenance contributions from all plugins and
+   * services, inject task metadata, then finalize the ProvenanceService.
+   *
+   * Called at the end of save() and run() to ensure all plugin/service
+   * provenance contributions are captured before the provenance record is
+   * written to disk.
+   */
+  void collectAndRegisterProvenance(ROOT::RDF::RNode& df);
 };
 
 #endif // ANALYZER_H_INCLUDED

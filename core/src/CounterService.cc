@@ -201,3 +201,15 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
   }
   
 }
+
+// ---------------------------------------------------------------------------
+// collectProvenanceEntries()
+// ---------------------------------------------------------------------------
+
+std::unordered_map<std::string, std::string>
+CounterService::collectProvenanceEntries() const {
+  return {
+      {"service.counter.sample",        sampleName_m},
+      {"service.counter.weight_branch", weightBranch_m},
+  };
+}
