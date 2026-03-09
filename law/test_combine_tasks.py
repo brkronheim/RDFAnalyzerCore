@@ -589,17 +589,19 @@ class TestManifestDatacardTask(unittest.TestCase):
 
             mock_gen = MagicMock()
             MockClass = MagicMock(return_value=mock_gen)
-            with patch.dict(sys.modules, {"create_datacards": MagicMock(DatacardGenerator=MockClass)}):
-                task.run()
+            cleanup_dir = os.path.join(combine_tasks.WORKSPACE, "manifestDatacard_prov_test")
+            try:
+                with patch.dict(sys.modules, {"create_datacards": MagicMock(DatacardGenerator=MockClass)}):
+                    task.run()
 
-            prov_path = os.path.join(out_dir, "provenance.json")
-            self.assertTrue(os.path.exists(prov_path))
-            with open(prov_path) as fh:
-                prov = json.load(fh)
-            self.assertEqual(prov["task"], "ManifestDatacardTask")
-            self.assertEqual(prov["manifest_framework_hash"], "fw42")
-
-            shutil.rmtree(os.path.join(combine_tasks.WORKSPACE, "manifestDatacard_prov_test"), ignore_errors=True)
+                prov_path = os.path.join(out_dir, "provenance.json")
+                self.assertTrue(os.path.exists(prov_path))
+                with open(prov_path) as fh:
+                    prov = json.load(fh)
+                self.assertEqual(prov["task"], "ManifestDatacardTask")
+                self.assertEqual(prov["manifest_framework_hash"], "fw42")
+            finally:
+                shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)

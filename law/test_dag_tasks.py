@@ -131,6 +131,7 @@ class TestFullAnalysisDAGConstruction(unittest.TestCase):
         path = task._resolved_manifest_path()
         self.assertIn("mergeRun_defaultManifest", path)
         self.assertTrue(path.endswith("output_manifest.yaml"))
+        self.assertIn(dag_tasks._MERGED_HISTOGRAM_MANIFEST_RELPATH, path)
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)

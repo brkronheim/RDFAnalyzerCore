@@ -450,7 +450,7 @@ def _derive_available_variations(manifest: "OutputManifest") -> Dict[str, List[s
         lower = name.lower()
         for suffix in ("up", "down"):
             if lower.endswith(suffix):
-                base = name[: len(name) - len(suffix)]
+                base = name[:-len(suffix)]
                 # Normalise base: strip trailing underscore / dash
                 base = base.rstrip("_-")
                 if not base:
@@ -939,7 +939,7 @@ def _parse_datacard_shapes(datacard_path: str):
             if not shapes_file:
                 shapes_file = root_file
             hist_pattern = parts[4] if len(parts) > 4 else ""
-            hist_name = hist_pattern.replace("$PROCESS", process_name).replace("$SYSTEMATIC", "")
+            hist_name = hist_pattern.replace("$PROCESS", process_name).replace("$SYSTEMATIC", "nominal")
             if process_name.lower() == "data_obs":
                 data_hist = hist_name or process_name
             elif process_name != "*":

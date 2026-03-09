@@ -61,6 +61,10 @@ from combine_tasks import ManifestDatacardTask, ManifestFitTask  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
 
+#: Relative path within a ``mergeRun_<name>/`` directory where MergeHistograms
+#: writes the merged OutputManifest.  Used by :class:`FullAnalysisDAG` when no
+#: explicit ``--manifest-path`` is given.
+_MERGED_HISTOGRAM_MANIFEST_RELPATH = os.path.join("histograms", "output_manifest.yaml")
 
 class FullAnalysisDAG(law.Task):
     """Orchestrate the complete analysis pipeline as a single law task.
@@ -225,7 +229,7 @@ class FullAnalysisDAG(law.Task):
         if self.manifest_path:
             return self.manifest_path
         return os.path.join(
-            WORKSPACE, f"mergeRun_{self.name}", "histograms", "output_manifest.yaml"
+            WORKSPACE, f"mergeRun_{self.name}", _MERGED_HISTOGRAM_MANIFEST_RELPATH
         )
 
     # ------------------------------------------------------------------ DAG wiring
