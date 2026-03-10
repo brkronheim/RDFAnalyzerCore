@@ -8,6 +8,12 @@ git submodule update --init --recursive
 COMBINE_FLAG=ON
 COMBINE_HARV_FLAG=ON
 
+if ! timeout 5 git ls-remote --heads https://github.com/cms-analysis/HiggsAnalysis-CombinedLimit.git > /dev/null 2>&1; then
+    echo "Combine repository not reachable; disabling BUILD_COMBINE and BUILD_COMBINE_HARVESTER."
+    COMBINE_FLAG=OFF
+    COMBINE_HARV_FLAG=OFF
+fi
+
 
 cmake . \
     -DCMAKE_BUILD_TYPE=Release \

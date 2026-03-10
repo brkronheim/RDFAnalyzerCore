@@ -14,18 +14,26 @@ kramdown:
   input: GFM
   syntax_highlighter: rouge
 
+# Apply the default Cayman layout to all pages so that pages without
+# explicit YAML front matter still render with the full site theme.
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
 # Navigation
 nav_links:
   - title: Getting Started
     url: GETTING_STARTED.html
-  - title: Python Bindings
-    url: PYTHON_BINDINGS.html
-  - title: Python Bindings Testing
-    url: PYTHON_BINDINGS_TESTING.html
-  - title: Configuration
-    url: CONFIG_REFERENCE.html
   - title: Analysis Guide
     url: ANALYSIS_GUIDE.html
+  - title: Configuration
+    url: CONFIG_REFERENCE.html
+  - title: Python Bindings
+    url: PYTHON_BINDINGS.html
+  - title: Batch Submission
+    url: BATCH_SUBMISSION.html
   - title: Architecture
     url: ARCHITECTURE.html
   - title: Plugin Development
@@ -39,23 +47,3 @@ exclude:
   - Gemfile
   - Gemfile.lock
   - vendor
-
-# Include files
-include:
-  - GETTING_STARTED.md
-  - NEW_FEATURES.md
-  - PYTHON_BINDINGS.md
-  - PYTHON_BINDINGS_TESTING.md
-  - CONFIG_REFERENCE.md
-  - ANALYSIS_GUIDE.md
-  - ARCHITECTURE.md
-  - PLUGIN_DEVELOPMENT.md
-  - API_REFERENCE.md
-  - ONNX_IMPLEMENTATION.md
-  - ONNX_MULTI_OUTPUT.md
-  - SOFIE_IMPLEMENTATION.md
-  - BATCH_SUBMISSION.md
-  - DATACARD_GENERATOR.md
-  - DATACARD_SYSTEMATICS_EXAMPLE.md
-  - COMBINE_INTEGRATION.md
-  - PRODUCTION_MANAGER.md

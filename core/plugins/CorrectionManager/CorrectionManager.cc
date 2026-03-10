@@ -3,6 +3,7 @@
 #include <api/IDataFrameProvider.h>
 #include <api/ILogger.h>
 #include <api/ISystematicManager.h>
+#include <algorithm>
 #include <iostream>
 
 /**
@@ -186,11 +187,13 @@ void CorrectionManager::applyCorrectionVec(
  */
 void CorrectionManager::registerCorrectionlib(
     const IConfigurationProvider &configProvider) {
+  // configProvider.get() returns an empty string when the key is absent.
+  // Prefer "correctionConfig"; fall back to the legacy "correctionlibConfig".
   auto correctionConfigFile = configProvider.get("correctionConfig");
-  std::cout << "CorrectionManager: Registering corrections from config file: " << correctionConfigFile << std::endl;
   if (correctionConfigFile.empty()) {
-    correctionConfigFile = "correctionlibConfig";
+    correctionConfigFile = configProvider.get("correctionlibConfig");
   }
+  std::cout << "CorrectionManager: Registering corrections from config file: " << correctionConfigFile << std::endl;
 
   const auto correctionConfig = configProvider.parseMultiKeyConfig(
       correctionConfigFile,

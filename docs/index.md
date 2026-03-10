@@ -11,18 +11,6 @@ New to RDFAnalyzerCore? Start here:
 
 ## User Documentation
 
-### New Features
-
-- **[New Features Guide](NEW_FEATURES.md)** - Recent additions and enhancements
-  - KinematicFitManager plugin for decay reconstruction
-  - GoldenJsonManager for data certification
-  - ONNX input padding for transformer models
-  - Glob patterns for output selection
-  - Vector corrections support
-  - Boost histogram backend
-  - Python plotting bindings
-  - Law workflow integration
-
 ### Building Analyses
 
 - **[Analysis Guide](ANALYSIS_GUIDE.md)** - Comprehensive guide to building analyses
@@ -55,13 +43,10 @@ New to RDFAnalyzerCore? Start here:
   - **[ONNX Models](ONNX_IMPLEMENTATION.md)** - Runtime ML from any framework (PyTorch, TensorFlow, scikit-learn)
   - **[SOFIE Models](SOFIE_IMPLEMENTATION.md)** - Build-time compiled models for maximum performance
   - **[BDT Models](CONFIG_REFERENCE.md#bdt-manager-configuration)** - FastForest boosted decision trees
-
-- **ML Implementation Guides**:
-  - [ONNX Implementation](ONNX_IMPLEMENTATION.md) - Deep dive into ONNX support
-  - [ONNX Multi-Output](ONNX_MULTI_OUTPUT.md) - Models with multiple outputs
-  - [SOFIE Implementation](SOFIE_IMPLEMENTATION.md) - Build-time compiled models
+  - **[ONNX Multi-Output](ONNX_MULTI_OUTPUT.md)** - Models with multiple outputs
 
 - **[Batch Submission](BATCH_SUBMISSION.md)** - HTCondor job submission guide
+- **[Production Manager](PRODUCTION_MANAGER.md)** - Production-scale job management and monitoring
 
 ### Data Management & Outputs
 
@@ -82,6 +67,10 @@ New to RDFAnalyzerCore? Start here:
 - **[Nuisance Groups](NUISANCE_GROUPS.md)** - Configuring systematic nuisance groups
   - Weight and shape systematic definitions
   - Nuisance group YAML schema and examples
+
+- **[Region Binding](REGION_BINDING.md)** - Region-aware histogram and cutflow auto-binding
+  - Defining analysis regions and hierarchies
+  - Automatic per-region histogram booking
 
 - **[Physics Objects](PHYSICS_OBJECTS.md)** - Physics object collection reference
   - Standard column names for leptons, jets, MET, and other objects
@@ -150,6 +139,10 @@ Framework is extensible via plugins:
 - **CorrectionManager**: Scale factors and corrections
 - **TriggerManager**: Trigger logic
 - **NDHistogramManager**: N-dimensional histograms
+- **WeightManager**: Nominal and varied event weights
+- **RegionManager**: Named analysis regions with hierarchy
+- **CutflowManager**: Sequential cutflow and N-1 tables
+- **GoldenJsonManager**: Data certification via golden JSON
 
 Add custom plugins without modifying core code.
 
@@ -264,4 +257,4 @@ See repository for license information.
 
 **Repository**: https://github.com/brkronheim/RDFAnalyzerCore
 
-**Last Updated**: February 2026
+**Last Updated**: March 2026

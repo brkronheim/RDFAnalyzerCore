@@ -10,7 +10,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Ensure our custom modules directory is always on the search path.  
-# Use list(APPEND) so the value isnt accidentally cached/overwritten by previous
+# Use list(APPEND) so the value isn't accidentally cached/overwritten by previous
 # configurations (a common source of "cannot find requested file" errors).
 # We use CMAKE_SOURCE_DIR rather than CURRENT_SOURCE_DIR because the former
 # always refers to the top-level project root even when this file is included
