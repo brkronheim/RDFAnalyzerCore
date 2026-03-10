@@ -56,10 +56,10 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
           -DBUILD_TESTS=ON \
-          -DBUILD_COMBINE=${COMBINE_FLAG} \
-          -DBUILD_COMBINE_HARVESTER=${COMBINE_HARV_FLAG} \
-          -DUSE_CUDA=ON \
-          -DONNXRUNTIME_USE_CUDA=ON \
+          -DBUILD_COMBINE=ON \
+          -DBUILD_COMBINE_HARVESTER=ON \
+          -DUSE_CUDA=OFF \
+          -DONNXRUNTIME_USE_CUDA=OFF \
           -B build # `correction config --cmake`  # --trace
           cd build
           make -j$(( $(nproc) > 8 ? 8 : $(nproc) ))
