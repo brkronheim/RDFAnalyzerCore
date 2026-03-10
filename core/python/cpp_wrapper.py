@@ -162,7 +162,10 @@ def run_cpp_executable(
     try:
         # Setup library path if needed
         if setup_libs:
-            lib_dir = os.path.join(working_dir, "lib")
+            # Use os.getcwd() after chdir to avoid double-prefixing relative
+            # working_dir paths (e.g. "tmp" → chdir into "tmp", then look for
+            # "lib" inside the current directory, not "tmp/lib" inside "tmp").
+            lib_dir = os.path.join(os.getcwd(), "lib")
             if os.path.exists(lib_dir):
                 setup_library_path(lib_dir)
         

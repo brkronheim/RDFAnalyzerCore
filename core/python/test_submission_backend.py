@@ -11,7 +11,7 @@ def test_generate_condor_submit_exports_condor_proc_env(tmp_path):
         shared_dir_name=None,
         config_file="submit_config.txt",
     )
-    assert "environment = CONDOR_PROC=$(Process)" in sub
+    assert 'environment = "CONDOR_PROC=$(Process)' in sub
     assert "CONDOR_CLUSTER=$(Cluster)" in sub
 
 

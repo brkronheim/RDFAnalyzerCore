@@ -1,0 +1,9 @@
+# CI test dependencies — install with: pip install -r requirements-ci.txt
+-r requirements-production.txt
+pytest>=7.0.0
+numpy>=1.20.0
+uproot>=5.0.0
+correctionlib>=2.0.0
+# requests is a direct dependency of opendata_tasks and nano_tasks (and
+# transitively of generateSubmissionFilesOpenData / test_validate_config).
+requests>=2.28.0

@@ -10,7 +10,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Ensure our custom modules directory is always on the search path.  
-# Use list(APPEND) so the value isnt accidentally cached/overwritten by previous
+# Use list(APPEND) so the value isn't accidentally cached/overwritten by previous
 # configurations (a common source of "cannot find requested file" errors).
 # We use CMAKE_SOURCE_DIR rather than CURRENT_SOURCE_DIR because the former
 # always refers to the top-level project root even when this file is included
@@ -131,6 +131,9 @@ endif()
 
 if(ROOT_CORE_LOCATION)
 	get_filename_component(ROOT_LIB_DIR "${ROOT_CORE_LOCATION}" DIRECTORY)
+	# Cache so subdirectory CMakeLists (core/test, law) can use it for
+	# setting PYTHONPATH to include ROOT Python bindings.
+	set(ROOT_LIB_DIR "${ROOT_LIB_DIR}" CACHE INTERNAL "ROOT library directory")
 	set(CMAKE_BUILD_RPATH "${ROOT_LIB_DIR}")
 	set(CMAKE_INSTALL_RPATH "${ROOT_LIB_DIR}")
 	set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
@@ -171,6 +174,16 @@ if(ROOT_CORE_LOCATION)
 		message(WARNING "Could not find libgslcblas/openblas for ROOT::TMVA. Link failures may occur if libTMVA.so is used.")
 	endif()
 
+	find_library(RDF_GSL_LIB NAMES gsl)
+	if(RDF_GSL_LIB)
+		get_filename_component(RDF_GSL_LIB_DIR "${RDF_GSL_LIB}" DIRECTORY)
+		list(APPEND RDF_ROOT_TRANSITIVE_LIBS "${RDF_GSL_LIB}")
+		list(APPEND RDF_ROOT_TRANSITIVE_RPATH_DIRS "${RDF_GSL_LIB_DIR}")
+		message(STATUS "Found ROOT transitive dep GSL: ${RDF_GSL_LIB}")
+	else()
+		message(WARNING "Could not find libgsl for ROOT::MathMore. Link failures may occur if libMathMore.so is used.")
+	endif()
+
 	if(RDF_ROOT_TRANSITIVE_RPATH_DIRS)
 		list(APPEND CMAKE_BUILD_RPATH ${RDF_ROOT_TRANSITIVE_RPATH_DIRS})
 		list(APPEND CMAKE_INSTALL_RPATH ${RDF_ROOT_TRANSITIVE_RPATH_DIRS})
@@ -201,3 +214,4 @@ set(RDF_CUSTOM_DICT_TARGET "RDFCustomDict" CACHE STRING "Target name for the cus
 
 add_subdirectory(core)
 add_subdirectory(analyses)
+add_subdirectory(law)

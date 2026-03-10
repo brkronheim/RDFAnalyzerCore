@@ -1,0 +1,64 @@
+# =============================================================================
+# cfg.yaml — Main runner configuration for the CMS Run2016G DoubleMuon analysis
+#
+# Data source (CMS Open Data — publicly accessible, no credentials required):
+#   CMS Open Data record 30522
+#   /DoubleMuon/Run2016G-UL2016_MiniAODv2_NanoAODv9-v2/NANOAOD
+#   https://opendata.cern.ch/record/30522
+#
+# ── Local run ─────────────────────────────────────────────────────────────────
+#   cmake -S . -B build && cmake --build build -j$(nproc)
+#   cd build/analyses/CMS_Run2016_DoubleMuon
+#   ./analysis ../../../analyses/CMS_Run2016_DoubleMuon/cfg.yaml
+#
+# ── LAW batch run (CERN Open Data portal) ─────────────────────────────────────
+#   source law/env.sh && law index
+#   law run PrepareOpenDataSample \
+#       --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
+#       --name run2016g_zpeak \
+#       --exe build/analyses/CMS_Run2016_DoubleMuon/analysis
+# =============================================================================
+
+# ---- Input files (CMS Open Data XRootD — publicly accessible) ---------------
+# A representative subset of Run2016G files.  To run over the full dataset,
+# retrieve the complete file list from https://opendata.cern.ch/record/30522 and
+# extend this list, or use the LAW OpenData workflow (see README.md).
+fileList: >-
+  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/DoubleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/0022/0E5B2574-86E2-1A4B-B37B-E01BBA4AEC56.root,
+  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/DoubleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/0022/2A9BD6BF-7E89-E943-8B05-EA8C0C18FDAC.root,
+  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/DoubleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/0022/4E68E57B-31D9-AF48-B5A9-5F5ACCBC1B0E.root
+
+# CMS NanoAOD stores events in the "Events" TTree
+treeList: Events
+
+# ---- Output ----------------------------------------------------------------
+saveFile: output/dimuon_zpeak.root
+saveDirectory: output/
+saveTree: Events
+saveConfig: output.yaml
+
+# ---- Sample type (used by TriggerManager to select the trigger group) ------
+# "0" = data.  Must match the 'sample' field in triggers.yaml.
+type: "0"
+
+# ---- Performance -----------------------------------------------------------
+# -1 = use all available hardware threads.  Set to "0" for single-threaded
+# debugging; set to a positive integer to cap parallelism.
+threads: "-1"
+batch: "False"
+
+# ---- File filters ----------------------------------------------------------
+antiglobs: output.root, hists.root
+
+# ---- Plugin configuration files (all in YAML format) ----------------------
+# Trigger paths for double-muon HLT selection (TriggerManager)
+triggerConfig: triggers.yaml
+
+# Config-driven histogram definitions (NDHistogramManager)
+histogramConfig: histograms.yaml
+
+# Scalar float constants loaded into the RDataFrame as constant columns
+floatConfig: floats.yaml
+
+# Scalar integer constants loaded into the RDataFrame as constant columns
+intConfig: ints.yaml

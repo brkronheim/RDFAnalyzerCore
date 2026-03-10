@@ -69,6 +69,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import luigi  # type: ignore
 import law  # type: ignore
@@ -80,12 +82,16 @@ from framework import Task, PlotTask, view_output_plots  # noqa: E402
 # ---------------------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BUILD_PYTHON = os.path.abspath(os.path.join(_HERE, "..", "build", "python"))
+_CORE_PYTHON = os.path.abspath(os.path.join(_HERE, "..", "core", "python"))
 if _BUILD_PYTHON not in sys.path:
     sys.path.insert(0, _BUILD_PYTHON)
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+if _CORE_PYTHON not in sys.path:
+    sys.path.insert(0, _CORE_PYTHON)
 
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
+from output_schema import OutputManifest  # noqa: E402
 
 
 def _build_plot_request(
@@ -313,3 +319,12 @@ class MakePlots(PlotTask, law.LocalWorkflow):
             f"(MC integral={result.mcIntegral:.3g}, "
             f"data integral={result.dataIntegral:.3g})"
         )
+
+
+
+# ===========================================================================
+# ManifestPlotTask  (manifest-aware batch plotting)
+# ===========================================================================
+# Imported from manifest_plot_tasks.py to keep this module free of circular
+# dependencies on the framework module.
+from manifest_plot_tasks import ManifestPlotTask  # noqa: F401, E402

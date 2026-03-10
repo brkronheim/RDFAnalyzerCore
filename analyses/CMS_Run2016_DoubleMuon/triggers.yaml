@@ -1,0 +1,26 @@
+# =============================================================================
+# triggers.yaml — TriggerManager configuration
+#
+# Format: YAML sequence.  Each entry must have:
+#   name     : trigger group label (arbitrary)
+#   sample   : sample-type string that matches the 'type' key in cfg.yaml
+#   triggers : comma-separated list of HLT branch names (Bool_t in NanoAOD)
+#   vetoes   : (optional) comma-separated list of HLT veto branches
+#
+# TriggerManager applies the logical OR of all 'triggers' branches and
+# filters the event if none fired.  When 'vetoes' are given it additionally
+# requires that none of the veto branches fired.
+#
+# The four double-muon paths together cover:
+#   - Global-muon (Mu) and Tracker-muon (TkMu) leg variants
+#   - With and without a displaced-vertex (DZ) requirement
+# This OR maximises efficiency across varying pileup and trigger conditions
+# throughout the 2016G data-taking period.
+# =============================================================================
+- name: double_muon
+  sample: "0"
+  triggers: >-
+    HLT_Mu17_TrkIsoVVL_Mu8_TrkIsoVVL,
+    HLT_Mu17_TrkIsoVVL_Mu8_TrkIsoVVL_DZ,
+    HLT_Mu17_TrkIsoVVL_TkMu8_TrkIsoVVL,
+    HLT_Mu17_TrkIsoVVL_TkMu8_TrkIsoVVL_DZ

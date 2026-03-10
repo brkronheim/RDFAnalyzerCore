@@ -202,3 +202,79 @@ add_test(
 endif()
 
 
+
+# ---------------------------------------------------------------------------
+# core/python Python tests
+# ---------------------------------------------------------------------------
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    set(_CORE_PY "${CMAKE_SOURCE_DIR}/core/python")
+    # Configure the pytest runner shim that exits non-zero when pytest is absent
+    # so the test is visible as FAILED rather than silently skipped.
+    configure_file(run_pytest.py.in "${CMAKE_BINARY_DIR}/run_pytest.py" @ONLY)
+
+    # PYTHONPATH for most tests (core/python only)
+    set(_PYPATH "${_CORE_PY}:$ENV{PYTHONPATH}")
+    # test_submission_backend does `from core.python.xxx import`, so it also needs
+    # the repo root on PYTHONPATH.
+    set(_PYPATH_WITH_ROOT_REPO "${CMAKE_SOURCE_DIR}:${_CORE_PY}:$ENV{PYTHONPATH}")
+    # ROOT Python bindings path (for tests that import ROOT directly).
+    # ROOT_LIB_DIR is set as a CACHE INTERNAL variable in the top-level CMakeLists.
+    set(_PYPATH_ROOT "${ROOT_LIB_DIR}:${_CORE_PY}:$ENV{PYTHONPATH}")
+
+    # Ensure a local tmp directory exists in the build tree so that tests which
+    # execute shell scripts are not affected by noexec mounts on the system /tmp.
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tmp")
+    set(_EXEC_TMPDIR "TMPDIR=${CMAKE_BINARY_DIR}/tmp")
+
+    # pytest-based tests
+    macro(add_core_pytest _name _stem _pypath)
+        add_test(
+            NAME    ${_name}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_BINARY_DIR}/run_pytest.py
+                    ${_CORE_PY}/${_stem}.py -v
+        )
+        set_tests_properties(${_name} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${_pypath}"
+        )
+    endmacro()
+
+    add_core_pytest(CorePyAnalysisConfigValidationTest  test_analysis_config_validation  "${_PYPATH}")
+    add_core_pytest(CorePyDatasetManifestTest            test_dataset_manifest            "${_PYPATH}")
+    add_core_pytest(CorePyNuisanceGroupsTest             test_nuisance_groups             "${_PYPATH}")
+    add_core_pytest(CorePyOutputSchemaTest               test_output_schema               "${_PYPATH}")
+    add_core_pytest(CorePyRegionSchemaTest               test_region_schema               "${_PYPATH}")
+    add_core_pytest(CorePyReproducibilityReportTest      test_reproducibility_report      "${_PYPATH}")
+    add_core_pytest(CorePyValidateConfigTest             test_validate_config             "${_PYPATH}")
+    add_core_pytest(CorePyValidationReportTest           test_validation_report           "${_PYPATH}")
+    add_core_pytest(CorePyVariationOrchestratorTest      test_variation_orchestrator      "${_PYPATH}")
+    # test_submission_backend uses absolute `core.python.*` imports so it needs
+    # both core/python and the repo root on PYTHONPATH.
+    add_core_pytest(CorePySubmissionBackendTest          test_submission_backend          "${_PYPATH_WITH_ROOT_REPO}")
+
+    # unittest-based tests (have __main__ guard)
+    macro(add_core_unittest _name _stem _pypath)
+        add_test(
+            NAME    ${_name}
+            COMMAND ${Python3_EXECUTABLE} ${_CORE_PY}/${_stem}.py
+        )
+        set_tests_properties(${_name} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${_pypath}"
+        )
+    endmacro()
+
+    add_core_unittest(CorePyProductionManagerTest  test_production_manager  "${_PYPATH}")
+    # test_uproot_datacard has a pre-existing uproot TAxis API mismatch; registered
+    # so the failure is visible in CI rather than silently absent.
+    add_core_unittest(CorePyUprootDatacardTest     test_uproot_datacard     "${_PYPATH}")
+
+    # test_datacard_generator requires ROOT Python bindings.
+    # ROOT_LIB_DIR is set by the top-level CMakeLists via CACHE INTERNAL.
+    add_test(
+        NAME    CorePyDatacardGeneratorTest
+        COMMAND ${Python3_EXECUTABLE} ${_CORE_PY}/test_datacard_generator.py
+    )
+    set_tests_properties(CorePyDatacardGeneratorTest PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${_PYPATH_ROOT}"
+    )
+endif()

@@ -37,4 +37,5 @@ example_outputs/
 aux/Run3/*
 aux/Run2/*
 docs/doxygen/*
-analyses/*/
+analyses/*/output/
+analyses/*/data/
