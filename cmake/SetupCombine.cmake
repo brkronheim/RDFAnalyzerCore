@@ -50,6 +50,34 @@ set(_ch_prefix "${CMAKE_BINARY_DIR}/external/CombineHarvester")
 set(_combineharvester_src_dir "${_ch_prefix}/src/CombineHarvester")
 set(_combineharvester_helper_dir "${CMAKE_SOURCE_DIR}/cmake/CombineHarvesterStandalone")
 
+# Locate GSL (needed as a transitive dependency of ROOT::MathMore used by Combine).
+# When GSL is installed in a non-standard prefix (common on CMSSW/EL9 runners),
+# the linker cannot resolve `libgsl`/`libgslcblas` during the Combine build
+# unless we explicitly tell it where to look.  We find the libraries here and
+# pass the directory to the ExternalProject via linker flags and RPATH.
+find_package(GSL QUIET)
+if(GSL_FOUND)
+    message(STATUS "Found GSL ${GSL_VERSION}: ${GSL_LIBRARIES}")
+    get_filename_component(_gsl_lib_dir "${GSL_LIBRARY}" DIRECTORY)
+else()
+    # Fall back to manual library search when the CMake FindGSL module cannot
+    # locate the package (e.g. gsl-config not on PATH but the .so is present).
+    find_library(_gsl_lib NAMES gsl)
+    if(_gsl_lib)
+        get_filename_component(_gsl_lib_dir "${_gsl_lib}" DIRECTORY)
+        message(STATUS "Found GSL library manually: ${_gsl_lib}")
+    else()
+        message(WARNING "GSL library not found. The Combine build may fail with "
+                        "undefined references to gsl_* symbols from libMathMore.so.")
+    endif()
+endif()
+
+set(_gsl_linker_flags "")
+if(_gsl_lib_dir)
+    set(_gsl_linker_flags "-L${_gsl_lib_dir} -Wl,-rpath,${_gsl_lib_dir}")
+    message(STATUS "Passing GSL library directory to Combine ExternalProject: ${_gsl_lib_dir}")
+endif()
+
 # Common CMake arguments for the external projects
 # We install into the same prefix to make it easier to locate binaries.
 set(_common_args
@@ -59,6 +87,8 @@ set(_common_args
     -DEigen3_DIR=${Eigen3_DIR}
     -DBUILD_TESTS=OFF
     -DBUILD_TESTING=OFF
+    -DCMAKE_EXE_LINKER_FLAGS="${_gsl_linker_flags}"
+    -DCMAKE_SHARED_LINKER_FLAGS="${_gsl_linker_flags}"
 )
 
 ExternalProject_Add(CombineTool
