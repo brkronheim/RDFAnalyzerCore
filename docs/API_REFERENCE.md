@@ -935,6 +935,30 @@ produces per-component audit statistics written to the meta ROOT file.
 auto& wm = *analyzer.getPlugin<WeightManager>("weights");
 ```
 
+#### Base Weight (Generator Weight)
+
+The **first** component you should register is always the per-event generator
+weight (e.g. `genWeight` in NanoAOD).  This is the "base weight" that all
+other scale factors multiply on top of:
+
+```cpp
+wm.addScaleFactor("genWeight", "genWeight");
+```
+
+The generator weight branch is also tracked **independently** by `CounterService`
+via the `counterWeightBranch` config key.  CounterService writes the total sum
+of weights (`counter_weightSum_<sample>`) and the sum of weight signs
+(`counter_weightSignSum_<sample>`) to the meta ROOT file.  These are consumed by
+`StitchingDerivationTask` to derive per-bin stitching scale factors.  The two
+roles are complementary:
+
+| Mechanism | Purpose |
+|-----------|---------|
+| `counterWeightBranch` in cfg.txt | Accumulate sum-of-weights for normalisation |
+| `wm.addScaleFactor("genWeight", "genWeight")` | Include generator weight in the per-event weight product |
+
+Both must reference the same branch for the analysis to be consistent.
+
 #### WeightAuditEntry
 
 ```cpp
@@ -1122,32 +1146,44 @@ to (and including) the named region. For example, if `"signal"` has parent
 **Example**:
 ```cpp
 #include <RegionManager.h>
+#include <NDHistogramManager/NDHistogramManager.h>
 
-auto rmPlugin = std::make_unique<RegionManager>();
+auto rmPlugin  = std::make_unique<RegionManager>();
+auto ndhPlugin = std::make_unique<NDHistogramManager>(configProvider);
 analyzer.addPlugin("regions", std::move(rmPlugin));
+analyzer.addPlugin("NDHistogramManager", std::move(ndhPlugin));
 
 // Define boolean selection columns first
 analyzer.Define("pass_presel", [](float pt){ return pt > 20.f; }, {"jet_pt"});
 analyzer.Define("pass_sr",     [](float mva){ return mva > 0.8f; }, {"mva_score"});
 analyzer.Define("pass_cr",     [](float mva){ return mva < 0.4f; }, {"mva_score"});
 
-auto& rm = *analyzer.getPlugin<RegionManager>("regions");
+auto& rm  = *analyzer.getPlugin<RegionManager>("regions");
+auto& ndh = *analyzer.getPlugin<NDHistogramManager>("NDHistogramManager");
 
 // Declare regions (parent before child)
 rm.declareRegion("presel",  "pass_presel");
 rm.declareRegion("signal",  "pass_sr", "presel");
 rm.declareRegion("control", "pass_cr", "presel");
 
-// Retrieve per-region DataFrames for histogramming
-ROOT::RDF::RNode signalDf  = rm.getRegionDataFrame("signal");
-ROOT::RDF::RNode controlDf = rm.getRegionDataFrame("control");
+// Bind NDHistogramManager — it will fill histograms for each declared region
+// automatically using its internal region axis.  No raw DataFrames needed.
+ndh.bindToRegionManager(&rm);
 
 // Validate hierarchy (also called automatically in initialize())
 auto errors = rm.validate();
 if (!errors.empty()) {
     for (const auto& e : errors) std::cerr << e << "\n";
 }
+
+// Book and save — NDHistogramManager fills all regions in one event-loop pass.
+ndh.bookConfigHistograms();
+ndh.saveHists();
 ```
+
+> **Note**: Prefer binding plugins to `RegionManager` over retrieving raw per-region
+> DataFrames.  Plugins bound to `RegionManager` iterate over all regions
+> internally and guarantee that the complete event loop is executed only once.
 
 ---
 

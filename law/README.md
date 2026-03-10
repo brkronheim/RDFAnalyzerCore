@@ -24,6 +24,7 @@ integrate with their outputs.
 - [NANO / Rucio Workflow](#nano--rucio-workflow)
 - [CERN Open Data Workflow](#cern-open-data-workflow)
 - [Combine Workflow](#combine-workflow)
+- [End-to-End Pipeline: From Data to Statistical Results](#end-to-end-pipeline-from-data-to-statistical-results)
 - [Common Parameters](#common-parameters)
 - [Important Behavior Notes](#important-behavior-notes)
 - [Monitoring and Resubmission](#monitoring-and-resubmission)
@@ -471,6 +472,52 @@ control_regions:
     signal_processes: [signal]
     data_process: data_obs
 ```
+
+---
+
+## End-to-End Pipeline: From Data to Statistical Results
+
+The LAW workflows cover the **complete** physics analysis pipeline.  The diagram
+below shows how the tasks connect:
+
+```
+NanoTask / OpenDataTask        ─┐
+  │  (batch jobs, HTCondor)      │  Skims raw data into per-dataset ROOT files
+  ▼                              │
+MonitorTask                    ─┘
+  │  (blocks until all jobs done)
+  ▼
+[merge per-dataset outputs]   ── optional manual step or MergeTask
+  │
+  ├─► StitchingDerivationTask  ── derives per-bin stitching scale factors
+  │                                (reads counter_intWeightSignSum_* histograms)
+  │
+HistFillTask (local)          ── fills N-dimensional histograms per dataset
+  │  (reads skim outputs from SkimTask via --skim-name)
+  │
+  ▼
+CreateDatacard                ── assembles CMS Combine datacards + shape files
+  │  (reads merged histogram ROOT files)
+  ▼
+RunCombine                    ── runs combine -M <method> for each datacard
+     (AsymptoticLimits, FitDiagnostics, Significance, MultiDimFit, ...)
+```
+
+### Histogram Backend and Downstream Compatibility
+
+The `NDHistogramManager` supports two backends (configured via `histogramBackend`
+in the analysis config):
+
+- **`root`** (default) — produces `THnSparseF` objects stored in ROOT files.
+  This format is required for `CreateDatacard` and all standard ROOT-based
+  downstream tools.
+- **`boost`** — uses Boost.Histogram during the event loop for reduced memory
+  usage; output is converted to ROOT format before writing, so it is fully
+  compatible with downstream tools including Combine.
+
+Both backends write identical output files; `histogramBackend` is purely an
+internal performance knob.  See [CONFIG_REFERENCE.md — Histogram Backend](../docs/CONFIG_REFERENCE.md#histogram-backend)
+for configuration details.
 
 ---
 

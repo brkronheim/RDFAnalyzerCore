@@ -754,6 +754,69 @@ systematic weight variations from individually registered components.  It
 replaces ad-hoc per-event weight expressions scattered across the analysis
 with a single, audited weight definition.
 
+### Base Weight: Generator Weight and Weight Sum Tracking
+
+In Monte Carlo analyses the first thing to include is the **per-event generator
+weight** (e.g. `genWeight` in NanoAOD).  This must be registered both in the
+config file and in your analysis code:
+
+1. **Config file** — tell `CounterService` which branch holds the generator weight
+   so that it can accumulate the sum-of-weights for normalisation:
+
+   ```
+   counterWeightBranch = genWeight
+   ```
+
+   CounterService then writes two histograms to the meta ROOT file:
+   - `counter_weightSum_<sample>` — sum of `genWeight` over all events (used as
+     `sumW` when computing the luminosity normalisation)
+   - `counter_weightSignSum_<sample>` — sum of `sign(genWeight)`, which is used
+     by `StitchingDerivationTask` to compute per-bin stitching scale factors
+
+2. **Analysis code** — add `genWeight` as the first scale factor so that the final
+   weight column includes it:
+
+   ```cpp
+   wm->addScaleFactor("genWeight", "genWeight");
+   ```
+
+For samples with negative-weight events (common in NLO generators) use
+`sign(genWeight)` instead of `genWeight` itself to avoid sign-weighted distortions
+while still properly normalising the sample.  In that case set
+`counterWeightBranch = genWeight` in the config (so `CounterService` tracks the
+true sum) and add the sign column as the scale factor:
+
+```cpp
+// Define sign-of-weight column
+analyzer.Define("genWeightSign", [](float w){ return w >= 0.f ? 1.f : -1.f; }, {"genWeight"});
+wm->addScaleFactor("genWeight", "genWeightSign");
+```
+
+### Interaction with Stitching Weights
+
+For inclusive+exclusive sample sets (e.g. DY + DY high-pT), per-event stitching
+scale factors are derived by `StitchingDerivationTask` from the
+`counter_intWeightSignSum_*` histograms written by CounterService.  To enable
+this:
+
+1. In the config file set `counterIntWeightBranch` to the integer stitching-bin
+   column (produced by your analysis or CorrectionManager):
+
+   ```
+   counterIntWeightBranch = stitchBin
+   ```
+
+2. After stitching weights are derived you load the resulting correctionlib JSON
+   and apply it as a per-event scale factor:
+
+   ```cpp
+   // Apply the derived stitching weight
+   wm->addScaleFactor("stitchSF", "stitch_weight_col");
+   ```
+
+See [LAW_TASKS.md — StitchingDerivationTask](LAW_TASKS.md#stitchingderivationtask) for
+details on deriving these weights from LAW.
+
 ### Registering WeightManager
 
 Add a `WeightManager` plugin to your analysis and retrieve it via
@@ -767,15 +830,20 @@ auto* wm = analyzer.getPlugin<WeightManager>("weights");
 
 ### Adding Weight Components
 
-Register each per-event scale factor column and any scalar normalization
-factors before calling `defineNominalWeight()`:
+Register the generator weight first, then all additional per-event scale
+factor columns and scalar normalization factors before calling
+`defineNominalWeight()`:
 
 ```cpp
-// Per-event scale factor columns (must already exist on the dataframe).
+// Base generator weight — must come first.
+wm->addScaleFactor("genWeight", "genWeight");
+
+// Additional per-event scale factor columns (must already exist on the dataframe).
 wm->addScaleFactor("leptonSF",  "lepton_sf_col");
 wm->addScaleFactor("pileupSF",  "pu_weight_col");
 
-// Scalar normalization applied uniformly to every event.
+// Scalar normalization applied uniformly to every event (lumi × xsec / sumW).
+// sumW should come from the counterWeightSum histogram in a previous skim.
 double normFactor = lumi * xsec / sumW;
 wm->addNormalization("lumi_xsec", normFactor);
 ```
@@ -949,30 +1017,50 @@ cfm->bindToRegionManager(rm);
 
 ### Complete RegionManager Example
 
+The typical pattern is to declare regions and then let the bound plugins
+(NDHistogramManager, CutflowManager) handle the per-region filling automatically.
+You do not need to retrieve raw per-region DataFrames; plugins that are bound
+to the RegionManager iterate over all regions internally.
+
 ```cpp
 #include <analyzer.h>
 #include <plugins/RegionManager/RegionManager.h>
+#include <plugins/NDHistogramManager/NDHistogramManager.h>
+#include <plugins/CutflowManager/CutflowManager.h>
 
-void myAnalysis() {
-    Analyzer analyzer("config.txt");
+int main(int argc, char* argv[]) {
+    Analyzer analyzer(argv[1]);
 
-    auto* rm = analyzer.getPlugin<RegionManager>("regions");
+    auto* rm  = analyzer.getPlugin<RegionManager>("regions");
+    auto* ndh = analyzer.getPlugin<NDHistogramManager>("NDHistogramManager");
+    auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 
-    // Define filter columns before the first declareRegion() call.
-    analyzer.Define("isPresel",       passPreselection,    {"lep_pt", "met"});
-    analyzer.Define("isSignalRegion", passSignalSelection, {"mva_score"});
-    analyzer.Define("isControlRegion",passControlSelection,{"mva_score"});
+    // Step 1 — define boolean selection columns.
+    analyzer.Define("isPresel",        passPreselection,    {"lep_pt", "met"});
+    analyzer.Define("isSignalRegion",  passSignalSelection, {"mva_score"});
+    analyzer.Define("isControlRegion", passControlSelection,{"mva_score"});
 
-    // Declare regions.
+    // Step 2 — declare regions.
     rm->declareRegion("presel",   "isPresel");
-    rm->declareRegion("signal",   "isSignalRegion",   "presel");
-    rm->declareRegion("control",  "isControlRegion",  "presel");
+    rm->declareRegion("signal",   "isSignalRegion",  "presel");
+    rm->declareRegion("control",  "isControlRegion", "presel");
 
-    // Use region DataFrames for histogram booking.
-    ROOT::RDF::RNode sigDf = rm->getRegionDataFrame("signal");
-    ROOT::RDF::RNode ctlDf = rm->getRegionDataFrame("control");
+    // Step 3 — bind plugins so they operate per-region automatically.
+    ndh->bindToRegionManager(rm);  // each histogram gains a region axis
+    cfm->bindToRegionManager(rm);  // cutflow tables produced per region
 
-    analyzer.run();
+    // Step 4 — register cuts (applies to the full dataframe; cfm tracks
+    //           per-region counts separately via the bound RegionManager).
+    cfm->addCut("presel",  "isPresel");
+    cfm->addCut("signal",  "isSignalRegion");
+
+    // Step 5 — book config-driven histograms (fills all declared regions).
+    ndh->bookConfigHistograms();
+    ndh->saveHists();
+
+    // Step 6 — execute.
+    analyzer.save();
+    return 0;
 }
 ```
 

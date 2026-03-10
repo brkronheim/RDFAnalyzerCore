@@ -518,11 +518,15 @@ histograms.
 
 ## 9. Complete C++ Examples
 
+All examples below use `analyzer.Define()` and `analyzer.Filter()` — the
+framework wrappers that ensure variables and filters are registered with the
+provenance system and remain compatible with the `SystematicManager`.
+
 ### Example 1: Jet selection with pT/eta cuts
 
 ```cpp
-// Define goodJets collection inside an RDataFrame lambda
-auto df1 = df.Define("goodJets", [](
+// Define goodJets using analyzer.Define()
+analyzer.Define("goodJets", [](
     const RVec<float>& pt,  const RVec<float>& eta,
     const RVec<float>& phi, const RVec<float>& mass)
 {
@@ -531,16 +535,14 @@ auto df1 = df.Define("goodJets", [](
 }, {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"});
 
 // Filter to events with at least 2 good jets
-auto df2 = df1.Filter([](const PhysicsObjectCollection& jets) {
-    return jets.size() >= 2;
-}, {"goodJets"});
+analyzer.Filter("goodJets.size() >= 2", "atLeastTwoJets");
 ```
 
 ### Example 2: Jet-lepton overlap removal
 
 ```cpp
-// First define the lepton collection (electrons passing selection)
-auto df_lep = df.Define("goodElectrons", [](
+// Define electron collection
+analyzer.Define("goodElectrons", [](
     const RVec<float>& pt,  const RVec<float>& eta,
     const RVec<float>& phi, const RVec<float>& mass,
     const RVec<bool>&  id_pass)
@@ -550,7 +552,7 @@ auto df_lep = df.Define("goodElectrons", [](
 }, {"Electron_pt", "Electron_eta", "Electron_phi", "Electron_mass", "Electron_mvaIso_WP90"});
 
 // Remove jets overlapping with electrons (ΔR < 0.4)
-auto df_clean = df_lep.Define("cleanJets", [](
+analyzer.Define("cleanJets", [](
     const PhysicsObjectCollection& jets,
     const PhysicsObjectCollection& electrons)
 {
@@ -562,7 +564,7 @@ auto df_clean = df_lep.Define("cleanJets", [](
 
 ```cpp
 // Build invariant masses of all unique jet pairs
-auto df_mjj = df_clean.Define("dijetMass", [](
+analyzer.Define("dijetMass", [](
     const PhysicsObjectCollection& jets)
 {
     auto pairs = makePairs(jets);
@@ -575,25 +577,25 @@ auto df_mjj = df_clean.Define("dijetMass", [](
 }, {"cleanJets"});
 
 // Select events with any pair above 500 GeV
-auto df_vbf = df_mjj.Filter([](const RVec<float>& mjj) {
-    return !mjj.empty() && Max(mjj) > 500.f;
-}, {"dijetMass"});
+analyzer.Define("hasVBFpair",
+    [](const RVec<float>& mjj){ return !mjj.empty() && Max(mjj) > 500.f; },
+    {"dijetMass"});
+analyzer.Filter("hasVBFpair", "VBFjetPairCut");
 ```
 
 ### Example 4: Jet-lepton cross pairs for HH→bbτν-style analyses
 
 ```cpp
 // Build all (b-jet, tau) cross pairs
-auto df_pairs = df.Define("bjetTauPairs", [](
+analyzer.Define("bjetTauPairs", [](
     const PhysicsObjectCollection& bjets,
     const PhysicsObjectCollection& taus)
 {
-    // Returns all bjets.size() × taus.size() combinations
     return makeCrossPairs(bjets, taus);
 }, {"selectedBJets", "selectedTaus"});
 
 // Find the pair with the smallest ΔR(b, τ)
-auto df_best = df_pairs.Define("bestBTauDR", [](
+analyzer.Define("bestBTauDR", [](
     const std::vector<ObjectPair>& pairs,
     const PhysicsObjectCollection& bjets,
     const PhysicsObjectCollection& taus)
@@ -611,12 +613,11 @@ auto df_best = df_pairs.Define("bestBTauDR", [](
 ### Example 5: Caching b-tag scores on a collection
 
 ```cpp
-auto df_btag = df.Define("btaggedJets", [](
+analyzer.Define("btaggedJets", [](
     const RVec<float>& pt,  const RVec<float>& eta,
     const RVec<float>& phi, const RVec<float>& mass,
     const RVec<float>& btag)
 {
-    // Select jets with pT > 25 GeV and |eta| < 2.5
     RVec<bool> mask = (pt > 25.f) && (abs(eta) < 2.5f);
     PhysicsObjectCollection jets(pt, eta, phi, mass, mask);
 
@@ -626,9 +627,8 @@ auto df_btag = df.Define("btaggedJets", [](
     return jets;
 }, {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass", "Jet_btagDeepFlavB"});
 
-// Count medium b-tags in a subsequent Define or Filter
-auto df_nb = df_btag.Define("nBtagMedium", [](
-    const PhysicsObjectCollection& jets)
+// Count medium b-tags in a subsequent Define
+analyzer.Define("nBtagMedium", [](const PhysicsObjectCollection& jets)
 {
     if (!jets.hasCachedFeature("btagDeepFlavB")) return 0;
     const auto& scores = jets.getCachedFeature<RVec<float>>("btagDeepFlavB");

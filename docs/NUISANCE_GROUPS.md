@@ -96,16 +96,19 @@ An empty `output_usage` list on a `NuisanceGroup` means the group is consumed by
 ## 4. NuisanceGroup Dataclass
 
 ```python
+from dataclasses import dataclass, field
+from typing import List
+
 @dataclass
 class NuisanceGroup:
     name:              str
-    group_type:        str = "shape"          # one of VALID_GROUP_TYPES
-    systematics:       List[str] = []
-    processes:         List[str] = []
-    regions:           List[str] = []
-    output_usage:      List[str] = []
-    description:       str = ""
-    correlation_group: str = ""
+    group_type:        str       = "shape"  # one of VALID_GROUP_TYPES
+    systematics:       List[str] = field(default_factory=list)
+    processes:         List[str] = field(default_factory=list)
+    regions:           List[str] = field(default_factory=list)
+    output_usage:      List[str] = field(default_factory=list)
+    description:       str       = ""
+    correlation_group: str       = ""
 ```
 
 ### Fields

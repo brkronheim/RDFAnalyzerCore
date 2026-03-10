@@ -457,6 +457,28 @@ The YAML config is validated at startup against a JSON Schema. See **[CONFIGURAT
 
 ## Advanced Configuration
 
+### Histogram Backend
+
+`NDHistogramManager` supports two histogram backends:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `histogramBackend` | String | `"root"` | Histogram backend: `"root"` (THnSparseF) or `"boost"` (Boost.Histogram) |
+
+**ROOT backend** (`"root"`, default): stores histograms as `THnSparseF` objects in the meta ROOT output file.  This is compatible with all downstream tools and is the correct choice for most analyses.
+
+**Boost.Histogram backend** (`"boost"`): stores histograms in-memory using Boost.Histogram during the event loop, then converts to ROOT format for output.  This can improve memory performance for analyses with very large numbers of histogram bins.
+
+```
+# Use ROOT backend (default — compatible with all downstream tools including Combine)
+histogramBackend=root
+
+# Use Boost.Histogram backend (in-memory optimisation, same output format)
+histogramBackend=boost
+```
+
+Both backends produce the same output format and are fully interchangeable.
+
 ### Counter Service
 
 Track event counts and weight sums per sample.

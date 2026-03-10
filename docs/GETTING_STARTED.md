@@ -47,8 +47,8 @@ The build artifacts will be placed in the `build/` directory.
 ### 4. Run the Example Analysis
 
 ```bash
-cd build/analyses/ExampleAnalysis
-./analysis ../../analyses/ExampleAnalysis/cfg.txt
+cd analyses/ExampleAnalysis
+../../build/analyses/ExampleAnalysis/analysis cfg.txt
 ```
 
 This runs a Z→μμ analysis on ATLAS Open Data.
@@ -279,17 +279,20 @@ cd /path/to/RDFAnalyzerCore
 source build.sh
 ```
 
-For faster incremental rebuilds after the first build:
+For faster incremental rebuilds, you can skip the test suite:
 
 ```bash
-source buildFast.sh
+(cd build && make -j$(nproc))
 ```
 
 ### Step 7: Run the Analysis
 
+Always run the analysis executable from the directory containing `cfg.txt` so
+that relative paths in the config resolve correctly:
+
 ```bash
-cd build/analyses/MyFirstAnalysis
-./myAnalysis ../../../analyses/MyFirstAnalysis/cfg.txt
+cd analyses/MyFirstAnalysis
+../../build/analyses/MyFirstAnalysis/myAnalysis cfg.txt
 ```
 
 The executable always takes one argument: the path to `cfg.txt`.
@@ -382,18 +385,19 @@ datasets:
    source build.sh
    ```
 
-4. **Run your analysis**
+4. **Run your analysis from the config directory**
    ```bash
-   cd build/analyses/MyAnalysis
-   ./myAnalysis ../../../analyses/MyAnalysis/cfg.txt
+   cd analyses/MyAnalysis
+   ../../build/analyses/MyAnalysis/myAnalysis cfg.txt
    ```
 
-5. **Iterate**: Edit `analysis.cc`, then rebuild with `source buildFast.sh`
+5. **Iterate**: Edit `analysis.cc`, then rebuild with `(cd build && make -j$(nproc))`
 
 ### Incremental Development Tips
 
-- Use `source buildFast.sh` (skips reconfiguration) for fast iteration after the first build.
+- Rebuild incrementally with `(cd build && make -j$(nproc))` (faster than re-running `build.sh`).
 - Use `source cleanBuild.sh` when you add new files or change `CMakeLists.txt`.
+- Always run the executable from the analysis directory so relative paths in `cfg.txt` resolve correctly.
 - Set `threads=1` in `cfg.txt` while debugging to get deterministic output and cleaner stack traces.
 - Use `source buildTest.sh` to build and run the unit test suite.
 
@@ -519,12 +523,14 @@ ctest -R TestName -V   # -V for verbose output
 Now that your first analysis is running, explore the full power of the framework:
 
 1. **Config reference**: All config keys explained in [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)
-2. **Analysis guide**: Advanced patterns in [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
+2. **Analysis guide**: Advanced patterns (WeightManager, RegionManager, systematics, ML) in [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
 3. **Architecture overview**: How the framework is structured in [ARCHITECTURE.md](ARCHITECTURE.md)
 4. **Plugin development**: Write your own plugins in [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md)
-5. **Machine learning**: Integrate BDTs or neural networks with `OnnxManager`
-6. **Scale corrections**: Apply per-event scale factors with `CorrectionManager`
-7. **Systematics**: Register and propagate systematic variations via `SystematicManager`
-8. **Batch processing**: Submit hundreds of jobs with the LAW workflow in `law/`
+5. **Machine learning**: Integrate BDTs or neural networks — [ONNX_IMPLEMENTATION.md](ONNX_IMPLEMENTATION.md), [SOFIE_IMPLEMENTATION.md](SOFIE_IMPLEMENTATION.md)
+6. **Scale corrections**: Apply per-event scale factors with `CorrectionManager` — [API_REFERENCE.md](API_REFERENCE.md)
+7. **Systematics & nuisance groups**: Register and propagate uncertainties — [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md)
+8. **Batch processing**: Submit hundreds of jobs — [LAW_TASKS.md](LAW_TASKS.md) and [BATCH_SUBMISSION.md](BATCH_SUBMISSION.md)
+9. **Physics objects**: Overlap removal, combinatorics — [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
+10. **Output validation**: Validate and inspect outputs — [VALIDATION_REPORTS.md](VALIDATION_REPORTS.md)
 
 Happy analyzing!

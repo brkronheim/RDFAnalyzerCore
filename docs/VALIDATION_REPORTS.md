@@ -180,12 +180,15 @@ Provides `to_dict()` and `from_dict()`.
 Coverage record for a single systematic variation.
 
 ```python
+from dataclasses import dataclass, field
+from typing import List
+
 @dataclass
 class SystematicEntry:
     systematic_name:  str
     has_up:           bool       = False
     has_down:         bool       = False
-    extra_variations: List[str]  = []
+    extra_variations: List[str]  = field(default_factory=list)
 ```
 
 | Field              | Description |
@@ -993,7 +996,9 @@ else:
 import yaml
 from reproducibility_report import ReproducibilityReport
 
-original = ReproducibilityReport({"framework.git_hash": "abc123", "config.hash": "42"})
+original = ReproducibilityReport(
+    provenance={"framework.git_hash": "abc123", "config.hash": "42"}
+)
 yaml_str = original.to_yaml()
 
 # Deserialise from the YAML dict
