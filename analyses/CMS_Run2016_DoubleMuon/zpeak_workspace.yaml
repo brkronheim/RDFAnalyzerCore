@@ -88,6 +88,6 @@ channels:
     histogram: DimuonMass_2j
     label:     "≥2 jets"
 
-  - name:      3j
-    histogram: DimuonMass_3j
+  - name:      ge3j
+    histogram: DimuonMass_ge3j
     label:     "≥3 jets"

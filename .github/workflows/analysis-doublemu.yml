@@ -1,9 +1,12 @@
 name: CMS DoubleMuon Analysis (on request)
 
 # Triggered manually via the GitHub Actions UI or REST API.
-# This job builds the CMS Run2016G DoubleMuon analysis and runs it over a
-# single public CMS Open Data NanoAOD file to validate the full
-# analysis pipeline end-to-end.
+# This job builds the CMS Run2016G DoubleMuon analysis, runs the analysis
+# executable over a single public CMS Open Data NanoAOD file, and then runs
+# the full analytic Z→μμ peak fit via AnalyticWorkspaceFitTask (local law).
+# If CMS Combine is found on the runner the fit is executed; otherwise the
+# datacards and RooFit workspaces are built and the fit step is skipped
+# gracefully.
 #
 # To trigger:
 #   GitHub UI:  Actions → "CMS DoubleMuon Analysis (on request)" → Run workflow
@@ -41,7 +44,7 @@ jobs:
             echo "ERROR: ROOT not found on runner"; exit 1
           fi
 
-      - name: Install Python test dependencies
+      - name: Install Python dependencies
         run: pip3 install -r requirements-ci.txt
 
       - name: Configure CMake
@@ -50,47 +53,88 @@ jobs:
       - name: Build cms_doublemu_analysis
         run: cmake --build build --target cms_doublemu_analysis --parallel $(nproc)
 
-      - name: Prepare output directory
-        run: mkdir -p build/analyses/CMS_Run2016_DoubleMuon/output
-
-      - name: Run analysis
+      - name: Run analysis executable
         working-directory: build/analyses/CMS_Run2016_DoubleMuon
         env:
-          # Allow the user to override thread count at dispatch time
           THREADS: ${{ github.event.inputs.threads }}
         run: |
           # Write a minimal override config so the thread count can be injected
           # without modifying the committed ci_cfg.yaml.
           if [ -n "${THREADS}" ] && [ "${THREADS}" != "-1" ]; then
-            cat ../../../analyses/CMS_Run2016_DoubleMuon/ci_cfg.yaml \
-              | sed "s/^threads:.*/threads: \"${THREADS}\"/" \
+            sed "s/^threads:.*/threads: \"${THREADS}\"/" \
+              "${GITHUB_WORKSPACE}/analyses/CMS_Run2016_DoubleMuon/ci_cfg.yaml" \
               > /tmp/ci_cfg_override.yaml
             CFG=/tmp/ci_cfg_override.yaml
           else
-            CFG=../../../analyses/CMS_Run2016_DoubleMuon/ci_cfg.yaml
+            CFG="${GITHUB_WORKSPACE}/analyses/CMS_Run2016_DoubleMuon/ci_cfg.yaml"
           fi
           ./cms_doublemu_analysis "$CFG"
 
-      - name: Verify output ROOT file
+      - name: Verify analysis output ROOT file
         working-directory: build/analyses/CMS_Run2016_DoubleMuon
         run: |
           python3 - << 'EOF'
-          import uproot, sys, os
+          import uproot, sys
           f = uproot.open("dimuon_zpeak_ci.root")
           keys = f.keys()
           print("ROOT file keys:", keys[:20])
-          # Require at least the inclusive DimuonMass histogram
           hist_keys = [k for k in keys if "DimuonMass" in k]
           if not hist_keys:
               print("ERROR: no DimuonMass histograms found in output!")
               sys.exit(1)
-          print(f"OK: found {len(hist_keys)} DimuonMass histogram(s): {hist_keys}")
+          print(f"OK: found {len(hist_keys)} DimuonMass histogram(s)")
           EOF
 
-      - name: Upload analysis output
+      - name: Run analytic Z-peak fit (AnalyticWorkspaceFitTask via local law)
+        run: |
+          # Build up PYTHONPATH: local law/, core/python, and ROOT Python bindings.
+          ROOT_LIB=$(root-config --libdir 2>/dev/null || echo "")
+          export PYTHONPATH="${GITHUB_WORKSPACE}/law:${GITHUB_WORKSPACE}/core/python:${ROOT_LIB}:${PYTHONPATH}"
+
+          # law needs its config file in the current directory or LAW_HOME.
+          export LAW_HOME="${GITHUB_WORKSPACE}/law"
+
+          # Absolute path to the histogram file produced by the analysis step.
+          HIST_FILE="${GITHUB_WORKSPACE}/build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci.root"
+          WS_CFG="${GITHUB_WORKSPACE}/analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml"
+
+          # Run AnalyticWorkspaceFitTask.  The task gracefully skips the
+          # combine invocation if the combine binary is not found.
+          law run AnalyticWorkspaceFitTask \
+            --name ci_run \
+            --workspace-config "${WS_CFG}" \
+            --histogram-file "${HIST_FILE}"
+
+      - name: Verify fit outputs (datacards + workspaces)
+        run: |
+          FIT_DIR="${GITHUB_WORKSPACE}/analyticFit_ci_run"
+          python3 - << EOF
+          import os, sys, glob
+          fit_dir = "${FIT_DIR}"
+          if not os.path.isdir(fit_dir):
+              print(f"ERROR: fit output directory not found: {fit_dir}")
+              sys.exit(1)
+          datacards = glob.glob(os.path.join(fit_dir, "datacard_*.txt"))
+          workspaces = glob.glob(os.path.join(fit_dir, "ws_*.root"))
+          print(f"Fit output dir: {fit_dir}")
+          print(f"  Datacards   : {[os.path.basename(f) for f in datacards]}")
+          print(f"  Workspaces  : {[os.path.basename(f) for f in workspaces]}")
+          if not datacards:
+              print("ERROR: no datacards found in fit output directory!")
+              sys.exit(1)
+          if not workspaces:
+              print("ERROR: no workspaces found in fit output directory!")
+              sys.exit(1)
+          print("OK: fit outputs look good.")
+          EOF
+
+      - name: Upload analysis artifacts
         uses: actions/upload-artifact@v4
         with:
           name: doublemu-analysis-output
-          path: build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci.root
+          path: |
+            build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci.root
+            analyticFit_ci_run/
           if-no-files-found: error
           retention-days: 7
+

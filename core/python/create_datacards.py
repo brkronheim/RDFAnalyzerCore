@@ -217,9 +217,10 @@ class DatacardGenerator:
                 obj = root_file[key]
                 
                 # Check if it's a TH1 histogram (not TH2, TH3, etc.)
-                if hasattr(obj, 'member') and hasattr(obj, 'values'):
-                    # Check if it's 1D
-                    if isinstance(obj.member('fXaxis'), uproot.models.TAxis.Model_TAxis):
+                if hasattr(obj, 'axes') and hasattr(obj, 'values'):
+                    # Check if it's 1D (uproot v4+ API; avoids the removed
+                    # uproot.models.TAxis attribute from uproot v3)
+                    if len(obj.axes) == 1:
                         values = obj.values()
                         edges = obj.axis().edges()
                         
