@@ -6,6 +6,7 @@
 .law
 .law/*
 !aux/*.root
+*x509*
 
 # Ignore plotting test output (generated PNGs)
 core/test/aux/test_plotting_*.png
