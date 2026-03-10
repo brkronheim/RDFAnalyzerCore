@@ -41,16 +41,17 @@ CMS Open Data NanoAOD (XRootD — public)
          ▼
    output/dimuon_zpeak.root
     ├── Events tree (DimuonMass, nGoodJets, …)
-    ├── histograms/DimuonMass_{0j,1j,2j,ge3j}   ◄── fed to fit_zpeak.py
+    ├── histograms/DimuonMass_{0j,1j,2j,ge3j}   ◄── fit inputs
     ├── histograms/DimuonMass (inclusive)
     ├── histograms/nGoodJets, LeadMuPt, …
     └── cutflow / cutflow_nminus1
          │
          ▼
-   fit_zpeak.py                    law run RunCombine
-    ├── ws_{0j,1j,2j,ge3j}.root ──────────────────►  FitDiagnostics
-    ├── datacard_{0j,…}.txt      (existing task)      per channel +
-    └── datacard_combined.txt                         simultaneous
+   zpeak_workspace.yaml          law run AnalyticWorkspaceFitTask
+    (Voigtian+exp model) ──────────────────────────────────────►
+                                 per-channel + simultaneous fits
+                                 ws_*.root, datacard_*.txt
+                                 fitDiagnostics_*.root
 ```
 
 ---
@@ -193,9 +194,10 @@ Every config file in this analysis uses YAML:
 | `floats.yaml` | Float constant columns |
 | `ints.yaml` | Integer constant columns |
 | `output.yaml` | Output tree branches |
+| `zpeak_workspace.yaml` | Generic fit model config (signal+background PDFs, channels) |
 | `dataset_manifest.yaml` | LAW OpenData task descriptor |
-| `fit_zpeak.py` | Workspace + datacard builder; delegates fits to RunCombine |
-| `CMakeLists.txt` | CMake build |
+| `fit_zpeak.py` | Standalone workspace builder; delegates to `AnalyticWorkspaceFitTask` |
+| `CMakeLists.txt` | CMake build (target: `cms_doublemu_analysis`) |
 
 ---
 
@@ -223,7 +225,7 @@ cmake --build build -j$(nproc)
 
 ```bash
 cd build/analyses/CMS_Run2016_DoubleMuon
-./analysis ../../../analyses/CMS_Run2016_DoubleMuon/cfg.yaml
+./cms_doublemu_analysis ../../../analyses/CMS_Run2016_DoubleMuon/cfg.yaml
 ```
 
 Output: `output/dimuon_zpeak.root` with the skimmed tree, histograms, and cutflow.
@@ -310,55 +312,123 @@ law run PrepareOpenDataSample \
 
 ---
 
-## Z Peak Fit with CombineHarvester and Combine
+## Z Peak Fit — Generic `AnalyticWorkspaceFitTask`
 
-### Step 1 — Create workspaces and datacards
+The fit is driven entirely by `zpeak_workspace.yaml` and the generic
+`AnalyticWorkspaceFitTask` in `law/combine_tasks.py`.  To fit a different
+resonance (J/ψ, Υ, H→γγ, …) you only need a different workspace config YAML
+— no code changes.
 
-```bash
-python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py \
-    --input  output/dimuon_zpeak.root \
-    --outdir zpeak_fit
+### Workspace config (`zpeak_workspace.yaml`)
+
+```yaml
+observable: {name: mass, title: "m_{#mu#mu} [GeV]", lo: 70.0, hi: 110.0}
+
+signal:
+  pdf: voigtian          # voigtian|gaussian|crystalball|double_gaussian|breit_wigner
+  parameters:
+    mean:  {init: 91.19, min: 88.0, max: 94.0, shared: true}   # shared mZ
+    width: {init: 2.495, fixed: true, shared: true}             # PDG width
+    sigma: {init: 2.0,   min: 0.3,   max: 6.0,  shared: true}  # shared σ
+
+background:
+  pdf: exponential       # exponential|polynomial|chebychev|bernstein
+  parameters:
+    decay: {init: -0.05, min: -0.5, max: -0.001, shared: false} # per-channel
+
+channels:
+  - {name: "0j",   histogram: "DimuonMass_0j",   label: "0 jets"}
+  - {name: "1j",   histogram: "DimuonMass_1j",   label: "1 jet"}
+  - {name: "2j",   histogram: "DimuonMass_2j",   label: "2 jets"}
+  - {name: "ge3j", histogram: "DimuonMass_ge3j", label: "≥3 jets"}
 ```
 
-This creates:
-- `zpeak_fit/ws_{0j,1j,2j,ge3j}.root` — RooWorkspaces with Voigtian+exp model
-- `zpeak_fit/datacard_{0j,…}.txt` — per-channel datacards (CombineHarvester or manual)
-- `zpeak_fit/datacard_combined.txt` — combined simultaneous-fit datacard
+Parameters with `shared: true` receive a name **without** a channel suffix
+(e.g. `mean`, `sigma`).  Combine ties these across channels automatically in
+the combined simultaneous fit, implementing a shared Z mass and detector
+resolution across all jet bins.
 
-The script also prints the exact `law run RunCombine` commands to use.
-
-### Step 2 — Run fits via the existing RunCombine LAW task
+### Step 1 — Run via `AnalyticWorkspaceFitTask` (recommended)
 
 ```bash
 source law/env.sh && law index
 
-# Per-channel fit (0j shown; repeat for 1j, 2j, ge3j)
-law run RunCombine \
-    --datacard-config analyses/CMS_Run2016_DoubleMuon/cfg.yaml \
-    --name zpeak_0j \
-    --datacard-path zpeak_fit/datacard_0j.txt \
-    --method FitDiagnostics \
-    --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
-
-# Simultaneous fit across all jet bins (one shared mZ and σ)
-law run RunCombine \
-    --datacard-config analyses/CMS_Run2016_DoubleMuon/cfg.yaml \
-    --name zpeak_combined \
-    --datacard-path zpeak_fit/datacard_combined.txt \
+law run AnalyticWorkspaceFitTask \
+    --name zpeak_run2016g \
+    --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \
+    --histogram-file output/dimuon_zpeak.root \
     --method FitDiagnostics \
     --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
 ```
 
-Results land in `combineRun_<name>/combine_results/fitDiagnostics_*.root`.
+Outputs land in `analyticFit_zpeak_run2016g/`:
 
-### Step 3 — Inspect results
+```
+analyticFit_zpeak_run2016g/
+  ws_0j.root / ws_1j.root / ws_2j.root / ws_ge3j.root
+  datacard_0j.txt / datacard_1j.txt / datacard_2j.txt / datacard_ge3j.txt
+  datacard_combined.txt   ← simultaneous fit across all jet bins
+  combine_0j.log / …
+  fitDiagnostics_0j.root / …
+  provenance.json
+  analytic_fit.perf.json
+```
+
+### Step 1 (alternative) — Standalone `fit_zpeak.py`
+
+For quick workspace inspection without a LAW environment:
+
+```bash
+python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py \
+    --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \
+    --input  output/dimuon_zpeak.root \
+    --outdir zpeak_fit
+```
+
+The script builds workspaces and datacards, then prints the exact
+`law run AnalyticWorkspaceFitTask` command to run the full fit.
+
+### Step 2 — Inspect results
 
 ```bash
 python - << 'EOF'
 import ROOT
-f = ROOT.TFile("combineRun_zpeak_0j/combine_results/fitDiagnostics__0j.root")
-f.fit_s.Print("v")   # signal+background fit result with all parameter values
+f = ROOT.TFile("analyticFit_zpeak_run2016g/fitDiagnostics_0j.root")
+f.fit_s.Print("v")   # all parameter values and uncertainties
 EOF
+```
+
+### Using a different signal or background model
+
+Simply edit `zpeak_workspace.yaml` (or provide a new config):
+
+```yaml
+# Crystal Ball signal + Chebyshev background
+signal:
+  pdf: crystalball
+  parameters:
+    mean:  {init: 91.2, min: 88.0, max: 94.0, shared: true}
+    sigma: {init: 2.0,  min: 0.3,  max: 8.0,  shared: true}
+    alpha: {init: 1.5,  min: 0.5,  max: 5.0,  shared: false}
+    n:     {init: 2.0,  min: 0.5,  max: 20.0, shared: false}
+
+background:
+  pdf: chebychev
+  order: 3
+  parameters:
+    a0: {init: 0.0, min: -5.0, max: 5.0, shared: false}
+    a1: {init: 0.0, min: -5.0, max: 5.0, shared: false}
+    a2: {init: 0.0, min: -5.0, max: 5.0, shared: false}
+```
+
+Then re-run with `--skip-fit` to build workspaces without requiring Combine:
+
+```bash
+law run AnalyticWorkspaceFitTask \
+    --name zpeak_cb_cheb \
+    --workspace-config /tmp/cb_cheb_workspace.yaml \
+    --histogram-file output/dimuon_zpeak.root \
+    --skip-fit
 ```
 
 ### Combine datacard structure (analytic shapes)
@@ -367,16 +437,16 @@ EOF
 # datacard_0j.txt
 imax 1
 jmax 1
-kmax 0
-shapes zpeak    0j  zpeak_fit/ws_0j.root  ws_0j:zpeak_0j
-shapes bkg      0j  zpeak_fit/ws_0j.root  ws_0j:bkg_0j
-shapes data_obs 0j  zpeak_fit/ws_0j.root  ws_0j:data_obs_0j
+kmax 0   # shape parameters float freely inside the workspace
+shapes sig       0j  .../ws_0j.root  ws_0j:sig_0j
+shapes bkg       0j  .../ws_0j.root  ws_0j:bkg_0j
+shapes data_obs  0j  .../ws_0j.root  ws_0j:data_obs_0j
 bin          0j
-observation  -1
+observation  <n_obs>
 bin          0j      0j
-process      zpeak   bkg
+process      sig     bkg
 process      0       1
-rate         -1      -1   # yields read from workspace extended PDFs
+rate         -1      -1   # yields from workspace extended PDFs
 ```
 
 ---
