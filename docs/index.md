@@ -35,9 +35,14 @@ New to RDFAnalyzerCore? Start here:
 
 - **[Configuration Reference](CONFIG_REFERENCE.md)** - Complete configuration documentation
   - Main configuration options
-  - Plugin configurations (BDT, ONNX, corrections, triggers)
-  - Configuration file format
+  - Plugin configurations (BDT, ONNX, corrections, triggers, WeightManager, RegionManager, GoldenJsonManager, CutflowManager)
+  - Configuration file format and YAML config overview
   - Example configurations
+
+- **[Configuration Validation](CONFIGURATION_VALIDATION.md)** - YAML analysis config schema and validation
+  - Full JSON Schema reference for the analysis YAML config
+  - Validation error messages and troubleshooting
+  - Nuisance group, region, and histogram config schema
 
 ### Python Analysis
 
@@ -57,6 +62,40 @@ New to RDFAnalyzerCore? Start here:
   - [SOFIE Implementation](SOFIE_IMPLEMENTATION.md) - Build-time compiled models
 
 - **[Batch Submission](BATCH_SUBMISSION.md)** - HTCondor job submission guide
+
+### Data Management & Outputs
+
+- **[Dataset Manifest](DATASET_MANIFEST.md)** - Describing and managing input datasets
+  - Dataset manifest file format and schema
+  - Sample metadata, cross-sections, and grouping
+
+- **[Output Schema](OUTPUT_SCHEMA.md)** - Structure of framework output files
+  - ROOT output file layout (event tree, histograms, metadata)
+  - Histogram naming conventions and cutflow outputs
+
+- **[Validation Reports](VALIDATION_REPORTS.md)** - Automated output validation
+  - Interpreting validation report contents
+  - Checking histogram integrity and cutflow consistency
+
+### Systematics & Physics Objects
+
+- **[Nuisance Groups](NUISANCE_GROUPS.md)** - Configuring systematic nuisance groups
+  - Weight and shape systematic definitions
+  - Nuisance group YAML schema and examples
+
+- **[Physics Objects](PHYSICS_OBJECTS.md)** - Physics object collection reference
+  - Standard column names for leptons, jets, MET, and other objects
+  - Collection conventions and branch naming
+
+### Batch Processing & Performance
+
+- **[LAW Tasks](LAW_TASKS.md)** - Luigi/LAW workflow task reference
+  - Available LAW tasks and their parameters
+  - Running and monitoring large-scale batch workflows
+
+- **[Performance Monitoring](PERFORMANCE_MONITORING.md)** - Profiling and tuning analysis jobs
+  - Identifying bottlenecks in RDataFrame processing
+  - Memory and CPU usage guidelines
 
 ### API Reference
 
@@ -149,6 +188,10 @@ Efficient processing with automatic optimization.
 - **Book histograms**: [Histogramming Guide](ANALYSIS_GUIDE.md#histogramming)
 - **Handle systematics**: [Systematics Guide](ANALYSIS_GUIDE.md#systematics)
 - **Submit to batch**: [HTCondor Scripts](ANALYSIS_GUIDE.md#advanced-topics)
+- **Validate my config**: [Configuration Validation](CONFIGURATION_VALIDATION.md)
+- **Understanding outputs**: [Output Schema](OUTPUT_SCHEMA.md)
+- **Physics object collections**: [Physics Objects](PHYSICS_OBJECTS.md)
+- **LAW task reference**: [LAW Tasks](LAW_TASKS.md)
 
 ## Examples
 
