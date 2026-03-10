@@ -11,14 +11,40 @@ set(_CORE_PY  "${CMAKE_SOURCE_DIR}/core/python")
 # in site-packages (namespace packages lose to regular packages).
 set(_PYTHONPATH "${_LAW_DIR}:${_CORE_PY}:$ENV{PYTHONPATH}")
 
+# Several tests invoke _run_analysis_job() which creates shell scripts in a
+# temporary directory and then exec()s them.  If the system /tmp is mounted
+# noexec (common in hardened CI environments), those scripts fail with exit 126.
+# Point TMPDIR at a directory inside the build tree which is guaranteed to be
+# on an exec-capable filesystem.
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tmp")
+set(_EXEC_TMPDIR "TMPDIR=${CMAKE_BINARY_DIR}/tmp")
+
+# Tests that execute shell scripts from tmpdir need TMPDIR overridden.
+set(_EXEC_TESTS
+    LawWorkflowExecutorsTest
+    LawExecutorParityTest
+    LawPerformanceRecorderTest
+    LawAnalysisTasksTest
+    LawCombineTasksTest
+    LawMergeTasksTest
+)
+
 macro(add_law_unittest _test_name _file_stem)
     add_test(
         NAME    ${_test_name}
         COMMAND ${Python3_EXECUTABLE} ${_LAW_DIR}/${_file_stem}.py
     )
-    set_tests_properties(${_test_name} PROPERTIES
-        ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}"
-    )
+    # Check if this test needs the TMPDIR override
+    list(FIND _EXEC_TESTS "${_test_name}" _idx)
+    if(_idx GREATER_EQUAL 0)
+        set_tests_properties(${_test_name} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${_EXEC_TMPDIR}"
+        )
+    else()
+        set_tests_properties(${_test_name} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}"
+        )
+    endif()
 endmacro()
 
 add_law_unittest(LawAnalysisTasksTest       test_analysis_tasks)

@@ -1,0 +1,96 @@
+name: CMS DoubleMuon Analysis (on request)
+
+# Triggered manually via the GitHub Actions UI or REST API.
+# This job builds the CMS Run2016G DoubleMuon analysis and runs it over a
+# single public CMS Open Data NanoAOD file to validate the full
+# analysis pipeline end-to-end.
+#
+# To trigger:
+#   GitHub UI:  Actions → "CMS DoubleMuon Analysis (on request)" → Run workflow
+#   gh CLI:     gh workflow run analysis-doublemu.yml --ref <branch>
+on:
+  workflow_dispatch:
+    inputs:
+      threads:
+        description: "Number of RDataFrame threads (default: -1 = all CPUs)"
+        required: false
+        default: "-1"
+
+jobs:
+  run-analysis:
+    runs-on: [self-hosted, linux]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify runner environment
+        run: |
+          echo "Using self-hosted runner with preinstalled dependencies"
+          uname -a
+
+      - name: Verify ROOT
+        run: |
+          if command -v root-config >/dev/null 2>&1; then
+            echo "root-config found:"; root-config --version
+          elif command -v root >/dev/null 2>&1; then
+            echo "root found:"; root --version
+          else
+            echo "ERROR: ROOT not found on runner"; exit 1
+          fi
+
+      - name: Install Python test dependencies
+        run: pip3 install -r requirements-ci.txt
+
+      - name: Configure CMake
+        run: cmake -S . -B build
+
+      - name: Build cms_doublemu_analysis
+        run: cmake --build build --target cms_doublemu_analysis --parallel $(nproc)
+
+      - name: Prepare output directory
+        run: mkdir -p build/analyses/CMS_Run2016_DoubleMuon/output
+
+      - name: Run analysis
+        working-directory: build/analyses/CMS_Run2016_DoubleMuon
+        env:
+          # Allow the user to override thread count at dispatch time
+          THREADS: ${{ github.event.inputs.threads }}
+        run: |
+          # Write a minimal override config so the thread count can be injected
+          # without modifying the committed ci_cfg.yaml.
+          if [ -n "${THREADS}" ] && [ "${THREADS}" != "-1" ]; then
+            cat ../../../analyses/CMS_Run2016_DoubleMuon/ci_cfg.yaml \
+              | sed "s/^threads:.*/threads: \"${THREADS}\"/" \
+              > /tmp/ci_cfg_override.yaml
+            CFG=/tmp/ci_cfg_override.yaml
+          else
+            CFG=../../../analyses/CMS_Run2016_DoubleMuon/ci_cfg.yaml
+          fi
+          ./cms_doublemu_analysis "$CFG"
+
+      - name: Verify output ROOT file
+        working-directory: build/analyses/CMS_Run2016_DoubleMuon
+        run: |
+          python3 - << 'EOF'
+          import uproot, sys, os
+          f = uproot.open("dimuon_zpeak_ci.root")
+          keys = f.keys()
+          print("ROOT file keys:", keys[:20])
+          # Require at least the inclusive DimuonMass histogram
+          hist_keys = [k for k in keys if "DimuonMass" in k]
+          if not hist_keys:
+              print("ERROR: no DimuonMass histograms found in output!")
+              sys.exit(1)
+          print(f"OK: found {len(hist_keys)} DimuonMass histogram(s): {hist_keys}")
+          EOF
+
+      - name: Upload analysis output
+        uses: actions/upload-artifact@v4
+        with:
+          name: doublemu-analysis-output
+          path: build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci.root
+          if-no-files-found: error
+          retention-days: 7
