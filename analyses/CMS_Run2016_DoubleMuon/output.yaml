@@ -1,0 +1,24 @@
+# =============================================================================
+# output.yaml — Branches written to the skimmed output TTree
+#
+# Format: YAML sequence of strings.  Each entry is a branch name that must
+# exist in the RDataFrame pipeline at the time save() is called.
+# =============================================================================
+
+# Reconstructed dimuon invariant mass [GeV]
+- DimuonMass
+
+# Jet multiplicity after pT/eta/ID cuts and muon overlap removal
+- nGoodJets
+
+# Muon kinematics
+- LeadMuPt
+- SublMuPt
+- LeadMuEta
+- SublMuEta
+
+# Per-jet-bin dimuon mass (sentinel -999 outside category; for inspection)
+- DimuonMass_0j
+- DimuonMass_1j
+- DimuonMass_2j
+- DimuonMass_ge3j

@@ -790,3 +790,308 @@ class TestParseDatacardShapes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ===========================================================================
+# Tests for AnalyticWorkspaceFitTask and its helpers
+# ===========================================================================
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestAnalyticWorkspaceFitTaskDefined(unittest.TestCase):
+    """Smoke tests: task class and helpers are importable and well-formed."""
+
+    def _import(self):
+        import combine_tasks
+        return combine_tasks
+
+    def test_task_class_exists(self):
+        mod = self._import()
+        self.assertTrue(hasattr(mod, "AnalyticWorkspaceFitTask"))
+
+    def test_task_namespace(self):
+        mod = self._import()
+        self.assertEqual(mod.AnalyticWorkspaceFitTask.task_namespace, "")
+
+    def test_method_defaults_to_fit_diagnostics(self):
+        mod = self._import()
+        task = mod.AnalyticWorkspaceFitTask(
+            name="test",
+            workspace_config="dummy.yaml",
+            histogram_file="dummy.root",
+        )
+        self.assertEqual(task.method, "FitDiagnostics")
+
+    def test_skip_fit_defaults_false(self):
+        mod = self._import()
+        task = mod.AnalyticWorkspaceFitTask(
+            name="test",
+            workspace_config="dummy.yaml",
+            histogram_file="dummy.root",
+        )
+        self.assertFalse(task.skip_fit)
+
+    def test_output_path(self):
+        mod = self._import()
+        task = mod.AnalyticWorkspaceFitTask(
+            name="myfitrun",
+            workspace_config="dummy.yaml",
+            histogram_file="dummy.root",
+        )
+        self.assertIn("analyticFit_myfitrun", task.output().path)
+
+    def test_helpers_defined(self):
+        mod = self._import()
+        for fn in ("_make_roo_var", "_build_signal_pdf", "_build_background_pdf",
+                   "_build_analytic_workspace", "_write_analytic_datacard",
+                   "_write_analytic_combined_datacard"):
+            self.assertTrue(hasattr(mod, fn), f"Missing helper: {fn}")
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestWriteAnalyticDatacard(unittest.TestCase):
+    """Tests for _write_analytic_datacard."""
+
+    def _import(self):
+        import combine_tasks
+        return combine_tasks
+
+    def test_writes_file(self):
+        mod = self._import()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws_path = os.path.join(tmpdir, "ws_0j.root")
+            card = mod._write_analytic_datacard("0j", 12345.0, ws_path, tmpdir)
+            self.assertTrue(os.path.exists(card))
+            content = Path(card).read_text()
+            self.assertIn("imax 1", content)
+            self.assertIn("jmax 1", content)
+            self.assertIn("shapes sig", content)
+            self.assertIn("shapes bkg", content)
+            self.assertIn("shapes data_obs", content)
+            self.assertIn("rate         -1", content)
+            self.assertIn("12345", content)
+
+    def test_channel_name_in_shapes(self):
+        mod = self._import()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws_path = os.path.join(tmpdir, "ws_ge3j.root")
+            card = mod._write_analytic_datacard("ge3j", 500.0, ws_path, tmpdir)
+            content = Path(card).read_text()
+            self.assertIn("sig_ge3j", content)
+            self.assertIn("bkg_ge3j", content)
+            self.assertIn("data_obs_ge3j", content)
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestWriteAnalyticCombinedDatacard(unittest.TestCase):
+    """Tests for _write_analytic_combined_datacard."""
+
+    def _import(self):
+        import combine_tasks
+        return combine_tasks
+
+    def test_writes_combined_card(self):
+        mod = self._import()
+        channels = ["0j", "1j", "ge3j"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            card = mod._write_analytic_combined_datacard(channels, tmpdir)
+            self.assertTrue(os.path.exists(card))
+            content = Path(card).read_text()
+            self.assertIn("imax 3", content)
+            for ch in channels:
+                self.assertIn(f"sig_{ch}", content)
+                self.assertIn(f"bkg_{ch}", content)
+
+    def test_all_channels_listed(self):
+        mod = self._import()
+        channels = ["ch_a", "ch_b"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            card = mod._write_analytic_combined_datacard(channels, tmpdir)
+            content = Path(card).read_text()
+            self.assertIn("ch_a", content)
+            self.assertIn("ch_b", content)
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestMakeRooVar(unittest.TestCase):
+    """Tests for _make_roo_var parameter helper."""
+
+    def _import(self):
+        import combine_tasks
+        return combine_tasks
+
+    def test_shared_parameter_has_no_suffix(self):
+        mod = self._import()
+        try:
+            import ROOT
+        except ImportError:
+            self.skipTest("ROOT not available")
+        var = mod._make_roo_var("mean", {"init": 91.2, "min": 88.0, "max": 94.0, "shared": True}, "0j")
+        self.assertEqual(var.GetName(), "mean")
+
+    def test_per_channel_parameter_has_suffix(self):
+        mod = self._import()
+        try:
+            import ROOT
+        except ImportError:
+            self.skipTest("ROOT not available")
+        var = mod._make_roo_var("decay", {"init": -0.05, "min": -0.5, "max": -0.001, "shared": False}, "1j")
+        self.assertEqual(var.GetName(), "decay_1j")
+
+    def test_fixed_parameter_is_constant(self):
+        mod = self._import()
+        try:
+            import ROOT
+        except ImportError:
+            self.skipTest("ROOT not available")
+        var = mod._make_roo_var("width", {"init": 2.495, "fixed": True}, "0j")
+        self.assertTrue(var.isConstant())
+
+    def test_floating_parameter_is_not_constant(self):
+        mod = self._import()
+        try:
+            import ROOT
+        except ImportError:
+            self.skipTest("ROOT not available")
+        var = mod._make_roo_var("sigma", {"init": 2.0, "min": 0.3, "max": 6.0}, "0j")
+        self.assertFalse(var.isConstant())
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestAnalyticWorkspaceFitTaskRun(unittest.TestCase):
+    """Integration test: run AnalyticWorkspaceFitTask with --skip-fit."""
+
+    def _import(self):
+        import combine_tasks
+        return combine_tasks
+
+    def _make_workspace_config(self, tmpdir: str) -> str:
+        """Write a minimal workspace config YAML."""
+        cfg = {
+            "observable": {"name": "mass", "title": "mass", "lo": 70.0, "hi": 110.0},
+            "signal": {
+                "pdf": "gaussian",
+                "parameters": {
+                    "mean":  {"init": 91.2, "min": 88.0, "max": 94.0, "shared": True},
+                    "sigma": {"init": 2.0,  "min": 0.5,  "max": 8.0,  "shared": True},
+                },
+            },
+            "background": {
+                "pdf": "exponential",
+                "parameters": {
+                    "decay": {"init": -0.05, "min": -0.5, "max": -0.001, "shared": False},
+                },
+            },
+            "channels": [
+                {"name": "inclusive", "histogram": "TestHist", "label": "Inclusive"},
+            ],
+        }
+        path = os.path.join(tmpdir, "ws_cfg.yaml")
+        import yaml
+        with open(path, "w") as fh:
+            yaml.dump(cfg, fh)
+        return path
+
+    def _make_histogram_file(self, tmpdir: str) -> str:
+        """Write a minimal ROOT file with a histogram under histograms/."""
+        try:
+            import ROOT
+        except ImportError:
+            return None
+        path = os.path.join(tmpdir, "hists.root")
+        f = ROOT.TFile(path, "RECREATE")
+        d = f.mkdir("histograms")
+        d.cd()
+        h = ROOT.TH1F("TestHist", "TestHist", 60, 70, 110)
+        # Fill with a Z-peak-like distribution + flat background
+        import random
+        rng = random.Random(42)
+        for _ in range(5000):
+            h.Fill(rng.gauss(91.2, 2.5))
+        for _ in range(500):
+            h.Fill(rng.uniform(70, 110))
+        h.Write()
+        f.Close()
+        return path
+
+    def test_skip_fit_builds_workspaces_and_datacards(self):
+        """With --skip-fit, workspaces and datacards are created without running combine."""
+        mod = self._import()
+        try:
+            import ROOT
+            import yaml
+        except ImportError:
+            self.skipTest("ROOT or PyYAML not available")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws_cfg_path   = self._make_workspace_config(tmpdir)
+            hist_file     = self._make_histogram_file(tmpdir)
+            out_dir       = os.path.join(tmpdir, "fit_out")
+
+            if hist_file is None:
+                self.skipTest("ROOT not available for histogram creation")
+
+            task = mod.AnalyticWorkspaceFitTask(
+                name="test_skip",
+                workspace_config=ws_cfg_path,
+                histogram_file=hist_file,
+                skip_fit=True,
+            )
+            # Patch output to point to our tmpdir
+            task._out_dir = out_dir  # type: ignore[assignment]
+
+            # run() is a LAW method; call it directly
+            task.run()
+
+            # Workspace must exist
+            ws_file = os.path.join(out_dir, "ws_inclusive.root")
+            self.assertTrue(os.path.exists(ws_file), f"Missing: {ws_file}")
+
+            # Per-channel datacard must exist
+            card = os.path.join(out_dir, "datacard_inclusive.txt")
+            self.assertTrue(os.path.exists(card), f"Missing: {card}")
+            content = Path(card).read_text()
+            self.assertIn("rate", content)
+
+            # Combined datacard must exist
+            combined = os.path.join(out_dir, "datacard_combined.txt")
+            self.assertTrue(os.path.exists(combined), f"Missing: {combined}")
+
+            # Provenance must be written
+            prov = os.path.join(out_dir, "provenance.json")
+            self.assertTrue(os.path.exists(prov))
+
+    def test_missing_workspace_config_raises(self):
+        mod = self._import()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task = mod.AnalyticWorkspaceFitTask(
+                name="bad_cfg",
+                workspace_config=os.path.join(tmpdir, "nonexistent.yaml"),
+                histogram_file=os.path.join(tmpdir, "hists.root"),
+                skip_fit=True,
+            )
+            task._out_dir = os.path.join(tmpdir, "out")  # type: ignore[assignment]
+            with self.assertRaises(RuntimeError):
+                task.run()
+
+    def test_missing_histogram_file_raises(self):
+        mod = self._import()
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not available")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws_cfg_path = self._make_workspace_config(tmpdir)
+            task = mod.AnalyticWorkspaceFitTask(
+                name="bad_hist",
+                workspace_config=ws_cfg_path,
+                histogram_file=os.path.join(tmpdir, "nonexistent.root"),
+                skip_fit=True,
+            )
+            task._out_dir = os.path.join(tmpdir, "out")  # type: ignore[assignment]
+            with self.assertRaises((RuntimeError, OSError)):
+                task.run()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

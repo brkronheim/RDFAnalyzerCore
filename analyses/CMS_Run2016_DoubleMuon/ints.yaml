@@ -1,0 +1,17 @@
+# =============================================================================
+# ints.yaml — Scalar integer constants loaded into the RDataFrame
+#
+# Format: YAML map (key: value).  Each entry becomes a constant integer
+# column in the RDataFrame.
+#
+# Note: the 'type' key required by TriggerManager is set in cfg.yaml, not
+# here, because TriggerManager reads it from the ConfigurationManager (the
+# main config), not from the intConfig constant columns.
+# =============================================================================
+
+# Sample type: 0 = data.  Informational constant column; scripts can use it
+# to distinguish data from MC when running the same executable.
+sampleType: 0
+
+# Minimum tight jet ID (Jet_jetId >= jetId_min passes; documentation only)
+jetId_min: 2

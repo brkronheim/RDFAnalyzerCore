@@ -131,6 +131,9 @@ endif()
 
 if(ROOT_CORE_LOCATION)
 	get_filename_component(ROOT_LIB_DIR "${ROOT_CORE_LOCATION}" DIRECTORY)
+	# Cache so subdirectory CMakeLists (core/test, law) can use it for
+	# setting PYTHONPATH to include ROOT Python bindings.
+	set(ROOT_LIB_DIR "${ROOT_LIB_DIR}" CACHE INTERNAL "ROOT library directory")
 	set(CMAKE_BUILD_RPATH "${ROOT_LIB_DIR}")
 	set(CMAKE_INSTALL_RPATH "${ROOT_LIB_DIR}")
 	set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
@@ -201,3 +204,4 @@ set(RDF_CUSTOM_DICT_TARGET "RDFCustomDict" CACHE STRING "Target name for the cus
 
 add_subdirectory(core)
 add_subdirectory(analyses)
+add_subdirectory(law)

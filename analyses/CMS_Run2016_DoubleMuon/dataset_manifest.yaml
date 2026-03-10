@@ -1,0 +1,67 @@
+# =============================================================================
+# dataset_manifest.yaml — Dataset manifest for LAW-based analysis tasks
+#
+# Used by PrepareOpenDataSample / HistFillTask / SkimTask in law/opendata_tasks.py
+# and law/analysis_tasks.py.
+#
+# The 'das' field is repurposed as the CERN Open Data record ID for the
+# PrepareOpenDataSample workflow (law/opendata_tasks.py parses it as the
+# record ID to query https://opendata.cern.ch/api/records/{id}).
+#
+# ── Prepare and submit HTCondor batch jobs (lxplus) ──────────────────────────
+#   source law/env.sh && law index
+#
+#   law run PrepareOpenDataSample \
+#       --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
+#       --name run2016g_zpeak \
+#       --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+#       --files 30
+#
+#   law run BuildOpenDataSubmission \
+#       --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
+#       --name run2016g_zpeak \
+#       --exe build/analyses/CMS_Run2016_DoubleMuon/analysis
+#
+#   law run SubmitOpenDataJobs \
+#       --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
+#       --name run2016g_zpeak \
+#       --exe build/analyses/CMS_Run2016_DoubleMuon/analysis
+#
+#   law run MonitorOpenDataJobs \
+#       --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
+#       --name run2016g_zpeak \
+#       --exe build/analyses/CMS_Run2016_DoubleMuon/analysis
+#
+# ── Local parallel run (LAW HistFillTask) ─────────────────────────────────────
+#   law run HistFillTask \
+#       --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+#       --submit-config analyses/CMS_Run2016_DoubleMuon/cfg.yaml \
+#       --dataset-manifest analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
+#       --name run2016g_zpeak
+# =============================================================================
+
+# Integrated luminosity of Run2016G in fb^-1
+lumi: 7.65
+
+datasets:
+  # ---- DoubleMuon primary dataset, Run2016G, UL NanoAODv9 ------------------
+  # CMS Open Data record 30522: publicly accessible via XRootD, no credentials.
+  # https://opendata.cern.ch/record/30522
+  #
+  # 'das' is used as the CERN Open Data portal record ID by the
+  # PrepareOpenDataSample LAW task (law/opendata_tasks.py).
+  - name: DoubleMuon_Run2016G
+    year: 2016
+    era: G
+    campaign: ~
+    process: data
+    group: data_2016
+    dtype: data
+    das: "30522"
+    xsec: ~
+    filter_efficiency: ~
+    kfac: ~
+    extra_scale: ~
+    sum_weights: ~
+    stitch_id: ~
+    parent: ~
