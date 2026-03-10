@@ -1,0 +1,93 @@
+# =============================================================================
+# zpeak_workspace.yaml — workspace configuration for the Z→μμ peak fit
+#
+# This file drives the AnalyticWorkspaceFitTask (law/combine_tasks.py).
+# It specifies:
+#   - The observable (dimuon mass range)
+#   - The signal PDF type and initial parameter values
+#   - The background PDF type and initial parameter values
+#   - The per-channel histogram → channel name mapping
+#
+# Swap signal/background models by editing the `pdf` fields — no code changes
+# are required.  For the full list of supported PDFs see the docstring for
+# AnalyticWorkspaceFitTask in law/combine_tasks.py.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Observable
+# ---------------------------------------------------------------------------
+observable:
+  name:  mass
+  title: "m_{#mu#mu} [GeV]"
+  lo:    60.0
+  hi:    120.0
+
+# ---------------------------------------------------------------------------
+# Signal PDF: Voigtian (Breit-Wigner ⊗ Gaussian resolution)
+#
+# Swap with, e.g.:
+#   pdf: gaussian
+#   pdf: crystalball
+#   pdf: double_gaussian
+#   pdf: breit_wigner
+# ---------------------------------------------------------------------------
+signal:
+  pdf: voigtian
+  parameters:
+    mean:
+      init:  91.2
+      min:   88.0
+      max:   94.0
+      # shared: true ties this parameter across all channels in the combined fit
+      shared: true
+    width:
+      init:  2.495
+      fixed: true          # Z natural width — fixed to PDG value
+      shared: true
+    sigma:
+      init:  2.0
+      min:   0.1
+      max:   8.0
+
+# ---------------------------------------------------------------------------
+# Background PDF: Exponential
+#
+# Swap with, e.g.:
+#   pdf: polynomial
+#   order: 2               # (for polynomial/chebychev/bernstein)
+#   pdf: chebychev
+#   pdf: bernstein
+# ---------------------------------------------------------------------------
+background:
+  pdf: exponential
+  parameters:
+    decay:
+      init: -0.05
+      min:  -1.0
+      max:  -1.0e-4
+
+# ---------------------------------------------------------------------------
+# Channels
+#
+# Each entry maps a histogram name (as stored in the output ROOT file under
+# the "histograms/" TDirectory) to a channel identifier used in the Combine
+# datacard.  The optional `label` field is used for plot titles.
+#
+# Add or remove jet-bin channels here; no C++ or Python code changes needed.
+# ---------------------------------------------------------------------------
+channels:
+  - name:      0j
+    histogram: DimuonMass_0j
+    label:     "0 jets"
+
+  - name:      1j
+    histogram: DimuonMass_1j
+    label:     "1 jet"
+
+  - name:      2j
+    histogram: DimuonMass_2j
+    label:     "≥2 jets"
+
+  - name:      3j
+    histogram: DimuonMass_3j
+    label:     "≥3 jets"
