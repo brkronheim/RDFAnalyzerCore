@@ -542,7 +542,7 @@ Should_Transfer_Files     = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification     = never
 transfer_input_files = {transfer_input_files}
-environment = CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)
+environment = "CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)"
 {stream_block}{want_os_block}+RequestMemory={request_memory}
 +RequestCpus={request_cpus}
 +RequestDisk={request_disk}
