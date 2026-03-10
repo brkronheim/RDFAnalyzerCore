@@ -24,6 +24,7 @@
 #include <TriggerManager.h>
 #include <SofieManager.h>
 #include <NDHistogramManager.h>
+#include <PlottingUtility.h>
 
 #include <ROOT/RDataFrame.hxx>
 #include <ROOT/RVec.hxx>
@@ -370,6 +371,32 @@ public:
                                                        const std::vector<std::string>& columnList) {
         analyzer_.getSystematicManager().registerExistingSystematics(systConfig, columnList);
         return *this;
+    }
+
+    /// Python-friendly wrapper for autoRegisterSystematics().
+    /// Returns a dict with keys "registered" (list of "baseVar:systName" strings),
+    /// "missing_down" (list of column names), and "missing_up" (list of column names).
+    py::dict autoRegisterSystematics(const std::vector<std::string>& columnList) {
+        const SystematicValidationResult res =
+            analyzer_.getSystematicManager().autoRegisterSystematics(columnList);
+
+        py::list registered;
+        for (const auto& p : res.registered) {
+            registered.append(p.first + ":" + p.second);
+        }
+        py::list missingDown;
+        for (const auto& col : res.missingDown) {
+            missingDown.append(col);
+        }
+        py::list missingUp;
+        for (const auto& col : res.missingUp) {
+            missingUp.append(col);
+        }
+        py::dict result;
+        result["registered"]   = registered;
+        result["missing_down"] = missingDown;
+        result["missing_up"]   = missingUp;
+        return result;
     }
 
     std::vector<std::string> makeSystList(const std::string& branchName) {
@@ -906,6 +933,11 @@ PYBIND11_MODULE(rdfanalyzer, m) {
                py::arg("columnList"),
                "Register existing systematics from config",
                py::return_value_policy::reference_internal)
+           .def("autoRegisterSystematics", &AnalyzerPythonWrapper::autoRegisterSystematics,
+               py::arg("columnList"),
+               "Automatically discover and register systematic variations from column names. "
+               "Returns a dict with keys 'registered' (list of 'baseVar:systName' strings), "
+               "'missing_down', and 'missing_up'.")
            .def("makeSystList", &AnalyzerPythonWrapper::makeSystList,
                py::arg("branchName"),
                "Compute systematic variation list for a branch")
@@ -996,4 +1028,164 @@ PYBIND11_MODULE(rdfanalyzer, m) {
     
     // Version info
     m.attr("__version__") = "1.0.0";
+
+    // ---------------------------------------------------------------------------
+    // PlottingUtility bindings
+    // ---------------------------------------------------------------------------
+
+    py::class_<PlotProcessConfig>(m, "PlotProcessConfig",
+        R"pbdoc(
+        Configuration for a single process in a stack plot.
+
+        Parameters
+        ----------
+        directory : str
+            TDirectory name inside the meta file (empty string = file root).
+        histogramName : str
+            Name of the TH1D histogram to retrieve.
+        legendLabel : str
+            Label shown in the plot legend.
+        color : int
+            ROOT color index used for fill/line.
+        scale : float
+            Manual normalization scale factor (multiplied on top of the
+            normalization histogram scale when provided).
+        normalizationHistogram : str
+            Optional name of a TH1 whose bin-1 content is used to normalize
+            the histogram (e.g. ``counter_weightSum_<sample>``).
+        isData : bool
+            When *True* the histogram is drawn as data points instead of a
+            filled stack contribution.
+        )pbdoc")
+        .def(py::init<>())
+        .def_readwrite("directory", &PlotProcessConfig::directory)
+        .def_readwrite("histogramName", &PlotProcessConfig::histogramName)
+        .def_readwrite("legendLabel", &PlotProcessConfig::legendLabel)
+        .def_readwrite("color", &PlotProcessConfig::color)
+        .def_readwrite("scale", &PlotProcessConfig::scale)
+        .def_readwrite("normalizationHistogram", &PlotProcessConfig::normalizationHistogram)
+        .def_readwrite("isData", &PlotProcessConfig::isData);
+
+    py::class_<PlotRequest>(m, "PlotRequest",
+        R"pbdoc(
+        Full specification for a single stack plot.
+
+        Parameters
+        ----------
+        metaFile : str
+            Path to the ROOT meta output file produced by the analysis.
+        outputFile : str
+            Destination path for the saved plot (PDF, PNG, …).
+        title : str
+            Histogram/canvas title.
+        xAxisTitle : str
+            Label for the x-axis.
+        yAxisTitle : str
+            Label for the y-axis (default: ``"Counts"``).
+        logY : bool
+            Draw y-axis in log scale.
+        drawRatio : bool
+            Add a data/MC ratio (and pull) panel below the stack.
+        processes : list[PlotProcessConfig]
+            Ordered list of processes (MC first, data last).
+        )pbdoc")
+        .def(py::init<>())
+        .def_readwrite("metaFile", &PlotRequest::metaFile)
+        .def_readwrite("outputFile", &PlotRequest::outputFile)
+        .def_readwrite("title", &PlotRequest::title)
+        .def_readwrite("xAxisTitle", &PlotRequest::xAxisTitle)
+        .def_readwrite("yAxisTitle", &PlotRequest::yAxisTitle)
+        .def_readwrite("logY", &PlotRequest::logY)
+        .def_readwrite("drawRatio", &PlotRequest::drawRatio)
+        .def_readwrite("processes", &PlotRequest::processes);
+
+    py::class_<PlotResult>(m, "PlotResult",
+        R"pbdoc(
+        Result returned by :py:meth:`PlottingUtility.makeStackPlot`.
+
+        Attributes
+        ----------
+        success : bool
+            *True* if the plot was created and saved successfully.
+        message : str
+            Error description when *success* is *False*.
+        mcIntegral : float
+            Integral of the total MC stack histogram.
+        dataIntegral : float
+            Integral of the data histogram (0 when no data process is given).
+        )pbdoc")
+        .def(py::init<>())
+        .def_readwrite("success", &PlotResult::success)
+        .def_readwrite("message", &PlotResult::message)
+        .def_readwrite("mcIntegral", &PlotResult::mcIntegral)
+        .def_readwrite("dataIntegral", &PlotResult::dataIntegral);
+
+    py::class_<PlottingUtility>(m, "PlottingUtility",
+        R"pbdoc(
+        Utility for creating and saving analysis-style ROOT stack plots.
+
+        Creates MC-stack + optional data-overlay plots with ratio and pull
+        panels directly from the meta output ROOT file produced by the
+        analysis framework.  Plots can be saved to any format supported by
+        ROOT's ``TCanvas::SaveAs`` (PDF, PNG, …).
+
+        Examples
+        --------
+        >>> import rdfanalyzer
+        >>> pu = rdfanalyzer.PlottingUtility()
+        >>>
+        >>> proc_mc = rdfanalyzer.PlotProcessConfig()
+        >>> proc_mc.directory = "signal"
+        >>> proc_mc.histogramName = "pt"
+        >>> proc_mc.legendLabel = "Signal MC"
+        >>> proc_mc.color = 2  # kRed
+        >>> proc_mc.normalizationHistogram = "counter_weightSum_signal"
+        >>>
+        >>> req = rdfanalyzer.PlotRequest()
+        >>> req.metaFile = "meta_output.root"
+        >>> req.outputFile = "pt_stack.pdf"
+        >>> req.title = "Transverse Momentum"
+        >>> req.xAxisTitle = "p_{T} [GeV]"
+        >>> req.logY = False
+        >>> req.drawRatio = False
+        >>> req.processes = [proc_mc]
+        >>>
+        >>> result = pu.makeStackPlot(req)
+        >>> assert result.success, result.message
+        )pbdoc")
+        .def(py::init<>())
+        .def("makeStackPlot", &PlottingUtility::makeStackPlot,
+             py::arg("request"),
+             R"pbdoc(
+             Create and save a single stack plot.
+
+             Parameters
+             ----------
+             request : PlotRequest
+                 Full plot specification.
+
+             Returns
+             -------
+             PlotResult
+                 Success flag, optional error message, and histogram integrals.
+             )pbdoc")
+        .def("makeStackPlots", &PlottingUtility::makeStackPlots,
+             py::arg("requests"),
+             py::arg("parallel") = false,
+             R"pbdoc(
+             Create and save multiple stack plots.
+
+             Parameters
+             ----------
+             requests : list[PlotRequest]
+                 List of plot specifications.
+             parallel : bool
+                 When *True*, plots are rendered concurrently using
+                 ``std::async``.  ROOT thread-safety is enabled automatically.
+
+             Returns
+             -------
+             list[PlotResult]
+                 One result per request, in the same order.
+             )pbdoc");
 }

@@ -188,3 +188,54 @@ TEST(PluginLifecycle, GetDependenciesRoundTrip) {
     MockPlugin p("P", log, {"dep1", "dep2"});
     EXPECT_EQ(p.getDependencies(), (std::vector<std::string>{"dep1", "dep2"}));
 }
+
+// ---------------------------------------------------------------------------
+// 8. collectProvenanceEntries() – default returns empty map
+// ---------------------------------------------------------------------------
+TEST(PluginLifecycle, DefaultCollectProvenanceEntriesIsEmpty) {
+    struct MinimalPlugin : public IPluggableManager {
+        void setContext(ManagerContext&) override {}
+        std::string type() const override { return "Minimal"; }
+        void setupFromConfigFile() override {}
+    };
+
+    MinimalPlugin p;
+    EXPECT_TRUE(p.collectProvenanceEntries().empty());
+}
+
+// ---------------------------------------------------------------------------
+// 9. collectProvenanceEntries() – override returns custom entries
+// ---------------------------------------------------------------------------
+TEST(PluginLifecycle, OverriddenCollectProvenanceEntriesReturnsEntries) {
+    class ProvenancePlugin : public IPluggableManager {
+    public:
+        void setContext(ManagerContext&) override {}
+        std::string type() const override { return "Provenance"; }
+        void setupFromConfigFile() override {}
+        std::unordered_map<std::string, std::string>
+        collectProvenanceEntries() const override {
+            return {{"mykey", "myvalue"}, {"setting_x", "42"}};
+        }
+    };
+
+    ProvenancePlugin p;
+    const auto entries = p.collectProvenanceEntries();
+    ASSERT_EQ(entries.size(), 2u);
+    EXPECT_EQ(entries.at("mykey"),     "myvalue");
+    EXPECT_EQ(entries.at("setting_x"), "42");
+}
+
+// ---------------------------------------------------------------------------
+// 10. setTaskMetadata() stores entries in the Analyzer's provenance map and
+//     they are written as "task.<key>" to the meta ROOT file.
+// ---------------------------------------------------------------------------
+TEST(PluginLifecycle, SetTaskMetadataStoresEntries) {
+    // Just verify chaining and no crash (no ROOT output in this unit test)
+    Analyzer analyzer(exampleCfg());
+    Analyzer* ret = analyzer.setTaskMetadata("job_id", "42");
+    EXPECT_EQ(ret, &analyzer) << "setTaskMetadata() must return this for chaining";
+
+    // Double-call should overwrite
+    analyzer.setTaskMetadata("job_id", "99");
+    // No assertion on the stored value here; integration tests cover writing
+}

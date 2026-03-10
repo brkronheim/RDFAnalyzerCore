@@ -25,11 +25,6 @@ import numpy as np
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Any, Union
 
-# Import the output schema module for manifest emission.
-# output_schema.py lives alongside this script in core/python/.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from output_schema import emit_output_manifest, LawArtifactSchema, MANIFEST_FILENAME
-
 # Try to import required packages
 try:
     import uproot
@@ -37,6 +32,15 @@ except ImportError:
     print("Error: uproot package not found.")
     print("Please install it with: pip install uproot")
     sys.exit(1)
+
+# Optional nuisance group registry – imported lazily so that the module is
+# still usable when nuisance_groups.py is not on the path.
+try:
+    from nuisance_groups import NuisanceGroupRegistry
+    _NUISANCE_GROUPS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    NuisanceGroupRegistry = None  # type: ignore[assignment,misc]
+    _NUISANCE_GROUPS_AVAILABLE = False
 
 
 class Histogram1D:
@@ -149,15 +153,31 @@ class DatacardGenerator:
         self.processes = self.config.get('processes', {})
         self.systematics = self.config.get('systematics', {})
         self.sample_combinations = self.config.get('sample_combinations', {})
+
+        # Build a NuisanceGroupRegistry from the config when available.
+        # A top-level ``nuisance_groups`` key (list of group dicts) is
+        # preferred; if absent the flat ``systematics`` dict is used as a
+        # fallback so that every existing config benefits from group-aware
+        # filtering without any migration effort.
+        if _NUISANCE_GROUPS_AVAILABLE:
+            if "nuisance_groups" in self.config:
+                self.nuisance_registry: Optional[NuisanceGroupRegistry] = (
+                    NuisanceGroupRegistry.from_config(self.config)
+                )
+            elif self.systematics:
+                self.nuisance_registry = NuisanceGroupRegistry.from_config(
+                    {"systematics": self.systematics}
+                )
+            else:
+                self.nuisance_registry = NuisanceGroupRegistry()
+        else:
+            self.nuisance_registry = None
         
         # Create output directory
         os.makedirs(self.output_dir, exist_ok=True)
         
         # Store histogram data
         self.histograms = {}
-
-        # Track artifacts emitted during this run for manifest emission.
-        self._generated_artifacts: Dict[str, LawArtifactSchema] = {}
         
     def read_histograms(self) -> None:
         """Read histograms from input ROOT files using uproot."""
@@ -197,9 +217,10 @@ class DatacardGenerator:
                 obj = root_file[key]
                 
                 # Check if it's a TH1 histogram (not TH2, TH3, etc.)
-                if hasattr(obj, 'member') and hasattr(obj, 'values'):
-                    # Check if it's 1D
-                    if isinstance(obj.member('fXaxis'), uproot.models.TAxis.Model_TAxis):
+                if hasattr(obj, 'axes') and hasattr(obj, 'values'):
+                    # Check if it's 1D (uproot v4+ API; avoids the removed
+                    # uproot.models.TAxis attribute from uproot v3)
+                    if len(obj.axes) == 1:
                         values = obj.values()
                         edges = obj.axis().edges()
                         
@@ -396,15 +417,6 @@ class DatacardGenerator:
         datacard_filename = os.path.join(self.output_dir, f"datacard_{region}.txt")
         self._write_datacard_file(datacard_filename, region, process_hists, root_filename)
         print(f"  Created datacard: {datacard_filename}")
-
-        # Record the artifacts generated for this region so they can be
-        # included in the output manifest emitted at the end of run().
-        self._generated_artifacts[f"shapes_{region}"] = LawArtifactSchema(
-            path=root_filename, artifact_type="shapes"
-        )
-        self._generated_artifacts[f"datacard_{region}"] = LawArtifactSchema(
-            path=datacard_filename, artifact_type="datacard"
-        )
     
     def _write_root_file(self, filename: str, process_hists: Dict[str, Histogram1D], region: str) -> None:
         """
@@ -535,6 +547,10 @@ class DatacardGenerator:
     def _get_systematics_for_process(self, process: str, region: str) -> Dict:
         """
         Get systematics that apply to a specific process and region.
+
+        When a :class:`~nuisance_groups.NuisanceGroupRegistry` is available it
+        is used as the authoritative source for applicability; the flat
+        ``systematics`` dict is used as a fallback.
         
         Args:
             process: Process name
@@ -543,6 +559,25 @@ class DatacardGenerator:
         Returns:
             Dictionary of applicable systematics
         """
+        # Registry-aware path: query by process, region, and datacard usage.
+        if self.nuisance_registry is not None:
+            syst_map = self.nuisance_registry.get_systematics_for_process_and_region(
+                process, region, output_usage="datacard"
+            )
+            applicable_systematics = {}
+            for syst_name in syst_map:
+                if syst_name in self.systematics:
+                    applicable_systematics[syst_name] = self.systematics[syst_name]
+                else:
+                    # Synthesise a minimal config entry from the group metadata.
+                    group = syst_map[syst_name]
+                    applicable_systematics[syst_name] = {
+                        "type": group.group_type,
+                        "distribution": "shape" if group.group_type == "shape" else "lnN",
+                    }
+            return applicable_systematics
+
+        # Fallback: original flat-dict logic.
         applicable_systematics = {}
         
         for syst_name, syst_config in self.systematics.items():
@@ -559,6 +594,55 @@ class DatacardGenerator:
             applicable_systematics[syst_name] = syst_config
         
         return applicable_systematics
+
+    def validate_coverage(
+        self, available_variations: Optional[Dict[str, List[str]]] = None
+    ) -> List[str]:
+        """Validate that all declared systematics have up and down shifts.
+
+        Uses the :class:`~nuisance_groups.NuisanceGroupRegistry` when
+        available, otherwise checks the flat ``systematics`` dictionary.
+
+        Parameters
+        ----------
+        available_variations : dict[str, list[str]] or None
+            Mapping from base systematic name to the list of histogram/column
+            names found in the output.  When ``None`` an empty dict is used
+            (all systematics will be reported as missing).
+
+        Returns
+        -------
+        list[str]
+            Human-readable issue descriptions.  An empty list means all
+            declared systematics have complete coverage.
+        """
+        avail = available_variations or {}
+        messages: List[str] = []
+
+        if self.nuisance_registry is not None:
+            from nuisance_groups import CoverageSeverity
+            issues = self.nuisance_registry.validate_coverage(avail)
+            for issue in issues:
+                prefix = "ERROR" if issue.severity == CoverageSeverity.ERROR else "WARNING"
+                messages.append(f"[{prefix}] {issue.group_name}/{issue.systematic_name}: {issue.message}")
+            return messages
+
+        # Fallback: check flat systematics dict.
+        for syst_name in self.systematics:
+            variations = avail.get(syst_name, [])
+            up_names = {v.lower() for v in variations}
+            has_up = (syst_name.lower() + "up") in up_names
+            has_down = (syst_name.lower() + "down") in up_names
+            if syst_name not in avail:
+                messages.append(
+                    f"[ERROR] {syst_name}: not present in available variations."
+                )
+            elif not has_up:
+                messages.append(f"[ERROR] {syst_name}: missing Up variation.")
+            elif not has_down:
+                messages.append(f"[ERROR] {syst_name}: missing Down variation.")
+
+        return messages
     
     def _write_datacard_file(self, filename: str, region: str, 
                             process_hists: Dict[str, Histogram1D], root_filename: str) -> None:
@@ -666,6 +750,10 @@ class DatacardGenerator:
     def _get_systematics_for_region(self, region: str) -> Dict:
         """
         Get all systematics for a specific region.
+
+        When a :class:`~nuisance_groups.NuisanceGroupRegistry` is available it
+        is used as the authoritative source; the flat ``systematics`` dict is
+        used as a fallback.
         
         Args:
             region: Control region name
@@ -673,6 +761,25 @@ class DatacardGenerator:
         Returns:
             Dictionary of systematics
         """
+        if self.nuisance_registry is not None:
+            # Collect all systematics in groups that apply to this region
+            # and are intended for datacard output.
+            applicable_systematics = {}
+            for group in self.nuisance_registry.get_groups_for_output("datacard"):
+                if not group.applies_to_region(region):
+                    continue
+                for syst_name in group.systematics:
+                    if syst_name not in applicable_systematics:
+                        if syst_name in self.systematics:
+                            applicable_systematics[syst_name] = self.systematics[syst_name]
+                        else:
+                            applicable_systematics[syst_name] = {
+                                "type": group.group_type,
+                                "distribution": "shape" if group.group_type == "shape" else "lnN",
+                            }
+            return applicable_systematics
+
+        # Fallback: original flat-dict logic.
         applicable_systematics = {}
         
         for syst_name, syst_config in self.systematics.items():
@@ -701,15 +808,6 @@ class DatacardGenerator:
         
         self.read_histograms()
         self.generate_all_datacards()
-
-        # Emit an output manifest listing all generated LAW artifacts so that
-        # downstream tasks can discover and validate them without custom logic.
-        if self._generated_artifacts:
-            manifest_path = emit_output_manifest(
-                self.output_dir,
-                extra_artifacts=self._generated_artifacts,
-            )
-            print(f"  Schema manifest written: {manifest_path}")
         
         print("=" * 80)
         print(f"Datacard generation complete. Output in: {self.output_dir}")

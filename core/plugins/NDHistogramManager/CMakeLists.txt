@@ -5,4 +5,5 @@ target_link_libraries(NDHistogramManager PUBLIC
     ROOT::ROOTDataFrame
     ROOT::ROOTVecOps
     ROOT::Core
+    Boost::headers
 ) 

@@ -1,0 +1,37 @@
+function(assert_exists path description)
+  if(NOT EXISTS "${path}")
+    message(FATAL_ERROR "${description} missing: ${path}")
+  endif()
+endfunction()
+
+function(assert_under_root path root description)
+  string(FIND "${path}" "${root}" root_pos)
+  if(NOT root_pos EQUAL 0)
+    message(FATAL_ERROR "${description} must live under ${root}, got ${path}")
+  endif()
+endfunction()
+
+if(NOT DEFINED COMBINE_PREFIX OR COMBINE_PREFIX STREQUAL "")
+  message(FATAL_ERROR "COMBINE_PREFIX was not provided to VerifyCombineConfig.cmake")
+endif()
+
+assert_exists("${COMBINE_PREFIX}" "Combine install prefix")
+assert_exists("${COMBINE_EXECUTABLE}" "Combine executable")
+assert_exists("${COMBINE_BIN_DIR}" "Combine bin directory")
+assert_exists("${COMBINE_LIBRARY_DIR}" "Combine library directory")
+assert_exists("${COMBINE_PREFIX}/include/HiggsAnalysis/CombinedLimit/interface" "Combine header directory")
+
+assert_under_root("${COMBINE_EXECUTABLE}" "${COMBINE_PREFIX}" "Combine executable")
+assert_under_root("${COMBINE_BIN_DIR}" "${COMBINE_PREFIX}" "Combine bin directory")
+assert_under_root("${COMBINE_LIBRARY_DIR}" "${COMBINE_PREFIX}" "Combine library directory")
+assert_under_root("${COMBINE_PYTHON_DIR}" "${COMBINE_PREFIX}" "Combine python directory")
+
+get_filename_component(_combine_executable_dir "${COMBINE_EXECUTABLE}" DIRECTORY)
+if(NOT _combine_executable_dir STREQUAL "${COMBINE_BIN_DIR}")
+  message(FATAL_ERROR "COMBINE_EXECUTABLE is not located in COMBINE_BIN_DIR: ${COMBINE_EXECUTABLE}")
+endif()
+
+file(GLOB _combine_libraries "${COMBINE_LIBRARY_DIR}/*")
+if(NOT _combine_libraries)
+  message(FATAL_ERROR "Combine library directory is empty: ${COMBINE_LIBRARY_DIR}")
+endif()

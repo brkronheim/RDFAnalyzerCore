@@ -1,5 +1,6 @@
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
+#include <api/ILogger.h>
 #include <api/ISystematicManager.h>
 #include <TriggerManager.h>
 #include <ROOT/RVec.hxx>
@@ -200,4 +201,20 @@ void TriggerManager::setupFromConfigFile() {
     objects_m.emplace(entryKeys.at("name"), triggerList);
     sampleToGroup_m.emplace(entryKeys.at("sample"), entryKeys.at("name"));
   }
+}
+void TriggerManager::initialize() {
+  std::cout << "TriggerManager: initialized with " << getAllGroups().size()
+            << " trigger group(s)." << std::endl;
+}
+
+void TriggerManager::reportMetadata() {
+  if (!logger_m) return;
+  std::string msg = "TriggerManager loaded groups: ";
+  bool first = true;
+  for (const auto& group : getAllGroups()) {
+    if (!first) msg += ", ";
+    msg += group;
+    first = false;
+  }
+  logger_m->log(ILogger::Level::Info, msg);
 }

@@ -1,6 +1,10 @@
 *.o
 *.png
 *.root
+*/.law
+*/.law/*
+.law
+.law/*
 !aux/*.root
 
 # Ignore plotting test output (generated PNGs)
@@ -19,7 +23,6 @@ build/*
 Testing/Temporary/*
 .cache/*
 CMakeFiles
-*.cmake
 Makefile
 CMakeCache.txt
 python/index.html
@@ -27,7 +30,11 @@ compile_commands.json
 *swp
 condorSub*
 *__afs*
+production_*/
+example_production_work/
+example_outputs/
 aux/Run3/*
 aux/Run2/*
 docs/doxygen/*
-analyses/*/
+analyses/*/output/
+analyses/*/data/

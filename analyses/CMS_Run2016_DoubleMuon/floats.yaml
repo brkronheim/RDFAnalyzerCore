@@ -1,0 +1,28 @@
+# =============================================================================
+# floats.yaml — Scalar float constants loaded into the RDataFrame
+#
+# Format: YAML map (key: value).  Each entry becomes a constant column in the
+# RDataFrame accessible by any Define, Filter, or histogram weight expression.
+#
+# For this data analysis the event weight is defined as 1.0 in analysis.cc
+# (constant column "eventWeight").  These entries document analysis parameters
+# and demonstrate the floatConfig mechanism for analyses needing per-sample
+# normalisation (e.g. MC cross-section × luminosity weighting).
+# =============================================================================
+
+# Integrated luminosity for Run2016G in fb^-1
+lumi_run2016g: 7.65
+
+# Muon selection thresholds (documentation; actual cuts are in analysis.cc)
+muon_pt_min: 20.0
+muon_eta_max: 2.4
+muon_iso_max: 0.15
+
+# Jet selection thresholds (documentation; actual cuts are in analysis.cc)
+jet_pt_min: 30.0
+jet_eta_max: 2.5
+jet_dR_clean: 0.4
+
+# Z mass window boundaries used by the mass-window cut and histograms
+zpeak_mass_lo: 70.0
+zpeak_mass_hi: 110.0

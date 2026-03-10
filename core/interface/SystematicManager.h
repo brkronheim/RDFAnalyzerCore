@@ -56,11 +56,27 @@ public:
                                    const std::vector<std::string> &columnList);
 
   /**
-   * @brief Make a list of systematic variations for a branch
-   * @param branchName Name of the branch
-   * @return Vector of systematic variation names
+   * @brief Automatically discover and register systematic variations from column names.
+   *
+   * See ISystematicManager::autoRegisterSystematics for full semantics.
    */
-  std::vector<std::string> makeSystList(const std::string &branchName, IDataFrameProvider &dataManager);
+  SystematicValidationResult autoRegisterSystematics(
+      const std::vector<std::string> &columnNames) override;
+
+  /**
+   * @brief Make a list of systematic variations for a branch
+   *
+   * See ISystematicManager::makeSystList for full semantics.
+   * The canonical branchName is ISystematicManager::CANONICAL_SYST_BRANCH_NAME.
+   */
+  std::vector<std::string> makeSystList(const std::string &branchName, IDataFrameProvider &dataManager) override;
+
+  /**
+   * @brief Check whether counter columns have already been materialized for branchName
+   * @param branchName The branch namespace to check
+   * @return True if makeSystList has already been called for this branchName
+   */
+  bool isBranchNameMaterialized(const std::string &branchName) const override;
 
 private:
   std::set<std::string> systematics_m;
@@ -68,8 +84,10 @@ private:
       systematicToVariableMap_m;
   std::unordered_map<std::string, std::set<std::string>>
       variableToSystematicMap_m;
-  bool systListDefined_m = false;
-  std::vector<std::string> systList_m;
+  /// Per-branchName cache: maps each materialized branchName to its systList.
+  /// Enables multiple callers to safely share or isolate counter namespaces.
+  std::unordered_map<std::string, std::vector<std::string>>
+      materializedSystLists_m;
 };
 
 #endif // SYSTEMATICMANAGER_H_INCLUDED

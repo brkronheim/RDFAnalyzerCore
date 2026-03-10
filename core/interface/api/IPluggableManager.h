@@ -2,6 +2,7 @@
 #define IPLUGGABLEMANAGER_H_INCLUDED
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <api/IContextAware.h>
 
@@ -14,20 +15,20 @@
  * ## Lifecycle
  * The framework invokes methods in the following order:
  *  1. Construction (by user code)
- *  2. setContext()         – inject shared services (IContextAware)
+ *  2. setContext()          – inject shared services (IContextAware)
  *  3. setupFromConfigFile() – load plugin-specific configuration
- *  4. initialize()         – post-wiring setup; all declared dependencies
- *                            are guaranteed to be registered at this point
- *  5. execute()            – called immediately before the RDataFrame
- *                            computation is triggered (inside save())
- *  6. finalize()           – called after the RDataFrame computation completes
- *  7. reportMetadata()     – called after finalize() for metadata emission
+ *  4. initialize()          – post-wiring setup; all declared dependencies
+ *                             are guaranteed to be registered at this point
+ *  5. execute()             – called immediately before the RDataFrame
+ *                             computation is triggered (inside save()/run())
+ *  6. finalize()            – called after the RDataFrame computation completes
+ *  7. reportMetadata()      – called after finalize() for metadata emission
  *
  * ## Dependency and resource advertisement
- * Plugins may override getDependencies(), getRequiredColumns(), and
- * getProducedColumns() to advertise their requirements and outputs.
- * The Analyzer uses getDependencies() to determine initialization order
- * and to validate that all required plugins are present.
+ * Plugins may declare ordering constraints and column requirements via:
+ *  - getDependencies()    – plugin roles this plugin depends on
+ *  - getRequiredColumns() – dataframe columns this plugin reads
+ *  - getProducedColumns() – dataframe columns this plugin writes
  */
 class IPluggableManager : public IContextAware {
 public:
@@ -59,24 +60,24 @@ public:
      * validate that all required plugins are registered before initialize()
      * is called. An exception is thrown if any declared dependency is absent.
      *
-     * @return Vector of role names (keys passed to Analyzer::addPlugin).
+     * @return Vector of role names (keys in the Analyzer's plugin map).
      */
     virtual std::vector<std::string> getDependencies() const { return {}; }
 
     /**
-     * @brief Advertise the RDataFrame column names this plugin reads.
-     * @return Vector of required column names.
+     * @brief Declare the dataframe columns this plugin reads.
+     * @return Vector of column names.
      */
     virtual std::vector<std::string> getRequiredColumns() const { return {}; }
 
     /**
-     * @brief Advertise the RDataFrame column names this plugin produces.
-     * @return Vector of produced column names.
+     * @brief Declare the dataframe columns this plugin writes/defines.
+     * @return Vector of column names.
      */
     virtual std::vector<std::string> getProducedColumns() const { return {}; }
 
     // -----------------------------------------------------------------------
-    // Lifecycle hooks (all default to no-ops so existing plugins need not change)
+    // Lifecycle hooks (default: no-op)
     // -----------------------------------------------------------------------
 
     /**
@@ -92,7 +93,7 @@ public:
     /**
      * @brief Pre-execution hook.
      *
-     * Called inside Analyzer::save(), immediately before the RDataFrame
+     * Called inside Analyzer::save()/run(), immediately before the RDataFrame
      * computation is triggered.
      */
     virtual void execute() {}
@@ -100,7 +101,7 @@ public:
     /**
      * @brief Post-execution hook.
      *
-     * Called inside Analyzer::save(), after the RDataFrame computation
+     * Called inside Analyzer::save()/run(), after the RDataFrame computation
      * has completed.
      */
     virtual void finalize() {}
@@ -112,6 +113,31 @@ public:
      * information to the metadata output sink or to the logger.
      */
     virtual void reportMetadata() {}
+
+    // -----------------------------------------------------------------------
+    // Structured provenance contribution (default: empty)
+    // -----------------------------------------------------------------------
+
+    /**
+     * @brief Contribute structured provenance metadata for this plugin.
+     *
+     * The framework calls this after reportMetadata(), collects all returned
+     * key-value pairs, and stores them in the ProvenanceService under the
+     * namespace "plugin.<role>.<key>".  It also automatically computes a
+     * content hash ("plugin.<role>.config_hash") from the returned entries so
+     * that any configuration change is detectable from the provenance record.
+     *
+     * Plugins that do not override this method contribute no custom provenance
+     * entries; only their type name (already recorded by the Analyzer) is
+     * stored.
+     *
+     * Keys named "config_hash" are reserved and will be overwritten by the
+     * framework's auto-computed hash.
+     *
+     * @return Map of provenance key-value pairs (without role prefix).
+     */
+    virtual std::unordered_map<std::string, std::string>
+    collectProvenanceEntries() const { return {}; }
 };
 
 #endif // IPLUGGABLEMANAGER_H_INCLUDED 

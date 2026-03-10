@@ -9,7 +9,6 @@
  */
 #include <cstdlib>
 #include <dlfcn.h>
-#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -22,6 +21,8 @@
 #include <TROOT.h>
 
 #include <dirent.h>
+
+#include <yaml-cpp/yaml.h>
 
 #include <functions.h>
 #include <plots.h>
@@ -65,36 +66,23 @@ static std::string getDirectory(const IConfigurationProvider &configProvider) {
 /**
  * @brief Validate ROOT runtime environment consistency
  *
- * Ensures ROOTSYS is set, a module map exists under ROOTSYS, and the loaded
- * libCore location matches ROOTSYS to avoid mixed ROOT installations at runtime.
+ * Ensures the loaded ROOT libraries are consistent with ROOTSYS when ROOTSYS
+ * is set, avoiding mixed ROOT installations at runtime.
  */
 static void validateRootEnvironment() {
-  const char *rootSysEnv = std::getenv("ROOTSYS");
-  if (rootSysEnv == nullptr || std::string(rootSysEnv).empty()) {
-    throw std::runtime_error(
-        "ROOTSYS is not set. Source env.sh and rebuild to ensure a consistent ROOT environment.");
-  }
-
-  const std::filesystem::path rootSysPath(rootSysEnv);
-  const std::filesystem::path moduleMapShare = rootSysPath / "share" / "root" / "cling" / "module.modulemap";
-  const std::filesystem::path moduleMapEtc = rootSysPath / "etc" / "cling" / "module.modulemap";
-  const std::filesystem::path moduleMapEtcLegacy = rootSysPath / "etc" / "cling" / "cling.modulemap";
-  if (!std::filesystem::exists(moduleMapShare) &&
-      !std::filesystem::exists(moduleMapEtc) &&
-      !std::filesystem::exists(moduleMapEtcLegacy)) {
-    throw std::runtime_error(
-        "ROOT module map not found under ROOTSYS. Please source env.sh and rebuild to avoid mixed ROOT installs.");
-  }
-
   Dl_info info;
   if (dladdr(reinterpret_cast<void*>(&TROOT::Class), &info) != 0 && info.dli_fname) {
     const std::string libCorePath(info.dli_fname);
+    const char *rootSysEnv = std::getenv("ROOTSYS");
+    if (rootSysEnv == nullptr || std::string(rootSysEnv).empty()) {
+      return;
+    }
     const std::string rootSysStr(rootSysEnv);
-    /*if (libCorePath.rfind(rootSysStr, 0) != 0) {
+    if (libCorePath.rfind(rootSysStr, 0) != 0) {
       throw std::runtime_error(
           "Detected ROOT library from '" + libCorePath + "' but ROOTSYS='" + rootSysStr +
           "'. This indicates mixed ROOT installations. Source env.sh and rebuild from a clean build directory.");
-    }*/
+    }
   }
 }
 
@@ -289,5 +277,100 @@ makeTChain(const IConfigurationProvider &configProvider) {
   }
   std::cout << fileNum << " files found" << std::endl;
   return tchainVector;
+}
+
+/**
+ * @brief Parse a friend-tree YAML configuration file into a list of specs.
+ *
+ * Expected YAML structure:
+ * @code{.yaml}
+ * friends:
+ *   - alias: calib
+ *     treeName: Events          # optional, defaults to "Events"
+ *     fileList:                 # explicit file list (local or XRootD)
+ *       - /path/to/calib.root
+ *       - root://server//path/to/remote.root
+ *     indexBranches:            # optional; enables index-based event matching
+ *       - run
+ *       - luminosityBlock
+ *   - alias: taggers
+ *     treeName: BTagging
+ *     directory: /path/to/dir  # scan a directory instead of explicit files
+ *     globs: [.root]
+ *     antiglobs: [output.root]
+ * @endcode
+ *
+ * @param configFile Path to the YAML configuration file.
+ * @return Vector of parsed FriendTreeSpec objects.
+ * @throws std::runtime_error on YAML parse errors.
+ */
+std::vector<FriendTreeSpec>
+parseFriendTreeConfig(const std::string &configFile) {
+  std::vector<FriendTreeSpec> specs;
+
+  YAML::Node root;
+  try {
+    root = YAML::LoadFile(configFile);
+  } catch (const YAML::Exception &e) {
+    throw std::runtime_error("Error parsing friend tree config '" + configFile +
+                             "': " + e.what());
+  }
+
+  auto friendsNode = root["friends"];
+  if (!friendsNode || !friendsNode.IsSequence()) {
+    return specs;
+  }
+
+  for (const auto &entry : friendsNode) {
+    if (!entry.IsMap()) {
+      continue;
+    }
+    if (!entry["alias"]) {
+      std::cerr << "Warning: friend tree entry missing required 'alias' field; skipping."
+                << std::endl;
+      continue;
+    }
+
+    FriendTreeSpec spec;
+    spec.alias = entry["alias"].as<std::string>();
+
+    if (entry["treeName"]) {
+      spec.treeName = entry["treeName"].as<std::string>();
+    }
+
+    if (entry["fileList"] && entry["fileList"].IsSequence()) {
+      for (const auto &f : entry["fileList"]) {
+        spec.files.push_back(f.as<std::string>());
+      }
+    }
+
+    if (entry["directory"]) {
+      spec.directory = entry["directory"].as<std::string>();
+    }
+
+    if (entry["globs"] && entry["globs"].IsSequence()) {
+      spec.globs.clear();
+      for (const auto &g : entry["globs"]) {
+        spec.globs.push_back(g.as<std::string>());
+      }
+    }
+
+    if (entry["antiglobs"] && entry["antiglobs"].IsSequence()) {
+      spec.antiglobs.clear();
+      for (const auto &g : entry["antiglobs"]) {
+        spec.antiglobs.push_back(g.as<std::string>());
+      }
+    }
+
+    if (entry["indexBranches"] && entry["indexBranches"].IsSequence()) {
+      for (const auto &b : entry["indexBranches"]) {
+        spec.indexBranches.push_back(b.as<std::string>());
+      }
+    }
+
+    specs.push_back(std::move(spec));
+  }
+
+  return specs;
 }
 

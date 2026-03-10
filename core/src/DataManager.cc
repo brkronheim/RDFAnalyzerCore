@@ -3,6 +3,7 @@
 #include <ROOT/RVec.hxx>
 #include <DataManager.h>
 #include <TChain.h>
+#include <iostream>
 #include <util.h>
 #include <filesystem>
 
@@ -17,11 +18,41 @@
 DataManager::DataManager(const IConfigurationProvider &configProvider)
     : chain_vec_m(makeTChain(configProvider)), df_m(ROOT::RDataFrame(1)) {
 
+    // Attach friend trees (from friendConfig) BEFORE wrapping in RDataFrame
+    // so that all friend branches are visible to the RDataFrame at creation.
+    const std::string friendConfigFile = configProvider.get("friendConfig");
+    if (!friendConfigFile.empty() && std::filesystem::exists(friendConfigFile)) {
+      registerFriendTrees(configProvider);
+    }
+
     // Fall back to a small in-memory dataframe (1 entry) if no input files were found
     // This allows unit tests to define variables and perform simple operations
     // that expect at least one row.
     if (!(chain_vec_m.empty()) && chain_vec_m[0]->GetEntries() > 0) {
       df_m = ROOT::RDataFrame(*chain_vec_m[0]);
+
+      // Apply optional entry-range restriction.
+      // Written by law tasks when partition='entry_range' is selected.
+      // Both keys must be present; if only one is set the range is ignored.
+      // Note: Range() disables implicit multi-threading (ImplicitMT) when
+      // used with ROOT < 6.28.  In entry_range partition mode each condor
+      // job is a separate process, so per-job parallelism is unaffected;
+      // only the in-process thread count is restricted to 1 on older ROOT.
+      const std::string firstEntryStr = configProvider.get("firstEntry");
+      const std::string lastEntryStr  = configProvider.get("lastEntry");
+      if (!firstEntryStr.empty() && !lastEntryStr.empty()) {
+        const ULong64_t firstEntry = std::stoull(firstEntryStr);
+        const ULong64_t lastEntry  = std::stoull(lastEntryStr);
+        if (lastEntry > firstEntry) {
+          df_m = df_m.Range(firstEntry, lastEntry);
+          std::cout << "Entry range applied: [" << firstEntry << ", "
+                    << lastEntry << ")" << std::endl;
+        } else {
+          std::cerr << "Warning: firstEntry (" << firstEntry
+                    << ") >= lastEntry (" << lastEntry
+                    << "); entry range ignored." << std::endl;
+        }
+      }
     } else {
       std::cout << "No input files found; using single-entry in-memory RDataFrame for testing." << std::endl;
     }
@@ -347,6 +378,7 @@ void DataManager::registerOptionalBranches(
     columnSet.insert(column);
   }
   for (const auto &entryKeys : aliasConfig) {
+    std::cout << "Processing optional branch " << entryKeys.at("name") << std::endl;
     if (columnSet.find(entryKeys.at("name")) == columnSet.end()) {
       const int varType = std::stoi(entryKeys.at("type"));
       const auto defaultValStr = entryKeys.at("default");
@@ -354,67 +386,61 @@ void DataManager::registerOptionalBranches(
       const Bool_t defaultBool = defaultValStr == "1" ||
                                  defaultValStr == "true" ||
                                  defaultValStr == "True";
+      std::cout << "Defining optional branch " << varName << " with default " << defaultValStr << " and type number " << varType << std::endl;
       switch (varType) {
       case 0:
-        SaveVar<UInt_t>(std::stoul(defaultValStr), varName);
+        df_m = saveVar<UInt_t>(std::stoul(defaultValStr), varName, df_m);
         break;
       case 1:
-        SaveVar<Int_t>(std::stoi(defaultValStr), varName);
+        df_m = saveVar<Int_t>(std::stoi(defaultValStr), varName, df_m);
         break;
       case 2:
-        SaveVar<UShort_t>(std::stoul(defaultValStr), varName);
+        df_m = saveVar<UShort_t>(std::stoul(defaultValStr), varName, df_m);
         break;
       case 3:
-        SaveVar<Short_t>(std::stoi(defaultValStr), varName);
+        df_m = saveVar<Short_t>(std::stoi(defaultValStr), varName, df_m);
         break;
       case 4:
-        SaveVar<UChar_t>(UChar_t(std::stoul(defaultValStr)), varName);
+        df_m = saveVar<UChar_t>(UChar_t(std::stoul(defaultValStr)), varName, df_m);
         break;
       case 5:
-        SaveVar<Char_t>(Char_t(std::stoi(defaultValStr)), varName);
+        df_m = saveVar<Char_t>(Char_t(std::stoi(defaultValStr)), varName, df_m);
         break;
       case 6:
-        SaveVar<Float_t>(std::stof(defaultValStr), varName);
+        df_m = saveVar<Float_t>(std::stof(defaultValStr), varName, df_m);
         break;
       case 7:
-        SaveVar<Double_t>(std::stod(defaultValStr), varName);
+        df_m = saveVar<Double_t>(std::stod(defaultValStr), varName, df_m);
         break;
       case 8:
-        SaveVar<Bool_t>(defaultBool, varName);
+        df_m = saveVar<Bool_t>(defaultBool, varName, df_m);
         break;
       case 10:
-        SaveVar<ROOT::VecOps::RVec<UInt_t>>(
-            {static_cast<UInt_t>(std::stoul(defaultValStr))}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<UInt_t>>(ROOT::VecOps::RVec<UInt_t>{static_cast<UInt_t>(std::stoul(defaultValStr))}, varName, df_m);
         break;
       case 11:
-        SaveVar<ROOT::VecOps::RVec<Int_t>>({std::stoi(defaultValStr)}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Int_t>>(ROOT::VecOps::RVec<Int_t>{std::stoi(defaultValStr)}, varName, df_m);
         break;
       case 12:
-        SaveVar<ROOT::VecOps::RVec<UShort_t>>(
-            {static_cast<UShort_t>(std::stoul(defaultValStr))}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<UShort_t>>(ROOT::VecOps::RVec<UShort_t>{static_cast<UShort_t>(std::stoul(defaultValStr))}, varName, df_m);
         break;
       case 13:
-        SaveVar<ROOT::VecOps::RVec<Short_t>>(
-            {static_cast<Short_t>(std::stoi(defaultValStr))}, varName);
+        df_m =  saveVar<ROOT::VecOps::RVec<Short_t>>(ROOT::VecOps::RVec<Short_t>{static_cast<Short_t>(std::stoi(defaultValStr))}, varName, df_m);
         break;
       case 14:
-        SaveVar<ROOT::VecOps::RVec<UChar_t>>(
-            {UChar_t(std::stoul(defaultValStr))}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<UChar_t>>(ROOT::VecOps::RVec<UChar_t>{UChar_t(std::stoul(defaultValStr))}, varName, df_m);
         break;
       case 15:
-        SaveVar<ROOT::VecOps::RVec<Char_t>>({Char_t(std::stoi(defaultValStr))},
-                                            varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Char_t>>(ROOT::VecOps::RVec<Char_t>{Char_t(std::stoi(defaultValStr))}, varName, df_m);
         break;
       case 16:
-        SaveVar<ROOT::VecOps::RVec<Float_t>>({std::stof(defaultValStr)},
-                                             varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Float_t>>(ROOT::VecOps::RVec<Float_t>{std::stof(defaultValStr)}, varName, df_m);
         break;
       case 17:
-        SaveVar<ROOT::VecOps::RVec<Double_t>>({std::stod(defaultValStr)},
-                                              varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Double_t>>(ROOT::VecOps::RVec<Double_t>{std::stod(defaultValStr)}, varName, df_m);
         break;
       case 18:
-        SaveVar<ROOT::VecOps::RVec<Bool_t>>({defaultBool}, varName);
+        df_m = saveVar<ROOT::VecOps::RVec<Bool_t>>(ROOT::VecOps::RVec<Bool_t>{defaultBool}, varName, df_m);
         break;
       }
     }
@@ -450,6 +476,99 @@ void DataManager::finalizeSetup(const IConfigurationProvider &configProvider,
   if (!optionalBranchesConfig.empty() && std::filesystem::exists(optionalBranchesConfig)) {
     std::cout << "Registering optional branches" << std::endl;
     registerOptionalBranches(configProvider, optionalBranchesConfigKey);
+  }
+}
+
+/**
+ * @brief Attach a single friend tree specified by @p spec to the main TChain.
+ */
+void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
+  auto friendChain = std::make_unique<TChain>(spec.treeName.c_str());
+
+  if (!spec.files.empty()) {
+    for (const auto &f : spec.files) {
+      std::cout << "[DataManager] Adding friend file: " << f << std::endl;
+      friendChain->Add(f.c_str());
+    }
+  } else if (!spec.directory.empty()) {
+    scan(*friendChain, spec.directory, spec.globs, spec.antiglobs);
+  } else {
+    std::cerr << "[DataManager] Warning: friend tree '" << spec.alias
+              << "' has neither fileList nor directory; skipping." << std::endl;
+    return;
+  }
+
+  const Long64_t nFriendEntries = friendChain->GetEntries();
+  if (nFriendEntries == 0) {
+    std::cerr << "[DataManager] Warning: friend tree '" << spec.alias
+              << "' has no entries (files may not exist or tree is empty)."
+              << std::endl;
+  }
+
+  // Build an in-memory event index for non-sequential (identifier-based) matching.
+  if (!spec.indexBranches.empty()) {
+    const std::string &major = spec.indexBranches[0];
+    const std::string minor =
+        spec.indexBranches.size() > 1 ? spec.indexBranches[1] : "0";
+    std::cout << "[DataManager] Building index on '" << major << "' / '"
+              << minor << "' for friend '" << spec.alias << "'" << std::endl;
+    friendChain->BuildIndex(major.c_str(), minor.c_str());
+  }
+
+  if (!chain_vec_m.empty() && chain_vec_m[0]) {
+    chain_vec_m[0]->AddFriend(friendChain.get(), spec.alias.c_str());
+    std::cout << "[DataManager] Attached friend tree '" << spec.alias
+              << "' (tree='" << spec.treeName << "', entries=" << nFriendEntries
+              << ")" << std::endl;
+  } else {
+    std::cerr << "[DataManager] Warning: no main chain available; cannot "
+                 "attach friend tree '"
+              << spec.alias << "'." << std::endl;
+    return;
+  }
+
+  // Retain ownership so the main chain's raw pointer remains valid.
+  friend_chains_m.push_back(std::move(friendChain));
+}
+
+/**
+ * @brief Attach friend trees or sidecar files declared in a YAML config file.
+ */
+void DataManager::registerFriendTrees(
+    const IConfigurationProvider &configProvider,
+    const std::string &friendConfigKey) {
+  const std::string friendConfigFile = configProvider.get(friendConfigKey);
+  if (friendConfigFile.empty()) {
+    return;
+  }
+  if (!std::filesystem::exists(friendConfigFile)) {
+    std::cerr << "[DataManager] Warning: friendConfig file '" << friendConfigFile
+              << "' not found; skipping friend tree registration." << std::endl;
+    return;
+  }
+
+  std::cout << "[DataManager] Loading friend tree config from '"
+            << friendConfigFile << "'" << std::endl;
+
+  const auto specs = parseFriendTreeConfig(friendConfigFile);
+  if (specs.empty()) {
+    std::cout << "[DataManager] No friend trees found in config." << std::endl;
+    return;
+  }
+
+  for (const auto &spec : specs) {
+    attachFriendTree(spec);
+  }
+
+  // Rebuild the RDataFrame so that friend branches are visible.
+  // This is a no-op when called from the constructor (the RDataFrame is
+  // rebuilt immediately after this method returns), but is required when
+  // registerFriendTrees is invoked programmatically after construction.
+  if (!chain_vec_m.empty() && chain_vec_m[0] &&
+      chain_vec_m[0]->GetEntries() > 0) {
+    df_m = ROOT::RDataFrame(*chain_vec_m[0]);
+    std::cout << "[DataManager] RDataFrame rebuilt after attaching "
+              << specs.size() << " friend tree(s)." << std::endl;
   }
 }
 

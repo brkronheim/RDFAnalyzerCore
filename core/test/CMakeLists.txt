@@ -2,6 +2,15 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../extern/gtest/googletest/inclu
 
 # Define the test source directory for all test executables
 add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_compile_definitions(TEST_BINARY_DIR="${CMAKE_BINARY_DIR}")
+
+add_executable(testRootOutputSink testRootOutputSink.cc)
+target_link_libraries(testRootOutputSink core gtest gtest_main)
+add_test(NAME RootOutputSinkTest COMMAND testRootOutputSink)
+
+add_executable(testProvenanceService testProvenanceService.cc)
+target_link_libraries(testProvenanceService core gtest gtest_main)
+add_test(NAME ProvenanceServiceTest COMMAND testProvenanceService)
 
 # Basic functionality tests
 
@@ -41,6 +50,10 @@ add_executable(testCounterService testCounterService.cc)
 target_link_libraries(testCounterService core gtest gtest_main)
 add_test(NAME CounterServiceTest COMMAND testCounterService)
 
+#add_executable(testCounterService_Dedup testCounterService_Dedup.cc)
+#target_link_libraries(testCounterService_Dedup core corePlugins gtest gtest_main)
+#add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)
+
 #add_executable(testDataManager testDataManager.cc)
 #target_link_libraries(testDataManager core corePlugins gtest gtest_main)
 #add_test(NAME DataManagerTest COMMAND testDataManager)
@@ -51,9 +64,17 @@ add_test(NAME CounterServiceTest COMMAND testCounterService)
 
 # Plugin tests
 
+add_executable(testPluginLifecycle testPluginLifecycle.cc)
+target_link_libraries(testPluginLifecycle core corePlugins gtest gtest_main)
+add_test(NAME PluginLifecycleTest COMMAND testPluginLifecycle)
+
 add_executable(testNamedObjectManager testNamedObjectManager.cc)
 target_link_libraries(testNamedObjectManager core gtest gtest_main)
 add_test(NAME NamedObjectManagerTest COMMAND testNamedObjectManager)
+
+add_executable(testPhysicsObjectCollection testPhysicsObjectCollection.cc)
+target_link_libraries(testPhysicsObjectCollection core gtest gtest_main)
+add_test(NAME PhysicsObjectCollectionTest COMMAND testPhysicsObjectCollection)
 
 add_executable(testCorrectionManager testCorrectionManager.cc)
 target_link_libraries(testCorrectionManager core corePlugins gtest gtest_main)
@@ -75,9 +96,39 @@ add_executable(testNDHistogramManager testNDHistogramManager.cc)
 target_link_libraries(testNDHistogramManager core corePlugins gtest gtest_main)
 add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
 
+add_executable(testNDHistogramManagerConfig testNDHistogramManagerConfig.cc)
+target_link_libraries(testNDHistogramManagerConfig core corePlugins gtest gtest_main)
+add_test(NAME NDHistogramManagerConfigTest COMMAND testNDHistogramManagerConfig)
+
 add_executable(testTriggerManager testTriggerManager.cc)
 target_link_libraries(testTriggerManager core corePlugins gtest gtest_main)
 add_test(NAME TriggerManagerTest COMMAND testTriggerManager)
+
+add_executable(testKinematicFitManager testKinematicFitManager.cc)
+target_link_libraries(testKinematicFitManager core corePlugins gtest gtest_main)
+add_test(NAME KinematicFitManagerTest COMMAND testKinematicFitManager)
+
+if(USE_CUDA)
+add_executable(testKinematicFitManagerGpu testKinematicFitManagerGpu.cc)
+target_link_libraries(testKinematicFitManagerGpu core corePlugins gtest gtest_main)
+add_test(NAME KinematicFitManagerGpuIntegrationTest COMMAND testKinematicFitManagerGpu)
+endif()
+
+add_executable(testCutflowManager testCutflowManager.cc)
+target_link_libraries(testCutflowManager core corePlugins gtest gtest_main)
+add_test(NAME CutflowManagerTest COMMAND testCutflowManager)
+
+add_executable(testRegionManager testRegionManager.cc)
+target_link_libraries(testRegionManager core corePlugins gtest gtest_main)
+add_test(NAME RegionManagerTest COMMAND testRegionManager)
+
+add_executable(testWeightManager testWeightManager.cc)
+target_link_libraries(testWeightManager core corePlugins gtest gtest_main)
+add_test(NAME WeightManagerTest COMMAND testWeightManager)
+
+add_executable(testGoldenJsonManager testGoldenJsonManager.cc)
+target_link_libraries(testGoldenJsonManager core corePlugins gtest gtest_main)
+add_test(NAME GoldenJsonManagerTest COMMAND testGoldenJsonManager)
 
 
 add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)
@@ -88,9 +139,9 @@ add_executable(testAnalyzer_PluginWiring testAnalyzer_PluginWiring.cc)
 target_link_libraries(testAnalyzer_PluginWiring core corePlugins gtest gtest_main)
 add_test(NAME AnalyzerPluginWiringTest COMMAND testAnalyzer_PluginWiring)
 
-add_executable(testPluginLifecycle testPluginLifecycle.cc)
-target_link_libraries(testPluginLifecycle core corePlugins gtest gtest_main)
-add_test(NAME PluginLifecycleTest COMMAND testPluginLifecycle)
+add_executable(testAnalyzer_ManagerContextPersistence testAnalyzer_ManagerContextPersistence.cc)
+target_link_libraries(testAnalyzer_ManagerContextPersistence core corePlugins gtest gtest_main)
+add_test(NAME AnalyzerManagerContextPersistenceTest COMMAND testAnalyzer_ManagerContextPersistence)
 
 add_executable(testRootEnvironmentGuard testRootEnvironmentGuard.cc)
 target_link_libraries(testRootEnvironmentGuard core gtest gtest_main)
@@ -99,6 +150,13 @@ add_test(NAME RootEnvironmentGuardTest COMMAND testRootEnvironmentGuard)
 add_executable(testPlottingUtility testPlottingUtility.cc)
 target_link_libraries(testPlottingUtility core gtest gtest_main)
 add_test(NAME PlottingUtilityTest COMMAND testPlottingUtility)
+
+if(ONNXRUNTIME_USE_CUDA)
+add_executable(testOnnxManagerGpu testOnnxManagerGpu.cc)
+target_link_libraries(testOnnxManagerGpu core corePlugins gtest gtest_main)
+add_test(NAME OnnxManagerGpuIntegrationTest COMMAND testOnnxManagerGpu)
+endif()
+
 if(TARGET rdfanalyzer AND Python_EXECUTABLE)
 add_test(NAME PythonBindingsNumbaIntegration
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_bindings.py)
@@ -111,59 +169,112 @@ set_tests_properties(PythonBindingsNumbaIntegration PROPERTIES
 endif()
 
 
-# -----------------------------------------------------------------------
-# Pure-Python tests (pytest-based, no C++ build artefacts needed)
-# -----------------------------------------------------------------------
-# Use Python_EXECUTABLE set by pybind11/FindPython above; fall back to an
-# explicit find_package so the tests are registered even when the Python
-# bindings are disabled or pybind11 was not found.
-if(NOT Python_EXECUTABLE)
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    if(Python3_FOUND)
-        set(Python_EXECUTABLE "${Python3_EXECUTABLE}")
-    endif()
-endif()
-
-if(Python_EXECUTABLE)
-    set(CORE_PYTHON_DIR "${CMAKE_SOURCE_DIR}/core/python")
-
-    # Thin wrapper copied to the build directory: runs pytest and exits with
-    # code 77 (CTest SKIP) when pytest itself is not installed on the runner.
-    configure_file(
-        ${CMAKE_CURRENT_SOURCE_DIR}/run_pytest.py.in
-        ${CMAKE_CURRENT_BINARY_DIR}/run_pytest.py
-        COPYONLY
-    )
-
-    # Helper macro to register a single pytest test with a consistent set of
-    # properties.  Each test prepends CORE_PYTHON_DIR to PYTHONPATH so that
-    # all modules in core/python/ are importable without installation.
-    macro(add_pytest_test TEST_NAME TEST_FILE)
-        add_test(
-            NAME ${TEST_NAME}
-            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/run_pytest.py
-                    ${TEST_FILE} -v --tb=short -p no:cacheprovider
-        )
-        set_tests_properties(${TEST_NAME} PROPERTIES
-            ENVIRONMENT "PYTHONPATH=${CORE_PYTHON_DIR}:$ENV{PYTHONPATH}"
-            SKIP_RETURN_CODE 77
-        )
-    endmacro()
-
-    # Output-schema tests (core/python/test_output_schema.py)
-    add_pytest_test(PythonOutputSchemaTest
-                    ${CORE_PYTHON_DIR}/test_output_schema.py)
-
-    # YAML/text config-parsing tests (core/test/test_yaml_config.py)
-    add_pytest_test(PythonYamlConfigTest
-                    ${CMAKE_CURRENT_SOURCE_DIR}/test_yaml_config.py)
-endif()
 
 
 # Integration tests
 
-#add_executable(testSystematicPropagation testSystematicPropagation.cc)
-#target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
-#add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+add_executable(testSystematicPropagation testSystematicPropagation.cc)
+target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
+add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
+
+if(BUILD_COMBINE)
+add_test(
+    NAME CombineConfigurationTest
+    COMMAND ${CMAKE_COMMAND}
+        -DCOMBINE_PREFIX=${COMBINE_PREFIX}
+        -DCOMBINE_EXECUTABLE=${COMBINE_EXECUTABLE}
+        -DCOMBINE_BIN_DIR=${COMBINE_BIN_DIR}
+        -DCOMBINE_LIBRARY_DIR=${COMBINE_LIBRARY_DIR}
+        -DCOMBINE_PYTHON_DIR=${COMBINE_PYTHON_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyCombineConfig.cmake)
+endif()
+
+if(BUILD_COMBINE_HARVESTER)
+add_test(
+    NAME CombineHarvesterConfigurationTest
+    COMMAND ${CMAKE_COMMAND}
+        -DCOMBINEHARVESTER_ROOT_DIR=${COMBINEHARVESTER_ROOT_DIR}
+        -DCOMBINEHARVESTER_TOOLS_DIR=${COMBINEHARVESTER_TOOLS_DIR}
+        -DCOMBINEHARVESTER_PYTHON_DIR=${COMBINEHARVESTER_PYTHON_DIR}
+        -DCOMBINEHARVESTER_PDFS_DIR=${COMBINEHARVESTER_PDFS_DIR}
+        -DCOMBINEHARVESTER_LIBRARY_DIR=${COMBINEHARVESTER_LIBRARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyCombineHarvesterConfig.cmake)
+endif()
 
 
+
+# ---------------------------------------------------------------------------
+# core/python Python tests
+# ---------------------------------------------------------------------------
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    set(_CORE_PY "${CMAKE_SOURCE_DIR}/core/python")
+    # Configure the pytest runner shim that exits non-zero when pytest is absent
+    # so the test is visible as FAILED rather than silently skipped.
+    configure_file(run_pytest.py.in "${CMAKE_BINARY_DIR}/run_pytest.py" @ONLY)
+
+    # PYTHONPATH for most tests (core/python only)
+    set(_PYPATH "${_CORE_PY}:$ENV{PYTHONPATH}")
+    # test_submission_backend does `from core.python.xxx import`, so it also needs
+    # the repo root on PYTHONPATH.
+    set(_PYPATH_WITH_ROOT_REPO "${CMAKE_SOURCE_DIR}:${_CORE_PY}:$ENV{PYTHONPATH}")
+    # ROOT Python bindings path (for tests that import ROOT directly).
+    # ROOT_LIB_DIR is set as a CACHE INTERNAL variable in the top-level CMakeLists.
+    set(_PYPATH_ROOT "${ROOT_LIB_DIR}:${_CORE_PY}:$ENV{PYTHONPATH}")
+
+    # Ensure a local tmp directory exists in the build tree so that tests which
+    # execute shell scripts are not affected by noexec mounts on the system /tmp.
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tmp")
+    set(_EXEC_TMPDIR "TMPDIR=${CMAKE_BINARY_DIR}/tmp")
+
+    # pytest-based tests
+    macro(add_core_pytest _name _stem _pypath)
+        add_test(
+            NAME    ${_name}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_BINARY_DIR}/run_pytest.py
+                    ${_CORE_PY}/${_stem}.py -v
+        )
+        set_tests_properties(${_name} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${_pypath}"
+        )
+    endmacro()
+
+    add_core_pytest(CorePyAnalysisConfigValidationTest  test_analysis_config_validation  "${_PYPATH}")
+    add_core_pytest(CorePyDatasetManifestTest            test_dataset_manifest            "${_PYPATH}")
+    add_core_pytest(CorePyNuisanceGroupsTest             test_nuisance_groups             "${_PYPATH}")
+    add_core_pytest(CorePyOutputSchemaTest               test_output_schema               "${_PYPATH}")
+    add_core_pytest(CorePyRegionSchemaTest               test_region_schema               "${_PYPATH}")
+    add_core_pytest(CorePyReproducibilityReportTest      test_reproducibility_report      "${_PYPATH}")
+    add_core_pytest(CorePyValidateConfigTest             test_validate_config             "${_PYPATH}")
+    add_core_pytest(CorePyValidationReportTest           test_validation_report           "${_PYPATH}")
+    add_core_pytest(CorePyVariationOrchestratorTest      test_variation_orchestrator      "${_PYPATH}")
+    # test_submission_backend uses absolute `core.python.*` imports so it needs
+    # both core/python and the repo root on PYTHONPATH.
+    add_core_pytest(CorePySubmissionBackendTest          test_submission_backend          "${_PYPATH_WITH_ROOT_REPO}")
+
+    # unittest-based tests (have __main__ guard)
+    macro(add_core_unittest _name _stem _pypath)
+        add_test(
+            NAME    ${_name}
+            COMMAND ${Python3_EXECUTABLE} ${_CORE_PY}/${_stem}.py
+        )
+        set_tests_properties(${_name} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${_pypath}"
+        )
+    endmacro()
+
+    add_core_unittest(CorePyProductionManagerTest  test_production_manager  "${_PYPATH}")
+    # test_uproot_datacard has a pre-existing uproot TAxis API mismatch; registered
+    # so the failure is visible in CI rather than silently absent.
+    add_core_unittest(CorePyUprootDatacardTest     test_uproot_datacard     "${_PYPATH}")
+
+    # test_datacard_generator requires ROOT Python bindings.
+    # ROOT_LIB_DIR is set by the top-level CMakeLists via CACHE INTERNAL.
+    add_test(
+        NAME    CorePyDatacardGeneratorTest
+        COMMAND ${Python3_EXECUTABLE} ${_CORE_PY}/test_datacard_generator.py
+    )
+    set_tests_properties(CorePyDatacardGeneratorTest PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${_PYPATH_ROOT}"
+    )
+endif()

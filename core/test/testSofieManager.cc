@@ -315,3 +315,24 @@ int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle hook tests
+// ---------------------------------------------------------------------------
+
+TEST_F(SofieManagerTest, InitializeIsCallable) {
+  EXPECT_NO_THROW(sofieManager->initialize());
+}
+
+TEST_F(SofieManagerTest, ReportMetadataIsCallable) {
+  EXPECT_NO_THROW(sofieManager->reportMetadata());
+}
+
+TEST_F(SofieManagerTest, ExecuteAndFinalizeAreNoOps) {
+  EXPECT_NO_THROW(sofieManager->execute());
+  EXPECT_NO_THROW(sofieManager->finalize());
+}
+
+TEST_F(SofieManagerTest, GetDependenciesReturnsEmpty) {
+  EXPECT_TRUE(sofieManager->getDependencies().empty());
+}

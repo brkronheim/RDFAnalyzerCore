@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 #include <analyzer.h>
 #include <NDHistogramManager.h>
+#include <test_util.h>
 
 TEST(AnalyzerPluginWiring, AddPluginAfterConfigCtor) {
+    ChangeToTestSourceDir();
+
     // Use the example analysis config file (bundled in the repo) to exercise the config-file-based ctor
     std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/../../analyses/ExampleAnalysis/cfg.txt";
     Analyzer analyzer(cfgPath);

@@ -1,6 +1,7 @@
 #include <BDTManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
+#include <api/ILogger.h>
 #include <api/ISystematicManager.h>
 
 /**
@@ -145,4 +146,20 @@ void BDTManager::setupFromConfigFile() {
     features_m.emplace(entryKeys.at("name"), inputVariableVector);
     bdt_runVars_m.emplace(entryKeys.at("name"), entryKeys.at("runVar"));
   }
+}
+void BDTManager::initialize() {
+  std::cout << "BDTManager: initialized with " << bdt_runVars_m.size()
+            << " BDT(s)." << std::endl;
+}
+
+void BDTManager::reportMetadata() {
+  if (!logger_m) return;
+  std::string msg = "BDTManager loaded BDTs: ";
+  bool first = true;
+  for (const auto& name : getAllBDTNames()) {
+    if (!first) msg += ", ";
+    msg += name;
+    first = false;
+  }
+  logger_m->log(ILogger::Level::Info, msg);
 }

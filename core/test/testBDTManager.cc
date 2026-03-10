@@ -233,3 +233,32 @@ int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle hook tests
+// ---------------------------------------------------------------------------
+
+TEST_F(BDTManagerTest, InitializeIsCallable) {
+  EXPECT_NO_THROW(bdtManager->initialize());
+}
+
+TEST_F(BDTManagerTest, ReportMetadataIsCallable) {
+  EXPECT_NO_THROW(bdtManager->reportMetadata());
+}
+
+TEST_F(BDTManagerTest, ExecuteAndFinalizeAreNoOps) {
+  EXPECT_NO_THROW(bdtManager->execute());
+  EXPECT_NO_THROW(bdtManager->finalize());
+}
+
+TEST_F(BDTManagerTest, GetDependenciesReturnsEmpty) {
+  EXPECT_TRUE(bdtManager->getDependencies().empty());
+}
+
+TEST_F(BDTManagerTest, LifecycleOrderViaSetupThenInitialize) {
+  // Simulate the Analyzer lifecycle: setupFromConfigFile → initialize
+  // The BDT count should be consistent after both calls.
+  bdtManager->setupFromConfigFile();
+  EXPECT_NO_THROW(bdtManager->initialize());
+  EXPECT_FALSE(bdtManager->getAllBDTNames().empty());
+}

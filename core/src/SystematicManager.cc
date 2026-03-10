@@ -4,7 +4,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <iostream>
 #include <api/IDataFrameProvider.h>
 
 /**
@@ -78,59 +77,162 @@ void SystematicManager::registerExistingSystematics(
   }
 }
 
+/**
+ * @brief Automatically discover and register systematic variations from column names.
+ *
+ * Scans @p columnNames for pairs of columns following the naming convention
+ * `baseVariable_systematicNameUp` / `baseVariable_systematicNameDown`.  For
+ * every complete pair found, registers the systematic as affecting the base
+ * variable.  Incomplete pairs are reported in the returned result.
+ */
+SystematicValidationResult SystematicManager::autoRegisterSystematics(
+    const std::vector<std::string> &columnNames) {
+
+  const std::unordered_set<std::string> colSet(columnNames.begin(), columnNames.end());
+  SystematicValidationResult result;
+
+  // Track (baseVar, systName) keys we have already processed to avoid
+  // reporting or registering the same pair twice.
+  std::unordered_set<std::string> processedPairs;
+
+  // --- Pass 1: scan for columns ending with "Up" ---
+  for (const auto &col : columnNames) {
+    static constexpr std::size_t kUpLen = 2; // "Up"
+    if (col.size() <= kUpLen) {
+      continue;
+    }
+    if (col.compare(col.size() - kUpLen, kUpLen, "Up") != 0) {
+      continue;
+    }
+
+    // prefix = "baseVar_systName"
+    const std::string prefix = col.substr(0, col.size() - kUpLen);
+    const std::size_t lastUnderscore = prefix.rfind('_');
+    if (lastUnderscore == std::string::npos || lastUnderscore == 0) {
+      continue;
+    }
+
+    const std::string baseVar  = prefix.substr(0, lastUnderscore);
+    const std::string systName = prefix.substr(lastUnderscore + 1);
+    if (baseVar.empty() || systName.empty()) {
+      continue;
+    }
+
+    const std::string pairKey = baseVar + "_" + systName;
+    if (processedPairs.count(pairKey)) {
+      continue;
+    }
+    processedPairs.insert(pairKey);
+
+    const std::string downCol = prefix + "Down";
+    if (colSet.count(downCol)) {
+      registerSystematic(systName, {baseVar});
+      result.registered.emplace_back(baseVar, systName);
+    } else {
+      result.missingDown.push_back(col);
+    }
+  }
+
+  // --- Pass 2: scan for orphaned "Down" columns (no matching "Up") ---
+  for (const auto &col : columnNames) {
+    static constexpr std::size_t kDownLen = 4; // "Down"
+    if (col.size() <= kDownLen) {
+      continue;
+    }
+    if (col.compare(col.size() - kDownLen, kDownLen, "Down") != 0) {
+      continue;
+    }
+
+    const std::string prefix = col.substr(0, col.size() - kDownLen);
+    const std::size_t lastUnderscore = prefix.rfind('_');
+    if (lastUnderscore == std::string::npos || lastUnderscore == 0) {
+      continue;
+    }
+
+    const std::string baseVar  = prefix.substr(0, lastUnderscore);
+    const std::string systName = prefix.substr(lastUnderscore + 1);
+    if (baseVar.empty() || systName.empty()) {
+      continue;
+    }
+
+    const std::string pairKey = baseVar + "_" + systName;
+    if (processedPairs.count(pairKey)) {
+      continue; // already handled (complete pair) in Pass 1
+    }
+
+    // Up column does not exist and we haven't processed this key yet.
+    result.missingUp.push_back(col);
+    processedPairs.insert(pairKey); // avoid duplicate missingUp entries
+  }
+
+  return result;
+}
+
 
 /**
- * @brief Make a list of systematic variations and store them in a branch and its systematic variations
- * @param branchName Name of the branch
- * @return Vector of systematic variation names
+ * @brief Make a list of systematic variations and define counter columns for branchName
+ *
+ * On the first call for a given branchName, builds the variation list from
+ * the currently registered systematics, defines the corresponding counter
+ * columns in @p dataManager, and caches the result.  Subsequent calls with
+ * the same branchName are no-ops for column definition and return the cached
+ * list, making the method safe to call from multiple plugins or services.
  */
  std::vector<std::string>
  SystematicManager::makeSystList(const std::string &branchName, IDataFrameProvider &dataManager) {
- 
-   std::vector<std::string> systList;
-   if (systListDefined_m) {
-     systList = systList_m;
-   } else {
-     systList = {"Nominal"};
-     for (const auto &syst : getSystematics()) {
-       systList.push_back(syst + "Up");
-       systList.push_back(syst + "Down");
-     }
+
+   // Return the cached list if this branchName has already been materialized.
+   auto it = materializedSystLists_m.find(branchName);
+   if (it != materializedSystLists_m.end()) {
+     return it->second;
    }
 
+   // Build the variation list from the currently registered systematics.
+   std::vector<std::string> systList = {"Nominal"};
+   for (const auto &syst : getSystematics()) {
+     systList.push_back(syst + "Up");
+     systList.push_back(syst + "Down");
+   }
+
+   // Define integer counter columns for this branchName namespace.
+   // Columns that already exist in the dataframe are silently skipped.
    auto df = dataManager.getDataFrame();
    const auto existingColumns = df.GetColumnNames();
    std::unordered_set<std::string> columnSet(existingColumns.begin(), existingColumns.end());
-  auto ensureColumn = [&](const std::string &name, int index) {
+   auto ensureColumn = [&](const std::string &name, int index) {
      if (columnSet.find(name) != columnSet.end()) {
        return;
      }
-    dataManager.Define(
-        name,
-        [index]() -> float {
-          return index;
-        },
-        {},
-        *this);
+     dataManager.Define(
+         name,
+         [index]() -> float {
+           return index;
+         },
+         {},
+         *this);
      columnSet.insert(name);
    };
 
    int var = 0;
-   std::cout << "Defining nominal branch: " << branchName << std::endl;
    ensureColumn(branchName, var);
 
    for (const auto &syst : getSystematics()) {
-     std::cout << "Defining systematic: " << syst << std::endl;
      var++;
      ensureColumn(branchName + "_" + syst + "Up", var);
      var++;
      ensureColumn(branchName + "_" + syst + "Down", var);
    }
 
-   if (!systListDefined_m) {
-     systListDefined_m = true;
-     systList_m = systList;
-   }
-
+   // Cache the list for this branchName so future calls are no-ops.
+   materializedSystLists_m[branchName] = systList;
    return systList;
  }
+
+/**
+ * @brief Check whether counter columns have already been materialized for branchName
+ * @param branchName The branch namespace to check
+ * @return True if makeSystList has already been called for this branchName
+ */
+bool SystematicManager::isBranchNameMaterialized(const std::string &branchName) const {
+  return materializedSystLists_m.count(branchName) != 0;
+}

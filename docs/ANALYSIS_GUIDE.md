@@ -14,8 +14,12 @@ This comprehensive guide walks you through creating a complete analysis with RDF
 - [Corrections and Scale Factors](#corrections-and-scale-factors)
 - [Histogramming](#histogramming)
 - [Systematics](#systematics)
+- [Managing Event Weights](#managing-event-weights)
+- [Analysis Regions](#analysis-regions)
+- [Cutflow and Event Selection Monitoring](#cutflow-and-event-selection-monitoring)
 - [Complete Example](#complete-example)
 - [Advanced Topics](#advanced-topics)
+- [Friend Trees](#friend-trees)
 
 ## Overview
 
@@ -743,6 +747,436 @@ When booking histograms with NDHistogramManager, an automatic systematic axis is
 // Access via: hist[channel][region][systematic]
 ```
 
+## Managing Event Weights
+
+WeightManager is a plugin that assembles the nominal event weight and any
+systematic weight variations from individually registered components.  It
+replaces ad-hoc per-event weight expressions scattered across the analysis
+with a single, audited weight definition.
+
+### Base Weight: Generator Weight and Weight Sum Tracking
+
+In Monte Carlo analyses the first thing to include is the **per-event generator
+weight** (e.g. `genWeight` in NanoAOD).  This must be registered both in the
+config file and in your analysis code:
+
+1. **Config file** — tell `CounterService` which branch holds the generator weight
+   so that it can accumulate the sum-of-weights for normalisation:
+
+   ```
+   counterWeightBranch = genWeight
+   ```
+
+   CounterService then writes two histograms to the meta ROOT file:
+   - `counter_weightSum_<sample>` — sum of `genWeight` over all events (used as
+     `sumW` when computing the luminosity normalisation)
+   - `counter_weightSignSum_<sample>` — sum of `sign(genWeight)`, which is used
+     by `StitchingDerivationTask` to compute per-bin stitching scale factors
+
+2. **Analysis code** — add `genWeight` as the first scale factor so that the final
+   weight column includes it:
+
+   ```cpp
+   wm->addScaleFactor("genWeight", "genWeight");
+   ```
+
+For samples with negative-weight events (common in NLO generators) use
+`sign(genWeight)` instead of `genWeight` itself to avoid sign-weighted distortions
+while still properly normalising the sample.  In that case set
+`counterWeightBranch = genWeight` in the config (so `CounterService` tracks the
+true sum) and add the sign column as the scale factor:
+
+```cpp
+// Define sign-of-weight column
+analyzer.Define("genWeightSign", [](float w){ return w >= 0.f ? 1.f : -1.f; }, {"genWeight"});
+wm->addScaleFactor("genWeight", "genWeightSign");
+```
+
+### Interaction with Stitching Weights
+
+For inclusive+exclusive sample sets (e.g. DY + DY high-pT), per-event stitching
+scale factors are derived by `StitchingDerivationTask` from the
+`counter_intWeightSignSum_*` histograms written by CounterService.  To enable
+this:
+
+1. In the config file set `counterIntWeightBranch` to the integer stitching-bin
+   column (produced by your analysis or CorrectionManager):
+
+   ```
+   counterIntWeightBranch = stitchBin
+   ```
+
+2. After stitching weights are derived you load the resulting correctionlib JSON
+   and apply it as a per-event scale factor:
+
+   ```cpp
+   // Apply the derived stitching weight
+   wm->addScaleFactor("stitchSF", "stitch_weight_col");
+   ```
+
+See [LAW_TASKS.md — StitchingDerivationTask](LAW_TASKS.md#stitchingderivationtask) for
+details on deriving these weights from LAW.
+
+### Registering WeightManager
+
+Add a `WeightManager` plugin to your analysis and retrieve it via
+`getPlugin<WeightManager>`:
+
+```cpp
+#include <plugins/WeightManager/WeightManager.h>
+
+auto* wm = analyzer.getPlugin<WeightManager>("weights");
+```
+
+### Adding Weight Components
+
+Register the generator weight first, then all additional per-event scale
+factor columns and scalar normalization factors before calling
+`defineNominalWeight()`:
+
+```cpp
+// Base generator weight — must come first.
+wm->addScaleFactor("genWeight", "genWeight");
+
+// Additional per-event scale factor columns (must already exist on the dataframe).
+wm->addScaleFactor("leptonSF",  "lepton_sf_col");
+wm->addScaleFactor("pileupSF",  "pu_weight_col");
+
+// Scalar normalization applied uniformly to every event (lumi × xsec / sumW).
+// sumW should come from the counterWeightSum histogram in a previous skim.
+double normFactor = lumi * xsec / sumW;
+wm->addNormalization("lumi_xsec", normFactor);
+```
+
+### Registering Weight Variations
+
+For each systematic that changes a scale factor, register the up/down
+column pair:
+
+```cpp
+wm->addWeightVariation("bTagSF", "bTagSF_up_col", "bTagSF_dn_col");
+wm->addWeightVariation("pileupSF", "pu_weight_up", "pu_weight_dn");
+```
+
+### Defining Weight Columns
+
+Schedule the weight columns to be defined on the dataframe.  The columns
+are created just before the event loop starts (`execute()`):
+
+```cpp
+// Nominal weight: product of all SFs and normalizations.
+wm->defineNominalWeight("weight_nominal");
+
+// Varied weights: replace the named SF component with its up/down variant.
+wm->defineVariedWeight("bTagSF",  "up",   "weight_bTagSF_up");
+wm->defineVariedWeight("bTagSF",  "down", "weight_bTagSF_dn");
+wm->defineVariedWeight("pileupSF","up",   "weight_pileupSF_up");
+wm->defineVariedWeight("pileupSF","down", "weight_pileupSF_dn");
+```
+
+Retrieve the defined column names for use when booking histograms:
+
+```cpp
+std::string nomCol = wm->getNominalWeightColumn();         // "weight_nominal"
+std::string upCol  = wm->getWeightColumn("bTagSF", "up"); // "weight_bTagSF_up"
+```
+
+### Audit Information
+
+After `analyzer.run()` completes, WeightManager writes per-component
+statistics (sum, mean, min, max, negative-event count) to the meta ROOT
+output file and to the analysis logger.  You can also inspect the entries
+programmatically:
+
+```cpp
+for (const auto& entry : wm->getAuditEntries()) {
+    std::cout << entry.name
+              << "  sum=" << entry.sumWeights
+              << "  mean=" << entry.meanWeight
+              << "  negEvents=" << entry.negativeCount << "\n";
+}
+```
+
+### Complete WeightManager Example
+
+```cpp
+#include <analyzer.h>
+#include <plugins/WeightManager/WeightManager.h>
+
+void myAnalysis() {
+    Analyzer analyzer("config.txt");
+
+    auto* wm = analyzer.getPlugin<WeightManager>("weights");
+
+    // Define SF columns on the dataframe first.
+    analyzer.Define("lepton_sf_col", computeLeptonSF, {"lep_pt", "lep_eta"});
+    analyzer.Define("bTagSF_col",    computeBTagSF,   {"jet_pt", "jet_eta"});
+    analyzer.Define("bTagSF_up_col", computeBTagSFUp, {"jet_pt", "jet_eta"});
+    analyzer.Define("bTagSF_dn_col", computeBTagSFDn, {"jet_pt", "jet_eta"});
+
+    // Register components.
+    wm->addScaleFactor("leptonSF", "lepton_sf_col");
+    wm->addScaleFactor("bTagSF",   "bTagSF_col");
+    wm->addNormalization("lumi_xsec", 59.7 * 831.76 / 1e8);
+
+    // Register systematic variations.
+    wm->addWeightVariation("bTagSF", "bTagSF_up_col", "bTagSF_dn_col");
+
+    // Schedule column definitions.
+    wm->defineNominalWeight("weight_nominal");
+    wm->defineVariedWeight("bTagSF", "up",   "weight_bTagSF_up");
+    wm->defineVariedWeight("bTagSF", "down", "weight_bTagSF_dn");
+
+    // Use the nominal weight column when booking histograms.
+    std::string nomCol = wm->getNominalWeightColumn();
+
+    analyzer.run();
+}
+```
+
+## Analysis Regions
+
+RegionManager declares named analysis regions with an optional hierarchy,
+providing filtered RDataFrame nodes that other plugins (histogram and cutflow
+managers) can consume.  The main analysis dataframe is not modified; filtered
+branches are built independently inside the plugin.
+
+### Registering RegionManager
+
+```cpp
+#include <plugins/RegionManager/RegionManager.h>
+
+auto* rm = analyzer.getPlugin<RegionManager>("regions");
+```
+
+### Defining Boolean Filter Columns
+
+Define all boolean filter columns on the dataframe **before** calling
+`declareRegion()` for the first time, because the base node is captured at
+that point:
+
+```cpp
+analyzer.Define("isPresel",       passPreselection,     {"lep_pt", "met"});
+analyzer.Define("isSignalRegion", passSignalSelection,  {"mva_score"});
+analyzer.Define("isControlRegion",passControlSelection, {"mva_score"});
+analyzer.Define("isTightSignal",  passTightSignal,      {"mva_score", "bdt_score"});
+```
+
+### Declaring Regions
+
+Declare root regions (no parent) first, then child regions:
+
+```cpp
+// Root region — applied to the base dataframe.
+rm->declareRegion("presel", "isPresel");
+
+// Child regions — filtered on top of their parent.
+rm->declareRegion("signal",  "isSignalRegion",  "presel");
+rm->declareRegion("control", "isControlRegion", "presel");
+
+// Grandchild region.
+rm->declareRegion("tight_signal", "isTightSignal", "signal");
+```
+
+### Retrieving Region DataFrames
+
+```cpp
+ROOT::RDF::RNode signalDf  = rm->getRegionDataFrame("signal");
+ROOT::RDF::RNode controlDf = rm->getRegionDataFrame("control");
+```
+
+### Validating the Hierarchy
+
+`validate()` checks for cycles, missing parent references, and duplicate
+names and returns a list of error strings (empty means valid):
+
+```cpp
+auto errors = rm->validate();
+if (!errors.empty()) {
+    for (const auto& e : errors) std::cerr << e << "\n";
+}
+```
+
+At analysis startup `initialize()` runs the same check and throws
+`std::runtime_error` on failure.  `finalize()` writes a region-summary
+entry to the meta ROOT output file.
+
+### Using Regions with NDHistogramManager
+
+```cpp
+ndh->bindToRegionManager(rm);
+// NDHistogramManager now fills histograms separately for each declared region.
+```
+
+### Using Regions with CutflowManager
+
+```cpp
+cfm->bindToRegionManager(rm);
+// CutflowManager books per-region count actions in a single event-loop pass.
+```
+
+### Complete RegionManager Example
+
+The typical pattern is to declare regions and then let the bound plugins
+(NDHistogramManager, CutflowManager) handle the per-region filling automatically.
+You do not need to retrieve raw per-region DataFrames; plugins that are bound
+to the RegionManager iterate over all regions internally.
+
+```cpp
+#include <analyzer.h>
+#include <plugins/RegionManager/RegionManager.h>
+#include <plugins/NDHistogramManager/NDHistogramManager.h>
+#include <plugins/CutflowManager/CutflowManager.h>
+
+int main(int argc, char* argv[]) {
+    Analyzer analyzer(argv[1]);
+
+    auto* rm  = analyzer.getPlugin<RegionManager>("regions");
+    auto* ndh = analyzer.getPlugin<NDHistogramManager>("NDHistogramManager");
+    auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+
+    // Step 1 — define boolean selection columns.
+    analyzer.Define("isPresel",        passPreselection,    {"lep_pt", "met"});
+    analyzer.Define("isSignalRegion",  passSignalSelection, {"mva_score"});
+    analyzer.Define("isControlRegion", passControlSelection,{"mva_score"});
+
+    // Step 2 — declare regions.
+    rm->declareRegion("presel",   "isPresel");
+    rm->declareRegion("signal",   "isSignalRegion",  "presel");
+    rm->declareRegion("control",  "isControlRegion", "presel");
+
+    // Step 3 — bind plugins so they operate per-region automatically.
+    ndh->bindToRegionManager(rm);  // each histogram gains a region axis
+    cfm->bindToRegionManager(rm);  // cutflow tables produced per region
+
+    // Step 4 — register cuts (applies to the full dataframe; cfm tracks
+    //           per-region counts separately via the bound RegionManager).
+    cfm->addCut("presel",  "isPresel");
+    cfm->addCut("signal",  "isSignalRegion");
+
+    // Step 5 — book config-driven histograms (fills all declared regions).
+    ndh->bookConfigHistograms();
+    ndh->saveHists();
+
+    // Step 6 — execute.
+    analyzer.save();
+    return 0;
+}
+```
+
+## Cutflow and Event Selection Monitoring
+
+CutflowManager computes a **sequential cutflow** (events remaining after
+each successive cut) and an **N-1 table** (events passing all cuts except
+one) in a single event-loop pass.
+
+### Registering CutflowManager
+
+```cpp
+#include <plugins/CutflowManager/CutflowManager.h>
+
+auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+```
+
+### Adding Cuts
+
+Define all boolean cut columns on the dataframe **before** the first
+`addCut()` call, since the base node (needed for N-1) is captured then.
+`addCut()` also applies each filter to the main analysis dataframe:
+
+```cpp
+// Define boolean columns first.
+analyzer.Define("leptonPtCut",  passLeptonPt,  {"lep_pt"});
+analyzer.Define("metCut",       passMET,       {"met"});
+analyzer.Define("bTagCut",      passBTag,      {"jet_btag"});
+
+// Register cuts in selection order.
+cfm->addCut("lepton_pT", "leptonPtCut");
+cfm->addCut("MET",       "metCut");
+cfm->addCut("b-tagging", "bTagCut");
+```
+
+All `addCut()` calls must be made **before** `analyzer.run()` (i.e. before
+`execute()` is triggered by the framework).
+
+### Binding to a RegionManager (Optional)
+
+When a RegionManager is bound, `execute()` books per-region count actions
+alongside the global ones, so global and per-region cutflows are computed in
+a single pass:
+
+```cpp
+cfm->bindToRegionManager(rm);
+```
+
+### Output Written Automatically
+
+After `analyzer.run()`:
+
+- **`cutflow`** — TH1D with sequential event counts after each cut.
+- **`cutflow_nminus1`** — TH1D with N-1 counts.
+- **`cutflow_regions`** — TH2D of regions × cuts (only when bound to a
+  RegionManager).
+
+All three histograms are written to the meta ROOT output file and a summary
+table is printed via the analysis logger.
+
+### Accessing Results Programmatically
+
+```cpp
+// After analyzer.run().
+
+// Global cutflow.
+for (const auto& [name, count] : cfm->getCutflowCounts()) {
+    std::cout << name << ": " << count << " events\n";
+}
+
+// N-1 table.
+for (const auto& [name, count] : cfm->getNMinusOneCounts()) {
+    std::cout << name << " (N-1): " << count << " events\n";
+}
+
+// Per-region cutflow (requires bindToRegionManager()).
+for (const auto& [name, count] : cfm->getRegionCutflowCounts("signal")) {
+    std::cout << "signal / " << name << ": " << count << " events\n";
+}
+```
+
+### Complete CutflowManager Example
+
+```cpp
+#include <analyzer.h>
+#include <plugins/RegionManager/RegionManager.h>
+#include <plugins/CutflowManager/CutflowManager.h>
+
+void myAnalysis() {
+    Analyzer analyzer("config.txt");
+
+    auto* rm  = analyzer.getPlugin<RegionManager>("regions");
+    auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+
+    // Define all boolean columns before the first addCut().
+    analyzer.Define("leptonPtCut", passLeptonPt, {"lep_pt"});
+    analyzer.Define("metCut",      passMET,      {"met"});
+    analyzer.Define("bTagCut",     passBTag,     {"jet_btag"});
+
+    // Register cuts (also applies filters to the main dataframe).
+    cfm->addCut("lepton_pT", "leptonPtCut");
+    cfm->addCut("MET",       "metCut");
+    cfm->addCut("b-tagging", "bTagCut");
+
+    // Declare regions after all cuts are registered.
+    analyzer.Define("isSignalRegion", passSignal, {"bdt_score"});
+    rm->declareRegion("signal", "isSignalRegion");
+
+    // Bind for per-region cutflows.
+    cfm->bindToRegionManager(rm);
+
+    analyzer.run();
+    // Results are written to the meta ROOT file automatically.
+}
+```
+
 ## Complete Example
 
 Here's a complete analysis putting it all together:
@@ -991,6 +1425,78 @@ namespace MyAnalysis {
 // In analysis
 analyzer.Define("selected", MyAnalysis::selectObjects, {...});
 ```
+
+## Friend Trees
+
+Friend trees let you attach extra branches stored in separate ROOT files to
+the main event tree without merging the files.  The framework adds friend
+TChains to the main chain before the RDataFrame is created, so all friend
+branches are immediately accessible by name.
+
+### Configuration via submit_config.txt
+
+Add one `friendTreeConfig` line per friend tree:
+
+```
+friendTreeConfig: calib,Events,/data/calib_files/*.root
+friendTreeConfig: pileup,Events,/data/pileup/pu_weights.root
+```
+
+The format is `alias,treeName,fileGlob`.  The alias is used to access friend
+branches (e.g. `calib.pt`).
+
+### Configuration via dataset_manifest.yaml
+
+Friend trees can also be specified per dataset under the `friend_trees` key.
+This is useful when different samples require different sidecar files:
+
+```yaml
+datasets:
+  - name: ttbar_2022
+    process: ttbar
+    files:
+      - /data/ttbar/ttbar_2022.root
+    friend_trees:
+      - alias: calib
+        tree_name: Events
+        files:
+          - /data/calib/calib_2022.root
+          - root://eosserver.cern.ch//eos/calib/calib_remote.root
+        index_branches: [run, luminosityBlock]
+
+      - alias: bTagWeights
+        tree_name: Events
+        directory: /data/btag_weights/2022/
+        globs: [".root"]
+        antiglobs: ["FAIL"]
+```
+
+### FriendTreeConfig Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `alias` | string | Name used to access friend branches (e.g. `alias.branch`). |
+| `tree_name` | string | TTree name inside the friend file(s). Default: `"Events"`. |
+| `files` | list | Explicit ROOT file paths or XRootD URLs. Takes precedence over `directory`. |
+| `directory` | string | Directory scanned for ROOT files (alternative to `files`). |
+| `globs` | list | Filename substrings to include when scanning `directory`. Default: `[".root"]`. |
+| `antiglobs` | list | Filename substrings to exclude when scanning `directory`. Default: `[]`. |
+| `index_branches` | list | Branch names for index-based event matching (see below). |
+
+### Index-Based Event Matching
+
+By default ROOT matches friend tree entries by sequential position.  If file
+ordering differs between the main tree and the friend tree, set
+`index_branches` to enable `TChain::BuildIndex`-based matching:
+
+```yaml
+index_branches: [run, luminosityBlock]   # match on run + lumi block
+# or
+index_branches: [run, event]             # match on run + event number
+```
+
+The first two entries are used as the major and minor index keys respectively.
+Leave `index_branches` empty for position-based (sequential) matching.
 
 ## Best Practices
 

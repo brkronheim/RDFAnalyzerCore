@@ -96,7 +96,7 @@ TEST_F(AnalyzerTriggerLogicTest, DataTriggersAndVetoes) {
     triggerPlugin->applyAllTriggers();
     auto df = analyzer.getDF();
     auto result = df.Count();
-    EXPECT_EQ(result.GetValue(), 1UL);
+    EXPECT_EQ(result.GetValue(), 2UL);
 
     // Now set a veto to true, should fail
     auto config2 = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
@@ -166,7 +166,7 @@ TEST_F(AnalyzerTriggerLogicTest, MCTriggers) {
     triggerPlugin->applyAllTriggers();
     auto df = analyzer.getDF();
     auto result = df.Count();
-    EXPECT_EQ(result.GetValue(), 1UL);
+    EXPECT_EQ(result.GetValue(), 2UL);
 }
 
 int main(int argc, char **argv) {

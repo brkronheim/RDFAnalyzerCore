@@ -95,6 +95,16 @@ public:
 
   void setupFromConfigFile() override;
 
+  /**
+   * @brief Post-wiring initialization: logs the number of loaded SOFIE models.
+   */
+  void initialize() override;
+
+  /**
+   * @brief Metadata hook: reports loaded SOFIE model names to the logger.
+   */
+  void reportMetadata() override;
+
 private:
   /**
    * @brief Register SOFIE models from the configuration
