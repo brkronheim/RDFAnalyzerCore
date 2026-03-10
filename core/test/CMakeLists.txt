@@ -202,3 +202,66 @@ add_test(
 endif()
 
 
+
+# ---------------------------------------------------------------------------
+# core/python Python tests
+# ---------------------------------------------------------------------------
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    set(_CORE_PY "${CMAKE_SOURCE_DIR}/core/python")
+    # Configure the pytest runner shim that exits non-zero when pytest is absent
+    # so the test is visible as FAILED rather than silently skipped.
+    configure_file(run_pytest.py.in "${CMAKE_BINARY_DIR}/run_pytest.py" @ONLY)
+
+    set(_PYPATH "${_CORE_PY}:$ENV{PYTHONPATH}")
+    # ROOT Python bindings path (for tests that import ROOT directly)
+    set(_PYPATH_ROOT "${ROOT_LIBRARY_DIR}:${_CORE_PY}:$ENV{PYTHONPATH}")
+
+    # pytest-based tests
+    macro(add_core_pytest _name _stem)
+        add_test(
+            NAME    ${_name}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_BINARY_DIR}/run_pytest.py
+                    ${_CORE_PY}/${_stem}.py -v
+        )
+        set_tests_properties(${_name} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${_PYPATH}"
+        )
+    endmacro()
+
+    add_core_pytest(CorePyAnalysisConfigValidationTest  test_analysis_config_validation)
+    add_core_pytest(CorePyDatasetManifestTest            test_dataset_manifest)
+    add_core_pytest(CorePyNuisanceGroupsTest             test_nuisance_groups)
+    add_core_pytest(CorePyOutputSchemaTest               test_output_schema)
+    add_core_pytest(CorePyRegionSchemaTest               test_region_schema)
+    add_core_pytest(CorePyReproducibilityReportTest      test_reproducibility_report)
+    add_core_pytest(CorePyValidateConfigTest             test_validate_config)
+    add_core_pytest(CorePyValidationReportTest           test_validation_report)
+    add_core_pytest(CorePyVariationOrchestratorTest      test_variation_orchestrator)
+    add_core_pytest(CorePySubmissionBackendTest          test_submission_backend)
+
+    # unittest-based tests (have __main__ guard)
+    macro(add_core_unittest _name _stem)
+        add_test(
+            NAME    ${_name}
+            COMMAND ${Python3_EXECUTABLE} ${_CORE_PY}/${_stem}.py
+        )
+        set_tests_properties(${_name} PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${_PYPATH}"
+        )
+    endmacro()
+
+    add_core_unittest(CorePyProductionManagerTest  test_production_manager)
+    # test_uproot_datacard has a pre-existing uproot API mismatch; registered
+    # so the failure is visible in CI rather than silently absent.
+    add_core_unittest(CorePyUprootDatacardTest     test_uproot_datacard)
+
+    # test_datacard_generator requires ROOT Python bindings
+    add_test(
+        NAME    CorePyDatacardGeneratorTest
+        COMMAND ${Python3_EXECUTABLE} ${_CORE_PY}/test_datacard_generator.py
+    )
+    set_tests_properties(CorePyDatacardGeneratorTest PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${_PYPATH_ROOT}"
+    )
+endif()

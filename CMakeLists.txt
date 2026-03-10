@@ -201,3 +201,4 @@ set(RDF_CUSTOM_DICT_TARGET "RDFCustomDict" CACHE STRING "Target name for the cus
 
 add_subdirectory(core)
 add_subdirectory(analyses)
+add_subdirectory(law)
