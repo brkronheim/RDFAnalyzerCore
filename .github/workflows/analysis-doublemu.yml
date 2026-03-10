@@ -51,7 +51,19 @@ jobs:
         run: cmake -S . -B build
 
       - name: Build cms_doublemu_analysis
-        run: cmake --build build --target cms_doublemu_analysis --parallel $(nproc)
+        run: |
+          cmake . \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -DBUILD_TESTS=ON \
+          -DBUILD_COMBINE=${COMBINE_FLAG} \
+          -DBUILD_COMBINE_HARVESTER=${COMBINE_HARV_FLAG} \
+          -DUSE_CUDA=ON \
+          -DONNXRUNTIME_USE_CUDA=ON \
+          -B build # `correction config --cmake`  # --trace
+          cd build
+          make -j$(( $(nproc) > 8 ? 8 : $(nproc) ))
+          cd ..
 
       - name: Run analysis executable
         working-directory: build/analyses/CMS_Run2016_DoubleMuon
