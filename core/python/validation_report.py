@@ -331,6 +331,10 @@ class RegionEntry:
         ``True`` when the region definition passed all validation checks.
     issues : list[str]
         Validation error or warning strings for this region.
+    covered_by : list[str]
+        Artifact roles (e.g. ``"histograms"``, ``"cutflow"``) that reference
+        this region in the output manifest.  An empty list means no output
+        artifact was found that covers this region.
     """
 
     region_name: str
@@ -338,6 +342,7 @@ class RegionEntry:
     parent: str = ""
     is_valid: bool = True
     issues: List[str] = field(default_factory=list)
+    covered_by: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -364,6 +369,10 @@ class NuisanceGroupCoverageEntry:
         Systematics missing the Down variation.
     not_found : list[str]
         Systematics not present in the output at all.
+    severity : str
+        Severity level for coverage gaps: ``"error"`` (default) causes
+        :attr:`~ValidationReport.has_errors` to be ``True`` when coverage is
+        incomplete; ``"warn"`` records the gap as a warning only.
     """
 
     group_name: str
@@ -375,6 +384,7 @@ class NuisanceGroupCoverageEntry:
     missing_up: List[str] = field(default_factory=list)
     missing_down: List[str] = field(default_factory=list)
     not_found: List[str] = field(default_factory=list)
+    severity: str = ReportSeverity.ERROR.value
 
     @property
     def is_complete(self) -> bool:
@@ -558,7 +568,10 @@ class ValidationReport:
             return True
         if any(not e.is_valid for e in self.regions):
             return True
-        if any(not e.is_complete for e in self.nuisance_group_coverage):
+        if any(
+            not e.is_complete and e.severity == ReportSeverity.ERROR.value
+            for e in self.nuisance_group_coverage
+        ):
             return True
         if any(not e.is_known for e in self.region_references):
             return True
@@ -572,6 +585,11 @@ class ValidationReport:
         if any(e.severity == ReportSeverity.WARNING for e in self.config_mismatches):
             return True
         if any(not e.is_complete for e in self.systematics):
+            return True
+        if any(
+            not e.is_complete and e.severity != ReportSeverity.ERROR.value
+            for e in self.nuisance_group_coverage
+        ):
             return True
         return False
 
@@ -840,23 +858,26 @@ class ValidationReport:
         # Region definitions
         if self.regions:
             _header("REGION DEFINITIONS")
-            col_w = (20, 24, 16, 10)
+            col_w = (20, 24, 16, 10, 20)
             header = (
                 f"  {'Region':<{col_w[0]}}"
                 f"{'Filter Column':<{col_w[1]}}"
                 f"{'Parent':<{col_w[2]}}"
                 f"{'Valid':>{col_w[3]}}"
+                f"  {'Output Coverage':<{col_w[4]}}"
             )
             lines.append(header)
             lines.append("  " + "-" * sum(col_w))
             for e in self.regions:
                 valid_str = "yes" if e.is_valid else "FAIL"
                 parent_str = e.parent if e.parent else "(root)"
+                cov_str = ", ".join(sorted(e.covered_by)) if e.covered_by else "(none)"
                 lines.append(
                     f"  {e.region_name:<{col_w[0]}}"
                     f"{e.filter_column:<{col_w[1]}}"
                     f"{parent_str:<{col_w[2]}}"
                     f"{valid_str:>{col_w[3]}}"
+                    f"  {cov_str:<{col_w[4]}}"
                 )
                 for issue in e.issues:
                     lines.append(f"      issue: {issue}")
@@ -864,20 +885,23 @@ class ValidationReport:
         # Nuisance group coverage
         if self.nuisance_group_coverage:
             _header("NUISANCE GROUP COVERAGE")
-            col_w = (24, 14, 8)
+            col_w = (24, 14, 8, 10)
             header = (
                 f"  {'Group':<{col_w[0]}}"
                 f"{'Type':<{col_w[1]}}"
                 f"{'Complete':>{col_w[2]}}"
+                f"  {'Severity':<{col_w[3]}}"
             )
             lines.append(header)
             lines.append("  " + "-" * sum(col_w))
             for e in self.nuisance_group_coverage:
                 complete_str = "yes" if e.is_complete else "FAIL"
+                sev_str = e.severity.upper()
                 lines.append(
                     f"  {e.group_name:<{col_w[0]}}"
                     f"{e.group_type:<{col_w[1]}}"
                     f"{complete_str:>{col_w[2]}}"
+                    f"  {sev_str:<{col_w[3]}}"
                 )
                 for syst in e.not_found:
                     lines.append(f"      not found:    {syst}")
@@ -1049,6 +1073,7 @@ class ValidationReport:
                     parent=raw.get("parent", ""),
                     is_valid=raw.get("is_valid", True),
                     issues=list(raw.get("issues", [])),
+                    covered_by=list(raw.get("covered_by", [])),
                 )
             )
 
@@ -1064,6 +1089,7 @@ class ValidationReport:
                     missing_up=list(raw.get("missing_up", [])),
                     missing_down=list(raw.get("missing_down", [])),
                     not_found=list(raw.get("not_found", [])),
+                    severity=raw.get("severity", ReportSeverity.ERROR.value),
                 )
             )
 
@@ -1214,6 +1240,15 @@ def generate_report_from_manifest(
       :class:`~output_schema.CutflowSchema`, the declared counter keys are
       listed as cutflow step names (counts are not available without reading
       the ROOT file).
+    * **Regions** – one :class:`RegionEntry` per declared region, with
+      validation status, hierarchy issues, and output-coverage information
+      (which artifact roles reference that region by name).
+    * **Nuisance group coverage** – one :class:`NuisanceGroupCoverageEntry`
+      per declared nuisance group, showing the expected systematics.
+      Coverage gaps (missing Up/Down columns) cannot be determined without
+      actual dataframe columns; callers that have column information should
+      call :meth:`~variation_orchestrator.VariationOrchestrator.build_validation_report`
+      to fill in the missing-column details.
     * **Errors / warnings** – any errors returned by
       :meth:`~output_schema.OutputManifest.validate` are appended to the
       report's error list.
@@ -1256,6 +1291,12 @@ def generate_report_from_manifest(
             report.add_cutflow_step(
                 CutflowEntry(cut_name=key, events_passed=0)
             )
+
+    # ---- region definitions and output coverage ----
+    _add_regions_from_manifest(report, manifest)
+
+    # ---- nuisance group coverage stubs ----
+    _add_nuisance_coverage_from_manifest(report, manifest)
 
     return report
 
@@ -1402,6 +1443,105 @@ def _add_version_mismatches_from_manifest(
                     severity=ReportSeverity.ERROR,
                 )
             )
+
+
+def _add_regions_from_manifest(
+    report: "ValidationReport", manifest: Any
+) -> None:
+    """Populate :class:`RegionEntry` records from manifest region definitions.
+
+    For each declared region the entry is validated and region-hierarchy
+    errors are recorded.  The ``covered_by`` field lists artifact roles
+    (``"histograms"``, ``"cutflow"``) that reference the region by name
+    (i.e. the region name appears as a substring in the artifact's named
+    outputs).
+    """
+    if not manifest.regions:
+        return
+
+    # Compute hierarchy errors and index them to regions
+    try:
+        from output_schema import validate_region_hierarchy
+        hierarchy_errors: List[str] = validate_region_hierarchy(manifest.regions)
+    except ImportError:
+        hierarchy_errors = []
+
+    # Build name lists for coverage checks once (not per-region)
+    histogram_names: List[str] = (
+        list(manifest.histograms.histogram_names)
+        if manifest.histograms is not None
+        else []
+    )
+    cutflow_keys: List[str] = (
+        list(manifest.cutflow.counter_keys)
+        if manifest.cutflow is not None
+        else []
+    )
+
+    def _region_in_names(region_name: str, names: List[str]) -> bool:
+        """Return True when *region_name* appears as a substring in any of *names*."""
+        return any(region_name in n for n in names)
+
+    for i, region in enumerate(manifest.regions):
+        # Per-region validation errors
+        per_region_issues = region.validate()
+        # Also surface hierarchy errors that mention this region by name
+        for herr in hierarchy_errors:
+            if region.name and region.name in herr:
+                if herr not in per_region_issues:
+                    per_region_issues.append(herr)
+
+        is_valid = len(per_region_issues) == 0
+
+        # Determine output coverage: which artifacts reference this region
+        covered_by: List[str] = []
+        if region.name:
+            if _region_in_names(region.name, histogram_names):
+                covered_by.append("histograms")
+            if _region_in_names(region.name, cutflow_keys):
+                covered_by.append("cutflow")
+
+        report.add_region(
+            RegionEntry(
+                region_name=region.name,
+                filter_column=region.filter_column,
+                parent=region.parent,
+                is_valid=is_valid,
+                issues=per_region_issues,
+                covered_by=covered_by,
+            )
+        )
+
+
+def _add_nuisance_coverage_from_manifest(
+    report: "ValidationReport", manifest: Any
+) -> None:
+    """Populate :class:`NuisanceGroupCoverageEntry` stubs from manifest nuisance groups.
+
+    One entry is added per declared nuisance group showing the expected
+    systematics, processes, regions, and output usage.  The
+    ``missing_up``, ``missing_down``, and ``not_found`` fields are left
+    empty because available dataframe columns are not accessible at
+    manifest-inspection time.  Callers that have column information should
+    call
+    :meth:`~variation_orchestrator.VariationOrchestrator.build_validation_report`
+    to fill in the missing-column details.
+    """
+    for ng in manifest.nuisance_groups:
+        report.add_nuisance_group_coverage(
+            NuisanceGroupCoverageEntry(
+                group_name=ng.name,
+                group_type=ng.group_type,
+                systematics=list(ng.systematics),
+                processes=list(ng.processes),
+                regions=list(ng.regions),
+                output_usage=list(ng.output_usage),
+                missing_up=[],
+                missing_down=[],
+                not_found=[],
+                severity=ReportSeverity.ERROR.value,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

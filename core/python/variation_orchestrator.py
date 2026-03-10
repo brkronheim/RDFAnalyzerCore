@@ -703,6 +703,7 @@ class VariationOrchestrator:
                             missing_up=gdata["missing_up"],
                             missing_down=gdata["missing_down"],
                             not_found=gdata["not_found"],
+                            severity=sev_value,
                         )
                         report.add_nuisance_group_coverage(entry)
 

@@ -281,7 +281,203 @@ name=double_muon sample=mc triggers=HLT_Mu17_Mu8,HLT_Mu17_TkMu8 triggerVetos=HLT
 
 The trigger logic: Event passes if ANY trigger fires AND NO veto trigger fires.
 
+### WeightManager Configuration
+
+WeightManager is configured **programmatically** in your analysis C++ code. The plugin must be registered in the main config, but all weight components are declared at runtime via the API.
+
+**Main config entry**:
+```
+# WeightManager
+# Note: WeightManager is configured programmatically in your analysis code,
+# not via the config file. However, it must be registered as a plugin.
+WeightManager = WeightManager
+```
+
+**Registered programmatically in C++**:
+```cpp
+auto* wm = analyzer->getPlugin<WeightManager>("weights");
+
+// Scale factors: named per-event multiplicative corrections (dataframe columns)
+wm->addScaleFactor("pileup_sf",  "pu_weight");
+wm->addScaleFactor("btag_sf",    "btag_weight");
+
+// Normalization weights: scalar factors applied uniformly to all events
+wm->addNormalization("lumi_xsec", 0.0412);  // e.g. xsec * lumi / sumWeights
+
+// Systematic weight variations: named up/down shifts
+wm->addWeightVariation("pileup", "pu_weight_up", "pu_weight_down");
+
+// Define the nominal combined weight column on the dataframe
+wm->defineNominalWeight("weight_nominal");
+
+// Define varied weight columns (for systematic histograms)
+wm->defineVariedWeight("pileup", "up",   "weight_pileup_up");
+wm->defineVariedWeight("pileup", "down", "weight_pileup_down");
+```
+
+After `analyzer->run()`, per-component audit statistics (sum, mean, min, max, negative-event count) are written to the meta ROOT file and logged.
+
+### RegionManager Configuration
+
+RegionManager is configured **programmatically** in your analysis C++ code. Regions are declared via `declareRegion()` and do not use a config file.
+
+**Main config entry**:
+```
+# RegionManager
+# Note: RegionManager is configured programmatically in your analysis code.
+# Regions are declared using declareRegion() in your analysis.
+RegionManager = RegionManager
+```
+
+**Declared programmatically in C++**:
+```cpp
+// 1. Define boolean filter columns upfront
+analyzer->Define("pass_presel",  [](float pt){ return pt > 20.f; }, {"pt"});
+analyzer->Define("pass_signal",  [](float mva){ return mva > 0.8f; }, {"mva"});
+analyzer->Define("pass_control", [](float mva){ return mva < 0.4f; }, {"mva"});
+
+// 2. Declare regions (parent before child)
+auto* rm = analyzer->getPlugin<RegionManager>("regions");
+rm->declareRegion("presel",  "pass_presel");
+rm->declareRegion("signal",  "pass_signal",  "presel");  // child of presel
+rm->declareRegion("control", "pass_control", "presel");  // child of presel
+
+// 3. Retrieve per-region DataFrames for histogramming
+ROOT::RDF::RNode signalDf = rm->getRegionDataFrame("signal");
+```
+
+Child regions are strict subsets of their parent. `initialize()` validates the hierarchy (no cycles, no missing parents, no duplicate names). `finalize()` writes a region-summary `TNamed` to the meta ROOT file.
+
+### GoldenJsonManager Configuration
+
+Applies CMS data quality certification filters against one or more golden JSON files. The filter is **automatically skipped for MC samples** — it only activates when the config key `type=data`.
+
+**Main config options**:
+```
+# GoldenJsonManager - CMS data quality certification
+GoldenJsonManager = GoldenJsonManager
+goldenJsonConfig = /path/to/golden_json_list.txt
+```
+
+**goldenJsonConfig**: Path to a text file listing golden JSON file paths, **one per line**. Lines beginning with `#` are treated as comments.
+
+**Example golden JSON list file** (`golden_json_list.txt`):
+```
+# CMS golden JSON files for Run2 UL
+/data/cert/Cert_271036-284044_13TeV_Legacy2016_Collisions16_JSON.txt
+/data/cert/Cert_294927-306462_13TeV_UL2017_Collisions17_JSON.txt
+```
+
+**Golden JSON file format** (standard CMS format):
+```json
+{"355100": [[1, 100], [150, 200]], "355101": [[1, 50]]}
+```
+Each key is a run number; the value is a list of `[lumi_min, lumi_max]` certified luminosity section ranges.
+
+**Apply the filter in C++**:
+```cpp
+auto* gjm = analyzer->getPlugin<GoldenJsonManager>("goldenJson");
+gjm->applyGoldenJson();
+```
+
+| Config Key | Type | Description |
+|------------|------|-------------|
+| `goldenJsonConfig` | Path | Text file listing golden JSON paths, one per line |
+
+### CutflowManager Configuration
+
+CutflowManager cuts are registered **programmatically** in your analysis C++ code. Results are written automatically to the meta ROOT file after `analyzer->run()`.
+
+**Main config entry**:
+```
+# CutflowManager
+# Note: CutflowManager cuts are registered programmatically.
+# Results are written to the meta ROOT file automatically.
+CutflowManager = CutflowManager
+```
+
+**Registered programmatically in C++**:
+```cpp
+// 1. Define boolean cut columns upfront (all columns needed by ANY cut
+//    must exist before the first addCut() call)
+analyzer->Define("pass_ptCut",  [](float pt){ return pt > 30.f; },          {"pt"});
+analyzer->Define("pass_etaCut", [](float eta){ return std::abs(eta) < 2.4f; }, {"eta"});
+
+// 2. Register cuts (also applies each filter to the dataframe)
+auto* cfm = analyzer->getPlugin<CutflowManager>("cutflow");
+cfm->addCut("ptCut",  "pass_ptCut");
+cfm->addCut("etaCut", "pass_etaCut");
+
+// 3. (Optional) bind to a RegionManager for per-region cutflows
+cfm->bindToRegionManager(analyzer->getPlugin<RegionManager>("regions"));
+```
+
+**Outputs written to the meta ROOT file**:
+- `cutflow` — `TH1D` with sequential event counts after each cut
+- `cutflow_nminus1` — `TH1D` with N-1 counts (all cuts except one applied)
+- `cutflow_regions` — `TH2D` (regions × cuts) when a RegionManager is bound
+
+## Analysis YAML Configuration
+
+In addition to the text-based config file, RDFAnalyzerCore supports an **analysis YAML config** as a newer, structured alternative for specifying regions, nuisance groups, histogram configuration, friend trees, and plugin settings.
+
+**Main config option** (text config points to the YAML file):
+```
+analysisConfig=cfg/analysis.yaml
+```
+
+**YAML config capabilities** (partial list):
+```yaml
+plugins:
+  WeightManager:
+    nominal_weight: weight_nominal
+    scale_factors:
+      - column: pu_weight
+        label: "Pileup SF"
+
+regions:
+  - name: signal
+    filter: pass_signal
+  - name: control
+    filter: pass_control
+    parent: signal
+
+nuisance_groups:
+  - name: pileup
+    type: weight
+    up: pu_weight_up
+    down: pu_weight_down
+
+friend_trees:
+  - file: friends.root
+    tree: Friends
+```
+
+The YAML config is validated at startup against a JSON Schema. See **[CONFIGURATION_VALIDATION.md](CONFIGURATION_VALIDATION.md)** for the full schema reference and validation error messages.
+
 ## Advanced Configuration
+
+### Histogram Backend
+
+`NDHistogramManager` supports two histogram backends:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `histogramBackend` | String | `"root"` | Histogram backend: `"root"` (THnSparseF) or `"boost"` (Boost.Histogram) |
+
+**ROOT backend** (`"root"`, default): stores histograms as `THnSparseF` objects in the meta ROOT output file.  This is compatible with all downstream tools and is the correct choice for most analyses.
+
+**Boost.Histogram backend** (`"boost"`): stores histograms in-memory using Boost.Histogram during the event loop, then converts to ROOT format for output.  This can improve memory performance for analyses with very large numbers of histogram bins.
+
+```
+# Use ROOT backend (default — compatible with all downstream tools including Combine)
+histogramBackend=root
+
+# Use Boost.Histogram backend (in-memory optimisation, same output format)
+histogramBackend=boost
+```
+
+Both backends produce the same output format and are fully interchangeable.
 
 ### Counter Service
 
@@ -485,3 +681,6 @@ ls -l cfg/*.txt
 - [GETTING_STARTED.md](GETTING_STARTED.md) - Quick start guide
 - [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md) - Building analyses
 - [API_REFERENCE.md](API_REFERENCE.md) - C++ API documentation
+- [CONFIGURATION_VALIDATION.md](CONFIGURATION_VALIDATION.md) - YAML config schema and validation
+- [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md) - Systematic nuisance group configuration
+- [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md) - Physics object collection reference
