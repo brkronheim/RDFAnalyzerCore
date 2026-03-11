@@ -37,5 +37,8 @@ example_outputs/
 aux/Run3/*
 aux/Run2/*
 docs/doxygen/*
-analyses/*/output/
-analyses/*/data/
+analyses/*
+
+
+python_env.tar.gz
+submit_config.txt

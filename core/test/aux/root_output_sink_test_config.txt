@@ -1,0 +1,3 @@
+saveTree=Events
+saveFile=/home/bkronhei/RDFAnalyzerCore/core/test/aux/root_output_sink_test_output.root
+saveConfig=/home/bkronhei/RDFAnalyzerCore/core/test/aux/root_output_sink_test_saveconfig.txt

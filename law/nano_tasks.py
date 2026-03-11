@@ -103,7 +103,7 @@ WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
 EOS_BASE = WORKSPACE  # root of the submission dir tree
 
 # Default XRootD redirector used when Rucio does not supply a site-specific one
-NANO_REDIRECTOR = "root://xrootd-cms.infn.it/"
+NANO_REDIRECTOR = "root://cms-xrd-global.cern.ch/"
 
 
 def _ensure_xrootd_redirector(uri: str, redirector: str = NANO_REDIRECTOR) -> str:
@@ -272,12 +272,41 @@ def _get_sample_list(config_file):
 
 
 def _normalize_config_paths(config_dict):
-    """Strip directory components from .txt path values (so job dirs are self-contained)."""
+    """Strip directory components from staged config paths.
+
+    Config files are copied flat into ``shared_inputs/`` and then into the
+    worker scratch directory, so job-local configs should reference only the
+    basename of staged ``.txt`` / ``.yaml`` / ``.yml`` files.
+    """
     normalized = dict(config_dict)
     for key, value in config_dict.items():
-        if isinstance(value, str) and ".txt" in value and os.path.sep in value:
+        if (
+            isinstance(value, str)
+            and os.path.sep in value
+            and value.lower().endswith((".txt", ".yaml", ".yml"))
+        ):
             normalized[key] = os.path.basename(value)
     return normalized
+
+
+def _analysis_type_value(sample: dict) -> str:
+    """Return the integer sample code to materialize into intConfig."""
+    sample_type = sample.get("sample_type")
+    if sample_type not in (None, ""):
+        return str(sample_type)
+
+    legacy_type = str(sample.get("type", "")).strip()
+    if re.fullmatch(r"[+-]?\d+", legacy_type):
+        return legacy_type
+    return ""
+
+
+def _seed_pair_config(src_path: str, dst_path: str) -> None:
+    """Seed a job-local pair config from its template, if one exists."""
+    if not src_path or not os.path.exists(src_path):
+        return
+    os.makedirs(os.path.dirname(dst_path) or ".", exist_ok=True)
+    shutil.copyfile(src_path, dst_path)
 
 
 def _append_unique_lines(file_path, lines):
@@ -825,10 +854,15 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
         das_path = sample.get("das", "")
         xsec = float(sample["xsec"])
         typ = sample["type"]
+        analysis_type = _analysis_type_value(sample)
         norm = float(sample.get("norm", 1))
         kfac = float(sample.get("kfac", 1))
         extra_scale = float(sample.get("extraScale", 1))
         site_override = sample.get("site", "")
+        base_float_config = self._resolve(config_dict.get("floatConfig", ""))
+        base_int_config = self._resolve(config_dict.get("intConfig", ""))
+        float_config_name = os.path.basename(base_float_config) if base_float_config else "floats.txt"
+        int_config_name = os.path.basename(base_int_config) if base_int_config else "ints.txt"
 
         # Determine the primary TTree name for entry-range queries
         tree_name = config_dict.get("treeList", "Events").split(",")[0].strip() or "Events"
@@ -923,10 +957,11 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
             )
             job_config["fileList"] = partition["files"]
             job_config["batch"] = "True"
+            job_config["sample"] = name
             job_config["type"] = typ
             job_config["sampleConfig"] = os.path.basename(self._sample_config)
-            job_config["floatConfig"] = "floats.txt"
-            job_config["intConfig"] = "ints.txt"
+            job_config["floatConfig"] = float_config_name
+            job_config["intConfig"] = int_config_name
 
             # Write entry-range keys when in entry_range partition mode ----
             # last_entry > 0 is the sentinel: file_group/file modes use 0
@@ -954,13 +989,20 @@ class PrepareNANOSample(NANOMixin, law.LocalWorkflow):
             job_config["metaFile"] = os.path.basename(job_config["metaFile"])
 
             # Write floats / ints -----------------------------------------
-            float_file = os.path.join(job_dir, "floats.txt")
+            float_file = os.path.join(job_dir, job_config["floatConfig"])
+            _seed_pair_config(base_float_config, float_file)
             _append_unique_lines(float_file, [
                 "normScale=" + norm_scale,
                 "sampleNorm=" + str(norm),
             ])
-            int_file = os.path.join(job_dir, "ints.txt")
-            _append_unique_lines(int_file, ["type=" + typ])
+            int_file = os.path.join(job_dir, job_config["intConfig"])
+            _seed_pair_config(base_int_config, int_file)
+            int_lines = []
+            if analysis_type:
+                int_lines.append("type=" + analysis_type)
+            if sample.get("stitch_id") not in (None, ""):
+                int_lines.append("stitch_id=" + str(sample["stitch_id"]))
+            _append_unique_lines(int_file, int_lines)
 
             with open(os.path.join(job_dir, "submit_config.txt"), "w") as fh:
                 for k, v in job_config.items():
