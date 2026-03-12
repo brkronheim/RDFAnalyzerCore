@@ -267,18 +267,58 @@ Paste the XRootD paths into `fileList` in `cfg.yaml` (comma-separated).
 ## CMS Open Data — Full Dataset via LAW
 
 `dataset_manifest.yaml` uses `das: "30522"` as the CERN Open Data record ID.
-The LAW `PrepareOpenDataSample` task queries `https://opendata.cern.ch/api/records/30522`
-to discover all files, then creates per-job configs for batch submission.
+
+### Option A: File listing + local SkimTask (recommended for smaller datasets)
 
 ```bash
 source law/env.sh && law index
 
-# Step 1 — Create per-job configs (30 files per job)
+# Discover files from the Open Data portal (one branch per sample, parallelized)
+law run GetOpenDataFileList \
+    --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
+    --name run2016g \
+    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+    --workers 4
+
+# Skim all datasets (pre-flight test job runs automatically by default)
+# RunSkimTestJob → PrepareSkimJobs → SkimTask
+law run SkimTask \
+    --name run2016g_zpeak \
+    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+    --submit-config analyses/CMS_Run2016_DoubleMuon/cfg.yaml \
+    --dataset-manifest analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
+    --file-source opendata \
+    --file-source-name run2016g \
+    --workers 4
+
+# Disable the pre-flight test if desired
+law run SkimTask \
+    --name run2016g_zpeak \
+    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+    --submit-config analyses/CMS_Run2016_DoubleMuon/cfg.yaml \
+    --dataset-manifest analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
+    --no-make-test-job \
+    --workers 4
+```
+
+### Option B: HTCondor batch submission (for large datasets)
+
+The `PrepareOpenDataSample` task queries
+`https://opendata.cern.ch/api/records/30522` to discover all files
+and create per-job configs for HTCondor batch submission.  File-existence
+verification during monitoring uses directory-level `xrdfs ls` queries for
+efficiency.
+
+```bash
+source law/env.sh && law index
+
+# Step 1 — Create per-job configs (30 files per job, one branch per sample)
 law run PrepareOpenDataSample \
     --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --name run2016g_zpeak \
     --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
-    --files 30
+    --files 30 \
+    --workers 4
 
 # Step 2 — Build HTCondor submission structure
 law run BuildOpenDataSubmission \
@@ -293,11 +333,15 @@ law run SubmitOpenDataJobs \
     --exe build/analyses/CMS_Run2016_DoubleMuon/analysis
 
 # Step 4 — Monitor and auto-resubmit failed jobs
+#           (EOS file checks now use directory-level xrdfs ls for speed)
 law run MonitorOpenDataJobs \
     --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --name run2016g_zpeak \
     --exe build/analyses/CMS_Run2016_DoubleMuon/analysis
 ```
+
+Because law tracks task outputs, you can jump straight to step 4 and law will
+automatically run steps 1–3 if they haven't completed yet.
 
 ### Entry-range splitting (for large files)
 

@@ -61,6 +61,8 @@ import subprocess
 import sys
 import time
 import glob
+import fnmatch
+from collections import defaultdict
 from pathlib import Path
 
 import luigi  # type: ignore
@@ -358,6 +360,71 @@ def _eos_file_exists(eos_path: str, timeout: int = 30) -> bool:
         return r.returncode == 0
     except Exception:
         return False
+
+
+def _eos_files_exist_batch(
+    eos_paths: list,
+    server: str = "root://eosuser.cern.ch/",
+    timeout: int = 60,
+) -> dict:
+    """Check existence of multiple EOS files using directory-level ``xrdfs ls``.
+
+    Files are grouped by their parent directory so that a single ``xrdfs ls``
+    call is made per parent directory instead of one ``xrdfs stat`` per file.
+    This reduces round-trips to the XRootD server significantly.
+
+    Parameters
+    ----------
+    eos_paths:
+        List of EOS paths to check.  Each path may be in ``root://...`` URL
+        form or a plain ``/eos/...`` path.
+    server:
+        XRootD server used for ``xrdfs ls`` calls (default: eosuser.cern.ch).
+    timeout:
+        Timeout in seconds for each ``xrdfs ls`` invocation.
+
+    Returns
+    -------
+    dict[str, bool]
+        Mapping from each original path to ``True`` / ``False``.
+    """
+    result: dict = {}
+    by_dir: dict = defaultdict(list)
+
+    for path in eos_paths:
+        if not path:
+            result[path] = False
+            continue
+        clean = path.strip()
+        if clean.startswith("root://"):
+            parts = clean.split("/", 3)
+            clean_path = "/" + parts[3].lstrip("/") if len(parts) >= 4 else ""
+        else:
+            clean_path = clean
+        if not clean_path:
+            result[path] = False
+            continue
+        parent = os.path.dirname(clean_path)
+        by_dir[parent].append((path, clean_path))
+
+    for parent_dir, items in by_dir.items():
+        try:
+            r = subprocess.run(
+                ["xrdfs", server, "ls", parent_dir],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if r.returncode != 0:
+                for orig_path, _ in items:
+                    result[orig_path] = _eos_file_exists(orig_path, timeout)
+                continue
+            existing = set(r.stdout.splitlines())
+            for orig_path, clean_path in items:
+                result[orig_path] = clean_path in existing
+        except Exception:
+            for orig_path, _ in items:
+                result[orig_path] = _eos_file_exists(orig_path, timeout)
+
+    return result
 
 
 def _condor_q_ads(cluster_id: str) -> dict[int, dict]:
@@ -1217,6 +1284,29 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
                 for proc, exit_code in _condor_history_exit(cid).items():
                     history_exit[(cid, proc)] = exit_code
 
+            # Batch-check EOS output files at the directory level for all
+            # jobs that are no longer in the condor queue.
+            eos_paths_to_check: list = []
+            for idx in sorted(job_info.keys()):
+                jstate_check = state["jobs"][str(idx)]
+                if jstate_check["status"] in ("done", "perm_fail"):
+                    continue
+                cid_check = str(jstate_check["cluster"])
+                proc_check = jstate_check["proc"]
+                if live_status.get((cid_check, proc_check)) is None:
+                    orig_save = job_info[idx]["orig_save"]
+                    orig_meta = job_info[idx]["orig_meta"]
+                    if orig_save:
+                        eos_paths_to_check.append(orig_save)
+                    if orig_meta:
+                        eos_paths_to_check.append(orig_meta)
+
+            eos_exists: dict = (
+                _eos_files_exist_batch(eos_paths_to_check)
+                if eos_paths_to_check
+                else {}
+            )
+
             for idx in sorted(job_info.keys()):
                 key    = str(idx)
                 jstate = state["jobs"][key]
@@ -1264,8 +1354,8 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
                     orig_save = job_info[idx]["orig_save"]
                     orig_meta = job_info[idx]["orig_meta"]
                     if (
-                        (orig_save and _eos_file_exists(orig_save))
-                        or (orig_meta and _eos_file_exists(orig_meta))
+                        (orig_save and eos_exists.get(orig_save, False))
+                        or (orig_meta and eos_exists.get(orig_meta, False))
                     ):
                         jstate["status"] = "done"
                         self.publish_message(f"Job {idx}: output verified on EOS.")
@@ -1559,4 +1649,87 @@ class RunOpenDataJobs(OpenDataMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWo
             _run_analysis_job,
             [exe_path, branch_data, self._root_setup_content, self.container_setup or ""],
             {},
+        )
+
+
+# ===========================================================================
+# GetOpenDataFileList – lightweight file-list-only task
+# ===========================================================================
+
+class GetOpenDataFileList(OpenDataMixin, law.LocalWorkflow):
+    """Produce a per-dataset XRootD file-list JSON from the CERN Open Data Portal.
+
+    Unlike :class:`PrepareOpenDataSample` this task **only** queries the CERN
+    Open Data API and writes a compact JSON file::
+
+        openDataFileList_{name}/{sample_name}.json
+        {"sample": "name", "files": ["root://...", ...]}
+
+    The output can be consumed by :class:`~analysis_tasks.SkimTask` via
+    ``--file-source opendata --file-source-name <name>``.
+
+    Parameters are identical to :class:`OpenDataMixin`.
+    """
+
+    task_namespace = ""
+
+    @property
+    def _file_list_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"openDataFileList_{self.name}")
+
+    def create_branch_map(self):
+        samples, _, _ = _parse_opendata_config(self._sample_config)
+        if self.dataset:
+            if self.dataset not in samples:
+                raise ValueError(
+                    f"Dataset {self.dataset!r} not found in sample config. "
+                    f"Available: {sorted(samples.keys())}"
+                )
+            return {0: self.dataset}
+        return {i: key for i, key in enumerate(sorted(samples.keys()))}
+
+    def output(self):
+        sample_key = self.branch_data
+        return law.LocalFileTarget(
+            os.path.join(self._file_list_dir, f"{sample_key}.json")
+        )
+
+    def run(self):
+        task_label = f"GetOpenDataFileList[branch={self.branch}]"
+        with PerformanceRecorder(task_label) as rec:
+            self._run_impl()
+        rec.save(perf_path_for(self.output().path))
+
+    def _run_impl(self):
+        sample_key = self.branch_data
+        samples, recids, lumi = _parse_opendata_config(self._sample_config)
+        sample = samples[sample_key]
+        name = sample["name"]
+
+        # Build das→name mapping
+        sample_names = {s.get("das", s["name"]): s["name"] for s in samples.values()}
+
+        file_list: list = []
+        for recid in recids:
+            try:
+                partial = _process_metadata(recid, sample_names)
+            except Exception as e:
+                self.publish_message(
+                    f"Warning: failed to fetch metadata for recid {recid} "
+                    f"(sample '{name}'): {e}"
+                )
+                continue
+            file_list.extend(partial.get(name, []))
+
+        if not file_list:
+            self.publish_message(
+                f"No files found for sample {name}; writing empty list."
+            )
+
+        payload = {"sample": name, "files": file_list}
+        Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
+        with open(self.output().path, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        self.publish_message(
+            f"GetOpenDataFileList: {name} → {len(file_list)} file(s)"
         )
