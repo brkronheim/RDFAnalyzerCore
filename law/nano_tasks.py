@@ -2146,8 +2146,11 @@ class GetNANOFileList(NANOMixin, law.LocalWorkflow):
 
         all_urls: list = []
         seen_urls: set = set()
+        # Rucio-computed groups preserved for downstream SkimTask partitioning.
+        # Each entry is a comma-separated URL string (one group = one future job).
+        rucio_groups: list = []
 
-        # Check for explicit file list
+        # Check for explicit file list (no Rucio, no size-based grouping)
         explicit_files = [
             f.strip() for f in sample.get("fileList", "").split(",") if f.strip()
         ]
@@ -2156,6 +2159,8 @@ class GetNANOFileList(NANOMixin, law.LocalWorkflow):
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     all_urls.append(ensure_xrootd_redirector(url))
+            # No pre-computed groups for explicit file lists; SkimTask will
+            # partition them using --partition / --files-per-job.
         elif das_path:
             try:
                 client = _get_rucio_client()
@@ -2164,26 +2169,37 @@ class GetNANOFileList(NANOMixin, law.LocalWorkflow):
 
             das_entries = [d.strip() for d in das_path.split(",") if d.strip()]
             for das_entry in das_entries:
+                # Use self.size (GB) AND self.files_per_job as the per-group
+                # limits – exactly the same parameters as PrepareNANOSample.
                 partial = _query_rucio(
                     das_entry, self.size, WL, BL, site_override, client,
-                    max_files_per_group=999999,  # no chunking – return all URLs
+                    max_files_per_group=self.files_per_job,
                 )
                 for gkey in sorted(partial.keys()):
-                    for url in partial[gkey].split(","):
-                        url = url.strip()
-                        if url and url not in seen_urls:
-                            seen_urls.add(url)
-                            all_urls.append(url)
+                    group_str = partial[gkey]  # comma-separated URL string
+                    group_urls = [u.strip() for u in group_str.split(",") if u.strip()]
+                    new_urls = [u for u in group_urls if u not in seen_urls]
+                    if new_urls:
+                        seen_urls.update(new_urls)
+                        all_urls.extend(new_urls)
+                        # Preserve the group as a comma-separated string
+                        rucio_groups.append(",".join(new_urls))
         else:
             self.publish_message(
                 f"No DAS entries or explicit files for sample {name}; writing empty list."
             )
 
-        payload = {"sample": name, "files": all_urls}
+        # Build output payload.
+        # ``groups`` encodes the Rucio-computed size+count grouping so that
+        # PrepareSkimJobs / SkimTask can use them directly without re-partitioning.
+        payload: dict = {"sample": name, "files": all_urls}
+        if rucio_groups:
+            payload["groups"] = rucio_groups
+
         Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
         with open(self.output().path, "w") as fh:
             json.dump(payload, fh, indent=2)
         self.publish_message(
-            f"GetNANOFileList: {name} → {len(all_urls)} file(s) written to "
-            f"{self.output().path}"
+            f"GetNANOFileList: {name} → {len(all_urls)} file(s), "
+            f"{len(rucio_groups)} Rucio group(s) written to {self.output().path}"
         )
