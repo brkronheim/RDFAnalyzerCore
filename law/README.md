@@ -37,7 +37,7 @@ integrate with their outputs.
 
 ## Local Workflow Tasks
 
-`analysis_tasks.py` provides three LAW tasks for running the analysis
+`analysis_tasks.py` provides the following LAW tasks for running the analysis
 framework **locally** (or dispatching to HTCondor/Dask).  They are simpler
 than the NANO/OpenData batch workflows and are the recommended starting point
 for new analyses.  See [docs/LAW_TASKS.md](../docs/LAW_TASKS.md) for the
@@ -54,6 +54,11 @@ Runs the analysis executable once per dataset entry defined in a dataset
 manifest YAML.  Each branch executes one dataset job and writes a `.done`
 marker file when finished.
 
+A **pre-flight local test job** (``RunSkimTestJob``) is run automatically
+before the full workflow is dispatched.  It executes the analysis on a single
+input file, catching runtime errors before potentially hundreds of jobs are
+submitted.  The test can be skipped with ``--no-make-test-job``.
+
 **Parameters**
 
 | Parameter | Default | Description |
@@ -62,27 +67,72 @@ marker file when finished.
 | `--exe` | *(required)* | Path to the compiled analysis executable |
 | `--name` | *(required)* | Run name; outputs go to `skimRun_<name>/` |
 | `--dataset-manifest` | *(required)* | Path to the YAML dataset manifest |
+| `--make-test-job` | `True` | Run a single-file test before full dispatch |
+| `--file-source` | `""` | File-list source: `""`, `nano`, `opendata`, or `xrdfs` |
+| `--file-source-name` | `""` | Name matching a completed file-list task run |
 | `--num-workers` | auto | Thread-pool size for the local runner |
-| `--skim-cmd` | `""` | Optional full command override |
 
 **Output structure**
 
 ```
 skimRun_<name>/
-  outputs/<dataset_name>/   ← ROOT skim and meta files
-  job_outputs/              ← <dataset_name>.done marker files
-                              <dataset_name>.perf.json performance records
+  test_job/            ← Pre-flight test outputs (single file)
+  outputs/<dataset>/   ← ROOT skim and meta files
+  job_outputs/         ← <dataset_name>.done marker files
+                         <dataset_name>.perf.json performance records
 ```
 
 **Example**
 
 ```bash
+# Standard mode: one branch per manifest entry, with pre-flight test
 law run SkimTask \
-  --submit-config law/submit_config.txt \
+  --submit-config cfg/submit_config.txt \
   --exe ./build/MyAnalysis \
   --name myRun \
   --dataset-manifest datasets.yaml
+
+# Skip the pre-flight test
+law run SkimTask \
+  --submit-config cfg/submit_config.txt \
+  --exe ./build/MyAnalysis \
+  --name myRun \
+  --dataset-manifest datasets.yaml \
+  --no-make-test-job
+
+# File-source mode: chains GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask
+law run SkimTask \
+  --submit-config cfg/submit_config.txt \
+  --exe ./build/MyAnalysis \
+  --name myRun \
+  --dataset-manifest datasets.yaml \
+  --file-source xrdfs \
+  --file-source-name myFiles
 ```
+
+### RunSkimTestJob
+
+Runs the analysis executable with a **single input file** to validate that the
+analysis compiles and runs without runtime errors before submitting the full
+workflow.  This task is required automatically by ``SkimTask`` when
+``--make-test-job`` is set (the default).
+
+In **file-source mode** (``--file-source xrdfs``) it requires ``PrepareSkimJobs``
+(which creates the ``test_job/`` directory).  In **standard manifest mode** it
+creates the test directory itself from the first dataset's first file.
+
+**Output**: ``skimRun_<name>/test_job/test_passed.txt``
+
+### PrepareSkimJobs
+
+Creates per-job configuration directories and the shared ``shared_inputs/``
+directory (executable, libraries, x509 proxy) for use by ``SkimTask`` in
+file-source mode.
+
+When ``--file-source xrdfs`` is set, ``PrepareSkimJobs`` automatically
+declares a LAW dependency on :class:`GetXRDFSFileList` so that the full chain
+``GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask``
+runs automatically.
 
 ### HistFillTask
 
@@ -164,6 +214,65 @@ import correctionlib
 cset = correctionlib.CorrectionSet.from_file("stitchWeights_myStitch/stitch_weights.json")
 sf = cset["wjets_ht"].evaluate("wjets_ht_0", stitch_id)
 ```
+
+---
+
+## File-List Discovery Tasks
+
+These tasks are `law.LocalWorkflow` tasks that run **one branch per dataset**,
+so file discovery across all datasets is **fully parallelized**.
+
+### GetXRDFSFileList
+
+Discovers ROOT files on XRootD storage (EOS, dCache, …) using `xrdfs ls`.
+Directory listings are performed at the directory level and sub-directory
+traversal is parallelized using a thread pool, making discovery of large
+directory trees much faster than serial recursive listing.
+
+```bash
+law run GetXRDFSFileList \
+  --name myFiles \
+  --dataset-manifest datasets.yaml \
+  --xrdfs-server root://eosuser.cern.ch/ \
+  --workers 4
+```
+
+Output: `xrdfsFileList_<name>/<dataset_name>.json` per dataset.
+
+When ``PrepareSkimJobs`` is run with ``--file-source xrdfs
+--file-source-name myFiles``, it automatically depends on this task.
+
+### GetNANOFileList
+
+Queries Rucio for CMS NanoAOD file URLs (one branch per sample).  When a
+sample specifies multiple DAS paths, the Rucio queries are **parallelized
+across DAS entries** for speed.
+
+```bash
+law run GetNANOFileList \
+  --submit-config cfg/submit_config.txt \
+  --name myFiles \
+  --exe build/MyAnalysis \
+  --x509 /tmp/x509 \
+  --workers 4
+```
+
+Output: `nanoFileList_<name>/<sample_name>.json` per sample.
+
+### GetOpenDataFileList
+
+Fetches file lists from the CERN Open Data Portal (one branch per sample,
+parallelized via LAW's `LocalWorkflow`).
+
+```bash
+law run GetOpenDataFileList \
+  --submit-config cfg/opendata_config.txt \
+  --name myFiles \
+  --exe build/MyAnalysis \
+  --workers 4
+```
+
+Output: `openDataFileList_<name>/<sample_name>.json` per sample.
 
 ---
 
@@ -478,29 +587,80 @@ control_regions:
 ## End-to-End Pipeline: From Data to Statistical Results
 
 The LAW workflows cover the **complete** physics analysis pipeline.  The diagram
-below shows how the tasks connect:
+below shows how the tasks connect, including the new pre-flight test job and
+automatic file-list chaining:
 
 ```
-NanoTask / OpenDataTask        ─┐
-  │  (batch jobs, HTCondor)      │  Skims raw data into per-dataset ROOT files
-  ▼                              │
-MonitorTask                    ─┘
-  │  (blocks until all jobs done)
+──── File Discovery ────────────────────────────────────────────────────
+
+GetXRDFSFileList  (parallel, one branch per dataset)
+GetNANOFileList   (parallel, one branch per sample; DAS queries parallelized)
+GetOpenDataFileList (parallel, one branch per sample)
+
+──── Skim Preparation ──────────────────────────────────────────────────
+
+PrepareSkimJobs    ─── depends on GetXRDFSFileList (automatic)
+   │                   or on GetNANO/OpenDataFileList (run manually first)
+   ▼
+RunSkimTestJob     ─── pre-flight: runs analysis on 1 file; blocks full dispatch
+   │
+   ▼
+
+──── Skim Dispatch ─────────────────────────────────────────────────────
+
+SkimTask   (LocalWorkflow / HTCondor / Dask)
+  │  one branch per dataset; writes skimRun_<name>/outputs/<dataset>/
+  │
+  OR
+  │
+NanoTask / OpenDataTask  (HTCondor batch)
+  │  (batch jobs, HTCondor)  ─── Skims raw data into per-dataset ROOT files
   ▼
-[merge per-dataset outputs]   ── optional manual step or MergeTask
-  │
-  ├─► StitchingDerivationTask  ── derives per-bin stitching scale factors
-  │                                (reads counter_intWeightSignSum_* histograms)
-  │
-HistFillTask (local)          ── fills N-dimensional histograms per dataset
+MonitorTask                ─── blocks until all jobs done;
+                               EOS file checks done at directory level (fast)
+
+──── Histogram Stage ───────────────────────────────────────────────────
+
+HistFillTask (local)       ── fills N-dimensional histograms per dataset
   │  (reads skim outputs from SkimTask via --skim-name)
   │
+  ├─► StitchingDerivationTask  ── derives per-bin stitching scale factors
+  │
   ▼
-CreateDatacard                ── assembles CMS Combine datacards + shape files
+CreateDatacard             ── assembles CMS Combine datacards + shape files
   │  (reads merged histogram ROOT files)
   ▼
-RunCombine                    ── runs combine -M <method> for each datacard
+RunCombine                 ── runs combine -M <method> for each datacard
      (AsymptoticLimits, FitDiagnostics, Significance, MultiDimFit, ...)
+```
+
+### FullAnalysisDAG: one command for everything
+
+`FullAnalysisDAG` in `dag_tasks.py` orchestrates the entire pipeline from
+skim through fit as a single law task:
+
+```bash
+law run FullAnalysisDAG \
+  --name myRun \
+  --exe build/analyses/myAnalysis/myanalysis \
+  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
+  --hist-config analyses/myAnalysis/cfg/hist_config.txt \
+  --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
+  --fitting-backend analysis
+```
+
+Skip stages you don't need:
+
+```bash
+# Start from pre-existing merged outputs
+law run FullAnalysisDAG \
+  --name myRun \
+  --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
+  --manifest-path mergeRun_myRun/histograms/output_manifest.yaml \
+  --skip-skim \
+  --skip-histfill \
+  --skip-merge
 ```
 
 ### Histogram Backend and Downstream Compatibility

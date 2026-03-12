@@ -63,6 +63,8 @@ import subprocess
 import sys
 import time
 import glob
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import luigi  # type: ignore
@@ -1534,6 +1536,32 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                 for proc, exit_code in _condor_history_exit(cid).items():
                     history_exit[(cid, proc)] = exit_code
 
+            # Batch-check EOS output files for all jobs that have left the
+            # condor queue.  Grouping by parent directory means one xrdfs ls
+            # call per output directory rather than one xrdfs stat per file.
+            eos_paths_to_check: list = []
+            for idx in sorted(job_info.keys()):
+                jstate_check = state["jobs"][str(idx)]
+                if jstate_check["status"] in ("done", "perm_fail"):
+                    continue
+                cid_check = str(jstate_check["cluster"])
+                proc_check = jstate_check["proc"]
+                if live_status.get((cid_check, proc_check)) is None:
+                    # Job not in live queue; may need EOS check
+                    orig_save = job_info[idx]["orig_save"]
+                    orig_meta = job_info[idx]["orig_meta"]
+                    if orig_save:
+                        eos_paths_to_check.append(orig_save)
+                    if orig_meta:
+                        eos_paths_to_check.append(orig_meta)
+
+            # One xrdfs ls per parent directory (batch, directory-level check)
+            eos_exists: dict = (
+                _eos_files_exist_batch(eos_paths_to_check)
+                if eos_paths_to_check
+                else {}
+            )
+
             # Update each job's status -----------------------------------
             for idx in sorted(job_info.keys()):
                 key    = str(idx)
@@ -1580,13 +1608,14 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                     # exit_code == 0: analysis finished, check EOS output
 
                 # Job either completed cleanly (exit 0) or is running and
-                # has already left the queue – check EOS file.
+                # has already left the queue – check EOS file using the
+                # pre-computed batch directory-level results.
                 if condor_js is None:  # no longer in queue
                     orig_save = job_info[idx]["orig_save"]
                     orig_meta = job_info[idx]["orig_meta"]
                     if (
-                        (orig_save and _eos_file_exists(orig_save))
-                        or (orig_meta and _eos_file_exists(orig_meta))
+                        (orig_save and eos_exists.get(orig_save, False))
+                        or (orig_meta and eos_exists.get(orig_meta, False))
                     ):
                         jstate["status"] = "done"
                         self.publish_message(f"Job {idx}: output verified on EOS.")
@@ -1906,8 +1935,15 @@ def _xrdfs_list_files(
     pattern: str = "*.root",
     recursive: bool = True,
     timeout: int = 60,
+    max_workers: int = 8,
 ) -> list:
     """Discover ROOT files on an XRootD server using ``xrdfs ls``.
+
+    Directory listings are performed at the directory level (one ``xrdfs ls``
+    call per directory) and all sub-directories are listed **in parallel** using
+    a :class:`~concurrent.futures.ThreadPoolExecutor`  BFS traversal.  This is
+    substantially faster than the previous recursive serial approach, especially
+    for deep directory trees with many sub-directories.
 
     Parameters
     ----------
@@ -1918,9 +1954,11 @@ def _xrdfs_list_files(
     pattern:
         Glob-style filename pattern to match (matched against basename only).
     recursive:
-        When True, recursively search sub-directories.
+        When True, recursively search sub-directories using parallel BFS.
     timeout:
-        Timeout in seconds for each ``xrdfs`` invocation.
+        Timeout in seconds for each individual ``xrdfs ls`` invocation.
+    max_workers:
+        Maximum number of parallel ``xrdfs ls`` threads per BFS level.
 
     Returns
     -------
@@ -1929,7 +1967,8 @@ def _xrdfs_list_files(
     """
     import fnmatch
 
-    def _ls(path: str) -> list:
+    def _ls_single_dir(path: str) -> tuple:
+        """List one directory; return (files, subdirs)."""
         try:
             result = subprocess.run(
                 ["xrdfs", server, "ls", "-l", path],
@@ -1937,16 +1976,17 @@ def _xrdfs_list_files(
             )
         except Exception as exc:
             logging.warning("xrdfs ls failed for %s: %s", path, exc)
-            return []
+            return [], []
 
         if result.returncode != 0:
             logging.warning(
                 "xrdfs ls returned %d for %s: %s",
                 result.returncode, path, result.stderr.strip(),
             )
-            return []
+            return [], []
 
-        found: list = []
+        files: list = []
+        subdirs: list = []
         for line in result.stdout.splitlines():
             parts = line.split()
             if not parts:
@@ -1955,17 +1995,105 @@ def _xrdfs_list_files(
             if not entry.startswith("/"):
                 continue
             if line.startswith("d") or (len(parts) > 4 and parts[0].startswith("d")):
-                # It's a directory
-                if recursive:
-                    found.extend(_ls(entry))
+                subdirs.append(entry)
             else:
                 if fnmatch.fnmatch(os.path.basename(entry), pattern):
-                    found.append(entry)
-        return found
+                    files.append(entry)
+        return files, subdirs
 
-    paths = _ls(remote_path)
-    urls = [f"{server.rstrip('/')}/{p.lstrip('/')}" for p in sorted(paths)]
+    # BFS with parallel per-level directory listing
+    all_files: list = []
+    queue: list = [remote_path]
+
+    while queue:
+        workers = min(len(queue), max_workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_dir = {executor.submit(_ls_single_dir, d): d for d in queue}
+            next_queue: list = []
+            for fut in as_completed(future_to_dir):
+                try:
+                    files, subdirs = fut.result()
+                except Exception as exc:
+                    logging.warning(
+                        "xrdfs listing failed for %s: %s",
+                        future_to_dir[fut], exc,
+                    )
+                    files, subdirs = [], []
+                all_files.extend(files)
+                if recursive:
+                    next_queue.extend(subdirs)
+        queue = next_queue
+
+    urls = [f"{server.rstrip('/')}/{p.lstrip('/')}" for p in sorted(all_files)]
     return urls
+
+
+def _eos_files_exist_batch(
+    eos_paths: list,
+    server: str = "root://eosuser.cern.ch/",
+    timeout: int = 60,
+) -> dict:
+    """Check existence of multiple EOS files using directory-level ``xrdfs ls``.
+
+    Files are grouped by their parent directory so that a single ``xrdfs ls``
+    call is made per parent directory instead of one ``xrdfs stat`` call per
+    file.  This dramatically reduces the number of round-trips to the XRootD
+    server when verifying many output files.
+
+    Parameters
+    ----------
+    eos_paths:
+        List of EOS paths to check.  Each path may be in ``root://...`` URL
+        form or a plain ``/eos/...`` path.
+    server:
+        XRootD server used for ``xrdfs ls`` calls (default: eosuser.cern.ch).
+    timeout:
+        Timeout in seconds for each ``xrdfs ls`` invocation.
+
+    Returns
+    -------
+    dict[str, bool]
+        Mapping from each original path to ``True`` (exists) / ``False``
+        (does not exist or could not be determined).
+    """
+    result: dict = {}
+    by_dir: dict = defaultdict(list)
+
+    for path in eos_paths:
+        if not path:
+            result[path] = False
+            continue
+        clean = path.strip()
+        if clean.startswith("root://"):
+            parts = clean.split("/", 3)
+            clean_path = "/" + parts[3].lstrip("/") if len(parts) >= 4 else ""
+        else:
+            clean_path = clean
+        if not clean_path:
+            result[path] = False
+            continue
+        parent = os.path.dirname(clean_path)
+        by_dir[parent].append((path, clean_path))
+
+    for parent_dir, items in by_dir.items():
+        try:
+            r = subprocess.run(
+                ["xrdfs", server, "ls", parent_dir],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if r.returncode != 0:
+                # Directory listing failed; fall back to per-file stat
+                for orig_path, _ in items:
+                    result[orig_path] = _eos_file_exists(orig_path, timeout)
+                continue
+            existing = set(r.stdout.splitlines())
+            for orig_path, clean_path in items:
+                result[orig_path] = clean_path in existing
+        except Exception:
+            for orig_path, _ in items:
+                result[orig_path] = _eos_file_exists(orig_path, timeout)
+
+    return result
 
 
 class XRDFSMixin:
@@ -2168,13 +2296,38 @@ class GetNANOFileList(NANOMixin, law.LocalWorkflow):
                 raise RuntimeError(f"Cannot open Rucio client: {e}") from e
 
             das_entries = [d.strip() for d in das_path.split(",") if d.strip()]
-            for das_entry in das_entries:
-                # Use self.size (GB) AND self.files_per_job as the per-group
-                # limits – exactly the same parameters as PrepareNANOSample.
-                partial = _query_rucio(
-                    das_entry, self.size, WL, BL, site_override, client,
+
+            # Parallelize queries across DAS entries so that datasets with
+            # multiple DAS paths are resolved as fast as possible.
+            if len(das_entries) == 1:
+                partial_results = {das_entries[0]: _query_rucio(
+                    das_entries[0], self.size, WL, BL, site_override, client,
                     max_files_per_group=self.files_per_job,
-                )
+                )}
+            else:
+                partial_results: dict = {}
+                workers = min(len(das_entries), 8)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    future_to_entry = {
+                        executor.submit(
+                            _query_rucio,
+                            entry, self.size, WL, BL, site_override, client,
+                            self.files_per_job,
+                        ): entry
+                        for entry in das_entries
+                    }
+                    for fut in as_completed(future_to_entry):
+                        entry = future_to_entry[fut]
+                        try:
+                            partial_results[entry] = fut.result()
+                        except Exception as exc:
+                            raise RuntimeError(
+                                f"Rucio query failed for DAS entry {entry!r}: {exc}"
+                            ) from exc
+
+            # Merge results in DAS-entry order for reproducibility
+            for das_entry in das_entries:
+                partial = partial_results.get(das_entry, {})
                 for gkey in sorted(partial.keys()):
                     group_str = partial[gkey]  # comma-separated URL string
                     group_urls = [u.strip() for u in group_str.split(",") if u.strip()]

@@ -360,6 +360,73 @@ def _eos_file_exists(eos_path: str, timeout: int = 30) -> bool:
         return False
 
 
+def _eos_files_exist_batch(
+    eos_paths: list,
+    server: str = "root://eosuser.cern.ch/",
+    timeout: int = 60,
+) -> dict:
+    """Check existence of multiple EOS files using directory-level ``xrdfs ls``.
+
+    Files are grouped by their parent directory so that a single ``xrdfs ls``
+    call is made per parent directory instead of one ``xrdfs stat`` per file.
+    This reduces round-trips to the XRootD server significantly.
+
+    Parameters
+    ----------
+    eos_paths:
+        List of EOS paths to check.  Each path may be in ``root://...`` URL
+        form or a plain ``/eos/...`` path.
+    server:
+        XRootD server used for ``xrdfs ls`` calls (default: eosuser.cern.ch).
+    timeout:
+        Timeout in seconds for each ``xrdfs ls`` invocation.
+
+    Returns
+    -------
+    dict[str, bool]
+        Mapping from each original path to ``True`` / ``False``.
+    """
+    from collections import defaultdict
+
+    result: dict = {}
+    by_dir: dict = defaultdict(list)
+
+    for path in eos_paths:
+        if not path:
+            result[path] = False
+            continue
+        clean = path.strip()
+        if clean.startswith("root://"):
+            parts = clean.split("/", 3)
+            clean_path = "/" + parts[3].lstrip("/") if len(parts) >= 4 else ""
+        else:
+            clean_path = clean
+        if not clean_path:
+            result[path] = False
+            continue
+        parent = os.path.dirname(clean_path)
+        by_dir[parent].append((path, clean_path))
+
+    for parent_dir, items in by_dir.items():
+        try:
+            r = subprocess.run(
+                ["xrdfs", server, "ls", parent_dir],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if r.returncode != 0:
+                for orig_path, _ in items:
+                    result[orig_path] = _eos_file_exists(orig_path, timeout)
+                continue
+            existing = set(r.stdout.splitlines())
+            for orig_path, clean_path in items:
+                result[orig_path] = clean_path in existing
+        except Exception:
+            for orig_path, _ in items:
+                result[orig_path] = _eos_file_exists(orig_path, timeout)
+
+    return result
+
+
 def _condor_q_ads(cluster_id: str) -> dict[int, dict]:
     """Return raw condor_q ads keyed by ProcId."""
     try:
@@ -1217,6 +1284,29 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
                 for proc, exit_code in _condor_history_exit(cid).items():
                     history_exit[(cid, proc)] = exit_code
 
+            # Batch-check EOS output files at the directory level for all
+            # jobs that are no longer in the condor queue.
+            eos_paths_to_check: list = []
+            for idx in sorted(job_info.keys()):
+                jstate_check = state["jobs"][str(idx)]
+                if jstate_check["status"] in ("done", "perm_fail"):
+                    continue
+                cid_check = str(jstate_check["cluster"])
+                proc_check = jstate_check["proc"]
+                if live_status.get((cid_check, proc_check)) is None:
+                    orig_save = job_info[idx]["orig_save"]
+                    orig_meta = job_info[idx]["orig_meta"]
+                    if orig_save:
+                        eos_paths_to_check.append(orig_save)
+                    if orig_meta:
+                        eos_paths_to_check.append(orig_meta)
+
+            eos_exists: dict = (
+                _eos_files_exist_batch(eos_paths_to_check)
+                if eos_paths_to_check
+                else {}
+            )
+
             for idx in sorted(job_info.keys()):
                 key    = str(idx)
                 jstate = state["jobs"][key]
@@ -1264,8 +1354,8 @@ class MonitorOpenDataJobs(OpenDataMixin, law.Task):
                     orig_save = job_info[idx]["orig_save"]
                     orig_meta = job_info[idx]["orig_meta"]
                     if (
-                        (orig_save and _eos_file_exists(orig_save))
-                        or (orig_meta and _eos_file_exists(orig_meta))
+                        (orig_save and eos_exists.get(orig_save, False))
+                        or (orig_meta and eos_exists.get(orig_meta, False))
                     ):
                         jstate["status"] = "done"
                         self.publish_message(f"Job {idx}: output verified on EOS.")

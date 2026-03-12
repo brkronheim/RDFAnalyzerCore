@@ -591,6 +591,15 @@ class SkimMixin:
             "node alongside the executable."
         ),
     )
+    make_test_job = luigi.BoolParameter(
+        default=True,
+        description=(
+            "If True (default), run a single-file local test job before dispatching "
+            "the full SkimTask workflow.  This catches analysis runtime errors early "
+            "before submitting potentially hundreds of jobs.  Set --no-make-test-job "
+            "to skip the test and submit immediately."
+        ),
+    )
 
     # ---- multi-executor control -------------------------------------------
 
@@ -680,6 +689,11 @@ class SkimMixin:
             return ""
         return os.path.join(WORKSPACE, f"{prefix}_{self.file_source_name}")
 
+    @property
+    def _test_job_dir(self) -> str:
+        """Directory for the local pre-submission test job."""
+        return os.path.join(self._run_dir, "test_job")
+
 
 # ===========================================================================
 # PrepareSkimJobs – set up shared_inputs/ and per-job directories
@@ -728,6 +742,27 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
     @property
     def _run_dir(self) -> str:
         return os.path.join(WORKSPACE, f"skimRun_{self.name}")
+
+    def requires(self):
+        """Declare LAW dependency on the file-list task when ``--file-source`` is set.
+
+        For ``--file-source xrdfs`` the dependency on
+        :class:`~nano_tasks.GetXRDFSFileList` is declared automatically because
+        both tasks share the same ``dataset_manifest`` parameter.
+
+        For ``--file-source nano`` and ``--file-source opendata`` the parameter
+        sets are incompatible (those tasks use a separate NANO/Open Data sample
+        config, not the skim submit_config), so the user must run those tasks
+        manually before :class:`PrepareSkimJobs`.  A clear :class:`RuntimeError`
+        is raised at run time when the expected output directory is missing.
+        """
+        if self.file_source == "xrdfs":
+            from nano_tasks import GetXRDFSFileList  # lazy import to avoid circular deps
+            return GetXRDFSFileList.req(
+                self,
+                name=self.file_source_name,
+            )
+        return None
 
     def output(self):
         return law.LocalFileTarget(
@@ -909,10 +944,302 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             f"  shared_inputs/ ready at {shared_dir}"
         )
 
+        # ---- create local test job (one file) for pre-flight validation -----
+        if self.make_test_job and job_entries:
+            self._create_test_job(exe_path, job_entries)
+
+    def _create_test_job(self, exe_path: str, job_entries: list) -> None:
+        """Create a minimal single-file ``test_job/`` directory for pre-flight testing.
+
+        The first available input file from the first job entry is used.  The test
+        job writes outputs to ``test_job/`` itself (not EOS/shared storage) so that
+        it runs entirely locally without staging.
+
+        Parameters
+        ----------
+        exe_path:
+            Absolute path to the analysis executable.
+        job_entries:
+            List of ``{"dataset_name", "job_dir", "out_dir"}`` dicts produced by
+            :meth:`_run_impl`.
+        """
+        test_dir = self._test_job_dir
+        Path(test_dir).mkdir(parents=True, exist_ok=True)
+
+        exe_relpath = self._exe_relpath
+
+        # Find the first input file from the first job entry
+        first_file = ""
+        first_job_dir = ""
+        for entry in job_entries:
+            jcfg_path = os.path.join(entry["job_dir"], "submit_config.txt")
+            if os.path.exists(jcfg_path):
+                jcfg = read_config(jcfg_path)
+                file_list = jcfg.get("fileList", "")
+                if file_list:
+                    first_file = file_list.split(",")[0].strip()
+                    first_job_dir = entry["job_dir"]
+                    break
+
+        if not first_file:
+            self.publish_message(
+                "Warning: no input files found in job entries; test job not created."
+            )
+            return
+
+        # Copy the analysis executable into the test job dir
+        dst_exe = os.path.join(test_dir, exe_relpath)
+        if not os.path.exists(dst_exe):
+            shutil.copy2(exe_path, dst_exe)
+
+        # Copy local shared libraries
+        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        for lib_name, lib_src in sorted(local_libs.items()):
+            lib_dst = os.path.join(test_dir, lib_name)
+            if not os.path.exists(lib_dst):
+                shutil.copy2(lib_src, lib_dst)
+
+        # Copy auxiliary config files referenced in the template
+        if os.path.isfile(self.submit_config):
+            template_config = read_config(self.submit_config)
+            copy_list = get_copy_file_list(template_config)
+            template_dir = os.path.dirname(os.path.abspath(self.submit_config))
+            for fpath in copy_list:
+                src = os.path.join(template_dir, fpath) if not os.path.isabs(fpath) else fpath
+                if src and os.path.exists(src):
+                    dst = os.path.join(test_dir, os.path.basename(src))
+                    if not os.path.exists(dst):
+                        shutil.copy2(src, dst)
+
+        # Reuse floats.txt / ints.txt from the first job dir if available
+        for aux_name in ("floats.txt", "ints.txt"):
+            src = os.path.join(first_job_dir, aux_name)
+            if os.path.exists(src):
+                dst = os.path.join(test_dir, aux_name)
+                if not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+
+        # Build a minimal submit config: single file, local outputs, single thread
+        if os.path.isfile(self.submit_config):
+            test_config = dict(read_config(self.submit_config))
+        else:
+            test_config = {}
+        test_config["fileList"] = first_file
+        test_config["saveFile"] = "test_output.root"
+        test_config["metaFile"] = "test_output_meta.root"
+        test_config["saveDirectory"] = test_dir
+        test_config.setdefault("threads", "1")
+        # Remove any stage-out sentinel keys
+        for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
+            test_config.pop(key, None)
+
+        # Resolve config-file references to their basenames (files are already copied)
+        for key, val in list(test_config.items()):
+            if key.startswith("__"):
+                continue
+            if isinstance(val, str) and (
+                val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
+            ):
+                basename = os.path.basename(val)
+                if os.path.exists(os.path.join(test_dir, basename)):
+                    test_config[key] = basename
+
+        with open(os.path.join(test_dir, "submit_config.txt"), "w") as fh:
+            for k, v in test_config.items():
+                if not k.startswith("__"):
+                    fh.write(f"{k}={v}\n")
+
+        self.publish_message(
+            f"[PrepareSkimJobs] Test job created in {test_dir}/\n"
+            f"  Input file: {first_file}\n"
+            f"  Run manually with:  cd {test_dir} && ./{exe_relpath} submit_config.txt"
+        )
+
 
 # ===========================================================================
-# Task 1 – SkimTask
+# RunSkimTestJob – pre-flight single-file local test
 # ===========================================================================
+
+class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
+    """Run a single-file local test before dispatching the full :class:`SkimTask`.
+
+    This task mirrors :class:`~nano_tasks.RunTestJob` in the NANO workflow.  It
+    runs the analysis executable with a single input file and validates the exit
+    code, catching analysis runtime errors **before** expensive batch or
+    multi-dataset dispatch.
+
+    In **file-source mode** (``--file-source`` set) the test job directory is
+    prepared by :class:`PrepareSkimJobs`, which is declared as a formal LAW
+    prerequisite.
+
+    In **standard manifest mode** (``--file-source`` empty) the task creates the
+    test job directory itself using the first file from the first dataset entry in
+    the manifest.
+
+    Output
+    ------
+    * ``skimRun_{name}/test_job/test_passed.txt`` – written on success
+    """
+
+    task_namespace = ""
+
+    @property
+    def _run_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"skimRun_{self.name}")
+
+    def requires(self):
+        """Require PrepareSkimJobs in file-source mode (creates the test_job/ dir)."""
+        if self.file_source:
+            return PrepareSkimJobs.req(self)
+        return None
+
+    def output(self):
+        return law.LocalFileTarget(
+            os.path.join(self._test_job_dir, "test_passed.txt")
+        )
+
+    def run(self):
+        test_dir = self._test_job_dir
+
+        if not os.path.isdir(test_dir):
+            # Standard manifest mode: PrepareSkimJobs did not create the test_job/
+            # dir because no file-source mode was used.  Build it from scratch.
+            self._prepare_standard_test_job(test_dir)
+
+        config_path = os.path.join(test_dir, "submit_config.txt")
+        if not os.path.isfile(config_path):
+            raise RuntimeError(
+                f"Test job config not found: {config_path!r}. "
+                "Ensure PrepareSkimJobs has completed (file-source mode) or "
+                "that the dataset manifest contains at least one dataset with files."
+            )
+
+        exe_relpath = self._exe_relpath
+        exe_in_test = os.path.join(test_dir, exe_relpath)
+        if not os.path.isfile(exe_in_test):
+            # Try the absolute path directly (in case shared_inputs is on PATH)
+            exe_in_test = os.path.abspath(self.exe)
+
+        if not os.path.isfile(exe_in_test):
+            raise RuntimeError(
+                f"Executable not found for test job: {exe_in_test!r}. "
+                "Build the analysis before running RunSkimTestJob."
+            )
+
+        self.publish_message(
+            f"[RunSkimTestJob] Running single-file test in {test_dir} …"
+        )
+
+        with PerformanceRecorder("RunSkimTestJob") as rec:
+            result = _run_analysis_job(
+                exe_path=exe_in_test,
+                job_dir=test_dir,
+                root_setup=self._root_setup_content,
+                container_setup=self.container_setup or "",
+            )
+        rec.save(os.path.join(test_dir, "test_job.perf.json"))
+
+        self.publish_message(
+            f"[RunSkimTestJob] Test passed: {result}"
+        )
+
+        with self.output().open("w") as fh:
+            fh.write(f"status=passed\n{result}\n")
+
+    def _prepare_standard_test_job(self, test_dir: str) -> None:
+        """Create a minimal test job directory in standard (non-file-source) mode.
+
+        Reads the first dataset from the manifest, takes the first file, copies
+        the executable and config files, and writes a minimal ``submit_config.txt``.
+        """
+        exe_path = os.path.abspath(self.exe)
+        if not os.path.isfile(exe_path):
+            raise RuntimeError(
+                f"Analysis executable not found: {exe_path!r}. "
+                "Build the analysis before running RunSkimTestJob."
+            )
+
+        manifest = DatasetManifest.load(self.dataset_manifest)
+        first_dataset = next(iter(manifest.datasets), None)
+        if first_dataset is None:
+            raise RuntimeError(
+                f"Dataset manifest '{self.dataset_manifest}' contains no datasets."
+            )
+
+        first_file = ""
+        if first_dataset.files:
+            first_file = first_dataset.files[0]
+        elif first_dataset.das:
+            first_file = first_dataset.das
+
+        if not first_file:
+            raise RuntimeError(
+                f"Dataset '{first_dataset.name}' has no files or DAS path; "
+                "cannot create a test job."
+            )
+
+        Path(test_dir).mkdir(parents=True, exist_ok=True)
+
+        # Copy executable
+        exe_relpath = self._exe_relpath
+        dst_exe = os.path.join(test_dir, exe_relpath)
+        if not os.path.exists(dst_exe):
+            shutil.copy2(exe_path, dst_exe)
+
+        # Copy local shared libraries
+        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        for lib_name, lib_src in sorted(local_libs.items()):
+            lib_dst = os.path.join(test_dir, lib_name)
+            if not os.path.exists(lib_dst):
+                shutil.copy2(lib_src, lib_dst)
+
+        # Copy auxiliary config files referenced in template
+        if os.path.isfile(self.submit_config):
+            template_config = read_config(self.submit_config)
+            template_dir = os.path.dirname(os.path.abspath(self.submit_config))
+            copy_list = get_copy_file_list(template_config)
+            for fpath in copy_list:
+                src = os.path.join(template_dir, fpath) if not os.path.isabs(fpath) else fpath
+                if src and os.path.exists(src):
+                    dst = os.path.join(test_dir, os.path.basename(src))
+                    if not os.path.exists(dst):
+                        shutil.copy2(src, dst)
+            test_config = dict(template_config)
+        else:
+            test_config = {}
+
+        # Override dataset-specific keys
+        test_config["fileList"] = first_file
+        test_config["saveFile"] = "test_output.root"
+        test_config["metaFile"] = "test_output_meta.root"
+        test_config["saveDirectory"] = test_dir
+        test_config["sample"] = first_dataset.name
+        if first_dataset.dtype:
+            test_config["type"] = first_dataset.dtype
+        test_config.setdefault("threads", "1")
+        for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
+            test_config.pop(key, None)
+
+        # Resolve referenced config files to basenames
+        for key, val in list(test_config.items()):
+            if key.startswith("__"):
+                continue
+            if isinstance(val, str) and (
+                val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
+            ):
+                basename = os.path.basename(val)
+                if os.path.exists(os.path.join(test_dir, basename)):
+                    test_config[key] = basename
+
+        with open(os.path.join(test_dir, "submit_config.txt"), "w") as fh:
+            for k, v in test_config.items():
+                if not k.startswith("__"):
+                    fh.write(f"{k}={v}\n")
+
+        self.publish_message(
+            f"[RunSkimTestJob] Test job prepared in {test_dir}/\n"
+            f"  First dataset: {first_dataset.name}, input: {first_file}"
+        )
 
 class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWorkflow):
     """
@@ -947,7 +1274,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
         getattr(law.LocalWorkflow, "exclude_params_branch", set())
         | getattr(HTCondorWorkflow, "exclude_params_branch", set())
         | getattr(DaskWorkflow, "exclude_params_branch", set())
-        | {"dask_scheduler", "dask_workers", "max_runtime"}
+        | {"dask_scheduler", "dask_workers", "max_runtime", "make_test_job"}
     )
 
     @property
@@ -985,16 +1312,25 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
     # ------------------------------------------------------------------
 
     def workflow_requires(self):
-        """Require PrepareSkimJobs when running in file-source mode."""
+        """Require PrepareSkimJobs in file-source mode and RunSkimTestJob when make_test_job is True."""
         reqs = super().workflow_requires()
         if self.file_source:
             reqs["prep"] = PrepareSkimJobs.req(self)
+        if self.make_test_job:
+            reqs["test"] = RunSkimTestJob.req(self)
         return reqs
 
     def requires(self):
+        reqs = []
         if self.file_source:
-            return PrepareSkimJobs.req(self)
-        return None
+            reqs.append(PrepareSkimJobs.req(self))
+        if self.make_test_job:
+            reqs.append(RunSkimTestJob.req(self))
+        if not reqs:
+            return None
+        if len(reqs) == 1:
+            return reqs[0]
+        return reqs
 
     # ------------------------------------------------------------------
     # Output
