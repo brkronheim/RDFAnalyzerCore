@@ -1,0 +1,59 @@
+# Test histogram configurations (YAML format)
+# Mirrors test_histograms.txt for cross-format consistency tests
+
+# Simple 1D histogram with defaults
+- name: test_hist1
+  variable: var1
+  weight: w1
+  bins: "10"
+  lowerBound: "0.0"
+  upperBound: "10.0"
+  suffix: simple
+
+# Histogram with label
+- name: test_hist2
+  variable: var2
+  weight: w2
+  bins: "20"
+  lowerBound: "-5.0"
+  upperBound: "5.0"
+  label: TestVariable2
+  suffix: labeled
+
+# Histogram with channel selection
+- name: test_hist3
+  variable: var3
+  weight: w3
+  bins: "15"
+  lowerBound: "0.0"
+  upperBound: "15.0"
+  channelVariable: channel
+  channelBins: "2"
+  channelLowerBound: "0.0"
+  channelUpperBound: "2.0"
+  channelRegions: "ch1,ch2"
+  suffix: with_channel
+
+# Histogram with full region/sampling separation
+- name: test_hist4
+  variable: var4
+  weight: w4
+  bins: "25"
+  lowerBound: "0.0"
+  upperBound: "25.0"
+  channelVariable: channel
+  channelBins: "2"
+  channelLowerBound: "0.0"
+  channelUpperBound: "2.0"
+  channelRegions: "ch1,ch2"
+  controlRegionVariable: controlRegion
+  controlRegionBins: "3"
+  controlRegionLowerBound: "0.0"
+  controlRegionUpperBound: "3.0"
+  controlRegionRegions: "cr1,cr2,cr3"
+  sampleCategoryVariable: sampleCategory
+  sampleCategoryBins: "4"
+  sampleCategoryLowerBound: "0.0"
+  sampleCategoryUpperBound: "4.0"
+  sampleCategoryRegions: "cat1,cat2,cat3,cat4"
+  suffix: full_separation

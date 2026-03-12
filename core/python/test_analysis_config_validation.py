@@ -181,6 +181,71 @@ class TestValidateHistogramConfigFile:
 
 
 # ===========================================================================
+# validate_histogram_config_file – YAML format
+# ===========================================================================
+
+class TestValidateHistogramConfigFileYaml:
+    """Tests for the YAML variant of the histogram config validator."""
+
+    def test_valid_yaml_histogram(self, tmp_path):
+        content = "- name: myhist\n  variable: pt\n  bins: '50'\n  lowerBound: '0.0'\n  upperBound: '500.0'\n"
+        path = _write(tmp_path, "hists.yaml", content)
+        errors, warnings = validate_histogram_config_file(path)
+        assert errors == []
+
+    def test_yml_extension_also_detected(self, tmp_path):
+        content = "- name: myhist\n  variable: pt\n  bins: '50'\n  lowerBound: '0.0'\n  upperBound: '500.0'\n"
+        path = _write(tmp_path, "hists.yml", content)
+        errors, warnings = validate_histogram_config_file(path)
+        assert errors == []
+
+    def test_yaml_missing_required_key(self, tmp_path):
+        content = "- variable: pt\n  bins: '50'\n  lowerBound: '0.0'\n  upperBound: '500.0'\n"
+        path = _write(tmp_path, "hists.yaml", content)
+        errors, _ = validate_histogram_config_file(path)
+        assert any("name" in e for e in errors)
+
+    def test_yaml_not_a_sequence_is_error(self, tmp_path):
+        content = "name: myhist\nvariable: pt\nbins: '50'\nlowerBound: '0.0'\nupperBound: '500.0'\n"
+        path = _write(tmp_path, "hists.yaml", content)
+        errors, _ = validate_histogram_config_file(path)
+        assert any("sequence" in e.lower() or "list" in e.lower() for e in errors)
+
+    def test_yaml_duplicate_name_is_error(self, tmp_path):
+        content = (
+            "- name: h1\n  variable: pt\n  bins: '50'\n  lowerBound: '0.0'\n  upperBound: '500.0'\n"
+            "- name: h1\n  variable: eta\n  bins: '60'\n  lowerBound: '-3.0'\n  upperBound: '3.0'\n"
+        )
+        path = _write(tmp_path, "hists.yaml", content)
+        errors, _ = validate_histogram_config_file(path)
+        assert any("Duplicate" in e and "h1" in e for e in errors)
+
+    def test_yaml_invalid_bins_is_error(self, tmp_path):
+        content = "- name: h1\n  variable: pt\n  bins: '0'\n  lowerBound: '0.0'\n  upperBound: '100.0'\n"
+        path = _write(tmp_path, "hists.yaml", content)
+        errors, _ = validate_histogram_config_file(path)
+        assert any("bins" in e for e in errors)
+
+    def test_yaml_bad_bounds_order_is_error(self, tmp_path):
+        content = "- name: h1\n  variable: pt\n  bins: '50'\n  lowerBound: '100.0'\n  upperBound: '0.0'\n"
+        path = _write(tmp_path, "hists.yaml", content)
+        errors, _ = validate_histogram_config_file(path)
+        assert any("lowerBound" in e or "upperBound" in e for e in errors)
+
+    def test_yaml_empty_sequence_is_warning(self, tmp_path):
+        path = _write(tmp_path, "hists.yaml", "[]\n")
+        _, warnings = validate_histogram_config_file(path)
+        assert any("no histogram entries" in w for w in warnings)
+
+    def test_yaml_entry_context_in_errors(self, tmp_path):
+        """Error messages should include an [entry N] context prefix for YAML."""
+        content = "- variable: pt\n  bins: '50'\n  lowerBound: '0.0'\n  upperBound: '500.0'\n"
+        path = _write(tmp_path, "hists.yaml", content)
+        errors, _ = validate_histogram_config_file(path)
+        assert any("[entry " in e for e in errors)
+
+
+# ===========================================================================
 # validate_regions_config
 # ===========================================================================
 

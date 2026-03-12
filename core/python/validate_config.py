@@ -127,24 +127,30 @@ _HISTOGRAM_KNOWN_KEYS = {
 def validate_histogram_config_file(
     path: str,
 ) -> Tuple[List[str], List[str]]:
-    """Validate a histogram configuration text file.
+    """Validate a histogram configuration file (text or YAML format).
 
-    Each non-comment, non-blank line must be a ``key=value`` record
-    containing at least the required keys (``name``, ``variable``, ``bins``,
-    ``lowerBound``, ``upperBound``).  Numeric fields are type-checked and bin
-    counts must be positive.  Duplicate histogram names are reported as
-    errors.
+    For text files (any extension other than ``.yaml`` / ``.yml``), each
+    non-comment, non-blank line must be a ``key=value`` record containing at
+    least the required keys (``name``, ``variable``, ``bins``, ``lowerBound``,
+    ``upperBound``).
+
+    For YAML files (``.yaml`` / ``.yml`` extension), the file must contain a
+    YAML sequence where each element is a mapping with at least the required
+    keys.
+
+    Numeric fields are type-checked and bin counts must be positive.  Duplicate
+    histogram names are reported as errors.
 
     Parameters
     ----------
     path : str
-        Absolute or relative path to the histogram config text file.
+        Absolute or relative path to the histogram config file.
 
     Returns
     -------
     tuple[list[str], list[str]]
         ``(errors, warnings)`` lists, each item including a line-number
-        context prefix such as ``"[line 3]"``.
+        context prefix such as ``"[line 3]"`` or ``"[entry 3]"``.
     """
     errors: List[str] = []
     warnings: List[str] = []
@@ -152,6 +158,20 @@ def validate_histogram_config_file(
     if not os.path.exists(path):
         errors.append(f"Histogram config file not found: {path}")
         return errors, warnings
+
+    # Auto-detect YAML format from the file extension.
+    is_yaml = path.endswith(".yaml") or path.endswith(".yml")
+    if is_yaml:
+        return _validate_histogram_config_yaml(path)
+    return _validate_histogram_config_text(path)
+
+
+def _validate_histogram_config_text(
+    path: str,
+) -> Tuple[List[str], List[str]]:
+    """Validate a histogram configuration file in ``key=value`` text format."""
+    errors: List[str] = []
+    warnings: List[str] = []
 
     seen_names: Dict[str, int] = {}
     entries_found = 0
@@ -178,76 +198,126 @@ def validate_histogram_config_file(
 
             ctx = f"[line {lineno}]"
             entries_found += 1
-
-            # Check required keys
-            for req in _HISTOGRAM_REQUIRED_KEYS:
-                if req not in entry:
-                    errors.append(
-                        f"{ctx} Missing required key '{req}'"
-                    )
-
-            # Check for unknown keys
-            for k in entry:
-                if k not in _HISTOGRAM_KNOWN_KEYS:
-                    warnings.append(
-                        f"{ctx} Unknown histogram config key '{k}'"
-                    )
-
-            # Validate numeric fields
-            for num_key in ("bins", "lowerBound", "upperBound",
-                            "channelBins", "channelLowerBound", "channelUpperBound",
-                            "controlRegionBins", "controlRegionLowerBound",
-                            "controlRegionUpperBound",
-                            "sampleCategoryBins", "sampleCategoryLowerBound",
-                            "sampleCategoryUpperBound"):
-                if num_key not in entry:
-                    continue
-                if num_key in ("bins", "channelBins", "controlRegionBins",
-                               "sampleCategoryBins"):
-                    if not _is_int(entry[num_key]):
-                        errors.append(
-                            f"{ctx} Key '{num_key}' must be an integer, got {entry[num_key]!r}"
-                        )
-                    elif int(entry[num_key]) <= 0:
-                        errors.append(
-                            f"{ctx} Key '{num_key}' must be a positive integer, got {entry[num_key]!r}"
-                        )
-                else:
-                    if not _is_float(entry[num_key]):
-                        errors.append(
-                            f"{ctx} Key '{num_key}' must be a float, got {entry[num_key]!r}"
-                        )
-
-            # Validate bound ordering: lowerBound < upperBound
-            for lower_key, upper_key in (
-                ("lowerBound", "upperBound"),
-                ("channelLowerBound", "channelUpperBound"),
-                ("controlRegionLowerBound", "controlRegionUpperBound"),
-                ("sampleCategoryLowerBound", "sampleCategoryUpperBound"),
-            ):
-                if lower_key in entry and upper_key in entry:
-                    if _is_float(entry[lower_key]) and _is_float(entry[upper_key]):
-                        if float(entry[lower_key]) >= float(entry[upper_key]):
-                            errors.append(
-                                f"{ctx} '{lower_key}' ({entry[lower_key]}) must be "
-                                f"less than '{upper_key}' ({entry[upper_key]})"
-                            )
-
-            # Duplicate name detection
-            name = entry.get("name", "")
-            if name:
-                if name in seen_names:
-                    errors.append(
-                        f"{ctx} Duplicate histogram name '{name}' "
-                        f"(first seen at line {seen_names[name]})"
-                    )
-                else:
-                    seen_names[name] = lineno
+            _validate_histogram_entry(entry, ctx, seen_names, lineno, errors, warnings)
 
     if entries_found == 0:
         warnings.append("Histogram config file contains no histogram entries")
 
     return errors, warnings
+
+
+def _validate_histogram_config_yaml(
+    path: str,
+) -> Tuple[List[str], List[str]]:
+    """Validate a histogram configuration file in YAML sequence format."""
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    try:
+        with open(path) as fh:
+            data = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        errors.append(f"Failed to parse YAML histogram config: {exc}")
+        return errors, warnings
+
+    if not isinstance(data, list):
+        errors.append(
+            "YAML histogram config must be a sequence (list) of histogram entries; "
+            f"got {type(data).__name__}"
+        )
+        return errors, warnings
+
+    seen_names: Dict[str, int] = {}
+    entries_found = 0
+    for idx, raw_entry in enumerate(data, start=1):
+        if not isinstance(raw_entry, dict):
+            errors.append(f"[entry {idx}] Each histogram entry must be a YAML mapping")
+            continue
+        # Convert all values to strings to match the text-format validation path.
+        entry: Dict[str, str] = {str(k): str(v) for k, v in raw_entry.items()}
+        ctx = f"[entry {idx}]"
+        entries_found += 1
+        _validate_histogram_entry(entry, ctx, seen_names, idx, errors, warnings)
+
+    if entries_found == 0:
+        warnings.append("Histogram config file contains no histogram entries")
+
+    return errors, warnings
+
+
+def _validate_histogram_entry(
+    entry: Dict[str, str],
+    ctx: str,
+    seen_names: Dict[str, int],
+    lineno: int,
+    errors: List[str],
+    warnings: List[str],
+) -> None:
+    """Validate a single parsed histogram entry (shared by text and YAML paths)."""
+    # Check required keys
+    for req in _HISTOGRAM_REQUIRED_KEYS:
+        if req not in entry:
+            errors.append(
+                f"{ctx} Missing required key '{req}'"
+            )
+
+    # Check for unknown keys
+    for k in entry:
+        if k not in _HISTOGRAM_KNOWN_KEYS:
+            warnings.append(
+                f"{ctx} Unknown histogram config key '{k}'"
+            )
+
+    # Validate numeric fields
+    for num_key in ("bins", "lowerBound", "upperBound",
+                    "channelBins", "channelLowerBound", "channelUpperBound",
+                    "controlRegionBins", "controlRegionLowerBound",
+                    "controlRegionUpperBound",
+                    "sampleCategoryBins", "sampleCategoryLowerBound",
+                    "sampleCategoryUpperBound"):
+        if num_key not in entry:
+            continue
+        if num_key in ("bins", "channelBins", "controlRegionBins",
+                       "sampleCategoryBins"):
+            if not _is_int(entry[num_key]):
+                errors.append(
+                    f"{ctx} Key '{num_key}' must be an integer, got {entry[num_key]!r}"
+                )
+            elif int(entry[num_key]) <= 0:
+                errors.append(
+                    f"{ctx} Key '{num_key}' must be a positive integer, got {entry[num_key]!r}"
+                )
+        else:
+            if not _is_float(entry[num_key]):
+                errors.append(
+                    f"{ctx} Key '{num_key}' must be a float, got {entry[num_key]!r}"
+                )
+
+    # Validate bound ordering: lowerBound < upperBound
+    for lower_key, upper_key in (
+        ("lowerBound", "upperBound"),
+        ("channelLowerBound", "channelUpperBound"),
+        ("controlRegionLowerBound", "controlRegionUpperBound"),
+        ("sampleCategoryLowerBound", "sampleCategoryUpperBound"),
+    ):
+        if lower_key in entry and upper_key in entry:
+            if _is_float(entry[lower_key]) and _is_float(entry[upper_key]):
+                if float(entry[lower_key]) >= float(entry[upper_key]):
+                    errors.append(
+                        f"{ctx} '{lower_key}' ({entry[lower_key]}) must be "
+                        f"less than '{upper_key}' ({entry[upper_key]})"
+                    )
+
+    # Duplicate name detection
+    name = entry.get("name", "")
+    if name:
+        if name in seen_names:
+            errors.append(
+                f"{ctx} Duplicate histogram name '{name}' "
+                f"(first seen at entry {seen_names[name]})"
+            )
+        else:
+            seen_names[name] = lineno
 
 
 # ---------------------------------------------------------------------------
