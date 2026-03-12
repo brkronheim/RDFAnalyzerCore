@@ -1087,6 +1087,15 @@ void NDHistogramManager::bookConfigHistograms() {
     // Build region names that match the axes used when booking.
     // SaveHists() uses these to map histogram bins to output directory paths.
     // Axis order: [channel, controlRegion, sampleCategory, systematics].
+    //
+    // NOTE: When different config histograms use distinct channel/control/
+    // sampleCategory region lists, SaveHists() can only honour one set of
+    // region names for the entire batch.  Using the first config's regions is
+    // correct for the common case where all histograms share the same region
+    // structure.  If histograms with heterogeneous region lists are needed,
+    // book them via separate bookND() calls with explicit allRegionNames.
+    // The guard `configBatch.empty()` above ensures configHistograms_m is
+    // non-empty before the `.front()` calls below.
     if (nRegions > 0) {
       // RegionManager path: channel axis is the region membership column.
       const auto& firstConfig = configHistograms_m.front();

@@ -173,7 +173,7 @@ def _validate_histogram_config_text(
     errors: List[str] = []
     warnings: List[str] = []
 
-    seen_names: Dict[str, int] = {}
+    seen_names: Dict[str, str] = {}
     entries_found = 0
 
     with open(path) as fh:
@@ -198,7 +198,7 @@ def _validate_histogram_config_text(
 
             ctx = f"[line {lineno}]"
             entries_found += 1
-            _validate_histogram_entry(entry, ctx, seen_names, lineno, errors, warnings)
+            _validate_histogram_entry(entry, ctx, seen_names, errors, warnings)
 
     if entries_found == 0:
         warnings.append("Histogram config file contains no histogram entries")
@@ -227,7 +227,7 @@ def _validate_histogram_config_yaml(
         )
         return errors, warnings
 
-    seen_names: Dict[str, int] = {}
+    seen_names: Dict[str, str] = {}
     entries_found = 0
     for idx, raw_entry in enumerate(data, start=1):
         if not isinstance(raw_entry, dict):
@@ -237,7 +237,7 @@ def _validate_histogram_config_yaml(
         entry: Dict[str, str] = {str(k): str(v) for k, v in raw_entry.items()}
         ctx = f"[entry {idx}]"
         entries_found += 1
-        _validate_histogram_entry(entry, ctx, seen_names, idx, errors, warnings)
+        _validate_histogram_entry(entry, ctx, seen_names, errors, warnings)
 
     if entries_found == 0:
         warnings.append("Histogram config file contains no histogram entries")
@@ -248,12 +248,17 @@ def _validate_histogram_config_yaml(
 def _validate_histogram_entry(
     entry: Dict[str, str],
     ctx: str,
-    seen_names: Dict[str, int],
-    lineno: int,
+    seen_names: Dict[str, str],
     errors: List[str],
     warnings: List[str],
 ) -> None:
-    """Validate a single parsed histogram entry (shared by text and YAML paths)."""
+    """Validate a single parsed histogram entry (shared by text and YAML paths).
+
+    ``seen_names`` maps histogram name → the ``ctx`` string of the first
+    occurrence, allowing the duplicate-name error to reference the original
+    location in a format-neutral way (e.g. "[line 3]" for text files or
+    "[entry 1]" for YAML files).
+    """
     # Check required keys
     for req in _HISTOGRAM_REQUIRED_KEYS:
         if req not in entry:
@@ -308,16 +313,18 @@ def _validate_histogram_entry(
                         f"less than '{upper_key}' ({entry[upper_key]})"
                     )
 
-    # Duplicate name detection
+    # Duplicate name detection.  seen_names maps name → ctx of the first
+    # occurrence so the message is format-neutral ("first seen at [line 3]" vs
+    # "first seen at [entry 1]").
     name = entry.get("name", "")
     if name:
         if name in seen_names:
             errors.append(
                 f"{ctx} Duplicate histogram name '{name}' "
-                f"(first seen at entry {seen_names[name]})"
+                f"(first seen at {seen_names[name]})"
             )
         else:
-            seen_names[name] = lineno
+            seen_names[name] = ctx
 
 
 # ---------------------------------------------------------------------------
