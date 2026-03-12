@@ -1625,7 +1625,8 @@ class GetOpenDataFileList(OpenDataMixin, law.LocalWorkflow):
                 partial = _process_metadata(recid, sample_names)
             except Exception as e:
                 self.publish_message(
-                    f"Warning: failed to fetch metadata for recid {recid}: {e}"
+                    f"Warning: failed to fetch metadata for recid {recid} "
+                    f"(sample '{name}'): {e}"
                 )
                 continue
             file_list.extend(partial.get(name, []))

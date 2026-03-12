@@ -54,6 +54,7 @@ Usage
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -1935,12 +1936,14 @@ def _xrdfs_list_files(
                 capture_output=True, text=True, timeout=timeout,
             )
         except Exception as exc:
-            print(f"Warning: xrdfs ls failed for {path}: {exc}")
+            logging.warning("xrdfs ls failed for %s: %s", path, exc)
             return []
 
         if result.returncode != 0:
-            print(f"Warning: xrdfs ls returned {result.returncode} for {path}: "
-                  f"{result.stderr.strip()}")
+            logging.warning(
+                "xrdfs ls returned %d for %s: %s",
+                result.returncode, path, result.stderr.strip(),
+            )
             return []
 
         found: list = []

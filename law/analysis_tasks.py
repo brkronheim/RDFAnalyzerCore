@@ -523,6 +523,7 @@ class SkimTask(AnalysisMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWorkflow)
     # task when dispatching via HTCondor or Dask.
     exclude_params_branch = (
         law.LocalWorkflow.exclude_params_branch
+        | HTCondorWorkflow.exclude_params_branch
         | DaskWorkflow.exclude_params_branch
         | {"dask_scheduler", "dask_workers", "max_runtime"}
     )
@@ -636,6 +637,8 @@ class SkimTask(AnalysisMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWorkflow)
         if self.file_source:
             return True
 
+        # In standard manifest mode branch_data is always a DatasetEntry
+        # (file-source mode already returned True above).
         dataset: DatasetEntry = self.branch_data
         skim_file = os.path.join(self._outputs_dir, dataset.name, "skim.root")
 
