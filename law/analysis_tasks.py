@@ -160,7 +160,7 @@ from output_schema import (  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
 
-import re as _re  # noqa: E402  – used by _collect_skim_shared_libs
+import re as _re  # noqa: E402  - used by _collect_skim_shared_libs
 
 
 # ===========================================================================
@@ -774,7 +774,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             self._run_impl()
         rec.save(os.path.join(self._run_dir, "prep_submission.perf.json"))
 
-    def _run_impl(self):  # noqa: C901 – intentionally comprehensive
+    def _run_impl(self):  # noqa: C901 - intentionally comprehensive
         exe_path = os.path.abspath(self.exe)
         if not os.path.isfile(exe_path):
             raise RuntimeError(

@@ -53,6 +53,7 @@ Usage
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -1965,7 +1966,6 @@ def _xrdfs_list_files(
     list[str]
         Sorted list of ``root://{server}/{path}`` URLs for matching files.
     """
-    import fnmatch
 
     def _ls_single_dir(path: str) -> tuple:
         """List one directory; return (files, subdirs)."""

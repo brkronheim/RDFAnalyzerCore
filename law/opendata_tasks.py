@@ -61,6 +61,8 @@ import subprocess
 import sys
 import time
 import glob
+import fnmatch
+from collections import defaultdict
 from pathlib import Path
 
 import luigi  # type: ignore
@@ -386,8 +388,6 @@ def _eos_files_exist_batch(
     dict[str, bool]
         Mapping from each original path to ``True`` / ``False``.
     """
-    from collections import defaultdict
-
     result: dict = {}
     by_dir: dict = defaultdict(list)
 
