@@ -1893,3 +1893,294 @@ class RunNANOJobs(NANOMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWorkflow):
             [exe_path, branch_data, self._root_setup_content, self.container_setup or ""],
             {},
         )
+
+
+# ===========================================================================
+# GetXRDFSFileList – file discovery via xrdfs ls
+# ===========================================================================
+
+def _xrdfs_list_files(
+    server: str,
+    remote_path: str,
+    pattern: str = "*.root",
+    recursive: bool = True,
+    timeout: int = 60,
+) -> list:
+    """Discover ROOT files on an XRootD server using ``xrdfs ls``.
+
+    Parameters
+    ----------
+    server:
+        XRootD server URL, e.g. ``root://eosuser.cern.ch/``.
+    remote_path:
+        Remote directory path to search, e.g. ``/eos/user/a/alice/ntuples/``.
+    pattern:
+        Glob-style filename pattern to match (matched against basename only).
+    recursive:
+        When True, recursively search sub-directories.
+    timeout:
+        Timeout in seconds for each ``xrdfs`` invocation.
+
+    Returns
+    -------
+    list[str]
+        Sorted list of ``root://{server}/{path}`` URLs for matching files.
+    """
+    import fnmatch
+
+    def _ls(path: str) -> list:
+        try:
+            result = subprocess.run(
+                ["xrdfs", server, "ls", "-l", path],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except Exception as exc:
+            print(f"Warning: xrdfs ls failed for {path}: {exc}")
+            return []
+
+        if result.returncode != 0:
+            print(f"Warning: xrdfs ls returned {result.returncode} for {path}: "
+                  f"{result.stderr.strip()}")
+            return []
+
+        found: list = []
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            entry = parts[-1]
+            if not entry.startswith("/"):
+                continue
+            if line.startswith("d") or (len(parts) > 4 and parts[0].startswith("d")):
+                # It's a directory
+                if recursive:
+                    found.extend(_ls(entry))
+            else:
+                if fnmatch.fnmatch(os.path.basename(entry), pattern):
+                    found.append(entry)
+        return found
+
+    paths = _ls(remote_path)
+    urls = [f"{server.rstrip('/')}/{p.lstrip('/')}" for p in sorted(paths)]
+    return urls
+
+
+class XRDFSMixin:
+    """Parameters shared by :class:`GetXRDFSFileList`."""
+
+    name = luigi.Parameter(
+        description="Run name; output files go to xrdfsFileList_{name}/",
+    )
+    dataset_manifest = luigi.Parameter(
+        description=(
+            "Path to the dataset manifest YAML.  Each dataset entry should "
+            "specify either an XRootD server + remote path via the ``xrdfs_server`` "
+            "and ``xrdfs_path`` fields, or explicit ``files`` URLs."
+        ),
+    )
+    xrdfs_server = luigi.Parameter(
+        default="",
+        description=(
+            "Default XRootD server (e.g. root://eosuser.cern.ch/).  "
+            "Can be overridden per-dataset in the manifest."
+        ),
+    )
+    xrdfs_pattern = luigi.Parameter(
+        default="*.root",
+        description="Glob pattern for ROOT file discovery (default: *.root).",
+    )
+    xrdfs_recursive = luigi.BoolParameter(
+        default=True,
+        description="Recursively search sub-directories (default: True).",
+    )
+
+
+class GetXRDFSFileList(XRDFSMixin, law.LocalWorkflow):
+    """Produce a per-dataset XRootD file-list JSON by running ``xrdfs ls``.
+
+    This task is useful for finding files on XRootD storage (EOS, dCache, etc.)
+    when Rucio or the CERN Open Data Portal are not available – for example when
+    running over existing skims or NTuples stored on EOS.
+
+    For each dataset entry in the manifest the task looks for an ``xrdfs_path``
+    field (the remote directory to search) and optionally an ``xrdfs_server``
+    field.  If neither is provided and explicit ``files`` are listed they are
+    used directly.
+
+    Output per dataset::
+
+        xrdfsFileList_{name}/{dataset_name}.json
+        {"sample": "dataset_name", "files": ["root://...", ...]}
+
+    The output can be consumed by :class:`~analysis_tasks.SkimTask` via
+    ``--file-source xrdfs --file-source-name <name>``.
+    """
+
+    task_namespace = ""
+
+    @property
+    def _file_list_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"xrdfsFileList_{self.name}")
+
+    def create_branch_map(self):
+        from dataset_manifest import DatasetManifest as _DatasetManifest
+        manifest = _DatasetManifest.load(self.dataset_manifest)
+        return {i: entry for i, entry in enumerate(manifest.datasets)}
+
+    def output(self):
+        from dataset_manifest import DatasetEntry as _DatasetEntry
+        dataset: _DatasetEntry = self.branch_data
+        return law.LocalFileTarget(
+            os.path.join(self._file_list_dir, f"{dataset.name}.json")
+        )
+
+    def run(self):
+        task_label = f"GetXRDFSFileList[branch={self.branch}]"
+        with PerformanceRecorder(task_label) as rec:
+            self._run_impl()
+        rec.save(perf_path_for(self.output().path))
+
+    def _run_impl(self):
+        from dataset_manifest import DatasetEntry as _DatasetEntry
+        dataset: _DatasetEntry = self.branch_data
+
+        # Prefer explicit file list from the manifest
+        if dataset.files:
+            files = [ensure_xrootd_redirector(f) for f in dataset.files]
+        else:
+            extras = getattr(dataset, "extra", {}) or {}
+            server = extras.get("xrdfs_server") or self.xrdfs_server
+            remote_path = extras.get("xrdfs_path", "")
+            if not remote_path:
+                self.publish_message(
+                    f"Dataset '{dataset.name}' has no files or xrdfs_path; "
+                    "writing empty list."
+                )
+                files = []
+            elif not server:
+                raise RuntimeError(
+                    f"Dataset '{dataset.name}': xrdfs_path is set but no "
+                    "xrdfs_server provided (set --xrdfs-server or add "
+                    "'xrdfs_server' to the manifest entry)."
+                )
+            else:
+                files = _xrdfs_list_files(
+                    server=server,
+                    remote_path=remote_path,
+                    pattern=self.xrdfs_pattern,
+                    recursive=self.xrdfs_recursive,
+                )
+
+        payload = {"sample": dataset.name, "files": files}
+        Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
+        with open(self.output().path, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        self.publish_message(
+            f"GetXRDFSFileList: {dataset.name} → {len(files)} file(s)"
+        )
+
+
+# ===========================================================================
+# GetNANOFileList – lightweight file-list-only task
+# ===========================================================================
+
+class GetNANOFileList(NANOMixin, law.LocalWorkflow):
+    """Produce a per-dataset XRootD file-list JSON without creating job directories.
+
+    Unlike :class:`PrepareNANOSample` this task **only** queries Rucio (or uses
+    the explicit ``files`` field from the dataset manifest) and writes a compact
+    JSON file::
+
+        nanoFileList_{name}/{sample_name}.json
+        {"sample": "name", "files": ["root://...", ...]}
+
+    The output of this task can be consumed directly by :class:`~analysis_tasks.SkimTask`
+    via the ``--file-source nano --file-source-name <name>`` parameters, enabling
+    a clean file-discovery → skim → collect-histograms pipeline without the full
+    HTCondor submission machinery.
+
+    Parameters are identical to :class:`NANOMixin`.
+    """
+
+    task_namespace = ""
+
+    @property
+    def _file_list_dir(self) -> str:
+        """Directory where per-dataset file list JSONs are written."""
+        return os.path.join(WORKSPACE, f"nanoFileList_{self.name}")
+
+    def create_branch_map(self):
+        sample_list, _, _, _, _ = _get_sample_list(self._sample_config)
+        if self.dataset:
+            if self.dataset not in sample_list:
+                raise ValueError(
+                    f"Dataset {self.dataset!r} not found in sample config. "
+                    f"Available: {sorted(sample_list.keys())}"
+                )
+            return {0: self.dataset}
+        return {i: key for i, key in enumerate(sorted(sample_list.keys()))}
+
+    def output(self):
+        sample_key = self.branch_data
+        return law.LocalFileTarget(
+            os.path.join(self._file_list_dir, f"{sample_key}.json")
+        )
+
+    def run(self):
+        task_label = f"GetNANOFileList[branch={self.branch}]"
+        with PerformanceRecorder(task_label) as rec:
+            self._run_impl()
+        rec.save(perf_path_for(self.output().path))
+
+    def _run_impl(self):
+        sample_key = self.branch_data
+        sample_list, _, lumi, WL, BL = _get_sample_list(self._sample_config)
+        sample = sample_list[sample_key]
+
+        name = sample["name"]
+        das_path = sample.get("das", "")
+        site_override = sample.get("site", "")
+
+        all_urls: list = []
+        seen_urls: set = set()
+
+        # Check for explicit file list
+        explicit_files = [
+            f.strip() for f in sample.get("fileList", "").split(",") if f.strip()
+        ]
+        if explicit_files:
+            for url in explicit_files:
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_urls.append(ensure_xrootd_redirector(url))
+        elif das_path:
+            try:
+                client = _get_rucio_client()
+            except Exception as e:
+                raise RuntimeError(f"Cannot open Rucio client: {e}") from e
+
+            das_entries = [d.strip() for d in das_path.split(",") if d.strip()]
+            for das_entry in das_entries:
+                partial = _query_rucio(
+                    das_entry, self.size, WL, BL, site_override, client,
+                    max_files_per_group=999999,  # no chunking – return all URLs
+                )
+                for gkey in sorted(partial.keys()):
+                    for url in partial[gkey].split(","):
+                        url = url.strip()
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            all_urls.append(url)
+        else:
+            self.publish_message(
+                f"No DAS entries or explicit files for sample {name}; writing empty list."
+            )
+
+        payload = {"sample": name, "files": all_urls}
+        Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
+        with open(self.output().path, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        self.publish_message(
+            f"GetNANOFileList: {name} → {len(all_urls)} file(s) written to "
+            f"{self.output().path}"
+        )

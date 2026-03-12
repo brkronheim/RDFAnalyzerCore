@@ -1560,3 +1560,85 @@ class RunOpenDataJobs(OpenDataMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWo
             [exe_path, branch_data, self._root_setup_content, self.container_setup or ""],
             {},
         )
+
+
+# ===========================================================================
+# GetOpenDataFileList – lightweight file-list-only task
+# ===========================================================================
+
+class GetOpenDataFileList(OpenDataMixin, law.LocalWorkflow):
+    """Produce a per-dataset XRootD file-list JSON from the CERN Open Data Portal.
+
+    Unlike :class:`PrepareOpenDataSample` this task **only** queries the CERN
+    Open Data API and writes a compact JSON file::
+
+        openDataFileList_{name}/{sample_name}.json
+        {"sample": "name", "files": ["root://...", ...]}
+
+    The output can be consumed by :class:`~analysis_tasks.SkimTask` via
+    ``--file-source opendata --file-source-name <name>``.
+
+    Parameters are identical to :class:`OpenDataMixin`.
+    """
+
+    task_namespace = ""
+
+    @property
+    def _file_list_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"openDataFileList_{self.name}")
+
+    def create_branch_map(self):
+        samples, _, _ = _parse_opendata_config(self._sample_config)
+        if self.dataset:
+            if self.dataset not in samples:
+                raise ValueError(
+                    f"Dataset {self.dataset!r} not found in sample config. "
+                    f"Available: {sorted(samples.keys())}"
+                )
+            return {0: self.dataset}
+        return {i: key for i, key in enumerate(sorted(samples.keys()))}
+
+    def output(self):
+        sample_key = self.branch_data
+        return law.LocalFileTarget(
+            os.path.join(self._file_list_dir, f"{sample_key}.json")
+        )
+
+    def run(self):
+        task_label = f"GetOpenDataFileList[branch={self.branch}]"
+        with PerformanceRecorder(task_label) as rec:
+            self._run_impl()
+        rec.save(perf_path_for(self.output().path))
+
+    def _run_impl(self):
+        sample_key = self.branch_data
+        samples, recids, lumi = _parse_opendata_config(self._sample_config)
+        sample = samples[sample_key]
+        name = sample["name"]
+
+        # Build das→name mapping
+        sample_names = {s.get("das", s["name"]): s["name"] for s in samples.values()}
+
+        file_list: list = []
+        for recid in recids:
+            try:
+                partial = _process_metadata(recid, sample_names)
+            except Exception as e:
+                self.publish_message(
+                    f"Warning: failed to fetch metadata for recid {recid}: {e}"
+                )
+                continue
+            file_list.extend(partial.get(name, []))
+
+        if not file_list:
+            self.publish_message(
+                f"No files found for sample {name}; writing empty list."
+            )
+
+        payload = {"sample": name, "files": file_list}
+        Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
+        with open(self.output().path, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        self.publish_message(
+            f"GetOpenDataFileList: {name} → {len(file_list)} file(s)"
+        )
