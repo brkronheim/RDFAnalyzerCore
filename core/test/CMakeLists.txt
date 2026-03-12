@@ -268,13 +268,13 @@ if(Python3_FOUND)
     # so the failure is visible in CI rather than silently absent.
     add_core_unittest(CorePyUprootDatacardTest     test_uproot_datacard     "${_PYPATH}")
 
-    # test_datacard_generator requires ROOT Python bindings.
-    # ROOT_LIB_DIR is set by the top-level CMakeLists via CACHE INTERNAL.
+    # test_datacard_generator used to require ROOT Python bindings but has
+    # been rewritten to use uproot; no special environment variable is needed.
     add_test(
         NAME    CorePyDatacardGeneratorTest
         COMMAND ${Python3_EXECUTABLE} ${_CORE_PY}/test_datacard_generator.py
     )
     set_tests_properties(CorePyDatacardGeneratorTest PROPERTIES
-        ENVIRONMENT "PYTHONPATH=${_PYPATH_ROOT}"
+        ENVIRONMENT "PYTHONPATH=${_PYPATH}"
     )
 endif()

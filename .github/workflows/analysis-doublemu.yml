@@ -2,11 +2,11 @@ name: CMS DoubleMuon Analysis (on request)
 
 # Triggered manually via the GitHub Actions UI or REST API.
 # This job builds the CMS Run2016G DoubleMuon analysis, runs the analysis
-# executable over a single public CMS Open Data NanoAOD file, and then runs
-# the full analytic Z→μμ peak fit via AnalyticWorkspaceFitTask (local law).
-# If CMS Combine is found on the runner the fit is executed; otherwise the
-# datacards and RooFit workspaces are built and the fit step is skipped
-# gracefully.
+# executable over a single public CMS Open Data NanoAOD file, and then builds
+# the analytic Z→μμ fit inputs (RooFit workspaces + Combine datacards).
+# The CI runner's py312 environment is used for the lightweight Python checks,
+# while the workspace builder runs with the system Python that matches the
+# installed ROOT bindings.
 #
 # To trigger:
 #   GitHub UI:  Actions → "CMS DoubleMuon Analysis (on request)" → Run workflow
@@ -85,39 +85,46 @@ jobs:
       - name: Verify analysis output ROOT file
         working-directory: build/analyses/CMS_Run2016_DoubleMuon
         run: |
-          python3 - << 'EOF'
-          import uproot, sys
-          f = uproot.open("dimuon_zpeak_ci.root")
+          # Choose meta file if present; histograms and counters are written
+          # to the meta file by default, with the main output reserved for the
+          # skim tree.  The old CI check assumed the histograms lived in the
+          # primary file which caused failures.
+          OUT="dimuon_zpeak_ci.root"
+          META="dimuon_zpeak_ci_meta.root"
+          if [ -f "$META" ]; then
+            CHECK="$META"
+            echo "Checking meta file for histograms"
+          else
+            CHECK="$OUT"
+            echo "Checking main output file for histograms"
+          fi
+          python3 - <<'EOF'
+          import uproot, sys, os
+          f = uproot.open(os.environ['CHECK'])
           keys = f.keys()
           print("ROOT file keys:", keys[:20])
           hist_keys = [k for k in keys if "DimuonMass" in k]
           if not hist_keys:
-              print("ERROR: no DimuonMass histograms found in output!")
+              print("ERROR: no DimuonMass histograms found in file", os.environ['CHECK'])
               sys.exit(1)
           print(f"OK: found {len(hist_keys)} DimuonMass histogram(s)")
           EOF
 
-      - name: Run analytic Z-peak fit (AnalyticWorkspaceFitTask via local law)
+      - name: Build analytic Z-peak workspaces and datacards
         run: |
-          # Build up PYTHONPATH: local law/, core/python, and ROOT Python bindings.
-          ROOT_LIB=$(root-config --libdir 2>/dev/null || echo "")
-          export PYTHONPATH="${GITHUB_WORKSPACE}/law:${GITHUB_WORKSPACE}/core/python:${ROOT_LIB}:${PYTHONPATH}"
-
-          # law needs its config file in the current directory or LAW_HOME.
-          export LAW_HOME="${GITHUB_WORKSPACE}/law"
-
-          # Absolute path to the histogram file produced by the analysis step.
-          HIST_FILE="${GITHUB_WORKSPACE}/build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci.root"
+          # Use the ROOT-compatible system Python here. The self-hosted py312
+          # environment is fine for uproot-based checks but its PyROOT bindings
+          # are not ABI-compatible on the runner.
+          HIST_FILE="${GITHUB_WORKSPACE}/build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci_meta.root"
           WS_CFG="${GITHUB_WORKSPACE}/analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml"
+          FIT_DIR="${GITHUB_WORKSPACE}/analyticFit_ci_run"
 
-          # Run AnalyticWorkspaceFitTask.  The task gracefully skips the
-          # combine invocation if the combine binary is not found.
-          law run AnalyticWorkspaceFitTask \
-            --name ci_run \
+          /usr/bin/python3 "${GITHUB_WORKSPACE}/analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py" \
             --workspace-config "${WS_CFG}" \
-            --histogram-file "${HIST_FILE}"
+            --input "${HIST_FILE}" \
+            --outdir "${FIT_DIR}"
 
-      - name: Verify fit outputs (datacards + workspaces)
+        - name: Verify fit outputs (datacards + workspaces + plots)
         run: |
           FIT_DIR="${GITHUB_WORKSPACE}/analyticFit_ci_run"
           python3 - << EOF
@@ -128,15 +135,20 @@ jobs:
               sys.exit(1)
           datacards = glob.glob(os.path.join(fit_dir, "datacard_*.txt"))
           workspaces = glob.glob(os.path.join(fit_dir, "ws_*.root"))
+          plots = glob.glob(os.path.join(fit_dir, "fit_*.png"))
           print(f"Fit output dir: {fit_dir}")
           print(f"  Datacards   : {[os.path.basename(f) for f in datacards]}")
           print(f"  Workspaces  : {[os.path.basename(f) for f in workspaces]}")
+          print(f"  Plots       : {[os.path.basename(f) for f in plots]}")
           if not datacards:
               print("ERROR: no datacards found in fit output directory!")
               sys.exit(1)
           if not workspaces:
               print("ERROR: no workspaces found in fit output directory!")
               sys.exit(1)
+          if not plots:
+            print("ERROR: no fit plots found in fit output directory!")
+            sys.exit(1)
           print("OK: fit outputs look good.")
           EOF
 

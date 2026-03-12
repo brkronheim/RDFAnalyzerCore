@@ -91,12 +91,6 @@ void CounterService::bookIntWeightHistogram(ROOT::RDF::RNode df,
 }
 
 void CounterService::onPreFilter(ROOT::RDF::RNode& df) {
-  if (!intWeightBranch_m.empty() && !intWeightHistResult_m.has_value()) {
-    // Default binning for stitching/category codes: integer-centered bins from
-    // -0.5 to 1023.5. This keeps the histogram on the pre-filter node and
-    // avoids an extra event loop or post-hoc reconstruction.
-    bookIntWeightHistogram(df, intWeightBranch_m, 1024, -0.5, 1023.5);
-  }
   filtersApplied_m = true;
 }
 

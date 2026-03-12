@@ -8,12 +8,14 @@ This test validates that:
 3. C++-style naming aliases (Define/Filter) work in Python.
 4. The output file contains the expected filtered entries and values.
 
+The test uses **uproot** to read/write ROOT files so there is no PyROOT
+requirement.  numba is still required for the DefineFromPointer portion.
+
 Exit codes:
   0: success
   1: failure
- 77: skipped due to missing runtime prerequisites (ROOT/numba/module)
+ 77: skipped due to missing runtime prerequisites (uproot/numba/module)
 """
-
 import ctypes
 import math
 import sys
@@ -41,9 +43,9 @@ def _require_imports():
         sys.exit(SKIP_EXIT_CODE)
 
     try:
-        import ROOT  # type: ignore
+        import uproot  # type: ignore
     except Exception as exc:
-        print(f"SKIP: unable to import ROOT: {exc}")
+        print(f"SKIP: unable to import uproot: {exc}")
         sys.exit(SKIP_EXIT_CODE)
 
     try:
@@ -52,22 +54,17 @@ def _require_imports():
         print(f"SKIP: unable to import numba: {exc}")
         sys.exit(SKIP_EXIT_CODE)
 
-    return rdfanalyzer, ROOT, numba
+    # return modules in the order they are used later; ROOT module is no longer needed
+    return rdfanalyzer, uproot, numba
 
 
-def _write_input_root(root_module, input_file: Path) -> None:
-    root_file = root_module.TFile(str(input_file), "RECREATE")
-    tree = root_module.TTree("Events", "Events")
-
-    pt = array("d", [0.0])
-    tree.Branch("pt", pt, "pt/D")
-
-    for value in (10.0, 30.0, 50.0):
-        pt[0] = value
-        tree.Fill()
-
-    tree.Write()
-    root_file.Close()
+def _write_input_root(uproot_module, input_file: Path) -> None:
+    # using uproot to create a simple TTree with a single branch
+    import numpy as np
+    # three values for pt (use native little-endian dtype for uproot compatibility)
+    arr = np.array([10.0, 30.0, 50.0], dtype="float64")
+    with uproot_module.recreate(str(input_file)) as f:
+        f["Events"] = {"pt": arr}
 
 
 def _write_save_config(save_config: Path) -> None:
@@ -109,25 +106,17 @@ def _write_analysis_config(config_path: Path, input_file: Path, output_file: Pat
     config_path.write_text(content + "\n")
 
 
-def _assert_output(root_module, output_file: Path) -> None:
-    root_file = root_module.TFile.Open(str(output_file), "READ")
-    if not root_file or root_file.IsZombie():
-        raise RuntimeError(f"Failed to open output file: {output_file}")
+def _assert_output(uproot_module, output_file: Path) -> None:
+    # read output with uproot and validate contents
+    with uproot_module.open(str(output_file)) as f:
+        tree = f["Events"]
+        entries = tree.num_entries
+        if entries != 2:
+            raise AssertionError(f"Expected 2 entries after filtering, got {entries}")
 
-    tree = root_file.Get("Events")
-    if tree is None:
-        raise RuntimeError("Output file does not contain tree 'Events'")
-
-    entries = tree.GetEntries()
-    if entries != 2:
-        raise AssertionError(f"Expected 2 entries after filtering, got {entries}")
-
-    scaled_values = []
-    pass_flags = []
-    for idx in range(entries):
-        tree.GetEntry(idx)
-        scaled_values.append(float(tree.pt_scaled))
-        pass_flags.append(bool(tree.pass_high_pt))
+        arr = tree.arrays(["pt_scaled", "pass_high_pt"], library="np")
+        scaled_values = arr["pt_scaled"].tolist()
+        pass_flags = arr["pass_high_pt"].tolist()
 
     expected_scaled = [60.0, 100.0]
     for actual, expected in zip(scaled_values, expected_scaled):
@@ -139,11 +128,9 @@ def _assert_output(root_module, output_file: Path) -> None:
     if pass_flags != [True, True]:
         raise AssertionError(f"Expected pass_high_pt flags [True, True], got {pass_flags}")
 
-    root_file.Close()
-
 
 def run_test() -> int:
-    rdfanalyzer, root_module, numba = _require_imports()
+    rdfanalyzer, uproot, numba = _require_imports()
 
     expected_methods = [
         "Define", "Filter", "DefineVector", "DefineFromPointer", "DefineFromVector",
@@ -170,7 +157,7 @@ def run_test() -> int:
         save_config = workdir / "save_columns.txt"
         config_file = workdir / "config.txt"
 
-        _write_input_root(root_module, input_file)
+        _write_input_root(uproot, input_file)
         _write_save_config(save_config)
         _write_analysis_config(config_file, input_file, output_file, save_config)
         plugin_cfgs = _write_minimal_plugin_configs(workdir)
@@ -291,7 +278,7 @@ def run_test() -> int:
         _ = analyzer.makeSystList("pt_scaled")
         analyzer.save()
 
-        _assert_output(root_module, output_file)
+        _assert_output(uproot, output_file)
 
     print("PASS: Python bindings numba DefineFromPointer + Define/Filter alias integration")
     return 0

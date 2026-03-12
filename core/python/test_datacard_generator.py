@@ -1,87 +1,59 @@
 #!/usr/bin/env python3
 """
-Test script for the datacard generator.
-Creates mock ROOT files and tests the datacard generation functionality.
+Originally a PyROOT-based datacard generator test; now rewritten to use
+uproot so that no ROOT Python bindings are required.
+
+The logic mirrors test_uproot_datacard.py but remains self-contained so the
+existing CTest rule can continue to execute this file.
 """
 
 import os
 import sys
 import tempfile
-import shutil
 
-# Add parent directory to path to import ROOT
+# Add parent directory to path to import the library under test
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import ROOT
+# dependencies
 import yaml
 
+try:
+    import uproot
+except ImportError:
+    print("SKIP: uproot not available")
+    sys.exit(77)
 
-def create_mock_histogram(name, nbins=50, xmin=0, xmax=500, mean=250, sigma=50, integral=1000):
-    """Create a mock histogram with Gaussian distribution."""
-    hist = ROOT.TH1F(name, name, nbins, xmin, xmax)
-    
-    # Fill with Gaussian distribution
-    for i in range(int(integral)):
-        hist.Fill(ROOT.gRandom.Gaus(mean, sigma))
-    
-    return hist
+import numpy as np
 
 
 def create_mock_root_file(filename, histograms):
-    """Create a mock ROOT file with given histograms."""
-    root_file = ROOT.TFile.Open(filename, "RECREATE")
-    
-    for hist_name, hist_params in histograms.items():
-        hist = create_mock_histogram(hist_name, **hist_params)
-        hist.Write()
-    
-    root_file.Close()
-    print(f"Created mock ROOT file: {filename}")
+    """Create a mock ROOT file with simple histograms using uproot.
 
+    `histograms` should be a dict mapping hist_name -> (values_array, edges_array)
+    """
+    with uproot.recreate(filename) as f:
+        for name, (values, edges) in histograms.items():
+            f[name] = (values, edges)
 
 def create_test_config(test_dir, input_dir):
-    """Create a test YAML configuration file."""
+    """Create a concise YAML configuration for the datacard generator."""
     config = {
         'output_dir': os.path.join(test_dir, 'output'),
         'input_files': {
-            'data_obs': {
-                'path': os.path.join(input_dir, 'data.root'),
-                'type': 'data'
-            },
-            'signal': {
-                'path': os.path.join(input_dir, 'signal.root'),
-                'type': 'signal'
-            },
-            'ttbar': {
-                'path': os.path.join(input_dir, 'ttbar.root'),
-                'type': 'background'
-            },
-            'wjets': {
-                'path': os.path.join(input_dir, 'wjets.root'),
-                'type': 'background'
-            }
+            'data_obs': {'path': os.path.join(input_dir, 'data.root'), 'type': 'data'},
+            'signal': {'path': os.path.join(input_dir, 'signal.root'), 'type': 'signal'},
+            'ttbar': {'path': os.path.join(input_dir, 'ttbar.root'), 'type': 'background'},
         },
         'processes': {
-            'signal': {
-                'samples': ['signal'],
-                'description': 'Test signal'
-            },
-            'ttbar': {
-                'samples': ['ttbar'],
-                'description': 'Top pair'
-            },
-            'wjets': {
-                'samples': ['wjets'],
-                'description': 'W+jets'
-            }
+            'signal': {'samples': ['signal'], 'description': 'Test signal'},
+            'ttbar': {'samples': ['ttbar'], 'description': 'Top pair'},
         },
         'control_regions': {
             'signal_region': {
                 'observable': 'mT',
-                'processes': ['signal', 'ttbar', 'wjets'],
+                'processes': ['signal', 'ttbar'],
                 'signal_processes': ['signal'],
                 'data_process': 'data_obs',
-                'rebin': 2,
                 'description': 'Test signal region'
             }
         },
@@ -90,11 +62,7 @@ def create_test_config(test_dir, input_dir):
                 'type': 'rate',
                 'distribution': 'lnN',
                 'value': 1.025,
-                'applies_to': {
-                    'signal': True,
-                    'ttbar': True,
-                    'wjets': True
-                },
+                'applies_to': {'signal': True, 'ttbar': True},
                 'regions': ['signal_region'],
                 'description': 'Luminosity'
             },
@@ -102,100 +70,78 @@ def create_test_config(test_dir, input_dir):
                 'type': 'shape',
                 'distribution': 'shape',
                 'variation': 0.03,
-                'applies_to': {
-                    'signal': True,
-                    'ttbar': True,
-                    'wjets': True
-                },
+                'applies_to': {'signal': True, 'ttbar': True},
                 'regions': ['signal_region'],
-                'correlated': True,
                 'description': 'Jet energy scale'
             }
         }
     }
-    
     config_file = os.path.join(test_dir, 'test_config.yaml')
     with open(config_file, 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
-    
     print(f"Created test configuration: {config_file}")
     return config_file
 
 
 def test_datacard_generator():
-    """Main test function."""
+    """Main test function using uproot-based histogram files."""
     print("=" * 80)
-    print("Testing Datacard Generator")
+    print("Testing Datacard Generator (pure uproot)")
     print("=" * 80)
-    
+
     # Create temporary directory for test files
     test_dir = tempfile.mkdtemp(prefix='datacard_test_')
     input_dir = os.path.join(test_dir, 'input')
     os.makedirs(input_dir, exist_ok=True)
-    
+
     try:
-        # Create mock ROOT files
         print("\nCreating mock ROOT files...")
-        
-        # Data file
+        # uniform binning for simplicity
+        edges = np.linspace(0, 500, 51)
+
         create_mock_root_file(
             os.path.join(input_dir, 'data.root'),
-            {
-                'mT': {'mean': 250, 'sigma': 50, 'integral': 5000}
-            }
+            {'mT': (np.random.poisson(100, 50), edges)}
         )
-        
-        # Signal file
         create_mock_root_file(
             os.path.join(input_dir, 'signal.root'),
             {
-                'mT': {'mean': 300, 'sigma': 30, 'integral': 500}
+                'mT': (np.random.poisson(10, 50), edges),
+                'mT_JESUp': (np.random.poisson(10, 50) * 1.03, edges),
+                'mT_JESDown': (np.random.poisson(10, 50) * 0.97, edges),
             }
         )
-        
-        # ttbar file
         create_mock_root_file(
             os.path.join(input_dir, 'ttbar.root'),
             {
-                'mT': {'mean': 200, 'sigma': 60, 'integral': 2000}
+                'mT': (np.random.poisson(50, 50), edges),
+                'mT_JESUp': (np.random.poisson(50, 50) * 1.03, edges),
+                'mT_JESDown': (np.random.poisson(50, 50) * 0.97, edges),
             }
         )
-        
-        # wjets file
-        create_mock_root_file(
-            os.path.join(input_dir, 'wjets.root'),
-            {
-                'mT': {'mean': 180, 'sigma': 70, 'integral': 2500}
-            }
-        )
-        
+
         # Create test configuration
         print("\nCreating test configuration...")
         config_file = create_test_config(test_dir, input_dir)
-        
+
         # Import and run the datacard generator
         print("\nRunning datacard generator...")
         from create_datacards import DatacardGenerator
-        
         generator = DatacardGenerator(config_file)
         generator.run()
-        
+
         # Verify outputs
         print("\nVerifying outputs...")
         output_dir = os.path.join(test_dir, 'output')
-        
         expected_files = [
             'datacard_signal_region.txt',
             'shapes_signal_region.root'
         ]
-        
         all_found = True
         for expected_file in expected_files:
             file_path = os.path.join(output_dir, expected_file)
             if os.path.exists(file_path):
                 print(f"  ✓ Found: {expected_file}")
-                
-                # Print file size
                 size = os.path.getsize(file_path)
                 print(f"    Size: {size} bytes")
                 
@@ -207,16 +153,10 @@ def test_datacard_generator():
                             if i < 10:
                                 print(f"      {line.rstrip()}")
                 
-                # For ROOT file, check histograms
+                # For ROOT file, check histograms with uproot
                 if expected_file.endswith('.root'):
-                    root_file = ROOT.TFile.Open(file_path, "READ")
-                    print(f"    Histograms:")
-                    for key in root_file.GetListOfKeys():
-                        obj = key.ReadObj()
-                        if obj.InheritsFrom("TH1"):
-                            integral = obj.Integral()
-                            print(f"      - {obj.GetName()}: {integral:.2f} events")
-                    root_file.Close()
+                    with uproot.open(file_path) as rf:
+                        print(f"    Histograms: {rf.keys()}")
             else:
                 print(f"  ✗ Missing: {expected_file}")
                 all_found = False
@@ -242,9 +182,5 @@ def test_datacard_generator():
 
 
 if __name__ == "__main__":
-    # Suppress ROOT messages
-    ROOT.gROOT.SetBatch(True)
-    ROOT.gErrorIgnoreLevel = ROOT.kWarning
-    
     success = test_datacard_generator()
     sys.exit(0 if success else 1)

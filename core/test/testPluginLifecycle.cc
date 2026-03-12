@@ -64,10 +64,11 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Helper: build a minimal Analyzer using the ExampleAnalysis config
+// Helper: build a minimal Analyzer using the small test_data_config
 // ---------------------------------------------------------------------------
 static std::string exampleCfg() {
-    return std::string(TEST_SOURCE_DIR) + "/../../analyses/ExampleAnalysis/cfg.txt";
+    // test_data_config.txt lives under core/test/cfg relative to source dir
+    return std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.txt";
 }
 
 // ---------------------------------------------------------------------------
