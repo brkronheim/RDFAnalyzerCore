@@ -10,6 +10,11 @@ namespace {
     if (suffix.size() > str.size()) return false;
     return str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
   }
+
+  // Returns true when the file path has a YAML extension (.yaml or .yml)
+  bool isYamlFile(const std::string& filePath) {
+    return endsWith(filePath, ".yaml") || endsWith(filePath, ".yml");
+  }
 }
 
 /**
@@ -187,17 +192,32 @@ std::string ConfigurationManager::resolveConfigPath(const std::string &path) con
 
 /**
  * @brief Parse a pair-based configuration file
+ *
+ * The format (YAML vs text) is determined by the extension of the referenced
+ * file, not the extension of the top-level config. This allows a text-format
+ * main config to reference YAML sub-configs and vice-versa.
+ *
  * @param configFile Path to the configuration file
  * @return Map of configuration keys and values
  */
 std::unordered_map<std::string, std::string>
 ConfigurationManager::parsePairBasedConfig(
     const std::string &configFile) const {
-  return adapter_m->parsePairBasedConfig(resolveConfigPath(configFile));
+  const std::string resolvedPath = resolveConfigPath(configFile);
+  if (isYamlFile(resolvedPath)) {
+    YamlConfigAdapter yamlAdapter;
+    return yamlAdapter.parsePairBasedConfig(resolvedPath);
+  }
+  return adapter_m->parsePairBasedConfig(resolvedPath);
 }
 
 /**
  * @brief Parse a multi-key configuration from a file
+ *
+ * The format (YAML vs text) is determined by the extension of the referenced
+ * file, not the extension of the top-level config. This allows a text-format
+ * main config to reference a YAML histogram config file and vice-versa.
+ *
  * @param configFile Path to the configuration file to parse
  * @param requiredEntryKeys Vector of required entry keys
  * @return Vector of maps of entry keys and values
@@ -206,17 +226,31 @@ std::vector<std::unordered_map<std::string, std::string>>
 ConfigurationManager::parseMultiKeyConfig(
     const std::string &configFile,
     const std::vector<std::string> &requiredEntryKeys) const {
-  return adapter_m->parseMultiKeyConfig(resolveConfigPath(configFile), requiredEntryKeys);
+  const std::string resolvedPath = resolveConfigPath(configFile);
+  if (isYamlFile(resolvedPath)) {
+    YamlConfigAdapter yamlAdapter;
+    return yamlAdapter.parseMultiKeyConfig(resolvedPath, requiredEntryKeys);
+  }
+  return adapter_m->parseMultiKeyConfig(resolvedPath, requiredEntryKeys);
 }
 
 /**
  * @brief Parse a vector-based configuration file
+ *
+ * The format (YAML vs text) is determined by the extension of the referenced
+ * file, not the extension of the top-level config.
+ *
  * @param configFile Path to the configuration file
  * @return Vector of configuration lines
  */
 std::vector<std::string>
 ConfigurationManager::parseVectorConfig(const std::string &configFile) const {
-  return adapter_m->parseVectorConfig(resolveConfigPath(configFile));
+  const std::string resolvedPath = resolveConfigPath(configFile);
+  if (isYamlFile(resolvedPath)) {
+    YamlConfigAdapter yamlAdapter;
+    return yamlAdapter.parseVectorConfig(resolvedPath);
+  }
+  return adapter_m->parseVectorConfig(resolvedPath);
 }
 
 /**

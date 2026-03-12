@@ -174,6 +174,54 @@ public:
    */
   void bindToRegionManager(RegionManager *rm);
 
+  /**
+   * @brief Structure to hold parsed histogram configuration.
+   *
+   * Exposed as a public struct so that tests (and user code) can inspect the
+   * loaded configuration via getConfigHistograms().
+   */
+  struct HistogramConfig {
+    std::string name;
+    std::string variable;
+    std::string label;
+    std::string weight;
+    int bins;
+    float lowerBound;
+    float upperBound;
+    std::string suffix;
+    std::string channelVariable;
+    int channelBins;
+    float channelLowerBound;
+    float channelUpperBound;
+    std::vector<std::string> channelRegions;
+    std::string controlRegionVariable;
+    int controlRegionBins;
+    float controlRegionLowerBound;
+    float controlRegionUpperBound;
+    std::vector<std::string> controlRegionRegions;
+    std::string sampleCategoryVariable;
+    int sampleCategoryBins;
+    float sampleCategoryLowerBound;
+    float sampleCategoryUpperBound;
+    std::vector<std::string> sampleCategoryRegions;
+  };
+
+  /**
+   * @brief Get the tracked histogram infos (for testing).
+   * @return Const reference to the tracked histogram info batches.
+   */
+  const std::vector<std::vector<histInfo>>& GetTrackedHistInfos() const {
+    return trackedHistInfos_m;
+  }
+
+  /**
+   * @brief Get the parsed config histogram definitions (for testing).
+   * @return Const reference to the config histogram vector.
+   */
+  const std::vector<HistogramConfig>& getConfigHistograms() const {
+    return configHistograms_m;
+  }
+
 private:
   void BookSingleHistogramWithSystList(histInfo &info,
                                        selectionInfo &&sampleCategoryInfo,
@@ -208,35 +256,6 @@ private:
    * @return The column name of the membership vector.
    */
   std::string ensureRegionMembershipColumn();
-
-  /**
-   * @brief Structure to hold parsed histogram configuration
-   */
-  struct HistogramConfig {
-    std::string name;
-    std::string variable;
-    std::string label;
-    std::string weight;
-    int bins;
-    float lowerBound;
-    float upperBound;
-    std::string suffix;
-    std::string channelVariable;
-    int channelBins;
-    float channelLowerBound;
-    float channelUpperBound;
-    std::vector<std::string> channelRegions;
-    std::string controlRegionVariable;
-    int controlRegionBins;
-    float controlRegionLowerBound;
-    float controlRegionUpperBound;
-    std::vector<std::string> controlRegionRegions;
-    std::string sampleCategoryVariable;
-    int sampleCategoryBins;
-    float sampleCategoryLowerBound;
-    float sampleCategoryUpperBound;
-    std::vector<std::string> sampleCategoryRegions;
-  };
 
   /**
    * @brief Vector of histogram result pointers.

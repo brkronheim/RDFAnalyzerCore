@@ -1071,6 +1071,51 @@ void NDHistogramManager::bookConfigHistograms() {
     }
   }
 
+  // Track booked config histogram infos so that the no-args saveHists()
+  // overload (called by Analyzer::run()) can find and write them to the meta
+  // file.  Without this, trackedHistInfos_m stays empty and saveHists()
+  // returns early, leaving histograms out of the output.
+  std::vector<histInfo> configBatch;
+  configBatch.reserve(configHistograms_m.size());
+  for (const auto& config : configHistograms_m) {
+    configBatch.emplace_back(config.name.c_str(), config.variable.c_str(),
+                              config.label.c_str(), config.weight.c_str(),
+                              config.bins, config.lowerBound, config.upperBound);
+  }
+  if (!configBatch.empty()) {
+    trackedHistInfos_m.push_back(std::move(configBatch));
+    // Build region names that match the axes used when booking.
+    // SaveHists() uses these to map histogram bins to output directory paths.
+    // Axis order: [channel, controlRegion, sampleCategory, systematics].
+    //
+    // NOTE: When different config histograms use distinct channel/control/
+    // sampleCategory region lists, SaveHists() can only honour one set of
+    // region names for the entire batch.  Using the first config's regions is
+    // correct for the common case where all histograms share the same region
+    // structure.  If histograms with heterogeneous region lists are needed,
+    // book them via separate bookND() calls with explicit allRegionNames.
+    // The guard `configBatch.empty()` above ensures configHistograms_m is
+    // non-empty before the `.front()` calls below.
+    if (nRegions > 0) {
+      // RegionManager path: channel axis is the region membership column.
+      const auto& firstConfig = configHistograms_m.front();
+      trackedRegionNames_m = {
+          rmRegionNames,
+          firstConfig.controlRegionRegions,
+          firstConfig.sampleCategoryRegions,
+          systList};
+    } else {
+      // Standard path: axes come from the per-histogram selectionInfo.
+      // Use the first config's regions as the representative set.
+      const auto& firstConfig = configHistograms_m.front();
+      trackedRegionNames_m = {
+          firstConfig.channelRegions,
+          firstConfig.controlRegionRegions,
+          firstConfig.sampleCategoryRegions,
+          systList};
+    }
+  }
+
   if (logger_m) {
     logger_m->log(ILogger::Level::Info, "NDHistogramManager: Successfully booked all config histograms");
   }
