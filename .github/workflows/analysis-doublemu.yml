@@ -1,4 +1,4 @@
-name: CMS DoubleMuon Analysis (on request)
+name: CMS DoubleMuon Analysis
 
 # Triggered manually via the GitHub Actions UI or REST API.
 # This job builds the CMS Run2016G DoubleMuon analysis, runs the analysis
@@ -124,7 +124,7 @@ jobs:
             --input "${HIST_FILE}" \
             --outdir "${FIT_DIR}"
 
-        - name: Verify fit outputs (datacards + workspaces + plots)
+      - name: Verify fit outputs (datacards + workspaces + plots)
         run: |
           FIT_DIR="${GITHUB_WORKSPACE}/analyticFit_ci_run"
           python3 - << EOF
