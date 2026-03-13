@@ -31,6 +31,9 @@ jobs:
         else
           echo "ERROR: ROOT not found on runner"; exit 1
         fi
+        which nvcc
+        nvcc --version
+        export CUDAToolkit_ROOT=/usr/local/cuda
 
     - name: Install Python test dependencies
       run: pip3 install -r requirements-ci.txt
