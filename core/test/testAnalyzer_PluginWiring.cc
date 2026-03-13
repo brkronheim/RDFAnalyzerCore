@@ -6,8 +6,8 @@
 TEST(AnalyzerPluginWiring, AddPluginAfterConfigCtor) {
     ChangeToTestSourceDir();
 
-    // Use the example analysis config file (bundled in the repo) to exercise the config-file-based ctor
-    std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/../../analyses/ExampleAnalysis/cfg.txt";
+    // Use the lightweight test config for speed and determinism
+    std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.txt";
     Analyzer analyzer(cfgPath);
 
     // Construct a histogram manager using the analyzer's config provider

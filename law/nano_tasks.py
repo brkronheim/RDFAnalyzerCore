@@ -53,7 +53,9 @@ Usage
 
 from __future__ import annotations
 
+import fnmatch
 import json
+import logging
 import os
 import re
 import shlex
@@ -62,6 +64,8 @@ import subprocess
 import sys
 import time
 import glob
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import luigi  # type: ignore
@@ -1533,6 +1537,32 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                 for proc, exit_code in _condor_history_exit(cid).items():
                     history_exit[(cid, proc)] = exit_code
 
+            # Batch-check EOS output files for all jobs that have left the
+            # condor queue.  Grouping by parent directory means one xrdfs ls
+            # call per output directory rather than one xrdfs stat per file.
+            eos_paths_to_check: list = []
+            for idx in sorted(job_info.keys()):
+                jstate_check = state["jobs"][str(idx)]
+                if jstate_check["status"] in ("done", "perm_fail"):
+                    continue
+                cid_check = str(jstate_check["cluster"])
+                proc_check = jstate_check["proc"]
+                if live_status.get((cid_check, proc_check)) is None:
+                    # Job not in live queue; may need EOS check
+                    orig_save = job_info[idx]["orig_save"]
+                    orig_meta = job_info[idx]["orig_meta"]
+                    if orig_save:
+                        eos_paths_to_check.append(orig_save)
+                    if orig_meta:
+                        eos_paths_to_check.append(orig_meta)
+
+            # One xrdfs ls per parent directory (batch, directory-level check)
+            eos_exists: dict = (
+                _eos_files_exist_batch(eos_paths_to_check)
+                if eos_paths_to_check
+                else {}
+            )
+
             # Update each job's status -----------------------------------
             for idx in sorted(job_info.keys()):
                 key    = str(idx)
@@ -1579,13 +1609,14 @@ class MonitorNANOJobs(NANOMixin, law.Task):
                     # exit_code == 0: analysis finished, check EOS output
 
                 # Job either completed cleanly (exit 0) or is running and
-                # has already left the queue – check EOS file.
+                # has already left the queue – check EOS file using the
+                # pre-computed batch directory-level results.
                 if condor_js is None:  # no longer in queue
                     orig_save = job_info[idx]["orig_save"]
                     orig_meta = job_info[idx]["orig_meta"]
                     if (
-                        (orig_save and _eos_file_exists(orig_save))
-                        or (orig_meta and _eos_file_exists(orig_meta))
+                        (orig_save and eos_exists.get(orig_save, False))
+                        or (orig_meta and eos_exists.get(orig_meta, False))
                     ):
                         jstate["status"] = "done"
                         self.publish_message(f"Job {idx}: output verified on EOS.")
@@ -1892,4 +1923,436 @@ class RunNANOJobs(NANOMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWorkflow):
             _run_analysis_job,
             [exe_path, branch_data, self._root_setup_content, self.container_setup or ""],
             {},
+        )
+
+
+# ===========================================================================
+# GetXRDFSFileList – file discovery via xrdfs ls
+# ===========================================================================
+
+def _xrdfs_list_files(
+    server: str,
+    remote_path: str,
+    pattern: str = "*.root",
+    recursive: bool = True,
+    timeout: int = 60,
+    max_workers: int = 8,
+) -> list:
+    """Discover ROOT files on an XRootD server using ``xrdfs ls``.
+
+    Directory listings are performed at the directory level (one ``xrdfs ls``
+    call per directory) and all sub-directories are listed **in parallel** using
+    a :class:`~concurrent.futures.ThreadPoolExecutor`  BFS traversal.  This is
+    substantially faster than the previous recursive serial approach, especially
+    for deep directory trees with many sub-directories.
+
+    Parameters
+    ----------
+    server:
+        XRootD server URL, e.g. ``root://eosuser.cern.ch/``.
+    remote_path:
+        Remote directory path to search, e.g. ``/eos/user/a/alice/ntuples/``.
+    pattern:
+        Glob-style filename pattern to match (matched against basename only).
+    recursive:
+        When True, recursively search sub-directories using parallel BFS.
+    timeout:
+        Timeout in seconds for each individual ``xrdfs ls`` invocation.
+    max_workers:
+        Maximum number of parallel ``xrdfs ls`` threads per BFS level.
+
+    Returns
+    -------
+    list[str]
+        Sorted list of ``root://{server}/{path}`` URLs for matching files.
+    """
+
+    def _ls_single_dir(path: str) -> tuple:
+        """List one directory; return (files, subdirs)."""
+        try:
+            result = subprocess.run(
+                ["xrdfs", server, "ls", "-l", path],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except Exception as exc:
+            logging.warning("xrdfs ls failed for %s: %s", path, exc)
+            return [], []
+
+        if result.returncode != 0:
+            logging.warning(
+                "xrdfs ls returned %d for %s: %s",
+                result.returncode, path, result.stderr.strip(),
+            )
+            return [], []
+
+        files: list = []
+        subdirs: list = []
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            entry = parts[-1]
+            if not entry.startswith("/"):
+                continue
+            if line.startswith("d") or (len(parts) > 4 and parts[0].startswith("d")):
+                subdirs.append(entry)
+            else:
+                if fnmatch.fnmatch(os.path.basename(entry), pattern):
+                    files.append(entry)
+        return files, subdirs
+
+    # BFS with parallel per-level directory listing
+    all_files: list = []
+    queue: list = [remote_path]
+
+    while queue:
+        workers = min(len(queue), max_workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_dir = {executor.submit(_ls_single_dir, d): d for d in queue}
+            next_queue: list = []
+            for fut in as_completed(future_to_dir):
+                try:
+                    files, subdirs = fut.result()
+                except Exception as exc:
+                    logging.warning(
+                        "xrdfs listing failed for %s: %s",
+                        future_to_dir[fut], exc,
+                    )
+                    files, subdirs = [], []
+                all_files.extend(files)
+                if recursive:
+                    next_queue.extend(subdirs)
+        queue = next_queue
+
+    urls = [f"{server.rstrip('/')}/{p.lstrip('/')}" for p in sorted(all_files)]
+    return urls
+
+
+def _eos_files_exist_batch(
+    eos_paths: list,
+    server: str = "root://eosuser.cern.ch/",
+    timeout: int = 60,
+) -> dict:
+    """Check existence of multiple EOS files using directory-level ``xrdfs ls``.
+
+    Files are grouped by their parent directory so that a single ``xrdfs ls``
+    call is made per parent directory instead of one ``xrdfs stat`` call per
+    file.  This dramatically reduces the number of round-trips to the XRootD
+    server when verifying many output files.
+
+    Parameters
+    ----------
+    eos_paths:
+        List of EOS paths to check.  Each path may be in ``root://...`` URL
+        form or a plain ``/eos/...`` path.
+    server:
+        XRootD server used for ``xrdfs ls`` calls (default: eosuser.cern.ch).
+    timeout:
+        Timeout in seconds for each ``xrdfs ls`` invocation.
+
+    Returns
+    -------
+    dict[str, bool]
+        Mapping from each original path to ``True`` (exists) / ``False``
+        (does not exist or could not be determined).
+    """
+    result: dict = {}
+    by_dir: dict = defaultdict(list)
+
+    for path in eos_paths:
+        if not path:
+            result[path] = False
+            continue
+        clean = path.strip()
+        if clean.startswith("root://"):
+            parts = clean.split("/", 3)
+            clean_path = "/" + parts[3].lstrip("/") if len(parts) >= 4 else ""
+        else:
+            clean_path = clean
+        if not clean_path:
+            result[path] = False
+            continue
+        parent = os.path.dirname(clean_path)
+        by_dir[parent].append((path, clean_path))
+
+    for parent_dir, items in by_dir.items():
+        try:
+            r = subprocess.run(
+                ["xrdfs", server, "ls", parent_dir],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if r.returncode != 0:
+                # Directory listing failed; fall back to per-file stat
+                for orig_path, _ in items:
+                    result[orig_path] = _eos_file_exists(orig_path, timeout)
+                continue
+            existing = set(r.stdout.splitlines())
+            for orig_path, clean_path in items:
+                result[orig_path] = clean_path in existing
+        except Exception:
+            for orig_path, _ in items:
+                result[orig_path] = _eos_file_exists(orig_path, timeout)
+
+    return result
+
+
+class XRDFSMixin:
+    """Parameters shared by :class:`GetXRDFSFileList`."""
+
+    name = luigi.Parameter(
+        description="Run name; output files go to xrdfsFileList_{name}/",
+    )
+    dataset_manifest = luigi.Parameter(
+        description=(
+            "Path to the dataset manifest YAML.  Each dataset entry should "
+            "specify either an XRootD server + remote path via the ``xrdfs_server`` "
+            "and ``xrdfs_path`` fields, or explicit ``files`` URLs."
+        ),
+    )
+    xrdfs_server = luigi.Parameter(
+        default="",
+        description=(
+            "Default XRootD server (e.g. root://eosuser.cern.ch/).  "
+            "Can be overridden per-dataset in the manifest."
+        ),
+    )
+    xrdfs_pattern = luigi.Parameter(
+        default="*.root",
+        description="Glob pattern for ROOT file discovery (default: *.root).",
+    )
+    xrdfs_recursive = luigi.BoolParameter(
+        default=True,
+        description="Recursively search sub-directories (default: True).",
+    )
+
+
+class GetXRDFSFileList(XRDFSMixin, law.LocalWorkflow):
+    """Produce a per-dataset XRootD file-list JSON by running ``xrdfs ls``.
+
+    This task is useful for finding files on XRootD storage (EOS, dCache, etc.)
+    when Rucio or the CERN Open Data Portal are not available – for example when
+    running over existing skims or NTuples stored on EOS.
+
+    For each dataset entry in the manifest the task looks for an ``xrdfs_path``
+    field (the remote directory to search) and optionally an ``xrdfs_server``
+    field.  If neither is provided and explicit ``files`` are listed they are
+    used directly.
+
+    Output per dataset::
+
+        xrdfsFileList_{name}/{dataset_name}.json
+        {"sample": "dataset_name", "files": ["root://...", ...]}
+
+    The output can be consumed by :class:`~analysis_tasks.SkimTask` via
+    ``--file-source xrdfs --file-source-name <name>``.
+    """
+
+    task_namespace = ""
+
+    @property
+    def _file_list_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"xrdfsFileList_{self.name}")
+
+    def create_branch_map(self):
+        from dataset_manifest import DatasetManifest as _DatasetManifest
+        manifest = _DatasetManifest.load(self.dataset_manifest)
+        return {i: entry for i, entry in enumerate(manifest.datasets)}
+
+    def output(self):
+        from dataset_manifest import DatasetEntry as _DatasetEntry
+        dataset: _DatasetEntry = self.branch_data
+        return law.LocalFileTarget(
+            os.path.join(self._file_list_dir, f"{dataset.name}.json")
+        )
+
+    def run(self):
+        task_label = f"GetXRDFSFileList[branch={self.branch}]"
+        with PerformanceRecorder(task_label) as rec:
+            self._run_impl()
+        rec.save(perf_path_for(self.output().path))
+
+    def _run_impl(self):
+        from dataset_manifest import DatasetEntry as _DatasetEntry
+        dataset: _DatasetEntry = self.branch_data
+
+        # Prefer explicit file list from the manifest
+        if dataset.files:
+            files = [ensure_xrootd_redirector(f) for f in dataset.files]
+        else:
+            extras = getattr(dataset, "extra", {}) or {}
+            server = extras.get("xrdfs_server") or self.xrdfs_server
+            remote_path = extras.get("xrdfs_path", "")
+            if not remote_path:
+                self.publish_message(
+                    f"Dataset '{dataset.name}' has no files or xrdfs_path; "
+                    "writing empty list."
+                )
+                files = []
+            elif not server:
+                raise RuntimeError(
+                    f"Dataset '{dataset.name}': xrdfs_path is set but no "
+                    "xrdfs_server provided (set --xrdfs-server or add "
+                    "'xrdfs_server' to the manifest entry)."
+                )
+            else:
+                files = _xrdfs_list_files(
+                    server=server,
+                    remote_path=remote_path,
+                    pattern=self.xrdfs_pattern,
+                    recursive=self.xrdfs_recursive,
+                )
+
+        payload = {"sample": dataset.name, "files": files}
+        Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
+        with open(self.output().path, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        self.publish_message(
+            f"GetXRDFSFileList: {dataset.name} → {len(files)} file(s)"
+        )
+
+
+# ===========================================================================
+# GetNANOFileList – lightweight file-list-only task
+# ===========================================================================
+
+class GetNANOFileList(NANOMixin, law.LocalWorkflow):
+    """Produce a per-dataset XRootD file-list JSON without creating job directories.
+
+    Unlike :class:`PrepareNANOSample` this task **only** queries Rucio (or uses
+    the explicit ``files`` field from the dataset manifest) and writes a compact
+    JSON file::
+
+        nanoFileList_{name}/{sample_name}.json
+        {"sample": "name", "files": ["root://...", ...]}
+
+    The output of this task can be consumed directly by :class:`~analysis_tasks.SkimTask`
+    via the ``--file-source nano --file-source-name <name>`` parameters, enabling
+    a clean file-discovery → skim → collect-histograms pipeline without the full
+    HTCondor submission machinery.
+
+    Parameters are identical to :class:`NANOMixin`.
+    """
+
+    task_namespace = ""
+
+    @property
+    def _file_list_dir(self) -> str:
+        """Directory where per-dataset file list JSONs are written."""
+        return os.path.join(WORKSPACE, f"nanoFileList_{self.name}")
+
+    def create_branch_map(self):
+        sample_list, _, _, _, _ = _get_sample_list(self._sample_config)
+        if self.dataset:
+            if self.dataset not in sample_list:
+                raise ValueError(
+                    f"Dataset {self.dataset!r} not found in sample config. "
+                    f"Available: {sorted(sample_list.keys())}"
+                )
+            return {0: self.dataset}
+        return {i: key for i, key in enumerate(sorted(sample_list.keys()))}
+
+    def output(self):
+        sample_key = self.branch_data
+        return law.LocalFileTarget(
+            os.path.join(self._file_list_dir, f"{sample_key}.json")
+        )
+
+    def run(self):
+        task_label = f"GetNANOFileList[branch={self.branch}]"
+        with PerformanceRecorder(task_label) as rec:
+            self._run_impl()
+        rec.save(perf_path_for(self.output().path))
+
+    def _run_impl(self):
+        sample_key = self.branch_data
+        sample_list, _, lumi, WL, BL = _get_sample_list(self._sample_config)
+        sample = sample_list[sample_key]
+
+        name = sample["name"]
+        das_path = sample.get("das", "")
+        site_override = sample.get("site", "")
+
+        all_urls: list = []
+        seen_urls: set = set()
+        # Rucio-computed groups preserved for downstream SkimTask partitioning.
+        # Each entry is a comma-separated URL string (one group = one future job).
+        rucio_groups: list = []
+
+        # Check for explicit file list (no Rucio, no size-based grouping)
+        explicit_files = [
+            f.strip() for f in sample.get("fileList", "").split(",") if f.strip()
+        ]
+        if explicit_files:
+            for url in explicit_files:
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_urls.append(ensure_xrootd_redirector(url))
+            # No pre-computed groups for explicit file lists; SkimTask will
+            # partition them using --partition / --files-per-job.
+        elif das_path:
+            try:
+                client = _get_rucio_client()
+            except Exception as e:
+                raise RuntimeError(f"Cannot open Rucio client: {e}") from e
+
+            das_entries = [d.strip() for d in das_path.split(",") if d.strip()]
+
+            # Parallelize queries across DAS entries so that datasets with
+            # multiple DAS paths are resolved as fast as possible.
+            if len(das_entries) == 1:
+                partial_results = {das_entries[0]: _query_rucio(
+                    das_entries[0], self.size, WL, BL, site_override, client,
+                    max_files_per_group=self.files_per_job,
+                )}
+            else:
+                partial_results: dict = {}
+                workers = min(len(das_entries), 8)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    future_to_entry = {
+                        executor.submit(
+                            _query_rucio,
+                            entry, self.size, WL, BL, site_override, client,
+                            self.files_per_job,
+                        ): entry
+                        for entry in das_entries
+                    }
+                    for fut in as_completed(future_to_entry):
+                        entry = future_to_entry[fut]
+                        try:
+                            partial_results[entry] = fut.result()
+                        except Exception as exc:
+                            raise RuntimeError(
+                                f"Rucio query failed for DAS entry {entry!r}: {exc}"
+                            ) from exc
+
+            # Merge results in DAS-entry order for reproducibility
+            for das_entry in das_entries:
+                partial = partial_results.get(das_entry, {})
+                for gkey in sorted(partial.keys()):
+                    group_str = partial[gkey]  # comma-separated URL string
+                    group_urls = [u.strip() for u in group_str.split(",") if u.strip()]
+                    new_urls = [u for u in group_urls if u not in seen_urls]
+                    if new_urls:
+                        seen_urls.update(new_urls)
+                        all_urls.extend(new_urls)
+                        # Preserve the group as a comma-separated string
+                        rucio_groups.append(",".join(new_urls))
+        else:
+            self.publish_message(
+                f"No DAS entries or explicit files for sample {name}; writing empty list."
+            )
+
+        # Build output payload.
+        # ``groups`` encodes the Rucio-computed size+count grouping so that
+        # PrepareSkimJobs / SkimTask can use them directly without re-partitioning.
+        payload: dict = {"sample": name, "files": all_urls}
+        if rucio_groups:
+            payload["groups"] = rucio_groups
+
+        Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
+        with open(self.output().path, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        self.publish_message(
+            f"GetNANOFileList: {name} → {len(all_urls)} file(s), "
+            f"{len(rucio_groups)} Rucio group(s) written to {self.output().path}"
         )

@@ -24,22 +24,43 @@
 
 ## 1. Overview
 
-The LAW (Luigi Analysis Workflow) task system provides three high-level
-pipeline tasks that orchestrate the C++ analysis executable over a set of
-datasets defined in a YAML manifest:
+The LAW (Luigi Analysis Workflow) task system provides pipeline tasks that
+orchestrate the C++ analysis executable over a set of datasets defined in a
+YAML manifest:
 
 | Task | Class | Purpose |
 |------|-------|---------|
+| Pre-flight test | `RunSkimTestJob` | Run exe on one file before full dispatch |
+| Job preparation | `PrepareSkimJobs` | Set up job dirs and shared_inputs/ |
 | Skim pass | `SkimTask` | Run exe per dataset to produce skimmed ROOT files |
 | Histogram fill | `HistFillTask` | Fill histograms, optionally reading skim outputs |
 | Stitching weights | `StitchingDerivationTask` | Derive MC stitching scale factors |
+| File discovery | `GetXRDFSFileList` | Discover ROOT files via xrdfs ls (parallel BFS) |
+| File discovery | `GetNANOFileList` | Query Rucio for NanoAOD file lists (parallel) |
+| File discovery | `GetOpenDataFileList` | Fetch file lists from CERN Open Data Portal |
 
-All three tasks live in `law/analysis_tasks.py` and are invoked with the
+All analysis tasks live in `law/analysis_tasks.py` and are invoked with the
 standard LAW command:
 
 ```bash
 source law/env.sh
 law run <TaskName> [parameters]
+```
+
+### Typical task dependency chain
+
+```
+GetXRDFSFileList (automatic, --file-source xrdfs)
+    ↓
+PrepareSkimJobs   ─── creates job dirs + test_job/
+    ↓
+RunSkimTestJob    ─── runs exe on 1 file; blocks dispatch on failure
+    ↓
+SkimTask          ─── one branch per dataset
+    ↓
+HistFillTask      ─── one branch per dataset (--skim-name)
+    ↓
+MergeAll / FullAnalysisDAG → datacards → fits
 ```
 
 Supporting modules:
@@ -116,7 +137,7 @@ Logging verbosity.  Valid values: `"debug"`, `"info"`, `"warning"`, `"error"`.
 ## 3. SkimTask
 
 ```python
-class SkimTask(AnalysisMixin, law.LocalWorkflow)
+class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow)
 ```
 
 ### Purpose
@@ -124,10 +145,41 @@ class SkimTask(AnalysisMixin, law.LocalWorkflow)
 Runs the analysis executable once per dataset to produce skimmed ROOT output
 files.  Each branch corresponds to one `DatasetEntry` from the dataset manifest.
 
+Before dispatching the full multi-dataset workflow a **pre-flight test job**
+(`RunSkimTestJob`) is run automatically on a single input file.  This catches
+analysis runtime errors early, before potentially hundreds of jobs are
+submitted.  Pass ``--no-make-test-job`` to skip the test.
+
 ### Parameters
 
-Inherits all [AnalysisMixin parameters](#2-analysismixin-parameters).  No
-additional parameters.
+Inherits all [AnalysisMixin parameters](#2-analysismixin-parameters) and
+[SkimMixin parameters](#skimmixin-parameters).  Key additions:
+
+#### `--make-test-job` *(bool, default: `True`)*
+
+When ``True`` (the default), `SkimTask` declares `RunSkimTestJob` as a
+workflow prerequisite.  `RunSkimTestJob` will run the analysis executable on
+a single input file and fail with a clear error message before any branch is
+dispatched if the executable crashes.
+
+Pass ``--no-make-test-job`` to disable the pre-flight test and submit
+immediately.
+
+#### `--file-source` *(str, default: `""`)*
+
+File-list source controlling where input files are discovered.  Valid values:
+
+| Value | Source | Required prerequisite |
+|-------|--------|-----------------------|
+| `""` (default) | Dataset manifest `files` / `das` fields | None |
+| `xrdfs` | `GetXRDFSFileList` output (auto-chained) | `--file-source-name` |
+| `nano` | `GetNANOFileList` output (run manually) | `--file-source-name` |
+| `opendata` | `GetOpenDataFileList` output (run manually) | `--file-source-name` |
+
+When `--file-source xrdfs` is set, `PrepareSkimJobs.requires()` automatically
+declares `GetXRDFSFileList` as a dependency, so the full chain
+`GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask` runs
+automatically with a single `law run SkimTask` command.
 
 ### Branch Map
 
@@ -142,17 +194,21 @@ For multi-dimensional branching (regions, systematics) use
 
 ```
 skimRun_<name>/
+├── test_job/
+│   ├── submit_config.txt      ← minimal single-file config
+│   ├── test_output.root        ← test skim output
+│   └── test_passed.txt         ← RunSkimTestJob success marker
 ├── jobs/
 │   └── <dataset_name>/
-│       └── submit_config.txt      ← per-dataset config written by the task
+│       └── submit_config.txt  ← per-dataset config written by the task
 ├── outputs/
 │   └── <dataset_name>/
-│       ├── skim.root              ← skimmed event tree
-│       ├── meta.root              ← counter / meta histograms
-│       └── .cache.yaml            ← provenance sidecar (written by task)
+│       ├── skim.root           ← skimmed event tree
+│       ├── meta.root           ← counter / meta histograms
+│       └── .cache.yaml         ← provenance sidecar (written by task)
 └── job_outputs/
-    ├── <dataset_name>.done        ← completion marker (LAW output target)
-    └── <dataset_name>.perf.json   ← performance metrics
+    ├── <dataset_name>.done     ← completion marker (LAW output target)
+    └── <dataset_name>.perf.json ← performance metrics
 ```
 
 ### Caching and `complete()`
@@ -171,15 +227,59 @@ validity check:
 This check only applies at branch level; at the workflow level the standard
 LAW behaviour is preserved.
 
-### Example Command
+### Example Commands
 
 ```bash
+# Standard mode with pre-flight test (default)
 law run SkimTask \
     --submit-config analyses/myAnalysis/cfg/skim_config.txt \
     --exe build/analyses/myAnalysis/myanalysis \
     --name mySkimRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml
+
+# Skip the pre-flight test
+law run SkimTask \
+    --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+    --exe build/analyses/myAnalysis/myanalysis \
+    --name mySkimRun \
+    --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
+    --no-make-test-job
+
+# Automatic chain: GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask
+law run SkimTask \
+    --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+    --exe build/analyses/myAnalysis/myanalysis \
+    --name mySkimRun \
+    --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
+    --file-source xrdfs \
+    --file-source-name myFiles
 ```
+
+---
+
+## 3a. RunSkimTestJob
+
+```python
+class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task)
+```
+
+### Purpose
+
+Runs the analysis executable on a **single input file** as a pre-flight
+validation step before ``SkimTask`` dispatches the full multi-dataset workflow.
+
+In **file-source mode** (``--file-source`` set) ``RunSkimTestJob`` requires
+``PrepareSkimJobs``, which creates a ``test_job/`` directory with a minimal
+single-file config.
+
+In **standard manifest mode** (``--file-source`` empty) the task builds the
+test job directory itself from the first dataset's first file.
+
+### Output
+
+``skimRun_<name>/test_job/test_passed.txt`` – written on success.  If the
+analysis executable exits non-zero, the task fails with the stderr tail, and
+``SkimTask`` will not start.
 
 ---
 

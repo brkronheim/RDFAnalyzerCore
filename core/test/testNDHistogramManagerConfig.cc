@@ -511,6 +511,75 @@ TEST_F(NDHistogramManagerConfigTest, AutoDetectDoesNotDuplicateManualRegistratio
   EXPECT_NE(systs.find("jes"), systs.end());
 }
 
+// ---------------------------------------------------------------------------
+// YAML histogram config tests
+// ---------------------------------------------------------------------------
+
+TEST_F(NDHistogramManagerConfigTest, YamlHistogramConfigParsedFromTextMainConfig) {
+  // The main config is a TEXT file (cfg/test_data_config_minimal.txt).
+  // The histogram config is a YAML file (cfg/test_histograms.yaml).
+  // The framework must auto-detect the YAML format from the file extension
+  // and parse it correctly even though the main config uses TextConfigAdapter.
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
+
+  // Setup should parse the YAML config file without errors
+  EXPECT_NO_THROW(histogramManager->setupFromConfigFile());
+}
+
+TEST_F(NDHistogramManagerConfigTest, YamlHistogramConfigProducesSameResultAsText) {
+  // Parse both the text and YAML histogram configs and verify they produce
+  // identical histogram definitions.
+  auto configManagerText = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+  auto histManagerText = std::make_unique<NDHistogramManager>(*configManagerText);
+  ManagerContext ctxText{*configManagerText, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+  histManagerText->setContext(ctxText);
+  configManagerText->set("histogramConfig", "cfg/test_histograms.txt");
+  histManagerText->setupFromConfigFile();
+
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
+  histogramManager->setupFromConfigFile();
+
+  // Both should have loaded 4 histogram configurations
+  auto& configHistsText = histManagerText->getConfigHistograms();
+  auto& configHistsYaml = histogramManager->getConfigHistograms();
+  ASSERT_EQ(configHistsText.size(), configHistsYaml.size());
+
+  for (size_t i = 0; i < configHistsText.size(); ++i) {
+    EXPECT_EQ(configHistsText[i].name,     configHistsYaml[i].name)     << "name mismatch at index " << i;
+    EXPECT_EQ(configHistsText[i].variable, configHistsYaml[i].variable) << "variable mismatch at index " << i;
+    EXPECT_EQ(configHistsText[i].weight,   configHistsYaml[i].weight)   << "weight mismatch at index " << i;
+    EXPECT_EQ(configHistsText[i].bins,     configHistsYaml[i].bins)     << "bins mismatch at index " << i;
+    EXPECT_FLOAT_EQ(configHistsText[i].lowerBound, configHistsYaml[i].lowerBound) << "lowerBound mismatch at index " << i;
+    EXPECT_FLOAT_EQ(configHistsText[i].upperBound, configHistsYaml[i].upperBound) << "upperBound mismatch at index " << i;
+  }
+}
+
+TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsTrackedForSaveHists) {
+  // Regression test for bug: bookConfigHistograms() was not populating
+  // trackedHistInfos_m, so saveHists() (no-args) returned early and
+  // histograms were never written to the meta file.
+  dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
+  dataManager->Define("w1",   []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("w2",   []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3",   []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4",   []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("channel",       []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory",[]() { return 2.5f; }, {}, *systematicManager);
+
+  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  histogramManager->setupFromConfigFile();
+  histogramManager->bookConfigHistograms();
+
+  // After bookConfigHistograms(), trackedHistInfos_m must be non-empty so
+  // that saveHists() does not return early.
+  EXPECT_FALSE(histogramManager->GetTrackedHistInfos().empty())
+      << "trackedHistInfos_m should be populated by bookConfigHistograms()";
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

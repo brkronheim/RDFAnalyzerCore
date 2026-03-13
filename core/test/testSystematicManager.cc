@@ -348,8 +348,8 @@ TEST_F(SystematicManagerTest, AutoRegisterSystematics_MultipleCompletePairs) {
 }
 
 TEST_F(SystematicManagerTest, AutoRegisterSystematics_MissingDown) {
-  const auto result = systematicManager->autoRegisterSystematics(
-      {"pt", "pt_jesUp"});  // no pt_jesDown
+  std::vector<std::string> missingDownCols{"pt", "pt_jesUp"};  // no pt_jesDown
+  const auto result = systematicManager->autoRegisterSystematics(missingDownCols);
 
   EXPECT_TRUE(result.registered.empty());
   ASSERT_EQ(result.missingDown.size(), 1u);
@@ -361,8 +361,8 @@ TEST_F(SystematicManagerTest, AutoRegisterSystematics_MissingDown) {
 }
 
 TEST_F(SystematicManagerTest, AutoRegisterSystematics_MissingUp) {
-  const auto result = systematicManager->autoRegisterSystematics(
-      {"pt", "pt_jesDown"});  // no pt_jesUp
+  std::vector<std::string> missingUpCols{"pt", "pt_jesDown"};  // no pt_jesUp
+  const auto result = systematicManager->autoRegisterSystematics(missingUpCols);
 
   EXPECT_TRUE(result.registered.empty());
   EXPECT_TRUE(result.missingDown.empty());
@@ -374,10 +374,13 @@ TEST_F(SystematicManagerTest, AutoRegisterSystematics_MissingUp) {
 }
 
 TEST_F(SystematicManagerTest, AutoRegisterSystematics_MixedCompleteAndIncomplete) {
-  const auto result = systematicManager->autoRegisterSystematics(
-      {"pt", "pt_jesUp", "pt_jesDown",   // complete
-       "energy", "energy_jerUp",          // missing Down
-       "mass", "mass_scalDown"});          // missing Up
+  // construct the vector separately to avoid a gcc ICE with a large
+  // braced initializer passed directly to the function call.
+  std::vector<std::string> mixedCols{
+      "pt", "pt_jesUp", "pt_jesDown",   // complete
+      "energy", "energy_jerUp",          // missing Down
+      "mass", "mass_scalDown"};          // missing Up
+  const auto result = systematicManager->autoRegisterSystematics(mixedCols);
 
   ASSERT_EQ(result.registered.size(), 1u);
   EXPECT_EQ(result.registered[0].first,  "pt");
@@ -397,8 +400,9 @@ TEST_F(SystematicManagerTest, AutoRegisterSystematics_MixedCompleteAndIncomplete
 
 TEST_F(SystematicManagerTest, AutoRegisterSystematics_CompoundVariableName) {
   // Variable names containing underscores
-  const auto result = systematicManager->autoRegisterSystematics(
-      {"my_var_name", "my_var_name_jesUp", "my_var_name_jesDown"});
+  std::vector<std::string> compoundCols{
+      "my_var_name", "my_var_name_jesUp", "my_var_name_jesDown"};
+  const auto result = systematicManager->autoRegisterSystematics(compoundCols);
 
   ASSERT_EQ(result.registered.size(), 1u);
   EXPECT_EQ(result.registered[0].first,  "my_var_name");

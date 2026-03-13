@@ -124,6 +124,36 @@ _COMBINE_SEARCH_PATHS = [
 ]
 
 
+def _find_histogram_in_file(root_file, hist_name: str):
+    """Find a histogram by name in common analysis output layouts."""
+    import ROOT  # type: ignore
+
+    candidate_paths = [
+        f"histograms/{hist_name}",
+        f"Default_Default/Default/{hist_name}",
+        hist_name,
+    ]
+    for hist_path in candidate_paths:
+        hist = root_file.Get(hist_path)
+        if hist and hist.InheritsFrom("TH1"):
+            return hist, hist_path
+
+    def _walk(directory, prefix=""):
+        for key in directory.GetListOfKeys():
+            name = key.GetName()
+            obj = key.ReadObj()
+            obj_path = f"{prefix}/{name}" if prefix else name
+            if obj.InheritsFrom("TH1") and name == hist_name:
+                return obj, obj_path
+            if obj.InheritsFrom("TDirectory"):
+                found_hist, found_path = _walk(obj, obj_path)
+                if found_hist:
+                    return found_hist, found_path
+        return None, None
+
+    return _walk(root_file)
+
+
 def _find_combine(combine_exe: str = "") -> str:
     """Return the path to the combine binary.
 
@@ -1146,10 +1176,10 @@ class AnalyticWorkspaceFitTask(law.Task):
                 hist_name = ch_cfg["histogram"]
                 label = ch_cfg.get("label", channel)
 
-                hist = root_file.Get(f"histograms/{hist_name}")
+                hist, hist_obj_path = _find_histogram_in_file(root_file, hist_name)
                 if not hist or hist.IsZombie():
                     self.publish_message(
-                        f"WARNING: histogram 'histograms/{hist_name}' not "
+                        f"WARNING: histogram '{hist_name}' not "
                         f"found in {hist_path!r}; skipping channel '{channel}'."
                     )
                     continue
@@ -1167,6 +1197,7 @@ class AnalyticWorkspaceFitTask(law.Task):
                     f"Building workspace for '{channel}' ({label}): "
                     f"{n_obs:.0f} events"
                 )
+                self.publish_message(f"  Histogram : {hist_obj_path}")
 
                 ws = _build_analytic_workspace(ws_cfg, hist, channel)
                 ws_path = os.path.join(out_dir, f"ws_{channel}.root")
