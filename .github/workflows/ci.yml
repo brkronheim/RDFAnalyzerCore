@@ -22,6 +22,12 @@ jobs:
         echo "Using self-hosted runner with preinstalled dependencies"
         uname -a
 
+    - name: Verify CUDA
+      run: |
+        which nvcc
+        nvcc --version
+        export CUDAToolkit_ROOT=/usr/local/cuda
+
     - name: Verify ROOT
       run: |
         if command -v root-config >/dev/null 2>&1; then
@@ -31,10 +37,7 @@ jobs:
         else
           echo "ERROR: ROOT not found on runner"; exit 1
         fi
-        which nvcc
-        nvcc --version
-        export CUDAToolkit_ROOT=/usr/local/cuda
-
+        
     - name: Install Python test dependencies
       run: pip3 install -r requirements-ci.txt
 
