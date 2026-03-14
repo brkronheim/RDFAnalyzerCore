@@ -11,10 +11,12 @@
 3. [Accessing Objects](#3-accessing-objects)
 4. [Feature Caching](#4-feature-caching)
 5. [Overlap Removal](#5-overlap-removal)
-6. [Combinatorics](#6-combinatorics)
-7. [TypedPhysicsObjectCollection\<T\>](#7-typedphysicsobjectcollectiont)
-8. [PhysicsObjectVariationMap](#8-physicsobjectvariationmap)
-9. [Complete C++ Examples](#9-complete-c-examples)
+6. [Sub-Collection Filtering](#6-sub-collection-filtering)
+7. [Correction Application](#7-correction-application)
+8. [Combinatorics](#8-combinatorics)
+9. [TypedPhysicsObjectCollection\<T\>](#9-typedphysicsobjectcollectiont)
+10. [PhysicsObjectVariationMap](#10-physicsobjectvariationmap)
+11. [Complete C++ Examples](#11-complete-c-examples)
 
 ---
 
@@ -302,7 +304,7 @@ float dr = PhysicsObjectCollection::deltaR(jets.at(0), muons.at(0));
 
 ---
 
-## 5a. Sub-Collection Filtering
+## 6. Sub-Collection Filtering
 
 ### `withFilter(mask)`
 
@@ -331,7 +333,7 @@ auto bJets = jets.withFilter(btagMask);
 
 ---
 
-## 5b. Correction Application
+## 7. Correction Application
 
 ### `withCorrectedKinematics(correctedPt, correctedEta, correctedPhi, correctedMass)`
 
@@ -389,6 +391,10 @@ auto corrJets = goodJets.withCorrectedPt(corrPt);
 > along with the filtered/corrected 4-vectors.  Corrections only update
 > the kinematic information; the user-defined objects are preserved
 > unchanged.
+
+---
+
+## 8. Combinatorics
 
 Three free functions build all unique combinations from one or two collections
 and return them as vectors of lightweight structs.
@@ -468,7 +474,7 @@ auto diJetMasses = df.Define("diJetMass", [](
 
 ---
 
-## 7. TypedPhysicsObjectCollection\<T\>
+## 9. TypedPhysicsObjectCollection\<T\>
 
 ```cpp
 template <typename ObjectType>
@@ -560,7 +566,7 @@ auto countBJets = [](const TypedPhysicsObjectCollection<JetInfo>& jets) {
 
 ---
 
-## 8. PhysicsObjectVariationMap
+## 10. PhysicsObjectVariationMap
 
 ```cpp
 using PhysicsObjectVariationMap =
@@ -606,7 +612,7 @@ histograms.
 
 ---
 
-## 9. Complete C++ Examples
+## 11. Complete C++ Examples
 
 All examples below use `analyzer.Define()` and `analyzer.Filter()` — the
 framework wrappers that ensure variables and filters are registered with the
