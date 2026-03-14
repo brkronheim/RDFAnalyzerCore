@@ -1369,6 +1369,52 @@ static float deltaR(const LorentzVec& v1, const LorentzVec& v2);
 Return a new collection with objects within ΔR < `deltaRMin` of any object
 in `other` removed. The cached-feature store is not propagated to the result.
 
+#### Sub-Collection Filtering
+
+```cpp
+PhysicsObjectCollection withFilter(const RVec<bool>& mask) const;
+```
+
+Returns a new collection containing only the objects where `mask[i]` is
+`true`.  The mask is indexed relative to *this* collection (0 to
+`size()-1`), not the original full collection.  Throws `std::runtime_error`
+on size mismatch.
+
+```cpp
+// Keep only b-tagged jets (btag score > 0.5)
+auto bJets = jets.withFilter(jets.getValue(Jet_btagDeepFlavB) > 0.5f);
+```
+
+#### Correction Application
+
+```cpp
+// Replace all four kinematic components (full-collection arrays, same
+// size as the original branches used to build this collection)
+PhysicsObjectCollection withCorrectedKinematics(
+    const RVec<Float_t>& correctedPt,
+    const RVec<Float_t>& correctedEta,
+    const RVec<Float_t>& correctedPhi,
+    const RVec<Float_t>& correctedMass) const;
+
+// Replace pt only; eta/phi/mass are taken from existing 4-vectors
+PhysicsObjectCollection withCorrectedPt(
+    const RVec<Float_t>& correctedPt) const;
+```
+
+Each corrected array must be indexed by position in the *original* (full,
+unfiltered) collection.  The stored original indices are used to look up
+each object's corrected value.  Throws `std::runtime_error` on size
+mismatch; throws `std::out_of_range` if an index is out of range.
+
+```cpp
+// Apply jet energy corrections from correctionlib
+auto corrJets = goodJets.withCorrectedKinematics(
+    correctedPt, Jet_eta, Jet_phi, correctedMass);
+```
+
+Both methods are **overridden** in `TypedPhysicsObjectCollection<T>` to
+return a typed collection and carry user-defined objects unchanged.
+
 #### Combinatoric Free Functions
 
 ```cpp

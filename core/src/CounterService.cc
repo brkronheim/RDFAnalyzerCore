@@ -91,6 +91,34 @@ void CounterService::bookIntWeightHistogram(ROOT::RDF::RNode df,
 }
 
 void CounterService::onPreFilter(ROOT::RDF::RNode& df) {
+  // Auto-book int-weight histogram when counterIntWeightBranch is configured
+  // and the histogram has not been booked already via bookIntWeightHistogram().
+  // Must happen before filtersApplied_m is set to avoid the "called after
+  // filters" warning inside bookIntWeightHistogram.
+  if (!intWeightBranch_m.empty() && !intWeightHistResult_m.has_value()) {
+    int    nBins = 10;
+    double low   = -0.5;
+    double high  = 9.5;
+
+    if (ctx_m) {
+      const auto& configMap = ctx_m->config.getConfigMap();
+      auto it_bins = configMap.find("counterIntWeightBranchNBins");
+      auto it_low  = configMap.find("counterIntWeightBranchMin");
+      auto it_high = configMap.find("counterIntWeightBranchMax");
+      if (it_bins != configMap.end()) {
+        try { nBins = std::stoi(it_bins->second); } catch (...) {}
+      }
+      if (it_low != configMap.end()) {
+        try { low = std::stod(it_low->second); } catch (...) {}
+      }
+      if (it_high != configMap.end()) {
+        try { high = std::stod(it_high->second); } catch (...) {}
+      }
+    }
+
+    bookIntWeightHistogram(df, intWeightBranch_m, nBins, low, high);
+  }
+
   filtersApplied_m = true;
 }
 
