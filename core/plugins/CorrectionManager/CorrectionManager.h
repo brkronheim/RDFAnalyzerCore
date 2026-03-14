@@ -47,7 +47,11 @@ public:
    *                           the numeric inputs to the correction.
    *
    * @throws std::runtime_error if the file cannot be opened or the
-   *         correction name is not found inside it.
+   *         correction name is not found inside it, or if a correction
+   *         with the given @p name is already registered.
+   * @throws std::invalid_argument if any string argument passed to
+   *         applyCorrection() later contains characters that are unsafe for
+   *         ROOT branch names (see validateBranchComponent).
    *
    * @code{.cpp}
    * correctionManager.registerCorrection(

@@ -4,7 +4,9 @@
 #include <api/ILogger.h>
 #include <api/ISystematicManager.h>
 #include <algorithm>
+#include <cctype>
 #include <iostream>
+#include <stdexcept>
 
 /**
  * @brief Construct a new CorrectionManager object
@@ -14,6 +16,28 @@ CorrectionManager::CorrectionManager(IConfigurationProvider const& configProvide
   std::cout  << "Constructing CorrectionManager with config provider" << std::endl;
   registerCorrectionlib(configProvider);
   initialized_m = true;
+}
+
+/**
+ * @brief Validate that a string is safe to use as part of an RDF branch name.
+ *
+ * Rejects empty strings and any character other than alphanumerics and
+ * underscores, which are the only characters guaranteed to produce valid
+ * ROOT TTree / RDataFrame column names.
+ */
+static void validateBranchComponent(const std::string &s, const std::string &context) {
+  if (s.empty()) {
+    throw std::invalid_argument(
+        context + ": string argument must not be empty");
+  }
+  for (char c : s) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+      throw std::invalid_argument(
+          context + ": string argument '" + s +
+          "' contains invalid character '" + c +
+          "' (only alphanumerics and underscores are allowed in branch names)");
+    }
+  }
 }
 
 /**
@@ -30,6 +54,9 @@ CorrectionManager::CorrectionManager(IConfigurationProvider const& configProvide
  */
 static std::string makeBranchName(const std::string &correctionName,
                                   const std::vector<std::string> &stringArguments) {
+  for (const auto &arg : stringArguments) {
+    validateBranchComponent(arg, "makeBranchName");
+  }
   std::string name = correctionName;
   for (const auto &arg : stringArguments) {
     name += "_" + arg;
@@ -45,8 +72,21 @@ void CorrectionManager::registerCorrection(
     const std::string &file,
     const std::string &correctionlibName,
     const std::vector<std::string> &inputVariables) {
-  auto correctionSet = correction::CorrectionSet::from_file(file);
-  auto corr = correctionSet->at(correctionlibName);
+  if (objects_m.count(name)) {
+    throw std::runtime_error(
+        "CorrectionManager::registerCorrection: a correction named '" + name +
+        "' is already registered. Use a unique name for each correction.");
+  }
+  correction::Correction::Ref corr;
+  try {
+    auto correctionSet = correction::CorrectionSet::from_file(file);
+    corr = correctionSet->at(correctionlibName);
+  } catch (const std::exception &e) {
+    throw std::runtime_error(
+        "CorrectionManager::registerCorrection: failed to load correction '" +
+        correctionlibName + "' from file '" + file + "' for registration as '" +
+        name + "': " + e.what());
+  }
   std::cout << "CorrectionManager: registering correction '" << name
             << "' from file '" << file << "'" << std::endl;
   objects_m.emplace(name, corr);

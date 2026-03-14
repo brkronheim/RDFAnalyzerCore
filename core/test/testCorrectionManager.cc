@@ -782,3 +782,68 @@ TEST_F(CorrectionManagerTest, ApplyVectorCorrection_ExplicitInputColumns) {
 
   setContextFor(*dataManager);
 }
+/**
+ * @brief Test that string arguments containing invalid characters are rejected.
+ *
+ * Branch names containing spaces, slashes, or other special characters would
+ * create invalid ROOT column names, so makeBranchName should throw.
+ */
+TEST_F(CorrectionManagerTest, ApplyCorrection_InvalidStringArgRejected) {
+  dataManager->Define("float_arg",
+                      [](ULong64_t) -> double { return 0.5; },
+                      {"rdfentry_"}, *systematicManager);
+  dataManager->Define("int_arg",
+                      [](ULong64_t) -> double { return 1; },
+                      {"rdfentry_"}, *systematicManager);
+
+  // Space is not allowed in a branch name component.
+  EXPECT_THROW(
+      correctionManager->applyCorrection("test_correction", {"syst up"}),
+      std::invalid_argument);
+
+  // Slash is not allowed.
+  EXPECT_THROW(
+      correctionManager->applyCorrection("test_correction", {"pt/eta"}),
+      std::invalid_argument);
+
+  // Empty string is not allowed.
+  EXPECT_THROW(
+      correctionManager->applyCorrection("test_correction", {""}),
+      std::invalid_argument);
+}
+
+/**
+ * @brief Test that registering the same correction name twice throws.
+ */
+TEST_F(CorrectionManagerTest, RegisterCorrection_DuplicateNameThrows) {
+  correctionManager->registerCorrection(
+      "once_only_sf", "aux/correction.json", "test_correction",
+      {"float_arg", "int_arg"});
+  EXPECT_THROW(
+      correctionManager->registerCorrection(
+          "once_only_sf", "aux/correction.json", "test_correction",
+          {"float_arg", "int_arg"}),
+      std::runtime_error);
+}
+
+/**
+ * @brief Test that registerCorrection throws for a missing file.
+ */
+TEST_F(CorrectionManagerTest, RegisterCorrection_MissingFileThrows) {
+  EXPECT_THROW(
+      correctionManager->registerCorrection(
+          "bad_sf", "nonexistent_file.json", "test_correction",
+          {"float_arg", "int_arg"}),
+      std::runtime_error);
+}
+
+/**
+ * @brief Test that registerCorrection throws for an unknown correction name inside a valid file.
+ */
+TEST_F(CorrectionManagerTest, RegisterCorrection_UnknownCorrectionNameThrows) {
+  EXPECT_THROW(
+      correctionManager->registerCorrection(
+          "bad_sf", "aux/correction.json", "no_such_correction",
+          {"float_arg", "int_arg"}),
+      std::runtime_error);
+}
