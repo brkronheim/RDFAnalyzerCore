@@ -138,6 +138,7 @@ def run_test() -> int:
         "setConfig", "getConfigMap", "getConfigList",
         "registerSystematic", "getSystematics", "makeSystList",
         "applyAllOnnxModels", "applyAllBDTs", "applyCorrection",
+        "applyCorrectionVec", "registerCorrection", "getCorrectionFeatures",
         "applyAllTriggers", "applyAllSofieModels",
         "bookNDHistograms", "saveNDHistograms", "clearNDHistograms",
     ]
