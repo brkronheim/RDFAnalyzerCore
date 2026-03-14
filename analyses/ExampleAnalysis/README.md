@@ -90,7 +90,7 @@ cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
 
-### Run
+### Run locally (single file)
 ```bash
 cd build/analyses/ExampleAnalysis
 ./analysis ../../analyses/ExampleAnalysis/cfg.txt
@@ -100,6 +100,68 @@ cd build/analyses/ExampleAnalysis
 - Running on lxplus at CERN
 - Having XRootD access to eospublic.cern.ch
 - Modifying `cfg.txt` to use local ROOT files
+
+### Run with LAW (file discovery + local multi-dataset skim)
+
+The recommended way to run over multiple datasets uses the LAW task system.
+
+```bash
+# Set up environment
+source law/env.sh
+law index
+
+# Discover files on XRootD storage (parallelized across datasets)
+law run GetXRDFSFileList \
+  --name exampleFiles \
+  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
+  --xrdfs-server root://eospublic.cern.ch/ \
+  --workers 4
+
+# Skim all datasets with pre-submission test job (default: enabled)
+law run SkimTask \
+  --name exampleRun \
+  --exe build/analyses/ExampleAnalysis/analysis \
+  --submit-config analyses/ExampleAnalysis/cfg.txt \
+  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
+  --workers 4
+
+# Skip the pre-flight test job if you want to submit immediately
+law run SkimTask \
+  --name exampleRun \
+  --exe build/analyses/ExampleAnalysis/analysis \
+  --submit-config analyses/ExampleAnalysis/cfg.txt \
+  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
+  --no-make-test-job \
+  --workers 4
+
+# Run with xrdfs file-source (automatically chains GetXRDFSFileList → PrepareSkimJobs → SkimTask)
+law run SkimTask \
+  --name exampleRun \
+  --exe build/analyses/ExampleAnalysis/analysis \
+  --submit-config analyses/ExampleAnalysis/cfg.txt \
+  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
+  --file-source xrdfs \
+  --file-source-name exampleFiles \
+  --workers 4
+```
+
+#### Complete end-to-end pipeline with FullAnalysisDAG
+
+```bash
+law run FullAnalysisDAG \
+  --name exampleRun \
+  --exe build/analyses/ExampleAnalysis/analysis \
+  --submit-config analyses/ExampleAnalysis/cfg.txt \
+  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
+  --hist-config analyses/ExampleAnalysis/hist_config.txt \
+  --datacard-config analyses/ExampleAnalysis/datacard_config.yaml
+```
+
+`FullAnalysisDAG` automatically runs:
+1. `SkimTask` (with pre-flight test job)  
+2. `HistFillTask`  
+3. `MergeAll`  
+4. `ManifestDatacardTask` + `ManifestFitTask`
 
 ## Output
 

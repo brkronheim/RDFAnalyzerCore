@@ -332,12 +332,16 @@ int main(int argc, char **argv) {
     an.bookConfigHistograms();
 
     // -----------------------------------------------------------------------
-    // 8. Execute the RDataFrame graph and write all outputs:
+    // 8. Execute the RDataFrame graph and write all outputs.  Use
+    //    run() (not save()) so that the histogram manager gets a chance to
+    //    write its histograms to the meta file.  `save()` only writes the
+    //    skimmed tree, which was the source of the CI failure when histo
+    //    verification was performed.
     //      - Skimmed event tree  → saveFile in cfg.yaml
     //      - Histograms          → histograms/ directory of the meta file
     //      - Cutflow tables      → cutflow, cutflow_nminus1 histograms
     // -----------------------------------------------------------------------
-    an.save();
+    an.run();
 
     return 0;
 }

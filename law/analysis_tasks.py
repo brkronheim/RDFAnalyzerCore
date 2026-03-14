@@ -122,6 +122,7 @@ C++ (via CorrectionManager) or Python::
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import shutil
 import subprocess
@@ -143,8 +144,9 @@ for _p in (_HERE, _CORE_PYTHON):
 
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
 from dataset_manifest import DatasetManifest, DatasetEntry  # noqa: E402
-from submission_backend import read_config  # noqa: E402
-from workflow_executors import _run_analysis_job  # noqa: E402
+from submission_backend import read_config, get_copy_file_list  # noqa: E402
+from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
+from partition_utils import _make_partitions  # noqa: E402
 from output_schema import (  # noqa: E402
     ArtifactResolutionStatus,
     DatasetManifestProvenance,
@@ -157,6 +159,76 @@ from output_schema import (  # noqa: E402
 )
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
+
+import re as _re  # noqa: E402  - used by _collect_skim_shared_libs
+
+
+# ===========================================================================
+# Shared-library staging helper (mirrors _collect_local_shared_libs in
+# nano_tasks.py but kept here so analysis_tasks has no circular import)
+# ===========================================================================
+
+
+def _collect_skim_shared_libs(exe_path: str, repo_root: str) -> dict:
+    """Return {staged_name: real_path} for local shared-library deps of *exe_path*.
+
+    Only libraries whose resolved path starts with *repo_root* are included,
+    so system libraries (glibc, libstdc++, …) are ignored.
+    """
+    staged: dict = {}
+    try:
+        ldd_output = subprocess.check_output(
+            ["ldd", exe_path], text=True, stderr=subprocess.STDOUT
+        )
+    except Exception:
+        return staged
+
+    repo_prefix = os.path.abspath(repo_root)
+    if not repo_prefix.endswith(os.path.sep):
+        repo_prefix += os.path.sep
+
+    for line in ldd_output.splitlines():
+        line = line.strip()
+        if not line or "=> not found" in line:
+            continue
+        soname = resolved = None
+        m = _re.match(r"^(\S+)\s*=>\s*(\S+)", line)
+        if m:
+            soname = os.path.basename(m.group(1))
+            resolved = m.group(2)
+        else:
+            m = _re.match(r"^(\/\S+)\s+\(", line)
+            if m:
+                resolved = m.group(1)
+                soname = os.path.basename(resolved)
+        if not resolved or not os.path.isabs(resolved):
+            continue
+        real_path = os.path.realpath(resolved)
+        if not os.path.exists(real_path) or not real_path.startswith(repo_prefix):
+            continue
+        real_name = os.path.basename(real_path)
+        if ".so" not in real_name:
+            continue
+        staged[real_name] = real_path
+        if soname and ".so" in soname:
+            staged[soname] = real_path
+    return staged
+
+
+def _find_dataset_entry(
+    dataset_manifest_path: str, name: str
+) -> Optional[DatasetEntry]:
+    """Return the :class:`~dataset_manifest.DatasetEntry` named *name*, or ``None``."""
+    if not dataset_manifest_path or not os.path.isfile(dataset_manifest_path):
+        return None
+    try:
+        manifest = DatasetManifest.load(dataset_manifest_path)
+        for entry in manifest.datasets:
+            if entry.name == name:
+                return entry
+    except Exception:
+        pass
+    return None
 
 
 # ===========================================================================
@@ -426,10 +498,750 @@ class AnalysisMixin:
 
 
 # ===========================================================================
-# Task 1 – SkimTask
+# Additional parameter mixin for SkimTask and PrepareSkimJobs
 # ===========================================================================
 
-class SkimTask(AnalysisMixin, law.LocalWorkflow):
+class SkimMixin:
+    """Extra parameters for :class:`PrepareSkimJobs` and :class:`SkimTask`.
+
+    Adds file-discovery chaining, per-job file partitioning, worker-environment
+    staging, and multi-executor (local / HTCondor / Dask) control on top of
+    the base :class:`AnalysisMixin` parameters.
+    """
+
+    # ---- file-source chaining ---------------------------------------------
+
+    file_source = luigi.Parameter(
+        default="",
+        description=(
+            "Source for input file lists.  One of: '' (use dataset manifest directly), "
+            "'nano' (use GetNANOFileList output), 'opendata' (use GetOpenDataFileList "
+            "output), 'xrdfs' (use GetXRDFSFileList output).  "
+            "When set, :class:`PrepareSkimJobs` is automatically required and "
+            "splits files into per-job chunks before HTCondor/Dask dispatch."
+        ),
+    )
+    file_source_name = luigi.Parameter(
+        default="",
+        description=(
+            "Name of the file-list task run to chain from (required when "
+            "--file-source is set)."
+        ),
+    )
+    files_per_job = luigi.IntParameter(
+        default=50,
+        description=(
+            "Maximum number of files per job when splitting from a file list "
+            "(default: 50).  Also used as the per-group file limit passed to "
+            "the Rucio query in GetNANOFileList."
+        ),
+    )
+    partition = luigi.Parameter(
+        default="file_group",
+        description=(
+            "Partitioning mode for splitting file lists into per-job chunks: "
+            "'file_group' (default – group by file count), "
+            "'file' (one file per job), "
+            "'entry_range' (split by TTree entry ranges, requires uproot)."
+        ),
+    )
+    entries_per_job = luigi.IntParameter(
+        default=100_000,
+        description=(
+            "Maximum TTree entries per job in 'entry_range' mode (default: 100000). "
+            "Requires uproot.  Ignored for 'file_group' and 'file' modes."
+        ),
+    )
+
+    # ---- worker environment -----------------------------------------------
+
+    x509 = luigi.Parameter(
+        default="",
+        description=(
+            "Path to the VOMS x509 proxy file.  Copied into "
+            "``skimRun_{name}/shared_inputs/x509`` for use by HTCondor workers."
+        ),
+    )
+    stage_in = luigi.BoolParameter(
+        default=False,
+        description=(
+            "If True, xrdcp input files to the worker node before running the "
+            "analysis (same as NANOMixin stage_in)."
+        ),
+    )
+    root_setup = luigi.Parameter(
+        default="",
+        description=(
+            "Path to a ROOT environment setup script whose contents are "
+            "embedded in the worker inner runscript."
+        ),
+    )
+    container_setup = luigi.Parameter(
+        default="",
+        description=(
+            "Container setup command used by the outer wrapper script "
+            "(e.g. 'cmssw-el9')."
+        ),
+    )
+    python_env = luigi.Parameter(
+        default="",
+        description=(
+            "Path to a Python environment tarball created by "
+            "``law/setup_python_env.sh``.  Staged to every HTCondor worker "
+            "node alongside the executable."
+        ),
+    )
+    make_test_job = luigi.BoolParameter(
+        default=True,
+        description=(
+            "If True (default), run a single-file local test job before dispatching "
+            "the full SkimTask workflow.  This catches analysis runtime errors early "
+            "before submitting potentially hundreds of jobs.  Set --no-make-test-job "
+            "to skip the test and submit immediately."
+        ),
+    )
+
+    # ---- multi-executor control -------------------------------------------
+
+    dask_scheduler = luigi.Parameter(
+        default="",
+        significant=False,
+        description=(
+            "Dask scheduler address for --workflow dask "
+            "(e.g. tcp://scheduler-host:8786). "
+            "Leave empty to start a local Dask cluster."
+        ),
+    )
+    dask_workers = luigi.IntParameter(
+        default=1,
+        significant=False,
+        description=(
+            "Number of workers for the local Dask cluster when "
+            "--dask-scheduler is empty (default: 1)."
+        ),
+    )
+    max_runtime = luigi.IntParameter(
+        default=3600,
+        significant=False,
+        description="Maximum HTCondor job runtime in seconds (default: 3600).",
+    )
+
+    # ---- derived helpers --------------------------------------------------
+
+    def _resolve_skim(self, path_value: str) -> str:
+        """Resolve *path_value* relative to the submit-config's parent directory."""
+        if not path_value:
+            return path_value
+        if os.path.isabs(path_value):
+            return path_value
+        if os.path.exists(path_value):
+            return os.path.abspath(path_value)
+        config_base = os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(self.submit_config)), "..")
+        )
+        return os.path.abspath(os.path.join(config_base, path_value))
+
+    @property
+    def _shared_dir(self) -> str:
+        """Shared inputs directory containing the exe, libs, and x509 proxy."""
+        return os.path.join(self._run_dir, "shared_inputs")
+
+    @property
+    def _exe_relpath(self) -> str:
+        """Basename of the compiled analysis executable."""
+        return os.path.basename(os.path.abspath(self.exe))
+
+    @property
+    def _root_setup_content(self) -> str:
+        """Return the content of the root_setup script, or empty string."""
+        if not self.root_setup:
+            return ""
+        path = self._resolve_skim(self.root_setup)
+        if not path or not os.path.isfile(path):
+            raise RuntimeError(
+                f"root_setup must point to an existing file, got: {self.root_setup!r}"
+            )
+        with open(path) as fh:
+            return fh.read().rstrip("\n")
+
+    def _python_env_path(self) -> Optional[str]:
+        """Return the resolved path to the Python environment tarball, or None."""
+        if not self.python_env:
+            return None
+        path = self._resolve_skim(self.python_env)
+        if not path or not os.path.isfile(path):
+            raise RuntimeError(
+                f"python_env must point to an existing tarball, "
+                f"got: {self.python_env!r}\n"
+                "Create one with:  bash law/setup_python_env.sh --output python_env.tar.gz"
+            )
+        return path
+
+    def _file_list_dir(self) -> str:
+        """Return the directory containing per-dataset file-list JSONs."""
+        prefix_map = {
+            "nano": "nanoFileList",
+            "opendata": "openDataFileList",
+            "xrdfs": "xrdfsFileList",
+        }
+        prefix = prefix_map.get(self.file_source, "")
+        if not prefix:
+            return ""
+        return os.path.join(WORKSPACE, f"{prefix}_{self.file_source_name}")
+
+    @property
+    def _test_job_dir(self) -> str:
+        """Directory for the local pre-submission test job."""
+        return os.path.join(self._run_dir, "test_job")
+
+
+# ===========================================================================
+# PrepareSkimJobs – set up shared_inputs/ and per-job directories
+# (analogous to BuildNANOSubmission in nano_tasks.py)
+# ===========================================================================
+
+class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
+    """Create per-job directories and ``shared_inputs/`` for :class:`SkimTask`.
+
+    This task mirrors the role of ``BuildNANOSubmission`` in the NANO workflow:
+    it prepares **all** job directories and the shared executable/library
+    staging area **before** any HTCondor or Dask branches are dispatched.
+
+    Workflow
+    --------
+    When ``--file-source`` is set the task reads the file-list JSON(s) written
+    by :class:`~nano_tasks.GetNANOFileList`,
+    :class:`~opendata_tasks.GetOpenDataFileList`, or
+    :class:`~nano_tasks.GetXRDFSFileList` from the appropriate
+    ``{prefix}FileList_{file_source_name}/`` directory.  Each JSON encodes a
+    flat ``files`` list and, when available, pre-computed Rucio size groups
+    (``groups`` key).  The task splits the files into per-job partitions and
+    writes one ``submit_config.txt`` / ``floats.txt`` / ``ints.txt`` set per
+    job directory under ``skimRun_{name}/jobs/{dataset}/job_{i}/``.
+
+    When ``--file-source`` is empty the manifest datasets are used directly
+    (one job dir per dataset entry).
+
+    In both cases the shared inputs directory
+    ``skimRun_{name}/shared_inputs/`` is populated with:
+
+    * the analysis executable (``self.exe``),
+    * local shared libraries that resolve under the repository root,
+    * the VOMS x509 proxy (when ``--x509`` is set),
+    * the Python environment tarball (when ``--python-env`` is set).
+
+    Output
+    ------
+    * ``skimRun_{name}/prep_submission.json`` – JSON list of
+      ``{"dataset_name": ..., "job_dir": ..., "out_dir": ...}`` records used
+      by :class:`SkimTask` to build its branch map.
+    """
+
+    task_namespace = ""
+
+    @property
+    def _run_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"skimRun_{self.name}")
+
+    def requires(self):
+        """Declare LAW dependency on the file-list task when ``--file-source`` is set.
+
+        For ``--file-source xrdfs`` the dependency on
+        :class:`~nano_tasks.GetXRDFSFileList` is declared automatically because
+        both tasks share the same ``dataset_manifest`` parameter.
+
+        For ``--file-source nano`` and ``--file-source opendata`` the parameter
+        sets are incompatible (those tasks use a separate NANO/Open Data sample
+        config, not the skim submit_config), so the user must run those tasks
+        manually before :class:`PrepareSkimJobs`.  A clear :class:`RuntimeError`
+        is raised at run time when the expected output directory is missing.
+        """
+        if self.file_source == "xrdfs":
+            from nano_tasks import GetXRDFSFileList  # lazy import to avoid circular deps
+            return GetXRDFSFileList.req(
+                self,
+                name=self.file_source_name,
+            )
+        return None
+
+    def output(self):
+        return law.LocalFileTarget(
+            os.path.join(self._run_dir, "prep_submission.json")
+        )
+
+    def run(self):
+        with PerformanceRecorder("PrepareSkimJobs") as rec:
+            self._run_impl()
+        rec.save(os.path.join(self._run_dir, "prep_submission.perf.json"))
+
+    def _run_impl(self):  # noqa: C901 - intentionally comprehensive
+        exe_path = os.path.abspath(self.exe)
+        if not os.path.isfile(exe_path):
+            raise RuntimeError(
+                f"Analysis executable not found: {exe_path!r}. "
+                "Build the analysis before running PrepareSkimJobs."
+            )
+
+        # ---- set up shared_inputs/ ----------------------------------------
+        shared_dir = self._shared_dir
+        Path(shared_dir).mkdir(parents=True, exist_ok=True)
+
+        # Copy executable
+        shutil.copy2(exe_path, os.path.join(shared_dir, self._exe_relpath))
+
+        # Copy local shared libraries
+        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        for lib_name, lib_src in sorted(local_libs.items()):
+            lib_dst = os.path.join(shared_dir, lib_name)
+            if (not os.path.exists(lib_dst)
+                    or os.path.getsize(lib_dst) != os.path.getsize(lib_src)):
+                shutil.copy2(lib_src, lib_dst)
+        if local_libs:
+            self.publish_message(
+                f"Staged {len(local_libs)} local shared lib(s) into {shared_dir}/"
+            )
+
+        # Copy x509 proxy
+        if self.x509:
+            x509_src = os.path.abspath(self.x509)
+            if os.path.isfile(x509_src):
+                shutil.copy2(x509_src, os.path.join(shared_dir, "x509"))
+            else:
+                self.publish_message(
+                    f"Warning: x509 file not found: {x509_src!r}; skipping."
+                )
+
+        # Copy Python env tarball
+        python_env_src = self._python_env_path()
+        if python_env_src:
+            tarball_name = os.path.basename(python_env_src)
+            shutil.copy2(python_env_src, os.path.join(shared_dir, tarball_name))
+
+        # Copy auxiliary config files referenced in submit_config template
+        if os.path.isfile(self.submit_config):
+            template_config = read_config(self.submit_config)
+            copy_list = get_copy_file_list(template_config)
+            template_dir = os.path.dirname(os.path.abspath(self.submit_config))
+            for fpath in copy_list:
+                src = os.path.join(template_dir, fpath) if not os.path.isabs(fpath) else fpath
+                if src and os.path.exists(src):
+                    dst = os.path.join(shared_dir, os.path.basename(src))
+                    if not os.path.exists(dst):
+                        shutil.copy2(src, dst)
+
+        # ---- determine datasets and file groups ---------------------------
+        job_entries: list = []
+
+        if self.file_source:
+            fl_dir = self._file_list_dir()
+            if not os.path.isdir(fl_dir):
+                raise RuntimeError(
+                    f"File list directory not found: {fl_dir!r}.\n"
+                    f"Run the file list task first:\n"
+                    f"  law run Get{self.file_source.capitalize()}FileList "
+                    f"--name {self.file_source_name!r} ..."
+                )
+
+            for json_path in sorted(Path(fl_dir).glob("*.json")):
+                with open(json_path) as fh:
+                    payload = json.load(fh)
+                dataset_name = payload.get("sample", json_path.stem)
+                all_files = payload.get("files", [])
+
+                if not all_files:
+                    self.publish_message(
+                        f"No files for dataset '{dataset_name}'; skipping."
+                    )
+                    continue
+
+                # Use pre-computed Rucio groups when available; otherwise
+                # partition the flat file list according to --partition mode.
+                if "groups" in payload and payload["groups"]:
+                    partitions = [
+                        {"files": g, "first_entry": 0, "last_entry": 0}
+                        for g in payload["groups"]
+                        if g
+                    ]
+                else:
+                    partitions = _make_partitions(
+                        urls=all_files,
+                        mode=self.partition,
+                        files_per_job=self.files_per_job,
+                        entries_per_job=self.entries_per_job,
+                    )
+
+                # Retrieve dataset metadata from the manifest for type / norm
+                dataset_entry = _find_dataset_entry(
+                    self.dataset_manifest, dataset_name
+                )
+
+                for sub_idx, part in enumerate(partitions):
+                    job_dir = os.path.join(
+                        self._jobs_dir, dataset_name, f"job_{sub_idx}"
+                    )
+                    Path(job_dir).mkdir(parents=True, exist_ok=True)
+
+                    out_dir = os.path.join(
+                        self._outputs_dir, dataset_name, f"job_{sub_idx}"
+                    )
+
+                    # Build a transient DatasetEntry for _write_job_config
+                    transient = DatasetEntry(
+                        name=dataset_name,
+                        files=[
+                            f.strip()
+                            for f in part["files"].split(",")
+                            if f.strip()
+                        ],
+                        dtype=dataset_entry.dtype if dataset_entry else "mc",
+                    )
+
+                    extra_overrides: dict = {}
+                    if part.get("last_entry", 0) > 0:
+                        extra_overrides["firstEntry"] = str(part["first_entry"])
+                        extra_overrides["lastEntry"] = str(part["last_entry"])
+
+                    _write_job_config(
+                        job_dir=job_dir,
+                        template_config_path=self.submit_config,
+                        dataset=transient,
+                        output_dir=out_dir,
+                        extra_overrides=extra_overrides,
+                    )
+
+                    job_entries.append({
+                        "dataset_name": dataset_name,
+                        "job_dir": job_dir,
+                        "out_dir": out_dir,
+                    })
+
+        else:
+            # Standard manifest mode: one job dir per dataset entry
+            manifest = DatasetManifest.load(self.dataset_manifest)
+            for entry in manifest.datasets:
+                job_dir = os.path.join(self._jobs_dir, entry.name)
+                Path(job_dir).mkdir(parents=True, exist_ok=True)
+                out_dir = os.path.join(self._outputs_dir, entry.name)
+                _write_job_config(
+                    job_dir=job_dir,
+                    template_config_path=self.submit_config,
+                    dataset=entry,
+                    output_dir=out_dir,
+                )
+                job_entries.append({
+                    "dataset_name": entry.name,
+                    "job_dir": job_dir,
+                    "out_dir": out_dir,
+                })
+
+        # ---- write the branch-map manifest --------------------------------
+        Path(self._run_dir).mkdir(parents=True, exist_ok=True)
+        with open(self.output().path, "w") as fh:
+            json.dump(job_entries, fh, indent=2)
+
+        self.publish_message(
+            f"PrepareSkimJobs: {len(job_entries)} job dir(s) prepared.\n"
+            f"  shared_inputs/ ready at {shared_dir}"
+        )
+
+        # ---- create local test job (one file) for pre-flight validation -----
+        if self.make_test_job and job_entries:
+            self._create_test_job(exe_path, job_entries)
+
+    def _create_test_job(self, exe_path: str, job_entries: list) -> None:
+        """Create a minimal single-file ``test_job/`` directory for pre-flight testing.
+
+        The first available input file from the first job entry is used.  The test
+        job writes outputs to ``test_job/`` itself (not EOS/shared storage) so that
+        it runs entirely locally without staging.
+
+        Parameters
+        ----------
+        exe_path:
+            Absolute path to the analysis executable.
+        job_entries:
+            List of ``{"dataset_name", "job_dir", "out_dir"}`` dicts produced by
+            :meth:`_run_impl`.
+        """
+        test_dir = self._test_job_dir
+        Path(test_dir).mkdir(parents=True, exist_ok=True)
+
+        exe_relpath = self._exe_relpath
+
+        # Find the first input file from the first job entry
+        first_file = ""
+        first_job_dir = ""
+        for entry in job_entries:
+            jcfg_path = os.path.join(entry["job_dir"], "submit_config.txt")
+            if os.path.exists(jcfg_path):
+                jcfg = read_config(jcfg_path)
+                file_list = jcfg.get("fileList", "")
+                if file_list:
+                    first_file = file_list.split(",")[0].strip()
+                    first_job_dir = entry["job_dir"]
+                    break
+
+        if not first_file:
+            self.publish_message(
+                "Warning: no input files found in job entries; test job not created."
+            )
+            return
+
+        # Copy the analysis executable into the test job dir
+        dst_exe = os.path.join(test_dir, exe_relpath)
+        if not os.path.exists(dst_exe):
+            shutil.copy2(exe_path, dst_exe)
+
+        # Copy local shared libraries
+        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        for lib_name, lib_src in sorted(local_libs.items()):
+            lib_dst = os.path.join(test_dir, lib_name)
+            if not os.path.exists(lib_dst):
+                shutil.copy2(lib_src, lib_dst)
+
+        # Copy auxiliary config files referenced in the template
+        if os.path.isfile(self.submit_config):
+            template_config = read_config(self.submit_config)
+            copy_list = get_copy_file_list(template_config)
+            template_dir = os.path.dirname(os.path.abspath(self.submit_config))
+            for fpath in copy_list:
+                src = os.path.join(template_dir, fpath) if not os.path.isabs(fpath) else fpath
+                if src and os.path.exists(src):
+                    dst = os.path.join(test_dir, os.path.basename(src))
+                    if not os.path.exists(dst):
+                        shutil.copy2(src, dst)
+
+        # Reuse floats.txt / ints.txt from the first job dir if available
+        for aux_name in ("floats.txt", "ints.txt"):
+            src = os.path.join(first_job_dir, aux_name)
+            if os.path.exists(src):
+                dst = os.path.join(test_dir, aux_name)
+                if not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+
+        # Build a minimal submit config: single file, local outputs, single thread
+        if os.path.isfile(self.submit_config):
+            test_config = dict(read_config(self.submit_config))
+        else:
+            test_config = {}
+        test_config["fileList"] = first_file
+        test_config["saveFile"] = "test_output.root"
+        test_config["metaFile"] = "test_output_meta.root"
+        test_config["saveDirectory"] = test_dir
+        test_config.setdefault("threads", "1")
+        # Remove any stage-out sentinel keys
+        for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
+            test_config.pop(key, None)
+
+        # Resolve config-file references to their basenames (files are already copied)
+        for key, val in list(test_config.items()):
+            if key.startswith("__"):
+                continue
+            if isinstance(val, str) and (
+                val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
+            ):
+                basename = os.path.basename(val)
+                if os.path.exists(os.path.join(test_dir, basename)):
+                    test_config[key] = basename
+
+        with open(os.path.join(test_dir, "submit_config.txt"), "w") as fh:
+            for k, v in test_config.items():
+                if not k.startswith("__"):
+                    fh.write(f"{k}={v}\n")
+
+        self.publish_message(
+            f"[PrepareSkimJobs] Test job created in {test_dir}/\n"
+            f"  Input file: {first_file}\n"
+            f"  Run manually with:  cd {test_dir} && ./{exe_relpath} submit_config.txt"
+        )
+
+
+# ===========================================================================
+# RunSkimTestJob – pre-flight single-file local test
+# ===========================================================================
+
+class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
+    """Run a single-file local test before dispatching the full :class:`SkimTask`.
+
+    This task mirrors :class:`~nano_tasks.RunTestJob` in the NANO workflow.  It
+    runs the analysis executable with a single input file and validates the exit
+    code, catching analysis runtime errors **before** expensive batch or
+    multi-dataset dispatch.
+
+    In **file-source mode** (``--file-source`` set) the test job directory is
+    prepared by :class:`PrepareSkimJobs`, which is declared as a formal LAW
+    prerequisite.
+
+    In **standard manifest mode** (``--file-source`` empty) the task creates the
+    test job directory itself using the first file from the first dataset entry in
+    the manifest.
+
+    Output
+    ------
+    * ``skimRun_{name}/test_job/test_passed.txt`` – written on success
+    """
+
+    task_namespace = ""
+
+    @property
+    def _run_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"skimRun_{self.name}")
+
+    def requires(self):
+        """Require PrepareSkimJobs in file-source mode (creates the test_job/ dir)."""
+        if self.file_source:
+            return PrepareSkimJobs.req(self)
+        return None
+
+    def output(self):
+        return law.LocalFileTarget(
+            os.path.join(self._test_job_dir, "test_passed.txt")
+        )
+
+    def run(self):
+        test_dir = self._test_job_dir
+
+        if not os.path.isdir(test_dir):
+            # Standard manifest mode: PrepareSkimJobs did not create the test_job/
+            # dir because no file-source mode was used.  Build it from scratch.
+            self._prepare_standard_test_job(test_dir)
+
+        config_path = os.path.join(test_dir, "submit_config.txt")
+        if not os.path.isfile(config_path):
+            raise RuntimeError(
+                f"Test job config not found: {config_path!r}. "
+                "Ensure PrepareSkimJobs has completed (file-source mode) or "
+                "that the dataset manifest contains at least one dataset with files."
+            )
+
+        exe_relpath = self._exe_relpath
+        exe_in_test = os.path.join(test_dir, exe_relpath)
+        if not os.path.isfile(exe_in_test):
+            # Try the absolute path directly (in case shared_inputs is on PATH)
+            exe_in_test = os.path.abspath(self.exe)
+
+        if not os.path.isfile(exe_in_test):
+            raise RuntimeError(
+                f"Executable not found for test job: {exe_in_test!r}. "
+                "Build the analysis before running RunSkimTestJob."
+            )
+
+        self.publish_message(
+            f"[RunSkimTestJob] Running single-file test in {test_dir} …"
+        )
+
+        with PerformanceRecorder("RunSkimTestJob") as rec:
+            result = _run_analysis_job(
+                exe_path=exe_in_test,
+                job_dir=test_dir,
+                root_setup=self._root_setup_content,
+                container_setup=self.container_setup or "",
+            )
+        rec.save(os.path.join(test_dir, "test_job.perf.json"))
+
+        self.publish_message(
+            f"[RunSkimTestJob] Test passed: {result}"
+        )
+
+        with self.output().open("w") as fh:
+            fh.write(f"status=passed\n{result}\n")
+
+    def _prepare_standard_test_job(self, test_dir: str) -> None:
+        """Create a minimal test job directory in standard (non-file-source) mode.
+
+        Reads the first dataset from the manifest, takes the first file, copies
+        the executable and config files, and writes a minimal ``submit_config.txt``.
+        """
+        exe_path = os.path.abspath(self.exe)
+        if not os.path.isfile(exe_path):
+            raise RuntimeError(
+                f"Analysis executable not found: {exe_path!r}. "
+                "Build the analysis before running RunSkimTestJob."
+            )
+
+        manifest = DatasetManifest.load(self.dataset_manifest)
+        first_dataset = next(iter(manifest.datasets), None)
+        if first_dataset is None:
+            raise RuntimeError(
+                f"Dataset manifest '{self.dataset_manifest}' contains no datasets."
+            )
+
+        first_file = ""
+        if first_dataset.files:
+            first_file = first_dataset.files[0]
+        elif first_dataset.das:
+            first_file = first_dataset.das
+
+        if not first_file:
+            raise RuntimeError(
+                f"Dataset '{first_dataset.name}' has no files or DAS path; "
+                "cannot create a test job."
+            )
+
+        Path(test_dir).mkdir(parents=True, exist_ok=True)
+
+        # Copy executable
+        exe_relpath = self._exe_relpath
+        dst_exe = os.path.join(test_dir, exe_relpath)
+        if not os.path.exists(dst_exe):
+            shutil.copy2(exe_path, dst_exe)
+
+        # Copy local shared libraries
+        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        for lib_name, lib_src in sorted(local_libs.items()):
+            lib_dst = os.path.join(test_dir, lib_name)
+            if not os.path.exists(lib_dst):
+                shutil.copy2(lib_src, lib_dst)
+
+        # Copy auxiliary config files referenced in template
+        if os.path.isfile(self.submit_config):
+            template_config = read_config(self.submit_config)
+            template_dir = os.path.dirname(os.path.abspath(self.submit_config))
+            copy_list = get_copy_file_list(template_config)
+            for fpath in copy_list:
+                src = os.path.join(template_dir, fpath) if not os.path.isabs(fpath) else fpath
+                if src and os.path.exists(src):
+                    dst = os.path.join(test_dir, os.path.basename(src))
+                    if not os.path.exists(dst):
+                        shutil.copy2(src, dst)
+            test_config = dict(template_config)
+        else:
+            test_config = {}
+
+        # Override dataset-specific keys
+        test_config["fileList"] = first_file
+        test_config["saveFile"] = "test_output.root"
+        test_config["metaFile"] = "test_output_meta.root"
+        test_config["saveDirectory"] = test_dir
+        test_config["sample"] = first_dataset.name
+        if first_dataset.dtype:
+            test_config["type"] = first_dataset.dtype
+        test_config.setdefault("threads", "1")
+        for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
+            test_config.pop(key, None)
+
+        # Resolve referenced config files to basenames
+        for key, val in list(test_config.items()):
+            if key.startswith("__"):
+                continue
+            if isinstance(val, str) and (
+                val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
+            ):
+                basename = os.path.basename(val)
+                if os.path.exists(os.path.join(test_dir, basename)):
+                    test_config[key] = basename
+
+        with open(os.path.join(test_dir, "submit_config.txt"), "w") as fh:
+            for k, v in test_config.items():
+                if not k.startswith("__"):
+                    fh.write(f"{k}={v}\n")
+
+        self.publish_message(
+            f"[RunSkimTestJob] Test job prepared in {test_dir}/\n"
+            f"  First dataset: {first_dataset.name}, input: {first_file}"
+        )
+
+class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWorkflow):
     """
     Run the analysis executable locally to produce skimmed ROOT files.
 
@@ -456,40 +1268,106 @@ class SkimTask(AnalysisMixin, law.LocalWorkflow):
 
     task_namespace = ""
 
+    # Parameters not meaningful at branch level (forwarded by the workflow
+    # task but consumed only at workflow-scheduling time).
+    exclude_params_branch = (
+        getattr(law.LocalWorkflow, "exclude_params_branch", set())
+        | getattr(HTCondorWorkflow, "exclude_params_branch", set())
+        | getattr(DaskWorkflow, "exclude_params_branch", set())
+        | {"dask_scheduler", "dask_workers", "max_runtime", "make_test_job"}
+    )
+
     @property
     def _run_dir(self) -> str:
         return os.path.join(WORKSPACE, f"skimRun_{self.name}")
 
+    # ------------------------------------------------------------------
+    # Branch map: two modes
+    #   1. file_source == "" → one branch per DatasetEntry from the manifest
+    #   2. file_source set   → read prep_submission.json written by
+    #                          PrepareSkimJobs; one branch per pre-created
+    #                          job directory
+    # ------------------------------------------------------------------
+
     def create_branch_map(self):
-        manifest = DatasetManifest.load(self.dataset_manifest)
-        return {i: entry for i, entry in enumerate(manifest.datasets)}
+        if not self.file_source:
+            # Standard mode: one branch per dataset entry in the manifest
+            manifest = DatasetManifest.load(self.dataset_manifest)
+            return {i: entry for i, entry in enumerate(manifest.datasets)}
+
+        # File-source mode: read job entries from PrepareSkimJobs output
+        prep_json = os.path.join(self._run_dir, "prep_submission.json")
+        if not os.path.exists(prep_json):
+            raise RuntimeError(
+                f"prep_submission.json not found at {prep_json!r}.\n"
+                "Ensure PrepareSkimJobs has completed (it runs automatically "
+                "as a workflow prerequisite when --file-source is set)."
+            )
+        with open(prep_json) as fh:
+            job_entries = json.load(fh)
+        return {i: entry for i, entry in enumerate(job_entries)}
+
+    # ------------------------------------------------------------------
+    # Workflow requirements
+    # ------------------------------------------------------------------
+
+    def workflow_requires(self):
+        """Require PrepareSkimJobs in file-source mode and RunSkimTestJob when make_test_job is True."""
+        reqs = super().workflow_requires()
+        if self.file_source:
+            reqs["prep"] = PrepareSkimJobs.req(self)
+        if self.make_test_job:
+            reqs["test"] = RunSkimTestJob.req(self)
+        return reqs
+
+    def requires(self):
+        reqs = []
+        if self.file_source:
+            reqs.append(PrepareSkimJobs.req(self))
+        if self.make_test_job:
+            reqs.append(RunSkimTestJob.req(self))
+        if not reqs:
+            return None
+        if len(reqs) == 1:
+            return reqs[0]
+        return reqs
+
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
 
     def output(self):
-        dataset: DatasetEntry = self.branch_data
+        branch_data = self.branch_data
+        if isinstance(branch_data, DatasetEntry):
+            # Standard mode: one .done file per dataset
+            return law.LocalFileTarget(
+                os.path.join(self._job_outputs_dir, f"{branch_data.name}.done")
+            )
+        # File-source mode: include branch index to guarantee uniqueness
+        dataset_name = branch_data["dataset_name"]
         return law.LocalFileTarget(
-            os.path.join(self._job_outputs_dir, f"{dataset.name}.done")
+            os.path.join(
+                self._job_outputs_dir, f"{dataset_name}_b{self.branch}.done"
+            )
         )
+
+    # ------------------------------------------------------------------
+    # complete() – adds cache-validity check in standard mode
+    # ------------------------------------------------------------------
 
     def complete(self):
         """Return True only when the `.done` marker and a valid cache sidecar exist.
 
-        Extends the standard LAW output-existence check with a provenance-based
-        cache validity check on the produced ``skim.root``.  If the cache
-        sidecar is absent, schema-incompatible, or records stale provenance
-        the ``.done`` marker is removed so that LAW will re-run this branch and
-        regenerate the artifact.
-
-        This override only applies at branch level (``self.is_branch() == True``).
-        At the workflow level the standard :meth:`law.LocalWorkflow.complete`
-        behaviour is preserved.
+        Cache validity is checked only in standard manifest mode (one job per
+        dataset).  In file-source mode there is no canonical single skim file
+        per dataset, so only the ``.done`` marker is checked.
         """
-        # Delegate non-branch (workflow-level) complete() to LAW.
         if not self.is_branch():
             return super().complete()
-
-        # If the standard output doesn't exist the task is not complete.
         if not super().complete():
             return False
+        if self.file_source:
+            return True
 
         dataset: DatasetEntry = self.branch_data
         skim_file = os.path.join(self._outputs_dir, dataset.name, "skim.root")
@@ -505,8 +1383,6 @@ class SkimTask(AnalysisMixin, law.LocalWorkflow):
         if status == ArtifactResolutionStatus.COMPATIBLE:
             return True
 
-        # Cache is stale or incompatible – remove the .done marker so LAW
-        # will schedule a fresh run of this branch.
         done_path = self.output().path
         if os.path.exists(done_path):
             os.remove(done_path)
@@ -517,60 +1393,191 @@ class SkimTask(AnalysisMixin, law.LocalWorkflow):
         )
         return False
 
+    # ------------------------------------------------------------------
+    # run()
+    # ------------------------------------------------------------------
+
     def run(self):
-        dataset: DatasetEntry = self.branch_data
+        branch_data = self.branch_data
 
-        exe_path = os.path.abspath(self.exe)
-        if not os.path.isfile(exe_path):
-            raise RuntimeError(
-                f"Analysis executable not found: {exe_path!r}. "
-                "Build the analysis before running SkimTask."
+        if isinstance(branch_data, DatasetEntry):
+            # ---- standard manifest mode --------------------------------
+            # Job directory is created on the fly; no PrepareSkimJobs needed.
+            dataset = branch_data
+            exe_path = os.path.abspath(self.exe)
+            if not os.path.isfile(exe_path):
+                raise RuntimeError(
+                    f"Analysis executable not found: {exe_path!r}. "
+                    "Build the analysis before running SkimTask."
+                )
+            if not dataset.files and not dataset.das:
+                raise RuntimeError(
+                    f"Dataset '{dataset.name}' has no files or DAS path defined "
+                    "in the dataset manifest."
+                )
+
+            job_dir = os.path.join(self._jobs_dir, dataset.name)
+            Path(job_dir).mkdir(parents=True, exist_ok=True)
+            out_dir = os.path.join(self._outputs_dir, dataset.name)
+            _write_job_config(
+                job_dir=job_dir,
+                template_config_path=self.submit_config,
+                dataset=dataset,
+                output_dir=out_dir,
             )
 
-        if not dataset.files and not dataset.das:
-            raise RuntimeError(
-                f"Dataset '{dataset.name}' has no files or DAS path defined "
-                "in the dataset manifest."
+            task_label = f"SkimTask[{dataset.name}]"
+            with PerformanceRecorder(task_label) as rec:
+                result = _run_analysis_job(exe_path=exe_path, job_dir=job_dir)
+
+            Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
+            rec.save(perf_path_for(self.output().path))
+
+            skim_file = os.path.join(out_dir, "skim.root")
+            if os.path.isfile(skim_file):
+                mf = _build_skim_manifest(
+                    dataset=dataset,
+                    submit_config_path=self.submit_config,
+                    dataset_manifest_path=self.dataset_manifest,
+                    skim_output_file=skim_file,
+                )
+                write_cache_sidecar(skim_file, mf)
+                self.publish_message(
+                    f"[SkimTask] Cache sidecar written for '{dataset.name}': "
+                    f"{skim_file}"
+                )
+
+            self.publish_message(f"Skim done for '{dataset.name}': {result}")
+            with self.output().open("w") as fh:
+                fh.write(f"status=done\ndataset={dataset.name}\n{result}\n")
+
+        else:
+            # ---- file-source mode (branch_data is a dict from PrepareSkimJobs)
+            # Job directory and submit_config.txt were created by PrepareSkimJobs.
+            # The executable lives in shared_inputs/ so it is accessible on
+            # workers via the shared filesystem (EOS/NFS) – same as RunNANOJobs.
+            dataset_name = branch_data["dataset_name"]
+            job_dir = branch_data["job_dir"]
+
+            if not os.path.isdir(job_dir):
+                raise RuntimeError(
+                    f"Job directory not found: {job_dir!r}.\n"
+                    "Ensure PrepareSkimJobs has completed successfully."
+                )
+
+            # Use the exe from shared_inputs/ (mirrors RunNANOJobs behavior)
+            exe_path = os.path.join(self._shared_dir, self._exe_relpath)
+            if not os.path.isfile(exe_path):
+                raise RuntimeError(
+                    f"Executable not found in shared_inputs: {exe_path!r}.\n"
+                    "Ensure PrepareSkimJobs has completed successfully."
+                )
+
+            task_label = f"SkimTask[{dataset_name}/b{self.branch}]"
+            with PerformanceRecorder(task_label) as rec:
+                result = _run_analysis_job(
+                    exe_path=exe_path,
+                    job_dir=job_dir,
+                    root_setup=self._root_setup_content,
+                    container_setup=self.container_setup or "",
+                )
+
+            Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
+            rec.save(perf_path_for(self.output().path))
+
+            self.publish_message(
+                f"Skim done for '{dataset_name}' branch {self.branch}: {result}"
             )
+            with self.output().open("w") as fh:
+                fh.write(
+                    f"status=done\ndataset={dataset_name}\n"
+                    f"branch={self.branch}\n{result}\n"
+                )
 
-        # ---- set up job directory ------------------------------------------
-        job_dir = os.path.join(self._jobs_dir, dataset.name)
-        Path(job_dir).mkdir(parents=True, exist_ok=True)
+    # ------------------------------------------------------------------
+    # HTCondor workflow configuration (mirrors RunNANOJobs)
+    # ------------------------------------------------------------------
 
-        out_dir = os.path.join(self._outputs_dir, dataset.name)
-        _write_job_config(
-            job_dir=job_dir,
-            template_config_path=self.submit_config,
-            dataset=dataset,
-            output_dir=out_dir,
+    def htcondor_output_directory(self):
+        """Directory for LAW's HTCondor job submission files."""
+        return law.LocalDirectoryTarget(
+            os.path.join(self._run_dir, "law_htcondor")
         )
 
-        # ---- run the analysis executable -----------------------------------
-        task_label = f"SkimTask[{dataset.name}]"
-        with PerformanceRecorder(task_label) as rec:
-            result = _run_analysis_job(exe_path=exe_path, job_dir=job_dir)
+    def htcondor_log_directory(self):
+        """Directory for HTCondor log files."""
+        return law.LocalDirectoryTarget(
+            os.path.join(self._run_dir, "law_htcondor_logs")
+        )
 
-        Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
-        rec.save(perf_path_for(self.output().path))
+    def htcondor_bootstrap_file(self):
+        """Optional bootstrap script executed on every HTCondor worker."""
+        bootstrap_path = os.path.join(_HERE, "htcondor_bootstrap.sh")
+        if os.path.isfile(bootstrap_path):
+            from law.job.base import JobInputFile  # type: ignore
+            return JobInputFile(bootstrap_path, copy=True, render_local=False)
+        return None
 
-        # ---- write cache sidecar for the produced skim artifact ------------
-        skim_file = os.path.join(out_dir, "skim.root")
-        if os.path.isfile(skim_file):
-            manifest = _build_skim_manifest(
-                dataset=dataset,
-                submit_config_path=self.submit_config,
-                dataset_manifest_path=self.dataset_manifest,
-                skim_output_file=skim_file,
+    def htcondor_job_config(self, config, job_num, branches):
+        """Configure per-job HTCondor resource requests.
+
+        When running in file-source mode the ``shared_inputs/`` directory is
+        added to ``transfer_input_files`` so workers receive the executable,
+        shared libraries, x509 proxy, and Python env tarball regardless of
+        whether a shared filesystem is available.
+        """
+        if not hasattr(config, "custom_content") or config.custom_content is None:
+            config.custom_content = []
+        config.custom_content.extend([
+            ("+RequestMemory", str(2000)),
+            ("+MaxRuntime", str(self.max_runtime)),
+            ("request_cpus", "1"),
+            ("request_disk", "20000"),
+        ])
+        if self.file_source and os.path.isdir(self._shared_dir):
+            existing = {
+                k: v
+                for item in config.custom_content
+                if isinstance(item, (list, tuple)) and len(item) == 2
+                for k, v in [item]
+            }
+            xfer = existing.get("transfer_input_files", "")
+            shared = self._shared_dir
+            config.custom_content.append(
+                ("transfer_input_files", f"{xfer},{shared}" if xfer else shared)
             )
-            write_cache_sidecar(skim_file, manifest)
-            self.publish_message(
-                f"[SkimTask] Cache sidecar written for '{dataset.name}': "
-                f"{skim_file}"
-            )
+        return config
 
-        self.publish_message(f"Skim done for '{dataset.name}': {result}")
-        with self.output().open("w") as fh:
-            fh.write(f"status=done\ndataset={dataset.name}\n{result}\n")
+    def htcondor_workflow_requires(self):
+        """Ensure PrepareSkimJobs is complete before HTCondor submission."""
+        from law.util import DotDict  # type: ignore
+        if self.file_source:
+            return DotDict(prep=PrepareSkimJobs.req(self))
+        return DotDict()
+
+    # ------------------------------------------------------------------
+    # Dask workflow configuration (mirrors RunNANOJobs)
+    # ------------------------------------------------------------------
+
+    def get_dask_work(self, branch_num: int, branch_data) -> tuple:
+        """Return the (callable, args, kwargs) triple for Dask dispatch.
+
+        In file-source mode the executable is taken from ``shared_inputs/``
+        (matching HTCondor behavior).  In standard mode the absolute path of
+        the compiled executable is used.
+        """
+        if isinstance(branch_data, DatasetEntry):
+            exe_path = os.path.abspath(self.exe)
+            job_dir = os.path.join(self._jobs_dir, branch_data.name)
+        else:
+            exe_path = os.path.join(self._shared_dir, self._exe_relpath)
+            job_dir = branch_data["job_dir"]
+        return (
+            _run_analysis_job,
+            [exe_path, job_dir, self._root_setup_content,
+             self.container_setup or ""],
+            {},
+        )
 
 
 # ===========================================================================
@@ -1167,3 +2174,134 @@ class StitchingDerivationTask(law.Task):
         self.publish_message(
             f"Stitch weights (correctionlib) written to: {json_path}"
         )
+
+
+# ===========================================================================
+# Task 4 – CollectHistogramsTask
+# ===========================================================================
+
+class CollectHistogramsTask(law.Task):
+    """Merge per-dataset histogram ROOT files produced by a SkimTask run.
+
+    Requires a completed :class:`SkimTask` (identified by ``--skim-name``) and
+    collects all ``skim.root`` files from its output directories, then merges
+    them into a single ``histograms.root`` using ``hadd``.
+
+    When the SkimTask was run in **file-source mode** (``--file-source`` set),
+    branch output directories follow the pattern
+    ``skimRun_{skim_name}/outputs/{dataset}/branch_*/skim.root``, which this
+    task discovers automatically.
+
+    Output
+    ------
+    * ``histCollect_{name}/histograms.root`` – merged histogram file
+    * ``histCollect_{name}/collect.done``    – completion marker
+
+    Parameters
+    ----------
+    name:
+        Run name; output goes to ``histCollect_{name}/``.
+    skim_name:
+        Name of the completed :class:`SkimTask` run to collect from.
+    dataset_manifest:
+        Path to the dataset manifest YAML (forwarded to :class:`SkimTask`).
+    """
+
+    task_namespace = ""
+
+    name = luigi.Parameter(
+        description=(
+            "Run name used to namespace the output directory. "
+            "Output is written to ``histCollect_{name}/``."
+        ),
+    )
+    skim_name = luigi.Parameter(
+        description="Name of the completed SkimTask run to merge histograms from.",
+    )
+    dataset_manifest = luigi.Parameter(
+        description="Path to the dataset manifest YAML (forwarded to SkimTask).",
+    )
+    submit_config = luigi.Parameter(
+        default="",
+        description=(
+            "Path to the submit_config.txt template (forwarded to SkimTask "
+            "for dependency resolution; not used directly by this task)."
+        ),
+    )
+    exe = luigi.Parameter(
+        default="",
+        description=(
+            "Path to the analysis executable (forwarded to SkimTask "
+            "for dependency resolution; not used directly by this task)."
+        ),
+    )
+
+    @property
+    def _output_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"histCollect_{self.name}")
+
+    @property
+    def _skim_outputs_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"skimRun_{self.skim_name}", "outputs")
+
+    def requires(self):
+        kwargs: dict = dict(
+            name=self.skim_name,
+            dataset_manifest=self.dataset_manifest,
+        )
+        if self.submit_config:
+            kwargs["submit_config"] = self.submit_config
+        if self.exe:
+            kwargs["exe"] = self.exe
+        return SkimTask.req(self, **kwargs)
+
+    def output(self):
+        return {
+            "histogram": law.LocalFileTarget(
+                os.path.join(self._output_dir, "histograms.root")
+            ),
+            "done": law.LocalFileTarget(
+                os.path.join(self._output_dir, "collect.done")
+            ),
+        }
+
+    def run(self):
+        # Discover all skim.root files under the skim outputs directory
+        skim_files = sorted(
+            str(p)
+            for p in Path(self._skim_outputs_dir).rglob("skim.root")
+            if p.is_file()
+        )
+
+        if not skim_files:
+            raise RuntimeError(
+                f"No skim.root files found under '{self._skim_outputs_dir}'. "
+                f"Ensure SkimTask --name {self.skim_name!r} has completed successfully."
+            )
+
+        self.publish_message(
+            f"CollectHistogramsTask: merging {len(skim_files)} skim file(s) "
+            f"into {self._output_dir}/histograms.root"
+        )
+
+        Path(self._output_dir).mkdir(parents=True, exist_ok=True)
+        merged_path = self.output()["histogram"].path
+
+        # Use hadd to merge histogram ROOT files
+        cmd = ["hadd", "-f", merged_path] + skim_files
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"hadd failed (exit {result.returncode}):\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+
+        self.publish_message(
+            f"CollectHistogramsTask: merged histogram written to {merged_path}"
+        )
+
+        with self.output()["done"].open("w") as fh:
+            fh.write(
+                f"status=done\nskim_name={self.skim_name}\n"
+                f"files_merged={len(skim_files)}\n"
+            )

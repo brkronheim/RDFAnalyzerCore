@@ -126,9 +126,11 @@ void TriggerManager::applyAllTriggers() {
     return pass;
   };
   
+  // Avoid forcing a dataframe evaluation here; counting entries would
+  // trigger an event loop before the main analysis execution, which doubles
+  // runtime.  Counters/logging can be added later if needed, but the
+  // default behaviour should be lazy.
   auto dfBefore = dataManager_m->getDataFrame();
-  auto totalBefore = dfBefore.Count();
-  std::cout << "TriggerManager: rows before applying triggers: " << totalBefore.GetValue() << std::endl;
 
   if (!group.empty()) {
     const auto& triggers = getTriggers(group);
@@ -137,8 +139,9 @@ void TriggerManager::applyAllTriggers() {
       dataManager_m->DefineVector("allTriggersPassVector", triggers, "Bool_t", *systematicManager_m);
       // Define the filter variable
       dataManager_m->Define("pass_applyTrigger", passTrigger, {"allTriggersPassVector"}, *systematicManager_m);
-      // Debug: check whether pass_applyTrigger evaluates to true for any row
-      {
+      // Optional debug: count rows passing pass_applyTrigger pre-apply. Only runs
+      // if TRIGGER_MANAGER_DEBUG is set (to avoid an eager event loop).
+      if (std::getenv("TRIGGER_MANAGER_DEBUG") != nullptr) {
         auto dfDbg = dataManager_m->getDataFrame();
         auto cntDbg = dfDbg.Filter([](bool val){ return val; }, {"pass_applyTrigger"}).Count();
         std::cout << "TriggerManager debug: rows passing pass_applyTrigger (pre-apply): " << cntDbg.GetValue() << std::endl;
@@ -150,8 +153,9 @@ void TriggerManager::applyAllTriggers() {
       dataManager_m->DefineVector(group + "_vetoVector", vetoes, "Bool_t", *systematicManager_m);
       // Define the filter variable
       dataManager_m->Define("pass_applyTrigger", passTriggerAndVeto, {group + "_passVector", group + "_vetoVector"}, *systematicManager_m);
-      // Debug: check whether pass_applyTrigger evaluates to true for any row
-      {
+      // Optional debug: count rows passing pass_applyTrigger pre-apply, only when
+      // TRIGGER_MANAGER_DEBUG is set.
+      if (std::getenv("TRIGGER_MANAGER_DEBUG") != nullptr) {
         auto dfDbg = dataManager_m->getDataFrame();
         auto cntDbg = dfDbg.Filter([](bool val){ return val; }, {"pass_applyTrigger"}).Count();
         std::cout << "TriggerManager debug: rows passing pass_applyTrigger (pre-apply): " << cntDbg.GetValue() << std::endl;
@@ -172,9 +176,12 @@ void TriggerManager::applyAllTriggers() {
     dataManager_m->Filter([](bool val) { return val; }, {"pass_applyTrigger"});
   }
 
-  auto dfAfter = dataManager_m->getDataFrame();
-  auto totalAfter = dfAfter.Count();
-  std::cout << "TriggerManager: rows after applying triggers: " << totalAfter.GetValue() << std::endl;
+  // Similarly, avoid counting after applying triggers unless debugging.
+  if (std::getenv("TRIGGER_MANAGER_DEBUG") != nullptr) {
+    auto dfAfter = dataManager_m->getDataFrame();
+    auto totalAfter = dfAfter.Count();
+    std::cout << "TriggerManager: rows after applying triggers: " << totalAfter.GetValue() << std::endl;
+  }
 }
 
 

@@ -112,6 +112,34 @@ DEFAULT_INPUT  = os.path.join(_SCRIPT_DIR, "output", "dimuon_zpeak.root")
 DEFAULT_OUTDIR = os.path.join(_SCRIPT_DIR, "zpeak_fit")
 
 
+def find_histogram(root_file: ROOT.TFile, hist_name: str) -> tuple[ROOT.TH1 | None, str | None]:
+    """Return a histogram and its path from common or nested output layouts."""
+    candidate_paths = [
+        f"histograms/{hist_name}",
+        f"Default_Default/Default/{hist_name}",
+        hist_name,
+    ]
+    for hist_path in candidate_paths:
+        hist = root_file.Get(hist_path)
+        if hist and hist.InheritsFrom("TH1"):
+            return hist, hist_path
+
+    def _walk(directory: ROOT.TDirectory, prefix: str = "") -> tuple[ROOT.TH1 | None, str | None]:
+        for key in directory.GetListOfKeys():
+            name = key.GetName()
+            obj = key.ReadObj()
+            obj_path = f"{prefix}/{name}" if prefix else name
+            if obj.InheritsFrom("TH1") and name == hist_name:
+                return obj, obj_path
+            if obj.InheritsFrom("TDirectory"):
+                found_hist, found_path = _walk(obj, obj_path)
+                if found_hist:
+                    return found_hist, found_path
+        return None, None
+
+    return _walk(root_file)
+
+
 # ---------------------------------------------------------------------------
 # Workspace building (delegates to combine_tasks helpers when available)
 # ---------------------------------------------------------------------------
@@ -249,6 +277,71 @@ def write_combined_datacard(channels: list, out_dir: str) -> str:
     return card_path
 
 
+def save_fit_plot(ws: ROOT.RooWorkspace, channel: str, out_dir: Path) -> str:
+    """Fit the analytic model to the channel data and save a PNG overlay."""
+    obs = ws.var("mass")
+    data = ws.data(f"data_obs_{channel}")
+    model = ws.pdf(f"model_{channel}")
+    sig_pdf = ws.pdf(f"sig_{channel}")
+    bkg_pdf = ws.pdf(f"bkg_{channel}")
+
+    if not obs or not data or not model or not sig_pdf or not bkg_pdf:
+        raise RuntimeError(f"Workspace for channel '{channel}' is missing required RooFit objects")
+
+    fit_result = model.fitTo(
+        data,
+        ROOT.RooFit.Save(True),
+        ROOT.RooFit.PrintLevel(-1),
+        ROOT.RooFit.PrintEvalErrors(-1),
+        ROOT.RooFit.Warnings(False),
+        ROOT.RooFit.Verbose(False),
+    )
+
+    frame = obs.frame(ROOT.RooFit.Title(f"Z peak fit: {channel}"))
+    data.plotOn(frame, ROOT.RooFit.Name("data"))
+    model.plotOn(frame, ROOT.RooFit.Name("model"), ROOT.RooFit.LineColor(ROOT.kBlue + 1))
+    model.plotOn(
+        frame,
+        ROOT.RooFit.Name("background"),
+        ROOT.RooFit.Components(f"bkg_{channel}"),
+        ROOT.RooFit.LineColor(ROOT.kRed + 1),
+        ROOT.RooFit.LineStyle(ROOT.kDashed),
+    )
+    model.plotOn(
+        frame,
+        ROOT.RooFit.Name("signal"),
+        ROOT.RooFit.Components(f"sig_{channel}"),
+        ROOT.RooFit.LineColor(ROOT.kGreen + 2),
+        ROOT.RooFit.LineStyle(ROOT.kDotted),
+    )
+
+    canvas = ROOT.TCanvas(f"c_{channel}", f"fit_{channel}", 900, 700)
+    canvas.cd()
+    frame.GetXaxis().SetTitle("m_{#mu#mu} [GeV]")
+    frame.GetYaxis().SetTitle("Events / bin")
+    frame.Draw()
+
+    legend = ROOT.TLegend(0.58, 0.68, 0.88, 0.88)
+    legend.SetBorderSize(0)
+    legend.SetFillStyle(0)
+    legend.AddEntry(frame.findObject("data"), "Data", "pe")
+    legend.AddEntry(frame.findObject("model"), "Total fit", "l")
+    legend.AddEntry(frame.findObject("signal"), "Signal", "l")
+    legend.AddEntry(frame.findObject("background"), "Background", "l")
+    legend.Draw()
+
+    fit_label = ROOT.TLatex()
+    fit_label.SetNDC(True)
+    fit_label.SetTextSize(0.03)
+    fit_label.DrawLatex(0.16, 0.88, f"fit status = {fit_result.status()}, covQual = {fit_result.covQual()}")
+    fit_label.DrawLatex(0.16, 0.84, f"#chi^{{2}}/ndf = {frame.chiSquare():.3f}")
+
+    plot_path = out_dir / f"fit_{channel}.png"
+    canvas.SaveAs(str(plot_path))
+    canvas.Close()
+    return str(plot_path)
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -306,12 +399,13 @@ def main() -> None:
         print(f" Channel: {channel}  ({label})")
         print(f"{'─' * 60}")
 
-        hist = root_file.Get(f"histograms/{hist_key}")
+        hist, hist_path = find_histogram(root_file, hist_key)
         if not hist or hist.IsZombie():
-            print(f"  WARNING: histogram 'histograms/{hist_key}' not found — skipping.")
+            print(f"  WARNING: histogram '{hist_key}' not found in input file — skipping.")
             continue
 
         hist.SetDirectory(0)
+        print(f"  Histogram : {hist_path}")
         n_obs = hist.Integral()
         print(f"  Events in fit range: {n_obs:.0f}")
 
@@ -328,6 +422,9 @@ def main() -> None:
 
         card_path = write_datacard(channel, n_obs, ws_path, str(out))
         print(f"  Datacard  : {card_path}")
+
+        plot_path = save_fit_plot(ws, channel, out)
+        print(f"  Plot      : {plot_path}")
         active_channels.append(channel)
 
     root_file.Close()

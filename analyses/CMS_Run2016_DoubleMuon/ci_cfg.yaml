@@ -14,7 +14,7 @@
 
 # ---- Input (single file — fast CI run) -------------------------------------
 fileList: >-
-  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/DoubleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/0022/0E5B2574-86E2-1A4B-B37B-E01BBA4AEC56.root
+  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/DoubleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/2430000/05DD095C-F6C3-9A4F-9FB3-348A5A6403D5.root
 
 treeList: Events
 
