@@ -33,7 +33,9 @@ A typical workflow:
 2. Use `getValue<T>()` to extract any feature branch for the selected objects.
 3. Cache derived quantities with `cacheFeature` / `getCachedFeature`.
 4. Remove objects that overlap with another collection via `removeOverlap`.
-5. Build di-object or tri-object combinations with `makePairs`,
+5. Apply additional selections in-place via `withFilter`.
+6. Apply kinematic corrections via `withCorrectedKinematics` / `withCorrectedPt`.
+7. Build di-object or tri-object combinations with `makePairs`,
    `makeCrossPairs`, or `makeTriplets`.
 
 Key capabilities:
@@ -45,6 +47,8 @@ Key capabilities:
 | Feature extraction | `getValue<T>(branch)` |
 | Derived-property cache | `cacheFeature`, `getCachedFeature`, `hasCachedFeature` |
 | Overlap removal | `removeOverlap(other, deltaRMin)` |
+| Sub-collection filtering | `withFilter(mask)` |
+| Kinematic corrections | `withCorrectedKinematics(pt,eta,phi,mass)`, `withCorrectedPt(pt)` |
 | Same-collection pairs | `makePairs(col)` |
 | Cross-collection pairs | `makeCrossPairs(col1, col2)` |
 | Same-collection triplets | `makeTriplets(col)` |
@@ -298,7 +302,93 @@ float dr = PhysicsObjectCollection::deltaR(jets.at(0), muons.at(0));
 
 ---
 
-## 6. Combinatorics
+## 5a. Sub-Collection Filtering
+
+### `withFilter(mask)`
+
+```cpp
+PhysicsObjectCollection withFilter(const ROOT::VecOps::RVec<bool>& mask) const;
+```
+
+Returns a **new** `PhysicsObjectCollection` containing only the objects for
+which `mask[i]` is `true`.  The mask is indexed **relative to this
+collection** (positions 0 to `size()-1`), not to the original full
+collection.
+
+This is the primary method for applying additional selections to an
+already-built collection, e.g. a b-tagging requirement applied after a
+basic pT/eta pre-selection.
+
+Throws `std::runtime_error` if `mask.size() != size()`.
+
+The cached-feature store is **not** propagated to the result.
+
+```cpp
+// Apply b-tag requirement to a jet collection built with pT/eta cuts
+RVec<bool> btagMask = jets.getValue(Jet_btagDeepFlavB) > 0.5f;
+auto bJets = jets.withFilter(btagMask);
+```
+
+---
+
+## 5b. Correction Application
+
+### `withCorrectedKinematics(correctedPt, correctedEta, correctedPhi, correctedMass)`
+
+```cpp
+PhysicsObjectCollection withCorrectedKinematics(
+    const ROOT::VecOps::RVec<Float_t>& correctedPt,
+    const ROOT::VecOps::RVec<Float_t>& correctedEta,
+    const ROOT::VecOps::RVec<Float_t>& correctedPhi,
+    const ROOT::VecOps::RVec<Float_t>& correctedMass) const;
+```
+
+Returns a **new** `PhysicsObjectCollection` with updated 4-vectors built
+from corrected kinematic arrays.  Each array must be indexed by position
+in the **original (full, unfiltered) collection** — the same indexing used
+when constructing this collection.
+
+The stored original indices are used to look up each object's corrected
+values, so you can pass the uncorrected `Jet_pt`, `Jet_eta`, … branch
+shapes with corrections applied element-wise.
+
+The cached-feature store is **not** propagated to the result.
+
+Throws `std::runtime_error` if the four arrays have inconsistent sizes.  
+Throws `std::out_of_range` if a stored index exceeds the array bounds.
+
+```cpp
+// Apply JEC corrections from correctionlib (correctedPt, correctedMass
+// are full-collection arrays, same shape as Jet_pt)
+auto corrJets = goodJets.withCorrectedKinematics(
+    correctedPt, Jet_eta, Jet_phi, correctedMass);
+```
+
+### `withCorrectedPt(correctedPt)`
+
+```cpp
+PhysicsObjectCollection withCorrectedPt(
+    const ROOT::VecOps::RVec<Float_t>& correctedPt) const;
+```
+
+Convenience wrapper around `withCorrectedKinematics` that replaces only
+the transverse momentum.  Eta, phi, and mass are taken from the existing
+4-vectors.  `correctedPt` is indexed by the **original** collection
+position.
+
+```cpp
+// Scale jet pt by a flat correction factor
+RVec<float> corrPt = Jet_pt * jecFactor;
+auto corrJets = goodJets.withCorrectedPt(corrPt);
+```
+
+> **TypedPhysicsObjectCollection note**: Both `withFilter`,
+> `withCorrectedKinematics`, and `withCorrectedPt` are **overridden** in
+> `TypedPhysicsObjectCollection<T>` to return a
+> `TypedPhysicsObjectCollection<T>` and carry the user-defined objects
+> along with the filtered/corrected 4-vectors.  Corrections only update
+> the kinematic information; the user-defined objects are preserved
+> unchanged.
 
 Three free functions build all unique combinations from one or two collections
 and return them as vectors of lightweight structs.

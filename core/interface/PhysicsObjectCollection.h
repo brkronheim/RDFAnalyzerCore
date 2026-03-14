@@ -356,11 +356,132 @@ public:
         return std::sqrt(dEta * dEta + dPhi * dPhi);
     }
 
-private:
+    // ------------------------------------------------------------------
+    // Sub-collection filtering
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Return a new collection containing only the objects where
+     *        @p mask is @c true.
+     *
+     * The mask is indexed relative to *this* collection (position 0 to
+     * @ref size() - 1), not the original full collection.  The cached-feature
+     * store is *not* propagated to the result.
+     *
+     * @param mask Boolean mask of length @ref size().
+     * @return New @c PhysicsObjectCollection with only the selected objects.
+     * @throws std::runtime_error if @p mask has a different size than this
+     *         collection.
+     */
+    PhysicsObjectCollection withFilter(const ROOT::VecOps::RVec<bool> &mask) const {
+        if (mask.size() != size()) {
+            throw std::runtime_error(
+                "PhysicsObjectCollection::withFilter: mask size mismatch");
+        }
+        PhysicsObjectCollection result;
+        for (std::size_t i = 0; i < size(); ++i) {
+            if (mask[i]) {
+                result.vectors_m.push_back(vectors_m[i]);
+                result.indices_m.push_back(indices_m[i]);
+            }
+        }
+        return result;
+    }
+
+    // ------------------------------------------------------------------
+    // Correction application
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Return a new collection with updated 4-vectors from corrected
+     *        kinematic arrays.
+     *
+     * Each input array is indexed by position in the *original* (full,
+     * unfiltered) collection — the same indexing used to build this collection.
+     * The stored indices are used to look up each object's corrected values.
+     *
+     * The cached-feature store is *not* propagated to the result.
+     *
+     * @param correctedPt   Corrected transverse momenta for the full collection.
+     * @param correctedEta  Corrected pseudorapidities for the full collection.
+     * @param correctedPhi  Corrected azimuthal angles for the full collection.
+     * @param correctedMass Corrected masses for the full collection.
+     * @return New @c PhysicsObjectCollection with corrected 4-vectors.
+     * @throws std::runtime_error if the corrected arrays have inconsistent sizes.
+     * @throws std::out_of_range  if a stored index is out of range for the
+     *         corrected arrays.
+     */
+    PhysicsObjectCollection withCorrectedKinematics(
+        const ROOT::VecOps::RVec<Float_t> &correctedPt,
+        const ROOT::VecOps::RVec<Float_t> &correctedEta,
+        const ROOT::VecOps::RVec<Float_t> &correctedPhi,
+        const ROOT::VecOps::RVec<Float_t> &correctedMass) const {
+        const auto n = correctedPt.size();
+        if (correctedEta.size() != n || correctedPhi.size() != n ||
+            correctedMass.size() != n) {
+            throw std::runtime_error(
+                "PhysicsObjectCollection::withCorrectedKinematics: "
+                "input vector size mismatch");
+        }
+        PhysicsObjectCollection result;
+        result.indices_m.reserve(size());
+        result.vectors_m.reserve(size());
+        for (std::size_t i = 0; i < size(); ++i) {
+            const auto idx = indices_m[i];
+            if (idx < 0 || static_cast<std::size_t>(idx) >= n) {
+                throw std::out_of_range(
+                    "PhysicsObjectCollection::withCorrectedKinematics: "
+                    "index out of range for corrected arrays");
+            }
+            result.indices_m.push_back(idx);
+            result.vectors_m.push_back(
+                makePtEtaPhiM(correctedPt[idx], correctedEta[idx],
+                              correctedPhi[idx], correctedMass[idx]));
+        }
+        return result;
+    }
+
+    /**
+     * @brief Return a new collection with corrected transverse momenta only.
+     *
+     * A convenience wrapper around @ref withCorrectedKinematics that replaces
+     * only pt; eta, phi, and mass are taken from the existing 4-vectors.
+     *
+     * @p correctedPt is indexed by position in the *original* (full,
+     * unfiltered) collection.
+     *
+     * @param correctedPt Corrected transverse momenta for the full collection.
+     * @return New @c PhysicsObjectCollection with updated pt.
+     * @throws std::out_of_range if a stored index is out of range for
+     *         @p correctedPt.
+     */
+    PhysicsObjectCollection withCorrectedPt(
+        const ROOT::VecOps::RVec<Float_t> &correctedPt) const {
+        const auto n = correctedPt.size();
+        PhysicsObjectCollection result;
+        result.indices_m.reserve(size());
+        result.vectors_m.reserve(size());
+        for (std::size_t i = 0; i < size(); ++i) {
+            const auto idx = indices_m[i];
+            if (idx < 0 || static_cast<std::size_t>(idx) >= n) {
+                throw std::out_of_range(
+                    "PhysicsObjectCollection::withCorrectedPt: "
+                    "index out of range for correctedPt");
+            }
+            const LorentzVec &old = vectors_m[i];
+            const Float_t eta  = static_cast<Float_t>(old.Eta());
+            const Float_t phi  = static_cast<Float_t>(old.Phi());
+            const Float_t mass = static_cast<Float_t>(old.M());
+            result.indices_m.push_back(idx);
+            result.vectors_m.push_back(
+                makePtEtaPhiM(correctedPt[idx], eta, phi, mass));
+        }
+        return result;
+    }
+
+protected:
     std::vector<LorentzVec> vectors_m; ///< 4-vectors of selected objects.
     std::vector<Int_t>      indices_m; ///< Original indices of selected objects.
-    /// Cache of arbitrary derived quantities, keyed by user-defined names.
-    std::unordered_map<std::string, std::any> cachedFeatures_m;
 
     /// Build a PxPyPzM LorentzVector from pt, eta, phi, mass.
     static LorentzVec makePtEtaPhiM(Float_t pt, Float_t eta, Float_t phi,
@@ -370,6 +491,10 @@ private:
         const Float_t pz = pt * std::sinh(eta);
         return LorentzVec(px, py, pz, mass);
     }
+
+private:
+    /// Cache of arbitrary derived quantities, keyed by user-defined names.
+    std::unordered_map<std::string, std::any> cachedFeatures_m;
 };
 
 // ============================================================================
@@ -608,6 +733,134 @@ public:
      * @return Const reference to the internal vector of user objects.
      */
     const std::vector<ObjectType> &objects() const { return objects_m; }
+
+    // ------------------------------------------------------------------
+    // Sub-collection filtering (typed override)
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Return a new typed collection containing only objects where
+     *        @p mask is @c true.
+     *
+     * Both 4-vectors and user-defined objects are filtered consistently.
+     * The mask is indexed relative to *this* collection (position 0 to
+     * @ref size() - 1).  The cached-feature store is *not* propagated.
+     *
+     * @param mask Boolean mask of length @ref size().
+     * @return New @c TypedPhysicsObjectCollection with only selected objects.
+     * @throws std::runtime_error if @p mask has a different size than this
+     *         collection.
+     */
+    TypedPhysicsObjectCollection<ObjectType>
+    withFilter(const ROOT::VecOps::RVec<bool> &mask) const {
+        if (mask.size() != this->size()) {
+            throw std::runtime_error(
+                "TypedPhysicsObjectCollection::withFilter: mask size mismatch");
+        }
+        TypedPhysicsObjectCollection<ObjectType> result;
+        for (std::size_t i = 0; i < this->size(); ++i) {
+            if (mask[i]) {
+                result.vectors_m.push_back(this->vectors_m[i]);
+                result.indices_m.push_back(this->indices_m[i]);
+                result.objects_m.push_back(objects_m[i]);
+            }
+        }
+        return result;
+    }
+
+    // ------------------------------------------------------------------
+    // Correction application (typed overrides)
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Return a new typed collection with updated 4-vectors from
+     *        corrected kinematic arrays, preserving user-defined objects.
+     *
+     * Each input array is indexed by position in the *original* (full,
+     * unfiltered) collection.  User-defined objects are carried over
+     * unchanged since corrections affect only the 4-momenta.
+     * The cached-feature store is *not* propagated.
+     *
+     * @param correctedPt   Corrected pt for the full collection.
+     * @param correctedEta  Corrected eta for the full collection.
+     * @param correctedPhi  Corrected phi for the full collection.
+     * @param correctedMass Corrected mass for the full collection.
+     * @return New @c TypedPhysicsObjectCollection with corrected 4-vectors.
+     * @throws std::runtime_error if the corrected arrays have inconsistent sizes.
+     * @throws std::out_of_range  if a stored index is out of range.
+     */
+    TypedPhysicsObjectCollection<ObjectType>
+    withCorrectedKinematics(
+        const ROOT::VecOps::RVec<Float_t> &correctedPt,
+        const ROOT::VecOps::RVec<Float_t> &correctedEta,
+        const ROOT::VecOps::RVec<Float_t> &correctedPhi,
+        const ROOT::VecOps::RVec<Float_t> &correctedMass) const {
+        const auto n = correctedPt.size();
+        if (correctedEta.size() != n || correctedPhi.size() != n ||
+            correctedMass.size() != n) {
+            throw std::runtime_error(
+                "TypedPhysicsObjectCollection::withCorrectedKinematics: "
+                "input vector size mismatch");
+        }
+        TypedPhysicsObjectCollection<ObjectType> result;
+        result.indices_m.reserve(this->size());
+        result.vectors_m.reserve(this->size());
+        result.objects_m.reserve(this->size());
+        for (std::size_t i = 0; i < this->size(); ++i) {
+            const auto idx = this->indices_m[i];
+            if (idx < 0 || static_cast<std::size_t>(idx) >= n) {
+                throw std::out_of_range(
+                    "TypedPhysicsObjectCollection::withCorrectedKinematics: "
+                    "index out of range for corrected arrays");
+            }
+            result.indices_m.push_back(idx);
+            result.vectors_m.push_back(
+                PhysicsObjectCollection::makePtEtaPhiM(
+                    correctedPt[idx], correctedEta[idx],
+                    correctedPhi[idx], correctedMass[idx]));
+            result.objects_m.push_back(objects_m[i]);
+        }
+        return result;
+    }
+
+    /**
+     * @brief Return a new typed collection with corrected transverse momenta,
+     *        preserving user-defined objects.
+     *
+     * A convenience wrapper around @ref withCorrectedKinematics that replaces
+     * only pt; eta, phi, and mass are taken from the existing 4-vectors.
+     * @p correctedPt is indexed by position in the *original* collection.
+     *
+     * @param correctedPt Corrected transverse momenta for the full collection.
+     * @return New @c TypedPhysicsObjectCollection with updated pt.
+     * @throws std::out_of_range if a stored index is out of range.
+     */
+    TypedPhysicsObjectCollection<ObjectType>
+    withCorrectedPt(const ROOT::VecOps::RVec<Float_t> &correctedPt) const {
+        const auto n = correctedPt.size();
+        TypedPhysicsObjectCollection<ObjectType> result;
+        result.indices_m.reserve(this->size());
+        result.vectors_m.reserve(this->size());
+        result.objects_m.reserve(this->size());
+        for (std::size_t i = 0; i < this->size(); ++i) {
+            const auto idx = this->indices_m[i];
+            if (idx < 0 || static_cast<std::size_t>(idx) >= n) {
+                throw std::out_of_range(
+                    "TypedPhysicsObjectCollection::withCorrectedPt: "
+                    "index out of range for correctedPt");
+            }
+            const LorentzVec &old = this->vectors_m[i];
+            const Float_t eta  = static_cast<Float_t>(old.Eta());
+            const Float_t phi  = static_cast<Float_t>(old.Phi());
+            const Float_t mass = static_cast<Float_t>(old.M());
+            result.indices_m.push_back(idx);
+            result.vectors_m.push_back(
+                PhysicsObjectCollection::makePtEtaPhiM(
+                    correctedPt[idx], eta, phi, mass));
+            result.objects_m.push_back(objects_m[i]);
+        }
+        return result;
+    }
 
 private:
     std::vector<ObjectType> objects_m; ///< User-defined objects for each selected entry.
