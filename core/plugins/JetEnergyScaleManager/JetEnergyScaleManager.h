@@ -2,6 +2,7 @@
 #define JETENERGYSCALEMANAGER_H_INCLUDED
 
 #include <CorrectionManager.h>
+#include <PhysicsObjectCollection.h>
 #include <api/IPluggableManager.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
@@ -45,6 +46,9 @@ struct JESVariationEntry {
  *    ISystematicManager; reportMetadata() logs a human-readable summary.
  *  - **MET propagation**: Type-1 MET propagation that updates MET pT and φ
  *    when jet pT changes due to corrections or systematic variations.
+ *  - **PhysicsObjectCollection integration**: accept a per-event
+ *    PhysicsObjectCollection of jets, produce a corrected nominal collection,
+ *    per-variation up/down collections, and a PhysicsObjectVariationMap.
  *
  * ## Typical CMS NanoAOD usage (full workflow)
  * @code
@@ -384,6 +388,112 @@ public:
                     float jetPtThreshold = 15.0f);
 
   // -------------------------------------------------------------------------
+  // PhysicsObjectCollection integration
+  // -------------------------------------------------------------------------
+
+  /**
+   * @brief Declare the name of the RDF column holding the input jet
+   *        PhysicsObjectCollection (one collection per event).
+   *
+   * This call is the entry point for the collection-based workflow.  The
+   * named column must be of type @c PhysicsObjectCollection and must be
+   * present in the dataframe before execute() is called.
+   *
+   * @param collectionColumn  RDF column name that produces a
+   *                          @c PhysicsObjectCollection per event.
+   *
+   * @throws std::invalid_argument if @p collectionColumn is empty.
+   */
+  void setInputJetCollection(const std::string &collectionColumn);
+
+  /**
+   * @brief Schedule definition of a corrected PhysicsObjectCollection column.
+   *
+   * In execute(), defines a new RDF column @p outputCollectionColumn of type
+   * @c PhysicsObjectCollection whose per-jet pT values are taken from
+   * @p correctedPtColumn (a full-size RVec column), and optionally whose mass
+   * values are taken from @p correctedMassColumn.  Eta and phi are preserved
+   * from the input collection.
+   *
+   * Requires setInputJetCollection() to have been called beforehand.
+   *
+   * @code
+   *   // After applying the nominal JEC:
+   *   jes->setInputJetCollection("goodJets");
+   *   jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+   *   // After execute(), the dataframe has a "goodJets_jec" column of type
+   *   // PhysicsObjectCollection with each jet's pT updated by the JEC.
+   * @endcode
+   *
+   * @param correctedPtColumn       Full-size per-jet pT RVec column (all jets
+   *                                in the original collection, not just
+   *                                selected ones).
+   * @param outputCollectionColumn  Output column name.
+   * @param correctedMassColumn     Optional full-size per-jet mass RVec column.
+   *                                When empty, mass values from the input
+   *                                collection are preserved.
+   *
+   * @throws std::invalid_argument if @p correctedPtColumn or
+   *         @p outputCollectionColumn is empty.
+   * @throws std::runtime_error    if setInputJetCollection() was not called.
+   */
+  void defineCollectionOutput(const std::string &correctedPtColumn,
+                              const std::string &outputCollectionColumn,
+                              const std::string &correctedMassColumn = "");
+
+  /**
+   * @brief Schedule definition of up/down variation collection columns and an
+   *        optional PhysicsObjectVariationMap column for all registered
+   *        variations.
+   *
+   * For each variation registered via addVariation() this method schedules
+   * (in execute()) the definition of two PhysicsObjectCollection columns:
+   *  - @c <collectionPrefix>_<variationName>Up: jets with upPtColumn pT values.
+   *  - @c <collectionPrefix>_<variationName>Down: jets with downPtColumn pT values.
+   *
+   * The names for the individual variation columns follow the pattern:
+   *  - @c <collectionPrefix>_<variationName>Up
+   *  - @c <collectionPrefix>_<variationName>Down
+   *
+   * If @p variationMapColumn is non-empty an additional column of type
+   * @c PhysicsObjectVariationMap is defined, containing:
+   *  - Key @c "nominal" → @p nominalCollectionColumn
+   *  - Key @c "<variationName>Up" / @c "<variationName>Down" for each variation
+   *
+   * Requires setInputJetCollection() to have been called beforehand.
+   *
+   * @code
+   *   jes->setInputJetCollection("goodJets");
+   *   jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+   *   jes->defineVariationCollections("goodJets_jec",
+   *                                   "goodJets",
+   *                                   "goodJets_variations");
+   *   // After execute():
+   *   //   "goodJets_AbsoluteCal_up" : PhysicsObjectCollection
+   *   //   "goodJets_AbsoluteCal_down" : PhysicsObjectCollection
+   *   //   "goodJets_variations" : PhysicsObjectVariationMap
+   *   //       ["nominal"]        → goodJets_jec collection
+   *   //       ["AbsoluteCalUp"]  → goodJets_AbsoluteCal_up collection
+   *   //       ...
+   * @endcode
+   *
+   * @param nominalCollectionColumn  The nominal (already-corrected) collection
+   *                                 column name; used as the "nominal" key in
+   *                                 the variation map.
+   * @param collectionPrefix         Prefix for output variation column names
+   *                                 (e.g. "goodJets" → "goodJets_TotalUp").
+   * @param variationMapColumn       If non-empty, name of the output
+   *                                 PhysicsObjectVariationMap column.
+   *
+   * @throws std::runtime_error    if setInputJetCollection() was not called.
+   * @throws std::invalid_argument if @p nominalCollectionColumn or
+   *         @p collectionPrefix is empty.
+   */
+  void defineVariationCollections(const std::string &nominalCollectionColumn,
+                                  const std::string &collectionPrefix,
+                                  const std::string &variationMapColumn = "");
+
+  // -------------------------------------------------------------------------
   // Accessors
   // -------------------------------------------------------------------------
 
@@ -402,6 +512,9 @@ public:
   /// Return the base MET-φ column name (as set by setMETColumns()).
   const std::string &getMETPhiColumn() const;
 
+  /// Return the input jet collection column name (as set by setInputJetCollection()).
+  const std::string &getInputJetCollectionColumn() const;
+
   /// Return all registered systematic variations.
   const std::vector<JESVariationEntry> &getVariations() const;
 
@@ -417,13 +530,15 @@ public:
   void setupFromConfigFile() override {}
 
   /**
-   * @brief Define all correction/propagation output columns on the dataframe.
+   * @brief Define all correction/propagation/collection output columns.
    *
    * Execution order:
    *  1. Raw-pT and raw-mass columns (if removeExistingCorrections() was called).
    *  2. Each scheduled correction step (applyCorrection / applyCorrectionlib).
    *  3. Each MET propagation step (propagateMET).
-   *  4. Register all systematic variations with ISystematicManager.
+   *  4. Each collection output step (defineCollectionOutput).
+   *  5. Each variation-collection step (defineVariationCollections).
+   *  6. Register all systematic variations with ISystematicManager.
    */
   void execute() override;
 
@@ -484,6 +599,25 @@ private:
     float jetPtThreshold;
   };
   std::vector<METPropagationStep> metPropagationSteps_m;
+
+  // ---- PhysicsObjectCollection integration --------------------------------
+  std::string inputJetCollectionColumn_m; ///< Input POC column (set by setInputJetCollection).
+
+  /// Deferred step: produce a corrected PhysicsObjectCollection column.
+  struct CollectionOutputStep {
+    std::string correctedPtColumn;
+    std::string correctedMassColumn; ///< may be empty
+    std::string outputCollectionColumn;
+  };
+  std::vector<CollectionOutputStep> collectionOutputSteps_m;
+
+  /// Deferred step: produce per-variation collection columns + optional map.
+  struct VariationCollectionsStep {
+    std::string nominalCollectionColumn;
+    std::string collectionPrefix;
+    std::string variationMapColumn; ///< may be empty
+  };
+  std::vector<VariationCollectionsStep> variationCollectionsSteps_m;
 
   // ---- Context ------------------------------------------------------------
   IConfigurationProvider *configManager_m = nullptr;

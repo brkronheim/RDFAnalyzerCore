@@ -306,6 +306,67 @@ void JetEnergyScaleManager::propagateMET(
 }
 
 // ---------------------------------------------------------------------------
+// PhysicsObjectCollection integration
+// ---------------------------------------------------------------------------
+
+void JetEnergyScaleManager::setInputJetCollection(
+    const std::string &collectionColumn) {
+  if (collectionColumn.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::setInputJetCollection: "
+        "collectionColumn must not be empty");
+  inputJetCollectionColumn_m = collectionColumn;
+}
+
+void JetEnergyScaleManager::defineCollectionOutput(
+    const std::string &correctedPtColumn,
+    const std::string &outputCollectionColumn,
+    const std::string &correctedMassColumn) {
+  if (correctedPtColumn.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::defineCollectionOutput: "
+        "correctedPtColumn must not be empty");
+  if (outputCollectionColumn.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::defineCollectionOutput: "
+        "outputCollectionColumn must not be empty");
+  if (inputJetCollectionColumn_m.empty())
+    throw std::runtime_error(
+        "JetEnergyScaleManager::defineCollectionOutput: "
+        "call setInputJetCollection() before defineCollectionOutput()");
+
+  CollectionOutputStep step;
+  step.correctedPtColumn = correctedPtColumn;
+  step.correctedMassColumn = correctedMassColumn;
+  step.outputCollectionColumn = outputCollectionColumn;
+  collectionOutputSteps_m.push_back(std::move(step));
+}
+
+void JetEnergyScaleManager::defineVariationCollections(
+    const std::string &nominalCollectionColumn,
+    const std::string &collectionPrefix,
+    const std::string &variationMapColumn) {
+  if (nominalCollectionColumn.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::defineVariationCollections: "
+        "nominalCollectionColumn must not be empty");
+  if (collectionPrefix.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::defineVariationCollections: "
+        "collectionPrefix must not be empty");
+  if (inputJetCollectionColumn_m.empty())
+    throw std::runtime_error(
+        "JetEnergyScaleManager::defineVariationCollections: "
+        "call setInputJetCollection() before defineVariationCollections()");
+
+  VariationCollectionsStep step;
+  step.nominalCollectionColumn = nominalCollectionColumn;
+  step.collectionPrefix = collectionPrefix;
+  step.variationMapColumn = variationMapColumn;
+  variationCollectionsSteps_m.push_back(std::move(step));
+}
+
+// ---------------------------------------------------------------------------
 // Accessors
 // ---------------------------------------------------------------------------
 
@@ -327,6 +388,10 @@ const std::string &JetEnergyScaleManager::getMETPtColumn() const {
 
 const std::string &JetEnergyScaleManager::getMETPhiColumn() const {
   return metPhiColumn_m;
+}
+
+const std::string &JetEnergyScaleManager::getInputJetCollectionColumn() const {
+  return inputJetCollectionColumn_m;
 }
 
 const std::vector<JESVariationEntry> &
@@ -469,7 +534,168 @@ void JetEnergyScaleManager::execute() {
     }
   }
 
-  // 4. Register systematic variations with the ISystematicManager.
+  // 4. Define PhysicsObjectCollection output columns.
+  for (const auto &colStep : collectionOutputSteps_m) {
+    const std::string inputCol  = inputJetCollectionColumn_m;
+    const std::string corrPtCol = colStep.correctedPtColumn;
+    const std::string outputCol = colStep.outputCollectionColumn;
+
+    if (!colStep.correctedMassColumn.empty()) {
+      // Pt + mass correction: use withCorrectedKinematics.
+      // Eta and phi are unchanged by JES/JER; reconstruct full-size arrays
+      // from the collection's stored 4-vectors.  Entries for jets that were
+      // filtered out of the input collection (i.e. not stored in the
+      // PhysicsObjectCollection) remain at their initialised value of 0.0f.
+      // withCorrectedKinematics only reads entries at the indices that are
+      // present in the collection, so the zero values for absent jets are
+      // never used in the output.
+      const std::string corrMasCol = colStep.correctedMassColumn;
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      auto newDf = df.Define(
+          outputCol,
+          [](const PhysicsObjectCollection &col,
+             const ROOT::VecOps::RVec<Float_t> &corrPt,
+             const ROOT::VecOps::RVec<Float_t> &corrMass)
+              -> PhysicsObjectCollection {
+            // Reconstruct full-size eta/phi arrays (unchanged by JES/JER).
+            const std::size_t n = corrPt.size();
+            ROOT::VecOps::RVec<Float_t> etaFull(n, 0.0f);
+            ROOT::VecOps::RVec<Float_t> phiFull(n, 0.0f);
+            for (std::size_t i = 0; i < col.size(); ++i) {
+              Int_t idx = col.index(i);
+              if (idx >= 0 && static_cast<std::size_t>(idx) < n) {
+                etaFull[idx] = static_cast<Float_t>(col.at(i).Eta());
+                phiFull[idx] = static_cast<Float_t>(col.at(i).Phi());
+              }
+            }
+            return col.withCorrectedKinematics(corrPt, etaFull, phiFull,
+                                               corrMass);
+          },
+          {inputCol, corrPtCol, corrMasCol});
+      dataManager_m->setDataFrame(newDf);
+    } else {
+      // Pt-only correction: use withCorrectedPt.
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      auto newDf = df.Define(
+          outputCol,
+          [](const PhysicsObjectCollection &col,
+             const ROOT::VecOps::RVec<Float_t> &corrPt)
+              -> PhysicsObjectCollection {
+            return col.withCorrectedPt(corrPt);
+          },
+          {inputCol, corrPtCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+  }
+
+  // 5. Define per-variation collection columns and optional variation map.
+  for (const auto &varColStep : variationCollectionsSteps_m) {
+    const std::string inputCol = inputJetCollectionColumn_m;
+    const std::string nomCol   = varColStep.nominalCollectionColumn;
+    const std::string prefix   = varColStep.collectionPrefix;
+    const std::string mapCol   = varColStep.variationMapColumn;
+
+    std::vector<std::string> varNames;
+    std::vector<std::string> upColNames;
+    std::vector<std::string> dnColNames;
+
+    for (const auto &var : variations_m) {
+      const std::string upCol = prefix + "_" + var.name + "Up";
+      const std::string dnCol = prefix + "_" + var.name + "Down";
+
+      // Define up-variation collection.
+      {
+        const std::string varUpPt = var.upPtColumn;
+        ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+        auto newDf = df.Define(
+            upCol,
+            [](const PhysicsObjectCollection &col,
+               const ROOT::VecOps::RVec<Float_t> &corrPt)
+                -> PhysicsObjectCollection {
+              return col.withCorrectedPt(corrPt);
+            },
+            {inputCol, varUpPt});
+        dataManager_m->setDataFrame(newDf);
+      }
+
+      // Define down-variation collection.
+      {
+        const std::string varDnPt = var.downPtColumn;
+        ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+        auto newDf = df.Define(
+            dnCol,
+            [](const PhysicsObjectCollection &col,
+               const ROOT::VecOps::RVec<Float_t> &corrPt)
+                -> PhysicsObjectCollection {
+              return col.withCorrectedPt(corrPt);
+            },
+            {inputCol, varDnPt});
+        dataManager_m->setDataFrame(newDf);
+      }
+
+      varNames.push_back(var.name);
+      upColNames.push_back(upCol);
+      dnColNames.push_back(dnCol);
+    }
+
+    // Build the PhysicsObjectVariationMap column (if requested).
+    // Strategy: define the column with "nominal" first, then Redefine
+    // it to accumulate each variation (up then down) one at a time.
+    // Listing the column name itself in the input cols of Redefine passes
+    // the current value of the column to the lambda, enabling accumulation.
+    if (!mapCol.empty()) {
+      // Step A: initialise the map with just the nominal collection.
+      {
+        ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+        auto newDf = df.Define(
+            mapCol,
+            [](const PhysicsObjectCollection &nominalCol)
+                -> PhysicsObjectVariationMap {
+              PhysicsObjectVariationMap m;
+              m.emplace("nominal", nominalCol);
+              return m;
+            },
+            {nomCol});
+        dataManager_m->setDataFrame(newDf);
+      }
+
+      // Step B: fold in each variation's up and down collections.
+      for (std::size_t i = 0; i < varNames.size(); ++i) {
+        const std::string keyUp = varNames[i] + "Up";
+        const std::string keyDn = varNames[i] + "Down";
+
+        {
+          ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+          auto newDf = df.Redefine(
+              mapCol,
+              [keyUp](PhysicsObjectVariationMap m,
+                      const PhysicsObjectCollection &upCol)
+                  -> PhysicsObjectVariationMap {
+                m.emplace(keyUp, upCol);
+                return m;
+              },
+              {mapCol, upColNames[i]});
+          dataManager_m->setDataFrame(newDf);
+        }
+
+        {
+          ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+          auto newDf = df.Redefine(
+              mapCol,
+              [keyDn](PhysicsObjectVariationMap m,
+                      const PhysicsObjectCollection &dnCol)
+                  -> PhysicsObjectVariationMap {
+                m.emplace(keyDn, dnCol);
+                return m;
+              },
+              {mapCol, dnColNames[i]});
+          dataManager_m->setDataFrame(newDf);
+        }
+      }
+    }
+  }
+
+  // 6. Register systematic variations with the ISystematicManager.
   for (const auto &var : variations_m) {
     {
       std::set<std::string> affectedUp = {var.upPtColumn};
@@ -564,6 +790,33 @@ void JetEnergyScaleManager::reportMetadata() {
     }
   }
 
+  if (!inputJetCollectionColumn_m.empty()) {
+    ss << "  Input jet collection: " << inputJetCollectionColumn_m << "\n";
+  }
+
+  if (!collectionOutputSteps_m.empty()) {
+    ss << "  Collection output steps (" << collectionOutputSteps_m.size() << "):\n";
+    for (const auto &step : collectionOutputSteps_m) {
+      ss << "    " << step.correctedPtColumn
+         << " -> " << step.outputCollectionColumn;
+      if (!step.correctedMassColumn.empty())
+        ss << " (mass: " << step.correctedMassColumn << ")";
+      ss << "\n";
+    }
+  }
+
+  if (!variationCollectionsSteps_m.empty()) {
+    ss << "  Variation collection steps ("
+       << variationCollectionsSteps_m.size() << "):\n";
+    for (const auto &step : variationCollectionsSteps_m) {
+      ss << "    nominal=\"" << step.nominalCollectionColumn
+         << "\" prefix=\"" << step.collectionPrefix << "\"";
+      if (!step.variationMapColumn.empty())
+        ss << " map=\"" << step.variationMapColumn << "\"";
+      ss << "\n";
+    }
+  }
+
   logger_m->log(ILogger::Level::Info, ss.str());
 }
 
@@ -641,6 +894,33 @@ JetEnergyScaleManager::collectProvenanceEntries() const {
          << ":" << metPropagationSteps_m[i].outputMETPtColumn;
     }
     entries["met_propagation_steps"] = ss.str();
+  }
+
+  if (!inputJetCollectionColumn_m.empty()) {
+    entries["input_jet_collection_column"] = inputJetCollectionColumn_m;
+  }
+
+  if (!collectionOutputSteps_m.empty()) {
+    std::ostringstream ss;
+    for (std::size_t i = 0; i < collectionOutputSteps_m.size(); ++i) {
+      if (i > 0) ss << ',';
+      ss << collectionOutputSteps_m[i].correctedPtColumn
+         << "->" << collectionOutputSteps_m[i].outputCollectionColumn;
+    }
+    entries["collection_output_steps"] = ss.str();
+  }
+
+  if (!variationCollectionsSteps_m.empty()) {
+    std::ostringstream ss;
+    for (std::size_t i = 0; i < variationCollectionsSteps_m.size(); ++i) {
+      if (i > 0) ss << ';';
+      ss << variationCollectionsSteps_m[i].collectionPrefix
+         << "(nom:" << variationCollectionsSteps_m[i].nominalCollectionColumn;
+      if (!variationCollectionsSteps_m[i].variationMapColumn.empty())
+        ss << ",map:" << variationCollectionsSteps_m[i].variationMapColumn;
+      ss << ')';
+    }
+    entries["variation_collection_steps"] = ss.str();
   }
 
   return entries;

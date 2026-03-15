@@ -4,7 +4,8 @@
  *
  * Tests cover: jet column registration, raw-pT computation, correction step
  * scheduling, CMS correctionlib convenience API, systematic variation
- * registration, lifecycle hooks, and error handling.
+ * registration, lifecycle hooks, PhysicsObjectCollection integration, and
+ * error handling.
  */
 
 #include <ConfigurationManager.h>
@@ -13,6 +14,7 @@
 #include <JetEnergyScaleManager.h>
 #include <ManagerFactory.h>
 #include <NullOutputSink.h>
+#include <PhysicsObjectCollection.h>
 #include <SystematicManager.h>
 #include <api/ManagerContext.h>
 #include <gtest/gtest.h>
@@ -1089,6 +1091,362 @@ TEST_F(JetEnergyScaleManagerTest, ReportMetadataWithAllFeaturesDoesNotThrow) {
                     "MET_pt_jec", "MET_phi_jec");
   mgr->execute();
   mgr->finalize();
+  EXPECT_NO_THROW(mgr->reportMetadata());
+}
+
+// ---------------------------------------------------------------------------
+// setInputJetCollection validation
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, SetInputJetCollectionStoresName) {
+  JetEnergyScaleManager mgr;
+  mgr.setInputJetCollection("goodJets");
+  EXPECT_EQ(mgr.getInputJetCollectionColumn(), "goodJets");
+}
+
+TEST_F(JetEnergyScaleManagerTest, SetInputJetCollectionEmptyThrows) {
+  JetEnergyScaleManager mgr;
+  EXPECT_THROW(mgr.setInputJetCollection(""), std::invalid_argument);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefaultInputJetCollectionIsEmpty) {
+  JetEnergyScaleManager mgr;
+  EXPECT_TRUE(mgr.getInputJetCollectionColumn().empty());
+}
+
+// ---------------------------------------------------------------------------
+// defineCollectionOutput validation
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, DefineCollectionOutputWithoutSetInputThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  // setInputJetCollection not called
+  EXPECT_THROW(mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec"),
+               std::runtime_error);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineCollectionOutputEmptyPtColumnThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setInputJetCollection("goodJets");
+  EXPECT_THROW(mgr->defineCollectionOutput("", "goodJets_jec"),
+               std::invalid_argument);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineCollectionOutputEmptyOutputColumnThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setInputJetCollection("goodJets");
+  EXPECT_THROW(mgr->defineCollectionOutput("Jet_pt_jec", ""),
+               std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------
+// defineVariationCollections validation
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, DefineVariationCollectionsWithoutSetInputThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  EXPECT_THROW(
+      mgr->defineVariationCollections("goodJets_jec", "goodJets"),
+      std::runtime_error);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineVariationCollectionsEmptyNominalThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setInputJetCollection("goodJets");
+  EXPECT_THROW(mgr->defineVariationCollections("", "goodJets"),
+               std::invalid_argument);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineVariationCollectionsEmptyPrefixThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setInputJetCollection("goodJets");
+  EXPECT_THROW(mgr->defineVariationCollections("goodJets_jec", ""),
+               std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------
+// defineCollectionOutput – correctness in execute()
+// ---------------------------------------------------------------------------
+
+/// Helper: build a PhysicsObjectCollection in the dataframe.
+/// Defines @p colName column: single jet with given pT, eta=1.0, phi=0.3, mass=10.
+static void defineJetCollection(DataManager &dm,
+                                 SystematicManager &sm,
+                                 const std::string &colName,
+                                 float jetPt) {
+  dm.Define(
+      colName,
+      [jetPt](ULong64_t) -> PhysicsObjectCollection {
+        ROOT::VecOps::RVec<Float_t> pt   = {jetPt};
+        ROOT::VecOps::RVec<Float_t> eta  = {1.0f};
+        ROOT::VecOps::RVec<Float_t> phi  = {0.3f};
+        ROOT::VecOps::RVec<Float_t> mass = {10.0f};
+        ROOT::VecOps::RVec<bool>    mask = {true};
+        return PhysicsObjectCollection(pt, eta, phi, mass, mask);
+      },
+      {"rdfentry_"}, sm);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineCollectionOutputPtOnly) {
+  // After applying a corrected-pT column via defineCollectionOutput,
+  // the output PhysicsObjectCollection should have the updated pT.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  // Input jet collection: 1 jet with pT=100
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  // Corrected pT column: pT=110 (scale factor 1.1)
+  defineRVecColumn(*dm, "Jet_pt_jec", [](ULong64_t) { return 110.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<PhysicsObjectCollection>("goodJets_jec");
+  const PhysicsObjectCollection &col = result.GetValue()[0];
+  ASSERT_EQ(col.size(), 1u);
+  EXPECT_NEAR(static_cast<float>(col.at(0).Pt()), 110.0f, 0.01f);
+  // Eta and phi should be preserved
+  EXPECT_NEAR(static_cast<float>(col.at(0).Eta()), 1.0f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(col.at(0).Phi()), 0.3f, 0.01f);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineCollectionOutputPtAndMass) {
+  // With a corrected-mass column, both pT and mass should be updated.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  defineRVecColumn(*dm, "Jet_pt_jec",   [](ULong64_t) { return 110.0f; });
+  defineRVecColumn(*dm, "Jet_mass_jec", [](ULong64_t) { return  11.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec", "Jet_mass_jec");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<PhysicsObjectCollection>("goodJets_jec");
+  const PhysicsObjectCollection &col = result.GetValue()[0];
+  ASSERT_EQ(col.size(), 1u);
+  EXPECT_NEAR(static_cast<float>(col.at(0).Pt()),   110.0f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(col.at(0).M()),     11.0f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(col.at(0).Eta()),    1.0f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(col.at(0).Phi()),    0.3f, 0.01f);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineCollectionOutputIndexPreserved) {
+  // The collection should preserve the original index (0 for the only jet).
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  defineRVecColumn(*dm, "Jet_pt_jec", [](ULong64_t) { return 110.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<PhysicsObjectCollection>("goodJets_jec");
+  const PhysicsObjectCollection &col = result.GetValue()[0];
+  ASSERT_EQ(col.size(), 1u);
+  EXPECT_EQ(col.index(0), 0);  // original index preserved
+}
+
+// ---------------------------------------------------------------------------
+// defineVariationCollections – correctness in execute()
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, DefineVariationCollectionsCreatesUpDownColumns) {
+  // Registers a single variation "jesTest" and verifies that both
+  // "goodJets_jesTestUp" and "goodJets_jesTestDown" columns are produced.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  defineRVecColumn(*dm, "Jet_pt_jec",    [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_up", [](ULong64_t) { return 105.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_dn", [](ULong64_t) { return  95.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+  mgr->addVariation("jesTest", "Jet_pt_jes_up", "Jet_pt_jes_dn");
+  mgr->defineVariationCollections("goodJets_jec", "goodJets");
+  mgr->execute();
+
+  auto cols = dm->getDataFrame().GetColumnNames();
+  EXPECT_NE(std::find(cols.begin(), cols.end(), "goodJets_jesTestUp"),   cols.end());
+  EXPECT_NE(std::find(cols.begin(), cols.end(), "goodJets_jesTestDown"), cols.end());
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineVariationCollectionsUpPtCorrect) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  defineRVecColumn(*dm, "Jet_pt_jec",    [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_up", [](ULong64_t) { return 108.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_dn", [](ULong64_t) { return  92.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+  mgr->addVariation("jesTest", "Jet_pt_jes_up", "Jet_pt_jes_dn");
+  mgr->defineVariationCollections("goodJets_jec", "goodJets");
+  mgr->execute();
+
+  auto upResult = dm->getDataFrame().Take<PhysicsObjectCollection>("goodJets_jesTestUp");
+  auto dnResult = dm->getDataFrame().Take<PhysicsObjectCollection>("goodJets_jesTestDown");
+
+  EXPECT_NEAR(static_cast<float>(upResult.GetValue()[0].at(0).Pt()), 108.0f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(dnResult.GetValue()[0].at(0).Pt()),  92.0f, 0.01f);
+}
+
+// ---------------------------------------------------------------------------
+// defineVariationCollections with variation map
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, DefineVariationCollectionsMapContainsNominal) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  defineRVecColumn(*dm, "Jet_pt_jec",    [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_up", [](ULong64_t) { return 105.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_dn", [](ULong64_t) { return  95.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+  mgr->addVariation("jesTest", "Jet_pt_jes_up", "Jet_pt_jes_dn");
+  mgr->defineVariationCollections("goodJets_jec", "goodJets", "goodJets_varMap");
+  mgr->execute();
+
+  auto mapResult = dm->getDataFrame().Take<PhysicsObjectVariationMap>("goodJets_varMap");
+  const PhysicsObjectVariationMap &vm = mapResult.GetValue()[0];
+  EXPECT_NE(vm.find("nominal"),      vm.end());
+  EXPECT_NE(vm.find("jesTestUp"),    vm.end());
+  EXPECT_NE(vm.find("jesTestDown"),  vm.end());
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineVariationCollectionsMapNominalPt) {
+  // The "nominal" entry in the map should have the nominal pT.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  defineRVecColumn(*dm, "Jet_pt_jec",    [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_up", [](ULong64_t) { return 105.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_dn", [](ULong64_t) { return  95.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+  mgr->addVariation("jesTest", "Jet_pt_jes_up", "Jet_pt_jes_dn");
+  mgr->defineVariationCollections("goodJets_jec", "goodJets", "goodJets_varMap");
+  mgr->execute();
+
+  auto mapResult = dm->getDataFrame().Take<PhysicsObjectVariationMap>("goodJets_varMap");
+  const PhysicsObjectVariationMap &vm = mapResult.GetValue()[0];
+  EXPECT_NEAR(static_cast<float>(vm.at("nominal").at(0).Pt()),     100.0f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(vm.at("jesTestUp").at(0).Pt()),   105.0f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(vm.at("jesTestDown").at(0).Pt()),  95.0f, 0.01f);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefineVariationCollectionsMapMultipleVariations) {
+  // Multiple variations should all appear in the map.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  defineRVecColumn(*dm, "Jet_pt_jec",      [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_pt_var1_up",  [](ULong64_t) { return 103.0f; });
+  defineRVecColumn(*dm, "Jet_pt_var1_dn",  [](ULong64_t) { return  97.0f; });
+  defineRVecColumn(*dm, "Jet_pt_var2_up",  [](ULong64_t) { return 106.0f; });
+  defineRVecColumn(*dm, "Jet_pt_var2_dn",  [](ULong64_t) { return  94.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+  mgr->addVariation("var1", "Jet_pt_var1_up", "Jet_pt_var1_dn");
+  mgr->addVariation("var2", "Jet_pt_var2_up", "Jet_pt_var2_dn");
+  mgr->defineVariationCollections("goodJets_jec", "goodJets", "goodJets_varMap");
+  mgr->execute();
+
+  auto mapResult = dm->getDataFrame().Take<PhysicsObjectVariationMap>("goodJets_varMap");
+  const PhysicsObjectVariationMap &vm = mapResult.GetValue()[0];
+  EXPECT_NE(vm.find("nominal"),   vm.end());
+  EXPECT_NE(vm.find("var1Up"),    vm.end());
+  EXPECT_NE(vm.find("var1Down"),  vm.end());
+  EXPECT_NE(vm.find("var2Up"),    vm.end());
+  EXPECT_NE(vm.find("var2Down"),  vm.end());
+  EXPECT_EQ(vm.size(), 5u);
+}
+
+// ---------------------------------------------------------------------------
+// collectProvenanceEntries – PhysicsObjectCollection fields
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest,
+       CollectProvenanceContainsInputJetCollectionColumn) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setInputJetCollection("goodJets");
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("input_jet_collection_column"), entries.end());
+  EXPECT_EQ(entries.at("input_jet_collection_column"), "goodJets");
+}
+
+TEST_F(JetEnergyScaleManagerTest,
+       CollectProvenanceContainsCollectionOutputSteps) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("collection_output_steps"), entries.end());
+  const std::string &steps = entries.at("collection_output_steps");
+  EXPECT_NE(steps.find("Jet_pt_jec"),  std::string::npos);
+  EXPECT_NE(steps.find("goodJets_jec"), std::string::npos);
+}
+
+TEST_F(JetEnergyScaleManagerTest,
+       CollectProvenanceContainsVariationCollectionSteps) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineVariationCollections("goodJets_jec", "goodJets",
+                                   "goodJets_varMap");
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("variation_collection_steps"), entries.end());
+  const std::string &steps = entries.at("variation_collection_steps");
+  EXPECT_NE(steps.find("goodJets"),       std::string::npos);
+  EXPECT_NE(steps.find("goodJets_jec"),   std::string::npos);
+  EXPECT_NE(steps.find("goodJets_varMap"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// reportMetadata with collection fields
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest,
+       ReportMetadataWithCollectionFeaturesDoesNotThrow) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  defineRVecColumn(*dm, "Jet_pt_jec",    [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_up", [](ULong64_t) { return 105.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_dn", [](ULong64_t) { return  95.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+  mgr->addVariation("jesTest", "Jet_pt_jes_up", "Jet_pt_jes_dn");
+  mgr->defineVariationCollections("goodJets_jec", "goodJets", "goodJets_varMap");
+  mgr->execute();
   EXPECT_NO_THROW(mgr->reportMetadata());
 }
 
