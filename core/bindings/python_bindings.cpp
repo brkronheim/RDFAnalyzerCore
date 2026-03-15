@@ -484,10 +484,33 @@ public:
         return std::vector<std::string>(features.begin(), features.end());
     }
 
+    AnalyzerPythonWrapper& registerCorrection(const std::string& role,
+                                               const std::string& name,
+                                               const std::string& file,
+                                               const std::string& correctionlibName,
+                                               const std::vector<std::string>& inputVariables) {
+        requirePlugin<CorrectionManager>(role, "CorrectionManager").registerCorrection(
+            name, file, correctionlibName, inputVariables);
+        return *this;
+    }
+
     AnalyzerPythonWrapper& applyCorrection(const std::string& role,
                                            const std::string& correctionName,
-                                           const std::vector<std::string>& stringArguments) {
-        requirePlugin<CorrectionManager>(role, "CorrectionManager").applyCorrection(correctionName, stringArguments);
+                                           const std::vector<std::string>& stringArguments,
+                                           const std::vector<std::string>& inputColumns = {},
+                                           const std::string& outputBranch = "") {
+        requirePlugin<CorrectionManager>(role, "CorrectionManager").applyCorrection(
+            correctionName, stringArguments, inputColumns, outputBranch);
+        return *this;
+    }
+
+    AnalyzerPythonWrapper& applyCorrectionVec(const std::string& role,
+                                              const std::string& correctionName,
+                                              const std::vector<std::string>& stringArguments,
+                                              const std::vector<std::string>& inputColumns = {},
+                                              const std::string& outputBranch = "") {
+        requirePlugin<CorrectionManager>(role, "CorrectionManager").applyCorrectionVec(
+            correctionName, stringArguments, inputColumns, outputBranch);
         return *this;
     }
 
@@ -992,6 +1015,22 @@ PYBIND11_MODULE(rdfanalyzer, m) {
                py::arg("role"),
                py::arg("correctionName"),
                py::arg("stringArguments"),
+               py::arg("inputColumns") = std::vector<std::string>{},
+               py::arg("outputBranch") = "",
+               py::return_value_policy::reference_internal)
+           .def("applyCorrectionVec", &AnalyzerPythonWrapper::applyCorrectionVec,
+               py::arg("role"),
+               py::arg("correctionName"),
+               py::arg("stringArguments"),
+               py::arg("inputColumns") = std::vector<std::string>{},
+               py::arg("outputBranch") = "",
+               py::return_value_policy::reference_internal)
+           .def("registerCorrection", &AnalyzerPythonWrapper::registerCorrection,
+               py::arg("role"),
+               py::arg("name"),
+               py::arg("file"),
+               py::arg("correctionlibName"),
+               py::arg("inputVariables"),
                py::return_value_policy::reference_internal)
            .def("getCorrectionFeatures", &AnalyzerPythonWrapper::getCorrectionFeatures,
                py::arg("role"),
