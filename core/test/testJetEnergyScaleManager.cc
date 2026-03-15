@@ -658,6 +658,440 @@ TEST_F(JetEnergyScaleManagerTest,
   EXPECT_EQ(std::find(cols.begin(), cols.end(), "Jet_mass_jec"), cols.end());
 }
 
+// ---------------------------------------------------------------------------
+// setMETColumns validation
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, SetMETColumnsStoresNames) {
+  JetEnergyScaleManager mgr;
+  mgr.setMETColumns("MET_pt", "MET_phi");
+  EXPECT_EQ(mgr.getMETPtColumn(),  "MET_pt");
+  EXPECT_EQ(mgr.getMETPhiColumn(), "MET_phi");
+}
+
+TEST_F(JetEnergyScaleManagerTest, SetMETColumnsWithEmptyPtThrows) {
+  JetEnergyScaleManager mgr;
+  EXPECT_THROW(mgr.setMETColumns("", "MET_phi"), std::invalid_argument);
+}
+
+TEST_F(JetEnergyScaleManagerTest, SetMETColumnsWithEmptyPhiThrows) {
+  JetEnergyScaleManager mgr;
+  EXPECT_THROW(mgr.setMETColumns("MET_pt", ""), std::invalid_argument);
+}
+
+TEST_F(JetEnergyScaleManagerTest, DefaultMETColumnsAreEmpty) {
+  JetEnergyScaleManager mgr;
+  EXPECT_TRUE(mgr.getMETPtColumn().empty());
+  EXPECT_TRUE(mgr.getMETPhiColumn().empty());
+}
+
+// ---------------------------------------------------------------------------
+// registerSystematicSources / getSystematicSources
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, RegisterAndRetrieveSystematicSources) {
+  JetEnergyScaleManager mgr;
+  mgr.registerSystematicSources("full", {"AbsoluteCal", "FlavorQCD", "PileUpDataMC"});
+  const auto &sources = mgr.getSystematicSources("full");
+  ASSERT_EQ(sources.size(), 3u);
+  EXPECT_EQ(sources[0], "AbsoluteCal");
+  EXPECT_EQ(sources[1], "FlavorQCD");
+  EXPECT_EQ(sources[2], "PileUpDataMC");
+}
+
+TEST_F(JetEnergyScaleManagerTest, RegisterSystematicSourcesReplacesExistingSet) {
+  JetEnergyScaleManager mgr;
+  mgr.registerSystematicSources("reduced", {"Total"});
+  mgr.registerSystematicSources("reduced", {"TotalUp", "TotalDown"});
+  EXPECT_EQ(mgr.getSystematicSources("reduced").size(), 2u);
+}
+
+TEST_F(JetEnergyScaleManagerTest, RegisterSystematicSourcesMultipleSets) {
+  JetEnergyScaleManager mgr;
+  mgr.registerSystematicSources("full",    {"AbsoluteCal", "FlavorQCD"});
+  mgr.registerSystematicSources("reduced", {"Total"});
+  EXPECT_EQ(mgr.getSystematicSources("full").size(),    2u);
+  EXPECT_EQ(mgr.getSystematicSources("reduced").size(), 1u);
+}
+
+TEST_F(JetEnergyScaleManagerTest, RegisterSystematicSourcesEmptyNameThrows) {
+  JetEnergyScaleManager mgr;
+  EXPECT_THROW(mgr.registerSystematicSources("", {"src"}), std::invalid_argument);
+}
+
+TEST_F(JetEnergyScaleManagerTest, RegisterSystematicSourcesEmptyListThrows) {
+  JetEnergyScaleManager mgr;
+  EXPECT_THROW(mgr.registerSystematicSources("full", {}), std::invalid_argument);
+}
+
+TEST_F(JetEnergyScaleManagerTest, RegisterSystematicSourcesEmptySourceNameThrows) {
+  JetEnergyScaleManager mgr;
+  EXPECT_THROW(mgr.registerSystematicSources("full", {"ok", ""}),
+               std::invalid_argument);
+}
+
+TEST_F(JetEnergyScaleManagerTest, GetSystematicSourcesUnknownSetThrows) {
+  JetEnergyScaleManager mgr;
+  EXPECT_THROW(mgr.getSystematicSources("nonexistent"), std::out_of_range);
+}
+
+// ---------------------------------------------------------------------------
+// applySystematicSet validation
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, ApplySystematicSetUnknownSetThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  // No CorrectionManager needed since we throw before using it.
+  // Use a minimal CM with no corrections registered to avoid constructor errors.
+  std::unique_ptr<IConfigurationProvider> cm_cfg =
+      ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+  auto cm = std::make_unique<CorrectionManager>(*cm_cfg);
+
+  JetEnergyScaleManager mgr;
+  auto ctx = makeContext(*config, *dm, *systematicManager, *logger,
+                         *skimSink, *metaSink);
+  mgr.setContext(ctx);
+  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+
+  EXPECT_THROW(
+      mgr.applySystematicSet(*cm, "jes_unc", "not_registered",
+                             "Jet_pt_jec", "Jet_pt_jes"),
+      std::runtime_error);
+}
+
+TEST_F(JetEnergyScaleManagerTest, ApplySystematicSetEmptyPrefixThrows) {
+  JetEnergyScaleManager mgr;
+  std::unique_ptr<IConfigurationProvider> cm_cfg =
+      ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+  auto cm = std::make_unique<CorrectionManager>(*cm_cfg);
+  mgr.registerSystematicSources("reduced", {"Total"});
+
+  EXPECT_THROW(
+      mgr.applySystematicSet(*cm, "jes_unc", "reduced", "Jet_pt_jec", ""),
+      std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------
+// propagateMET validation
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, PropagateMETWithoutJetColumnsThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  // phiColumn_m is empty because setJetColumns was not called.
+  EXPECT_THROW(
+      mgr->propagateMET("MET_pt", "MET_phi",
+                        "Jet_pt_raw", "Jet_pt_jec",
+                        "MET_pt_jec", "MET_phi_jec"),
+      std::runtime_error);
+}
+
+TEST_F(JetEnergyScaleManagerTest, PropagateMETWithEmptyBasePtThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  EXPECT_THROW(
+      mgr->propagateMET("", "MET_phi",
+                        "Jet_pt_raw", "Jet_pt_jec",
+                        "MET_pt_jec", "MET_phi_jec"),
+      std::invalid_argument);
+}
+
+TEST_F(JetEnergyScaleManagerTest, PropagateMETWithEmptyOutputThrows) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  EXPECT_THROW(
+      mgr->propagateMET("MET_pt", "MET_phi",
+                        "Jet_pt_raw", "Jet_pt_jec",
+                        "", "MET_phi_jec"),
+      std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------
+// propagateMET – Type-1 MET propagation correctness
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, PropagateMETNominalCorrectionNoJetChange) {
+  // When nominal == varied, MET should be unchanged.
+  // 1 event, 1 jet: MET_pt = 50, MET_phi = 0, Jet_pt_nominal = 100,
+  // Jet_pt_varied = 100 (no change), Jet_phi = 0.
+  // dMET = 0 → MET_pt_out = 50, MET_phi_out = 0.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("MET_pt",  [](ULong64_t) -> Float_t { return 50.0f; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("MET_phi", [](ULong64_t) -> Float_t { return 0.0f; },
+             {"rdfentry_"}, *systematicManager);
+  defineRVecColumn(*dm, "Jet_phi",       [](ULong64_t) { return 0.0f; });
+  defineRVecColumn(*dm, "Jet_pt_nom",    [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_pt_varied", [](ULong64_t) { return 100.0f; });
+
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->propagateMET("MET_pt", "MET_phi",
+                    "Jet_pt_nom", "Jet_pt_varied",
+                    "MET_pt_out", "MET_phi_out");
+  mgr->execute();
+
+  auto ptResult  = dm->getDataFrame().Take<Float_t>("MET_pt_out");
+  auto phiResult = dm->getDataFrame().Take<Float_t>("MET_phi_out");
+  EXPECT_FLOAT_EQ(ptResult.GetValue()[0],  50.0f);
+  EXPECT_FLOAT_EQ(phiResult.GetValue()[0], 0.0f);
+}
+
+TEST_F(JetEnergyScaleManagerTest, PropagateMETJetPtIncreaseReducesMET) {
+  // 1 event, 1 jet pointing in same direction as MET.
+  // MET_pt = 100, MET_phi = 0.
+  // Jet_phi = 0 (collinear with MET).
+  // Jet_pt_nom = 50, Jet_pt_varied = 60 (increase by 10).
+  // dMET_x = -(60-50)*cos(0) = -10
+  // new_MET_x = 100*cos(0) + (-10) = 100 - 10 = 90
+  // new_MET_y = 100*sin(0) = 0
+  // new_MET_pt = 90, new_MET_phi = 0
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("MET_pt",  [](ULong64_t) -> Float_t { return 100.0f; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("MET_phi", [](ULong64_t) -> Float_t { return 0.0f; },
+             {"rdfentry_"}, *systematicManager);
+  defineRVecColumn(*dm, "Jet_phi",       [](ULong64_t) { return 0.0f; });
+  defineRVecColumn(*dm, "Jet_pt_nom",    [](ULong64_t) { return 50.0f; });
+  defineRVecColumn(*dm, "Jet_pt_varied", [](ULong64_t) { return 60.0f; });
+
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->propagateMET("MET_pt", "MET_phi",
+                    "Jet_pt_nom", "Jet_pt_varied",
+                    "MET_pt_out", "MET_phi_out");
+  mgr->execute();
+
+  auto ptResult  = dm->getDataFrame().Take<Float_t>("MET_pt_out");
+  auto phiResult = dm->getDataFrame().Take<Float_t>("MET_phi_out");
+  EXPECT_FLOAT_EQ(ptResult.GetValue()[0],  90.0f);
+  EXPECT_FLOAT_EQ(phiResult.GetValue()[0], 0.0f);
+}
+
+TEST_F(JetEnergyScaleManagerTest, PropagateMETJetPtDecreaseIncreasesMET) {
+  // Jet pT decreases: MET should increase in jet direction.
+  // MET_pt = 50, MET_phi = 0.
+  // Jet_phi = 0, Jet_pt_nom = 80, Jet_pt_varied = 60.
+  // dMET_x = -(60-80)*cos(0) = -(-20) = 20
+  // new_MET_x = 50 + 20 = 70, new_MET_pt = 70, new_MET_phi = 0
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("MET_pt",  [](ULong64_t) -> Float_t { return 50.0f; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("MET_phi", [](ULong64_t) -> Float_t { return 0.0f; },
+             {"rdfentry_"}, *systematicManager);
+  defineRVecColumn(*dm, "Jet_phi",       [](ULong64_t) { return 0.0f; });
+  defineRVecColumn(*dm, "Jet_pt_nom",    [](ULong64_t) { return 80.0f; });
+  defineRVecColumn(*dm, "Jet_pt_varied", [](ULong64_t) { return 60.0f; });
+
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->propagateMET("MET_pt", "MET_phi",
+                    "Jet_pt_nom", "Jet_pt_varied",
+                    "MET_pt_out", "MET_phi_out");
+  mgr->execute();
+
+  auto ptResult = dm->getDataFrame().Take<Float_t>("MET_pt_out");
+  EXPECT_FLOAT_EQ(ptResult.GetValue()[0], 70.0f);
+}
+
+TEST_F(JetEnergyScaleManagerTest, PropagateMETPtThresholdExcludesLowPtJets) {
+  // Jet below threshold should NOT contribute to MET propagation.
+  // MET_pt = 100, MET_phi = 0.
+  // 2 jets: phi=0, pt_nom=[10, 50], pt_varied=[20, 50].
+  // With threshold=15: only jet[0] is above threshold in nominal? No:
+  //   jet[0].nom = 10 < 15 → excluded; jet[1].nom = 50 ≥ 15 → delta = 0.
+  // → MET unchanged = 100.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("MET_pt",  [](ULong64_t) -> Float_t { return 100.0f; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("MET_phi", [](ULong64_t) -> Float_t { return 0.0f; },
+             {"rdfentry_"}, *systematicManager);
+  // 2 jets per event
+  dm->Define("Jet_phi",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.0f, 0.0f}; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("Jet_pt_nom",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {10.0f, 50.0f}; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("Jet_pt_varied",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {20.0f, 50.0f}; },
+             {"rdfentry_"}, *systematicManager);
+
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  // Default threshold=15: jet[0].nom=10 < 15, excluded
+  mgr->propagateMET("MET_pt", "MET_phi",
+                    "Jet_pt_nom", "Jet_pt_varied",
+                    "MET_pt_out", "MET_phi_out");
+  mgr->execute();
+
+  auto ptResult = dm->getDataFrame().Take<Float_t>("MET_pt_out");
+  EXPECT_FLOAT_EQ(ptResult.GetValue()[0], 100.0f);
+}
+
+TEST_F(JetEnergyScaleManagerTest, PropagateMETPhiChangeWithPerpendicularJet) {
+  // Jet perpendicular to MET direction.
+  // MET_pt = 100, MET_phi = 0.
+  // Jet_phi = pi/2 (pointing along +y), pt_nom = 40, pt_varied = 50.
+  // dMET_x = -(50-40)*cos(pi/2) = 0
+  // dMET_y = -(50-40)*sin(pi/2) = -10
+  // new_MET_x = 100, new_MET_y = -10
+  // new_MET_pt = sqrt(100^2 + 10^2) = sqrt(10100) ≈ 100.499
+  // new_MET_phi = atan2(-10, 100) ≈ -0.0997
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  const float pi = static_cast<float>(M_PI);
+
+  dm->Define("MET_pt",  [](ULong64_t) -> Float_t { return 100.0f; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("MET_phi", [](ULong64_t) -> Float_t { return 0.0f; },
+             {"rdfentry_"}, *systematicManager);
+  defineRVecColumn(*dm, "Jet_phi",
+      [pi](ULong64_t) { return pi / 2.0f; });
+  defineRVecColumn(*dm, "Jet_pt_nom",    [](ULong64_t) { return 40.0f; });
+  defineRVecColumn(*dm, "Jet_pt_varied", [](ULong64_t) { return 50.0f; });
+
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->propagateMET("MET_pt", "MET_phi",
+                    "Jet_pt_nom", "Jet_pt_varied",
+                    "MET_pt_out", "MET_phi_out");
+  mgr->execute();
+
+  auto ptResult  = dm->getDataFrame().Take<Float_t>("MET_pt_out");
+  auto phiResult = dm->getDataFrame().Take<Float_t>("MET_phi_out");
+
+  const float expectedPt  = std::sqrt(100.0f * 100.0f + 10.0f * 10.0f);
+  const float expectedPhi = std::atan2(-10.0f, 100.0f);
+  EXPECT_NEAR(ptResult.GetValue()[0],  expectedPt,  1e-3f);
+  EXPECT_NEAR(phiResult.GetValue()[0], expectedPhi, 1e-4f);
+}
+
+// ---------------------------------------------------------------------------
+// Multiple MET propagation steps (chained)
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, ChainedMETPropagationSteps) {
+  // Step 1: nominal JEC. Step 2: JES up variation.
+  // MET_pt = 100, MET_phi = 0.
+  // Step 1: jet[0] pt_nom=50 → pt_jec=60. dMET_x = -(60-50)*1 = -10.
+  //         MET_jec_pt = 90, MET_jec_phi = 0.
+  // Step 2: jet[0] pt_jec=60 → pt_jes_up=66. dMET_x = -(66-60)*1 = -6.
+  //         MET_jes_up_pt = 90 - 6 = 84.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("MET_pt",  [](ULong64_t) -> Float_t { return 100.0f; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("MET_phi", [](ULong64_t) -> Float_t { return 0.0f; },
+             {"rdfentry_"}, *systematicManager);
+  defineRVecColumn(*dm, "Jet_phi",        [](ULong64_t) { return 0.0f; });
+  defineRVecColumn(*dm, "Jet_pt_raw",     [](ULong64_t) { return 50.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jec",     [](ULong64_t) { return 60.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_up",  [](ULong64_t) { return 66.0f; });
+
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  // Step 1: raw → jec
+  mgr->propagateMET("MET_pt", "MET_phi",
+                    "Jet_pt_raw", "Jet_pt_jec",
+                    "MET_pt_jec", "MET_phi_jec");
+  // Step 2: jec → jes_up
+  mgr->propagateMET("MET_pt_jec", "MET_phi_jec",
+                    "Jet_pt_jec", "Jet_pt_jes_up",
+                    "MET_pt_jes_up", "MET_phi_jes_up");
+  mgr->execute();
+
+  auto ptJec    = dm->getDataFrame().Take<Float_t>("MET_pt_jec");
+  auto ptJesUp  = dm->getDataFrame().Take<Float_t>("MET_pt_jes_up");
+  EXPECT_FLOAT_EQ(ptJec.GetValue()[0],   90.0f);
+  EXPECT_FLOAT_EQ(ptJesUp.GetValue()[0], 84.0f);
+}
+
+// ---------------------------------------------------------------------------
+// collectProvenanceEntries – new fields
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, CollectProvenanceContainsMETColumns) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setMETColumns("MET_pt", "MET_phi");
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("met_pt_column"),  entries.end());
+  ASSERT_NE(entries.find("met_phi_column"), entries.end());
+  EXPECT_EQ(entries.at("met_pt_column"),  "MET_pt");
+  EXPECT_EQ(entries.at("met_phi_column"), "MET_phi");
+}
+
+TEST_F(JetEnergyScaleManagerTest, CollectProvenanceContainsSystematicSets) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->registerSystematicSources("reduced", {"Total"});
+  mgr->registerSystematicSources("full",    {"AbsoluteCal", "FlavorQCD"});
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("systematic_sets"), entries.end());
+  const std::string &sets = entries.at("systematic_sets");
+  EXPECT_NE(sets.find("reduced"),     std::string::npos);
+  EXPECT_NE(sets.find("Total"),       std::string::npos);
+  EXPECT_NE(sets.find("full"),        std::string::npos);
+  EXPECT_NE(sets.find("AbsoluteCal"), std::string::npos);
+  EXPECT_NE(sets.find("FlavorQCD"),   std::string::npos);
+}
+
+TEST_F(JetEnergyScaleManagerTest, CollectProvenanceContainsMETPropagationSteps) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->propagateMET("MET_pt", "MET_phi",
+                    "Jet_pt_raw", "Jet_pt_jec",
+                    "MET_pt_jec", "MET_phi_jec");
+
+  const auto entries = mgr->collectProvenanceEntries();
+  ASSERT_NE(entries.find("met_propagation_steps"), entries.end());
+  const std::string &steps = entries.at("met_propagation_steps");
+  EXPECT_NE(steps.find("Jet_pt_raw"),  std::string::npos);
+  EXPECT_NE(steps.find("Jet_pt_jec"),  std::string::npos);
+  EXPECT_NE(steps.find("MET_pt_jec"),  std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// reportMetadata – new fields logged without throwing
+// ---------------------------------------------------------------------------
+
+TEST_F(JetEnergyScaleManagerTest, ReportMetadataWithAllFeaturesDoesNotThrow) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineRVecColumn(*dm, "Jet_pt",        [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_mass",      [](ULong64_t) { return  10.0f; });
+  defineRVecColumn(*dm, "Jet_rawFactor", [](ULong64_t) { return   0.1f; });
+  defineRVecColumn(*dm, "sf_nom",        [](ULong64_t) { return   1.0f; });
+  dm->Define("MET_pt",  [](ULong64_t) -> Float_t { return 50.0f; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("MET_phi", [](ULong64_t) -> Float_t { return 0.0f; },
+             {"rdfentry_"}, *systematicManager);
+
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setMETColumns("MET_pt", "MET_phi");
+  mgr->registerSystematicSources("reduced", {"Total"});
+  mgr->removeExistingCorrections("Jet_rawFactor");
+  mgr->applyCorrection("Jet_pt_raw", "sf_nom", "Jet_pt_jec");
+  mgr->addVariation("testSyst", "Jet_pt_jec", "Jet_pt_jec");
+  mgr->propagateMET("MET_pt", "MET_phi",
+                    "Jet_pt_raw", "Jet_pt_jec",
+                    "MET_pt_jec", "MET_phi_jec");
+  mgr->execute();
+  mgr->finalize();
+  EXPECT_NO_THROW(mgr->reportMetadata());
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

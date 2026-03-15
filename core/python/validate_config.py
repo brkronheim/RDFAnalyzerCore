@@ -104,14 +104,18 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "required_keys": [],
         "optional_keys": [
             "jet_columns",
+            "met_columns",
             "raw_factor_column",
             "corrections",
+            "systematic_sets",
             "variations",
         ],
         "key_types": {
             "jet_columns": dict,
+            "met_columns": dict,
             "raw_factor_column": str,
             "corrections": list,
+            "systematic_sets": dict,
             "variations": list,
         },
     },
