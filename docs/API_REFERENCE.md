@@ -12,6 +12,7 @@ Complete API documentation for RDFAnalyzerCore interfaces and key classes.
   - [WeightManager](#weightmanager)
   - [RegionManager](#regionmanager)
   - [CutflowManager](#cutflowmanager)
+  - [JetEnergyScaleManager](#jetenergyscalemanager)
   - [PhysicsObjectCollection](#physicsobjectcollection)
   - [ProvenanceService](#provenanceservice)
 - [Utility Classes](#utility-classes)
@@ -1290,6 +1291,107 @@ for (const auto& [name, count] : cfm.getRegionCutflowCounts("signal")) {
     std::cout << "[signal] " << name << ": " << count << "\n";
 }
 ```
+
+---
+
+### JetEnergyScaleManager
+
+**Header**: `core/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
+
+> **Full reference**: [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md)
+
+Plugin for applying CMS Jet Energy Scale (JES) and Jet Energy Resolution
+(JER) corrections to jet collections, with support for named systematic source
+sets, Type-1 MET propagation, and clean `PhysicsObjectCollection` integration.
+
+#### Configuration Methods
+
+```cpp
+// Declare input column names
+void setJetColumns(ptCol, etaCol, phiCol, massCol);
+void setMETColumns(metPtCol, metPhiCol);
+
+// Stripping existing corrections
+void removeExistingCorrections(rawFactorColumn);
+void setRawPtColumn(rawPtColumn);                  // alternative
+
+// Applying scale-factor corrections
+void applyCorrection(inputPt, sfCol, outputPt,
+                     applyToMass=true, inputMass="", outputMass="");
+void applyCorrectionlib(cm, correctionName, stringArgs, inputPt, outputPt, ...);
+
+// CMS systematic source sets
+void registerSystematicSources(setName, sources);
+void applySystematicSet(cm, correctionName, setName, inputPt, outputPtPrefix, ...);
+
+// Type-1 MET propagation
+void propagateMET(basePt, basePhi, nomPt, varPt,
+                  outPt, outPhi, threshold=15.f);
+
+// PhysicsObjectCollection integration
+void setInputJetCollection(collectionColumn);
+void defineCollectionOutput(correctedPt, outputCol, correctedMass="");
+void defineVariationCollections(nominalCol, prefix, mapCol="");
+
+// Direct variation registration
+void addVariation(name, upPt, downPt, upMass="", downMass="");
+```
+
+#### Accessors
+
+```cpp
+const std::string& getRawPtColumn()              const;
+const std::string& getPtColumn()                 const;
+const std::string& getMassColumn()               const;
+const std::string& getMETPtColumn()              const;
+const std::string& getMETPhiColumn()             const;
+const std::string& getInputJetCollectionColumn() const;
+const std::vector<JESVariationEntry>& getVariations() const;
+const std::vector<std::string>& getSystematicSources(setName) const;
+```
+
+#### CMS NanoAOD Usage
+
+```cpp
+auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+
+// 1. Column declarations
+jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+jes->setMETColumns("MET_pt", "MET_phi");
+
+// 2. Strip NanoAOD JEC → raw pT
+jes->removeExistingCorrections("Jet_rawFactor");
+
+// 3. Apply new L1L2L3 JEC
+jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
+                        "Jet_pt_raw", "Jet_pt_jec");
+
+// 4. Register reduced JES set (Total only) and apply
+jes->registerSystematicSources("reduced", {"Total"});
+jes->applySystematicSet(*cm, "jes_unc", "reduced",
+                        "Jet_pt_jec", "Jet_pt_jes");
+
+// 5. Propagate JEC to MET
+jes->propagateMET("MET_pt", "MET_phi",
+                  "Jet_pt_raw", "Jet_pt_jec",
+                  "MET_pt_jec", "MET_phi_jec");
+
+// 6. PhysicsObjectCollection integration
+jes->setInputJetCollection("goodJets");
+jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+jes->defineVariationCollections("goodJets_jec", "goodJets",
+                                "goodJets_variations");
+// After execute():
+//   "goodJets_jec"         : PhysicsObjectCollection (nominal JEC)
+//   "goodJets_TotalUp"     : PhysicsObjectCollection (JES up)
+//   "goodJets_TotalDown"   : PhysicsObjectCollection (JES down)
+//   "goodJets_variations"  : PhysicsObjectVariationMap
+```
+
+See [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md) for the complete
+reference including the full systematic source list, MET propagation details,
+and a production-ready end-to-end example.
 
 ---
 
