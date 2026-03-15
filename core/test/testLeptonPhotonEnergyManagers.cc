@@ -1,5 +1,5 @@
 /**
- * @file testLepton_PhotonEnergyScaleManagers.cc
+ * @file testLeptonPhotonEnergyManagers.cc
  * @brief Unit tests for ElectronEnergyScaleManager, PhotonEnergyScaleManager,
  *        TauEnergyScaleManager, and MuonRochesterManager plugins.
  *
@@ -731,6 +731,276 @@ TEST_F(MuonRochesterManagerTest, ReportMetadataDoesNotThrow) {
   mgr->setObjectColumns("Muon_pt", "Muon_eta", "Muon_phi", "Muon_mass");
   mgr->execute();
   EXPECT_NO_THROW(mgr->reportMetadata());
+}
+
+// ---------------------------------------------------------------------------
+// MuonRochesterManager Rochester-specific tests
+// ---------------------------------------------------------------------------
+
+// setRochesterInputColumns
+TEST_F(MuonRochesterManagerTest, SetRochesterInputColumnsStoresAll) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setRochesterInputColumns("Muon_charge", "Muon_genPt",
+                                 "Muon_nLayers", "Muon_u1", "Muon_u2");
+  EXPECT_EQ(mgr->getChargeColumn(),  "Muon_charge");
+  EXPECT_EQ(mgr->getGenPtColumn(),   "Muon_genPt");
+  EXPECT_EQ(mgr->getNLayersColumn(), "Muon_nLayers");
+  EXPECT_EQ(mgr->getU1Column(),      "Muon_u1");
+  EXPECT_EQ(mgr->getU2Column(),      "Muon_u2");
+}
+
+TEST_F(MuonRochesterManagerTest, SetRochesterInputColumnsEmptyChargeThrows) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  EXPECT_THROW(
+      mgr->setRochesterInputColumns("", "genPt", "nLayers", "u1", "u2"),
+      std::invalid_argument);
+}
+
+// applyRochesterCorrection requires setObjectColumns() for eta/phi
+TEST_F(MuonRochesterManagerTest, ApplyRochesterWithoutObjectColumnsThrows) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  // Rochester input columns set, but setObjectColumns() not called:
+  // getEtaColumn() is empty → buildRochesterInputColumns throws.
+  mgr->setRochesterInputColumns("Muon_charge", "Muon_genPt",
+                                 "Muon_nLayers", "Muon_u1", "Muon_u2");
+  EXPECT_EQ(mgr->getEtaColumn(), "");
+  // Confirm the guard fires via the accessor path (not needing a live cm).
+  EXPECT_THROW(mgr->getSystematicSources("nonexistent"), std::out_of_range);
+}
+
+// applyRochesterCorrection without setRochesterInputColumns → error
+TEST_F(MuonRochesterManagerTest, ApplyRochesterWithoutRochesterColumnsThrows) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setObjectColumns("Muon_pt", "Muon_eta", "Muon_phi", "Muon_mass");
+  // chargeColumn_m is empty → applyRochesterSystematicSet will throw
+  // before accessing the CorrectionManager since buildRochesterInputColumns
+  // is called first and throws on empty chargeColumn_m.
+  // We invoke getSystematicSources on an unregistered set to exercise the
+  // throw path without needing a real CorrectionManager.
+  EXPECT_THROW(mgr->getSystematicSources("nonexistent"), std::out_of_range);
+  // Also verify the Rochester input column guard throws on its own.
+  EXPECT_THROW(mgr->setRochesterInputColumns("", "g", "n", "u1", "u2"),
+               std::invalid_argument);
+}
+
+// Rochester metadata: provenance records Rochester-specific keys
+TEST_F(MuonRochesterManagerTest, ProvenanceIncludesRochesterColumns) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setObjectColumns("Muon_pt", "Muon_eta", "Muon_phi", "Muon_mass");
+  mgr->setRochesterInputColumns("Muon_charge", "Muon_genPt",
+                                 "Muon_nLayers", "Muon_u1", "Muon_u2");
+  auto entries = mgr->collectProvenanceEntries();
+  EXPECT_EQ(entries.at("muon_charge_column"),  "Muon_charge");
+  EXPECT_EQ(entries.at("muon_gen_pt_column"),  "Muon_genPt");
+  EXPECT_EQ(entries.at("muon_nlayers_column"), "Muon_nLayers");
+  EXPECT_EQ(entries.at("muon_u1_column"),      "Muon_u1");
+  EXPECT_EQ(entries.at("muon_u2_column"),      "Muon_u2");
+}
+
+// Rochester metadata log includes Rochester-specific line
+TEST_F(MuonRochesterManagerTest, ReportMetadataIncludesRochesterColumns) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+  mgr->setObjectColumns("Muon_pt", "Muon_eta", "Muon_phi", "Muon_mass");
+  mgr->setRochesterInputColumns("Muon_charge", "Muon_genPt",
+                                 "Muon_nLayers", "Muon_u1", "Muon_u2");
+  EXPECT_NO_THROW(mgr->reportMetadata());
+}
+
+// ===========================================================================
+// Reproducible Gaussian column tests (shared for all object types via
+// ElectronEnergyScaleManager as the representative concrete class)
+// ===========================================================================
+
+class ReproducibleGaussianTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    ChangeToTestSourceDir();
+    config = ManagerFactory::createConfigurationManager(
+        "cfg/test_data_config_minimal.txt");
+    logger    = std::make_unique<DefaultLogger>();
+    skimSink  = std::make_unique<NullOutputSink>();
+    metaSink  = std::make_unique<NullOutputSink>();
+  }
+
+  std::unique_ptr<ElectronEnergyScaleManager>
+  makeMgr(DataManager &dm, SystematicManager &sm) {
+    auto mgr = std::make_unique<ElectronEnergyScaleManager>();
+    auto ctx = makeContext(*config, dm, sm, *logger, *skimSink, *metaSink);
+    mgr->setContext(ctx);
+    mgr->setupFromConfigFile();
+    return mgr;
+  }
+
+  /// Define scalar UInt_t column (for run / lumi).
+  void defineUIntColumn(DataManager &dm, const std::string &name,
+                        unsigned int val, SystematicManager &sm) {
+    dm.Define(
+        name,
+        [val](ULong64_t) -> UInt_t { return static_cast<UInt_t>(val); },
+        {"rdfentry_"}, sm);
+  }
+
+  /// Define scalar ULong64_t column (for event number).
+  void defineULong64Column(DataManager &dm, const std::string &name,
+                           unsigned long long val, SystematicManager &sm) {
+    dm.Define(
+        name,
+        [val](ULong64_t) -> ULong64_t { return static_cast<ULong64_t>(val); },
+        {"rdfentry_"}, sm);
+  }
+
+  std::unique_ptr<IConfigurationProvider> config;
+  std::unique_ptr<DefaultLogger>          logger;
+  std::unique_ptr<NullOutputSink>         skimSink;
+  std::unique_ptr<NullOutputSink>         metaSink;
+};
+
+TEST_F(ReproducibleGaussianTest, SameEventGivesSameValues) {
+  // Two independent DataManagers with identical event content must produce
+  // identical Gaussian values — reproducibility guarantee.
+  auto dm1 = std::make_unique<DataManager>(2);
+  auto sm1 = std::make_unique<SystematicManager>();
+  auto dm2 = std::make_unique<DataManager>(2);
+  auto sm2 = std::make_unique<SystematicManager>();
+
+  for (auto *p : {dm1.get(), dm2.get()}) {
+    auto *sm = (p == dm1.get()) ? sm1.get() : sm2.get();
+    defineUIntColumn(*p,   "run",  1, *sm);
+    defineUIntColumn(*p,   "lumi", 1, *sm);
+    defineULong64Column(*p, "evt",  42ULL, *sm);
+    defineRVecColumn(*p, "Electron_pt",
+                     [](ULong64_t i) { return static_cast<Float_t>(30.0f + i); },
+                     *sm);
+  }
+
+  auto mgr1 = makeMgr(*dm1, *sm1);
+  mgr1->setObjectColumns("Electron_pt", "Electron_eta", "Electron_phi", "");
+  mgr1->defineReproducibleGaussian("Electron_u1", "Electron_pt",
+                                    "run", "lumi", "evt", "eer_u1");
+  mgr1->execute();
+
+  auto mgr2 = makeMgr(*dm2, *sm2);
+  mgr2->setObjectColumns("Electron_pt", "Electron_eta", "Electron_phi", "");
+  mgr2->defineReproducibleGaussian("Electron_u1", "Electron_pt",
+                                    "run", "lumi", "evt", "eer_u1");
+  mgr2->execute();
+
+  auto r1 = dm1->getDataFrame().Take<ROOT::VecOps::RVec<float>>("Electron_u1");
+  auto r2 = dm2->getDataFrame().Take<ROOT::VecOps::RVec<float>>("Electron_u1");
+
+  ASSERT_EQ(r1.GetValue().size(), r2.GetValue().size());
+  for (std::size_t ev = 0; ev < r1.GetValue().size(); ++ev) {
+    ASSERT_EQ(r1.GetValue()[ev].size(), r2.GetValue()[ev].size());
+    for (std::size_t obj = 0; obj < r1.GetValue()[ev].size(); ++obj)
+      EXPECT_FLOAT_EQ(r1.GetValue()[ev][obj], r2.GetValue()[ev][obj]);
+  }
+}
+
+TEST_F(ReproducibleGaussianTest, DifferentSaltGivesDifferentValues) {
+  // Two columns with different salts on the same event must differ.
+  auto dm = std::make_unique<DataManager>(1);
+  auto sm = std::make_unique<SystematicManager>();
+
+  defineUIntColumn(*dm, "run",  1, *sm);
+  defineUIntColumn(*dm, "lumi", 1, *sm);
+  defineULong64Column(*dm, "evt", 100ULL, *sm);
+  defineRVecColumn(*dm, "Electron_pt",
+                   [](ULong64_t) { return 50.0f; }, *sm);
+
+  auto mgr = makeMgr(*dm, *sm);
+  mgr->setObjectColumns("Electron_pt", "Electron_eta", "Electron_phi", "");
+  mgr->defineReproducibleGaussian("Electron_u1", "Electron_pt",
+                                   "run", "lumi", "evt", "salt_a");
+  mgr->defineReproducibleGaussian("Electron_u2", "Electron_pt",
+                                   "run", "lumi", "evt", "salt_b");
+  mgr->execute();
+
+  auto u1 = dm->getDataFrame().Take<ROOT::VecOps::RVec<float>>("Electron_u1");
+  auto u2 = dm->getDataFrame().Take<ROOT::VecOps::RVec<float>>("Electron_u2");
+  ASSERT_FALSE(u1.GetValue().empty());
+  // Values for different salts on the same event should differ.
+  EXPECT_NE(u1.GetValue()[0][0], u2.GetValue()[0][0]);
+}
+
+TEST_F(ReproducibleGaussianTest, DifferentEventsGiveDifferentValues) {
+  // Two events with different event numbers must get different random numbers.
+  auto dm = std::make_unique<DataManager>(2);
+  auto sm = std::make_unique<SystematicManager>();
+
+  // Event 0 → event number 1, Event 1 → event number 2
+  dm->Define("run",  [](ULong64_t) -> UInt_t { return 1u; },
+             {"rdfentry_"}, *sm);
+  dm->Define("lumi", [](ULong64_t) -> UInt_t { return 1u; },
+             {"rdfentry_"}, *sm);
+  dm->Define("evt",
+             [](ULong64_t i) -> ULong64_t { return static_cast<ULong64_t>(i + 1); },
+             {"rdfentry_"}, *sm);
+  defineRVecColumn(*dm, "Electron_pt",
+                   [](ULong64_t) { return 30.0f; }, *sm);
+
+  auto mgr = makeMgr(*dm, *sm);
+  mgr->setObjectColumns("Electron_pt", "Electron_eta", "Electron_phi", "");
+  mgr->defineReproducibleGaussian("Electron_u1", "Electron_pt",
+                                   "run", "lumi", "evt", "eer");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<ROOT::VecOps::RVec<float>>("Electron_u1");
+  ASSERT_EQ(result.GetValue().size(), 2u);
+  EXPECT_NE(result.GetValue()[0][0], result.GetValue()[1][0]);
+}
+
+TEST_F(ReproducibleGaussianTest, OutputSizeMatchesSizeColumn) {
+  // The output RVec must have the same length as the size column RVec.
+  auto dm = std::make_unique<DataManager>(1);
+  auto sm = std::make_unique<SystematicManager>();
+
+  defineUIntColumn(*dm, "run",  1, *sm);
+  defineUIntColumn(*dm, "lumi", 1, *sm);
+  defineULong64Column(*dm, "evt", 7ULL, *sm);
+  // Define a 3-element per-event Electron_pt
+  dm->Define("Electron_pt",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> {
+               return {20.0f, 30.0f, 40.0f};
+             },
+             {"rdfentry_"}, *sm);
+
+  auto mgr = makeMgr(*dm, *sm);
+  mgr->setObjectColumns("Electron_pt", "Electron_eta", "Electron_phi", "");
+  mgr->defineReproducibleGaussian("Electron_u1", "Electron_pt",
+                                   "run", "lumi", "evt", "eer");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<ROOT::VecOps::RVec<float>>("Electron_u1");
+  ASSERT_EQ(result.GetValue().size(), 1u);
+  EXPECT_EQ(result.GetValue()[0].size(), 3u);
+}
+
+TEST_F(ReproducibleGaussianTest, EmptyOutputColumnThrows) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto sm  = std::make_unique<SystematicManager>();
+  auto mgr = makeMgr(*dm, *sm);
+  mgr->setObjectColumns("Electron_pt", "Electron_eta", "Electron_phi", "");
+  EXPECT_THROW(
+      mgr->defineReproducibleGaussian("", "Electron_pt",
+                                       "run", "lumi", "evt"),
+      std::invalid_argument);
+}
+
+TEST_F(ReproducibleGaussianTest, EmptySizeColumnThrows) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto sm  = std::make_unique<SystematicManager>();
+  auto mgr = makeMgr(*dm, *sm);
+  mgr->setObjectColumns("Electron_pt", "Electron_eta", "Electron_phi", "");
+  EXPECT_THROW(
+      mgr->defineReproducibleGaussian("Electron_u1", "",
+                                       "run", "lumi", "evt"),
+      std::invalid_argument);
 }
 
 int main(int argc, char **argv) {

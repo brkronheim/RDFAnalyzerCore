@@ -11,7 +11,7 @@
  * the plugin type string ("PhotonEnergyScaleManager") and the physics-object name ("Photon").
  *
  * @see ObjectEnergyManagerBase for the full API reference.
- * @see docs/PHOTON_ENERGY_CORRECTIONS.md  [or MUON_ROCHESTER_CORRECTIONS.md]
+ * @see docs/PHOTON_ENERGY_CORRECTIONS.md
  */
 class PhotonEnergyScaleManager : public ObjectEnergyManagerBase {
 public:

@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
+#include <functional>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -71,6 +74,41 @@ void ObjectEnergyManagerBase::setMETColumns(const std::string &metPtColumn,
         type() + "::setMETColumns: metPhiColumn must not be empty");
   metPtColumn_m  = metPtColumn;
   metPhiColumn_m = metPhiColumn;
+}
+
+// ---------------------------------------------------------------------------
+// Reproducible per-event/per-object Gaussian random columns
+// ---------------------------------------------------------------------------
+
+void ObjectEnergyManagerBase::defineReproducibleGaussian(
+    const std::string &outputColumn, const std::string &sizeColumn,
+    const std::string &runColumn, const std::string &lumiColumn,
+    const std::string &eventColumn, const std::string &salt) {
+  if (outputColumn.empty())
+    throw std::invalid_argument(
+        type() + "::defineReproducibleGaussian: outputColumn must not be empty");
+  if (sizeColumn.empty())
+    throw std::invalid_argument(
+        type() + "::defineReproducibleGaussian: sizeColumn must not be empty");
+  if (runColumn.empty())
+    throw std::invalid_argument(
+        type() + "::defineReproducibleGaussian: runColumn must not be empty");
+  if (lumiColumn.empty())
+    throw std::invalid_argument(
+        type() + "::defineReproducibleGaussian: lumiColumn must not be empty");
+  if (eventColumn.empty())
+    throw std::invalid_argument(
+        type() + "::defineReproducibleGaussian: eventColumn must not be empty");
+
+  GaussianColumnStep step;
+  step.outputColumn = outputColumn;
+  step.sizeColumn   = sizeColumn;
+  step.runColumn    = runColumn;
+  step.lumiColumn   = lumiColumn;
+  step.eventColumn  = eventColumn;
+  // Hash the salt string at schedule time so the lambda captures only a uint64_t.
+  step.saltHash = std::hash<std::string>{}(salt);
+  gaussianColumnSteps_m.push_back(std::move(step));
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +398,12 @@ void ObjectEnergyManagerBase::defineVariationCollections(
 const std::string &ObjectEnergyManagerBase::getPtColumn() const {
   return ptColumn_m;
 }
+const std::string &ObjectEnergyManagerBase::getEtaColumn() const {
+  return etaColumn_m;
+}
+const std::string &ObjectEnergyManagerBase::getPhiColumn() const {
+  return phiColumn_m;
+}
 const std::string &ObjectEnergyManagerBase::getMassColumn() const {
   return massColumn_m;
 }
@@ -378,12 +422,69 @@ ObjectEnergyManagerBase::getVariations() const {
 }
 
 // ---------------------------------------------------------------------------
+// Extension hooks (default no-ops)
+// ---------------------------------------------------------------------------
+
+void ObjectEnergyManagerBase::appendObjectMetadata(
+    std::ostringstream & /*ss*/) const {}
+
+void ObjectEnergyManagerBase::appendObjectProvenanceEntries(
+    std::unordered_map<std::string, std::string> & /*entries*/) const {}
+
+// ---------------------------------------------------------------------------
 // execute()
 // ---------------------------------------------------------------------------
 
 void ObjectEnergyManagerBase::execute() {
   if (!dataManager_m)
     throw std::runtime_error(type() + "::execute: context not set");
+
+  // 0. Define reproducible per-object Gaussian random columns.
+  //    These must be defined before any smearing steps that consume them.
+  //    Each per-object value is seeded by a splitmix64 hash of:
+  //      saltHash ^ run ^ lumi ^ event ^ objectIndex
+  //    guaranteeing bit-identical results for any re-run on the same dataset.
+  for (const auto &step : gaussianColumnSteps_m) {
+    const std::string outCol  = step.outputColumn;
+    const std::string sizeCol = step.sizeColumn;
+    const std::string runCol  = step.runColumn;
+    const std::string lumiCol = step.lumiColumn;
+    const std::string evtCol  = step.eventColumn;
+    const uint64_t saltHash   = step.saltHash;
+
+    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+    auto newDf = df.Define(
+        outCol,
+        [saltHash](UInt_t run, UInt_t lumi, ULong64_t event,
+                   const ROOT::VecOps::RVec<Float_t> &sizeVec)
+            -> ROOT::VecOps::RVec<float> {
+          // Mix run/lumi/event into a per-event seed.
+          // Each constant is a distinct odd 64-bit integer to break symmetry.
+          uint64_t seed = saltHash;
+          seed ^= static_cast<uint64_t>(run)  * 0x9e3779b97f4a7c15ULL;
+          seed ^= static_cast<uint64_t>(lumi) * 0x6c62272e07bb0142ULL;
+          seed ^= static_cast<uint64_t>(event)* 0x517cc1b727220a95ULL;
+
+          ROOT::VecOps::RVec<float> result(sizeVec.size());
+          for (std::size_t i = 0; i < sizeVec.size(); ++i) {
+            // Incorporate object index, then finalise with splitmix64
+            // to ensure excellent avalanche and zero-correlation between
+            // adjacent indices.
+            uint64_t h = seed ^ (static_cast<uint64_t>(i) * 0x9e3779b97f4a7c15ULL + 1ULL);
+            h ^= h >> 30;
+            h *= 0xbf58476d1ce4e5b9ULL;
+            h ^= h >> 27;
+            h *= 0x94d049bb133111ebULL;
+            h ^= h >> 31;
+            std::mt19937_64 rng(h);
+            std::normal_distribution<float> dist(0.0f, 1.0f);
+            result[i] = dist(rng);
+          }
+          return result;
+        },
+        {runCol, lumiCol, evtCol, sizeCol});
+    dataManager_m->setDataFrame(newDf);
+  }
 
   // 1. Scale correction steps: output_pt = input_pt × sf  [and mass × sf].
   for (const auto &step : correctionSteps_m) {
@@ -738,6 +839,7 @@ void ObjectEnergyManagerBase::reportMetadata() {
     }
   }
 
+  appendObjectMetadata(ss);  // hook for derived classes (e.g. Rochester-specific info)
   logger_m->log(ILogger::Level::Info, ss.str());
 }
 
@@ -850,5 +952,6 @@ ObjectEnergyManagerBase::collectProvenanceEntries() const {
     entries["variation_collection_steps"] = ss.str();
   }
 
+  appendObjectProvenanceEntries(entries);  // hook for derived classes
   return entries;
 }

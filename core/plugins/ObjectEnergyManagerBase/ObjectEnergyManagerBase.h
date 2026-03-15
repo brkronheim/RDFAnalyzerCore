@@ -10,7 +10,9 @@
 #include <api/IOutputSink.h>
 #include <api/ISystematicManager.h>
 #include <api/ManagerContext.h>
+#include <cstdint>
 #include <map>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -179,8 +181,44 @@ public:
                           const std::vector<std::string> &inputColumns = {});
 
   // -------------------------------------------------------------------------
-  // Systematic source sets
+  // Reproducible per-event/per-object Gaussian random columns
   // -------------------------------------------------------------------------
+
+  /**
+   * @brief Schedule definition of a per-object N(0,1) random column whose
+   *        values are fully determined by the event identity.
+   *
+   * Running the same analysis twice on the same dataset will produce
+   * identical smearing because the per-object seed is derived entirely from
+   * event-level quantities:
+   * @code
+   *   seed = splitmix64( hash(run, lumi, event) XOR saltHash XOR objIndex )
+   * @endcode
+   * where @c saltHash = std::hash<std::string>{}(salt).
+   *
+   * The output column is a @c RVec<float> of the same length as
+   * @p sizeColumn.  It is defined in execute() before any correction or
+   * smearing steps, so it can immediately be passed to
+   * applyResolutionSmearing().
+   *
+   * @param outputColumn  Name for the new per-object random column.
+   * @param sizeColumn    Name of any per-object RVec column used to determine
+   *                      the number of objects per event (e.g. the pT column).
+   * @param runColumn     Event run-number column (ROOT type: @c UInt_t).
+   * @param lumiColumn    Luminosity-block column (ROOT type: @c UInt_t).
+   * @param eventColumn   Event-number column (ROOT type: @c ULong64_t).
+   * @param salt          Distinguishes multiple calls on the same event
+   *                      (e.g. "electron_smear_u1" vs "electron_smear_u2").
+   *
+   * @throws std::invalid_argument if @p outputColumn or @p sizeColumn is
+   *         empty.
+   */
+  void defineReproducibleGaussian(const std::string &outputColumn,
+                                   const std::string &sizeColumn,
+                                   const std::string &runColumn,
+                                   const std::string &lumiColumn,
+                                   const std::string &eventColumn,
+                                   const std::string &salt = "");
 
   /**
    * @brief Register a named list of systematic source names.
@@ -319,6 +357,12 @@ public:
   /// pT column name (from setObjectColumns).
   const std::string &getPtColumn() const;
 
+  /// η column name (from setObjectColumns).
+  const std::string &getEtaColumn() const;
+
+  /// φ column name (from setObjectColumns).
+  const std::string &getPhiColumn() const;
+
   /// Mass column name (from setObjectColumns; empty if not set).
   const std::string &getMassColumn() const;
 
@@ -372,6 +416,25 @@ protected:
    */
   virtual std::string objectName() const = 0;
 
+  /**
+   * @brief Hook for derived classes to append object-specific rows to the
+   *        metadata log string built by reportMetadata().
+   *
+   * Called just before the logger.log() call; @p ss already contains all
+   * base-class information.  Default implementation is a no-op.
+   */
+  virtual void appendObjectMetadata(std::ostringstream &ss) const;
+
+  /**
+   * @brief Hook for derived classes to append object-specific entries to the
+   *        provenance map returned by collectProvenanceEntries().
+   *
+   * Called just before the map is returned; @p entries already contains all
+   * base-class entries.  Default implementation is a no-op.
+   */
+  virtual void appendObjectProvenanceEntries(
+      std::unordered_map<std::string, std::string> &entries) const;
+
 private:
   // ---- Helper -------------------------------------------------------------
   /// Derive a mass column name corresponding to a given pT column name.
@@ -389,6 +452,17 @@ private:
   // ---- MET column names ---------------------------------------------------
   std::string metPtColumn_m;
   std::string metPhiColumn_m;
+
+  // ---- Reproducible Gaussian random column steps --------------------------
+  struct GaussianColumnStep {
+    std::string outputColumn;
+    std::string sizeColumn;
+    std::string runColumn;
+    std::string lumiColumn;
+    std::string eventColumn;
+    uint64_t    saltHash = 0;
+  };
+  std::vector<GaussianColumnStep> gaussianColumnSteps_m;
 
   // ---- Scale correction steps ---------------------------------------------
   struct CorrectionStep {

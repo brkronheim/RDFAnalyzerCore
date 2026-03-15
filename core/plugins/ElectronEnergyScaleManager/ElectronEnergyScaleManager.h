@@ -11,7 +11,7 @@
  * the plugin type string ("ElectronEnergyScaleManager") and the physics-object name ("Electron").
  *
  * @see ObjectEnergyManagerBase for the full API reference.
- * @see docs/ELECTRON_ENERGY_CORRECTIONS.md  [or MUON_ROCHESTER_CORRECTIONS.md]
+ * @see docs/ELECTRON_ENERGY_CORRECTIONS.md
  */
 class ElectronEnergyScaleManager : public ObjectEnergyManagerBase {
 public:

@@ -11,7 +11,7 @@
  * the plugin type string ("TauEnergyScaleManager") and the physics-object name ("Tau").
  *
  * @see ObjectEnergyManagerBase for the full API reference.
- * @see docs/TAU_ENERGY_CORRECTIONS.md  [or MUON_ROCHESTER_CORRECTIONS.md]
+ * @see docs/TAU_ENERGY_CORRECTIONS.md
  */
 class TauEnergyScaleManager : public ObjectEnergyManagerBase {
 public:
