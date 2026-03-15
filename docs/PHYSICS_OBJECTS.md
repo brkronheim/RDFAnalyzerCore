@@ -17,6 +17,7 @@
 9. [TypedPhysicsObjectCollection\<T\>](#9-typedphysicsobjectcollectiont)
 10. [PhysicsObjectVariationMap](#10-physicsobjectvariationmap)
 11. [Complete C++ Examples](#11-complete-c-examples)
+12. [JetEnergyScaleManager Integration](#12-jetenergyscalemanager-integration)
 
 ---
 
@@ -731,3 +732,125 @@ analyzer.Define("nBtagMedium", [](const PhysicsObjectCollection& jets)
     return static_cast<int>(Sum(scores > 0.2783f));  // Medium WP
 }, {"btaggedJets"});
 ```
+
+---
+
+## 12. JetEnergyScaleManager Integration
+
+`JetEnergyScaleManager` is the recommended plugin for applying CMS Jet Energy
+Scale (JES) and Jet Energy Resolution (JER) corrections to
+`PhysicsObjectCollection` objects.  The plugin:
+
+1. Accepts a `PhysicsObjectCollection` column as input (built with any
+   standard selection the user defines).
+2. Produces a corrected nominal `PhysicsObjectCollection` with updated pT
+   (and optionally mass) from correctionlib evaluations.
+3. Produces per-variation `PhysicsObjectCollection` columns for every
+   registered systematic, using `withCorrectedPt()` internally.
+4. Optionally assembles all collections into a `PhysicsObjectVariationMap`
+   column for convenient downstream access.
+5. Propagates all jet energy changes to MET via a Type-1 correction.
+
+### Setting up the integration
+
+```cpp
+// Build a selected jet collection (user-defined)
+analyzer.Define("goodJets",
+    [](const RVec<float>& pt, const RVec<float>& eta,
+       const RVec<float>& phi, const RVec<float>& mass) {
+        return PhysicsObjectCollection(pt, eta, phi, mass,
+                                       (pt > 25.f) && (abs(eta) < 2.4f));
+    },
+    {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
+);
+
+auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+
+// Declare columns, strip NanoAOD JEC, apply new JEC
+jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+jes->setMETColumns("MET_pt", "MET_phi");
+jes->removeExistingCorrections("Jet_rawFactor");
+jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
+                        "Jet_pt_raw", "Jet_pt_jec");
+
+// Tell the plugin which collection to use
+jes->setInputJetCollection("goodJets");
+
+// Define a corrected nominal collection
+jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+
+// Register the "Total" JES uncertainty and apply
+jes->registerSystematicSources("reduced", {"Total"});
+jes->applySystematicSet(*cm, "jes_unc", "reduced",
+                        "Jet_pt_jec", "Jet_pt_jes");
+
+// Define per-variation collections and a combined variation map
+jes->defineVariationCollections("goodJets_jec", "goodJets",
+                                "goodJets_variations");
+
+// Propagate JEC and JES variations to MET
+jes->propagateMET("MET_pt", "MET_phi",
+                  "Jet_pt_raw", "Jet_pt_jec",
+                  "MET_pt_jec", "MET_phi_jec");
+jes->propagateMET("MET_pt_jec", "MET_phi_jec",
+                  "Jet_pt_jec", "Jet_pt_jes_Total_up",
+                  "MET_pt_jes_Total_up", "MET_phi_jes_Total_up");
+jes->propagateMET("MET_pt_jec", "MET_phi_jec",
+                  "Jet_pt_jec", "Jet_pt_jes_Total_down",
+                  "MET_pt_jes_Total_down", "MET_phi_jes_Total_down");
+```
+
+### Columns produced (after execute)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `goodJets_jec` | `PhysicsObjectCollection` | Jets with JEC-corrected pT |
+| `goodJets_TotalUp` | `PhysicsObjectCollection` | Jets with JES Total up shift |
+| `goodJets_TotalDown` | `PhysicsObjectCollection` | Jets with JES Total down shift |
+| `goodJets_variations` | `PhysicsObjectVariationMap` | Map with keys `"nominal"`, `"TotalUp"`, `"TotalDown"` |
+| `MET_pt_jec` / `MET_phi_jec` | `Float_t` | MET after JEC Type-1 propagation |
+| `MET_pt_jes_Total_up` / `MET_phi_jes_Total_up` | `Float_t` | MET after JES up propagation |
+
+### Using the variation map
+
+The `PhysicsObjectVariationMap` (key `"nominal"`, `"<name>Up"`,
+`"<name>Down"`) allows downstream code to iterate over all variations without
+knowing their names at compile time:
+
+```cpp
+// Compute di-jet mass for every variation
+analyzer.Define("dijetMass_vars",
+    [](const PhysicsObjectVariationMap& vm) {
+        std::unordered_map<std::string, float> results;
+        for (const auto& [key, col] : vm) {
+            auto pairs = makePairs(col);
+            results[key] = pairs.empty()
+                ? -1.f
+                : static_cast<float>(pairs[0].p4.M());
+        }
+        return results;
+    },
+    {"goodJets_variations"}
+);
+```
+
+### Relationship with withCorrectedPt and withCorrectedKinematics
+
+`JetEnergyScaleManager` calls `PhysicsObjectCollection::withCorrectedPt` and
+`withCorrectedKinematics` under the hood.  The key detail is that these
+methods expect **full-size** `RVec<Float_t>` columns (one entry per jet in
+the original unselected collection), using the stored original indices to look
+up each selected jet's corrected value.  The correctionlib-derived pT columns
+`Jet_pt_jec`, `Jet_pt_jes_Total_up`, etc., produced by
+`JetEnergyScaleManager` are exactly in this format.
+
+### See also
+
+- [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md) — full
+  `JetEnergyScaleManager` reference including all API methods, CMS source
+  sets, MET propagation, and a complete production workflow.
+- [Section 7: Correction Application](#7-correction-application) above —
+  manual use of `withCorrectedPt` and `withCorrectedKinematics`.
+- [Section 10: PhysicsObjectVariationMap](#10-physicsobjectvariationmap) —
+  systematic-variation map type.

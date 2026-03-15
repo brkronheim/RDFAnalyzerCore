@@ -33,7 +33,10 @@ struct JESVariationEntry {
  * @class JetEnergyScaleManager
  * @brief Plugin for applying Jet Energy Scale (JES) and Jet Energy Resolution
  *        (JER) corrections to jet collections, with full support for CMS-style
- *        systematic uncertainty sets and Type-1 MET propagation.
+ *        systematic uncertainty sets, Type-1 MET propagation, and
+ *        PhysicsObjectCollection integration.
+ *
+ * @see docs/JET_ENERGY_CORRECTIONS.md for the full user-facing reference.
  *
  * ## Features
  *  - **Removing existing JEC**: strip NanoAOD-level corrections using a raw
@@ -77,9 +80,7 @@ struct JESVariationEntry {
  *       "RelativePtBB", "RelativePtEC1", "RelativePtEC2",
  *       "RelativePtHF", "RelativeBal", "RelativeSample"
  *   });
- *   jes->registerSystematicSources("reduced", {
- *       "Total"
- *   });
+ *   jes->registerSystematicSources("reduced", {"Total"});
  *
  *   // 5. Apply all sources in a set (creates up/down pT columns + registers
  *   //    all variations with ISystematicManager in execute()).
@@ -95,6 +96,14 @@ struct JESVariationEntry {
  *   jes->propagateMET("MET_pt_jec", "MET_phi_jec",
  *                     "Jet_pt_jec", "Jet_pt_jes_Total_up",
  *                     "MET_pt_jes_Total_up", "MET_phi_jes_Total_up");
+ *
+ *   // 8. PhysicsObjectCollection integration.
+ *   jes->setInputJetCollection("goodJets");
+ *   jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+ *   jes->defineVariationCollections("goodJets_jec", "goodJets",
+ *                                   "goodJets_variations");
+ *   // → defines goodJets_jec, goodJets_TotalUp, goodJets_TotalDown,
+ *   //   goodJets_variations (PhysicsObjectVariationMap)
  * @endcode
  *
  * ## Applying a single CMS JES uncertainty source

@@ -76,6 +76,11 @@ New to RDFAnalyzerCore? Start here:
   - Standard column names for leptons, jets, MET, and other objects
   - Collection conventions and branch naming
 
+- **[Jet Energy Corrections](JET_ENERGY_CORRECTIONS.md)** - JES/JER correction plugin reference
+  - CMS NanoAOD JEC workflow (strip, apply, systematic sets)
+  - Type-1 MET propagation
+  - PhysicsObjectCollection integration and variation maps
+
 ### Batch Processing & Performance
 
 - **[LAW Tasks](LAW_TASKS.md)** - Luigi/LAW workflow task reference
@@ -137,6 +142,7 @@ Framework is extensible via plugins:
 - **OnnxManager**: Neural networks and ML models
 - **SofieManager**: Build-time compiled models
 - **CorrectionManager**: Scale factors and corrections
+- **JetEnergyScaleManager**: JES/JER corrections, CMS systematic sets, MET propagation, and PhysicsObjectCollection integration
 - **TriggerManager**: Trigger logic
 - **NDHistogramManager**: N-dimensional histograms
 - **WeightManager**: Nominal and varied event weights
@@ -178,6 +184,7 @@ Efficient processing with automatic optimization.
 
 - **Add ML model**: [ONNX Configuration](CONFIG_REFERENCE.md#onnx-manager-configuration)
 - **Apply corrections**: [CorrectionManager](CONFIG_REFERENCE.md#correction-manager-configuration)
+- **Apply JES/JER corrections**: [Jet Energy Corrections](JET_ENERGY_CORRECTIONS.md)
 - **Book histograms**: [Histogramming Guide](ANALYSIS_GUIDE.md#histogramming)
 - **Handle systematics**: [Systematics Guide](ANALYSIS_GUIDE.md#systematics)
 - **Submit to batch**: [HTCondor Scripts](ANALYSIS_GUIDE.md#advanced-topics)
