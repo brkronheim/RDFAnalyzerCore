@@ -100,6 +100,21 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "optional_keys": ["objects"],
         "key_types": {"objects": list},
     },
+    "JetEnergyScaleManager": {
+        "required_keys": [],
+        "optional_keys": [
+            "jet_columns",
+            "raw_factor_column",
+            "corrections",
+            "variations",
+        ],
+        "key_types": {
+            "jet_columns": dict,
+            "raw_factor_column": str,
+            "corrections": list,
+            "variations": list,
+        },
+    },
 }
 
 
