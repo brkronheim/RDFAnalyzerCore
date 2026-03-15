@@ -4,6 +4,7 @@ target_include_directories(MuonRochesterManager PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../interface
 )
 target_link_libraries(MuonRochesterManager PUBLIC
+    ObjectEnergyManagerBase
     ROOT::ROOTDataFrame
     ROOT::ROOTVecOps
     ROOT::Core

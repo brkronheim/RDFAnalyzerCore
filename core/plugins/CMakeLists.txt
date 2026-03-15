@@ -10,6 +10,7 @@ set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/GoldenJsonManager
     ${CMAKE_CURRENT_SOURCE_DIR}/MuonRochesterManager
     ${CMAKE_CURRENT_SOURCE_DIR}/NDHistogramManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/ObjectEnergyManagerBase
     ${CMAKE_CURRENT_SOURCE_DIR}/PhotonEnergyScaleManager
     ${CMAKE_CURRENT_SOURCE_DIR}/RegionManager
     ${CMAKE_CURRENT_SOURCE_DIR}/TauEnergyScaleManager
@@ -27,6 +28,7 @@ add_library(corePlugins STATIC)
 add_subdirectory(BDTManager)
 add_subdirectory(CorrectionManager)
 add_subdirectory(CutflowManager)
+add_subdirectory(ObjectEnergyManagerBase)
 add_subdirectory(ElectronEnergyScaleManager)
 add_subdirectory(JetEnergyScaleManager)
 add_subdirectory(KinematicFitManager)
@@ -46,6 +48,7 @@ target_link_libraries(corePlugins
     BDTManager
     CorrectionManager
     CutflowManager
+    ObjectEnergyManagerBase
     ElectronEnergyScaleManager
     JetEnergyScaleManager
     KinematicFitManager

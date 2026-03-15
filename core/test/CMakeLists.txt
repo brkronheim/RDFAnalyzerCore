@@ -122,6 +122,10 @@ add_executable(testJetEnergyScaleManager testJetEnergyScaleManager.cc)
 target_link_libraries(testJetEnergyScaleManager core corePlugins gtest gtest_main)
 add_test(NAME JetEnergyScaleManagerTest COMMAND testJetEnergyScaleManager)
 
+add_executable(testLeptonPhotonEnergyManagers testLeptonPhotonEnergyManagers.cc)
+target_link_libraries(testLeptonPhotonEnergyManagers core corePlugins gtest gtest_main)
+add_test(NAME LeptonPhotonEnergyManagersTest COMMAND testLeptonPhotonEnergyManagers)
+
 add_executable(testRegionManager testRegionManager.cc)
 target_link_libraries(testRegionManager core corePlugins gtest gtest_main)
 add_test(NAME RegionManagerTest COMMAND testRegionManager)

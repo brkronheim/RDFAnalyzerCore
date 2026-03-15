@@ -4,6 +4,7 @@ target_include_directories(TauEnergyScaleManager PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../interface
 )
 target_link_libraries(TauEnergyScaleManager PUBLIC
+    ObjectEnergyManagerBase
     ROOT::ROOTDataFrame
     ROOT::ROOTVecOps
     ROOT::Core
