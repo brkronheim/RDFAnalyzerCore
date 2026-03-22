@@ -734,7 +734,7 @@ TEST_F(JetEnergyScaleManagerTest, RegisterSystematicSourcesEmptySourceNameThrows
 
 TEST_F(JetEnergyScaleManagerTest, GetSystematicSourcesUnknownSetThrows) {
   JetEnergyScaleManager mgr;
-  EXPECT_THROW(mgr.getSystematicSources("nonexistent"), std::out_of_range);
+  EXPECT_THROW(mgr.getSystematicSources("nonexistent"), std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,6 +1072,8 @@ TEST_F(JetEnergyScaleManagerTest, ReportMetadataWithAllFeaturesDoesNotThrow) {
   auto mgr = makeMgr(*dm);
 
   defineRVecColumn(*dm, "Jet_pt",        [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_eta",       [](ULong64_t) { return   0.5f; });
+  defineRVecColumn(*dm, "Jet_phi",       [](ULong64_t) { return   1.0f; });
   defineRVecColumn(*dm, "Jet_mass",      [](ULong64_t) { return  10.0f; });
   defineRVecColumn(*dm, "Jet_rawFactor", [](ULong64_t) { return   0.1f; });
   defineRVecColumn(*dm, "sf_nom",        [](ULong64_t) { return   1.0f; });

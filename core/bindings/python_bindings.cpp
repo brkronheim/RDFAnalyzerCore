@@ -28,7 +28,9 @@
 
 #include <ROOT/RDataFrame.hxx>
 #include <ROOT/RVec.hxx>
+#include <TInterpreter.h>
 
+#include <atomic>
 #include <sstream>
 #include <algorithm>
 #include <set>
@@ -211,8 +213,7 @@ public:
         }
         
         // Build a proper C++ function pointer type from the simple signature string
-        // e.g. "double(double,double)" -> "double(*)(double,double)" and then
-        // call it: (reinterpret_cast<double(*)(double,double)>(addr))(arg1, arg2)
+        // e.g. "double(double,double)" -> "double(*)(double,double)"
         auto toFunctionPointerType = [](const std::string& sig)->std::string {
             size_t open = sig.find('(');
             size_t close = sig.rfind(')');
@@ -225,10 +226,70 @@ public:
         };
         const auto fptr = toFunctionPointerType(signature);
 
+        // Declare the function pointer globally via ROOT's Cling interpreter.
+        // A monotonically increasing ID ensures each declaration has a unique name.
+        static std::atomic<unsigned int> fptr_counter{0};
+        const unsigned int fptr_id = fptr_counter.fetch_add(1);
+        const std::string fname = "__rdf_jit_fptr_" + std::to_string(fptr_id);
+
+        const std::string decl = "auto " + fname +
+                                 " = reinterpret_cast<" + fptr + ">(" +
+                                 std::to_string(func_ptr) + ");";
+        if (!gInterpreter->Declare(decl.c_str())) {
+            throw std::runtime_error(
+                "DefineFromPointer: failed to declare function pointer via Cling interpreter"
+            );
+        }
+
+        // Build a typed wrapper function so that ROOT's JIT column-name
+        // auto-detection can identify the column arguments.  A bare function
+        // pointer call "fptr(col)" confuses ROOT's expression parser; a regular
+        // function call "wrapper(col)" works reliably.
+        //
+        // Parse argument types from signature, e.g. "double(double,float)"
+        // → retType="double", argTypes={"double","float"}
+        const size_t open  = signature.find('(');
+        const size_t close = signature.rfind(')');
+        std::string retType = (open == std::string::npos) ? signature : signature.substr(0, open);
+        std::string argsStr = (open == std::string::npos || close == std::string::npos)
+                                  ? "" : signature.substr(open + 1, close - open - 1);
+        retType.erase(std::remove_if(retType.begin(), retType.end(), ::isspace), retType.end());
+        argsStr.erase(std::remove_if(argsStr.begin(), argsStr.end(), ::isspace), argsStr.end());
+
+        // Split comma-separated arg types
+        std::vector<std::string> argTypes;
+        if (!argsStr.empty()) {
+            std::istringstream argStream(argsStr);
+            std::string tok;
+            while (std::getline(argStream, tok, ',')) {
+                if (!tok.empty()) argTypes.push_back(tok);
+            }
+        }
+
+        // Build wrapper: "double __rdf_jit_fptr_0_w(double a0,float a1){return __rdf_jit_fptr_0(a0,a1);}"
+        const std::string wname = fname + "_w";
+        std::ostringstream wdecl;
+        wdecl << retType << " " << wname << "(";
+        for (size_t i = 0; i < argTypes.size(); ++i) {
+            if (i > 0) wdecl << ",";
+            wdecl << argTypes[i] << " a" << i;
+        }
+        wdecl << "){return " << fname << "(";
+        for (size_t i = 0; i < argTypes.size(); ++i) {
+            if (i > 0) wdecl << ",";
+            wdecl << "a" << i;
+        }
+        wdecl << ");}";
+        if (!gInterpreter->Declare(wdecl.str().c_str())) {
+            throw std::runtime_error(
+                "DefineFromPointer: failed to declare wrapper function via Cling interpreter"
+            );
+        }
+
+        // Build the JIT expression using the wrapper function.
+        // ROOT's column-name auto-detection works for regular function calls.
         std::stringstream jit_expr;
-        // Cast the integer address to a function pointer and immediately call it
-        jit_expr << "(reinterpret_cast<" << fptr << ">(" << func_ptr << "))";
-        jit_expr << "(";
+        jit_expr << wname << "(";
         for (size_t i = 0; i < columns.size(); ++i) {
             if (i > 0) jit_expr << ", ";
             jit_expr << columns[i];

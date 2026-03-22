@@ -42,6 +42,14 @@ add_executable(testConfigurationManager_MemoryAndSemantics testConfigurationMana
 target_link_libraries(testConfigurationManager_MemoryAndSemantics core gtest gtest_main)
 add_test(NAME ConfigurationManagerMemoryAndSemanticsTest COMMAND testConfigurationManager_MemoryAndSemantics)
 
+add_executable(testConfigurationManager_YamlParsing testConfigurationManager_YamlParsing.cc)
+target_link_libraries(testConfigurationManager_YamlParsing core gtest gtest_main)
+add_test(NAME ConfigurationManagerYamlParsingTest COMMAND testConfigurationManager_YamlParsing)
+
+add_executable(testManagerRegistry testManagerRegistry.cc)
+target_link_libraries(testManagerRegistry core corePlugins)
+add_test(NAME ManagerRegistryTest COMMAND testManagerRegistry)
+
 add_executable(testSystematicManager testSystematicManager.cc)
 target_link_libraries(testSystematicManager core gtest gtest_main)
 add_test(NAME SystematicManagerTest COMMAND testSystematicManager)
@@ -50,13 +58,13 @@ add_executable(testCounterService testCounterService.cc)
 target_link_libraries(testCounterService core gtest gtest_main)
 add_test(NAME CounterServiceTest COMMAND testCounterService)
 
-#add_executable(testCounterService_Dedup testCounterService_Dedup.cc)
-#target_link_libraries(testCounterService_Dedup core corePlugins gtest gtest_main)
-#add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)
+add_executable(testCounterService_Dedup testCounterService_Dedup.cc)
+target_link_libraries(testCounterService_Dedup core corePlugins gtest gtest_main)
+add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)
 
-#add_executable(testDataManager testDataManager.cc)
-#target_link_libraries(testDataManager core corePlugins gtest gtest_main)
-#add_test(NAME DataManagerTest COMMAND testDataManager)
+add_executable(testDataManager testDataManager.cc)
+target_link_libraries(testDataManager core corePlugins gtest gtest_main)
+add_test(NAME DataManagerTest COMMAND testDataManager)
 
 
 

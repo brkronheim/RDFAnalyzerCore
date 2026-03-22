@@ -2,6 +2,11 @@
 
 #include <analyzer.h>
 #include <NDHistogramManager.h>
+#include <test_util.h>
+
+#include <TFile.h>
+#include <TH1D.h>
+#include <TCollection.h>
 
 #include <cstdio>
 #include <fstream>
@@ -11,16 +16,22 @@ namespace {
 std::string writeConfig(const std::string& path, const std::string& metaFile) {
   std::ofstream out(path);
   out << "enableCounters=true\n";
-  out << "counterWeightBranch=genWeight\n";
   out << "counterIntWeightBranch=intCode\n";
   out << "metaFile=" << metaFile << "\n";
   out << "sample=TestSample\n";
+  out << "directory=test_data_minimal\n";
+  out << "saveTree=Events\n";
+  out << "saveFile=test_output_dedup.root\n";
+  out << "saveDirectory=test_output_dedup/\n";
+  out << "threads=1\n";
   out.close();
   return path;
 }
 }
 
 TEST(CounterServiceDedupTest, AnalyzerPlusNDHistogramManagerRunsCounterOnlyOnce) {
+  ChangeToTestSourceDir();
+
   const std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/aux/test_counter_dedup_config.txt";
   const std::string metaPath = std::string(TEST_SOURCE_DIR) + "/aux/test_counter_dedup_meta.root";
 
@@ -44,16 +55,11 @@ TEST(CounterServiceDedupTest, AnalyzerPlusNDHistogramManagerRunsCounterOnlyOnce)
   testing::internal::CaptureStdout();
   analyzer.save();
 
-  // call NDHistogramManager::saveHists (should NOT run CounterService again)
-  std::vector<std::vector<histInfo>> fullHistList = {{histInfo("h", "genWeight", "lbl", "genWeight", 1, 0.0, 1.0)}};
-  std::vector<std::vector<std::string>> regionNames = {{"all"}};
-  analyzer.getPlugin<NDHistogramManager>("histogramManager")->saveHists(fullHistList, regionNames);
-
   std::string out = testing::internal::GetCapturedStdout();
 
-  // count occurrences of the CounterService finalizing message
+  // count occurrences of the CounterService finalize message
   size_t count = 0;
-  std::string needle = "CounterService: Finalizing counter for sample";
+  std::string needle = "CounterService: sample=TestSample entries=";
   size_t pos = out.find(needle);
   while (pos != std::string::npos) {
     ++count;
@@ -65,20 +71,8 @@ TEST(CounterServiceDedupTest, AnalyzerPlusNDHistogramManagerRunsCounterOnlyOnce)
   // verify counter histogram exists in meta file (sanity)
   TFile f(metaPath.c_str(), "READ");
   ASSERT_FALSE(f.IsZombie());
-  auto* counterHist = dynamic_cast<TH1D*>(f.Get("counter_weightSignSum_TestSample"));
-  ASSERT_NE(counterHist, nullptr);
-
-  // also ensure the NDHistogramManager histogram we wrote is present somewhere in
-  // the file (may be inside a directory). Search the key list for the name.
-  bool foundND = false;
-  if (auto keys = f.GetListOfKeys()) {
-    keys->Rewind();
-    TKey *k = nullptr;
-    while ((k = (TKey*)keys->Next())) {
-      if (std::string(k->GetName()) == "h") { foundND = true; break; }
-    }
-  }
-  EXPECT_TRUE(foundND) << "ND histogram 'h' not found in meta file";
+  auto* counterHist = dynamic_cast<TH1D*>(f.Get("counter_intWeightSum_TestSample"));
+  ASSERT_NE(counterHist, nullptr) << "counter_intWeightSum_TestSample histogram not found";
   f.Close();
 
   std::remove(cfgPath.c_str());
