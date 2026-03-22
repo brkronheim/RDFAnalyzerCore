@@ -615,6 +615,82 @@ with open("corrections.json", "w") as f:
     f.write(cset.json())
 ```
 
+### Jet Energy Corrections (JES/JER) with JetEnergyScaleManager
+
+For CMS-style Jet Energy Scale (JES) and Jet Energy Resolution (JER)
+corrections, use the dedicated `JetEnergyScaleManager` plugin.  It
+integrates with `CorrectionManager` for correctionlib evaluations and with
+`PhysicsObjectCollection` for clean jet-collection management.
+
+> **Full reference**: [Jet Energy Corrections Guide](JET_ENERGY_CORRECTIONS.md)
+
+#### Typical CMS NanoAOD JEC workflow
+
+```cpp
+#include <JetEnergyScaleManager.h>
+#include <PhysicsObjectCollection.h>
+
+auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+
+// 1. Declare jet/MET column names.
+jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+jes->setMETColumns("MET_pt", "MET_phi");
+
+// 2. Build a selected jet collection (any user selection).
+analyzer.Define("goodJets",
+    [](const RVec<float>& pt, const RVec<float>& eta,
+       const RVec<float>& phi, const RVec<float>& mass) {
+        return PhysicsObjectCollection(pt, eta, phi, mass,
+                                       (pt > 25.f) && (abs(eta) < 2.4f));
+    },
+    {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
+);
+
+// 3. Strip NanoAOD JEC → raw pT.
+jes->removeExistingCorrections("Jet_rawFactor");
+
+// 4. Apply new L1L2L3 JEC via correctionlib.
+jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
+                        "Jet_pt_raw", "Jet_pt_jec");
+
+// 5. Register and apply CMS JES systematic set (reduced: "Total" only).
+jes->registerSystematicSources("reduced", {"Total"});
+jes->applySystematicSet(*cm, "jes_unc", "reduced",
+                        "Jet_pt_jec", "Jet_pt_jes");
+
+// 6. Propagate JEC to MET (Type-1).
+jes->propagateMET("MET_pt", "MET_phi",
+                  "Jet_pt_raw", "Jet_pt_jec",
+                  "MET_pt_jec", "MET_phi_jec");
+
+// 7. Produce corrected PhysicsObjectCollection columns.
+jes->setInputJetCollection("goodJets");
+jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+jes->defineVariationCollections("goodJets_jec", "goodJets",
+                                "goodJets_variations");
+// After execute():
+//   "goodJets_jec"        PhysicsObjectCollection (nominal JEC)
+//   "goodJets_TotalUp"    PhysicsObjectCollection (JES up)
+//   "goodJets_TotalDown"  PhysicsObjectCollection (JES down)
+//   "goodJets_variations" PhysicsObjectVariationMap (all of the above)
+```
+
+#### Applying the full CMS JES source set
+
+```cpp
+jes->registerSystematicSources("full", {
+    "AbsoluteCal", "AbsoluteScale", "AbsoluteMPFBias",
+    "FlavorQCD", "Fragmentation", "PileUpDataMC",
+    "PileUpPtRef", "RelativeFSR", "RelativeJEREC1",
+    "RelativeJEREC2", "RelativeJERHF",
+    "RelativePtBB", "RelativePtEC1", "RelativePtEC2",
+    "RelativePtHF", "RelativeBal", "RelativeSample"
+});
+jes->applySystematicSet(*cm, "jes_unc", "full", "Jet_pt_jec", "Jet_pt_jes");
+// Creates 34 variation columns (17 sources × up/down)
+```
+
 ## Histogramming
 
 ### Using NDHistogramManager
