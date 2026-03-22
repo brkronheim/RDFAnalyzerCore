@@ -58,6 +58,15 @@ public:
    */
   Analyzer(std::unique_ptr<IConfigurationProvider> configProvider,
            std::unique_ptr<IDataFrameProvider> dataFrameProvider,
+           std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& plugins,
+           std::unique_ptr<ISystematicManager> systematicManager,
+           std::unique_ptr<ILogger> logger,
+           std::unique_ptr<IOutputSink> skimSink,
+           std::unique_ptr<IOutputSink> metaSink);
+
+  /// @brief Dependency-injected constructor (unique_ptr plugin map — backward compat).
+  Analyzer(std::unique_ptr<IConfigurationProvider> configProvider,
+           std::unique_ptr<IDataFrameProvider> dataFrameProvider,
            std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins,
            std::unique_ptr<ISystematicManager> systematicManager,
            std::unique_ptr<ILogger> logger,
@@ -74,7 +83,11 @@ public:
    * @param plugins Map of plugin role names to pluggable manager instances (default: empty).
    */
   Analyzer(std::string configFile,
-           std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins = {});
+           std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& plugins = {});
+
+  /// @brief Config-file constructor (unique_ptr plugin map — backward compat).
+  Analyzer(std::string configFile,
+           std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins);
 
   /**
    * @brief Define a new variable in the dataframe. Systematics are handled automatically.
@@ -236,10 +249,10 @@ public:
    * @return Pointer to the plugin as T, or nullptr if not found or wrong type
    */
   template<typename T>
-  T* getPlugin(const std::string& key) const {
+  std::shared_ptr<T> getPlugin(const std::string& key) const {
     auto it = plugins.find(key);
     if (it != plugins.end()) {
-      return dynamic_cast<T*>(it->second.get());
+      return std::dynamic_pointer_cast<T>(it->second);
     }
     return nullptr;
   }
@@ -257,13 +270,10 @@ public:
    * @param plugin Unique pointer to the plugin manager to register
    * @return Pointer to this Analyzer (for chaining)
    */
+  Analyzer *addPlugin(const std::string &role, std::shared_ptr<IPluggableManager> plugin);
   Analyzer *addPlugin(const std::string &role, std::unique_ptr<IPluggableManager> plugin);
 
-  /**
-   * @brief Register multiple plugins at once.
-   * @param newPlugins Map of role name -> plugin manager
-   * @return Pointer to this Analyzer (for chaining)
-   */
+  Analyzer *addPlugins(std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& newPlugins);
   Analyzer *addPlugins(std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& newPlugins);
 
   /**
@@ -329,7 +339,7 @@ private:
   /**
    * @brief Map of plugin role names to pluggable manager instances.
    */
-  std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
+  std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins;
   /**
    * @brief Optional analysis services (internal only for now).
    */

@@ -277,4 +277,13 @@ private:
   RegionManager* regionManager_m = nullptr;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<NDHistogramManager> makeNDHistogramManager(
+    Analyzer& an, const std::string& role = "histogramManager");
+
 #endif // NDHISTOGRAMMANAGER_H_INCLUDED 

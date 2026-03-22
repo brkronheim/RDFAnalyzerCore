@@ -88,4 +88,13 @@ private:
   std::unordered_map<std::string, std::string> sampleToGroup_m;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<TriggerManager> makeTriggerManager(
+    Analyzer& an, const std::string& role = "triggerManager");
+
 #endif // TRIGGERMANAGER_H_INCLUDED 

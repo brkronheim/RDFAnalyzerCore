@@ -97,4 +97,13 @@ private:
   std::unordered_map<std::string, std::string> bdt_runVars_m;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<BDTManager> makeBDTManager(
+    Analyzer& an, const std::string& role = "bdtManager");
+
 #endif // BDTMANAGER_H_INCLUDED 

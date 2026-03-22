@@ -125,4 +125,13 @@ private:
   std::unordered_map<std::string, std::string> model_runVars_m;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<SofieManager> makeSofieManager(
+    Analyzer& an, const std::string& role = "sofieManager");
+
 #endif // SOFIEMANAGER_H_INCLUDED

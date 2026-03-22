@@ -20,4 +20,13 @@ protected:
   std::string objectName() const override { return "Electron"; }
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<ElectronEnergyScaleManager> makeElectronEnergyScaleManager(
+    Analyzer& an, const std::string& role = "electronEnergyScaleManager");
+
 #endif // ELECTRONENERGYMANAGER_H_INCLUDED

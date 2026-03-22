@@ -203,4 +203,13 @@ private:
   std::string u2Column_m;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<MuonRochesterManager> makeMuonRochesterManager(
+    Analyzer& an, const std::string& role = "muonRochesterManager");
+
 #endif // MUONROCHESTERMANAGER_H_INCLUDED

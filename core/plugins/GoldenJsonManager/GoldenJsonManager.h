@@ -100,4 +100,13 @@ private:
   void loadJsonFile(const std::string &filename);
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<GoldenJsonManager> makeGoldenJsonManager(
+    Analyzer& an, const std::string& role = "goldenJsonManager");
+
 #endif // GOLDENJSONMANAGER_H_INCLUDED

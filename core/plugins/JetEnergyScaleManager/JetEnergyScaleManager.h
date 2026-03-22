@@ -646,4 +646,13 @@ private:
   std::string deriveMassColumnName(const std::string &ptColName) const;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<JetEnergyScaleManager> makeJetEnergyScaleManager(
+    Analyzer& an, const std::string& role = "jetEnergyScaleManager");
+
 #endif // JETENERGYSCALEMANAGER_H_INCLUDED

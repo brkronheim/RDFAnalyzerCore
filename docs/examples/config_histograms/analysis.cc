@@ -21,10 +21,8 @@ int main(int argc, char **argv) {
     // Create analyzer with config file
     auto analyzer = Analyzer(argv[1]);
 
-    // Add NDHistogramManager plugin to enable histogram functionality
-    auto histManager = std::make_unique<NDHistogramManager>(
-        analyzer.getConfigurationProvider());
-    analyzer.addPlugin("histogramManager", std::move(histManager));
+    // Add NDHistogramManager plugin using the helper function
+    makeNDHistogramManager(analyzer);
 
     // Define analysis variables
     analyzer.Define("example_var", []() -> Float_t { return 5.0; }, {})

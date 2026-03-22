@@ -191,4 +191,13 @@ private:
   std::unordered_map<std::string, std::vector<const char *>> model_outputNamePtrs_m;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<OnnxManager> makeOnnxManager(
+    Analyzer& an, const std::string& role = "onnxManager");
+
 #endif // ONNXMANAGER_H_INCLUDED

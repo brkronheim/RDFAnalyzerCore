@@ -20,4 +20,13 @@ protected:
   std::string objectName() const override { return "Tau"; }
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<TauEnergyScaleManager> makeTauEnergyScaleManager(
+    Analyzer& an, const std::string& role = "tauEnergyScaleManager");
+
 #endif // TAUENERGYMANAGER_H_INCLUDED

@@ -597,3 +597,15 @@ void OnnxManager::reportMetadata() {
   }
   logger_m->log(ILogger::Level::Info, msg);
 }
+
+// ---------------------------------------------------------------------------
+// Plugin helper function
+// ---------------------------------------------------------------------------
+#include <analyzer.h>
+
+std::shared_ptr<OnnxManager> makeOnnxManager(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<OnnxManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
+}

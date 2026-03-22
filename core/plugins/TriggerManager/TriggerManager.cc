@@ -235,3 +235,15 @@ void TriggerManager::reportMetadata() {
   }
   logger_m->log(ILogger::Level::Info, msg);
 }
+
+// ---------------------------------------------------------------------------
+// Plugin helper function
+// ---------------------------------------------------------------------------
+#include <analyzer.h>
+
+std::shared_ptr<TriggerManager> makeTriggerManager(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<TriggerManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
+}

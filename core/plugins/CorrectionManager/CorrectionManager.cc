@@ -371,3 +371,15 @@ void CorrectionManager::reportMetadata() {
   }
   logger_m->log(ILogger::Level::Info, msg);
 }
+
+// ---------------------------------------------------------------------------
+// Plugin helper function
+// ---------------------------------------------------------------------------
+#include <analyzer.h>
+
+std::shared_ptr<CorrectionManager> makeCorrectionManager(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<CorrectionManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
+}

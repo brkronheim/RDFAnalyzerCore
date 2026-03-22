@@ -925,3 +925,15 @@ JetEnergyScaleManager::collectProvenanceEntries() const {
 
   return entries;
 }
+
+// ---------------------------------------------------------------------------
+// Plugin helper function
+// ---------------------------------------------------------------------------
+#include <analyzer.h>
+
+std::shared_ptr<JetEnergyScaleManager> makeJetEnergyScaleManager(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<JetEnergyScaleManager>();
+    an.addPlugin(role, plugin);
+    return plugin;
+}

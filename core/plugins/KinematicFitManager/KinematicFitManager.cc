@@ -834,3 +834,15 @@ void KinematicFitManager::reportMetadata() {
   }
   logger_m->log(ILogger::Level::Info, msg);
 }
+
+// ---------------------------------------------------------------------------
+// Plugin helper function
+// ---------------------------------------------------------------------------
+#include <analyzer.h>
+
+std::shared_ptr<KinematicFitManager> makeKinematicFitManager(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<KinematicFitManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
+}

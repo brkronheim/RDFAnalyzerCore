@@ -187,4 +187,13 @@ private:
   bool initialized_m = false;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<CorrectionManager> makeCorrectionManager(
+    Analyzer& an, const std::string& role = "correctionManager");
+
 #endif // CORRECTIONMANAGER_H_INCLUDED 

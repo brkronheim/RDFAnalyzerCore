@@ -41,8 +41,7 @@ TEST(CounterServiceDedupTest, AnalyzerPlusNDHistogramManagerRunsCounterOnlyOnce)
   writeConfig(cfgPath, metaPath);
 
   Analyzer analyzer(cfgPath);
-  auto histManager = std::make_unique<NDHistogramManager>(analyzer.getConfigurationProvider());
-  analyzer.addPlugin("histogramManager", std::move(histManager));
+  makeNDHistogramManager(analyzer);
 
   // define the branches used by CounterService
   analyzer.Define("intCode", [](ULong64_t entry) { return static_cast<Int_t>(entry % 3); }, {"rdfentry_"});

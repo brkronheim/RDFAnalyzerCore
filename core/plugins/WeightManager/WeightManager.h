@@ -309,4 +309,13 @@ private:
                  ROOT::RDF::RNode &df);
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<WeightManager> makeWeightManager(
+    Analyzer& an, const std::string& role = "weightManager");
+
 #endif // WEIGHTMANAGER_H_INCLUDED

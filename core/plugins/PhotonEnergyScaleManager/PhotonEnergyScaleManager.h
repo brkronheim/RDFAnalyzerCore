@@ -20,4 +20,13 @@ protected:
   std::string objectName() const override { return "Photon"; }
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<PhotonEnergyScaleManager> makePhotonEnergyScaleManager(
+    Analyzer& an, const std::string& role = "photonEnergyScaleManager");
+
 #endif // PHOTONENERGYMANAGER_H_INCLUDED

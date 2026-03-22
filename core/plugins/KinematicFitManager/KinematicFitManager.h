@@ -345,4 +345,13 @@ private:
   std::unordered_map<std::string, std::string> kinfit_runVars_m;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<KinematicFitManager> makeKinematicFitManager(
+    Analyzer& an, const std::string& role = "kinematicFitManager");
+
 #endif // KINEMATICFITMANAGER_H_INCLUDED

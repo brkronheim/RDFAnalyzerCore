@@ -189,4 +189,13 @@ private:
   IOutputSink *metaSink_m = nullptr;
 };
 
+
+// ---------------------------------------------------------------------------
+// Helper: create, register with analyzer, and return as shared_ptr
+// ---------------------------------------------------------------------------
+#include <memory>
+class Analyzer;
+std::shared_ptr<RegionManager> makeRegionManager(
+    Analyzer& an, const std::string& role = "regionManager");
+
 #endif // REGIONMANAGER_H_INCLUDED

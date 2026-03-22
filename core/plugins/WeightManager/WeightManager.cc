@@ -465,3 +465,15 @@ WeightManager::collectProvenanceEntries() const {
 
   return entries;
 }
+
+// ---------------------------------------------------------------------------
+// Plugin helper function
+// ---------------------------------------------------------------------------
+#include <analyzer.h>
+
+std::shared_ptr<WeightManager> makeWeightManager(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<WeightManager>();
+    an.addPlugin(role, plugin);
+    return plugin;
+}
