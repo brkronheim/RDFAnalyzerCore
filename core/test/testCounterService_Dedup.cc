@@ -3,6 +3,10 @@
 #include <analyzer.h>
 #include <NDHistogramManager.h>
 
+#include <TFile.h>
+#include <TH1D.h>
+#include <TIter.h>
+
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -71,11 +75,10 @@ TEST(CounterServiceDedupTest, AnalyzerPlusNDHistogramManagerRunsCounterOnlyOnce)
   // also ensure the NDHistogramManager histogram we wrote is present somewhere in
   // the file (may be inside a directory). Search the key list for the name.
   bool foundND = false;
-  if (auto keys = f.GetListOfKeys()) {
-    keys->Rewind();
-    TKey *k = nullptr;
-    while ((k = (TKey*)keys->Next())) {
-      if (std::string(k->GetName()) == "h") { foundND = true; break; }
+  if (TList* keys = f.GetListOfKeys()) {
+    TIter next(keys);
+    while (TObject* obj = next()) {
+      if (std::string(obj->GetName()) == "h") { foundND = true; break; }
     }
   }
   EXPECT_TRUE(foundND) << "ND histogram 'h' not found in meta file";

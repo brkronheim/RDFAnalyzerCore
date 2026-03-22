@@ -187,7 +187,7 @@ TEST_F(DataManagerTest, DefineVectorCreatesVectorColumn) {
  */
 TEST_F(DataManagerTest, Filter_mAppliesFilter) {
   dataManager->Define("filt_col", []() { return 5; }, {}, *systematicManager);
-  dynamic_cast<DataManager*>(dataManager.get())->Filter_m([](int x) { return x == 5; }, {"filt_col"});
+  dynamic_cast<DataManager*>(dataManager.get())->Filter([](int x) { return x == 5; }, {"filt_col"});
   auto df = dataManager->getDataFrame();
   auto result = df.Take<int>("filt_col");
   for (auto v : *result) {
@@ -201,7 +201,7 @@ TEST_F(DataManagerTest, Filter_mAppliesFilter) {
  * Verifies that DefinePerSample_m creates a column with the expected value for all samples.
  */
 TEST_F(DataManagerTest, DefinePerSample_mCreatesColumn) {
-  dynamic_cast<DataManager*>(dataManager.get())->DefinePerSample_m("sample_col", [](unsigned int, const ROOT::RDF::RSampleInfo&) { return 7; });
+  dynamic_cast<DataManager*>(dataManager.get())->DefinePerSample("sample_col", [](unsigned int, const ROOT::RDF::RSampleInfo&) { return 7; });
   auto df = dataManager->getDataFrame();
   auto result = df.Take<int>("sample_col");
   for (auto v : *result) {
