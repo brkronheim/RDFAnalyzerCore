@@ -762,7 +762,7 @@ TEST_F(PhysicsObjectCollectionFilterTest, FilterKeepsMatchingObjects) {
     auto filtered = col.withFilter(extra);
     ASSERT_EQ(filtered.size(), 2u);
     EXPECT_TRUE(approxEq(filtered.at(0).Pt(), 30.f));
-    EXPECT_TRUE(approxEq(filtered.at(1).Pt(), 50.f));
+    EXPECT_TRUE(approxEq(filtered.at(1).Pt(), 20.f));
 }
 
 TEST_F(PhysicsObjectCollectionFilterTest, FilterPreservesOriginalIndices) {

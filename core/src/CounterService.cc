@@ -18,11 +18,18 @@ void CounterService::initialize(ManagerContext& ctx) {
 
   const auto& configMap = ctx.config.getConfigMap();
 
-  if (configMap.find("sample") != configMap.end()) {
-    sampleName_m = configMap.at("sample");
-  } else if (configMap.find("type") != configMap.end()) {
-    sampleName_m = configMap.at("type");
-  } else {
+  auto get_config_value = [&](std::initializer_list<const char*> keys) -> std::string {
+    for (const char* key : keys) {
+      auto it = configMap.find(key);
+      if (it != configMap.end() && !it->second.empty()) {
+        return it->second;
+      }
+    }
+    return "";
+  };
+
+  sampleName_m = get_config_value({"sample", "name", "sample_type", "stitch_id", "type", "dtype", "process", "group"});
+  if (sampleName_m.empty()) {
     sampleName_m = "unknown";
   }
 

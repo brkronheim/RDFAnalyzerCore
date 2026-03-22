@@ -3,6 +3,7 @@
 
 #include <cctype>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <stdexcept>
@@ -149,6 +150,8 @@ void GoldenJsonManager::setupFromConfigFile() {
   const std::string configKey = "goldenJsonConfig";
   std::string configFile;
   try {
+    std::cout << "GoldenJsonManager: loading golden JSON files from config key '"
+              << configKey << "'..." << std::endl;
     configFile = configManager_m->get(configKey);
   } catch (...) {
     throw std::runtime_error(
@@ -156,6 +159,8 @@ void GoldenJsonManager::setupFromConfigFile() {
         "' not found. Add 'goldenJsonConfig=<path>' to your configuration.");
   }
 
+  std::cout << "GoldenJsonManager: loading golden JSON files from '" << configFile
+            << "'..." << std::endl;
   const auto jsonFiles = configManager_m->parseVectorConfig(configFile);
   if (jsonFiles.empty()) {
     throw std::runtime_error(
@@ -208,10 +213,18 @@ void GoldenJsonManager::applyGoldenJson() {
 
   std::string sampleType;
   try {
-    sampleType = configManager_m->get("type");
+    std::cout << "GoldenJsonManager: checking sample type from config key 'dtype'..."
+              << std::endl;
+    sampleType = configManager_m->get("dtype");
   } catch (...) {
-    throw std::runtime_error(
-        "GoldenJsonManager: config key 'type' not found");
+    try {
+      std::cout << "GoldenJsonManager: falling back to config key 'type'..."
+                << std::endl;
+      sampleType = configManager_m->get("type");
+    } catch (...) {
+      throw std::runtime_error(
+          "GoldenJsonManager: config keys 'dtype' and 'type' not found");
+    }
   }
 
   if (sampleType != "data") {

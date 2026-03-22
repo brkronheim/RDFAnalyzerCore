@@ -6,6 +6,7 @@
 .law
 .law/*
 !aux/*.root
+*x509*
 
 # Ignore plotting test output (generated PNGs)
 core/test/aux/test_plotting_*.png
@@ -36,5 +37,8 @@ example_outputs/
 aux/Run3/*
 aux/Run2/*
 docs/doxygen/*
-analyses/*/output/
-analyses/*/data/
+analyses/*
+
+
+python_env.tar.gz
+submit_config.txt

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -178,7 +179,9 @@ class TestWriteJobConfig(unittest.TestCase):
                     if "=" in line:
                         k, v = line.split("=", 1)
                         cfg[k] = v
-            self.assertEqual(cfg["fileList"], dataset.das)
+            # Ensure the DAS path is redirected to XRootD (root://...) for remote access
+            self.assertTrue(cfg["fileList"].startswith("root://"))
+            self.assertIn(dataset.das, cfg["fileList"])
 
     def test_auxiliary_files_are_copied(self):
         """floats.txt and ints.txt referenced in the template are copied."""
@@ -206,6 +209,202 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(job_dir, "floats.txt")))
             self.assertTrue(os.path.exists(os.path.join(job_dir, "ints.txt")))
 
+    def test_auxiliary_files_resolve_from_analysis_root(self):
+        """cfg/... references are resolved relative to the analysis root."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analysis_dir = os.path.join(tmpdir, "analysis")
+            cfg_dir = os.path.join(analysis_dir, "cfg")
+            Path(cfg_dir).mkdir(parents=True)
+
+            manifest_path = os.path.join(cfg_dir, "dataset_manifest.yaml")
+            Path(manifest_path).write_text("datasets: []\nlumi: 1.0\n")
+            floats_path = os.path.join(cfg_dir, "floats.yaml")
+            Path(floats_path).write_text("normScale: 1.0\n")
+
+            template = _write_submit_config_template(
+                cfg_dir,
+                extra={
+                    "sampleConfig": "cfg/dataset_manifest.yaml",
+                    "floatConfig": "cfg/floats.yaml",
+                },
+            )
+            dataset = DatasetEntry(name="sample", files=["f.root"], dtype="mc")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(job_dir, template, dataset, out_dir)
+
+            self.assertTrue(os.path.exists(os.path.join(job_dir, "dataset_manifest.yaml")))
+            self.assertTrue(os.path.exists(os.path.join(job_dir, "floats.yaml")))
+
+            cfg = {}
+            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k] = v
+
+            self.assertEqual(cfg["sampleConfig"], "dataset_manifest.yaml")
+            self.assertEqual(cfg["floatConfig"], "floats.yaml")
+
+    def test_counter_weight_branch_removed_for_data(self):
+        """Data jobs do not keep MC-only counter weight branches."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(
+                tmpdir,
+                extra={"counterWeightBranch": "Generator_weight"},
+            )
+            dataset = DatasetEntry(name="data", files=["f.root"], dtype="data")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(job_dir, template, dataset, out_dir)
+
+            cfg = {}
+            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k] = v
+
+            self.assertNotIn("counterWeightBranch", cfg)
+
+    def test_manifest_metadata_is_injected_into_job_config(self):
+        """Per-job configs include scalar dataset-manifest metadata and numeric type."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir)
+            dataset = DatasetEntry(
+                name="dy0j",
+                files=["f.root"],
+                dtype="mc",
+                year=2022,
+                campaign="Run3Summer22",
+                process="dy2jets_0J",
+                group="dy2jets_2022",
+                stitch_id=2,
+                sample_type=42,
+                xsec=5020.0,
+                extra_scale=1.5,
+                filter_efficiency=0.75,
+                sum_weights=12345.0,
+                parent="parent_sample",
+            )
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(job_dir, template, dataset, out_dir)
+
+            cfg = {}
+            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k] = v
+
+            self.assertEqual(cfg["sample"], "dy0j")
+            self.assertEqual(cfg["name"], "dy0j")
+            self.assertEqual(cfg["dtype"], "mc")
+            self.assertEqual(cfg["type"], "42")
+            self.assertEqual(cfg["stitch_id"], "2")
+            self.assertEqual(cfg["sample_type"], "42")
+            self.assertEqual(cfg["year"], "2022")
+            self.assertEqual(cfg["campaign"], "Run3Summer22")
+            self.assertEqual(cfg["process"], "dy2jets_0J")
+            self.assertEqual(cfg["group"], "dy2jets_2022")
+            self.assertEqual(cfg["xsec"], "5020.0")
+            self.assertEqual(cfg["extra_scale"], "1.5")
+            self.assertEqual(cfg["extraScale"], "1.5")
+            self.assertEqual(cfg["filter_efficiency"], "0.75")
+            self.assertEqual(cfg["filterEfficiency"], "0.75")
+            self.assertEqual(cfg["sum_weights"], "12345.0")
+            self.assertEqual(cfg["norm"], "12345.0")
+            self.assertEqual(cfg["parent"], "parent_sample")
+
+    def test_rewrite_job_output_destinations(self):
+        """Concrete skim jobs can rewrite their final save targets independently."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "submit_config.txt")
+            Path(cfg_path).write_text(
+                "saveDirectory=/tmp/local/out\n"
+                "saveFile=/tmp/local/out/skim.root\n"
+                "metaFile=/tmp/local/out/meta.root\n"
+                "sample=test\n"
+            )
+
+            mod._rewrite_job_output_destinations(
+                cfg_path,
+                "/eos/user/b/test/sample/job_0",
+            )
+
+            cfg = {}
+            with open(cfg_path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k] = v
+
+            self.assertEqual(cfg["saveDirectory"], "/eos/user/b/test/sample/job_0")
+            self.assertEqual(cfg["saveFile"], "/eos/user/b/test/sample/job_0/skim.root")
+            self.assertEqual(cfg["metaFile"], "/eos/user/b/test/sample/job_0/meta.root")
+            self.assertEqual(cfg["sample"], "test")
+
+    def test_aux_directory_is_copied_and_rewritten(self):
+        """Copied YAML payloads reference the staged aux/ directory."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analysis_dir = os.path.join(tmpdir, "analysis")
+            cfg_dir = os.path.join(analysis_dir, "cfg")
+            aux_dir = os.path.join(analysis_dir, "aux")
+            Path(cfg_dir).mkdir(parents=True)
+            Path(aux_dir).mkdir(parents=True)
+
+            Path(os.path.join(aux_dir, "muon_scalesmearing.json.gz")).write_text("payload\n")
+            Path(os.path.join(aux_dir, "jetvetomaps.json.gz")).write_text("payload\n")
+            Path(os.path.join(cfg_dir, "corrections.yaml")).write_text(
+                "- file: aux/muon_scalesmearing.json.gz\n"
+                "- file: jetvetomaps.json.gz\n"
+            )
+
+            template = _write_submit_config_template(
+                cfg_dir,
+                extra={"correctionConfig": "cfg/corrections.yaml"},
+            )
+            dataset = DatasetEntry(name="sample", files=["f.root"], dtype="mc")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(job_dir, template, dataset, out_dir)
+
+            self.assertTrue(os.path.exists(os.path.join(job_dir, "aux", "muon_scalesmearing.json.gz")))
+            self.assertTrue(os.path.exists(os.path.join(job_dir, "aux", "jetvetomaps.json.gz")))
+
+            with open(os.path.join(job_dir, "corrections.yaml")) as fh:
+                contents = fh.read()
+
+            self.assertIn("file: aux/muon_scalesmearing.json.gz", contents)
+            self.assertIn("file: aux/jetvetomaps.json.gz", contents)
+
     def test_extra_overrides_applied(self):
         """extra_overrides dict is applied on top of computed values."""
         mod = self._import()
@@ -231,6 +430,52 @@ class TestWriteJobConfig(unittest.TestCase):
                         k, v = line.split("=", 1)
                         cfg[k] = v
             self.assertEqual(cfg["fileList"], "/my/skim.root")
+
+    def test_shared_config_layout_without_local_staging(self):
+        """File-source job configs keep cfg/ references and avoid local payload copies."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analysis_dir = os.path.join(tmpdir, "analysis")
+            cfg_dir = os.path.join(analysis_dir, "cfg")
+            aux_dir = os.path.join(analysis_dir, "aux")
+            Path(cfg_dir).mkdir(parents=True)
+            Path(aux_dir).mkdir(parents=True)
+
+            Path(os.path.join(cfg_dir, "corrections.yaml")).write_text(
+                "- file: aux/muon_scalesmearing.json.gz\n"
+            )
+            Path(os.path.join(aux_dir, "muon_scalesmearing.json.gz")).write_text("payload\n")
+
+            template = _write_submit_config_template(
+                cfg_dir,
+                extra={"correctionConfig": "cfg/corrections.yaml"},
+            )
+            dataset = DatasetEntry(name="sample", files=["f.root"], dtype="mc")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(
+                job_dir,
+                template,
+                dataset,
+                out_dir,
+                stage_shared_inputs_locally=False,
+            )
+
+            self.assertFalse(os.path.exists(os.path.join(job_dir, "corrections.yaml")))
+            self.assertFalse(os.path.exists(os.path.join(job_dir, "aux")))
+
+            cfg = {}
+            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k] = v
+            self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
 
 
 # ===========================================================================
@@ -340,6 +585,677 @@ class TestSkimTask(unittest.TestCase):
             exe="/f", submit_config="/f", dataset_manifest="/f", name="t"
         )
         self.assertEqual(task.task_namespace, "")
+
+    def test_complete_returns_false_when_prep_missing_in_file_source_mode(self):
+        """Workflow complete() should not raise before PrepareSkimJobs runs."""
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config="/fake/cfg.txt",
+                dataset_manifest=manifest_path,
+                name="myRun",
+                file_source="nano",
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                self.assertFalse(task.complete())
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_requires_prepare_jobs_even_without_file_source(self):
+        """SkimTask always chains PrepareSkimJobs so all executors share one setup path."""
+        import analysis_tasks
+
+        task = analysis_tasks.SkimTask(
+            exe="/fake/exe",
+            submit_config="/fake/cfg.txt",
+            dataset_manifest="/fake/manifest.yaml",
+            name="myRun",
+            make_test_job=False,
+        )
+
+        req = task.requires()
+        self.assertIn("prep", req)
+        self.assertIsInstance(req["prep"], analysis_tasks.PrepareSkimJobs)
+
+    def test_get_dask_work_uses_prepared_job_runner_for_dict_branch(self):
+        """Dict-style branch metadata dispatches through _run_prepared_skim_job."""
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_myRun")
+            shared_dir = os.path.join(run_dir, "shared_inputs")
+            job_dir = os.path.join(run_dir, "jobs", "sample", "job_0")
+            Path(shared_dir).mkdir(parents=True)
+            Path(job_dir).mkdir(parents=True)
+
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config="/fake/cfg.txt",
+                dataset_manifest="/fake/manifest.yaml",
+                name="myRun",
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
+            try:
+                func, args, kwargs = task.get_dask_work(
+                    0,
+                    {
+                        "dataset_name": "sample",
+                        "job_dir": job_dir,
+                        "out_dir": os.path.join(run_dir, "outputs", "sample"),
+                    },
+                )
+                self.assertIs(func, analysis_tasks._run_prepared_skim_job)
+                self.assertEqual(args[0], shared_dir)
+                self.assertEqual(args[1], job_dir)
+                self.assertEqual(kwargs, {})
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestPrepareSkimJobs(unittest.TestCase):
+    """Tests for PrepareSkimJobs helpers."""
+
+    def test_requires_get_nano_file_list_automatically(self):
+        import analysis_tasks
+        import nano_tasks
+
+        task = analysis_tasks.PrepareSkimJobs(
+            exe="/fake/exe",
+            submit_config="/fake/cfg.yaml",
+            dataset_manifest="/fake/manifest.yaml",
+            name="skimDY2Jet",
+            file_source="nano",
+            file_source_name="",
+            x509="/fake/x509",
+        )
+
+        req = task.requires()
+        self.assertIsInstance(req, nano_tasks.GetNANOFileList)
+        self.assertEqual(req.name, "skimDY2Jet")
+
+    def test_effective_file_source_name_defaults_to_run_name(self):
+        import analysis_tasks
+
+        task = analysis_tasks.PrepareSkimJobs(
+            exe="/fake/exe",
+            submit_config="/fake/cfg.yaml",
+            dataset_manifest="/fake/manifest.yaml",
+            name="skimDY2Jet",
+            file_source="nano",
+            file_source_name="",
+            x509="/fake/x509",
+        )
+
+        self.assertEqual(task._effective_file_source_name, "skimDY2Jet")
+
+    def test_create_test_job_copies_resolved_payloads(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analysis_dir = os.path.join(tmpdir, "analysis")
+            cfg_dir = os.path.join(analysis_dir, "cfg")
+            Path(cfg_dir).mkdir(parents=True)
+
+            exe_path = os.path.join(tmpdir, "exe")
+            Path(exe_path).write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(exe_path, 0o755)
+
+            Path(os.path.join(cfg_dir, "dataset_manifest.yaml")).write_text(
+                "datasets: []\nlumi: 1.0\n"
+            )
+            Path(os.path.join(cfg_dir, "floats.yaml")).write_text("normScale: 1.0\n")
+
+            template = _write_submit_config_template(
+                cfg_dir,
+                extra={
+                    "sampleConfig": "cfg/dataset_manifest.yaml",
+                    "floatConfig": "cfg/floats.yaml",
+                },
+            )
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+
+            task = analysis_tasks.PrepareSkimJobs(
+                exe=exe_path,
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="myRun",
+            )
+
+            orig_run_dir = analysis_tasks.PrepareSkimJobs._run_dir.fget
+            analysis_tasks.PrepareSkimJobs._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                first_job_dir = os.path.join(
+                    tmpdir, "skimRun_myRun", "jobs", "sample", "job_0"
+                )
+                Path(first_job_dir).mkdir(parents=True)
+                Path(os.path.join(first_job_dir, "submit_config.txt")).write_text(
+                    "fileList=root://server/file.root\n"
+                )
+
+                task._create_test_job(
+                    exe_path,
+                    [{
+                        "dataset_name": "sample",
+                        "job_dir": first_job_dir,
+                        "out_dir": os.path.join(tmpdir, "out"),
+                    }],
+                )
+
+                test_dir = os.path.join(tmpdir, "skimRun_myRun", "test_job")
+                self.assertTrue(os.path.exists(os.path.join(test_dir, "dataset_manifest.yaml")))
+                self.assertTrue(os.path.exists(os.path.join(test_dir, "floats.yaml")))
+
+                cfg = {}
+                with open(os.path.join(test_dir, "submit_config.txt")) as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            cfg[k] = v
+
+                self.assertEqual(cfg["sampleConfig"], "dataset_manifest.yaml")
+                self.assertEqual(cfg["floatConfig"], "floats.yaml")
+                self.assertEqual(cfg["fileList"], "root://server/file.root")
+            finally:
+                analysis_tasks.PrepareSkimJobs._run_dir = property(orig_run_dir)
+
+    def test_create_test_job_copies_aux_directory(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analysis_dir = os.path.join(tmpdir, "analysis")
+            cfg_dir = os.path.join(analysis_dir, "cfg")
+            aux_dir = os.path.join(analysis_dir, "aux")
+            Path(cfg_dir).mkdir(parents=True)
+            Path(aux_dir).mkdir(parents=True)
+
+            exe_path = os.path.join(tmpdir, "exe")
+            Path(exe_path).write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(exe_path, 0o755)
+
+            Path(os.path.join(aux_dir, "muon_scalesmearing.json.gz")).write_text("payload\n")
+            Path(os.path.join(cfg_dir, "corrections.yaml")).write_text(
+                "- file: aux/muon_scalesmearing.json.gz\n"
+            )
+
+            template = _write_submit_config_template(
+                cfg_dir,
+                extra={"correctionConfig": "cfg/corrections.yaml"},
+            )
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+
+            task = analysis_tasks.PrepareSkimJobs(
+                exe=exe_path,
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="myRun",
+            )
+
+            orig_run_dir = analysis_tasks.PrepareSkimJobs._run_dir.fget
+            analysis_tasks.PrepareSkimJobs._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                first_job_dir = os.path.join(
+                    tmpdir, "skimRun_myRun", "jobs", "sample", "job_0"
+                )
+                Path(first_job_dir).mkdir(parents=True)
+                Path(os.path.join(first_job_dir, "submit_config.txt")).write_text(
+                    "fileList=root://server/file.root\n"
+                )
+
+                task._create_test_job(
+                    exe_path,
+                    [{
+                        "dataset_name": "sample",
+                        "job_dir": first_job_dir,
+                        "out_dir": os.path.join(tmpdir, "out"),
+                    }],
+                )
+
+                test_dir = os.path.join(tmpdir, "skimRun_myRun", "test_job")
+                self.assertTrue(os.path.exists(os.path.join(test_dir, "aux", "muon_scalesmearing.json.gz")))
+
+                with open(os.path.join(test_dir, "corrections.yaml")) as fh:
+                    contents = fh.read()
+
+                self.assertIn("file: aux/muon_scalesmearing.json.gz", contents)
+            finally:
+                analysis_tasks.PrepareSkimJobs._run_dir = property(orig_run_dir)
+
+    def test_run_impl_stages_aux_in_shared_inputs(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analysis_dir = os.path.join(tmpdir, "analysis")
+            cfg_dir = os.path.join(analysis_dir, "cfg")
+            aux_dir = os.path.join(analysis_dir, "aux")
+            Path(cfg_dir).mkdir(parents=True)
+            Path(aux_dir).mkdir(parents=True)
+
+            exe_path = os.path.join(tmpdir, "exe")
+            Path(exe_path).write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(exe_path, 0o755)
+
+            Path(os.path.join(aux_dir, "jetvetomaps.json.gz")).write_text("payload\n")
+            Path(os.path.join(cfg_dir, "corrections.yaml")).write_text(
+                "- file: jetvetomaps.json.gz\n"
+            )
+
+            template = _write_submit_config_template(
+                cfg_dir,
+                extra={"correctionConfig": "cfg/corrections.yaml"},
+            )
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+
+            task = analysis_tasks.PrepareSkimJobs(
+                exe=exe_path,
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="myRun",
+                make_test_job=False,
+            )
+
+            orig_run_dir = analysis_tasks.PrepareSkimJobs._run_dir.fget
+            analysis_tasks.PrepareSkimJobs._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                with patch("analysis_tasks._collect_skim_shared_libs", return_value={}):
+                    task._run_impl()
+
+                shared_dir = os.path.join(tmpdir, "skimRun_myRun", "shared_inputs")
+                self.assertTrue(os.path.exists(os.path.join(shared_dir, "aux_bundle.tar.gz")))
+                self.assertTrue(os.path.exists(os.path.join(shared_dir, "cfg_bundle.tar.gz")))
+
+                job_cfg = os.path.join(
+                    tmpdir,
+                    "skimRun_myRun",
+                    "jobs",
+                    "sample",
+                    "submit_config.txt",
+                )
+                cfg = {}
+                with open(job_cfg) as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            cfg[k] = v
+
+                self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
+                self.assertFalse(os.path.exists(os.path.join(shared_dir, "aux")))
+                self.assertFalse(os.path.exists(os.path.join(shared_dir, "corrections.yaml")))
+            finally:
+                analysis_tasks.PrepareSkimJobs._run_dir = property(orig_run_dir)
+
+    def test_materialize_file_source_runtime_job_unpacks_bundles(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_dir = os.path.join(tmpdir, "shared_inputs")
+            job_dir = os.path.join(tmpdir, "job_0")
+            Path(shared_dir).mkdir()
+            Path(job_dir).mkdir()
+
+            exe_path = os.path.join(shared_dir, "exe")
+            Path(exe_path).write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(exe_path, 0o755)
+            Path(os.path.join(job_dir, "submit_config.txt")).write_text(
+                "correctionConfig=cfg/corrections.yaml\n"
+            )
+            Path(os.path.join(job_dir, "cfg")).mkdir()
+            Path(os.path.join(job_dir, "cfg", "corrections.yaml")).write_text(
+                "- file: aux/override.json.gz\n"
+            )
+
+            cfg_src = os.path.join(tmpdir, "cfg_src")
+            aux_src = os.path.join(tmpdir, "aux_src")
+            Path(os.path.join(cfg_src, "cfg")).mkdir(parents=True)
+            Path(os.path.join(aux_src, "aux")).mkdir(parents=True)
+            Path(os.path.join(cfg_src, "cfg", "corrections.yaml")).write_text(
+                "- file: aux/shared.json.gz\n"
+            )
+            Path(os.path.join(aux_src, "aux", "shared.json.gz")).write_text("shared\n")
+
+            import tarfile
+            with tarfile.open(os.path.join(shared_dir, "cfg_bundle.tar.gz"), "w:gz") as archive:
+                archive.add(os.path.join(cfg_src, "cfg"), arcname="cfg")
+            with tarfile.open(os.path.join(shared_dir, "aux_bundle.tar.gz"), "w:gz") as archive:
+                archive.add(os.path.join(aux_src, "aux"), arcname="aux")
+
+            runtime_dir, runtime_exe = analysis_tasks._materialize_file_source_runtime_job(
+                shared_dir=shared_dir,
+                source_job_dir=job_dir,
+                exe_relpath="exe",
+            )
+            try:
+                self.assertTrue(os.path.exists(os.path.join(runtime_dir, "cfg", "corrections.yaml")))
+                self.assertTrue(os.path.exists(os.path.join(runtime_dir, "aux", "shared.json.gz")))
+                self.assertEqual(runtime_exe, os.path.join(runtime_dir, "exe"))
+
+                with open(os.path.join(runtime_dir, "cfg", "corrections.yaml")) as fh:
+                    contents = fh.read()
+                self.assertIn("override.json.gz", contents)
+            finally:
+                shutil.rmtree(runtime_dir, ignore_errors=True)
+
+    def test_htcondor_job_config_transfers_shared_and_branch_dirs(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_myRun")
+            shared_dir = os.path.join(run_dir, "shared_inputs")
+            job_dir = os.path.join(run_dir, "jobs", "sample", "job_0")
+            Path(shared_dir).mkdir(parents=True)
+            Path(job_dir).mkdir(parents=True)
+
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config="/fake/cfg.txt",
+                dataset_manifest=manifest_path,
+                name="myRun",
+                file_source="nano",
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
+            try:
+                config = MagicMock()
+                config.custom_content = []
+                with patch.object(task, "create_branch_map", return_value={0: {"job_dir": job_dir}}):
+                    result = task.htcondor_job_config(config, job_num=0, branches=[0])
+
+                transfer_values = [value for key, value in result.custom_content if key == "transfer_input_files"]
+                self.assertTrue(transfer_values)
+                transfer_text = transfer_values[-1]
+                self.assertIn(shared_dir, transfer_text)
+                self.assertIn(job_dir, transfer_text)
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_htcondor_job_config_flattens_grouped_branches(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_myRun")
+            shared_dir = os.path.join(run_dir, "shared_inputs")
+            job_dir_0 = os.path.join(run_dir, "jobs", "sample", "job_0")
+            job_dir_1 = os.path.join(run_dir, "jobs", "sample", "job_1")
+            Path(shared_dir).mkdir(parents=True)
+            Path(job_dir_0).mkdir(parents=True)
+            Path(job_dir_1).mkdir(parents=True)
+
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config="/fake/cfg.txt",
+                dataset_manifest=manifest_path,
+                name="myRun",
+                file_source="nano",
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
+            try:
+                config = MagicMock()
+                config.custom_content = []
+                with patch.object(
+                    task,
+                    "create_branch_map",
+                    return_value={
+                        0: {"job_dir": job_dir_0},
+                        1: {"job_dir": job_dir_1},
+                    },
+                ):
+                    result = task.htcondor_job_config(
+                        config,
+                        job_num=0,
+                        branches=[[0, 1]],
+                    )
+
+                transfer_values = [value for key, value in result.custom_content if key == "transfer_input_files"]
+                self.assertTrue(transfer_values)
+                transfer_text = transfer_values[-1]
+                self.assertIn(shared_dir, transfer_text)
+                self.assertIn(job_dir_0, transfer_text)
+                self.assertIn(job_dir_1, transfer_text)
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_htcondor_create_job_file_factory_uses_persistent_submit_paths(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_myRun")
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config="/fake/cfg.txt",
+                dataset_manifest=manifest_path,
+                name="myRun",
+                file_source="nano",
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
+            try:
+                factory = task.htcondor_create_job_file_factory()
+                config = factory.get_config()
+                self.assertEqual(config.dir, run_dir)
+                self.assertEqual(config.file_name, "condor_submit.sub")
+                self.assertTrue(os.path.isdir(run_dir))
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_htcondor_uses_persistent_condor_runscript(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_myRun")
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config="/fake/cfg.txt",
+                dataset_manifest=manifest_path,
+                name="myRun",
+                file_source="nano",
+            )
+
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
+            try:
+                job_file = task.htcondor_job_file()
+                wrapper_file = task.htcondor_wrapper_file()
+                group_wrapper_file = task.htcondor_group_wrapper_file()
+
+                expected_path = os.path.join(run_dir, "condor_runscript.sh")
+                self.assertEqual(job_file.path, expected_path)
+                self.assertEqual(wrapper_file.path, expected_path)
+                self.assertEqual(group_wrapper_file.path, expected_path)
+                self.assertTrue(os.path.isfile(expected_path))
+                self.assertTrue(os.access(expected_path, os.X_OK))
+
+                with open(expected_path) as fh:
+                    contents = fh.read()
+                self.assertIn("law run ${LAW_JOB_TASK_MODULE}.${LAW_JOB_TASK_CLASS}", contents)
+                self.assertNotIn("law_job", contents)
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_build_skim_submission_writes_concrete_submit_files(self):
+        import analysis_tasks
+        import tarfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_myRun")
+            shared_dir = os.path.join(run_dir, "shared_inputs")
+            jobs_dir = os.path.join(run_dir, "jobs", "sample")
+            Path(shared_dir).mkdir(parents=True)
+            Path(jobs_dir).mkdir(parents=True)
+
+            exe_name = "myanalysis"
+            Path(os.path.join(shared_dir, exe_name)).write_text("#!/bin/sh\nexit 0\n")
+            Path(os.path.join(shared_dir, "libexample.so")).write_text("fake-so")
+            Path(os.path.join(shared_dir, "x509")).write_text("proxy")
+
+            cfg_src = os.path.join(tmpdir, "cfg")
+            aux_src = os.path.join(tmpdir, "aux")
+            Path(cfg_src).mkdir()
+            Path(aux_src).mkdir()
+            Path(os.path.join(cfg_src, "floats.yaml")).write_text("x: 1\n")
+            Path(os.path.join(aux_src, "weights.json")).write_text("{}\n")
+            with tarfile.open(os.path.join(shared_dir, "cfg_bundle.tar.gz"), "w:gz") as tar:
+                tar.add(cfg_src, arcname="cfg")
+            with tarfile.open(os.path.join(shared_dir, "aux_bundle.tar.gz"), "w:gz") as tar:
+                tar.add(aux_src, arcname="aux")
+
+            job0 = os.path.join(jobs_dir, "job_0")
+            job1 = os.path.join(jobs_dir, "job_1")
+            Path(job0).mkdir()
+            Path(job1).mkdir()
+            Path(os.path.join(job0, "submit_config.txt")).write_text("saveFile=out0.root\nmetaFile=meta0.root\n")
+            Path(os.path.join(job1, "submit_config.txt")).write_text("saveFile=out1.root\nmetaFile=meta1.root\n")
+
+            with open(os.path.join(run_dir, "prep_submission.json"), "w") as fh:
+                json.dump(
+                    [
+                        {"dataset_name": "sample", "job_dir": job0, "out_dir": os.path.join(run_dir, "outputs", "sample", "job_0")},
+                        {"dataset_name": "sample", "job_dir": job1, "out_dir": os.path.join(run_dir, "outputs", "sample", "job_1")},
+                    ],
+                    fh,
+                )
+
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+            submit_config = _write_submit_config_template(tmpdir, extra={"saveDirectory": "/tmp/out"})
+            task = analysis_tasks.BuildSkimSubmission(
+                exe=os.path.join(tmpdir, exe_name),
+                submit_config=submit_config,
+                dataset_manifest=manifest_path,
+                name="myRun",
+                file_source="nano",
+            )
+
+            orig_run_dir = analysis_tasks.BuildSkimSubmission._run_dir.fget
+            analysis_tasks.BuildSkimSubmission._run_dir = property(lambda self: run_dir)
+            try:
+                task._run_impl()
+            finally:
+                analysis_tasks.BuildSkimSubmission._run_dir = property(orig_run_dir)
+
+            submit_path = os.path.join(run_dir, "condor_submit.sub")
+            runscript_path = os.path.join(run_dir, "condor_runscript.sh")
+            self.assertTrue(os.path.isfile(submit_path))
+            self.assertTrue(os.path.isfile(runscript_path))
+            self.assertTrue(os.path.isdir(os.path.join(run_dir, "job_0")))
+            self.assertTrue(os.path.isdir(os.path.join(run_dir, "job_1")))
+
+            job0_cfg = Path(os.path.join(run_dir, "job_0", "submit_config.txt")).read_text()
+            self.assertIn("saveDirectory=/tmp/out/sample/job_0", job0_cfg)
+            self.assertIn("saveFile=/tmp/out/sample/job_0/skim.root", job0_cfg)
+            self.assertIn("metaFile=/tmp/out/sample/job_0/meta.root", job0_cfg)
+
+            submit_text = Path(submit_path).read_text()
+            self.assertIn("job_$(Process)/submit_config.txt", submit_text)
+            self.assertIn(os.path.join(run_dir, "shared_inputs", exe_name), submit_text)
+            self.assertIn(os.path.join(run_dir, "shared_inputs", "cfg_bundle.tar.gz"), submit_text)
+            self.assertIn(os.path.join(run_dir, "shared_inputs", "aux_bundle.tar.gz"), submit_text)
+            self.assertIn(os.path.join(run_dir, "shared_inputs", "libexample.so"), submit_text)
+            self.assertNotIn(f"transfer_input_files = {os.path.join(run_dir, 'shared_inputs')}\n", submit_text)
+            self.assertNotIn("job_$(Process)/floats.txt", submit_text)
+            self.assertNotIn("job_$(Process)/ints.txt", submit_text)
+
+            runscript_text = Path(runscript_path).read_text()
+            self.assertIn('for _bundle in cfg_bundle.tar.gz aux_bundle.tar.gz; do', runscript_text)
+            self.assertIn('tar -xzf "$_bundle"', runscript_text)
+            self.assertIn('_target_dir=cfg', runscript_text)
+            self.assertIn('_target_dir=aux', runscript_text)
+            self.assertIn('__orig_saveFile', runscript_text)
+            self.assertIn('__orig_metaFile', runscript_text)
+            self.assertIn('xrdcp_if_exists(save_file, orig_save)', runscript_text)
+            self.assertIn('xrdcp_if_exists(meta_file, orig_meta)', runscript_text)
+
+    def test_monitor_skim_jobs_discovers_save_and_meta_outputs(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_myRun")
+            source_job = os.path.join(run_dir, "jobs", "sample", "job_0")
+            Path(source_job).mkdir(parents=True)
+
+            save_path = os.path.join(run_dir, "outputs", "sample", "job_0", "skim.root")
+            meta_path = os.path.join(run_dir, "outputs", "sample", "job_0", "meta.root")
+            Path(os.path.dirname(save_path)).mkdir(parents=True)
+            Path(os.path.join(source_job, "submit_config.txt")).write_text(
+                f"saveFile={save_path}\nmetaFile={meta_path}\n"
+            )
+            os.symlink(source_job, os.path.join(run_dir, "job_0"))
+
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
+            )
+            submit_config = _write_submit_config_template(tmpdir)
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe",
+                submit_config=submit_config,
+                dataset_manifest=manifest_path,
+                name="myRun",
+                file_source="nano",
+            )
+
+            orig_run_dir = analysis_tasks.MonitorSkimJobs._run_dir.fget
+            analysis_tasks.MonitorSkimJobs._run_dir = property(lambda self: run_dir)
+            try:
+                discovered = task._discover_jobs()
+            finally:
+                analysis_tasks.MonitorSkimJobs._run_dir = property(orig_run_dir)
+
+            self.assertEqual(discovered[0]["dir"], source_job)
+            self.assertEqual(discovered[0]["save"], save_path)
+            self.assertEqual(discovered[0]["meta"], meta_path)
 
 
 # ===========================================================================

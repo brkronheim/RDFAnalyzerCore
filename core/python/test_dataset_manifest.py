@@ -54,6 +54,7 @@ class TestDatasetEntry:
             process="ttbar",
             group="ttbar",
             stitch_id=3,
+            sample_type=42,
             xsec=98.34,
             filter_efficiency=0.5,
             kfac=1.1,
@@ -67,6 +68,7 @@ class TestDatasetEntry:
         assert e.year == 2022
         assert e.campaign == "Run3Summer22"
         assert e.stitch_id == 3
+        assert e.sample_type == 42
         assert e.xsec == 98.34
 
     def test_to_legacy_dict_mc(self):
@@ -84,6 +86,7 @@ class TestDatasetEntry:
             sum_weights=500000.0,
             das="/TTto2L2Nu/Run3/NANO",
             stitch_id=1,
+            sample_type=120,
             parent="ttbar_gen",
         )
         d = e.to_legacy_dict()
@@ -96,6 +99,7 @@ class TestDatasetEntry:
         assert d["das"] == "/TTto2L2Nu/Run3/NANO"
         assert d["type"] == "mc"
         assert d["stitch_id"] == "1"
+        assert d["sample_type"] == "120"
         assert d["year"] == "2022"
         assert d["campaign"] == "Run3Summer22"
         assert d["process"] == "ttbar"

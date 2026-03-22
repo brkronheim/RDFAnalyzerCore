@@ -100,7 +100,15 @@ law run SkimTask \
   --dataset-manifest datasets.yaml \
   --no-make-test-job
 
-# File-source mode: chains GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask
+# File-source mode: SkimTask can trigger GetNANOFileList automatically
+law run SkimTask \
+  --submit-config cfg/submit_config.txt \
+  --exe ./build/MyAnalysis \
+  --name myRun \
+  --dataset-manifest datasets.yaml \
+  --file-source nano
+
+# XRDFS mode can chain automatically from GetXRDFSFileList
 law run SkimTask \
   --submit-config cfg/submit_config.txt \
   --exe ./build/MyAnalysis \
@@ -117,9 +125,11 @@ analysis compiles and runs without runtime errors before submitting the full
 workflow.  This task is required automatically by ``SkimTask`` when
 ``--make-test-job`` is set (the default).
 
-In **file-source mode** (``--file-source xrdfs``) it requires ``PrepareSkimJobs``
-(which creates the ``test_job/`` directory).  In **standard manifest mode** it
-creates the test directory itself from the first dataset's first file.
+In **file-source mode** it uses the ``PrepareSkimJobs`` output directory.  The
+``xrdfs``, ``nano``, and ``opendata`` backends can all be chained automatically.
+When ``--file-source-name`` is omitted, the task falls back to ``--name`` for
+the upstream file-list run.  In **standard manifest mode** it creates the test
+directory itself from the first dataset's first file.
 
 **Output**: ``skimRun_<name>/test_job/test_passed.txt``
 

@@ -37,7 +37,7 @@ _py_tarball=""
 # Use nullglob so the loop does not iterate over literal glob strings when
 # no matching files exist.
 shopt -s nullglob
-for _t in *.tar.gz python_env*.tgz; do
+for _t in *.tar.gz python_env*.tgz shared_inputs/*.tar.gz shared_inputs/python_env*.tgz; do
     _py_tarball="$_t"
     break
 done
@@ -90,6 +90,9 @@ fi
 # ---------------------------------------------------------------------------
 if [ -f "x509" ]; then
     export X509_USER_PROXY="$PWD/x509"
+    echo "Using x509 proxy: $X509_USER_PROXY"
+elif [ -f "shared_inputs/x509" ]; then
+    export X509_USER_PROXY="$PWD/shared_inputs/x509"
     echo "Using x509 proxy: $X509_USER_PROXY"
 fi
 
