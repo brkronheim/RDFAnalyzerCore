@@ -16,6 +16,8 @@
 #include <SystematicManager.h>
 #include <api/ManagerContext.h>
 #include <gtest/gtest.h>
+#include <cstdio>
+#include <fstream>
 #include <stdexcept>
 #include <test_util.h>
 
@@ -214,6 +216,53 @@ TEST_F(GoldenJsonManagerTest, ApplyIsNoOpForMCSample) {
   auto df = dm->getDataFrame();
   auto count = df.Count();
   EXPECT_EQ(count.GetValue(), 4ULL);
+}
+
+TEST_F(GoldenJsonManagerTest, ApplyUsesDTypeWhenTypeIsNumericMetadata) {
+  const std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/aux/test_golden_json_dtype_numeric_type.txt";
+  {
+    std::ofstream out(cfgPath);
+    out << "goldenJsonConfig=cfg/test_golden_json_files.txt\n";
+    out << "dtype=data\n";
+    out << "type=0\n";
+    out << "fileList=\n";
+  }
+
+  auto cfg = ManagerFactory::createConfigurationManager(cfgPath);
+  auto dm = std::make_unique<DataManager>(6);
+  auto mgr = makeManager(*cfg, *dm);
+
+  dm->Define(
+      "run",
+      [](ULong64_t i) -> unsigned int {
+        if (i == 0) return 355100;
+        if (i == 1) return 355100;
+        if (i == 2) return 355100;
+        if (i == 3) return 355100;
+        if (i == 4) return 999999;
+        return 355101;
+      },
+      {"rdfentry_"}, *systematicManager);
+
+  dm->Define(
+      "luminosityBlock",
+      [](ULong64_t i) -> unsigned int {
+        if (i == 0) return 1;
+        if (i == 1) return 50;
+        if (i == 2) return 150;
+        if (i == 3) return 101;
+        if (i == 4) return 1;
+        return 60;
+      },
+      {"rdfentry_"}, *systematicManager);
+
+  mgr->applyGoldenJson();
+
+  auto df = dm->getDataFrame();
+  auto count = df.Count();
+  EXPECT_EQ(count.GetValue(), 3ULL);
+
+  std::remove(cfgPath.c_str());
 }
 
 // ---------------------------------------------------------------------------

@@ -65,8 +65,8 @@ TextConfigAdapter::parsePairBasedConfig(const std::string &configFile) const {
     }
     file.close();
   } else {
-    throw std::runtime_error("Error: Configuration file " + configFile +
-                             " could not be opened.");
+    throw std::runtime_error("Error: Configuration file '" + configFile +
+                             "' could not be opened in parsePairBasedConfig.");
   }
   return configMap;
 }
@@ -79,8 +79,8 @@ TextConfigAdapter::parseMultiKeyConfig(
 
   std::ifstream file(configFile);
   if (!file.is_open()) {
-    throw std::runtime_error("Error: Configuration file " + configFile +
-                             " could not be opened.");
+    throw std::runtime_error("Error: Configuration file '" + configFile +
+                             "' could not be opened in parseMultiKeyConfig.");
     return parsedConfig;
   }
 
@@ -136,8 +136,8 @@ TextConfigAdapter::parseVectorConfig(const std::string &configFile) const {
     }
     file.close();
   } else {
-    throw std::runtime_error("Error: Configuration file " + configFile +
-                             " could not be opened.");
+    throw std::runtime_error("Error: Configuration file '" + configFile +
+                             "' could not be opened in parseVectorConfig.");
   }
   return configVector;
 }

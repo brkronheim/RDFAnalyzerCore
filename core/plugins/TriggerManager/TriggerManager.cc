@@ -21,6 +21,12 @@ TriggerManager::TriggerManager(IConfigurationProvider const& configProvider) {
  */
 void TriggerManager::registerTriggers(
     const IConfigurationProvider &configProvider) {
+
+  if (configProvider.get("triggerConfig") == "") {
+    throw std::runtime_error(
+        "TriggerManager: 'triggerConfig' key not found or empty in config. Add 'triggerConfig=<path>' to your configuration.");
+  }
+
   const auto triggerConfig = configProvider.parseMultiKeyConfig(
       configProvider.get("triggerConfig"), {"name", "sample", "triggers"});
 
@@ -189,6 +195,10 @@ void TriggerManager::setupFromConfigFile() {
   if (!configManager_m) {
     throw std::runtime_error("TriggerManager: ConfigManager not set");
   }
+  if(configManager_m->get("triggerConfig")=="") {
+    throw std::runtime_error("TriggerManager: 'triggerConfig' key not found or empty in config. Add 'triggerConfig=<path>' to your configuration.");
+  }
+
 
   const auto triggerConfig = configManager_m->parseMultiKeyConfig(
     configManager_m->get("triggerConfig"), {"name", "sample", "triggers"});

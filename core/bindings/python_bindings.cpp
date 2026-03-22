@@ -151,16 +151,11 @@ public:
             }
         }
         
-        // When column names are explicitly provided, pass them to ROOT's
-        // string-based Define so that the JIT compiler can resolve them as
-        // variables in the expression scope.  Without an explicit column list,
-        // ROOT's auto-detection can fail for complex expressions such as
-        // reinterpret_cast-based function pointer calls.
-        if (!columns.empty()) {
-            df = df.Define(name, expression, columns);
-        } else {
-            df = df.Define(name, expression);
-        }
+        // ROOT's string-based Define overload does not accept an explicit
+        // column list (it only supports a name + expression). Therefore, we
+        // rely on ROOT's expression parsing (and the earlier systematic handling
+        // above) and ignore the provided column list here.
+        df = df.Define(name, expression);
         analyzer_.getDataFrameProvider().setDataFrame(df);
         return *this;
     }

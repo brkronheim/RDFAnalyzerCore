@@ -3,6 +3,7 @@
 #include <YamlConfigAdapter.h>
 #include <stdexcept>
 #include <filesystem>
+#include <iostream>
 
 namespace {
   // Helper function for C++17 compatibility (ends_with is C++20)
@@ -59,6 +60,8 @@ std::string ConfigurationManager::get(const std::string &key) const {
   if (it != configMap_m.end()) {
     return it->second;
   }
+  std::cerr << "Warning: Configuration key '" << key
+            << "' from config file '" << configFile_m << "' not found. Returning empty string." << std::endl;
   return "";
 }
 
@@ -149,6 +152,7 @@ void ConfigurationManager::processTopLevelConfig(
   }
   
   configMap_m = adapter_m->parsePairBasedConfig(configFile);
+  configFile_m = configFile; // Store the original config file path for reference
 }
 
 /**

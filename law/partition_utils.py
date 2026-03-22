@@ -126,8 +126,12 @@ def _make_partitions(
         installed, or a file's entry count cannot be determined.
     """
     sorted_urls = sorted(set(urls))
+    print("sorted_urls", sorted_urls)
 
     if mode == "file":
+        print("mode file", [{"files": u, "first_entry": 0, "last_entry": 0}
+            for u in sorted_urls])
+        sfsdfds
         return [
             {"files": u, "first_entry": 0, "last_entry": 0}
             for u in sorted_urls
@@ -151,6 +155,8 @@ def _make_partitions(
                 "first_entry": 0,
                 "last_entry": 0,
             })
+        print("mode file_group", partitions)
+        sfsdfds
         return partitions
 
     if mode == "entry_range":

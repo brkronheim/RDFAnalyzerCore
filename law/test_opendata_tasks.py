@@ -56,22 +56,38 @@ class TestEnsureXrootdRedirectorBackend(unittest.TestCase):
         uri = "/eos/opendata/cms/Run2016G/foo.root"
         result = mod.ensure_xrootd_redirector(uri)
         self.assertTrue(result.startswith("root://"))
-        self.assertIn("/eos/opendata/cms/Run2016G/foo.root", result)
+        self.assertIn("//eos/opendata/cms/Run2016G/foo.root", result)
 
     def test_bare_path_no_double_slash(self):
         """Prepending the redirector does not create a triple-slash artefact."""
         mod = self._import()
         uri = "/eos/opendata/cms/foo.root"
         result = mod.ensure_xrootd_redirector(uri)
+        self.assertIn("//eos/opendata/cms/foo.root", result)
         self.assertNotIn("///", result)
+
+    def test_bare_path_missing_leading_slash(self):
+        """A path missing the leading slash still gets the redirector prepended."""
+        mod = self._import()
+        uri = "store/data/Run2016G/foo.root"
+        result = mod.ensure_xrootd_redirector(uri)
+        self.assertTrue(result.startswith("root://"))
+        self.assertIn("//store/data/Run2016G/foo.root", result)
 
     def test_custom_redirector(self):
         """A custom redirector is used when explicitly provided."""
         mod = self._import()
         uri = "/store/data/Run2016G/foo.root"
         result = mod.ensure_xrootd_redirector(uri, redirector="root://xrootd-cms.infn.it/")
-        self.assertTrue(result.startswith("root://xrootd-cms.infn.it/"))
-        self.assertIn("store/data/Run2016G/foo.root", result)
+        self.assertTrue(result.startswith("root://xrootd-cms.infn.it//"))
+        self.assertIn("//store/data/Run2016G/foo.root", result)
+
+    def test_normalizes_single_slash_root_url(self):
+        """root://host/store/... is normalized to root://host//store/..."""
+        mod = self._import()
+        uri = "root://xrootd-cms.infn.it/store/data/Run2016G/foo.root"
+        result = mod.ensure_xrootd_redirector(uri)
+        self.assertTrue(result.startswith("root://xrootd-cms.infn.it//"))
 
     def test_empty_string_returned_unchanged(self):
         """An empty URI is returned unchanged."""
@@ -105,22 +121,38 @@ class TestEnsureXrootdRedirector(unittest.TestCase):
         uri = "/eos/opendata/cms/Run2016G/foo.root"
         result = mod._ensure_xrootd_redirector(uri)
         self.assertTrue(result.startswith("root://"))
-        self.assertIn("/eos/opendata/cms/Run2016G/foo.root", result)
+        self.assertIn("//eos/opendata/cms/Run2016G/foo.root", result)
 
     def test_bare_path_no_double_slash(self):
         """Prepending the redirector does not create a triple-slash artefact."""
         mod = self._import()
         uri = "/eos/opendata/cms/foo.root"
         result = mod._ensure_xrootd_redirector(uri)
+        self.assertIn("//eos/opendata/cms/foo.root", result)
         self.assertNotIn("///", result)
+
+    def test_bare_path_missing_leading_slash(self):
+        """A path missing the leading slash still gets the redirector prepended."""
+        mod = self._import()
+        uri = "store/data/Run2016G/foo.root"
+        result = mod._ensure_xrootd_redirector(uri)
+        self.assertTrue(result.startswith("root://"))
+        self.assertIn("//store/data/Run2016G/foo.root", result)
 
     def test_custom_redirector(self):
         """A custom redirector is used when explicitly provided."""
         mod = self._import()
         uri = "/store/data/Run2016G/foo.root"
         result = mod._ensure_xrootd_redirector(uri, redirector="root://xrootd-cms.infn.it/")
-        self.assertTrue(result.startswith("root://xrootd-cms.infn.it/"))
-        self.assertIn("store/data/Run2016G/foo.root", result)
+        self.assertTrue(result.startswith("root://xrootd-cms.infn.it//"))
+        self.assertIn("//store/data/Run2016G/foo.root", result)
+
+    def test_normalizes_single_slash_root_url(self):
+        """root://host/store/... is normalized to root://host//store/..."""
+        mod = self._import()
+        uri = "root://xrootd-cms.infn.it/store/data/Run2016G/foo.root"
+        result = mod._ensure_xrootd_redirector(uri)
+        self.assertTrue(result.startswith("root://xrootd-cms.infn.it//"))
 
     def test_empty_string_returned_unchanged(self):
         """An empty URI is returned unchanged."""

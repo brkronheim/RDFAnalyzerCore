@@ -97,9 +97,28 @@ def ensure_xrootd_redirector(uri, redirector="root://eospublic.cern.ch/"):
     if not uri:
         return uri
     if uri.startswith("root://"):
+        # Normalize root:// URLs to always use a double-slash after the host.
+        # Some XRootD pools require the "//store/..." form, and os.path-like
+        # operations can accidentally collapse it into "/store/...".
+        parts = uri.split("/", 3)
+        if len(parts) >= 4 and not parts[3].startswith("/"):
+            # root://host/store/foo -> root://host//store/foo
+            return f"{parts[0]}//{parts[2]}//{parts[3]}"
         return uri
+
     if uri.startswith("/"):
-        return redirector.rstrip("/") + "/" + uri.lstrip("/")
+        # Ensure we produce a double-slash after the redirector (e.g. root://host//store/...)
+        # while avoiding a triple-slash artifact.
+        if not uri.startswith("//"):
+            uri = "//" + uri.lstrip("/")
+        return redirector.rstrip("/") + uri
+
+    # If the URI looks like an EOS path without a leading slash, treat it as such.
+    if uri.startswith("store/") or uri.startswith("eos/"):
+        uri = "/" + uri
+        return redirector.rstrip("/") + "//" + uri.lstrip("/")
+
+    print(uri)
     return uri
 
 
@@ -174,7 +193,7 @@ for i, url in enumerate(file_list.split(",")):
         cur_url = url if not tried_normalized else _normalize_test_redirector(url)
         print("xrdcp attempt", attempt, "->", cur_url)
         try:
-            subprocess.run(["xrdcp", "-f", "--nopbar", "--streams", streams, cur_url, local_name], check=True, timeout=120+attempt*30)
+            subprocess.run(["xrdcp", "-f", "--nopbar", "--streams", streams, cur_url, local_name], check=True, timeout=120)
             local_paths.append(local_name)
             break
         except Exception as exc:
@@ -285,9 +304,22 @@ def read_config(config_file):
 
 cfg = read_config("{config_file}")
 
+def normalize_dest(dest):
+    if not dest:
+        return dest
+    if dest.startswith("root://"):
+        return dest
+    return "root://eosuser.cern.ch/" + dest
+
+def eos_dir_from_dest(dest):
+    if dest.startswith("root://"):
+        parts = dest.split("/", 3)
+        path_part = "/" + parts[3] if len(parts) > 3 else "/"
+    else:
+        path_part = dest
+    return os.path.dirname("/" + path_part.lstrip("/"))
+
 def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
-    dest = "root://eosuser.cern.ch/" + dest
-    print(local_name, dest, retries, timeout, streams)
     if not dest:
         print("no dest")
         return
@@ -297,17 +329,19 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
     if os.path.getsize(local_name) == 0:
         raise RuntimeError(f"Refusing to stage out empty file: {{local_name}}")
 
+    normalized_dest = normalize_dest(dest)
+    print(local_name, normalized_dest, retries, timeout, streams)
+
     if streams is None:
         streams = os.environ.get("XRDCP_STREAMS", "4")
 
-    # Ensure the destination directory exists on EOS before copying
-    eos_path = dest.split("//", 2)[-1] if "//" in dest else dest
-    eos_dir = os.path.dirname("/" + eos_path.lstrip("/"))
+    eos_dir = eos_dir_from_dest(normalized_dest)
     if eos_dir and eos_dir != "/":
         try:
             subprocess.run(
                 ["xrdfs", "root://eosuser.cern.ch/", "mkdir", "-p", eos_dir],
-                capture_output=True, timeout=30,
+                capture_output=True,
+                timeout=30,
             )
         except Exception as mkdir_exc:
             print(f"Warning: xrdfs mkdir -p {{eos_dir}} failed (may already exist): {{mkdir_exc}}")
@@ -321,7 +355,7 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
         "--retry",
         "3",
         local_name,
-        dest,
+        normalized_dest,
     ]
     last_exc = None
     for attempt in range(1, retries + 1):
@@ -331,8 +365,10 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
             return
         except Exception as exc:
             last_exc = exc
-            time.sleep(min(10 * attempt, 30))
-    raise RuntimeError(f"xrdcp failed after {{retries}} attempts for {{local_name}} -> {{dest}}: {{last_exc}}")
+            print(f"xrdcp attempt {{attempt}} failed for {{normalized_dest}}: {{exc}}")
+            time.sleep(min(5 * attempt, 30))
+
+    raise RuntimeError(f"xrdcp failed after {{retries}} attempt(s) for {{normalized_dest}}: {{last_exc}}")
 
 orig_save = cfg.get("__orig_saveFile", "")
 orig_meta = cfg.get("__orig_metaFile", "")
@@ -378,10 +414,27 @@ def generate_condor_runscript(
     shared_block = ""
     if shared_dir_name:
         shared_block = (
-            f"if [ -f {shared_dir_name}/{exe_relpath} ]; then cp -f {shared_dir_name}/{exe_relpath} .; chmod +x {exe_relpath}; fi\n"
+            f"if [ -f {shared_dir_name}/{exe_relpath} ]; then cp -f {shared_dir_name}/{exe_relpath} .; fi\n"
+            f"if [ -f {exe_relpath} ]; then chmod +x {exe_relpath}; fi\n"
             f"if [ -d {shared_dir_name}/aux ] && [ ! -e aux ]; then cp -R {shared_dir_name}/aux aux; fi\n"
+            f"if [ -d {shared_dir_name}/cfg ] && [ ! -e cfg ]; then cp -R {shared_dir_name}/cfg cfg; fi\n"
             f"if compgen -G \"{shared_dir_name}/*.so*\" > /dev/null; then cp -f {shared_dir_name}/*.so* .; fi\n"
             f"for _shared_f in {shared_dir_name}/*; do [ -f \"$_shared_f\" ] && cp -n \"$_shared_f\" . 2>/dev/null || true; done\n"
+            "for _bundle in cfg_bundle.tar.gz aux_bundle.tar.gz; do\n"
+            f"  if [ -f {shared_dir_name}/$_bundle ]; then\n"
+            f"    cp -n {shared_dir_name}/$_bundle . 2>/dev/null || true\n"
+            "  fi\n"
+            "  if [ -f \"$_bundle\" ]; then\n"
+            "    case \"$_bundle\" in\n"
+            "      cfg_bundle.tar.gz) _target_dir=cfg ;;\n"
+            "      aux_bundle.tar.gz) _target_dir=aux ;;\n"
+            "      *) _target_dir= ;;\n"
+            "    esac\n"
+            "    if [ -n \"${_target_dir:-}\" ] && [ ! -d \"$_target_dir\" ]; then\n"
+            "      tar -xzf \"$_bundle\"\n"
+            "    fi\n"
+            "  fi\n"
+            "done\n"
             f"export LD_LIBRARY_PATH=\"$PWD/{shared_dir_name}:$PWD:${{LD_LIBRARY_PATH:-}}\"\n"
         )
         if x509_name:
@@ -533,7 +586,6 @@ def generate_condor_submit(
     #    stream_block = "stream_output = True\nstream_error = True\n"
 
     log_name = "log_$(Cluster).log"
-
     want_os_block = f'MY.WantOS = "{want_os}"\n' if want_os else ""
 
     submit_file = f"""universe = vanilla

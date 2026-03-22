@@ -132,3 +132,38 @@ TEST(CounterServiceTest, CollectProvenanceEntriesContainsSampleName) {
   std::remove(cfgPath.c_str());
   std::remove(metaPath.c_str());
 }
+
+TEST(CounterServiceTest, FallsBackToStitchIdWhenSampleMissing) {
+  const std::string cfgPath  = std::string(TEST_SOURCE_DIR) + "/aux/counter_stitch_cfg.txt";
+  const std::string metaPath = std::string(TEST_SOURCE_DIR) + "/aux/counter_stitch_meta.root";
+
+  {
+    std::ofstream out(cfgPath);
+    out << "stitch_id=7\n";
+    out << "dtype=mc\n";
+    out << "metaFile=" << metaPath << "\n";
+    out << "fileList=\n";
+  }
+
+  ConfigurationManager config(cfgPath);
+  DataManager          dataManager(1);
+  SystematicManager    systematicManager;
+  DefaultLogger        logger;
+  NullOutputSink       skimSink;
+  NullOutputSink       metaSink;
+
+  ManagerContext ctx{config, dataManager, systematicManager, logger,
+                     skimSink, metaSink};
+
+  CounterService svc;
+  svc.initialize(ctx);
+
+  const auto entries = svc.collectProvenanceEntries();
+  auto it_sample = entries.find("service.counter.sample");
+
+  ASSERT_NE(it_sample, entries.end());
+  EXPECT_EQ(it_sample->second, "7");
+
+  std::remove(cfgPath.c_str());
+  std::remove(metaPath.c_str());
+}

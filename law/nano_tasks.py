@@ -204,7 +204,7 @@ def _query_rucio(directory, file_split_gb, WL, BL, site_override, client,
             group += 1
             running_size = size_gb
             running_files = 1
-
+        """
         for site, state in states.items():
             if state == "AVAILABLE" and "Tape" not in site:
                 clean_site = site.replace("_Disk", "")
@@ -215,7 +215,7 @@ def _query_rucio(directory, file_split_gb, WL, BL, site_override, client,
                     continue
                 else:
                     redirector = "root://xrootd-cms.infn.it//store/test/xrootd/" + clean_site + "/"
-
+        """
         url = ensure_xrootd_redirector(fname, redirector)
         if group in groups:
             groups[group] += "," + url
@@ -627,8 +627,8 @@ class NANOMixin:
         ),
     )
     size = luigi.IntParameter(
-        default=30,
-        description="GB of data per condor job (default: 30)",
+        default=10,
+        description="GB of data per condor job (default: 10)",
     )
     partition = luigi.Parameter(
         default="file_group",
@@ -1077,6 +1077,7 @@ class BuildNANOSubmission(NANOMixin, law.Task):
             manifest = target.load(formatter="json")
             if isinstance(manifest, list):
                 job_dirs.extend(manifest)
+        
 
         if not job_dirs:
             raise RuntimeError("No job directories were created by PrepareNANOSample.")
@@ -2387,7 +2388,13 @@ class GetNANOFileList(NANOMixin, law.LocalWorkflow):
         # Build output payload.
         # ``groups`` encodes the Rucio-computed size+count grouping so that
         # PrepareSkimJobs / SkimTask can use them directly without re-partitioning.
-        payload: dict = {"sample": name, "files": all_urls}
+        fixed_urls = []
+        for url in all_urls:
+            if("/store" in url and "//store" not in url):
+                url = url.replace("/store", "//store")
+                fixed_urls.append(url)
+        
+        payload: dict = {"sample": name, "files": fixed_urls}
         if rucio_groups:
             payload["groups"] = rucio_groups
 
