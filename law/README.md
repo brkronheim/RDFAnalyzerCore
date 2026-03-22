@@ -647,7 +647,12 @@ RunCombine                 ── runs combine -M <method> for each datacard
 ### FullAnalysisDAG: one command for everything
 
 `FullAnalysisDAG` in `dag_tasks.py` orchestrates the entire pipeline from
-skim through fit as a single law task:
+ingestion/skim through fit as a single law task.  When `--file-source` is set,
+the DAG forwards it to `SkimTask`, which automatically chains the corresponding
+local ingestion task (`GetNANOFileList`, `GetOpenDataFileList`, or
+`GetXRDFSFileList`) before dispatching skim jobs.  Histogram filling is wired
+to the skim outputs, and manifest-based plot/datacard/fit tasks wait for the
+merge stage automatically:
 
 ```bash
 law run FullAnalysisDAG \
@@ -658,6 +663,16 @@ law run FullAnalysisDAG \
   --hist-config analyses/myAnalysis/cfg/hist_config.txt \
   --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
   --fitting-backend analysis
+
+# Include NanoAOD ingestion in the same DAG invocation
+law run FullAnalysisDAG \
+  --name myNanoRun \
+  --exe build/analyses/myAnalysis/myanalysis \
+  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
+  --hist-config analyses/myAnalysis/cfg/hist_config.txt \
+  --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
+  --file-source nano
 ```
 
 Skip stages you don't need:
