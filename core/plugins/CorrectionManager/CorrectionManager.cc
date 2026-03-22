@@ -1,10 +1,13 @@
 #include <CorrectionManager.h>
+#include <analyzer.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ILogger.h>
 #include <api/ISystematicManager.h>
 #include <algorithm>
+#include <cctype>
 #include <iostream>
+#include <stdexcept>
 
 /**
  * @brief Construct a new CorrectionManager object
@@ -17,23 +20,111 @@ CorrectionManager::CorrectionManager(IConfigurationProvider const& configProvide
 }
 
 /**
- * @brief Apply a correction to a set of input features
- * @param correctionName Name of the correction
- * @param stringArguments String arguments for the correction
+ * @brief Validate that a string is safe to use as part of an RDF branch name.
+ *
+ * Rejects empty strings and any character other than alphanumerics and
+ * underscores, which are the only characters guaranteed to produce valid
+ * ROOT TTree / RDataFrame column names.
+ */
+static void validateBranchComponent(const std::string &s, const std::string &context) {
+  if (s.empty()) {
+    throw std::invalid_argument(
+        context + ": string argument must not be empty");
+  }
+  for (char c : s) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+      throw std::invalid_argument(
+          context + ": string argument '" + s +
+          "' contains invalid character '" + c +
+          "' (only alphanumerics and underscores are allowed in branch names)");
+    }
+  }
+}
+
+/**
+ * @brief Build an output branch name from a correction name and string arguments.
+ *
+ * When @p stringArguments is non-empty each argument is appended to
+ * @p correctionName separated by underscores, allowing the same correction
+ * to be applied multiple times with different variations (e.g. "nominal",
+ * "syst_up", "syst_down") and stored in distinct dataframe columns.
+ *
+ * @param correctionName Base correction name.
+ * @param stringArguments String arguments passed to the correction.
+ * @return The decorated branch name.
+ */
+static std::string makeBranchName(const std::string &correctionName,
+                                  const std::vector<std::string> &stringArguments) {
+  for (const auto &arg : stringArguments) {
+    validateBranchComponent(arg, "makeBranchName");
+  }
+  std::string name = correctionName;
+  for (const auto &arg : stringArguments) {
+    name += "_" + arg;
+  }
+  return name;
+}
+
+/**
+ * @brief Register a correction directly from C++ code (without a config file).
+ */
+void CorrectionManager::registerCorrection(
+    const std::string &name,
+    const std::string &file,
+    const std::string &correctionlibName,
+    const std::vector<std::string> &inputVariables) {
+  if (objects_m.count(name)) {
+    throw std::runtime_error(
+        "CorrectionManager::registerCorrection: a correction named '" + name +
+        "' is already registered. Use a unique name for each correction.");
+  }
+  correction::Correction::Ref corr;
+  try {
+    auto correctionSet = correction::CorrectionSet::from_file(file);
+    corr = correctionSet->at(correctionlibName);
+  } catch (const std::exception &e) {
+    throw std::runtime_error(
+        "CorrectionManager::registerCorrection: failed to load correction '" +
+        correctionlibName + "' from file '" + file + "' for registration as '" +
+        name + "': " + e.what());
+  }
+  std::cout << "CorrectionManager: registering correction '" << name
+            << "' from file '" << file << "'" << std::endl;
+  objects_m.emplace(name, corr);
+  features_m.emplace(name, inputVariables);
+}
+
+/**
+ * @brief Apply a scalar correction to the dataframe.
+ *
+ * @param correctionName  Name of the registered correction.
+ * @param stringArguments String arguments consumed by the correction; each is
+ *        also appended to the output column name (joined with underscores).
+ * @param inputColumns    Optional override for the RDF input column names.
+ *        When non-empty, these are used instead of the configured columns.
+ * @param outputBranch    Optional explicit output column name.
+ *        When non-empty, used as-is instead of the auto-derived name.
  */
 void CorrectionManager::applyCorrection(const std::string &correctionName,
-                                        const std::vector<std::string> &stringArguments) {  
+                                        const std::vector<std::string> &stringArguments,
+                                        const std::vector<std::string> &inputColumns,
+                                        const std::string &outputBranch) {
   std::cout << "Applying correction " << correctionName << std::endl;
 
   if (!dataManager_m || !systematicManager_m) {
     throw std::runtime_error("CorrectionManager: DataManager or SystematicManager not set");
   }
 
-  auto df = dataManager_m->getDataFrame();
-  std::cout << "Getting input features" << std::endl;
-  const auto &inputFeatures = getCorrectionFeatures(correctionName);
+  const std::string branchName = outputBranch.empty()
+                                     ? makeBranchName(correctionName, stringArguments)
+                                     : outputBranch;
+  const std::string inputColName = "input_" + branchName;
+
+  const std::vector<std::string> &resolvedInputs =
+      inputColumns.empty() ? getCorrectionFeatures(correctionName) : inputColumns;
+
   std::cout << "Defining input features for correction " << correctionName << std::endl;
-  dataManager_m->DefineVector("input_" + correctionName, inputFeatures, "double", *systematicManager_m);
+  dataManager_m->DefineVector(inputColName, resolvedInputs, "double", *systematicManager_m);
   auto correction = this->objects_m.at(correctionName);
   auto stringArgs = stringArguments;
   auto correctionLambda =
@@ -56,7 +147,7 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
     }
     return correction->evaluate(values);
   };
-  dataManager_m->Define(correctionName, correctionLambda, {"input_" + correctionName}, *systematicManager_m);
+  dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
 }
 
 /**
@@ -83,30 +174,36 @@ CorrectionManager::getCorrectionFeatures(const std::string &key) const {
  * @brief Apply a correction over a vector of objects and store per-object
  *        results as an RVec<Float_t> column in the dataframe.
  *
- * Each input variable registered for the correction must be an RVec column
- * whose i-th element holds the value of that variable for the i-th object.
- * String arguments are constant per event and are passed via @p stringArguments
- * in the same order they appear in the correctionlib JSON.
- *
- * @param correctionName Name of the correction
- * @param stringArguments Constant string arguments for the correction
+ * @param correctionName  Name of the registered correction.
+ * @param stringArguments Constant string arguments consumed by the correction.
+ * @param inputColumns    Optional override for the RDF input column names
+ *        (RVec columns).  When non-empty, used instead of configured columns.
+ * @param outputBranch    Optional explicit output column name.
+ *        When non-empty, used as-is instead of the auto-derived name.
  */
 void CorrectionManager::applyCorrectionVec(
     const std::string &correctionName,
-    const std::vector<std::string> &stringArguments) {
+    const std::vector<std::string> &stringArguments,
+    const std::vector<std::string> &inputColumns,
+    const std::string &outputBranch) {
   std::cout << "Applying vector correction " << correctionName << std::endl;
   if (!dataManager_m || !systematicManager_m) {
     throw std::runtime_error(
         "CorrectionManager: DataManager or SystematicManager not set");
   }
 
-  const auto &inputFeatures = getCorrectionFeatures(correctionName);
+  const std::string branchName = outputBranch.empty()
+                                     ? makeBranchName(correctionName, stringArguments)
+                                     : outputBranch;
+
+  const std::vector<std::string> &resolvedInputs =
+      inputColumns.empty() ? getCorrectionFeatures(correctionName) : inputColumns;
 
   // Validate that all required input columns exist in the dataframe.
   {
     const auto existingColumns = dataManager_m->getDataFrame().GetColumnNames();
     std::vector<std::string> missing;
-    for (const auto &f : inputFeatures) {
+    for (const auto &f : resolvedInputs) {
       if (std::find(existingColumns.begin(), existingColumns.end(), f) ==
           existingColumns.end()) {
         missing.push_back(f);
@@ -124,12 +221,15 @@ void CorrectionManager::applyCorrectionVec(
   // Build an intermediate column of type RVec<RVec<double>> that packs the
   // per-object feature values.  Element [i][j] holds the value of input
   // feature j for the i-th object in the collection.
-  if (inputFeatures.empty()) {
+  if (resolvedInputs.empty()) {
     throw std::runtime_error(
         "applyCorrectionVec: correction '" + correctionName +
         "' has no registered input variables");
   }
-  const std::string inputVecName = "input_vec_" + correctionName;
+  // The intermediate packed column name includes the branch suffix so that the
+  // same correction can be applied with different string arguments without
+  // column name collisions.
+  const std::string inputVecName = "input_vec_" + branchName;
   {
     auto dfNode = dataManager_m->getDataFrame();
     const auto existingColumns = dfNode.GetColumnNames();
@@ -137,8 +237,8 @@ void CorrectionManager::applyCorrectionVec(
                   inputVecName) == existingColumns.end()) {
       std::string expr =
           "ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> _out(" +
-          inputFeatures[0] + ".size());\n";
-      for (const auto &f : inputFeatures) {
+          resolvedInputs[0] + ".size());\n";
+      for (const auto &f : resolvedInputs) {
         expr += "for (size_t _i = 0; _i < _out.size(); ++_i)"
                 " _out[_i].push_back(static_cast<double>(" +
                 f + "[_i]));\n";
@@ -177,7 +277,7 @@ void CorrectionManager::applyCorrectionVec(
     }
     return result;
   };
-  dataManager_m->Define(correctionName, correctionLambda, {inputVecName},
+  dataManager_m->Define(branchName, correctionLambda, {inputVecName},
                         *systematicManager_m);
 }
 
@@ -271,4 +371,11 @@ void CorrectionManager::reportMetadata() {
     first = false;
   }
   logger_m->log(ILogger::Level::Info, msg);
+}
+
+std::shared_ptr<CorrectionManager> CorrectionManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<CorrectionManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
 }

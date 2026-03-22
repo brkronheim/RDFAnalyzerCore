@@ -173,6 +173,11 @@ class DatasetEntry:
     stitch_id : int or None
         Integer stitching code written into the event stream and read back by
         the CounterService ``counterIntWeightBranch`` mechanism.
+    sample_type : int or None
+        Optional analysis-specific integer sample code preserved for legacy
+        submission workflows. This stays separate from ``dtype`` so YAML
+        manifests can retain framework-level ``mc`` / ``data`` typing while
+        still passing numeric sample codes into per-job configs.
 
     Physics normalisation
     ---------------------
@@ -218,6 +223,7 @@ class DatasetEntry:
     process: Optional[str] = None
     group: Optional[str] = None
     stitch_id: Optional[int] = None
+    sample_type: Optional[int] = None
 
     # -- normalisation ---
     xsec: Optional[float] = None
@@ -286,6 +292,8 @@ class DatasetEntry:
         # Carry extra fields used by stitching and open-data workflows
         if self.stitch_id is not None:
             d["stitch_id"] = str(self.stitch_id)
+        if self.sample_type is not None:
+            d["sample_type"] = str(self.sample_type)
         if self.year is not None:
             d["year"] = str(self.year)
         if self.era is not None:

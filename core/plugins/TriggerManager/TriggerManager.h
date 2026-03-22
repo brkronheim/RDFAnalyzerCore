@@ -6,6 +6,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <memory>
+
+class Analyzer;
 
 /**
  * @class TriggerManager
@@ -17,6 +20,13 @@
  */
 class TriggerManager : public NamedObjectManager<std::vector<std::string>> {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<TriggerManager> create(
+      Analyzer& an, const std::string& role = "triggerManager");
+
   /**
    * @brief Construct a new TriggerManager object
    * @param configProvider Reference to the configuration provider
@@ -87,5 +97,7 @@ private:
    */
   std::unordered_map<std::string, std::string> sampleToGroup_m;
 };
+
+
 
 #endif // TRIGGERMANAGER_H_INCLUDED 

@@ -11,8 +11,7 @@ target_include_directories(cms_doublemu_analysis
 
 target_link_libraries(cms_doublemu_analysis
     PRIVATE
-        core
-        corePlugins
+        coreAll
         ROOT::ROOTDataFrame
         ROOT::ROOTVecOps
         ROOT::Core

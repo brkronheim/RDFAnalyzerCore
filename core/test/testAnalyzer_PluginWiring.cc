@@ -10,14 +10,11 @@ TEST(AnalyzerPluginWiring, AddPluginAfterConfigCtor) {
     std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.txt";
     Analyzer analyzer(cfgPath);
 
-    // Construct a histogram manager using the analyzer's config provider
-    auto histManager = std::make_unique<NDHistogramManager>(analyzer.getConfigurationProvider());
-
-    // Register the plugin after Analyzer construction
-    analyzer.addPlugin("histogramManager", std::move(histManager));
+    // Use the helper to create, register, and get the plugin as shared_ptr
+    auto histManager = NDHistogramManager::create(analyzer);
 
     // The plugin should now be retrievable and the correct type
-    auto *retrieved = analyzer.getPlugin<NDHistogramManager>("histogramManager");
+    auto retrieved = analyzer.getPlugin<NDHistogramManager>("histogramManager");
     ASSERT_NE(retrieved, nullptr);
     EXPECT_EQ(retrieved->type(), std::string("NDHistogramManager"));
 }

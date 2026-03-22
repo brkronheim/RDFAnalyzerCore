@@ -1,8 +1,10 @@
 #include <GoldenJsonManager.h>
+#include <analyzer.h>
 #include <api/ILogger.h>
 
 #include <cctype>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <stdexcept>
@@ -149,6 +151,8 @@ void GoldenJsonManager::setupFromConfigFile() {
   const std::string configKey = "goldenJsonConfig";
   std::string configFile;
   try {
+    std::cout << "GoldenJsonManager: loading golden JSON files from config key '"
+              << configKey << "'..." << std::endl;
     configFile = configManager_m->get(configKey);
   } catch (...) {
     throw std::runtime_error(
@@ -156,6 +160,8 @@ void GoldenJsonManager::setupFromConfigFile() {
         "' not found. Add 'goldenJsonConfig=<path>' to your configuration.");
   }
 
+  std::cout << "GoldenJsonManager: loading golden JSON files from '" << configFile
+            << "'..." << std::endl;
   const auto jsonFiles = configManager_m->parseVectorConfig(configFile);
   if (jsonFiles.empty()) {
     throw std::runtime_error(
@@ -207,11 +213,17 @@ void GoldenJsonManager::applyGoldenJson() {
   }
 
   std::string sampleType;
-  try {
+  std::cout << "GoldenJsonManager: checking sample type from config key 'dtype'..."
+            << std::endl;
+  sampleType = configManager_m->get("dtype");
+  if (sampleType.empty()) {
+    std::cout << "GoldenJsonManager: falling back to config key 'type'..."
+              << std::endl;
     sampleType = configManager_m->get("type");
-  } catch (...) {
+  }
+  if (sampleType.empty()) {
     throw std::runtime_error(
-        "GoldenJsonManager: config key 'type' not found");
+        "GoldenJsonManager: config keys 'dtype' and 'type' not found");
   }
 
   if (sampleType != "data") {
@@ -250,4 +262,11 @@ void GoldenJsonManager::reportMetadata() {
   logger_m->log(ILogger::Level::Info,
                 "GoldenJsonManager: " + std::to_string(validLumis_m.size()) +
                 " certified run(s) loaded.");
+}
+
+std::shared_ptr<GoldenJsonManager> GoldenJsonManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<GoldenJsonManager>();
+    an.addPlugin(role, plugin);
+    return plugin;
 }

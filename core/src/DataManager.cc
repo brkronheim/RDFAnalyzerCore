@@ -506,7 +506,8 @@ void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
   }
 
   // Build an in-memory event index for non-sequential (identifier-based) matching.
-  if (!spec.indexBranches.empty()) {
+  // Skip if the chain is empty to avoid segfaults when no files could be opened.
+  if (!spec.indexBranches.empty() && nFriendEntries > 0) {
     const std::string &major = spec.indexBranches[0];
     const std::string minor =
         spec.indexBranches.size() > 1 ? spec.indexBranches[1] : "0";

@@ -11,6 +11,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <memory>
+
+class Analyzer;
 
 /**
  * @class RegionManager
@@ -58,6 +61,13 @@
  */
 class RegionManager : public IPluggableManager {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<RegionManager> create(
+      Analyzer& an, const std::string& role = "regionManager");
+
   RegionManager() = default;
 
   /**
@@ -188,5 +198,7 @@ private:
   ILogger *logger_m = nullptr;
   IOutputSink *metaSink_m = nullptr;
 };
+
+
 
 #endif // REGIONMANAGER_H_INCLUDED

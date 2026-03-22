@@ -117,6 +117,7 @@ A `DatasetEntry` is a Python dataclass (`@dataclass`) that models a single HEP d
 | `process` | `str \| None` | `None` | Physics process label (e.g. `"ttbar"`, `"wjets"`, `"data"`). |
 | `group` | `str \| None` | `None` | Sample grouping label for collecting stitched or HT-binned samples (e.g. `"wjets_ht"`). All samples sharing a group can be queried together with `DatasetManifest.query(group=...)`. |
 | `stitch_id` | `int \| None` | `None` | Integer stitching code written into the event stream and read back by the `CounterService` `counterIntWeightBranch` mechanism. |
+| `sample_type` | `int \| None` | `None` | Optional analysis-specific integer sample code forwarded to legacy batch workflows. Use this when you need a numeric per-sample code while preserving `dtype` for framework-level `mc` / `data` handling. |
 
 ### Normalisation Fields
 
@@ -594,5 +595,7 @@ Global directives:
 - `BL=site1,site2` — site blacklist
 
 Per-sample recognised fields: `name`, `xsec`, `das`, `type` (`"mc"`/`"data"`), `kfac`, `extraScale`, `filterEfficiency`, `norm` (sum of weights), `year`, `era`, `campaign`, `process`, `group`, `stitch_id`, `parent`, `fileList` (comma-separated file paths).
+
+For YAML manifests, keep framework typing in `dtype` and place any analysis-specific integer code in `sample_type`. Submission tools can then materialize that numeric code into per-job integer configs without overloading the main config `type` key.
 
 The YAML format is preferred for new analyses; the legacy format is maintained solely for compatibility with existing submission scripts.

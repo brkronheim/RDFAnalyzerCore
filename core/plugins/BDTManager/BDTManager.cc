@@ -1,4 +1,5 @@
 #include <BDTManager.h>
+#include <analyzer.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ILogger.h>
@@ -162,4 +163,11 @@ void BDTManager::reportMetadata() {
     first = false;
   }
   logger_m->log(ILogger::Level::Info, msg);
+}
+
+std::shared_ptr<BDTManager> BDTManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<BDTManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
 }

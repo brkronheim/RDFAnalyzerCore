@@ -11,6 +11,9 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <memory>
+
+class Analyzer;
 
 /**
  * @class GoldenJsonManager
@@ -34,6 +37,13 @@
  */
 class GoldenJsonManager : public IPluggableManager {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<GoldenJsonManager> create(
+      Analyzer& an, const std::string& role = "goldenJsonManager");
+
   /**
    * @brief Default constructor.
    */
@@ -99,5 +109,7 @@ private:
    */
   void loadJsonFile(const std::string &filename);
 };
+
+
 
 #endif // GOLDENJSONMANAGER_H_INCLUDED

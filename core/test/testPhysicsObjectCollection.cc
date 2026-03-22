@@ -738,3 +738,180 @@ TEST(PhysicsObjectVariationMap, EmptyMapHasNoEntries) {
     PhysicsObjectVariationMap varMap;
     EXPECT_TRUE(varMap.empty());
 }
+
+// ---------------------------------------------------------------------------
+// withFilter – sub-collection creation from boolean mask
+// ---------------------------------------------------------------------------
+
+class PhysicsObjectCollectionFilterTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        pt_   = {10.f, 30.f, 50.f, 20.f};
+        eta_  = {0.0f, 1.0f, -1.5f, 2.0f};
+        phi_  = {0.5f, -0.5f, 1.0f, -1.0f};
+        mass_ = {0.0f, 0.0f, 0.0f, 0.0f};
+        mask_ = {false, true, true, true}; // select objects 1, 2, 3
+    }
+    RVec<Float_t> pt_, eta_, phi_, mass_;
+    RVec<bool>    mask_;
+};
+
+TEST_F(PhysicsObjectCollectionFilterTest, FilterKeepsMatchingObjects) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<bool> extra = {true, false, true};
+    auto filtered = col.withFilter(extra);
+    ASSERT_EQ(filtered.size(), 2u);
+    EXPECT_TRUE(approxEq(filtered.at(0).Pt(), 30.f));
+    EXPECT_TRUE(approxEq(filtered.at(1).Pt(), 20.f));
+}
+
+TEST_F(PhysicsObjectCollectionFilterTest, FilterPreservesOriginalIndices) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<bool> extra = {true, false, true};
+    auto filtered = col.withFilter(extra);
+    ASSERT_EQ(filtered.size(), 2u);
+    EXPECT_EQ(filtered.index(0), 1);
+    EXPECT_EQ(filtered.index(1), 3);
+}
+
+TEST_F(PhysicsObjectCollectionFilterTest, AllTrueFilterKeepsAll) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<bool> extra = {true, true, true};
+    auto filtered = col.withFilter(extra);
+    EXPECT_EQ(filtered.size(), col.size());
+}
+
+TEST_F(PhysicsObjectCollectionFilterTest, AllFalseFilterGivesEmpty) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<bool> extra = {false, false, false};
+    auto filtered = col.withFilter(extra);
+    EXPECT_TRUE(filtered.empty());
+}
+
+TEST_F(PhysicsObjectCollectionFilterTest, MaskSizeMismatchThrows) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<bool> badMask = {true, false};  // wrong size
+    EXPECT_THROW(col.withFilter(badMask), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// withCorrectedKinematics – 4-vector correction via full-collection arrays
+// ---------------------------------------------------------------------------
+
+class PhysicsObjectCollectionCorrectionTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        pt_   = {10.f, 30.f, 50.f, 20.f};
+        eta_  = {0.0f, 1.0f, -1.5f, 2.0f};
+        phi_  = {0.5f, -0.5f, 1.0f, -1.0f};
+        mass_ = {0.0f, 0.0f, 0.0f, 0.0f};
+        mask_ = {false, true, true, false};
+    }
+    RVec<Float_t> pt_, eta_, phi_, mass_;
+    RVec<bool>    mask_;
+};
+
+TEST_F(PhysicsObjectCollectionCorrectionTest, CorrectedKinematicsUpdatesVectors) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    // Scale pt by 1.1 for all objects
+    RVec<Float_t> corrPt   = {11.f, 33.f, 55.f, 22.f};
+    RVec<Float_t> corrEta  = eta_;
+    RVec<Float_t> corrPhi  = phi_;
+    RVec<Float_t> corrMass = mass_;
+    auto corrected = col.withCorrectedKinematics(corrPt, corrEta, corrPhi, corrMass);
+    ASSERT_EQ(corrected.size(), 2u);
+    EXPECT_TRUE(approxEq(corrected.at(0).Pt(), 33.f));
+    EXPECT_TRUE(approxEq(corrected.at(1).Pt(), 55.f));
+}
+
+TEST_F(PhysicsObjectCollectionCorrectionTest, CorrectedKinematicsPreservesIndices) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<Float_t> corrPt   = {11.f, 33.f, 55.f, 22.f};
+    auto corrected = col.withCorrectedKinematics(corrPt, eta_, phi_, mass_);
+    ASSERT_EQ(corrected.size(), 2u);
+    EXPECT_EQ(corrected.index(0), 1);
+    EXPECT_EQ(corrected.index(1), 2);
+}
+
+TEST_F(PhysicsObjectCollectionCorrectionTest, MismatchedCorrectedSizeThrows) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<Float_t> shortPt = {11.f, 33.f};  // too short
+    EXPECT_THROW(col.withCorrectedKinematics(shortPt, eta_, phi_, mass_),
+                 std::runtime_error);
+}
+
+TEST_F(PhysicsObjectCollectionCorrectionTest, InconsistentCorrectedArraySizesThrow) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<Float_t> corrPt   = {11.f, 33.f, 55.f, 22.f};
+    RVec<Float_t> shortEta = {0.f, 1.f};  // wrong size
+    EXPECT_THROW(col.withCorrectedKinematics(corrPt, shortEta, phi_, mass_),
+                 std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// withCorrectedPt – pt-only correction
+// ---------------------------------------------------------------------------
+
+TEST_F(PhysicsObjectCollectionCorrectionTest, CorrectedPtUpdatesOnlyPt) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<Float_t> corrPt = {11.f, 33.f, 55.f, 22.f};
+    auto corrected = col.withCorrectedPt(corrPt);
+    ASSERT_EQ(corrected.size(), 2u);
+    EXPECT_TRUE(approxEq(corrected.at(0).Pt(), 33.f));
+    EXPECT_TRUE(approxEq(corrected.at(1).Pt(), 55.f));
+    // eta should be unchanged
+    EXPECT_TRUE(approxEq(corrected.at(0).Eta(), 1.0f, 1e-3f));
+    EXPECT_TRUE(approxEq(corrected.at(1).Eta(), -1.5f, 1e-3f));
+}
+
+TEST_F(PhysicsObjectCollectionCorrectionTest, CorrectedPtOutOfRangeThrows) {
+    PhysicsObjectCollection col(pt_, eta_, phi_, mass_, mask_);
+    RVec<Float_t> shortPt = {11.f};  // too short, can't index object at index 2
+    EXPECT_THROW(col.withCorrectedPt(shortPt), std::out_of_range);
+}
+
+// ---------------------------------------------------------------------------
+// TypedPhysicsObjectCollection – withFilter/withCorrectedKinematics/withCorrectedPt
+// ---------------------------------------------------------------------------
+
+TEST_F(TypedPhysicsObjectCollectionTest, WithFilterPreservesObjects) {
+    TypedPhysicsObjectCollection<TestJetInfo> col(
+        pt_, eta_, phi_, mass_, mask_, allInfo_);
+    // mask_ selects indices 1,2; apply extra filter to keep only the first
+    RVec<bool> extra = {true, false};
+    auto filtered = col.withFilter(extra);
+    ASSERT_EQ(filtered.size(), 1u);
+    EXPECT_TRUE(approxEq(filtered.at(0).Pt(), 30.f));
+    EXPECT_TRUE(approxEq(filtered.object(0).btagScore, 0.8f));
+    EXPECT_EQ(filtered.object(0).flavour, 5);
+}
+
+TEST_F(TypedPhysicsObjectCollectionTest, WithFilterSizeMismatchThrows) {
+    TypedPhysicsObjectCollection<TestJetInfo> col(
+        pt_, eta_, phi_, mass_, mask_, allInfo_);
+    RVec<bool> badMask = {true};  // size 1, but collection has 2 objects
+    EXPECT_THROW(col.withFilter(badMask), std::runtime_error);
+}
+
+TEST_F(TypedPhysicsObjectCollectionTest, WithCorrectedKinematicsPreservesObjects) {
+    TypedPhysicsObjectCollection<TestJetInfo> col(
+        pt_, eta_, phi_, mass_, mask_, allInfo_);
+    RVec<Float_t> corrPt   = {11.f, 33.f, 55.f, 22.f};
+    auto corrected = col.withCorrectedKinematics(corrPt, eta_, phi_, mass_);
+    ASSERT_EQ(corrected.size(), 2u);
+    EXPECT_TRUE(approxEq(corrected.at(0).Pt(), 33.f));
+    EXPECT_TRUE(approxEq(corrected.at(1).Pt(), 55.f));
+    EXPECT_TRUE(approxEq(corrected.object(0).btagScore, 0.8f));
+    EXPECT_TRUE(approxEq(corrected.object(1).btagScore, 0.9f));
+}
+
+TEST_F(TypedPhysicsObjectCollectionTest, WithCorrectedPtPreservesObjects) {
+    TypedPhysicsObjectCollection<TestJetInfo> col(
+        pt_, eta_, phi_, mass_, mask_, allInfo_);
+    RVec<Float_t> corrPt = {11.f, 33.f, 55.f, 22.f};
+    auto corrected = col.withCorrectedPt(corrPt);
+    ASSERT_EQ(corrected.size(), 2u);
+    EXPECT_TRUE(approxEq(corrected.at(0).Pt(), 33.f));
+    EXPECT_TRUE(approxEq(corrected.object(0).btagScore, 0.8f));
+    EXPECT_TRUE(approxEq(corrected.object(1).btagScore, 0.9f));
+}

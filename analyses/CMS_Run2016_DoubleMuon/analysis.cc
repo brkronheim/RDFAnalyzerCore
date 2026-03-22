@@ -222,20 +222,9 @@ int main(int argc, char **argv) {
     //      c) TriggerManager    – reads triggerConfig; applies trigger filter
     //         via applyAllTriggers() before analysis cuts are registered.
     // -----------------------------------------------------------------------
-    auto histMgr = std::make_unique<NDHistogramManager>(
-        an.getConfigurationProvider());
-    an.addPlugin("histogramManager", std::move(histMgr));
-
-    auto cutflowMgr = std::make_unique<CutflowManager>();
-    an.addPlugin("cutflowManager", std::move(cutflowMgr));
-
-    // TriggerManager reads triggerConfig from cfg.yaml.
-    // It uses the 'type' key in cfg.yaml to select the trigger group
-    // matching this sample (data type "0" → "double_muon" group in
-    // triggers.yaml).
-    auto trigMgr = std::make_unique<TriggerManager>(
-        an.getConfigurationProvider());
-    an.addPlugin("triggerManager", std::move(trigMgr));
+    auto histMgr    = NDHistogramManager::create(an);
+    auto cutflowMgr = CutflowManager::create(an);
+    auto trigMgr    = TriggerManager::create(an);
 
     // -----------------------------------------------------------------------
     // 3. Apply trigger selection via TriggerManager.
@@ -249,8 +238,7 @@ int main(int argc, char **argv) {
     //    cutflow table reflects the analysis selection starting from the
     //    triggered data sample (standard CMS practice).
     // -----------------------------------------------------------------------
-    auto *tm = an.getPlugin<TriggerManager>("triggerManager");
-    tm->applyAllTriggers();
+    trigMgr->applyAllTriggers();
 
     // -----------------------------------------------------------------------
     // 4. Define PhysicsObjectCollections and event-level boolean columns.
@@ -280,10 +268,9 @@ int main(int argc, char **argv) {
     //
     //    The cutflow starts from "events passing trigger" as the baseline.
     // -----------------------------------------------------------------------
-    auto *cfm = an.getPlugin<CutflowManager>("cutflowManager");
-    cfm->addCut("DimuonPair",   "hasTwoMuons");
-    cfm->addCut("OppositeSign", "hasOppositeSign");
-    cfm->addCut("MassWindow",   "inMassWindow");
+    cutflowMgr->addCut("DimuonPair",   "hasTwoMuons");
+    cutflowMgr->addCut("OppositeSign", "hasOppositeSign");
+    cutflowMgr->addCut("MassWindow",   "inMassWindow");
 
     // -----------------------------------------------------------------------
     // 6. Derived quantities (computed after all cuts; exactly 2 OS muons

@@ -45,6 +45,19 @@ if(RDF_CUSTOM_DICT_HEADERS AND RDF_CUSTOM_DICT_LINKDEF)
     target_link_libraries(core PUBLIC ${RDF_CUSTOM_DICT_TARGET})
 endif()
 add_subdirectory(plugins)
+
+# coreAll: interface target that links core + corePlugins inside a linker
+# rescan group so the circular dependency between the two static archives
+# (core→NDHistogramManager symbols, corePlugins→Analyzer::addPlugin) is
+# resolved regardless of link order on single-pass GNU ld.
+add_library(coreAll INTERFACE)
+target_link_libraries(coreAll INTERFACE
+    -Wl,--start-group
+    core
+    corePlugins
+    -Wl,--end-group
+)
+
 add_subdirectory(bindings)
 
 # Only build tests if requested

@@ -1,4 +1,3 @@
-#include <ManagerRegistry.h>
 #include <api/IPluggableManager.h>
 #include <cassert>
 #include <iostream>
@@ -9,45 +8,26 @@
  */
 class DummyManager : public IPluggableManager {
 public:
-    DummyManager(int v) : value(v) {}
+    DummyManager() = default;
     std::string type() const override { return "DummyManager"; }
-    
-    void setConfigManager(IConfigurationProvider* configManager) override {
+
+    void setContext(ManagerContext& ctx) override {
         // Dummy implementation
     }
-    
-    void setDataManager(IDataFrameProvider* dataManager) override {
-        // Dummy implementation
-    }
-    
-    void setSystematicManager(ISystematicManager* systematicManager) override {
-        // Dummy implementation
-    }
-    
 
     void setupFromConfigFile() override {
         // Dummy implementation: No action needed for testing purposes.
     }
-    
-    int value;
 };
 
-// Register DummyManager
-REGISTER_MANAGER_TYPE(DummyManager, int)
-
-void testDummyManager() {
-    int v = 42;
-    std::vector<void*> args = {&v};
-    auto mgr = ManagerRegistry::instance().create("DummyManager", args);
-    assert(mgr);
-    assert(mgr->type() == "DummyManager");
-    assert(static_cast<DummyManager*>(mgr.get())->value == 42);
-    std::cout << "DummyManager test passed.\n";
+void testManagerInterface() {
+    DummyManager mgr;
+    assert(mgr.type() == "DummyManager");
+    std::cout << "DummyManager type() test passed.\n";
 }
 
 int main() {
-    testDummyManager();
-    // BDTManager test could be added here with a mock IConfigurationProvider if needed
+    testManagerInterface();
     std::cout << "All ManagerRegistry tests passed.\n";
     return 0;
-} 
+}

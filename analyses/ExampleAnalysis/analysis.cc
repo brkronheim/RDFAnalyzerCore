@@ -76,10 +76,8 @@ int main(int argc, char **argv) {
     // Create analyzer from config file
     auto an = Analyzer(argv[1]);
 
-    // Add NDHistogramManager plugin for config-driven histogram booking
-    auto histManager = std::make_unique<NDHistogramManager>(
-        an.getConfigurationProvider());
-    an.addPlugin("histogramManager", std::move(histManager));
+    // Add NDHistogramManager plugin using the helper function
+    NDHistogramManager::create(an);
 
     // Register systematic variation for muon momentum scale
     // This demonstrates how systematics propagate through the analysis

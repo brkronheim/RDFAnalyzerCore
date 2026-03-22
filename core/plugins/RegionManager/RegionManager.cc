@@ -1,4 +1,5 @@
 #include <RegionManager.h>
+#include <analyzer.h>
 #include <NullOutputSink.h>
 #include <TFile.h>
 #include <TNamed.h>
@@ -260,4 +261,11 @@ void RegionManager::reportMetadata() {
     ss << "\n";
   }
   logger_m->log(ILogger::Level::Info, ss.str());
+}
+
+std::shared_ptr<RegionManager> RegionManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<RegionManager>();
+    an.addPlugin(role, plugin);
+    return plugin;
 }

@@ -11,10 +11,13 @@
 3. [Accessing Objects](#3-accessing-objects)
 4. [Feature Caching](#4-feature-caching)
 5. [Overlap Removal](#5-overlap-removal)
-6. [Combinatorics](#6-combinatorics)
-7. [TypedPhysicsObjectCollection\<T\>](#7-typedphysicsobjectcollectiont)
-8. [PhysicsObjectVariationMap](#8-physicsobjectvariationmap)
-9. [Complete C++ Examples](#9-complete-c-examples)
+6. [Sub-Collection Filtering](#6-sub-collection-filtering)
+7. [Correction Application](#7-correction-application)
+8. [Combinatorics](#8-combinatorics)
+9. [TypedPhysicsObjectCollection\<T\>](#9-typedphysicsobjectcollectiont)
+10. [PhysicsObjectVariationMap](#10-physicsobjectvariationmap)
+11. [Complete C++ Examples](#11-complete-c-examples)
+12. [JetEnergyScaleManager Integration](#12-jetenergyscalemanager-integration)
 
 ---
 
@@ -33,7 +36,9 @@ A typical workflow:
 2. Use `getValue<T>()` to extract any feature branch for the selected objects.
 3. Cache derived quantities with `cacheFeature` / `getCachedFeature`.
 4. Remove objects that overlap with another collection via `removeOverlap`.
-5. Build di-object or tri-object combinations with `makePairs`,
+5. Apply additional selections in-place via `withFilter`.
+6. Apply kinematic corrections via `withCorrectedKinematics` / `withCorrectedPt`.
+7. Build di-object or tri-object combinations with `makePairs`,
    `makeCrossPairs`, or `makeTriplets`.
 
 Key capabilities:
@@ -45,6 +50,8 @@ Key capabilities:
 | Feature extraction | `getValue<T>(branch)` |
 | Derived-property cache | `cacheFeature`, `getCachedFeature`, `hasCachedFeature` |
 | Overlap removal | `removeOverlap(other, deltaRMin)` |
+| Sub-collection filtering | `withFilter(mask)` |
+| Kinematic corrections | `withCorrectedKinematics(pt,eta,phi,mass)`, `withCorrectedPt(pt)` |
 | Same-collection pairs | `makePairs(col)` |
 | Cross-collection pairs | `makeCrossPairs(col1, col2)` |
 | Same-collection triplets | `makeTriplets(col)` |
@@ -298,7 +305,97 @@ float dr = PhysicsObjectCollection::deltaR(jets.at(0), muons.at(0));
 
 ---
 
-## 6. Combinatorics
+## 6. Sub-Collection Filtering
+
+### `withFilter(mask)`
+
+```cpp
+PhysicsObjectCollection withFilter(const ROOT::VecOps::RVec<bool>& mask) const;
+```
+
+Returns a **new** `PhysicsObjectCollection` containing only the objects for
+which `mask[i]` is `true`.  The mask is indexed **relative to this
+collection** (positions 0 to `size()-1`), not to the original full
+collection.
+
+This is the primary method for applying additional selections to an
+already-built collection, e.g. a b-tagging requirement applied after a
+basic pT/eta pre-selection.
+
+Throws `std::runtime_error` if `mask.size() != size()`.
+
+The cached-feature store is **not** propagated to the result.
+
+```cpp
+// Apply b-tag requirement to a jet collection built with pT/eta cuts
+RVec<bool> btagMask = jets.getValue(Jet_btagDeepFlavB) > 0.5f;
+auto bJets = jets.withFilter(btagMask);
+```
+
+---
+
+## 7. Correction Application
+
+### `withCorrectedKinematics(correctedPt, correctedEta, correctedPhi, correctedMass)`
+
+```cpp
+PhysicsObjectCollection withCorrectedKinematics(
+    const ROOT::VecOps::RVec<Float_t>& correctedPt,
+    const ROOT::VecOps::RVec<Float_t>& correctedEta,
+    const ROOT::VecOps::RVec<Float_t>& correctedPhi,
+    const ROOT::VecOps::RVec<Float_t>& correctedMass) const;
+```
+
+Returns a **new** `PhysicsObjectCollection` with updated 4-vectors built
+from corrected kinematic arrays.  Each array must be indexed by position
+in the **original (full, unfiltered) collection** — the same indexing used
+when constructing this collection.
+
+The stored original indices are used to look up each object's corrected
+values, so you can pass the uncorrected `Jet_pt`, `Jet_eta`, … branch
+shapes with corrections applied element-wise.
+
+The cached-feature store is **not** propagated to the result.
+
+Throws `std::runtime_error` if the four arrays have inconsistent sizes.  
+Throws `std::out_of_range` if a stored index exceeds the array bounds.
+
+```cpp
+// Apply JEC corrections from correctionlib (correctedPt, correctedMass
+// are full-collection arrays, same shape as Jet_pt)
+auto corrJets = goodJets.withCorrectedKinematics(
+    correctedPt, Jet_eta, Jet_phi, correctedMass);
+```
+
+### `withCorrectedPt(correctedPt)`
+
+```cpp
+PhysicsObjectCollection withCorrectedPt(
+    const ROOT::VecOps::RVec<Float_t>& correctedPt) const;
+```
+
+Convenience wrapper around `withCorrectedKinematics` that replaces only
+the transverse momentum.  Eta, phi, and mass are taken from the existing
+4-vectors.  `correctedPt` is indexed by the **original** collection
+position.
+
+```cpp
+// Scale jet pt by a flat correction factor
+RVec<float> corrPt = Jet_pt * jecFactor;
+auto corrJets = goodJets.withCorrectedPt(corrPt);
+```
+
+> **TypedPhysicsObjectCollection note**: Both `withFilter`,
+> `withCorrectedKinematics`, and `withCorrectedPt` are **overridden** in
+> `TypedPhysicsObjectCollection<T>` to return a
+> `TypedPhysicsObjectCollection<T>` and carry the user-defined objects
+> along with the filtered/corrected 4-vectors.  Corrections only update
+> the kinematic information; the user-defined objects are preserved
+> unchanged.
+
+---
+
+## 8. Combinatorics
 
 Three free functions build all unique combinations from one or two collections
 and return them as vectors of lightweight structs.
@@ -378,7 +475,7 @@ auto diJetMasses = df.Define("diJetMass", [](
 
 ---
 
-## 7. TypedPhysicsObjectCollection\<T\>
+## 9. TypedPhysicsObjectCollection\<T\>
 
 ```cpp
 template <typename ObjectType>
@@ -470,7 +567,7 @@ auto countBJets = [](const TypedPhysicsObjectCollection<JetInfo>& jets) {
 
 ---
 
-## 8. PhysicsObjectVariationMap
+## 10. PhysicsObjectVariationMap
 
 ```cpp
 using PhysicsObjectVariationMap =
@@ -516,7 +613,7 @@ histograms.
 
 ---
 
-## 9. Complete C++ Examples
+## 11. Complete C++ Examples
 
 All examples below use `analyzer.Define()` and `analyzer.Filter()` — the
 framework wrappers that ensure variables and filters are registered with the
@@ -635,3 +732,125 @@ analyzer.Define("nBtagMedium", [](const PhysicsObjectCollection& jets)
     return static_cast<int>(Sum(scores > 0.2783f));  // Medium WP
 }, {"btaggedJets"});
 ```
+
+---
+
+## 12. JetEnergyScaleManager Integration
+
+`JetEnergyScaleManager` is the recommended plugin for applying CMS Jet Energy
+Scale (JES) and Jet Energy Resolution (JER) corrections to
+`PhysicsObjectCollection` objects.  The plugin:
+
+1. Accepts a `PhysicsObjectCollection` column as input (built with any
+   standard selection the user defines).
+2. Produces a corrected nominal `PhysicsObjectCollection` with updated pT
+   (and optionally mass) from correctionlib evaluations.
+3. Produces per-variation `PhysicsObjectCollection` columns for every
+   registered systematic, using `withCorrectedPt()` internally.
+4. Optionally assembles all collections into a `PhysicsObjectVariationMap`
+   column for convenient downstream access.
+5. Propagates all jet energy changes to MET via a Type-1 correction.
+
+### Setting up the integration
+
+```cpp
+// Build a selected jet collection (user-defined)
+analyzer.Define("goodJets",
+    [](const RVec<float>& pt, const RVec<float>& eta,
+       const RVec<float>& phi, const RVec<float>& mass) {
+        return PhysicsObjectCollection(pt, eta, phi, mass,
+                                       (pt > 25.f) && (abs(eta) < 2.4f));
+    },
+    {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
+);
+
+auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+
+// Declare columns, strip NanoAOD JEC, apply new JEC
+jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+jes->setMETColumns("MET_pt", "MET_phi");
+jes->removeExistingCorrections("Jet_rawFactor");
+jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
+                        "Jet_pt_raw", "Jet_pt_jec");
+
+// Tell the plugin which collection to use
+jes->setInputJetCollection("goodJets");
+
+// Define a corrected nominal collection
+jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+
+// Register the "Total" JES uncertainty and apply
+jes->registerSystematicSources("reduced", {"Total"});
+jes->applySystematicSet(*cm, "jes_unc", "reduced",
+                        "Jet_pt_jec", "Jet_pt_jes");
+
+// Define per-variation collections and a combined variation map
+jes->defineVariationCollections("goodJets_jec", "goodJets",
+                                "goodJets_variations");
+
+// Propagate JEC and JES variations to MET
+jes->propagateMET("MET_pt", "MET_phi",
+                  "Jet_pt_raw", "Jet_pt_jec",
+                  "MET_pt_jec", "MET_phi_jec");
+jes->propagateMET("MET_pt_jec", "MET_phi_jec",
+                  "Jet_pt_jec", "Jet_pt_jes_Total_up",
+                  "MET_pt_jes_Total_up", "MET_phi_jes_Total_up");
+jes->propagateMET("MET_pt_jec", "MET_phi_jec",
+                  "Jet_pt_jec", "Jet_pt_jes_Total_down",
+                  "MET_pt_jes_Total_down", "MET_phi_jes_Total_down");
+```
+
+### Columns produced (after execute)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `goodJets_jec` | `PhysicsObjectCollection` | Jets with JEC-corrected pT |
+| `goodJets_TotalUp` | `PhysicsObjectCollection` | Jets with JES Total up shift |
+| `goodJets_TotalDown` | `PhysicsObjectCollection` | Jets with JES Total down shift |
+| `goodJets_variations` | `PhysicsObjectVariationMap` | Map with keys `"nominal"`, `"TotalUp"`, `"TotalDown"` |
+| `MET_pt_jec` / `MET_phi_jec` | `Float_t` | MET after JEC Type-1 propagation |
+| `MET_pt_jes_Total_up` / `MET_phi_jes_Total_up` | `Float_t` | MET after JES up propagation |
+
+### Using the variation map
+
+The `PhysicsObjectVariationMap` (key `"nominal"`, `"<name>Up"`,
+`"<name>Down"`) allows downstream code to iterate over all variations without
+knowing their names at compile time:
+
+```cpp
+// Compute di-jet mass for every variation
+analyzer.Define("dijetMass_vars",
+    [](const PhysicsObjectVariationMap& vm) {
+        std::unordered_map<std::string, float> results;
+        for (const auto& [key, col] : vm) {
+            auto pairs = makePairs(col);
+            results[key] = pairs.empty()
+                ? -1.f
+                : static_cast<float>(pairs[0].p4.M());
+        }
+        return results;
+    },
+    {"goodJets_variations"}
+);
+```
+
+### Relationship with withCorrectedPt and withCorrectedKinematics
+
+`JetEnergyScaleManager` calls `PhysicsObjectCollection::withCorrectedPt` and
+`withCorrectedKinematics` under the hood.  The key detail is that these
+methods expect **full-size** `RVec<Float_t>` columns (one entry per jet in
+the original unselected collection), using the stored original indices to look
+up each selected jet's corrected value.  The correctionlib-derived pT columns
+`Jet_pt_jec`, `Jet_pt_jes_Total_up`, etc., produced by
+`JetEnergyScaleManager` are exactly in this format.
+
+### See also
+
+- [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md) — full
+  `JetEnergyScaleManager` reference including all API methods, CMS source
+  sets, MET propagation, and a complete production workflow.
+- [Section 7: Correction Application](#7-correction-application) above —
+  manual use of `withCorrectedPt` and `withCorrectedKinematics`.
+- [Section 10: PhysicsObjectVariationMap](#10-physicsobjectvariationmap) —
+  systematic-variation map type.

@@ -145,7 +145,7 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionPositive) {
   std::vector<std::string> stringArguments = {"A"};
   correctionManager->applyCorrection("test_correction", stringArguments);
   auto df = dataManager->getDataFrame();
-  auto result = df.Take<float>("test_correction");
+  auto result = df.Take<float>("test_correction_A");
   ASSERT_EQ(result->size(), 2);
   EXPECT_NEAR(result->at(0), 0.1, 1e-6);
   EXPECT_NEAR(result->at(1), 0.4, 1e-6);
@@ -164,7 +164,7 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionWithDifferentStringArguments) {
   std::vector<std::string> stringArguments = {"B"};
   correctionManager->applyCorrection("test_correction", stringArguments);
   auto df = dataManager->getDataFrame();
-  auto result = df.Take<float>("test_correction");
+  auto result = df.Take<float>("test_correction_B");
   ASSERT_EQ(result->size(), 2);
   EXPECT_NEAR(result->at(0), 0.5, 1e-6);
   EXPECT_NEAR(result->at(1), 0.8, 1e-6);
@@ -194,7 +194,7 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionWithBoundaryValues) {
   std::vector<std::string> stringArguments = {"A"};
   correctionManager->applyCorrection("test_correction", stringArguments);
   auto df = testDataManager->getDataFrame();
-  auto result = df.Take<float>("test_correction");
+  auto result = df.Take<float>("test_correction_A");
   ASSERT_EQ(result->size(), 4);
   EXPECT_NEAR(result->at(0), 0.1, 1e-6); // 0.0 falls in first bin [0.0, 1.0)
   EXPECT_NEAR(result->at(1), 0.2, 1e-6); // 1.0 falls in second bin [1.0, 2.0)
@@ -222,7 +222,7 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionWithEmptyDataframe) {
   std::vector<std::string> stringArguments = {"A"};
   correctionManager->applyCorrection("test_correction", stringArguments);
   auto df = testDataManager->getDataFrame();
-  auto result = df.Take<float>("test_correction");
+  auto result = df.Take<float>("test_correction_A");
   ASSERT_EQ(result->size(), 0);
 }
 
@@ -281,7 +281,7 @@ TEST_F(CorrectionManagerTest, ExtremeNumericValues) {
     correctionManager->applyCorrection("test_correction", stringArguments);
   });
   auto df = testDataManager->getDataFrame();
-  auto result = df.Take<float>("test_correction");
+  auto result = df.Take<float>("test_correction_A");
   ASSERT_EQ(result->size(), 4);
   for (size_t i = 0; i < result->size(); ++i) {
     EXPECT_TRUE(std::abs(result->at(i)) < 1e-6 ||
@@ -317,7 +317,7 @@ TEST_F(CorrectionManagerTest, NaNAndInfinityHandling) {
     correctionManager->applyCorrection("test_correction", stringArguments);
   });
   auto df = testDataManager->getDataFrame();
-  auto result = df.Take<float>("test_correction");
+  auto result = df.Take<float>("test_correction_A");
   ASSERT_EQ(result->size(), 3);
   for (size_t i = 0; i < result->size(); ++i) {
     EXPECT_TRUE(std::isnan(result->at(i)) || std::abs(result->at(i)) < 1e-6);
@@ -345,7 +345,7 @@ TEST_F(CorrectionManagerTest, ZeroAndNegativeValues) {
   std::vector<std::string> stringArguments = {"A"};
   correctionManager->applyCorrection("test_correction", stringArguments);
   auto df = testDataManager->getDataFrame();
-  auto result = df.Take<float>("test_correction");
+  auto result = df.Take<float>("test_correction_A");
   ASSERT_EQ(result->size(), 4);
   EXPECT_NEAR(result->at(0), 0.1, 1e-6); // 0.0 in first bin
   EXPECT_NEAR(result->at(1), 0.0, 1e-6); // -1.0 is flow
@@ -425,7 +425,7 @@ TEST_F(CorrectionManagerTest, MultipleCorrections) {
   correctionManager->applyCorrection("test_correction", stringArguments);
   correctionManager->applyCorrection("test_correction2", {});
   auto df = dataManager->getDataFrame();
-  auto result1 = df.Take<float>("test_correction");
+  auto result1 = df.Take<float>("test_correction_A");
   auto result2 = df.Take<float>("test_correction2");
   ASSERT_EQ(result1->size(), 2);
   ASSERT_EQ(result2->size(), 2);
@@ -444,7 +444,7 @@ TEST_F(CorrectionManagerTest, ThreadSafetyWithROOTImplicitMT) {
   std::vector<std::string> stringArguments = {"A"};
   correctionManager->applyCorrection("test_correction", stringArguments);
   auto df = dataManager->getDataFrame();
-  auto result = df.Take<float>("test_correction");
+  auto result = df.Take<float>("test_correction_A");
   ASSERT_EQ(result->size(), 100);
   for (const auto &val : *result) {
     EXPECT_GE(val, 0.0f);
@@ -485,7 +485,7 @@ TEST_F(CorrectionManagerTest, ApplyVectorCorrectionBasic) {
   correctionManager->applyCorrectionVec("test_correction", {"A"});
 
   auto df = testDataManager->getDataFrame();
-  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction");
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction_A");
   ASSERT_EQ(result->size(), 1u);          // one event
   ASSERT_EQ((*result)[0].size(), 2u);     // two objects per event
   EXPECT_NEAR((*result)[0][0], 0.1f, 1e-6f);
@@ -518,7 +518,7 @@ TEST_F(CorrectionManagerTest, ApplyVectorCorrectionStringArgB) {
   correctionManager->applyCorrectionVec("test_correction", {"B"});
 
   auto df = testDataManager->getDataFrame();
-  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction");
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction_B");
   ASSERT_EQ(result->size(), 1u);
   ASSERT_EQ((*result)[0].size(), 2u);
   EXPECT_NEAR((*result)[0][0], 0.5f, 1e-6f);
@@ -549,7 +549,7 @@ TEST_F(CorrectionManagerTest, ApplyVectorCorrectionEmptyVector) {
   correctionManager->applyCorrectionVec("test_correction", {"A"});
 
   auto df = testDataManager->getDataFrame();
-  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction");
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction_A");
   ASSERT_EQ(result->size(), 1u);
   EXPECT_EQ((*result)[0].size(), 0u);
 
@@ -599,4 +599,251 @@ TEST_F(CorrectionManagerTest, ExecuteAndFinalizeAreNoOps) {
 
 TEST_F(CorrectionManagerTest, GetDependenciesReturnsEmpty) {
   EXPECT_TRUE(correctionManager->getDependencies().empty());
+}
+
+// ============================================================================
+// C++ API Tests: string argument branch naming, explicit input/output branches,
+// and programmatic registration
+// ============================================================================
+
+/**
+ * @brief Test that applying the same correction with different string arguments
+ *        creates separate output columns.
+ *
+ * The main motivation from the issue: corrections like muon SFs can be applied
+ * multiple times (nominal, syst_up, syst_down) and each variation lives in its
+ * own dataframe column.
+ */
+TEST_F(CorrectionManagerTest, SameCorrection_DifferentStringArgs_CreatesDistinctColumns) {
+  dataManager->Define("float_arg",
+                      [](ULong64_t i) -> double { return i == 0 ? 0.5 : 1.5; },
+                      {"rdfentry_"}, *systematicManager);
+  dataManager->Define("int_arg",
+                      [](ULong64_t i) -> double { return i == 0 ? 1 : 2; },
+                      {"rdfentry_"}, *systematicManager);
+
+  correctionManager->applyCorrection("test_correction", {"A"});
+  correctionManager->applyCorrection("test_correction", {"B"});
+
+  auto df = dataManager->getDataFrame();
+
+  auto resultA = df.Take<float>("test_correction_A");
+  auto resultB = df.Take<float>("test_correction_B");
+
+  ASSERT_EQ(resultA->size(), 2u);
+  ASSERT_EQ(resultB->size(), 2u);
+
+  // "A" path: float=0.5→bin[0,1), int=1 → 0.1; float=1.5→bin[1,2), int=2 → 0.4
+  EXPECT_NEAR(resultA->at(0), 0.1f, 1e-6f);
+  EXPECT_NEAR(resultA->at(1), 0.4f, 1e-6f);
+
+  // "B" path: same inputs → 0.5 and 0.8
+  EXPECT_NEAR(resultB->at(0), 0.5f, 1e-6f);
+  EXPECT_NEAR(resultB->at(1), 0.8f, 1e-6f);
+}
+
+/**
+ * @brief Test explicit output branch name override in applyCorrection.
+ *
+ * When @p outputBranch is provided the output column gets that exact name
+ * instead of the auto-derived "correctionName_stringArg" name.
+ */
+TEST_F(CorrectionManagerTest, ApplyCorrection_ExplicitOutputBranch) {
+  dataManager->Define("float_arg",
+                      [](ULong64_t i) -> double { return i == 0 ? 0.5 : 1.5; },
+                      {"rdfentry_"}, *systematicManager);
+  dataManager->Define("int_arg",
+                      [](ULong64_t i) -> double { return i == 0 ? 1 : 2; },
+                      {"rdfentry_"}, *systematicManager);
+
+  correctionManager->applyCorrection("test_correction", {"A"}, {}, "my_custom_sf");
+
+  auto df = dataManager->getDataFrame();
+  auto result = df.Take<float>("my_custom_sf");
+  ASSERT_EQ(result->size(), 2u);
+  EXPECT_NEAR(result->at(0), 0.1f, 1e-6f);
+  EXPECT_NEAR(result->at(1), 0.4f, 1e-6f);
+}
+
+/**
+ * @brief Test explicit input column name override in applyCorrection.
+ *
+ * When @p inputColumns is provided, those columns are used instead of the
+ * ones registered in the configuration.  This lets you reuse the same
+ * correction with different branch names without modifying the config.
+ */
+TEST_F(CorrectionManagerTest, ApplyCorrection_ExplicitInputColumns) {
+  // Use deliberately different column names from those in the config.
+  dataManager->Define("my_pt",
+                      [](ULong64_t i) -> double { return i == 0 ? 0.5 : 1.5; },
+                      {"rdfentry_"}, *systematicManager);
+  dataManager->Define("my_bin",
+                      [](ULong64_t i) -> double { return i == 0 ? 1 : 2; },
+                      {"rdfentry_"}, *systematicManager);
+
+  correctionManager->applyCorrection("test_correction", {"A"},
+                                     {"my_pt", "my_bin"}, "sf_from_custom_cols");
+
+  auto df = dataManager->getDataFrame();
+  auto result = df.Take<float>("sf_from_custom_cols");
+  ASSERT_EQ(result->size(), 2u);
+  // Same numeric inputs, same expected values as the standard test.
+  EXPECT_NEAR(result->at(0), 0.1f, 1e-6f);
+  EXPECT_NEAR(result->at(1), 0.4f, 1e-6f);
+}
+
+/**
+ * @brief Test programmatic registration of a correction (registerCorrection).
+ *
+ * Registers a correction directly from C++ without a config file entry, then
+ * applies it and verifies the output values.
+ */
+TEST_F(CorrectionManagerTest, RegisterCorrection_ProgrammaticCppRegistration) {
+  // Register the same JSON correction under a new name via the C++ API.
+  correctionManager->registerCorrection(
+      "cpp_registered_sf",
+      "aux/correction.json",
+      "test_correction",
+      {"float_arg", "int_arg"});
+
+  dataManager->Define("float_arg",
+                      [](ULong64_t i) -> double { return i == 0 ? 0.5 : 1.5; },
+                      {"rdfentry_"}, *systematicManager);
+  dataManager->Define("int_arg",
+                      [](ULong64_t i) -> double { return i == 0 ? 1 : 2; },
+                      {"rdfentry_"}, *systematicManager);
+
+  correctionManager->applyCorrection("cpp_registered_sf", {"A"});
+
+  auto df = dataManager->getDataFrame();
+  auto result = df.Take<float>("cpp_registered_sf_A");
+  ASSERT_EQ(result->size(), 2u);
+  EXPECT_NEAR(result->at(0), 0.1f, 1e-6f);
+  EXPECT_NEAR(result->at(1), 0.4f, 1e-6f);
+}
+
+/**
+ * @brief Test programmatic registration combined with explicit input/output branches.
+ *
+ * Demonstrates the full C++-only workflow: register + apply with custom branches.
+ */
+TEST_F(CorrectionManagerTest, RegisterCorrection_WithExplicitBranches) {
+  correctionManager->registerCorrection(
+      "my_sf",
+      "aux/correction.json",
+      "test_correction",
+      {"float_arg", "int_arg"});
+
+  dataManager->Define("jet_pt",
+                      [](ULong64_t i) -> double { return i == 0 ? 0.5 : 1.5; },
+                      {"rdfentry_"}, *systematicManager);
+  dataManager->Define("jet_bin",
+                      [](ULong64_t i) -> double { return i == 0 ? 1 : 2; },
+                      {"rdfentry_"}, *systematicManager);
+
+  // Apply with explicit input columns and explicit output branch name.
+  correctionManager->applyCorrection("my_sf", {"B"},
+                                     {"jet_pt", "jet_bin"}, "jet_sf_down");
+
+  auto df = dataManager->getDataFrame();
+  auto result = df.Take<float>("jet_sf_down");
+  ASSERT_EQ(result->size(), 2u);
+  EXPECT_NEAR(result->at(0), 0.5f, 1e-6f);
+  EXPECT_NEAR(result->at(1), 0.8f, 1e-6f);
+}
+
+/**
+ * @brief Test explicit input column override for applyCorrectionVec.
+ */
+TEST_F(CorrectionManagerTest, ApplyVectorCorrection_ExplicitInputColumns) {
+  auto testDataManager = std::make_unique<DataManager>(1);
+  setContextFor(*testDataManager);
+
+  // Use non-standard column names.
+  testDataManager->Define(
+      "jet_pt_vec",
+      []() -> ROOT::VecOps::RVec<double> { return {0.5, 1.5}; }, {},
+      *systematicManager);
+  testDataManager->Define(
+      "jet_bin_vec",
+      []() -> ROOT::VecOps::RVec<double> { return {1.0, 2.0}; }, {},
+      *systematicManager);
+
+  correctionManager->applyCorrectionVec("test_correction", {"A"},
+                                        {"jet_pt_vec", "jet_bin_vec"},
+                                        "jet_sf_vec_nominal");
+
+  auto df = testDataManager->getDataFrame();
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("jet_sf_vec_nominal");
+  ASSERT_EQ(result->size(), 1u);
+  ASSERT_EQ((*result)[0].size(), 2u);
+  EXPECT_NEAR((*result)[0][0], 0.1f, 1e-6f);
+  EXPECT_NEAR((*result)[0][1], 0.4f, 1e-6f);
+
+  setContextFor(*dataManager);
+}
+/**
+ * @brief Test that string arguments containing invalid characters are rejected.
+ *
+ * Branch names containing spaces, slashes, or other special characters would
+ * create invalid ROOT column names, so makeBranchName should throw.
+ */
+TEST_F(CorrectionManagerTest, ApplyCorrection_InvalidStringArgRejected) {
+  dataManager->Define("float_arg",
+                      [](ULong64_t) -> double { return 0.5; },
+                      {"rdfentry_"}, *systematicManager);
+  dataManager->Define("int_arg",
+                      [](ULong64_t) -> double { return 1; },
+                      {"rdfentry_"}, *systematicManager);
+
+  // Space is not allowed in a branch name component.
+  EXPECT_THROW(
+      correctionManager->applyCorrection("test_correction", {"syst up"}),
+      std::invalid_argument);
+
+  // Slash is not allowed.
+  EXPECT_THROW(
+      correctionManager->applyCorrection("test_correction", {"pt/eta"}),
+      std::invalid_argument);
+
+  // Empty string is not allowed.
+  EXPECT_THROW(
+      correctionManager->applyCorrection("test_correction", {""}),
+      std::invalid_argument);
+}
+
+/**
+ * @brief Test that registering the same correction name twice throws.
+ */
+TEST_F(CorrectionManagerTest, RegisterCorrection_DuplicateNameThrows) {
+  correctionManager->registerCorrection(
+      "once_only_sf", "aux/correction.json", "test_correction",
+      {"float_arg", "int_arg"});
+  EXPECT_THROW(
+      correctionManager->registerCorrection(
+          "once_only_sf", "aux/correction.json", "test_correction",
+          {"float_arg", "int_arg"}),
+      std::runtime_error);
+}
+
+/**
+ * @brief Test that registerCorrection throws for a missing file.
+ */
+TEST_F(CorrectionManagerTest, RegisterCorrection_MissingFileThrows) {
+  EXPECT_THROW(
+      correctionManager->registerCorrection(
+          "bad_sf", "nonexistent_file.json", "test_correction",
+          {"float_arg", "int_arg"}),
+      std::runtime_error);
+}
+
+/**
+ * @brief Test that registerCorrection throws for an unknown correction name inside a valid file.
+ */
+TEST_F(CorrectionManagerTest, RegisterCorrection_UnknownCorrectionNameThrows) {
+  EXPECT_THROW(
+      correctionManager->registerCorrection(
+          "bad_sf", "aux/correction.json", "no_such_correction",
+          {"float_arg", "int_arg"}),
+      std::runtime_error);
 }

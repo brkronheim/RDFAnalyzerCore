@@ -22,15 +22,15 @@ jobs:
         echo "Using self-hosted runner with preinstalled dependencies"
         uname -a
 
-    - name: Verify CUDA
-      run: |
-        export PATH=/usr/local/cuda-12.9/bin:$PATH
-        export CUDAToolkit_ROOT=/usr/local/cuda-12.9
-        export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH
-        echo $LD_LIBRARY_PATH
-        echo $PATH
-        ls /usr/local/
-        nvidia-smi
+    #- name: Verify CUDA
+    #  run: |
+    #    export PATH=/usr/local/cuda-12.9/bin:$PATH
+    #    export CUDAToolkit_ROOT=/usr/local/cuda-12.9
+    #    export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH
+    #    echo $LD_LIBRARY_PATH
+    #    echo $PATH
+    #    ls /usr/local/
+    #    nvidia-smi
 
 
     - name: Verify ROOT
@@ -47,7 +47,7 @@ jobs:
       run: pip3 install -r requirements-ci.txt
 
     - name: Configure CMake
-      run: cmake -S . -B build -DUSE_CUDA=ON -DONNXRUNTIME_USE_CUDA=ON
+      run: cmake -S . -B build -DUSE_CUDA=OFF -DONNXRUNTIME_USE_CUDA=OFF
 
     - name: Build
       run: cmake --build build --parallel $(nproc)

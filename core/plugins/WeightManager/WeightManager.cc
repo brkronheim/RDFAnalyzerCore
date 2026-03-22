@@ -1,4 +1,5 @@
 #include <WeightManager.h>
+#include <analyzer.h>
 #include <NullOutputSink.h>
 #include <TFile.h>
 #include <TH1D.h>
@@ -464,4 +465,11 @@ WeightManager::collectProvenanceEntries() const {
   }
 
   return entries;
+}
+
+std::shared_ptr<WeightManager> WeightManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<WeightManager>();
+    an.addPlugin(role, plugin);
+    return plugin;
 }

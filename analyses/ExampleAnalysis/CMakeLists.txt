@@ -13,8 +13,7 @@ target_include_directories(analysis
 
 target_link_libraries(analysis
     PRIVATE
-        core
-        corePlugins
+        coreAll
         ROOT::ROOTDataFrame
         ROOT::ROOTVecOps
         ROOT::Core

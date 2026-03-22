@@ -5,11 +5,15 @@ Provides:
 
   FullAnalysisDAG  (Task)
       Orchestrates the full pipeline:
-          SkimTask  →  HistFillTask  →  MergeAll
-              → ManifestDatacardTask  (datacards + nuisance coverage validation)
-              → ManifestPlotTask      (per-region plots)
-              → ManifestFitTask       (Combine or analysis-defined fits)
+          Get{NANO,OpenData,XRDFS}FileList  (optional via --file-source)
+              → SkimTask  →  HistFillTask  →  MergeAll
+               → ManifestDatacardTask  (datacards + nuisance coverage validation)
+               → ManifestPlotTask      (per-region plots)
+               → ManifestFitTask       (Combine or analysis-defined fits)
 
+      Skim, histogramming, merge, plotting, and fitting are chained through the
+      actual LAW task dependencies so the full pipeline can be run in one go on
+      a single machine or split across multiple invocations with the skip flags.
       All downstream tasks receive the merged OutputManifest written by
       MergeHistograms / MergeMetadata so that they are schema- and
       provenance-aware.
@@ -112,6 +116,12 @@ class FullAnalysisDAG(law.Task):
         Path to the submit_config.txt template (SkimTask / HistFillTask).
     dataset_manifest:
         Path to the dataset manifest YAML (SkimTask / HistFillTask).
+    file_source:
+        Optional ingestion backend forwarded to :class:`analysis_tasks.SkimTask`.
+        One of ``""``, ``"nano"``, ``"opendata"``, or ``"xrdfs"``.
+    file_source_name:
+        Optional upstream file-list task name forwarded to
+        :class:`analysis_tasks.SkimTask`.
     hist_config:
         Path to the histogram fill configuration (HistFillTask).
     merge_input_dir:
@@ -168,6 +178,20 @@ class FullAnalysisDAG(law.Task):
     dataset_manifest = luigi.Parameter(
         default="",
         description="Path to the dataset manifest YAML (SkimTask / HistFillTask).",
+    )
+    file_source = luigi.Parameter(
+        default="",
+        description=(
+            "Optional file-list ingestion backend for SkimTask: '', 'nano', "
+            "'opendata', or 'xrdfs'."
+        ),
+    )
+    file_source_name = luigi.Parameter(
+        default="",
+        description=(
+            "Optional name of the upstream file-list task run used when "
+            "--file-source is set."
+        ),
     )
     hist_config = luigi.Parameter(
         default="",
@@ -232,13 +256,120 @@ class FullAnalysisDAG(law.Task):
             WORKSPACE, f"mergeRun_{self.name}", _MERGED_HISTOGRAM_MANIFEST_RELPATH
         )
 
+    @property
+    def _skim_stage_enabled(self) -> bool:
+        return bool(
+            not self.skip_skim
+            and self.exe
+            and self.submit_config
+            and self.dataset_manifest
+        )
+
+    @property
+    def _histfill_stage_enabled(self) -> bool:
+        return bool(
+            not self.skip_histfill
+            and self.exe
+            and self.submit_config
+            and self.dataset_manifest
+        )
+
+    @property
+    def _merge_stage_enabled(self) -> bool:
+        return not self.skip_merge
+
+    @property
+    def _file_source_run_name(self) -> str:
+        return str(self.file_source_name or self.name)
+
+    def _effective_merge_input_dir(self) -> str:
+        if self.merge_input_dir:
+            return self.merge_input_dir
+        if self._histfill_stage_enabled:
+            return os.path.join(WORKSPACE, f"histRun_{self.name}", "outputs")
+        if self._skim_stage_enabled:
+            return os.path.join(WORKSPACE, f"skimRun_{self.name}", "outputs")
+        return ""
+
     # ------------------------------------------------------------------ DAG wiring
 
     def requires(self) -> list:
         reqs: list = []
 
-        # ---- Skim stage ----
-        if not self.skip_skim and self.exe and self.submit_config and self.dataset_manifest:
+        merge_input_dir = self._effective_merge_input_dir()
+
+        # ---- Fit stage (terminal task; chains datacards and merge automatically) ----
+        if not self.skip_fits and self.datacard_config:
+            reqs.append(
+                ManifestFitTask(
+                    name=self.name,
+                    datacard_config=self.datacard_config,
+                    manifest_path=self._resolved_manifest_path(),
+                    merge_input_dir=merge_input_dir if self._merge_stage_enabled else "",
+                    fitting_backend=self.fitting_backend,
+                    method=self.method,
+                    combine_exe=self.combine_exe,
+                )
+            )
+
+        # ---- Datacard stage (terminal only when no fit stage requested) ----
+        elif self.datacard_config:
+            reqs.append(
+                ManifestDatacardTask(
+                    name=self.name,
+                    datacard_config=self.datacard_config,
+                    manifest_path=self._resolved_manifest_path(),
+                    merge_input_dir=merge_input_dir if self._merge_stage_enabled else "",
+                    strict_coverage=self.strict_coverage,
+                )
+            )
+
+        # ---- Plot stage (may run alongside datacards/fits) ----
+        if not self.skip_plots and self.plot_config:
+            try:
+                from manifest_plot_tasks import ManifestPlotTask  # noqa: E402
+                reqs.append(
+                    ManifestPlotTask(
+                        name=self.name,
+                        manifest_path=self._resolved_manifest_path(),
+                        merge_input_dir=merge_input_dir if self._merge_stage_enabled else "",
+                        plot_config=self.plot_config,
+                    )
+                )
+            except ImportError:
+                pass
+
+        # ---- Merge stage (terminal only when nothing downstream is requested) ----
+        if self._merge_stage_enabled and not reqs:
+            try:
+                from merge_tasks import MergeAll  # noqa: E402
+                reqs.append(
+                    MergeAll(
+                        name=self.name,
+                        input_dir=merge_input_dir,
+                    )
+                )
+            except ImportError:
+                pass
+
+        # ---- HistFill stage (terminal only when merge/downstream is skipped) ----
+        if not reqs and self._histfill_stage_enabled:
+            try:
+                from analysis_tasks import HistFillTask  # noqa: E402
+                histfill_kwargs = dict(
+                    exe=self.exe,
+                    submit_config=self.hist_config or self.submit_config,
+                    dataset_manifest=self.dataset_manifest,
+                    name=self.name,
+                )
+                if self._skim_stage_enabled:
+                    histfill_kwargs["skim_name"] = self.name
+                reqs.append(HistFillTask(**histfill_kwargs))
+            except ImportError:
+                pass
+
+        # ---- Skim stage (terminal only when it is the last requested stage) ----
+        if not reqs and self._skim_stage_enabled:
             try:
                 from analysis_tasks import SkimTask  # noqa: E402
                 reqs.append(
@@ -247,76 +378,12 @@ class FullAnalysisDAG(law.Task):
                         submit_config=self.submit_config,
                         dataset_manifest=self.dataset_manifest,
                         name=self.name,
+                        file_source=self.file_source,
+                        file_source_name=self.file_source_name,
                     )
                 )
             except ImportError:
                 pass
-
-        # ---- HistFill stage ----
-        if not self.skip_histfill and self.exe and self.submit_config and self.dataset_manifest:
-            try:
-                from analysis_tasks import HistFillTask  # noqa: E402
-                reqs.append(
-                    HistFillTask(
-                        exe=self.exe,
-                        submit_config=self.hist_config or self.submit_config,
-                        dataset_manifest=self.dataset_manifest,
-                        name=self.name,
-                    )
-                )
-            except ImportError:
-                pass
-
-        # ---- Merge stage ----
-        if not self.skip_merge:
-            try:
-                from merge_tasks import MergeAll  # noqa: E402
-                reqs.append(
-                    MergeAll(
-                        name=self.name,
-                        input_dir=self.merge_input_dir,
-                    )
-                )
-            except ImportError:
-                pass
-
-        # ---- Datacard stage ----
-        if self.datacard_config:
-            reqs.append(
-                ManifestDatacardTask(
-                    name=self.name,
-                    datacard_config=self.datacard_config,
-                    manifest_path=self._resolved_manifest_path(),
-                    strict_coverage=self.strict_coverage,
-                )
-            )
-
-        # ---- Plot stage ----
-        if not self.skip_plots and self.plot_config:
-            try:
-                from manifest_plot_tasks import ManifestPlotTask  # noqa: E402
-                reqs.append(
-                    ManifestPlotTask(
-                        name=self.name,
-                        manifest_path=self._resolved_manifest_path(),
-                        plot_config=self.plot_config,
-                    )
-                )
-            except ImportError:
-                pass
-
-        # ---- Fit stage ----
-        if not self.skip_fits and self.datacard_config:
-            reqs.append(
-                ManifestFitTask(
-                    name=self.name,
-                    datacard_config=self.datacard_config,
-                    manifest_path=self._resolved_manifest_path(),
-                    fitting_backend=self.fitting_backend,
-                    method=self.method,
-                    combine_exe=self.combine_exe,
-                )
-            )
 
         return reqs
 
@@ -325,15 +392,22 @@ class FullAnalysisDAG(law.Task):
 
     def run(self):
         Path(self._dag_dir).mkdir(parents=True, exist_ok=True)
+        merge_input_dir = self._effective_merge_input_dir()
 
         summary = {
             "name": self.name,
             "dag_dir": self._dag_dir,
             "manifest_path": self._resolved_manifest_path(),
+            "merge_input_dir": merge_input_dir,
+            "file_source": self.file_source,
+            "file_source_name": (
+                self._file_source_run_name if self.file_source else ""
+            ),
             "stages": {
-                "skim": not self.skip_skim,
-                "histfill": not self.skip_histfill,
-                "merge": not self.skip_merge,
+                "ingestion": bool(self.file_source) and self._skim_stage_enabled,
+                "skim": self._skim_stage_enabled,
+                "histfill": self._histfill_stage_enabled,
+                "merge": self._merge_stage_enabled,
                 "datacards": bool(self.datacard_config),
                 "plots": not self.skip_plots and bool(self.plot_config),
                 "fits": not self.skip_fits and bool(self.datacard_config),
