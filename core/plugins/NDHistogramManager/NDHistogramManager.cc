@@ -1133,15 +1133,3 @@ void NDHistogramManager::reportMetadata() {
                 std::to_string(configHistograms_m.size()) +
                 " config histogram(s) defined.");
 }
-
-// ---------------------------------------------------------------------------
-// Plugin helper function
-// ---------------------------------------------------------------------------
-#include <analyzer.h>
-
-std::shared_ptr<NDHistogramManager> makeNDHistogramManager(
-    Analyzer& an, const std::string& role) {
-    auto plugin = std::make_shared<NDHistogramManager>(an.getConfigurationProvider());
-    an.addPlugin(role, plugin);
-    return plugin;
-}

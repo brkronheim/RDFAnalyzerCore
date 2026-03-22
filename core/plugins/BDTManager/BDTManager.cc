@@ -163,15 +163,3 @@ void BDTManager::reportMetadata() {
   }
   logger_m->log(ILogger::Level::Info, msg);
 }
-
-// ---------------------------------------------------------------------------
-// Plugin helper function
-// ---------------------------------------------------------------------------
-#include <analyzer.h>
-
-std::shared_ptr<BDTManager> makeBDTManager(
-    Analyzer& an, const std::string& role) {
-    auto plugin = std::make_shared<BDTManager>(an.getConfigurationProvider());
-    an.addPlugin(role, plugin);
-    return plugin;
-}

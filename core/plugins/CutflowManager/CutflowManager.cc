@@ -369,15 +369,3 @@ CutflowManager::collectProvenanceEntries() const {
 
   return entries;
 }
-
-// ---------------------------------------------------------------------------
-// Plugin helper function
-// ---------------------------------------------------------------------------
-#include <analyzer.h>
-
-std::shared_ptr<CutflowManager> makeCutflowManager(
-    Analyzer& an, const std::string& role) {
-    auto plugin = std::make_shared<CutflowManager>();
-    an.addPlugin(role, plugin);
-    return plugin;
-}

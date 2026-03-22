@@ -16,10 +16,23 @@ target_include_directories(core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../extern/correctionlib/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/BDTManager
     ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/CorrectionManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/CutflowManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/ElectronEnergyScaleManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/GoldenJsonManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/JetEnergyScaleManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/KinematicFitManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/MuonRochesterManager
     ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/NDHistogramManager
-    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/SystematicManager
-    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/TriggerManager
     ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/NamedObjectManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/ObjectEnergyManagerBase
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/OnnxManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/PhotonEnergyScaleManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/RegionManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/SofieManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/SystematicManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/TauEnergyScaleManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/TriggerManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/WeightManager
     ${CMAKE_BINARY_DIR}/include  # for generated GitVersion.h
 )
 

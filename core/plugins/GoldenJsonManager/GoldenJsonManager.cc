@@ -262,15 +262,3 @@ void GoldenJsonManager::reportMetadata() {
                 "GoldenJsonManager: " + std::to_string(validLumis_m.size()) +
                 " certified run(s) loaded.");
 }
-
-// ---------------------------------------------------------------------------
-// Plugin helper function
-// ---------------------------------------------------------------------------
-#include <analyzer.h>
-
-std::shared_ptr<GoldenJsonManager> makeGoldenJsonManager(
-    Analyzer& an, const std::string& role) {
-    auto plugin = std::make_shared<GoldenJsonManager>();
-    an.addPlugin(role, plugin);
-    return plugin;
-}

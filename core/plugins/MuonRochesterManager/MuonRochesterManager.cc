@@ -106,15 +106,3 @@ void MuonRochesterManager::appendObjectProvenanceEntries(
     entries["muon_u2_column"]      = u2Column_m;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Plugin helper function
-// ---------------------------------------------------------------------------
-#include <analyzer.h>
-
-std::shared_ptr<MuonRochesterManager> makeMuonRochesterManager(
-    Analyzer& an, const std::string& role) {
-    auto plugin = std::make_shared<MuonRochesterManager>();
-    an.addPlugin(role, plugin);
-    return plugin;
-}

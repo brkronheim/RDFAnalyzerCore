@@ -261,15 +261,3 @@ void RegionManager::reportMetadata() {
   }
   logger_m->log(ILogger::Level::Info, ss.str());
 }
-
-// ---------------------------------------------------------------------------
-// Plugin helper function
-// ---------------------------------------------------------------------------
-#include <analyzer.h>
-
-std::shared_ptr<RegionManager> makeRegionManager(
-    Analyzer& an, const std::string& role) {
-    auto plugin = std::make_shared<RegionManager>();
-    an.addPlugin(role, plugin);
-    return plugin;
-}
