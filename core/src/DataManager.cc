@@ -25,12 +25,10 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
       registerFriendTrees(configProvider);
     }
 
-    // Fall back to a small in-memory dataframe (1 entry) if no input files were found.
-    // Use GetNtrees() rather than GetEntries() so that the file-based RDF is used
-    // whenever files have been added to the chain.  GetEntries() can return 0 or -1
-    // for files written by external tools (e.g. uproot) even when the file is valid
-    // and readable, causing a spurious in-memory fallback.
-    if (!(chain_vec_m.empty()) && chain_vec_m[0]->GetNtrees() > 0) {
+    // Fall back to a small in-memory dataframe (1 entry) if no input files were found
+    // This allows unit tests to define variables and perform simple operations
+    // that expect at least one row.
+    if (!(chain_vec_m.empty()) && chain_vec_m[0]->GetEntries() > 0) {
       df_m = ROOT::RDataFrame(*chain_vec_m[0]);
 
       // Apply optional entry-range restriction.
@@ -568,7 +566,7 @@ void DataManager::registerFriendTrees(
   // rebuilt immediately after this method returns), but is required when
   // registerFriendTrees is invoked programmatically after construction.
   if (!chain_vec_m.empty() && chain_vec_m[0] &&
-      chain_vec_m[0]->GetNtrees() > 0) {
+      chain_vec_m[0]->GetEntries() > 0) {
     df_m = ROOT::RDataFrame(*chain_vec_m[0]);
     std::cout << "[DataManager] RDataFrame rebuilt after attaching "
               << specs.size() << " friend tree(s)." << std::endl;
