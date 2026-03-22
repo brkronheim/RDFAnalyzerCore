@@ -552,6 +552,14 @@ class ManifestDatacardTask(CombineMixin, law.Task):
             "'histograms' entry pointing to the merged histogram ROOT file."
         ),
     )
+    merge_input_dir = luigi.Parameter(
+        default="",
+        description=(
+            "Optional MergeAll input directory.  When set, this task declares "
+            "a dependency on MergeAll so manifest-based datacards wait for the "
+            "merge stage to complete."
+        ),
+    )
     strict_coverage = luigi.BoolParameter(
         default=False,
         description=(
@@ -568,6 +576,13 @@ class ManifestDatacardTask(CombineMixin, law.Task):
     @property
     def _manifest_fit_dir(self) -> str:
         return os.path.join(WORKSPACE, f"manifestDatacard_{self.name}", "fit_results")
+
+    def requires(self):
+        if not self.merge_input_dir:
+            return None
+        from merge_tasks import MergeAll  # noqa: E402
+
+        return MergeAll.req(self, input_dir=self.merge_input_dir)
 
     def output(self):
         return law.LocalDirectoryTarget(self._manifest_datacard_dir)
@@ -785,10 +800,22 @@ class ManifestFitTask(CombineMixin, law.Task):
             "provenance recording; not required for the fit itself."
         ),
     )
+    merge_input_dir = luigi.Parameter(
+        default="",
+        description=(
+            "Optional MergeAll input directory forwarded to "
+            "ManifestDatacardTask when datacards are produced as part of a "
+            "single end-to-end DAG run."
+        ),
+    )
 
     def requires(self):
         if not self.datacard_dir:
-            return ManifestDatacardTask.req(self, manifest_path=self.manifest_path)
+            return ManifestDatacardTask.req(
+                self,
+                manifest_path=self.manifest_path,
+                merge_input_dir=self.merge_input_dir,
+            )
         return None
 
     def output(self):

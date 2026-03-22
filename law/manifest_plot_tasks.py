@@ -167,6 +167,13 @@ class ManifestPlotTask(law.Task):
             "entry provides the merged histogram ROOT file used for all plots."
         ),
     )
+    merge_input_dir = luigi.Parameter(
+        default="",
+        description=(
+            "Optional MergeAll input directory.  When set, this task declares "
+            "a dependency on MergeAll so plotting waits for merged histograms."
+        ),
+    )
     plot_config = luigi.Parameter(
         description=(
             "Path to a JSON file describing the list of plots to create.  "
@@ -177,6 +184,13 @@ class ManifestPlotTask(law.Task):
     @property
     def _plots_dir(self) -> str:
         return os.path.join(WORKSPACE, f"manifestPlots_{self.name}")
+
+    def requires(self):
+        if not self.merge_input_dir:
+            return None
+        from merge_tasks import MergeAll  # noqa: E402
+
+        return MergeAll.req(self, input_dir=self.merge_input_dir)
 
     def output(self):
         return law.LocalDirectoryTarget(self._plots_dir)

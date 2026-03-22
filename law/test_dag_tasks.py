@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -227,6 +228,114 @@ class TestFullAnalysisDAGRequires(unittest.TestCase):
         reqs = task.requires()
         types = [type(r).__name__ for r in reqs]
         self.assertNotIn("MergeAll", types)
+
+    def test_skim_leaf_forwards_file_source_parameters(self):
+        class SkimTask:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        mod = types.ModuleType("analysis_tasks")
+        mod.SkimTask = SkimTask
+
+        task = self._make_task(
+            skip_skim=False,
+            skip_histfill=True,
+            skip_merge=True,
+            skip_plots=True,
+            skip_fits=True,
+            exe="analysis.exe",
+            submit_config="submit_config.txt",
+            dataset_manifest="datasets.yaml",
+            file_source="nano",
+            file_source_name="nanoFiles",
+        )
+        with patch.dict(sys.modules, {"analysis_tasks": mod}):
+            reqs = task.requires()
+
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(type(reqs[0]).__name__, "SkimTask")
+        self.assertEqual(reqs[0].kwargs["file_source"], "nano")
+        self.assertEqual(reqs[0].kwargs["file_source_name"], "nanoFiles")
+
+    def test_histfill_leaf_uses_skim_outputs_when_skim_enabled(self):
+        class HistFillTask:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        mod = types.ModuleType("analysis_tasks")
+        mod.HistFillTask = HistFillTask
+
+        task = self._make_task(
+            skip_skim=False,
+            skip_histfill=False,
+            skip_merge=True,
+            skip_plots=True,
+            skip_fits=True,
+            exe="analysis.exe",
+            submit_config="submit_config.txt",
+            hist_config="hist_config.txt",
+            dataset_manifest="datasets.yaml",
+        )
+        with patch.dict(sys.modules, {"analysis_tasks": mod}):
+            reqs = task.requires()
+
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(type(reqs[0]).__name__, "HistFillTask")
+        self.assertEqual(reqs[0].kwargs["skim_name"], "reqDAG")
+        self.assertEqual(reqs[0].kwargs["submit_config"], "hist_config.txt")
+
+    def test_merge_uses_hist_output_directory_by_default(self):
+        import dag_tasks
+
+        class MergeAll:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        mod = types.ModuleType("merge_tasks")
+        mod.MergeAll = MergeAll
+
+        task = self._make_task(
+            skip_skim=False,
+            skip_histfill=False,
+            skip_merge=False,
+            skip_plots=True,
+            skip_fits=True,
+            datacard_config="",
+            exe="analysis.exe",
+            submit_config="submit_config.txt",
+            dataset_manifest="datasets.yaml",
+        )
+        with patch.dict(sys.modules, {"merge_tasks": mod}):
+            reqs = task.requires()
+
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(type(reqs[0]).__name__, "MergeAll")
+        self.assertEqual(
+            reqs[0].kwargs["input_dir"],
+            os.path.join(dag_tasks.WORKSPACE, "histRun_reqDAG", "outputs"),
+        )
+
+    def test_fit_task_receives_merge_input_dir_for_full_pipeline(self):
+        import dag_tasks
+
+        task = self._make_task(
+            skip_skim=False,
+            skip_histfill=False,
+            skip_merge=False,
+            skip_plots=True,
+            skip_fits=False,
+            datacard_config="some_config.yaml",
+            exe="analysis.exe",
+            submit_config="submit_config.txt",
+            dataset_manifest="datasets.yaml",
+        )
+        reqs = task.requires()
+        self.assertEqual(len(reqs), 1)
+        self.assertEqual(type(reqs[0]).__name__, "ManifestFitTask")
+        self.assertEqual(
+            reqs[0].merge_input_dir,
+            os.path.join(dag_tasks.WORKSPACE, "histRun_reqDAG", "outputs"),
+        )
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
