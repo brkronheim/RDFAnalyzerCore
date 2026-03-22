@@ -89,7 +89,6 @@ target_link_libraries(corePlugins
     OnnxManager
     SofieManager
     WeightManager
-    core
     fastforest
     correctionlib
     OnnxRuntime::OnnxRuntime
