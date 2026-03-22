@@ -47,7 +47,7 @@ target_link_libraries(testConfigurationManager_YamlParsing core gtest gtest_main
 add_test(NAME ConfigurationManagerYamlParsingTest COMMAND testConfigurationManager_YamlParsing)
 
 add_executable(testManagerRegistry testManagerRegistry.cc)
-target_link_libraries(testManagerRegistry core corePlugins)
+target_link_libraries(testManagerRegistry coreAll)
 add_test(NAME ManagerRegistryTest COMMAND testManagerRegistry)
 
 add_executable(testSystematicManager testSystematicManager.cc)
@@ -59,11 +59,11 @@ target_link_libraries(testCounterService core gtest gtest_main)
 add_test(NAME CounterServiceTest COMMAND testCounterService)
 
 add_executable(testCounterService_Dedup testCounterService_Dedup.cc)
-target_link_libraries(testCounterService_Dedup core corePlugins gtest gtest_main)
+target_link_libraries(testCounterService_Dedup coreAll gtest gtest_main)
 add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)
 
 add_executable(testDataManager testDataManager.cc)
-target_link_libraries(testDataManager core corePlugins gtest gtest_main)
+target_link_libraries(testDataManager coreAll gtest gtest_main)
 add_test(NAME DataManagerTest COMMAND testDataManager)
 
 
@@ -73,7 +73,7 @@ add_test(NAME DataManagerTest COMMAND testDataManager)
 # Plugin tests
 
 add_executable(testPluginLifecycle testPluginLifecycle.cc)
-target_link_libraries(testPluginLifecycle core corePlugins gtest gtest_main)
+target_link_libraries(testPluginLifecycle coreAll gtest gtest_main)
 add_test(NAME PluginLifecycleTest COMMAND testPluginLifecycle)
 
 add_executable(testNamedObjectManager testNamedObjectManager.cc)
@@ -85,78 +85,78 @@ target_link_libraries(testPhysicsObjectCollection core gtest gtest_main)
 add_test(NAME PhysicsObjectCollectionTest COMMAND testPhysicsObjectCollection)
 
 add_executable(testCorrectionManager testCorrectionManager.cc)
-target_link_libraries(testCorrectionManager core corePlugins gtest gtest_main)
+target_link_libraries(testCorrectionManager coreAll gtest gtest_main)
 add_test(NAME CorrectionManagerTest COMMAND testCorrectionManager)
 
 add_executable(testBDTManager testBDTManager.cc)
-target_link_libraries(testBDTManager core corePlugins gtest gtest_main)
+target_link_libraries(testBDTManager coreAll gtest gtest_main)
 add_test(NAME BDTManagerTest COMMAND testBDTManager)
 
 add_executable(testOnnxManager testOnnxManager.cc)
-target_link_libraries(testOnnxManager core corePlugins gtest gtest_main)
+target_link_libraries(testOnnxManager coreAll gtest gtest_main)
 add_test(NAME OnnxManagerTest COMMAND testOnnxManager)
 
 add_executable(testSofieManager testSofieManager.cc)
-target_link_libraries(testSofieManager core corePlugins gtest gtest_main)
+target_link_libraries(testSofieManager coreAll gtest gtest_main)
 add_test(NAME SofieManagerTest COMMAND testSofieManager)
 
 add_executable(testNDHistogramManager testNDHistogramManager.cc)
-target_link_libraries(testNDHistogramManager core corePlugins gtest gtest_main)
+target_link_libraries(testNDHistogramManager coreAll gtest gtest_main)
 add_test(NAME NDHistogramManagerTest COMMAND testNDHistogramManager)
 
 add_executable(testNDHistogramManagerConfig testNDHistogramManagerConfig.cc)
-target_link_libraries(testNDHistogramManagerConfig core corePlugins gtest gtest_main)
+target_link_libraries(testNDHistogramManagerConfig coreAll gtest gtest_main)
 add_test(NAME NDHistogramManagerConfigTest COMMAND testNDHistogramManagerConfig)
 
 add_executable(testTriggerManager testTriggerManager.cc)
-target_link_libraries(testTriggerManager core corePlugins gtest gtest_main)
+target_link_libraries(testTriggerManager coreAll gtest gtest_main)
 add_test(NAME TriggerManagerTest COMMAND testTriggerManager)
 
 add_executable(testKinematicFitManager testKinematicFitManager.cc)
-target_link_libraries(testKinematicFitManager core corePlugins gtest gtest_main)
+target_link_libraries(testKinematicFitManager coreAll gtest gtest_main)
 add_test(NAME KinematicFitManagerTest COMMAND testKinematicFitManager)
 
 if(USE_CUDA)
 add_executable(testKinematicFitManagerGpu testKinematicFitManagerGpu.cc)
-target_link_libraries(testKinematicFitManagerGpu core corePlugins gtest gtest_main)
+target_link_libraries(testKinematicFitManagerGpu coreAll gtest gtest_main)
 add_test(NAME KinematicFitManagerGpuIntegrationTest COMMAND testKinematicFitManagerGpu)
 endif()
 
 add_executable(testCutflowManager testCutflowManager.cc)
-target_link_libraries(testCutflowManager core corePlugins gtest gtest_main)
+target_link_libraries(testCutflowManager coreAll gtest gtest_main)
 add_test(NAME CutflowManagerTest COMMAND testCutflowManager)
 
 add_executable(testJetEnergyScaleManager testJetEnergyScaleManager.cc)
-target_link_libraries(testJetEnergyScaleManager core corePlugins gtest gtest_main)
+target_link_libraries(testJetEnergyScaleManager coreAll gtest gtest_main)
 add_test(NAME JetEnergyScaleManagerTest COMMAND testJetEnergyScaleManager)
 
 add_executable(testLeptonPhotonEnergyManagers testLeptonPhotonEnergyManagers.cc)
-target_link_libraries(testLeptonPhotonEnergyManagers core corePlugins gtest gtest_main)
+target_link_libraries(testLeptonPhotonEnergyManagers coreAll gtest gtest_main)
 add_test(NAME LeptonPhotonEnergyManagersTest COMMAND testLeptonPhotonEnergyManagers)
 
 add_executable(testRegionManager testRegionManager.cc)
-target_link_libraries(testRegionManager core corePlugins gtest gtest_main)
+target_link_libraries(testRegionManager coreAll gtest gtest_main)
 add_test(NAME RegionManagerTest COMMAND testRegionManager)
 
 add_executable(testWeightManager testWeightManager.cc)
-target_link_libraries(testWeightManager core corePlugins gtest gtest_main)
+target_link_libraries(testWeightManager coreAll gtest gtest_main)
 add_test(NAME WeightManagerTest COMMAND testWeightManager)
 
 add_executable(testGoldenJsonManager testGoldenJsonManager.cc)
-target_link_libraries(testGoldenJsonManager core corePlugins gtest gtest_main)
+target_link_libraries(testGoldenJsonManager coreAll gtest gtest_main)
 add_test(NAME GoldenJsonManagerTest COMMAND testGoldenJsonManager)
 
 
 add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)
-target_link_libraries(testAnalyzer_TriggerLogic core corePlugins gtest gtest_main)
+target_link_libraries(testAnalyzer_TriggerLogic coreAll gtest gtest_main)
 add_test(NAME AnalyzerTriggerLogicTest COMMAND testAnalyzer_TriggerLogic)
 
 add_executable(testAnalyzer_PluginWiring testAnalyzer_PluginWiring.cc)
-target_link_libraries(testAnalyzer_PluginWiring core corePlugins gtest gtest_main)
+target_link_libraries(testAnalyzer_PluginWiring coreAll gtest gtest_main)
 add_test(NAME AnalyzerPluginWiringTest COMMAND testAnalyzer_PluginWiring)
 
 add_executable(testAnalyzer_ManagerContextPersistence testAnalyzer_ManagerContextPersistence.cc)
-target_link_libraries(testAnalyzer_ManagerContextPersistence core corePlugins gtest gtest_main)
+target_link_libraries(testAnalyzer_ManagerContextPersistence coreAll gtest gtest_main)
 add_test(NAME AnalyzerManagerContextPersistenceTest COMMAND testAnalyzer_ManagerContextPersistence)
 
 add_executable(testRootEnvironmentGuard testRootEnvironmentGuard.cc)
@@ -169,7 +169,7 @@ add_test(NAME PlottingUtilityTest COMMAND testPlottingUtility)
 
 if(ONNXRUNTIME_USE_CUDA)
 add_executable(testOnnxManagerGpu testOnnxManagerGpu.cc)
-target_link_libraries(testOnnxManagerGpu core corePlugins gtest gtest_main)
+target_link_libraries(testOnnxManagerGpu coreAll gtest gtest_main)
 add_test(NAME OnnxManagerGpuIntegrationTest COMMAND testOnnxManagerGpu)
 endif()
 
@@ -190,7 +190,7 @@ endif()
 # Integration tests
 
 add_executable(testSystematicPropagation testSystematicPropagation.cc)
-target_link_libraries(testSystematicPropagation core corePlugins gtest gtest_main)
+target_link_libraries(testSystematicPropagation coreAll gtest gtest_main)
 add_test(NAME SystematicPropagationTest COMMAND testSystematicPropagation)
 
 if(BUILD_COMBINE)

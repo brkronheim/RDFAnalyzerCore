@@ -39,8 +39,7 @@ pybind11_add_module(rdfanalyzer python_bindings.cpp)
 
 # Link against the core library
 target_link_libraries(rdfanalyzer PRIVATE
-    core
-    corePlugins
+    coreAll
     ROOT::ROOTDataFrame
     ROOT::ROOTVecOps
     ROOT::Core
