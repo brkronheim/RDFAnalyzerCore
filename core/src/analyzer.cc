@@ -218,10 +218,6 @@ Analyzer *Analyzer::addPlugin(const std::string &role, std::shared_ptr<IPluggabl
     return this;
 }
 
-Analyzer *Analyzer::addPlugin(const std::string &role, std::unique_ptr<IPluggableManager> plugin) {
-    return addPlugin(role, std::shared_ptr<IPluggableManager>(std::move(plugin)));
-}
-
 Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& newPlugins) {
     for (auto &kv : newPlugins) { addPlugin(kv.first, std::move(kv.second)); }
     return this;

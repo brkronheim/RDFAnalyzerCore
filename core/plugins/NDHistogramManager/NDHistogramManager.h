@@ -9,6 +9,7 @@
 #include <api/IOutputSink.h>
 #include <string>
 #include <vector>
+#include <memory>
 
 class Analyzer;
 
@@ -47,6 +48,13 @@ class RegionManager;
  */
 class NDHistogramManager : public IPluggableManager {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<NDHistogramManager> create(
+      Analyzer& an, const std::string& role = "histogramManager");
+
   /**
    * @brief Construct a new NDHistogramManager object
    */
@@ -277,12 +285,6 @@ private:
   bool countersFinalized_m = false;
   std::string histogramBackend_m = "root";
   RegionManager* regionManager_m = nullptr;
-
-  // -------------------------------------------------------------------------
-  // Factory: create, register with an Analyzer, and return as shared_ptr.
-  // -------------------------------------------------------------------------
-  static std::shared_ptr<NDHistogramManager> create(
-      Analyzer& an, const std::string& role = "histogramManager");
 };
 
 

@@ -2,6 +2,7 @@
 #define TAUENERGYMANAGER_H_INCLUDED
 
 #include <ObjectEnergyManagerBase.h>
+#include <memory>
 
 class Analyzer;
 
@@ -17,15 +18,16 @@ class Analyzer;
  */
 class TauEnergyScaleManager : public ObjectEnergyManagerBase {
 public:
-  std::string type() const override { return "TauEnergyScaleManager"; }
-protected:
-  std::string objectName() const override { return "Tau"; }
 
   // -------------------------------------------------------------------------
   // Factory: create, register with an Analyzer, and return as shared_ptr.
   // -------------------------------------------------------------------------
   static std::shared_ptr<TauEnergyScaleManager> create(
       Analyzer& an, const std::string& role = "tauEnergyScaleManager");
+
+  std::string type() const override { return "TauEnergyScaleManager"; }
+protected:
+  std::string objectName() const override { return "Tau"; }
 };
 
 

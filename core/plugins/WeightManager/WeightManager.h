@@ -13,6 +13,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <memory>
 
 class Analyzer;
 
@@ -84,6 +85,13 @@ struct WeightVariation {
  */
 class WeightManager : public IPluggableManager {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<WeightManager> create(
+      Analyzer& an, const std::string& role = "weightManager");
+
   WeightManager() = default;
 
   // -------------------------------------------------------------------------
@@ -309,12 +317,6 @@ private:
   /// Book lazy RDF actions to audit the named column.
   void bookAudit(const std::string &label, const std::string &column,
                  ROOT::RDF::RNode &df);
-
-  // -------------------------------------------------------------------------
-  // Factory: create, register with an Analyzer, and return as shared_ptr.
-  // -------------------------------------------------------------------------
-  static std::shared_ptr<WeightManager> create(
-      Analyzer& an, const std::string& role = "weightManager");
 };
 
 

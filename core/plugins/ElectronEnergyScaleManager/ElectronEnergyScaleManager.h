@@ -2,6 +2,7 @@
 #define ELECTRONENERGYMANAGER_H_INCLUDED
 
 #include <ObjectEnergyManagerBase.h>
+#include <memory>
 
 class Analyzer;
 
@@ -17,15 +18,16 @@ class Analyzer;
  */
 class ElectronEnergyScaleManager : public ObjectEnergyManagerBase {
 public:
-  std::string type() const override { return "ElectronEnergyScaleManager"; }
-protected:
-  std::string objectName() const override { return "Electron"; }
 
   // -------------------------------------------------------------------------
   // Factory: create, register with an Analyzer, and return as shared_ptr.
   // -------------------------------------------------------------------------
   static std::shared_ptr<ElectronEnergyScaleManager> create(
       Analyzer& an, const std::string& role = "electronEnergyScaleManager");
+
+  std::string type() const override { return "ElectronEnergyScaleManager"; }
+protected:
+  std::string objectName() const override { return "Electron"; }
 };
 
 

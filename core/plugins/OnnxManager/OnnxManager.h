@@ -27,6 +27,13 @@ class Analyzer;
 class OnnxManager
     : public NamedObjectManager<std::shared_ptr<Ort::Session>> {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<OnnxManager> create(
+      Analyzer& an, const std::string& role = "onnxManager");
+
   /**
    * @brief Construct a new OnnxManager object
    * @param configProvider Reference to the configuration provider
@@ -191,12 +198,6 @@ private:
    * @brief Cached C-string pointers for ONNX output names (to avoid per-event allocation).
    */
   std::unordered_map<std::string, std::vector<const char *>> model_outputNamePtrs_m;
-
-  // -------------------------------------------------------------------------
-  // Factory: create, register with an Analyzer, and return as shared_ptr.
-  // -------------------------------------------------------------------------
-  static std::shared_ptr<OnnxManager> create(
-      Analyzer& an, const std::string& role = "onnxManager");
 };
 
 

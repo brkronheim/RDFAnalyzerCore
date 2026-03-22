@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <memory>
 
 class Analyzer;
 
@@ -77,6 +78,13 @@ class RegionManager;
  */
 class CutflowManager : public IPluggableManager {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<CutflowManager> create(
+      Analyzer& an, const std::string& role = "cutflowManager");
+
   CutflowManager() = default;
 
   /**
@@ -254,12 +262,6 @@ private:
   IDataFrameProvider *dataManager_m = nullptr;
   ILogger *logger_m = nullptr;
   IOutputSink *metaSink_m = nullptr;
-
-  // -------------------------------------------------------------------------
-  // Factory: create, register with an Analyzer, and return as shared_ptr.
-  // -------------------------------------------------------------------------
-  static std::shared_ptr<CutflowManager> create(
-      Analyzer& an, const std::string& role = "cutflowManager");
 };
 
 

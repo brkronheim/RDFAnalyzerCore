@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <memory>
 
 class Analyzer;
 
@@ -125,6 +126,13 @@ struct JESVariationEntry {
  */
 class JetEnergyScaleManager : public IPluggableManager {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<JetEnergyScaleManager> create(
+      Analyzer& an, const std::string& role = "jetEnergyScaleManager");
+
   JetEnergyScaleManager() = default;
 
   // -------------------------------------------------------------------------
@@ -646,12 +654,6 @@ private:
    * Returns empty string when substitution is not possible.
    */
   std::string deriveMassColumnName(const std::string &ptColName) const;
-
-  // -------------------------------------------------------------------------
-  // Factory: create, register with an Analyzer, and return as shared_ptr.
-  // -------------------------------------------------------------------------
-  static std::shared_ptr<JetEnergyScaleManager> create(
-      Analyzer& an, const std::string& role = "jetEnergyScaleManager");
 };
 
 

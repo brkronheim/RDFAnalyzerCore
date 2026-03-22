@@ -271,7 +271,12 @@ public:
    * @return Pointer to this Analyzer (for chaining)
    */
   Analyzer *addPlugin(const std::string &role, std::shared_ptr<IPluggableManager> plugin);
-  Analyzer *addPlugin(const std::string &role, std::unique_ptr<IPluggableManager> plugin);
+  /// Accept any unique_ptr<T> (T must derive from IPluggableManager).
+  /// Template avoids ambiguity with the shared_ptr overload when T is a derived type.
+  template<typename T>
+  Analyzer *addPlugin(const std::string &role, std::unique_ptr<T> plugin) {
+    return addPlugin(role, std::shared_ptr<IPluggableManager>(std::move(plugin)));
+  }
 
   Analyzer *addPlugins(std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& newPlugins);
   Analyzer *addPlugins(std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& newPlugins);

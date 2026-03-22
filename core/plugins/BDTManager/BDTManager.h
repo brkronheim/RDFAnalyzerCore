@@ -26,6 +26,13 @@ class Analyzer;
 class BDTManager
     : public NamedObjectManager<std::shared_ptr<fastforest::FastForest>> {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<BDTManager> create(
+      Analyzer& an, const std::string& role = "bdtManager");
+
   /**
    * @brief Construct a new BDTManager object
    * @param configProvider Reference to the configuration provider
@@ -97,12 +104,6 @@ private:
    * @brief Map from BDT name to run variable name.
    */
   std::unordered_map<std::string, std::string> bdt_runVars_m;
-
-  // -------------------------------------------------------------------------
-  // Factory: create, register with an Analyzer, and return as shared_ptr.
-  // -------------------------------------------------------------------------
-  static std::shared_ptr<BDTManager> create(
-      Analyzer& an, const std::string& role = "bdtManager");
 };
 
 
