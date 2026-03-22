@@ -269,8 +269,8 @@ int main(int argc, char **argv) {
     //    The cutflow starts from "events passing trigger" as the baseline.
     // -----------------------------------------------------------------------
     cutflowMgr->addCut("DimuonPair",   "hasTwoMuons");
-    cfm->addCut("OppositeSign", "hasOppositeSign");
-    cfm->addCut("MassWindow",   "inMassWindow");
+    cutflowMgr->addCut("OppositeSign", "hasOppositeSign");
+    cutflowMgr->addCut("MassWindow",   "inMassWindow");
 
     // -----------------------------------------------------------------------
     // 6. Derived quantities (computed after all cuts; exactly 2 OS muons

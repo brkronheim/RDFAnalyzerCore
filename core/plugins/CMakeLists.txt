@@ -46,6 +46,30 @@ add_subdirectory(OnnxManager)
 add_subdirectory(SofieManager)
 add_subdirectory(WeightManager)
 
+# Explicitly embed all OBJECT library object files into the static archive.
+# This ensures libcorePlugins.a contains every plugin's symbols, so executables
+# that link against corePlugins can resolve them even if they don't directly
+# reference a particular plugin (e.g. tests that use Analyzer but not NDHistogramManager).
+target_sources(corePlugins PRIVATE
+    $<TARGET_OBJECTS:BDTManager>
+    $<TARGET_OBJECTS:CorrectionManager>
+    $<TARGET_OBJECTS:CutflowManager>
+    $<TARGET_OBJECTS:ObjectEnergyManagerBase>
+    $<TARGET_OBJECTS:ElectronEnergyScaleManager>
+    $<TARGET_OBJECTS:JetEnergyScaleManager>
+    $<TARGET_OBJECTS:KinematicFitManager>
+    $<TARGET_OBJECTS:GoldenJsonManager>
+    $<TARGET_OBJECTS:MuonRochesterManager>
+    $<TARGET_OBJECTS:NDHistogramManager>
+    $<TARGET_OBJECTS:PhotonEnergyScaleManager>
+    $<TARGET_OBJECTS:RegionManager>
+    $<TARGET_OBJECTS:TauEnergyScaleManager>
+    $<TARGET_OBJECTS:TriggerManager>
+    $<TARGET_OBJECTS:OnnxManager>
+    $<TARGET_OBJECTS:SofieManager>
+    $<TARGET_OBJECTS:WeightManager>
+)
+
 # Link all plugin libraries to corePlugins
 target_link_libraries(corePlugins
     BDTManager
