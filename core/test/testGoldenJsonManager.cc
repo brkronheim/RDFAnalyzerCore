@@ -222,7 +222,7 @@ TEST_F(GoldenJsonManagerTest, ApplyUsesDTypeWhenTypeIsNumericMetadata) {
   const std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/aux/test_golden_json_dtype_numeric_type.txt";
   {
     std::ofstream out(cfgPath);
-    out << "goldenJsonConfig=cfg/test_golden_json_files.txt\n";
+    out << "goldenJsonConfig=cfg/golden_json_files.txt\n";
     out << "dtype=data\n";
     out << "type=0\n";
     out << "fileList=\n";

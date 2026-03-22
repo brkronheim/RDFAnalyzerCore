@@ -28,7 +28,9 @@
 
 #include <ROOT/RDataFrame.hxx>
 #include <ROOT/RVec.hxx>
+#include <TInterpreter.h>
 
+#include <atomic>
 #include <sstream>
 #include <algorithm>
 #include <set>
@@ -211,8 +213,7 @@ public:
         }
         
         // Build a proper C++ function pointer type from the simple signature string
-        // e.g. "double(double,double)" -> "double(*)(double,double)" and then
-        // call it: (reinterpret_cast<double(*)(double,double)>(addr))(arg1, arg2)
+        // e.g. "double(double,double)" -> "double(*)(double,double)"
         auto toFunctionPointerType = [](const std::string& sig)->std::string {
             size_t open = sig.find('(');
             size_t close = sig.rfind(')');
@@ -225,10 +226,28 @@ public:
         };
         const auto fptr = toFunctionPointerType(signature);
 
+        // Declare the function pointer globally via ROOT's Cling interpreter.
+        // This avoids embedding a complex reinterpret_cast inside the JIT expression
+        // string, which ROOT's column-name auto-detection cannot handle reliably.
+        // A monotonically increasing ID ensures each declaration has a unique name.
+        static std::atomic<unsigned int> fptr_counter{0};
+        const unsigned int fptr_id = fptr_counter.fetch_add(1);
+        const std::string fname = "__rdf_jit_fptr_" + std::to_string(fptr_id);
+
+        const std::string decl = fptr + " " + fname +
+                                 " = reinterpret_cast<" + fptr + ">(" +
+                                 std::to_string(func_ptr) + ");";
+        if (!gInterpreter->Declare(decl.c_str())) {
+            throw std::runtime_error(
+                "DefineFromPointer: failed to declare function pointer via Cling interpreter"
+            );
+        }
+
+        // Generate a simple call expression using the declared function name.
+        // ROOT's column-name auto-detection works correctly for expressions of
+        // the form "funcname(col1, col2, ...)".
         std::stringstream jit_expr;
-        // Cast the integer address to a function pointer and immediately call it
-        jit_expr << "(reinterpret_cast<" << fptr << ">(" << func_ptr << "))";
-        jit_expr << "(";
+        jit_expr << fname << "(";
         for (size_t i = 0; i < columns.size(); ++i) {
             if (i > 0) jit_expr << ", ";
             jit_expr << columns[i];

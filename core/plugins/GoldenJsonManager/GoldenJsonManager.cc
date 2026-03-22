@@ -212,19 +212,17 @@ void GoldenJsonManager::applyGoldenJson() {
   }
 
   std::string sampleType;
-  try {
-    std::cout << "GoldenJsonManager: checking sample type from config key 'dtype'..."
+  std::cout << "GoldenJsonManager: checking sample type from config key 'dtype'..."
+            << std::endl;
+  sampleType = configManager_m->get("dtype");
+  if (sampleType.empty()) {
+    std::cout << "GoldenJsonManager: falling back to config key 'type'..."
               << std::endl;
-    sampleType = configManager_m->get("dtype");
-  } catch (...) {
-    try {
-      std::cout << "GoldenJsonManager: falling back to config key 'type'..."
-                << std::endl;
-      sampleType = configManager_m->get("type");
-    } catch (...) {
-      throw std::runtime_error(
-          "GoldenJsonManager: config keys 'dtype' and 'type' not found");
-    }
+    sampleType = configManager_m->get("type");
+  }
+  if (sampleType.empty()) {
+    throw std::runtime_error(
+        "GoldenJsonManager: config keys 'dtype' and 'type' not found");
   }
 
   if (sampleType != "data") {

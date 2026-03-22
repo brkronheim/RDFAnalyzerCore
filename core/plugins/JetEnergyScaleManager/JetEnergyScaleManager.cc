@@ -176,7 +176,7 @@ const std::vector<std::string> &
 JetEnergyScaleManager::getSystematicSources(const std::string &setName) const {
   auto it = systematicSets_m.find(setName);
   if (it == systematicSets_m.end())
-    throw std::out_of_range(
+    throw std::runtime_error(
         "JetEnergyScaleManager::getSystematicSources: set \"" + setName +
         "\" is not registered");
   return it->second;
