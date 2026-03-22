@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class OnnxManager
  * @brief Handles loading, storing, and applying ONNX models.
@@ -25,6 +27,13 @@
 class OnnxManager
     : public NamedObjectManager<std::shared_ptr<Ort::Session>> {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<OnnxManager> create(
+      Analyzer& an, const std::string& role = "onnxManager");
+
   /**
    * @brief Construct a new OnnxManager object
    * @param configProvider Reference to the configuration provider
@@ -190,5 +199,7 @@ private:
    */
   std::unordered_map<std::string, std::vector<const char *>> model_outputNamePtrs_m;
 };
+
+
 
 #endif // ONNXMANAGER_H_INCLUDED

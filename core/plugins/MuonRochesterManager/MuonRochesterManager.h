@@ -2,6 +2,9 @@
 #define MUONROCHESTERMANAGER_H_INCLUDED
 
 #include <ObjectEnergyManagerBase.h>
+#include <memory>
+
+class Analyzer;
 
 /**
  * @class MuonRochesterManager
@@ -62,6 +65,13 @@
  */
 class MuonRochesterManager : public ObjectEnergyManagerBase {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<MuonRochesterManager> create(
+      Analyzer& an, const std::string& role = "muonRochesterManager");
+
   std::string type() const override { return "MuonRochesterManager"; }
 
   // -------------------------------------------------------------------------
@@ -202,5 +212,7 @@ private:
   std::string u1Column_m;
   std::string u2Column_m;
 };
+
+
 
 #endif // MUONROCHESTERMANAGER_H_INCLUDED

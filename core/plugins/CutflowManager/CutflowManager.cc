@@ -1,4 +1,5 @@
 #include <CutflowManager.h>
+#include <analyzer.h>
 #include <RegionManager.h>
 #include <NullOutputSink.h>
 #include <TFile.h>
@@ -368,4 +369,11 @@ CutflowManager::collectProvenanceEntries() const {
   }
 
   return entries;
+}
+
+std::shared_ptr<CutflowManager> CutflowManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<CutflowManager>();
+    an.addPlugin(role, plugin);
+    return plugin;
 }

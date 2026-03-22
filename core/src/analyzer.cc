@@ -18,11 +18,11 @@
 #include <SystematicManager.h>
 #include <api/ManagerContext.h> // for wiring plugins and services
 
-// Dependency-injected constructor
+// Dependency-injected constructor (shared_ptr plugin map)
 Analyzer::Analyzer(
     std::unique_ptr<IConfigurationProvider> configProvider,
     std::unique_ptr<IDataFrameProvider> dataFrameProvider,
-    std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins,
+    std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& plugins,
     std::unique_ptr<ISystematicManager> systematicManager,
     std::unique_ptr<ILogger> logger,
     std::unique_ptr<IOutputSink> skimSink,
@@ -47,17 +47,37 @@ Analyzer::Analyzer(
     //initialize();
 }
 
-/**
- * @brief Construct a new Analyzer object with a config file and optional plugins.
- *
- * This constructor creates default configuration, data, and systematic managers using the provided config file.
- * Plugins can be optionally provided as a map; if omitted, no plugins are set.
- *
- * @param configFile Path to the configuration file.
- * @param plugins Map of plugin role names to pluggable manager instances (default: empty).
- */
+// Dependency-injected constructor (unique_ptr plugin map — backward compat)
+Analyzer::Analyzer(
+    std::unique_ptr<IConfigurationProvider> configProvider,
+    std::unique_ptr<IDataFrameProvider> dataFrameProvider,
+    std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& uniquePlugins,
+    std::unique_ptr<ISystematicManager> systematicManager,
+    std::unique_ptr<ILogger> logger,
+    std::unique_ptr<IOutputSink> skimSink,
+    std::unique_ptr<IOutputSink> metaSink)
+    : configProvider_m(std::move(configProvider)),
+      dataFrameProvider_m(std::move(dataFrameProvider)),
+      systematicManager_m(std::move(systematicManager)),
+      logger_m(std::move(logger)),
+      skimSink_m(std::move(skimSink)),
+      metaSink_m(std::move(metaSink)),
+      managerContext_m{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m}
+{
+    if (!configProvider_m || !dataFrameProvider_m || !systematicManager_m || !logger_m || !skimSink_m || !metaSink_m) {
+        throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
+    }
+    for (auto& kv : uniquePlugins) { plugins.emplace(kv.first, std::move(kv.second)); }
+    verbosityLevel_m = 1;
+    if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
+        dataManager->finalizeSetup(*configProvider_m);
+    }
+    wirePluginManagers();
+    //initialize();
+}
+
 Analyzer::Analyzer(std::string configFile,
-                                     std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins)
+                                     std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& plugins)
         : configProvider_m(ManagerFactory::createConfigurationManager(configFile)),
             dataFrameProvider_m(ManagerFactory::createDataManager(*configProvider_m)),
             systematicManager_m(ManagerFactory::createSystematicManager()),
@@ -68,6 +88,28 @@ Analyzer::Analyzer(std::string configFile,
         if (!configProvider_m || !dataFrameProvider_m || !systematicManager_m) {
         throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
     }
+    verbosityLevel_m = 1;
+    if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
+        dataManager->finalizeSetup(*configProvider_m);
+    }
+    wirePluginManagers();
+    //initialize();
+}
+
+// Config-file constructor (unique_ptr plugin map — backward compat)
+Analyzer::Analyzer(std::string configFile,
+                                     std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& uniquePlugins)
+        : configProvider_m(ManagerFactory::createConfigurationManager(configFile)),
+            dataFrameProvider_m(ManagerFactory::createDataManager(*configProvider_m)),
+            systematicManager_m(ManagerFactory::createSystematicManager()),
+            logger_m(std::make_unique<DefaultLogger>()),
+    skimSink_m(std::make_unique<RootOutputSink>()),
+            metaSink_m(std::make_unique<RootOutputSink>()),            managerContext_m{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m}
+{
+        if (!configProvider_m || !dataFrameProvider_m || !systematicManager_m) {
+        throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
+    }
+    for (auto& kv : uniquePlugins) { plugins.emplace(kv.first, std::move(kv.second)); }
     verbosityLevel_m = 1;
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
         dataManager->finalizeSetup(*configProvider_m);
@@ -157,9 +199,8 @@ void Analyzer::wirePluginManagers() {
     }
 }
 
-Analyzer *Analyzer::addPlugin(const std::string &role, std::unique_ptr<IPluggableManager> plugin) {
+Analyzer *Analyzer::addPlugin(const std::string &role, std::shared_ptr<IPluggableManager> plugin) {
     if (!plugin) return this;
-    // Validate that all declared dependencies are already registered.
     for (const auto& dep : plugin->getDependencies()) {
         if (plugins.find(dep) == plugins.end()) {
             throw std::runtime_error(
@@ -167,11 +208,9 @@ Analyzer *Analyzer::addPlugin(const std::string &role, std::unique_ptr<IPluggabl
                 "' which is not registered.");
         }
     }
-    // Wire the plugin immediately with the persisted ManagerContext
     plugin->setContext(managerContext_m);
     plugin->setupFromConfigFile();
     plugin->initialize();
-    // Record provenance entry for the newly added plugin
     if (provenanceService_m) {
         provenanceService_m->addEntry("plugin." + role, plugin->type());
     }
@@ -179,10 +218,13 @@ Analyzer *Analyzer::addPlugin(const std::string &role, std::unique_ptr<IPluggabl
     return this;
 }
 
+Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& newPlugins) {
+    for (auto &kv : newPlugins) { addPlugin(kv.first, std::move(kv.second)); }
+    return this;
+}
+
 Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& newPlugins) {
-    for (auto &kv : newPlugins) {
-        addPlugin(kv.first, std::move(kv.second));
-    }
+    for (auto &kv : newPlugins) { addPlugin(kv.first, std::move(kv.second)); }
     return this;
 }
 
@@ -221,7 +263,7 @@ Analyzer *Analyzer::DefineVector(std::string name, const std::vector<std::string
 
 Analyzer *Analyzer::bookConfigHistograms() {
     // Get the NDHistogramManager plugin if it exists
-    auto* histogramManager = getPlugin<NDHistogramManager>("histogramManager");
+    auto histogramManager = getPlugin<NDHistogramManager>("histogramManager");
     if (histogramManager) {
         histogramManager->bookConfigHistograms();
     }
@@ -356,7 +398,7 @@ Analyzer *Analyzer::run() {
     }
 
     // Save ND histograms (uses internally tracked histInfo / regionNames)
-    if (auto* histogramManager = getPlugin<NDHistogramManager>("histogramManager")) {
+    if (auto histogramManager = getPlugin<NDHistogramManager>("histogramManager")) {
         histogramManager->saveHists();
     }
 

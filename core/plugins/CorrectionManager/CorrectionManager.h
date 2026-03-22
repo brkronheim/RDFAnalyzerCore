@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class CorrectionManager
  * @brief Handles loading and applying corrections (correctionlib).
@@ -27,6 +29,13 @@
 class CorrectionManager
     : public NamedObjectManager<correction::Correction::Ref> {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<CorrectionManager> create(
+      Analyzer& an, const std::string& role = "correctionManager");
+
   /**
    * @brief Construct a new CorrectionManager object
    * @param configProvider Reference to the configuration provider
@@ -186,5 +195,7 @@ private:
 
   bool initialized_m = false;
 };
+
+
 
 #endif // CORRECTIONMANAGER_H_INCLUDED 

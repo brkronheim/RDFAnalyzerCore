@@ -374,27 +374,27 @@ public:
     }
 
     AnalyzerPythonWrapper& SetupPlugin(const std::string& role) {
-        if (auto* mgr = analyzer_.getPlugin<OnnxManager>(role)) {
+        if (auto mgr = analyzer_.getPlugin<OnnxManager>(role)) {
             mgr->setupFromConfigFile();
             return *this;
         }
-        if (auto* mgr = analyzer_.getPlugin<BDTManager>(role)) {
+        if (auto mgr = analyzer_.getPlugin<BDTManager>(role)) {
             mgr->setupFromConfigFile();
             return *this;
         }
-        if (auto* mgr = analyzer_.getPlugin<CorrectionManager>(role)) {
+        if (auto mgr = analyzer_.getPlugin<CorrectionManager>(role)) {
             mgr->setupFromConfigFile();
             return *this;
         }
-        if (auto* mgr = analyzer_.getPlugin<TriggerManager>(role)) {
+        if (auto mgr = analyzer_.getPlugin<TriggerManager>(role)) {
             mgr->setupFromConfigFile();
             return *this;
         }
-        if (auto* mgr = analyzer_.getPlugin<SofieManager>(role)) {
+        if (auto mgr = analyzer_.getPlugin<SofieManager>(role)) {
             mgr->setupFromConfigFile();
             return *this;
         }
-        if (auto* mgr = analyzer_.getPlugin<NDHistogramManager>(role)) {
+        if (auto mgr = analyzer_.getPlugin<NDHistogramManager>(role)) {
             mgr->setupFromConfigFile();
             return *this;
         }
@@ -677,7 +677,7 @@ public:
 private:
     template <typename T>
     T& requirePlugin(const std::string& role, const std::string& typeName) {
-        auto* plugin = analyzer_.getPlugin<T>(role);
+        auto plugin = analyzer_.getPlugin<T>(role);
         if (plugin == nullptr) {
             throw std::runtime_error(
                 "Plugin with role '" + role + "' not found or not of type '" + typeName +

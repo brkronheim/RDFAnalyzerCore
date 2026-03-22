@@ -1,4 +1,5 @@
 #include <OnnxManager.h>
+#include <analyzer.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ILogger.h>
@@ -596,4 +597,11 @@ void OnnxManager::reportMetadata() {
     first = false;
   }
   logger_m->log(ILogger::Level::Info, msg);
+}
+
+std::shared_ptr<OnnxManager> OnnxManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<OnnxManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
 }

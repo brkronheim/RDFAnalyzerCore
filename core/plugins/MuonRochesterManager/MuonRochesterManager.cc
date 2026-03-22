@@ -4,6 +4,7 @@
 // the Rochester-specific extensions and emits the vtable for this class.
 
 #include <MuonRochesterManager.h>
+#include <analyzer.h>
 #include <api/ILogger.h>
 #include <sstream>
 #include <stdexcept>
@@ -105,4 +106,11 @@ void MuonRochesterManager::appendObjectProvenanceEntries(
     entries["muon_u1_column"]      = u1Column_m;
     entries["muon_u2_column"]      = u2Column_m;
   }
+}
+
+std::shared_ptr<MuonRochesterManager> MuonRochesterManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<MuonRochesterManager>();
+    an.addPlugin(role, plugin);
+    return plugin;
 }

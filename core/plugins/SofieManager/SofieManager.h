@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class SofieManager
  * @brief Handles storing and applying SOFIE models.
@@ -32,6 +34,13 @@ using SofieInferenceFunction = std::function<std::vector<float>(const std::vecto
 class SofieManager
     : public NamedObjectManager<std::shared_ptr<SofieInferenceFunction>> {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<SofieManager> create(
+      Analyzer& an, const std::string& role = "sofieManager");
+
   /**
    * @brief Construct a new SofieManager object
    * @param configProvider Reference to the configuration provider
@@ -124,5 +133,7 @@ private:
    */
   std::unordered_map<std::string, std::string> model_runVars_m;
 };
+
+
 
 #endif // SOFIEMANAGER_H_INCLUDED

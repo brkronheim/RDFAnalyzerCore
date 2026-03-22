@@ -2,6 +2,9 @@
 #define PHOTONENERGYMANAGER_H_INCLUDED
 
 #include <ObjectEnergyManagerBase.h>
+#include <memory>
+
+class Analyzer;
 
 /**
  * @class PhotonEnergyScaleManager
@@ -15,9 +18,18 @@
  */
 class PhotonEnergyScaleManager : public ObjectEnergyManagerBase {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<PhotonEnergyScaleManager> create(
+      Analyzer& an, const std::string& role = "photonEnergyScaleManager");
+
   std::string type() const override { return "PhotonEnergyScaleManager"; }
 protected:
   std::string objectName() const override { return "Photon"; }
 };
+
+
 
 #endif // PHOTONENERGYMANAGER_H_INCLUDED

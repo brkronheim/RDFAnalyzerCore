@@ -1,4 +1,5 @@
 #include <api/IConfigurationProvider.h>
+#include <analyzer.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ILogger.h>
 #include <api/ISystematicManager.h>
@@ -234,4 +235,11 @@ void TriggerManager::reportMetadata() {
     first = false;
   }
   logger_m->log(ILogger::Level::Info, msg);
+}
+
+std::shared_ptr<TriggerManager> TriggerManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<TriggerManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
 }

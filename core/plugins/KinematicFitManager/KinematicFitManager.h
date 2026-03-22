@@ -7,6 +7,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <memory>
+
+class Analyzer;
 
 /**
  * @brief Configuration for one particle in the kinematic fit.
@@ -275,6 +278,13 @@ struct KinFitConfig {
  */
 class KinematicFitManager : public NamedObjectManager<KinFitConfig> {
 public:
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<KinematicFitManager> create(
+      Analyzer& an, const std::string& role = "kinematicFitManager");
+
   /**
    * @brief Construct a KinematicFitManager and load fits from configuration.
    * @param configProvider Reference to the analysis configuration provider.
@@ -344,5 +354,7 @@ private:
   /// Map from fit name to run-variable column name (empty = always run).
   std::unordered_map<std::string, std::string> kinfit_runVars_m;
 };
+
+
 
 #endif // KINEMATICFITMANAGER_H_INCLUDED

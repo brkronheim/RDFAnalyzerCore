@@ -1,4 +1,5 @@
 #include <JetEnergyScaleManager.h>
+#include <analyzer.h>
 #include <ROOT/RVec.hxx>
 #include <api/ILogger.h>
 #include <cmath>
@@ -924,4 +925,11 @@ JetEnergyScaleManager::collectProvenanceEntries() const {
   }
 
   return entries;
+}
+
+std::shared_ptr<JetEnergyScaleManager> JetEnergyScaleManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<JetEnergyScaleManager>();
+    an.addPlugin(role, plugin);
+    return plugin;
 }

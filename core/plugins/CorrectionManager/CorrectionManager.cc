@@ -1,4 +1,5 @@
 #include <CorrectionManager.h>
+#include <analyzer.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ILogger.h>
@@ -370,4 +371,11 @@ void CorrectionManager::reportMetadata() {
     first = false;
   }
   logger_m->log(ILogger::Level::Info, msg);
+}
+
+std::shared_ptr<CorrectionManager> CorrectionManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<CorrectionManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
 }

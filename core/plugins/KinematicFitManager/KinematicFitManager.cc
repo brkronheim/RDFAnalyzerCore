@@ -1,4 +1,5 @@
 #include <KinematicFit.h>
+#include <analyzer.h>
 #include <KinematicFitGPU.h>
 #include <KinematicFitManager.h>
 #include <api/IConfigurationProvider.h>
@@ -833,4 +834,11 @@ void KinematicFitManager::reportMetadata() {
     first = false;
   }
   logger_m->log(ILogger::Level::Info, msg);
+}
+
+std::shared_ptr<KinematicFitManager> KinematicFitManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<KinematicFitManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
 }
