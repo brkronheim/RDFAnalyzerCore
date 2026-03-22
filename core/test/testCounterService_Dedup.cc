@@ -5,7 +5,7 @@
 
 #include <TFile.h>
 #include <TH1D.h>
-#include <TIter.h>
+#include <TCollection.h>
 
 #include <cstdio>
 #include <fstream>
