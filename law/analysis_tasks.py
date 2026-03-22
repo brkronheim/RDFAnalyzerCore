@@ -168,59 +168,14 @@ from output_schema import (  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
 
-import re as _re  # noqa: E402  - used by _collect_skim_shared_libs
-
-
-# ===========================================================================
-# Shared-library staging helper (mirrors _collect_local_shared_libs in
-# nano_tasks.py but kept here so analysis_tasks has no circular import)
-# ===========================================================================
-
-
-def _collect_skim_shared_libs(exe_path: str, repo_root: str) -> dict:
-    """Return {staged_name: real_path} for local shared-library deps of *exe_path*.
-
-    Only libraries whose resolved path starts with *repo_root* are included,
-    so system libraries (glibc, libstdc++, …) are ignored.
-    """
-    staged: dict = {}
-    try:
-        ldd_output = subprocess.check_output(
-            ["ldd", exe_path], text=True, stderr=subprocess.STDOUT
-        )
-    except Exception:
-        return staged
-
-    repo_prefix = os.path.abspath(repo_root)
-    if not repo_prefix.endswith(os.path.sep):
-        repo_prefix += os.path.sep
-
-    for line in ldd_output.splitlines():
-        line = line.strip()
-        if not line or "=> not found" in line:
-            continue
-        soname = resolved = None
-        m = _re.match(r"^(\S+)\s*=>\s*(\S+)", line)
-        if m:
-            soname = os.path.basename(m.group(1))
-            resolved = m.group(2)
-        else:
-            m = _re.match(r"^(\/\S+)\s+\(", line)
-            if m:
-                resolved = m.group(1)
-                soname = os.path.basename(resolved)
-        if not resolved or not os.path.isabs(resolved):
-            continue
-        real_path = os.path.realpath(resolved)
-        if not os.path.exists(real_path) or not real_path.startswith(repo_prefix):
-            continue
-        real_name = os.path.basename(real_path)
-        if ".so" not in real_name:
-            continue
-        staged[real_name] = real_path
-        if soname and ".so" in soname:
-            staged[soname] = real_path
-    return staged
+from ingestion_utils import (  # noqa: E402
+    collect_local_shared_libs as _collect_skim_shared_libs,
+    condor_history_exit as _condor_history_exit,
+    condor_q_ads as _condor_q_ads,
+    condor_rm_job as _condor_rm_job,
+    eos_files_exist_batch as _eos_files_exist_batch_util,
+    read_failed_job_error as _read_failed_job_error,
+)
 
 
 def _find_dataset_entry(
@@ -553,9 +508,7 @@ def _output_files_exist_batch(output_paths: list[str]) -> dict[str, bool]:
             result[path] = os.path.exists(path)
 
     if eos_paths:
-        from nano_tasks import _eos_files_exist_batch  # lazy import to avoid circular deps
-
-        result.update(_eos_files_exist_batch(eos_paths))
+        result.update(_eos_files_exist_batch_util(eos_paths))
 
     return result
 
@@ -1155,8 +1108,10 @@ class SkimMixin:
         default="",
         description=(
             "Source for input file lists.  One of: '' (use dataset manifest directly), "
-            "'nano' (use GetNANOFileList output), 'opendata' (use GetOpenDataFileList "
-            "output), 'xrdfs' (use GetXRDFSFileList output).  "
+            "'rucio' (use GetRucioFileList output), "
+            "'nano' (legacy alias for 'rucio', use GetNANOFileList output), "
+            "'opendata' (use GetOpenDataFileList output), "
+            "'xrdfs' (use GetXRDFSFileList output).  "
             "When set, :class:`PrepareSkimJobs` is automatically required and "
             "splits files into per-job chunks before HTCondor/Dask dispatch."
         ),
@@ -1312,6 +1267,7 @@ class SkimMixin:
         """Return the directory containing per-dataset file-list JSONs."""
         prefix_map = {
             "nano": "nanoFileList",
+            "rucio": "rucioFileList",
             "opendata": "openDataFileList",
             "xrdfs": "xrdfsFileList",
         }
@@ -1392,19 +1348,20 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         automatically from :class:`SkimTask`.
         """
         if self.file_source == "xrdfs":
-            from nano_tasks import GetXRDFSFileList  # lazy import to avoid circular deps
+            from xrdfs_tasks import GetXRDFSFileList  # noqa: PLC0415
             return GetXRDFSFileList.req(
                 self,
                 name=self._effective_file_source_name,
             )
-        if self.file_source == "nano":
-            from nano_tasks import GetNANOFileList  # lazy import to avoid circular deps
-            return GetNANOFileList.req(
+        if self.file_source in ("nano", "rucio"):
+            from rucio_tasks import GetNANOFileList, GetRucioFileList  # noqa: PLC0415
+            cls = GetRucioFileList if self.file_source == "rucio" else GetNANOFileList
+            return cls.req(
                 self,
                 name=self._effective_file_source_name,
             )
         if self.file_source == "opendata":
-            from opendata_tasks import GetOpenDataFileList  # lazy import to avoid circular deps
+            from opendata_tasks import GetOpenDataFileList  # noqa: PLC0415
             return GetOpenDataFileList.req(
                 self,
                 name=self._effective_file_source_name,
@@ -2114,13 +2071,6 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         return counts
 
     def run(self):
-        from nano_tasks import (  # lazy import to avoid circular deps
-            _condor_history_exit,
-            _condor_q_ads,
-            _condor_rm_job,
-            _read_failed_job_error,
-        )
-
         sub_info: dict[str, str] = {}
         with self.input().open("r") as fh:
             for line in fh:
