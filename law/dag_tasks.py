@@ -278,7 +278,8 @@ class FullAnalysisDAG(law.Task):
     def _merge_stage_enabled(self) -> bool:
         return not self.skip_merge
 
-    def _resolved_file_source_name(self) -> str:
+    @property
+    def _file_source_run_name(self) -> str:
         return str(self.file_source_name or self.name)
 
     def _effective_merge_input_dir(self) -> str:
@@ -400,7 +401,7 @@ class FullAnalysisDAG(law.Task):
             "merge_input_dir": merge_input_dir,
             "file_source": self.file_source,
             "file_source_name": (
-                self._resolved_file_source_name() if self.file_source else ""
+                self._file_source_run_name if self.file_source else ""
             ),
             "stages": {
                 "ingestion": bool(self.file_source) and self._skim_stage_enabled,

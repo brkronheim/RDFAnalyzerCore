@@ -234,8 +234,8 @@ class TestFullAnalysisDAGRequires(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
-        mod = types.ModuleType("analysis_tasks")
-        mod.SkimTask = SkimTask
+        mock_analysis_tasks_module = types.ModuleType("analysis_tasks")
+        mock_analysis_tasks_module.SkimTask = SkimTask
 
         task = self._make_task(
             skip_skim=False,
@@ -249,7 +249,7 @@ class TestFullAnalysisDAGRequires(unittest.TestCase):
             file_source="nano",
             file_source_name="nanoFiles",
         )
-        with patch.dict(sys.modules, {"analysis_tasks": mod}):
+        with patch.dict(sys.modules, {"analysis_tasks": mock_analysis_tasks_module}):
             reqs = task.requires()
 
         self.assertEqual(len(reqs), 1)
@@ -262,8 +262,8 @@ class TestFullAnalysisDAGRequires(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
-        mod = types.ModuleType("analysis_tasks")
-        mod.HistFillTask = HistFillTask
+        mock_analysis_tasks_module = types.ModuleType("analysis_tasks")
+        mock_analysis_tasks_module.HistFillTask = HistFillTask
 
         task = self._make_task(
             skip_skim=False,
@@ -276,7 +276,7 @@ class TestFullAnalysisDAGRequires(unittest.TestCase):
             hist_config="hist_config.txt",
             dataset_manifest="datasets.yaml",
         )
-        with patch.dict(sys.modules, {"analysis_tasks": mod}):
+        with patch.dict(sys.modules, {"analysis_tasks": mock_analysis_tasks_module}):
             reqs = task.requires()
 
         self.assertEqual(len(reqs), 1)
@@ -291,8 +291,8 @@ class TestFullAnalysisDAGRequires(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
-        mod = types.ModuleType("merge_tasks")
-        mod.MergeAll = MergeAll
+        mock_merge_tasks_module = types.ModuleType("merge_tasks")
+        mock_merge_tasks_module.MergeAll = MergeAll
 
         task = self._make_task(
             skip_skim=False,
@@ -305,7 +305,7 @@ class TestFullAnalysisDAGRequires(unittest.TestCase):
             submit_config="submit_config.txt",
             dataset_manifest="datasets.yaml",
         )
-        with patch.dict(sys.modules, {"merge_tasks": mod}):
+        with patch.dict(sys.modules, {"merge_tasks": mock_merge_tasks_module}):
             reqs = task.requires()
 
         self.assertEqual(len(reqs), 1)
