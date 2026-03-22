@@ -234,7 +234,7 @@ public:
         const unsigned int fptr_id = fptr_counter.fetch_add(1);
         const std::string fname = "__rdf_jit_fptr_" + std::to_string(fptr_id);
 
-        const std::string decl = fptr + " " + fname +
+        const std::string decl = "auto " + fname +
                                  " = reinterpret_cast<" + fptr + ">(" +
                                  std::to_string(func_ptr) + ");";
         if (!gInterpreter->Declare(decl.c_str())) {

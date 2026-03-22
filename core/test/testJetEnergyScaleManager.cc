@@ -734,7 +734,7 @@ TEST_F(JetEnergyScaleManagerTest, RegisterSystematicSourcesEmptySourceNameThrows
 
 TEST_F(JetEnergyScaleManagerTest, GetSystematicSourcesUnknownSetThrows) {
   JetEnergyScaleManager mgr;
-  EXPECT_THROW(mgr.getSystematicSources("nonexistent"), std::out_of_range);
+  EXPECT_THROW(mgr.getSystematicSources("nonexistent"), std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
