@@ -77,7 +77,7 @@ int main(int argc, char **argv) {
     auto an = Analyzer(argv[1]);
 
     // Add NDHistogramManager plugin using the helper function
-    makeNDHistogramManager(an);
+    NDHistogramManager::create(an);
 
     // Register systematic variation for muon momentum scale
     // This demonstrates how systematics propagate through the analysis

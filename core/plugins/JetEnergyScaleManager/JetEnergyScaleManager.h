@@ -15,6 +15,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @brief Record of a single JES/JER systematic variation.
  *
@@ -644,15 +646,14 @@ private:
    * Returns empty string when substitution is not possible.
    */
   std::string deriveMassColumnName(const std::string &ptColName) const;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<JetEnergyScaleManager> create(
+      Analyzer& an, const std::string& role = "jetEnergyScaleManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<JetEnergyScaleManager> makeJetEnergyScaleManager(
-    Analyzer& an, const std::string& role = "jetEnergyScaleManager");
 
 #endif // JETENERGYSCALEMANAGER_H_INCLUDED

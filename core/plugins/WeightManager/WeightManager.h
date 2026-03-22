@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @brief Audit record for a single weight component.
  *
@@ -307,15 +309,14 @@ private:
   /// Book lazy RDF actions to audit the named column.
   void bookAudit(const std::string &label, const std::string &column,
                  ROOT::RDF::RNode &df);
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<WeightManager> create(
+      Analyzer& an, const std::string& role = "weightManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<WeightManager> makeWeightManager(
-    Analyzer& an, const std::string& role = "weightManager");
 
 #endif // WEIGHTMANAGER_H_INCLUDED

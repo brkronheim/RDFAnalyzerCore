@@ -3,6 +3,8 @@
 
 #include <ObjectEnergyManagerBase.h>
 
+class Analyzer;
+
 /**
  * @class PhotonEnergyScaleManager
  * @brief Concrete plugin for CMS Photon energy scale and resolution corrections.
@@ -18,15 +20,14 @@ public:
   std::string type() const override { return "PhotonEnergyScaleManager"; }
 protected:
   std::string objectName() const override { return "Photon"; }
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<PhotonEnergyScaleManager> create(
+      Analyzer& an, const std::string& role = "photonEnergyScaleManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<PhotonEnergyScaleManager> makePhotonEnergyScaleManager(
-    Analyzer& an, const std::string& role = "photonEnergyScaleManager");
 
 #endif // PHOTONENERGYMANAGER_H_INCLUDED

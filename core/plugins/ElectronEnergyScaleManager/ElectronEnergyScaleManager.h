@@ -3,6 +3,8 @@
 
 #include <ObjectEnergyManagerBase.h>
 
+class Analyzer;
+
 /**
  * @class ElectronEnergyScaleManager
  * @brief Concrete plugin for CMS Electron energy scale and resolution corrections.
@@ -18,15 +20,14 @@ public:
   std::string type() const override { return "ElectronEnergyScaleManager"; }
 protected:
   std::string objectName() const override { return "Electron"; }
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<ElectronEnergyScaleManager> create(
+      Analyzer& an, const std::string& role = "electronEnergyScaleManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<ElectronEnergyScaleManager> makeElectronEnergyScaleManager(
-    Analyzer& an, const std::string& role = "electronEnergyScaleManager");
 
 #endif // ELECTRONENERGYMANAGER_H_INCLUDED

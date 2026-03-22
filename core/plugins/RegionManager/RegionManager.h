@@ -12,6 +12,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class RegionManager
  * @brief Plugin that manages named analysis regions with optional hierarchy.
@@ -187,15 +189,14 @@ private:
   IDataFrameProvider *dataManager_m = nullptr;
   ILogger *logger_m = nullptr;
   IOutputSink *metaSink_m = nullptr;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<RegionManager> create(
+      Analyzer& an, const std::string& role = "regionManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<RegionManager> makeRegionManager(
-    Analyzer& an, const std::string& role = "regionManager");
 
 #endif // REGIONMANAGER_H_INCLUDED

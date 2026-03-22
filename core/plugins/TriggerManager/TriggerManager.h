@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class TriggerManager
  * @brief Handles loading, storing, and applying trigger groups and vetoes.
@@ -86,15 +88,14 @@ private:
    * @brief Map from sample name to group name.
    */
   std::unordered_map<std::string, std::string> sampleToGroup_m;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<TriggerManager> create(
+      Analyzer& an, const std::string& role = "triggerManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<TriggerManager> makeTriggerManager(
-    Analyzer& an, const std::string& role = "triggerManager");
 
 #endif // TRIGGERMANAGER_H_INCLUDED 

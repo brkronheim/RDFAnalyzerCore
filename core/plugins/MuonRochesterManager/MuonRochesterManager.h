@@ -3,6 +3,8 @@
 
 #include <ObjectEnergyManagerBase.h>
 
+class Analyzer;
+
 /**
  * @class MuonRochesterManager
  * @brief Plugin for applying CMS muon Rochester momentum corrections.
@@ -201,15 +203,14 @@ private:
   std::string nLayersColumn_m;
   std::string u1Column_m;
   std::string u2Column_m;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<MuonRochesterManager> create(
+      Analyzer& an, const std::string& role = "muonRochesterManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<MuonRochesterManager> makeMuonRochesterManager(
-    Analyzer& an, const std::string& role = "muonRochesterManager");
 
 #endif // MUONROCHESTERMANAGER_H_INCLUDED

@@ -1,4 +1,5 @@
 #include <api/IConfigurationProvider.h>
+#include <analyzer.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ISystematicManager.h>
 #include <api/IPluggableManager.h>
@@ -1132,4 +1133,11 @@ void NDHistogramManager::reportMetadata() {
                 "NDHistogramManager: " +
                 std::to_string(configHistograms_m.size()) +
                 " config histogram(s) defined.");
+}
+
+std::shared_ptr<NDHistogramManager> NDHistogramManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<NDHistogramManager>(an.getConfigurationProvider());
+    an.addPlugin(role, plugin);
+    return plugin;
 }

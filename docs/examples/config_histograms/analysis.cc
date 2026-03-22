@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
     auto analyzer = Analyzer(argv[1]);
 
     // Add NDHistogramManager plugin using the helper function
-    makeNDHistogramManager(analyzer);
+    NDHistogramManager::create(analyzer);
 
     // Define analysis variables
     analyzer.Define("example_var", []() -> Float_t { return 5.0; }, {})

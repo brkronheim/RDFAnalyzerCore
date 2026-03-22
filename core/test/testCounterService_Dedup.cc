@@ -41,7 +41,7 @@ TEST(CounterServiceDedupTest, AnalyzerPlusNDHistogramManagerRunsCounterOnlyOnce)
   writeConfig(cfgPath, metaPath);
 
   Analyzer analyzer(cfgPath);
-  makeNDHistogramManager(analyzer);
+  NDHistogramManager::create(analyzer);
 
   // define the branches used by CounterService
   analyzer.Define("intCode", [](ULong64_t entry) { return static_cast<Int_t>(entry % 3); }, {"rdfentry_"});

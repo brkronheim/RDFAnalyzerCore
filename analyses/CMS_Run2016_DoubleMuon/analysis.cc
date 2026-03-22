@@ -222,9 +222,9 @@ int main(int argc, char **argv) {
     //      c) TriggerManager    – reads triggerConfig; applies trigger filter
     //         via applyAllTriggers() before analysis cuts are registered.
     // -----------------------------------------------------------------------
-    auto histMgr    = makeNDHistogramManager(an);
-    auto cutflowMgr = makeCutflowManager(an);
-    auto trigMgr    = makeTriggerManager(an);
+    auto histMgr    = NDHistogramManager::create(an);
+    auto cutflowMgr = CutflowManager::create(an);
+    auto trigMgr    = TriggerManager::create(an);
 
     // -----------------------------------------------------------------------
     // 3. Apply trigger selection via TriggerManager.

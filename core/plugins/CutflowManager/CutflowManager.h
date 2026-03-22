@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+class Analyzer;
+
 // Forward declaration to avoid circular includes.
 class RegionManager;
 
@@ -252,15 +254,14 @@ private:
   IDataFrameProvider *dataManager_m = nullptr;
   ILogger *logger_m = nullptr;
   IOutputSink *metaSink_m = nullptr;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<CutflowManager> create(
+      Analyzer& an, const std::string& role = "cutflowManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<CutflowManager> makeCutflowManager(
-    Analyzer& an, const std::string& role = "cutflowManager");
 
 #endif // CUTFLOWMANAGER_H_INCLUDED

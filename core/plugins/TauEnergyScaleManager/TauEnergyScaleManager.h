@@ -3,6 +3,8 @@
 
 #include <ObjectEnergyManagerBase.h>
 
+class Analyzer;
+
 /**
  * @class TauEnergyScaleManager
  * @brief Concrete plugin for CMS Tau energy scale and resolution corrections.
@@ -18,15 +20,14 @@ public:
   std::string type() const override { return "TauEnergyScaleManager"; }
 protected:
   std::string objectName() const override { return "Tau"; }
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<TauEnergyScaleManager> create(
+      Analyzer& an, const std::string& role = "tauEnergyScaleManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<TauEnergyScaleManager> makeTauEnergyScaleManager(
-    Analyzer& an, const std::string& role = "tauEnergyScaleManager");
 
 #endif // TAUENERGYMANAGER_H_INCLUDED

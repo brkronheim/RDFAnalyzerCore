@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class BDTManager
  * @brief Handles loading, storing, and applying BDTs.
@@ -95,15 +97,14 @@ private:
    * @brief Map from BDT name to run variable name.
    */
   std::unordered_map<std::string, std::string> bdt_runVars_m;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<BDTManager> create(
+      Analyzer& an, const std::string& role = "bdtManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<BDTManager> makeBDTManager(
-    Analyzer& an, const std::string& role = "bdtManager");
 
 #endif // BDTMANAGER_H_INCLUDED 

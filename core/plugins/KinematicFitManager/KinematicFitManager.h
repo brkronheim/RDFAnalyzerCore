@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @brief Configuration for one particle in the kinematic fit.
  *
@@ -343,15 +345,14 @@ private:
 
   /// Map from fit name to run-variable column name (empty = always run).
   std::unordered_map<std::string, std::string> kinfit_runVars_m;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<KinematicFitManager> create(
+      Analyzer& an, const std::string& role = "kinematicFitManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<KinematicFitManager> makeKinematicFitManager(
-    Analyzer& an, const std::string& role = "kinematicFitManager");
 
 #endif // KINEMATICFITMANAGER_H_INCLUDED

@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class SofieManager
  * @brief Handles storing and applying SOFIE models.
@@ -123,15 +125,14 @@ private:
    * @brief Map from model name to run variable name.
    */
   std::unordered_map<std::string, std::string> model_runVars_m;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<SofieManager> create(
+      Analyzer& an, const std::string& role = "sofieManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<SofieManager> makeSofieManager(
-    Analyzer& an, const std::string& role = "sofieManager");
 
 #endif // SOFIEMANAGER_H_INCLUDED

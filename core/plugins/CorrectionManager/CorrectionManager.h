@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class CorrectionManager
  * @brief Handles loading and applying corrections (correctionlib).
@@ -185,15 +187,14 @@ private:
   void registerCorrectionlib(const IConfigurationProvider &configProvider);
 
   bool initialized_m = false;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<CorrectionManager> create(
+      Analyzer& an, const std::string& role = "correctionManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<CorrectionManager> makeCorrectionManager(
-    Analyzer& an, const std::string& role = "correctionManager");
 
 #endif // CORRECTIONMANAGER_H_INCLUDED 

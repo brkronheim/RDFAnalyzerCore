@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class GoldenJsonManager
  * @brief Filters data events against one or more CMS golden JSON files.
@@ -98,15 +100,14 @@ private:
    * @param filename Path to the JSON file.
    */
   void loadJsonFile(const std::string &filename);
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<GoldenJsonManager> create(
+      Analyzer& an, const std::string& role = "goldenJsonManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<GoldenJsonManager> makeGoldenJsonManager(
-    Analyzer& an, const std::string& role = "goldenJsonManager");
 
 #endif // GOLDENJSONMANAGER_H_INCLUDED

@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Analyzer;
+
 /**
  * @class OnnxManager
  * @brief Handles loading, storing, and applying ONNX models.
@@ -189,15 +191,14 @@ private:
    * @brief Cached C-string pointers for ONNX output names (to avoid per-event allocation).
    */
   std::unordered_map<std::string, std::vector<const char *>> model_outputNamePtrs_m;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<OnnxManager> create(
+      Analyzer& an, const std::string& role = "onnxManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<OnnxManager> makeOnnxManager(
-    Analyzer& an, const std::string& role = "onnxManager");
 
 #endif // ONNXMANAGER_H_INCLUDED

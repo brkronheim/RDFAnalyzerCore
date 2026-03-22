@@ -1,4 +1,5 @@
 #include <GoldenJsonManager.h>
+#include <analyzer.h>
 #include <api/ILogger.h>
 
 #include <cctype>
@@ -261,4 +262,11 @@ void GoldenJsonManager::reportMetadata() {
   logger_m->log(ILogger::Level::Info,
                 "GoldenJsonManager: " + std::to_string(validLumis_m.size()) +
                 " certified run(s) loaded.");
+}
+
+std::shared_ptr<GoldenJsonManager> GoldenJsonManager::create(
+    Analyzer& an, const std::string& role) {
+    auto plugin = std::make_shared<GoldenJsonManager>();
+    an.addPlugin(role, plugin);
+    return plugin;
 }

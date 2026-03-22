@@ -19,6 +19,9 @@ set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/OnnxManager
     ${CMAKE_CURRENT_SOURCE_DIR}/SofieManager
     ${CMAKE_CURRENT_SOURCE_DIR}/WeightManager
+    # Extern headers needed so plugin .cc files can #include <analyzer.h>
+    ${CMAKE_CURRENT_SOURCE_DIR}/../extern/correctionlib/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../extern/XGBoost-FastForest/include
 )
 
 # Create static library

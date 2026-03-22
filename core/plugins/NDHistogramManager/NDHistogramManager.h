@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+class Analyzer;
+
 // Forward declaration to avoid circular includes.
 class RegionManager;
 
@@ -275,15 +277,14 @@ private:
   bool countersFinalized_m = false;
   std::string histogramBackend_m = "root";
   RegionManager* regionManager_m = nullptr;
+
+  // -------------------------------------------------------------------------
+  // Factory: create, register with an Analyzer, and return as shared_ptr.
+  // -------------------------------------------------------------------------
+  static std::shared_ptr<NDHistogramManager> create(
+      Analyzer& an, const std::string& role = "histogramManager");
 };
 
 
-// ---------------------------------------------------------------------------
-// Helper: create, register with analyzer, and return as shared_ptr
-// ---------------------------------------------------------------------------
-#include <memory>
-class Analyzer;
-std::shared_ptr<NDHistogramManager> makeNDHistogramManager(
-    Analyzer& an, const std::string& role = "histogramManager");
 
 #endif // NDHISTOGRAMMANAGER_H_INCLUDED 

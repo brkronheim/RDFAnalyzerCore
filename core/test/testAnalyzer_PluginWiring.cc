@@ -11,7 +11,7 @@ TEST(AnalyzerPluginWiring, AddPluginAfterConfigCtor) {
     Analyzer analyzer(cfgPath);
 
     // Use the helper to create, register, and get the plugin as shared_ptr
-    auto histManager = makeNDHistogramManager(analyzer);
+    auto histManager = NDHistogramManager::create(analyzer);
 
     // The plugin should now be retrievable and the correct type
     auto retrieved = analyzer.getPlugin<NDHistogramManager>("histogramManager");
