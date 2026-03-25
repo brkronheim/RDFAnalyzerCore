@@ -397,6 +397,8 @@ def generate_condor_runscript(
     shared_dir_name=None,
     config_file="submit_config.txt",
     python_env_tarball=None,
+    shared_archive_name=None,
+    runtime_config_relpath=None,
 ):
     stage_block = stage_inputs_block(eos_sched, config_file) if stage_inputs else ""
     stage_out_pre = ""
@@ -439,6 +441,27 @@ def generate_condor_runscript(
         )
         if x509_name:
             shared_block += f"if [ -f {shared_dir_name}/{x509_name} ]; then cp -f {shared_dir_name}/{x509_name} .; fi\n"
+    elif shared_archive_name:
+        shared_block = (
+            f"if [ -f \"{shared_archive_name}\" ]; then\n"
+            f"  tar -xzf \"{shared_archive_name}\"\n"
+            f"fi\n"
+            f"if [ -f \"{exe_relpath}\" ]; then chmod +x \"{exe_relpath}\"; fi\n"
+            "export LD_LIBRARY_PATH=\"$PWD:${LD_LIBRARY_PATH:-}\"\n"
+        )
+
+    config_runtime_path = runtime_config_relpath or config_file
+    config_runtime_dir = os.path.dirname(config_runtime_path)
+    materialize_config_block = ""
+    if config_runtime_path != config_file:
+        materialize_config_block = (
+            (f"mkdir -p {shlex.quote(config_runtime_dir)}\n" if config_runtime_dir else "")
+            + "for _cfg_payload in *.txt *.yaml *.yml; do\n"
+            + "  [ -f \"$_cfg_payload\" ] || continue\n"
+            + f"  if [ \"$_cfg_payload\" != \"{config_file}\" ]; then cp -n \"$_cfg_payload\" {shlex.quote((config_runtime_dir or '.') + '/')} 2>/dev/null || true; fi\n"
+            + "done\n"
+            + f"cp -f {shlex.quote(config_file)} {shlex.quote(config_runtime_path)}\n"
+        )
 
     x509_block = ""
     if x509_name:
@@ -446,6 +469,14 @@ def generate_condor_runscript(
             f"export X509_USER_PROXY={x509_name}\n"
             "voms-proxy-info -all\n"
             f"voms-proxy-info -all -file {x509_name}\n"
+        )
+    else:
+        x509_block = (
+            'if [ -f "x509" ]; then\n'
+            '  export X509_USER_PROXY=x509\n'
+            '  voms-proxy-info -all || true\n'
+            '  voms-proxy-info -all -file x509 || true\n'
+            'fi\n'
         )
 
     python_env_block = ""
@@ -478,12 +509,14 @@ stage_in_end=$(date +%s)
 echo "Stage-in time: $((stage_in_end - stage_in_start))s"
 echo "Check file existence"
 ls
+{materialize_config_block}
 
 analysis_start=$(date +%s)
 echo "Starting Analysis"
+chmod +x ./{exe_relpath}
 # run the analysis but capture its exit status so we can re-raise a signal
 set +e
-./{exe_relpath} submit_config.txt
+./{exe_relpath} {config_runtime_path}
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
@@ -553,6 +586,7 @@ def generate_condor_submit(
     eos_sched=False,
     include_aux=True,
     shared_dir_name=None,
+    shared_archive_name=None,
     config_file="submit_config.txt",
 ):
     Path(main_dir + "/condor_logs").mkdir(parents=True, exist_ok=True)
@@ -563,6 +597,10 @@ def generate_condor_submit(
     ]
     if shared_dir_name:
         transfer_files.append(f"{main_dir}/{shared_dir_name}")
+    elif shared_archive_name:
+        archive_path = os.path.join(main_dir, shared_archive_name)
+        if os.path.exists(archive_path):
+            transfer_files.append(archive_path)
     else:
         transfer_files.append(f"{main_dir}/job_$(Process)/{exe_relpath}")
         if include_aux:
@@ -634,6 +672,8 @@ def write_submit_files(
     config_file="submit_config.txt",
     container_setup="",
     python_env_tarball=None,
+    shared_archive_name=None,
+    runtime_config_relpath=None,
 ):
     submit_path = os.path.join(main_dir, "condor_submit.sub")
     runscript_path = os.path.join(main_dir, "condor_runscript.sh")
@@ -660,6 +700,8 @@ def write_submit_files(
                     shared_dir_name=shared_dir_name,
                     config_file=config_file,
                     python_env_tarball=python_env_tarball,
+                    shared_archive_name=shared_archive_name,
+                    runtime_config_relpath=runtime_config_relpath,
                 )
             )
         with open(runscript_path, "w") as condor_sub:
@@ -679,6 +721,8 @@ def write_submit_files(
                     shared_dir_name=shared_dir_name,
                     config_file=config_file,
                     python_env_tarball=python_env_tarball,
+                    shared_archive_name=shared_archive_name,
+                    runtime_config_relpath=runtime_config_relpath,
                 )
             )
 
@@ -700,6 +744,7 @@ def write_submit_files(
                 eos_sched=eos_sched,
                 include_aux=include_aux,
                 shared_dir_name=shared_dir_name,
+                shared_archive_name=shared_archive_name,
                 config_file=config_file,
             )
         )

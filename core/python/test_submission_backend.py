@@ -55,3 +55,21 @@ def test_generate_condor_runscript_shared_block_copies_config_files(tmp_path):
     # Generic copy loop must be present
     assert "for _shared_f in shared_inputs/*" in script
     assert "cp -n" in script
+
+
+def test_generate_condor_runscript_shared_archive_materializes_cfg_runtime():
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=False,
+        stage_outputs=False,
+        root_setup="",
+        x509loc="x509",
+        shared_archive_name="shared_inputs.tar.gz",
+        runtime_config_relpath="cfg/submit_config.txt",
+    )
+    assert 'tar -xzf "shared_inputs.tar.gz"' in script
+    assert 'cp -f submit_config.txt cfg/submit_config.txt' in script
+    assert 'chmod +x "myexe"' in script
+    assert 'export LD_LIBRARY_PATH="$PWD:${LD_LIBRARY_PATH:-}"' in script
+    assert './myexe cfg/submit_config.txt' in script
+    assert 'export X509_USER_PROXY=x509' in script

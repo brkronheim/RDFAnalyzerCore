@@ -111,10 +111,11 @@ def _run_analysis_job(
     job_dir: str,
     root_setup: str = "",
     container_setup: str = "",
+    config_relpath: str = "submit_config.txt",
 ) -> str:
     """
-    Run a single analysis job in *job_dir* by invoking *exe_path* with
-    ``submit_config.txt`` as its argument.
+    Run a single analysis job in *job_dir* by invoking *exe_path* with a
+    job config path such as ``submit_config.txt`` or ``cfg/submit_config.txt``.
 
     This function is intentionally free of LAW/Luigi imports so that it can be
     pickled and sent to a remote Dask worker without shipping the full task
@@ -147,6 +148,8 @@ def _run_analysis_job(
         entire inner command.  The string ``{cmd}`` is replaced with the inner
         command when present; otherwise the inner command is appended after
         ``--command-to-run`` (for CMSSW wrappers) or ``bash -c``.
+    config_relpath:
+        Config path relative to *job_dir* passed to the analysis executable.
 
     Returns
     -------
@@ -174,8 +177,9 @@ def _run_analysis_job(
 
     cmd_parts.extend([
         f"cd {shlex.quote(job_dir)}",
+        "if [ -f x509 ]; then export X509_USER_PROXY=$PWD/x509; fi",
         f"chmod +x {shlex.quote(exe_path)}",
-        f"{shlex.quote(exe_path)} submit_config.txt",
+        f"{shlex.quote(exe_path)} {shlex.quote(config_relpath)}",
     ])
 
     inner_cmd = " && ".join(cmd_parts)

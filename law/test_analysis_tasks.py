@@ -340,7 +340,9 @@ class TestWriteJobConfig(unittest.TestCase):
         mod = self._import()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "submit_config.txt")
+            job_dir = os.path.join(tmpdir, "job_0")
+            Path(job_dir).mkdir()
+            cfg_path = os.path.join(job_dir, "submit_config.txt")
             Path(cfg_path).write_text(
                 "saveDirectory=/tmp/local/out\n"
                 "saveFile=/tmp/local/out/skim.root\n"
@@ -350,7 +352,7 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._rewrite_job_output_destinations(
                 cfg_path,
-                "/eos/user/b/test/sample/job_0",
+                "/eos/user/b/test/sample",
             )
 
             cfg = {}
@@ -361,9 +363,9 @@ class TestWriteJobConfig(unittest.TestCase):
                         k, v = line.split("=", 1)
                         cfg[k] = v
 
-            self.assertEqual(cfg["saveDirectory"], "/eos/user/b/test/sample/job_0")
-            self.assertEqual(cfg["saveFile"], "/eos/user/b/test/sample/job_0/skim.root")
-            self.assertEqual(cfg["metaFile"], "/eos/user/b/test/sample/job_0/meta.root")
+            self.assertEqual(cfg["saveDirectory"], "/eos/user/b/test/sample")
+            self.assertEqual(cfg["saveFile"], "/eos/user/b/test/sample/output_0.root")
+            self.assertEqual(cfg["metaFile"], "/eos/user/b/test/sample/meta_0.root")
             self.assertEqual(cfg["sample"], "test")
 
     def test_aux_directory_is_copied_and_rewritten(self):
@@ -655,12 +657,15 @@ class TestSkimTask(unittest.TestCase):
                     {
                         "dataset_name": "sample",
                         "job_dir": job_dir,
+                        "config_path": os.path.join(job_dir, "submit_config.txt"),
                         "out_dir": os.path.join(run_dir, "outputs", "sample"),
                     },
                 )
                 self.assertIs(func, analysis_tasks._run_prepared_skim_job)
                 self.assertEqual(args[0], shared_dir)
                 self.assertEqual(args[1], job_dir)
+                self.assertEqual(args[5], os.path.join(job_dir, "submit_config.txt"))
+                self.assertEqual(args[6], os.path.join(run_dir, "shared_inputs.tar.gz"))
                 self.assertEqual(kwargs, {})
             finally:
                 analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
@@ -893,6 +898,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 shared_dir = os.path.join(tmpdir, "skimRun_myRun", "shared_inputs")
                 self.assertTrue(os.path.exists(os.path.join(shared_dir, "aux_bundle.tar.gz")))
                 self.assertTrue(os.path.exists(os.path.join(shared_dir, "cfg_bundle.tar.gz")))
+                self.assertTrue(os.path.exists(os.path.join(tmpdir, "skimRun_myRun", "shared_inputs.tar.gz")))
 
                 job_cfg = os.path.join(
                     tmpdir,
@@ -957,6 +963,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
             )
             try:
                 self.assertTrue(os.path.exists(os.path.join(runtime_dir, "cfg", "corrections.yaml")))
+                self.assertTrue(os.path.exists(os.path.join(runtime_dir, "cfg", "submit_config.txt")))
                 self.assertTrue(os.path.exists(os.path.join(runtime_dir, "aux", "shared.json.gz")))
                 self.assertEqual(runtime_exe, os.path.join(runtime_dir, "exe"))
 
@@ -966,15 +973,14 @@ class TestPrepareSkimJobs(unittest.TestCase):
             finally:
                 shutil.rmtree(runtime_dir, ignore_errors=True)
 
-    def test_htcondor_job_config_transfers_shared_and_branch_dirs(self):
+    def test_htcondor_job_config_is_explicitly_unsupported(self):
         import analysis_tasks
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = os.path.join(tmpdir, "skimRun_myRun")
-            shared_dir = os.path.join(run_dir, "shared_inputs")
             job_dir = os.path.join(run_dir, "jobs", "sample", "job_0")
-            Path(shared_dir).mkdir(parents=True)
             Path(job_dir).mkdir(parents=True)
+            Path(os.path.join(job_dir, "submit_config.txt")).write_text("saveFile=out.root\n")
 
             manifest_path = _write_manifest(
                 tmpdir,
@@ -992,30 +998,20 @@ class TestPrepareSkimJobs(unittest.TestCase):
             analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
             try:
                 config = MagicMock()
+                config.input_files = {}
                 config.custom_content = []
-                with patch.object(task, "create_branch_map", return_value={0: {"job_dir": job_dir}}):
-                    result = task.htcondor_job_config(config, job_num=0, branches=[0])
-
-                transfer_values = [value for key, value in result.custom_content if key == "transfer_input_files"]
-                self.assertTrue(transfer_values)
-                transfer_text = transfer_values[-1]
-                self.assertIn(shared_dir, transfer_text)
-                self.assertIn(job_dir, transfer_text)
+                with patch.object(task, "create_branch_map", return_value={0: {"job_dir": job_dir, "config_path": os.path.join(job_dir, "submit_config.txt")}}):
+                    with self.assertRaisesRegex(RuntimeError, "branch-level LAW HTCondor execution is disabled"):
+                        task.htcondor_job_config(config, job_num=0, branches=[0])
             finally:
                 analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
 
-    def test_htcondor_job_config_flattens_grouped_branches(self):
+    def test_htcondor_workflow_delegates_to_monitor_task(self):
         import analysis_tasks
+        import law as law_mod
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = os.path.join(tmpdir, "skimRun_myRun")
-            shared_dir = os.path.join(run_dir, "shared_inputs")
-            job_dir_0 = os.path.join(run_dir, "jobs", "sample", "job_0")
-            job_dir_1 = os.path.join(run_dir, "jobs", "sample", "job_1")
-            Path(shared_dir).mkdir(parents=True)
-            Path(job_dir_0).mkdir(parents=True)
-            Path(job_dir_1).mkdir(parents=True)
-
             manifest_path = _write_manifest(
                 tmpdir,
                 [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
@@ -1025,38 +1021,27 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 submit_config="/fake/cfg.txt",
                 dataset_manifest=manifest_path,
                 name="myRun",
+                workflow="htcondor",
                 file_source="nano",
             )
 
             orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
             analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
             try:
-                config = MagicMock()
-                config.custom_content = []
-                with patch.object(
-                    task,
-                    "create_branch_map",
-                    return_value={
-                        0: {"job_dir": job_dir_0},
-                        1: {"job_dir": job_dir_1},
-                    },
-                ):
-                    result = task.htcondor_job_config(
-                        config,
-                        job_num=0,
-                        branches=[[0, 1]],
-                    )
+                delegate = MagicMock()
+                delegate.complete.return_value = True
+                delegate_output = law_mod.LocalFileTarget(os.path.join(tmpdir, "delegated.done"))
+                delegate.output.return_value = delegate_output
 
-                transfer_values = [value for key, value in result.custom_content if key == "transfer_input_files"]
-                self.assertTrue(transfer_values)
-                transfer_text = transfer_values[-1]
-                self.assertIn(shared_dir, transfer_text)
-                self.assertIn(job_dir_0, transfer_text)
-                self.assertIn(job_dir_1, transfer_text)
+                with patch.object(analysis_tasks.MonitorSkimJobs, "req", return_value=delegate):
+                    self.assertTrue(task.complete())
+                    self.assertEqual(task.output().path, delegate_output.path)
+                    reqs = task.workflow_proxy.requires()
+                    self.assertIs(reqs["delegate"], delegate)
             finally:
                 analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
 
-    def test_htcondor_create_job_file_factory_uses_persistent_submit_paths(self):
+    def test_htcondor_remote_helper_methods_are_disabled(self):
         import analysis_tasks
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1076,49 +1061,16 @@ class TestPrepareSkimJobs(unittest.TestCase):
             orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
             analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
             try:
-                factory = task.htcondor_create_job_file_factory()
-                config = factory.get_config()
-                self.assertEqual(config.dir, run_dir)
-                self.assertEqual(config.file_name, "condor_submit.sub")
-                self.assertTrue(os.path.isdir(run_dir))
-            finally:
-                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
-
-    def test_htcondor_uses_persistent_condor_runscript(self):
-        import analysis_tasks
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_dir = os.path.join(tmpdir, "skimRun_myRun")
-            manifest_path = _write_manifest(
-                tmpdir,
-                [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
-            )
-            task = analysis_tasks.SkimTask(
-                exe="/fake/exe",
-                submit_config="/fake/cfg.txt",
-                dataset_manifest=manifest_path,
-                name="myRun",
-                file_source="nano",
-            )
-
-            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
-            analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
-            try:
-                job_file = task.htcondor_job_file()
-                wrapper_file = task.htcondor_wrapper_file()
-                group_wrapper_file = task.htcondor_group_wrapper_file()
-
-                expected_path = os.path.join(run_dir, "condor_runscript.sh")
-                self.assertEqual(job_file.path, expected_path)
-                self.assertEqual(wrapper_file.path, expected_path)
-                self.assertEqual(group_wrapper_file.path, expected_path)
-                self.assertTrue(os.path.isfile(expected_path))
-                self.assertTrue(os.access(expected_path, os.X_OK))
-
-                with open(expected_path) as fh:
-                    contents = fh.read()
-                self.assertIn("law run ${LAW_JOB_TASK_MODULE}.${LAW_JOB_TASK_CLASS}", contents)
-                self.assertNotIn("law_job", contents)
+                with self.assertRaisesRegex(RuntimeError, "does not use LAW remote HTCondor job files"):
+                    task.htcondor_job_file()
+                with self.assertRaisesRegex(RuntimeError, "does not use LAW remote HTCondor wrappers"):
+                    task.htcondor_wrapper_file()
+                with self.assertRaisesRegex(RuntimeError, "does not use LAW remote HTCondor wrappers"):
+                    task.htcondor_group_wrapper_file()
+                with self.assertRaisesRegex(RuntimeError, "does not use LAW remote HTCondor job factories"):
+                    task.htcondor_create_job_file_factory()
+                self.assertIsNone(task.htcondor_bootstrap_file())
+                self.assertIsNone(task.htcondor_stageout_file())
             finally:
                 analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
 
@@ -1148,6 +1100,10 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 tar.add(cfg_src, arcname="cfg")
             with tarfile.open(os.path.join(shared_dir, "aux_bundle.tar.gz"), "w:gz") as tar:
                 tar.add(aux_src, arcname="aux")
+            analysis_tasks._build_shared_inputs_archive(
+                shared_dir,
+                os.path.join(run_dir, "shared_inputs.tar.gz"),
+            )
 
             job0 = os.path.join(jobs_dir, "job_0")
             job1 = os.path.join(jobs_dir, "job_1")
@@ -1159,8 +1115,8 @@ class TestPrepareSkimJobs(unittest.TestCase):
             with open(os.path.join(run_dir, "prep_submission.json"), "w") as fh:
                 json.dump(
                     [
-                        {"dataset_name": "sample", "job_dir": job0, "out_dir": os.path.join(run_dir, "outputs", "sample", "job_0")},
-                        {"dataset_name": "sample", "job_dir": job1, "out_dir": os.path.join(run_dir, "outputs", "sample", "job_1")},
+                        {"dataset_name": "sample", "job_dir": job0, "config_path": os.path.join(job0, "submit_config.txt"), "out_dir": os.path.join(run_dir, "outputs", "sample", "job_0")},
+                        {"dataset_name": "sample", "job_dir": job1, "config_path": os.path.join(job1, "submit_config.txt"), "out_dir": os.path.join(run_dir, "outputs", "sample", "job_1")},
                     ],
                     fh,
                 )
@@ -1185,53 +1141,87 @@ class TestPrepareSkimJobs(unittest.TestCase):
             finally:
                 analysis_tasks.BuildSkimSubmission._run_dir = property(orig_run_dir)
 
-            submit_path = os.path.join(run_dir, "condor_submit.sub")
-            runscript_path = os.path.join(run_dir, "condor_runscript.sh")
+            manifest_path = os.path.join(run_dir, "submission_manifest.json")
+            self.assertTrue(os.path.isfile(manifest_path))
+
+            manifest_payload = json.loads(Path(manifest_path).read_text())
+            self.assertEqual(len(manifest_payload["datasets"]), 1)
+            dataset_payload = manifest_payload["datasets"][0]
+            submit_dir = dataset_payload["submission_dir"]
+            submit_path = dataset_payload["submit_path"]
+            runscript_path = dataset_payload["runscript_path"]
+
             self.assertTrue(os.path.isfile(submit_path))
             self.assertTrue(os.path.isfile(runscript_path))
-            self.assertTrue(os.path.isdir(os.path.join(run_dir, "job_0")))
-            self.assertTrue(os.path.isdir(os.path.join(run_dir, "job_1")))
+            self.assertTrue(os.path.isdir(os.path.join(submit_dir, "job_0")))
+            self.assertTrue(os.path.isdir(os.path.join(submit_dir, "job_1")))
 
-            job0_cfg = Path(os.path.join(run_dir, "job_0", "submit_config.txt")).read_text()
-            self.assertIn("saveDirectory=/tmp/out/sample/job_0", job0_cfg)
-            self.assertIn("saveFile=/tmp/out/sample/job_0/skim.root", job0_cfg)
-            self.assertIn("metaFile=/tmp/out/sample/job_0/meta.root", job0_cfg)
+            job0_cfg = Path(os.path.join(submit_dir, "job_0", "submit_config.txt")).read_text()
+            self.assertIn("saveDirectory=/tmp/out/sample", job0_cfg)
+            self.assertIn("saveFile=/tmp/out/sample/output_0.root", job0_cfg)
+            self.assertIn("metaFile=/tmp/out/sample/meta_0.root", job0_cfg)
 
             submit_text = Path(submit_path).read_text()
             self.assertIn("job_$(Process)/submit_config.txt", submit_text)
-            self.assertIn(os.path.join(run_dir, "shared_inputs", exe_name), submit_text)
-            self.assertIn(os.path.join(run_dir, "shared_inputs", "cfg_bundle.tar.gz"), submit_text)
-            self.assertIn(os.path.join(run_dir, "shared_inputs", "aux_bundle.tar.gz"), submit_text)
-            self.assertIn(os.path.join(run_dir, "shared_inputs", "libexample.so"), submit_text)
-            self.assertNotIn(f"transfer_input_files = {os.path.join(run_dir, 'shared_inputs')}\n", submit_text)
+            self.assertIn(os.path.join(run_dir, "shared_inputs.tar.gz"), submit_text)
+            self.assertNotIn("job_$(Process)/myanalysis", submit_text)
+            self.assertNotIn(f"transfer_input_files = {os.path.join(submit_dir, 'shared_inputs')}\n", submit_text)
             self.assertNotIn("job_$(Process)/floats.txt", submit_text)
             self.assertNotIn("job_$(Process)/ints.txt", submit_text)
+            self.assertNotIn("job_$(Process)/x509", submit_text)
+            self.assertIn(os.path.join(submit_dir, "condor_logs", "log_$(Cluster)_$(Process).stdout"), submit_text)
+            self.assertIn(os.path.join(submit_dir, "condor_logs", "log_$(Cluster)_$(Process).stderr"), submit_text)
+            self.assertIn(os.path.join(submit_dir, "condor_logs", "log_$(Cluster).log"), submit_text)
 
             runscript_text = Path(runscript_path).read_text()
-            self.assertIn('for _bundle in cfg_bundle.tar.gz aux_bundle.tar.gz; do', runscript_text)
-            self.assertIn('tar -xzf "$_bundle"', runscript_text)
-            self.assertIn('_target_dir=cfg', runscript_text)
-            self.assertIn('_target_dir=aux', runscript_text)
+            self.assertIn('tar -xzf "shared_inputs.tar.gz"', runscript_text)
+            self.assertIn('cp -f submit_config.txt cfg/submit_config.txt', runscript_text)
+            self.assertIn('./myanalysis cfg/submit_config.txt', runscript_text)
+            self.assertIn('chmod +x "myanalysis"', runscript_text)
             self.assertIn('__orig_saveFile', runscript_text)
             self.assertIn('__orig_metaFile', runscript_text)
             self.assertIn('xrdcp_if_exists(save_file, orig_save)', runscript_text)
             self.assertIn('xrdcp_if_exists(meta_file, orig_meta)', runscript_text)
+
+    def test_plan_file_source_jobs_fails_on_empty_file_payloads(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "das": "/Sample/NANO", "dtype": "mc"}],
+            )
+            file_list_dir = os.path.join(tmpdir, "file_lists")
+            Path(file_list_dir).mkdir()
+            Path(os.path.join(file_list_dir, "sample.json")).write_text(
+                json.dumps({"sample": "sample", "files": []})
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "empty payloads"):
+                analysis_tasks._plan_file_source_jobs(
+                    dataset_manifest_path=manifest_path,
+                    file_list_dir=file_list_dir,
+                    partition="files",
+                    files_per_job=1,
+                    entries_per_job=0,
+                    jobs_dir=os.path.join(tmpdir, "jobs"),
+                    outputs_dir=os.path.join(tmpdir, "outputs"),
+                )
 
     def test_monitor_skim_jobs_discovers_save_and_meta_outputs(self):
         import analysis_tasks
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = os.path.join(tmpdir, "skimRun_myRun")
-            source_job = os.path.join(run_dir, "jobs", "sample", "job_0")
+            source_job = os.path.join(run_dir, "condor_submissions", "sample", "job_0")
             Path(source_job).mkdir(parents=True)
 
-            save_path = os.path.join(run_dir, "outputs", "sample", "job_0", "skim.root")
-            meta_path = os.path.join(run_dir, "outputs", "sample", "job_0", "meta.root")
+            save_path = os.path.join(run_dir, "outputs", "sample", "output_0.root")
+            meta_path = os.path.join(run_dir, "outputs", "sample", "meta_0.root")
             Path(os.path.dirname(save_path)).mkdir(parents=True)
             Path(os.path.join(source_job, "submit_config.txt")).write_text(
                 f"saveFile={save_path}\nmetaFile={meta_path}\n"
             )
-            os.symlink(source_job, os.path.join(run_dir, "job_0"))
 
             manifest_path = _write_manifest(
                 tmpdir,
@@ -1249,13 +1239,26 @@ class TestPrepareSkimJobs(unittest.TestCase):
             orig_run_dir = analysis_tasks.MonitorSkimJobs._run_dir.fget
             analysis_tasks.MonitorSkimJobs._run_dir = property(lambda self: run_dir)
             try:
-                discovered = task._discover_jobs()
+                discovered = task._discover_jobs(os.path.join(run_dir, "condor_submissions", "sample"))
             finally:
                 analysis_tasks.MonitorSkimJobs._run_dir = property(orig_run_dir)
 
             self.assertEqual(discovered[0]["dir"], source_job)
             self.assertEqual(discovered[0]["save"], save_path)
             self.assertEqual(discovered[0]["meta"], meta_path)
+
+    def test_output_files_exist_batch_uses_xrootd_for_eos_like_paths(self):
+        import analysis_tasks
+
+        eos_path = "/store/user/test/sample/output_0.root"
+        local_path = "/tmp/nonexistent-local-output.root"
+
+        with patch("analysis_tasks._eos_files_exist_batch_util", return_value={eos_path: True}) as eos_batch:
+            result = analysis_tasks._output_files_exist_batch([eos_path, local_path])
+
+        eos_batch.assert_called_once_with([eos_path])
+        self.assertTrue(result[eos_path])
+        self.assertFalse(result[local_path])
 
 
 # ===========================================================================

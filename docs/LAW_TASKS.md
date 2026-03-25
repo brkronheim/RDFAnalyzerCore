@@ -253,7 +253,43 @@ law run SkimTask \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
     --file-source xrdfs \
     --file-source-name myFiles
+
+# Same task, different executor: delegate to concrete per-dataset HTCondor submission
+law run SkimTask \
+        --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+        --exe build/analyses/myAnalysis/myanalysis \
+        --name mySkimRun \
+        --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
+        --file-source nano \
+        --workflow htcondor
 ```
+
+### Workflow Ergonomics
+
+`SkimTask` is the user-facing entrypoint for all skim execution modes:
+
+- `--workflow local`: run branch jobs locally.
+- `--workflow dask`: dispatch prepared branch jobs to Dask workers.
+- `--workflow htcondor`: do **not** use LAW remote workers. Instead, delegate to the concrete skim submission chain:
+    `PrepareSkimJobs -> BuildSkimSubmission -> SubmitSkimJobs -> MonitorSkimJobs`.
+
+In delegated `htcondor` mode, concrete submissions are created per dataset under
+`skimRun_<name>/condor_submissions/<dataset>/`.
+
+Log locations in delegated `htcondor` mode:
+
+- `condor_logs/log_<Cluster>.log`: always present on the submit side, including transfer holds.
+- `condor_logs/log_<Cluster>_<Process>.stdout`
+- `condor_logs/log_<Cluster>_<Process>.stderr`
+
+When a job is held before payload execution, only the `.log` file may exist because the job never reached the execution wrapper.
+
+Final staged skim outputs in delegated `htcondor` mode are flattened per dataset directory rather than nested per job directory:
+
+- `.../<dataset>/output_<job>.root`
+- `.../<dataset>/meta_<job>.root`
+
+This layout keeps all outputs for one dataset under a single XRootD directory, which matches monitor verification via directory-level `xrdfs ls` calls.
 
 ---
 

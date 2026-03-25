@@ -124,6 +124,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -135,6 +136,8 @@ from typing import Optional, cast
 
 import luigi  # type: ignore
 import law  # type: ignore
+from law.util import DotDict  # type: ignore
+from law.workflow.base import BaseWorkflow, BaseWorkflowProxy  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Make sure core/python and law/ are importable regardless of invocation path
@@ -311,6 +314,43 @@ def _bundle_analysis_config_files(
     return archive_path
 
 
+def _shared_inputs_archive_name() -> str:
+    """Return the canonical filename for the skim shared-input archive."""
+    return "shared_inputs.tar.gz"
+
+
+def _build_shared_inputs_archive(shared_dir: str, archive_path: str) -> str:
+    """Create a tar.gz archive with materialized cfg/aux and shared runtime files."""
+    cfg_bundle = os.path.join(shared_dir, "cfg_bundle.tar.gz")
+    aux_bundle = os.path.join(shared_dir, "aux_bundle.tar.gz")
+    excluded_files = {
+        "cfg_bundle.tar.gz",
+        "aux_bundle.tar.gz",
+        os.path.basename(archive_path),
+    }
+
+    with tempfile.TemporaryDirectory(prefix="skim_shared_inputs_") as tmpdir:
+        Path(os.path.join(tmpdir, "cfg")).mkdir(parents=True, exist_ok=True)
+        Path(os.path.join(tmpdir, "aux")).mkdir(parents=True, exist_ok=True)
+
+        if os.path.isfile(cfg_bundle):
+            _extract_tar_archive(cfg_bundle, tmpdir)
+        if os.path.isfile(aux_bundle):
+            _extract_tar_archive(aux_bundle, tmpdir)
+
+        with tarfile.open(archive_path, "w:gz") as archive:
+            for entry_name in ("cfg", "aux"):
+                entry_path = os.path.join(tmpdir, entry_name)
+                if os.path.isdir(entry_path):
+                    archive.add(entry_path, arcname=entry_name)
+            for entry in sorted(Path(shared_dir).iterdir()):
+                if not entry.is_file() or entry.name in excluded_files:
+                    continue
+                archive.add(str(entry), arcname=entry.name)
+
+    return archive_path
+
+
 def _normalize_shared_config_references(
     template_config_path: str,
     job_config: dict[str, str],
@@ -342,6 +382,63 @@ def _resolve_runtime_transfer_path(path_value: str) -> str:
     return path_value
 
 
+def _runtime_loose_cfg_files(exclude_names: Optional[set[str]] = None) -> list[str]:
+    """Discover loose config payload files transferred into the current work dir."""
+    exclude = set(exclude_names or set())
+    discovered: list[str] = []
+    for entry_name in sorted(os.listdir(os.getcwd())):
+        if entry_name in exclude:
+            continue
+        entry_path = os.path.join(os.getcwd(), entry_name)
+        if not os.path.isfile(entry_path):
+            continue
+        if not entry_name.lower().endswith((".txt", ".yaml", ".yml")):
+            continue
+        discovered.append(entry_path)
+    return discovered
+
+
+def _copy_runtime_loose_cfg_files(destination_cfg_dir: str, exclude_names: Optional[set[str]] = None) -> None:
+    """Copy transferred loose config files into the runtime cfg/ directory."""
+    for src_path in _runtime_loose_cfg_files(exclude_names=exclude_names):
+        dst_path = os.path.join(destination_cfg_dir, os.path.basename(src_path))
+        if os.path.exists(dst_path):
+            continue
+        shutil.copy2(src_path, dst_path)
+
+
+def _flatten_job_cfg_overlay_files(job_dir: str) -> list[str]:
+    """Flatten per-job cfg overlay payloads into *job_dir* for file-based transfer."""
+    overlay_dir = os.path.join(job_dir, "cfg")
+    flattened: list[str] = []
+    if not os.path.isdir(overlay_dir):
+        return flattened
+
+    for entry in sorted(Path(overlay_dir).iterdir()):
+        if not entry.is_file():
+            continue
+        flat_path = os.path.join(job_dir, entry.name)
+        if not os.path.exists(flat_path):
+            shutil.copy2(str(entry), flat_path)
+        flattened.append(flat_path)
+
+    return flattened
+
+
+def _skim_shared_loose_input_files(shared_dir: str) -> list[str]:
+    """Return shared input files that should be transferred individually."""
+    excluded = {
+        "cfg_bundle.tar.gz",
+        "aux_bundle.tar.gz",
+        _shared_inputs_archive_name(),
+    }
+    return sorted(
+        os.path.join(shared_dir, entry)
+        for entry in os.listdir(shared_dir)
+        if os.path.isfile(os.path.join(shared_dir, entry)) and entry not in excluded
+    )
+
+
 def _copy_tree_contents(src_dir: str, dst_dir: str) -> None:
     """Copy all files/directories under src_dir into dst_dir."""
     if not os.path.isdir(src_dir):
@@ -369,49 +466,73 @@ def _materialize_file_source_runtime_job(
     shared_dir: str,
     source_job_dir: str,
     exe_relpath: str,
+    source_config_path: Optional[str] = None,
+    shared_archive_path: Optional[str] = None,
 ) -> tuple[str, str]:
     """Create a worker-local runtime directory with cfg/ and aux/ materialized."""
     runtime_shared_dir = _resolve_runtime_transfer_path(shared_dir)
     runtime_job_dir = _resolve_runtime_transfer_path(source_job_dir)
-    if not os.path.isdir(runtime_shared_dir):
+    runtime_shared_archive = ""
+    if shared_archive_path:
+        runtime_shared_archive = _resolve_runtime_transfer_path(shared_archive_path)
+
+    if not os.path.isdir(runtime_shared_dir) and not (
+        runtime_shared_archive and os.path.isfile(runtime_shared_archive)
+    ):
         raise RuntimeError(
-            f"Shared inputs directory not available at runtime: {runtime_shared_dir!r}."
+            "Shared inputs are not available at runtime. Expected either a shared "
+            f"directory {runtime_shared_dir!r} or archive {runtime_shared_archive!r}."
         )
-    if not os.path.isdir(runtime_job_dir):
-        raise RuntimeError(
-            f"Per-job directory not available at runtime: {runtime_job_dir!r}."
-        )
+    if source_job_dir and not os.path.isdir(runtime_job_dir):
+        runtime_job_dir = ""
 
     sandbox_dir = tempfile.mkdtemp(prefix="skim_runtime_")
 
-    cfg_bundle = os.path.join(runtime_shared_dir, "cfg_bundle.tar.gz")
-    if os.path.isfile(cfg_bundle):
-        _extract_tar_archive(cfg_bundle, sandbox_dir)
+    if runtime_shared_archive and os.path.isfile(runtime_shared_archive):
+        _extract_tar_archive(runtime_shared_archive, sandbox_dir)
 
-    aux_bundle = os.path.join(runtime_shared_dir, "aux_bundle.tar.gz")
-    if os.path.isfile(aux_bundle):
-        _extract_tar_archive(aux_bundle, sandbox_dir)
+    if os.path.isdir(runtime_shared_dir):
+        cfg_bundle = os.path.join(runtime_shared_dir, "cfg_bundle.tar.gz")
+        if os.path.isfile(cfg_bundle):
+            _extract_tar_archive(cfg_bundle, sandbox_dir)
 
-    submit_config_src = os.path.join(runtime_job_dir, "submit_config.txt")
+        aux_bundle = os.path.join(runtime_shared_dir, "aux_bundle.tar.gz")
+        if os.path.isfile(aux_bundle):
+            _extract_tar_archive(aux_bundle, sandbox_dir)
+
+    runtime_cfg_dir = os.path.join(sandbox_dir, "cfg")
+    Path(runtime_cfg_dir).mkdir(parents=True, exist_ok=True)
+
+    submit_config_src = ""
+    if source_config_path:
+        submit_config_src = _resolve_runtime_transfer_path(source_config_path)
+    elif runtime_job_dir:
+        submit_config_src = os.path.join(runtime_job_dir, "submit_config.txt")
+
     if not os.path.isfile(submit_config_src):
         raise RuntimeError(
             f"Per-job submit config not found at runtime: {submit_config_src!r}."
         )
-    shutil.copy2(submit_config_src, os.path.join(sandbox_dir, "submit_config.txt"))
+    shutil.copy2(submit_config_src, os.path.join(runtime_cfg_dir, "submit_config.txt"))
 
-    job_cfg_overlay = os.path.join(runtime_job_dir, "cfg")
-    if os.path.isdir(job_cfg_overlay):
-        _copy_tree_contents(job_cfg_overlay, os.path.join(sandbox_dir, "cfg"))
+    if runtime_job_dir:
+        job_cfg_overlay = os.path.join(runtime_job_dir, "cfg")
+        if os.path.isdir(job_cfg_overlay):
+            _copy_tree_contents(job_cfg_overlay, runtime_cfg_dir)
 
-    for staged_name in sorted(os.listdir(runtime_shared_dir)):
-        src_path = os.path.join(runtime_shared_dir, staged_name)
-        if not os.path.isfile(src_path):
-            continue
-        if staged_name in {"cfg_bundle.tar.gz", "aux_bundle.tar.gz", "x509"}:
-            continue
-        if staged_name.endswith((".tar.gz", ".tgz")) and staged_name != exe_relpath:
-            continue
-        shutil.copy2(src_path, os.path.join(sandbox_dir, staged_name))
+    _copy_runtime_loose_cfg_files(
+        runtime_cfg_dir,
+        exclude_names={os.path.basename(submit_config_src)},
+    )
+
+    if os.path.isdir(runtime_shared_dir):
+        for src_path in _skim_shared_loose_input_files(runtime_shared_dir):
+            runtime_src_path = _resolve_runtime_transfer_path(src_path)
+            if os.path.isfile(runtime_src_path):
+                shutil.copy2(
+                    runtime_src_path,
+                    os.path.join(sandbox_dir, os.path.basename(src_path)),
+                )
 
     exe_path = os.path.join(sandbox_dir, exe_relpath)
     if not os.path.isfile(exe_path):
@@ -427,6 +548,8 @@ def _run_prepared_skim_job(
     exe_relpath: str,
     root_setup: str = "",
     container_setup: str = "",
+    source_config_path: Optional[str] = None,
+    shared_archive_path: Optional[str] = None,
 ) -> str:
     """Run a prepared skim job after materializing a worker-local sandbox."""
     runtime_job_dir = None
@@ -435,12 +558,15 @@ def _run_prepared_skim_job(
             shared_dir=shared_dir,
             source_job_dir=source_job_dir,
             exe_relpath=exe_relpath,
+            source_config_path=source_config_path,
+            shared_archive_path=shared_archive_path,
         )
         return _run_analysis_job(
             exe_path=exe_path,
             job_dir=runtime_job_dir,
             root_setup=root_setup,
             container_setup=container_setup,
+            config_relpath=os.path.join("cfg", "submit_config.txt"),
         )
     finally:
         if runtime_job_dir and os.path.isdir(runtime_job_dir):
@@ -487,11 +613,10 @@ def _rewrite_submit_transfer_files(
 
 def _skim_shared_input_files(shared_dir: str) -> list[str]:
     """Return concrete shared-input files to transfer one-by-one for skim jobs."""
-    return sorted(
-        os.path.join(shared_dir, entry)
-        for entry in os.listdir(shared_dir)
-        if os.path.isfile(os.path.join(shared_dir, entry))
-    )
+    archive_path = os.path.join(os.path.dirname(shared_dir), _shared_inputs_archive_name())
+    if os.path.isfile(archive_path):
+        return [archive_path]
+    return _skim_shared_loose_input_files(shared_dir)
 
 
 def _output_files_exist_batch(output_paths: list[str]) -> dict[str, bool]:
@@ -502,7 +627,7 @@ def _output_files_exist_batch(output_paths: list[str]) -> dict[str, bool]:
     for path in output_paths:
         if not path:
             result[path] = False
-        elif path.startswith("root://"):
+        elif path.startswith("root://") or path.startswith("/eos/") or path.startswith("/store/"):
             eos_paths.append(path)
         else:
             result[path] = os.path.exists(path)
@@ -513,36 +638,78 @@ def _output_files_exist_batch(output_paths: list[str]) -> dict[str, bool]:
     return result
 
 
+def _safe_dataset_submission_name(dataset_name: str) -> str:
+    """Return a filesystem-safe directory name for a dataset submission bundle."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(dataset_name)).strip("._") or "dataset"
+
+
+def _dataset_submission_dir(run_dir: str, dataset_name: str) -> str:
+    """Return the dataset-specific concrete Condor submission directory."""
+    return os.path.join(run_dir, "condor_submissions", _safe_dataset_submission_name(dataset_name))
+
+
+def _group_prepared_skim_jobs_by_dataset(payload: list[dict]) -> dict[str, list[tuple[int, dict]]]:
+    """Group prepared skim job entries by dataset while preserving order."""
+    grouped: dict[str, list[tuple[int, dict]]] = {}
+    for global_index, entry in enumerate(payload):
+        if not isinstance(entry, dict):
+            continue
+        dataset_name = str(entry.get("dataset_name", "")).strip()
+        if not dataset_name:
+            continue
+        grouped.setdefault(dataset_name, []).append((global_index, entry))
+    return grouped
+
+
+def _discover_jobs_in_submission_dir(submission_dir: str) -> dict[int, dict[str, str]]:
+    """Discover prepared concrete skim jobs under a dataset submission directory."""
+    info: dict[int, dict[str, str]] = {}
+    idx = 0
+    while True:
+        job_dir = os.path.join(submission_dir, f"job_{idx}")
+        if not os.path.exists(job_dir):
+            break
+        cfg = read_config(os.path.join(job_dir, "submit_config.txt"))
+        save = cfg.get("__orig_saveFile", cfg.get("saveFile", ""))
+        meta = cfg.get("__orig_metaFile", cfg.get("metaFile", ""))
+        info[idx] = {
+            "dir": os.path.realpath(job_dir),
+            "save": save,
+            "meta": meta,
+        }
+        idx += 1
+    return info
+
+
 def _submit_single_skim_job(
     job_index: int,
-    main_dir: str,
+    submission_dir: str,
     max_runtime: int,
     request_memory: int,
-    shared_dir_name: str,
+    extra_transfer_files: Optional[list[str]] = None,
     config_file: str = "submit_config.txt",
 ) -> Optional[str]:
     """Submit a single prepared skim job for monitor-driven resubmission."""
-    job_dir = os.path.join(main_dir, f"job_{job_index}")
-    resub_dir = os.path.join(main_dir, "resubmissions")
+    job_dir = os.path.join(submission_dir, f"job_{job_index}")
+    resub_dir = os.path.join(submission_dir, "resubmissions")
     Path(resub_dir).mkdir(parents=True, exist_ok=True)
 
     transfer_files = [
         os.path.join(job_dir, config_file),
     ]
-    shared_dir = os.path.join(main_dir, shared_dir_name)
-    transfer_files.extend(_skim_shared_input_files(shared_dir))
-    inner_script = os.path.join(main_dir, "condor_runscript_inner.sh")
+    transfer_files.extend(extra_transfer_files or [])
+    inner_script = os.path.join(submission_dir, "condor_runscript_inner.sh")
     if os.path.exists(inner_script):
         transfer_files.append(inner_script)
 
     transfer_str = ",".join(
         path for path in transfer_files if "$(" in path or os.path.exists(path)
     )
-    log_base = os.path.join(main_dir, "condor_logs")
+    log_base = os.path.join(submission_dir, "condor_logs")
     Path(log_base).mkdir(parents=True, exist_ok=True)
 
     sub_content = f"""universe = vanilla
-Executable     = {main_dir}/condor_runscript.sh
+Executable     = {submission_dir}/condor_runscript.sh
 Should_Transfer_Files = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification = never
@@ -861,8 +1028,10 @@ def _rewrite_job_output_destinations(config_path: str, final_output_dir: str) ->
     """Rewrite saveDirectory/saveFile/metaFile in a per-job config copy."""
     config_dict = read_config(config_path)
     config_dict["saveDirectory"] = final_output_dir
-    config_dict["saveFile"] = os.path.join(final_output_dir, "skim.root")
-    config_dict["metaFile"] = os.path.join(final_output_dir, "meta.root")
+    job_dir = os.path.basename(os.path.dirname(config_path))
+    job_index = job_dir.split("job_", 1)[1] if job_dir.startswith("job_") else job_dir
+    config_dict["saveFile"] = os.path.join(final_output_dir, f"output_{job_index}.root")
+    config_dict["metaFile"] = os.path.join(final_output_dir, f"meta_{job_index}.root")
 
     with open(config_path, "w") as fh:
         for key, value in config_dict.items():
@@ -992,8 +1161,12 @@ def _plan_file_source_jobs(
 ) -> list[dict[str, object]]:
     """Build deterministic per-job metadata from file-list JSON outputs."""
     job_plans: list[dict[str, object]] = []
+    missing_datasets: list[str] = []
 
     for json_path in sorted(Path(file_list_dir).glob("*.json")):
+        if json_path.name.endswith(".perf.json"):
+            continue
+
         with open(json_path) as fh:
             payload = json.load(fh)
 
@@ -1011,6 +1184,7 @@ def _plan_file_source_jobs(
             ]
         else:
             if not all_files:
+                missing_datasets.append(str(dataset_name))
                 continue
             partitions = _make_partitions(
                 urls=all_files,
@@ -1032,7 +1206,14 @@ def _plan_file_source_jobs(
                 "last_entry": part.get("last_entry", 0),
                 "dtype": dtype,
             })
-            
+
+    if missing_datasets:
+        missing_display = ", ".join(sorted(set(missing_datasets)))
+        raise RuntimeError(
+            "File-list discovery returned empty payloads for the following dataset(s): "
+            f"{missing_display}. Re-run the file-list task and inspect the corresponding "
+            "JSON outputs before preparing skim jobs."
+        )
 
     return job_plans
 
@@ -1233,6 +1414,11 @@ class SkimMixin:
         return os.path.join(self._run_dir, "shared_inputs")
 
     @property
+    def _shared_archive_path(self) -> str:
+        """Tarball containing the worker runtime cfg/ and aux/ layout."""
+        return os.path.join(self._run_dir, _shared_inputs_archive_name())
+
+    @property
     def _exe_relpath(self) -> str:
         """Basename of the compiled analysis executable."""
         return os.path.basename(os.path.abspath(self.exe))
@@ -1426,6 +1612,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             template_config = read_config(self.submit_config)
             _bundle_analysis_config_files(self.submit_config, template_config, shared_dir)
             _bundle_analysis_aux_dir(self.submit_config, shared_dir)
+        _build_shared_inputs_archive(shared_dir, self._shared_archive_path)
 
         # ---- determine datasets and file groups ---------------------------
         job_entries: list = []
@@ -1494,6 +1681,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 job_entries.append({
                     "dataset_name": dataset_name,
                     "job_dir": job_dir,
+                    "config_path": os.path.join(job_dir, "submit_config.txt"),
                     "out_dir": out_dir,
                 })
 
@@ -1514,6 +1702,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 job_entries.append({
                     "dataset_name": entry.name,
                     "job_dir": job_dir,
+                    "config_path": os.path.join(job_dir, "submit_config.txt"),
                     "out_dir": out_dir,
                 })
 
@@ -1605,6 +1794,8 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         test_config["saveFile"] = "test_output.root"
         test_config["metaFile"] = "test_output_meta.root"
         test_config["saveDirectory"] = test_dir
+        test_config["type"] = 1
+        test_config["year"] = 2018
         test_config.setdefault("threads", "1")
         # Remove any stage-out sentinel keys
         for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
@@ -1827,8 +2018,7 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
 
     def output(self):
         return {
-            "submit": law.LocalFileTarget(os.path.join(self._run_dir, "condor_submit.sub")),
-            "runscript": law.LocalFileTarget(os.path.join(self._run_dir, "condor_runscript.sh")),
+            "manifest": law.LocalFileTarget(os.path.join(self._run_dir, "submission_manifest.json")),
         }
 
     def run(self):
@@ -1849,12 +2039,8 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
         if not isinstance(payload, list) or not payload:
             raise RuntimeError("No prepared skim jobs found in prep_submission.json.")
 
-        job_dirs = sorted(
-            str(entry["job_dir"])
-            for entry in payload
-            if isinstance(entry, dict) and entry.get("job_dir")
-        )
-        if not job_dirs:
+        grouped_jobs = _group_prepared_skim_jobs_by_dataset(payload)
+        if not grouped_jobs:
             raise RuntimeError("No prepared skim job directories were discovered.")
 
         template_config = read_config(self.submit_config)
@@ -1865,24 +2051,6 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
         bookkeeping_outputs_dir = os.path.join(self._run_dir, "outputs")
 
         Path(self._run_dir).mkdir(parents=True, exist_ok=True)
-        for idx, entry in enumerate(payload):
-            job_dir_abs = str(entry["job_dir"])
-            link_path = os.path.join(self._run_dir, f"job_{idx}")
-            if os.path.islink(link_path):
-                os.unlink(link_path)
-            elif os.path.exists(link_path):
-                shutil.rmtree(link_path)
-
-            Path(link_path).mkdir(parents=True, exist_ok=True)
-            _copy_tree_contents(job_dir_abs, link_path)
-
-            if final_output_base and entry.get("out_dir"):
-                rel_out_dir = os.path.relpath(str(entry["out_dir"]), bookkeeping_outputs_dir)
-                final_output_dir = os.path.join(final_output_base, rel_out_dir)
-                _rewrite_job_output_destinations(
-                    os.path.join(link_path, "submit_config.txt"),
-                    final_output_dir,
-                )
 
         shared_dir = self._shared_dir
         if not os.path.isdir(shared_dir):
@@ -1898,39 +2066,83 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
             if os.path.isfile(candidate):
                 python_env_staged = candidate
 
-        x509_loc = "x509" if os.path.isfile(os.path.join(shared_dir, "x509")) else None
         shared_transfer_files = _skim_shared_input_files(shared_dir)
 
-        submit_path = write_submit_files(
-            self._run_dir,
-            len(job_dirs),
-            self._exe_relpath,
-            stage_inputs=self.stage_in,
-            stage_outputs=True,
-            root_setup=self._root_setup_content,
-            x509loc=x509_loc,
-            max_runtime=str(self.max_runtime),
-            request_memory=2000,
-            request_cpus=1,
-            request_disk=20000,
-            extra_transfer_files=shared_transfer_files,
-            include_aux=False,
-            shared_dir_name="shared_inputs",
-            eos_sched=False,
-            config_file="submit_config.txt",
-            container_setup=self.container_setup,
-            python_env_tarball=python_env_staged,
-        )
-        _rewrite_submit_transfer_files(
-            submit_path,
-            banned_suffixes=["/floats.txt", "/ints.txt"],
-            banned_exact_paths=[os.path.join(self._run_dir, "shared_inputs")],
-        )
+        submission_records: list[dict[str, object]] = []
+        for dataset_name, dataset_jobs in grouped_jobs.items():
+            submission_dir = _dataset_submission_dir(self._run_dir, dataset_name)
+            if os.path.exists(submission_dir):
+                shutil.rmtree(submission_dir)
+            Path(submission_dir).mkdir(parents=True, exist_ok=True)
+
+            jobs_payload: list[dict[str, object]] = []
+            for local_index, (global_index, entry) in enumerate(dataset_jobs):
+                job_dir_abs = str(entry["job_dir"])
+                staged_job_dir = os.path.join(submission_dir, f"job_{local_index}")
+                Path(staged_job_dir).mkdir(parents=True, exist_ok=True)
+                _copy_tree_contents(job_dir_abs, staged_job_dir)
+                _flatten_job_cfg_overlay_files(staged_job_dir)
+
+                if final_output_base and entry.get("out_dir"):
+                    final_output_dir = os.path.join(final_output_base, dataset_name)
+                    _rewrite_job_output_destinations(
+                        os.path.join(staged_job_dir, "submit_config.txt"),
+                        final_output_dir,
+                    )
+
+                jobs_payload.append({
+                    "job_index": local_index,
+                    "global_index": global_index,
+                    "source_job_dir": job_dir_abs,
+                    "job_dir": staged_job_dir,
+                    "out_dir": str(entry.get("out_dir", "")),
+                })
+
+            submit_path = write_submit_files(
+                submission_dir,
+                len(dataset_jobs),
+                self._exe_relpath,
+                stage_inputs=self.stage_in,
+                stage_outputs=True,
+                root_setup=self._root_setup_content,
+                x509loc=None,
+                max_runtime=str(self.max_runtime),
+                request_memory=2000,
+                request_cpus=1,
+                request_disk=20000,
+                extra_transfer_files=shared_transfer_files,
+                include_aux=False,
+                shared_dir_name=None,
+                eos_sched=False,
+                config_file="submit_config.txt",
+                container_setup=self.container_setup,
+                python_env_tarball=python_env_staged,
+                shared_archive_name=os.path.basename(self._shared_archive_path),
+                runtime_config_relpath=os.path.join("cfg", "submit_config.txt"),
+            )
+            _rewrite_submit_transfer_files(
+                submit_path,
+                banned_suffixes=["/floats.txt", "/ints.txt"],
+                banned_exact_paths=[os.path.join(submission_dir, "shared_inputs")],
+            )
+
+            submission_records.append({
+                "dataset_name": dataset_name,
+                "submission_dir": submission_dir,
+                "submit_path": submit_path,
+                "runscript_path": os.path.join(submission_dir, "condor_runscript.sh"),
+                "job_count": len(dataset_jobs),
+                "shared_transfer_files": list(shared_transfer_files),
+                "jobs": jobs_payload,
+            })
+
+        with self.output()["manifest"].open("w") as fh:
+            json.dump({"datasets": submission_records}, fh, indent=2)
 
         self.publish_message(
             f"Skim condor submission ready.\n"
-            f"  {len(job_dirs)} job(s) prepared.\n"
-            f"  Submit with: condor_submit {submit_path}"
+            f"  {len(payload)} job(s) prepared across {len(submission_records)} dataset submission(s).\n"
+            f"  Submission manifest: {self.output()['manifest'].path}"
         )
 
 
@@ -1950,52 +2162,62 @@ class SubmitSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         return reqs
 
     def output(self):
-        return law.LocalFileTarget(os.path.join(self._run_dir, "submitted.txt"))
+        return law.LocalFileTarget(os.path.join(self._run_dir, "submitted.json"))
 
     def run(self):
         with PerformanceRecorder("SubmitSkimJobs") as rec:
             build_target = self.input()["build"]
-            submit_file = build_target["submit"].path
-            if not os.path.exists(submit_file):
-                raise RuntimeError(f"condor_submit.sub not found: {submit_file}")
+            manifest_path = build_target["manifest"].path
+            if not os.path.exists(manifest_path):
+                raise RuntimeError(f"submission manifest not found: {manifest_path}")
 
-            result = subprocess.run(
-                ["condor_submit", submit_file],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            stdout = result.stdout.strip()
-            self.publish_message(stdout)
+            with open(manifest_path) as fh:
+                submission_manifest = json.load(fh)
+            dataset_records = list(submission_manifest.get("datasets", []))
+            if not dataset_records:
+                raise RuntimeError("No dataset submissions found in submission manifest.")
 
-            cluster_id = ""
-            for line in stdout.splitlines():
-                if "cluster" not in line.lower():
-                    continue
-                parts = line.split()
-                for idx, part in enumerate(parts):
-                    if part.lower().rstrip(".") == "cluster" and idx + 1 < len(parts):
-                        cluster_id = parts[idx + 1].rstrip(".")
+            submitted_records: list[dict[str, object]] = []
+            for record in dataset_records:
+                dataset_name = str(record["dataset_name"])
+                submit_file = str(record["submit_path"])
+                if not os.path.exists(submit_file):
+                    raise RuntimeError(
+                        f"condor_submit.sub not found for dataset {dataset_name}: {submit_file}"
+                    )
+
+                result = subprocess.run(
+                    ["condor_submit", submit_file],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                stdout = result.stdout.strip()
+                self.publish_message(f"[{dataset_name}] {stdout}")
+
+                cluster_id = ""
+                for line in stdout.splitlines():
+                    if "cluster" not in line.lower():
+                        continue
+                    parts = line.split()
+                    for idx, part in enumerate(parts):
+                        if part.lower().rstrip(".") == "cluster" and idx + 1 < len(parts):
+                            cluster_id = parts[idx + 1].rstrip(".")
+                            break
+                    if cluster_id:
                         break
 
-            n_jobs = 0
-            for line in Path(submit_file).read_text().splitlines():
-                stripped = line.strip()
-                if stripped.lower().startswith("queue"):
-                    try:
-                        n_jobs = int(stripped.split()[1])
-                    except (IndexError, ValueError):
-                        pass
+                submitted_record = dict(record)
+                submitted_record["cluster_id"] = cluster_id
+                submitted_record["stdout"] = stdout
+                submitted_records.append(submitted_record)
+
+                self.publish_message(
+                    f"Submitted skim dataset {dataset_name} in cluster {cluster_id} with {record['job_count']} job(s)."
+                )
 
             with self.output().open("w") as fh:
-                fh.write(f"cluster_id={cluster_id}\n")
-                fh.write(f"n_jobs={n_jobs}\n")
-                fh.write(f"submit_file={submit_file}\n")
-                fh.write(stdout + "\n")
-
-            self.publish_message(
-                f"Submitted skim cluster {cluster_id} with {n_jobs} job(s)."
-            )
+                json.dump({"datasets": submitted_records}, fh, indent=2)
 
         rec.save(perf_path_for(str(self.output().path)))
 
@@ -2037,80 +2259,77 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     return json.load(fh)
                 except json.JSONDecodeError:
                     pass
-        return {"jobs": {}}
+        return {"datasets": {}}
 
     def _save_state(self, state: dict) -> None:
         with open(self._state_file, "w") as fh:
             json.dump(state, fh, indent=2)
 
-    def _discover_jobs(self) -> dict[int, dict[str, str]]:
-        info: dict[int, dict[str, str]] = {}
-        idx = 0
-        while True:
-            link = os.path.join(self._run_dir, f"job_{idx}")
-            if not os.path.exists(link):
-                break
-            real_dir = os.path.realpath(link)
-            cfg = read_config(os.path.join(real_dir, "submit_config.txt"))
-            # Prefer the original remote output paths (used for staging to EOS)
-            save = cfg.get("__orig_saveFile", cfg.get("saveFile", ""))
-            meta = cfg.get("__orig_metaFile", cfg.get("metaFile", ""))
-            info[idx] = {
-                "dir": real_dir,
-                "save": save,
-                "meta": meta,
-            }
-            idx += 1
-        return info
+    def _discover_jobs(self, submission_dir: str) -> dict[int, dict[str, str]]:
+        return _discover_jobs_in_submission_dir(submission_dir)
 
     def _status_summary(self, state: dict) -> dict[str, int]:
         counts: dict[str, int] = {}
-        for job_state in state["jobs"].values():
-            status = job_state["status"]
-            counts[status] = counts.get(status, 0) + 1
+        for dataset_state in state.get("datasets", {}).values():
+            for job_state in dataset_state.get("jobs", {}).values():
+                status = job_state["status"]
+                counts[status] = counts.get(status, 0) + 1
         return counts
 
     def run(self):
-        sub_info: dict[str, str] = {}
         with self.input().open("r") as fh:
-            for line in fh:
-                line = line.strip()
-                if "=" in line:
-                    key, value = line.split("=", 1)
-                    sub_info[key.strip()] = value.strip()
+            submitted_payload = json.load(fh)
 
-        initial_cluster = sub_info.get("cluster_id", "")
-        if not initial_cluster:
-            raise RuntimeError("No cluster_id found in submitted.txt")
-
-        job_info = self._discover_jobs()
-        if not job_info:
-            raise RuntimeError(
-                f"No job_N symlinks found in {self._run_dir}. "
-                "Run BuildSkimSubmission first."
-            )
+        dataset_records = list(submitted_payload.get("datasets", []))
+        if not dataset_records:
+            raise RuntimeError("No submitted dataset clusters found in submitted.json")
 
         state = self._load_state()
-        for idx in job_info:
-            key = str(idx)
-            if key not in state["jobs"]:
-                state["jobs"][key] = {
-                    "status": "submitted",
-                    "retries": 0,
-                    "cluster": initial_cluster,
-                    "proc": idx,
-                }
+        dataset_job_info: dict[str, dict[int, dict[str, str]]] = {}
+        for record in dataset_records:
+            dataset_name = str(record["dataset_name"])
+            submission_dir = str(record["submission_dir"])
+            initial_cluster = str(record.get("cluster_id", ""))
+            if not initial_cluster:
+                raise RuntimeError(f"No cluster_id found for dataset {dataset_name}")
+
+            job_info = self._discover_jobs(submission_dir)
+            if not job_info:
+                raise RuntimeError(
+                    f"No job_N directories found in {submission_dir}. "
+                    "Run BuildSkimSubmission first."
+                )
+
+            dataset_job_info[dataset_name] = job_info
+            dataset_state = state.setdefault("datasets", {}).setdefault(dataset_name, {
+                "submission_dir": submission_dir,
+                "shared_transfer_files": list(record.get("shared_transfer_files", [])),
+                "jobs": {},
+            })
+            dataset_state["submission_dir"] = submission_dir
+            dataset_state["shared_transfer_files"] = list(record.get("shared_transfer_files", []))
+
+            for idx in job_info:
+                key = str(idx)
+                if key not in dataset_state["jobs"]:
+                    dataset_state["jobs"][key] = {
+                        "status": "submitted",
+                        "retries": 0,
+                        "cluster": initial_cluster,
+                        "proc": idx,
+                    }
         self._save_state(state)
 
         self.publish_message(
-            f"Monitoring {len(job_info)} skim job(s) in cluster {initial_cluster}."
+            f"Monitoring {sum(len(job_info) for job_info in dataset_job_info.values())} skim job(s) across {len(dataset_job_info)} dataset cluster(s)."
         )
 
         while True:
             active_clusters = set()
-            for job_state in state["jobs"].values():
-                if job_state["status"] in ("submitted", "running", "resubmitting"):
-                    active_clusters.add(str(job_state["cluster"]))
+            for dataset_state in state.get("datasets", {}).values():
+                for job_state in dataset_state.get("jobs", {}).values():
+                    if job_state["status"] in ("submitted", "running", "resubmitting"):
+                        active_clusters.add(str(job_state["cluster"]))
 
             live_status: dict[tuple[str, int], int] = {}
             live_hold_reason: dict[tuple[str, int], str] = {}
@@ -2125,71 +2344,75 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     history_exit[(cluster_id, proc)] = exit_code
 
             output_paths_to_check: list[str] = []
-            for idx in sorted(job_info.keys()):
-                job_state = state["jobs"][str(idx)]
-                if job_state["status"] in ("done", "perm_fail"):
-                    continue
-                cluster_id = str(job_state["cluster"])
-                proc = job_state["proc"]
-                if live_status.get((cluster_id, proc)) is None:
-                    if job_info[idx]["save"]:
-                        output_paths_to_check.append(job_info[idx]["save"])
-                    if job_info[idx]["meta"]:
-                        output_paths_to_check.append(job_info[idx]["meta"])
-
+            for dataset_name, job_info in dataset_job_info.items():
+                dataset_state = state["datasets"][dataset_name]
+                for idx in sorted(job_info.keys()):
+                    job_state = dataset_state["jobs"][str(idx)]
+                    if job_state["status"] in ("done", "perm_fail"):
+                        continue
+                    cluster_id = str(job_state["cluster"])
+                    proc = job_state["proc"]
+                    if live_status.get((cluster_id, proc)) is None:
+                        if job_info[idx]["save"]:
+                            output_paths_to_check.append(job_info[idx]["save"])
+                        if job_info[idx]["meta"]:
+                            output_paths_to_check.append(job_info[idx]["meta"])
             output_exists = _output_files_exist_batch(output_paths_to_check)
 
-            for idx in sorted(job_info.keys()):
-                key = str(idx)
-                job_state = state["jobs"][key]
-                cluster_id = str(job_state["cluster"])
-                proc = job_state["proc"]
-                status = job_state["status"]
-                if status in ("done", "perm_fail"):
-                    continue
+            for dataset_name, job_info in dataset_job_info.items():
+                dataset_state = state["datasets"][dataset_name]
+                submission_dir = str(dataset_state["submission_dir"])
+                for idx in sorted(job_info.keys()):
+                    key = str(idx)
+                    job_state = dataset_state["jobs"][key]
+                    cluster_id = str(job_state["cluster"])
+                    proc = job_state["proc"]
+                    status = job_state["status"]
+                    if status in ("done", "perm_fail"):
+                        continue
 
-                condor_status = live_status.get((cluster_id, proc))
-                exit_code = history_exit.get((cluster_id, proc))
+                    condor_status = live_status.get((cluster_id, proc))
+                    exit_code = history_exit.get((cluster_id, proc))
 
-                if condor_status == 2:
-                    job_state["status"] = "running"
-                    continue
+                    if condor_status == 2:
+                        job_state["status"] = "running"
+                        continue
 
-                if condor_status == 5:
-                    hold_reason = live_hold_reason.get((cluster_id, proc), "held without reported reason")
-                    removed = _condor_rm_job(cluster_id, proc)
-                    if removed:
-                        self.publish_message(f"Job {idx} held and removed from queue: {hold_reason}")
-                    else:
-                        self.publish_message(f"Job {idx} held (could not confirm condor_rm): {hold_reason}")
-                    self._try_resubmit(idx, job_state, reason=f"held: {hold_reason}")
-                    continue
+                    if condor_status == 5:
+                        hold_reason = live_hold_reason.get((cluster_id, proc), "held without reported reason")
+                        removed = _condor_rm_job(cluster_id, proc)
+                        if removed:
+                            self.publish_message(f"[{dataset_name}] Job {idx} held and removed from queue: {hold_reason}")
+                        else:
+                            self.publish_message(f"[{dataset_name}] Job {idx} held (could not confirm condor_rm): {hold_reason}")
+                        self._try_resubmit(dataset_name, idx, dataset_state, job_state, reason=f"held: {hold_reason}")
+                        continue
 
-                if condor_status is None and exit_code is not None and exit_code != 0:
-                    error_tail = _read_failed_job_error(self._run_dir, cluster_id, proc, idx)
-                    if error_tail:
-                        self.publish_message(
-                            f"Job {idx} failed with exit code {exit_code}. stderr tail:\n{error_tail}"
-                        )
-                    self._try_resubmit(idx, job_state, reason=f"exit code {exit_code}")
-                    continue
+                    if condor_status is None and exit_code is not None and exit_code != 0:
+                        error_tail = _read_failed_job_error(submission_dir, cluster_id, proc, idx)
+                        if error_tail:
+                            self.publish_message(
+                                f"[{dataset_name}] Job {idx} failed with exit code {exit_code}. stderr tail:\n{error_tail}"
+                            )
+                        self._try_resubmit(dataset_name, idx, dataset_state, job_state, reason=f"exit code {exit_code}")
+                        continue
 
-                if condor_status is None:
-                    save_path = job_info[idx]["save"]
-                    meta_path = job_info[idx]["meta"]
-                    if (
-                        (save_path and output_exists.get(save_path, False))
-                        or (meta_path and output_exists.get(meta_path, False))
-                    ):
-                        job_state["status"] = "done"
-                        self.publish_message(f"Job {idx}: output verified.")
+                    if condor_status is None:
+                        save_path = job_info[idx]["save"]
+                        meta_path = job_info[idx]["meta"]
+                        if (
+                            (save_path and output_exists.get(save_path, False))
+                            or (meta_path and output_exists.get(meta_path, False))
+                        ):
+                            job_state["status"] = "done"
+                            self.publish_message(f"[{dataset_name}] Job {idx}: output verified.")
 
             self._save_state(state)
 
             summary = self._status_summary(state)
             done = summary.get("done", 0)
             perm_fail = summary.get("perm_fail", 0)
-            total = len(job_info)
+            total = sum(len(job_info) for job_info in dataset_job_info.values())
             self.publish_message(
                 f"Poll: {done}/{total} verified, {perm_fail} permanently failed, "
                 f"{total - done - perm_fail} in-flight."
@@ -2206,10 +2429,12 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         with self.output().open("w") as fh:
             fh.write(f"done={done}\n")
             fh.write(f"perm_fail={perm_fail}\n")
-            fh.write(f"total={len(job_info)}\n")
+            fh.write(f"total={sum(len(job_info) for job_info in dataset_job_info.values())}\n")
             if perm_fail:
                 failed = [
-                    key for key, job_state in state["jobs"].items()
+                    f"{dataset_name}:{key}"
+                    for dataset_name, dataset_state in state.get("datasets", {}).items()
+                    for key, job_state in dataset_state.get("jobs", {}).items()
                     if job_state["status"] == "perm_fail"
                 ]
                 fh.write("perm_failed_jobs=" + ",".join(failed) + "\n")
@@ -2221,25 +2446,25 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         else:
             self.publish_message(f"All {done} skim output(s) verified. Monitoring complete.")
 
-    def _try_resubmit(self, idx: int, job_state: dict, reason: str) -> None:
+    def _try_resubmit(self, dataset_name: str, idx: int, dataset_state: dict, job_state: dict, reason: str) -> None:
         retries = job_state["retries"]
         if retries >= self.max_retries:
             self.publish_message(
-                f"Job {idx}: permanently failed ({reason}, {retries} retries exhausted)."
+                f"[{dataset_name}] Job {idx}: permanently failed ({reason}, {retries} retries exhausted)."
             )
             job_state["status"] = "perm_fail"
             return
 
         self.publish_message(
-            f"Job {idx} failed ({reason}) - resubmitting "
+            f"[{dataset_name}] Job {idx} failed ({reason}) - resubmitting "
             f"(attempt {retries + 1}/{self.max_retries})."
         )
         new_cluster = _submit_single_skim_job(
             idx,
-            self._run_dir,
+            str(dataset_state["submission_dir"]),
             self.max_runtime,
             2000,
-            "shared_inputs",
+            extra_transfer_files=list(dataset_state.get("shared_transfer_files", [])),
             config_file="submit_config.txt",
         )
         if new_cluster:
@@ -2252,7 +2477,35 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         else:
             job_state["status"] = "perm_fail"
 
-class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, DaskWorkflow):
+
+class SkimHTCondorWorkflowProxy(BaseWorkflowProxy):
+    """Delegate SkimTask workflow-level htcondor execution to the concrete skim chain."""
+
+    workflow_type = "htcondor"
+
+    def _delegate_task(self):
+        return self.task.htcondor_delegate_task()
+
+    def complete(self):
+        return self._delegate_task().complete()
+
+    def requires(self):
+        return DotDict(delegate=self._delegate_task())
+
+    def output(self):
+        return self._delegate_task().output()
+
+    def run(self):
+        super().run()
+
+
+class SkimHTCondorWorkflow(BaseWorkflow):
+    """Pseudo-htcondor workflow that wraps the concrete skim submission chain."""
+
+    workflow_proxy_cls = SkimHTCondorWorkflowProxy
+    exclude_index = True
+
+class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow, DaskWorkflow):
     """
     Run the analysis executable locally to produce skimmed ROOT files.
 
@@ -2283,7 +2536,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
     # task but consumed only at workflow-scheduling time).
     exclude_params_branch = (
         getattr(law.LocalWorkflow, "exclude_params_branch", set())
-        | getattr(HTCondorWorkflow, "exclude_params_branch", set())
+        | getattr(SkimHTCondorWorkflow, "exclude_params_branch", set())
         | getattr(DaskWorkflow, "exclude_params_branch", set())
         | {"dask_scheduler", "dask_workers", "max_runtime", "make_test_job"}
     )
@@ -2308,6 +2561,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
                     {
                         "dataset_name": str(entry["dataset_name"]),
                         "job_dir": str(entry["job_dir"]),
+                        "config_path": os.path.join(str(entry["job_dir"]), "submit_config.txt"),
                         "out_dir": str(entry["out_dir"]),
                     }
                     for entry in _plan_file_source_jobs(
@@ -2326,6 +2580,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
                 {
                     "dataset_name": entry.name,
                     "job_dir": os.path.join(self._jobs_dir, entry.name, "job_0"),
+                    "config_path": os.path.join(self._jobs_dir, entry.name, "job_0", "submit_config.txt"),
                     "out_dir": os.path.join(self._outputs_dir, entry.name, "job_0"),
                 }
                 for entry in manifest.datasets
@@ -2336,6 +2591,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
             {
                 "dataset_name": entry.name,
                 "job_dir": os.path.join(self._jobs_dir, entry.name),
+                "config_path": os.path.join(self._jobs_dir, entry.name, "submit_config.txt"),
                 "out_dir": os.path.join(self._outputs_dir, entry.name),
             }
             for entry in manifest.datasets
@@ -2352,6 +2608,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
                     {
                         "dataset_name": str(entry["dataset_name"]),
                         "job_dir": str(entry["job_dir"]),
+                        "config_path": str(entry.get("config_path", os.path.join(str(entry["job_dir"]), "submit_config.txt"))),
                         "out_dir": str(entry["out_dir"]),
                     }
                     for entry in payload
@@ -2365,12 +2622,20 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
             for i, entry in enumerate(self._prepared_branch_entries())
         }
 
+    def _uses_delegated_htcondor_workflow(self) -> bool:
+        return self.is_workflow() and str(getattr(self, "effective_workflow", "")) == "htcondor"
+
+    def htcondor_delegate_task(self):
+        return MonitorSkimJobs.req(self)
+
     # ------------------------------------------------------------------
     # Workflow requirements
     # ------------------------------------------------------------------
 
     def workflow_requires(self):
         """Require prepared jobs before any executor dispatch begins."""
+        if self._uses_delegated_htcondor_workflow():
+            return DotDict(delegate=self.htcondor_delegate_task())
         reqs = super().workflow_requires()
         reqs["prep"] = PrepareSkimJobs.req(self)
         if self.make_test_job:
@@ -2390,6 +2655,8 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
     # ------------------------------------------------------------------
 
     def output(self):
+        if self._uses_delegated_htcondor_workflow():
+            return self.htcondor_delegate_task().output()
         branch_data = self.branch_data
         if isinstance(branch_data, DatasetEntry):
             return law.LocalFileTarget(
@@ -2418,6 +2685,8 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
         dataset).  In file-source mode there is no canonical single skim file
         per dataset, so only the ``.done`` marker is checked.
         """
+        if self._uses_delegated_htcondor_workflow():
+            return self.htcondor_delegate_task().complete()
         if not self.is_branch():
             prep_json = os.path.join(self._run_dir, "prep_submission.json")
             if not os.path.exists(prep_json):
@@ -2467,6 +2736,9 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
     # ------------------------------------------------------------------
 
     def run(self):
+        if self._uses_delegated_htcondor_workflow():
+            return
+
         branch_data = self.branch_data
 
         if isinstance(branch_data, DatasetEntry):
@@ -2522,6 +2794,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
             branch_entry = cast(dict[str, str], branch_data)
             dataset_name = str(branch_entry["dataset_name"])
             job_dir = str(branch_entry["job_dir"])
+            config_path = str(branch_entry.get("config_path", os.path.join(job_dir, "submit_config.txt")))
             out_dir = str(branch_entry["out_dir"])
 
             if not os.path.isdir(self._shared_dir):
@@ -2551,6 +2824,8 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, HTCondorWorkflow, Da
                     exe_relpath=self._exe_relpath,
                     root_setup=self._root_setup_content,
                     container_setup=self.container_setup or "",
+                    source_config_path=config_path,
+                    shared_archive_path=self._shared_archive_path,
                 )
 
             Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
@@ -2622,10 +2897,6 @@ export LAW_JOB_DASHBOARD_DATA="$( echo "$7" | base64 --decode )"
 export LAW_HTCONDOR_JOB_NUMBER="${LAW_HTCONDOR_JOB_PROCESS:-${_CONDOR_PROCNO:-0}}"
 LAW_HTCONDOR_JOB_NUMBER="$((LAW_HTCONDOR_JOB_NUMBER + 1))"
 
-if [ -f "htcondor_bootstrap.sh" ]; then
-    source "./htcondor_bootstrap.sh" ""
-fi
-
 branch_param="branch"
 workflow_param=""
 if [ "${LAW_JOB_TASK_N_BRANCHES}" != "1" ]; then
@@ -2651,33 +2922,25 @@ eval "${cmd}"
         return runscript_path
 
     def htcondor_create_job_file_factory(self, **kwargs):
-        """Store concrete submit artifacts in the skim run directory."""
-        Path(self._run_dir).mkdir(parents=True, exist_ok=True)
-        kwargs.setdefault("dir", self._run_dir)
-        kwargs.setdefault("mkdtemp", False)
-        kwargs.setdefault("cleanup", False)
-        kwargs.setdefault("file_name", os.path.basename(self._htcondor_submit_file))
-        return super().htcondor_create_job_file_factory(**kwargs)
+        raise RuntimeError(
+            "SkimTask does not use LAW remote HTCondor job factories. Use workflow-level "
+            "htcondor delegation via BuildSkimSubmission, SubmitSkimJobs, and MonitorSkimJobs."
+        )
 
     def htcondor_group_wrapper_file(self):
-        """Use a persistent runscript instead of LAW's transient group wrapper."""
-        from law.job.base import JobInputFile  # type: ignore
-
-        return JobInputFile(
-            self._ensure_htcondor_runscript(),
-            copy=True,
-            render_local=False,
-            render_job=False,
-            share=True,
+        raise RuntimeError(
+            "SkimTask does not use LAW remote HTCondor wrappers in delegated htcondor mode."
         )
 
     def htcondor_wrapper_file(self):
-        """Use a persistent runscript instead of LAW's transient wrapper."""
-        return self.htcondor_group_wrapper_file()
+        raise RuntimeError(
+            "SkimTask does not use LAW remote HTCondor wrappers in delegated htcondor mode."
+        )
 
     def htcondor_job_file(self):
-        """Execute the same persistent runscript as the remote job file."""
-        return self.htcondor_group_wrapper_file()
+        raise RuntimeError(
+            "SkimTask does not use LAW remote HTCondor job files in delegated htcondor mode."
+        )
 
     def htcondor_log_directory(self):
         """Directory for HTCondor log files."""
@@ -2686,71 +2949,24 @@ eval "${cmd}"
         )
 
     def htcondor_bootstrap_file(self):
-        """Optional bootstrap script executed on every HTCondor worker."""
-        bootstrap_path = os.path.join(_HERE, "htcondor_bootstrap.sh")
-        if os.path.isfile(bootstrap_path):
-            from law.job.base import JobInputFile  # type: ignore
-            return JobInputFile(bootstrap_path, copy=True, render_local=False)
+        return None
+
+    def htcondor_stageout_file(self):
+        """Disable LAW stageout injection for skim HTCondor jobs."""
         return None
 
     def htcondor_job_config(self, config, job_num, branches):
-        """Configure per-job HTCondor resource requests.
-
-        The ``shared_inputs/`` directory and per-branch prepared job
-        directories are transferred explicitly so workers execute the same
-        payload layout as local mode.
-        """
-        def _iter_branch_numbers(values):
-            for value in values:
-                if isinstance(value, (list, tuple, set)):
-                    yield from _iter_branch_numbers(value)
-                else:
-                    yield value
-
-        if not hasattr(config, "custom_content") or config.custom_content is None:
-            config.custom_content = []
-        config.custom_content.extend([
-            ("+RequestMemory", str(2000)),
-            ("+MaxRuntime", str(self.max_runtime)),
-            ("request_cpus", "1"),
-            ("request_disk", "20000"),
-        ])
-        if os.path.isdir(self._shared_dir):
-            existing = {
-                k: v
-                for item in config.custom_content
-                if isinstance(item, (list, tuple)) and len(item) == 2
-                for k, v in [item]
-            }
-            xfer_items = [item for item in existing.get("transfer_input_files", "").split(",") if item]
-            xfer_items.append(self._shared_dir)
-            branch_map = self.create_branch_map()
-            for branch in _iter_branch_numbers(branches):
-                branch_data = branch_map.get(branch)
-                if isinstance(branch_data, dict):
-                    job_dir = str(branch_data.get("job_dir", ""))
-                    if job_dir and os.path.isdir(job_dir):
-                        xfer_items.append(job_dir)
-            deduped_items: list[str] = []
-            for item in xfer_items:
-                if item not in deduped_items:
-                    deduped_items.append(item)
-            config.custom_content.append(
-                ("transfer_input_files", ",".join(deduped_items))
-            )
-        return config
+        raise RuntimeError(
+            "SkimTask branch-level LAW HTCondor execution is disabled. The workflow-level "
+            "htcondor mode delegates to the concrete skim submission chain instead."
+        )
 
     def htcondor_workflow_requires(self):
-        """Ensure prepared jobs and optional pre-flight validation exist first."""
-        from law.util import DotDict  # type: ignore
-        reqs = DotDict(prep=PrepareSkimJobs.req(self))
-        if self.make_test_job:
-            reqs["test"] = RunSkimTestJob.req(self)
-        return reqs
+        """Mirror workflow requirements for compatibility with existing tests and callers."""
+        return self.workflow_requires()
 
     def dask_workflow_requires(self):
         """Ensure prepared jobs and optional pre-flight validation exist first."""
-        from law.util import DotDict  # type: ignore
         reqs = DotDict(prep=PrepareSkimJobs.req(self))
         if self.make_test_job:
             reqs["test"] = RunSkimTestJob.req(self)
@@ -2785,6 +3001,8 @@ eval "${cmd}"
                 self._exe_relpath,
                 self._root_setup_content,
                 self.container_setup or "",
+                str(branch_entry.get("config_path", os.path.join(str(branch_entry["job_dir"]), "submit_config.txt"))),
+                self._shared_archive_path,
             ],
             {},
         )

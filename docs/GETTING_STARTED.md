@@ -425,10 +425,17 @@ Once your analysis works locally, scale it up to many datasets using the LAW wor
      --exe ./build/analyses/MyFirstAnalysis/myAnalysis \
      --name myRun \
      --dataset-manifest analyses/MyFirstAnalysis/datasets.yaml \
-     --submit-config law/submit_config.txt
+         --submit-config law/submit_config.txt \
+         --workflow htcondor
    ```
 
-LAW handles job splitting, submission to the batch system, and output collection automatically.
+`SkimTask` is the common entrypoint across execution modes:
+
+- `--workflow local` runs branches locally.
+- `--workflow dask` sends prepared jobs to Dask workers.
+- `--workflow htcondor` delegates to the concrete skim submission chain and creates per-dataset Condor bundles under `skimRun_<name>/condor_submissions/`.
+
+For delegated HTCondor runs, submit-side logs live under each dataset bundle's `condor_logs/` directory. If a job is held during input transfer, you may only see the `.log` file because `stdout` and `stderr` are created only after the payload starts.
 
 ---
 
