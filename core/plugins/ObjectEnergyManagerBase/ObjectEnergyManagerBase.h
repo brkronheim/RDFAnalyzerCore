@@ -435,6 +435,15 @@ protected:
   virtual void appendObjectProvenanceEntries(
       std::unordered_map<std::string, std::string> &entries) const;
 
+  /// Access the current dataframe provider from derived managers.
+  IDataFrameProvider *getDataFrameProvider() const { return dataManager_m; }
+
+  /// Convenience wrapper for reading the current dataframe from derived managers.
+  ROOT::RDF::RNode getCurrentDataFrame() const { return dataManager_m->getDataFrame(); }
+
+  /// Convenience wrapper for updating the dataframe from derived managers.
+  void setCurrentDataFrame(ROOT::RDF::RNode df) { dataManager_m->setDataFrame(df); }
+
 private:
   // ---- Helper -------------------------------------------------------------
   /// Derive a mass column name corresponding to a given pT column name.

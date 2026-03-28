@@ -15,13 +15,10 @@
 #include <DataManager.h>
 #include <ROOT/RDataFrame.hxx>
 #include <ROOT/RVec.hxx>
-#include <atomic>
-#include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <unistd.h>
 #include <vector>
 #include <ManagerFactory.h>
@@ -846,4 +843,87 @@ TEST_F(CorrectionManagerTest, RegisterCorrection_UnknownCorrectionNameThrows) {
           "bad_sf", "aux/correction.json", "no_such_correction",
           {"float_arg", "int_arg"}),
       std::runtime_error);
+}
+
+TEST_F(CorrectionManagerTest, RegisterCompoundCorrectionAndApplyScalar) {
+  auto testDataManager = std::make_unique<DataManager>(1);
+  setContextFor(*testDataManager);
+
+  const std::string file =
+    "../../analyses/VHbbcc/corrections/EGM/Run3-22CDSep23-Summer22-NanoAODv12/latest/electronSS_EtDependent.json.gz";
+
+  testDataManager->Define("run", []() -> double { return 355862.0; }, {}, *systematicManager);
+  testDataManager->Define("Electron_scEta", []() -> double { return 0.15; }, {}, *systematicManager);
+  testDataManager->Define("Electron_r9", []() -> double { return 0.95; }, {}, *systematicManager);
+  testDataManager->Define("Electron_pt", []() -> double { return 45.0; }, {}, *systematicManager);
+  testDataManager->Define("Electron_seedGain", []() -> double { return 12.0; }, {}, *systematicManager);
+
+  correctionManager->registerCorrection(
+    "electron_scale_compound",
+    file,
+    "Scale",
+    {"run", "Electron_scEta", "Electron_r9", "Electron_pt", "Electron_seedGain"});
+  correctionManager->applyCorrection(
+    "electron_scale_compound", {"scale"}, {}, "electron_scale_sf");
+
+  auto df = testDataManager->getDataFrame();
+  auto result = df.Take<float>("electron_scale_sf");
+  ASSERT_EQ(result->size(), 1u);
+
+  auto cset = correction::CorrectionSet::from_file(file);
+  const auto expected = static_cast<float>(
+    cset->compound().at("Scale")->evaluate(
+      {std::string("scale"), 355862.0, 0.15, 0.95, 45.0, 12.0}));
+  EXPECT_NEAR(result->at(0), expected, 1e-6f);
+
+  EXPECT_NO_THROW(correctionManager->getCompoundCorrection("electron_scale_compound"));
+
+  setContextFor(*dataManager);
+}
+
+TEST_F(CorrectionManagerTest, ApplyCompoundCorrectionVecSupportsMixedScalarAndRVecInputs) {
+  auto testDataManager = std::make_unique<DataManager>(1);
+  setContextFor(*testDataManager);
+
+  const std::string file =
+    "../../analyses/VHbbcc/corrections/JME/Run3-22CDSep23-Summer22-NanoAODv12/latest/jet_jerc.json.gz";
+  const std::string compoundName =
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi";
+
+  testDataManager->Define(
+    "Jet_area",
+    []() -> ROOT::VecOps::RVec<Float_t> { return {0.52f, 0.61f}; }, {}, *systematicManager);
+  testDataManager->Define(
+    "Jet_eta",
+    []() -> ROOT::VecOps::RVec<Float_t> { return {0.3f, -1.1f}; }, {}, *systematicManager);
+  testDataManager->Define(
+    "Jet_pt_raw",
+    []() -> ROOT::VecOps::RVec<Float_t> { return {55.0f, 110.0f}; }, {}, *systematicManager);
+  testDataManager->Define(
+    "Rho_fixedGridRhoFastjetAll",
+    []() -> double { return 21.0; }, {}, *systematicManager);
+
+  correctionManager->registerCorrection(
+    "jme_compound",
+    file,
+    compoundName,
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+  correctionManager->applyCorrectionVec(
+    "jme_compound", {}, {}, "jme_sf");
+
+  auto df = testDataManager->getDataFrame();
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("jme_sf");
+  ASSERT_EQ(result->size(), 1u);
+  ASSERT_EQ((*result)[0].size(), 2u);
+
+  auto cset = correction::CorrectionSet::from_file(file);
+  const auto compound = cset->compound().at(compoundName);
+  const auto expected0 = static_cast<float>(compound->evaluate(
+    {0.52, 0.3, 55.0, 21.0}));
+  const auto expected1 = static_cast<float>(compound->evaluate(
+    {0.61, -1.1, 110.0, 21.0}));
+  EXPECT_NEAR((*result)[0][0], expected0, 1e-6f);
+  EXPECT_NEAR((*result)[0][1], expected1, 1e-6f);
+
+  setContextFor(*dataManager);
 }

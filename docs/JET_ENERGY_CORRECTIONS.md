@@ -40,6 +40,7 @@ the framework's systematic-variation infrastructure.
 | Strip existing NanoAOD JEC | `removeExistingCorrections(rawFactorColumn)` |
 | Apply scale-factor correction | `applyCorrection(inputPt, sfCol, outputPt)` |
 | Apply correctionlib correction | `applyCorrectionlib(cm, name, args, inputPt, outputPt)` |
+| Apply JER smearing | `applyJERSmearing(cm, resolution, scaleFactor, inputPt, outputPt)` |
 | Register named CMS source sets | `registerSystematicSources(setName, sources)` |
 | Apply entire source set at once | `applySystematicSet(cm, name, setName, inputPt, prefix)` |
 | Type-1 MET propagation | `propagateMET(basePt, basePhi, nomPt, varPt, outPt, outPhi)` |
@@ -75,17 +76,36 @@ jes->setMETColumns("MET_pt", "MET_phi");
 jes->removeExistingCorrections("Jet_rawFactor");
 // → Jet_pt_raw, Jet_mass_raw defined in execute()
 
-// 3. Apply new L1L2L3 JEC via correctionlib.
-jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
-                        "Jet_pt_raw", "Jet_pt_jec");
+// 3. Register and evaluate a nominal compound JEC.
+cm->registerCorrection(
+  "jec_nominal",
+  "jet_jerc.json.gz",
+  "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+  {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+
+// 4. Apply the resulting scale-factor column.
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");
 // → Jet_pt_jec, Jet_mass_jec defined in execute()
 
-// 4. Register reduced systematic set and apply.
+// 5. Configure JER smearing inputs.
+jes->setJERSmearingColumns("Jet_genMatchedPt",
+               "Rho_fixedGridRhoFastjetAll",
+               "event");
+
+// 6. Register reduced systematic set and apply.
 jes->registerSystematicSources("reduced", {"Total"});
 jes->applySystematicSet(*cm, "jes_unc", "reduced", "Jet_pt_jec", "Jet_pt_jes");
 // → Jet_pt_jes_Total_up, Jet_pt_jes_Total_down defined in execute()
 
-// 5. Propagate JEC to MET.
+// 7. Apply nominal JER smearing.
+jes->applyJERSmearing(*cm,
+            "jer_pt_resolution",
+            "jer_scale_factor",
+            "Jet_pt_jec",
+            "Jet_pt_jer_nominal");
+
+// 8. Propagate JEC to MET.
 jes->propagateMET("MET_pt", "MET_phi",
                   "Jet_pt_raw", "Jet_pt_jec",
                   "MET_pt_jec", "MET_phi_jec");
@@ -232,13 +252,62 @@ sfColumnName = correctionName + "_" + stringArgs[0] + "_" + stringArgs[1] + ...
 For CMS JES/JER uncertainty sources the `stringArgs` follow the convention
 `{sourceName, "up"}` or `{sourceName, "down"}`.
 
+For compound JEC entries that already encode the full stack in the correction
+name, pass an empty string-argument list and register the compound entry with
+`CorrectionManager` directly.
+
 **Example: apply L1L2L3 JEC**
 ```cpp
-jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
-                        "Jet_pt_raw", "Jet_pt_jec");
-// Intermediate SF column: "jec_l1l2l3_L3Residual"
-// Output column:          "Jet_pt_jec"
+cm->registerCorrection(
+  "jec_nominal",
+  "jet_jerc.json.gz",
+  "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+  {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");
+// Intermediate SF column: "Jet_jec_sf_nominal"
+// Output columns:         "Jet_pt_jec", "Jet_mass_jec"
 ```
+
+### `setJERSmearingColumns`
+
+```cpp
+void setJERSmearingColumns(const std::string& genJetPtColumn,
+                           const std::string& rhoColumn,
+                           const std::string& eventColumn);
+```
+
+Declares the auxiliary inputs needed by `applyJERSmearing(...)`:
+
+- matched generator-jet pT per reco jet
+- event-level `rho`
+- event identifier for deterministic stochastic smearing
+
+### `applyJERSmearing`
+
+```cpp
+void applyJERSmearing(CorrectionManager& cm,
+                      const std::string& ptResolutionCorrection,
+                      const std::string& scaleFactorCorrection,
+                      const std::string& inputPtColumn,
+                      const std::string& outputPtColumn,
+                      const std::string& systematic = "nom",
+                      bool applyToMass = true,
+                      const std::string& inputMassColumn = "",
+                      const std::string& outputMassColumn = "",
+                      const std::vector<std::string>& ptResolutionInputs = {},
+                      const std::vector<std::string>& scaleFactorInputs = {});
+```
+
+Schedules CMS JER smearing using the pt-resolution and scale-factor payloads already registered in `CorrectionManager`.
+
+This method is intended for payloads where:
+
+- the resolution correction uses only numeric inputs
+- the scale-factor correction uses numeric inputs plus a variation string like `nom`, `up`, or `down`
+- unmatched jets require stochastic smearing
+
+The output smearing is reproducible because the random seed is derived from the event id and jet index.
 
 ---
 
@@ -326,7 +395,7 @@ jes->registerSystematicSources("full", {
 });
 jes->applySystematicSet(*cm, "jes_unc", "full", "Jet_pt_jec", "Jet_pt_jes");
 // Produces columns: Jet_pt_jes_AbsoluteCal_up, Jet_pt_jes_AbsoluteCal_down, ...
-// Registers 34 systematics (17 × 2 directions) with ISystematicManager.
+// Registers 17 systematic families and their explicit Up/Down mappings.
 ```
 
 ---
@@ -495,9 +564,14 @@ void defineVariationCollections(const std::string& nominalCollectionColumn,
 For each variation registered with `addVariation()` (or by
 `applySystematicSet()`), schedules in `execute()`:
 - `<collectionPrefix>_<variationName>Up`   — `PhysicsObjectCollection`
-  with up-shifted pT.
+  with up-shifted kinematics.
 - `<collectionPrefix>_<variationName>Down` — `PhysicsObjectCollection`
-  with down-shifted pT.
+  with down-shifted kinematics.
+
+The nominal collection name is also registered as a systematic-aware base
+variable. That means downstream `IDataFrameProvider::Define(...)` calls can use
+the nominal collection directly and automatically materialize derived
+`..._<variationName>Up` and `..._<variationName>Down` outputs.
 
 If `variationMapColumn` is non-empty, also defines a
 `PhysicsObjectVariationMap` column built as:
@@ -529,6 +603,19 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
 //       ["nominal"]           → goodJets_jec
 //       ["TotalUp"]           → goodJets_TotalUp
 //       ["TotalDown"]         → goodJets_TotalDown
+
+analyzer.Define("selectedJetPts",
+  [](const PhysicsObjectCollection& jets) {
+    ROOT::VecOps::RVec<float> pts;
+    for (std::size_t i = 0; i < jets.size(); ++i) {
+      pts.push_back(static_cast<float>(jets.at(i).Pt()));
+    }
+    return pts;
+  },
+  {"goodJets"}, *analyzer.getSystematicManager());
+// Also materializes:
+//   selectedJetPts_TotalUp
+//   selectedJetPts_TotalDown
 ```
 
 ---
@@ -545,9 +632,14 @@ void addVariation(const std::string& systematicName,
                   const std::string& downMassColumn = "");
 ```
 
-Registers a named JES/JER systematic variation.  In `execute()`, registers
-both directions with `ISystematicManager` so that downstream histogram
-booking and validation tools propagate the systematic correctly.
+Registers a named JES/JER systematic variation. In `execute()`, the manager:
+
+- registers the base systematic family with `ISystematicManager`
+- records the explicit Up/Down source columns for the nominal corrected branch
+- exposes collection-prefix aliases such as `goodJets_jesTotalUp`
+
+This lets downstream histogram booking and `Define(...)` calls propagate the
+systematic correctly from the nominal branch or nominal collection name.
 
 `applySystematicSet()` calls `addVariation()` automatically for every source
 in the set.
@@ -610,10 +702,12 @@ processes the registered steps in this order:
 |------|-----------|
 | 1 | Raw-pT and raw-mass columns (if `removeExistingCorrections` was called). |
 | 2 | Each correction step (from `applyCorrection` / `applyCorrectionlib`). |
-| 3 | Each MET propagation step (from `propagateMET`). |
-| 4 | Each collection output step (from `defineCollectionOutput`). |
-| 5 | Per-variation collection columns and optional variation map (from `defineVariationCollections`). |
-| 6 | Register all systematic variations with `ISystematicManager`. |
+| 3 | Each registered JER smearing step (from `applyJERSmearing`). |
+| 4 | Each MET propagation step (from `propagateMET`). |
+| 5 | Register explicit variation mappings for corrected nominal pt/mass inputs. |
+| 6 | Each collection output step (from `defineCollectionOutput`) through the systematic-aware `Define(...)` path. |
+| 7 | Per-variation collection aliases and optional variation map (from `defineVariationCollections`). |
+| 8 | Register variation-family mappings with `ISystematicManager`. |
 
 `reportMetadata()` logs a human-readable summary of the complete
 configuration (jet/MET columns, correction steps, systematic sets,
@@ -687,10 +781,16 @@ int main(int argc, char** argv) {
     // Defines: Jet_pt_raw, Jet_mass_raw
 
     // -----------------------------------------------------------------------
-    // 4. Apply new L1L2L3 JEC via correctionlib
+    // 4. Apply new L1L2L3 JEC via a compound correction
     // -----------------------------------------------------------------------
-    jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
-                            "Jet_pt_raw", "Jet_pt_jec");
+    cm->registerCorrection(
+      "jec_nominal",
+      "jet_jerc.json.gz",
+      "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+      {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+    cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+    jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec",
+               true, "Jet_mass_raw", "Jet_mass_jec");
     // Defines: Jet_pt_jec, Jet_mass_jec
 
     // -----------------------------------------------------------------------
@@ -716,7 +816,7 @@ int main(int argc, char** argv) {
     jes->applySystematicSet(*cm, "jes_unc", "reduced",
                             "Jet_pt_jec", "Jet_pt_jes");
     // Defines: Jet_pt_jes_Total_up, Jet_pt_jes_Total_down
-    // Registers: TotalUp, TotalDown with ISystematicManager
+    // Registers: Total family plus explicit Up/Down source mappings
 
     // -----------------------------------------------------------------------
     // 8. Per-variation jet collections + variation map
@@ -725,6 +825,17 @@ int main(int argc, char** argv) {
                                     "goodJets_variations");
     // Defines: goodJets_TotalUp, goodJets_TotalDown
     //          goodJets_variations (PhysicsObjectVariationMap)
+
+    analyzer.Define("selectedJetPts",
+      [](const PhysicsObjectCollection& jets) {
+        ROOT::VecOps::RVec<float> pts;
+        for (std::size_t i = 0; i < jets.size(); ++i) {
+          pts.push_back(static_cast<float>(jets.at(i).Pt()));
+        }
+        return pts;
+      },
+      {"goodJets"}, *analyzer.getSystematicManager());
+    // Also defines: selectedJetPts_TotalUp, selectedJetPts_TotalDown
 
     // -----------------------------------------------------------------------
     // 9. Propagate JES Total variation to MET

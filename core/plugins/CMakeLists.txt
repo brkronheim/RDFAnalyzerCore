@@ -3,6 +3,7 @@
 set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/BDTManager
     ${CMAKE_CURRENT_SOURCE_DIR}/CorrectionManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/CorrectedObjectCollectionManagers
     ${CMAKE_CURRENT_SOURCE_DIR}/CutflowManager
     ${CMAKE_CURRENT_SOURCE_DIR}/ElectronEnergyScaleManager
     ${CMAKE_CURRENT_SOURCE_DIR}/JetEnergyScaleManager
@@ -30,6 +31,7 @@ add_library(corePlugins STATIC)
 # Add subdirectories
 add_subdirectory(BDTManager)
 add_subdirectory(CorrectionManager)
+add_subdirectory(CorrectedObjectCollectionManagers)
 add_subdirectory(CutflowManager)
 add_subdirectory(ObjectEnergyManagerBase)
 add_subdirectory(ElectronEnergyScaleManager)
@@ -53,6 +55,7 @@ add_subdirectory(WeightManager)
 target_sources(corePlugins PRIVATE
     $<TARGET_OBJECTS:BDTManager>
     $<TARGET_OBJECTS:CorrectionManager>
+    $<TARGET_OBJECTS:CorrectedObjectCollectionManagers>
     $<TARGET_OBJECTS:CutflowManager>
     $<TARGET_OBJECTS:ObjectEnergyManagerBase>
     $<TARGET_OBJECTS:ElectronEnergyScaleManager>
@@ -74,6 +77,7 @@ target_sources(corePlugins PRIVATE
 target_link_libraries(corePlugins
     BDTManager
     CorrectionManager
+    CorrectedObjectCollectionManagers
     CutflowManager
     ObjectEnergyManagerBase
     ElectronEnergyScaleManager

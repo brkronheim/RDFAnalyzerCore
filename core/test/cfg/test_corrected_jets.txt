@@ -1,0 +1,8 @@
+ptColumn=Jet_pt
+etaColumn=Jet_eta
+phiColumn=Jet_phi
+massColumn=Jet_mass
+correctedPtColumn=Jet_pt_corr_nominal
+correctedMassColumn=Jet_mass_corr_nominal
+outputCollection=CorrectedJets
+variationMapColumn=CorrectedJets_variations

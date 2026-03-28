@@ -293,6 +293,45 @@ TEST_F(ElectronEnergyScaleManagerTest, VariationMapContainsNominalAndVariations)
   EXPECT_NE(vm.find("eesDown"), vm.end());
 }
 
+TEST_F(ElectronEnergyScaleManagerTest, CollectionDefinePropagatesSystematicVariations) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineObjectCollection(*dm, "goodElectrons", 50.0f, *systematicManager);
+  defineRVecColumn(*dm, "Electron_pt_corr",
+                   [](ULong64_t) { return 50.0f; }, *systematicManager);
+  defineRVecColumn(*dm, "Electron_pt_ees_up",
+                   [](ULong64_t) { return 52.0f; }, *systematicManager);
+  defineRVecColumn(*dm, "Electron_pt_ees_dn",
+                   [](ULong64_t) { return 48.0f; }, *systematicManager);
+
+  mgr->setInputCollection("goodElectrons");
+  mgr->defineCollectionOutput("Electron_pt_corr", "goodElectrons_corr");
+  mgr->addVariation("ees", "Electron_pt_ees_up", "Electron_pt_ees_dn");
+  mgr->defineVariationCollections("goodElectrons_corr", "goodElectrons");
+  mgr->execute();
+
+  dm->Define(
+      "selectedElectronPts",
+      [](const PhysicsObjectCollection &col) -> ROOT::VecOps::RVec<Float_t> {
+        ROOT::VecOps::RVec<Float_t> pts;
+        pts.reserve(col.size());
+        for (std::size_t i = 0; i < col.size(); ++i) {
+          pts.push_back(static_cast<Float_t>(col.at(i).Pt()));
+        }
+        return pts;
+      },
+      {"goodElectrons"}, *systematicManager);
+
+  auto nominal = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedElectronPts");
+  auto up = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedElectronPts_eesUp");
+  auto down = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedElectronPts_eesDown");
+
+  EXPECT_NEAR(nominal.GetValue()[0][0], 50.0f, 0.01f);
+  EXPECT_NEAR(up.GetValue()[0][0], 52.0f, 0.01f);
+  EXPECT_NEAR(down.GetValue()[0][0], 48.0f, 0.01f);
+}
+
 // reportMetadata
 TEST_F(ElectronEnergyScaleManagerTest, ReportMetadataDoesNotThrow) {
   auto dm  = std::make_unique<DataManager>(1);
@@ -435,6 +474,45 @@ TEST_F(PhotonEnergyScaleManagerTest, VariationMapContainsNominalAndVariations) {
   EXPECT_NE(vm.find("nominal"), vm.end());
   EXPECT_NE(vm.find("pesUp"),   vm.end());
   EXPECT_NE(vm.find("pesDown"), vm.end());
+}
+
+TEST_F(PhotonEnergyScaleManagerTest, CollectionDefinePropagatesSystematicVariations) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineObjectCollection(*dm, "goodPhotons", 40.0f, *systematicManager);
+  defineRVecColumn(*dm, "Photon_pt_corr",
+                   [](ULong64_t) { return 40.0f; }, *systematicManager);
+  defineRVecColumn(*dm, "Photon_pt_pes_up",
+                   [](ULong64_t) { return 42.0f; }, *systematicManager);
+  defineRVecColumn(*dm, "Photon_pt_pes_dn",
+                   [](ULong64_t) { return 38.0f; }, *systematicManager);
+
+  mgr->setInputCollection("goodPhotons");
+  mgr->defineCollectionOutput("Photon_pt_corr", "goodPhotons_corr");
+  mgr->addVariation("pes", "Photon_pt_pes_up", "Photon_pt_pes_dn");
+  mgr->defineVariationCollections("goodPhotons_corr", "goodPhotons");
+  mgr->execute();
+
+  dm->Define(
+      "selectedPhotonPts",
+      [](const PhysicsObjectCollection &col) -> ROOT::VecOps::RVec<Float_t> {
+        ROOT::VecOps::RVec<Float_t> pts;
+        pts.reserve(col.size());
+        for (std::size_t i = 0; i < col.size(); ++i) {
+          pts.push_back(static_cast<Float_t>(col.at(i).Pt()));
+        }
+        return pts;
+      },
+      {"goodPhotons"}, *systematicManager);
+
+  auto nominal = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedPhotonPts");
+  auto up = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedPhotonPts_pesUp");
+  auto down = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedPhotonPts_pesDown");
+
+  EXPECT_NEAR(nominal.GetValue()[0][0], 40.0f, 0.01f);
+  EXPECT_NEAR(up.GetValue()[0][0], 42.0f, 0.01f);
+  EXPECT_NEAR(down.GetValue()[0][0], 38.0f, 0.01f);
 }
 
 TEST_F(PhotonEnergyScaleManagerTest, ProvenanceContainsPtColumn) {
@@ -715,6 +793,45 @@ TEST_F(MuonRochesterManagerTest, VariationMapContainsNominalAndVariations) {
   EXPECT_NE(vm.find("nominal"), vm.end());
   EXPECT_NE(vm.find("statUp"),  vm.end());
   EXPECT_NE(vm.find("statDown"), vm.end());
+}
+
+TEST_F(MuonRochesterManagerTest, CollectionDefinePropagatesSystematicVariations) {
+  auto dm  = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineObjectCollection(*dm, "goodMuons", 20.0f, *systematicManager);
+  defineRVecColumn(*dm, "Muon_pt_roch",
+                   [](ULong64_t) { return 20.0f; }, *systematicManager);
+  defineRVecColumn(*dm, "Muon_pt_stat_up",
+                   [](ULong64_t) { return 20.2f; }, *systematicManager);
+  defineRVecColumn(*dm, "Muon_pt_stat_dn",
+                   [](ULong64_t) { return 19.8f; }, *systematicManager);
+
+  mgr->setInputCollection("goodMuons");
+  mgr->defineCollectionOutput("Muon_pt_roch", "goodMuons_corr");
+  mgr->addVariation("stat", "Muon_pt_stat_up", "Muon_pt_stat_dn");
+  mgr->defineVariationCollections("goodMuons_corr", "goodMuons");
+  mgr->execute();
+
+  dm->Define(
+      "selectedMuonPts",
+      [](const PhysicsObjectCollection &col) -> ROOT::VecOps::RVec<Float_t> {
+        ROOT::VecOps::RVec<Float_t> pts;
+        pts.reserve(col.size());
+        for (std::size_t i = 0; i < col.size(); ++i) {
+          pts.push_back(static_cast<Float_t>(col.at(i).Pt()));
+        }
+        return pts;
+      },
+      {"goodMuons"}, *systematicManager);
+
+  auto nominal = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedMuonPts");
+  auto up = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedMuonPts_statUp");
+  auto down = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedMuonPts_statDown");
+
+  EXPECT_NEAR(nominal.GetValue()[0][0], 20.0f, 0.01f);
+  EXPECT_NEAR(up.GetValue()[0][0], 20.2f, 0.01f);
+  EXPECT_NEAR(down.GetValue()[0][0], 19.8f, 0.01f);
 }
 
 TEST_F(MuonRochesterManagerTest, ProvenanceContainsPtColumn) {

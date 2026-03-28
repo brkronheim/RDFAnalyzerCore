@@ -9,6 +9,117 @@
 #include <iostream>
 #include <stdexcept>
 
+namespace {
+
+Float_t evaluateScalarCorrection(
+  const correction::Correction::Ref &correction,
+    const std::vector<std::string> &stringArgs,
+    ROOT::VecOps::RVec<double> &inputVector) {
+  std::vector<std::variant<int, double, std::string>> values;
+  auto stringArgIt = stringArgs.begin();
+  auto doubleArgIt = inputVector.begin();
+  for (const auto &varType : correction->inputs()) {
+    if (varType.typeStr() == "string") {
+      values.push_back(*stringArgIt);
+      ++stringArgIt;
+    } else if (varType.typeStr() == "int") {
+      values.push_back(int(*doubleArgIt));
+      ++doubleArgIt;
+    } else {
+      values.push_back(*doubleArgIt);
+      ++doubleArgIt;
+    }
+  }
+  return correction->evaluate(values);
+}
+
+Float_t evaluateScalarCorrection(
+    const correction::CompoundCorrection::Ref &correction,
+    const std::vector<std::string> &stringArgs,
+    ROOT::VecOps::RVec<double> &inputVector) {
+  std::vector<std::variant<int, double, std::string>> values;
+  auto stringArgIt = stringArgs.begin();
+  auto doubleArgIt = inputVector.begin();
+  for (const auto &varType : correction->inputs()) {
+    if (varType.typeStr() == "string") {
+      values.push_back(*stringArgIt);
+      ++stringArgIt;
+    } else {
+      values.push_back(*doubleArgIt);
+      ++doubleArgIt;
+    }
+  }
+  return correction->evaluate(values);
+}
+
+ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
+    const correction::Correction::Ref &correction,
+    const std::vector<std::string> &stringArgs,
+    const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> &inputMatrix) {
+  ROOT::VecOps::RVec<Float_t> result(inputMatrix.size());
+  for (size_t i = 0; i < inputMatrix.size(); ++i) {
+    std::vector<std::variant<int, double, std::string>> values;
+    auto stringArgIt = stringArgs.begin();
+    auto doubleArgIt = inputMatrix[i].begin();
+    for (const auto &varType : correction->inputs()) {
+      if (varType.typeStr() == "string") {
+        values.push_back(*stringArgIt);
+        ++stringArgIt;
+      } else if (varType.typeStr() == "int") {
+        values.push_back(int(*doubleArgIt));
+        ++doubleArgIt;
+      } else {
+        values.push_back(*doubleArgIt);
+        ++doubleArgIt;
+      }
+    }
+    result[i] = correction->evaluate(values);
+  }
+  return result;
+}
+
+ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
+    const correction::CompoundCorrection::Ref &correction,
+    const std::vector<std::string> &stringArgs,
+    const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> &inputMatrix) {
+  ROOT::VecOps::RVec<Float_t> result(inputMatrix.size());
+  for (size_t i = 0; i < inputMatrix.size(); ++i) {
+    std::vector<std::variant<int, double, std::string>> values;
+    auto stringArgIt = stringArgs.begin();
+    auto doubleArgIt = inputMatrix[i].begin();
+    for (const auto &varType : correction->inputs()) {
+      if (varType.typeStr() == "string") {
+        values.push_back(*stringArgIt);
+        ++stringArgIt;
+      } else {
+        values.push_back(*doubleArgIt);
+        ++doubleArgIt;
+      }
+    }
+    result[i] = correction->evaluate(values);
+  }
+  return result;
+}
+
+template <typename CorrectionSetT>
+auto lookupCorrectionOrCompound(const CorrectionSetT &correctionSet,
+                                const std::string &name)
+    -> std::pair<correction::Correction::Ref, correction::CompoundCorrection::Ref> {
+  try {
+    return {correctionSet->at(name), nullptr};
+  } catch (const std::out_of_range &) {
+  }
+
+  const auto compoundIt = correctionSet->compound().find(name);
+  if (compoundIt != correctionSet->compound().end()) {
+    return {nullptr, compoundIt->second};
+  }
+
+  throw std::runtime_error("Correction '" + name + "' was not found as either a regular or compound correction");
+}
+
+} // namespace
+
 /**
  * @brief Construct a new CorrectionManager object
  * @param configProvider Reference to the configuration provider
@@ -73,15 +184,20 @@ void CorrectionManager::registerCorrection(
     const std::string &file,
     const std::string &correctionlibName,
     const std::vector<std::string> &inputVariables) {
-  if (objects_m.count(name)) {
+  if (objects_m.count(name) || compoundObjects_m.count(name)) {
     throw std::runtime_error(
         "CorrectionManager::registerCorrection: a correction named '" + name +
         "' is already registered. Use a unique name for each correction.");
   }
-  correction::Correction::Ref corr;
   try {
     auto correctionSet = correction::CorrectionSet::from_file(file);
-    corr = correctionSet->at(correctionlibName);
+    const auto [corr, compoundCorr] =
+        lookupCorrectionOrCompound(correctionSet, correctionlibName);
+    if (corr) {
+      objects_m.emplace(name, corr);
+    } else {
+      compoundObjects_m.emplace(name, compoundCorr);
+    }
   } catch (const std::exception &e) {
     throw std::runtime_error(
         "CorrectionManager::registerCorrection: failed to load correction '" +
@@ -90,7 +206,6 @@ void CorrectionManager::registerCorrection(
   }
   std::cout << "CorrectionManager: registering correction '" << name
             << "' from file '" << file << "'" << std::endl;
-  objects_m.emplace(name, corr);
   features_m.emplace(name, inputVariables);
 }
 
@@ -125,29 +240,31 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
 
   std::cout << "Defining input features for correction " << correctionName << std::endl;
   dataManager_m->DefineVector(inputColName, resolvedInputs, "double", *systematicManager_m);
-  auto correction = this->objects_m.at(correctionName);
-  auto stringArgs = stringArguments;
-  auto correctionLambda =
-      [correction,
-       stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
-    std::vector<std::variant<int, double, std::string>> values;
-    auto stringArgIt = stringArgs.begin();
-    auto doubleArgIt = inputVector.begin();
-    for (const auto &varType : correction->inputs()) {
-      if (varType.typeStr() == "string") {
-        values.push_back(*stringArgIt);
-        ++stringArgIt;
-      } else if (varType.typeStr() == "int") {
-        values.push_back(int(*doubleArgIt));
-        ++doubleArgIt;
-      } else {
-        values.push_back(*doubleArgIt);
-        ++doubleArgIt;
-      }
-    }
-    return correction->evaluate(values);
-  };
-  dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+  if (const auto corrIt = this->objects_m.find(correctionName);
+      corrIt != this->objects_m.end()) {
+    auto correction = corrIt->second;
+    auto stringArgs = stringArguments;
+    auto correctionLambda =
+        [correction, stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
+      return evaluateScalarCorrection(correction, stringArgs, inputVector);
+    };
+    dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+    return;
+  }
+
+  if (const auto compoundIt = compoundObjects_m.find(correctionName);
+      compoundIt != compoundObjects_m.end()) {
+    auto correction = compoundIt->second;
+    auto stringArgs = stringArguments;
+    auto correctionLambda =
+        [correction, stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
+      return evaluateScalarCorrection(correction, stringArgs, inputVector);
+    };
+    dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+    return;
+  }
+
+  throw std::runtime_error("CorrectionManager::applyCorrection: unknown correction '" + correctionName + "'");
 }
 
 /**
@@ -158,6 +275,15 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
 correction::Correction::Ref
 CorrectionManager::getCorrection(const std::string &key) const {
   return getObject(key);
+}
+
+correction::CompoundCorrection::Ref
+CorrectionManager::getCompoundCorrection(const std::string &key) const {
+  const auto it = compoundObjects_m.find(key);
+  if (it != compoundObjects_m.end()) {
+    return it->second;
+  }
+  throw std::runtime_error("Compound correction not found: " + key);
 }
 
 /**
@@ -235,13 +361,39 @@ void CorrectionManager::applyCorrectionVec(
     const auto existingColumns = dfNode.GetColumnNames();
     if (std::find(existingColumns.begin(), existingColumns.end(),
                   inputVecName) == existingColumns.end()) {
+      std::vector<bool> isRVec;
+      isRVec.reserve(resolvedInputs.size());
+      std::string sizeColumn;
+      for (const auto &f : resolvedInputs) {
+        const std::string colType = dfNode.GetColumnType(f);
+        const bool columnIsRVec = colType.find("RVec") != std::string::npos;
+        isRVec.push_back(columnIsRVec);
+        if (sizeColumn.empty() && columnIsRVec) {
+          sizeColumn = f;
+        }
+      }
+
+      if (sizeColumn.empty()) {
+        throw std::runtime_error(
+            "applyCorrectionVec: at least one input column must be an RVec for correction '" +
+            correctionName + "'");
+      }
+
       std::string expr =
           "ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> _out(" +
-          resolvedInputs[0] + ".size());\n";
-      for (const auto &f : resolvedInputs) {
-        expr += "for (size_t _i = 0; _i < _out.size(); ++_i)"
-                " _out[_i].push_back(static_cast<double>(" +
-                f + "[_i]));\n";
+          sizeColumn + ".size());\n";
+      for (size_t index = 0; index < resolvedInputs.size(); ++index) {
+        const auto &f = resolvedInputs[index];
+        const bool columnIsRVec = isRVec[index];
+        if (columnIsRVec) {
+          expr += "for (size_t _i = 0; _i < _out.size(); ++_i)"
+                  " _out[_i].push_back(static_cast<double>(" +
+                  f + "[_i]));\n";
+        } else {
+          expr += "for (size_t _i = 0; _i < _out.size(); ++_i)"
+                  " _out[_i].push_back(static_cast<double>(" +
+                  f + "));\n";
+        }
       }
       expr += "return _out;";
       dfNode = dfNode.Define(inputVecName, expr);
@@ -250,35 +402,35 @@ void CorrectionManager::applyCorrectionVec(
   }
 
   // Lambda that applies the correction to every object in the collection.
-  auto correction = this->objects_m.at(correctionName);
-  auto stringArgs = stringArguments;
-  auto correctionLambda =
-      [correction, stringArgs](
-          const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>>
-              &inputMatrix) -> ROOT::VecOps::RVec<Float_t> {
-    ROOT::VecOps::RVec<Float_t> result(inputMatrix.size());
-    for (size_t i = 0; i < inputMatrix.size(); ++i) {
-      std::vector<std::variant<int, double, std::string>> values;
-      auto stringArgIt = stringArgs.begin();
-      auto doubleArgIt = inputMatrix[i].begin();
-      for (const auto &varType : correction->inputs()) {
-        if (varType.typeStr() == "string") {
-          values.push_back(*stringArgIt);
-          ++stringArgIt;
-        } else if (varType.typeStr() == "int") {
-          values.push_back(int(*doubleArgIt));
-          ++doubleArgIt;
-        } else {
-          values.push_back(*doubleArgIt);
-          ++doubleArgIt;
-        }
-      }
-      result[i] = correction->evaluate(values);
-    }
-    return result;
-  };
-  dataManager_m->Define(branchName, correctionLambda, {inputVecName},
-                        *systematicManager_m);
+  if (const auto corrIt = this->objects_m.find(correctionName);
+      corrIt != this->objects_m.end()) {
+    auto correction = corrIt->second;
+    auto stringArgs = stringArguments;
+    auto correctionLambda =
+        [correction, stringArgs](const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>>
+                                     &inputMatrix) -> ROOT::VecOps::RVec<Float_t> {
+      return evaluateVectorCorrection(correction, stringArgs, inputMatrix);
+    };
+    dataManager_m->Define(branchName, correctionLambda, {inputVecName},
+                          *systematicManager_m);
+    return;
+  }
+
+  if (const auto compoundIt = compoundObjects_m.find(correctionName);
+      compoundIt != compoundObjects_m.end()) {
+    auto correction = compoundIt->second;
+    auto stringArgs = stringArguments;
+    auto correctionLambda =
+        [correction, stringArgs](const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>>
+                                     &inputMatrix) -> ROOT::VecOps::RVec<Float_t> {
+      return evaluateVectorCorrection(correction, stringArgs, inputMatrix);
+    };
+    dataManager_m->Define(branchName, correctionLambda, {inputVecName},
+                          *systematicManager_m);
+    return;
+  }
+
+  throw std::runtime_error("CorrectionManager::applyCorrectionVec: unknown correction '" + correctionName + "'");
 }
 
 /**
@@ -309,12 +461,17 @@ void CorrectionManager::registerCorrectionlib(
     // load correction object from json
     auto correctionF =
         correction::CorrectionSet::from_file(entryKeys.at("file"));
-    auto correction = correctionF->at(entryKeys.at("correctionName"));
+    const auto [correction, compoundCorrection] =
+        lookupCorrectionOrCompound(correctionF, entryKeys.at("correctionName"));
 
     // Add the correction and feature list to their maps
     std::cout << "Adding correction " << entryKeys.at("name") << "!"
               << std::endl;
-    objects_m.emplace(entryKeys.at("name"), correction);
+    if (correction) {
+      objects_m.emplace(entryKeys.at("name"), correction);
+    } else {
+      compoundObjects_m.emplace(entryKeys.at("name"), compoundCorrection);
+    }
     features_m.emplace(entryKeys.at("name"), inputVariableVector);
   }
 } 
@@ -345,12 +502,17 @@ void CorrectionManager::setupFromConfigFile() {
     // load correction object from json
     auto correctionF =
       correction::CorrectionSet::from_file(entryKeys.at("file"));
-    auto correction = correctionF->at(entryKeys.at("correctionName"));
+    const auto [correction, compoundCorrection] =
+      lookupCorrectionOrCompound(correctionF, entryKeys.at("correctionName"));
 
     // Add the correction and feature list to their maps
     std::cout << "Adding correction " << entryKeys.at("name") << "!"
               << std::endl;
-    objects_m.emplace(entryKeys.at("name"), correction);
+    if (correction) {
+      objects_m.emplace(entryKeys.at("name"), correction);
+    } else {
+      compoundObjects_m.emplace(entryKeys.at("name"), compoundCorrection);
+    }
     features_m.emplace(entryKeys.at("name"), inputVariableVector);
   }
 

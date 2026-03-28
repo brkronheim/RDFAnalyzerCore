@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 #include <memory>
+#include <correction.h>
 
 class Analyzer;
 
@@ -211,6 +212,19 @@ public:
    */
   void setRawPtColumn(const std::string &rawPtColumn);
 
+  /**
+   * @brief Declare the auxiliary columns needed for JER smearing.
+   *
+   * @param genJetPtColumn Matched generator-jet pT per reco jet (0 or -1 if unmatched).
+   * @param rhoColumn      Per-event rho column used by the JER payload.
+   * @param eventColumn    Event identifier used to derive reproducible random numbers.
+   *
+   * @throws std::invalid_argument if any argument is empty.
+   */
+  void setJERSmearingColumns(const std::string &genJetPtColumn,
+                             const std::string &rhoColumn,
+                             const std::string &eventColumn);
+
   // -------------------------------------------------------------------------
   // Applying corrections
   // -------------------------------------------------------------------------
@@ -266,6 +280,37 @@ public:
                           const std::string &inputMassColumn = "",
                           const std::string &outputMassColumn = "",
                           const std::vector<std::string> &inputColumns = {});
+
+  /**
+   * @brief Schedule CMS JER smearing from correctionlib resolution and scale-factor payloads.
+   *
+   * The nominal or shifted JER scale factor is evaluated at execute time after
+   * any preceding JEC columns already exist in the dataframe.
+   *
+   * @param cm                      CorrectionManager holding the registered corrections.
+   * @param ptResolutionCorrection  Correction name for the pt-resolution payload.
+   * @param scaleFactorCorrection   Correction name for the scale-factor payload.
+   * @param inputPtColumn           Corrected jet pT to smear.
+   * @param outputPtColumn          Output smeared jet pT column.
+   * @param systematic              Scale-factor variation string, usually one of
+   *                                "nom", "up", or "down".
+   * @param applyToMass            Also smear the jet mass with the same factor.
+   * @param inputMassColumn        Explicit input mass column; auto-derived if empty.
+   * @param outputMassColumn       Explicit output mass column; auto-derived if empty.
+   * @param ptResolutionInputs     Optional override for pt-resolution numeric inputs.
+   * @param scaleFactorInputs      Optional override for scale-factor numeric inputs.
+   */
+  void applyJERSmearing(CorrectionManager &cm,
+                        const std::string &ptResolutionCorrection,
+                        const std::string &scaleFactorCorrection,
+                        const std::string &inputPtColumn,
+                        const std::string &outputPtColumn,
+                        const std::string &systematic = "nom",
+                        bool applyToMass = true,
+                        const std::string &inputMassColumn = "",
+                        const std::string &outputMassColumn = "",
+                        const std::vector<std::string> &ptResolutionInputs = {},
+                        const std::vector<std::string> &scaleFactorInputs = {});
 
   // -------------------------------------------------------------------------
   // CMS systematic source sets
@@ -590,6 +635,9 @@ private:
   std::string rawFactorColumn_m;
   std::string rawPtColumn_m;
   std::string rawMassColumn_m;
+  std::string genJetPtColumn_m;
+  std::string rhoColumn_m;
+  std::string eventColumn_m;
 
   // ---- Correction steps ---------------------------------------------------
   struct CorrectionStep {
@@ -600,6 +648,19 @@ private:
     std::string outputMassColumn;
   };
   std::vector<CorrectionStep> correctionSteps_m;
+
+  struct JERSmearingStep {
+    correction::Correction::Ref ptResolutionCorrection;
+    correction::Correction::Ref scaleFactorCorrection;
+    std::vector<std::string> ptResolutionInputs;
+    std::vector<std::string> scaleFactorInputs;
+    std::string systematic;
+    std::string inputPtColumn;
+    std::string outputPtColumn;
+    std::string inputMassColumn;
+    std::string outputMassColumn;
+  };
+  std::vector<JERSmearingStep> jerSmearingSteps_m;
 
   // ---- Systematic variations ----------------------------------------------
   std::vector<JESVariationEntry> variations_m;

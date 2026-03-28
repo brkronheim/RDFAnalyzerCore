@@ -650,9 +650,14 @@ analyzer.Define("goodJets",
 // 3. Strip NanoAOD JEC → raw pT.
 jes->removeExistingCorrections("Jet_rawFactor");
 
-// 4. Apply new L1L2L3 JEC via correctionlib.
-jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
-                        "Jet_pt_raw", "Jet_pt_jec");
+// 4. Evaluate the nominal compound JEC and apply it.
+cm->registerCorrection(
+    "jec_nominal",
+    "jet_jerc.json.gz",
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");
 
 // 5. Register and apply CMS JES systematic set (reduced: "Total" only).
 jes->registerSystematicSources("reduced", {"Total"});
@@ -674,6 +679,18 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
 //   "goodJets_TotalUp"    PhysicsObjectCollection (JES up)
 //   "goodJets_TotalDown"  PhysicsObjectCollection (JES down)
 //   "goodJets_variations" PhysicsObjectVariationMap (all of the above)
+
+// 8. Downstream Define calls can stay on the nominal collection name.
+analyzer.Define("selectedJetPts",
+    [](const PhysicsObjectCollection& jets) {
+        ROOT::VecOps::RVec<float> pts;
+        for (std::size_t i = 0; i < jets.size(); ++i) {
+            pts.push_back(static_cast<float>(jets.at(i).Pt()));
+        }
+        return pts;
+    },
+    {"goodJets"}, *sysMgr);
+// Also defines: selectedJetPts_TotalUp, selectedJetPts_TotalDown
 ```
 
 #### Applying the full CMS JES source set
@@ -688,7 +705,7 @@ jes->registerSystematicSources("full", {
     "RelativePtHF", "RelativeBal", "RelativeSample"
 });
 jes->applySystematicSet(*cm, "jes_unc", "full", "Jet_pt_jec", "Jet_pt_jes");
-// Creates 34 variation columns (17 sources × up/down)
+// Creates 34 variation columns and registers 17 systematic families.
 ```
 
 ## Histogramming
@@ -807,11 +824,17 @@ dataManager->Define("jet_pt_corrected",
 #### Registering Systematics
 
 ```cpp
-// Register systematic variations
-sysMgr->registerSystematic("jes_up");
-sysMgr->registerSystematic("jes_down");
-sysMgr->registerSystematic("jer_up");
-sysMgr->registerSystematic("jer_down");
+// Register a base systematic family and its affected nominal variable.
+sysMgr->registerSystematic("jes", {"jet_pt_corrected"});
+
+// If the real source columns do not follow the default
+// jet_pt_corrected_jesUp / jet_pt_corrected_jesDown naming, register the
+// explicit mapping once.
+sysMgr->registerVariationColumns(
+    "jet_pt_corrected",
+    "jes",
+    "jet_pt_jes_up",
+    "jet_pt_jes_down");
 ```
 
 #### Histograms with Systematics

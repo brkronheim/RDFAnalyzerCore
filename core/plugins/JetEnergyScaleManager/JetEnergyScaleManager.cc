@@ -3,9 +3,44 @@
 #include <ROOT/RVec.hxx>
 #include <api/ILogger.h>
 #include <cmath>
-#include <set>
+#include <cstdint>
 #include <sstream>
 #include <stdexcept>
+
+namespace {
+
+std::string buildPackedInputExpression(const std::vector<std::string> &inputColumns) {
+  std::string expr =
+      "ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> _out(" +
+      inputColumns[0] + ".size());\n";
+  for (const auto &column : inputColumns) {
+    expr += "for (size_t _i = 0; _i < _out.size(); ++_i)"
+            " _out[_i].push_back(static_cast<double>(" +
+            column + "[_i]));\n";
+  }
+  expr += "return _out;";
+  return expr;
+}
+
+uint64_t splitmix64(uint64_t value) {
+  value += 0x9e3779b97f4a7c15ULL;
+  value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+  return value ^ (value >> 31U);
+}
+
+float normalFromSeed(uint64_t seed) {
+  constexpr double invTwoTo53 = 1.0 / static_cast<double>(1ULL << 53U);
+  const double u1 = std::max(
+      static_cast<double>((splitmix64(seed) >> 11U)) * invTwoTo53,
+      1e-12);
+  const double u2 = static_cast<double>((splitmix64(seed ^ 0x9e3779b97f4a7c15ULL) >> 11U)) *
+                    invTwoTo53;
+  return static_cast<float>(std::sqrt(-2.0 * std::log(u1)) *
+                            std::cos(2.0 * M_PI * u2));
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // setContext
@@ -79,6 +114,23 @@ void JetEnergyScaleManager::setRawPtColumn(const std::string &rawPtColumn) {
   rawPtColumn_m = rawPtColumn;
 }
 
+void JetEnergyScaleManager::setJERSmearingColumns(
+    const std::string &genJetPtColumn, const std::string &rhoColumn,
+    const std::string &eventColumn) {
+  if (genJetPtColumn.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::setJERSmearingColumns: genJetPtColumn must not be empty");
+  if (rhoColumn.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::setJERSmearingColumns: rhoColumn must not be empty");
+  if (eventColumn.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::setJERSmearingColumns: eventColumn must not be empty");
+  genJetPtColumn_m = genJetPtColumn;
+  rhoColumn_m = rhoColumn;
+  eventColumn_m = eventColumn;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -150,6 +202,56 @@ void JetEnergyScaleManager::applyCorrectionlib(
   // Schedule the element-wise pT (and mass) multiplication for execute().
   applyCorrection(inputPtColumn, sfColumn, outputPtColumn, applyToMass,
                   inputMassColumn, outputMassColumn);
+}
+
+void JetEnergyScaleManager::applyJERSmearing(
+    CorrectionManager &cm, const std::string &ptResolutionCorrection,
+    const std::string &scaleFactorCorrection, const std::string &inputPtColumn,
+    const std::string &outputPtColumn, const std::string &systematic,
+    bool applyToMass, const std::string &inputMassColumn,
+    const std::string &outputMassColumn,
+    const std::vector<std::string> &ptResolutionInputs,
+    const std::vector<std::string> &scaleFactorInputs) {
+  if (ptResolutionCorrection.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::applyJERSmearing: ptResolutionCorrection must not be empty");
+  if (scaleFactorCorrection.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::applyJERSmearing: scaleFactorCorrection must not be empty");
+  if (inputPtColumn.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::applyJERSmearing: inputPtColumn must not be empty");
+  if (outputPtColumn.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::applyJERSmearing: outputPtColumn must not be empty");
+  if (systematic.empty())
+    throw std::invalid_argument(
+        "JetEnergyScaleManager::applyJERSmearing: systematic must not be empty");
+  if (genJetPtColumn_m.empty() || rhoColumn_m.empty() || eventColumn_m.empty())
+    throw std::runtime_error(
+        "JetEnergyScaleManager::applyJERSmearing: call setJERSmearingColumns() before scheduling JER smearing");
+
+  JERSmearingStep step;
+  step.ptResolutionCorrection = cm.getCorrection(ptResolutionCorrection);
+  step.scaleFactorCorrection = cm.getCorrection(scaleFactorCorrection);
+  step.ptResolutionInputs = ptResolutionInputs.empty()
+                                ? cm.getCorrectionFeatures(ptResolutionCorrection)
+                                : ptResolutionInputs;
+  step.scaleFactorInputs = scaleFactorInputs.empty()
+                               ? cm.getCorrectionFeatures(scaleFactorCorrection)
+                               : scaleFactorInputs;
+  step.systematic = systematic;
+  step.inputPtColumn = inputPtColumn;
+  step.outputPtColumn = outputPtColumn;
+  if (applyToMass) {
+    step.inputMassColumn = inputMassColumn.empty()
+                               ? deriveMassColumnName(inputPtColumn)
+                               : inputMassColumn;
+    step.outputMassColumn = outputMassColumn.empty()
+                                ? deriveMassColumnName(outputPtColumn)
+                                : outputMassColumn;
+  }
+  jerSmearingSteps_m.push_back(std::move(step));
 }
 
 // ---------------------------------------------------------------------------
@@ -470,7 +572,158 @@ void JetEnergyScaleManager::execute() {
     }
   }
 
-  // 3. Apply each MET propagation step.
+  // 3. Apply each registered JER smearing step.
+  for (const auto &step : jerSmearingSteps_m) {
+    const std::string resInputCol = "_jer_inputs_res_" + step.outputPtColumn;
+    const std::string sfInputCol = "_jer_inputs_sf_" + step.outputPtColumn;
+    const std::string jerResCol = "_jer_resolution_" + step.outputPtColumn;
+    const std::string jerSfCol = "_jer_scale_factor_" + step.outputPtColumn;
+    const std::string smearCol = "_jer_smear_" + step.outputPtColumn;
+
+    {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      auto newDf = df.Define(resInputCol,
+                             buildPackedInputExpression(step.ptResolutionInputs));
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      auto newDf = df.Define(sfInputCol,
+                             buildPackedInputExpression(step.scaleFactorInputs));
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const auto resolution = step.ptResolutionCorrection;
+      auto newDf = df.Define(
+          jerResCol,
+          [resolution](const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> &inputMatrix)
+              -> ROOT::VecOps::RVec<Float_t> {
+            ROOT::VecOps::RVec<Float_t> result(inputMatrix.size());
+            for (std::size_t i = 0; i < inputMatrix.size(); ++i) {
+              std::vector<correction::Variable::Type> values;
+              values.reserve(inputMatrix[i].size());
+              for (double value : inputMatrix[i])
+                values.emplace_back(value);
+              result[i] = static_cast<Float_t>(resolution->evaluate(values));
+            }
+            return result;
+          },
+          {resInputCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const auto scaleFactor = step.scaleFactorCorrection;
+      const auto systematic = step.systematic;
+      auto newDf = df.Define(
+          jerSfCol,
+          [scaleFactor, systematic](const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> &inputMatrix)
+              -> ROOT::VecOps::RVec<Float_t> {
+            ROOT::VecOps::RVec<Float_t> result(inputMatrix.size());
+            for (std::size_t i = 0; i < inputMatrix.size(); ++i) {
+              std::vector<correction::Variable::Type> values;
+              values.reserve(inputMatrix[i].size() + 1U);
+              std::size_t numericIndex = 0;
+              for (const auto &input : scaleFactor->inputs()) {
+                if (input.type() == correction::Variable::VarType::string) {
+                  values.emplace_back(systematic);
+                } else {
+                  values.emplace_back(inputMatrix[i].at(numericIndex));
+                  ++numericIndex;
+                }
+              }
+              result[i] = static_cast<Float_t>(scaleFactor->evaluate(values));
+            }
+            return result;
+          },
+          {sfInputCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const std::string inputPt = step.inputPtColumn;
+      const std::string etaCol = etaColumn_m;
+      const std::string genJetPtCol = genJetPtColumn_m;
+      const std::string eventCol = eventColumn_m;
+      auto newDf = df.Define(
+          smearCol,
+          [](const ROOT::VecOps::RVec<Float_t> &pt,
+             const ROOT::VecOps::RVec<Float_t> &eta,
+             const ROOT::VecOps::RVec<Float_t> &genJetPt,
+             ULong64_t eventId,
+             const ROOT::VecOps::RVec<Float_t> &resolution,
+             const ROOT::VecOps::RVec<Float_t> &scaleFactor)
+              -> ROOT::VecOps::RVec<Float_t> {
+            ROOT::VecOps::RVec<Float_t> smear(pt.size(), 1.0f);
+            for (std::size_t i = 0; i < pt.size(); ++i) {
+              const float ptValue = pt[i];
+              if (ptValue <= 0.0f) {
+                smear[i] = 1.0f;
+                continue;
+              }
+              const float sf = i < scaleFactor.size() ? scaleFactor[i] : 1.0f;
+              const float res = i < resolution.size() ? resolution[i] : 0.0f;
+              const float genPt = i < genJetPt.size() ? genJetPt[i] : -1.0f;
+              const bool matched =
+                  genPt > 0.0f && std::fabs(ptValue - genPt) < 3.0f * ptValue * res;
+              float smearFactor = 1.0f;
+              if (matched) {
+                smearFactor += (sf - 1.0f) * (ptValue - genPt) / ptValue;
+              } else {
+                const float stochastic = std::sqrt(std::max(sf * sf - 1.0f, 0.0f));
+                const uint64_t etaBits = static_cast<uint64_t>(std::llround((eta[i] + 10.0f) * 10000.0f));
+                const uint64_t seed = splitmix64(static_cast<uint64_t>(eventId) ^
+                                                (static_cast<uint64_t>(i) << 32U) ^
+                                                etaBits);
+                smearFactor += stochastic * res * normalFromSeed(seed);
+              }
+              if (!std::isfinite(smearFactor) || smearFactor <= 0.0f)
+                smearFactor = 1.0f;
+              smear[i] = smearFactor;
+            }
+            return smear;
+          },
+          {inputPt, etaCol, genJetPtCol, eventCol, jerResCol, jerSfCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const std::string inputPt = step.inputPtColumn;
+      const std::string outputPt = step.outputPtColumn;
+      auto newDf = df.Define(
+          outputPt,
+          [](const ROOT::VecOps::RVec<Float_t> &pt,
+             const ROOT::VecOps::RVec<Float_t> &smear)
+              -> ROOT::VecOps::RVec<Float_t> {
+            return pt * smear;
+          },
+          {inputPt, smearCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    if (!step.inputMassColumn.empty() && !step.outputMassColumn.empty()) {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const std::string inputMass = step.inputMassColumn;
+      const std::string outputMass = step.outputMassColumn;
+      auto newDf = df.Define(
+          outputMass,
+          [](const ROOT::VecOps::RVec<Float_t> &mass,
+             const ROOT::VecOps::RVec<Float_t> &smear)
+              -> ROOT::VecOps::RVec<Float_t> {
+            return mass * smear;
+          },
+          {inputMass, smearCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+  }
+
+  // 4. Apply each MET propagation step.
   //    Strategy: define an intermediate column holding [metX, metY], then
   //    derive MET pT and phi from it to avoid computing the sum twice.
   for (const auto &step : metPropagationSteps_m) {
@@ -535,24 +788,29 @@ void JetEnergyScaleManager::execute() {
     }
   }
 
-  // 4. Define PhysicsObjectCollection output columns.
+  // 5. Register explicit variation mappings for corrected collection inputs.
+  for (const auto &colStep : collectionOutputSteps_m) {
+    for (const auto &var : variations_m) {
+      systematicManager_m->registerVariationColumns(
+          colStep.correctedPtColumn, var.name, var.upPtColumn, var.downPtColumn);
+      if (!colStep.correctedMassColumn.empty() && !var.upMassColumn.empty() &&
+          !var.downMassColumn.empty()) {
+        systematicManager_m->registerVariationColumns(
+            colStep.correctedMassColumn, var.name, var.upMassColumn,
+            var.downMassColumn);
+      }
+    }
+  }
+
+  // 6. Define PhysicsObjectCollection output columns.
   for (const auto &colStep : collectionOutputSteps_m) {
     const std::string inputCol  = inputJetCollectionColumn_m;
     const std::string corrPtCol = colStep.correctedPtColumn;
     const std::string outputCol = colStep.outputCollectionColumn;
 
     if (!colStep.correctedMassColumn.empty()) {
-      // Pt + mass correction: use withCorrectedKinematics.
-      // Eta and phi are unchanged by JES/JER; reconstruct full-size arrays
-      // from the collection's stored 4-vectors.  Entries for jets that were
-      // filtered out of the input collection (i.e. not stored in the
-      // PhysicsObjectCollection) remain at their initialised value of 0.0f.
-      // withCorrectedKinematics only reads entries at the indices that are
-      // present in the collection, so the zero values for absent jets are
-      // never used in the output.
       const std::string corrMasCol = colStep.correctedMassColumn;
-      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-      auto newDf = df.Define(
+      dataManager_m->Define(
           outputCol,
           [](const PhysicsObjectCollection &col,
              const ROOT::VecOps::RVec<Float_t> &corrPt,
@@ -572,26 +830,21 @@ void JetEnergyScaleManager::execute() {
             return col.withCorrectedKinematics(corrPt, etaFull, phiFull,
                                                corrMass);
           },
-          {inputCol, corrPtCol, corrMasCol});
-      dataManager_m->setDataFrame(newDf);
+          {inputCol, corrPtCol, corrMasCol}, *systematicManager_m);
     } else {
-      // Pt-only correction: use withCorrectedPt.
-      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-      auto newDf = df.Define(
+      dataManager_m->Define(
           outputCol,
           [](const PhysicsObjectCollection &col,
              const ROOT::VecOps::RVec<Float_t> &corrPt)
               -> PhysicsObjectCollection {
             return col.withCorrectedPt(corrPt);
           },
-          {inputCol, corrPtCol});
-      dataManager_m->setDataFrame(newDf);
+          {inputCol, corrPtCol}, *systematicManager_m);
     }
   }
 
-  // 5. Define per-variation collection columns and optional variation map.
+  // 7. Define per-variation collection aliases and optional variation map.
   for (const auto &varColStep : variationCollectionsSteps_m) {
-    const std::string inputCol = inputJetCollectionColumn_m;
     const std::string nomCol   = varColStep.nominalCollectionColumn;
     const std::string prefix   = varColStep.collectionPrefix;
     const std::string mapCol   = varColStep.variationMapColumn;
@@ -601,38 +854,37 @@ void JetEnergyScaleManager::execute() {
     std::vector<std::string> dnColNames;
 
     for (const auto &var : variations_m) {
+      const std::string sourceUpCol =
+          systematicManager_m->getVariationColumnName(nomCol, var.name + "Up");
+      const std::string sourceDnCol =
+          systematicManager_m->getVariationColumnName(nomCol, var.name + "Down");
       const std::string upCol = prefix + "_" + var.name + "Up";
       const std::string dnCol = prefix + "_" + var.name + "Down";
 
-      // Define up-variation collection.
-      {
-        const std::string varUpPt = var.upPtColumn;
+      if (upCol != sourceUpCol) {
         ROOT::RDF::RNode df = dataManager_m->getDataFrame();
         auto newDf = df.Define(
             upCol,
-            [](const PhysicsObjectCollection &col,
-               const ROOT::VecOps::RVec<Float_t> &corrPt)
-                -> PhysicsObjectCollection {
-              return col.withCorrectedPt(corrPt);
+            [](const PhysicsObjectCollection &col) -> PhysicsObjectCollection {
+              return col;
             },
-            {inputCol, varUpPt});
+            {sourceUpCol});
         dataManager_m->setDataFrame(newDf);
       }
 
-      // Define down-variation collection.
-      {
-        const std::string varDnPt = var.downPtColumn;
+      if (dnCol != sourceDnCol) {
         ROOT::RDF::RNode df = dataManager_m->getDataFrame();
         auto newDf = df.Define(
             dnCol,
-            [](const PhysicsObjectCollection &col,
-               const ROOT::VecOps::RVec<Float_t> &corrPt)
-                -> PhysicsObjectCollection {
-              return col.withCorrectedPt(corrPt);
+            [](const PhysicsObjectCollection &col) -> PhysicsObjectCollection {
+              return col;
             },
-            {inputCol, varDnPt});
+            {sourceDnCol});
         dataManager_m->setDataFrame(newDf);
       }
+
+      systematicManager_m->registerVariationColumns(prefix, var.name, upCol,
+                                                    dnCol);
 
       varNames.push_back(var.name);
       upColNames.push_back(upCol);
@@ -696,22 +948,22 @@ void JetEnergyScaleManager::execute() {
     }
   }
 
-  // 6. Register systematic variations with the ISystematicManager.
   for (const auto &var : variations_m) {
-    {
-      std::set<std::string> affectedUp = {var.upPtColumn};
-      if (!var.upMassColumn.empty())
-        affectedUp.insert(var.upMassColumn);
-      systematicManager_m->registerSystematic(var.name + "Up", affectedUp);
+    std::set<std::string> affected = {var.upPtColumn, var.downPtColumn};
+    if (!var.upMassColumn.empty()) {
+      affected.insert(var.upMassColumn);
     }
-    {
-      std::set<std::string> affectedDown = {var.downPtColumn};
-      if (!var.downMassColumn.empty())
-        affectedDown.insert(var.downMassColumn);
-      systematicManager_m->registerSystematic(var.name + "Down",
-                                               affectedDown);
+    if (!var.downMassColumn.empty()) {
+      affected.insert(var.downMassColumn);
     }
+    systematicManager_m->registerSystematic(var.name, affected);
   }
+
+  correctionSteps_m.clear();
+  jerSmearingSteps_m.clear();
+  metPropagationSteps_m.clear();
+  collectionOutputSteps_m.clear();
+  variationCollectionsSteps_m.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +1005,19 @@ void JetEnergyScaleManager::reportMetadata() {
       ss << "    " << step.inputPtColumn
          << " x " << step.sfColumn
          << " -> " << step.outputPtColumn;
+      if (!step.outputMassColumn.empty())
+        ss << "  (mass: " << step.inputMassColumn
+           << " -> " << step.outputMassColumn << ")";
+      ss << "\n";
+    }
+  }
+
+  if (!jerSmearingSteps_m.empty()) {
+    ss << "  JER smearing steps (" << jerSmearingSteps_m.size() << "):\n";
+    for (const auto &step : jerSmearingSteps_m) {
+      ss << "    " << step.inputPtColumn
+         << " -> " << step.outputPtColumn
+         << " (systematic=" << step.systematic << ")";
       if (!step.outputMassColumn.empty())
         ss << "  (mass: " << step.inputMassColumn
            << " -> " << step.outputMassColumn << ")";
@@ -848,6 +1113,12 @@ JetEnergyScaleManager::collectProvenanceEntries() const {
     entries["raw_pt_column"] = rawPtColumn_m;
   }
 
+  if (!genJetPtColumn_m.empty()) {
+    entries["jer_gen_pt_column"] = genJetPtColumn_m;
+    entries["jer_rho_column"] = rhoColumn_m;
+    entries["jer_event_column"] = eventColumn_m;
+  }
+
   if (!correctionSteps_m.empty()) {
     std::ostringstream ss;
     for (std::size_t i = 0; i < correctionSteps_m.size(); ++i) {
@@ -857,6 +1128,17 @@ JetEnergyScaleManager::collectProvenanceEntries() const {
          << "(sf:" << correctionSteps_m[i].sfColumn << ')';
     }
     entries["correction_steps"] = ss.str();
+  }
+
+  if (!jerSmearingSteps_m.empty()) {
+    std::ostringstream ss;
+    for (std::size_t i = 0; i < jerSmearingSteps_m.size(); ++i) {
+      if (i > 0) ss << ',';
+      ss << jerSmearingSteps_m[i].inputPtColumn
+         << "->" << jerSmearingSteps_m[i].outputPtColumn
+         << "(syst:" << jerSmearingSteps_m[i].systematic << ')';
+    }
+    entries["jer_smearing_steps"] = ss.str();
   }
 
   if (!systematicSets_m.empty()) {

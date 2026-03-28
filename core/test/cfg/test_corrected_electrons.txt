@@ -1,0 +1,7 @@
+ptColumn=Electron_pt
+etaColumn=Electron_eta
+phiColumn=Electron_phi
+massColumn=Electron_mass
+correctedPtColumn=Electron_pt_corr_nominal
+outputCollection=CorrectedElectrons
+variationMapColumn=CorrectedElectrons_variations

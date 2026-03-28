@@ -2,6 +2,7 @@
 #define MUONROCHESTERMANAGER_H_INCLUDED
 
 #include <ObjectEnergyManagerBase.h>
+#include <correction.h>
 #include <memory>
 
 class Analyzer;
@@ -113,6 +114,15 @@ public:
                                 const std::string &u1Column,
                                 const std::string &u2Column);
 
+  /**
+   * @brief Declare event-identity columns used by the Run 3 scale/resolution model.
+   *
+   * @param lumiColumn  Luminosity-block column.
+   * @param eventColumn Event identifier column.
+   */
+  void setScaleResolutionEventColumns(const std::string &lumiColumn,
+                                      const std::string &eventColumn);
+
   // -------------------------------------------------------------------------
   // Convenience Rochester correction methods
   // -------------------------------------------------------------------------
@@ -165,6 +175,22 @@ public:
                                    const std::string &inputPtColumn,
                                    const std::string &outputPtPrefix);
 
+  /**
+   * @brief Schedule Run 3 muon scale/resolution corrections from the split-schema payload.
+   *
+   * Supported variations are:
+   * - scaleVariation: "nom", "up", "down"
+   * - resolutionVariation: "nom", "up", "down"
+   *
+   * For data only the nominal scale correction is applied.
+   */
+  void applyScaleAndResolution(const std::string &jsonFile,
+                               bool isData,
+                               const std::string &inputPtColumn,
+                               const std::string &outputPtColumn,
+                               const std::string &scaleVariation = "nom",
+                               const std::string &resolutionVariation = "nom");
+
   // -------------------------------------------------------------------------
   // Accessors
   // -------------------------------------------------------------------------
@@ -183,6 +209,14 @@ public:
 
   /// Second Gaussian random number column (from setRochesterInputColumns).
   const std::string &getU2Column() const;
+
+  /// Lumi column used by the Run 3 scale/resolution model.
+  const std::string &getLumiColumn() const;
+
+  /// Event column used by the Run 3 scale/resolution model.
+  const std::string &getEventColumn() const;
+
+  void execute() override;
 
 protected:
   std::string objectName() const override { return "Muon"; }
@@ -206,11 +240,23 @@ private:
   std::vector<std::string>
   buildRochesterInputColumns(const std::string &ptColumn) const;
 
+  struct ScaleResolutionStep {
+    std::shared_ptr<correction::CorrectionSet> correctionSet;
+    bool isData = false;
+    std::string inputPtColumn;
+    std::string outputPtColumn;
+    std::string scaleVariation;
+    std::string resolutionVariation;
+  };
+
   std::string chargeColumn_m;
   std::string genPtColumn_m;
   std::string nLayersColumn_m;
   std::string u1Column_m;
   std::string u2Column_m;
+  std::string lumiColumn_m;
+  std::string eventColumn_m;
+  std::vector<ScaleResolutionStep> scaleResolutionSteps_m;
 };
 
 

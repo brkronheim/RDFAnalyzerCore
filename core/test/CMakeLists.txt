@@ -134,6 +134,10 @@ add_executable(testLeptonPhotonEnergyManagers testLeptonPhotonEnergyManagers.cc)
 target_link_libraries(testLeptonPhotonEnergyManagers coreAll gtest gtest_main)
 add_test(NAME LeptonPhotonEnergyManagersTest COMMAND testLeptonPhotonEnergyManagers)
 
+add_executable(testCorrectedObjectCollectionManagers testCorrectedObjectCollectionManagers.cc)
+target_link_libraries(testCorrectedObjectCollectionManagers coreAll gtest gtest_main)
+add_test(NAME CorrectedObjectCollectionManagersTest COMMAND testCorrectedObjectCollectionManagers)
+
 add_executable(testRegionManager testRegionManager.cc)
 target_link_libraries(testRegionManager coreAll gtest gtest_main)
 add_test(NAME RegionManagerTest COMMAND testRegionManager)

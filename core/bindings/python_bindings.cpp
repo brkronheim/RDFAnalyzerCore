@@ -21,6 +21,12 @@
 #include <OnnxManager.h>
 #include <BDTManager.h>
 #include <CorrectionManager.h>
+#include "../plugins/CorrectedObjectCollectionManagers/CorrectedObjectCollectionManagers.h"
+#include <ElectronEnergyScaleManager.h>
+#include <JetEnergyScaleManager.h>
+#include <MuonRochesterManager.h>
+#include <PhotonEnergyScaleManager.h>
+#include <TauEnergyScaleManager.h>
 #include <TriggerManager.h>
 #include <SofieManager.h>
 #include <NDHistogramManager.h>
@@ -348,6 +354,30 @@ public:
             analyzer_.addPlugin(role, std::make_unique<BDTManager>(cfg));
         } else if (normalized == "correction") {
             analyzer_.addPlugin(role, std::make_unique<CorrectionManager>(cfg));
+        } else if (normalized == "correctedjetcollection") {
+            auto mgr = analyzer_.getPlugin<JetEnergyScaleManager>("jetEnergyScaleManager");
+            if (!mgr) throw std::runtime_error("CorrectedJetCollectionManager requires plugin role 'jetEnergyScaleManager'");
+            analyzer_.addPlugin(role, std::make_unique<CorrectedJetCollectionManager>(*mgr));
+        } else if (normalized == "correctedfatjetcollection") {
+            auto mgr = analyzer_.getPlugin<JetEnergyScaleManager>("fatJetEnergyScaleManager");
+            if (!mgr) throw std::runtime_error("CorrectedFatJetCollectionManager requires plugin role 'fatJetEnergyScaleManager'");
+            analyzer_.addPlugin(role, std::make_unique<CorrectedFatJetCollectionManager>(*mgr));
+        } else if (normalized == "correctedelectroncollection") {
+            auto mgr = analyzer_.getPlugin<ElectronEnergyScaleManager>("electronEnergyScaleManager");
+            if (!mgr) throw std::runtime_error("CorrectedElectronCollectionManager requires plugin role 'electronEnergyScaleManager'");
+            analyzer_.addPlugin(role, std::make_unique<CorrectedElectronCollectionManager>(*mgr));
+        } else if (normalized == "correctedmuoncollection") {
+            auto mgr = analyzer_.getPlugin<MuonRochesterManager>("muonRochesterManager");
+            if (!mgr) throw std::runtime_error("CorrectedMuonCollectionManager requires plugin role 'muonRochesterManager'");
+            analyzer_.addPlugin(role, std::make_unique<CorrectedMuonCollectionManager>(*mgr));
+        } else if (normalized == "correctedtaucollection") {
+            auto mgr = analyzer_.getPlugin<TauEnergyScaleManager>("tauEnergyScaleManager");
+            if (!mgr) throw std::runtime_error("CorrectedTauCollectionManager requires plugin role 'tauEnergyScaleManager'");
+            analyzer_.addPlugin(role, std::make_unique<CorrectedTauCollectionManager>(*mgr));
+        } else if (normalized == "correctedphotoncollection") {
+            auto mgr = analyzer_.getPlugin<PhotonEnergyScaleManager>("photonEnergyScaleManager");
+            if (!mgr) throw std::runtime_error("CorrectedPhotonCollectionManager requires plugin role 'photonEnergyScaleManager'");
+            analyzer_.addPlugin(role, std::make_unique<CorrectedPhotonCollectionManager>(*mgr));
         } else if (normalized == "trigger") {
             analyzer_.addPlugin(role, std::make_unique<TriggerManager>(cfg));
         } else if (normalized == "sofie") {
@@ -357,7 +387,7 @@ public:
         } else {
             throw std::invalid_argument(
                 "Unsupported plugin type: '" + pluginType + "'. Supported: "
-                "OnnxManager, BDTManager, CorrectionManager, TriggerManager, SofieManager, NDHistogramManager"
+                "OnnxManager, BDTManager, CorrectionManager, CorrectedJetCollectionManager, CorrectedFatJetCollectionManager, CorrectedElectronCollectionManager, CorrectedMuonCollectionManager, CorrectedTauCollectionManager, CorrectedPhotonCollectionManager, TriggerManager, SofieManager, NDHistogramManager"
             );
         }
         return *this;

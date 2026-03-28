@@ -8,7 +8,6 @@
 #include <RtypesCore.h>
 #include <correction.h>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -162,6 +161,14 @@ public:
   correction::Correction::Ref getCorrection(const std::string &key) const;
 
   /**
+   * @brief Get a compound correction object by key.
+   * @param key Correction key
+   * @return Compound correction reference
+   */
+  correction::CompoundCorrection::Ref
+  getCompoundCorrection(const std::string &key) const;
+
+  /**
    * @brief Get the features for a correction by key
    * @param key Correction key
    * @return Reference to the vector of feature names
@@ -192,6 +199,8 @@ private:
    * @param configProvider Reference to the configuration provider
    */
   void registerCorrectionlib(const IConfigurationProvider &configProvider);
+
+  std::unordered_map<std::string, correction::CompoundCorrection::Ref> compoundObjects_m;
 
   bool initialized_m = false;
 };

@@ -409,8 +409,7 @@ TEST_F(JetEnergyScaleManagerTest,
   mgr->execute();
 
   const auto &systs = systematicManager->getSystematics();
-  EXPECT_NE(systs.find("jesTotalUp"),   systs.end());
-  EXPECT_NE(systs.find("jesTotalDown"), systs.end());
+  EXPECT_NE(systs.find("jesTotal"), systs.end());
 }
 
 TEST_F(JetEnergyScaleManagerTest,
@@ -429,8 +428,7 @@ TEST_F(JetEnergyScaleManagerTest,
   mgr->addVariation("jer", "Jet_pt_jer_up", "Jet_pt_jer_dn");
   mgr->execute();
 
-  // "jerUp" systematic should list Jet_pt_jer_up as an affected variable.
-  const auto &affUp =
+    const auto &affUp =
       systematicManager->getVariablesForSystematic("jerUp");
   EXPECT_NE(affUp.find("Jet_pt_jer_up"), affUp.end());
 
@@ -461,12 +459,12 @@ TEST_F(JetEnergyScaleManagerTest,
                     "Jet_mass_jes_up","Jet_mass_jes_dn");
   mgr->execute();
 
-  const auto &affUp =
+    const auto &affUp =
       systematicManager->getVariablesForSystematic("jesTotalUp");
   EXPECT_NE(affUp.find("Jet_pt_jes_up"),   affUp.end());
   EXPECT_NE(affUp.find("Jet_mass_jes_up"), affUp.end());
 
-  const auto &affDn =
+    const auto &affDn =
       systematicManager->getVariablesForSystematic("jesTotalDown");
   EXPECT_NE(affDn.find("Jet_pt_jes_dn"),   affDn.end());
   EXPECT_NE(affDn.find("Jet_mass_jes_dn"), affDn.end());
@@ -525,9 +523,7 @@ TEST_F(JetEnergyScaleManagerTest, FullWorkflowRawToJECToJESVariation) {
   EXPECT_FLOAT_EQ(ptJesUp.GetValue()[0][0], 94.5f * 1.1f);
 
   // Verify systematic registered
-  EXPECT_NE(systematicManager->getSystematics().find("jesTotalUp"),
-            systematicManager->getSystematics().end());
-  EXPECT_NE(systematicManager->getSystematics().find("jesTotalDown"),
+  EXPECT_NE(systematicManager->getSystematics().find("jesTotal"),
             systematicManager->getSystematics().end());
 }
 
@@ -1383,6 +1379,42 @@ TEST_F(JetEnergyScaleManagerTest, DefineVariationCollectionsMapMultipleVariation
   EXPECT_NE(vm.find("var2Up"),    vm.end());
   EXPECT_NE(vm.find("var2Down"),  vm.end());
   EXPECT_EQ(vm.size(), 5u);
+}
+
+TEST_F(JetEnergyScaleManagerTest, CollectionDefinePropagatesSystematicVariations) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineJetCollection(*dm, *systematicManager, "goodJets", 100.0f);
+  defineRVecColumn(*dm, "Jet_pt_jec",    [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_up", [](ULong64_t) { return 108.0f; });
+  defineRVecColumn(*dm, "Jet_pt_jes_dn", [](ULong64_t) { return  92.0f; });
+
+  mgr->setInputJetCollection("goodJets");
+  mgr->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+  mgr->addVariation("jesTest", "Jet_pt_jes_up", "Jet_pt_jes_dn");
+  mgr->defineVariationCollections("goodJets_jec", "goodJets");
+  mgr->execute();
+
+  dm->Define(
+      "selectedJetPts",
+      [](const PhysicsObjectCollection &col) -> ROOT::VecOps::RVec<Float_t> {
+        ROOT::VecOps::RVec<Float_t> pts;
+        pts.reserve(col.size());
+        for (std::size_t i = 0; i < col.size(); ++i) {
+          pts.push_back(static_cast<Float_t>(col.at(i).Pt()));
+        }
+        return pts;
+      },
+      {"goodJets"}, *systematicManager);
+
+  auto nominal = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedJetPts");
+  auto up = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedJetPts_jesTestUp");
+  auto down = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("selectedJetPts_jesTestDown");
+
+  EXPECT_NEAR(nominal.GetValue()[0][0], 100.0f, 0.01f);
+  EXPECT_NEAR(up.GetValue()[0][0], 108.0f, 0.01f);
+  EXPECT_NEAR(down.GetValue()[0][0], 92.0f, 0.01f);
 }
 
 // ---------------------------------------------------------------------------

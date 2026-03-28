@@ -258,6 +258,83 @@ dataManager.Define("corrected_jet_pt",
 );
 ```
 
+### Corrected Object Collection Plugin Configuration
+
+These plugins provide config-driven full corrected object collections on top of
+the existing jet and object energy managers.
+
+**Main config options**:
+
+- `correctedJetCollectionConfig=path/to/corrected_jets.txt`
+- `correctedFatJetCollectionConfig=path/to/corrected_fatjets.txt`
+- `correctedElectronCollectionConfig=path/to/corrected_electrons.txt`
+- `correctedMuonCollectionConfig=path/to/corrected_muons.txt`
+- `correctedTauCollectionConfig=path/to/corrected_taus.txt`
+- `correctedPhotonCollectionConfig=path/to/corrected_photons.txt`
+
+**Pair-based config format**:
+
+```text
+inputCollection=goodJets
+ptColumn=Jet_pt
+etaColumn=Jet_eta
+phiColumn=Jet_phi
+massColumn=Jet_mass
+correctedPtColumn=Jet_pt_corr_nominal
+correctedMassColumn=Jet_mass_corr_nominal
+outputCollection=CorrectedJets
+variationMapColumn=CorrectedJets_variations
+workflowConfig=cfg/corrected_jets_workflow.txt
+```
+
+**Parameters**:
+
+- `inputCollection`: Existing `PhysicsObjectCollection` column to correct.
+- `ptColumn`, `etaColumn`, `phiColumn`, `massColumn`: Raw component columns used
+  to auto-build `inputCollection` when it is omitted.
+- `correctedPtColumn`: Required corrected pt branch produced by the underlying
+  correction manager.
+- `correctedMassColumn`: Optional corrected mass branch. Required for jets and
+  fatjets when mass systematics should propagate into the corrected collection.
+- `outputCollection`: Nominal corrected `PhysicsObjectCollection` column name.
+- `variationMapColumn`: Optional `PhysicsObjectVariationMap` output column.
+- `workflowConfig`: Optional multi-entry workflow config executed in order to
+  configure `CorrectionManager` and the underlying jet/object correction
+  manager.
+
+**Notes**:
+
+- If `inputCollection` is omitted, the plugin auto-builds an input collection
+  from the raw component branches.
+- `workflowConfig` rows can be gated with `sample=mc`, `sample=data`, or
+  `sample=all`.
+- `workflowConfig` values support `${...}` placeholders that resolve against
+  top-level config keys and corrected-wrapper spec values such as
+  `${correctedPtColumn}` or `${outputCollection}`.
+- The plugin registers collection-level systematics with
+  `SystematicManager`, so downstream code can work directly with
+  `outputCollection` under systematic substitution.
+- Variation collections use the same suffix convention as branch-level
+  systematics: `outputCollection_systematicNameUp/Down`.
+
+**Workflow action examples**:
+
+```text
+type=setJetColumns ptColumn=Jet_pt etaColumn=Jet_eta phiColumn=Jet_phi massColumn=Jet_mass
+type=removeExistingCorrections rawFactorColumn=Jet_rawFactor sample=mc
+type=registerCorrection sample=mc name=vhqq_jec_nominal file=${jmeFile} correctionName=${jecCompoundCorrection} inputVariables=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+type=applyCorrectionlib sample=mc correction=vhqq_jec_nominal inputPtColumn=Jet_pt_raw outputPtColumn=${correctedPtColumn} applyToMass=true inputMassColumn=Jet_mass_raw outputMassColumn=${correctedMassColumn} inputColumns=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+type=defineRelativeUncertaintyScaleFactors sample=mc inputColumn=vhqq_electron_scale_uncertainty upColumn=vhqq_electron_scale_sf_up downColumn=vhqq_electron_scale_sf_down
+type=applyScaleAndResolution sample=mc jsonFile=${muonScaleResolutionFile} isData=false inputPtColumn=Muon_pt outputPtColumn=Muon_pt_corr_nominal scaleVariation=nom resolutionVariation=nom
+```
+
+Supported workflow action families:
+
+- Common: `registerCorrection`, `applyCorrectionVec`, `defineRelativeUncertaintyScaleFactors`
+- Jet / fatjet: `setJetColumns`, `setMETColumns`, `removeExistingCorrections`, `setRawPtColumn`, `setJERSmearingColumns`, `applyCorrection`, `applyCorrectionlib`, `applyJERSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`, `applySystematicSet`
+- Electron / photon / tau: `setObjectColumns`, `setMETColumns`, `defineReproducibleGaussian`, `applyCorrection`, `applyCorrectionlib`, `applyResolutionSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`
+- Muon additions: `setRochesterInputColumns`, `setScaleResolutionEventColumns`, `applyScaleAndResolution`, `applyRochesterCorrection`, `applyRochesterSystematicSet`
+
 ### Trigger Manager Configuration
 
 **Main config option**: `triggerConfig=path/to/triggers.txt`

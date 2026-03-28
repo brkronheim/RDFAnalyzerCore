@@ -9,9 +9,14 @@ Complete API documentation for RDFAnalyzerCore interfaces and key classes.
 - [Data Management](#data-management)
 - [Plugin Interfaces](#plugin-interfaces)
 - [Manager Implementations](#manager-implementations)
+    - [CorrectionManager](#correctionmanager)
+    - [CorrectedObjectCollectionManagers](#correctedobjectcollectionmanagers)
   - [WeightManager](#weightmanager)
   - [RegionManager](#regionmanager)
   - [CutflowManager](#cutflowmanager)
+    - [ObjectEnergyManagerBase](#objectenergymanagerbase)
+    - [ElectronEnergyScaleManager](#electronenergyscalemanager)
+    - [MuonRochesterManager](#muonrochestermanager)
   - [JetEnergyScaleManager](#jetenergyscalemanager)
   - [PhysicsObjectCollection](#physicsobjectcollection)
   - [ProvenanceService](#provenanceservice)
@@ -612,74 +617,233 @@ sofieMgr->applyModel("my_model");
 Applies scale factors and other corrections loaded from correctionlib JSON
 files.
 
+> **See also**: [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
+
+The manager now supports both correctionlib `corrections` and `compound_corrections` through the same registration and application APIs.
+
 #### `applyCorrection`
 
 ```cpp
 void applyCorrection(const std::string& correctionName,
-                     const std::vector<std::string>& stringArguments);
+                     const std::vector<std::string>& stringArguments,
+                     const std::vector<std::string>& inputColumns = {},
+                     const std::string& outputBranch = "");
 ```
 
-Evaluates the named correction once per event using **scalar** input columns
-and defines a new `Float_t` column called `correctionName` in the dataframe.
+Evaluates the named correction once per event using scalar input columns and
+defines a `Float_t` output column.
 
-- `correctionName`: Key registered in the configuration (the `name` field).
+- `correctionName`: Key registered in the configuration or via `registerCorrection(...)`.
 - `stringArguments`: Constant string values for all `string`-typed inputs
   declared in the correctionlib JSON, supplied in the order they appear in the
   JSON.
+- `inputColumns`: Optional override for the numeric RDF input columns.
+- `outputBranch`: Optional explicit output column name.
+
+When `outputBranch` is empty, the derived name is:
+
+- `correctionName` if there are no string arguments
+- `correctionName_<arg1>_<arg2>_...` otherwise
 
 **Example**:
 ```cpp
-// muon_pt and muon_eta are scalar float columns
 correctionManager.applyCorrection("muon_sf", {"nominal"});
-// Adds a Float_t column "muon_sf" to the dataframe
+// Adds a Float_t column "muon_sf_nominal" to the dataframe
+
+correctionManager.applyCorrection(
+    "pileup_weight", {"up"}, {}, "pileup_weight_up");
 ```
 
 #### `applyCorrectionVec`
 
 ```cpp
 void applyCorrectionVec(const std::string& correctionName,
-                        const std::vector<std::string>& stringArguments);
+                        const std::vector<std::string>& stringArguments,
+                        const std::vector<std::string>& inputColumns = {},
+                        const std::string& outputBranch = "");
 ```
 
-Evaluates the named correction **for every object in a collection** (e.g. all
-jets in an event) and defines a new `ROOT::VecOps::RVec<Float_t>` column
-called `correctionName` in the dataframe.
+Evaluates the named correction for every object in a collection and defines a
+`ROOT::VecOps::RVec<Float_t>` output column.
 
-Use this method instead of `applyCorrection` when the input columns registered
-via `inputVariables` are **RVec** columns (one vector per event, one element
-per object).
+Use this method instead of `applyCorrection` when at least one registered
+numeric input is an `RVec`.
 
-- `correctionName`: Key registered in the configuration.
+- `correctionName`: Key registered in the configuration or via `registerCorrection(...)`.
 - `stringArguments`: Constant string values applied to every object in the
   collection (same semantics as in `applyCorrection`).
+- `inputColumns`: Optional override for the numeric RDF input columns.
+- `outputBranch`: Optional explicit output column name.
 
-The method internally creates a temporary column that packs all per-object
-feature vectors into a `RVec<RVec<double>>`, then applies the correction
-lambda element-wise.
+The method packs vector inputs per object and broadcasts scalar event inputs
+across the object loop automatically. This matches CMS payloads that mix
+per-jet features with per-event quantities like `rho`.
 
 **Example**:
 ```cpp
-// jet_pt and jet_eta are RVec<float> columns (one entry per jet per event)
 correctionManager.applyCorrectionVec("jet_sf", {"nominal"});
-// Adds an RVec<Float_t> column "jet_sf" (one scale factor per jet)
+// Adds an RVec<Float_t> column "jet_sf_nominal"
 
 // Use the per-jet scale factors downstream:
 analyzer.Define("corrected_jet_pt",
     [](const ROOT::VecOps::RVec<float>& pt,
        const ROOT::VecOps::RVec<Float_t>& sf) { return pt * sf; },
-    {"jet_pt", "jet_sf"}
+    {"jet_pt", "jet_sf_nominal"}
 );
+
+// Mixed vector + scalar inputs are also supported.
+correctionManager.applyCorrectionVec(
+    "jec_nominal", {},
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"},
+    "Jet_jec_sf_nominal");
 ```
 
-#### `getCorrection` / `getCorrectionFeatures`
+#### `registerCorrection`
+
+```cpp
+void registerCorrection(const std::string& name,
+                        const std::string& file,
+                        const std::string& correctionlibName,
+                        const std::vector<std::string>& inputVariables);
+```
+
+Registers either a regular correction or a compound correction from a JSON file.
+
+#### `getCorrection` / `getCompoundCorrection` / `getCorrectionFeatures`
 
 ```cpp
 correction::Correction::Ref getCorrection(const std::string& key) const;
+correction::CompoundCorrection::Ref getCompoundCorrection(const std::string& key) const;
 const std::vector<std::string>& getCorrectionFeatures(const std::string& key) const;
 ```
 
 Low-level accessors for the loaded correction objects and their registered
 input-variable lists. Typically not needed in analysis code.
+
+---
+
+### ObjectEnergyManagerBase
+
+**Header**: `core/plugins/ObjectEnergyManagerBase/ObjectEnergyManagerBase.h`
+
+Shared base implementation for electron, photon, tau, and muon object-energy corrections.
+
+> **See also**: [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
+
+Key capabilities:
+
+- `applyCorrection(...)` for multiplicative object-scale updates
+- `applyResolutionSmearing(...)` for additive Gaussian smearing
+- `applyCorrectionlib(...)` for direct `CorrectionManager` integration
+- `defineReproducibleGaussian(...)` for deterministic MC smearing
+- `propagateMET(...)` for Type-1 style MET updates
+- `addVariation(...)` and variation-collection outputs
+
+`execute()` now clears queued correction and variation steps after materializing them. This makes explicit pre-materialization safe when downstream `Define(...)` calls need corrected columns immediately.
+
+### CorrectedObjectCollectionManagers
+
+**Header**: `core/plugins/CorrectedObjectCollectionManagers/CorrectedObjectCollectionManagers.h`
+
+Thin wrapper plugins that expose corrected full-object collections directly to
+analysis code.
+
+Available concrete managers:
+
+- `CorrectedJetCollectionManager`
+- `CorrectedFatJetCollectionManager`
+- `CorrectedElectronCollectionManager`
+- `CorrectedMuonCollectionManager`
+- `CorrectedTauCollectionManager`
+- `CorrectedPhotonCollectionManager`
+
+Shared behavior:
+
+- optionally auto-build an input `PhysicsObjectCollection` from raw component
+    branches
+- optionally replay an ordered `workflowConfig` into `CorrectionManager` and
+    the underlying correction manager
+- schedule nominal corrected collection materialization on the underlying
+    correction manager
+- schedule varied collection outputs and optional
+    `PhysicsObjectVariationMap`
+- register the nominal collection base name with `SystematicManager`
+
+Systematic behavior:
+
+- the underlying correction manager registers a base systematic family such as
+    `jes_total`, `ees`, `stat`, or `pes`
+- explicit nominal-to-directional mappings are recorded through
+    `registerVariationColumns(...)`
+- downstream `Define(...)` calls that consume the nominal collection name can
+    automatically materialize derived `...Up` and `...Down` outputs
+
+Typical config keys:
+
+```text
+correctedJetCollectionConfig=cfg/corrected_jets.txt
+correctedElectronCollectionConfig=cfg/corrected_electrons.txt
+correctedMuonCollectionConfig=cfg/corrected_muons.txt
+```
+
+Pair-based config files may also include:
+
+```text
+workflowConfig=cfg/corrected_jets_workflow.txt
+```
+
+When present, `workflowConfig` is parsed as a multi-entry config whose rows are
+executed in order during `setupFromConfigFile()`. Each row must define
+`type=...`. Optional `sample=mc|data|all` gates a row on the current sample
+class, inferred from the top-level `type` / `primaryDataset` config. Values of
+the form `${key}` resolve against top-level config keys and corrected-wrapper
+spec values like `${correctedPtColumn}` and `${outputCollection}`.
+
+Supported workflow action families:
+
+- Common: `registerCorrection`, `applyCorrectionVec`, `defineRelativeUncertaintyScaleFactors`
+- Jet / fatjet: `setJetColumns`, `setMETColumns`, `removeExistingCorrections`, `setRawPtColumn`, `setJERSmearingColumns`, `applyCorrection`, `applyCorrectionlib`, `applyJERSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`, `applySystematicSet`
+- Electron / photon / tau: `setObjectColumns`, `setMETColumns`, `defineReproducibleGaussian`, `applyCorrection`, `applyCorrectionlib`, `applyResolutionSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`
+- Muon additions: `setRochesterInputColumns`, `setScaleResolutionEventColumns`, `applyScaleAndResolution`, `applyRochesterCorrection`, `applyRochesterSystematicSet`
+
+See [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md) for the full configuration format
+and usage pattern.
+
+### ElectronEnergyScaleManager
+
+**Header**: `core/plugins/ElectronEnergyScaleManager/ElectronEnergyScaleManager.h`
+
+Thin concrete wrapper over `ObjectEnergyManagerBase` for electron workflows.
+
+Typical CMS usage combines:
+
+- `CorrectionManager` for `SmearAndSyst` or compound `Scale` payload evaluation
+- `defineReproducibleGaussian(...)` for MC smearing
+- `applyResolutionSmearing(...)` and `applyCorrection(...)` for nominal and shifted outputs
+
+See [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md) for a full Run 3 pattern.
+
+### MuonRochesterManager
+
+**Header**: `core/plugins/MuonRochesterManager/MuonRochesterManager.h`
+
+Concrete object-energy manager for CMS muon momentum corrections.
+
+Additional public methods beyond the shared object-energy API:
+
+```cpp
+void setRochesterInputColumns(charge, genPt, nLayers, u1, u2);
+void setScaleResolutionEventColumns(lumiColumn, eventColumn);
+void applyRochesterCorrection(cm, correctionName, inputPtColumn, outputPtColumn);
+void applyRochesterSystematicSet(cm, correctionName, setName, inputPtColumn, outputPtPrefix);
+void applyScaleAndResolution(jsonFile, isData, inputPtColumn, outputPtColumn,
+                             scaleVariation = "nom",
+                             resolutionVariation = "nom");
+```
+
+Use `applyScaleAndResolution(...)` for the newer Run 3 split-schema payloads that expose separate `a_*`, `m_*`, `k_*`, `cb_params`, and `poly_params` corrections.
+
+---
 
 ### IKinematicFitManager
 
@@ -1304,6 +1468,8 @@ Plugin for applying CMS Jet Energy Scale (JES) and Jet Energy Resolution
 (JER) corrections to jet collections, with support for named systematic source
 sets, Type-1 MET propagation, and clean `PhysicsObjectCollection` integration.
 
+> **See also**: [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md) and [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
+
 #### Configuration Methods
 
 ```cpp
@@ -1314,11 +1480,14 @@ void setMETColumns(metPtCol, metPhiCol);
 // Stripping existing corrections
 void removeExistingCorrections(rawFactorColumn);
 void setRawPtColumn(rawPtColumn);                  // alternative
+void setJERSmearingColumns(genJetPtColumn, rhoColumn, eventColumn);
 
 // Applying scale-factor corrections
 void applyCorrection(inputPt, sfCol, outputPt,
                      applyToMass=true, inputMass="", outputMass="");
 void applyCorrectionlib(cm, correctionName, stringArgs, inputPt, outputPt, ...);
+void applyJERSmearing(cm, ptResolutionCorrection, scaleFactorCorrection,
+                      inputPt, outputPt, systematic="nom", ...);
 
 // CMS systematic source sets
 void registerSystematicSources(setName, sources);
@@ -1363,21 +1532,35 @@ jes->setMETColumns("MET_pt", "MET_phi");
 // 2. Strip NanoAOD JEC → raw pT
 jes->removeExistingCorrections("Jet_rawFactor");
 
-// 3. Apply new L1L2L3 JEC
-jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
-                        "Jet_pt_raw", "Jet_pt_jec");
+// 3. Evaluate the nominal compound JEC via CorrectionManager
+cm->registerCorrection(
+    "jec_nominal", "jet_jerc.json.gz",
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
 
-// 4. Register reduced JES set (Total only) and apply
+// 4. Apply the resulting scale factors to jet pt and mass
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec",
+                     true, "Jet_mass_raw", "Jet_mass_jec");
+
+// 5. Register reduced JES set (Total only) and apply
 jes->registerSystematicSources("reduced", {"Total"});
 jes->applySystematicSet(*cm, "jes_unc", "reduced",
                         "Jet_pt_jec", "Jet_pt_jes");
 
-// 5. Propagate JEC to MET
+// 6. Configure and apply JER smearing
+jes->setJERSmearingColumns("Jet_genMatchedPt",
+                           "Rho_fixedGridRhoFastjetAll",
+                           "event");
+jes->applyJERSmearing(*cm, "jer_pt_resolution", "jer_scale_factor",
+                      "Jet_pt_jec", "Jet_pt_jer_nominal");
+
+// 7. Propagate JEC to MET
 jes->propagateMET("MET_pt", "MET_phi",
                   "Jet_pt_raw", "Jet_pt_jec",
                   "MET_pt_jec", "MET_phi_jec");
 
-// 6. PhysicsObjectCollection integration
+// 8. PhysicsObjectCollection integration
 jes->setInputJetCollection("goodJets");
 jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
 jes->defineVariationCollections("goodJets_jec", "goodJets",
@@ -1387,6 +1570,17 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
 //   "goodJets_TotalUp"     : PhysicsObjectCollection (JES up)
 //   "goodJets_TotalDown"   : PhysicsObjectCollection (JES down)
 //   "goodJets_variations"  : PhysicsObjectVariationMap
+
+analyzer.Define("selectedJetPts",
+    [](const PhysicsObjectCollection& jets) {
+        ROOT::VecOps::RVec<float> pts;
+        for (std::size_t i = 0; i < jets.size(); ++i) {
+            pts.push_back(static_cast<float>(jets.at(i).Pt()));
+        }
+        return pts;
+    },
+    {"goodJets"}, analyzer.getSystematicManager());
+// Also materializes: selectedJetPts_TotalUp, selectedJetPts_TotalDown
 ```
 
 See [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md) for the complete
@@ -1711,25 +1905,41 @@ for key in d.GetListOfKeys():
 
 **Header**: `core/interface/api/ISystematicManager.h`
 
-Interface for tracking systematic variations.
+Interface for tracking systematic families, affected variables, and explicit
+nominal-to-variation column mappings.
 
 ```cpp
 class ISystematicManager {
 public:
-    virtual void registerSystematic(const std::string& name) = 0;
-    virtual std::vector<std::string> getSystematicNames() const = 0;
-    virtual bool hasSystematic(const std::string& name) const = 0;
+    virtual void registerSystematic(const std::string& syst,
+                                    const std::set<std::string>& affectedVariables) = 0;
+    virtual void registerVariationColumns(const std::string& variable,
+                                          const std::string& systematicName,
+                                          const std::string& upColumn,
+                                          const std::string& downColumn) = 0;
+    virtual const std::set<std::string>& getSystematics() const = 0;
+    virtual const std::set<std::string>& getVariablesForSystematic(const std::string& syst) const = 0;
+    virtual const std::set<std::string>& getSystematicsForVariable(const std::string& var) const = 0;
+    virtual std::string getVariationColumnName(const std::string& variable,
+                                               const std::string& syst) const = 0;
 };
 ```
 
 **Example**:
 ```cpp
-auto* sysMgr = analyzer.getSystematicManager();
-sysMgr->registerSystematic("jes_up");
-sysMgr->registerSystematic("jes_down");
+auto& sysMgr = analyzer.getSystematicManager();
+sysMgr.registerSystematic("jes_total", {"Jet_pt_corr_nominal"});
+sysMgr.registerVariationColumns(
+    "Jet_pt_corr_nominal",
+    "jes_total",
+    "Jet_pt_jes_total_up",
+    "Jet_pt_jes_total_down");
 
-auto systematics = sysMgr->getSystematicNames();
-// Returns: ["nominal", "jes_up", "jes_down"]
+const auto& systematics = sysMgr.getSystematics();
+// Contains: "jes_total"
+
+sysMgr.getVariationColumnName("Jet_pt_corr_nominal", "jes_totalUp");
+// Returns: "Jet_pt_jes_total_up"
 ```
 
 ### IOutputSink

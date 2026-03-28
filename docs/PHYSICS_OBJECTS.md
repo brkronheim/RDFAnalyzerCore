@@ -607,9 +607,21 @@ const auto& nominalJets = jetVariations.at("nominal");
 const auto& jecUpJets   = jetVariations.at("JEC_up");
 ```
 
-The `PhysicsObjectVariationMap` type alias integrates directly with
-`SystematicManager`, which iterates over the map keys to fill varied
-histograms.
+`PhysicsObjectVariationMap` is a convenient event-level container for nominal
+and varied collections, but it is not itself the mechanism used by the
+framework to propagate systematic substitutions.
+
+Automatic propagation happens through `SystematicManager` and
+`IDataFrameProvider::Define(...)`:
+
+- nominal collection names are registered as systematic-aware variables
+- explicit Up/Down mappings are recorded when the real source columns do not
+    follow the default suffix convention
+- downstream derived columns that consume the nominal collection name are then
+    expanded automatically into varied outputs
+
+The variation map remains useful when user code or histogram code wants to loop
+over the available collection variations explicitly inside a single lambda.
 
 ---
 
@@ -746,10 +758,13 @@ Scale (JES) and Jet Energy Resolution (JER) corrections to
 2. Produces a corrected nominal `PhysicsObjectCollection` with updated pT
    (and optionally mass) from correctionlib evaluations.
 3. Produces per-variation `PhysicsObjectCollection` columns for every
-   registered systematic, using `withCorrectedPt()` internally.
+    registered systematic, using corrected pt-only or full-kinematic
+    replacement as needed.
 4. Optionally assembles all collections into a `PhysicsObjectVariationMap`
    column for convenient downstream access.
 5. Propagates all jet energy changes to MET via a Type-1 correction.
+6. Registers the nominal collection name with `SystematicManager` so later
+    `Define(...)` calls can derive their own varied outputs automatically.
 
 ### Setting up the integration
 
@@ -771,8 +786,13 @@ auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
 jes->setMETColumns("MET_pt", "MET_phi");
 jes->removeExistingCorrections("Jet_rawFactor");
-jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
-                        "Jet_pt_raw", "Jet_pt_jec");
+cm->registerCorrection(
+    "jec_nominal",
+    "jet_jerc.json.gz",
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");
 
 // Tell the plugin which collection to use
 jes->setInputJetCollection("goodJets");
@@ -812,6 +832,12 @@ jes->propagateMET("MET_pt_jec", "MET_phi_jec",
 | `MET_pt_jec` / `MET_phi_jec` | `Float_t` | MET after JEC Type-1 propagation |
 | `MET_pt_jes_Total_up` / `MET_phi_jes_Total_up` | `Float_t` | MET after JES up propagation |
 
+Downstream code can also consume `goodJets` directly through systematic-aware
+`Define(...)` calls. If `goodJets` is registered through
+`defineVariationCollections(...)`, a derived column such as `selectedJetPts`
+automatically expands into `selectedJetPts_TotalUp` and
+`selectedJetPts_TotalDown` without requiring explicit variation-map logic.
+
 ### Using the variation map
 
 The `PhysicsObjectVariationMap` (key `"nominal"`, `"<name>Up"`,
@@ -838,12 +864,17 @@ analyzer.Define("dijetMass_vars",
 ### Relationship with withCorrectedPt and withCorrectedKinematics
 
 `JetEnergyScaleManager` calls `PhysicsObjectCollection::withCorrectedPt` and
-`withCorrectedKinematics` under the hood.  The key detail is that these
+`withCorrectedKinematics` under the hood. The key detail is that these
 methods expect **full-size** `RVec<Float_t>` columns (one entry per jet in
 the original unselected collection), using the stored original indices to look
 up each selected jet's corrected value.  The correctionlib-derived pT columns
 `Jet_pt_jec`, `Jet_pt_jes_Total_up`, etc., produced by
 `JetEnergyScaleManager` are exactly in this format.
+
+When those corrected nominal columns are additionally registered with explicit
+Up/Down mappings in `SystematicManager`, the framework can substitute the real
+variation source columns during downstream `Define(...)` expansion even when
+their names do not follow the default suffix convention.
 
 ### See also
 

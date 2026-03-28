@@ -275,6 +275,25 @@ TEST_F(SystematicManagerTest, GetVariationColumnName) {
   EXPECT_EQ(systematicManager->getVariationColumnName("pt", "unknown"), "pt");
 }
 
+TEST_F(SystematicManagerTest, RegisterVariationColumnsSupportsDirectionalLookups) {
+  systematicManager->registerVariationColumns(
+      "Jet_pt_corr_nominal", "jes_total", "Jet_pt_jes_total_up",
+      "Jet_pt_jes_total_down");
+
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic(
+      "Jet_pt_corr_nominal", "jes_total"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic(
+      "Jet_pt_corr_nominal", "jes_totalUp"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic(
+      "Jet_pt_corr_nominal", "jes_totalDown"));
+  EXPECT_EQ(systematicManager->getVariationColumnName(
+                "Jet_pt_corr_nominal", "jes_totalUp"),
+            "Jet_pt_jes_total_up");
+  EXPECT_EQ(systematicManager->getVariationColumnName(
+                "Jet_pt_corr_nominal", "jes_totalDown"),
+            "Jet_pt_jes_total_down");
+}
+
 TEST_F(SystematicManagerTest, IsBranchNameMaterializedFalseInitially) {
   // No branchName should be materialized before any makeSystList call
   EXPECT_FALSE(systematicManager->isBranchNameMaterialized("SystematicCounter"));

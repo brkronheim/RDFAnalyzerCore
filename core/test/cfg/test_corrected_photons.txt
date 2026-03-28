@@ -1,0 +1,7 @@
+ptColumn=Photon_pt
+etaColumn=Photon_eta
+phiColumn=Photon_phi
+massColumn=Photon_mass
+correctedPtColumn=Photon_pt_corr_nominal
+outputCollection=CorrectedPhotons
+variationMapColumn=CorrectedPhotons_variations

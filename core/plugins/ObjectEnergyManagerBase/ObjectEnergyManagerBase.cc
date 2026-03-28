@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <functional>
 #include <random>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -593,17 +592,29 @@ void ObjectEnergyManagerBase::execute() {
     }
   }
 
-  // 4. PhysicsObjectCollection output columns.
+  // 4. Register explicit variation mappings for corrected collection inputs.
+  for (const auto &colStep : collectionOutputSteps_m) {
+    for (const auto &var : variations_m) {
+      systematicManager_m->registerVariationColumns(
+          colStep.correctedPtColumn, var.name, var.upPtColumn, var.downPtColumn);
+      if (!colStep.correctedMassColumn.empty() && !var.upMassColumn.empty() &&
+          !var.downMassColumn.empty()) {
+        systematicManager_m->registerVariationColumns(
+            colStep.correctedMassColumn, var.name, var.upMassColumn,
+            var.downMassColumn);
+      }
+    }
+  }
+
+  // 5. PhysicsObjectCollection output columns.
   for (const auto &colStep : collectionOutputSteps_m) {
     const std::string inputCol  = inputCollectionColumn_m;
     const std::string corrPtCol = colStep.correctedPtColumn;
     const std::string outputCol = colStep.outputCollectionColumn;
 
     if (!colStep.correctedMassColumn.empty()) {
-      // Pt + mass correction: withCorrectedKinematics.
       const std::string corrMasCol = colStep.correctedMassColumn;
-      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-      auto newDf = df.Define(
+      dataManager_m->Define(
           outputCol,
           [](const PhysicsObjectCollection &col,
              const ROOT::VecOps::RVec<Float_t> &corrPt,
@@ -621,26 +632,21 @@ void ObjectEnergyManagerBase::execute() {
             }
             return col.withCorrectedKinematics(corrPt, etaFull, phiFull, corrMass);
           },
-          {inputCol, corrPtCol, corrMasCol});
-      dataManager_m->setDataFrame(newDf);
+          {inputCol, corrPtCol, corrMasCol}, *systematicManager_m);
     } else {
-      // Pt-only correction: withCorrectedPt.
-      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-      auto newDf = df.Define(
+      dataManager_m->Define(
           outputCol,
           [](const PhysicsObjectCollection &col,
              const ROOT::VecOps::RVec<Float_t> &corrPt)
               -> PhysicsObjectCollection {
             return col.withCorrectedPt(corrPt);
           },
-          {inputCol, corrPtCol});
-      dataManager_m->setDataFrame(newDf);
+          {inputCol, corrPtCol}, *systematicManager_m);
     }
   }
 
-  // 5. Per-variation collection columns and optional PhysicsObjectVariationMap.
+  // 6. Per-variation collection aliases and optional PhysicsObjectVariationMap.
   for (const auto &varColStep : variationCollectionsSteps_m) {
-    const std::string inputCol = inputCollectionColumn_m;
     const std::string nomCol   = varColStep.nominalCollectionColumn;
     const std::string prefix   = varColStep.collectionPrefix;
     const std::string mapCol   = varColStep.variationMapColumn;
@@ -650,35 +656,36 @@ void ObjectEnergyManagerBase::execute() {
     std::vector<std::string> dnColNames;
 
     for (const auto &var : variations_m) {
+      const std::string sourceUpCol =
+          systematicManager_m->getVariationColumnName(nomCol, var.name + "Up");
+      const std::string sourceDnCol =
+          systematicManager_m->getVariationColumnName(nomCol, var.name + "Down");
       const std::string upCol = prefix + "_" + var.name + "Up";
       const std::string dnCol = prefix + "_" + var.name + "Down";
 
-      {
-        const std::string varUpPt = var.upPtColumn;
+      if (upCol != sourceUpCol) {
         ROOT::RDF::RNode df = dataManager_m->getDataFrame();
         auto newDf = df.Define(
             upCol,
-            [](const PhysicsObjectCollection &col,
-               const ROOT::VecOps::RVec<Float_t> &corrPt)
-                -> PhysicsObjectCollection {
-              return col.withCorrectedPt(corrPt);
+            [](const PhysicsObjectCollection &col) -> PhysicsObjectCollection {
+              return col;
             },
-            {inputCol, varUpPt});
+            {sourceUpCol});
         dataManager_m->setDataFrame(newDf);
       }
-      {
-        const std::string varDnPt = var.downPtColumn;
+      if (dnCol != sourceDnCol) {
         ROOT::RDF::RNode df = dataManager_m->getDataFrame();
         auto newDf = df.Define(
             dnCol,
-            [](const PhysicsObjectCollection &col,
-               const ROOT::VecOps::RVec<Float_t> &corrPt)
-                -> PhysicsObjectCollection {
-              return col.withCorrectedPt(corrPt);
+            [](const PhysicsObjectCollection &col) -> PhysicsObjectCollection {
+              return col;
             },
-            {inputCol, varDnPt});
+            {sourceDnCol});
         dataManager_m->setDataFrame(newDf);
       }
+
+      systematicManager_m->registerVariationColumns(prefix, var.name, upCol,
+                                                    dnCol);
 
       varNames.push_back(var.name);
       upColNames.push_back(upCol);
@@ -733,21 +740,23 @@ void ObjectEnergyManagerBase::execute() {
     }
   }
 
-  // 6. Register systematic variations with ISystematicManager.
   for (const auto &var : variations_m) {
-    {
-      std::set<std::string> affectedUp = {var.upPtColumn};
-      if (!var.upMassColumn.empty())
-        affectedUp.insert(var.upMassColumn);
-      systematicManager_m->registerSystematic(var.name + "Up", affectedUp);
+    std::set<std::string> affected = {var.upPtColumn, var.downPtColumn};
+    if (!var.upMassColumn.empty()) {
+      affected.insert(var.upMassColumn);
     }
-    {
-      std::set<std::string> affectedDown = {var.downPtColumn};
-      if (!var.downMassColumn.empty())
-        affectedDown.insert(var.downMassColumn);
-      systematicManager_m->registerSystematic(var.name + "Down", affectedDown);
+    if (!var.downMassColumn.empty()) {
+      affected.insert(var.downMassColumn);
     }
+    systematicManager_m->registerSystematic(var.name, affected);
   }
+
+  gaussianColumnSteps_m.clear();
+  correctionSteps_m.clear();
+  smearingSteps_m.clear();
+  metPropagationSteps_m.clear();
+  collectionOutputSteps_m.clear();
+  variationCollectionsSteps_m.clear();
 }
 
 // ---------------------------------------------------------------------------

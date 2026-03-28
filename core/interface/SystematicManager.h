@@ -23,13 +23,18 @@ public:
    * @param affectedVariables Set of affected variable names
    */
   void registerSystematic(const std::string &syst,
-                          const std::set<std::string> &affectedVariables);
+                          const std::set<std::string> &affectedVariables) override;
+
+  void registerVariationColumns(const std::string &variable,
+                                const std::string &systematicName,
+                                const std::string &upColumn,
+                                const std::string &downColumn) override;
 
   /**
    * @brief Get the set of all registered systematics
    * @return Reference to the set of systematic names
    */
-  const std::set<std::string> &getSystematics() const;
+  const std::set<std::string> &getSystematics() const override;
 
   /**
    * @brief Get the set of variables affected by a given systematic
@@ -37,7 +42,7 @@ public:
    * @return Reference to the set of variable names
    */
   const std::set<std::string> &
-  getVariablesForSystematic(const std::string &syst) const;
+  getVariablesForSystematic(const std::string &syst) const override;
 
   /**
    * @brief Get the set of systematics affecting a given variable
@@ -45,7 +50,7 @@ public:
    * @return Reference to the set of systematic names
    */
   const std::set<std::string> &
-  getSystematicsForVariable(const std::string &var) const;
+  getSystematicsForVariable(const std::string &var) const override;
 
   /**
    * @brief Register existing systematics from configuration
@@ -53,7 +58,7 @@ public:
    * @param columnList Vector of column names
    */
   void registerExistingSystematics(const std::vector<std::string> &systConfig,
-                                   const std::vector<std::string> &columnList);
+                                   const std::vector<std::string> &columnList) override;
 
   /**
    * @brief Automatically discover and register systematic variations from column names.
@@ -78,12 +83,17 @@ public:
    */
   bool isBranchNameMaterialized(const std::string &branchName) const override;
 
+  std::string getVariationColumnName(const std::string &variable,
+                                     const std::string &syst) const override;
+
 private:
   std::set<std::string> systematics_m;
   std::unordered_map<std::string, std::set<std::string>>
       systematicToVariableMap_m;
   std::unordered_map<std::string, std::set<std::string>>
       variableToSystematicMap_m;
+  std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
+      variationColumnMap_m;
   /// Per-branchName cache: maps each materialized branchName to its systList.
   /// Enables multiple callers to safely share or isolate counter namespaces.
   std::unordered_map<std::string, std::vector<std::string>>
