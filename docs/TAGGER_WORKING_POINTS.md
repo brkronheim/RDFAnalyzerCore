@@ -79,7 +79,7 @@ WP thresholds that are ≤ the object's tagger score).
 auto *twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
 auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
-// 1. Declare jet kinematic columns.
+// 1. Declare object kinematic columns.
 twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
 
 // 2. Set the tagger discriminator score column.

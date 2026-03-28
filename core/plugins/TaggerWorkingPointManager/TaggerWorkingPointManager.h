@@ -45,8 +45,8 @@ struct WorkingPointEntry {
  */
 struct TaggingVariationEntry {
   std::string name;            ///< Systematic name (e.g. "btagHF")
-  std::string upSFColumn;      ///< Per-jet SF column for the up shift   (RVec<Float_t>)
-  std::string downSFColumn;    ///< Per-jet SF column for the down shift (RVec<Float_t>)
+  std::string upSFColumn;      ///< Per-object SF column for the up shift   (RVec<Float_t>)
+  std::string downSFColumn;    ///< Per-object SF column for the down shift (RVec<Float_t>)
   std::string upWeightColumn;  ///< Per-event weight column for the up shift   (Float_t)
   std::string downWeightColumn;///< Per-event weight column for the down shift (Float_t)
 };
@@ -321,7 +321,7 @@ public:
    * @brief Apply a correctionlib-based per-object SF and produce a per-event
    *        weight column.
    *
-   * The correctionlib payload is evaluated once per jet per event via
+   * The correctionlib payload is evaluated once per object per event via
    * CorrectionManager::applyCorrectionVec().  The resulting per-object
    * RVec<Float_t> SF column is then reduced to a per-event scalar weight
    * (product of all per-object SFs for objects in the input collection) stored in
@@ -444,8 +444,8 @@ public:
    * or applySystematicSet).
    *
    * @param systematicName  Base name (e.g. @c "btagHF").
-   * @param upSFColumn      Per-jet SF column for the up variation.
-   * @param downSFColumn    Per-jet SF column for the down variation.
+   * @param upSFColumn      Per-object SF column for the up variation.
+   * @param downSFColumn    Per-object SF column for the down variation.
    * @param upWeightColumn  Corresponding per-event weight column for up.
    * @param downWeightColumn Corresponding per-event weight column for down.
    *
@@ -518,7 +518,7 @@ public:
    * @brief Book per-(pt, η, flavour) tagger-score fraction histograms.
    *
    * This method is intended for a **dedicated pre-processing run** whose sole
-   * purpose is to compute generator-level jet fractions.  The resulting
+   * purpose is to compute generator-level object fractions.  The resulting
    * histograms can be used to build the fraction correctionlib payload consumed
    * by setFractionCorrection().
    *
@@ -529,9 +529,9 @@ public:
    * category can be read off after running over the full MC sample.
    *
    * @param outputPrefix   Prefix for all histogram names.
-   * @param ptBinEdges     Bin edges for the jet-pT dimension (must have ≥ 2
+   * @param ptBinEdges     Bin edges for the object-pT dimension (must have ≥ 2
    *                       elements; entries are in GeV).
-   * @param etaBinEdges    Bin edges for the jet-|η| dimension (must have ≥ 2
+   * @param etaBinEdges    Bin edges for the object-|η| dimension (must have ≥ 2
    *                       elements).
    * @param flavourColumn  Optional per-object hadron-flavour column (RVec<Int_t>).
    *                       When non-empty, separate histograms are produced for
@@ -583,7 +583,7 @@ public:
    * @brief Define all WP-category, weight, and filtered-collection columns.
    *
    * Execution order:
-   *  1. Per-jet WP category column (`<ptColumn>_wp_category`).
+   *  1. Per-object WP category column (`<ptColumn>_wp_category`).
    *  2. Each scheduled SF weight column (from applyCorrectionlib / applySystematicSet).
    *  3. Each WP-filtered PhysicsObjectCollection column.
    *  4. Each variation-collection step.
@@ -635,7 +635,7 @@ private:
 
   // ---- Per-event weight steps ---------------------------------------------
   struct WeightStep {
-    std::string perJetSFColumn;   ///< RVec<Float_t> from correctionlib
+    std::string perObjectSFColumn;   ///< RVec<Float_t> from correctionlib
     std::string outputWeightColumn; ///< scalar Float_t per-event weight
   };
   std::vector<WeightStep> weightSteps_m;
@@ -691,7 +691,7 @@ private:
   /// Build a per-event weight column from a per-object SF column.
   /// If fraction correction is configured, divides each per-object SF by the
   /// MC fraction for the jet's WP category.
-  void defineWeightColumn(const std::string &perJetSFColumn,
+  void defineWeightColumn(const std::string &perObjectSFColumn,
                           const std::string &outputWeightColumn);
 };
 

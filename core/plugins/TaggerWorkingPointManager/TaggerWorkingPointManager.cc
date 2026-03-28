@@ -134,7 +134,7 @@ void TaggerWorkingPointManager::applyCorrectionlib(
         "TaggerWorkingPointManager::applyCorrectionlib: call "
         "setInputObjectCollection() first");
 
-  // Evaluate the correctionlib to get a per-jet SF column.
+  // Evaluate the correctionlib to get a per-object SF column.
   cm.applyCorrectionVec(correctionName, stringArgs, inputColumns);
 
   // Derive the SF column name following CorrectionManager convention.
@@ -420,12 +420,12 @@ WPCollectionSelection TaggerWorkingPointManager::parseSelection(
 // ---------------------------------------------------------------------------
 
 void TaggerWorkingPointManager::defineWeightColumn(
-    const std::string &perJetSFColumn,
+    const std::string &perObjectSFColumn,
     const std::string &outputWeightColumn) {
   ROOT::RDF::RNode df = dataManager_m->getDataFrame();
 
   if (!hasFractionCorrection_m) {
-    // Simple product of per-jet SFs over jets in the input collection.
+    // Simple product of per-object SFs over objects in the input collection.
     const std::string collectionCol = inputObjectCollectionColumn_m;
     auto newDf = df.Define(
         outputWeightColumn,
@@ -440,10 +440,10 @@ void TaggerWorkingPointManager::defineWeightColumn(
           }
           return weight;
         },
-        {collectionCol, perJetSFColumn});
+        {collectionCol, perObjectSFColumn});
     dataManager_m->setDataFrame(newDf);
   } else {
-    // Fraction-weighted: divide each per-jet SF by the MC fraction for the
+    // Fraction-weighted: divide each per-object SF by the MC fraction for the
     // jet's WP category so the total weight reflects the generator-level
     // distribution.
     const std::string collectionCol = inputObjectCollectionColumn_m;
@@ -468,7 +468,7 @@ void TaggerWorkingPointManager::defineWeightColumn(
           }
           return weight;
         },
-        {collectionCol, perJetSFColumn, fracCol});
+        {collectionCol, perObjectSFColumn, fracCol});
     dataManager_m->setDataFrame(newDf);
   }
 }
@@ -483,7 +483,7 @@ void TaggerWorkingPointManager::execute() {
         "TaggerWorkingPointManager::execute: context not set");
 
   // -------------------------------------------------------------------------
-  // 1. Define per-jet WP category column.
+  // 1. Define per-object WP category column.
   // -------------------------------------------------------------------------
   if (!taggerColumn_m.empty() && !workingPoints_m.empty()) {
     ROOT::RDF::RNode df = dataManager_m->getDataFrame();
@@ -516,7 +516,7 @@ void TaggerWorkingPointManager::execute() {
   // 2. Define per-event weight columns for each scheduled SF step.
   // -------------------------------------------------------------------------
   for (const auto &step : weightSteps_m) {
-    defineWeightColumn(step.perJetSFColumn, step.outputWeightColumn);
+    defineWeightColumn(step.perObjectSFColumn, step.outputWeightColumn);
   }
 
   // -------------------------------------------------------------------------
@@ -706,7 +706,7 @@ void TaggerWorkingPointManager::execute() {
     std::set<std::string> affected;
     affected.insert(var.upWeightColumn);
     affected.insert(var.downWeightColumn);
-    // Also include the per-jet SF columns so downstream consumers can track them.
+    // Also include the per-object SF columns so downstream consumers can track them.
     affected.insert(var.upSFColumn);
     affected.insert(var.downSFColumn);
     systematicManager_m->registerSystematic(var.name, affected);
@@ -904,7 +904,7 @@ void TaggerWorkingPointManager::reportMetadata() {
   if (!weightSteps_m.empty()) {
     ss << "  Weight columns (" << weightSteps_m.size() << "):\n";
     for (const auto &ws : weightSteps_m) {
-      ss << "    " << ws.perJetSFColumn << " -> " << ws.outputWeightColumn << "\n";
+      ss << "    " << ws.perObjectSFColumn << " -> " << ws.outputWeightColumn << "\n";
     }
   }
 
