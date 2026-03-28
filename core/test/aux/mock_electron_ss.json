@@ -1,0 +1,51 @@
+{
+  "schema_version": 2,
+  "description": "Mock electron scale and smear corrections for unit testing. Mimics the structure of CMS EGM Run3 correctionlib payloads.",
+  "corrections": [
+    {
+      "name": "electron_scale_sf",
+      "description": "Mock electron energy scale correction with systematic variations",
+      "version": 1,
+      "inputs": [
+        {"name": "syst",      "type": "string"},
+        {"name": "run",       "type": "real"},
+        {"name": "scEta",     "type": "real"},
+        {"name": "r9",        "type": "real"},
+        {"name": "pt",        "type": "real"},
+        {"name": "seedGain",  "type": "real"}
+      ],
+      "output": {"name": "scale_factor", "type": "real"},
+      "data": {
+        "nodetype": "category",
+        "input": "syst",
+        "content": [
+          {"key": "scale",      "value": 1.0},
+          {"key": "smear",      "value": 1.0},
+          {"key": "scaleUp",    "value": 1.005},
+          {"key": "scaleDown",  "value": 0.995},
+          {"key": "smearUp",    "value": 1.01},
+          {"key": "smearDown",  "value": 0.99}
+        ]
+      }
+    }
+  ],
+  "compound_corrections": [
+    {
+      "name": "Scale",
+      "description": "Mock compound electron energy scale correction",
+      "inputs": [
+        {"name": "syst",      "type": "string"},
+        {"name": "run",       "type": "real"},
+        {"name": "scEta",     "type": "real"},
+        {"name": "r9",        "type": "real"},
+        {"name": "pt",        "type": "real"},
+        {"name": "seedGain",  "type": "real"}
+      ],
+      "output": {"name": "scale_factor", "type": "real"},
+      "inputs_update": [],
+      "input_op": "*",
+      "output_op": "last",
+      "stack": ["electron_scale_sf"]
+    }
+  ]
+}

@@ -849,8 +849,7 @@ TEST_F(CorrectionManagerTest, RegisterCompoundCorrectionAndApplyScalar) {
   auto testDataManager = std::make_unique<DataManager>(1);
   setContextFor(*testDataManager);
 
-  const std::string file =
-    "../../analyses/VHbbcc/corrections/EGM/Run3-22CDSep23-Summer22-NanoAODv12/latest/electronSS_EtDependent.json.gz";
+  const std::string file = "aux/mock_electron_ss.json";
 
   testDataManager->Define("run", []() -> double { return 355862.0; }, {}, *systematicManager);
   testDataManager->Define("Electron_scEta", []() -> double { return 0.15; }, {}, *systematicManager);
@@ -885,8 +884,7 @@ TEST_F(CorrectionManagerTest, ApplyCompoundCorrectionVecSupportsMixedScalarAndRV
   auto testDataManager = std::make_unique<DataManager>(1);
   setContextFor(*testDataManager);
 
-  const std::string file =
-    "../../analyses/VHbbcc/corrections/JME/Run3-22CDSep23-Summer22-NanoAODv12/latest/jet_jerc.json.gz";
+  const std::string file = "aux/mock_jet_jerc.json";
   const std::string compoundName =
     "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi";
 

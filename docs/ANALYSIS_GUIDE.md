@@ -14,6 +14,8 @@ This comprehensive guide walks you through creating a complete analysis with RDF
 - [Corrections and Scale Factors](#corrections-and-scale-factors)
 - [Histogramming](#histogramming)
 - [Systematics](#systematics)
+  - [SystematicManager Integration](#systematicmanager-integration)
+  - [Systematics on PhysicsObjectCollections](#systematics-on-physicsobjectcollections)
 - [Managing Event Weights](#managing-event-weights)
 - [Analysis Regions](#analysis-regions)
 - [Cutflow and Event Selection Monitoring](#cutflow-and-event-selection-monitoring)
@@ -845,6 +847,153 @@ When booking histograms with NDHistogramManager, an automatic systematic axis is
 // Histograms are automatically filled for all systematic variations
 // Access via: hist[channel][region][systematic]
 ```
+
+### Systematics on PhysicsObjectCollections
+
+The preferred way to apply systematic variations in CMS analyses is through
+`PhysicsObjectCollection` and the object-energy manager plugins.  This approach
+removes all boilerplate: you define your physics selection once on the nominal
+collection, and the framework automatically propagates every systematic
+variation to every downstream column.
+
+#### Step 1 — Define your object collection on the nominal kinematics
+
+```cpp
+analyzer.Define("goodJets",
+    [](const RVec<float>& pt, const RVec<float>& eta,
+       const RVec<float>& phi, const RVec<float>& mass) {
+        return PhysicsObjectCollection(pt, eta, phi, mass,
+                                       (pt > 25.f) && (abs(eta) < 2.4f));
+    },
+    {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
+);
+```
+
+#### Step 2 — Apply CMS corrections and register systematic sources
+
+`JetEnergyScaleManager` handles the entire JEC/JES/JER pipeline, including
+corrected `PhysicsObjectCollection` outputs:
+
+```cpp
+auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+
+jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+jes->setMETColumns("MET_pt", "MET_phi");
+
+// Strip NanoAOD embedded JEC → raw pT
+jes->removeExistingCorrections("Jet_rawFactor");
+
+// Evaluate the nominal compound JEC from a correctionlib payload.
+// Mixed per-jet RVec inputs and scalar rho are handled automatically.
+cm->registerCorrection(
+    "jec_nominal",
+    "jet_jerc.json.gz",
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");
+
+// Register all CMS JES uncertainty sources and apply them in one call.
+jes->registerSystematicSources("reduced", {"Total"});
+jes->applySystematicSet(*cm, "jes_unc", "reduced",
+                        "Jet_pt_jec", "Jet_pt_jes");
+
+// Type-1 MET propagation for JEC and JES
+jes->propagateMET("MET_pt", "MET_phi",
+                  "Jet_pt_raw", "Jet_pt_jec",
+                  "MET_pt_jec", "MET_phi_jec");
+```
+
+#### Step 3 — Produce corrected collections for nominal + all variations
+
+```cpp
+jes->setInputJetCollection("goodJets");
+// Define a corrected nominal collection
+jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+// Define per-variation collections and assemble a variation map
+jes->defineVariationCollections("goodJets_jec", "goodJets",
+                                "goodJets_variations");
+```
+
+After `analyzer.save()`:
+
+| Column | Description |
+|--------|-------------|
+| `goodJets_jec` | Nominal JEC-corrected `PhysicsObjectCollection` |
+| `goodJets_TotalUp` | JES Total up variation `PhysicsObjectCollection` |
+| `goodJets_TotalDown` | JES Total down variation `PhysicsObjectCollection` |
+| `goodJets_variations` | `PhysicsObjectVariationMap` keyed by `"nominal"`, `"TotalUp"`, `"TotalDown"` |
+
+#### Step 4 — Write downstream code once; automatic propagation does the rest
+
+Because `defineVariationCollections` registers `goodJets` with `SystematicManager`,
+any downstream `Define` that passes `*sysMgr` is **automatically duplicated for
+every registered variation**:
+
+```cpp
+// Written once — automatically becomes:
+//   selectedJetPts           (consumes goodJets_jec)
+//   selectedJetPts_TotalUp   (consumes goodJets_TotalUp)
+//   selectedJetPts_TotalDown (consumes goodJets_TotalDown)
+analyzer.Define("selectedJetPts",
+    [](const PhysicsObjectCollection& jets) {
+        RVec<float> pts;
+        for (std::size_t i = 0; i < jets.size(); ++i)
+            pts.push_back(static_cast<float>(jets.at(i).Pt()));
+        return pts;
+    },
+    {"goodJets"}, *sysMgr
+);
+```
+
+No manual duplication of your physics logic is needed.
+
+#### Using the full CMS JES source set
+
+```cpp
+jes->registerSystematicSources("full", {
+    "AbsoluteCal", "AbsoluteScale", "AbsoluteMPFBias",
+    "FlavorQCD", "Fragmentation", "PileUpDataMC",
+    "PileUpPtRef", "RelativeFSR", "RelativeJEREC1",
+    "RelativeJEREC2", "RelativeJERHF",
+    "RelativePtBB", "RelativePtEC1", "RelativePtEC2",
+    "RelativePtHF", "RelativeBal", "RelativeSample"
+});
+jes->applySystematicSet(*cm, "jes_unc", "full", "Jet_pt_jec", "Jet_pt_jes");
+// Creates 34 variation columns and registers 17 systematic families in one call.
+```
+
+#### Manual corrected-kinematics approach (non-JES use cases)
+
+For object types without a dedicated manager (or custom corrections), call
+`withCorrectedPt` or `withCorrectedKinematics` directly:
+
+```cpp
+// Electron energy scale correction
+analyzer.Define("goodElectrons_scaled",
+    [](const PhysicsObjectCollection& electrons,
+       const RVec<float>& pt_scaled) {
+        return electrons.withCorrectedPt(pt_scaled);
+    },
+    {"goodElectrons", "Electron_pt_scale"}
+);
+
+// Full 4-vector replacement (e.g. tau energy scale with mass rescaling)
+analyzer.Define("goodTaus_corrected",
+    [](const PhysicsObjectCollection& taus,
+       const RVec<float>& pt_corr, const RVec<float>& eta_corr,
+       const RVec<float>& phi_corr, const RVec<float>& mass_corr) {
+        return taus.withCorrectedKinematics(pt_corr, eta_corr,
+                                            phi_corr, mass_corr);
+    },
+    {"goodTaus", "Tau_pt_tes", "Tau_eta_tes",
+     "Tau_phi_tes", "Tau_mass_tes"}
+);
+```
+
+> **Full reference**: [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md) and
+> [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
 
 ## Managing Event Weights
 

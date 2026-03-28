@@ -516,6 +516,167 @@ ctest -R TestName -V   # -V for verbose output
 
 ---
 
+## Applying Systematics to Physics Object Collections
+
+One of the most powerful features of RDFAnalyzerCore is how easily it supports
+applying systematic variations directly to **physics object collections** (jets,
+electrons, muons, taus, …). This is particularly streamlined for CMS-style
+corrections using correctionlib payloads.
+
+### Manual Kinematic Corrections
+
+`PhysicsObjectCollection` provides first-class support for corrected kinematics.
+Once you have a collection, you can produce a corrected version in one call:
+
+```cpp
+#include <PhysicsObjectCollection.h>
+
+// Build a jet collection
+analyzer.Define("goodJets",
+    [](const RVec<float>& pt, const RVec<float>& eta,
+       const RVec<float>& phi, const RVec<float>& mass) {
+        return PhysicsObjectCollection(pt, eta, phi, mass,
+                                       (pt > 25.f) && (abs(eta) < 2.4f));
+    },
+    {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
+);
+
+// Apply a corrected-pT column to the collection — produces a new collection
+// with updated 4-vectors and the same object selection.
+analyzer.Define("goodJets_corrected",
+    [](const PhysicsObjectCollection& jets,
+       const RVec<float>& corrected_pt) {
+        return jets.withCorrectedPt(corrected_pt);
+    },
+    {"goodJets", "Jet_pt_corrected"}
+);
+```
+
+`withCorrectedKinematics(pt, eta, phi, mass)` is available when all four
+4-vector components are corrected (e.g. JES corrections with mass rescaling).
+
+### CMS-Style Corrections with JetEnergyScaleManager
+
+For CMS NanoAOD analyses, the **`JetEnergyScaleManager`** plugin handles the
+full JES/JER workflow — including stripping the embedded NanoAOD JEC,
+applying a new correctionlib-based JEC, propagating uncertainties, building
+corrected `PhysicsObjectCollection` outputs, and performing Type-1 MET
+propagation — with just a handful of API calls:
+
+```cpp
+#include <JetEnergyScaleManager.h>
+#include <PhysicsObjectCollection.h>
+
+auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+
+// 1. Declare which branches hold jet/MET kinematics.
+jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+jes->setMETColumns("MET_pt", "MET_phi");
+
+// 2. Build a selected jet collection (any selection criteria you like).
+analyzer.Define("goodJets",
+    [](const RVec<float>& pt, const RVec<float>& eta,
+       const RVec<float>& phi, const RVec<float>& mass) {
+        return PhysicsObjectCollection(pt, eta, phi, mass,
+                                       (pt > 25.f) && (abs(eta) < 2.4f));
+    },
+    {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
+);
+
+// 3. Strip the NanoAOD JEC (applies Jet_rawFactor) to get raw pT.
+jes->removeExistingCorrections("Jet_rawFactor");
+
+// 4. Evaluate the nominal compound JEC from the correctionlib payload.
+//    Mixed per-jet (RVec) and per-event (scalar rho) inputs are handled automatically.
+cm->registerCorrection(
+    "jec_nominal",
+    "jet_jerc.json.gz",
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");
+
+// 5. Register CMS JES systematic sources and apply them in one call.
+//    Each source automatically produces _up and _down variation columns.
+jes->registerSystematicSources("reduced", {"Total"});
+jes->applySystematicSet(*cm, "jes_unc", "reduced",
+                        "Jet_pt_jec", "Jet_pt_jes");
+
+// 6. Propagate JEC and JES variations to MET (Type-1 correction).
+jes->propagateMET("MET_pt", "MET_phi",
+                  "Jet_pt_raw", "Jet_pt_jec",
+                  "MET_pt_jec", "MET_phi_jec");
+
+// 7. Produce corrected PhysicsObjectCollection columns for nominal + all
+//    systematic variations, and bundle them into a variation map.
+jes->setInputJetCollection("goodJets");
+jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+jes->defineVariationCollections("goodJets_jec", "goodJets",
+                                "goodJets_variations");
+```
+
+After `analyzer.save()` this creates:
+
+| Column | Description |
+|--------|-------------|
+| `goodJets_jec` | `PhysicsObjectCollection` — nominal JEC-corrected jets |
+| `goodJets_TotalUp` | `PhysicsObjectCollection` — JES Total up variation |
+| `goodJets_TotalDown` | `PhysicsObjectCollection` — JES Total down variation |
+| `goodJets_variations` | `PhysicsObjectVariationMap` — all of the above keyed by name |
+
+### Automatic Systematic Propagation
+
+Because `JetEnergyScaleManager` registers the nominal collection name with
+`SystematicManager`, any **downstream** `Define(...)` call that consumes the
+nominal collection is **automatically expanded** into up/down variants:
+
+```cpp
+// Defined once — the framework automatically creates:
+//   selectedJetPts             (nominal)
+//   selectedJetPts_TotalUp     (JES up)
+//   selectedJetPts_TotalDown   (JES down)
+analyzer.Define("selectedJetPts",
+    [](const PhysicsObjectCollection& jets) {
+        RVec<float> pts;
+        for (std::size_t i = 0; i < jets.size(); ++i)
+            pts.push_back(static_cast<float>(jets.at(i).Pt()));
+        return pts;
+    },
+    {"goodJets"}, *sysMgr   // ← passing sysMgr enables automatic propagation
+);
+```
+
+No manual duplication of your physics logic for each systematic — the
+framework handles it.
+
+### Using the Full CMS JES Source Set
+
+For a complete set of CMS Run 3 JES uncertainty sources, expand the
+registration call:
+
+```cpp
+jes->registerSystematicSources("full", {
+    "AbsoluteCal", "AbsoluteScale", "AbsoluteMPFBias",
+    "FlavorQCD", "Fragmentation", "PileUpDataMC",
+    "PileUpPtRef", "RelativeFSR", "RelativeJEREC1",
+    "RelativeJEREC2", "RelativeJERHF",
+    "RelativePtBB", "RelativePtEC1", "RelativePtEC2",
+    "RelativePtHF", "RelativeBal", "RelativeSample"
+});
+jes->applySystematicSet(*cm, "jes_unc", "full", "Jet_pt_jec", "Jet_pt_jes");
+// Creates 34 variation columns and registers 17 systematic families in one call.
+```
+
+### Further Reading
+
+- **Complete JES/JER reference**: [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md)
+- **CMS correction stack**: [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
+- **All PhysicsObjectCollection APIs**: [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
+- **Analysis guide (JES/JER workflow, electron/muon corrections)**: [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
+
+---
+
 ## Getting Help
 
 - **Documentation**: See the `docs/` directory for detailed guides
@@ -534,10 +695,10 @@ Now that your first analysis is running, explore the full power of the framework
 3. **Architecture overview**: How the framework is structured in [ARCHITECTURE.md](ARCHITECTURE.md)
 4. **Plugin development**: Write your own plugins in [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md)
 5. **Machine learning**: Integrate BDTs or neural networks — [ONNX_IMPLEMENTATION.md](ONNX_IMPLEMENTATION.md), [SOFIE_IMPLEMENTATION.md](SOFIE_IMPLEMENTATION.md)
-6. **Scale corrections**: Apply per-event scale factors with `CorrectionManager` — [API_REFERENCE.md](API_REFERENCE.md)
-7. **Systematics & nuisance groups**: Register and propagate uncertainties — [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md)
-8. **Batch processing**: Submit hundreds of jobs — [LAW_TASKS.md](LAW_TASKS.md) and [BATCH_SUBMISSION.md](BATCH_SUBMISSION.md)
-9. **Physics objects**: Overlap removal, combinatorics — [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
+6. **CMS corrections & systematics**: Apply JES/JER, electron, muon corrections with automatic variation propagation — [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md), [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md)
+7. **Physics object collections**: Overlap removal, combinatorics, corrected kinematics — [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
+8. **Systematics & nuisance groups**: Register and propagate uncertainties — [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md)
+9. **Batch processing**: Submit hundreds of jobs — [LAW_TASKS.md](LAW_TASKS.md) and [BATCH_SUBMISSION.md](BATCH_SUBMISSION.md)
 10. **Output validation**: Validate and inspect outputs — [VALIDATION_REPORTS.md](VALIDATION_REPORTS.md)
 
 Happy analyzing!
