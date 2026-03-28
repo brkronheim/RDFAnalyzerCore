@@ -142,7 +142,7 @@ struct WPCollectionSelection {
  *   // 6. (Optional) Set a fraction correctionlib for generator-level
  *   //    distribution reweighting.
  *   jtm->setFractionCorrection(*cm, "deepjet_fractions",
- *                              {"Jet_pt", "Jet_eta", "Jet_wp_category"});
+ *                              {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
  *
  *   // 7. Register systematic source sets and apply them in one call.
  *   jtm->registerSystematicSources("standard",
@@ -339,7 +339,7 @@ public:
    *
    * The fraction payload evaluates to the MC fraction of jets at a given
    * (pt, η, …) that fall in a given WP category.  Typical inputs are
-   * `{"Jet_pt", "Jet_eta", "Jet_wp_category"}` (after setTaggerColumn and
+   * `{"Jet_pt", "Jet_eta", "Jet_pt_wp_category"}` (after setTaggerColumn and
    * addWorkingPoint have been called and execute() has defined the category
    * column).
    *

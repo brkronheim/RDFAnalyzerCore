@@ -830,8 +830,8 @@ Now that your first analysis is running, explore the full power of the framework
 6. **CMS corrections & systematics**: Apply JES/JER, electron, muon corrections with automatic variation propagation — [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md), [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md)
 7. **Tagger working-point corrections**: Apply b-tag / tagger SFs with WP-filtered collections and fraction reweighting — [JET_TAGGING_WORKING_POINTS.md](JET_TAGGING_WORKING_POINTS.md)
 8. **Physics object collections**: Overlap removal, combinatorics, corrected kinematics — [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
-8. **Systematics & nuisance groups**: Register and propagate uncertainties — [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md)
-9. **Batch processing**: Submit hundreds of jobs — [LAW_TASKS.md](LAW_TASKS.md) and [BATCH_SUBMISSION.md](BATCH_SUBMISSION.md)
-10. **Output validation**: Validate and inspect outputs — [VALIDATION_REPORTS.md](VALIDATION_REPORTS.md)
+9. **Systematics & nuisance groups**: Register and propagate uncertainties — [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md)
+10. **Batch processing**: Submit hundreds of jobs — [LAW_TASKS.md](LAW_TASKS.md) and [BATCH_SUBMISSION.md](BATCH_SUBMISSION.md)
+11. **Output validation**: Validate and inspect outputs — [VALIDATION_REPORTS.md](VALIDATION_REPORTS.md)
 
 Happy analyzing!

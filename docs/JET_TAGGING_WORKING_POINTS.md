@@ -15,7 +15,7 @@ physics collections.
 5. [Generator-level fraction reweighting](#generator-level-fraction-reweighting)
 6. [Pre-processing: computing fraction histograms](#pre-processing-computing-fraction-histograms)
 7. [Systematic variations and collections](#systematic-variations-and-collections)
-8. [Complete CMS NanoAOD workflow](#complete-cms-nanoad-workflow)
+8. [Complete CMS NanoAOD workflow](#complete-cms-nanoaod-workflow)
 9. [Integration with WeightManager](#integration-with-weightmanager)
 10. [Further reading](#further-reading)
 
