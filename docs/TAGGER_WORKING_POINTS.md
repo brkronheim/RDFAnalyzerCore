@@ -1,8 +1,8 @@
-# JetTaggingWorkingPointManager Reference
+# TaggerWorkingPointManager Reference
 
-This document describes the `JetTaggingWorkingPointManager` plugin for
-working-point-based tagger corrections and systematics on Jet and FatJet
-physics collections.
+This document describes the `TaggerWorkingPointManager` plugin for
+working-point-based tagger corrections and systematics on **any physics
+object collection** — including Jets, FatJets, and Taus.
 
 ---
 
@@ -10,37 +10,41 @@ physics collections.
 
 1. [Overview](#overview)
 2. [Working-point categories](#working-point-categories)
-3. [Quick start](#quick-start)
-4. [API reference](#api-reference)
-5. [Generator-level fraction reweighting](#generator-level-fraction-reweighting)
-6. [Pre-processing: computing fraction histograms](#pre-processing-computing-fraction-histograms)
-7. [Systematic variations and collections](#systematic-variations-and-collections)
-8. [Complete CMS NanoAOD workflow](#complete-cms-nanoaod-workflow)
-9. [Integration with WeightManager](#integration-with-weightmanager)
-10. [Further reading](#further-reading)
+3. [Quick start: Jets (b-tagging)](#quick-start-jets-b-tagging)
+4. [Quick start: Taus (DeepTau ID)](#quick-start-taus-deeptau-id)
+5. [API reference](#api-reference)
+6. [Generator-level fraction reweighting](#generator-level-fraction-reweighting)
+7. [Pre-processing: computing fraction histograms](#pre-processing-computing-fraction-histograms)
+8. [Systematic variations and collections](#systematic-variations-and-collections)
+9. [Complete CMS NanoAOD workflow](#complete-cms-nanoaod-workflow)
+10. [Integration with WeightManager](#integration-with-weightmanager)
+11. [Further reading](#further-reading)
 
 ---
 
 ## Overview
 
-`JetTaggingWorkingPointManager` applies **working-point-based tagger scale
-factors** (e.g. for CMS b-tagging algorithms: DeepJet, RobustParTAK4,
-ParticleNet) to Jet and FatJet physics collections with full CMS-style
-systematic uncertainty support.
+`TaggerWorkingPointManager` applies **working-point-based tagger scale
+factors** to **any `PhysicsObjectCollection`** with a discriminator score.
+Common use cases include:
+
+- **Jets**: b-tagging (DeepJet, RobustParTAK4, ParticleNet)
+- **Taus**: DeepTau ID (VSjet, VSe, VSmu discriminators)
+- **FatJets**: Xbb / Xcc boosted taggers
 
 Key features:
 - **Working-point definitions** — register any number of named WPs with score
   thresholds (e.g. loose / medium / tight).
-- **WP category column** — per-jet integer category (0 = fail all, …, N = pass all).
-- **Correctionlib SF application** — per-jet SFs from a correctionlib payload
+- **WP category column** — per-object integer category (0 = fail all, …, N = pass all).
+- **Correctionlib SF application** — per-object SFs from a correctionlib payload
   reduced to per-event weight columns.
 - **Generator-level fraction correction** — optional second correctionlib encoding
-  MC jet fractions per WP category, for proper distribution reweighting.
+  MC object fractions per WP category, for proper distribution reweighting.
 - **Systematic source sets** — bulk application of named uncertainty sources
   matching the JetEnergyScaleManager API.
-- **WP-filtered PhysicsObjectCollections** — jets passing/failing specific WP
+- **WP-filtered PhysicsObjectCollections** — objects passing/failing specific WP
   criteria as named RDF columns.
-- **Variation collections + map** — per-systematic up/down jet collections and a
+- **Variation collections + map** — per-systematic up/down object collections and a
   `PhysicsObjectVariationMap` for downstream propagation.
 - **Fraction histogram utility** — book per-(pT, η, flavour) tagger-score
   histograms for calculating MC fractions in a dedicated pre-processing run.
@@ -49,8 +53,8 @@ Key features:
 
 ## Working-point categories
 
-For working points **[loose=0.05, medium=0.30, tight=0.75]**, the per-jet
-WP category column (`Jet_pt_wp_category` by default) is assigned as:
+For working points **[loose=0.05, medium=0.30, tight=0.75]**, the per-object
+WP category column (`<ptColumn>_wp_category` by default) is assigned as:
 
 | category | tagger score range       | meaning                         |
 |----------|--------------------------|---------------------------------|
@@ -60,91 +64,136 @@ WP category column (`Jet_pt_wp_category` by default) is assigned as:
 | 3        | score ≥ 0.75             | pass all WPs                    |
 
 The categories are assigned as the **count of WPs passed** (i.e. the number of
-WP thresholds that are ≤ the jet's tagger score).
+WP thresholds that are ≤ the object's tagger score).
 
 ---
 
-## Quick start
+## Quick start: Jets (b-tagging)
 
 ```cpp
-#include <JetTaggingWorkingPointManager.h>
+#include <TaggerWorkingPointManager.h>
 #include <CorrectionManager.h>
 #include <PhysicsObjectCollection.h>
 
 // Get plugin instances from the analyzer.
-auto *jtm = analyzer.getPlugin<JetTaggingWorkingPointManager>("btagManager");
+auto *twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
 auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare jet kinematic columns.
-jtm->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
 
 // 2. Set the tagger discriminator score column.
-jtm->setTaggerColumn("Jet_btagDeepFlavB");
+twm->setTaggerColumn("Jet_btagDeepFlavB");
 
 // 3. Register working points in order of increasing threshold.
-jtm->addWorkingPoint("loose",  0.0521f);
-jtm->addWorkingPoint("medium", 0.3033f);
-jtm->addWorkingPoint("tight",  0.7489f);
+twm->addWorkingPoint("loose",  0.0521f);
+twm->addWorkingPoint("medium", 0.3033f);
+twm->addWorkingPoint("tight",  0.7489f);
 
 // 4. Declare the input jet collection.
-jtm->setInputJetCollection("goodJets");
+twm->setInputObjectCollection("goodJets");
 
 // 5. Apply a central (nominal) correctionlib SF.
-jtm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
+twm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
                          "Jet_btagDeepFlavB"});
 // → defines per-event weight column "deepjet_sf_central_weight"
 
 // 6. Register and apply systematic source sets.
-jtm->registerSystematicSources("standard",
+twm->registerSystematicSources("standard",
     {"hf", "lf", "hfstats1", "hfstats2", "lfstats1", "lfstats2",
      "cferr1", "cferr2"});
-jtm->applySystematicSet(*cm, "deepjet_sf", "standard",
+twm->applySystematicSet(*cm, "deepjet_sf", "standard",
                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
                          "Jet_btagDeepFlavB"});
 
 // 7. Define WP-filtered jet collections.
-jtm->defineWorkingPointCollection("pass_medium",      "goodJets_bmedium");
-jtm->defineWorkingPointCollection("fail_loose",       "goodJets_bfail");
-jtm->defineWorkingPointCollection("pass_tight_fail_medium", "goodJets_btight");
+twm->defineWorkingPointCollection("pass_medium",      "goodJets_bmedium");
+twm->defineWorkingPointCollection("fail_loose",       "goodJets_bfail");
+twm->defineWorkingPointCollection("pass_loose_fail_medium", "goodJets_btight");
 
 // 8. Build systematic variation collections + variation map.
-jtm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
+twm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
                                  "goodJets_btag_variations");
 ```
 
 After `analyzer.save()`:
 
-| Column                        | Type                     | Description                              |
-|-------------------------------|--------------------------|------------------------------------------|
-| `Jet_pt_wp_category`          | `RVec<Int_t>`            | Per-jet WP category (0 = fail all)       |
-| `deepjet_sf_central_weight`   | `Float_t`                | Per-event weight (product of per-jet SFs)|
-| `deepjet_sf_hf_up_weight`     | `Float_t`                | Per-event weight for hf up variation     |
-| `deepjet_sf_hf_down_weight`   | `Float_t`                | Per-event weight for hf down variation   |
-| `goodJets_bmedium`            | `PhysicsObjectCollection`| Jets passing medium WP                   |
-| `goodJets_btag_hfUp`          | `PhysicsObjectCollection`| Nominal jet collection (same as medium)  |
-| `goodJets_btag_variations`    | `PhysicsObjectVariationMap` | All collections keyed by variation name |
+| Column                        | Type                        | Description                                    |
+|-------------------------------|-----------------------------|------------------------------------------------|
+| `Jet_pt_wp_category`          | `RVec<Int_t>`               | Per-object WP category (0 = fail all)          |
+| `deepjet_sf_central_weight`   | `Float_t`                   | Per-event weight (product of per-object SFs)   |
+| `deepjet_sf_hf_up_weight`     | `Float_t`                   | Per-event weight for hf up variation           |
+| `deepjet_sf_hf_down_weight`   | `Float_t`                   | Per-event weight for hf down variation         |
+| `goodJets_bmedium`            | `PhysicsObjectCollection`   | Jets passing medium WP                         |
+| `goodJets_btag_hfUp`          | `PhysicsObjectCollection`   | Nominal jet collection (same as medium)        |
+| `goodJets_btag_variations`    | `PhysicsObjectVariationMap` | All collections keyed by variation name        |
+
+---
+
+## Quick start: Taus (DeepTau ID)
+
+The same plugin works identically for taus — the only difference is the
+input column names and working-point thresholds.
+
+```cpp
+auto *tauTwm = analyzer.getPlugin<TaggerWorkingPointManager>("tauIdManager");
+auto *cm     = analyzer.getPlugin<CorrectionManager>("corrections");
+
+// 1. Declare tau kinematic columns.
+tauTwm->setObjectColumns("Tau_pt", "Tau_eta", "Tau_phi", "Tau_mass");
+
+// 2. Set the DeepTau VSjet discriminant score column.
+tauTwm->setTaggerColumn("Tau_rawDeepTau2018v2p5VSjet");
+
+// 3. Register DeepTau VSjet working points (example Run 3 values).
+tauTwm->addWorkingPoint("VVVLoose", 0.05f);
+tauTwm->addWorkingPoint("Loose",    0.20f);
+tauTwm->addWorkingPoint("Medium",   0.49f);
+tauTwm->addWorkingPoint("Tight",    0.75f);
+
+// 4. Declare the input tau collection.
+tauTwm->setInputObjectCollection("goodTaus");
+
+// 5. Apply tau ID SFs from correctionlib.
+tauTwm->applyCorrectionlib(*cm, "tau_id_sf", {"pt_binned", "central"},
+                           {"Tau_pt", "Tau_decayMode", "Tau_genPartFlav"});
+// → defines per-event weight column "tau_id_sf_pt_binned_central_weight"
+
+// 6. Register and apply tau ID systematic sources.
+tauTwm->registerSystematicSources("tau_unc", {"stat0", "stat1", "syst"});
+tauTwm->applySystematicSet(*cm, "tau_id_sf", "tau_unc",
+                           {"Tau_pt", "Tau_decayMode", "Tau_genPartFlav"});
+
+// 7. Define WP-filtered tau collections.
+tauTwm->defineWorkingPointCollection("pass_Medium", "goodTaus_medium");
+tauTwm->defineWorkingPointCollection("fail_Loose",  "goodTaus_antiIso");
+
+// 8. Build variation collections + map.
+tauTwm->defineVariationCollections("goodTaus_medium", "goodTaus_id",
+                                    "goodTaus_id_variations");
+```
 
 ---
 
 ## API reference
 
-### `setJetColumns(pt, eta, phi, mass)`
+### `setObjectColumns(pt, eta, phi, mass)`
 
 Declare the input jet kinematic column names.  The `pt` column must not be
 empty; `mass` may be empty to disable mass handling.
 
 ```cpp
-jtm->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
 ```
 
 ### `setTaggerColumn(taggerScoreColumn)`
 
-Declare the per-jet tagger discriminator score column (type `RVec<Float_t>`).
-This column is used in `execute()` to compute the per-jet WP category.
+Declare the per-object tagger discriminator score column (type `RVec<Float_t>`).
+This column is used in `execute()` to compute the per-object WP category.
 
 ```cpp
-jtm->setTaggerColumn("Jet_btagDeepFlavB");
+twm->setTaggerColumn("Jet_btagDeepFlavB");
 ```
 
 ### `addWorkingPoint(name, threshold)`
@@ -153,22 +202,22 @@ Register a named WP with a score threshold.  WPs must be added in **ascending
 threshold order**.
 
 ```cpp
-jtm->addWorkingPoint("loose",  0.0521f);
-jtm->addWorkingPoint("medium", 0.3033f);
-jtm->addWorkingPoint("tight",  0.7489f);
+twm->addWorkingPoint("loose",  0.0521f);
+twm->addWorkingPoint("medium", 0.3033f);
+twm->addWorkingPoint("tight",  0.7489f);
 ```
 
 Throws:
 - `std::invalid_argument` if name is empty, already registered, or threshold
   order is violated.
 
-### `setInputJetCollection(collectionColumn)`
+### `setInputObjectCollection(collectionColumn)`
 
 Declare the RDF column holding the input `PhysicsObjectCollection`.  Required
 before any collection-based methods.
 
 ```cpp
-jtm->setInputJetCollection("goodJets");
+twm->setInputObjectCollection("goodJets");
 ```
 
 ### `applyCorrectionlib(cm, correctionName, stringArgs, inputColumns)`
@@ -176,18 +225,18 @@ jtm->setInputJetCollection("goodJets");
 Apply a correctionlib payload per jet and produce a per-event weight column.
 
 The correctionlib is evaluated once per jet via
-`CorrectionManager::applyCorrectionVec()`.  The resulting per-jet
+`CorrectionManager::applyCorrectionVec()`.  The resulting per-object
 `RVec<Float_t>` SF column is then reduced to a per-event `Float_t` weight
-(product of all per-jet SFs for jets in the input collection).
+(product of all per-object SFs for objects in the input collection).
 
 Output column name: `<correctionName>_<stringArgs...>_weight`
 
 ```cpp
 // Central (nominal) SF:
-jtm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
+twm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
                          "Jet_btagDeepFlavB"});
-// → creates "deepjet_sf_central" (per-jet SFs) and
+// → creates "deepjet_sf_central" (per-object SFs) and
 //   "deepjet_sf_central_weight" (per-event weight)
 ```
 
@@ -201,7 +250,7 @@ Enable generator-level fraction reweighting.  See
 Register a named set of uncertainty source names for bulk application.
 
 ```cpp
-jtm->registerSystematicSources("standard",
+twm->registerSystematicSources("standard",
     {"hf", "lf", "hfstats1", "hfstats2", "lfstats1", "lfstats2",
      "cferr1", "cferr2"});
 ```
@@ -210,13 +259,13 @@ jtm->registerSystematicSources("standard",
 
 Apply all sources in a named set.  For each source `S`, two SF columns and two
 weight columns are produced:
-- `<correctionName>_<S>_up` (per-jet SFs), `<correctionName>_<S>_up_weight`
-- `<correctionName>_<S>_down` (per-jet SFs), `<correctionName>_<S>_down_weight`
+- `<correctionName>_<S>_up` (per-object SFs), `<correctionName>_<S>_up_weight`
+- `<correctionName>_<S>_down` (per-object SFs), `<correctionName>_<S>_down_weight`
 
 Each source is automatically registered with `ISystematicManager`.
 
 ```cpp
-jtm->applySystematicSet(*cm, "deepjet_sf", "standard",
+twm->applySystematicSet(*cm, "deepjet_sf", "standard",
                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
                          "Jet_btagDeepFlavB"});
 ```
@@ -227,7 +276,7 @@ Register a single systematic variation manually (for SFs not produced by
 `applySystematicSet`).
 
 ```cpp
-jtm->addVariation("btagXY", "my_btag_xy_up_sf", "my_btag_xy_down_sf");
+twm->addVariation("btagXY", "my_btag_xy_up_sf", "my_btag_xy_down_sf");
 // Weight columns auto-derived as: my_btag_xy_up_sf_weight, etc.
 ```
 
@@ -244,10 +293,10 @@ Define a `PhysicsObjectCollection` of jets satisfying a WP selection.
 | `"pass_<wp1>_fail_<wp2>"` | index(`<wp1>`) + 1 ≤ category ≤ index(`<wp2>`)   |
 
 ```cpp
-jtm->defineWorkingPointCollection("pass_medium",      "goodJets_bmedium");
-jtm->defineWorkingPointCollection("fail_loose",       "goodJets_bfail");
-jtm->defineWorkingPointCollection("pass_loose_fail_medium", "goodJets_bL_notM");
-jtm->defineWorkingPointCollection("pass_tight",       "goodJets_btight");
+twm->defineWorkingPointCollection("pass_medium",      "goodJets_bmedium");
+twm->defineWorkingPointCollection("fail_loose",       "goodJets_bfail");
+twm->defineWorkingPointCollection("pass_loose_fail_medium", "goodJets_bL_notM");
+twm->defineWorkingPointCollection("pass_tight",       "goodJets_btight");
 ```
 
 ### `defineVariationCollections(nominalCollectionColumn, collectionPrefix, [variationMapColumn])`
@@ -260,7 +309,7 @@ kinematics), all variation collections contain the same jets as the nominal.
 The weight difference is tracked via the separate weight columns.
 
 ```cpp
-jtm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
+twm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
                                  "goodJets_btag_variations");
 // Creates:
 //   goodJets_btag_hfUp, goodJets_btag_hfDown, ...
@@ -290,7 +339,7 @@ different tagger-score distribution from data, the SFs alone may not fully
 correct the event-weight distribution.
 
 The **fraction-weighted** approach additionally divides each per-jet SF by the
-MC fraction of jets in that category at the given (pT, η):
+MC fraction of objects in that category at the given (pT, η):
 
 ```
 W_frac = Π [SF(pt_i, η_i, flav_i, c_i) / f_MC(pt_i, η_i, c_i)]
@@ -317,7 +366,7 @@ cm->registerCorrection(
 // setTaggerColumn + addWorkingPoint.
 
 // Enable fraction reweighting.
-jtm->setFractionCorrection(*cm, "deepjet_fractions",
+twm->setFractionCorrection(*cm, "deepjet_fractions",
                            {"Jet_pt", "Jet_eta",
                             "Jet_pt_wp_category"});
 // All subsequent applyCorrectionlib weight columns will be fraction-weighted.
@@ -333,15 +382,15 @@ analysis that calls `defineFractionHistograms()`:
 ```cpp
 // In a dedicated pre-processing analysis (fraction_calc.cc):
 
-jtm->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
-jtm->setTaggerColumn("Jet_btagDeepFlavB");
-jtm->addWorkingPoint("loose",  0.0521f);
-jtm->addWorkingPoint("medium", 0.3033f);
-jtm->addWorkingPoint("tight",  0.7489f);
-jtm->setInputJetCollection("goodJets");
+twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+twm->setTaggerColumn("Jet_btagDeepFlavB");
+twm->addWorkingPoint("loose",  0.0521f);
+twm->addWorkingPoint("medium", 0.3033f);
+twm->addWorkingPoint("tight",  0.7489f);
+twm->setInputObjectCollection("goodJets");
 
 // Book histograms for each (pT, |η|, flavour) combination.
-jtm->defineFractionHistograms(
+twm->defineFractionHistograms(
     "deepjet_frac",                      // output prefix
     {20.f, 30.f, 50.f, 100.f, 200.f, 500.f},  // pT bin edges [GeV]
     {0.f, 1.5f, 2.4f},                   // |η| bin edges
@@ -398,7 +447,7 @@ wm->addWeightVariation("btagHF",
 
 ### Automatic systematic propagation
 
-Because `JetTaggingWorkingPointManager` registers variation column names with
+Because `TaggerWorkingPointManager` registers variation column names with
 `ISystematicManager` via `registerVariationColumns()`, any downstream
 `Define(...)` call that consumes the nominal WP-filtered collection will
 automatically have up/down variants created:
@@ -427,30 +476,30 @@ The following shows the complete workflow for CMS Run 3 AK4 b-tagging with
 DeepJet, including fraction reweighting and systematic variations:
 
 ```cpp
-#include <JetTaggingWorkingPointManager.h>
+#include <TaggerWorkingPointManager.h>
 #include <CorrectionManager.h>
 #include <WeightManager.h>
 
 // -------------------------------------------------------------------------
 // Setup
 // -------------------------------------------------------------------------
-auto *jtm = analyzer.getPlugin<JetTaggingWorkingPointManager>("btagManager");
+auto *jtm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
 auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 auto *wm  = analyzer.getPlugin<WeightManager>("weights");
 
 // 1. Declare jet columns.
-jtm->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
 
 // 2. Set tagger discriminator.
-jtm->setTaggerColumn("Jet_btagDeepFlavB");
+twm->setTaggerColumn("Jet_btagDeepFlavB");
 
 // 3. Register working points (Run 3 UL values for DeepJet).
-jtm->addWorkingPoint("loose",  0.0521f);
-jtm->addWorkingPoint("medium", 0.3033f);
-jtm->addWorkingPoint("tight",  0.7489f);
+twm->addWorkingPoint("loose",  0.0521f);
+twm->addWorkingPoint("medium", 0.3033f);
+twm->addWorkingPoint("tight",  0.7489f);
 
 // 4. Declare input jet collection.
-jtm->setInputJetCollection("goodJets");
+twm->setInputObjectCollection("goodJets");
 
 // -------------------------------------------------------------------------
 // 5. (Optional) enable fraction-weighted SFs
@@ -458,7 +507,7 @@ jtm->setInputJetCollection("goodJets");
 cm->registerCorrection("deepjet_frac", "deepjet_fractions.json",
                         "DeepJetFractions",
                         {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
-jtm->setFractionCorrection(*cm, "deepjet_frac",
+twm->setFractionCorrection(*cm, "deepjet_frac",
                            {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
 
 // -------------------------------------------------------------------------
@@ -470,16 +519,16 @@ cm->registerCorrection("deepjet_sf", "deepjet_sf.json",
                          "Jet_btagDeepFlavB"});
 
 // 7. Apply nominal SF.
-jtm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
+twm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
                          "Jet_btagDeepFlavB"});
 // → "deepjet_sf_central_weight"
 
 // 8. Apply CMS b-tag systematic source set.
-jtm->registerSystematicSources("standard",
+twm->registerSystematicSources("standard",
     {"hf", "lf", "hfstats1", "hfstats2", "lfstats1", "lfstats2",
      "cferr1", "cferr2"});
-jtm->applySystematicSet(*cm, "deepjet_sf", "standard",
+twm->applySystematicSet(*cm, "deepjet_sf", "standard",
                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
                          "Jet_btagDeepFlavB"});
 // → "deepjet_sf_hf_up_weight", "deepjet_sf_hf_down_weight", …
@@ -488,7 +537,7 @@ jtm->applySystematicSet(*cm, "deepjet_sf", "standard",
 // 9. Register weights with WeightManager.
 // -------------------------------------------------------------------------
 wm->addScaleFactor("btag", "deepjet_sf_central_weight");
-for (const auto &src : jtm->getSystematicSources("standard")) {
+for (const auto &src : twm->getSystematicSources("standard")) {
     wm->addWeightVariation(
         "btag_" + src,
         "deepjet_sf_" + src + "_up_weight",
@@ -498,15 +547,15 @@ for (const auto &src : jtm->getSystematicSources("standard")) {
 // -------------------------------------------------------------------------
 // 10. Define WP-filtered jet collections.
 // -------------------------------------------------------------------------
-jtm->defineWorkingPointCollection("pass_medium",      "goodJets_bmedium");
-jtm->defineWorkingPointCollection("fail_loose",       "goodJets_bfail");
-jtm->defineWorkingPointCollection("pass_loose_fail_medium", "goodJets_bL_notM");
-jtm->defineWorkingPointCollection("pass_tight",       "goodJets_btight");
+twm->defineWorkingPointCollection("pass_medium",      "goodJets_bmedium");
+twm->defineWorkingPointCollection("fail_loose",       "goodJets_bfail");
+twm->defineWorkingPointCollection("pass_loose_fail_medium", "goodJets_bL_notM");
+twm->defineWorkingPointCollection("pass_tight",       "goodJets_btight");
 
 // -------------------------------------------------------------------------
 // 11. Build systematic variation collections + variation map.
 // -------------------------------------------------------------------------
-jtm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
+twm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
                                  "goodJets_btag_variations");
 // Creates: goodJets_btag_hfUp, goodJets_btag_hfDown, …
 //          goodJets_btag_variations (PhysicsObjectVariationMap)
@@ -516,7 +565,7 @@ jtm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
 
 ## Integration with WeightManager
 
-The per-event weight columns produced by `JetTaggingWorkingPointManager` are
+The per-event weight columns produced by `TaggerWorkingPointManager` are
 designed to plug directly into `WeightManager`:
 
 ```cpp

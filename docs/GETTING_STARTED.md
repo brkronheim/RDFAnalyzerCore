@@ -571,7 +571,7 @@ auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
 auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare which branches hold jet/MET kinematics.
-jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+jes->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");;
 jes->setMETColumns("MET_pt", "MET_phi");
 
 // 2. Build a selected jet collection (any selection criteria you like).
@@ -670,48 +670,49 @@ jes->applySystematicSet(*cm, "jes_unc", "full", "Jet_pt_jec", "Jet_pt_jes");
 
 ---
 
-## Working-Point Tagger Corrections with JetTaggingWorkingPointManager
+## Working-Point Tagger Corrections with TaggerWorkingPointManager
 
 For CMS analyses that apply b-tagging or other tagger-based selections (e.g.
-with DeepJet, RobustParTAK4, ParticleNet), the
-**`JetTaggingWorkingPointManager`** plugin handles the full working-point (WP)
-workflow — registering WP thresholds, computing per-jet WP categories, applying
-correctionlib-based scale factors, and producing WP-filtered
-`PhysicsObjectCollection` outputs — with full systematic variation support.
+with DeepJet, RobustParTAK4, ParticleNet, or DeepTau), the
+**`TaggerWorkingPointManager`** plugin handles the full working-point (WP)
+workflow for **any physics object** — registering WP thresholds, computing
+per-object WP categories, applying correctionlib-based scale factors, and
+producing WP-filtered `PhysicsObjectCollection` outputs — with full systematic
+variation support.
 
 ### Defining Working Points and Applying Scale Factors
 
 ```cpp
-#include <JetTaggingWorkingPointManager.h>
+#include <TaggerWorkingPointManager.h>
 
-auto *jtm = analyzer.getPlugin<JetTaggingWorkingPointManager>("btagManager");
+auto *twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
 auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
-// 1. Declare jet columns (same pattern as JES).
-jtm->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+// 1. Declare object kinematic columns (jets, taus, or fat-jets).
+twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
 
 // 2. Set the tagger discriminator score column.
-jtm->setTaggerColumn("Jet_btagDeepFlavB");
+twm->setTaggerColumn("Jet_btagDeepFlavB");
 
 // 3. Register working points in ascending threshold order.
-jtm->addWorkingPoint("loose",  0.0521f);
-jtm->addWorkingPoint("medium", 0.3033f);
-jtm->addWorkingPoint("tight",  0.7489f);
+twm->addWorkingPoint("loose",  0.0521f);
+twm->addWorkingPoint("medium", 0.3033f);
+twm->addWorkingPoint("tight",  0.7489f);
 
-// 4. Declare the input jet PhysicsObjectCollection.
-jtm->setInputJetCollection("goodJets");
+// 4. Declare the input PhysicsObjectCollection.
+twm->setInputObjectCollection("goodJets");
 
 // 5. Apply nominal SF from a correctionlib payload.
-jtm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
+twm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
                          "Jet_btagDeepFlavB"});
 // → creates per-event weight column "deepjet_sf_central_weight"
 
 // 6. Register and apply CMS b-tag systematic sources.
-jtm->registerSystematicSources("standard",
+twm->registerSystematicSources("standard",
     {"hf", "lf", "hfstats1", "hfstats2", "lfstats1", "lfstats2",
      "cferr1", "cferr2"});
-jtm->applySystematicSet(*cm, "deepjet_sf", "standard",
+twm->applySystematicSet(*cm, "deepjet_sf", "standard",
                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
                          "Jet_btagDeepFlavB"});
 // → creates "deepjet_sf_hf_up_weight", "deepjet_sf_hf_down_weight", …
@@ -719,24 +720,24 @@ jtm->applySystematicSet(*cm, "deepjet_sf", "standard",
 
 ### WP-Based Collection Selections
 
-The manager supports expressive selection strings for filtering jet collections:
+The manager supports expressive selection strings for filtering object collections:
 
 ```cpp
 // Jets passing the medium WP (score ≥ 0.3033).
-jtm->defineWorkingPointCollection("pass_medium", "goodJets_bmedium");
+twm->defineWorkingPointCollection("pass_medium", "goodJets_bmedium");
 
 // Jets failing the loose WP (score < 0.0521) — b-tag control region.
-jtm->defineWorkingPointCollection("fail_loose", "goodJets_bfail");
+twm->defineWorkingPointCollection("fail_loose", "goodJets_bfail");
 
 // Jets passing loose but failing medium (i.e. between the two WPs).
-jtm->defineWorkingPointCollection("pass_loose_fail_medium", "goodJets_bL_notM");
+twm->defineWorkingPointCollection("pass_loose_fail_medium", "goodJets_bL_notM");
 
 // Jets passing the tight WP.
-jtm->defineWorkingPointCollection("pass_tight", "goodJets_btight");
+twm->defineWorkingPointCollection("pass_tight", "goodJets_btight");
 ```
 
-The per-jet WP category column (`Jet_pt_wp_category`) is also available for
-direct use in downstream selections:
+The per-object WP category column (`<ptCol>_wp_category`, e.g. `Jet_pt_wp_category`) is also
+available for direct use in downstream selections:
 
 | category | meaning for [loose, medium, tight] WPs     |
 |----------|--------------------------------------------|
@@ -751,21 +752,21 @@ After defining WP-filtered collections, build systematic variation collections
 and a variation map for downstream propagation:
 
 ```cpp
-jtm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
+twm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
                                  "goodJets_btag_variations");
 // Creates:
 //   goodJets_btag_hfUp, goodJets_btag_hfDown     (per-variation collections)
 //   goodJets_btag_variations  (PhysicsObjectVariationMap)
 ```
 
-Because tagger corrections modify only the **event weight** (not jet
-kinematics), all variation collections contain the same jets as the nominal.
+Because tagger corrections modify only the **event weight** (not object
+kinematics), all variation collections contain the same objects as the nominal.
 The weight difference is tracked via the separate weight columns.
 
 ### Generator-Level Fraction Reweighting
 
 For the most accurate results, use a correctionlib payload encoding the
-generator-level MC fractions of jets in each WP category at given (pT, η):
+generator-level MC fractions of objects in each WP category at given (pT, η):
 
 ```cpp
 // Register the fraction correctionlib.
@@ -773,11 +774,11 @@ cm->registerCorrection("deepjet_frac", "deepjet_fractions.json",
                         "DeepJetFractions",
                         {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
 // Enable fraction-weighted SFs (must be called before applyCorrectionlib).
-jtm->setFractionCorrection(*cm, "deepjet_frac",
+twm->setFractionCorrection(*cm, "deepjet_frac",
                            {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
 ```
 
-This ensures the per-event weights properly reflect the generator-level jet
+This ensures the per-event weights properly reflect the generator-level object
 distributions when making WP-based selections.
 
 ### Pre-Processing: Computing Fraction Distributions
@@ -787,7 +788,7 @@ run** using `defineFractionHistograms()`:
 
 ```cpp
 // In a dedicated fraction_calc analysis (run before the main analysis):
-jtm->defineFractionHistograms(
+twm->defineFractionHistograms(
     "deepjet_frac",                             // output prefix
     {20.f, 30.f, 50.f, 100.f, 200.f, 500.f},  // pT bin edges [GeV]
     {0.f, 1.5f, 2.4f},                          // |η| bin edges
@@ -795,14 +796,14 @@ jtm->defineFractionHistograms(
 ```
 
 This books per-(pT, η, flavour) tagger-score histograms in the metadata ROOT
-file under `tagger_fractions/`.  The fraction of jets in each WP category can
+file under `tagger_fractions/`.  The fraction of objects in each WP category can
 then be read from these histograms and stored in a correctionlib JSON for use
 in the main analysis.
 
 ### Further Reading
 
 - **Complete JES/JER reference**: [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md)
-- **Tagger WP corrections reference**: [JET_TAGGING_WORKING_POINTS.md](JET_TAGGING_WORKING_POINTS.md)
+- **Tagger WP corrections reference**: [TAGGER_WORKING_POINTS.md](TAGGER_WORKING_POINTS.md)
 - **CMS correction stack**: [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
 - **All PhysicsObjectCollection APIs**: [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
 - **Analysis guide (JES/JER workflow, electron/muon corrections)**: [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
@@ -828,7 +829,7 @@ Now that your first analysis is running, explore the full power of the framework
 4. **Plugin development**: Write your own plugins in [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md)
 5. **Machine learning**: Integrate BDTs or neural networks — [ONNX_IMPLEMENTATION.md](ONNX_IMPLEMENTATION.md), [SOFIE_IMPLEMENTATION.md](SOFIE_IMPLEMENTATION.md)
 6. **CMS corrections & systematics**: Apply JES/JER, electron, muon corrections with automatic variation propagation — [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md), [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md)
-7. **Tagger working-point corrections**: Apply b-tag / tagger SFs with WP-filtered collections and fraction reweighting — [JET_TAGGING_WORKING_POINTS.md](JET_TAGGING_WORKING_POINTS.md)
+7. **Tagger working-point corrections**: Apply b-tag / tagger SFs with WP-filtered collections and fraction reweighting — [TAGGER_WORKING_POINTS.md](TAGGER_WORKING_POINTS.md)
 8. **Physics object collections**: Overlap removal, combinatorics, corrected kinematics — [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
 9. **Systematics & nuisance groups**: Register and propagate uncertainties — [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md)
 10. **Batch processing**: Submit hundreds of jobs — [LAW_TASKS.md](LAW_TASKS.md) and [BATCH_SUBMISSION.md](BATCH_SUBMISSION.md)

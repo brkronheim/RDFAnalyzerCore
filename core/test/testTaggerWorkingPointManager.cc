@@ -1,11 +1,11 @@
 /**
- * @file testJetTaggingWorkingPointManager.cc
- * @brief Unit tests for JetTaggingWorkingPointManager.
+ * @file testTaggerWorkingPointManager.cc
+ * @brief Unit tests for TaggerWorkingPointManager.
  *
  * Covers:
  *  - Plugin type string.
  *  - Default construction.
- *  - setJetColumns / setTaggerColumn / addWorkingPoint validation.
+ *  - setObjectColumns / setTaggerColumn / addWorkingPoint validation.
  *  - WP category column definition in execute().
  *  - defineWorkingPointCollection: pass, fail, pass-range selections.
  *  - Per-event weight column definition (product of per-jet SFs).
@@ -18,7 +18,7 @@
 #include <ConfigurationManager.h>
 #include <DataManager.h>
 #include <DefaultLogger.h>
-#include <JetTaggingWorkingPointManager.h>
+#include <TaggerWorkingPointManager.h>
 #include <ManagerFactory.h>
 #include <NullOutputSink.h>
 #include <PhysicsObjectCollection.h>
@@ -43,7 +43,7 @@ static ManagerContext makeContext(IConfigurationProvider &cfg,
 // Fixture
 // ---------------------------------------------------------------------------
 
-class JetTaggingWorkingPointManagerTest : public ::testing::Test {
+class TaggerWorkingPointManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
     ChangeToTestSourceDir();
@@ -55,9 +55,9 @@ protected:
     metaSink = std::make_unique<NullOutputSink>();
   }
 
-  /// Create, wire, and return a JetTaggingWorkingPointManager.
-  std::unique_ptr<JetTaggingWorkingPointManager> makeMgr(DataManager &dm) {
-    auto mgr = std::make_unique<JetTaggingWorkingPointManager>();
+  /// Create, wire, and return a TaggerWorkingPointManager.
+  std::unique_ptr<TaggerWorkingPointManager> makeMgr(DataManager &dm) {
+    auto mgr = std::make_unique<TaggerWorkingPointManager>();
     auto ctx = makeContext(*config, dm, *systematicManager, *logger,
                            *skimSink, *metaSink);
     mgr->setContext(ctx);
@@ -109,28 +109,28 @@ protected:
 // Construction and type
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, TypeStringIsCorrect) {
-  JetTaggingWorkingPointManager mgr;
-  EXPECT_EQ(mgr.type(), "JetTaggingWorkingPointManager");
+TEST_F(TaggerWorkingPointManagerTest, TypeStringIsCorrect) {
+  TaggerWorkingPointManager mgr;
+  EXPECT_EQ(mgr.type(), "TaggerWorkingPointManager");
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, DefaultConstructionSucceeds) {
-  EXPECT_NO_THROW(JetTaggingWorkingPointManager mgr);
+TEST_F(TaggerWorkingPointManagerTest, DefaultConstructionSucceeds) {
+  EXPECT_NO_THROW(TaggerWorkingPointManager mgr);
 }
 
 // ---------------------------------------------------------------------------
-// setJetColumns validation
+// setObjectColumns validation
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, SetJetColumnsStoresNames) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+TEST_F(TaggerWorkingPointManagerTest, SetJetColumnsStoresNames) {
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   EXPECT_EQ(mgr.getWPCategoryColumn(), "Jet_pt_wp_category");
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, SetJetColumnsWithEmptyPtThrows) {
-  JetTaggingWorkingPointManager mgr;
-  EXPECT_THROW(mgr.setJetColumns("", "eta", "phi", "mass"),
+TEST_F(TaggerWorkingPointManagerTest, SetJetColumnsWithEmptyPtThrows) {
+  TaggerWorkingPointManager mgr;
+  EXPECT_THROW(mgr.setObjectColumns("", "eta", "phi", "mass"),
                std::invalid_argument);
 }
 
@@ -138,14 +138,14 @@ TEST_F(JetTaggingWorkingPointManagerTest, SetJetColumnsWithEmptyPtThrows) {
 // setTaggerColumn validation
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, SetTaggerColumnStoresName) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, SetTaggerColumnStoresName) {
+  TaggerWorkingPointManager mgr;
   mgr.setTaggerColumn("Jet_btagDeepFlavB");
   EXPECT_EQ(mgr.getTaggerColumn(), "Jet_btagDeepFlavB");
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, SetTaggerColumnEmptyThrows) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, SetTaggerColumnEmptyThrows) {
+  TaggerWorkingPointManager mgr;
   EXPECT_THROW(mgr.setTaggerColumn(""), std::invalid_argument);
 }
 
@@ -153,8 +153,8 @@ TEST_F(JetTaggingWorkingPointManagerTest, SetTaggerColumnEmptyThrows) {
 // addWorkingPoint validation
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, AddWorkingPointsInOrder) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointsInOrder) {
+  TaggerWorkingPointManager mgr;
   mgr.addWorkingPoint("loose",  0.05f);
   mgr.addWorkingPoint("medium", 0.30f);
   mgr.addWorkingPoint("tight",  0.75f);
@@ -164,19 +164,19 @@ TEST_F(JetTaggingWorkingPointManagerTest, AddWorkingPointsInOrder) {
   EXPECT_EQ(mgr.getWorkingPoints()[2].name, "tight");
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, AddWorkingPointEmptyNameThrows) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointEmptyNameThrows) {
+  TaggerWorkingPointManager mgr;
   EXPECT_THROW(mgr.addWorkingPoint("", 0.5f), std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, AddWorkingPointDuplicateNameThrows) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointDuplicateNameThrows) {
+  TaggerWorkingPointManager mgr;
   mgr.addWorkingPoint("loose", 0.05f);
   EXPECT_THROW(mgr.addWorkingPoint("loose", 0.30f), std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, AddWorkingPointWrongOrderThrows) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointWrongOrderThrows) {
+  TaggerWorkingPointManager mgr;
   mgr.addWorkingPoint("medium", 0.30f);
   // Threshold not strictly greater than previous → should throw.
   EXPECT_THROW(mgr.addWorkingPoint("loose", 0.10f), std::invalid_argument);
@@ -184,31 +184,31 @@ TEST_F(JetTaggingWorkingPointManagerTest, AddWorkingPointWrongOrderThrows) {
 }
 
 // ---------------------------------------------------------------------------
-// setInputJetCollection
+// setInputObjectCollection
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, SetInputJetCollectionEmptyThrows) {
-  JetTaggingWorkingPointManager mgr;
-  EXPECT_THROW(mgr.setInputJetCollection(""), std::invalid_argument);
+TEST_F(TaggerWorkingPointManagerTest, SetInputJetCollectionEmptyThrows) {
+  TaggerWorkingPointManager mgr;
+  EXPECT_THROW(mgr.setInputObjectCollection(""), std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, SetInputJetCollectionStoresName) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setInputJetCollection("goodJets");
-  EXPECT_EQ(mgr.getInputJetCollectionColumn(), "goodJets");
+TEST_F(TaggerWorkingPointManagerTest, SetInputJetCollectionStoresName) {
+  TaggerWorkingPointManager mgr;
+  mgr.setInputObjectCollection("goodJets");
+  EXPECT_EQ(mgr.getInputObjectCollectionColumn(), "goodJets");
 }
 
 // ---------------------------------------------------------------------------
 // execute(): WP category column
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, ExecuteDefinesWPCategoryColumn) {
+TEST_F(TaggerWorkingPointManagerTest, ExecuteDefinesWPCategoryColumn) {
   // Single event with one jet that has score 0.4 (passes loose=0.05, medium=0.3,
   // fails tight=0.75 → category 2).
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);
 
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("loose",  0.05f);
   mgr->addWorkingPoint("medium", 0.30f);
@@ -230,11 +230,11 @@ TEST_F(JetTaggingWorkingPointManagerTest, ExecuteDefinesWPCategoryColumn) {
   EXPECT_EQ(cats[0][0], 2);             // category 2: passes L and M, fails T
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, WPCategoryFailAll) {
+TEST_F(TaggerWorkingPointManagerTest, WPCategoryFailAll) {
   // score = 0.01 → below all thresholds → category 0.
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("loose",  0.05f);
   mgr->addWorkingPoint("medium", 0.30f);
@@ -251,11 +251,11 @@ TEST_F(JetTaggingWorkingPointManagerTest, WPCategoryFailAll) {
   EXPECT_EQ(result.GetValue()[0][0], 0);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, WPCategoryPassAll) {
+TEST_F(TaggerWorkingPointManagerTest, WPCategoryPassAll) {
   // score = 0.9 → passes all three WPs → category 3.
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("loose",  0.05f);
   mgr->addWorkingPoint("medium", 0.30f);
@@ -276,7 +276,7 @@ TEST_F(JetTaggingWorkingPointManagerTest, WPCategoryPassAll) {
 // execute(): WP-filtered collections
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, DefineWorkingPointCollectionPassWP) {
+TEST_F(TaggerWorkingPointManagerTest, DefineWorkingPointCollectionPassWP) {
   // 2 events: one jet per event.
   // Event 0: btag = 0.4 → category 2 (pass medium).
   // Event 1: btag = 0.01 → category 0 (fail all).
@@ -284,12 +284,12 @@ TEST_F(JetTaggingWorkingPointManagerTest, DefineWorkingPointCollectionPassWP) {
   auto dm = std::make_unique<DataManager>(2);
   auto mgr = makeMgr(*dm);
 
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("loose",  0.05f);
   mgr->addWorkingPoint("medium", 0.30f);
   mgr->addWorkingPoint("tight",  0.75f);
-  mgr->setInputJetCollection("goodJets");
+  mgr->setInputObjectCollection("goodJets");
 
   // Define goodJets: a single jet with pt=50 for all events.
   dm->Define(
@@ -319,16 +319,16 @@ TEST_F(JetTaggingWorkingPointManagerTest, DefineWorkingPointCollectionPassWP) {
   EXPECT_EQ(cols[1].size(), 0u);  // Event 1: fails medium
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, DefineWorkingPointCollectionFailWP) {
+TEST_F(TaggerWorkingPointManagerTest, DefineWorkingPointCollectionFailWP) {
   auto dm = std::make_unique<DataManager>(2);
   auto mgr = makeMgr(*dm);
 
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("loose",  0.05f);
   mgr->addWorkingPoint("medium", 0.30f);
   mgr->addWorkingPoint("tight",  0.75f);
-  mgr->setInputJetCollection("goodJets");
+  mgr->setInputObjectCollection("goodJets");
 
   dm->Define(
       "goodJets",
@@ -357,17 +357,17 @@ TEST_F(JetTaggingWorkingPointManagerTest, DefineWorkingPointCollectionFailWP) {
   EXPECT_EQ(cols[1].size(), 1u);  // Event 1: fails loose
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, DefineWorkingPointCollectionPassRangeWP) {
+TEST_F(TaggerWorkingPointManagerTest, DefineWorkingPointCollectionPassRangeWP) {
   // "pass_loose_fail_medium" → jets with category == 1
   auto dm = std::make_unique<DataManager>(3);
   auto mgr = makeMgr(*dm);
 
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("loose",  0.05f);
   mgr->addWorkingPoint("medium", 0.30f);
   mgr->addWorkingPoint("tight",  0.75f);
-  mgr->setInputJetCollection("goodJets");
+  mgr->setInputObjectCollection("goodJets");
 
   dm->Define(
       "goodJets",
@@ -406,16 +406,16 @@ TEST_F(JetTaggingWorkingPointManagerTest, DefineWorkingPointCollectionPassRangeW
 // execute(): per-event weight column
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, WeightColumnIsProductOfPerJetSFs) {
+TEST_F(TaggerWorkingPointManagerTest, WeightColumnIsProductOfPerJetSFs) {
   // Single event, single jet with SF=1.2.
   // Expected per-event weight = 1.2.
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);
 
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("medium", 0.3f);
-  mgr->setInputJetCollection("goodJets");
+  mgr->setInputObjectCollection("goodJets");
 
   defineCollectionColumn(*dm, "goodJets", 50.f);
   // Per-jet SF = 1.2
@@ -441,24 +441,24 @@ TEST_F(JetTaggingWorkingPointManagerTest, WeightColumnIsProductOfPerJetSFs) {
 // addVariation / registerSystematicSources
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, AddVariationEmptyNameThrows) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, AddVariationEmptyNameThrows) {
+  TaggerWorkingPointManager mgr;
   EXPECT_THROW(mgr.addVariation("", "up_col", "dn_col"), std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, AddVariationEmptyUpColThrows) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, AddVariationEmptyUpColThrows) {
+  TaggerWorkingPointManager mgr;
   EXPECT_THROW(mgr.addVariation("sf", "", "dn_col"), std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, AddVariationEmptyDownColThrows) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, AddVariationEmptyDownColThrows) {
+  TaggerWorkingPointManager mgr;
   EXPECT_THROW(mgr.addVariation("sf", "up_col", ""), std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, AddVariationStoresEntry) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setInputJetCollection("goodJets");
+TEST_F(TaggerWorkingPointManagerTest, AddVariationStoresEntry) {
+  TaggerWorkingPointManager mgr;
+  mgr.setInputObjectCollection("goodJets");
   mgr.addVariation("myVar", "up_sf", "dn_sf");
   ASSERT_EQ(mgr.getVariations().size(), 1u);
   EXPECT_EQ(mgr.getVariations()[0].name, "myVar");
@@ -466,21 +466,21 @@ TEST_F(JetTaggingWorkingPointManagerTest, AddVariationStoresEntry) {
   EXPECT_EQ(mgr.getVariations()[0].downSFColumn, "dn_sf");
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, RegisterSystematicSetsThrowsOnEmpty) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, RegisterSystematicSetsThrowsOnEmpty) {
+  TaggerWorkingPointManager mgr;
   EXPECT_THROW(mgr.registerSystematicSources("", {"src"}),
                std::invalid_argument);
   EXPECT_THROW(mgr.registerSystematicSources("set", {}),
                std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, GetUnknownSystematicSetThrows) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, GetUnknownSystematicSetThrows) {
+  TaggerWorkingPointManager mgr;
   EXPECT_THROW(mgr.getSystematicSources("nonexistent"), std::out_of_range);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, RegisterSystematicSetsStoresEntries) {
-  JetTaggingWorkingPointManager mgr;
+TEST_F(TaggerWorkingPointManagerTest, RegisterSystematicSetsStoresEntries) {
+  TaggerWorkingPointManager mgr;
   mgr.registerSystematicSources("standard", {"hf", "lf", "cferr1"});
   const auto &sources = mgr.getSystematicSources("standard");
   ASSERT_EQ(sources.size(), 3u);
@@ -492,35 +492,35 @@ TEST_F(JetTaggingWorkingPointManagerTest, RegisterSystematicSetsStoresEntries) {
 // defineWorkingPointCollection error handling
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest,
+TEST_F(TaggerWorkingPointManagerTest,
        DefineWPCollectionWithoutInputCollectionThrows) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr.setTaggerColumn("Jet_btag");
   mgr.addWorkingPoint("medium", 0.3f);
-  // No setInputJetCollection → should throw.
+  // No setInputObjectCollection → should throw.
   EXPECT_THROW(mgr.defineWorkingPointCollection("pass_medium", "out"),
                std::runtime_error);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest,
+TEST_F(TaggerWorkingPointManagerTest,
        DefineWPCollectionUnknownWPNameThrows) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr.setTaggerColumn("Jet_btag");
   mgr.addWorkingPoint("medium", 0.3f);
-  mgr.setInputJetCollection("goodJets");
+  mgr.setInputObjectCollection("goodJets");
   EXPECT_THROW(mgr.defineWorkingPointCollection("pass_tight", "out"),
                std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest,
+TEST_F(TaggerWorkingPointManagerTest,
        DefineWPCollectionMalformedSelectionThrows) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr.setTaggerColumn("Jet_btag");
   mgr.addWorkingPoint("medium", 0.3f);
-  mgr.setInputJetCollection("goodJets");
+  mgr.setInputObjectCollection("goodJets");
   EXPECT_THROW(mgr.defineWorkingPointCollection("medium", "out"),
                std::invalid_argument);
 }
@@ -529,40 +529,40 @@ TEST_F(JetTaggingWorkingPointManagerTest,
 // defineVariationCollections
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest,
+TEST_F(TaggerWorkingPointManagerTest,
        DefineVariationCollectionsWithoutInputCollectionThrows) {
-  JetTaggingWorkingPointManager mgr;
+  TaggerWorkingPointManager mgr;
   EXPECT_THROW(
       mgr.defineVariationCollections("nominal", "prefix"),
       std::runtime_error);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest,
+TEST_F(TaggerWorkingPointManagerTest,
        DefineVariationCollectionsEmptyNominalThrows) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setInputJetCollection("goodJets");
+  TaggerWorkingPointManager mgr;
+  mgr.setInputObjectCollection("goodJets");
   EXPECT_THROW(mgr.defineVariationCollections("", "prefix"),
                std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest,
+TEST_F(TaggerWorkingPointManagerTest,
        DefineVariationCollectionsEmptyPrefixThrows) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setInputJetCollection("goodJets");
+  TaggerWorkingPointManager mgr;
+  mgr.setInputObjectCollection("goodJets");
   EXPECT_THROW(mgr.defineVariationCollections("nominal", ""),
                std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest,
+TEST_F(TaggerWorkingPointManagerTest,
        DefineVariationCollectionsCreatesVariationMap) {
   // Set up a single-event, single-jet analysis.
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);
 
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("medium", 0.30f);
-  mgr->setInputJetCollection("goodJets");
+  mgr->setInputObjectCollection("goodJets");
 
   defineCollectionColumn(*dm, "goodJets", 50.f);
   defineRVecColumn(*dm, "Jet_btag", 0.5f);  // as a score column (not used here)
@@ -595,37 +595,37 @@ TEST_F(JetTaggingWorkingPointManagerTest,
 // defineFractionHistograms input validation
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, FractionHistEmptyPrefixThrows) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+TEST_F(TaggerWorkingPointManagerTest, FractionHistEmptyPrefixThrows) {
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr.setTaggerColumn("Jet_btag");
-  mgr.setInputJetCollection("goodJets");
+  mgr.setInputObjectCollection("goodJets");
   EXPECT_THROW(mgr.defineFractionHistograms("", {20.f, 50.f}, {0.f, 2.4f}),
                std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, FractionHistTooFewPtBinsThrows) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+TEST_F(TaggerWorkingPointManagerTest, FractionHistTooFewPtBinsThrows) {
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr.setTaggerColumn("Jet_btag");
-  mgr.setInputJetCollection("goodJets");
+  mgr.setInputObjectCollection("goodJets");
   EXPECT_THROW(mgr.defineFractionHistograms("prefix", {20.f}, {0.f, 2.4f}),
                std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, FractionHistTooFewEtaBinsThrows) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+TEST_F(TaggerWorkingPointManagerTest, FractionHistTooFewEtaBinsThrows) {
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr.setTaggerColumn("Jet_btag");
-  mgr.setInputJetCollection("goodJets");
+  mgr.setInputObjectCollection("goodJets");
   EXPECT_THROW(mgr.defineFractionHistograms("prefix", {20.f, 50.f}, {0.f}),
                std::invalid_argument);
 }
 
-TEST_F(JetTaggingWorkingPointManagerTest, FractionHistWithoutTaggerColumnThrows) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
-  mgr.setInputJetCollection("goodJets");
+TEST_F(TaggerWorkingPointManagerTest, FractionHistWithoutTaggerColumnThrows) {
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr.setInputObjectCollection("goodJets");
   EXPECT_THROW(mgr.defineFractionHistograms("prefix", {20.f, 50.f}, {0.f, 2.4f}),
                std::runtime_error);
 }
@@ -634,14 +634,14 @@ TEST_F(JetTaggingWorkingPointManagerTest, FractionHistWithoutTaggerColumnThrows)
 // execute(): systematic registration
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, ExecuteRegistersSystematics) {
+TEST_F(TaggerWorkingPointManagerTest, ExecuteRegistersSystematics) {
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);
 
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("medium", 0.30f);
-  mgr->setInputJetCollection("goodJets");
+  mgr->setInputObjectCollection("goodJets");
 
   defineCollectionColumn(*dm, "goodJets", 50.f);
 
@@ -665,15 +665,15 @@ TEST_F(JetTaggingWorkingPointManagerTest, ExecuteRegistersSystematics) {
 // reportMetadata (smoke test)
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, ReportMetadataDoesNotThrow) {
+TEST_F(TaggerWorkingPointManagerTest, ReportMetadataDoesNotThrow) {
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);
 
-  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr->setTaggerColumn("Jet_btag");
   mgr->addWorkingPoint("loose",  0.05f);
   mgr->addWorkingPoint("medium", 0.30f);
-  mgr->setInputJetCollection("goodJets");
+  mgr->setInputObjectCollection("goodJets");
 
   EXPECT_NO_THROW(mgr->reportMetadata());
 }
@@ -682,16 +682,16 @@ TEST_F(JetTaggingWorkingPointManagerTest, ReportMetadataDoesNotThrow) {
 // collectProvenanceEntries
 // ---------------------------------------------------------------------------
 
-TEST_F(JetTaggingWorkingPointManagerTest, CollectProvenanceEntriesNotEmpty) {
-  JetTaggingWorkingPointManager mgr;
-  mgr.setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+TEST_F(TaggerWorkingPointManagerTest, CollectProvenanceEntriesNotEmpty) {
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
   mgr.setTaggerColumn("Jet_btag");
   mgr.addWorkingPoint("medium", 0.30f);
-  mgr.setInputJetCollection("goodJets");
+  mgr.setInputObjectCollection("goodJets");
 
   const auto entries = mgr.collectProvenanceEntries();
   EXPECT_NE(entries.find("jet_pt_column"),   entries.end());
   EXPECT_NE(entries.find("tagger_column"),   entries.end());
   EXPECT_NE(entries.find("working_points"),  entries.end());
-  EXPECT_NE(entries.find("input_jet_collection_column"), entries.end());
+  EXPECT_NE(entries.find("input_object_collection_column"), entries.end());
 }

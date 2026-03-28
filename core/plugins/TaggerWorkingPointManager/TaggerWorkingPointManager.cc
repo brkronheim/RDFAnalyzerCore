@@ -1,4 +1,4 @@
-#include <JetTaggingWorkingPointManager.h>
+#include <TaggerWorkingPointManager.h>
 #include <NullOutputSink.h>
 #include <analyzer.h>
 #include <ROOT/RVec.hxx>
@@ -14,9 +14,9 @@
 // Factory
 // ---------------------------------------------------------------------------
 
-std::shared_ptr<JetTaggingWorkingPointManager>
-JetTaggingWorkingPointManager::create(Analyzer &an, const std::string &role) {
-  auto plugin = std::make_shared<JetTaggingWorkingPointManager>();
+std::shared_ptr<TaggerWorkingPointManager>
+TaggerWorkingPointManager::create(Analyzer &an, const std::string &role) {
+  auto plugin = std::make_shared<TaggerWorkingPointManager>();
   an.addPlugin(role, plugin);
   return plugin;
 }
@@ -25,7 +25,7 @@ JetTaggingWorkingPointManager::create(Analyzer &an, const std::string &role) {
 // setContext
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::setContext(ManagerContext &ctx) {
+void TaggerWorkingPointManager::setContext(ManagerContext &ctx) {
   dataManager_m = &ctx.data;
   systematicManager_m = &ctx.systematics;
   logger_m = &ctx.logger;
@@ -34,16 +34,16 @@ void JetTaggingWorkingPointManager::setContext(ManagerContext &ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// setJetColumns
+// setObjectColumns
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::setJetColumns(const std::string &ptColumn,
+void TaggerWorkingPointManager::setObjectColumns(const std::string &ptColumn,
                                                     const std::string &etaColumn,
                                                     const std::string &phiColumn,
                                                     const std::string &massColumn) {
   if (ptColumn.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::setJetColumns: ptColumn must not be empty");
+        "TaggerWorkingPointManager::setObjectColumns: ptColumn must not be empty");
   ptColumn_m = ptColumn;
   etaColumn_m = etaColumn;
   phiColumn_m = phiColumn;
@@ -54,11 +54,11 @@ void JetTaggingWorkingPointManager::setJetColumns(const std::string &ptColumn,
 // setTaggerColumn
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::setTaggerColumn(
+void TaggerWorkingPointManager::setTaggerColumn(
     const std::string &taggerScoreColumn) {
   if (taggerScoreColumn.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::setTaggerColumn: column must not be empty");
+        "TaggerWorkingPointManager::setTaggerColumn: column must not be empty");
   taggerColumn_m = taggerScoreColumn;
 }
 
@@ -66,47 +66,47 @@ void JetTaggingWorkingPointManager::setTaggerColumn(
 // addWorkingPoint
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::addWorkingPoint(const std::string &name,
+void TaggerWorkingPointManager::addWorkingPoint(const std::string &name,
                                                      float threshold) {
   if (name.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::addWorkingPoint: name must not be empty");
+        "TaggerWorkingPointManager::addWorkingPoint: name must not be empty");
   for (const auto &wp : workingPoints_m) {
     if (wp.name == name)
       throw std::invalid_argument(
-          "JetTaggingWorkingPointManager::addWorkingPoint: duplicate WP name '" +
+          "TaggerWorkingPointManager::addWorkingPoint: duplicate WP name '" +
           name + "'");
   }
   if (!workingPoints_m.empty() && threshold <= workingPoints_m.back().threshold)
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::addWorkingPoint: threshold must be "
+        "TaggerWorkingPointManager::addWorkingPoint: threshold must be "
         "strictly greater than the previous WP threshold");
   workingPoints_m.push_back({name, threshold});
 }
 
 // ---------------------------------------------------------------------------
-// setInputJetCollection
+// setInputObjectCollection
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::setInputJetCollection(
+void TaggerWorkingPointManager::setInputObjectCollection(
     const std::string &collectionColumn) {
   if (collectionColumn.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::setInputJetCollection: column must not "
+        "TaggerWorkingPointManager::setInputObjectCollection: column must not "
         "be empty");
-  inputJetCollectionColumn_m = collectionColumn;
+  inputObjectCollectionColumn_m = collectionColumn;
 }
 
 // ---------------------------------------------------------------------------
 // setFractionCorrection
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::setFractionCorrection(
+void TaggerWorkingPointManager::setFractionCorrection(
     CorrectionManager &cm, const std::string &fractionCorrectionName,
     const std::vector<std::string> &inputColumns) {
   if (fractionCorrectionName.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::setFractionCorrection: "
+        "TaggerWorkingPointManager::setFractionCorrection: "
         "fractionCorrectionName must not be empty");
   fractionCorrectionName_m = fractionCorrectionName;
   fractionInputColumns_m = inputColumns;
@@ -121,18 +121,18 @@ void JetTaggingWorkingPointManager::setFractionCorrection(
 // applyCorrectionlib
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::applyCorrectionlib(
+void TaggerWorkingPointManager::applyCorrectionlib(
     CorrectionManager &cm, const std::string &correctionName,
     const std::vector<std::string> &stringArgs,
     const std::vector<std::string> &inputColumns) {
   if (correctionName.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::applyCorrectionlib: correctionName "
+        "TaggerWorkingPointManager::applyCorrectionlib: correctionName "
         "must not be empty");
-  if (inputJetCollectionColumn_m.empty())
+  if (inputObjectCollectionColumn_m.empty())
     throw std::runtime_error(
-        "JetTaggingWorkingPointManager::applyCorrectionlib: call "
-        "setInputJetCollection() first");
+        "TaggerWorkingPointManager::applyCorrectionlib: call "
+        "setInputObjectCollection() first");
 
   // Evaluate the correctionlib to get a per-jet SF column.
   cm.applyCorrectionVec(correctionName, stringArgs, inputColumns);
@@ -152,32 +152,32 @@ void JetTaggingWorkingPointManager::applyCorrectionlib(
 // registerSystematicSources / getSystematicSources
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::registerSystematicSources(
+void TaggerWorkingPointManager::registerSystematicSources(
     const std::string &setName, const std::vector<std::string> &sources) {
   if (setName.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::registerSystematicSources: setName "
+        "TaggerWorkingPointManager::registerSystematicSources: setName "
         "must not be empty");
   if (sources.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::registerSystematicSources: sources "
+        "TaggerWorkingPointManager::registerSystematicSources: sources "
         "must not be empty");
   for (const auto &s : sources) {
     if (s.empty())
       throw std::invalid_argument(
-          "JetTaggingWorkingPointManager::registerSystematicSources: source "
+          "TaggerWorkingPointManager::registerSystematicSources: source "
           "name must not be empty");
   }
   systematicSets_m[setName] = sources;
 }
 
 const std::vector<std::string> &
-JetTaggingWorkingPointManager::getSystematicSources(
+TaggerWorkingPointManager::getSystematicSources(
     const std::string &setName) const {
   auto it = systematicSets_m.find(setName);
   if (it == systematicSets_m.end())
     throw std::out_of_range(
-        "JetTaggingWorkingPointManager::getSystematicSources: unknown set '" +
+        "TaggerWorkingPointManager::getSystematicSources: unknown set '" +
         setName + "'");
   return it->second;
 }
@@ -186,17 +186,17 @@ JetTaggingWorkingPointManager::getSystematicSources(
 // applySystematicSet
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::applySystematicSet(
+void TaggerWorkingPointManager::applySystematicSet(
     CorrectionManager &cm, const std::string &correctionName,
     const std::string &setName,
     const std::vector<std::string> &inputColumns) {
   if (correctionName.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::applySystematicSet: correctionName "
+        "TaggerWorkingPointManager::applySystematicSet: correctionName "
         "must not be empty");
   if (setName.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::applySystematicSet: setName "
+        "TaggerWorkingPointManager::applySystematicSet: setName "
         "must not be empty");
 
   const auto &sources = getSystematicSources(setName);
@@ -225,7 +225,7 @@ void JetTaggingWorkingPointManager::applySystematicSet(
 // addVariation
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::addVariation(
+void TaggerWorkingPointManager::addVariation(
     const std::string &systematicName,
     const std::string &upSFColumn,
     const std::string &downSFColumn,
@@ -233,15 +233,15 @@ void JetTaggingWorkingPointManager::addVariation(
     const std::string &downWeightColumn) {
   if (systematicName.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::addVariation: systematicName must not "
+        "TaggerWorkingPointManager::addVariation: systematicName must not "
         "be empty");
   if (upSFColumn.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::addVariation: upSFColumn must not be "
+        "TaggerWorkingPointManager::addVariation: upSFColumn must not be "
         "empty");
   if (downSFColumn.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::addVariation: downSFColumn must not "
+        "TaggerWorkingPointManager::addVariation: downSFColumn must not "
         "be empty");
 
   const std::string upWt   = upWeightColumn.empty()   ? upSFColumn   + "_weight" : upWeightColumn;
@@ -267,20 +267,20 @@ void JetTaggingWorkingPointManager::addVariation(
 // defineWorkingPointCollection
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::defineWorkingPointCollection(
+void TaggerWorkingPointManager::defineWorkingPointCollection(
     const std::string &selection, const std::string &outputCollectionColumn) {
   if (selection.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::defineWorkingPointCollection: "
+        "TaggerWorkingPointManager::defineWorkingPointCollection: "
         "selection must not be empty");
   if (outputCollectionColumn.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::defineWorkingPointCollection: "
+        "TaggerWorkingPointManager::defineWorkingPointCollection: "
         "outputCollectionColumn must not be empty");
-  if (inputJetCollectionColumn_m.empty())
+  if (inputObjectCollectionColumn_m.empty())
     throw std::runtime_error(
-        "JetTaggingWorkingPointManager::defineWorkingPointCollection: call "
-        "setInputJetCollection() first");
+        "TaggerWorkingPointManager::defineWorkingPointCollection: call "
+        "setInputObjectCollection() first");
 
   wpCollectionSteps_m.push_back({parseSelection(selection), outputCollectionColumn});
 }
@@ -289,22 +289,22 @@ void JetTaggingWorkingPointManager::defineWorkingPointCollection(
 // defineVariationCollections
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::defineVariationCollections(
+void TaggerWorkingPointManager::defineVariationCollections(
     const std::string &nominalCollectionColumn,
     const std::string &collectionPrefix,
     const std::string &variationMapColumn) {
   if (nominalCollectionColumn.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::defineVariationCollections: "
+        "TaggerWorkingPointManager::defineVariationCollections: "
         "nominalCollectionColumn must not be empty");
   if (collectionPrefix.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::defineVariationCollections: "
+        "TaggerWorkingPointManager::defineVariationCollections: "
         "collectionPrefix must not be empty");
-  if (inputJetCollectionColumn_m.empty())
+  if (inputObjectCollectionColumn_m.empty())
     throw std::runtime_error(
-        "JetTaggingWorkingPointManager::defineVariationCollections: call "
-        "setInputJetCollection() first");
+        "TaggerWorkingPointManager::defineVariationCollections: call "
+        "setInputObjectCollection() first");
   variationCollectionsSteps_m.push_back(
       {nominalCollectionColumn, collectionPrefix, variationMapColumn});
 }
@@ -313,35 +313,35 @@ void JetTaggingWorkingPointManager::defineVariationCollections(
 // defineFractionHistograms
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::defineFractionHistograms(
+void TaggerWorkingPointManager::defineFractionHistograms(
     const std::string &outputPrefix,
     const std::vector<float> &ptBinEdges,
     const std::vector<float> &etaBinEdges,
     const std::string &flavourColumn) {
   if (outputPrefix.empty())
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::defineFractionHistograms: outputPrefix "
+        "TaggerWorkingPointManager::defineFractionHistograms: outputPrefix "
         "must not be empty");
   if (ptBinEdges.size() < 2)
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::defineFractionHistograms: ptBinEdges "
+        "TaggerWorkingPointManager::defineFractionHistograms: ptBinEdges "
         "must have at least 2 elements");
   if (etaBinEdges.size() < 2)
     throw std::invalid_argument(
-        "JetTaggingWorkingPointManager::defineFractionHistograms: etaBinEdges "
+        "TaggerWorkingPointManager::defineFractionHistograms: etaBinEdges "
         "must have at least 2 elements");
   if (taggerColumn_m.empty())
     throw std::runtime_error(
-        "JetTaggingWorkingPointManager::defineFractionHistograms: call "
+        "TaggerWorkingPointManager::defineFractionHistograms: call "
         "setTaggerColumn() first");
   if (ptColumn_m.empty())
     throw std::runtime_error(
-        "JetTaggingWorkingPointManager::defineFractionHistograms: call "
-        "setJetColumns() first");
-  if (inputJetCollectionColumn_m.empty())
+        "TaggerWorkingPointManager::defineFractionHistograms: call "
+        "setObjectColumns() first");
+  if (inputObjectCollectionColumn_m.empty())
     throw std::runtime_error(
-        "JetTaggingWorkingPointManager::defineFractionHistograms: call "
-        "setInputJetCollection() first");
+        "TaggerWorkingPointManager::defineFractionHistograms: call "
+        "setInputObjectCollection() first");
 
   fractionHistogramConfigs_m.push_back(
       {outputPrefix, ptBinEdges, etaBinEdges, flavourColumn});
@@ -351,25 +351,25 @@ void JetTaggingWorkingPointManager::defineFractionHistograms(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-std::size_t JetTaggingWorkingPointManager::wpIndex(
+std::size_t TaggerWorkingPointManager::wpIndex(
     const std::string &name) const {
   for (std::size_t i = 0; i < workingPoints_m.size(); ++i) {
     if (workingPoints_m[i].name == name)
       return i;
   }
   throw std::invalid_argument(
-      "JetTaggingWorkingPointManager: unknown working point '" + name + "'");
+      "TaggerWorkingPointManager: unknown working point '" + name + "'");
 }
 
-std::string JetTaggingWorkingPointManager::wpCategoryColumn() const {
+std::string TaggerWorkingPointManager::wpCategoryColumn() const {
   return ptColumn_m + "_wp_category";
 }
 
-std::string JetTaggingWorkingPointManager::getWPCategoryColumn() const {
+std::string TaggerWorkingPointManager::getWPCategoryColumn() const {
   return wpCategoryColumn();
 }
 
-WPCollectionSelection JetTaggingWorkingPointManager::parseSelection(
+WPCollectionSelection TaggerWorkingPointManager::parseSelection(
     const std::string &selection) const {
   WPCollectionSelection sel;
 
@@ -387,7 +387,7 @@ WPCollectionSelection JetTaggingWorkingPointManager::parseSelection(
       const std::size_t idx2 = wpIndex(wp2);
       if (idx1 >= idx2)
         throw std::invalid_argument(
-            "JetTaggingWorkingPointManager: in 'pass_" + wp1 + "_fail_" + wp2 +
+            "TaggerWorkingPointManager: in 'pass_" + wp1 + "_fail_" + wp2 +
             "', '" + wp1 + "' must have a lower threshold than '" + wp2 + "'");
       sel.type = WPCollectionSelection::Type::PassRangeWP;
       sel.wpNameLower = wp1;
@@ -411,7 +411,7 @@ WPCollectionSelection JetTaggingWorkingPointManager::parseSelection(
   }
 
   throw std::invalid_argument(
-      "JetTaggingWorkingPointManager: unrecognised selection '" + selection +
+      "TaggerWorkingPointManager: unrecognised selection '" + selection +
       "'. Expected 'pass_<wp>', 'fail_<wp>', or 'pass_<wp1>_fail_<wp2>'.");
 }
 
@@ -419,14 +419,14 @@ WPCollectionSelection JetTaggingWorkingPointManager::parseSelection(
 // defineWeightColumn — private helper called from execute()
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::defineWeightColumn(
+void TaggerWorkingPointManager::defineWeightColumn(
     const std::string &perJetSFColumn,
     const std::string &outputWeightColumn) {
   ROOT::RDF::RNode df = dataManager_m->getDataFrame();
 
   if (!hasFractionCorrection_m) {
     // Simple product of per-jet SFs over jets in the input collection.
-    const std::string collectionCol = inputJetCollectionColumn_m;
+    const std::string collectionCol = inputObjectCollectionColumn_m;
     auto newDf = df.Define(
         outputWeightColumn,
         [](const PhysicsObjectCollection &jets,
@@ -446,7 +446,7 @@ void JetTaggingWorkingPointManager::defineWeightColumn(
     // Fraction-weighted: divide each per-jet SF by the MC fraction for the
     // jet's WP category so the total weight reflects the generator-level
     // distribution.
-    const std::string collectionCol = inputJetCollectionColumn_m;
+    const std::string collectionCol = inputObjectCollectionColumn_m;
     // The fraction column was registered under fractionCorrectionName_m
     // (no string args appended since we called with empty stringArgs).
     const std::string fracCol = fractionCorrectionName_m;
@@ -477,10 +477,10 @@ void JetTaggingWorkingPointManager::defineWeightColumn(
 // execute()
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::execute() {
+void TaggerWorkingPointManager::execute() {
   if (!dataManager_m)
     throw std::runtime_error(
-        "JetTaggingWorkingPointManager::execute: context not set");
+        "TaggerWorkingPointManager::execute: context not set");
 
   // -------------------------------------------------------------------------
   // 1. Define per-jet WP category column.
@@ -524,7 +524,7 @@ void JetTaggingWorkingPointManager::execute() {
   // -------------------------------------------------------------------------
   for (const auto &step : wpCollectionSteps_m) {
     ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-    const std::string inputCol = inputJetCollectionColumn_m;
+    const std::string inputCol = inputObjectCollectionColumn_m;
     const std::string outputCol = step.outputCollectionColumn;
     const WPCollectionSelection sel = step.selection;
     const std::string catCol = wpCategoryColumn();
@@ -746,7 +746,7 @@ void JetTaggingWorkingPointManager::execute() {
           // Build an intermediate column with the selected jet scores.
           const std::string scoreSelCol = "_frac_score_" + histName;
           const std::string taggerCol   = taggerColumn_m;
-          const std::string collectionCol = inputJetCollectionColumn_m;
+          const std::string collectionCol = inputObjectCollectionColumn_m;
           const std::string flavCol     = cfg.flavourColumn;
 
           if (!hasFlavour) {
@@ -827,7 +827,7 @@ void JetTaggingWorkingPointManager::execute() {
 // finalize()
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::finalize() {
+void TaggerWorkingPointManager::finalize() {
   if (fractionHistResults_m.empty()) return;
 
   // Skip writing if running against a NullOutputSink (e.g. unit tests).
@@ -842,7 +842,7 @@ void JetTaggingWorkingPointManager::finalize() {
   if (outFile.IsZombie()) {
     if (logger_m) {
       logger_m->log(ILogger::Level::Error,
-                    "JetTaggingWorkingPointManager: failed to open meta output "
+                    "TaggerWorkingPointManager: failed to open meta output "
                     "file: " + fileName);
     }
     return;
@@ -870,11 +870,11 @@ void JetTaggingWorkingPointManager::finalize() {
 // reportMetadata()
 // ---------------------------------------------------------------------------
 
-void JetTaggingWorkingPointManager::reportMetadata() {
+void TaggerWorkingPointManager::reportMetadata() {
   if (!logger_m) return;
 
   std::ostringstream ss;
-  ss << "JetTaggingWorkingPointManager configuration:\n";
+  ss << "TaggerWorkingPointManager configuration:\n";
 
   if (!ptColumn_m.empty()) {
     ss << "  Jet columns: pt=" << ptColumn_m
@@ -895,8 +895,8 @@ void JetTaggingWorkingPointManager::reportMetadata() {
     ss << "  WP category column: " << wpCategoryColumn() << "\n";
   }
 
-  if (!inputJetCollectionColumn_m.empty())
-    ss << "  Input jet collection: " << inputJetCollectionColumn_m << "\n";
+  if (!inputObjectCollectionColumn_m.empty())
+    ss << "  Input object collection: " << inputObjectCollectionColumn_m << "\n";
 
   if (hasFractionCorrection_m)
     ss << "  Fraction correction: " << fractionCorrectionName_m << "\n";
@@ -964,7 +964,7 @@ void JetTaggingWorkingPointManager::reportMetadata() {
 // ---------------------------------------------------------------------------
 
 std::unordered_map<std::string, std::string>
-JetTaggingWorkingPointManager::collectProvenanceEntries() const {
+TaggerWorkingPointManager::collectProvenanceEntries() const {
   std::unordered_map<std::string, std::string> entries;
 
   if (!ptColumn_m.empty()) {
@@ -986,8 +986,8 @@ JetTaggingWorkingPointManager::collectProvenanceEntries() const {
     entries["working_points"] = ss.str();
   }
 
-  if (!inputJetCollectionColumn_m.empty())
-    entries["input_jet_collection_column"] = inputJetCollectionColumn_m;
+  if (!inputObjectCollectionColumn_m.empty())
+    entries["input_object_collection_column"] = inputObjectCollectionColumn_m;
 
   if (hasFractionCorrection_m)
     entries["fraction_correction"] = fractionCorrectionName_m;

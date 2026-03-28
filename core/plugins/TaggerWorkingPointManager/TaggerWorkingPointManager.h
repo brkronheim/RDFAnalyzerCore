@@ -1,5 +1,5 @@
-#ifndef JETTAGGINGWORKINGPOINTMANAGER_H_INCLUDED
-#define JETTAGGINGWORKINGPOINTMANAGER_H_INCLUDED
+#ifndef TAGGERWORKINGPOINTMANAGER_H_INCLUDED
+#define TAGGERWORKINGPOINTMANAGER_H_INCLUDED
 
 #include <CorrectionManager.h>
 #include <PhysicsObjectCollection.h>
@@ -38,7 +38,7 @@ struct WorkingPointEntry {
 };
 
 /**
- * @brief Record of a per-jet SF column pair for a tagger systematic variation.
+ * @brief Record of a per-object SF column pair for a tagger systematic variation.
  *
  * Populated by addVariation() and used in execute() for systematic registration
  * and variation-collection definition.
@@ -58,7 +58,7 @@ struct TaggingVariationEntry {
 /**
  * @brief Describes a working-point-based selection for filtered collections.
  *
- * The selection determines which jets are kept in a PhysicsObjectCollection:
+ * The selection determines which objects are kept in a PhysicsObjectCollection:
  *
  * | Type            | Meaning                                          |
  * |-----------------|--------------------------------------------------|
@@ -66,7 +66,7 @@ struct TaggingVariationEntry {
  * | FailWP          | jet fails a named WP (below its threshold)       |
  * | PassRangeWP     | jet passes lower WP but fails upper WP           |
  *
- * @see JetTaggingWorkingPointManager::defineWorkingPointCollection
+ * @see TaggerWorkingPointManager::defineWorkingPointCollection
  */
 struct WPCollectionSelection {
   enum class Type { PassWP, FailWP, PassRangeWP };
@@ -76,103 +76,123 @@ struct WPCollectionSelection {
 };
 
 // ---------------------------------------------------------------------------
-// JetTaggingWorkingPointManager
+// TaggerWorkingPointManager
 // ---------------------------------------------------------------------------
 
 /**
- * @class JetTaggingWorkingPointManager
+ * @class TaggerWorkingPointManager
  * @brief Plugin for applying working-point-based tagger corrections and
- *        systematics to Jet and FatJet physics collections.
+ *        systematics to any PhysicsObjectCollection.
  *
  * ## Overview
  *
- * This plugin handles CMS-style working-point (WP) tagger scale factors —
- * e.g. for b-tagging algorithms such as DeepJet, ParticleNet, RobustParTAK4
- * — with full support for:
+ * This plugin handles CMS-style working-point (WP) tagger scale factors for
+ * **any physics object** with a tagger discriminator — including jets, taus,
+ * and fat-jets.  Common use cases include:
+ *  - **Jets**: b-tagging (DeepJet, RobustParTAK4, ParticleNet)
+ *  - **Taus**: DeepTau ID (VSe, VSmu, VSjet discriminators)
+ *  - **Fat jets**: Xbb / Xcc boosted taggers
+ *
+ * The plugin supports:
  *  - **Working-point definitions**: declare any number of named WPs with
  *    score thresholds (e.g. loose/medium/tight).
- *  - **WP category column**: per-jet integer encoding which WP range a jet
- *    falls into (0 = fail all, 1 = pass lowest, …, N = pass all).
- *  - **Correctionlib scale factors**: apply per-jet SFs from a correctionlib
+ *  - **WP category column**: per-object integer encoding which WP range an
+ *    object falls into (0 = fail all, 1 = pass lowest, …, N = pass all).
+ *  - **Correctionlib scale factors**: apply per-object SFs from a correctionlib
  *    payload to produce per-event weight columns compatible with WeightManager.
- *  - **Generator-level jet fraction correction**: optionally accept a second
- *    correctionlib payload encoding the MC fraction of jets in each WP
- *    category at given (pt, η).  These fractions reweight the per-jet SF
- *    contributions to properly reflect the generator-level jet distributions
+ *  - **Generator-level fraction correction**: optionally accept a second
+ *    correctionlib payload encoding the MC fraction of objects in each WP
+ *    category at given (pt, η).  These fractions reweight the per-object SF
+ *    contributions to properly reflect the generator-level object distributions
  *    when making WP-based selections.
  *  - **Systematic source sets**: bulk application of named uncertainty sources
  *    via applySystematicSet(), matching the JetEnergyScaleManager API.
- *  - **WP-filtered PhysicsObjectCollections**: produce collections of jets
+ *  - **WP-filtered PhysicsObjectCollections**: produce collections of objects
  *    passing specific WP criteria (pass_<wp>, fail_<wp>,
  *    pass_<wp1>_fail_<wp2>).
- *  - **Variation collections and map**: per-variation up/down jet collections
+ *  - **Variation collections and map**: per-variation up/down object collections
  *    and a PhysicsObjectVariationMap for downstream systematic propagation.
  *  - **Fraction histogram utility**: book per-(pt, η, flavour) tagger-score
  *    histograms in a dedicated pre-processing run so the fraction payload can
- *    be constructed from data.
+ *    be constructed from MC data.
  *
- * ## Typical usage
+ * ## Typical usage — Jets (b-tagging with DeepJet)
  * @code
- *   auto* jtm = analyzer->getPlugin<JetTaggingWorkingPointManager>("btagManager");
+ *   auto* twm = analyzer->getPlugin<TaggerWorkingPointManager>("btagManager");
  *   auto* cm  = analyzer->getPlugin<CorrectionManager>("corrections");
  *
- *   // 1. Declare jet kinematic column names.
- *   jtm->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+ *   // 1. Declare kinematic column names.
+ *   twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
  *
  *   // 2. Declare the tagger discriminator score column.
- *   jtm->setTaggerColumn("Jet_btagDeepFlavB");
+ *   twm->setTaggerColumn("Jet_btagDeepFlavB");
  *
  *   // 3. Register working points in order of increasing threshold.
- *   jtm->addWorkingPoint("loose",  0.0521f);
- *   jtm->addWorkingPoint("medium", 0.3033f);
- *   jtm->addWorkingPoint("tight",  0.7489f);
+ *   twm->addWorkingPoint("loose",  0.0521f);
+ *   twm->addWorkingPoint("medium", 0.3033f);
+ *   twm->addWorkingPoint("tight",  0.7489f);
  *
- *   // 4. Set the input jet PhysicsObjectCollection column.
- *   jtm->setInputJetCollection("goodJets");
+ *   // 4. Set the input PhysicsObjectCollection column.
+ *   twm->setInputObjectCollection("goodJets");
  *
- *   // 5. Apply a correctionlib payload that returns per-jet SFs.
- *   //    The correctionlib inputs typically include: systematic type,
- *   //    jet flavour, eta, pt.  String arguments (like "central") are
- *   //    passed via stringArgs; numeric columns via inputColumns.
- *   jtm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
+ *   // 5. Apply a correctionlib SF payload.
+ *   twm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
  *                           {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
  *                            "Jet_btagDeepFlavB"});
- *   // Defines per-event weight column "deepjet_sf_central_weight".
+ *   // → "deepjet_sf_central_weight"
  *
- *   // 6. (Optional) Set a fraction correctionlib for generator-level
- *   //    distribution reweighting.
- *   jtm->setFractionCorrection(*cm, "deepjet_fractions",
- *                              {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
- *
- *   // 7. Register systematic source sets and apply them in one call.
- *   jtm->registerSystematicSources("standard",
+ *   // 6. Register systematic sources and apply in one call.
+ *   twm->registerSystematicSources("standard",
  *                                   {"hf", "lf", "hfstats1", "hfstats2",
  *                                    "lfstats1", "lfstats2", "cferr1", "cferr2"});
- *   jtm->applySystematicSet(*cm, "deepjet_sf", "standard",
+ *   twm->applySystematicSet(*cm, "deepjet_sf", "standard",
  *                           {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
  *                            "Jet_btagDeepFlavB"});
  *
- *   // 8. Define WP-filtered jet collections.
- *   jtm->defineWorkingPointCollection("pass_medium",      "goodJets_bmedium");
- *   jtm->defineWorkingPointCollection("fail_loose",       "goodJets_bfail");
- *   jtm->defineWorkingPointCollection("pass_tight_fail_medium", "goodJets_btight");
- *
- *   // 9. Build systematic variation collections + variation map.
- *   jtm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
+ *   // 7. Define WP-filtered object collections.
+ *   twm->defineWorkingPointCollection("pass_medium", "goodJets_bmedium");
+ *   twm->defineWorkingPointCollection("fail_loose",  "goodJets_bfail");
+ *   twm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
  *                                    "goodJets_btag_variations");
+ * @endcode
  *
- *   // 10. (Pre-processing only) book fraction histograms.
- *   //     Run with a dedicated minimal analysis to collect these first.
- *   // jtm->defineFractionHistograms("btag_frac",
- *   //                               {20,30,50,70,100,200,500},
- *   //                               {-2.4f,-1.5f,0.f,1.5f,2.4f},
- *   //                               "Jet_hadronFlavour");
+ * ## Typical usage — Taus (DeepTau ID)
+ * @code
+ *   auto* tauTwm = analyzer->getPlugin<TaggerWorkingPointManager>("tauIdManager");
+ *
+ *   // 1. Declare tau kinematic column names.
+ *   tauTwm->setObjectColumns("Tau_pt", "Tau_eta", "Tau_phi", "Tau_mass");
+ *
+ *   // 2. Set the DeepTau VSjet discriminator score column.
+ *   tauTwm->setTaggerColumn("Tau_rawDeepTau2018v2p5VSjet");
+ *
+ *   // 3. Register DeepTau VSjet WPs (Run 3 working points).
+ *   tauTwm->addWorkingPoint("VVVLoose", 0.05f);
+ *   tauTwm->addWorkingPoint("Medium",   0.49f);
+ *   tauTwm->addWorkingPoint("Tight",    0.75f);
+ *
+ *   // 4. Set the input tau collection.
+ *   tauTwm->setInputObjectCollection("goodTaus");
+ *
+ *   // 5. Apply tau ID SF from correctionlib.
+ *   tauTwm->applyCorrectionlib(*cm, "tau_id_sf", {"pt_binned", "central"},
+ *                              {"Tau_pt", "Tau_decayMode",
+ *                               "Tau_genPartFlav"});
+ *   // → "tau_id_sf_pt_binned_central_weight"
+ *
+ *   // 6. Apply systematic variations.
+ *   tauTwm->registerSystematicSources("tau_unc", {"stat0", "stat1", "syst"});
+ *   tauTwm->applySystematicSet(*cm, "tau_id_sf", "tau_unc",
+ *                              {"Tau_pt", "Tau_decayMode", "Tau_genPartFlav"});
+ *
+ *   // 7. WP-filtered tau collections.
+ *   tauTwm->defineWorkingPointCollection("pass_Medium", "goodTaus_medium");
  * @endcode
  *
  * ## Working-point categories
  *
- * With WPs [loose=0.05, medium=0.3, tight=0.75] the per-jet category column
- * `Jet_wp_category` is:
+ * With WPs [loose=0.05, medium=0.3, tight=0.75] the per-object category column
+ * `<ptColumn>_wp_category` is:
  * | category | meaning                                   |
  * |----------|-------------------------------------------|
  * |    0     | score < 0.05  (fail all WPs)              |
@@ -181,30 +201,30 @@ struct WPCollectionSelection {
  * |    3     | score ≥ 0.75 (pass all WPs / pass tight)  |
  *
  * Selection expressions for defineWorkingPointCollection():
- * | string                     | jets kept                         |
- * |----------------------------|-----------------------------------|
- * | `"pass_loose"`             | category ≥ 1                      |
- * | `"pass_medium"`            | category ≥ 2                      |
- * | `"fail_loose"`             | category = 0                      |
- * | `"pass_medium_fail_tight"` | category = 2 (pass M, fail T)     |
- * | `"pass_loose_fail_medium"` | category = 1 (pass L, fail M)     |
+ * | string                       | objects kept                      |
+ * |------------------------------|-----------------------------------|
+ * | `"pass_loose"`               | category ≥ 1                      |
+ * | `"pass_medium"`              | category ≥ 2                      |
+ * | `"fail_loose"`               | category = 0                      |
+ * | `"pass_medium_fail_tight"`   | category = 2 (pass M, fail T)     |
+ * | `"pass_loose_fail_medium"`   | category = 1 (pass L, fail M)     |
  *
  * ## Generator-level fraction reweighting
  *
  * When setFractionCorrection() is called the per-event weight becomes
- * a fraction-weighted sum rather than a product of per-jet SFs.  For each
- * jet @c j, the contribution is:
+ * a fraction-weighted sum rather than a product of per-object SFs.  For each
+ * object @c j, the contribution is:
  * @code
  *   weight_j = SF(pt_j, η_j, …) / mc_fraction(pt_j, η_j, category_j)
  * @endcode
- * This ensures that the selected jet distribution matches the generator-level
+ * This ensures that the selected object distribution matches the generator-level
  * expectation when SFs differ across WP categories.
  *
- * @see docs/JET_TAGGING_WORKING_POINTS.md for the complete reference.
+ * @see docs/TAGGER_WORKING_POINTS.md for the complete reference.
  * @see JetEnergyScaleManager for JES/JER corrections.
  * @see WeightManager for applying the resulting weight columns.
  */
-class JetTaggingWorkingPointManager : public IPluggableManager {
+class TaggerWorkingPointManager : public IPluggableManager {
 public:
 
   // -------------------------------------------------------------------------
@@ -212,10 +232,10 @@ public:
   // -------------------------------------------------------------------------
 
   /**
-   * @brief Create a JetTaggingWorkingPointManager, register it with @p an
+   * @brief Create a TaggerWorkingPointManager, register it with @p an
    *        under @p role, and return the owning shared_ptr.
    */
-  static std::shared_ptr<JetTaggingWorkingPointManager> create(
+  static std::shared_ptr<TaggerWorkingPointManager> create(
       Analyzer &an, const std::string &role = "btagManager");
 
   // -------------------------------------------------------------------------
@@ -223,16 +243,16 @@ public:
   // -------------------------------------------------------------------------
 
   /**
-   * @brief Declare the jet kinematic column names.
+   * @brief Declare the object kinematic column names.
    *
-   * @param ptColumn   Per-jet pT column (RVec<Float_t>).
-   * @param etaColumn  Per-jet η column.
-   * @param phiColumn  Per-jet φ column.
-   * @param massColumn Per-jet mass column (may be empty to skip mass handling).
+   * @param ptColumn   Per-object pT column (RVec<Float_t>).
+   * @param etaColumn  Per-object η column.
+   * @param phiColumn  Per-object φ column.
+   * @param massColumn Per-object mass column (may be empty to skip mass handling).
    *
    * @throws std::invalid_argument if @p ptColumn is empty.
    */
-  void setJetColumns(const std::string &ptColumn,
+  void setObjectColumns(const std::string &ptColumn,
                      const std::string &etaColumn,
                      const std::string &phiColumn,
                      const std::string &massColumn);
@@ -242,10 +262,10 @@ public:
   // -------------------------------------------------------------------------
 
   /**
-   * @brief Set the per-jet tagger discriminator score column.
+   * @brief Set the per-object tagger discriminator score column.
    *
-   * The column must be of type RVec<Float_t> with one entry per jet.
-   * It is used in execute() to build the per-jet WP category column
+   * The column must be of type RVec<Float_t> with one entry per object.
+   * It is used in execute() to build the per-object WP category column
    * (`<ptColumn>_wp_category`).
    *
    * @param taggerScoreColumn  RDF column name.
@@ -269,7 +289,7 @@ public:
    * @endcode
    *
    * @param name       Human-readable WP label (must be unique, non-empty).
-   * @param threshold  Score threshold; jets with score ≥ threshold pass.
+   * @param threshold  Score threshold; objects with score ≥ threshold pass.
    *
    * @throws std::invalid_argument if @p name is empty, already registered,
    *         or if the threshold is not strictly greater than the previously
@@ -282,7 +302,7 @@ public:
   // -------------------------------------------------------------------------
 
   /**
-   * @brief Declare the RDF column holding the input jet PhysicsObjectCollection.
+   * @brief Declare the RDF column holding the input PhysicsObjectCollection.
    *
    * This enables the WP-filtered collection API (defineWorkingPointCollection,
    * defineVariationCollections).  The named column must be present in the
@@ -291,23 +311,23 @@ public:
    * @param collectionColumn  RDF column name of type PhysicsObjectCollection.
    * @throws std::invalid_argument if empty.
    */
-  void setInputJetCollection(const std::string &collectionColumn);
+  void setInputObjectCollection(const std::string &collectionColumn);
 
   // -------------------------------------------------------------------------
   // Scale-factor application
   // -------------------------------------------------------------------------
 
   /**
-   * @brief Apply a correctionlib-based per-jet SF and produce a per-event
+   * @brief Apply a correctionlib-based per-object SF and produce a per-event
    *        weight column.
    *
    * The correctionlib payload is evaluated once per jet per event via
-   * CorrectionManager::applyCorrectionVec().  The resulting per-jet
+   * CorrectionManager::applyCorrectionVec().  The resulting per-object
    * RVec<Float_t> SF column is then reduced to a per-event scalar weight
-   * (product of all per-jet SFs for jets in the input collection) stored in
+   * (product of all per-object SFs for objects in the input collection) stored in
    * the column `<correctionName>_<stringArgs...>_weight`.
    *
-   * If setFractionCorrection() has been called, each per-jet contribution
+   * If setFractionCorrection() has been called, each per-object contribution
    * is divided by the MC fraction for that jet's WP category, normalising
    * the weight to the generator-level distribution.
    *
@@ -317,12 +337,12 @@ public:
    *                         evaluator (e.g. @c {"central"}).  Each argument is
    *                         also appended to the output weight column name.
    * @param inputColumns     Ordered list of numeric input columns for the
-   *                         correctionlib evaluator (RVec columns for per-jet
+   *                         correctionlib evaluator (RVec columns for per-object
    *                         quantities).  When empty, uses the columns
    *                         registered with the correction.
    *
    * @throws std::invalid_argument if @p correctionName is empty.
-   * @throws std::runtime_error    if setInputJetCollection() was not called.
+   * @throws std::runtime_error    if setInputObjectCollection() was not called.
    */
   void applyCorrectionlib(CorrectionManager &cm,
                           const std::string &correctionName,
@@ -337,7 +357,7 @@ public:
    * @brief Set a correctionlib payload encoding MC generator-level jet
    *        fractions per WP category.
    *
-   * The fraction payload evaluates to the MC fraction of jets at a given
+   * The fraction payload evaluates to the MC fraction of objects at a given
    * (pt, η, …) that fall in a given WP category.  Typical inputs are
    * `{"Jet_pt", "Jet_eta", "Jet_pt_wp_category"}` (after setTaggerColumn and
    * addWorkingPoint have been called and execute() has defined the category
@@ -350,7 +370,7 @@ public:
    * @param cm                    CorrectionManager holding the correction.
    * @param fractionCorrectionName  Name of the fraction correction in @p cm.
    * @param inputColumns          Ordered list of numeric input columns (RVec
-   *                              columns, one entry per jet per event).  Must
+   *                              columns, one entry per object per event).  Must
    *                              include the WP category column
    *                              `<ptColumn>_wp_category` produced by execute().
    *
@@ -419,7 +439,7 @@ public:
    * @brief Register a tagger systematic variation for framework tracking.
    *
    * In execute(), registers both directions with ISystematicManager.
-   * The @p upSFColumn and @p downSFColumn must be per-jet RVec<Float_t>
+   * The @p upSFColumn and @p downSFColumn must be per-object RVec<Float_t>
    * columns already defined in the dataframe (e.g. via applyCorrectionlib
    * or applySystematicSet).
    *
@@ -445,14 +465,14 @@ public:
    * @brief Schedule definition of a WP-filtered PhysicsObjectCollection.
    *
    * In execute(), defines a new RDF column @p outputCollectionColumn of type
-   * PhysicsObjectCollection containing only jets that satisfy @p selection.
+   * PhysicsObjectCollection containing only objects that satisfy @p selection.
    *
    * Supported selection strings (names must match those passed to addWorkingPoint):
-   *  - `"pass_<wp>"` — keeps jets with WP category ≥ index(<wp>), i.e. jets
+   *  - `"pass_<wp>"` — keeps objects with WP category ≥ index(<wp>), i.e. objects
    *    that pass <wp> and all lower WPs.
-   *  - `"fail_<wp>"` — keeps jets with WP category < index(<wp>), i.e. jets
+   *  - `"fail_<wp>"` — keeps objects with WP category < index(<wp>), i.e. objects
    *    that fail <wp> (fail all WPs with equal or higher threshold).
-   *  - `"pass_<wp1>_fail_<wp2>"` — keeps jets in the WP range [wp1, wp2),
+   *  - `"pass_<wp1>_fail_<wp2>"` — keeps objects in the WP range [wp1, wp2),
    *    i.e. passing wp1 but failing wp2 (wp1 < wp2 in threshold order).
    *
    * @param selection               Selection expression (see above).
@@ -460,7 +480,7 @@ public:
    *
    * @throws std::invalid_argument if the selection string is malformed or
    *         references an unknown WP name, or if either argument is empty.
-   * @throws std::runtime_error    if setInputJetCollection() was not called.
+   * @throws std::runtime_error    if setInputObjectCollection() was not called.
    */
   void defineWorkingPointCollection(const std::string &selection,
                                     const std::string &outputCollectionColumn);
@@ -473,7 +493,7 @@ public:
    * the input collection @p nominalCollectionColumn is re-filtered using the
    * same WP selection while ISystematicManager marks the nominal collection as
    * affected.  The variation collections are produced by re-running the WP
-   * category computation with the nominal jet collection, so the selected jets
+   * category computation with the nominal object collection, so the selected objects
    * are the same as the nominal — only the event weight differs.  The nominal
    * collection itself is stored under the key @c "nominal" in the variation map.
    *
@@ -482,7 +502,7 @@ public:
    * @param variationMapColumn       If non-empty, name for the output
    *                                 PhysicsObjectVariationMap column.
    *
-   * @throws std::runtime_error    if setInputJetCollection() was not called.
+   * @throws std::runtime_error    if setInputObjectCollection() was not called.
    * @throws std::invalid_argument if @p nominalCollectionColumn or
    *         @p collectionPrefix is empty.
    */
@@ -505,7 +525,7 @@ public:
    * For each combination of (pt-bin, η-bin) a TH1D named
    * `<outputPrefix>_pt<I>_eta<J>[_<flavourLabel>]` is booked in the metadata
    * output ROOT file.  The x-axis spans [0, 1] and records the tagger score
-   * distribution.  From these histograms, the fraction of jets in each WP
+   * distribution.  From these histograms, the fraction of objects in each WP
    * category can be read off after running over the full MC sample.
    *
    * @param outputPrefix   Prefix for all histogram names.
@@ -513,7 +533,7 @@ public:
    *                       elements; entries are in GeV).
    * @param etaBinEdges    Bin edges for the jet-|η| dimension (must have ≥ 2
    *                       elements).
-   * @param flavourColumn  Optional per-jet hadron-flavour column (RVec<Int_t>).
+   * @param flavourColumn  Optional per-object hadron-flavour column (RVec<Int_t>).
    *                       When non-empty, separate histograms are produced for
    *                       flavour labels "b", "c", "light" (hadron flavour
    *                       5, 4, other respectively).  When empty, a single
@@ -521,8 +541,8 @@ public:
    *
    * @throws std::invalid_argument if @p outputPrefix is empty, or if either
    *         bin-edge vector has fewer than 2 elements.
-   * @throws std::runtime_error    if setTaggerColumn() or setJetColumns() was
-   *         not called, or if setInputJetCollection() was not called.
+   * @throws std::runtime_error    if setTaggerColumn() or setObjectColumns() was
+   *         not called, or if setInputObjectCollection() was not called.
    */
   void defineFractionHistograms(const std::string &outputPrefix,
                                  const std::vector<float> &ptBinEdges,
@@ -539,20 +559,20 @@ public:
   /// Return the registered working points.
   const std::vector<WorkingPointEntry> &getWorkingPoints() const { return workingPoints_m; }
 
-  /// Return the input jet collection column name.
-  const std::string &getInputJetCollectionColumn() const { return inputJetCollectionColumn_m; }
+  /// Return the input object collection column name.
+  const std::string &getInputObjectCollectionColumn() const { return inputObjectCollectionColumn_m; }
 
   /// Return all registered variations.
   const std::vector<TaggingVariationEntry> &getVariations() const { return variations_m; }
 
-  /// Return the per-jet WP category column name.
+  /// Return the per-object WP category column name.
   std::string getWPCategoryColumn() const;
 
   // -------------------------------------------------------------------------
   // IPluggableManager interface
   // -------------------------------------------------------------------------
 
-  std::string type() const override { return "JetTaggingWorkingPointManager"; }
+  std::string type() const override { return "TaggerWorkingPointManager"; }
 
   void setContext(ManagerContext &ctx) override;
 
@@ -605,8 +625,8 @@ private:
   // ---- Working points (ordered ascending by threshold) --------------------
   std::vector<WorkingPointEntry> workingPoints_m;
 
-  // ---- Input jet collection -----------------------------------------------
-  std::string inputJetCollectionColumn_m;
+  // ---- Input object collection -----------------------------------------------
+  std::string inputObjectCollectionColumn_m;
 
   // ---- Fraction correction ------------------------------------------------
   std::string fractionCorrectionName_m;
@@ -665,14 +685,14 @@ private:
   /// Return the index of a WP by name, or throw if not found.
   std::size_t wpIndex(const std::string &name) const;
 
-  /// Return the column name for per-jet WP category.
+  /// Return the column name for per-object WP category.
   std::string wpCategoryColumn() const;
 
-  /// Build a per-event weight column from a per-jet SF column.
-  /// If fraction correction is configured, divides each per-jet SF by the
+  /// Build a per-event weight column from a per-object SF column.
+  /// If fraction correction is configured, divides each per-object SF by the
   /// MC fraction for the jet's WP category.
   void defineWeightColumn(const std::string &perJetSFColumn,
                           const std::string &outputWeightColumn);
 };
 
-#endif // JETTAGGINGWORKINGPOINTMANAGER_H_INCLUDED
+#endif // TAGGERWORKINGPOINTMANAGER_H_INCLUDED

@@ -119,7 +119,7 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
             "variations": list,
         },
     },
-    "JetTaggingWorkingPointManager": {
+    "TaggerWorkingPointManager": {
         "required_keys": [],
         "optional_keys": [
             "jet_columns",
