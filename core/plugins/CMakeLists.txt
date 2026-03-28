@@ -7,6 +7,7 @@ set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/CutflowManager
     ${CMAKE_CURRENT_SOURCE_DIR}/ElectronEnergyScaleManager
     ${CMAKE_CURRENT_SOURCE_DIR}/JetEnergyScaleManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/JetTaggingWorkingPointManager
     ${CMAKE_CURRENT_SOURCE_DIR}/KinematicFitManager
     ${CMAKE_CURRENT_SOURCE_DIR}/GoldenJsonManager
     ${CMAKE_CURRENT_SOURCE_DIR}/MuonRochesterManager
@@ -36,6 +37,7 @@ add_subdirectory(CutflowManager)
 add_subdirectory(ObjectEnergyManagerBase)
 add_subdirectory(ElectronEnergyScaleManager)
 add_subdirectory(JetEnergyScaleManager)
+add_subdirectory(JetTaggingWorkingPointManager)
 add_subdirectory(KinematicFitManager)
 add_subdirectory(GoldenJsonManager)
 add_subdirectory(MuonRochesterManager)
@@ -60,6 +62,7 @@ target_sources(corePlugins PRIVATE
     $<TARGET_OBJECTS:ObjectEnergyManagerBase>
     $<TARGET_OBJECTS:ElectronEnergyScaleManager>
     $<TARGET_OBJECTS:JetEnergyScaleManager>
+    $<TARGET_OBJECTS:JetTaggingWorkingPointManager>
     $<TARGET_OBJECTS:KinematicFitManager>
     $<TARGET_OBJECTS:GoldenJsonManager>
     $<TARGET_OBJECTS:MuonRochesterManager>
@@ -82,6 +85,7 @@ target_link_libraries(corePlugins
     ObjectEnergyManagerBase
     ElectronEnergyScaleManager
     JetEnergyScaleManager
+    JetTaggingWorkingPointManager
     KinematicFitManager
     GoldenJsonManager
     MuonRochesterManager
