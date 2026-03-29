@@ -51,15 +51,26 @@ void TaggerWorkingPointManager::setObjectColumns(const std::string &ptColumn,
 }
 
 // ---------------------------------------------------------------------------
-// setTaggerColumn
+// setTaggerColumn / setTaggerColumns
 // ---------------------------------------------------------------------------
 
 void TaggerWorkingPointManager::setTaggerColumn(
     const std::string &taggerScoreColumn) {
-  if (taggerScoreColumn.empty())
+  setTaggerColumns({taggerScoreColumn});
+}
+
+void TaggerWorkingPointManager::setTaggerColumns(
+    const std::vector<std::string> &taggerScoreColumns) {
+  if (taggerScoreColumns.empty())
     throw std::invalid_argument(
-        "TaggerWorkingPointManager::setTaggerColumn: column must not be empty");
-  taggerColumn_m = taggerScoreColumn;
+        "TaggerWorkingPointManager::setTaggerColumns: list must not be empty");
+  for (const auto &col : taggerScoreColumns) {
+    if (col.empty())
+      throw std::invalid_argument(
+          "TaggerWorkingPointManager::setTaggerColumns: column names must not "
+          "be empty");
+  }
+  taggerColumns_m = taggerScoreColumns;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,20 +79,33 @@ void TaggerWorkingPointManager::setTaggerColumn(
 
 void TaggerWorkingPointManager::addWorkingPoint(const std::string &name,
                                                      float threshold) {
+  addWorkingPoint(name, std::vector<float>{threshold});
+}
+
+void TaggerWorkingPointManager::addWorkingPoint(
+    const std::string &name, const std::vector<float> &thresholds) {
   if (name.empty())
     throw std::invalid_argument(
         "TaggerWorkingPointManager::addWorkingPoint: name must not be empty");
+  if (thresholds.empty())
+    throw std::invalid_argument(
+        "TaggerWorkingPointManager::addWorkingPoint: thresholds must not be "
+        "empty");
   for (const auto &wp : workingPoints_m) {
     if (wp.name == name)
       throw std::invalid_argument(
           "TaggerWorkingPointManager::addWorkingPoint: duplicate WP name '" +
           name + "'");
   }
-  if (!workingPoints_m.empty() && threshold <= workingPoints_m.back().threshold)
+  // Enforce ascending order only for single-score WPs (multi-score ordering
+  // is the user's responsibility).
+  if (thresholds.size() == 1 && !workingPoints_m.empty() &&
+      workingPoints_m.back().thresholds.size() == 1 &&
+      thresholds[0] <= workingPoints_m.back().thresholds[0])
     throw std::invalid_argument(
         "TaggerWorkingPointManager::addWorkingPoint: threshold must be "
         "strictly greater than the previous WP threshold");
-  workingPoints_m.push_back({name, threshold});
+  workingPoints_m.push_back({name, thresholds});
 }
 
 // ---------------------------------------------------------------------------
@@ -330,10 +354,10 @@ void TaggerWorkingPointManager::defineFractionHistograms(
     throw std::invalid_argument(
         "TaggerWorkingPointManager::defineFractionHistograms: etaBinEdges "
         "must have at least 2 elements");
-  if (taggerColumn_m.empty())
+  if (taggerColumns_m.empty())
     throw std::runtime_error(
         "TaggerWorkingPointManager::defineFractionHistograms: call "
-        "setTaggerColumn() first");
+        "setTaggerColumn(s)() first");
   if (ptColumn_m.empty())
     throw std::runtime_error(
         "TaggerWorkingPointManager::defineFractionHistograms: call "
@@ -474,6 +498,123 @@ void TaggerWorkingPointManager::defineWeightColumn(
 }
 
 // ---------------------------------------------------------------------------
+// defineWPCategoryColumn() — private helper called from execute()
+// ---------------------------------------------------------------------------
+
+void TaggerWorkingPointManager::defineWPCategoryColumn() {
+  const std::string catCol = wpCategoryColumn();
+  const std::vector<WorkingPointEntry> wps = workingPoints_m;
+
+  if (taggerColumns_m.size() == 1) {
+    // -----------------------------------------------------------------------
+    // Single-score path (fast path — existing logic, no intermediate columns).
+    // -----------------------------------------------------------------------
+    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+    const std::string taggerCol = taggerColumns_m[0];
+
+    auto newDf = df.Define(
+        catCol,
+        [wps](const ROOT::VecOps::RVec<Float_t> &score)
+            -> ROOT::VecOps::RVec<Int_t> {
+          ROOT::VecOps::RVec<Int_t> cat(score.size(), 0);
+          for (std::size_t i = 0; i < score.size(); ++i) {
+            Int_t c = 0;
+            for (const auto &wp : wps) {
+              if (score[i] >= wp.thresholds[0])
+                ++c;
+              else
+                break;
+            }
+            cat[i] = c;
+          }
+          return cat;
+        },
+        {taggerCol});
+    dataManager_m->setDataFrame(newDf);
+
+  } else {
+    // -----------------------------------------------------------------------
+    // Multi-score path: pack all discriminant scores per object into a
+    // RVec<RVec<Float_t>> intermediate column, then compute category.
+    //
+    // The packed column is named "_twm_packed_<catCol>" so multiple instances
+    // of the plugin don't collide.
+    // -----------------------------------------------------------------------
+    const std::string packedCol = "_twm_packed_" + catCol;
+    const std::size_t numScores = taggerColumns_m.size();
+
+    // Step A: initialise packed column from first tagger score.
+    {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const std::string firstCol = taggerColumns_m[0];
+      auto newDf = df.Define(
+          packedCol,
+          [](const ROOT::VecOps::RVec<Float_t> &s)
+              -> ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> {
+            ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> result(s.size());
+            for (std::size_t i = 0; i < s.size(); ++i)
+              result[i] = ROOT::VecOps::RVec<Float_t>{s[i]};
+            return result;
+          },
+          {firstCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    // Step B: append each additional tagger score column.
+    for (std::size_t k = 1; k < taggerColumns_m.size(); ++k) {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const std::string scoreCol = taggerColumns_m[k];
+      auto newDf = df.Redefine(
+          packedCol,
+          [](ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> packed,
+             const ROOT::VecOps::RVec<Float_t> &s)
+              -> ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> {
+            const std::size_t n = std::min(packed.size(), s.size());
+            for (std::size_t i = 0; i < n; ++i)
+              packed[i].push_back(s[i]);
+            return packed;
+          },
+          {packedCol, scoreCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    // Step C: compute category from packed scores.
+    {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      auto newDf = df.Define(
+          catCol,
+          [wps, numScores](
+              const ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> &packed)
+              -> ROOT::VecOps::RVec<Int_t> {
+            ROOT::VecOps::RVec<Int_t> cat(packed.size(), 0);
+            for (std::size_t i = 0; i < packed.size(); ++i) {
+              const auto &scores = packed[i];
+              Int_t c = 0;
+              for (const auto &wp : wps) {
+                bool passes = true;
+                for (std::size_t k = 0; k < numScores; ++k) {
+                  if (k >= scores.size() ||
+                      scores[k] < wp.thresholds[k]) {
+                    passes = false;
+                    break;
+                  }
+                }
+                if (passes)
+                  ++c;
+                else
+                  break;
+              }
+              cat[i] = c;
+            }
+            return cat;
+          },
+          {packedCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // execute()
 // ---------------------------------------------------------------------------
 
@@ -485,31 +626,8 @@ void TaggerWorkingPointManager::execute() {
   // -------------------------------------------------------------------------
   // 1. Define per-object WP category column.
   // -------------------------------------------------------------------------
-  if (!taggerColumn_m.empty() && !workingPoints_m.empty()) {
-    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-    const std::string taggerCol = taggerColumn_m;
-    const std::vector<WorkingPointEntry> wps = workingPoints_m;
-    const std::string catCol = wpCategoryColumn();
-
-    auto newDf = df.Define(
-        catCol,
-        [wps](const ROOT::VecOps::RVec<Float_t> &score)
-            -> ROOT::VecOps::RVec<Int_t> {
-          ROOT::VecOps::RVec<Int_t> cat(score.size(), 0);
-          for (std::size_t i = 0; i < score.size(); ++i) {
-            Int_t c = 0;
-            for (const auto &wp : wps) {
-              if (score[i] >= wp.threshold)
-                ++c;
-              else
-                break;
-            }
-            cat[i] = c;
-          }
-          return cat;
-        },
-        {taggerCol});
-    dataManager_m->setDataFrame(newDf);
+  if (!taggerColumns_m.empty() && !workingPoints_m.empty()) {
+    defineWPCategoryColumn();
   }
 
   // -------------------------------------------------------------------------
@@ -744,8 +862,10 @@ void TaggerWorkingPointManager::execute() {
           const std::string histName = hname.str();
 
           // Build an intermediate column with the selected jet scores.
+          // For multi-score WPs, use the first tagger column for the fraction
+          // histogram (the primary discriminant).
           const std::string scoreSelCol = "_frac_score_" + histName;
-          const std::string taggerCol   = taggerColumn_m;
+          const std::string taggerCol   = taggerColumns_m[0];
           const std::string collectionCol = inputObjectCollectionColumn_m;
           const std::string flavCol     = cfg.flavourColumn;
 
@@ -877,20 +997,32 @@ void TaggerWorkingPointManager::reportMetadata() {
   ss << "TaggerWorkingPointManager configuration:\n";
 
   if (!ptColumn_m.empty()) {
-    ss << "  Jet columns: pt=" << ptColumn_m
+    ss << "  Object columns: pt=" << ptColumn_m
        << " eta=" << etaColumn_m
        << " phi=" << phiColumn_m
        << " mass=" << massColumn_m << "\n";
   }
 
-  if (!taggerColumn_m.empty())
-    ss << "  Tagger column: " << taggerColumn_m << "\n";
+  if (!taggerColumns_m.empty()) {
+    if (taggerColumns_m.size() == 1) {
+      ss << "  Tagger column: " << taggerColumns_m[0] << "\n";
+    } else {
+      ss << "  Tagger columns (" << taggerColumns_m.size() << "):\n";
+      for (const auto &col : taggerColumns_m)
+        ss << "    " << col << "\n";
+    }
+  }
 
   if (!workingPoints_m.empty()) {
     ss << "  Working points (" << workingPoints_m.size() << "):\n";
     for (std::size_t i = 0; i < workingPoints_m.size(); ++i) {
       ss << "    [" << i + 1 << "] " << workingPoints_m[i].name
-         << " threshold=" << workingPoints_m[i].threshold << "\n";
+         << " thresholds={";
+      for (std::size_t k = 0; k < workingPoints_m[i].thresholds.size(); ++k) {
+        if (k > 0) ss << ", ";
+        ss << workingPoints_m[i].thresholds[k];
+      }
+      ss << "}\n";
     }
     ss << "  WP category column: " << wpCategoryColumn() << "\n";
   }
@@ -968,20 +1100,35 @@ TaggerWorkingPointManager::collectProvenanceEntries() const {
   std::unordered_map<std::string, std::string> entries;
 
   if (!ptColumn_m.empty()) {
-    entries["jet_pt_column"]   = ptColumn_m;
-    entries["jet_eta_column"]  = etaColumn_m;
-    entries["jet_phi_column"]  = phiColumn_m;
-    entries["jet_mass_column"] = massColumn_m;
+    entries["pt_column"]   = ptColumn_m;
+    entries["eta_column"]  = etaColumn_m;
+    entries["phi_column"]  = phiColumn_m;
+    entries["mass_column"] = massColumn_m;
   }
 
-  if (!taggerColumn_m.empty())
-    entries["tagger_column"] = taggerColumn_m;
+  if (!taggerColumns_m.empty()) {
+    if (taggerColumns_m.size() == 1) {
+      entries["tagger_column"] = taggerColumns_m[0];
+    } else {
+      std::ostringstream ss;
+      for (std::size_t k = 0; k < taggerColumns_m.size(); ++k) {
+        if (k > 0) ss << ',';
+        ss << taggerColumns_m[k];
+      }
+      entries["tagger_columns"] = ss.str();
+    }
+  }
 
   if (!workingPoints_m.empty()) {
     std::ostringstream ss;
     for (std::size_t i = 0; i < workingPoints_m.size(); ++i) {
       if (i > 0) ss << ',';
-      ss << workingPoints_m[i].name << ':' << workingPoints_m[i].threshold;
+      ss << workingPoints_m[i].name << ":{";
+      for (std::size_t k = 0; k < workingPoints_m[i].thresholds.size(); ++k) {
+        if (k > 0) ss << ";";
+        ss << workingPoints_m[i].thresholds[k];
+      }
+      ss << "}";
     }
     entries["working_points"] = ss.str();
   }

@@ -160,7 +160,8 @@ TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointsInOrder) {
   mgr.addWorkingPoint("tight",  0.75f);
   ASSERT_EQ(mgr.getWorkingPoints().size(), 3u);
   EXPECT_EQ(mgr.getWorkingPoints()[0].name, "loose");
-  EXPECT_FLOAT_EQ(mgr.getWorkingPoints()[0].threshold, 0.05f);
+  ASSERT_FALSE(mgr.getWorkingPoints()[0].thresholds.empty());
+  EXPECT_FLOAT_EQ(mgr.getWorkingPoints()[0].thresholds[0], 0.05f);
   EXPECT_EQ(mgr.getWorkingPoints()[2].name, "tight");
 }
 
@@ -181,6 +182,57 @@ TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointWrongOrderThrows) {
   // Threshold not strictly greater than previous → should throw.
   EXPECT_THROW(mgr.addWorkingPoint("loose", 0.10f), std::invalid_argument);
   EXPECT_THROW(mgr.addWorkingPoint("same",  0.30f), std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------
+// setTaggerColumns — multi-score API
+// ---------------------------------------------------------------------------
+
+TEST_F(TaggerWorkingPointManagerTest, SetTaggerColumnsStoresNames) {
+  TaggerWorkingPointManager mgr;
+  mgr.setTaggerColumns({"Jet_CvsL", "Jet_CvsB"});
+  ASSERT_EQ(mgr.getTaggerColumns().size(), 2u);
+  EXPECT_EQ(mgr.getTaggerColumns()[0], "Jet_CvsL");
+  EXPECT_EQ(mgr.getTaggerColumns()[1], "Jet_CvsB");
+  // getTaggerColumn() should return the first column.
+  EXPECT_EQ(mgr.getTaggerColumn(), "Jet_CvsL");
+}
+
+TEST_F(TaggerWorkingPointManagerTest, SetTaggerColumnsEmptyListThrows) {
+  TaggerWorkingPointManager mgr;
+  EXPECT_THROW(mgr.setTaggerColumns({}), std::invalid_argument);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, SetTaggerColumnsEmptyElementThrows) {
+  TaggerWorkingPointManager mgr;
+  EXPECT_THROW(mgr.setTaggerColumns({"Jet_CvsL", ""}), std::invalid_argument);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointVectorSingleThreshold) {
+  TaggerWorkingPointManager mgr;
+  mgr.addWorkingPoint("loose",  std::vector<float>{0.05f});
+  mgr.addWorkingPoint("medium", std::vector<float>{0.30f});
+  ASSERT_EQ(mgr.getWorkingPoints().size(), 2u);
+  ASSERT_EQ(mgr.getWorkingPoints()[0].thresholds.size(), 1u);
+  EXPECT_FLOAT_EQ(mgr.getWorkingPoints()[0].thresholds[0], 0.05f);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointVectorMultiThreshold) {
+  TaggerWorkingPointManager mgr;
+  // CvsL/CvsB charm-tagging WPs (no ordering constraint in multi-score).
+  mgr.addWorkingPoint("loose",  {0.042f, 0.135f});
+  mgr.addWorkingPoint("medium", {0.108f, 0.285f});
+  mgr.addWorkingPoint("tight",  {0.274f, 0.605f});
+  ASSERT_EQ(mgr.getWorkingPoints().size(), 3u);
+  ASSERT_EQ(mgr.getWorkingPoints()[1].thresholds.size(), 2u);
+  EXPECT_FLOAT_EQ(mgr.getWorkingPoints()[1].thresholds[0], 0.108f);
+  EXPECT_FLOAT_EQ(mgr.getWorkingPoints()[1].thresholds[1], 0.285f);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointEmptyThresholdsThrows) {
+  TaggerWorkingPointManager mgr;
+  EXPECT_THROW(mgr.addWorkingPoint("loose", std::vector<float>{}),
+               std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------
@@ -690,8 +742,152 @@ TEST_F(TaggerWorkingPointManagerTest, CollectProvenanceEntriesNotEmpty) {
   mgr.setInputObjectCollection("goodJets");
 
   const auto entries = mgr.collectProvenanceEntries();
-  EXPECT_NE(entries.find("jet_pt_column"),   entries.end());
+  EXPECT_NE(entries.find("pt_column"),   entries.end());
   EXPECT_NE(entries.find("tagger_column"),   entries.end());
   EXPECT_NE(entries.find("working_points"),  entries.end());
   EXPECT_NE(entries.find("input_object_collection_column"), entries.end());
+}
+
+// ---------------------------------------------------------------------------
+// Multi-score WP category column
+// ---------------------------------------------------------------------------
+
+TEST_F(TaggerWorkingPointManagerTest, MultiScoreWPCategoryColumnFailAll) {
+  // CvsL=0.03, CvsB=0.10 — fails loose WP (needs CvsL>0.042 AND CvsB>0.135).
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumns({"Jet_CvsL", "Jet_CvsB"});
+  mgr->addWorkingPoint("loose",  {0.042f, 0.135f});
+  mgr->addWorkingPoint("medium", {0.108f, 0.285f});
+
+  dm->Define("Jet_CvsL",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.03f}; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("Jet_CvsB",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.10f}; },
+             {"rdfentry_"}, *systematicManager);
+
+  mgr->execute();
+
+  auto cat = dm->getDataFrame()
+                  .Take<ROOT::VecOps::RVec<Int_t>>("Jet_pt_wp_category")
+                  .GetValue();
+  ASSERT_EQ(cat.size(), 1u);
+  EXPECT_EQ(cat[0][0], 0);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, MultiScoreWPCategoryColumnPassLoose) {
+  // CvsL=0.06, CvsB=0.20 — passes loose (>0.042,>0.135) fails medium (>0.108,>0.285).
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumns({"Jet_CvsL", "Jet_CvsB"});
+  mgr->addWorkingPoint("loose",  {0.042f, 0.135f});
+  mgr->addWorkingPoint("medium", {0.108f, 0.285f});
+
+  dm->Define("Jet_CvsL",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.06f}; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("Jet_CvsB",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.20f}; },
+             {"rdfentry_"}, *systematicManager);
+
+  mgr->execute();
+
+  auto cat = dm->getDataFrame()
+                  .Take<ROOT::VecOps::RVec<Int_t>>("Jet_pt_wp_category")
+                  .GetValue();
+  ASSERT_EQ(cat.size(), 1u);
+  EXPECT_EQ(cat[0][0], 1);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, MultiScoreWPCategoryColumnPassAllPartial) {
+  // CvsL=0.15, CvsB=0.20 — passes CvsL for medium but fails CvsB for medium.
+  // Should pass loose (cat=1), not medium.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumns({"Jet_CvsL", "Jet_CvsB"});
+  mgr->addWorkingPoint("loose",  {0.042f, 0.135f});
+  mgr->addWorkingPoint("medium", {0.108f, 0.285f});
+
+  dm->Define("Jet_CvsL",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.15f}; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("Jet_CvsB",
+             // 0.20 < 0.285 → fails medium's CvsB threshold
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.20f}; },
+             {"rdfentry_"}, *systematicManager);
+
+  mgr->execute();
+
+  auto cat = dm->getDataFrame()
+                  .Take<ROOT::VecOps::RVec<Int_t>>("Jet_pt_wp_category")
+                  .GetValue();
+  ASSERT_EQ(cat.size(), 1u);
+  EXPECT_EQ(cat[0][0], 1);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, MultiScoreWPCategoryColumnPassAll) {
+  // CvsL=0.30, CvsB=0.50 — passes both loose and medium thresholds.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumns({"Jet_CvsL", "Jet_CvsB"});
+  mgr->addWorkingPoint("loose",  {0.042f, 0.135f});
+  mgr->addWorkingPoint("medium", {0.108f, 0.285f});
+
+  dm->Define("Jet_CvsL",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.30f}; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("Jet_CvsB",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.50f}; },
+             {"rdfentry_"}, *systematicManager);
+
+  mgr->execute();
+
+  auto cat = dm->getDataFrame()
+                  .Take<ROOT::VecOps::RVec<Int_t>>("Jet_pt_wp_category")
+                  .GetValue();
+  ASSERT_EQ(cat.size(), 1u);
+  EXPECT_EQ(cat[0][0], 2);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, MultiScoreWPCollectionFilter) {
+  // Jet with CvsL=0.06, CvsB=0.20 → passes loose, fails medium.
+  // defineWorkingPointCollection("pass_loose") should include it.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumns({"Jet_CvsL", "Jet_CvsB"});
+  mgr->addWorkingPoint("loose",  {0.042f, 0.135f});
+  mgr->addWorkingPoint("medium", {0.108f, 0.285f});
+
+  dm->Define("Jet_CvsL",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.06f}; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("Jet_CvsB",
+             [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.20f}; },
+             {"rdfentry_"}, *systematicManager);
+
+  defineCollectionColumn(*dm, "goodJets", 50.f);
+  mgr->setInputObjectCollection("goodJets");
+  mgr->defineWorkingPointCollection("pass_loose",  "jets_passLoose");
+  mgr->defineWorkingPointCollection("pass_medium", "jets_passMedium");
+  mgr->execute();
+
+  auto passLoose = dm->getDataFrame()
+                       .Take<PhysicsObjectCollection>("jets_passLoose")
+                       .GetValue();
+  auto passMedium = dm->getDataFrame()
+                        .Take<PhysicsObjectCollection>("jets_passMedium")
+                        .GetValue();
+  EXPECT_EQ(passLoose[0].size(), 1u);   // passes loose → included
+  EXPECT_EQ(passMedium[0].size(), 0u);  // fails medium → excluded
 }

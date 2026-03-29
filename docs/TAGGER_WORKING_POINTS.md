@@ -11,14 +11,15 @@ object collection** — including Jets, FatJets, and Taus.
 1. [Overview](#overview)
 2. [Working-point categories](#working-point-categories)
 3. [Quick start: Jets (b-tagging)](#quick-start-jets-b-tagging)
-4. [Quick start: Taus (DeepTau ID)](#quick-start-taus-deeptau-id)
-5. [API reference](#api-reference)
-6. [Generator-level fraction reweighting](#generator-level-fraction-reweighting)
-7. [Pre-processing: computing fraction histograms](#pre-processing-computing-fraction-histograms)
-8. [Systematic variations and collections](#systematic-variations-and-collections)
-9. [Complete CMS NanoAOD workflow](#complete-cms-nanoaod-workflow)
-10. [Integration with WeightManager](#integration-with-weightmanager)
-11. [Further reading](#further-reading)
+4. [Quick start: Jets (charm-tagging, multi-score)](#quick-start-jets-charm-tagging-multi-score)
+5. [Quick start: Taus (DeepTau ID)](#quick-start-taus-deeptau-id)
+6. [API reference](#api-reference)
+7. [Generator-level fraction reweighting](#generator-level-fraction-reweighting)
+8. [Pre-processing: computing fraction histograms](#pre-processing-computing-fraction-histograms)
+9. [Systematic variations and collections](#systematic-variations-and-collections)
+10. [Complete CMS NanoAOD workflow](#complete-cms-nanoaod-workflow)
+11. [Integration with WeightManager](#integration-with-weightmanager)
+12. [Further reading](#further-reading)
 
 ---
 
@@ -29,12 +30,17 @@ factors** to **any `PhysicsObjectCollection`** with a discriminator score.
 Common use cases include:
 
 - **Jets**: b-tagging (DeepJet, RobustParTAK4, ParticleNet)
+- **Jets (multi-score)**: charm-tagging (CvsL + CvsB simultaneously)
 - **Taus**: DeepTau ID (VSjet, VSe, VSmu discriminators)
 - **FatJets**: Xbb / Xcc boosted taggers
 
 Key features:
 - **Working-point definitions** — register any number of named WPs with score
   thresholds (e.g. loose / medium / tight).
+- **Multi-score WPs** — a WP can require passing thresholds on *multiple*
+  discriminant scores simultaneously (e.g. CMS charm-tagging uses both CvsL and
+  CvsB; see [`setTaggerColumns`](#settaggercolumns) and the vector overload of
+  [`addWorkingPoint`](#addworkingpoint)).
 - **WP category column** — per-object integer category (0 = fail all, …, N = pass all).
 - **Correctionlib SF application** — per-object SFs from a correctionlib payload
   reduced to per-event weight columns.
@@ -63,8 +69,22 @@ WP category column (`<ptColumn>_wp_category` by default) is assigned as:
 | 2        | 0.30 ≤ score < 0.75      | pass medium, fail tight         |
 | 3        | score ≥ 0.75             | pass all WPs                    |
 
-The categories are assigned as the **count of WPs passed** (i.e. the number of
-WP thresholds that are ≤ the object's tagger score).
+The categories are assigned as the **count of consecutive WPs passed** (i.e.
+the count of WP thresholds that are ≤ the object's tagger score, stopping at
+the first failure).
+
+For **multi-score WPs** (e.g. charm-tagging), the same integer encoding applies
+but an object "passes" WP `i` only if **all** its discriminant scores meet their
+respective thresholds for WP `i`:
+
+| category | meaning (CvsL/CvsB charm-tagging with 2 WPs)         |
+|----------|------------------------------------------------------|
+| 0        | fails loose (at least one score below loose thresholds) |
+| 1        | passes loose, fails medium                           |
+| 2        | passes both loose and medium (pass all)              |
+
+The `defineWorkingPointCollection()` selection strings (`pass_<wp>`, `fail_<wp>`,
+`pass_<wp1>_fail_<wp2>`) work identically for both single-score and multi-score WPs.
 
 ---
 
@@ -131,6 +151,71 @@ After `analyzer.save()`:
 
 ---
 
+## Quick start: Jets (charm-tagging, multi-score)
+
+CMS charm-tagging uses **two** discriminants simultaneously: CvsL (charm vs
+light) and CvsB (charm vs b).  Each working point requires *both* discriminants
+to exceed their respective thresholds.  Use `setTaggerColumns` (plural) and the
+vector overload of `addWorkingPoint`.
+
+```cpp
+#include <TaggerWorkingPointManager.h>
+#include <CorrectionManager.h>
+
+auto *ctwm = analyzer.getPlugin<TaggerWorkingPointManager>("ctagManager");
+auto *cm   = analyzer.getPlugin<CorrectionManager>("corrections");
+
+// 1. Declare object kinematic columns.
+ctwm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+
+// 2. Set BOTH charm-tagger score columns (order matters — must match the
+//    threshold order used in addWorkingPoint below).
+ctwm->setTaggerColumns({"Jet_btagDeepFlavCvL", "Jet_btagDeepFlavCvB"});
+
+// 3. Register 2D WPs: {CvsL threshold, CvsB threshold}.
+//    An object passes a WP only if ALL its discriminant scores meet their
+//    respective thresholds.  WPs should be defined in globally nested order
+//    (passing tight implies passing medium implies passing loose).
+ctwm->addWorkingPoint("loose",  {0.042f, 0.135f});
+ctwm->addWorkingPoint("medium", {0.108f, 0.285f});
+ctwm->addWorkingPoint("tight",  {0.274f, 0.605f});
+// → execute() will define "Jet_pt_wp_category" (0=fail all, 1=pass loose only,
+//                                                2=pass medium, 3=pass all)
+
+// 4. Declare the input jet collection.
+ctwm->setInputObjectCollection("goodJets");
+
+// 5. Apply charm-tagging SFs from correctionlib.
+ctwm->applyCorrectionlib(*cm, "ctag_sf", {"central"},
+                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
+                          "Jet_btagDeepFlavCvL", "Jet_btagDeepFlavCvB"});
+// → defines "ctag_sf_central_weight"
+
+// 6. Apply systematic sources.
+ctwm->registerSystematicSources("standard",
+    {"Extrap", "Interp", "LHEScaleWeight_muF", "LHEScaleWeight_muR",
+     "PSWeight_ISR", "PSWeight_FSR", "PUWeight", "StatCsJet", "StatLJet"});
+ctwm->applySystematicSet(*cm, "ctag_sf", "standard",
+                         {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
+                          "Jet_btagDeepFlavCvL", "Jet_btagDeepFlavCvB"});
+
+// 7. Define WP-filtered jet collections.
+ctwm->defineWorkingPointCollection("pass_medium",      "goodJets_cmedium");
+ctwm->defineWorkingPointCollection("fail_loose",       "goodJets_cfail");
+ctwm->defineWorkingPointCollection("pass_loose_fail_medium", "goodJets_cloose_notM");
+
+// 8. Build systematic variation collections.
+ctwm->defineVariationCollections("goodJets_cmedium", "goodJets_ctag",
+                                  "goodJets_ctag_variations");
+```
+
+**Note:** For multi-score WPs, `defineFractionHistograms()` fills the histogram
+of the first discriminant (CvsL in this case).  If you need separate fraction
+histograms for each discriminant, create two separate
+`TaggerWorkingPointManager` instances.
+
+---
+
 ## Quick start: Taus (DeepTau ID)
 
 The same plugin works identically for taus — the only difference is the
@@ -180,7 +265,7 @@ tauTwm->defineVariationCollections("goodTaus_medium", "goodTaus_id",
 
 ### `setObjectColumns(pt, eta, phi, mass)`
 
-Declare the input jet kinematic column names.  The `pt` column must not be
+Declare the input object kinematic column names.  The `pt` column must not be
 empty; `mass` may be empty to disable mass handling.
 
 ```cpp
@@ -189,17 +274,33 @@ twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
 
 ### `setTaggerColumn(taggerScoreColumn)`
 
-Declare the per-object tagger discriminator score column (type `RVec<Float_t>`).
-This column is used in `execute()` to compute the per-object WP category.
+Declare a **single** per-object tagger discriminator score column
+(type `RVec<Float_t>`).  Shorthand for `setTaggerColumns({taggerScoreColumn})`.
 
 ```cpp
 twm->setTaggerColumn("Jet_btagDeepFlavB");
 ```
 
-### `addWorkingPoint(name, threshold)`
+### `setTaggerColumns(taggerScoreColumns)`
 
-Register a named WP with a score threshold.  WPs must be added in **ascending
-threshold order**.
+Declare **multiple** per-object tagger discriminator score columns for
+multi-score working points.  Each column must be `RVec<Float_t>`.  The column
+order here must match the threshold order in `addWorkingPoint`.
+
+```cpp
+// Charm-tagging: both CvsL and CvsB required.
+ctwm->setTaggerColumns({"Jet_btagDeepFlavCvL", "Jet_btagDeepFlavCvB"});
+```
+
+Throws:
+- `std::invalid_argument` if the list is empty or any element is empty.
+
+### `addWorkingPoint(name, threshold)` / `addWorkingPoint(name, thresholds)`
+
+Register a named working point.
+
+**Single-score** (float overload) — WPs must be added in **ascending threshold
+order**:
 
 ```cpp
 twm->addWorkingPoint("loose",  0.0521f);
@@ -207,9 +308,23 @@ twm->addWorkingPoint("medium", 0.3033f);
 twm->addWorkingPoint("tight",  0.7489f);
 ```
 
+**Multi-score** (vector overload) — one threshold per discriminant column:
+
+```cpp
+// {CvsL threshold, CvsB threshold} — no ordering constraint enforced.
+ctwm->addWorkingPoint("loose",  {0.042f, 0.135f});
+ctwm->addWorkingPoint("medium", {0.108f, 0.285f});
+ctwm->addWorkingPoint("tight",  {0.274f, 0.605f});
+```
+
+An object passes a multi-score WP only if **all** its discriminant scores are
+≥ the respective threshold.  The WP category column uses the same integer
+encoding as single-score (count of consecutive WPs passed, break on first
+failure).  WPs should be defined in a globally nested order where possible.
+
 Throws:
-- `std::invalid_argument` if name is empty, already registered, or threshold
-  order is violated.
+- `std::invalid_argument` if name is empty, already registered, thresholds
+  vector is empty, or (for single-score) threshold order is violated.
 
 ### `setInputObjectCollection(collectionColumn)`
 

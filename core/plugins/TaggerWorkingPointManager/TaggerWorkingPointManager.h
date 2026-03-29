@@ -29,12 +29,16 @@ class Analyzer;
 /**
  * @brief A single working-point definition for a tagger discriminator.
  *
- * Working points are ordered by threshold (ascending), allowing selection
- * categories such as "pass medium but fail tight".
+ * Working points are ordered (ascending), allowing selection categories such as
+ * "pass medium but fail tight".  For multi-score WPs (e.g. charm-tagging with
+ * CvsL and CvsB), @p thresholds holds one threshold per discriminant column
+ * in the same order as `setTaggerColumns()`.  For single-score WPs there is
+ * exactly one element.
  */
 struct WorkingPointEntry {
-  std::string name;    ///< Human-readable label (e.g. "loose", "medium", "tight")
-  float threshold;     ///< Discriminator score threshold (score >= threshold = pass)
+  std::string name;                ///< Human-readable label (e.g. "loose", "medium", "tight")
+  std::vector<float> thresholds;  ///< Per-discriminant score thresholds; an object passes this WP
+                                   ///< only if ALL scores meet their respective thresholds.
 };
 
 /**
@@ -62,9 +66,9 @@ struct TaggingVariationEntry {
  *
  * | Type            | Meaning                                          |
  * |-----------------|--------------------------------------------------|
- * | PassWP          | jet passes at least one named WP                 |
- * | FailWP          | jet fails a named WP (below its threshold)       |
- * | PassRangeWP     | jet passes lower WP but fails upper WP           |
+ * | PassWP          | object passes at least one named WP              |
+ * | FailWP          | object fails a named WP (below its threshold)    |
+ * | PassRangeWP     | object passes lower WP but fails upper WP        |
  *
  * @see TaggerWorkingPointManager::defineWorkingPointCollection
  */
@@ -90,12 +94,17 @@ struct WPCollectionSelection {
  * **any physics object** with a tagger discriminator — including jets, taus,
  * and fat-jets.  Common use cases include:
  *  - **Jets**: b-tagging (DeepJet, RobustParTAK4, ParticleNet)
+ *  - **Jets (multi-score)**: charm-tagging (CvsL + CvsB simultaneously)
  *  - **Taus**: DeepTau ID (VSe, VSmu, VSjet discriminators)
  *  - **Fat jets**: Xbb / Xcc boosted taggers
  *
  * The plugin supports:
  *  - **Working-point definitions**: declare any number of named WPs with
  *    score thresholds (e.g. loose/medium/tight).
+ *  - **Multi-score WPs**: a single WP can require passing thresholds on
+ *    *multiple* discriminants simultaneously (e.g. charm-tagging uses both
+ *    CvsL and CvsB; see setTaggerColumns() and the vector overload of
+ *    addWorkingPoint()).
  *  - **WP category column**: per-object integer encoding which WP range an
  *    object falls into (0 = fail all, 1 = pass lowest, …, N = pass all).
  *  - **Correctionlib scale factors**: apply per-object SFs from a correctionlib
@@ -156,6 +165,31 @@ struct WPCollectionSelection {
  *                                    "goodJets_btag_variations");
  * @endcode
  *
+ * ## Typical usage — Jets (charm-tagging with CvsL + CvsB)
+ * @code
+ *   auto* ctwm = analyzer->getPlugin<TaggerWorkingPointManager>("ctagManager");
+ *
+ *   // 1. Declare kinematic columns.
+ *   ctwm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+ *
+ *   // 2. Declare BOTH charm-tagger score columns (order matters).
+ *   ctwm->setTaggerColumns({"Jet_btagDeepFlavCvL", "Jet_btagDeepFlavCvB"});
+ *
+ *   // 3. Register 2D working points: {CvsL threshold, CvsB threshold}.
+ *   //    An object passes a WP only if BOTH its CvsL and CvsB scores are
+ *   //    at or above the respective thresholds.
+ *   ctwm->addWorkingPoint("loose",  {0.042f, 0.135f});
+ *   ctwm->addWorkingPoint("medium", {0.108f, 0.285f});
+ *   ctwm->addWorkingPoint("tight",  {0.274f, 0.605f});
+ *   // → defines "Jet_pt_wp_category" encoding category 0..3
+ *
+ *   // 4. Set input collection and apply SFs as usual.
+ *   ctwm->setInputObjectCollection("goodJets");
+ *   ctwm->applyCorrectionlib(*cm, "ctag_sf", {"central"},
+ *                            {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
+ *                             "Jet_btagDeepFlavCvL", "Jet_btagDeepFlavCvB"});
+ * @endcode
+ *
  * ## Typical usage — Taus (DeepTau ID)
  * @code
  *   auto* tauTwm = analyzer->getPlugin<TaggerWorkingPointManager>("tauIdManager");
@@ -199,6 +233,11 @@ struct WPCollectionSelection {
  * |    1     | 0.05 ≤ score < 0.3  (pass loose, fail medium) |
  * |    2     | 0.3  ≤ score < 0.75 (pass medium, fail tight) |
  * |    3     | score ≥ 0.75 (pass all WPs / pass tight)  |
+ *
+ * For multi-score WPs (e.g. charm tagging), an object passes WP `i` only if
+ * **all** its discriminant scores meet the respective thresholds for WP `i`.
+ * The category is still the count of consecutive WPs passed (break on first
+ * failure), so WPs should be defined in globally nested order if possible.
  *
  * Selection expressions for defineWorkingPointCollection():
  * | string                       | objects kept                      |
@@ -262,30 +301,46 @@ public:
   // -------------------------------------------------------------------------
 
   /**
-   * @brief Set the per-object tagger discriminator score column.
+   * @brief Set the per-object tagger discriminator score column (single-score).
    *
-   * The column must be of type RVec<Float_t> with one entry per object.
-   * It is used in execute() to build the per-object WP category column
-   * (`<ptColumn>_wp_category`).
+   * Shorthand for `setTaggerColumns({taggerScoreColumn})`.  The column must be
+   * of type `RVec<Float_t>` with one entry per object.
    *
    * @param taggerScoreColumn  RDF column name.
    * @throws std::invalid_argument if empty.
    */
   void setTaggerColumn(const std::string &taggerScoreColumn);
 
+  /**
+   * @brief Set multiple per-object tagger discriminator score columns.
+   *
+   * Use this for multi-score WPs such as CMS charm-tagging where both CvsL and
+   * CvsB are required.  Each column must be of type `RVec<Float_t>` with one
+   * entry per object.  The order of columns here must match the order of
+   * threshold values passed to the vector overload of addWorkingPoint().
+   *
+   * @code
+   *   ctwm->setTaggerColumns({"Jet_btagDeepFlavCvL", "Jet_btagDeepFlavCvB"});
+   * @endcode
+   *
+   * @param taggerScoreColumns  Ordered list of RDF column names (all non-empty).
+   * @throws std::invalid_argument if the list is empty or any element is empty.
+   */
+  void setTaggerColumns(const std::vector<std::string> &taggerScoreColumns);
+
   // -------------------------------------------------------------------------
   // Working-point registration
   // -------------------------------------------------------------------------
 
   /**
-   * @brief Register a named working point with its score threshold.
+   * @brief Register a named working point with a single-score threshold.
    *
-   * Working points must be added in order of *increasing* threshold so that
-   * the category encoding is well-defined:
+   * Shorthand for `addWorkingPoint(name, {threshold})`.  Working points must
+   * be added in strictly *increasing* threshold order:
    * @code
-   *   jtm->addWorkingPoint("loose",  0.0521f);  // threshold 0
-   *   jtm->addWorkingPoint("medium", 0.3033f);  // threshold 1
-   *   jtm->addWorkingPoint("tight",  0.7489f);  // threshold 2
+   *   twm->addWorkingPoint("loose",  0.0521f);
+   *   twm->addWorkingPoint("medium", 0.3033f);
+   *   twm->addWorkingPoint("tight",  0.7489f);
    * @endcode
    *
    * @param name       Human-readable WP label (must be unique, non-empty).
@@ -293,9 +348,36 @@ public:
    *
    * @throws std::invalid_argument if @p name is empty, already registered,
    *         or if the threshold is not strictly greater than the previously
-   *         registered WP threshold.
+   *         registered single-score WP threshold.
    */
   void addWorkingPoint(const std::string &name, float threshold);
+
+  /**
+   * @brief Register a named working point with per-discriminant thresholds.
+   *
+   * For multi-score WPs the @p thresholds vector must have one entry for each
+   * tagger column registered via setTaggerColumns() (if setTaggerColumns() has
+   * already been called; otherwise this is validated lazily in execute()).
+   * An object passes this WP only if **all** its discriminant scores are ≥ the
+   * respective threshold.
+   *
+   * @code
+   *   // CvsL threshold = 0.108, CvsB threshold = 0.285
+   *   ctwm->addWorkingPoint("medium", {0.108f, 0.285f});
+   * @endcode
+   *
+   * For single-score WPs (thresholds.size() == 1), the same ascending-order
+   * constraint is enforced as for the single-float overload.  For multi-score
+   * WPs the ordering check is not enforced (user responsibility).
+   *
+   * @param name        Human-readable WP label (must be unique, non-empty).
+   * @param thresholds  Per-discriminant score thresholds (must be non-empty).
+   *
+   * @throws std::invalid_argument if @p name is empty, already registered, or
+   *         if @p thresholds is empty.
+   */
+  void addWorkingPoint(const std::string &name,
+                       const std::vector<float> &thresholds);
 
   // -------------------------------------------------------------------------
   // Input collection
@@ -541,8 +623,8 @@ public:
    *
    * @throws std::invalid_argument if @p outputPrefix is empty, or if either
    *         bin-edge vector has fewer than 2 elements.
-   * @throws std::runtime_error    if setTaggerColumn() or setObjectColumns() was
-   *         not called, or if setInputObjectCollection() was not called.
+   * @throws std::runtime_error    if setTaggerColumn(s)() or setObjectColumns()
+   *         was not called, or if setInputObjectCollection() was not called.
    */
   void defineFractionHistograms(const std::string &outputPrefix,
                                  const std::vector<float> &ptBinEdges,
@@ -553,8 +635,14 @@ public:
   // Accessors
   // -------------------------------------------------------------------------
 
-  /// Return the tagger score column name.
-  const std::string &getTaggerColumn() const { return taggerColumn_m; }
+  /// Return the first (or only) tagger score column name.
+  const std::string &getTaggerColumn() const {
+    static const std::string empty;
+    return taggerColumns_m.empty() ? empty : taggerColumns_m[0];
+  }
+
+  /// Return all tagger score column names.
+  const std::vector<std::string> &getTaggerColumns() const { return taggerColumns_m; }
 
   /// Return the registered working points.
   const std::vector<WorkingPointEntry> &getWorkingPoints() const { return workingPoints_m; }
@@ -584,6 +672,7 @@ public:
    *
    * Execution order:
    *  1. Per-object WP category column (`<ptColumn>_wp_category`).
+   *     For multi-score WPs, an intermediate packed-scores column is created.
    *  2. Each scheduled SF weight column (from applyCorrectionlib / applySystematicSet).
    *  3. Each WP-filtered PhysicsObjectCollection column.
    *  4. Each variation-collection step.
@@ -613,19 +702,19 @@ private:
   ILogger *logger_m = nullptr;
   IOutputSink *metaSink_m = nullptr;
 
-  // ---- Jet kinematic columns ----------------------------------------------
+  // ---- Object kinematic columns -------------------------------------------
   std::string ptColumn_m;
   std::string etaColumn_m;
   std::string phiColumn_m;
   std::string massColumn_m;
 
-  // ---- Tagger column ------------------------------------------------------
-  std::string taggerColumn_m;
+  // ---- Tagger columns (one for single-score, two+ for multi-score) --------
+  std::vector<std::string> taggerColumns_m;
 
-  // ---- Working points (ordered ascending by threshold) --------------------
+  // ---- Working points (ordered ascending) ---------------------------------
   std::vector<WorkingPointEntry> workingPoints_m;
 
-  // ---- Input object collection -----------------------------------------------
+  // ---- Input object collection --------------------------------------------
   std::string inputObjectCollectionColumn_m;
 
   // ---- Fraction correction ------------------------------------------------
@@ -690,9 +779,12 @@ private:
 
   /// Build a per-event weight column from a per-object SF column.
   /// If fraction correction is configured, divides each per-object SF by the
-  /// MC fraction for the jet's WP category.
+  /// MC fraction for the object's WP category.
   void defineWeightColumn(const std::string &perObjectSFColumn,
                           const std::string &outputWeightColumn);
+
+  /// Define the per-object WP category column (handles single- and multi-score).
+  void defineWPCategoryColumn();
 };
 
 #endif // TAGGERWORKINGPOINTMANAGER_H_INCLUDED
