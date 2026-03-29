@@ -835,7 +835,8 @@ void TaggerWorkingPointManager::execute() {
           {inputCol, catCol});
       dataManager_m->setDataFrame(newDf);
 
-    } else { // AllObjects: copy input collection unchanged
+    } else if (sel.type == WPCollectionSelection::Type::AllObjects) {
+      // AllObjects: copy input collection unchanged (no WP filter).
       auto newDf = df.Define(
           outputCol,
           [](const PhysicsObjectCollection &col) -> PhysicsObjectCollection {
@@ -1144,7 +1145,8 @@ void TaggerWorkingPointManager::execute() {
               dataManager_m->setDataFrame(newDfCat);
             }
 
-            // N+1 bins from 0 to N+1 to cover categories 0..N.
+            // N+1 bins from 0 to N+1: one bin per category (0 = fail all,
+            // 1..N = count of WPs passed).  The +1 accounts for category 0.
             const int nCatBins =
                 static_cast<int>(workingPoints_m.size()) + 1;
             ROOT::RDF::RNode dfCatHist = dataManager_m->getDataFrame();

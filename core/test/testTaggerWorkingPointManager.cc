@@ -901,7 +901,8 @@ TEST_F(TaggerWorkingPointManagerTest, MultiScoreWPCollectionFilter) {
 // ---------------------------------------------------------------------------
 
 TEST_F(TaggerWorkingPointManagerTest, UnfilteredCollectionKeepsAllObjects) {
-  // 1 event with a single jet — unfiltered collection should have 1 jet.
+  // 1 event with a single jet (score 0.01, fails medium).
+  // Unfiltered collection must keep it; WP category column must equal 0.
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);
 
@@ -916,15 +917,24 @@ TEST_F(TaggerWorkingPointManagerTest, UnfilteredCollectionKeepsAllObjects) {
       [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.01f}; },
       {"rdfentry_"}, *systematicManager);
 
-  // Even though score 0.01 fails medium, unfiltered collection keeps all.
   mgr->defineUnfilteredCollection("allJets_annotated");
   mgr->execute();
 
+  // Unfiltered: all jets kept regardless of WP threshold.
   auto result = dm->getDataFrame()
                     .Take<PhysicsObjectCollection>("allJets_annotated")
                     .GetValue();
   ASSERT_EQ(result.size(), 1u);
   EXPECT_EQ(result[0].size(), 1u);  // unchanged — all jets kept
+
+  // WP category column must also be computed (score 0.01 → fails medium → cat 0).
+  auto catResult = dm->getDataFrame()
+                       .Take<ROOT::VecOps::RVec<Int_t>>(
+                           mgr->getWPCategoryColumn())
+                       .GetValue();
+  ASSERT_EQ(catResult.size(), 1u);
+  ASSERT_EQ(catResult[0].size(), 1u);
+  EXPECT_EQ(catResult[0][0], 0);  // fails medium → category 0
 }
 
 TEST_F(TaggerWorkingPointManagerTest,
