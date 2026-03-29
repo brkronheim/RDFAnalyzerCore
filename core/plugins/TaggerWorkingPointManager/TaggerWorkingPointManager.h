@@ -21,6 +21,7 @@
 #include <TH1D.h>
 
 class Analyzer;
+class WeightManager;
 
 // ---------------------------------------------------------------------------
 // Supporting structs
@@ -73,7 +74,7 @@ struct TaggingVariationEntry {
  * @see TaggerWorkingPointManager::defineWorkingPointCollection
  */
 struct WPCollectionSelection {
-  enum class Type { PassWP, FailWP, PassRangeWP };
+  enum class Type { PassWP, FailWP, PassRangeWP, AllObjects };
   Type type;
   std::string wpNameLower;  ///< Name of the lower (or single) WP
   std::string wpNameUpper;  ///< Name of the upper WP (only for PassRangeWP)
@@ -632,6 +633,104 @@ public:
                                  const std::string &flavourColumn = "");
 
   // -------------------------------------------------------------------------
+  // Unfiltered collection (all objects, annotated with WP category)
+  // -------------------------------------------------------------------------
+
+  /**
+   * @brief Schedule definition of a PhysicsObjectCollection containing all
+   *        input objects (no WP filter applied).
+   *
+   * The WP category column is still computed for every object by the existing
+   * execute() logic, so downstream users can slice on category themselves.
+   * This is useful when you want all objects annotated with their WP category
+   * rather than a pre-filtered sub-collection.
+   *
+   * @param outputCollectionColumn  Output RDF column name.
+   *
+   * @throws std::invalid_argument if @p outputCollectionColumn is empty.
+   * @throws std::runtime_error    if setInputObjectCollection() was not called.
+   */
+  void defineUnfilteredCollection(const std::string &outputCollectionColumn);
+
+  // -------------------------------------------------------------------------
+  // Config-file driven setup
+  // -------------------------------------------------------------------------
+
+  /**
+   * @brief Stores correction details for deferred application via
+   *        applyConfiguredCorrections().
+   */
+  struct ConfiguredCorrection {
+    std::string correctionName;
+    std::vector<std::string> stringArgs;
+    std::vector<std::string> inputColumns;
+  };
+
+  /**
+   * @brief Set the plugin role used to construct the config-file key.
+   *
+   * When setupFromConfigFile() is called it looks for
+   * `<role>Config` first, then `taggerConfig`.  Default role is
+   * `"taggerWorkingPoints"`.
+   *
+   * @param role  Role string (e.g. `"btagManager"`, `"ctagManager"`).
+   */
+  void setRole(const std::string &role) { role_m = role; }
+
+  /// Return the current plugin role string.
+  const std::string &getRole() const { return role_m; }
+
+  /**
+   * @brief Apply all corrections stored by setupFromConfigFile() to @p cm.
+   *
+   * Call this after setupFromConfigFile() and before execute() to register
+   * the correctionlib scale-factor payloads that were declared in the config
+   * file.
+   *
+   * @param cm  CorrectionManager to apply corrections on.
+   */
+  void applyConfiguredCorrections(CorrectionManager &cm);
+
+  /**
+   * @brief Return the list of corrections declared in the config file.
+   *
+   * Useful for iterating or auditing without triggering CorrectionManager.
+   */
+  const std::vector<ConfiguredCorrection> &getConfiguredCorrections() const {
+    return configuredCorrections_m;
+  }
+
+  // -------------------------------------------------------------------------
+  // WeightManager integration
+  // -------------------------------------------------------------------------
+
+  /**
+   * @brief Register the nominal weight column and all systematic variation
+   *        weight columns with a WeightManager instance.
+   *
+   * Convenience wrapper that calls:
+   *  - `wm.addScaleFactor(nominalSFName, nominalWeightColumn)`.
+   *  - For each variation registered via addVariation() / applySystematicSet(),
+   *    calls `wm.addWeightVariation(var.name, var.upWeightColumn,
+   *    var.downWeightColumn)` when @p registerVariations is @c true.
+   *
+   * @code
+   *   // After applyCorrectionlib() and applySystematicSet():
+   *   twm->registerWeightsWithWeightManager(*wm, "btag",
+   *                                          "deepjet_sf_central_weight");
+   * @endcode
+   *
+   * @param wm                   WeightManager to register with.
+   * @param nominalSFName        Human-readable name for the nominal SF.
+   * @param nominalWeightColumn  Dataframe column name for the nominal weight.
+   * @param registerVariations   If true, also register all known variations.
+   */
+  void registerWeightsWithWeightManager(WeightManager &wm,
+                                         const std::string &nominalSFName,
+                                         const std::string &nominalWeightColumn,
+                                         bool registerVariations = true);
+
+  // -------------------------------------------------------------------------
   // Accessors
   // -------------------------------------------------------------------------
 
@@ -664,8 +763,8 @@ public:
 
   void setContext(ManagerContext &ctx) override;
 
-  /** No-op: corrections are registered programmatically. */
-  void setupFromConfigFile() override {}
+  /** Read tagger WP configuration from the config file (optional). */
+  void setupFromConfigFile() override;
 
   /**
    * @brief Define all WP-category, weight, and filtered-collection columns.
@@ -765,6 +864,10 @@ private:
     ROOT::RDF::RResultPtr<TH1D> result;
   };
   std::vector<FractionHistResult> fractionHistResults_m;
+
+  // ---- Config-file setup --------------------------------------------------
+  std::string role_m = "taggerWorkingPoints";
+  std::vector<ConfiguredCorrection> configuredCorrections_m;
 
   // ---- Internal helpers ---------------------------------------------------
 

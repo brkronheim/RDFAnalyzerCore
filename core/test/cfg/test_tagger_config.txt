@@ -1,0 +1,2 @@
+type=working_points taggerColumns=Jet_btagDeepFlavB wpNames=loose,medium,tight wpThresholds=0.0521,0.3033,0.7489
+type=systematics setName=standard sources=hf,lf,hfstats1

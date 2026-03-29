@@ -19,7 +19,9 @@ object collection** — including Jets, FatJets, and Taus.
 9. [Systematic variations and collections](#systematic-variations-and-collections)
 10. [Complete CMS NanoAOD workflow](#complete-cms-nanoaod-workflow)
 11. [Integration with WeightManager](#integration-with-weightmanager)
-12. [Further reading](#further-reading)
+12. [Config-file driven setup](#config-file-driven-setup)
+13. [No-filter annotated collection](#no-filter-annotated-collection)
+14. [Further reading](#further-reading)
 
 ---
 
@@ -512,13 +514,22 @@ twm->defineFractionHistograms(
     "Jet_hadronFlavour");                 // optional flavour column
 ```
 
-After running over the MC sample, the metadata ROOT file will contain
-histograms named `deepjet_frac_pt<I>_eta<J>_<flavour>` under the
-`tagger_fractions/` directory.  Each histogram records the tagger-score
-distribution for jets in that (pT, η, flavour) bin.
+After running over the MC sample, the metadata ROOT file will contain two
+types of histograms under the `tagger_fractions/` directory:
 
-**Converting to fractions:** From each histogram, integrate the bins
-corresponding to each WP category range to obtain the fraction:
+1. **Score histograms** — named `deepjet_frac_pt<I>_eta<J>[_<flavour>]`:
+   record the tagger-score distribution (x-axis [0,1]) for jets in each
+   (pT, η, flavour) bin.  These are used to derive WP fractions analytically.
+
+2. **Category histograms** — named `deepjet_frac_cat_pt<I>_eta<J>[_<flavour>]`
+   (always produced when working points are defined): record the WP category
+   distribution (integers 0..N) directly.  Each bin corresponds to one WP
+   category, making it trivial to read off category fractions without
+   re-binning the score histograms.
+
+**Converting score histograms to fractions:** From each score histogram,
+integrate the bins corresponding to each WP category range to obtain the
+fraction:
 
 ```python
 import uproot
@@ -535,6 +546,16 @@ with uproot.open("meta.root") as f:
     cat1 = counts[(edges[:-1] >= wp_loose) & (edges[:-1] < wp_medium)].sum() / total
     cat2 = counts[(edges[:-1] >= wp_medium) & (edges[:-1] < wp_tight)].sum() / total
     cat3 = counts[edges[:-1] >= wp_tight].sum() / total
+```
+
+**Using category histograms directly:**
+
+```python
+with uproot.open("meta.root") as f:
+    hcat = f["tagger_fractions/deepjet_frac_cat_pt2_eta0_b"]
+    counts, _ = hcat.to_numpy()   # bins: [0, 1, 2, 3] for 3 WPs
+    total = counts.sum()
+    fractions = counts / total    # fractions[i] = fraction in category i
 ```
 
 These fractions can then be stored in a correctionlib JSON and consumed by
@@ -681,7 +702,9 @@ twm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
 ## Integration with WeightManager
 
 The per-event weight columns produced by `TaggerWorkingPointManager` are
-designed to plug directly into `WeightManager`:
+designed to plug directly into `WeightManager`.
+
+### Manual registration
 
 ```cpp
 // Nominal SF as a scale factor:
@@ -693,8 +716,108 @@ wm->addWeightVariation("btagHF",
     "deepjet_sf_hf_down_weight");
 ```
 
-This integrates the b-tag SFs into the global event weight together with other
-corrections (muon/electron SFs, pileup weights, etc.).
+### Convenience method
+
+`registerWeightsWithWeightManager()` does both steps in one call:
+
+```cpp
+// After applyCorrectionlib() and applySystematicSet():
+twm->registerWeightsWithWeightManager(*wm,
+    "btag",                       // human-readable SF name
+    "deepjet_sf_central_weight"); // nominal weight column
+// Automatically calls wm->addWeightVariation() for every registered
+// variation (hf, lf, hfstats1, …).
+```
+
+This integrates the b-tag SFs into the global event weight together with
+other corrections (muon/electron SFs, pileup weights, etc.).
+
+---
+
+## Config-file driven setup
+
+`setupFromConfigFile()` reads optional tagger configuration from a file
+pointed to by the `<role>Config` or `taggerConfig` key in the analysis
+config.  If the key is absent, the method returns silently — config is
+entirely optional and programmatic setup continues to work unchanged.
+
+### Config file format
+
+Each line defines one setup block using space-separated `key=value` pairs:
+
+```
+# Working-point block (1D — single tagger column)
+type=working_points taggerColumns=Jet_btagDeepFlavB wpNames=loose,medium,tight wpThresholds=0.0521,0.3033,0.7489
+
+# Working-point block (ND — multi-score, colon-separated thresholds)
+type=working_points taggerColumns=Jet_btagDeepFlavCvL,Jet_btagDeepFlavCvB wpNames=loose,medium,tight wpThresholds=0.042:0.135,0.108:0.285,0.274:0.605
+
+# Correction block (stored for deferred application)
+type=correction correctionName=deepjet_sf stringArgs=central inputColumns=Jet_hadronFlavour,Jet_eta,Jet_pt,Jet_btagDeepFlavB
+
+# Systematics block
+type=systematics setName=standard sources=hf,lf,hfstats1,hfstats2,lfstats1,lfstats2,cferr1,cferr2
+```
+
+### Role-based config key lookup
+
+When multiple tagger managers exist (e.g. b-tag and c-tag), use
+`setRole()` to give each a distinct lookup key:
+
+```cpp
+btwm->setRole("btag");  // looks for "btagConfig" in the analysis config
+ctwm->setRole("ctag");  // looks for "ctagConfig"
+```
+
+Then in the analysis config:
+```
+btagConfig=cfg/btag_config.txt
+ctagConfig=cfg/ctag_config.txt
+```
+
+### Applying deferred corrections
+
+Correction blocks are stored and applied later when a `CorrectionManager`
+is available:
+
+```cpp
+twm->setupFromConfigFile();   // parses config, stores correction entries
+// ... register corrections in cm ...
+twm->applyConfiguredCorrections(*cm);  // calls applyCorrectionlib() for each
+```
+
+Alternatively, iterate manually:
+```cpp
+for (const auto &cc : twm->getConfiguredCorrections()) {
+    cm->registerCorrection(cc.correctionName, ...);
+    twm->applyCorrectionlib(*cm, cc.correctionName, cc.stringArgs, cc.inputColumns);
+}
+```
+
+---
+
+## No-filter annotated collection
+
+`defineUnfilteredCollection()` schedules an output collection that contains
+**all** input objects without any WP filter.  The per-object WP category
+column is still computed (by the normal `execute()` logic), so the objects
+are fully annotated and can be sliced downstream:
+
+```cpp
+twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+twm->setTaggerColumn("Jet_btagDeepFlavB");
+twm->addWorkingPoint("loose",  0.0521f);
+twm->addWorkingPoint("medium", 0.3033f);
+twm->addWorkingPoint("tight",  0.7489f);
+twm->setInputObjectCollection("goodJets");
+
+// All goodJets, annotated with Jet_pt_wp_category:
+twm->defineUnfilteredCollection("allJets_tagged");
+```
+
+After `execute()`, `allJets_tagged` is a `PhysicsObjectCollection`
+identical to `goodJets` in content but with `Jet_pt_wp_category`
+available per-object for downstream use.
 
 ---
 

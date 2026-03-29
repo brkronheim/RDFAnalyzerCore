@@ -1,5 +1,6 @@
 #include <TaggerWorkingPointManager.h>
 #include <NullOutputSink.h>
+#include <WeightManager.h>
 #include <analyzer.h>
 #include <ROOT/RVec.hxx>
 #include <TFile.h>
@@ -331,6 +332,121 @@ void TaggerWorkingPointManager::defineVariationCollections(
         "setInputObjectCollection() first");
   variationCollectionsSteps_m.push_back(
       {nominalCollectionColumn, collectionPrefix, variationMapColumn});
+}
+
+// ---------------------------------------------------------------------------
+// defineUnfilteredCollection
+// ---------------------------------------------------------------------------
+
+void TaggerWorkingPointManager::defineUnfilteredCollection(
+    const std::string &outputCollectionColumn) {
+  if (outputCollectionColumn.empty())
+    throw std::invalid_argument(
+        "TaggerWorkingPointManager::defineUnfilteredCollection: "
+        "outputCollectionColumn must not be empty");
+  if (inputObjectCollectionColumn_m.empty())
+    throw std::runtime_error(
+        "TaggerWorkingPointManager::defineUnfilteredCollection: call "
+        "setInputObjectCollection() first");
+
+  WPCollectionSelection sel;
+  sel.type = WPCollectionSelection::Type::AllObjects;
+  wpCollectionSteps_m.push_back({sel, outputCollectionColumn});
+}
+
+// ---------------------------------------------------------------------------
+// setupFromConfigFile
+// ---------------------------------------------------------------------------
+
+void TaggerWorkingPointManager::setupFromConfigFile() {
+  if (!configManager_m)
+    throw std::runtime_error(
+        "TaggerWorkingPointManager::setupFromConfigFile: context not set");
+
+  // Prefer role-specific key, fall back to generic "taggerConfig".
+  std::string configFile = configManager_m->get(role_m + "Config");
+  if (configFile.empty())
+    configFile = configManager_m->get("taggerConfig");
+  if (configFile.empty())
+    return; // config is optional
+
+  const auto entries =
+      configManager_m->parseMultiKeyConfig(configFile, {"type"});
+
+  for (const auto &entry : entries) {
+    const std::string &blockType = entry.at("type");
+
+    if (blockType == "working_points") {
+      if (entry.count("taggerColumns")) {
+        const auto cols =
+            configManager_m->splitString(entry.at("taggerColumns"), ",");
+        setTaggerColumns(cols);
+      }
+      if (entry.count("wpNames") && entry.count("wpThresholds")) {
+        const auto names =
+            configManager_m->splitString(entry.at("wpNames"), ",");
+        const auto threshStrs =
+            configManager_m->splitString(entry.at("wpThresholds"), ",");
+        for (std::size_t i = 0;
+             i < names.size() && i < threshStrs.size(); ++i) {
+          const auto parts =
+              configManager_m->splitString(threshStrs[i], ":");
+          if (parts.size() == 1) {
+            addWorkingPoint(names[i], std::stof(parts[0]));
+          } else {
+            std::vector<float> thresholds;
+            for (const auto &p : parts)
+              thresholds.push_back(std::stof(p));
+            addWorkingPoint(names[i], thresholds);
+          }
+        }
+      }
+    } else if (blockType == "correction") {
+      ConfiguredCorrection cc;
+      if (entry.count("correctionName"))
+        cc.correctionName = entry.at("correctionName");
+      if (entry.count("stringArgs"))
+        cc.stringArgs =
+            configManager_m->splitString(entry.at("stringArgs"), ",");
+      if (entry.count("inputColumns"))
+        cc.inputColumns =
+            configManager_m->splitString(entry.at("inputColumns"), ",");
+      configuredCorrections_m.push_back(std::move(cc));
+    } else if (blockType == "systematics") {
+      if (entry.count("setName") && entry.count("sources")) {
+        const auto sources =
+            configManager_m->splitString(entry.at("sources"), ",");
+        registerSystematicSources(entry.at("setName"), sources);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// applyConfiguredCorrections
+// ---------------------------------------------------------------------------
+
+void TaggerWorkingPointManager::applyConfiguredCorrections(
+    CorrectionManager &cm) {
+  for (const auto &cc : configuredCorrections_m) {
+    applyCorrectionlib(cm, cc.correctionName, cc.stringArgs, cc.inputColumns);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// registerWeightsWithWeightManager
+// ---------------------------------------------------------------------------
+
+void TaggerWorkingPointManager::registerWeightsWithWeightManager(
+    WeightManager &wm, const std::string &nominalSFName,
+    const std::string &nominalWeightColumn, bool registerVariations) {
+  wm.addScaleFactor(nominalSFName, nominalWeightColumn);
+  if (registerVariations) {
+    for (const auto &var : variations_m) {
+      wm.addWeightVariation(var.name, var.upWeightColumn,
+                            var.downWeightColumn);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -696,7 +812,8 @@ void TaggerWorkingPointManager::execute() {
           {inputCol, catCol});
       dataManager_m->setDataFrame(newDf);
 
-    } else { // PassRangeWP: pass lower WP, fail upper WP
+    } else if (sel.type == WPCollectionSelection::Type::PassRangeWP) {
+      // PassRangeWP: pass lower WP, fail upper WP
       const std::size_t minCat = wpIndex(sel.wpNameLower) + 1;
       const std::size_t maxCat = wpIndex(sel.wpNameUpper); // exclusive upper bound
       auto newDf = df.Define(
@@ -716,6 +833,15 @@ void TaggerWorkingPointManager::execute() {
             return jets.withFilter(mask);
           },
           {inputCol, catCol});
+      dataManager_m->setDataFrame(newDf);
+
+    } else { // AllObjects: copy input collection unchanged
+      auto newDf = df.Define(
+          outputCol,
+          [](const PhysicsObjectCollection &col) -> PhysicsObjectCollection {
+            return col;
+          },
+          {inputCol});
       dataManager_m->setDataFrame(newDf);
     }
   }
@@ -944,6 +1070,91 @@ void TaggerWorkingPointManager::execute() {
               100, 0.0, 1.0);
           auto hPtr = dfHist.Histo1D(model, scoreSelCol);
           fractionHistResults_m.push_back({histName, std::move(hPtr)});
+
+          // Book a 1D histogram of WP category (0..N) — always, when WPs are defined.
+          if (!workingPoints_m.empty()) {
+            const std::string catHistName =
+                cfg.outputPrefix + "_cat_pt" + std::to_string(iPt) +
+                "_eta" + std::to_string(iEta) +
+                (hasFlavour ? "_" + flavourLabels[iFl] : "");
+            const std::string catSelCol = "_frac_cat_" + catHistName;
+            const std::string catColName = wpCategoryColumn();
+
+            if (!hasFlavour) {
+              ROOT::RDF::RNode dfCat = dataManager_m->getDataFrame();
+              auto newDfCat = dfCat.Define(
+                  catSelCol,
+                  [ptLow, ptHigh, etaLow, etaHigh](
+                      const PhysicsObjectCollection &jets,
+                      const ROOT::VecOps::RVec<Int_t> &category)
+                      -> ROOT::VecOps::RVec<Float_t> {
+                    ROOT::VecOps::RVec<Float_t> cats;
+                    for (std::size_t i = 0; i < jets.size(); ++i) {
+                      const Float_t pt =
+                          static_cast<Float_t>(jets.at(i).Pt());
+                      const Float_t eta = static_cast<Float_t>(
+                          std::fabs(jets.at(i).Eta()));
+                      if (pt < ptLow || pt >= ptHigh) continue;
+                      if (eta < etaLow || eta >= etaHigh) continue;
+                      const Int_t idx = jets.index(i);
+                      if (idx >= 0 &&
+                          static_cast<std::size_t>(idx) < category.size())
+                        cats.push_back(static_cast<Float_t>(
+                            category[static_cast<std::size_t>(idx)]));
+                    }
+                    return cats;
+                  },
+                  {collectionCol, catColName});
+              dataManager_m->setDataFrame(newDfCat);
+            } else {
+              ROOT::RDF::RNode dfCat = dataManager_m->getDataFrame();
+              auto newDfCat = dfCat.Define(
+                  catSelCol,
+                  [ptLow, ptHigh, etaLow, etaHigh, flavTarget](
+                      const PhysicsObjectCollection &jets,
+                      const ROOT::VecOps::RVec<Int_t> &category,
+                      const ROOT::VecOps::RVec<Int_t> &flavour)
+                      -> ROOT::VecOps::RVec<Float_t> {
+                    ROOT::VecOps::RVec<Float_t> cats;
+                    for (std::size_t i = 0; i < jets.size(); ++i) {
+                      const Float_t pt =
+                          static_cast<Float_t>(jets.at(i).Pt());
+                      const Float_t eta = static_cast<Float_t>(
+                          std::fabs(jets.at(i).Eta()));
+                      if (pt < ptLow || pt >= ptHigh) continue;
+                      if (eta < etaLow || eta >= etaHigh) continue;
+                      const Int_t idx = jets.index(i);
+                      if (idx < 0 ||
+                          static_cast<std::size_t>(idx) >= category.size())
+                        continue;
+                      const std::size_t j = static_cast<std::size_t>(idx);
+                      const Int_t fl =
+                          (j < flavour.size()) ? flavour[j] : 0;
+                      const bool matchFlavour =
+                          (flavTarget == 5  && fl == 5) ||
+                          (flavTarget == 4  && fl == 4) ||
+                          (flavTarget == -1 && fl != 5 && fl != 4);
+                      if (!matchFlavour) continue;
+                      cats.push_back(static_cast<Float_t>(
+                          category[static_cast<std::size_t>(idx)]));
+                    }
+                    return cats;
+                  },
+                  {collectionCol, catColName, flavCol});
+              dataManager_m->setDataFrame(newDfCat);
+            }
+
+            // N+1 bins from 0 to N+1 to cover categories 0..N.
+            const int nCatBins =
+                static_cast<int>(workingPoints_m.size()) + 1;
+            ROOT::RDF::RNode dfCatHist = dataManager_m->getDataFrame();
+            auto catModel = ROOT::RDF::TH1DModel(
+                catHistName.c_str(),
+                (catHistName + ";WP category;jets").c_str(),
+                nCatBins, 0.0, static_cast<double>(nCatBins));
+            auto catHPtr = dfCatHist.Histo1D(catModel, catSelCol);
+            fractionHistResults_m.push_back({catHistName, std::move(catHPtr)});
+          }
         }
       }
     }

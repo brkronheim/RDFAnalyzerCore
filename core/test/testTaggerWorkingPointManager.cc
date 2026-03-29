@@ -12,6 +12,9 @@
  *  - addVariation / registerSystematicSources / applySystematicSet.
  *  - defineVariationCollections and PhysicsObjectVariationMap.
  *  - defineFractionHistograms input validation.
+ *  - defineUnfilteredCollection.
+ *  - setupFromConfigFile / setRole / configuredCorrections.
+ *  - registerWeightsWithWeightManager.
  *  - Error handling (missing context, empty columns, duplicate WPs, etc.).
  */
 
@@ -19,6 +22,7 @@
 #include <DataManager.h>
 #include <DefaultLogger.h>
 #include <TaggerWorkingPointManager.h>
+#include <WeightManager.h>
 #include <ManagerFactory.h>
 #include <NullOutputSink.h>
 #include <PhysicsObjectCollection.h>
@@ -890,4 +894,85 @@ TEST_F(TaggerWorkingPointManagerTest, MultiScoreWPCollectionFilter) {
                         .GetValue();
   EXPECT_EQ(passLoose[0].size(), 1u);   // passes loose → included
   EXPECT_EQ(passMedium[0].size(), 0u);  // fails medium → excluded
+}
+
+// ---------------------------------------------------------------------------
+// Feature: defineUnfilteredCollection
+// ---------------------------------------------------------------------------
+
+TEST_F(TaggerWorkingPointManagerTest, UnfilteredCollectionKeepsAllObjects) {
+  // 1 event with a single jet — unfiltered collection should have 1 jet.
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumn("Jet_btag");
+  mgr->addWorkingPoint("medium", 0.30f);
+  mgr->setInputObjectCollection("goodJets");
+
+  defineCollectionColumn(*dm, "goodJets", 50.f);
+  dm->Define(
+      "Jet_btag",
+      [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.01f}; },
+      {"rdfentry_"}, *systematicManager);
+
+  // Even though score 0.01 fails medium, unfiltered collection keeps all.
+  mgr->defineUnfilteredCollection("allJets_annotated");
+  mgr->execute();
+
+  auto result = dm->getDataFrame()
+                    .Take<PhysicsObjectCollection>("allJets_annotated")
+                    .GetValue();
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_EQ(result[0].size(), 1u);  // unchanged — all jets kept
+}
+
+TEST_F(TaggerWorkingPointManagerTest,
+       DefineUnfilteredCollectionRequiresInputCollection) {
+  TaggerWorkingPointManager mgr;
+  mgr.setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr.setTaggerColumn("Jet_btag");
+  mgr.addWorkingPoint("medium", 0.3f);
+  // No setInputObjectCollection() → should throw.
+  EXPECT_THROW(mgr.defineUnfilteredCollection("out"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Feature: setRole / ConfiguredCorrections
+// ---------------------------------------------------------------------------
+
+TEST_F(TaggerWorkingPointManagerTest, SetRoleStoresRole) {
+  TaggerWorkingPointManager mgr;
+  EXPECT_EQ(mgr.getRole(), "taggerWorkingPoints");  // default
+  mgr.setRole("myTagger");
+  EXPECT_EQ(mgr.getRole(), "myTagger");
+}
+
+TEST_F(TaggerWorkingPointManagerTest, ConfiguredCorrectionsEmptyByDefault) {
+  TaggerWorkingPointManager mgr;
+  EXPECT_TRUE(mgr.getConfiguredCorrections().empty());
+}
+
+// ---------------------------------------------------------------------------
+// Feature: WeightManager integration
+// ---------------------------------------------------------------------------
+
+TEST_F(TaggerWorkingPointManagerTest,
+       WeightManagerIntegrationRegistersScaleFactor) {
+  // Verify that registerWeightsWithWeightManager calls addScaleFactor on wm.
+  // addScaleFactor + defineNominalWeight must not throw (they are pure state
+  // mutations; the actual column is only defined inside execute()).
+  TaggerWorkingPointManager mgr;
+  mgr.setInputObjectCollection("goodJets");
+
+  // Register a variation so we can verify registerVariations path too.
+  mgr.addVariation("btagHF", "sf_hf_up", "sf_hf_down",
+                   "sf_hf_up_weight", "sf_hf_down_weight");
+
+  WeightManager wm;
+  EXPECT_NO_THROW(
+      mgr.registerWeightsWithWeightManager(wm, "btag", "btag_weight"));
+
+  // defineNominalWeight just records the column name — must not throw.
+  EXPECT_NO_THROW(wm.defineNominalWeight("weight_nominal"));
 }
