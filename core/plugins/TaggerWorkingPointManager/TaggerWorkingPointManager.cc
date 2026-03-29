@@ -1147,8 +1147,8 @@ void TaggerWorkingPointManager::execute() {
 
             // N+1 bins from 0 to N+1: one bin per category (0 = fail all,
             // 1..N = count of WPs passed).  The +1 accounts for category 0.
-            const int nCatBins =
-                static_cast<int>(workingPoints_m.size()) + 1;
+            const std::size_t nWPs = workingPoints_m.size();
+            const int nCatBins = static_cast<int>(nWPs) + 1;
             ROOT::RDF::RNode dfCatHist = dataManager_m->getDataFrame();
             auto catModel = ROOT::RDF::TH1DModel(
                 catHistName.c_str(),
