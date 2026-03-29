@@ -119,6 +119,31 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
             "variations": list,
         },
     },
+    "TaggerWorkingPointManager": {
+        "required_keys": [],
+        "optional_keys": [
+            "jet_columns",
+            "tagger_column",
+            "working_points",
+            "input_collection",
+            "corrections",
+            "fraction_correction",
+            "systematic_sets",
+            "variations",
+            "wp_collections",
+        ],
+        "key_types": {
+            "jet_columns": dict,
+            "tagger_column": str,
+            "working_points": list,
+            "input_collection": str,
+            "corrections": list,
+            "fraction_correction": dict,
+            "systematic_sets": dict,
+            "variations": list,
+            "wp_collections": list,
+        },
+    },
 }
 
 

@@ -130,6 +130,10 @@ add_executable(testJetEnergyScaleManager testJetEnergyScaleManager.cc)
 target_link_libraries(testJetEnergyScaleManager coreAll gtest gtest_main)
 add_test(NAME JetEnergyScaleManagerTest COMMAND testJetEnergyScaleManager)
 
+add_executable(testTaggerWorkingPointManager testTaggerWorkingPointManager.cc)
+target_link_libraries(testTaggerWorkingPointManager coreAll gtest gtest_main)
+add_test(NAME TaggerWorkingPointManagerTest COMMAND testTaggerWorkingPointManager)
+
 add_executable(testLeptonPhotonEnergyManagers testLeptonPhotonEnergyManagers.cc)
 target_link_libraries(testLeptonPhotonEnergyManagers coreAll gtest gtest_main)
 add_test(NAME LeptonPhotonEnergyManagersTest COMMAND testLeptonPhotonEnergyManagers)
