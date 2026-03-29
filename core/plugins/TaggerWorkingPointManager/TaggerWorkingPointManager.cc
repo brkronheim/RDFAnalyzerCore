@@ -569,8 +569,15 @@ void TaggerWorkingPointManager::defineWPCategoryColumn() {
           [](ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> packed,
              const ROOT::VecOps::RVec<Float_t> &s)
               -> ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> {
-            const std::size_t n = std::min(packed.size(), s.size());
-            for (std::size_t i = 0; i < n; ++i)
+            // Both columns must have the same number of objects per event.
+            // Size mismatches indicate a configuration error (mismatched
+            // tagger columns or incorrectly sized branches).
+            if (packed.size() != s.size())
+              throw std::runtime_error(
+                  "TaggerWorkingPointManager: tagger score columns have "
+                  "different lengths per event — ensure all setTaggerColumns() "
+                  "columns have one entry per object");
+            for (std::size_t i = 0; i < packed.size(); ++i)
               packed[i].push_back(s[i]);
             return packed;
           },

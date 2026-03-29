@@ -69,9 +69,8 @@ WP category column (`<ptColumn>_wp_category` by default) is assigned as:
 | 2        | 0.30 ≤ score < 0.75      | pass medium, fail tight         |
 | 3        | score ≥ 0.75             | pass all WPs                    |
 
-The categories are assigned as the **count of consecutive WPs passed** (i.e.
-the count of WP thresholds that are ≤ the object's tagger score, stopping at
-the first failure).
+The categories are assigned as the **count of WPs passed** (incrementing for
+each WP whose thresholds are met, stopping at the first failure).
 
 For **multi-score WPs** (e.g. charm-tagging), the same integer encoding applies
 but an object "passes" WP `i` only if **all** its discriminant scores meet their
@@ -319,8 +318,9 @@ ctwm->addWorkingPoint("tight",  {0.274f, 0.605f});
 
 An object passes a multi-score WP only if **all** its discriminant scores are
 ≥ the respective threshold.  The WP category column uses the same integer
-encoding as single-score (count of consecutive WPs passed, break on first
-failure).  WPs should be defined in a globally nested order where possible.
+encoding as single-score (count of WPs passed, incrementing until the first
+failure).  WPs should be defined in a globally nested order where possible
+(e.g. passing the medium WP should imply passing the loose WP for all objects).
 
 Throws:
 - `std::invalid_argument` if name is empty, already registered, thresholds
