@@ -74,7 +74,13 @@ struct TaggingVariationEntry {
  * @see TaggerWorkingPointManager::defineWorkingPointCollection
  */
 struct WPCollectionSelection {
-  enum class Type { PassWP, FailWP, PassRangeWP, AllObjects ///< No filter; all objects kept, annotated with WP category };
+  /// Selection type: how to filter objects by WP category.
+  enum class Type {
+    PassWP,     ///< category ≥ lower WP
+    FailWP,     ///< category = 0 (fail all)
+    PassRangeWP,///< lower WP ≤ category < upper WP
+    AllObjects  ///< No filter; all objects kept, annotated with WP category
+  };
   Type type;
   std::string wpNameLower;  ///< Name of the lower (or single) WP
   std::string wpNameUpper;  ///< Name of the upper WP (only for PassRangeWP)
