@@ -59,9 +59,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import warnings
 import traceback
 from pathlib import Path
+from typing import Optional
 
 import luigi  # type: ignore
 import law  # type: ignore
@@ -100,6 +103,190 @@ from failure_handler import (  # noqa: E402
     classify_failure,
     run_with_retries,
 )
+
+
+# ---------------------------------------------------------------------------
+# Runtime I/O throughput monitor (Linux only)
+# ---------------------------------------------------------------------------
+
+class _IOThroughputMonitor:
+    """Background thread that tracks a process's read throughput via /proc.
+
+    Reads ``/proc/{pid}/io`` (Linux only) at a configurable interval and
+    computes a rolling average throughput.  When the sustained throughput
+    falls below *threshold_mbs* the :attr:`was_slow` flag is set.
+
+    This provides a passive signal for slow XRootD sources.  Since the
+    analysis executable reads files in its own thread(s), this monitor works
+    for single-threaded and multi-threaded workloads without any code changes
+    to the compiled binary.
+
+    Parameters
+    ----------
+    pid:
+        PID of the subprocess to monitor.
+    threshold_mbs:
+        Throughput (MB/s) below which the job is considered slow.
+    poll_interval:
+        Seconds between ``/proc`` samples.
+    grace_s:
+        Seconds of consistently low throughput before ``was_slow`` is set.
+    """
+
+    def __init__(
+        self,
+        pid: int,
+        threshold_mbs: float = 1.0,
+        poll_interval: float = 5.0,
+        grace_s: float = 60.0,
+    ) -> None:
+        self._pid = pid
+        self._threshold = threshold_mbs
+        self._interval = poll_interval
+        self._grace = grace_s
+        self.was_slow: bool = False
+        self.avg_throughput_mbs: float = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        """Start the background monitoring thread."""
+        if sys.platform == "linux":
+            self._thread.start()
+
+    def stop(self) -> None:
+        """Stop the monitoring thread."""
+        self._stop.set()
+        self._thread.join(timeout=max(self._interval * 2, 5.0))
+
+    def _read_bytes_read(self) -> int:
+        """Return cumulative bytes read by *pid* from ``/proc``, or -1."""
+        try:
+            with open(f"/proc/{self._pid}/io") as fh:
+                for line in fh:
+                    if line.startswith("read_bytes:"):
+                        return int(line.split(":")[1].strip())
+        except (OSError, ValueError):
+            pass
+        return -1
+
+    def _run(self) -> None:
+        prev_bytes = self._read_bytes_read()
+        if prev_bytes < 0:
+            return
+        prev_time = time.monotonic()
+        below_since: Optional[float] = None
+        samples: list[float] = []
+
+        while not self._stop.is_set():
+            self._stop.wait(self._interval)
+            now_bytes = self._read_bytes_read()
+            if now_bytes < 0:
+                break
+            now_time = time.monotonic()
+            delta_bytes = now_bytes - prev_bytes
+            delta_time = now_time - prev_time
+            if delta_time > 0 and delta_bytes >= 0:
+                tput = (delta_bytes / (1024.0 * 1024.0)) / delta_time
+                samples.append(tput)
+                if samples:
+                    self.avg_throughput_mbs = sum(samples) / len(samples)
+                if tput < self._threshold:
+                    if below_since is None:
+                        below_since = now_time
+                    elif (now_time - below_since) >= self._grace:
+                        self.was_slow = True
+                else:
+                    below_since = None
+            prev_bytes = now_bytes
+            prev_time = now_time
+
+
+# ---------------------------------------------------------------------------
+# XRootD site optimisation helper
+# ---------------------------------------------------------------------------
+
+def _optimize_job_config_xrootd(config_path: str) -> None:
+    """Rewrite XRootD URLs in *config_path* to use the fastest available site.
+
+    Reads the ``fileList`` key from the job config, calls
+    :func:`xrootd_site_selector.optimize_file_list` to probe all known CMS
+    redirectors in parallel, and overwrites the config with the best URLs.
+
+    This is a best-effort optimisation: if the site selector is not
+    importable, no redirectors are reachable, or the config has no XRootD
+    files, the config is left unchanged and no error is raised.
+
+    Parameters
+    ----------
+    config_path:
+        Absolute path to the per-job ``submit_config.txt`` (or ``.yaml``).
+    """
+    if not os.path.isfile(config_path):
+        return
+
+    # Lazy import so the function remains picklable even when the selector
+    # module is not available on the submit node at serialisation time.
+    try:
+        _law_dir = os.path.dirname(os.path.abspath(__file__))
+        _core_python = os.path.abspath(os.path.join(_law_dir, "..", "core", "python"))
+        if _core_python not in sys.path:
+            sys.path.insert(0, _core_python)
+        from xrootd_site_selector import optimize_file_list  # type: ignore[import]
+    except ImportError:
+        return  # selector not available; skip optimisation silently
+
+    # Read the config (support both key=value text and YAML).
+    cfg: dict[str, str] = {}
+    is_yaml = config_path.endswith((".yaml", ".yml"))
+    try:
+        if is_yaml:
+            import yaml  # type: ignore[import]
+            with open(config_path) as fh:
+                raw = yaml.safe_load(fh)
+            cfg = {k: str(v) for k, v in (raw or {}).items()}
+        else:
+            with open(config_path) as fh:
+                for line in fh:
+                    line = line.split("#")[0].strip()
+                    if not line or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip()
+    except Exception:
+        return
+
+    file_list_raw = cfg.get("fileList", "")
+    if not file_list_raw:
+        return
+
+    files = [f.strip() for f in file_list_raw.split(",") if f.strip()]
+    xrd_files = [
+        f for f in files
+        if f.startswith("root://") or f.startswith("/store/") or f.startswith("/eos/")
+    ]
+    if not xrd_files:
+        return  # nothing to optimise
+
+    optimized = optimize_file_list(files)
+    if optimized == files:
+        return  # no change
+
+    cfg["fileList"] = ",".join(optimized)
+
+    # Write back the updated config.
+    try:
+        if is_yaml:
+            import yaml  # type: ignore[import]
+            with open(config_path, "w") as fh:
+                yaml.dump(cfg, fh, default_flow_style=False, sort_keys=False)
+        else:
+            with open(config_path, "w") as fh:
+                for k, v in cfg.items():
+                    if not k.startswith("__"):
+                        fh.write(f"{k}={v}\n")
+    except Exception:
+        pass  # best-effort; leave the original if write fails
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +348,24 @@ def _run_analysis_job(
     RuntimeError
         If the analysis process exits with a non-zero return code.
     """
+    # ------------------------------------------------------------------
+    # XRootD site optimisation (best-effort; never aborts the job)
+    # ------------------------------------------------------------------
+    # When the config contains XRootD file URLs, probe all known CMS
+    # redirectors from the current worker node and substitute the fastest
+    # site-specific URL before the analysis executable opens the files.
+    # The optimisation is skipped when XRD_OPTIMIZE_SITES=0 is set.
+    if os.environ.get("XRD_OPTIMIZE_SITES", "1") != "0":
+        config_abs = os.path.join(job_dir, config_relpath)
+        try:
+            _optimize_job_config_xrootd(config_abs)
+        except Exception as _xrd_exc:
+            warnings.warn(
+                f"XRootD site optimisation failed (will use original URLs): {_xrd_exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     cmd_parts: list[str] = []
 
     # Optional ROOT / CMSSW environment setup
@@ -210,7 +415,10 @@ def _run_analysis_job(
                 text=True,
             )
             rec.monitor_process(proc.pid)
+            slow_detector = _IOThroughputMonitor(proc.pid)
+            slow_detector.start()
             stdout_data, stderr_data = proc.communicate()
+            slow_detector.stop()
             returncode = proc.returncode
             rec.set_throughput(input_bytes)
 
@@ -220,6 +428,15 @@ def _run_analysis_job(
         except OSError as exc:
             warnings.warn(
                 f"Could not write job.perf.json in {job_dir!r}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        if slow_detector.was_slow:
+            warnings.warn(
+                f"Slow XRootD throughput detected during job in {job_dir!r} "
+                f"(avg {slow_detector.avg_throughput_mbs:.2f} MB/s).  "
+                "Consider re-running with a different site or enabling stage-in.",
                 RuntimeWarning,
                 stacklevel=2,
             )

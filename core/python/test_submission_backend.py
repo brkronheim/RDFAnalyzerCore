@@ -73,3 +73,125 @@ def test_generate_condor_runscript_shared_archive_materializes_cfg_runtime():
     assert 'export LD_LIBRARY_PATH="$PWD:${LD_LIBRARY_PATH:-}"' in script
     assert './myexe cfg/submit_config.txt' in script
     assert 'export X509_USER_PROXY=x509' in script
+
+
+def test_runscript_includes_xrootd_optimize_when_no_stage_in():
+    """When stage_inputs=False, the runscript must include the XRootD
+    optimisation block that probes and selects the fastest redirector."""
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=False,
+        stage_outputs=False,
+        root_setup="",
+    )
+    assert "Optimizing XRootD redirectors" in script
+    assert "xrd-opt" in script
+    assert "CMS_REDIRECTORS" in script
+    assert "detect_local_site" in script
+    # Must use ROOT macro, not pyxrootd
+    assert "probe_via_root_macro" in script
+    assert "probe_via_pyxrootd" not in script
+
+
+def test_runscript_excludes_xrootd_optimize_when_stage_in():
+    """When stage_inputs=True, files are staged locally so no XRootD
+    optimisation is needed and the block must be absent."""
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=True,
+        stage_outputs=False,
+        root_setup="",
+    )
+    assert "Optimizing XRootD redirectors" not in script
+    # Stage-in block must be present instead
+    assert "Staging input files" in script
+
+
+def test_stage_in_uses_site_selection():
+    """The stage-in block must probe redirectors in parallel and pick the best."""
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "rank_redirectors_parallel" in block
+    assert "CMS_REDIRECTORS" in block
+    assert "ThreadPoolExecutor" in block
+
+
+def test_stage_in_probe_bytes_is_1mb():
+    """Stage-in probing should use 1 MiB (not tiny 32 KiB)."""
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "1 * 1024 * 1024" in block
+
+
+def test_stage_in_uses_60s_timeout():
+    """Each xrdcp copy in stage-in must use a 60-second timeout."""
+    from core.python.submission_backend import stage_inputs_block
+    import re
+    block = stage_inputs_block()
+    m = re.search(r"STAGE_COPY_TIMEOUT\s*=\s*(\d+)", block)
+    assert m is not None, "STAGE_COPY_TIMEOUT not found in stage_inputs_block"
+    assert int(m.group(1)) == 60
+
+
+def test_stage_in_caps_retries_at_3():
+    """Stage-in must cap total attempts at 3 per file."""
+    from core.python.submission_backend import stage_inputs_block
+    import re
+    block = stage_inputs_block()
+    m = re.search(r"MAX_ATTEMPTS\s*=\s*(\d+)", block)
+    assert m is not None, "MAX_ATTEMPTS not found in stage_inputs_block"
+    assert int(m.group(1)) == 3
+
+
+def test_stage_in_falls_back_to_global_redirector():
+    """After failure the stage-in block must fall back to the global redirector."""
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "GLOBAL_REDIRECTOR" in block
+    assert "cms-xrd-global.cern.ch" in block
+
+
+def test_stage_in_uses_root_macro():
+    """Stage-in probing must use the ROOT macro (not pyxrootd)."""
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "probe_via_root_macro" in block
+    assert "probe_via_pyxrootd" not in block
+
+
+def test_runscript_xrootd_optimize_uses_correct_config_file():
+    """The XRootD optimisation block must reference the custom config file."""
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=False,
+        stage_outputs=False,
+        root_setup="",
+        config_file="cfg/my_config.txt",
+    )
+    assert "cfg/my_config.txt" in script
+
+
+def test_xrootd_optimize_block_includes_blacklist():
+    """Blacklisted sites passed to xrootd_optimize_block must appear in the
+    generated script so the worker node can skip them."""
+    from core.python.submission_backend import xrootd_optimize_block
+    block = xrootd_optimize_block(blacklisted_sites=["T2_Bad_Site", "bad-host.cern.ch"])
+    assert "T2_Bad_Site" in block
+    assert "bad-host.cern.ch" in block
+
+
+def test_xrootd_optimize_block_uses_short_timeout():
+    """The probe timeout in the worker-side script must be <= 10 s."""
+    from core.python.submission_backend import xrootd_optimize_block
+    import re
+    block = xrootd_optimize_block()
+    m = re.search(r"PROBE_TIMEOUT\s*=\s*(\d+(?:\.\d+)?)", block)
+    assert m is not None, "PROBE_TIMEOUT not found in generated block"
+    assert float(m.group(1)) <= 10.0, f"PROBE_TIMEOUT too large: {m.group(1)}"
+
+
+def test_xrootd_optimize_block_reads_runtime_blacklist():
+    """The generated script must read the xrdBlacklist key from the config."""
+    from core.python.submission_backend import xrootd_optimize_block
+    block = xrootd_optimize_block()
+    assert "xrdBlacklist" in block
