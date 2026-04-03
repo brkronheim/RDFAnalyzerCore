@@ -64,8 +64,8 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
         groups = mod._query_rucio(
             "/store/data/Run2018A/Charmonium/MINIAOD/17Sep2018-v1",
             file_split_gb=10.0,
-            WL=[],
-            BL=[],
+            whitelist=[],
+            blacklist=[],
             site_override="",
             client=client,
         )
@@ -89,8 +89,8 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
         groups = mod._query_rucio(
             "/store/data/Run2018A/MINIAOD",
             file_split_gb=10.0,
-            WL=[],
-            BL=[],
+            whitelist=[],
+            blacklist=[],
             site_override="",
             client=client,
         )
@@ -100,7 +100,8 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
             self.assertTrue(url.startswith("root://"))
 
     def test_site_override_redirector_applied(self):
-        """With a site override the site-specific redirector is still an XRootD URL."""
+        """When a file is available at a whitelisted site, the site-specific
+        redirector is used instead of the generic CMS global redirector."""
         mod = self._import()
         lfn = "/store/data/Run2018A/Charmonium/foo.root"
         entry = self._make_rucio_entry(lfn, states={"T2_US_Nebraska_Disk": "AVAILABLE"})
@@ -112,8 +113,8 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
         groups = mod._query_rucio(
             "/store/data/Run2018A/MINIAOD",
             file_split_gb=10.0,
-            WL=["T2_US_Nebraska"],
-            BL=[],
+            whitelist=["T2_US_Nebraska"],
+            blacklist=[],
             site_override="",
             client=client,
         )
@@ -122,6 +123,58 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
             self.assertTrue(
                 url.startswith("root://"),
                 f"Expected root:// prefix but got: {url!r}",
+            )
+            # Must use the site-specific redirector path, not the generic CMS one
+            self.assertIn(
+                "T2_US_Nebraska",
+                url,
+                f"Expected site-specific redirector for T2_US_Nebraska but got: {url!r}",
+            )
+            self.assertNotIn(
+                "cms-xrd-global.cern.ch",
+                url,
+                f"Expected site-specific redirector but got generic CMS global: {url!r}",
+            )
+
+    def test_existing_redirector_stripped_before_site_specific_applied(self):
+        """When Rucio returns a full XRootD URL with an existing redirector and a
+        whitelisted site is available, the existing redirector is stripped first
+        and the site-specific one is applied instead."""
+        mod = self._import()
+        # Rucio returns a full URL with an old/generic redirector already embedded
+        full_url = "root://cms-xrd-global.cern.ch//store/data/Run2018A/foo.root"
+        entry = self._make_rucio_entry(
+            full_url, states={"T2_US_Nebraska_Disk": "AVAILABLE"}
+        )
+
+        from unittest.mock import MagicMock
+        client = MagicMock()
+        client.list_replicas.return_value = iter([entry])
+
+        groups = mod._query_rucio(
+            "/store/data/Run2018A/MINIAOD",
+            file_split_gb=10.0,
+            whitelist=["T2_US_Nebraska"],
+            blacklist=[],
+            site_override="",
+            client=client,
+        )
+        all_urls = ",".join(groups.values()).split(",")
+        for url in all_urls:
+            self.assertTrue(url.startswith("root://"))
+            # The result must not contain a double redirector (old one + new one)
+            self.assertNotIn("root://root://", url, "Double-prefix detected")
+            # The original generic redirector must have been removed
+            self.assertNotIn(
+                "cms-xrd-global.cern.ch//store/data",
+                url,
+                f"Original generic redirector was not stripped: {url!r}",
+            )
+            # The site-specific redirector must now be present
+            self.assertIn(
+                "T2_US_Nebraska",
+                url,
+                f"Expected site-specific redirector for T2_US_Nebraska but got: {url!r}",
             )
 
 

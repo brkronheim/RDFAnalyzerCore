@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -209,7 +210,26 @@ def _query_rucio(
 
     for filedata in replicas:
         size_gb = filedata.get("bytes", 0) * 1e-9
+
+        # Select a site-specific redirector when a whitelisted site holds a
+        # replica, mirroring the behaviour of the legacy queryRucio helper.
         redirector = RUCIO_REDIRECTOR
+        states = filedata.get("states", {})
+        for site_key, state_val in states.items():
+            if state_val == "AVAILABLE" and "Tape" not in site_key:
+                site = site_key.replace("_Disk", "")
+                if site in whitelist:
+                    redirector = f"root://xrootd-cms.infn.it//store/test/xrootd/{site}/"
+                    break
+
+        # Strip any existing redirector from the file name so we always
+        # apply the chosen redirector to the bare LFN.
+        file_name = filedata["name"]
+        if file_name.startswith("root://"):
+            m = re.match(r"root://[^/]+/(.*)", file_name)
+            if m:
+                file_name = "/" + m.group(1).lstrip("/")
+
         running_size += size_gb
         running_files += 1
         if running_size > file_split_gb or running_files >= max_files_per_group:
@@ -217,7 +237,7 @@ def _query_rucio(
             running_size = size_gb
             running_files = 1
 
-        url = ensure_xrootd_redirector(filedata["name"], redirector)
+        url = ensure_xrootd_redirector(file_name, redirector)
         if group in groups:
             groups[group] += "," + url
             group_counts[group] += 1
