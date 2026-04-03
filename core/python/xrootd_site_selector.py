@@ -53,9 +53,9 @@ CMS_REDIRECTORS: list[str] = [
     "root://cms-xrd-global.cern.ch/",   # Global CMS redirector (fallback)
 ]
 
-# Bytes to read when probing a site (32 KiB gives a decent bandwidth sample
-# without unduly stressing the server or wasting time on large files).
-DEFAULT_PROBE_BYTES: int = 32 * 1024
+# Bytes to read when probing a site.  1 MiB gives a more realistic bandwidth
+# sample than a tiny read while still completing quickly on a healthy site.
+DEFAULT_PROBE_BYTES: int = 1 * 1024 * 1024
 
 # Per-site probe timeout in seconds.  Kept short so a slow/unreachable site
 # does not significantly delay the site-ranking step before the job starts.

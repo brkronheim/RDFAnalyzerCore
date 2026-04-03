@@ -107,6 +107,58 @@ def test_runscript_excludes_xrootd_optimize_when_stage_in():
     assert "Staging input files" in script
 
 
+def test_stage_in_uses_site_selection():
+    """The stage-in block must probe redirectors in parallel and pick the best."""
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "rank_redirectors_parallel" in block
+    assert "CMS_REDIRECTORS" in block
+    assert "ThreadPoolExecutor" in block
+
+
+def test_stage_in_probe_bytes_is_1mb():
+    """Stage-in probing should use 1 MiB (not tiny 32 KiB)."""
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "1 * 1024 * 1024" in block
+
+
+def test_stage_in_uses_60s_timeout():
+    """Each xrdcp copy in stage-in must use a 60-second timeout."""
+    from core.python.submission_backend import stage_inputs_block
+    import re
+    block = stage_inputs_block()
+    m = re.search(r"STAGE_COPY_TIMEOUT\s*=\s*(\d+)", block)
+    assert m is not None, "STAGE_COPY_TIMEOUT not found in stage_inputs_block"
+    assert int(m.group(1)) == 60
+
+
+def test_stage_in_caps_retries_at_3():
+    """Stage-in must cap total attempts at 3 per file."""
+    from core.python.submission_backend import stage_inputs_block
+    import re
+    block = stage_inputs_block()
+    m = re.search(r"MAX_ATTEMPTS\s*=\s*(\d+)", block)
+    assert m is not None, "MAX_ATTEMPTS not found in stage_inputs_block"
+    assert int(m.group(1)) == 3
+
+
+def test_stage_in_falls_back_to_global_redirector():
+    """After failure the stage-in block must fall back to the global redirector."""
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "GLOBAL_REDIRECTOR" in block
+    assert "cms-xrd-global.cern.ch" in block
+
+
+def test_stage_in_uses_root_macro():
+    """Stage-in probing must use the ROOT macro (not pyxrootd)."""
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "probe_via_root_macro" in block
+    assert "probe_via_pyxrootd" not in block
+
+
 def test_runscript_xrootd_optimize_uses_correct_config_file():
     """The XRootD optimisation block must reference the custom config file."""
     script = generate_condor_runscript(
