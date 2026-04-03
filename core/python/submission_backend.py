@@ -385,6 +385,248 @@ PY
     return pre_block, post_block
 
 
+def xrootd_optimize_block(config_file="submit_config.txt"):
+    """Return a shell heredoc that selects the fastest XRootD redirector.
+
+    This block is embedded in the Condor worker runscript when stage-in is
+    **not** used.  It reads the ``fileList`` from the job config, probes all
+    well-known CMS XRootD redirectors from the worker node, and rewrites the
+    config with the site-specific URLs that delivered the best throughput.
+
+    The local CMS site is detected from common grid environment variables
+    (``GLIDEIN_CMSSite``, ``CMS_LOCAL_SITE``, etc.) and preferred when its
+    measured performance is within 20% of the global best.
+
+    Args:
+        config_file: Path to the per-job submit config passed to the
+            analysis executable.
+
+    Returns:
+        A multi-line bash string (heredoc) safe to embed in a generated
+        runscript.
+    """
+    return f"""
+echo "Optimizing XRootD redirectors for fastest site"
+python3 - << 'XRDPY'
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ---------------------------------------------------------------------------
+# Inline helpers (no external dependencies beyond stdlib + optional pyxrootd)
+# ---------------------------------------------------------------------------
+
+CMS_REDIRECTORS = [
+    "root://cmsxrootd.fnal.gov/",
+    "root://xrootd-cms.infn.it/",
+    "root://cms-xrd-global.cern.ch/",
+]
+LOCAL_SITE_BONUS = 1.25
+PROBE_TIMEOUT = 15.0
+PROBE_BYTES = 32 * 1024
+
+
+def read_config(cfg_path):
+    if cfg_path.endswith('.yaml') or cfg_path.endswith('.yml'):
+        import yaml
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        return {{k: str(v) for k, v in cfg.items()}}
+    cfg = {{}}
+    with open(cfg_path) as f:
+        for line in f:
+            line = line.split("#")[0].strip()
+            if not line or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def write_config(cfg, cfg_path):
+    if cfg_path.endswith('.yaml') or cfg_path.endswith('.yml'):
+        import yaml
+        with open(cfg_path, "w") as f:
+            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+    else:
+        with open(cfg_path, "w") as f:
+            for k, v in cfg.items():
+                f.write(f"{{k}}={{v}}\\n")
+
+
+def detect_local_site():
+    for var in ("CMS_LOCAL_SITE", "GLIDEIN_CMSSite", "OSG_SITE_NAME", "SITE_NAME"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            return val
+    try:
+        hn = socket.getfqdn().lower()
+        if hn.endswith(".fnal.gov") or hn == "fnal.gov":
+            return "T1_US_FNAL"
+        if hn.endswith(".cern.ch") or hn == "cern.ch":
+            return "T0_CH_CERN"
+    except Exception:
+        pass
+    return ""
+
+
+def extract_lfn(url):
+    if url.startswith("root://"):
+        m = re.match(r"root://[^/]+/(.*)", url)
+        if m:
+            return "/" + m.group(1).lstrip("/")
+    return url
+
+
+def build_url(lfn, redirector):
+    return redirector.rstrip("/") + "/" + lfn.lstrip("/")
+
+
+def redirector_host(redirector):
+    m = re.match(r"root://([^/]+)", redirector)
+    return m.group(1) if m else redirector
+
+
+def probe_via_pyxrootd(url, read_bytes, timeout):
+    from XRootD import client as xrdclient
+    from XRootD.client.flags import OpenFlags
+    f = xrdclient.File()
+    status, _ = f.open(url, OpenFlags.READ, timeout=int(max(1, timeout)))
+    if not status.ok:
+        return None
+    t0 = time.perf_counter()
+    status, data = f.read(0, read_bytes)
+    elapsed = time.perf_counter() - t0
+    f.close()
+    if not status.ok or not data or elapsed <= 0:
+        return None
+    return len(data) / (1024.0 * 1024.0) / elapsed
+
+
+def probe_via_subprocess(lfn, redirector, timeout):
+    host = redirector_host(redirector)
+    path = "/" + lfn.lstrip("/")
+    t0 = time.perf_counter()
+    try:
+        r = subprocess.run(
+            ["xrdfs", host, "stat", path],
+            capture_output=True, timeout=timeout, text=True,
+        )
+        elapsed = time.perf_counter() - t0
+        if r.returncode != 0:
+            return None
+        return max(0.01, 10.0 / elapsed)
+    except Exception:
+        return None
+
+
+def probe_redirector(lfn, redirector, read_bytes=PROBE_BYTES, timeout=PROBE_TIMEOUT):
+    url = build_url(lfn, redirector)
+    try:
+        result = probe_via_pyxrootd(url, read_bytes, timeout)
+        if result is not None:
+            return result
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return probe_via_subprocess(lfn, redirector, timeout)
+
+
+def select_best_url(url, redirectors, local_site=""):
+    lfn = extract_lfn(url)
+    if not (lfn.startswith("/store/") or lfn.startswith("/eos/")):
+        return url
+
+    # Mapping from site name prefix to preferred redirector domain.
+    site_domain_map = {{
+        "T1_US_FNAL": "fnal.gov",
+        "T0_CH_CERN": "cern.ch",
+        "T2_US_": "fnal.gov",
+        "T2_DE_": "infn.it", "T2_IT_": "infn.it", "T2_FR_": "infn.it",
+        "T2_UK_": "infn.it", "T2_ES_": "infn.it", "T2_CH_": "cern.ch",
+        "T3_US_": "fnal.gov",
+    }}
+
+    def site_matches_redir(site, redir):
+        redir_l = redir.lower()
+        for prefix, domain in site_domain_map.items():
+            if site.startswith(prefix) and domain in redir_l:
+                return True
+        return site in redir
+
+    results = []
+    with ThreadPoolExecutor(max_workers=len(redirectors)) as pool:
+        futures = {{pool.submit(probe_redirector, lfn, r): r for r in redirectors}}
+        for future in as_completed(futures, timeout=PROBE_TIMEOUT + 5):
+            try:
+                tput = future.result()
+            except Exception:
+                continue
+            if tput is None:
+                continue
+            redir = futures[future]
+            if local_site and site_matches_redir(local_site, redir):
+                tput *= LOCAL_SITE_BONUS
+            results.append((redir, tput))
+
+    if not results:
+        print(f"  [xrd-opt] All probes failed for {{lfn}}; keeping original URL")
+        return url
+
+    results.sort(key=lambda x: x[1], reverse=True)
+    best_redir, best_tput = results[0]
+    new_url = build_url(lfn, best_redir)
+    print(f"  [xrd-opt] {{lfn}} -> {{best_redir}} ({{best_tput:.2f}} MB/s)")
+    return new_url
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+cfg_path = "{config_file}"
+if not os.path.exists(cfg_path):
+    print(f"[xrd-opt] Config not found at {{cfg_path}}; skipping site optimisation")
+    sys.exit(0)
+
+cfg = read_config(cfg_path)
+file_list_raw = cfg.get("fileList", "")
+if not file_list_raw:
+    print("[xrd-opt] No fileList in config; skipping")
+    sys.exit(0)
+
+files = [f.strip() for f in file_list_raw.split(",") if f.strip()]
+xrd_files = [f for f in files if f.startswith("root://") or f.startswith("/store/")]
+if not xrd_files:
+    print("[xrd-opt] No XRootD files in fileList; skipping")
+    sys.exit(0)
+
+local_site = detect_local_site()
+if local_site:
+    print(f"[xrd-opt] Local site: {{local_site}}")
+else:
+    print("[xrd-opt] Local site not detected; using throughput ranking only")
+
+print(f"[xrd-opt] Probing {{len(CMS_REDIRECTORS)}} redirector(s) for {{len(xrd_files)}} file(s)...")
+optimized = []
+for f in files:
+    if f.startswith("root://") or f.startswith("/store/"):
+        optimized.append(select_best_url(f, CMS_REDIRECTORS, local_site))
+    else:
+        optimized.append(f)
+
+cfg["fileList"] = ",".join(optimized)
+write_config(cfg, cfg_path)
+print(f"[xrd-opt] Config updated with optimized file list")
+XRDPY
+"""
+
+
 def generate_condor_runscript(
     exe_relpath,
     stage_inputs,
@@ -401,6 +643,7 @@ def generate_condor_runscript(
     runtime_config_relpath=None,
 ):
     stage_block = stage_inputs_block(eos_sched, config_file) if stage_inputs else ""
+    xrd_optimize_block = "" if stage_inputs else xrootd_optimize_block(config_file)
     stage_out_pre = ""
     stage_out_post = ""
     if stage_outputs:
@@ -509,8 +752,7 @@ stage_in_end=$(date +%s)
 echo "Stage-in time: $((stage_in_end - stage_in_start))s"
 echo "Check file existence"
 ls
-{materialize_config_block}
-
+{materialize_config_block}{xrd_optimize_block}
 analysis_start=$(date +%s)
 echo "Starting Analysis"
 chmod +x ./{exe_relpath}

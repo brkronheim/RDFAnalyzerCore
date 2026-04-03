@@ -73,3 +73,44 @@ def test_generate_condor_runscript_shared_archive_materializes_cfg_runtime():
     assert 'export LD_LIBRARY_PATH="$PWD:${LD_LIBRARY_PATH:-}"' in script
     assert './myexe cfg/submit_config.txt' in script
     assert 'export X509_USER_PROXY=x509' in script
+
+
+def test_runscript_includes_xrootd_optimize_when_no_stage_in():
+    """When stage_inputs=False, the runscript must include the XRootD
+    optimisation block that probes and selects the fastest redirector."""
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=False,
+        stage_outputs=False,
+        root_setup="",
+    )
+    assert "Optimizing XRootD redirectors" in script
+    assert "xrd-opt" in script
+    assert "CMS_REDIRECTORS" in script
+    assert "detect_local_site" in script
+
+
+def test_runscript_excludes_xrootd_optimize_when_stage_in():
+    """When stage_inputs=True, files are staged locally so no XRootD
+    optimisation is needed and the block must be absent."""
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=True,
+        stage_outputs=False,
+        root_setup="",
+    )
+    assert "Optimizing XRootD redirectors" not in script
+    # Stage-in block must be present instead
+    assert "Staging input files" in script
+
+
+def test_runscript_xrootd_optimize_uses_correct_config_file():
+    """The XRootD optimisation block must reference the custom config file."""
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=False,
+        stage_outputs=False,
+        root_setup="",
+        config_file="cfg/my_config.txt",
+    )
+    assert "cfg/my_config.txt" in script
