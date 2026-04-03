@@ -88,6 +88,9 @@ def test_runscript_includes_xrootd_optimize_when_no_stage_in():
     assert "xrd-opt" in script
     assert "CMS_REDIRECTORS" in script
     assert "detect_local_site" in script
+    # Must use ROOT macro, not pyxrootd
+    assert "probe_via_root_macro" in script
+    assert "probe_via_pyxrootd" not in script
 
 
 def test_runscript_excludes_xrootd_optimize_when_stage_in():
@@ -114,3 +117,29 @@ def test_runscript_xrootd_optimize_uses_correct_config_file():
         config_file="cfg/my_config.txt",
     )
     assert "cfg/my_config.txt" in script
+
+
+def test_xrootd_optimize_block_includes_blacklist():
+    """Blacklisted sites passed to xrootd_optimize_block must appear in the
+    generated script so the worker node can skip them."""
+    from core.python.submission_backend import xrootd_optimize_block
+    block = xrootd_optimize_block(blacklisted_sites=["T2_Bad_Site", "bad-host.cern.ch"])
+    assert "T2_Bad_Site" in block
+    assert "bad-host.cern.ch" in block
+
+
+def test_xrootd_optimize_block_uses_short_timeout():
+    """The probe timeout in the worker-side script must be <= 10 s."""
+    from core.python.submission_backend import xrootd_optimize_block
+    import re
+    block = xrootd_optimize_block()
+    m = re.search(r"PROBE_TIMEOUT\s*=\s*(\d+(?:\.\d+)?)", block)
+    assert m is not None, "PROBE_TIMEOUT not found in generated block"
+    assert float(m.group(1)) <= 10.0, f"PROBE_TIMEOUT too large: {m.group(1)}"
+
+
+def test_xrootd_optimize_block_reads_runtime_blacklist():
+    """The generated script must read the xrdBlacklist key from the config."""
+    from core.python.submission_backend import xrootd_optimize_block
+    block = xrootd_optimize_block()
+    assert "xrdBlacklist" in block

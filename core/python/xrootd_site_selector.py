@@ -4,7 +4,8 @@ XRootD site selection and performance monitoring for RDFAnalyzerCore.
 When stage-in is not applied, this module ranks available XRootD sites by
 reading a small amount of data from each and selects the fastest redirector
 for each file.  A local-site preference is applied when the job is running
-close to a storage element that performs well.
+close to a storage element that performs well.  Known-problematic sites can
+be excluded via the *blacklisted_sites* parameter.
 
 For single-threaded reads a :class:`SlowSiteDetector` can monitor ongoing
 throughput and transparently flag slow sites mid-run so the caller can retry
@@ -15,12 +16,16 @@ Typical usage::
     from xrootd_site_selector import optimize_file_list
 
     original_files = cfg.get("fileList", "").split(",")
-    optimized_files = optimize_file_list(original_files)
+    optimized_files = optimize_file_list(
+        original_files,
+        blacklisted_sites=["T2_Bad_Site"],  # optional
+    )
     cfg["fileList"] = ",".join(optimized_files)
 
-The module tries the XRootD Python API (``pyxrootd`` / ``XRootD.client``)
-for probing when available, and falls back to ``xrdfs stat`` via subprocess
-when the native bindings are absent.
+Probing uses a ROOT macro (``root -b -q -l macro.C``) to open the file and
+read a small amount of data, which measures real read throughput in the CMS
+grid environment where ROOT is always available.  When ROOT is not in the
+PATH the module falls back to ``xrdfs stat`` latency probing.
 """
 
 from __future__ import annotations
@@ -52,8 +57,9 @@ CMS_REDIRECTORS: list[str] = [
 # without unduly stressing the server or wasting time on large files).
 DEFAULT_PROBE_BYTES: int = 32 * 1024
 
-# Per-site probe timeout in seconds.
-DEFAULT_PROBE_TIMEOUT: float = 15.0
+# Per-site probe timeout in seconds.  Kept short so a slow/unreachable site
+# does not significantly delay the site-ranking step before the job starts.
+DEFAULT_PROBE_TIMEOUT: float = 5.0
 
 # Maximum wall-clock time for the entire site-ranking step.
 DEFAULT_RANK_TIMEOUT: float = 60.0
@@ -218,41 +224,158 @@ def _redirector_host(redirector: str) -> str:
     return m.group(1) if m else redirector
 
 
+def _is_blacklisted(redirector: str, blacklisted_sites: list[str]) -> bool:
+    """Return ``True`` when *redirector* matches any entry in *blacklisted_sites*.
+
+    Each entry in *blacklisted_sites* is tested as a case-insensitive
+    substring of the redirector URL, so it can be a CMS site name fragment
+    (e.g. ``"T2_IT_"``) or a hostname pattern (e.g. ``"bad-site.cern.ch"``).
+
+    Parameters
+    ----------
+    redirector:
+        XRootD redirector URL to test.
+    blacklisted_sites:
+        List of patterns to match against.  An empty list always returns
+        ``False``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the redirector should be excluded from probing.
+    """
+    redir_lower = redirector.lower()
+    for pattern in blacklisted_sites:
+        if pattern.lower() in redir_lower:
+            return True
+    return False
+
+
+
 # ---------------------------------------------------------------------------
 # Probing
 # ---------------------------------------------------------------------------
 
-def _probe_via_pyxrootd(url: str, read_bytes: int, timeout: float) -> Optional[float]:
-    """Probe *url* using the XRootD Python bindings and return MB/s or ``None``.
+# ROOT macro template used by _probe_via_root_macro.  The macro opens the
+# file via TFile::Open (which exercises the XRootD transport), reads a small
+# number of bytes to measure actual transfer throughput, and prints a single
+# structured result line to stdout.
+#
+# NOTE: TFile::ReadBuffer uses the ROOT/POSIX errno convention where
+# kFALSE (0) means SUCCESS and kTRUE (1) means FAILURE.  The check below
+# uses ``if (ok)`` (i.e. if the call returned non-zero / kTRUE) to detect
+# errors.
+#
+# NOTE: If you update this template also update ROOT_MACRO_TMPL in
+# submission_backend.py::xrootd_optimize_block() which embeds a copy for
+# execution on Condor worker nodes.
+_ROOT_PROBE_MACRO_TMPL: str = """\
+void probe_xrootd() {{
+  const char* url = "{url}";
+  Long64_t nbytes = {nbytes}LL;
+  TStopwatch sw;
+  sw.Start();
+  TFile* f = TFile::Open(url, "READ");
+  if (!f || f->IsZombie()) {{
+    printf("PROBE_RESULT:FAILED\\n");
+    if (f) {{ f->Close(); delete f; }}
+    return;
+  }}
+  Long64_t sz = f->GetSize();
+  Long64_t to_read = (sz > 0 && sz < nbytes) ? sz : nbytes;
+  Bool_t ok = kFALSE;
+  if (to_read > 0) {{
+    char* buf = new char[to_read];
+    ok = f->ReadBuffer(buf, 0LL, (Int_t)to_read);
+    delete[] buf;
+  }}
+  sw.Stop();
+  f->Close();
+  delete f;
+  if (ok) {{ printf("PROBE_RESULT:FAILED\\n"); return; }}
+  double elapsed = sw.RealTime();
+  if (elapsed > 0 && to_read > 0)
+    printf("PROBE_RESULT:%.6f:%.0f\\n", elapsed, (double)to_read);
+  else
+    printf("PROBE_RESULT:FAILED\\n");
+}}
+"""
 
-    Requires the ``XRootD`` (pyxrootd) package to be installed.
+
+def _probe_via_root_macro(url: str, read_bytes: int, timeout: float) -> Optional[float]:
+    """Probe *url* by running a temporary ROOT macro and return MB/s or ``None``.
+
+    Generates a small ROOT C++ macro that opens the file via ``TFile::Open``
+    and reads *read_bytes* bytes with ``TFile::ReadBuffer``, measures the
+    elapsed wall-clock time, and prints a structured result line.  The macro
+    is executed as a subprocess via ``root -b -q -l``.
+
+    This is the preferred probing method in CMS grid environments where ROOT
+    (and therefore XRootD) is always available.
+
+    Parameters
+    ----------
+    url:
+        Full XRootD URL (e.g. ``root://host//store/data/foo.root``).
+    read_bytes:
+        Number of bytes to read from the beginning of the file.
+    timeout:
+        Maximum seconds to allow for the entire ``root`` subprocess.
+
+    Returns
+    -------
+    float or None
+        Measured throughput in MB/s, or ``None`` when ROOT is unavailable,
+        the file cannot be opened, or the probe times out.
     """
-    from XRootD import client as xrdclient  # type: ignore[import]
-    from XRootD.client.flags import OpenFlags  # type: ignore[import]
+    import tempfile
 
-    f = xrdclient.File()
-    status, _ = f.open(url, OpenFlags.READ, timeout=int(max(1, timeout)))
-    if not status.ok:
-        logger.debug("pyxrootd open failed for %s: %s", url, status.message)
+    macro = _ROOT_PROBE_MACRO_TMPL.format(url=url, nbytes=read_bytes)
+    macro_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".C", delete=False, prefix="xrd_probe_"
+        ) as tmp:
+            tmp.write(macro)
+            macro_path = tmp.name
+
+        result = subprocess.run(
+            ["root", "-b", "-q", "-l", macro_path],
+            capture_output=True,
+            timeout=timeout,
+            text=True,
+        )
+
+        for line in result.stdout.splitlines():
+            if line.startswith("PROBE_RESULT:"):
+                parts = line.split(":")
+                if len(parts) >= 2 and parts[1] == "FAILED":
+                    return None
+                if len(parts) >= 3:
+                    try:
+                        elapsed = float(parts[1])
+                        to_read = float(parts[2])
+                        if elapsed > 0 and to_read > 0:
+                            return to_read / (1024.0 * 1024.0) / elapsed
+                    except ValueError:
+                        pass
         return None
 
-    t0 = time.perf_counter()
-    status, data = f.read(0, read_bytes)
-    elapsed = time.perf_counter() - t0
-    f.close()
-
-    if not status.ok or not data:
-        logger.debug("pyxrootd read failed for %s: %s", url, status.message)
+    except FileNotFoundError:
+        logger.debug("root not found in PATH; cannot probe via ROOT macro")
         return None
-
-    actual_bytes = len(data)
-    if elapsed <= 0 or actual_bytes == 0:
+    except subprocess.TimeoutExpired:
+        logger.debug("ROOT macro probe timed out for %s", url)
         return None
-
-    throughput = actual_bytes / (1024.0 * 1024.0) / elapsed
-    logger.debug("pyxrootd probe %s -> %.3f MB/s (%d bytes in %.3fs)",
-                 url, throughput, actual_bytes, elapsed)
-    return throughput
+    except Exception as exc:
+        logger.debug("ROOT macro probe error for %s: %s", url, exc)
+        return None
+    finally:
+        if macro_path is not None:
+            try:
+                os.unlink(macro_path)
+            except OSError:
+                pass
 
 
 def _probe_via_subprocess(lfn: str, redirector: str, timeout: float) -> Optional[float]:
@@ -305,9 +428,10 @@ def probe_redirector(
 ) -> Optional[float]:
     """Probe *redirector* for *lfn* and return throughput in MB/s or ``None``.
 
-    Tries the XRootD Python API first for an actual read throughput
-    measurement, then falls back to ``xrdfs stat`` latency probing when
-    the native bindings are unavailable.
+    Tries a ROOT macro first (``root -b -q -l``) to measure actual read
+    throughput via ``TFile::Open`` and ``TFile::ReadBuffer``.  Falls back to
+    ``xrdfs stat`` latency probing when ROOT is not available in the PATH.
+    The per-probe *timeout* is applied to each attempt independently.
 
     Parameters
     ----------
@@ -316,9 +440,9 @@ def probe_redirector(
     redirector:
         XRootD redirector URL (e.g. ``root://cmsxrootd.fnal.gov/``).
     read_bytes:
-        Number of bytes to read when using the Python API path.
+        Number of bytes to read when using the ROOT macro path.
     timeout:
-        Maximum seconds to wait for the probe attempt.
+        Maximum seconds to wait for a single probe attempt.
 
     Returns
     -------
@@ -328,13 +452,10 @@ def probe_redirector(
     """
     url = _build_url(lfn, redirector)
 
-    # Prefer actual read measurement via pyxrootd.
-    try:
-        return _probe_via_pyxrootd(url, read_bytes, timeout)
-    except ImportError:
-        pass
-    except Exception as exc:
-        logger.debug("pyxrootd probe error for %s: %s", url, exc)
+    # Prefer actual read measurement via ROOT macro (TFile).
+    result = _probe_via_root_macro(url, read_bytes, timeout)
+    if result is not None:
+        return result
 
     # Fall back to latency-based probing via xrdfs subprocess.
     return _probe_via_subprocess(lfn, redirector, timeout)
@@ -351,11 +472,13 @@ def rank_redirectors(
     timeout: float = DEFAULT_PROBE_TIMEOUT,
     local_site: str = "",
     max_workers: int = 6,
+    blacklisted_sites: Optional[list[str]] = None,
 ) -> list[tuple[str, float]]:
     """Probe all *redirectors* in parallel and return them ranked by throughput.
 
     The local site's measured throughput is multiplied by :data:`LOCAL_SITE_BONUS`
-    so it is preferred when approximately equal to other sites.
+    so it is preferred when approximately equal to other sites.  Redirectors
+    that match any entry in *blacklisted_sites* are skipped before probing.
 
     Parameters
     ----------
@@ -364,7 +487,7 @@ def rank_redirectors(
     redirectors:
         List of XRootD redirector URLs to probe.
     probe_bytes:
-        Bytes to read per probe (XRootD Python API path only).
+        Bytes to read per probe (ROOT macro path only).
     timeout:
         Per-probe timeout in seconds.
     local_site:
@@ -372,20 +495,34 @@ def rank_redirectors(
         to apply a bonus to redirectors that serve the local site.
     max_workers:
         Maximum concurrent probe threads.
+    blacklisted_sites:
+        Patterns to skip (e.g. ``["T2_Bad_Site", "bad-host.cern.ch"]``).
+        A redirector is excluded when any pattern is a case-insensitive
+        substring of its URL.
 
     Returns
     -------
     list of (redirector, throughput_mbs)
-        Pairs sorted best-first; sites that failed are omitted.
+        Pairs sorted best-first; sites that failed or were blacklisted are
+        omitted.
     """
     results: list[tuple[str, float]] = []
+    _blacklist = blacklisted_sites or []
+
+    # Filter out blacklisted redirectors before any probing.
+    active_redirectors = [
+        r for r in redirectors if not _is_blacklisted(r, _blacklist)
+    ]
+    if not active_redirectors:
+        logger.debug("All redirectors are blacklisted; returning empty ranking")
+        return results
 
     def _probe_one(redir: str) -> tuple[str, Optional[float]]:
         tput = probe_redirector(lfn, redir, read_bytes=probe_bytes, timeout=timeout)
         return redir, tput
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_probe_one, r): r for r in redirectors}
+        futures = {pool.submit(_probe_one, r): r for r in active_redirectors}
         for future in as_completed(futures, timeout=timeout + 5):
             try:
                 redir, tput = future.result()
@@ -413,6 +550,7 @@ def select_best_url(
     probe_bytes: int = DEFAULT_PROBE_BYTES,
     timeout: float = DEFAULT_PROBE_TIMEOUT,
     local_site: str = "",
+    blacklisted_sites: Optional[list[str]] = None,
 ) -> str:
     """Return the fastest XRootD URL for *url* among *redirectors*.
 
@@ -432,6 +570,8 @@ def select_best_url(
         Per-site probe timeout in seconds.
     local_site:
         Local CMS site name for bonus application.
+    blacklisted_sites:
+        Patterns for redirectors to skip entirely.
 
     Returns
     -------
@@ -453,6 +593,7 @@ def select_best_url(
         probe_bytes=probe_bytes,
         timeout=timeout,
         local_site=local_site,
+        blacklisted_sites=blacklisted_sites,
     )
 
     if not ranked:
@@ -476,13 +617,15 @@ def optimize_file_list(
     timeout: float = DEFAULT_PROBE_TIMEOUT,
     local_site: Optional[str] = None,
     enabled: bool = True,
+    blacklisted_sites: Optional[list[str]] = None,
 ) -> list[str]:
     """Optimize a list of file URLs by selecting the best XRootD redirector.
 
     For each file that looks like an XRootD-accessible CMS path (starts with
     ``root://`` or ``/store/``), all *redirectors* are probed in parallel and
     the fastest one is substituted into the URL.  Files that are local paths
-    or non-XRootD URLs are returned unchanged.
+    or non-XRootD URLs are returned unchanged.  Redirectors that match any
+    entry in *blacklisted_sites* are excluded from probing entirely.
 
     Parameters
     ----------
@@ -500,6 +643,10 @@ def optimize_file_list(
     enabled:
         When ``False`` the function returns *file_list* unchanged, which
         allows disabling site selection without changing call sites.
+    blacklisted_sites:
+        Patterns for redirectors/sites that should never be used.
+        Each entry is matched as a case-insensitive substring of the
+        redirector URL (e.g. ``["bad-site.cern.ch", "T2_IT_BadSite"]``).
 
     Returns
     -------
@@ -544,6 +691,7 @@ def optimize_file_list(
             probe_bytes=probe_bytes,
             timeout=timeout,
             local_site=local_site,
+            blacklisted_sites=blacklisted_sites,
         )
 
     return optimized

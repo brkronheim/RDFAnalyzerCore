@@ -116,19 +116,78 @@ class TestBuildUrl(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestProbeRedirector(unittest.TestCase):
-    """Tests for probe_redirector() with all external calls mocked."""
+    """Tests for probe_redirector() and _probe_via_root_macro()."""
+
+    # ---- ROOT macro path ----
+
+    def test_root_macro_returns_throughput_on_success(self):
+        """A successful ROOT macro run returns positive throughput."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "PROBE_RESULT:0.250000:32768\n"
+        mock_result.stderr = ""
+        with patch("subprocess.run", return_value=mock_result):
+            result = sel._probe_via_root_macro(
+                "root://cmsxrootd.fnal.gov//store/data/foo.root",
+                32768,
+                timeout=5.0,
+            )
+        # 32768 bytes / 0.25 s ≈ 0.125 MB/s
+        self.assertIsNotNone(result)
+        self.assertGreater(result, 0)
+
+    def test_root_macro_returns_none_on_failed_result(self):
+        """PROBE_RESULT:FAILED → None."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "PROBE_RESULT:FAILED\n"
+        with patch("subprocess.run", return_value=mock_result):
+            result = sel._probe_via_root_macro(
+                "root://cmsxrootd.fnal.gov//store/data/foo.root",
+                32768,
+                timeout=5.0,
+            )
+        self.assertIsNone(result)
+
+    def test_root_macro_returns_none_when_root_not_found(self):
+        """FileNotFoundError (root not in PATH) → None."""
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            result = sel._probe_via_root_macro(
+                "root://cmsxrootd.fnal.gov//store/data/foo.root",
+                32768,
+                timeout=5.0,
+            )
+        self.assertIsNone(result)
+
+    def test_root_macro_returns_none_on_timeout(self):
+        """Subprocess timeout → None."""
+        import subprocess as _sp
+        with patch("subprocess.run", side_effect=_sp.TimeoutExpired("root", 5)):
+            result = sel._probe_via_root_macro(
+                "root://cmsxrootd.fnal.gov//store/data/foo.root",
+                32768,
+                timeout=5.0,
+            )
+        self.assertIsNone(result)
+
+    # ---- xrdfs stat fallback ----
 
     def test_returns_none_when_xrdfs_fails(self):
-        """xrdfs returning non-zero exit code → None throughput."""
+        """ROOT macro + xrdfs both fail → None."""
         mock_result = MagicMock()
         mock_result.returncode = 1
-        with patch("subprocess.run", return_value=mock_result):
-            with patch("builtins.__import__", side_effect=ImportError):
-                result = sel.probe_redirector(
-                    "/store/data/foo.root",
-                    "root://cmsxrootd.fnal.gov/",
-                    timeout=1.0,
-                )
+        call_count = {"n": 0}
+        def _side_effect(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise FileNotFoundError  # root not found
+            return mock_result  # xrdfs fails too
+        with patch("subprocess.run", side_effect=_side_effect):
+            result = sel.probe_redirector(
+                "/store/data/foo.root",
+                "root://cmsxrootd.fnal.gov/",
+                timeout=1.0,
+            )
         self.assertIsNone(result)
 
     def test_returns_synthetic_throughput_on_xrdfs_success(self):
@@ -137,12 +196,11 @@ class TestProbeRedirector(unittest.TestCase):
         mock_result.returncode = 0
         mock_result.stderr = ""
         with patch("subprocess.run", return_value=mock_result):
-            with patch.dict(sys.modules, {"XRootD": None, "XRootD.client": None}):
-                result = sel._probe_via_subprocess(
-                    "/store/data/foo.root",
-                    "root://cmsxrootd.fnal.gov/",
-                    timeout=5.0,
-                )
+            result = sel._probe_via_subprocess(
+                "/store/data/foo.root",
+                "root://cmsxrootd.fnal.gov/",
+                timeout=5.0,
+            )
         self.assertIsNotNone(result)
         self.assertGreater(result, 0)
 
@@ -166,6 +224,10 @@ class TestProbeRedirector(unittest.TestCase):
                 timeout=5.0,
             )
         self.assertIsNone(result)
+
+    def test_default_timeout_is_short(self):
+        """Default probe timeout must be <= 10 seconds to avoid slow tests."""
+        self.assertLessEqual(sel.DEFAULT_PROBE_TIMEOUT, 10.0)
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +289,61 @@ class TestRankRedirectors(unittest.TestCase):
             f"Expected FNAL first but got: {ranked}",
         )
 
+    def test_blacklisted_redirectors_excluded(self):
+        """Redirectors matching the blacklist should not be probed or returned."""
+        with patch.object(sel, "probe_redirector", side_effect=self._mock_probe):
+            ranked = sel.rank_redirectors(
+                "/store/data/foo.root",
+                sel.CMS_REDIRECTORS,
+                timeout=5.0,
+                blacklisted_sites=["fnal.gov"],  # blacklist FNAL
+            )
+        redirectors_in_result = [r for r, _ in ranked]
+        self.assertNotIn("root://cmsxrootd.fnal.gov/", redirectors_in_result)
+
+    def test_all_blacklisted_returns_empty(self):
+        """When all redirectors are blacklisted the result is empty."""
+        with patch.object(sel, "probe_redirector", side_effect=self._mock_probe):
+            ranked = sel.rank_redirectors(
+                "/store/data/foo.root",
+                sel.CMS_REDIRECTORS,
+                timeout=5.0,
+                blacklisted_sites=["fnal.gov", "infn.it", "cern.ch"],
+            )
+        self.assertEqual(ranked, [])
+
+
+# ---------------------------------------------------------------------------
+# _is_blacklisted
+# ---------------------------------------------------------------------------
+
+class TestIsBlacklisted(unittest.TestCase):
+
+    def test_exact_hostname_match(self):
+        self.assertTrue(
+            sel._is_blacklisted("root://bad-site.cern.ch/", ["bad-site.cern.ch"])
+        )
+
+    def test_partial_pattern_match(self):
+        self.assertTrue(
+            sel._is_blacklisted("root://cmsxrootd.fnal.gov/", ["fnal.gov"])
+        )
+
+    def test_no_match(self):
+        self.assertFalse(
+            sel._is_blacklisted("root://cmsxrootd.fnal.gov/", ["infn.it"])
+        )
+
+    def test_empty_blacklist_always_false(self):
+        self.assertFalse(
+            sel._is_blacklisted("root://cmsxrootd.fnal.gov/", [])
+        )
+
+    def test_case_insensitive(self):
+        self.assertTrue(
+            sel._is_blacklisted("root://CMS-XRD-GLOBAL.CERN.CH/", ["cern.ch"])
+        )
+
 
 # ---------------------------------------------------------------------------
 # optimize_file_list (mocked)
@@ -286,6 +403,21 @@ class TestOptimizeFileList(unittest.TestCase):
             result = sel.optimize_file_list(files)
         self.assertEqual(result[0], "input_0.root")  # local unchanged
         self.assertEqual(result[1], optimized_url)    # XRootD optimised
+
+    def test_blacklist_forwarded_to_select_best_url(self):
+        """The blacklisted_sites list must be forwarded to select_best_url."""
+        files = ["root://cms-xrd-global.cern.ch//store/data/foo.root"]
+        blacklist = ["cern.ch"]
+        captured_kwargs = {}
+
+        def _capture(url, **kwargs):
+            captured_kwargs.update(kwargs)
+            return url
+
+        with patch.object(sel, "select_best_url", side_effect=_capture):
+            sel.optimize_file_list(files, blacklisted_sites=blacklist)
+
+        self.assertEqual(captured_kwargs.get("blacklisted_sites"), blacklist)
 
 
 # ---------------------------------------------------------------------------
