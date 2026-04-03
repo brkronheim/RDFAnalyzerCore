@@ -1786,16 +1786,16 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     shutil.copy2(src, dst)
 
         # Build a minimal submit config: single file, local outputs, single thread
-        if os.path.isfile(self.submit_config):
-            test_config = dict(read_config(self.submit_config))
-        else:
-            test_config = {}
+        #if os.path.isfile(self.submit_config):
+        #    test_config = dict(read_config(self.submit_config))
+        #else:
+        #    test_config = {}
+        import copy
+        test_config  = copy.deepcopy(jcfg)
         test_config["fileList"] = first_file
         test_config["saveFile"] = "test_output.root"
         test_config["metaFile"] = "test_output_meta.root"
         test_config["saveDirectory"] = test_dir
-        test_config["type"] = 1
-        test_config["year"] = 2018
         test_config.setdefault("threads", "1")
         # Remove any stage-out sentinel keys
         for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
