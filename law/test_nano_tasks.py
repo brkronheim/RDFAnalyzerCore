@@ -170,11 +170,13 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
                 url,
                 f"Original generic redirector was not stripped: {url!r}",
             )
-            # The site-specific redirector must now be present
-            self.assertIn(
-                "T2_US_Nebraska",
+            # The site-specific redirector must now be present, and the LFN
+            # path must appear after the site name without a second redirector
+            # host in between.
+            self.assertRegex(
                 url,
-                f"Expected site-specific redirector for T2_US_Nebraska but got: {url!r}",
+                r"root://xrootd-cms\.infn\.it//store/test/xrootd/T2_US_Nebraska//store/data",
+                f"Expected site-specific redirector pattern but got: {url!r}",
             )
 
 

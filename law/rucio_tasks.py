@@ -223,12 +223,14 @@ def _query_rucio(
                     break
 
         # Strip any existing redirector from the file name so we always
-        # apply the chosen redirector to the bare LFN.
+        # apply the chosen redirector to the bare LFN.  Match one or more
+        # slashes after the host to handle both "root://host/store/..." and
+        # "root://host//store/..." forms.
         file_name = filedata["name"]
         if file_name.startswith("root://"):
-            m = re.match(r"root://[^/]+/(.*)", file_name)
+            m = re.match(r"root://[^/]+/+(.*)", file_name)
             if m:
-                file_name = "/" + m.group(1).lstrip("/")
+                file_name = "/" + m.group(1)
 
         running_size += size_gb
         running_files += 1
