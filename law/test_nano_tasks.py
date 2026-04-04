@@ -38,7 +38,7 @@ _SKIP_MSG = "law and luigi packages not available"
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
 class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
-    """Tests that _query_rucio produces XRootD URLs via ensure_xrootd_redirector."""
+    """Tests that _query_rucio produces XRootD URLs and collects site redirectors."""
 
     def _import(self):
         import nano_tasks
@@ -51,6 +51,18 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
             "bytes": size_bytes,
         }
 
+    # ------------------------------------------------------------------
+    # Helper: extract groups and site_redirectors from the new return type
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _groups(result):
+        return result.get("groups", {})
+
+    @staticmethod
+    def _site_redirectors(result):
+        return result.get("site_redirectors", {})
+
     def test_bare_lfn_gets_redirector(self):
         """A bare LFN from Rucio gets the default CMS redirector prepended."""
         mod = self._import()
@@ -61,20 +73,29 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
         client = MagicMock()
         client.list_replicas.return_value = iter([entry])
 
-        groups = mod._query_rucio(
+        result = mod._query_rucio(
             "/store/data/Run2018A/Charmonium/MINIAOD/17Sep2018-v1",
             file_split_gb=10.0,
-            WL=[],
-            BL=[],
+            whitelist=[],
+            blacklist=[],
             site_override="",
             client=client,
         )
+        groups = self._groups(result)
         all_urls = ",".join(groups.values()).split(",")
         for url in all_urls:
             self.assertTrue(
                 url.startswith("root://"),
                 f"Expected root:// prefix but got: {url!r}",
             )
+        # Without Rucio state information, site_redirectors should contain
+        # only the generic CMS fallback redirectors.
+        site_redirs = self._site_redirectors(result)
+        self.assertIn(lfn, site_redirs, "LFN should appear in site_redirectors")
+        for fb in ["root://cmsxrootd.fnal.gov/", "root://xrootd-cms.infn.it/",
+                   "root://cms-xrd-global.cern.ch/"]:
+            self.assertIn(fb, site_redirs[lfn],
+                          f"Generic fallback redirector {fb!r} should be in list")
 
     def test_full_xrootd_lfn_not_double_prefixed(self):
         """If Rucio returns a name already starting with root://, it is not double-prefixed."""
@@ -86,43 +107,161 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
         client = MagicMock()
         client.list_replicas.return_value = iter([entry])
 
-        groups = mod._query_rucio(
+        result = mod._query_rucio(
             "/store/data/Run2018A/MINIAOD",
             file_split_gb=10.0,
-            WL=[],
-            BL=[],
+            whitelist=[],
+            blacklist=[],
             site_override="",
             client=client,
         )
+        groups = self._groups(result)
         all_urls = ",".join(groups.values()).split(",")
         for url in all_urls:
             self.assertNotIn("root://root://", url, "Double-prefix detected")
             self.assertTrue(url.startswith("root://"))
+        # The extracted LFN (/store/data/Run2018A/foo.root) should appear in
+        # site_redirectors (not the full URL with original redirector).
+        site_redirs = self._site_redirectors(result)
+        lfn = "/store/data/Run2018A/foo.root"
+        self.assertIn(lfn, site_redirs,
+                      "Extracted LFN should be the key in site_redirectors")
 
-    def test_site_override_redirector_applied(self):
-        """With a site override the site-specific redirector is still an XRootD URL."""
+    def test_site_specific_redirectors_collected_for_available_sites(self):
+        """All AVAILABLE non-Tape sites produce site-specific redirectors in
+        site_redirectors; the URL in groups uses the global redirector as
+        a reliable fallback (the worker picks the actual best site)."""
         mod = self._import()
         lfn = "/store/data/Run2018A/Charmonium/foo.root"
-        entry = self._make_rucio_entry(lfn, states={"T2_US_Nebraska_Disk": "AVAILABLE"})
+        entry = self._make_rucio_entry(
+            lfn,
+            states={
+                "T2_US_Nebraska_Disk": "AVAILABLE",
+                "T2_DE_RWTH_Disk": "AVAILABLE",
+                "T1_US_FNAL_Tape": "AVAILABLE",   # Tape – must be excluded
+            },
+        )
 
         from unittest.mock import MagicMock
         client = MagicMock()
         client.list_replicas.return_value = iter([entry])
 
-        groups = mod._query_rucio(
+        result = mod._query_rucio(
             "/store/data/Run2018A/MINIAOD",
             file_split_gb=10.0,
-            WL=["T2_US_Nebraska"],
-            BL=[],
+            whitelist=["T2_US_Nebraska"],
+            blacklist=[],
             site_override="",
             client=client,
         )
+
+        groups = self._groups(result)
+        all_urls = ",".join(groups.values()).split(",")
+        # The URL stored in groups uses the global redirector (not site-specific).
+        for url in all_urls:
+            self.assertTrue(url.startswith("root://"))
+            self.assertIn("cms-xrd-global.cern.ch", url,
+                          "Groups URL should use the global redirector as fallback")
+
+        site_redirs = self._site_redirectors(result)
+        self.assertIn(lfn, site_redirs)
+        redir_list = site_redirs[lfn]
+
+        # Both disk sites should appear as site-specific redirectors.
+        self.assertTrue(
+            any("T2_US_Nebraska" in r for r in redir_list),
+            f"T2_US_Nebraska should be in site_redirectors, got: {redir_list}",
+        )
+        self.assertTrue(
+            any("T2_DE_RWTH" in r for r in redir_list),
+            f"T2_DE_RWTH should be in site_redirectors, got: {redir_list}",
+        )
+        # Tape sites must NOT appear.
+        self.assertFalse(
+            any("T1_US_FNAL" in r for r in redir_list),
+            f"Tape site T1_US_FNAL should NOT be in site_redirectors, got: {redir_list}",
+        )
+        # Generic CMS fallback redirectors must also be present.
+        for fb in ["root://cmsxrootd.fnal.gov/", "root://cms-xrd-global.cern.ch/"]:
+            self.assertIn(fb, redir_list,
+                          f"Generic fallback {fb!r} should be in site_redirectors")
+
+    def test_blacklisted_site_excluded_from_redirectors(self):
+        """Sites on the blacklist must not appear in site_redirectors."""
+        mod = self._import()
+        lfn = "/store/data/Run2018A/Charmonium/foo.root"
+        entry = self._make_rucio_entry(
+            lfn,
+            states={
+                "T2_US_Nebraska_Disk": "AVAILABLE",
+                "T2_DE_RWTH_Disk": "AVAILABLE",
+            },
+        )
+
+        from unittest.mock import MagicMock
+        client = MagicMock()
+        client.list_replicas.return_value = iter([entry])
+
+        result = mod._query_rucio(
+            "/store/data/Run2018A/MINIAOD",
+            file_split_gb=10.0,
+            whitelist=[],
+            blacklist=["T2_US_Nebraska"],
+            site_override="",
+            client=client,
+        )
+        site_redirs = self._site_redirectors(result)
+        self.assertIn(lfn, site_redirs)
+        redir_list = site_redirs[lfn]
+        self.assertFalse(
+            any("T2_US_Nebraska" in r for r in redir_list),
+            f"Blacklisted site T2_US_Nebraska should NOT appear, got: {redir_list}",
+        )
+        # T2_DE_RWTH (not blacklisted) must still be present.
+        self.assertTrue(
+            any("T2_DE_RWTH" in r for r in redir_list),
+            f"T2_DE_RWTH (not blacklisted) should still be in site_redirectors",
+        )
+
+    def test_existing_redirector_stripped_before_lfn_extracted(self):
+        """When Rucio returns a full XRootD URL with an existing redirector, the
+        LFN is correctly extracted and used as the key in site_redirectors."""
+        mod = self._import()
+        # Rucio returns a full URL with an old/generic redirector already embedded
+        full_url = "root://cms-xrd-global.cern.ch//store/data/Run2018A/foo.root"
+        entry = self._make_rucio_entry(
+            full_url, states={"T2_US_Nebraska_Disk": "AVAILABLE"}
+        )
+
+        from unittest.mock import MagicMock
+        client = MagicMock()
+        client.list_replicas.return_value = iter([entry])
+
+        result = mod._query_rucio(
+            "/store/data/Run2018A/MINIAOD",
+            file_split_gb=10.0,
+            whitelist=["T2_US_Nebraska"],
+            blacklist=[],
+            site_override="",
+            client=client,
+        )
+        # The URL in groups should use the global redirector (not double-prefixed).
+        groups = self._groups(result)
         all_urls = ",".join(groups.values()).split(",")
         for url in all_urls:
-            self.assertTrue(
-                url.startswith("root://"),
-                f"Expected root:// prefix but got: {url!r}",
-            )
+            self.assertTrue(url.startswith("root://"))
+            self.assertNotIn("root://root://", url, "Double-prefix detected")
+
+        # The extracted LFN should be the key in site_redirectors.
+        site_redirs = self._site_redirectors(result)
+        lfn = "/store/data/Run2018A/foo.root"
+        self.assertIn(lfn, site_redirs,
+                      "Extracted LFN should be the key in site_redirectors")
+        # The site-specific redirector must appear in the list.
+        self.assertTrue(
+            any("T2_US_Nebraska" in r for r in site_redirs[lfn]),
+            f"T2_US_Nebraska should be in site_redirectors, got: {site_redirs[lfn]}",
+        )
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)

@@ -236,7 +236,10 @@ def extract_lfn(url):
 
 
 def build_url(lfn, redirector):
-    return redirector.rstrip("/") + "/" + lfn.lstrip("/")
+    # Always use // between redirector and LFN: required for both regular
+    # redirectors (root://cmsxrootd.fnal.gov/) and site-specific test
+    # redirectors (root://xrootd-cms.infn.it//store/test/xrootd/<site>/).
+    return redirector.rstrip("/") + "//" + lfn.lstrip("/")
 
 
 def redirector_host(redirector):
@@ -386,6 +389,21 @@ if local_site:
 else:
     print("[stage-in] Local site not detected; using throughput ranking only")
 
+# Load per-file redirector list produced by _query_rucio during job preparation.
+# Falls back to the generic CMS redirectors when the file is absent (e.g. for
+# non-Rucio sources) or when a file has no Rucio-discovered site redirectors.
+import json as _json
+_site_redirectors_file = "site_redirectors.json"
+_site_redirectors: dict = {{}}
+if os.path.exists(_site_redirectors_file):
+    try:
+        with open(_site_redirectors_file) as _sr_fh:
+            _site_redirectors = _json.load(_sr_fh)
+        if _site_redirectors:
+            print(f"[stage-in] Loaded site redirectors for {{len(_site_redirectors)}} file(s)")
+    except Exception as _sr_exc:
+        print(f"[stage-in] Warning: could not read site_redirectors.json: {{_sr_exc}}")
+
 streams = os.environ.get("XRDCP_STREAMS", "4")
 urls = [u.strip() for u in file_list.split(",") if u.strip()]
 
@@ -394,7 +412,10 @@ def _best_redirector_for(url):
     lfn = extract_lfn(url)
     if not (lfn.startswith("/store/") or lfn.startswith("/eos/")):
         return url, url  # non-XRootD: keep original, no ranking
-    ranked = rank_redirectors_parallel(lfn, CMS_REDIRECTORS, local_site)
+    # Use per-file redirectors from Rucio when available; fall back to the
+    # generic CMS redirectors so there is always something to probe.
+    file_redirectors = _site_redirectors.get(lfn) or CMS_REDIRECTORS
+    ranked = rank_redirectors_parallel(lfn, file_redirectors, local_site)
     if not ranked:
         return url, GLOBAL_REDIRECTOR
     best_redir = ranked[0][0]
@@ -402,7 +423,8 @@ def _best_redirector_for(url):
     print(f"  [stage-in] {{lfn}} -> {{best_redir}} ({{ranked[0][1]:.2f}} MB/s)")
     return url, best_url
 
-print(f"[stage-in] Probing {{len(CMS_REDIRECTORS)}} redirector(s) for {{len(urls)}} file(s) in parallel...")
+n_redirectors = len(next(iter(_site_redirectors.values()), CMS_REDIRECTORS))
+print(f"[stage-in] Probing up to {{n_redirectors}} redirector(s) per file for {{len(urls)}} file(s) in parallel...")
 best_urls = {{}}
 with ThreadPoolExecutor(max_workers=len(urls) or 1) as pool:
     futures = {{pool.submit(_best_redirector_for, u): u for u in urls}}
@@ -420,15 +442,11 @@ local_paths = []
 for i, url in enumerate(urls):
     local_name = f"input_{{i}}.root"
     best_url = best_urls.get(url, url)
-    # Normalise test redirectors
-    best_url = _normalize_test_redirector(best_url)
 
     success = False
     for attempt in range(1, MAX_ATTEMPTS + 1):
         # After initial failure, fall back to the global redirector.
         cur_url = best_url if attempt == 1 else build_url(extract_lfn(url), GLOBAL_REDIRECTOR)
-        if attempt > 1:
-            cur_url = _normalize_test_redirector(cur_url)
         print(f"[stage-in] attempt {{attempt}}/{{MAX_ATTEMPTS}} xrdcp {{cur_url}} -> {{local_name}}")
         try:
             subprocess.run(
@@ -774,7 +792,10 @@ def extract_lfn(url):
 
 
 def build_url(lfn, redirector):
-    return redirector.rstrip("/") + "/" + lfn.lstrip("/")
+    # Always use // between redirector and LFN: required for both regular
+    # redirectors (root://cmsxrootd.fnal.gov/) and site-specific test
+    # redirectors (root://xrootd-cms.infn.it//store/test/xrootd/<site>/).
+    return redirector.rstrip("/") + "//" + lfn.lstrip("/")
 
 
 def redirector_host(redirector):
@@ -936,11 +957,28 @@ if local_site:
 else:
     print("[xrd-opt] Local site not detected; using throughput ranking only")
 
-print(f"[xrd-opt] Probing {{len(CMS_REDIRECTORS)}} redirector(s) for {{len(xrd_files)}} file(s)...")
+# Load per-file redirector list produced by _query_rucio during job preparation.
+# Falls back to the generic CMS_REDIRECTORS when absent (non-Rucio sources).
+import json as _json
+_site_redirectors_file = "site_redirectors.json"
+_site_redirectors: dict = {{}}
+if os.path.exists(_site_redirectors_file):
+    try:
+        with open(_site_redirectors_file) as _sr_fh:
+            _site_redirectors = _json.load(_sr_fh)
+        if _site_redirectors:
+            print(f"[xrd-opt] Loaded site redirectors for {{len(_site_redirectors)}} file(s)")
+    except Exception as _sr_exc:
+        print(f"[xrd-opt] Warning: could not read site_redirectors.json: {{_sr_exc}}")
+
+n_redirectors = len(next(iter(_site_redirectors.values()), CMS_REDIRECTORS)) if _site_redirectors else len(CMS_REDIRECTORS)
+print(f"[xrd-opt] Probing up to {{n_redirectors}} redirector(s) per file for {{len(xrd_files)}} file(s)...")
 optimized = []
 for f in files:
     if f.startswith("root://") or f.startswith("/store/"):
-        optimized.append(select_best_url(f, CMS_REDIRECTORS, local_site, blacklist))
+        lfn = extract_lfn(f)
+        file_redirectors = _site_redirectors.get(lfn) or CMS_REDIRECTORS
+        optimized.append(select_best_url(f, file_redirectors, local_site, blacklist))
     else:
         optimized.append(f)
 
@@ -1160,6 +1198,7 @@ def generate_condor_submit(
         f"{main_dir}/job_$(Process)/{config_file}",
         f"{main_dir}/job_$(Process)/floats.txt",
         f"{main_dir}/job_$(Process)/ints.txt",
+        f"{main_dir}/job_$(Process)/site_redirectors.json",
     ]
     if shared_dir_name:
         transfer_files.append(f"{main_dir}/{shared_dir_name}")

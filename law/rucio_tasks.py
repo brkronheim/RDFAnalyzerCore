@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -127,6 +128,14 @@ def _get_rucio_client(proxy: str | None = None):
         raise RuntimeError(f"Cannot create Rucio client: {e}") from e
 
 
+# Generic CMS XRootD redirectors used as fallbacks in the per-file redirector list.
+_CMS_FALLBACK_REDIRECTORS: list[str] = [
+    "root://cmsxrootd.fnal.gov/",
+    "root://xrootd-cms.infn.it/",
+    "root://cms-xrd-global.cern.ch/",
+]
+
+
 def _query_rucio(
     dataset_path: str,
     file_split_gb: float,
@@ -135,11 +144,18 @@ def _query_rucio(
     site_override: str,
     client,
     max_files_per_group: int = 50,
-) -> dict[int, str]:
-    """Query Rucio for replicas of *dataset_path* and return grouped URL strings.
+) -> dict:
+    """Query Rucio for replicas of *dataset_path* and return grouped URL strings
+    together with a complete per-file redirector list for site-aware probing on
+    the worker node.
 
     Files are grouped so that each group contains at most *max_files_per_group*
-    files and at most *file_split_gb* GB of data.
+    files and at most *file_split_gb* GB of data.  The URL stored in each group
+    uses the generic global redirector so that it is always reachable as a
+    fallback.  The per-file redirector list (``"site_redirectors"`` key) contains
+    ALL available site-specific redirectors for every file, plus the three generic
+    CMS redirectors as fallbacks.  Workers use this list to probe each candidate
+    site in parallel and select the fastest one.
 
     Parameters
     ----------
@@ -148,10 +164,10 @@ def _query_rucio(
     file_split_gb:
         Maximum GB of data per job group.
     whitelist:
-        Preferred site names; if a replica is available at one of these sites
-        a site-specific redirector is used.
+        Preferred site names.  No longer used for URL selection (all available
+        sites are now collected), but kept for API compatibility.
     blacklist:
-        Site names to skip.
+        Site names to skip when collecting site-specific redirectors.
     site_override:
         If non-empty, force this specific site for all replicas.
     client:
@@ -161,13 +177,19 @@ def _query_rucio(
 
     Returns
     -------
-    dict[int, str]
-        Mapping ``{group_index: "url1,url2,..."}`` where each value is a
-        comma-separated string of XRootD URLs belonging to that group.
+    dict
+        ``{"groups": dict[int, str], "site_redirectors": dict[str, list[str]]}``
+
+        * ``"groups"`` maps ``group_index`` to a comma-separated string of
+          XRootD URLs (using the global redirector as a reliable fallback).
+        * ``"site_redirectors"`` maps each bare LFN to the ordered list of
+          redirectors that should be probed on the worker node.  Site-specific
+          redirectors (from Rucio ``states``) come first, followed by the
+          generic CMS fallbacks so that the worker always has a usable option.
     """
     if not dataset_path or not isinstance(dataset_path, str) or not dataset_path.startswith("/"):
         print(f"Warning: invalid Rucio dataset path: {dataset_path!r} – skipping")
-        return {}
+        return {"groups": {}, "site_redirectors": {}}
 
     max_retries = 5
     backoff = 0.5
@@ -191,25 +213,64 @@ def _query_rucio(
                     f"Error: Rucio failed for {dataset_path!r} after "
                     f"{max_retries} attempts: {e}"
                 )
-                return {}
+                return {"groups": {}, "site_redirectors": {}}
         except Exception as e:
             print(f"Error: unexpected Rucio error for {dataset_path!r}: {e}")
-            return {}
+            return {"groups": {}, "site_redirectors": {}}
 
     if not replicas:
         print(f"Warning: no replicas found for {dataset_path!r}")
-        return {}
+        return {"groups": {}, "site_redirectors": {}}
 
     groups: dict[int, str] = {}
     group_sizes: dict[int, float] = {}
     group_counts: dict[int, int] = {}
+    per_file_redirectors: dict[str, list[str]] = {}
     running_size = 0.0
     running_files = 0
     group = 0
 
     for filedata in replicas:
         size_gb = filedata.get("bytes", 0) * 1e-9
-        redirector = RUCIO_REDIRECTOR
+
+        # Strip any existing redirector from the file name so we always work
+        # with a bare LFN.  Match one or more slashes after the host to handle
+        # both "root://host/store/..." and "root://host//store/..." forms.
+        file_name = filedata["name"]
+        if file_name.startswith("root://"):
+            m = re.match(r"root://[^/]+/+(.*)", file_name)
+            if m:
+                file_name = "/" + m.group(1)
+
+        # Collect ALL available site-specific redirectors for this file so the
+        # worker can probe each one and pick the fastest.  Every AVAILABLE
+        # non-Tape site (not on the blacklist) contributes a site-specific
+        # test redirector of the form:
+        #   root://xrootd-cms.infn.it//store/test/xrootd/<site>/
+        # The generic CMS redirectors are appended as fallbacks so the worker
+        # can always reach the file even if all site-specific probes fail.
+        states = filedata.get("states", {})
+        site_redirectors: list[str] = []
+        seen_redirectors: set[str] = set()
+        for site_key, state_val in states.items():
+            if state_val != "AVAILABLE" or "Tape" in site_key:
+                continue
+            site = site_key.replace("_Disk", "")
+            # Skip blacklisted sites.
+            if blacklist and any(b.lower() in site.lower() for b in blacklist):
+                continue
+            redir = f"root://xrootd-cms.infn.it//store/test/xrootd/{site}/"
+            if redir not in seen_redirectors:
+                site_redirectors.append(redir)
+                seen_redirectors.add(redir)
+        # Append the generic CMS redirectors as fallbacks (deduplicated).
+        for fb in _CMS_FALLBACK_REDIRECTORS:
+            if fb not in seen_redirectors:
+                site_redirectors.append(fb)
+                seen_redirectors.add(fb)
+
+        per_file_redirectors[file_name] = site_redirectors
+
         running_size += size_gb
         running_files += 1
         if running_size > file_split_gb or running_files >= max_files_per_group:
@@ -217,7 +278,10 @@ def _query_rucio(
             running_size = size_gb
             running_files = 1
 
-        url = ensure_xrootd_redirector(filedata["name"], redirector)
+        # The URL stored in groups uses the global redirector as a reliable
+        # fallback.  The worker will replace it with the fastest available URL
+        # after probing the per-file redirector list.
+        url = ensure_xrootd_redirector(file_name, RUCIO_REDIRECTOR)
         if group in groups:
             groups[group] += "," + url
             group_counts[group] += 1
@@ -227,7 +291,7 @@ def _query_rucio(
             group_counts[group] = 1
             group_sizes[group] = round(size_gb, 1)
 
-    return groups
+    return {"groups": groups, "site_redirectors": per_file_redirectors}
 
 
 def _get_sample_list(config_file: str):
@@ -418,6 +482,7 @@ class GetRucioFileList(RucioMixin, law.LocalWorkflow):
         all_urls: list[str] = []
         seen_urls: set[str] = set()
         rucio_groups: list[str] = []
+        all_site_redirectors: dict[str, list[str]] = {}
 
         # Explicit file list overrides Rucio discovery
         explicit_files = [
@@ -476,10 +541,13 @@ class GetRucioFileList(RucioMixin, law.LocalWorkflow):
                                 f"Rucio query failed for entry {entry!r}: {exc}"
                             ) from exc
 
+            all_site_redirectors: dict[str, list[str]] = {}
             for das_entry in das_entries:
-                partial = partial_results.get(das_entry, {})
-                for gkey in sorted(partial.keys()):
-                    group_str = partial[gkey]
+                result = partial_results.get(das_entry, {"groups": {}, "site_redirectors": {}})
+                partial_groups = result.get("groups", {})
+                partial_site_redir = result.get("site_redirectors", {})
+                for gkey in sorted(partial_groups.keys()):
+                    group_str = partial_groups[gkey]
                     group_urls = [
                         u.strip() for u in group_str.split(",") if u.strip()
                     ]
@@ -488,6 +556,7 @@ class GetRucioFileList(RucioMixin, law.LocalWorkflow):
                         seen_urls.update(new_urls)
                         all_urls.extend(new_urls)
                         rucio_groups.append(",".join(new_urls))
+                all_site_redirectors.update(partial_site_redir)
         else:
             self.publish_message(
                 f"No Rucio path or explicit files for sample {name!r}; "
@@ -504,6 +573,8 @@ class GetRucioFileList(RucioMixin, law.LocalWorkflow):
         payload: dict = {"sample": name, "files": fixed_urls}
         if rucio_groups:
             payload["groups"] = rucio_groups
+        if all_site_redirectors:
+            payload["site_redirectors"] = all_site_redirectors
 
         Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
         with open(self.output().path, "w") as fh:

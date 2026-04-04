@@ -1149,6 +1149,31 @@ def _write_job_config(
                 fh.write(f"{key}={val}\n")
 
 
+def _extract_lfn_for_redirect(url: str) -> str:
+    """Extract the bare LFN from an XRootD URL for site_redirectors lookup.
+
+    Handles both regular XRootD URLs (``root://host//store/...``) and
+    site-specific test redirector URLs
+    (``root://xrootd-cms.infn.it//store/test/xrootd/<site>//store/...``).
+    Returns the logical file name starting with ``/store/`` or ``/eos/``,
+    or the original *url* if it is not an XRootD URL.
+    """
+    import re as _re
+    if not url.startswith("root://"):
+        return url
+    # Strip the server component to get the path.
+    m = _re.match(r"root://[^/]+/+(.*)", url)
+    if not m:
+        return url
+    path = "/" + m.group(1).lstrip("/")
+    # For site-specific test redirectors the path is
+    # /store/test/xrootd/<site>//store/... — extract the actual LFN.
+    test_m = _re.match(r"/store/test/xrootd/[^/]+/(.*)", path)
+    if test_m:
+        path = "/" + test_m.group(1).lstrip("/")
+    return path
+
+
 def _plan_file_source_jobs(
     *,
     dataset_manifest_path: str,
@@ -1173,6 +1198,9 @@ def _plan_file_source_jobs(
         dataset_name = payload.get("sample", json_path.stem)
         all_files = payload.get("files", [])
         groups = payload.get("groups", [])
+        # Per-file redirector list from Rucio discovery (may be absent for
+        # non-Rucio sources or explicit file lists).
+        site_redirectors: dict[str, list[str]] = payload.get("site_redirectors", {})
 
         # Prefer pre-computed group partitions when available (e.g. from GetNANOFileList).
         # If the file list is empty but groups exist, we still want to create jobs.
@@ -1197,6 +1225,17 @@ def _plan_file_source_jobs(
         dtype = dataset_entry.dtype if dataset_entry else "mc"
 
         for sub_idx, part in enumerate(partitions):
+            # Build per-job site_redirectors: only include LFNs in this partition.
+            job_lfns = [
+                _extract_lfn_for_redirect(u.strip())
+                for u in str(part["files"]).split(",")
+                if u.strip()
+            ]
+            job_site_redirectors = {
+                lfn: site_redirectors[lfn]
+                for lfn in job_lfns
+                if lfn in site_redirectors
+            }
             job_plans.append({
                 "dataset_name": dataset_name,
                 "job_dir": os.path.join(jobs_dir, dataset_name, f"job_{sub_idx}"),
@@ -1205,6 +1244,7 @@ def _plan_file_source_jobs(
                 "first_entry": part.get("first_entry", 0),
                 "last_entry": part.get("last_entry", 0),
                 "dtype": dtype,
+                "site_redirectors": job_site_redirectors,
             })
 
     if missing_datasets:
@@ -1678,6 +1718,13 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     stage_shared_inputs_locally=False,
                 )
 
+                # Write the per-job site redirector list so Condor workers
+                # can probe all available sites instead of only the generic
+                # CMS_REDIRECTORS.
+                job_site_redirectors = plan.get("site_redirectors", {})
+                with open(os.path.join(job_dir, "site_redirectors.json"), "w") as sr_fh:
+                    json.dump(job_site_redirectors, sr_fh)
+
                 job_entries.append({
                     "dataset_name": dataset_name,
                     "job_dir": job_dir,
@@ -1699,6 +1746,10 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     output_dir=out_dir,
                     stage_shared_inputs_locally=False,
                 )
+                # Write empty site_redirectors.json so Condor transfer works
+                # consistently; workers fall back to CMS_REDIRECTORS when empty.
+                with open(os.path.join(job_dir, "site_redirectors.json"), "w") as sr_fh:
+                    json.dump({}, sr_fh)
                 job_entries.append({
                     "dataset_name": entry.name,
                     "job_dir": job_dir,
