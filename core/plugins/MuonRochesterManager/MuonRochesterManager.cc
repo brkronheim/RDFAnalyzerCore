@@ -203,6 +203,11 @@ void MuonRochesterManager::applyScaleAndResolution(
   step.scaleVariation = scaleVariation;
   step.resolutionVariation = resolutionVariation;
   scaleResolutionSteps_m.push_back(std::move(step));
+
+  // Corrected-muon workflows register variation collections during setup, so
+  // the Rochester output columns must exist immediately rather than only when
+  // the framework later calls execute().
+  execute();
 }
 
 // ---------------------------------------------------------------------------
@@ -240,8 +245,8 @@ void MuonRochesterManager::execute() {
             const ROOT::VecOps::RVec<Float_t> &pt,
             const ROOT::VecOps::RVec<Float_t> &eta,
             const ROOT::VecOps::RVec<Float_t> &phi,
-            const ROOT::VecOps::RVec<Float_t> &charge,
-            const ROOT::VecOps::RVec<Float_t> &nLayers,
+          const ROOT::VecOps::RVec<Int_t> &charge,
+          const ROOT::VecOps::RVec<UChar_t> &nLayers,
             UInt_t lumi,
             ULong64_t event)
             -> ROOT::VecOps::RVec<Float_t> {

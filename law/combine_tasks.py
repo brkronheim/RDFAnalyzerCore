@@ -96,11 +96,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import luigi  # type: ignore
 import law  # type: ignore
+import yaml
 
 # ---------------------------------------------------------------------------
 # Make sure core/python is importable regardless of how the script is invoked
@@ -513,6 +515,169 @@ def _derive_available_variations(manifest: "OutputManifest") -> Dict[str, List[s
     return variations
 
 
+def _resolve_manifest_histogram_file(
+    manifest: "OutputManifest", manifest_path: str
+) -> str:
+    """Return the absolute merged histogram ROOT path referenced by *manifest*."""
+    if manifest.histograms is None or not manifest.histograms.output_file:
+        raise RuntimeError(
+            "ManifestDatacardTask requires a manifest with a 'histograms.output_file' entry."
+        )
+
+    hist_path = manifest.histograms.output_file
+    if os.path.isabs(hist_path):
+        return hist_path
+    return os.path.abspath(os.path.join(os.path.dirname(manifest_path), hist_path))
+
+
+def _collect_config_sample_names(config: Dict[str, object]) -> List[str]:
+    """Extract the sample aliases referenced by a datacard config."""
+    sample_names: List[str] = []
+    seen: set[str] = set()
+
+    for process_cfg in (config.get("processes") or {}).values():
+        if not isinstance(process_cfg, dict):
+            continue
+        for sample in process_cfg.get("samples", []):
+            if isinstance(sample, str) and sample and sample not in seen:
+                sample_names.append(sample)
+                seen.add(sample)
+
+    for combo_cfg in (config.get("sample_combinations") or {}).values():
+        if not isinstance(combo_cfg, dict):
+            continue
+        for sample in combo_cfg.get("samples", []):
+            if isinstance(sample, str) and sample and sample not in seen:
+                sample_names.append(sample)
+                seen.add(sample)
+
+    for process_name in (config.get("processes") or {}).keys():
+        if isinstance(process_name, str) and process_name and process_name not in seen:
+            sample_names.append(process_name)
+            seen.add(process_name)
+
+    return sample_names
+
+
+def _load_dataset_manifest_sample_names(dataset_manifest_path: str) -> List[str]:
+    """Load dataset names from a dataset manifest for implicit input-file mapping."""
+    from dataset_manifest import DatasetManifest  # noqa: E402
+
+    manifest = DatasetManifest.load(dataset_manifest_path)
+    return [entry.name for entry in manifest.datasets if entry.name]
+
+
+def _load_manifest_sample_names(manifest: "OutputManifest") -> List[str]:
+    """Extract available sample aliases from enriched histogram metadata."""
+    if manifest.histograms is None:
+        return []
+
+    sample_names: List[str] = []
+    seen: set[str] = set()
+    for sample_name in (manifest.histograms.sample_metadata or {}).keys():
+        if isinstance(sample_name, str) and sample_name and sample_name not in seen:
+            sample_names.append(sample_name)
+            seen.add(sample_name)
+    return sample_names
+
+
+def _build_manifest_region_config(
+    manifest_defaults: Dict[str, object],
+    region_name: str,
+) -> Dict[str, object]:
+    """Create a control-region config block from manifest defaults."""
+    region_cfg = dict(manifest_defaults)
+    region_cfg.pop("region_names", None)
+    region_cfg.pop("region_overrides", None)
+    overrides = manifest_defaults.get("region_overrides", {})
+    if isinstance(overrides, dict) and isinstance(overrides.get(region_name), dict):
+        region_cfg.update(overrides[region_name])
+    return region_cfg
+
+
+def _prepare_manifest_datacard_config(
+    config_file: str,
+    manifest: "OutputManifest",
+    manifest_path: str,
+    target_region: str = "",
+    dataset_manifest_path: str = "",
+) -> str:
+    """Create a temporary datacard YAML adapted to a merged manifest.
+
+    The helper fills in missing ``input_files`` from the merged histogram file,
+    optionally synthesizes region definitions from a ``manifest_defaults`` block,
+    and restricts multi-region configs to the requested region.
+    """
+    with open(config_file, "r") as fh:
+        config = yaml.safe_load(fh) or {}
+
+    if not isinstance(config, dict):
+        raise RuntimeError(
+            f"Datacard configuration must contain a YAML mapping at the top level: {config_file!r}"
+        )
+
+    hist_file = _resolve_manifest_histogram_file(manifest, manifest_path)
+
+    if not config.get("input_files"):
+        sample_names = _collect_config_sample_names(config)
+        if not sample_names:
+            sample_names = _load_manifest_sample_names(manifest)
+        if not sample_names and dataset_manifest_path:
+            sample_names = _load_dataset_manifest_sample_names(dataset_manifest_path)
+        if not sample_names:
+            sample_names = ["merged"]
+        config["input_files"] = {
+            sample_name: {"path": hist_file} for sample_name in sample_names
+        }
+
+    if (
+        not config.get("sample_combinations")
+        and manifest.histograms is not None
+        and manifest.histograms.sample_combinations
+    ):
+        config["sample_combinations"] = {
+            combo_name: dict(combo_cfg)
+            for combo_name, combo_cfg in manifest.histograms.sample_combinations.items()
+        }
+
+    if (
+        not config.get("processes")
+        and manifest.histograms is not None
+        and manifest.histograms.processes
+    ):
+        config["processes"] = {
+            process_name: dict(process_cfg)
+            for process_name, process_cfg in manifest.histograms.processes.items()
+        }
+
+    control_regions = config.get("control_regions")
+    manifest_defaults = config.get("manifest_defaults")
+    if (not control_regions) and isinstance(manifest_defaults, dict):
+        region_names = [target_region] if target_region else [r.name for r in manifest.regions if r.name]
+        if not region_names:
+            region_names = list(manifest_defaults.get("region_names", [])) or ["combined"]
+        config["control_regions"] = {
+            region_name: _build_manifest_region_config(manifest_defaults, region_name)
+            for region_name in region_names
+        }
+        control_regions = config["control_regions"]
+
+    if target_region:
+        if isinstance(control_regions, dict) and target_region in control_regions:
+            config["control_regions"] = {target_region: control_regions[target_region]}
+        elif isinstance(manifest_defaults, dict):
+            config["control_regions"] = {
+                target_region: _build_manifest_region_config(manifest_defaults, target_region)
+            }
+
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", prefix="manifest_datacard_", delete=False
+    )
+    with handle:
+        yaml.safe_dump(config, handle, sort_keys=False)
+    return handle.name
+
+
 # ===========================================================================
 # Task 3 – ManifestDatacardTask
 # ===========================================================================
@@ -558,6 +723,14 @@ class ManifestDatacardTask(CombineMixin, law.Task):
             "Optional MergeAll input directory.  When set, this task declares "
             "a dependency on MergeAll so manifest-based datacards wait for the "
             "merge stage to complete."
+        ),
+    )
+    dataset_manifest = luigi.Parameter(
+        default="",
+        description=(
+            "Optional dataset manifest YAML. When provided, missing input-file "
+            "sample aliases in the datacard config are synthesized from the "
+            "dataset entries."
         ),
     )
     strict_coverage = luigi.BoolParameter(
@@ -683,28 +856,51 @@ class ManifestDatacardTask(CombineMixin, law.Task):
             "task": "ManifestDatacardTask",
             "name": self.name,
             "manifest_path": self.manifest_path,
+            "dataset_manifest": self.dataset_manifest or None,
             "manifest_framework_hash": manifest.framework_hash,
             "manifest_user_repo_hash": manifest.user_repo_hash,
             "regions": region_names,
             "n_nuisance_groups": len(manifest.nuisance_groups),
         }
 
+        generated_configs: List[str] = []
         with PerformanceRecorder("ManifestDatacardTask") as rec:
-            generator = DatacardGenerator(config_file)
-            generator.output_dir = out_dir
-
             if region_names:
                 for region in region_names:
                     region_out_dir = os.path.join(out_dir, region)
                     Path(region_out_dir).mkdir(parents=True, exist_ok=True)
+                    generated_config = _prepare_manifest_datacard_config(
+                        config_file,
+                        manifest,
+                        self.manifest_path,
+                        target_region=region,
+                        dataset_manifest_path=self.dataset_manifest,
+                    )
+                    generated_configs.append(generated_config)
+                    generator = DatacardGenerator(generated_config)
                     generator.output_dir = region_out_dir
-                    self.publish_message(f"Generating datacard for region '{region}' in {region_out_dir}")
+                    self.publish_message(
+                        f"Generating datacard for region '{region}' in {region_out_dir}"
+                    )
                     generator.run()
-                # Reset to root out_dir for the final check below
-                generator.output_dir = out_dir
             else:
+                generated_config = _prepare_manifest_datacard_config(
+                    config_file,
+                    manifest,
+                    self.manifest_path,
+                    dataset_manifest_path=self.dataset_manifest,
+                )
+                generated_configs.append(generated_config)
+                generator = DatacardGenerator(generated_config)
+                generator.output_dir = out_dir
                 self.publish_message(f"Generating combined datacard in {out_dir}")
                 generator.run()
+
+        for generated_config in generated_configs:
+            try:
+                os.unlink(generated_config)
+            except OSError:
+                pass
 
         rec.save(os.path.join(out_dir, "manifest_datacard.perf.json"))
 

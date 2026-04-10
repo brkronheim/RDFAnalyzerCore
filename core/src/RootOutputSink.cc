@@ -2,6 +2,7 @@
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ISystematicManager.h>
+#include <filesystem>
 #include <fnmatch.h>
 #include <iostream>
 #include <unordered_set>
@@ -76,6 +77,11 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec
   std::cout << "Executing Snapshot" << std::endl;
   std::cout << "Tree: " << spec.treeName << std::endl;
   std::cout << "SaveFile: " << spec.outputFile << std::endl;
+
+  const std::filesystem::path outputPath(spec.outputFile);
+  if (outputPath.has_parent_path()) {
+    std::filesystem::create_directories(outputPath.parent_path());
+  }
 
   if (spec.columns.empty()) {
     df.Snapshot(spec.treeName, spec.outputFile);

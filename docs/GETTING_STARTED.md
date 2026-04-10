@@ -680,6 +680,11 @@ per-object WP categories, applying correctionlib-based scale factors, and
 producing WP-filtered `PhysicsObjectCollection` outputs — with full systematic
 variation support.
 
+For CMS BTV **fixed working point** weights, the recommended event-weight
+formula is category-dependent and uses analyzer-derived MC efficiencies. Use
+`defineFixedWorkingPointWeight()` for that workflow rather than treating the
+fixed-WP SFs as a plain product of per-object weights.
+
 ### Defining Working Points and Applying Scale Factors
 
 ```cpp
@@ -717,6 +722,20 @@ twm->applySystematicSet(*cm, "deepjet_sf", "standard",
                          "Jet_btagDeepFlavB"});
 // → creates "deepjet_sf_hf_up_weight", "deepjet_sf_hf_down_weight", …
 ```
+
+For BTV fixed-WP corrections, first merge the appropriate flavour-family SF
+payloads (for example `<tagger>_comb` plus `<tagger>_light` for b-tagging),
+then build the event weight with:
+
+```cpp
+twm->defineFixedWorkingPointWeight(
+    {"btag_sf_L_central", "btag_sf_M_central", "btag_sf_T_central"},
+    {"btag_eff_L", "btag_eff_M", "btag_eff_T"},
+    "btag_weight_nominal");
+```
+
+The efficiency columns are analyzer-derived MC tagging efficiencies and are not
+shipped by the CMS BTV payloads.
 
 ### WP-Based Collection Selections
 
@@ -764,6 +783,9 @@ kinematics), all variation collections contain the same objects as the nominal.
 The weight difference is tracked via the separate weight columns.
 
 ### Generator-Level Fraction Reweighting
+
+This is an optional analyzer-specific utility. It is not the CMS BTV
+recommended fixed-WP event-weight method.
 
 For the most accurate results, use a correctionlib payload encoding the
 generator-level MC fractions of objects in each WP category at given (pT, η):

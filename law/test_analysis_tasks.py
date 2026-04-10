@@ -1403,6 +1403,101 @@ class TestHistFillTask(unittest.TestCase):
     def test_task_namespace(self):
         self.assertEqual(self._make_task().task_namespace, "")
 
+    def test_run_writes_output_manifest_with_fit_metadata(self):
+        """HistFillTask writes an enriched output_manifest.yaml next to outputs."""
+        import analysis_tasks
+        import yaml
+        from dataset_manifest import DatasetEntry
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exe_path = os.path.join(tmpdir, "exe")
+            Path(exe_path).write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(exe_path, 0o755)
+
+            histogram_cfg = os.path.join(tmpdir, "histograms.txt")
+            Path(histogram_cfg).write_text(
+                "name=vhbb_dnn variable=score weight=weight bins=20 lowerBound=0 upperBound=1 "
+                "channelVariable=channel channelBins=2 channelLowerBound=0 channelUpperBound=2 "
+                "channelRegions=Zll,Wln controlRegionVariable=region controlRegionBins=2 "
+                "controlRegionLowerBound=0 controlRegionUpperBound=2 "
+                "controlRegionRegions=SR,CR sampleCategoryVariable=stxs sampleCategoryBins=3 "
+                "sampleCategoryLowerBound=0 sampleCategoryUpperBound=3 "
+                "sampleCategoryRegions=inclusive,wh_301,wh_302\n"
+            )
+
+            fit_meta = os.path.join(tmpdir, "fit_metadata.yaml")
+            with open(fit_meta, "w") as fh:
+                yaml.safe_dump(
+                    {
+                        "sample_combinations": {
+                            "wh_merged": {
+                                "select": {"pattern": "wh_*"},
+                                "method": "sum",
+                            }
+                        },
+                        "processes": {
+                            "signal": {
+                                "samples": ["wh_merged"],
+                                "signal": True,
+                            }
+                        },
+                    },
+                    fh,
+                )
+
+            template = _write_submit_config_template(
+                tmpdir,
+                extra={
+                    "histogramConfig": histogram_cfg,
+                    "fitMetadataConfig": fit_meta,
+                    "metaFile": os.path.join(tmpdir, "meta.root"),
+                },
+            )
+
+            entry = DatasetEntry(name="wjets", files=["original.root"], process="wjets", group="vjets")
+            task = analysis_tasks.HistFillTask(
+                exe=exe_path,
+                submit_config=template,
+                dataset_manifest="/fake/manifest.yaml",
+                name="myHistRun",
+                branch=0,
+            )
+
+            orig_run = analysis_tasks.HistFillTask._run_dir.fget
+            analysis_tasks.HistFillTask._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"histRun_{self.name}")
+            )
+            try:
+                with patch.object(type(task), "branch_data", new_callable=PropertyMock,
+                                  return_value=entry):
+                    with patch("analysis_tasks._run_analysis_job",
+                               return_value="done:job"):
+                        task.run()
+
+                manifest_path = os.path.join(
+                    tmpdir, "histRun_myHistRun", "outputs", "wjets", "output_manifest.yaml"
+                )
+                self.assertTrue(os.path.exists(manifest_path))
+                with open(manifest_path, "r") as fh:
+                    manifest = yaml.safe_load(fh)
+
+                histograms = manifest["histograms"]
+                self.assertIn("axis_labels", histograms)
+                self.assertEqual(histograms["axis_labels"]["sample"], ["inclusive", "wh_301", "wh_302"])
+                self.assertIn("wjets", histograms["sample_metadata"])
+                self.assertEqual(
+                    histograms["sample_combinations"]["wh_merged"]["samples"],
+                    ["wh_301", "wh_302"],
+                )
+                self.assertTrue(histograms["processes"]["signal"]["signal"])
+                self.assertEqual(
+                    manifest["regions"][0]["name"],
+                    "Zll/SR",
+                )
+            finally:
+                analysis_tasks.HistFillTask._run_dir = property(orig_run)
+
 
 # ===========================================================================
 # _read_intweight_sign_hist (uproot path)

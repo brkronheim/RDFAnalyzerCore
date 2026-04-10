@@ -124,7 +124,6 @@ TEST_F(CorrectedObjectCollectionManagersTest, JetWrapperPropagatesMassVariations
   wrapper.setContext(jetContext);
   wrapper.setupFromConfigFile();
 
-  jetManager.execute();
   wrapper.execute();
 
   defineCollectionPtProbe(dm, *systematics, "SelectedJetPts", "CorrectedJets");
@@ -242,6 +241,41 @@ TEST_F(CorrectedObjectCollectionManagersTest, MuonWrapperRegistersCollectionSyst
 
   const auto &affected = systematics->getVariablesForSystematic("statUp");
   EXPECT_NE(affected.find("CorrectedMuons"), affected.end());
+}
+
+TEST_F(CorrectedObjectCollectionManagersTest,
+       MuonWrapperMaterializesCollectionDuringSetup) {
+  config->set("correctedMuonCollectionConfig", "cfg/test_corrected_muons.txt");
+
+  DataManager dm(1);
+  defineRVecColumn(dm, "Muon_pt", 20.0f, *systematics);
+  defineRVecColumn(dm, "Muon_eta", -0.4f, *systematics);
+  defineRVecColumn(dm, "Muon_phi", 0.9f, *systematics);
+  defineRVecColumn(dm, "Muon_mass", 0.105f, *systematics);
+  defineRVecColumn(dm, "Muon_pt_corr_nominal", 20.3f, *systematics);
+  defineRVecColumn(dm, "Muon_pt_stat_up", 20.5f, *systematics);
+  defineRVecColumn(dm, "Muon_pt_stat_down", 20.1f, *systematics);
+
+  MuonRochesterManager muonManager;
+  auto muonContext = context(dm);
+  muonManager.setContext(muonContext);
+  muonManager.setupFromConfigFile();
+  muonManager.setObjectColumns("Muon_pt", "Muon_eta", "Muon_phi", "Muon_mass");
+  muonManager.addVariation("stat", "Muon_pt_stat_up", "Muon_pt_stat_down");
+
+  CorrectedMuonCollectionManager wrapper(muonManager);
+  wrapper.setContext(muonContext);
+  wrapper.setupFromConfigFile();
+
+  defineCollectionPtProbe(dm, *systematics, "SelectedMuonPts", "CorrectedMuons");
+
+  auto nominal = dm.getDataFrame().Take<PhysicsObjectCollection>("CorrectedMuons");
+  auto up = dm.getDataFrame().Take<PhysicsObjectCollection>("CorrectedMuons_statUp");
+  auto selectedNominal = dm.getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("SelectedMuonPts");
+
+  EXPECT_NEAR(static_cast<float>(nominal.GetValue()[0].at(0).Pt()), 20.3f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(up.GetValue()[0].at(0).Pt()), 20.5f, 0.01f);
+  EXPECT_NEAR(selectedNominal.GetValue()[0][0], 20.3f, 0.01f);
 }
 
 TEST_F(CorrectedObjectCollectionManagersTest, PhotonWrapperRegistersCollectionSystematics) {

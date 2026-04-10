@@ -533,6 +533,7 @@ private:
   ISystematicManager     *systematicManager_m = nullptr;
   ILogger                *logger_m = nullptr;
   IOutputSink            *metaSink_m = nullptr;
+  bool executionPending_m = false;
 };
 
 #endif // OBJECTENERGYMANAGERBASE_H_INCLUDED

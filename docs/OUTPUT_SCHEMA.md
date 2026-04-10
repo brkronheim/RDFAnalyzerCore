@@ -169,6 +169,10 @@ Describes `THnSparseF` histogram objects saved by `NDHistogramManager` into the 
 | `output_file` | `str` | `""` | Path or pattern of the meta-output ROOT file. Must not be empty. |
 | `histogram_names` | `list[str]` | `[]` | Names of the `THnSparseF` objects expected in the file. |
 | `axes` | `list[HistogramAxisSpec]` | `[]` | Axis specifications shared across all histograms in this schema. |
+| `axis_labels` | `dict[str, list[str]]` | `{}` | Optional label payloads inferred from histogram config axes such as channel, control-region, or sample-category labels. |
+| `sample_metadata` | `dict[str, dict]` | `{}` | Optional per-sample or per-alias metadata used by downstream tools to resolve fit groupings. |
+| `sample_combinations` | `dict[str, dict]` | `{}` | Optional pre-resolved sample-combination definitions, compatible with the datacard generator `sample_combinations` block. |
+| `processes` | `dict[str, dict]` | `{}` | Optional pre-resolved process definitions, compatible with the datacard generator `processes` block. |
 
 ```python
 from output_schema import HistogramSchema, HistogramAxisSpec
@@ -180,8 +184,21 @@ histograms = HistogramSchema(
         HistogramAxisSpec(variable="Muon_pt", bins=50, lower_bound=0.0, upper_bound=200.0, label="Muon p_{T} [GeV]"),
         HistogramAxisSpec(variable="Muon_eta", bins=30, lower_bound=-3.0, upper_bound=3.0, label="#eta"),
     ],
+    axis_labels={"sample": ["inclusive", "wh_301", "wh_302"]},
+    sample_metadata={
+        "wh_301": {"process": "wh", "stxs_bin": "wh_301", "tags": ["signal", "stxs"]},
+        "wh_302": {"process": "wh", "stxs_bin": "wh_302", "tags": ["signal", "stxs"]},
+    },
+    sample_combinations={
+        "wh_lowpt": {"method": "sum", "samples": ["wh_301", "wh_302"]},
+    },
+    processes={
+        "signal": {"samples": ["wh_lowpt"], "signal": True},
+    },
 )
 ```
+
+These extra histogram fields are intended for downstream automation rather than ROOT I/O validation alone. In the LAW pipeline, `HistFillTask` now writes an `output_manifest.yaml` next to each histogram output and can populate these fields from an optional metadata YAML referenced by `manifestMetadataConfig` or `fitMetadataConfig` in the job configuration. `ManifestDatacardTask` can then reuse the stored `sample_metadata`, `sample_combinations`, and `processes` blocks when the fit YAML leaves them unspecified.
 
 ---
 

@@ -132,10 +132,12 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional, cast
+from fnmatch import fnmatch
+from typing import Any, Optional, cast
 
 import luigi  # type: ignore
 import law  # type: ignore
+import yaml
 from law.util import DotDict  # type: ignore
 from law.workflow.base import BaseWorkflow, BaseWorkflowProxy  # type: ignore
 
@@ -160,10 +162,15 @@ from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job
 from partition_utils import _make_partitions  # noqa: E402
 from output_schema import (  # noqa: E402
     ArtifactResolutionStatus,
+    CutflowSchema,
     DatasetManifestProvenance,
+    HistogramAxisSpec,
+    HistogramSchema,
     IntermediateArtifactSchema,
+    MetadataSchema,
     OutputManifest,
     ProvenanceRecord,
+    RegionDefinition,
     SkimSchema,
     check_cache_validity,
     write_cache_sidecar,
@@ -947,6 +954,438 @@ def _build_skim_manifest(
         config_mtime=prov.config_mtime,
         dataset_manifest_provenance=dataset_manifest_prov,
     )
+
+
+def _read_histogram_config_entries(config_path: str) -> list[dict[str, str]]:
+    """Parse a histogramConfig file in either text or YAML format."""
+    if not config_path or not os.path.isfile(config_path):
+        return []
+
+    if config_path.endswith((".yaml", ".yml")):
+        with open(config_path, "r") as fh:
+            payload = yaml.safe_load(fh) or []
+        if not isinstance(payload, list):
+            return []
+        entries: list[dict[str, str]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            entries.append({str(key): str(value) for key, value in item.items()})
+        return entries
+
+    entries = []
+    with open(config_path, "r") as fh:
+        for raw_line in fh:
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            entry: dict[str, str] = {}
+            for token in line.split():
+                if "=" not in token:
+                    continue
+                key, value = token.split("=", 1)
+                entry[key.strip()] = value.strip()
+            if entry:
+                entries.append(entry)
+    return entries
+
+
+def _read_root_histogram_names(meta_file: str) -> list[str]:
+    """Return deduplicated histogram names found recursively in *meta_file*."""
+    if not meta_file or not os.path.isfile(meta_file):
+        return []
+
+    try:
+        import uproot  # type: ignore
+    except ImportError:
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _visit(directory) -> None:
+        for key in directory.keys(cycle=False):
+            try:
+                obj = directory[key]
+            except Exception:
+                continue
+
+            if hasattr(obj, "keys") and not hasattr(obj, "values"):
+                _visit(obj)
+                continue
+
+            if not hasattr(obj, "values"):
+                continue
+
+            name = str(key).split(";", 1)[0]
+            if name and name not in seen:
+                names.append(name)
+                seen.add(name)
+
+    with uproot.open(meta_file) as root_file:
+        _visit(root_file)
+    return names
+
+
+def _histogram_axis_labels_from_entries(
+    entries: list[dict[str, str]],
+    histogram_names: list[str],
+) -> dict[str, list[str]]:
+    """Build axis-label metadata from parsed histogram config entries."""
+    axis_labels: dict[str, list[str]] = {}
+    if not entries:
+        return axis_labels
+
+    first = entries[0]
+    for role, key in (
+        ("channel", "channelRegions"),
+        ("control", "controlRegionRegions"),
+        ("sample", "sampleCategoryRegions"),
+    ):
+        raw = first.get(key, "")
+        labels = [label.strip() for label in raw.split(",") if label.strip()]
+        if labels:
+            axis_labels[role] = labels
+
+    systematic_labels = sorted(
+        {
+            match.group(1)
+            for name in histogram_names
+            for match in [re.search(r"_(.+(?:Up|Down))$", name)]
+            if match
+        }
+    )
+    axis_labels["systematic"] = ["Nominal"] + systematic_labels
+    return axis_labels
+
+
+def _infer_region_definitions(entries: list[dict[str, str]]) -> list[RegionDefinition]:
+    """Synthesize manifest region definitions from histogram axis labels."""
+    if not entries:
+        return []
+
+    first = entries[0]
+    channel_labels = [
+        label.strip() for label in first.get("channelRegions", "").split(",") if label.strip()
+    ]
+    control_labels = [
+        label.strip()
+        for label in first.get("controlRegionRegions", "").split(",")
+        if label.strip()
+    ]
+    channel_var = first.get("channelVariable", "channel")
+    control_var = first.get("controlRegionVariable", "control")
+
+    if not channel_labels and not control_labels:
+        return []
+
+    regions: list[RegionDefinition] = []
+    if channel_labels and control_labels:
+        for channel_name in channel_labels:
+            for control_name in control_labels:
+                regions.append(
+                    RegionDefinition(
+                        name=f"{channel_name}/{control_name}",
+                        filter_column=f"{channel_var}={channel_name};{control_var}={control_name}",
+                        parent=channel_name,
+                        description=(
+                            f"Histogram region for channel '{channel_name}' and "
+                            f"control category '{control_name}'."
+                        ),
+                    )
+                )
+        for channel_name in channel_labels:
+            regions.append(
+                RegionDefinition(
+                    name=channel_name,
+                    filter_column=f"{channel_var}={channel_name}",
+                    description=f"Histogram channel '{channel_name}'.",
+                )
+            )
+        return regions
+
+    labels = control_labels or channel_labels
+    variable = control_var if control_labels else channel_var
+    return [
+        RegionDefinition(
+            name=label,
+            filter_column=f"{variable}={label}",
+            description=f"Histogram region '{label}'.",
+        )
+        for label in labels
+    ]
+
+
+def _initial_sample_metadata(dataset: DatasetEntry) -> dict[str, dict[str, Any]]:
+    """Build default alias metadata from a dataset manifest entry."""
+    metadata: dict[str, dict[str, Any]] = {
+        dataset.name: {
+            "alias_type": "dataset",
+            "dataset_name": dataset.name,
+            "dtype": dataset.dtype,
+        }
+    }
+    for key in (
+        "process",
+        "group",
+        "stitch_id",
+        "sample_type",
+        "year",
+        "era",
+        "campaign",
+        "parent",
+    ):
+        value = getattr(dataset, key)
+        if value is not None:
+            metadata[dataset.name][key] = value
+    return metadata
+
+
+def _augment_sample_metadata_with_axis_labels(
+    sample_metadata: dict[str, dict[str, Any]],
+    axis_labels: dict[str, list[str]],
+) -> None:
+    """Add sample-axis aliases such as STXS template bins into sample metadata."""
+    for alias in axis_labels.get("sample", []):
+        if not alias:
+            continue
+        entry = sample_metadata.setdefault(
+            alias,
+            {
+                "alias_type": "histogram_category",
+                "source_axis": "sample",
+            },
+        )
+        if "process" not in entry and "_" in alias:
+            entry["process"] = alias.split("_", 1)[0]
+        if "stxs_bin" not in entry and re.match(r"^[A-Za-z]+_\d+$", alias):
+            entry["stxs_bin"] = alias
+
+
+def _matches_manifest_selector(metadata: dict[str, Any], selector: dict[str, Any], alias: str) -> bool:
+    """Return True when *metadata* satisfies a selector mapping."""
+    if not selector:
+        return True
+
+    for key, expected in selector.items():
+        if key == "pattern":
+            patterns = expected if isinstance(expected, list) else [expected]
+            if not any(isinstance(pattern, str) and fnmatch(alias, pattern) for pattern in patterns):
+                return False
+            continue
+
+        if key == "tags_any":
+            tags = metadata.get("tags", [])
+            wanted = expected if isinstance(expected, list) else [expected]
+            if not any(tag in tags for tag in wanted):
+                return False
+            continue
+
+        if key == "tags_all":
+            tags = metadata.get("tags", [])
+            wanted = expected if isinstance(expected, list) else [expected]
+            if any(tag not in tags for tag in wanted):
+                return False
+            continue
+
+        actual = metadata.get(key)
+        if isinstance(expected, list):
+            if actual not in expected:
+                return False
+        else:
+            if actual != expected:
+                return False
+
+    return True
+
+
+def _resolve_manifest_samples(
+    config_block: dict[str, Any],
+    sample_metadata: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Resolve explicit + selector-based sample aliases to a concrete list."""
+    resolved: list[str] = []
+    seen: set[str] = set()
+
+    for sample in config_block.get("samples", []):
+        if isinstance(sample, str) and sample and sample not in seen:
+            resolved.append(sample)
+            seen.add(sample)
+
+    selector = config_block.get("select")
+    if isinstance(selector, dict):
+        for alias, metadata in sample_metadata.items():
+            if alias in seen:
+                continue
+            if _matches_manifest_selector(metadata, selector, alias):
+                resolved.append(alias)
+                seen.add(alias)
+
+    return resolved
+
+
+def _resolve_manifest_fit_metadata(
+    metadata_config_path: str,
+    sample_metadata: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Load optional fit metadata config and resolve selectors to sample lists."""
+    if not metadata_config_path or not os.path.isfile(metadata_config_path):
+        return sample_metadata, {}, {}
+
+    with open(metadata_config_path, "r") as fh:
+        payload = yaml.safe_load(fh) or {}
+    if not isinstance(payload, dict):
+        return sample_metadata, {}, {}
+
+    merged_sample_metadata: dict[str, dict[str, Any]] = {
+        alias: dict(metadata) for alias, metadata in sample_metadata.items()
+    }
+
+    for alias, metadata in (payload.get("sample_metadata") or {}).items():
+        if not isinstance(alias, str) or not isinstance(metadata, dict):
+            continue
+        merged_sample_metadata.setdefault(alias, {}).update(metadata)
+
+    sample_combinations: dict[str, dict[str, Any]] = {}
+    for combo_name, combo_cfg in (payload.get("sample_combinations") or {}).items():
+        if not isinstance(combo_name, str) or not isinstance(combo_cfg, dict):
+            continue
+        resolved_samples = _resolve_manifest_samples(combo_cfg, merged_sample_metadata)
+        combination_cfg = {
+            key: value for key, value in combo_cfg.items() if key != "select"
+        }
+        if resolved_samples:
+            combination_cfg["samples"] = resolved_samples
+        sample_combinations[combo_name] = combination_cfg
+
+    processes: dict[str, dict[str, Any]] = {}
+    for process_name, process_cfg in (payload.get("processes") or {}).items():
+        if not isinstance(process_name, str) or not isinstance(process_cfg, dict):
+            continue
+        resolved_samples = _resolve_manifest_samples(process_cfg, merged_sample_metadata)
+        concrete_cfg = {
+            key: value for key, value in process_cfg.items() if key != "select"
+        }
+        if resolved_samples:
+            concrete_cfg["samples"] = resolved_samples
+        processes[process_name] = concrete_cfg
+
+    return merged_sample_metadata, sample_combinations, processes
+
+
+def _make_meta_output_name(save_file: str) -> str:
+    """Match RootOutputSink's default meta ROOT file naming."""
+    if not save_file:
+        return ""
+    stem, ext = os.path.splitext(save_file)
+    if ext:
+        return f"{stem}_meta{ext}"
+    return save_file + "_meta.root"
+
+
+def _build_histfill_manifest(
+    dataset: DatasetEntry,
+    submit_config_path: str,
+    dataset_manifest_path: str,
+    job_config_path: str,
+) -> OutputManifest:
+    """Build an OutputManifest describing histogram, metadata, and cutflow outputs."""
+    prov = _build_task_provenance(
+        submit_config_path=submit_config_path,
+        dataset_manifest_path=dataset_manifest_path,
+    )
+
+    manifest_hash: Optional[str] = None
+    if os.path.isfile(dataset_manifest_path):
+        try:
+            manifest_hash = DatasetManifest.file_hash(dataset_manifest_path)
+        except Exception:
+            pass
+
+    dataset_manifest_prov = DatasetManifestProvenance(
+        manifest_path=dataset_manifest_path,
+        manifest_hash=manifest_hash,
+        resolved_entry_names=[dataset.name],
+    )
+
+    job_config = read_config(job_config_path)
+    save_file = job_config.get("saveFile", "")
+    meta_file = job_config.get("metaFile", "") or _make_meta_output_name(save_file)
+
+    histogram_config_path = _resolve_analysis_config_path(
+        submit_config_path,
+        job_config.get("histogramConfig", ""),
+    )
+    histogram_entries = _read_histogram_config_entries(histogram_config_path)
+    histogram_names = _read_root_histogram_names(meta_file)
+    axis_labels = _histogram_axis_labels_from_entries(histogram_entries, histogram_names)
+
+    sample_metadata = _initial_sample_metadata(dataset)
+    _augment_sample_metadata_with_axis_labels(sample_metadata, axis_labels)
+
+    fit_metadata_path = _resolve_analysis_config_path(
+        submit_config_path,
+        job_config.get("manifestMetadataConfig", job_config.get("fitMetadataConfig", "")),
+    )
+    sample_metadata, sample_combinations, processes = _resolve_manifest_fit_metadata(
+        fit_metadata_path,
+        sample_metadata,
+    )
+
+    axes: list[HistogramAxisSpec] = []
+    if histogram_entries:
+        first = histogram_entries[0]
+        role_specs = (
+            ("channelVariable", "channelBins", "channelLowerBound", "channelUpperBound", "channel"),
+            (
+                "controlRegionVariable",
+                "controlRegionBins",
+                "controlRegionLowerBound",
+                "controlRegionUpperBound",
+                "control",
+            ),
+            (
+                "sampleCategoryVariable",
+                "sampleCategoryBins",
+                "sampleCategoryLowerBound",
+                "sampleCategoryUpperBound",
+                "sample",
+            ),
+        )
+        for var_key, bins_key, low_key, high_key, role in role_specs:
+            if var_key not in first:
+                continue
+            try:
+                axes.append(
+                    HistogramAxisSpec(
+                        variable=first[var_key],
+                        bins=int(first[bins_key]),
+                        lower_bound=float(first[low_key]),
+                        upper_bound=float(first[high_key]),
+                        label=role,
+                    )
+                )
+            except Exception:
+                continue
+
+    manifest = OutputManifest(
+        histograms=HistogramSchema(
+            output_file=meta_file,
+            histogram_names=histogram_names,
+            axes=axes,
+            axis_labels=axis_labels,
+            sample_metadata=sample_metadata,
+            sample_combinations=sample_combinations,
+            processes=processes,
+        ),
+        metadata=MetadataSchema(output_file=meta_file),
+        cutflow=CutflowSchema(output_file=meta_file),
+        regions=_infer_region_definitions(histogram_entries),
+        framework_hash=prov.framework_hash,
+        config_mtime=prov.config_mtime,
+        dataset_manifest_provenance=dataset_manifest_prov,
+    )
+    return manifest
 
 
 def _dataset_job_metadata(dataset: DatasetEntry) -> dict[str, str]:
@@ -3178,6 +3617,18 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
 
         Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
         rec.save(perf_path_for(self.output().path))
+
+        manifest = _build_histfill_manifest(
+            dataset=dataset,
+            submit_config_path=self.submit_config,
+            dataset_manifest_path=self.dataset_manifest,
+            job_config_path=os.path.join(job_dir, "submit_config.txt"),
+        )
+        manifest_path = os.path.join(out_dir, "output_manifest.yaml")
+        manifest.save_yaml(manifest_path)
+        self.publish_message(
+            f"Histogram manifest written for '{dataset.name}': {manifest_path}"
+        )
 
         self.publish_message(f"Histogram fill done for '{dataset.name}': {result}")
         with self.output().open("w") as fh:

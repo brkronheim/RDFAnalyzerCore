@@ -21,7 +21,7 @@
 #include <ConfigurationManager.h>
 #include <DataManager.h>
 #include <DefaultLogger.h>
-#include <TaggerWorkingPointManager.h>
+#include "../plugins/TaggerWorkingPointManager/TaggerWorkingPointManager.h"
 #include <WeightManager.h>
 #include <ManagerFactory.h>
 #include <NullOutputSink.h>
@@ -491,6 +491,99 @@ TEST_F(TaggerWorkingPointManagerTest, WeightColumnIsProductOfPerJetSFs) {
 
   auto result = dm->getDataFrame().Take<Float_t>("my_sf_central_weight");
   EXPECT_FLOAT_EQ(result.GetValue()[0], 1.2f);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, FixedWPWeightSingleWorkingPointPassAndFail) {
+  auto dm = std::make_unique<DataManager>(2);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumn("Jet_btag");
+  mgr->addWorkingPoint("L", 0.30f);
+  mgr->setInputObjectCollection("goodJets");
+
+  defineCollectionColumn(*dm, "goodJets", 50.f);
+
+  dm->Define(
+      "Jet_btag",
+      [](ULong64_t entry) -> ROOT::VecOps::RVec<Float_t> {
+        return entry == 0 ? ROOT::VecOps::RVec<Float_t>{0.40f}
+                          : ROOT::VecOps::RVec<Float_t>{0.10f};
+      },
+      {"rdfentry_"}, *systematicManager);
+
+  defineRVecColumn(*dm, "sf_L", 1.10f);
+  defineRVecColumn(*dm, "eff_L", 0.60f);
+
+  mgr->defineFixedWorkingPointWeight({"sf_L"}, {"eff_L"}, "fixed_wp_weight");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<Float_t>("fixed_wp_weight").GetValue();
+  ASSERT_EQ(result.size(), 2u);
+  EXPECT_FLOAT_EQ(result[0], 1.10f);
+  EXPECT_FLOAT_EQ(result[1], (1.0f - 1.10f * 0.60f) / (1.0f - 0.60f));
+}
+
+TEST_F(TaggerWorkingPointManagerTest, FixedWPWeightIntermediateCategoryUsesBTVFormula) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumn("Jet_btag");
+  mgr->addWorkingPoint("L", 0.20f);
+  mgr->addWorkingPoint("M", 0.50f);
+  mgr->setInputObjectCollection("goodJets");
+
+  defineCollectionColumn(*dm, "goodJets", 50.f);
+  defineRVecColumn(*dm, "sf_L", 1.05f);
+  defineRVecColumn(*dm, "sf_M", 0.95f);
+  defineRVecColumn(*dm, "eff_L", 0.70f);
+  defineRVecColumn(*dm, "eff_M", 0.40f);
+
+  dm->Define(
+      "Jet_btag",
+      [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.30f}; },
+      {"rdfentry_"}, *systematicManager);
+
+  mgr->defineFixedWorkingPointWeight({"sf_L", "sf_M"}, {"eff_L", "eff_M"},
+                                     "fixed_wp_weight");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<Float_t>("fixed_wp_weight").GetValue();
+  ASSERT_EQ(result.size(), 1u);
+  const float expected = (1.05f * 0.70f - 0.95f * 0.40f) / (0.70f - 0.40f);
+  EXPECT_FLOAT_EQ(result[0], expected);
+}
+
+TEST_F(TaggerWorkingPointManagerTest,
+       FixedWPWeightNegativeIntermediateNumeratorFallsBackToUnity) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumn("Jet_btag");
+  mgr->addWorkingPoint("L", 0.20f);
+  mgr->addWorkingPoint("M", 0.50f);
+  mgr->setInputObjectCollection("goodJets");
+
+  defineCollectionColumn(*dm, "goodJets", 50.f);
+  defineRVecColumn(*dm, "sf_L", 0.80f);
+  defineRVecColumn(*dm, "sf_M", 1.50f);
+  defineRVecColumn(*dm, "eff_L", 0.60f);
+  defineRVecColumn(*dm, "eff_M", 0.50f);
+
+  dm->Define(
+      "Jet_btag",
+      [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> { return {0.30f}; },
+      {"rdfentry_"}, *systematicManager);
+
+  mgr->defineFixedWorkingPointWeight({"sf_L", "sf_M"}, {"eff_L", "eff_M"},
+                                     "fixed_wp_weight");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<Float_t>("fixed_wp_weight").GetValue();
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_FLOAT_EQ(result[0], 1.0f);
 }
 
 // ---------------------------------------------------------------------------

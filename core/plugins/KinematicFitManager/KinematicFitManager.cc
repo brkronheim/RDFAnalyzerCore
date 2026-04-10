@@ -710,7 +710,7 @@ void KinematicFitManager::setupFromConfigFile() {
  * @brief Parse the kinematic fit configuration and register fit instances.
  *
  * Required keys per config-file line:
- *   name, particles, constraints, maxIterations, convergenceTolerance
+ *   name, particles, constraints
  *
  * Optional keys (fall back to struct defaults if absent):
  *   leptonPtResolution, leptonEtaResolution, leptonPhiResolution,
@@ -722,8 +722,7 @@ void KinematicFitManager::registerFits(
     const IConfigurationProvider &configProvider) {
   const auto fitConfig = configProvider.parseMultiKeyConfig(
       configProvider.get("kinematicFitConfig"),
-      {"name", "particles", "constraints",
-       "maxIterations", "convergenceTolerance"});
+      {"name", "particles", "constraints"});
 
   for (const auto &entry : fitConfig) {
     KinFitConfig cfg;
@@ -761,16 +760,19 @@ void KinematicFitManager::registerFits(
     }
 
     // ── convergence ────────────────────────────────────────────────────────
-    cfg.maxIterations =
-        parseInt(entry.at("maxIterations"), "maxIterations");
-    cfg.convergenceTolerance =
-        parseDouble(entry.at("convergenceTolerance"), "convergenceTolerance");
-
-    // ── optional resolution parameters (fall back to struct defaults) ──────
     auto getOpt = [&](const std::string &key, double def) -> double {
       auto it = entry.find(key);
       return (it != entry.end()) ? parseDouble(it->second, key) : def;
     };
+    auto getOptInt = [&](const std::string &key, int def) -> int {
+      auto it = entry.find(key);
+      return (it != entry.end()) ? parseInt(it->second, key) : def;
+    };
+    cfg.maxIterations = getOptInt("maxIterations", cfg.maxIterations);
+    cfg.convergenceTolerance =
+        getOpt("convergenceTolerance", cfg.convergenceTolerance);
+
+    // ── optional resolution parameters (fall back to struct defaults) ──────
     cfg.leptonPtResolution  = getOpt("leptonPtResolution",  cfg.leptonPtResolution);
     cfg.leptonEtaResolution = getOpt("leptonEtaResolution", cfg.leptonEtaResolution);
     cfg.leptonPhiResolution = getOpt("leptonPhiResolution", cfg.leptonPhiResolution);

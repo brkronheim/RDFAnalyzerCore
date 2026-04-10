@@ -1,5 +1,15 @@
 import os
-from core.python.submission_backend import generate_condor_submit, generate_condor_runscript, stage_outputs_blocks
+from core.python.submission_backend import ensure_xrootd_redirector, generate_condor_submit, generate_condor_runscript, stage_outputs_blocks
+
+
+def test_ensure_xrootd_redirector_preserves_absolute_local_paths():
+    local_path = "/tmp/rdfanalyzer/local_input.root"
+    assert ensure_xrootd_redirector(local_path) == local_path
+
+
+def test_ensure_xrootd_redirector_rewrites_eos_style_paths():
+    eos_path = "/store/mc/Run3/file.root"
+    assert ensure_xrootd_redirector(eos_path) == "root://eospublic.cern.ch//store/mc/Run3/file.root"
 
 
 def test_generate_condor_submit_exports_condor_proc_env(tmp_path):

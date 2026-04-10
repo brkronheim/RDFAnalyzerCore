@@ -572,6 +572,32 @@ TEST_F(CorrectionManagerTest, ApplyVectorCorrectionThrowsForMissingColumns) {
       std::runtime_error);
 }
 
+TEST_F(CorrectionManagerTest, ApplyVectorCorrectionSupportsMixedScalarAndRVecInputs) {
+  auto testDataManager = std::make_unique<DataManager>(1);
+  setContextFor(*testDataManager);
+
+  testDataManager->Define(
+      "float_arg",
+      []() -> ROOT::VecOps::RVec<Float_t> { return {0.5f, 1.5f}; }, {},
+      *systematicManager);
+  testDataManager->Define(
+      "int_arg",
+      []() -> double { return 1.0; }, {},
+      *systematicManager);
+
+  correctionManager->applyCorrectionVec("test_correction", {"A"}, {},
+                                        "test_correction_mixed");
+
+  auto df = testDataManager->getDataFrame();
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction_mixed");
+  ASSERT_EQ(result->size(), 1u);
+  ASSERT_EQ((*result)[0].size(), 2u);
+  EXPECT_NEAR((*result)[0][0], 0.1f, 1e-6f);
+  EXPECT_NEAR((*result)[0][1], 0.2f, 1e-6f);
+
+  setContextFor(*dataManager);
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

@@ -107,8 +107,13 @@ def ensure_xrootd_redirector(uri, redirector="root://eospublic.cern.ch/"):
         return uri
 
     if uri.startswith("/"):
-        # Ensure we produce a double-slash after the redirector (e.g. root://host//store/...)
-        # while avoiding a triple-slash artifact.
+        # Preserve local absolute paths for local-mode workflows. Only EOS-like
+        # storage paths should be normalized through an XRootD redirector.
+        if not (uri.startswith("/store/") or uri.startswith("/eos/")):
+            return uri
+
+        # Ensure we produce a double-slash after the redirector
+        # (e.g. root://host//store/...) while avoiding a triple-slash artifact.
         if not uri.startswith("//"):
             uri = "//" + uri.lstrip("/")
         return redirector.rstrip("/") + uri

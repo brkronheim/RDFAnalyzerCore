@@ -9,7 +9,6 @@
 #include <onnxruntime_cxx_api.h>
 #include <memory>
 #include <cstdint>
-#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -60,6 +59,16 @@ public:
    * @param outputSuffix Optional suffix to append to output column names (default: empty)
    */
   void applyAllModels(const std::string &outputSuffix = "");
+
+  /**
+   * @brief Run a single-output ONNX model immediately on a packed input vector.
+   * @param modelName Name of the model
+   * @param inputVector Packed input feature vector
+   * @return First output element from the ONNX model
+   */
+  Float_t runScalarModel(
+      const std::string &modelName,
+      const ROOT::VecOps::RVec<Float_t> &inputVector) const;
 
   /**
    * @brief Get an ONNX session object by key

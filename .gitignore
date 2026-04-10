@@ -38,7 +38,7 @@ aux/Run3/*
 aux/Run2/*
 docs/doxygen/*
 analyses/*
-
+law/index
 
 python_env.tar.gz
 submit_config.txt

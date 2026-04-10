@@ -171,6 +171,12 @@ TEST_F(WeightManagerTest, AddWeightVariationWithEmptyNameThrows) {
   EXPECT_THROW(mgr.addWeightVariation("", "up_col", "dn_col"), std::invalid_argument);
 }
 
+TEST_F(WeightManagerTest, AddWeightVariationWithEmptyComponentNameThrows) {
+  WeightManager mgr;
+  EXPECT_THROW(mgr.addWeightVariation("pileup", "", "up_col", "dn_col"),
+               std::invalid_argument);
+}
+
 TEST_F(WeightManagerTest, AddWeightVariationWithEmptyUpColThrows) {
   WeightManager mgr;
   EXPECT_THROW(mgr.addWeightVariation("pileup", "", "dn_col"), std::invalid_argument);
@@ -401,6 +407,52 @@ TEST_F(WeightManagerTest, GetWeightColumnAfterDefineVariedWeight) {
   EXPECT_EQ(mgr->getNominalWeightColumn(), "w_nom");
   EXPECT_EQ(mgr->getWeightColumn("sf1", "up"),   "w_sf1_up");
   EXPECT_EQ(mgr->getWeightColumn("sf1", "down"), "w_sf1_down");
+}
+
+TEST_F(WeightManagerTest, VariationCanReplaceDifferentComponentName) {
+  auto dm = std::make_unique<DataManager>(2);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("btag_nominal",
+             [](ULong64_t i) { return i == 0 ? 0.8 : 0.9; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("ctag_nominal",
+             [](ULong64_t i) { return i == 0 ? 1.1 : 1.2; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("btag_hf_up",
+             [](ULong64_t i) { return i == 0 ? 0.85 : 0.95; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("btag_hf_down",
+             [](ULong64_t i) { return i == 0 ? 0.75 : 0.85; },
+             {"rdfentry_"}, *systematicManager);
+
+  mgr->addScaleFactor("btag", "btag_nominal");
+  mgr->addScaleFactor("ctag", "ctag_nominal");
+  mgr->addWeightVariation("btag_hf", "btag", "btag_hf_up", "btag_hf_down");
+  mgr->defineNominalWeight("w_nom");
+  mgr->defineVariedWeight("btag_hf", "up", "w_btag_hf_up");
+  mgr->defineVariedWeight("btag_hf", "down", "w_btag_hf_down");
+
+  mgr->execute();
+
+  auto nominal = dm->getDataFrame().Take<double>("w_nom");
+  auto up = dm->getDataFrame().Take<double>("w_btag_hf_up");
+  auto down = dm->getDataFrame().Take<double>("w_btag_hf_down");
+
+  const auto nominalValues = nominal.GetValue();
+  const auto upValues = up.GetValue();
+  const auto downValues = down.GetValue();
+
+  ASSERT_EQ(nominalValues.size(), 2u);
+  ASSERT_EQ(upValues.size(), 2u);
+  ASSERT_EQ(downValues.size(), 2u);
+
+  EXPECT_DOUBLE_EQ(nominalValues[0], 0.8 * 1.1);
+  EXPECT_DOUBLE_EQ(nominalValues[1], 0.9 * 1.2);
+  EXPECT_DOUBLE_EQ(upValues[0], 0.85 * 1.1);
+  EXPECT_DOUBLE_EQ(upValues[1], 0.95 * 1.2);
+  EXPECT_DOUBLE_EQ(downValues[0], 0.75 * 1.1);
+  EXPECT_DOUBLE_EQ(downValues[1], 0.85 * 1.2);
 }
 
 // ---------------------------------------------------------------------------

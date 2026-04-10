@@ -298,6 +298,30 @@ TEST_F(JetEnergyScaleManagerTest, RawPtAndMassColumnsDefinedByRemoveExisting) {
   EXPECT_FLOAT_EQ(massRaw[2][0], 21.0f);
 }
 
+TEST_F(JetEnergyScaleManagerTest, RemoveExistingCorrectionsReusesPreexistingRawColumns) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  defineRVecColumn(*dm, "Jet_pt", [](ULong64_t) { return 100.0f; });
+  defineRVecColumn(*dm, "Jet_mass", [](ULong64_t) { return 10.0f; });
+  defineRVecColumn(*dm, "Jet_rawFactor", [](ULong64_t) { return 0.1f; });
+  defineRVecColumn(*dm, "Jet_pt_raw", [](ULong64_t) { return 93.0f; });
+  defineRVecColumn(*dm, "Jet_mass_raw", [](ULong64_t) { return 9.3f; });
+
+  mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->removeExistingCorrections("Jet_rawFactor");
+
+  EXPECT_NO_THROW(mgr->execute());
+
+  auto ptRaw =
+      dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("Jet_pt_raw");
+  auto massRaw =
+      dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("Jet_mass_raw");
+
+  EXPECT_FLOAT_EQ(ptRaw.GetValue()[0][0], 93.0f);
+  EXPECT_FLOAT_EQ(massRaw.GetValue()[0][0], 9.3f);
+}
+
 // ---------------------------------------------------------------------------
 // applyCorrection – corrected pT and mass columns are defined correctly
 // ---------------------------------------------------------------------------
@@ -387,6 +411,54 @@ TEST_F(JetEnergyScaleManagerTest, ChainedCorrectionStepsApplySequentially) {
   EXPECT_FLOAT_EQ(ptJec.GetValue()[0][0],   200.0f);
   EXPECT_FLOAT_EQ(ptJesUp.GetValue()[0][0], 220.0f);
 }
+
+  TEST_F(JetEnergyScaleManagerTest,
+       ChainedCorrectionlibStepsDeferIntermediateColumnResolution) {
+    auto dm = std::make_unique<DataManager>(1);
+    auto mgr = makeMgr(*dm);
+
+    auto correctionConfig =
+      ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    auto correctionManager = std::make_unique<CorrectionManager>(*correctionConfig);
+
+    auto correctionContext = makeContext(*config, *dm, *systematicManager, *logger,
+                       *skimSink, *metaSink);
+    correctionManager->setContext(correctionContext);
+
+    correctionManager->registerCorrection(
+      "jec_like", "aux/correction.json", "test_correction",
+      {"Jet_pt_raw", "Jet_bin"});
+    correctionManager->registerCorrection(
+      "jes_like", "aux/correction.json", "test_correction",
+      {"Jet_pt_corr_jec", "Jet_bin"});
+
+    defineRVecColumn(*dm, "Jet_pt_raw", [](ULong64_t) { return 0.5f; });
+    defineRVecColumn(*dm, "Jet_mass_raw", [](ULong64_t) { return 10.0f; });
+    defineRVecColumn(*dm, "Jet_bin", [](ULong64_t) { return 1.0f; });
+
+    mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+    mgr->applyCorrectionlib(*correctionManager, "jec_like", {"A"},
+                "Jet_pt_raw", "Jet_pt_corr_jec",
+                true, "Jet_mass_raw", "Jet_mass_corr_jec",
+                {"Jet_pt_raw", "Jet_bin"});
+    mgr->applyCorrectionlib(*correctionManager, "jes_like", {"B"},
+                "Jet_pt_corr_jec", "Jet_pt_jes_up",
+                true, "Jet_mass_corr_jec", "Jet_mass_jes_up",
+                {"Jet_pt_corr_jec", "Jet_bin"});
+
+    EXPECT_NO_THROW(mgr->execute());
+
+    auto ptJec =
+      dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("Jet_pt_corr_jec");
+    auto ptJesUp =
+      dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("Jet_pt_jes_up");
+    auto massJesUp =
+      dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>("Jet_mass_jes_up");
+
+    EXPECT_FLOAT_EQ(ptJec.GetValue()[0][0], 0.05f);
+    EXPECT_FLOAT_EQ(ptJesUp.GetValue()[0][0], 0.025f);
+    EXPECT_FLOAT_EQ(massJesUp.GetValue()[0][0], 0.5f);
+  }
 
 // ---------------------------------------------------------------------------
 // Systematic variation registration

@@ -657,6 +657,7 @@ void CorrectedCollectionManagerBase::setupFromConfigFile() {
 
   applyWorkflowConfig(spec_m);
   bindCollectionSpec(spec_m);
+  materializeWrappedOutputs();
   configured_m = true;
 }
 

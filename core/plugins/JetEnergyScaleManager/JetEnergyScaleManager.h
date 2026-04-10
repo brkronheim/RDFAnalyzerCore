@@ -251,10 +251,10 @@ public:
                        const std::string &outputMassColumn = "");
 
   /**
-   * @brief Apply a CMS correctionlib-based JES/JER correction via CorrectionManager.
-   *
-   * Calls @p cm.applyCorrectionVec() to evaluate the correctionlib formula
-   * and store per-jet scale factors, then schedules the pT/mass update.
+  * @brief Schedule a CMS correctionlib-based JES/JER correction via CorrectionManager.
+  *
+  * The correctionlib evaluation is deferred to execute() so later scheduled
+  * steps may depend on columns produced by earlier jet corrections.
    *
    * The intermediate SF column name follows CorrectionManager's convention:
    * @c correctionName + "_" + joined(@p stringArgs, "_").
@@ -641,6 +641,11 @@ private:
 
   // ---- Correction steps ---------------------------------------------------
   struct CorrectionStep {
+    bool evaluateScaleFactor = false;
+    CorrectionManager *correctionManager = nullptr;
+    std::string correctionName;
+    std::vector<std::string> correctionStringArgs;
+    std::vector<std::string> correctionInputColumns;
     std::string inputPtColumn;
     std::string sfColumn;
     std::string outputPtColumn;
@@ -705,6 +710,7 @@ private:
   ISystematicManager *systematicManager_m = nullptr;
   ILogger *logger_m = nullptr;
   IOutputSink *metaSink_m = nullptr;
+  bool executionPending_m = false;
 
   // ---- Internal helpers ---------------------------------------------------
 

@@ -51,6 +51,7 @@ protected:
                                           CorrectionManager *correctionManager = nullptr);
 
   virtual void bindCollectionSpec(const CorrectedCollectionSpec &spec) = 0;
+  virtual void materializeWrappedOutputs() = 0;
   virtual std::vector<std::string> getVariationNames() const = 0;
   virtual std::string objectLabel() const = 0;
   virtual void applyWorkflowAction(
@@ -94,6 +95,7 @@ public:
 
 protected:
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
+  void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
   std::string objectLabel() const override { return "jet"; }
   void applyWorkflowAction(
@@ -119,6 +121,7 @@ public:
 
 protected:
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
+  void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
   std::string objectLabel() const override { return "fatjet"; }
   void applyWorkflowAction(
@@ -144,6 +147,7 @@ public:
 
 protected:
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
+  void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
   std::string objectLabel() const override { return "electron"; }
   void applyWorkflowAction(
@@ -169,6 +173,7 @@ public:
 
 protected:
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
+  void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
   std::string objectLabel() const override { return "muon"; }
   void applyWorkflowAction(
@@ -194,6 +199,7 @@ public:
 
 protected:
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
+  void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
   std::string objectLabel() const override { return "tau"; }
   void applyWorkflowAction(
@@ -219,6 +225,7 @@ public:
 
 protected:
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
+  void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
   std::string objectLabel() const override { return "photon"; }
   void applyWorkflowAction(

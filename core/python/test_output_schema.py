@@ -259,6 +259,10 @@ class TestHistogramSchema:
         assert h.output_file == ""
         assert h.histogram_names == []
         assert h.axes == []
+        assert h.axis_labels == {}
+        assert h.sample_metadata == {}
+        assert h.sample_combinations == {}
+        assert h.processes == {}
 
     def test_current_version_matches_constant(self):
         assert HistogramSchema.CURRENT_VERSION == HISTOGRAM_SCHEMA_VERSION
@@ -293,6 +297,16 @@ class TestHistogramSchema:
             output_file="meta.root",
             histogram_names=["h_pt", "h_eta"],
             axes=[self._make_axis()],
+            axis_labels={"sample": ["inclusive", "wh_301"]},
+            sample_metadata={
+                "wh_301": {"alias_type": "histogram_category", "process": "wh"}
+            },
+            sample_combinations={
+                "vh_signal": {"samples": ["wh_301", "zh_401"], "method": "sum"}
+            },
+            processes={
+                "signal": {"samples": ["vh_signal"], "signal": True}
+            },
         )
         d = h.to_dict()
         h2 = HistogramSchema.from_dict(d)
@@ -301,10 +315,22 @@ class TestHistogramSchema:
         assert len(h2.axes) == 1
         assert h2.axes[0].variable == "pt"
         assert h2.schema_version == h.schema_version
+        assert h2.axis_labels == h.axis_labels
+        assert h2.sample_metadata == h.sample_metadata
+        assert h2.sample_combinations == h.sample_combinations
+        assert h2.processes == h.processes
 
     def test_from_dict_empty_axes(self):
         h = HistogramSchema.from_dict({"output_file": "x.root"})
         assert h.axes == []
+
+    def test_validate_rejects_bad_metadata_types(self):
+        h = HistogramSchema(output_file="meta.root")
+        h.axis_labels = {"sample": ["ok", ""]}
+        h.sample_metadata = {"sample": []}  # type: ignore[assignment]
+        errors = h.validate()
+        assert any("axis_labels" in e for e in errors)
+        assert any("sample_metadata['sample']" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------

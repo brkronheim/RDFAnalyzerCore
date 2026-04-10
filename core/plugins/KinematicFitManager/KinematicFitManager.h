@@ -196,10 +196,9 @@ struct KinFitConfig {
  *                       pt:2:0.0
  *                       @endcode
  *                       where indices are zero-based into the particles list.
+ *   Optional (fall back to built-in defaults if absent):
  *     maxIterations        – maximum number of linearisation iterations
  *     convergenceTolerance – convergence criterion on |Δχ²|
- *
- *   Optional (fall back to built-in defaults if absent):
  *     runVar               – name of a boolean RDataFrame column; when the
  *                           column value is false for an event the fit is
  *                           skipped and all output columns receive -1 (chi2,

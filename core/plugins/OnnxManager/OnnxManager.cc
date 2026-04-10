@@ -141,6 +141,73 @@ const Ort::MemoryInfo &cpuMemoryInfo() {
       Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
   return memoryInfo;
 }
+
+struct OnnxScratchBuffers {
+  std::vector<std::vector<float>> ownedInputs;
+  std::vector<Ort::Value> inputTensors;
+  std::vector<float> outputs;
+};
+
+const std::vector<float> &runModelOutputs(
+  Ort::Session &session,
+    const std::vector<std::vector<int64_t>> &inputShapes,
+    const std::vector<int64_t> &inputElementCounts,
+    const std::vector<const char *> &inputNamePtrs,
+    const std::vector<const char *> &outputNamePtrs,
+    const ROOT::VecOps::RVec<Float_t> &inputVector,
+    int64_t totalExpectedElements) {
+  if (static_cast<int64_t>(inputVector.size()) > totalExpectedElements) {
+    throw std::runtime_error(
+        "OnnxManager: Packed input size exceeds expected ONNX input size.");
+  }
+
+  const auto &memoryInfo = cpuMemoryInfo();
+  thread_local OnnxScratchBuffers scratch;
+  if (scratch.ownedInputs.size() < inputShapes.size()) {
+    scratch.ownedInputs.resize(inputShapes.size());
+  }
+  scratch.inputTensors.clear();
+  scratch.inputTensors.reserve(inputShapes.size());
+
+  size_t cursor = 0;
+  for (size_t i = 0; i < inputShapes.size(); ++i) {
+    const int64_t expectedElements = inputElementCounts[i];
+    const size_t available = inputVector.size() - cursor;
+    const size_t toCopy =
+        std::min<size_t>(available, static_cast<size_t>(expectedElements));
+
+    auto &buffer = scratch.ownedInputs[i];
+    if (buffer.size() != static_cast<size_t>(expectedElements)) {
+      buffer.resize(static_cast<size_t>(expectedElements));
+    }
+
+    if (toCopy > 0) {
+      std::copy_n(inputVector.begin() + static_cast<std::ptrdiff_t>(cursor),
+                  static_cast<std::ptrdiff_t>(toCopy), buffer.begin());
+    }
+    if (toCopy < static_cast<size_t>(expectedElements)) {
+      std::fill(buffer.begin() + static_cast<std::ptrdiff_t>(toCopy),
+                buffer.end(), 0.0f);
+    }
+    cursor += toCopy;
+
+    scratch.inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
+        memoryInfo, buffer.data(), buffer.size(), inputShapes[i].data(),
+        inputShapes[i].size()));
+  }
+
+  auto outputTensors = session.Run(
+      Ort::RunOptions{nullptr}, inputNamePtrs.data(), scratch.inputTensors.data(),
+      scratch.inputTensors.size(), outputNamePtrs.data(), outputNamePtrs.size());
+
+  scratch.outputs.resize(outputTensors.size());
+  for (size_t i = 0; i < outputTensors.size(); ++i) {
+    const float *outputData = outputTensors[i].GetTensorData<float>();
+    scratch.outputs[i] = outputData[0];
+  }
+
+  return scratch.outputs;
+}
 } // namespace
 
 /**
@@ -188,44 +255,9 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
       if (!runVar) {
         return -1.0f;
       }
-
-      if (static_cast<int64_t>(inputVector.size()) > totalExpectedElements) {
-        throw std::runtime_error(
-            "OnnxManager: Packed input size exceeds expected ONNX input size.");
-      }
-
-      const auto &memoryInfo = cpuMemoryInfo();
-      std::vector<std::vector<float>> ownedInputs;
-      ownedInputs.reserve(inputShapes.size());
-      std::vector<Ort::Value> inputTensors;
-      inputTensors.reserve(inputShapes.size());
-
-      size_t cursor = 0;
-      for (size_t i = 0; i < inputShapes.size(); ++i) {
-        const int64_t expectedElements = inputElementCounts[i];
-        const size_t available = inputVector.size() - cursor;
-        const size_t toCopy =
-            std::min<size_t>(available, static_cast<size_t>(expectedElements));
-
-        auto &buffer = ownedInputs.emplace_back(
-            static_cast<size_t>(expectedElements), 0.0f);
-        std::copy_n(inputVector.begin() + static_cast<std::ptrdiff_t>(cursor),
-                    static_cast<std::ptrdiff_t>(toCopy),
-                    buffer.begin());
-        cursor += toCopy;
-
-        inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
-            memoryInfo, buffer.data(), buffer.size(),
-            inputShapes[i].data(), inputShapes[i].size()));
-      }
-
-      auto output_tensors = session->Run(
-          Ort::RunOptions{nullptr},
-          inputNamePtrs.data(), inputTensors.data(), inputTensors.size(),
-          outputNamePtrs.data(), outputNamePtrs.size());
-
-      float *output_data = output_tensors[0].GetTensorMutableData<float>();
-      return output_data[0];
+      return runModelOutputs(*session, inputShapes, inputElementCounts,
+                             inputNamePtrs, outputNamePtrs, inputVector,
+                             totalExpectedElements)[0];
     };
 
     std::string outputColName = modelName + outputSuffix;
@@ -242,45 +274,12 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
       if (!runVar) {
         return outputs;
       }
-
-      if (static_cast<int64_t>(inputVector.size()) > totalExpectedElements) {
-        throw std::runtime_error(
-            "OnnxManager: Packed input size exceeds expected ONNX input size.");
-      }
-
-      const auto &memoryInfo = cpuMemoryInfo();
-      std::vector<std::vector<float>> ownedInputs;
-      ownedInputs.reserve(inputShapes.size());
-      std::vector<Ort::Value> inputTensors;
-      inputTensors.reserve(inputShapes.size());
-
-      size_t cursor = 0;
-      for (size_t i = 0; i < inputShapes.size(); ++i) {
-        const int64_t expectedElements = inputElementCounts[i];
-        const size_t available = inputVector.size() - cursor;
-        const size_t toCopy =
-            std::min<size_t>(available, static_cast<size_t>(expectedElements));
-
-        auto &buffer = ownedInputs.emplace_back(
-            static_cast<size_t>(expectedElements), 0.0f);
-        std::copy_n(inputVector.begin() + static_cast<std::ptrdiff_t>(cursor),
-                    static_cast<std::ptrdiff_t>(toCopy),
-                    buffer.begin());
-        cursor += toCopy;
-
-        inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
-            memoryInfo, buffer.data(), buffer.size(),
-            inputShapes[i].data(), inputShapes[i].size()));
-      }
-
-      auto output_tensors = session->Run(
-          Ort::RunOptions{nullptr},
-          inputNamePtrs.data(), inputTensors.data(), inputTensors.size(),
-          outputNamePtrs.data(), outputNamePtrs.size());
-
+      const auto modelOutputs =
+          runModelOutputs(*session, inputShapes, inputElementCounts,
+                          inputNamePtrs, outputNamePtrs, inputVector,
+                          totalExpectedElements);
       for (size_t i = 0; i < numOutputs; i++) {
-        float *output_data = output_tensors[i].GetTensorMutableData<float>();
-        outputs[i] = output_data[0];
+        outputs[i] = modelOutputs[i];
       }
 
       return outputs;
@@ -307,6 +306,27 @@ void OnnxManager::applyAllModels(const std::string &outputSuffix) {
   for (const auto &modelName : getAllModelNames()) {
     applyModel(modelName, outputSuffix);
   }
+}
+
+Float_t OnnxManager::runScalarModel(
+    const std::string &modelName,
+    const ROOT::VecOps::RVec<Float_t> &inputVector) const {
+  const auto &session = this->objects_m.at(modelName);
+  const auto &inputShapes = model_inputShapes_m.at(modelName);
+  const auto &inputElementCounts = model_inputElementCounts_m.at(modelName);
+  const auto &inputNamePtrs = model_inputNamePtrs_m.at(modelName);
+  const auto &outputNamePtrs = model_outputNamePtrs_m.at(modelName);
+
+  if (outputNamePtrs.size() != 1) {
+    throw std::runtime_error("OnnxManager: Model '" + modelName +
+                             "' does not have exactly one output.");
+  }
+
+  const int64_t totalExpectedElements = std::accumulate(
+      inputElementCounts.begin(), inputElementCounts.end(), int64_t{0});
+  return runModelOutputs(*session, inputShapes, inputElementCounts,
+                         inputNamePtrs, outputNamePtrs, inputVector,
+                         totalExpectedElements)[0];
 }
 
 /**
@@ -426,10 +446,6 @@ void OnnxManager::registerModels(const IConfigurationProvider &configProvider) {
 void OnnxManager::loadModelsFromConfig(
     const IConfigurationProvider &configProvider,
     const std::vector<std::unordered_map<std::string, std::string>> &modelConfig) {
-
-  Ort::SessionOptions session_options;
-  session_options.SetIntraOpNumThreads(1);
-  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
   for (const auto &entryKeys : modelConfig) {
     const std::string &modelName = entryKeys.at("name");

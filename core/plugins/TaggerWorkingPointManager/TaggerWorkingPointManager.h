@@ -10,7 +10,6 @@
 #include <api/IOutputSink.h>
 #include <api/ISystematicManager.h>
 #include <api/ManagerContext.h>
-#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -438,6 +437,40 @@ public:
                           const std::vector<std::string> &stringArgs,
                           const std::vector<std::string> &inputColumns = {});
 
+  /**
+   * @brief Define a BTV-style fixed-WP event weight from per-WP SF and MC
+   *        efficiency columns.
+   *
+   * This implements the fixed working-point event reweighting prescription
+   * used by CMS BTV. The per-object WP category column must already be
+   * configured via setTaggerColumn(s)() and addWorkingPoint().
+   *
+   * The inputs are ordered to match the registered working points. For working
+   * points [L, M, T], the contribution for an object in category:
+   *  - 0 (fail L):    $(1 - SF_L \epsilon_L) / (1 - \epsilon_L)$
+   *  - 1 (pass L fail M): $(SF_L \epsilon_L - SF_M \epsilon_M) / (\epsilon_L - \epsilon_M)$
+   *  - 2 (pass M fail T): $(SF_M \epsilon_M - SF_T \epsilon_T) / (\epsilon_M - \epsilon_T)$
+   *  - 3 (pass T):    $SF_T$
+   *
+   * When an intermediate-bin numerator becomes negative, the per-object factor
+   * is set to unity to avoid unphysical negative event weights, following the
+   * BTV recommendation.
+   *
+   * @param perWorkingPointSFColumns   Per-object SF columns in WP order.
+   * @param perWorkingPointEfficiencyColumns  Per-object MC efficiency columns
+   *        in the same WP order.
+   * @param outputWeightColumn  Output scalar event-weight column name.
+   *
+   * @throws std::runtime_error if setInputObjectCollection() was not called or
+   *         no working points are registered.
+   * @throws std::invalid_argument if the column lists are empty, contain empty
+   *         names, or do not match the working-point count.
+   */
+  void defineFixedWorkingPointWeight(
+      const std::vector<std::string> &perWorkingPointSFColumns,
+      const std::vector<std::string> &perWorkingPointEfficiencyColumns,
+      const std::string &outputWeightColumn);
+
   // -------------------------------------------------------------------------
   // Generator-level fraction correction
   // -------------------------------------------------------------------------
@@ -834,6 +867,13 @@ private:
   };
   std::vector<WeightStep> weightSteps_m;
 
+  struct FixedWorkingPointWeightStep {
+    std::vector<std::string> perWorkingPointSFColumns;
+    std::vector<std::string> perWorkingPointEfficiencyColumns;
+    std::string outputWeightColumn;
+  };
+  std::vector<FixedWorkingPointWeightStep> fixedWPWeightSteps_m;
+
   // ---- Systematic source sets ---------------------------------------------
   std::unordered_map<std::string, std::vector<std::string>> systematicSets_m;
 
@@ -891,6 +931,13 @@ private:
   /// MC fraction for the object's WP category.
   void defineWeightColumn(const std::string &perObjectSFColumn,
                           const std::string &outputWeightColumn);
+
+  /// Build a BTV-style fixed-WP event weight from per-WP SF and efficiency
+  /// columns.
+  void defineFixedWorkingPointWeightColumn(
+      const std::vector<std::string> &perWorkingPointSFColumns,
+      const std::vector<std::string> &perWorkingPointEfficiencyColumns,
+      const std::string &outputWeightColumn);
 
   /// Define the per-object WP category column (handles single- and multi-score).
   void defineWPCategoryColumn();

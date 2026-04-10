@@ -18,6 +18,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import yaml
+
 # ---------------------------------------------------------------------------
 # Make sure law/combine_tasks is importable
 # ---------------------------------------------------------------------------
@@ -443,6 +445,196 @@ class TestLoadManifest(unittest.TestCase):
                 yaml.dump(manifest_data, fh)
             result = mod._load_manifest(mpath)
             self.assertEqual(result.framework_hash, "abc123")
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
+class TestPrepareManifestDatacardConfig(unittest.TestCase):
+    """Tests for manifest-aware datacard config synthesis."""
+
+    def _import(self):
+        import combine_tasks
+        return combine_tasks
+
+    def test_synthesizes_input_files_from_manifest(self):
+        mod = self._import()
+        from output_schema import OutputManifest, HistogramSchema
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hist_path = os.path.join(tmpdir, "merged.root")
+            Path(hist_path).write_text("")
+            config_path = os.path.join(tmpdir, "datacard.yaml")
+            with open(config_path, "w") as fh:
+                yaml.safe_dump(
+                    {
+                        "processes": {
+                            "signal": {"samples": ["wh_301", "wh_302"]},
+                            "background": {"samples": ["inclusive"]},
+                        },
+                        "control_regions": {
+                            "Zll/Zee_BB": {
+                                "observable": "vhbb_dnn_stxs",
+                                "processes": ["signal", "background"],
+                            }
+                        },
+                    },
+                    fh,
+                )
+
+            manifest = OutputManifest()
+            manifest.histograms = HistogramSchema(output_file="merged.root")
+            manifest_path = os.path.join(tmpdir, "output_manifest.yaml")
+            with open(manifest_path, "w") as fh:
+                yaml.safe_dump(manifest.to_dict(), fh)
+
+            prepared = mod._prepare_manifest_datacard_config(
+                config_path, manifest, manifest_path, target_region="Zll/Zee_BB"
+            )
+            try:
+                with open(prepared, "r") as fh:
+                    prepared_cfg = yaml.safe_load(fh)
+                self.assertIn("input_files", prepared_cfg)
+                self.assertEqual(
+                    sorted(prepared_cfg["input_files"].keys()),
+                    ["inclusive", "wh_301", "wh_302"],
+                )
+                self.assertEqual(
+                    prepared_cfg["input_files"]["wh_301"]["path"],
+                    hist_path,
+                )
+                self.assertEqual(
+                    list(prepared_cfg["control_regions"].keys()),
+                    ["Zll/Zee_BB"],
+                )
+            finally:
+                os.unlink(prepared)
+
+    def test_synthesizes_regions_from_manifest_defaults(self):
+        mod = self._import()
+        from output_schema import OutputManifest, HistogramSchema, RegionDefinition
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hist_path = os.path.join(tmpdir, "merged.root")
+            Path(hist_path).write_text("")
+            config_path = os.path.join(tmpdir, "datacard.yaml")
+            with open(config_path, "w") as fh:
+                yaml.safe_dump(
+                    {
+                        "processes": {"signal": {"samples": ["wh_301"]}},
+                        "manifest_defaults": {
+                            "observable": "vhbb_dnn_stxs",
+                            "processes": ["signal"],
+                            "rebin": 2,
+                        },
+                    },
+                    fh,
+                )
+
+            manifest = OutputManifest(
+                histograms=HistogramSchema(output_file="merged.root"),
+                regions=[RegionDefinition(name="Zll/Zee_BB")],
+            )
+            manifest_path = os.path.join(tmpdir, "output_manifest.yaml")
+            with open(manifest_path, "w") as fh:
+                yaml.safe_dump(manifest.to_dict(), fh)
+
+            prepared = mod._prepare_manifest_datacard_config(
+                config_path, manifest, manifest_path, target_region="Zll/Zee_BB"
+            )
+            try:
+                with open(prepared, "r") as fh:
+                    prepared_cfg = yaml.safe_load(fh)
+                region_cfg = prepared_cfg["control_regions"]["Zll/Zee_BB"]
+                self.assertEqual(region_cfg["observable"], "vhbb_dnn_stxs")
+                self.assertEqual(region_cfg["processes"], ["signal"])
+                self.assertEqual(region_cfg["rebin"], 2)
+            finally:
+                os.unlink(prepared)
+
+    def test_uses_manifest_sample_metadata_for_input_files(self):
+        mod = self._import()
+        from output_schema import OutputManifest, HistogramSchema
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hist_path = os.path.join(tmpdir, "merged.root")
+            Path(hist_path).write_text("")
+            config_path = os.path.join(tmpdir, "datacard.yaml")
+            with open(config_path, "w") as fh:
+                yaml.safe_dump({}, fh)
+
+            manifest = OutputManifest(
+                histograms=HistogramSchema(
+                    output_file="merged.root",
+                    sample_metadata={
+                        "inclusive": {"alias_type": "histogram_category"},
+                        "wh_301": {"alias_type": "histogram_category", "process": "wh"},
+                    },
+                )
+            )
+            manifest_path = os.path.join(tmpdir, "output_manifest.yaml")
+            with open(manifest_path, "w") as fh:
+                yaml.safe_dump(manifest.to_dict(), fh)
+
+            prepared = mod._prepare_manifest_datacard_config(
+                config_path, manifest, manifest_path
+            )
+            try:
+                with open(prepared, "r") as fh:
+                    prepared_cfg = yaml.safe_load(fh)
+                self.assertEqual(
+                    sorted(prepared_cfg["input_files"].keys()),
+                    ["inclusive", "wh_301"],
+                )
+            finally:
+                os.unlink(prepared)
+
+    def test_copies_processes_and_sample_combinations_from_manifest(self):
+        mod = self._import()
+        from output_schema import OutputManifest, HistogramSchema
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hist_path = os.path.join(tmpdir, "merged.root")
+            Path(hist_path).write_text("")
+            config_path = os.path.join(tmpdir, "datacard.yaml")
+            with open(config_path, "w") as fh:
+                yaml.safe_dump({}, fh)
+
+            manifest = OutputManifest(
+                histograms=HistogramSchema(
+                    output_file="merged.root",
+                    sample_metadata={
+                        "VJets_stitched": {"alias_type": "dataset", "group": "vjets"},
+                        "wh_301": {"alias_type": "histogram_category", "process": "wh"},
+                    },
+                    sample_combinations={
+                        "VJets": {"samples": ["VJets_stitched"], "method": "sum"}
+                    },
+                    processes={
+                        "signal": {"samples": ["wh_301"], "signal": True},
+                        "background": {"samples": ["VJets"]},
+                    },
+                )
+            )
+            manifest_path = os.path.join(tmpdir, "output_manifest.yaml")
+            with open(manifest_path, "w") as fh:
+                yaml.safe_dump(manifest.to_dict(), fh)
+
+            prepared = mod._prepare_manifest_datacard_config(
+                config_path, manifest, manifest_path
+            )
+            try:
+                with open(prepared, "r") as fh:
+                    prepared_cfg = yaml.safe_load(fh)
+                self.assertEqual(
+                    prepared_cfg["sample_combinations"]["VJets"]["samples"],
+                    ["VJets_stitched"],
+                )
+                self.assertTrue(prepared_cfg["processes"]["signal"]["signal"])
+                self.assertEqual(
+                    prepared_cfg["processes"]["background"]["samples"],
+                    ["VJets"],
+                )
+            finally:
+                os.unlink(prepared)
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)

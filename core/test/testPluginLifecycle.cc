@@ -148,6 +148,29 @@ TEST(PluginLifecycle, DependencyInitializedBeforeDependent) {
         << "Base must be initialized before Derived";
 }
 
+TEST(PluginLifecycle, DependencyExecutedBeforeDependentDuringRun) {
+    CallLog log;
+
+    std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
+    plugins["base"] = std::make_unique<MockPlugin>("Base", log);
+    plugins["derived"] = std::make_unique<MockPlugin>("Derived", log,
+                                                        std::vector<std::string>{"base"});
+
+    Analyzer analyzer(exampleCfg(), std::move(plugins));
+    log.calls.clear();
+
+    ASSERT_NO_THROW(analyzer.run());
+
+    const auto& c = log.calls;
+    auto it_base = std::find(c.begin(), c.end(), "Base::execute");
+    auto it_derived = std::find(c.begin(), c.end(), "Derived::execute");
+
+    ASSERT_NE(it_base, c.end()) << "Base::execute not called";
+    ASSERT_NE(it_derived, c.end()) << "Derived::execute not called";
+    EXPECT_LT(it_base, it_derived)
+        << "Base must execute before Derived";
+}
+
 // ---------------------------------------------------------------------------
 // 5. Missing dependency throws at construction / addPlugin time
 // ---------------------------------------------------------------------------
