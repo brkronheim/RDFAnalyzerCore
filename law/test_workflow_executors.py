@@ -17,10 +17,13 @@ or CMS/ATLAS software environment.  They verify:
 from __future__ import annotations
 
 import os
+import io
 import stat
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -191,6 +194,44 @@ class TestRunAnalysisJob(unittest.TestCase):
             root_setup = "export MY_VAR=hello"
             result = fn(exe_path=exe, job_dir=tmpdir, root_setup=root_setup)
             self.assertIn("done:", result)
+
+    def test_stream_output_emits_live_stdout_and_stderr(self):
+        """stream_output=True forwards child stdout/stderr to the current streams."""
+        fn = self._fn()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(os.path.join(tmpdir, "submit_config.txt")).write_text("batch=false\n")
+            exe = os.path.join(tmpdir, "talk.sh")
+            Path(exe).write_text(
+                "#!/bin/sh\n"
+                "printf 'stdout-progress\\r'\n"
+                "printf 'stderr-line\\n' >&2\n"
+                "exit 0\n"
+            )
+            os.chmod(exe, stat.S_IRWXU)
+
+            stdout_buf = io.StringIO()
+            stderr_buf = io.StringIO()
+            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+                result = fn(exe_path=exe, job_dir=tmpdir, stream_output=True)
+
+            self.assertIn("done:", result)
+            self.assertIn("stdout-progress", stdout_buf.getvalue())
+            self.assertIn("stderr-line", stderr_buf.getvalue())
+
+    def test_explicit_xrootd_urls_are_not_reoptimized(self):
+        """Fully qualified XRDFS URLs should keep their original redirector."""
+        from workflow_executors import _optimize_job_config_xrootd
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "submit_config.txt")
+            original_url = "root://eosuser.cern.ch//eos/user/b/example.root"
+            Path(config_path).write_text(f"fileList={original_url}\n")
+
+            fake_selector = SimpleNamespace(optimize_file_list=lambda files: [_ for _ in files])
+            with patch.dict("sys.modules", {"xrootd_site_selector": fake_selector}):
+                _optimize_job_config_xrootd(config_path)
+
+            self.assertEqual(Path(config_path).read_text(), f"fileList={original_url}\n")
 
 
 # ===========================================================================

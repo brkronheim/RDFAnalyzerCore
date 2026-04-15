@@ -96,6 +96,11 @@ cd build/analyses/ExampleAnalysis
 - Python 3.8+
 - pybind11, numpy, numba (install with `pip install pybind11 numpy numba`)
 
+**For LAW / Luigi workflows:**
+- Create and activate the repository-local virtualenv, then install the production requirements: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements-production.txt`
+- After that, `source law/env.sh` will reuse `.venv` automatically when it exists.
+- `xrdfs` must be available on `PATH` for XRootD file discovery workflows.
+
 **Self-hosted CI runner Dockerfile**
 - A ready-to-build runner image including ROOT, Python, `numpy` and `numba` is provided at `docker/gh-runner.Dockerfile`.
 - See `docs/CI_DOCKERFILE.md` for build/run instructions and details.
