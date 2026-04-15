@@ -213,6 +213,7 @@ law run MonitorNANOJobs --workers 4 \
   --exe build/analyses/myAnalysis/myanalysis \
   --root-setup env.sh \
   --container-setup cmssw-el9 \
+  --want-os el8 \
   --stage-in \
   --size 30
 ```
@@ -330,7 +331,8 @@ These parameters apply to **all** law submission tasks:
 | `--exe` | *(required)* | Path to the compiled C++ executable |
 | `--stage-in` | `False` | xrdcp input files to worker node before running |
 | `--root-setup` | `""` | Path to a setup script; contents embedded in inner runscript |
-| `--container-setup` | `""` | Container setup command (e.g. `cmssw-el9`) |
+| `--container-setup` | `""` | Container image path for `MY.SingularityImage` |
+| `--want-os` | `""` | Optional `MY.WantOS` value (for example `el8`) |
 | `--python-env` | `""` | Path to Python environment tarball (see below) |
 | `--no-validate` | `False` | Skip submit-config validation |
 

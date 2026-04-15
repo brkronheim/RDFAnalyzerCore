@@ -4,6 +4,41 @@ from pathlib import Path
 import yaml
 
 
+_EMBEDDED_ROOT_PROBE_MACRO_TMPL = """\\
+void __FUNCNAME__() {
+    const char* url = \"__URL__\";
+    Long64_t nbytes = __NBYTES__LL;
+    TStopwatch sw;
+    sw.Start();
+    TFile* f = TFile::Open(url, \"READ\");
+    if (!f || f->IsZombie()) {
+        printf(\"PROBE_RESULT:FAILED\\n\");
+        if (f) { f->Close(); delete f; }
+        return;
+    }
+    Int_t to_read = (nbytes > 0 && nbytes < (Long64_t)kMaxInt) ? (Int_t)nbytes : kMaxInt;
+    if (to_read <= 0) {
+        f->Close();
+        delete f;
+        printf(\"PROBE_RESULT:FAILED\\n\");
+        return;
+    }
+    char* buf = new char[to_read];
+    Bool_t ok = f->ReadBuffer(buf, 0LL, to_read);
+    delete[] buf;
+    sw.Stop();
+    f->Close();
+    delete f;
+    if (ok) { printf(\"PROBE_RESULT:FAILED\\n\"); return; }
+    double elapsed = sw.RealTime();
+    if (elapsed > 0)
+        printf(\"PROBE_RESULT:%.6f:%.0f\\n\", elapsed, (double)to_read);
+    else
+        printf(\"PROBE_RESULT:FAILED\\n\");
+}
+"""
+
+
 def read_config(config_file):
     """
     Read config file in either text or YAML format.
@@ -131,72 +166,39 @@ def ensure_symlink(src, dst):
 def stage_inputs_block(eos_sched=False, config_file="submit_config.txt"):
     return f"""
 echo "Staging input files with xrdcp"
-python3 - << 'PY'
+run_helper_python - << 'PY'
 import os
 import re
 import socket
 import subprocess
 import sys
 import tempfile
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 
 # ---------------------------------------------------------------------------
 # Inline helpers shared with the XRootD optimiser (no external Python packages)
 # ---------------------------------------------------------------------------
 
-CMS_REDIRECTORS = [
-    "root://cmsxrootd.fnal.gov/",
-    "root://xrootd-cms.infn.it/",
-    "root://cms-xrd-global.cern.ch/",
-]
-GLOBAL_REDIRECTOR = "root://cms-xrd-global.cern.ch/"
+SITE_REDIRECTOR_MARKER = "/store/test/xrootd/"
+GENERIC_REDIRECTOR_HOSTS = {
+    "cmsxrootd.fnal.gov",
+    "xrootd-cms.infn.it",
+    "cms-xrd-global.cern.ch",
+}
 LOCAL_SITE_BONUS = 1.25
-PROBE_TIMEOUT = 5.0
+PROBE_TIMEOUT = 15.0
 # Extra seconds added to the per-probe timeout when waiting for the thread
 # pool to finish — gives in-flight probes time to complete gracefully.
-PROBE_POOL_TIMEOUT_BUFFER = 5
+PROBE_POOL_TIMEOUT_BUFFER = 2.0
 PROBE_BYTES = 1 * 1024 * 1024  # 1 MiB – realistic but still small
 STAGE_COPY_TIMEOUT = 60        # per-xrdcp timeout in seconds
-# Total attempts per file: 1 initial + (MAX_ATTEMPTS - 1) fallback retries
-# using the global redirector.  User requested "cap retries at 3".
+# Total attempts per file: try up to MAX_ATTEMPTS site-specific redirectors
+# ranked by measured read throughput.
 MAX_ATTEMPTS = 3
-# Latency-to-synthetic-throughput constants for the xrdfs stat fallback.
-# A site responding to 'xrdfs stat' in 1 s receives MIN_FALLBACK_SCORE / 1 s.
-FALLBACK_SCORE_NUMERATOR = 10.0   # MB/s numerator when latency = 1 s
-MIN_FALLBACK_SCORE      = 0.01    # floor so we never return 0 MB/s
 
 # ROOT macro template (TFile::Open + TFile::ReadBuffer).
 # TFile::ReadBuffer: kFALSE (0) = success, kTRUE (1) = failure.
-ROOT_MACRO_TMPL = '''\\
-void probe_xrootd() {{
-  const char* url = "{{url}}";
-  Long64_t nbytes = {{nbytes}}LL;
-  TStopwatch sw; sw.Start();
-  TFile* f = TFile::Open(url, "READ");
-  if (!f || f->IsZombie()) {{
-    printf("PROBE_RESULT:FAILED\\\\n");
-    if (f) {{ f->Close(); delete f; }}
-    return;
-  }}
-  Long64_t sz = f->GetSize();
-  Long64_t to_read = (sz > 0 && sz < nbytes) ? sz : nbytes;
-  Bool_t ok = kFALSE;
-  if (to_read > 0) {{
-    char* buf = new char[to_read];
-    ok = f->ReadBuffer(buf, 0LL, (Int_t)to_read);
-    delete[] buf;
-  }}
-  sw.Stop();
-  f->Close(); delete f;
-  if (ok) {{ printf("PROBE_RESULT:FAILED\\\\n"); return; }}
-  double elapsed = sw.RealTime();
-  if (elapsed > 0 && to_read > 0)
-    printf("PROBE_RESULT:%.6f:%.0f\\\\n", elapsed, (double)to_read);
-  else
-    printf("PROBE_RESULT:FAILED\\\\n");
-}}
-'''
+ROOT_MACRO_TMPL = {_EMBEDDED_ROOT_PROBE_MACRO_TMPL!r}
 
 
 def read_config(cfg_path):
@@ -242,19 +244,51 @@ def build_url(lfn, redirector):
     return redirector.rstrip("/") + "//" + lfn.lstrip("/")
 
 
-def redirector_host(redirector):
-    m = re.match(r"root://([^/]+)", redirector)
-    return m.group(1) if m else redirector
+def is_site_specific_redirector(redirector):
+    return SITE_REDIRECTOR_MARKER in redirector
+
+
+def is_direct_xrootd_candidate(candidate):
+    if not candidate.startswith("root://") or is_site_specific_redirector(candidate):
+        return False
+    match = re.match(r"root://([^/:]+)", candidate)
+    host = match.group(1).lower() if match else ""
+    return host not in GENERIC_REDIRECTOR_HOSTS
+
+
+def filter_site_redirectors(redirectors):
+    filtered = []
+    seen = set()
+    for redirector in redirectors:
+        if not (is_site_specific_redirector(redirector) or is_direct_xrootd_candidate(redirector)):
+            continue
+        if redirector in seen:
+            continue
+        filtered.append(redirector)
+        seen.add(redirector)
+    return filtered
+
+
+def candidate_url(lfn, redirector):
+    if is_direct_xrootd_candidate(redirector):
+        return redirector
+    return build_url(lfn, redirector)
 
 
 def probe_via_root_macro(url, read_bytes, timeout):
     # Probe via ROOT macro (TFile::Open + ReadBuffer).
-    macro_src = ROOT_MACRO_TMPL.format(url=url, nbytes=read_bytes)
     macro_path = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".C", delete=False, prefix="xrd_probe_"
         ) as tmp:
+            funcname = os.path.splitext(os.path.basename(tmp.name))[0]
+            macro_src = (
+                ROOT_MACRO_TMPL
+                .replace("__FUNCNAME__", funcname)
+                .replace("__URL__", url)
+                .replace("__NBYTES__", str(read_bytes))
+            )
             tmp.write(macro_src)
             macro_path = tmp.name
         result = subprocess.run(
@@ -275,10 +309,15 @@ def probe_via_root_macro(url, read_bytes, timeout):
                         pass
         return None
     except FileNotFoundError:
+        print("ROOT executable not found. Please ensure ROOT is installed and in PATH.")
         return None
     except subprocess.TimeoutExpired:
+        print(f"ROOT macro execution timed out after {{timeout}} seconds.")
         return None
-    except Exception:
+    except Exception as e:
+        import traceback
+        print(f"An unexpected error occurred: {{e}}")
+        print(traceback.format_exc())
         return None
     finally:
         if macro_path:
@@ -288,30 +327,9 @@ def probe_via_root_macro(url, read_bytes, timeout):
                 pass
 
 
-def probe_via_subprocess(lfn, redirector, timeout):
-    # Fallback: probe via xrdfs stat latency when ROOT is unavailable.
-    host = redirector_host(redirector)
-    path = "/" + lfn.lstrip("/")
-    t0 = time.perf_counter()
-    try:
-        r = subprocess.run(
-            ["xrdfs", host, "stat", path],
-            capture_output=True, timeout=timeout, text=True,
-        )
-        elapsed = time.perf_counter() - t0
-        if r.returncode != 0:
-            return None
-        return max(MIN_FALLBACK_SCORE, FALLBACK_SCORE_NUMERATOR / elapsed)
-    except Exception:
-        return None
-
-
 def probe_one_redirector(lfn, redirector, read_bytes=PROBE_BYTES, timeout=PROBE_TIMEOUT):
-    url = build_url(lfn, redirector)
-    result = probe_via_root_macro(url, read_bytes, timeout)
-    if result is not None:
-        return result
-    return probe_via_subprocess(lfn, redirector, timeout)
+    url = candidate_url(lfn, redirector)
+    return probe_via_root_macro(url, read_bytes, timeout)
 
 
 def rank_redirectors_parallel(lfn, redirectors, local_site=""):
@@ -332,16 +350,34 @@ def rank_redirectors_parallel(lfn, redirectors, local_site=""):
         return site in redir
 
     results = []
-    with ThreadPoolExecutor(max_workers=len(redirectors)) as pool:
+    processed = set()
+    with ThreadPoolExecutor(max_workers=max(1, min(len(redirectors), 4))) as pool:
         futures = {{pool.submit(probe_one_redirector, lfn, r): r for r in redirectors}}
-        for future in as_completed(futures, timeout=PROBE_TIMEOUT + PROBE_POOL_TIMEOUT_BUFFER):
+        try:
+            for future in as_completed(futures, timeout=PROBE_TIMEOUT + PROBE_POOL_TIMEOUT_BUFFER):
+                processed.add(future)
+                try:
+                    tput = future.result()
+                except Exception:
+                    continue
+                if tput is None:
+                    continue
+                redir = futures[future]
+                if local_site and site_matches(local_site, redir):
+                    tput *= LOCAL_SITE_BONUS
+                results.append((redir, tput))
+        except TimeoutError:
+            pass
+
+        for future, redir in futures.items():
+            if future in processed or not future.done():
+                continue
             try:
                 tput = future.result()
             except Exception:
                 continue
             if tput is None:
                 continue
-            redir = futures[future]
             if local_site and site_matches(local_site, redir):
                 tput *= LOCAL_SITE_BONUS
             results.append((redir, tput))
@@ -390,8 +426,8 @@ else:
     print("[stage-in] Local site not detected; using throughput ranking only")
 
 # Load per-file redirector list produced by _query_rucio during job preparation.
-# Falls back to the generic CMS redirectors when the file is absent (e.g. for
-# non-Rucio sources) or when a file has no Rucio-discovered site redirectors.
+# Only site-specific redirectors are considered; generic redirectors are
+# intentionally ignored.
 import json as _json
 _site_redirectors_file = "site_redirectors.json"
 _site_redirectors: dict = {{}}
@@ -412,41 +448,47 @@ def _best_redirector_for(url):
     lfn = extract_lfn(url)
     if not (lfn.startswith("/store/") or lfn.startswith("/eos/")):
         return url, url  # non-XRootD: keep original, no ranking
-    # Use per-file redirectors from Rucio when available; fall back to the
-    # generic CMS redirectors so there is always something to probe.
-    file_redirectors = _site_redirectors.get(lfn) or CMS_REDIRECTORS
+    file_redirectors = filter_site_redirectors(_site_redirectors.get(lfn) or [])
+    if not file_redirectors:
+        raise RuntimeError(f"no site-specific redirectors available for {{lfn}}")
     ranked = rank_redirectors_parallel(lfn, file_redirectors, local_site)
     if not ranked:
-        return url, GLOBAL_REDIRECTOR
+        raise RuntimeError(f"all probes failed for {{lfn}}")
     best_redir = ranked[0][0]
-    best_url = build_url(lfn, best_redir)
     print(f"  [stage-in] {{lfn}} -> {{best_redir}} ({{ranked[0][1]:.2f}} MB/s)")
-    return url, best_url
+    return url, ranked
 
-n_redirectors = len(next(iter(_site_redirectors.values()), CMS_REDIRECTORS))
+n_redirectors = len(filter_site_redirectors(next(iter(_site_redirectors.values()), []))) if _site_redirectors else 0
 print(f"[stage-in] Probing up to {{n_redirectors}} redirector(s) per file for {{len(urls)}} file(s) in parallel...")
-best_urls = {{}}
-with ThreadPoolExecutor(max_workers=len(urls) or 1) as pool:
+best_redirector_rankings = {{}}
+redirector_failures = []
+with ThreadPoolExecutor(max_workers=max(1, min(len(urls), 3))) as pool:
     futures = {{pool.submit(_best_redirector_for, u): u for u in urls}}
     for fut in as_completed(futures):
         try:
-            orig, best = fut.result()
-            best_urls[orig] = best
+            orig, ranked = fut.result()
+            best_redirector_rankings[orig] = ranked
         except Exception as exc:
             orig = futures[fut]
-            print(f"  [stage-in] probe failed for {{orig}}: {{exc}}; using original URL")
-            best_urls[orig] = orig
+            redirector_failures.append(f"{{extract_lfn(orig)}} :: {{exc}}")
+
+if redirector_failures:
+    print("[stage-in] ERROR: redirector selection failed for one or more files:")
+    for failure in redirector_failures:
+        print(f"  [stage-in] {{failure}}")
+    sys.exit(42)
 
 # Stage each file with xrdcp using the ranked best URL.
 local_paths = []
 for i, url in enumerate(urls):
     local_name = f"input_{{i}}.root"
-    best_url = best_urls.get(url, url)
+    ranked_redirectors = best_redirector_rankings.get(url, [])
+    if not ranked_redirectors:
+        raise RuntimeError(f"missing ranked redirectors for {{url}}")
 
     success = False
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        # After initial failure, fall back to the global redirector.
-        cur_url = best_url if attempt == 1 else build_url(extract_lfn(url), GLOBAL_REDIRECTOR)
+    for attempt, (redirector, _) in enumerate(ranked_redirectors[:MAX_ATTEMPTS], start=1):
+        cur_url = candidate_url(extract_lfn(url), redirector)
         print(f"[stage-in] attempt {{attempt}}/{{MAX_ATTEMPTS}} xrdcp {{cur_url}} -> {{local_name}}")
         try:
             subprocess.run(
@@ -472,8 +514,14 @@ PY
 
 def stage_outputs_blocks(eos_sched=False, config_file="submit_config.txt"):
     pre_block = f"""
-python3 - << 'PY'
+run_helper_python - << 'PY'
 import os
+import subprocess
+import time
+
+XRDFS_TIMEOUT = int(os.environ.get("XRDFS_TIMEOUT", "30"))
+XRDFS_VERIFY_RETRIES = int(os.environ.get("XRDFS_VERIFY_RETRIES", "4"))
+XRDFS_VERIFY_DELAY = float(os.environ.get("XRDFS_VERIFY_DELAY", "5"))
 
 def read_config(config_file):
     if config_file.endswith('.yaml') or config_file.endswith('.yml'):
@@ -502,6 +550,72 @@ def write_config(cfg, config_file):
             for k, v in cfg.items():
                 f.write(f"{{k}}={{v}}\\n")
 
+def normalize_dest(dest):
+    if not dest:
+        return dest
+    if dest.startswith("root://"):
+        return dest
+    return "root://eosuser.cern.ch/" + dest
+
+def split_xrootd_dest(dest):
+    normalized = normalize_dest(dest)
+    if not normalized.startswith("root://"):
+        raise RuntimeError(f"Unsupported stage-out destination: {{dest}}")
+    without_scheme = normalized[len("root://"):]
+    host, _, remainder = without_scheme.partition("/")
+    if not host:
+        raise RuntimeError(f"Could not parse XRootD host from destination: {{normalized}}")
+    path = "/" + remainder.lstrip("/")
+    return normalized, f"root://{{host}}/", path
+
+def eos_dir_from_dest(dest):
+    if dest.startswith("root://"):
+        _, _, path_part = split_xrootd_dest(dest)
+    else:
+        path_part = dest
+    return os.path.dirname("/" + path_part.lstrip("/"))
+
+def xrdfs_ok(host_url, *args, timeout=XRDFS_TIMEOUT):
+    try:
+        result = subprocess.run(
+            ["xrdfs", host_url, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return result.returncode == 0, result.stdout.strip() or result.stderr.strip()
+    except Exception as exc:
+        return False, str(exc)
+
+def ensure_output_endpoint_ready(dest, retries=XRDFS_VERIFY_RETRIES, delay=XRDFS_VERIFY_DELAY):
+    normalized_dest, host_url, _ = split_xrootd_dest(dest)
+    eos_dir = eos_dir_from_dest(normalized_dest)
+    if not eos_dir or eos_dir == "/":
+        return
+
+    mkdir_ok, mkdir_msg = xrdfs_ok(host_url, "mkdir", "-p", eos_dir)
+    if not mkdir_ok:
+        print(f"Warning: xrdfs mkdir -p {{eos_dir}} failed (may already exist): {{mkdir_msg}}")
+
+    last_err = ""
+    for attempt in range(1, retries + 1):
+        stat_ok, stat_msg = xrdfs_ok(host_url, "stat", eos_dir)
+        if stat_ok:
+            ls_ok, ls_msg = xrdfs_ok(host_url, "ls", eos_dir)
+            if ls_ok:
+                return
+            last_err = ls_msg or f"xrdfs ls failed for {{eos_dir}}"
+        else:
+            last_err = stat_msg or f"xrdfs stat failed for {{eos_dir}}"
+        print(f"xrdfs endpoint check attempt {{attempt}} failed for {{eos_dir}}: {{last_err}}")
+        time.sleep(delay * attempt)
+
+    raise RuntimeError(f"Output endpoint check failed for {{normalized_dest}}: {{last_err}}")
+
+def check_output_endpoint(dest):
+    if dest:
+        ensure_output_endpoint_ready(dest)
+
 cfg = read_config("{config_file}")
 
 save_file = cfg.get("saveFile", "")
@@ -519,6 +633,9 @@ elif meta_file:
     cfg["__orig_metaFile"] = meta_file
     cfg["metaFile"] = os.path.basename(meta_file)
 
+check_output_endpoint(cfg.get("__orig_saveFile", ""))
+check_output_endpoint(cfg.get("__orig_metaFile", ""))
+
 proc_id = os.environ.get("CONDOR_PROC", "")
 if proc_id and cfg.get("saveFile"):
     base, ext = os.path.splitext(cfg["saveFile"])
@@ -532,10 +649,19 @@ PY
 """
 
     post_block = f"""
-python3 - << 'PY'
+run_helper_python - << 'PY'
 import os
 import subprocess
 import time
+
+XRDFS_TIMEOUT = int(os.environ.get("XRDFS_TIMEOUT", "30"))
+XRDFS_VERIFY_RETRIES = int(os.environ.get("XRDFS_VERIFY_RETRIES", "4"))
+XRDFS_VERIFY_DELAY = float(os.environ.get("XRDFS_VERIFY_DELAY", "5"))
+XRDCP_TIMEOUT_FLOOR = int(os.environ.get("XRDCP_TIMEOUT_FLOOR", "300"))
+XRDCP_TIMEOUT_CEILING = int(os.environ.get("XRDCP_TIMEOUT_CEILING", "1800"))
+XRDCP_TIMEOUT_BYTES_PER_SEC = int(
+    os.environ.get("XRDCP_TIMEOUT_BYTES_PER_SEC", str(20 * 1024 * 1024))
+)
 
 def read_config(config_file):
     if config_file.endswith('.yaml') or config_file.endswith('.yml'):
@@ -563,13 +689,82 @@ def normalize_dest(dest):
         return dest
     return "root://eosuser.cern.ch/" + dest
 
+def split_xrootd_dest(dest):
+    normalized = normalize_dest(dest)
+    if not normalized.startswith("root://"):
+        raise RuntimeError(f"Unsupported stage-out destination: {{dest}}")
+    without_scheme = normalized[len("root://"):]
+    host, _, remainder = without_scheme.partition("/")
+    if not host:
+        raise RuntimeError(f"Could not parse XRootD host from destination: {{normalized}}")
+    path = "/" + remainder.lstrip("/")
+    return normalized, f"root://{{host}}/", path
+
 def eos_dir_from_dest(dest):
     if dest.startswith("root://"):
-        parts = dest.split("/", 3)
-        path_part = "/" + parts[3] if len(parts) > 3 else "/"
+        _, _, path_part = split_xrootd_dest(dest)
     else:
         path_part = dest
     return os.path.dirname("/" + path_part.lstrip("/"))
+
+def xrdfs_ok(host_url, *args, timeout=XRDFS_TIMEOUT):
+    try:
+        result = subprocess.run(
+            ["xrdfs", host_url, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return result.returncode == 0, result.stdout.strip() or result.stderr.strip()
+    except Exception as exc:
+        return False, str(exc)
+
+def ensure_output_endpoint_ready(dest, retries=XRDFS_VERIFY_RETRIES, delay=XRDFS_VERIFY_DELAY):
+    normalized_dest, host_url, _ = split_xrootd_dest(dest)
+    eos_dir = eos_dir_from_dest(normalized_dest)
+    if not eos_dir or eos_dir == "/":
+        return
+
+    mkdir_ok, mkdir_msg = xrdfs_ok(host_url, "mkdir", "-p", eos_dir)
+    if not mkdir_ok:
+        print(f"Warning: xrdfs mkdir -p {{eos_dir}} failed (may already exist): {{mkdir_msg}}")
+
+    last_err = ""
+    for attempt in range(1, retries + 1):
+        stat_ok, stat_msg = xrdfs_ok(host_url, "stat", eos_dir)
+        if stat_ok:
+            ls_ok, ls_msg = xrdfs_ok(host_url, "ls", eos_dir)
+            if ls_ok:
+                return
+            last_err = ls_msg or f"xrdfs ls failed for {{eos_dir}}"
+        else:
+            last_err = stat_msg or f"xrdfs stat failed for {{eos_dir}}"
+        print(f"xrdfs endpoint check attempt {{attempt}} failed for {{eos_dir}}: {{last_err}}")
+        time.sleep(delay * attempt)
+
+    raise RuntimeError(f"Output endpoint check failed for {{normalized_dest}}: {{last_err}}")
+
+def check_output_endpoint(dest):
+    normalized_dest = normalize_dest(dest)
+    ensure_output_endpoint_ready(normalized_dest)
+
+def verify_remote_file(dest, retries=XRDFS_VERIFY_RETRIES, delay=XRDFS_VERIFY_DELAY):
+    normalized_dest, host_url, remote_path = split_xrootd_dest(dest)
+    last_err = ""
+    for attempt in range(1, retries + 1):
+        ok, msg = xrdfs_ok(host_url, "stat", remote_path)
+        if ok:
+            return
+        last_err = msg or f"xrdfs stat failed for {{remote_path}}"
+        print(f"xrdfs remote verification attempt {{attempt}} failed for {{normalized_dest}}: {{last_err}}")
+        time.sleep(delay * attempt)
+
+    raise RuntimeError(f"Remote file not visible after stage-out: {{normalized_dest}} ({{last_err}})")
+
+def compute_xrdcp_timeout(local_name):
+    size_bytes = os.path.getsize(local_name)
+    estimated = XRDCP_TIMEOUT_FLOOR + int(size_bytes / max(XRDCP_TIMEOUT_BYTES_PER_SEC, 1))
+    return max(XRDCP_TIMEOUT_FLOOR, min(XRDCP_TIMEOUT_CEILING, estimated))
 
 def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
     if not dest:
@@ -582,21 +777,13 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
         raise RuntimeError(f"Refusing to stage out empty file: {{local_name}}")
 
     normalized_dest = normalize_dest(dest)
-    print(local_name, normalized_dest, retries, timeout, streams)
+    effective_timeout = max(timeout, compute_xrdcp_timeout(local_name))
+    print(local_name, normalized_dest, retries, effective_timeout, streams)
 
     if streams is None:
         streams = os.environ.get("XRDCP_STREAMS", "4")
 
-    eos_dir = eos_dir_from_dest(normalized_dest)
-    if eos_dir and eos_dir != "/":
-        try:
-            subprocess.run(
-                ["xrdfs", "root://eosuser.cern.ch/", "mkdir", "-p", eos_dir],
-                capture_output=True,
-                timeout=30,
-            )
-        except Exception as mkdir_exc:
-            print(f"Warning: xrdfs mkdir -p {{eos_dir}} failed (may already exist): {{mkdir_exc}}")
+    ensure_output_endpoint_ready(normalized_dest)
 
     cmd = [
         "xrdcp",
@@ -613,7 +800,8 @@ def xrdcp_if_exists(local_name, dest, retries=3, timeout=120, streams=None):
     for attempt in range(1, retries + 1):
         print(attempt, cmd)
         try:
-            subprocess.run(cmd, check=True, timeout=timeout + 60)
+            subprocess.run(cmd, check=True, timeout=effective_timeout)
+            verify_remote_file(normalized_dest)
             return
         except Exception as exc:
             last_exc = exc
@@ -669,33 +857,30 @@ def xrootd_optimize_block(config_file="submit_config.txt", blacklisted_sites=Non
 
     return f"""
 echo "Optimizing XRootD redirectors for fastest site"
-python3 - << 'XRDPY'
+run_helper_python - << 'XRDPY'
 import os
 import re
 import socket
 import subprocess
 import sys
 import tempfile
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 
 # ---------------------------------------------------------------------------
 # Inline helpers (stdlib + ROOT via subprocess; no external Python packages)
 # ---------------------------------------------------------------------------
 
-CMS_REDIRECTORS = [
-    "root://cmsxrootd.fnal.gov/",
-    "root://xrootd-cms.infn.it/",
-    "root://cms-xrd-global.cern.ch/",
-]
+SITE_REDIRECTOR_MARKER = "/store/test/xrootd/"
+GENERIC_REDIRECTOR_HOSTS = {
+    "cmsxrootd.fnal.gov",
+    "xrootd-cms.infn.it",
+    "cms-xrd-global.cern.ch",
+}
 LOCAL_SITE_BONUS = 1.25
-PROBE_TIMEOUT = 5.0
+PROBE_TIMEOUT = 10.0
 # Extra seconds added to PROBE_TIMEOUT when waiting for the thread pool.
-PROBE_POOL_TIMEOUT_BUFFER = 5
+PROBE_POOL_TIMEOUT_BUFFER = 2.0
 PROBE_BYTES = 1 * 1024 * 1024
-# Latency-to-synthetic-throughput constants for the xrdfs stat fallback.
-FALLBACK_SCORE_NUMERATOR = 10.0   # MB/s numerator when latency = 1 s
-MIN_FALLBACK_SCORE       = 0.01   # floor so we never return 0 MB/s
 
 # Compile-time blacklist (merged with runtime xrdBlacklist config key below).
 STATIC_BLACKLIST = {_bl_literal}
@@ -703,35 +888,7 @@ STATIC_BLACKLIST = {_bl_literal}
 # ROOT macro template – measures TFile::Open + TFile::ReadBuffer throughput.
 # NOTE: TFile::ReadBuffer uses kFALSE (0) = success, kTRUE (1) = failure.
 # NOTE: Keep this in sync with _ROOT_PROBE_MACRO_TMPL in xrootd_site_selector.py.
-ROOT_MACRO_TMPL = '''\\
-void probe_xrootd() {{
-  const char* url = "{{url}}";
-  Long64_t nbytes = {{nbytes}}LL;
-  TStopwatch sw; sw.Start();
-  TFile* f = TFile::Open(url, "READ");
-  if (!f || f->IsZombie()) {{
-    printf("PROBE_RESULT:FAILED\\\\n");
-    if (f) {{ f->Close(); delete f; }}
-    return;
-  }}
-  Long64_t sz = f->GetSize();
-  Long64_t to_read = (sz > 0 && sz < nbytes) ? sz : nbytes;
-  Bool_t ok = kFALSE;
-  if (to_read > 0) {{
-    char* buf = new char[to_read];
-    ok = f->ReadBuffer(buf, 0LL, (Int_t)to_read);
-    delete[] buf;
-  }}
-  sw.Stop();
-  f->Close(); delete f;
-  if (ok) {{ printf("PROBE_RESULT:FAILED\\\\n"); return; }}
-  double elapsed = sw.RealTime();
-  if (elapsed > 0 && to_read > 0)
-    printf("PROBE_RESULT:%.6f:%.0f\\\\n", elapsed, (double)to_read);
-  else
-    printf("PROBE_RESULT:FAILED\\\\n");
-}}
-'''
+ROOT_MACRO_TMPL = {_EMBEDDED_ROOT_PROBE_MACRO_TMPL!r}
 
 
 def read_config(cfg_path):
@@ -798,19 +955,54 @@ def build_url(lfn, redirector):
     return redirector.rstrip("/") + "//" + lfn.lstrip("/")
 
 
-def redirector_host(redirector):
-    m = re.match(r"root://([^/]+)", redirector)
-    return m.group(1) if m else redirector
+def is_site_specific_redirector(redirector):
+    return SITE_REDIRECTOR_MARKER in redirector
+
+
+def is_direct_xrootd_candidate(candidate):
+    if not candidate.startswith("root://") or is_site_specific_redirector(candidate):
+        return False
+    match = re.match(r"root://([^/:]+)", candidate)
+    host = match.group(1).lower() if match else ""
+    return host not in GENERIC_REDIRECTOR_HOSTS
+
+
+def filter_site_redirectors(redirectors, blacklist=None):
+    _blacklist = blacklist or []
+    filtered = []
+    seen = set()
+    for redirector in redirectors:
+        if not (is_site_specific_redirector(redirector) or is_direct_xrootd_candidate(redirector)):
+            continue
+        if is_blacklisted(redirector, _blacklist):
+            continue
+        if redirector in seen:
+            continue
+        filtered.append(redirector)
+        seen.add(redirector)
+    return filtered
+
+
+def candidate_url(lfn, redirector):
+    if is_direct_xrootd_candidate(redirector):
+        return redirector
+    return build_url(lfn, redirector)
 
 
 def probe_via_root_macro(url, read_bytes, timeout):
     # Probe url using a ROOT macro (TFile::Open + ReadBuffer).
-    macro_src = ROOT_MACRO_TMPL.format(url=url, nbytes=read_bytes)
     macro_path = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".C", delete=False, prefix="xrd_probe_"
         ) as tmp:
+            funcname = os.path.splitext(os.path.basename(tmp.name))[0]
+            macro_src = (
+                ROOT_MACRO_TMPL
+                .replace("__FUNCNAME__", funcname)
+                .replace("__URL__", url)
+                .replace("__NBYTES__", str(read_bytes))
+            )
             tmp.write(macro_src)
             macro_path = tmp.name
         result = subprocess.run(
@@ -831,10 +1023,15 @@ def probe_via_root_macro(url, read_bytes, timeout):
                         pass
         return None
     except FileNotFoundError:
+        print("ROOT executable not found. Please ensure ROOT is installed and in PATH.")
         return None
     except subprocess.TimeoutExpired:
+        print(f"ROOT macro execution timed out after {{timeout}} seconds.")
         return None
-    except Exception:
+    except Exception as e:
+        import traceback
+        print(f"An unexpected error occurred: {{e}}")
+        print(traceback.format_exc())
         return None
     finally:
         if macro_path:
@@ -844,30 +1041,9 @@ def probe_via_root_macro(url, read_bytes, timeout):
                 pass
 
 
-def probe_via_subprocess(lfn, redirector, timeout):
-    # Fallback: probe via xrdfs stat latency when ROOT is unavailable.
-    host = redirector_host(redirector)
-    path = "/" + lfn.lstrip("/")
-    t0 = time.perf_counter()
-    try:
-        r = subprocess.run(
-            ["xrdfs", host, "stat", path],
-            capture_output=True, timeout=timeout, text=True,
-        )
-        elapsed = time.perf_counter() - t0
-        if r.returncode != 0:
-            return None
-        return max(MIN_FALLBACK_SCORE, FALLBACK_SCORE_NUMERATOR / elapsed)
-    except Exception:
-        return None
-
-
 def probe_redirector(lfn, redirector, read_bytes=PROBE_BYTES, timeout=PROBE_TIMEOUT):
-    url = build_url(lfn, redirector)
-    result = probe_via_root_macro(url, read_bytes, timeout)
-    if result is not None:
-        return result
-    return probe_via_subprocess(lfn, redirector, timeout)
+    url = candidate_url(lfn, redirector)
+    return probe_via_root_macro(url, read_bytes, timeout)
 
 
 def select_best_url(url, redirectors, local_site="", blacklist=None):
@@ -875,11 +1051,9 @@ def select_best_url(url, redirectors, local_site="", blacklist=None):
     if not (lfn.startswith("/store/") or lfn.startswith("/eos/")):
         return url
 
-    _blacklist = blacklist or []
-    active = [r for r in redirectors if not is_blacklisted(r, _blacklist)]
+    active = filter_site_redirectors(redirectors, blacklist)
     if not active:
-        print(f"  [xrd-opt] All redirectors blacklisted for {{lfn}}; keeping original URL")
-        return url
+        raise RuntimeError(f"no site-specific redirectors available for {{lfn}}")
 
     # Mapping from site name prefix to preferred redirector domain.
     site_domain_map = {{
@@ -899,27 +1073,44 @@ def select_best_url(url, redirectors, local_site="", blacklist=None):
         return site in redir
 
     results = []
-    with ThreadPoolExecutor(max_workers=len(active)) as pool:
+    processed = set()
+    with ThreadPoolExecutor(max_workers=max(1, min(len(active), 4))) as pool:
         futures = {{pool.submit(probe_redirector, lfn, r): r for r in active}}
-        for future in as_completed(futures, timeout=PROBE_TIMEOUT + PROBE_POOL_TIMEOUT_BUFFER):
+        try:
+            for future in as_completed(futures, timeout=PROBE_TIMEOUT + PROBE_POOL_TIMEOUT_BUFFER):
+                processed.add(future)
+                try:
+                    tput = future.result()
+                except Exception:
+                    continue
+                if tput is None:
+                    continue
+                redir = futures[future]
+                if local_site and site_matches_redir(local_site, redir):
+                    tput *= LOCAL_SITE_BONUS
+                results.append((redir, tput))
+        except TimeoutError:
+            pass
+
+        for future, redir in futures.items():
+            if future in processed or not future.done():
+                continue
             try:
                 tput = future.result()
             except Exception:
                 continue
             if tput is None:
                 continue
-            redir = futures[future]
             if local_site and site_matches_redir(local_site, redir):
                 tput *= LOCAL_SITE_BONUS
             results.append((redir, tput))
 
     if not results:
-        print(f"  [xrd-opt] All probes failed for {{lfn}}; keeping original URL")
-        return url
+        raise RuntimeError(f"all probes failed for {{lfn}}")
 
     results.sort(key=lambda x: x[1], reverse=True)
     best_redir, best_tput = results[0]
-    new_url = build_url(lfn, best_redir)
+    new_url = candidate_url(lfn, best_redir)
     print(f"  [xrd-opt] {{lfn}} -> {{best_redir}} ({{best_tput:.2f}} MB/s)")
     return new_url
 
@@ -958,7 +1149,6 @@ else:
     print("[xrd-opt] Local site not detected; using throughput ranking only")
 
 # Load per-file redirector list produced by _query_rucio during job preparation.
-# Falls back to the generic CMS_REDIRECTORS when absent (non-Rucio sources).
 import json as _json
 _site_redirectors_file = "site_redirectors.json"
 _site_redirectors: dict = {{}}
@@ -971,16 +1161,26 @@ if os.path.exists(_site_redirectors_file):
     except Exception as _sr_exc:
         print(f"[xrd-opt] Warning: could not read site_redirectors.json: {{_sr_exc}}")
 
-n_redirectors = len(next(iter(_site_redirectors.values()), CMS_REDIRECTORS)) if _site_redirectors else len(CMS_REDIRECTORS)
+n_redirectors = len(filter_site_redirectors(next(iter(_site_redirectors.values()), []), blacklist)) if _site_redirectors else 0
 print(f"[xrd-opt] Probing up to {{n_redirectors}} redirector(s) per file for {{len(xrd_files)}} file(s)...")
 optimized = []
+redirector_failures = []
 for f in files:
     if f.startswith("root://") or f.startswith("/store/"):
         lfn = extract_lfn(f)
-        file_redirectors = _site_redirectors.get(lfn) or CMS_REDIRECTORS
-        optimized.append(select_best_url(f, file_redirectors, local_site, blacklist))
+        file_redirectors = _site_redirectors.get(lfn) or []
+        try:
+            optimized.append(select_best_url(f, file_redirectors, local_site, blacklist))
+        except Exception as exc:
+            redirector_failures.append(f"{{lfn}} :: {{exc}}")
     else:
         optimized.append(f)
+
+if redirector_failures:
+    print("[xrd-opt] ERROR: redirector selection failed for one or more files:")
+    for failure in redirector_failures:
+        print(f"  [xrd-opt] {{failure}}")
+    sys.exit(42)
 
 cfg["fileList"] = ",".join(optimized)
 write_config(cfg, cfg_path)
@@ -1005,15 +1205,26 @@ def generate_condor_runscript(
     runtime_config_relpath=None,
 ):
     stage_block = stage_inputs_block(eos_sched, config_file) if stage_inputs else ""
-    xrd_optimize_block = "" if stage_inputs else xrootd_optimize_block(config_file)
     stage_out_pre = ""
     stage_out_post = ""
     if stage_outputs:
         stage_out_pre, stage_out_post = stage_outputs_blocks(eos_sched, config_file)
+    def _relax_ulimit_commands(setup_text):
+        if not setup_text:
+            return ""
+        relaxed_lines = []
+        for line in setup_text.splitlines():
+            if line.lstrip().startswith("ulimit "):
+                indent = line[:len(line) - len(line.lstrip())]
+                relaxed_lines.append(f"{indent}({line.strip()}) || true")
+            else:
+                relaxed_lines.append(line)
+        return "\n".join(relaxed_lines)
+
     def _setup_block(setup_text):
         if not setup_text:
             return ""
-        return "set +u\n" + setup_text.rstrip() + "\nset -u\n"
+        return "set +u\n" + _relax_ulimit_commands(setup_text).rstrip() + "\nset -u\n"
 
     root_block = _setup_block(root_setup)
     pre_block = pre_setup_lines or ""
@@ -1056,6 +1267,7 @@ def generate_condor_runscript(
         )
 
     config_runtime_path = runtime_config_relpath or config_file
+    xrd_optimize_block = "" if stage_inputs else xrootd_optimize_block(config_runtime_path)
     config_runtime_dir = os.path.dirname(config_runtime_path)
     materialize_config_block = ""
     if config_runtime_path != config_file:
@@ -1107,6 +1319,15 @@ set -euo pipefail
 trap 'rc=$?; echo "ERROR: wrapper exited with code $rc"; exit $rc' ERR
 # log and re-raise SIGTERM so Condor records ExitBySignal (do not swallow the signal)
 trap 'echo "Received SIGTERM - likely timed out by scheduler"; trap - SIGTERM; kill -s SIGTERM $$' SIGTERM
+RDF_ORIG_LD_LIBRARY_PATH="${{LD_LIBRARY_PATH:-}}"
+RDF_HELPER_PYTHON="$(command -v python3 || command -v python || true)"
+run_helper_python() {{
+    local helper="${{RDF_HELPER_PYTHON:-python3}}"
+    if [ -z "$helper" ]; then
+        helper=python3
+    fi
+    env -u PYTHONHOME LD_LIBRARY_PATH="${{RDF_ORIG_LD_LIBRARY_PATH:-}}" "$helper" "$@"
+}}
 {root_block}{pre_block}{shared_block}{x509_block}{python_env_block}ls
 stage_in_start=$(date +%s)
 {stage_out_pre}{stage_block}
@@ -1192,6 +1413,7 @@ def generate_condor_submit(
     shared_dir_name=None,
     shared_archive_name=None,
     config_file="submit_config.txt",
+    container_image="",
 ):
     Path(main_dir + "/condor_logs").mkdir(parents=True, exist_ok=True)
     transfer_files = [
@@ -1230,6 +1452,12 @@ def generate_condor_submit(
 
     log_name = "log_$(Cluster).log"
     want_os_block = f'MY.WantOS = "{want_os}"\n' if want_os else ""
+    container_block = f'MY.SingularityImage = "{container_image}"\n' if container_image else ""
+    requirements_block = (
+        'requirements = (TARGET.Arch =?= "X86_64") && '
+        '((TARGET.Microarch =!= UNDEFINED && regexp("^x86_64-v([2-9]|[1-9][0-9]+)$", TARGET.Microarch)) '
+        '|| (TARGET.Has_sse4_1 =?= True && TARGET.Has_sse4_2 =?= True && TARGET.has_ssse3 =?= True))\n'
+    )
 
     submit_file = f"""universe = vanilla
 Executable     =  {main_dir}/condor_runscript.sh
@@ -1238,7 +1466,7 @@ on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification     = never
 transfer_input_files = {transfer_input_files}
 environment = "CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)"
-{stream_block}{want_os_block}+RequestMemory={request_memory}
+{requirements_block}{stream_block}{want_os_block}{container_block}+RequestMemory={request_memory}
 +RequestCpus={request_cpus}
 +RequestDisk={request_disk}
 +MaxRuntime={max_runtime}
@@ -1290,46 +1518,28 @@ def write_submit_files(
     if container_setup:
         submit_extra_transfer_files.append(inner_runscript_path)
 
+    payload_script = generate_condor_runscript(
+        exe_relpath,
+        stage_inputs,
+        stage_outputs,
+        root_setup,
+        x509loc=x509loc,
+        pre_setup_lines=pre_setup_lines,
+        use_shared_inputs=use_shared_inputs,
+        eos_sched=eos_sched,
+        shared_dir_name=shared_dir_name,
+        config_file=config_file,
+        python_env_tarball=python_env_tarball,
+        shared_archive_name=shared_archive_name,
+        runtime_config_relpath=runtime_config_relpath,
+    )
+
     if container_setup:
         with open(inner_runscript_path, "w") as condor_sub:
-            condor_sub.write(
-                generate_condor_runscript(
-                    exe_relpath,
-                    stage_inputs,
-                    stage_outputs,
-                    root_setup,
-                    x509loc=x509loc,
-                    pre_setup_lines=pre_setup_lines,
-                    use_shared_inputs=use_shared_inputs,
-                    eos_sched=eos_sched,
-                    shared_dir_name=shared_dir_name,
-                    config_file=config_file,
-                    python_env_tarball=python_env_tarball,
-                    shared_archive_name=shared_archive_name,
-                    runtime_config_relpath=runtime_config_relpath,
-                )
-            )
-        with open(runscript_path, "w") as condor_sub:
-            condor_sub.write(generate_container_wrapper(container_setup, inner_script_name))
-    else:
-        with open(runscript_path, "w") as condor_sub:
-            condor_sub.write(
-                generate_condor_runscript(
-                    exe_relpath,
-                    stage_inputs,
-                    stage_outputs,
-                    root_setup,
-                    x509loc=x509loc,
-                    pre_setup_lines=pre_setup_lines,
-                    use_shared_inputs=use_shared_inputs,
-                    eos_sched=eos_sched,
-                    shared_dir_name=shared_dir_name,
-                    config_file=config_file,
-                    python_env_tarball=python_env_tarball,
-                    shared_archive_name=shared_archive_name,
-                    runtime_config_relpath=runtime_config_relpath,
-                )
-            )
+            condor_sub.write(payload_script)
+
+    with open(runscript_path, "w") as condor_sub:
+        condor_sub.write(payload_script)
 
     with open(submit_path, "w") as condor_sub:
         condor_sub.write(
@@ -1351,6 +1561,7 @@ def write_submit_files(
                 shared_dir_name=shared_dir_name,
                 shared_archive_name=shared_archive_name,
                 config_file=config_file,
+                container_image=(container_setup or "").strip(),
             )
         )
     return submit_path

@@ -130,9 +130,9 @@ def _get_rucio_client(proxy: str | None = None):
 
 # Generic CMS XRootD redirectors used as fallbacks in the per-file redirector list.
 _CMS_FALLBACK_REDIRECTORS: list[str] = [
-    "root://cmsxrootd.fnal.gov/",
-    "root://xrootd-cms.infn.it/",
-    "root://cms-xrd-global.cern.ch/",
+    #"root://cmsxrootd.fnal.gov/",
+    #"root://xrootd-cms.infn.it/",
+    #"root://cms-xrd-global.cern.ch/",
 ]
 
 

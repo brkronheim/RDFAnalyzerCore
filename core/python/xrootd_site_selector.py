@@ -48,9 +48,9 @@ logger = logging.getLogger(__name__)
 #: Ordered list of CMS XRootD redirectors to probe.  Tier-1/global entries
 #: come first so they are tried before purely regional fallbacks.
 CMS_REDIRECTORS: list[str] = [
-    "root://cmsxrootd.fnal.gov/",       # FNAL (US Tier-1)
-    "root://xrootd-cms.infn.it/",       # INFN (European Tier-1)
-    "root://cms-xrd-global.cern.ch/",   # Global CMS redirector (fallback)
+    #"root://cmsxrootd.fnal.gov/",       # FNAL (US Tier-1)
+    #"root://xrootd-cms.infn.it/",       # INFN (European Tier-1)
+    #"root://cms-xrd-global.cern.ch/",   # Global CMS redirector (fallback)
 ]
 
 # Bytes to read when probing a site.  1 MiB gives a more realistic bandwidth
@@ -59,7 +59,7 @@ DEFAULT_PROBE_BYTES: int = 1 * 1024 * 1024
 
 # Per-site probe timeout in seconds.  Kept short so a slow/unreachable site
 # does not significantly delay the site-ranking step before the job starts.
-DEFAULT_PROBE_TIMEOUT: float = 5.0
+DEFAULT_PROBE_TIMEOUT: float = 10.0
 
 # Maximum wall-clock time for the entire site-ranking step.
 DEFAULT_RANK_TIMEOUT: float = 60.0
@@ -270,7 +270,7 @@ def _is_blacklisted(redirector: str, blacklisted_sites: list[str]) -> bool:
 # submission_backend.py::xrootd_optimize_block() which embeds a copy for
 # execution on Condor worker nodes.
 _ROOT_PROBE_MACRO_TMPL: str = """\
-void probe_xrootd() {{
+void {funcname}() {{
   const char* url = "{url}";
   Long64_t nbytes = {nbytes}LL;
   TStopwatch sw;
@@ -330,12 +330,18 @@ def _probe_via_root_macro(url: str, read_bytes: int, timeout: float) -> Optional
     """
     import tempfile
 
-    macro = _ROOT_PROBE_MACRO_TMPL.format(url=url, nbytes=read_bytes)
+    funcname: Optional[str] = None
     macro_path: Optional[str] = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".C", delete=False, prefix="xrd_probe_"
         ) as tmp:
+            funcname = os.path.splitext(os.path.basename(tmp.name))[0]
+            macro = _ROOT_PROBE_MACRO_TMPL.format(
+                funcname=funcname,
+                url=url,
+                nbytes=read_bytes,
+            )
             tmp.write(macro)
             macro_path = tmp.name
 
@@ -378,6 +384,16 @@ def _probe_via_root_macro(url: str, read_bytes: int, timeout: float) -> Optional
                 pass
 
 
+def _xrdfs_stat_path(lfn: str, redirector: str) -> str:
+    """Build the xrdfs path for *lfn* while preserving redirector test prefixes."""
+    match = re.match(r"root://[^/]+(?P<prefix>/.*)?$", redirector)
+    prefix = (match.group("prefix") if match else "") or ""
+    prefix = prefix.rstrip("/")
+    if prefix:
+        return f"{prefix}/{lfn.lstrip('/')}"
+    return "/" + lfn.lstrip("/")
+
+
 def _probe_via_subprocess(lfn: str, redirector: str, timeout: float) -> Optional[float]:
     """Probe *redirector* for *lfn* using ``xrdfs stat`` (latency-only proxy).
 
@@ -389,7 +405,7 @@ def _probe_via_subprocess(lfn: str, redirector: str, timeout: float) -> Optional
     Returns ``None`` when the file is unreachable or ``xrdfs`` is not found.
     """
     host = _redirector_host(redirector)
-    path = "/" + lfn.lstrip("/")
+    path = _xrdfs_stat_path(lfn, redirector)
 
     t0 = time.perf_counter()
     try:
@@ -428,10 +444,12 @@ def probe_redirector(
 ) -> Optional[float]:
     """Probe *redirector* for *lfn* and return throughput in MB/s or ``None``.
 
-    Tries a ROOT macro first (``root -b -q -l``) to measure actual read
-    throughput via ``TFile::Open`` and ``TFile::ReadBuffer``.  Falls back to
-    ``xrdfs stat`` latency probing when ROOT is not available in the PATH.
-    The per-probe *timeout* is applied to each attempt independently.
+    Probes the redirector in two steps. First it runs ``xrdfs stat`` to warm
+    up metadata access for the file and record a latency-based synthetic score.
+    It then runs the ROOT macro probe (``root -b -q -l``) to measure actual
+    read throughput via ``TFile::Open`` and ``TFile::ReadBuffer``. When the
+    ROOT probe succeeds, its measured throughput is preferred. When it fails,
+    the warmed-up ``xrdfs stat`` score is returned as a fallback.
 
     Parameters
     ----------
@@ -452,13 +470,16 @@ def probe_redirector(
     """
     url = _build_url(lfn, redirector)
 
-    # Prefer actual read measurement via ROOT macro (TFile).
+    # Warm up metadata/path resolution first via xrdfs and keep the result as a
+    # fallback when the ROOT read probe is unavailable or fails.
+    fallback_result = _probe_via_subprocess(lfn, redirector, timeout)
+
+    # Prefer the actual read measurement via ROOT after the warm-up step.
     result = _probe_via_root_macro(url, read_bytes, timeout)
     if result is not None:
         return result
 
-    # Fall back to latency-based probing via xrdfs subprocess.
-    return _probe_via_subprocess(lfn, redirector, timeout)
+    return fallback_result
 
 
 # ---------------------------------------------------------------------------

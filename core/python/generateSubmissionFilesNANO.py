@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import re
 import shutil
@@ -47,6 +48,15 @@ def get_proxy_path() -> str:
 # Rucio needs the default configuration --> taken from CMS cvmfs defaults
 if "RUCIO_HOME" not in os.environ:
     os.environ["RUCIO_HOME"] = "/cvmfs/cms.cern.ch/rucio/current"
+
+
+RUCIO_FALLBACK_REDIRECTOR = "root://cms-xrd-global.cern.ch/"
+SITE_TEST_REDIRECTOR_PREFIX = "root://xrootd-cms.infn.it//store/test/xrootd/"
+GENERIC_REDIRECTOR_HOSTS = {
+    "cmsxrootd.fnal.gov",
+    "xrootd-cms.infn.it",
+    "cms-xrd-global.cern.ch",
+}
 
 
 def get_rucio_client(proxy=None) -> Client:
@@ -231,12 +241,99 @@ def _collect_local_shared_libs(exe_path, repo_root):
     return staged
 
 
+def _extract_lfn(url):
+    if url.startswith("root://"):
+        match = re.match(r"root://[^/]+/+(.*)", url)
+        if match:
+            return "/" + match.group(1).lstrip("/")
+    return url
+
+
+def _normalize_site_name(site_name):
+    return site_name.replace("_Disk", "")
+
+
+def _site_test_redirector(site_name):
+    return f"{SITE_TEST_REDIRECTOR_PREFIX}{site_name}/"
+
+
+def _candidate_rse_names(meta):
+    names = []
+    if not isinstance(meta, dict):
+        return names
+    for key in ("rse", "site", "domain", "priority"):
+        value = meta.get(key)
+        if isinstance(value, str) and value:
+            names.append(value)
+    return names
+
+
+def _collect_direct_root_pfns(filedata, allowed_sites):
+    allowed = {site.lower() for site in allowed_sites}
+    direct_pfns = []
+    seen = set()
+    pfns = filedata.get("pfns") or {}
+    for pfn, meta in pfns.items():
+        if not isinstance(pfn, str) or not pfn.startswith("root://"):
+            continue
+        host_match = re.match(r"root://([^/:]+)", pfn)
+        host = host_match.group(1).lower() if host_match else ""
+        if host in GENERIC_REDIRECTOR_HOSTS:
+            continue
+
+        if allowed:
+            meta_names = [name.lower() for name in _candidate_rse_names(meta)]
+            if meta_names and not any(site in meta_name or meta_name in site for meta_name in meta_names for site in allowed):
+                continue
+
+        if pfn in seen:
+            continue
+        direct_pfns.append(pfn)
+        seen.add(pfn)
+    return direct_pfns
+
+
+def _collect_available_sites(states, blacklist=None, site_override=""):
+    blacklist = blacklist or []
+    available_sites = []
+    for site_key, state_value in states.items():
+        if state_value != "AVAILABLE" or "Tape" in site_key:
+            continue
+        site_name = _normalize_site_name(site_key)
+        if site_override and site_name != site_override:
+            continue
+        if blacklist and any(entry.lower() in site_name.lower() for entry in blacklist):
+            continue
+        available_sites.append(site_name)
+    return available_sites
+
+
+def _dedupe_preserve_order(items):
+    deduped = []
+    seen = set()
+    for item in items:
+        if not item or item in seen:
+            continue
+        deduped.append(item)
+        seen.add(item)
+    return deduped
+
+
+def _build_site_candidates(filedata, blacklist=None, site_override=""):
+    states = filedata.get("states", {}) or {}
+    available_sites = _collect_available_sites(states, blacklist=blacklist, site_override=site_override)
+    candidates = _collect_direct_root_pfns(filedata, available_sites)
+    candidates.extend(_site_test_redirector(site_name) for site_name in available_sites)
+    return _dedupe_preserve_order(candidates)
+
+
 
 
 def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
     runningSize = 0
 
     groups = dict()
+    per_file_redirectors = dict()
     filesFound = 0
     group = 0
     groupCount = dict()
@@ -246,7 +343,7 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
     # Basic validation of the DAS/Rucio path
     if not directory or not isinstance(directory, str) or not directory.startswith("/"):
         print(f"Warning: invalid DAS/Rucio path: '{directory}' - skipping")
-        return {}
+        return {"groups": {}, "site_redirectors": {}}
 
     # Robustly call Rucio with retries/backoff to handle intermittent stream errors
     max_retries = 5
@@ -265,50 +362,33 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
                 continue
             else:
                 print(f"Error: failed to list replicas for '{directory}' after {max_retries} attempts: {e}")
-                return {}
+                return {"groups": {}, "site_redirectors": {}}
         except Exception as e:
             print(f"Error: unexpected error while listing replicas for '{directory}': {e}")
-            return {}
+            return {"groups": {}, "site_redirectors": {}}
 
     if rucioOutput is None:
         print(f"Error: no response from Rucio for '{directory}'")
-        return {}
+        return {"groups": {}, "site_redirectors": {}}
 
     if not rucioOutput:
         print(f"Warning: no files found for '{directory}'")
-        return {}
+        return {"groups": {}, "site_redirectors": {}}
 
     #print("Output received")
     #print(len(rucioOutput), "files found")
     for filedata in rucioOutput:
-         file = filedata["name"]
-         states = filedata.get("states", {})
+         file = _extract_lfn(filedata["name"])
          size = filedata.get("bytes", 0)*1e-9
-         redirector="root://xrootd-cms.infn.it/"
+         file_candidates = _build_site_candidates(filedata, blacklist=BL, site_override=siteOverride)
+         per_file_redirectors[file] = file_candidates
          filesFound += 1
          runningSize += size
          if(runningSize > fileSplit):
              group += 1
              runningSize = size
 
-         for site in states:
-             
-             if(states[site]=="AVAILABLE" and "Tape" not in site):
-                 site = site.replace("_Disk", "")
-                 if(site in WL):
-                     #print("Good", site)
-                     redirector = "root://xrootd-cms.infn.it/" +  "/store/test/xrootd/"+site+"/"
-                     break
-                 """
-                 elif(site in BL or "T3" in site or "Tape" in site):
-                     continue
-                     #print("Bad", site)
-                 else:
-                     #
-                     #print("Neutral", site)
-                     redirector =  "root://xrootd-cms.infn.it/" + "/store/test/xrootd/"+site+"/"
-                """
-                 
+         redirector = RUCIO_FALLBACK_REDIRECTOR
          if(group in groups):
              groups[group] +=","+ensure_xrootd_redirector(file, redirector)
              groupCount[group]+=1
@@ -322,7 +402,7 @@ def queryRucio(directory, fileSplit, WL, BL, siteOverride, client):
     #print("groupCounts:", groupCount)
     #print("groupSizes:", groupSizes)
     #print(len(groups), "groups found and", filesFound, "files found")
-    return(groups)
+    return {"groups": groups, "site_redirectors": per_file_redirectors}
 
 def getSampleList(configFile):
     """Parse a sample config file and return ``(sampleDict, baseDirectoryList, lumi, WL, BL)``.
@@ -382,6 +462,7 @@ def main():
     parser.add_argument('--stage-outputs', action='store_true', help="xrdcp outputs to final destination after running")
     parser.add_argument('--root-setup', type=str, default="", help="path to a setup script file; file contents are embedded into the inner worker runscript")
     parser.add_argument('--container-setup', type=str, default="", help="container setup command, script path, or @script path to run before the main executable")
+    parser.add_argument('--want-os', type=str, default="", help="set MY.WantOS in the generated submit file (for example: el8 or el9)")
     parser.add_argument('--no-validate', action='store_true', help="skip config validation")
     parser.add_argument('--make-test-job', action='store_true', help="create a local test job using one file")
     parser.add_argument(
@@ -480,6 +561,16 @@ def main():
 
     test_job_event = threading.Event()
 
+    def result_groups(result):
+        if isinstance(result, dict) and "groups" in result:
+            return result.get("groups", {})
+        return result or {}
+
+    def result_site_redirectors(result):
+        if isinstance(result, dict) and "site_redirectors" in result:
+            return result.get("site_redirectors", {})
+        return {}
+
     mainDir = f"condorSub_{args.name}/"
 
     if args.eos_sched:
@@ -554,10 +645,13 @@ def main():
         das_entries = [d.strip() for d in das.split(',') if d and d.strip()]
         # parallelize queries across DAS entries for this sample
         groups_result = {}
+        site_redirectors_result = {}
         if not das_entries:
             groups_result = {}
         elif len(das_entries) == 1:
-            groups_result = queryRucio(das_entries[0], fileSplit, WL, BL, site, client_local)
+            rucio_result = queryRucio(das_entries[0], fileSplit, WL, BL, site, client_local)
+            groups_result = result_groups(rucio_result)
+            site_redirectors_result = result_site_redirectors(rucio_result)
         else:
             # ensure ThreadPoolExecutor gets at least 1 worker
             workers = max(1, min(len(das_entries), args.threads))
@@ -565,12 +659,16 @@ def main():
                 das_futures = {das_executor.submit(queryRucio, das_entry, fileSplit, WL, BL, site, client_local): das_entry for das_entry in das_entries}
                 # collect returned groups per DAS entry (preserve group boundaries)
                 all_groups = []
+                merged_site_redirectors = {}
                 for fut in as_completed(das_futures):
                     res = fut.result()
-                    if not res:
+                    partial_groups = result_groups(res)
+                    if not partial_groups:
                         continue
-                    for g in sorted(res.keys()):
-                        grp = res[g]
+                    partial_site_redirectors = result_site_redirectors(res)
+                    merged_site_redirectors.update(partial_site_redirectors)
+                    for g in sorted(partial_groups.keys()):
+                        grp = partial_groups[g]
                         if not grp:
                             continue
                         parts = [p.strip() for p in grp.split(',') if p.strip()]
@@ -590,6 +688,7 @@ def main():
                     if uniq_parts:
                         groups_result[idx] = ",".join(uniq_parts)
                         idx += 1
+                site_redirectors_result = merged_site_redirectors
 
         # Create a single local test job (race-protected)
         if args.make_test_job and not test_job_event.is_set() and groups_result:
@@ -691,6 +790,16 @@ def main():
                 for key in job_config.keys():
                     f.write(str(key)+"="+job_config[key]+"\n")
 
+            group_urls = [url.strip() for url in groups_result[subDir].split(",") if url.strip()]
+            job_site_redirectors = {}
+            for url in group_urls:
+                lfn = _extract_lfn(url)
+                if lfn in site_redirectors_result:
+                    job_site_redirectors[lfn] = site_redirectors_result[lfn]
+
+            with open(os.path.join(job_dir, "site_redirectors.json"), "w") as sr_fh:
+                json.dump(job_site_redirectors, sr_fh, indent=2)
+
             jobs_created += 1
             sampleIndex += 1
 
@@ -730,6 +839,7 @@ def main():
         eos_sched=args.eos_sched,
         config_file="submit_config.txt",
         container_setup=container_setup_block,
+        want_os=args.want_os,
     )
     if(index==1):
         print(index, "job created")

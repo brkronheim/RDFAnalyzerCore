@@ -694,21 +694,69 @@ def _submit_single_skim_job(
     resub_dir = os.path.join(submission_dir, "resubmissions")
     Path(resub_dir).mkdir(parents=True, exist_ok=True)
 
-    transfer_files = [
-        os.path.join(job_dir, config_file),
-    ]
-    transfer_files.extend(extra_transfer_files or [])
-    inner_script = os.path.join(submission_dir, "condor_runscript_inner.sh")
-    if os.path.exists(inner_script):
-        transfer_files.append(inner_script)
-
-    transfer_str = ",".join(
-        path for path in transfer_files if "$(" in path or os.path.exists(path)
-    )
+    submit_template_path = os.path.join(submission_dir, "condor_submit.sub")
     log_base = os.path.join(submission_dir, "condor_logs")
     Path(log_base).mkdir(parents=True, exist_ok=True)
 
-    sub_content = f"""universe = vanilla
+    if os.path.exists(submit_template_path):
+        with open(submit_template_path) as fh:
+            sub_content = fh.read()
+
+        sub_content = sub_content.replace("job_$(Process)/", f"job_{job_index}/")
+        sub_content = sub_content.replace("$(Process)", str(job_index))
+        sub_content = re.sub(r"(?mi)^[ \t]*queue\b.*$", "queue 1", sub_content)
+        sub_content = re.sub(
+            r"(?mi)^[ \t]*Output\s*=.*$",
+            f"Output = {log_base}/resub_{job_index}_$(Cluster)_$(Process).stdout",
+            sub_content,
+        )
+        sub_content = re.sub(
+            r"(?mi)^[ \t]*Error\s*=.*$",
+            f"Error = {log_base}/resub_{job_index}_$(Cluster)_$(Process).stderr",
+            sub_content,
+        )
+        sub_content = re.sub(
+            r"(?mi)^[ \t]*Log\s*=.*$",
+            f"Log = {log_base}/resub_{job_index}.log",
+            sub_content,
+        )
+        sub_content = re.sub(
+            r"(?mi)^[ \t]*\+RequestMemory\s*=.*$",
+            f"+RequestMemory={request_memory}",
+            sub_content,
+        )
+        sub_content = re.sub(
+            r"(?mi)^[ \t]*\+MaxRuntime\s*=.*$",
+            f"+MaxRuntime={max_runtime}",
+            sub_content,
+        )
+
+        extra_inputs = [path for path in (extra_transfer_files or []) if os.path.exists(path)]
+        if extra_inputs:
+            match = re.search(r"(?mi)^(?P<indent>[ \t]*transfer_input_files\s*=\s*)(?P<value>.*)$", sub_content)
+            if match:
+                existing = [entry.strip() for entry in match.group("value").split(",") if entry.strip()]
+                for path in extra_inputs:
+                    if path not in existing:
+                        existing.append(path)
+                replacement = f"{match.group('indent')}{','.join(existing)}"
+                sub_content = (
+                    sub_content[:match.start()] + replacement + sub_content[match.end():]
+                )
+    else:
+        transfer_files = [
+            os.path.join(job_dir, config_file),
+        ]
+        transfer_files.extend(extra_transfer_files or [])
+        inner_script = os.path.join(submission_dir, "condor_runscript_inner.sh")
+        if os.path.exists(inner_script):
+            transfer_files.append(inner_script)
+
+        transfer_str = ",".join(
+            path for path in transfer_files if "$(" in path or os.path.exists(path)
+        )
+
+        sub_content = f"""universe = vanilla
 Executable     = {submission_dir}/condor_runscript.sh
 Should_Transfer_Files = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
@@ -1395,8 +1443,15 @@ class SkimMixin:
     container_setup = luigi.Parameter(
         default="",
         description=(
-            "Container setup command used by the outer wrapper script "
-            "(e.g. 'cmssw-el9')."
+            "Container image path passed to HTCondor via MY.SingularityImage "
+            "(for example '/cvmfs/cms.cern.ch/common/cmssw-el9')."
+        ),
+    )
+    want_os = luigi.Parameter(
+        default="",
+        description=(
+            "Optional HTCondor MY.WantOS value to add to the submit file "
+            "(for example 'el8')."
         ),
     )
     python_env = luigi.Parameter(
@@ -1954,7 +2009,7 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
                 exe_path=exe_in_test,
                 job_dir=test_dir,
                 root_setup=self._root_setup_content,
-                container_setup=self.container_setup or "",
+                container_setup="",
             )
         rec.save(os.path.join(test_dir, "test_job.perf.json"))
 
@@ -2167,6 +2222,7 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 eos_sched=False,
                 config_file="submit_config.txt",
                 container_setup=self.container_setup,
+                want_os=self.want_os,
                 python_env_tarball=python_env_staged,
                 shared_archive_name=os.path.basename(self._shared_archive_path),
                 runtime_config_relpath=os.path.join("cfg", "submit_config.txt"),

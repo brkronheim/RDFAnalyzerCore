@@ -15,11 +15,52 @@ def test_generate_condor_submit_exports_condor_proc_env(tmp_path):
     assert "CONDOR_CLUSTER=$(Cluster)" in sub
 
 
+def test_generate_condor_submit_sets_singularity_image(tmp_path):
+    sub = generate_condor_submit(
+        main_dir=str(tmp_path),
+        jobs=1,
+        exe_relpath="bin/fakeexe",
+        config_file="submit_config.txt",
+        container_image="/cvmfs/cms.cern.ch/common/cmssw-el9",
+    )
+    assert 'MY.SingularityImage = "/cvmfs/cms.cern.ch/common/cmssw-el9"' in sub
+
+
+def test_generate_condor_submit_sets_want_os(tmp_path):
+    sub = generate_condor_submit(
+        main_dir=str(tmp_path),
+        jobs=1,
+        exe_relpath="bin/fakeexe",
+        config_file="submit_config.txt",
+        want_os="el8",
+    )
+    assert 'MY.WantOS = "el8"' in sub
+
+
+def test_generate_condor_submit_sets_x86_v2_requirements(tmp_path):
+    sub = generate_condor_submit(
+        main_dir=str(tmp_path),
+        jobs=1,
+        exe_relpath="bin/fakeexe",
+        config_file="submit_config.txt",
+    )
+    assert 'requirements = (TARGET.Arch =?= "X86_64")' in sub
+    assert 'TARGET.Microarch =!= UNDEFINED' in sub
+    assert 'TARGET.Has_sse4_1 =?= True' in sub
+
+
 def test_stage_outputs_preblock_contains_condor_proc_handling():
     pre, post = stage_outputs_blocks(eos_sched=False, config_file="submit_config.txt")
     # ensure pre-block reads CONDOR_PROC and will append process id to filenames
     assert "CONDOR_PROC" in pre
     assert "_proc" not in pre  # we don't hardcode a literal suffix, but proc-aware logic exists
+    assert "check_output_endpoint(cfg.get(\"__orig_saveFile\", \"\"))" in pre
+    assert "check_output_endpoint(cfg.get(\"__orig_metaFile\", \"\"))" in pre
+    assert "ensure_output_endpoint_ready" in post
+    assert "verify_remote_file" in post
+    assert 'xrdfs_ok(host_url, "stat", eos_dir)' in post
+    assert 'xrdfs_ok(host_url, "stat", remote_path)' in post
+    assert 'XRDCP_TIMEOUT_FLOOR' in post
 
 
 def test_generate_condor_submit_shared_dir_uses_directory_entry(tmp_path):
@@ -75,6 +116,30 @@ def test_generate_condor_runscript_shared_archive_materializes_cfg_runtime():
     assert 'export X509_USER_PROXY=x509' in script
 
 
+def test_runscript_uses_preserved_host_python_for_helpers():
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=False,
+        stage_outputs=False,
+        root_setup="",
+    )
+    assert 'RDF_HELPER_PYTHON="$(command -v python3 || command -v python || true)"' in script
+    assert 'run_helper_python() {' in script
+    assert 'env -u PYTHONHOME LD_LIBRARY_PATH="${RDF_ORIG_LD_LIBRARY_PATH:-}" "$helper" "$@"' in script
+    assert "run_helper_python - << 'XRDPY'" in script
+
+
+def test_runscript_relaxes_ulimit_commands_in_root_setup():
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=False,
+        stage_outputs=False,
+        root_setup="ulimit -n 10000\nexport FOO=bar\n",
+    )
+    assert "(ulimit -n 10000) || true" in script
+    assert "export FOO=bar" in script
+
+
 def test_runscript_includes_xrootd_optimize_when_no_stage_in():
     """When stage_inputs=False, the runscript must include the XRootD
     optimisation block that probes and selects the fastest redirector."""
@@ -86,11 +151,12 @@ def test_runscript_includes_xrootd_optimize_when_no_stage_in():
     )
     assert "Optimizing XRootD redirectors" in script
     assert "xrd-opt" in script
-    assert "CMS_REDIRECTORS" in script
+    assert "SITE_REDIRECTOR_MARKER" in script
     assert "detect_local_site" in script
     # Must use ROOT macro, not pyxrootd
     assert "probe_via_root_macro" in script
     assert "probe_via_pyxrootd" not in script
+    assert "probe_via_subprocess" not in script
 
 
 def test_runscript_excludes_xrootd_optimize_when_stage_in():
@@ -112,7 +178,7 @@ def test_stage_in_uses_site_selection():
     from core.python.submission_backend import stage_inputs_block
     block = stage_inputs_block()
     assert "rank_redirectors_parallel" in block
-    assert "CMS_REDIRECTORS" in block
+    assert "filter_site_redirectors" in block
     assert "ThreadPoolExecutor" in block
 
 
@@ -143,12 +209,13 @@ def test_stage_in_caps_retries_at_3():
     assert int(m.group(1)) == 3
 
 
-def test_stage_in_falls_back_to_global_redirector():
-    """After failure the stage-in block must fall back to the global redirector."""
+def test_stage_in_uses_only_site_specific_redirectors():
+    """Stage-in must rank and retry only site-specific redirectors."""
     from core.python.submission_backend import stage_inputs_block
     block = stage_inputs_block()
-    assert "GLOBAL_REDIRECTOR" in block
-    assert "cms-xrd-global.cern.ch" in block
+    assert "SITE_REDIRECTOR_MARKER" in block
+    assert "GLOBAL_REDIRECTOR" not in block
+    assert "build_url(extract_lfn(url), GLOBAL_REDIRECTOR)" not in block
 
 
 def test_stage_in_uses_root_macro():
@@ -169,6 +236,19 @@ def test_runscript_xrootd_optimize_uses_correct_config_file():
         config_file="cfg/my_config.txt",
     )
     assert "cfg/my_config.txt" in script
+
+
+def test_runscript_xrootd_optimize_uses_runtime_config_relpath():
+    script = generate_condor_runscript(
+        exe_relpath="myexe",
+        stage_inputs=False,
+        stage_outputs=False,
+        root_setup="",
+        config_file="submit_config.txt",
+        runtime_config_relpath="cfg/submit_config.txt",
+    )
+    assert 'cfg_path = "cfg/submit_config.txt"' in script
+    assert './myexe cfg/submit_config.txt' in script
 
 
 def test_xrootd_optimize_block_includes_blacklist():
@@ -195,3 +275,57 @@ def test_xrootd_optimize_block_reads_runtime_blacklist():
     from core.python.submission_backend import xrootd_optimize_block
     block = xrootd_optimize_block()
     assert "xrdBlacklist" in block
+
+
+def test_xrootd_optimize_block_filters_site_specific_redirectors():
+    from core.python.submission_backend import xrootd_optimize_block
+    block = xrootd_optimize_block()
+    assert "filter_site_redirectors" in block
+    assert "SITE_REDIRECTOR_MARKER" in block
+
+
+def test_stage_in_block_filters_site_specific_redirectors():
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "filter_site_redirectors" in block
+    assert "SITE_REDIRECTOR_MARKER" in block
+
+
+def test_stage_in_block_accepts_direct_pfn_candidates():
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert "is_direct_xrootd_candidate" in block
+    assert "GENERIC_REDIRECTOR_HOSTS" in block
+    assert "candidate_url" in block
+
+
+def test_stage_in_block_fails_job_when_any_redirector_selection_fails():
+    from core.python.submission_backend import stage_inputs_block
+    block = stage_inputs_block()
+    assert 'redirector_failures = []' in block
+    assert 'sys.exit(42)' in block
+    assert 'raise RuntimeError(f"all probes failed for {lfn}")' in block
+    assert 'using original URL' not in block
+
+
+def test_xrootd_optimize_block_uses_root_probe_only():
+    from core.python.submission_backend import xrootd_optimize_block
+    block = xrootd_optimize_block()
+    assert "probe_via_subprocess" not in block
+    assert "probe_via_root_macro" in block
+
+
+def test_xrootd_optimize_block_accepts_direct_pfn_candidates():
+    from core.python.submission_backend import xrootd_optimize_block
+    block = xrootd_optimize_block()
+    assert "is_direct_xrootd_candidate" in block
+    assert "GENERIC_REDIRECTOR_HOSTS" in block
+    assert "candidate_url" in block
+
+
+def test_xrootd_optimize_block_fails_job_when_any_redirector_selection_fails():
+    from core.python.submission_backend import xrootd_optimize_block
+    block = xrootd_optimize_block()
+    assert 'redirector_failures = []' in block
+    assert 'sys.exit(42)' in block
+    assert 'raise RuntimeError(f"all probes failed for {lfn}")' in block

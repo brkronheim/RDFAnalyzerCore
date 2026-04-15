@@ -58,6 +58,11 @@ def generate_production_from_nano(
     # Read sample list and topology
     sample_list, base_dirs, lumi, WL, BL = getSampleList(sample_config)
 
+    def result_groups(result):
+        if isinstance(result, dict) and "groups" in result:
+            return result.get("groups", {})
+        return result or {}
+
     # Thread-safe accumulators
     file_lists: list = []
     job_configs: list = []
@@ -84,7 +89,9 @@ def generate_production_from_nano(
 
         # If there are multiple DAS entries, query them in parallel
         if len(das_entries) == 1:
-            groups_result = queryRucio(das_entries[0], file_split_gb, WL, BL, site, client_local)
+            groups_result = result_groups(
+                queryRucio(das_entries[0], file_split_gb, WL, BL, site, client_local)
+            )
         else:
             workers = max(1, min(len(das_entries), threads))
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -93,7 +100,7 @@ def generate_production_from_nano(
                 das_futures = {das_executor.submit(queryRucio, e, file_split_gb, WL, BL, site, client_local): e for e in das_entries}
                 for fut in as_completed(das_futures):
                     try:
-                        res = fut.result()
+                        res = result_groups(fut.result())
                     except Exception:
                         continue
                     if not res:

@@ -110,6 +110,20 @@ class TestBuildUrl(unittest.TestCase):
             "cms-xrd-global.cern.ch:1094",
         )
 
+    def test_xrdfs_stat_path_preserves_site_test_prefix(self):
+        path = sel._xrdfs_stat_path(
+            "/store/data/foo.root",
+            "root://xrootd-cms.infn.it//store/test/xrootd/T2_DE_DESY/",
+        )
+        self.assertEqual(path, "//store/test/xrootd/T2_DE_DESY/store/data/foo.root")
+
+    def test_xrdfs_stat_path_for_generic_redirector(self):
+        path = sel._xrdfs_stat_path(
+            "/store/data/foo.root",
+            "root://cmsxrootd.fnal.gov/",
+        )
+        self.assertEqual(path, "/store/data/foo.root")
+
 
 # ---------------------------------------------------------------------------
 # probe_redirector (mocked)
@@ -228,6 +242,50 @@ class TestProbeRedirector(unittest.TestCase):
     def test_default_timeout_is_short(self):
         """Default probe timeout must be <= 10 seconds to avoid slow tests."""
         self.assertLessEqual(sel.DEFAULT_PROBE_TIMEOUT, 10.0)
+
+    def test_xrdfs_runs_before_root_and_root_result_wins(self):
+        calls = []
+
+        def _fake_xrdfs(lfn, redirector, timeout):
+            calls.append("xrdfs")
+            return 3.0
+
+        def _fake_root(url, read_bytes, timeout):
+            calls.append("root")
+            return 7.0
+
+        with patch.object(sel, "_probe_via_subprocess", side_effect=_fake_xrdfs):
+            with patch.object(sel, "_probe_via_root_macro", side_effect=_fake_root):
+                result = sel.probe_redirector(
+                    "/store/data/foo.root",
+                    "root://cmsxrootd.fnal.gov/",
+                    timeout=5.0,
+                )
+
+        self.assertEqual(calls, ["xrdfs", "root"])
+        self.assertEqual(result, 7.0)
+
+    def test_xrdfs_result_used_when_root_fails_after_warmup(self):
+        calls = []
+
+        def _fake_xrdfs(lfn, redirector, timeout):
+            calls.append("xrdfs")
+            return 3.0
+
+        def _fake_root(url, read_bytes, timeout):
+            calls.append("root")
+            return None
+
+        with patch.object(sel, "_probe_via_subprocess", side_effect=_fake_xrdfs):
+            with patch.object(sel, "_probe_via_root_macro", side_effect=_fake_root):
+                result = sel.probe_redirector(
+                    "/store/data/foo.root",
+                    "root://cmsxrootd.fnal.gov/",
+                    timeout=5.0,
+                )
+
+        self.assertEqual(calls, ["xrdfs", "root"])
+        self.assertEqual(result, 3.0)
 
 
 # ---------------------------------------------------------------------------

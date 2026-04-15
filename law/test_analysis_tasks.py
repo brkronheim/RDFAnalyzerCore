@@ -480,6 +480,46 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
 
 
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestRunSkimTestJob(unittest.TestCase):
+    """Tests for the local pre-flight skim test job."""
+
+    def test_run_ignores_container_setup(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exe_path = os.path.join(tmpdir, "exe")
+            Path(exe_path).write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(exe_path, 0o755)
+
+            template = _write_submit_config_template(tmpdir)
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "ttbar", "files": ["root://cms-xrd-global.cern.ch//store/test.root"]}],
+            )
+
+            task = analysis_tasks.RunSkimTestJob(
+                exe=exe_path,
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="testSkim",
+                container_setup="/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/batch-team/containers/plusbatch/el9-full:latest",
+            )
+
+            orig_run_dir = analysis_tasks.RunSkimTestJob._run_dir.fget
+            analysis_tasks.RunSkimTestJob._run_dir = property(
+                lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
+            )
+            try:
+                with patch("analysis_tasks._run_analysis_job", return_value="done:test") as mock_run:
+                    task.run()
+
+                self.assertEqual(mock_run.call_count, 1)
+                self.assertEqual(mock_run.call_args.kwargs.get("container_setup"), "")
+            finally:
+                analysis_tasks.RunSkimTestJob._run_dir = property(orig_run_dir)
+
+
 # ===========================================================================
 # SkimTask
 # ===========================================================================
@@ -1246,6 +1286,72 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertEqual(discovered[0]["dir"], source_job)
             self.assertEqual(discovered[0]["save"], save_path)
             self.assertEqual(discovered[0]["meta"], meta_path)
+
+    def test_submit_single_skim_job_preserves_container_image(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            submit_dir = os.path.join(tmpdir, "condor_submissions", "sample")
+            job_dir = os.path.join(submit_dir, "job_7")
+            shared_inputs = os.path.join(tmpdir, "shared_inputs.tar.gz")
+            Path(job_dir).mkdir(parents=True)
+            Path(os.path.join(job_dir, "submit_config.txt")).write_text("saveFile=out.root\n")
+            Path(shared_inputs).write_text("archive")
+
+            Path(os.path.join(submit_dir, "condor_submit.sub")).write_text(
+                "\n".join(
+                    [
+                        "universe = vanilla",
+                        f"Executable = {submit_dir}/condor_runscript.sh",
+                        "transfer_input_files = "
+                        f"{submit_dir}/job_$(Process)/submit_config.txt,"
+                        f"{submit_dir}/job_$(Process)/site_redirectors.json,"
+                        f"{shared_inputs},"
+                        f"{submit_dir}/condor_runscript_inner.sh",
+                        'environment = "CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)"',
+                        'MY.SingularityImage = "/cvmfs/unpacked.cern.ch/example/image:latest"',
+                        'MY.WantOS = "el9"',
+                        "+RequestMemory=2000",
+                        "+MaxRuntime=3600",
+                        f"Output = {submit_dir}/condor_logs/log_$(Cluster)_$(Process).stdout",
+                        f"Error = {submit_dir}/condor_logs/log_$(Cluster)_$(Process).stderr",
+                        f"Log = {submit_dir}/condor_logs/log_$(Cluster).log",
+                        "queue 10",
+                        "",
+                    ]
+                )
+            )
+
+            completed = analysis_tasks.subprocess.CompletedProcess(
+                args=["condor_submit", "dummy"],
+                returncode=0,
+                stdout="Submitting job(s).\n1 job(s) submitted to cluster 12345.\n",
+                stderr="",
+            )
+            with patch("analysis_tasks.subprocess.run", return_value=completed):
+                cluster_id = analysis_tasks._submit_single_skim_job(
+                    job_index=7,
+                    submission_dir=submit_dir,
+                    max_runtime=5400,
+                    request_memory=3000,
+                    extra_transfer_files=[shared_inputs],
+                )
+
+            self.assertEqual(cluster_id, "12345")
+
+            resub_text = Path(
+                os.path.join(submit_dir, "resubmissions", "resub_job7.sub")
+            ).read_text()
+            self.assertIn('MY.SingularityImage = "/cvmfs/unpacked.cern.ch/example/image:latest"', resub_text)
+            self.assertIn('MY.WantOS = "el9"', resub_text)
+            self.assertIn(f"{submit_dir}/job_7/submit_config.txt", resub_text)
+            self.assertIn(f"{submit_dir}/job_7/site_redirectors.json", resub_text)
+            self.assertIn('environment = "CONDOR_PROC=7 CONDOR_CLUSTER=$(Cluster)"', resub_text)
+            self.assertIn("+RequestMemory=3000", resub_text)
+            self.assertIn("+MaxRuntime=5400", resub_text)
+            self.assertIn(f"Output = {submit_dir}/condor_logs/resub_7_$(Cluster)_$(Process).stdout", resub_text)
+            self.assertIn(f"Log = {submit_dir}/condor_logs/resub_7.log", resub_text)
+            self.assertRegex(resub_text, r"(?m)^queue 1$")
 
     def test_output_files_exist_batch_uses_xrootd_for_eos_like_paths(self):
         import analysis_tasks
