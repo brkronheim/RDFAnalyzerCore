@@ -154,6 +154,7 @@ from submission_backend import (  # noqa: E402
     ensure_xrootd_redirector,
     get_copy_file_list,
     read_config,
+    write_config,
     write_submit_files,
 )
 from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
@@ -213,12 +214,19 @@ def _resolve_analysis_config_path(
         return path_value
 
     template_dir = os.path.dirname(os.path.abspath(template_config_path))
-    analysis_dir = os.path.abspath(os.path.join(template_dir, ".."))
-    candidates = [
-        os.path.abspath(path_value),
-        os.path.join(template_dir, path_value),
-        os.path.join(analysis_dir, path_value),
-    ]
+    candidates = [os.path.abspath(path_value)]
+
+    current_dir = template_dir
+    visited: set[str] = set()
+    while current_dir not in visited:
+        visited.add(current_dir)
+        candidates.append(os.path.join(current_dir, path_value))
+
+        parent_dir = os.path.dirname(current_dir)
+        if parent_dir == current_dir:
+            break
+        current_dir = parent_dir
+
     for candidate in candidates:
         if os.path.exists(candidate):
             return os.path.abspath(candidate)
@@ -314,6 +322,44 @@ def _bundle_analysis_config_files(
     return archive_path
 
 
+def _symlink_or_copy_path(src_path: str, dst_path: str) -> None:
+    """Create *dst_path* from *src_path*, preferring symlinks and falling back to copies."""
+    if os.path.exists(dst_path) or os.path.islink(dst_path):
+        return
+
+    src_abs = os.path.abspath(src_path)
+    try:
+        os.symlink(src_abs, dst_path)
+    except OSError:
+        if os.path.isdir(src_abs):
+            shutil.copytree(src_abs, dst_path, dirs_exist_ok=True)
+        else:
+            Path(os.path.dirname(dst_path)).mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_abs, dst_path)
+
+
+def _ensure_local_analysis_runtime_layout(
+    template_config_path: str,
+    config_dict: dict[str, str],
+    destination_dir: str,
+) -> None:
+    """Populate local job directories with cfg/ payloads and an aux/ tree."""
+    cfg_dir = os.path.join(destination_dir, "cfg")
+    Path(cfg_dir).mkdir(parents=True, exist_ok=True)
+
+    for path_value in get_copy_file_list(config_dict):
+        src = _resolve_analysis_config_path(template_config_path, path_value)
+        if not src or not os.path.isfile(src):
+            continue
+        dst = os.path.join(cfg_dir, os.path.basename(src))
+        _symlink_or_copy_path(src, dst)
+
+    aux_src = _analysis_aux_dir(template_config_path)
+    if aux_src and os.path.isdir(aux_src):
+        aux_dst = os.path.join(destination_dir, "aux")
+        _symlink_or_copy_path(aux_src, aux_dst)
+
+
 def _shared_inputs_archive_name() -> str:
     """Return the canonical filename for the skim shared-input archive."""
     return "shared_inputs.tar.gz"
@@ -375,7 +421,9 @@ def _normalize_shared_config_references(
 
 
 def _resolve_runtime_transfer_path(path_value: str) -> str:
-    """Prefer a transferred HTCondor copy in the current directory when present."""
+    """Resolve a runtime path, preferring local originals before transferred copies."""
+    if path_value and os.path.exists(path_value):
+        return path_value
     local_candidate = os.path.join(os.getcwd(), os.path.basename(path_value))
     if os.path.exists(local_candidate):
         return local_candidate
@@ -405,6 +453,44 @@ def _copy_runtime_loose_cfg_files(destination_cfg_dir: str, exclude_names: Optio
         if os.path.exists(dst_path):
             continue
         shutil.copy2(src_path, dst_path)
+
+
+def _materialize_runtime_staged_inputs(runtime_cfg_path: str, sandbox_dir: str) -> None:
+    """Link staged worker input files into the runtime sandbox when present."""
+    config_dict = read_config(runtime_cfg_path)
+    file_list = str(config_dict.get("fileList", "") or "")
+    if not file_list:
+        return
+
+    staged_names = [
+        entry.strip()
+        for entry in file_list.split(",")
+        if re.fullmatch(r"input_\d+\.root", entry.strip())
+    ]
+    if not staged_names:
+        return
+
+    missing: list[str] = []
+    for staged_name in staged_names:
+        src_path = os.path.join(os.getcwd(), staged_name)
+        dst_path = os.path.join(sandbox_dir, staged_name)
+        if os.path.exists(dst_path):
+            continue
+        if not os.path.exists(src_path):
+            missing.append(staged_name)
+            continue
+        try:
+            os.symlink(src_path, dst_path)
+        except OSError:
+            shutil.copy2(src_path, dst_path)
+
+    if not missing:
+        return
+
+    original_file_list = str(config_dict.get("__orig_fileList", "") or "")
+    if original_file_list:
+        config_dict["fileList"] = original_file_list
+        write_config(config_dict, runtime_cfg_path)
 
 
 def _flatten_job_cfg_overlay_files(job_dir: str) -> list[str]:
@@ -513,7 +599,8 @@ def _materialize_file_source_runtime_job(
         raise RuntimeError(
             f"Per-job submit config not found at runtime: {submit_config_src!r}."
         )
-    shutil.copy2(submit_config_src, os.path.join(runtime_cfg_dir, "submit_config.txt"))
+    runtime_submit_config = os.path.join(runtime_cfg_dir, "submit_config.txt")
+    shutil.copy2(submit_config_src, runtime_submit_config)
 
     if runtime_job_dir:
         job_cfg_overlay = os.path.join(runtime_job_dir, "cfg")
@@ -524,6 +611,8 @@ def _materialize_file_source_runtime_job(
         runtime_cfg_dir,
         exclude_names={os.path.basename(submit_config_src)},
     )
+
+    _materialize_runtime_staged_inputs(runtime_submit_config, sandbox_dir)
 
     if os.path.isdir(runtime_shared_dir):
         for src_path in _skim_shared_loose_input_files(runtime_shared_dir):
@@ -550,6 +639,7 @@ def _run_prepared_skim_job(
     container_setup: str = "",
     source_config_path: Optional[str] = None,
     shared_archive_path: Optional[str] = None,
+    stream_output: bool = False,
 ) -> str:
     """Run a prepared skim job after materializing a worker-local sandbox."""
     runtime_job_dir = None
@@ -567,6 +657,7 @@ def _run_prepared_skim_job(
             root_setup=root_setup,
             container_setup=container_setup,
             config_relpath=os.path.join("cfg", "submit_config.txt"),
+            stream_output=stream_output,
         )
     finally:
         if runtime_job_dir and os.path.isdir(runtime_job_dir):
@@ -1032,6 +1123,7 @@ def _dataset_job_metadata(dataset: DatasetEntry) -> dict[str, str]:
     _store("xsec", dataset.xsec)
     _store("filter_efficiency", dataset.filter_efficiency)
     _store("kfac", dataset.kfac)
+    _store("energy", dataset.energy)
     _store("extra_scale", dataset.extra_scale)
     _store("sum_weights", dataset.sum_weights)
     _store("dtype", dataset.dtype)
@@ -1772,6 +1864,11 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     extra_overrides=extra_overrides,
                     stage_shared_inputs_locally=False,
                 )
+                _ensure_local_analysis_runtime_layout(
+                    self.submit_config,
+                    read_config(os.path.join(job_dir, "submit_config.txt")),
+                    job_dir,
+                )
 
                 # Write the per-job site redirector list so Condor workers
                 # can probe all available sites instead of only the generic
@@ -1800,6 +1897,11 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     dataset=entry,
                     output_dir=out_dir,
                     stage_shared_inputs_locally=False,
+                )
+                _ensure_local_analysis_runtime_layout(
+                    self.submit_config,
+                    read_config(os.path.join(job_dir, "submit_config.txt")),
+                    job_dir,
                 )
                 # Write empty site_redirectors.json so Condor transfer works
                 # consistently; workers fall back to CMS_REDIRECTORS when empty.
@@ -1878,6 +1980,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 shutil.copy2(lib_src, lib_dst)
 
         # Copy auxiliary config files referenced in the template
+        template_config: dict[str, str] = {}
         if os.path.isfile(self.submit_config):
             template_config = read_config(self.submit_config)
             _copy_analysis_config_files(self.submit_config, template_config, test_dir)
@@ -1897,7 +2000,8 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         #else:
         #    test_config = {}
         import copy
-        test_config  = copy.deepcopy(jcfg)
+        test_config = copy.deepcopy(template_config)
+        test_config.update(jcfg)
         test_config["fileList"] = first_file
         test_config["saveFile"] = "test_output.root"
         test_config["metaFile"] = "test_output_meta.root"
@@ -1907,6 +2011,13 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
             test_config.pop(key, None)
 
+        if os.path.isfile(self.submit_config):
+            _ensure_local_analysis_runtime_layout(
+                self.submit_config,
+                test_config,
+                test_dir,
+            )
+
         # Resolve config-file references to their basenames (files are already copied)
         for key, val in list(test_config.items()):
             if key.startswith("__"):
@@ -1915,6 +2026,10 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
             ):
                 basename = os.path.basename(val)
+                cfg_path = os.path.join(test_dir, "cfg", basename)
+                if os.path.exists(cfg_path):
+                    test_config[key] = os.path.join("cfg", basename)
+                    continue
                 if os.path.exists(os.path.join(test_dir, basename)):
                     test_config[key] = basename
 
@@ -2009,7 +2124,8 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
                 exe_path=exe_in_test,
                 job_dir=test_dir,
                 root_setup=self._root_setup_content,
-                container_setup="",
+                container_setup=self.container_setup or "",
+                stream_output=True,
             )
         rec.save(os.path.join(test_dir, "test_job.perf.json"))
 
@@ -2088,6 +2204,13 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
         for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
             test_config.pop(key, None)
 
+        if os.path.isfile(self.submit_config):
+            _ensure_local_analysis_runtime_layout(
+                self.submit_config,
+                test_config,
+                test_dir,
+            )
+
         # Resolve referenced config files to basenames
         for key, val in list(test_config.items()):
             if key.startswith("__"):
@@ -2096,6 +2219,10 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
                 val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
             ):
                 basename = os.path.basename(val)
+                cfg_path = os.path.join(test_dir, "cfg", basename)
+                if os.path.exists(cfg_path):
+                    test_config[key] = os.path.join("cfg", basename)
+                    continue
                 if os.path.exists(os.path.join(test_dir, basename)):
                     test_config[key] = basename
 
@@ -2874,7 +3001,11 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
 
             task_label = f"SkimTask[{dataset.name}]"
             with PerformanceRecorder(task_label) as rec:
-                result = _run_analysis_job(exe_path=exe_path, job_dir=job_dir)
+                result = _run_analysis_job(
+                    exe_path=exe_path,
+                    job_dir=job_dir,
+                    stream_output=True,
+                )
 
             Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
             rec.save(perf_path_for(str(self.output().path)))
@@ -2933,6 +3064,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
                     container_setup=self.container_setup or "",
                     source_config_path=config_path,
                     shared_archive_path=self._shared_archive_path,
+                    stream_output=True,
                 )
 
             Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
@@ -3281,7 +3413,11 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
         # ---- run the analysis executable -----------------------------------
         task_label = f"HistFillTask[{dataset.name}]"
         with PerformanceRecorder(task_label) as rec:
-            result = _run_analysis_job(exe_path=exe_path, job_dir=job_dir)
+            result = _run_analysis_job(
+                exe_path=exe_path,
+                job_dir=job_dir,
+                stream_output=True,
+            )
 
         Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
         rec.save(perf_path_for(self.output().path))

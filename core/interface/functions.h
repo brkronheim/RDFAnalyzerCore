@@ -105,6 +105,21 @@ template <Int_t index> Int_t constantInteger() { return (index); }
 template <typename T, typename S> S castVar(T val1) { return (S(val1)); }
 
 /**
+ * @brief Casts all elements of an RVec to another type.
+ * @tparam S Output element type
+ * @tparam T Input element type
+ * @param values Input vector
+ * @return Vector with all elements cast to type S
+ */
+template <typename S, typename T>
+ROOT::VecOps::RVec<S> castRVec(const ROOT::VecOps::RVec<T> &values) {
+  ROOT::VecOps::RVec<S> out(values.size());
+  std::transform(values.begin(), values.end(), out.begin(),
+                 [](const T &value) { return static_cast<S>(value); });
+  return out;
+}
+
+/**
  * @brief Creates a vector with a single value.
  * @tparam T Type of the value
  * @param val1 Value to place in the vector

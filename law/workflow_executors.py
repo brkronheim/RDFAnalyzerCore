@@ -261,16 +261,23 @@ def _optimize_job_config_xrootd(config_path: str) -> None:
         return
 
     files = [f.strip() for f in file_list_raw.split(",") if f.strip()]
-    xrd_files = [
-        f for f in files
-        if f.startswith("root://") or f.startswith("/store/") or f.startswith("/eos/")
+    optimizable_indices = [
+        i for i, f in enumerate(files)
+        if f.startswith("/store/") or f.startswith("/eos/")
     ]
-    if not xrd_files:
+    if not optimizable_indices:
         return  # nothing to optimise
 
-    optimized = optimize_file_list(files)
-    if optimized == files:
+    # XRDFS discovery already chose the redirector for fully qualified
+    # root:// URLs. Preserve those URLs as-is and only optimise bare LFNs.
+    optimizable_files = [files[i] for i in optimizable_indices]
+    optimized_files = optimize_file_list(optimizable_files)
+    if optimized_files == optimizable_files:
         return  # no change
+
+    optimized = list(files)
+    for index, optimized_file in zip(optimizable_indices, optimized_files):
+        optimized[index] = optimized_file
 
     cfg["fileList"] = ",".join(optimized)
 
@@ -299,6 +306,7 @@ def _run_analysis_job(
     root_setup: str = "",
     container_setup: str = "",
     config_relpath: str = "submit_config.txt",
+    stream_output: bool = False,
 ) -> str:
     """
     Run a single analysis job in *job_dir* by invoking *exe_path* with a
@@ -337,6 +345,10 @@ def _run_analysis_job(
         ``--command-to-run`` (for CMSSW wrappers) or ``bash -c``.
     config_relpath:
         Config path relative to *job_dir* passed to the analysis executable.
+    stream_output:
+        When ``True``, stream the child process stdout/stderr live to the
+        current terminal while keeping a bounded stderr tail for error
+        reporting. Intended for interactive local LAW runs.
 
     Returns
     -------
@@ -404,22 +416,80 @@ def _run_analysis_job(
 
     task_label = f"analysis_job:{os.path.basename(job_dir)}"
 
+    def _append_tail(buf: bytearray, chunk: bytes, max_bytes: int = 2000) -> None:
+        buf.extend(chunk)
+        overflow = len(buf) - max_bytes
+        if overflow > 0:
+            del buf[:overflow]
+
+    def _write_stream(target, chunk: bytes) -> None:
+        buffer = getattr(target, "buffer", None)
+        if buffer is not None:
+            buffer.write(chunk)
+            buffer.flush()
+            return
+        target.write(chunk.decode(errors="replace"))
+        target.flush()
+
+    def _stream_subprocess_output(proc: subprocess.Popen) -> tuple[str, str]:
+        stdout_tail = bytearray()
+        stderr_tail = bytearray()
+
+        def _drain_stream(stream, sink, tail_buf: bytearray) -> None:
+            try:
+                while True:
+                    chunk = stream.read(4096)
+                    if not chunk:
+                        break
+                    _append_tail(tail_buf, chunk)
+                    _write_stream(sink, chunk)
+            finally:
+                stream.close()
+
+        stdout_thread = threading.Thread(
+            target=_drain_stream,
+            args=(proc.stdout, sys.stdout, stdout_tail),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_drain_stream,
+            args=(proc.stderr, sys.stderr, stderr_tail),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        stdout_thread.join()
+        stderr_thread.join()
+
+        return (
+            stdout_tail.decode(errors="replace"),
+            stderr_tail.decode(errors="replace"),
+        )
+
     if _PerformanceRecorder is not None:
         input_bytes = _estimate_job_input_bytes(job_dir) if _estimate_job_input_bytes else 0
         with _PerformanceRecorder(task_label) as rec:
-            proc = subprocess.Popen(
-                full_cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            popen_kwargs = {
+                "args": full_cmd,
+                "shell": True,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+            }
+            if stream_output:
+                popen_kwargs["bufsize"] = 0
+            else:
+                popen_kwargs["text"] = True
+            proc = subprocess.Popen(**popen_kwargs)
             rec.monitor_process(proc.pid)
             slow_detector = _IOThroughputMonitor(proc.pid)
             slow_detector.start()
-            stdout_data, stderr_data = proc.communicate()
+            if stream_output:
+                stdout_data, stderr_data = _stream_subprocess_output(proc)
+                returncode = proc.wait()
+            else:
+                stdout_data, stderr_data = proc.communicate()
+                returncode = proc.returncode
             slow_detector.stop()
-            returncode = proc.returncode
             rec.set_throughput(input_bytes)
 
         # Write performance metrics (best-effort; log a warning on failure)
@@ -449,11 +519,24 @@ def _run_analysis_job(
             )
     else:
         # Fallback: original subprocess.run path (no performance recording)
-        result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
-        if result.returncode != 0:
+        if stream_output:
+            proc = subprocess.Popen(
+                full_cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            _, stderr_data = _stream_subprocess_output(proc)
+            returncode = proc.wait()
+            stderr_tail = stderr_data[-2000:] if stderr_data else ""
+        else:
+            result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
+            returncode = result.returncode
             stderr_tail = result.stderr[-2000:] if result.stderr else ""
+        if returncode != 0:
             raise RuntimeError(
-                f"Analysis job failed (exit {result.returncode}) in {job_dir!r}."
+                f"Analysis job failed (exit {returncode}) in {job_dir!r}."
                 + (f"\nstderr:\n{stderr_tail}" if stderr_tail else "")
             )
 

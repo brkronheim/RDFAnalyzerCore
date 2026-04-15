@@ -3,6 +3,28 @@
 #include <fstream>
 #include <stdexcept>
 
+namespace {
+
+std::string serializeConfigNode(const YAML::Node &node) {
+  if (!node) {
+    return "";
+  }
+
+  if (node.IsScalar()) {
+    return node.as<std::string>();
+  }
+
+  YAML::Emitter emitter;
+  emitter << YAML::Flow << node;
+  if (!emitter.good()) {
+    throw std::runtime_error("Failed to serialize non-scalar YAML config value");
+  }
+
+  return emitter.c_str();
+}
+
+} // namespace
+
 std::string_view YamlConfigAdapter::trim(std::string_view s) const {
   size_t first = s.find_first_not_of(" \t\n\r");
   size_t last = s.find_last_not_of(" \t\n\r");
@@ -27,7 +49,7 @@ YamlConfigAdapter::parsePairBasedConfig(const std::string &configFile) const {
     
     for (const auto& kv : config) {
       std::string key = kv.first.as<std::string>();
-      std::string value = kv.second.as<std::string>();
+      std::string value = serializeConfigNode(kv.second);
       
       if (configMap.find(key) != configMap.end()) {
         throw std::runtime_error(
@@ -66,7 +88,7 @@ YamlConfigAdapter::parseMultiKeyConfig(
       std::unordered_map<std::string, std::string> entryKeys;
       for (const auto& kv : entry) {
         std::string key = kv.first.as<std::string>();
-        std::string value = kv.second.as<std::string>();
+        std::string value = serializeConfigNode(kv.second);
         
         if (entryKeys.find(key) != entryKeys.end()) {
           throw std::runtime_error(

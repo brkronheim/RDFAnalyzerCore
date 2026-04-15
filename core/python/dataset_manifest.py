@@ -231,6 +231,7 @@ class DatasetEntry:
     kfac: float = 1.0
     extra_scale: float = 1.0
     sum_weights: Optional[float] = None
+    energy: float = 13600.0
 
     # -- type ---
     dtype: str = "mc"  # "mc" | "data"
@@ -241,6 +242,9 @@ class DatasetEntry:
 
     # -- provenance ---
     parent: Optional[str] = None
+
+    # -- extensible per-dataset metadata ---
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     # -- friend trees / sidecar inputs ---
     friend_trees: List[FriendTreeConfig] = field(default_factory=list)
@@ -791,8 +795,10 @@ def _entry_from_legacy_kv(kv: Dict[str, str]) -> DatasetEntry:
         kfac=_float("kfac", 1.0),
         extra_scale=_float("extraScale", 1.0),
         sum_weights=_float("norm"),
+        energy=_float("energy", 13600.0),
         dtype=dtype,
         das=kv.get("das"),
         files=[f for f in kv.get("fileList", "").split(",") if f],
         parent=kv.get("parent"),
+        extra={},
     )

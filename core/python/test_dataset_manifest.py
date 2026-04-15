@@ -129,6 +129,7 @@ class TestDatasetEntry:
             group="wjets_ht",
             xsec=1000.0,
             dtype="mc",
+            extra={"xrdfs_path": "/eos/user/a/alice/sample"},
         )
         d = e.to_dict()
         e2 = DatasetEntry.from_dict(d)
@@ -137,6 +138,7 @@ class TestDatasetEntry:
         assert e2.group == e.group
         assert e2.xsec == e.xsec
         assert e2.dtype == e.dtype
+        assert e2.extra == e.extra
 
     def test_from_dict_ignores_unknown_keys(self):
         d = {
@@ -147,6 +149,18 @@ class TestDatasetEntry:
         e = DatasetEntry.from_dict(d)
         assert e.name == "s"
         assert e.dtype == "data"
+
+    def test_from_dict_preserves_extra_metadata(self):
+        d = {
+            "name": "s",
+            "dtype": "mc",
+            "extra": {
+                "xrdfs_server": "root://eosuser.cern.ch/",
+                "xrdfs_path": "/eos/user/b/test/sample",
+            },
+        }
+        e = DatasetEntry.from_dict(d)
+        assert e.extra == d["extra"]
 
 
 # ---------------------------------------------------------------------------

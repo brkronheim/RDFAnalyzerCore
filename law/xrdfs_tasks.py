@@ -75,6 +75,12 @@ WORKSPACE = os.path.abspath(os.path.join(_HERE, ".."))
 # ---------------------------------------------------------------------------
 
 
+def _should_ignore_xrdfs_entry(path: str) -> bool:
+    """Return ``True`` for EOS bookkeeping entries that should be skipped."""
+    base = os.path.basename(path.rstrip("/"))
+    return base.startswith(".sys.")
+
+
 def xrdfs_list_files(
     server: str,
     remote_path: str,
@@ -140,6 +146,8 @@ def xrdfs_list_files(
                 continue
             entry = parts[-1]
             if not entry.startswith("/"):
+                continue
+            if _should_ignore_xrdfs_entry(entry):
                 continue
             if line.startswith("d") or (len(parts) > 4 and parts[0].startswith("d")):
                 subdirs.append(entry)
