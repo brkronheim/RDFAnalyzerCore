@@ -29,6 +29,21 @@ struct CorrectedCollectionSpec {
   std::string etaColumn;
   std::string phiColumn;
   std::string massColumn;
+  std::string metPtColumn;
+  std::string metPhiColumn;
+  std::string rawFactorColumn;
+  std::string rawPtColumn;
+  std::string jerGenJetPtColumn;
+  std::string jerRhoColumn;
+  std::string jerEventColumn;
+  std::string runColumn;
+  std::string lumiColumn;
+  std::string eventColumn;
+  std::string chargeColumn;
+  std::string genPtColumn;
+  std::string nLayersColumn;
+  std::string u1Column;
+  std::string u2Column;
   std::string correctedPtColumn;
   std::string correctedMassColumn;
   std::string outputCollection;
@@ -50,6 +65,7 @@ protected:
   explicit CorrectedCollectionManagerBase(std::string configKey,
                                           CorrectionManager *correctionManager = nullptr);
 
+  virtual void applyImplicitSetup(const CorrectedCollectionSpec &spec) = 0;
   virtual void bindCollectionSpec(const CorrectedCollectionSpec &spec) = 0;
   virtual void materializeWrappedOutputs() = 0;
   virtual std::vector<std::string> getVariationNames() const = 0;
@@ -94,6 +110,7 @@ public:
   std::string type() const override { return "CorrectedJetCollectionManager"; }
 
 protected:
+  void applyImplicitSetup(const CorrectedCollectionSpec &spec) override;
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
   void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
@@ -120,6 +137,7 @@ public:
   std::string type() const override { return "CorrectedFatJetCollectionManager"; }
 
 protected:
+  void applyImplicitSetup(const CorrectedCollectionSpec &spec) override;
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
   void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
@@ -146,6 +164,7 @@ public:
   std::string type() const override { return "CorrectedElectronCollectionManager"; }
 
 protected:
+  void applyImplicitSetup(const CorrectedCollectionSpec &spec) override;
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
   void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
@@ -172,6 +191,7 @@ public:
   std::string type() const override { return "CorrectedMuonCollectionManager"; }
 
 protected:
+  void applyImplicitSetup(const CorrectedCollectionSpec &spec) override;
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
   void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
@@ -198,6 +218,7 @@ public:
   std::string type() const override { return "CorrectedTauCollectionManager"; }
 
 protected:
+  void applyImplicitSetup(const CorrectedCollectionSpec &spec) override;
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
   void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;
@@ -224,6 +245,7 @@ public:
   std::string type() const override { return "CorrectedPhotonCollectionManager"; }
 
 protected:
+  void applyImplicitSetup(const CorrectedCollectionSpec &spec) override;
   void bindCollectionSpec(const CorrectedCollectionSpec &spec) override;
   void materializeWrappedOutputs() override { manager_m.execute(); }
   std::vector<std::string> getVariationNames() const override;

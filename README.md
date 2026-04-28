@@ -57,12 +57,19 @@ source build.sh
 
 # Run example
 cd build/analyses/ExampleAnalysis
-./example cfg.txt
+./analysis cfg.yaml
 ```
 
 **New to the framework?** Check out the [Getting Started Guide](docs/GETTING_STARTED.md).
 
 ## Documentation
+
+### Core C++ Backbone
+
+- **[Architecture](docs/ARCHITECTURE.md)** - Core manager wiring, plugin lifecycle, and execution flow
+- **[API Reference](docs/API_REFERENCE.md)** - Canonical `Analyzer` and interface APIs
+- **[Plugin Development](docs/PLUGIN_DEVELOPMENT.md)** - Implementing C++ plugins via `IPluggableManager`
+- **[Doxygen Guide](docs/DOXYGEN_GUIDE.md)** - C++ documentation standards for headers and interfaces
 
 ### For Users
 
@@ -80,14 +87,14 @@ cd build/analyses/ExampleAnalysis
 
 ### For Developers
 
-- **[Architecture](docs/ARCHITECTURE.md)** - Internal design and structure
+- **[Architecture](docs/ARCHITECTURE.md)** - Internal design and C++ wiring structure
 - **[Plugin Development](docs/PLUGIN_DEVELOPMENT.md)** - Creating custom plugins
 - **[ONNX Implementation](docs/ONNX_IMPLEMENTATION.md)** - ONNX manager details
 - **[ONNX Multi-Output](docs/ONNX_MULTI_OUTPUT.md)** - Multi-output model support
 
 ## Requirements
 
-- ROOT 6.30/02 or later (progress bar support requires 6.28+)
+- ROOT 6.30/02 or later (progress bar support requires 6.30+)
 - CMake 3.19.0 or later
 - C++17 compatible compiler
 - Git
@@ -250,15 +257,35 @@ See [Combine Integration Guide](docs/COMBINE_INTEGRATION.md) for complete statis
 
 ### Testing
 
+Create and activate a local Python virtual environment before running Python-focused tests. Use the same interpreter for both CTest and direct pytest runs when possible.
+
 ```bash
-source test.sh
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-ci.txt pytest
 ```
 
-Or run specific tests:
+Then run the full C++/Python suite through CTest:
+
 ```bash
 cd build
-ctest -R TestName -V
+ctest --output-on-failure
 ```
+
+Or run targeted suites directly from the canonical Python test directories:
+```bash
+source .venv/bin/activate
+PYTHONPATH=core/python:core/python/law python -m pytest core/tests/python/ core/tests/law/ -q
+```
+
+The C++ suite and Python binding smoke test now live under `core/tests/cpp/`.
+
+If you rebuild or reconfigure after creating the virtual environment, prefer:
+```bash
+cmake -S . -B build -DPython3_EXECUTABLE=.venv/bin/python
+```
+
+For a fast sanity check after edits, run `cd build && ctest --output-on-failure` and then `source .venv/bin/activate && PYTHONPATH=core/python:core/python/law python -m pytest core/tests/python/ core/tests/law/ -q`.
 
 ## Adding Your Analysis
 
@@ -296,9 +323,10 @@ The framework is built around several key components that work together:
 3. **DataManager**: Wraps ROOT::RDataFrame with systematic support
 4. **SystematicManager**: Tracks and propagates systematic variations
 5. **Plugins**: Extensible managers for specific tasks (ML, corrections, histograms)
-6. **OutputSinks**: Abstract destinations for skims and metadata
+6. **Analysis Services**: Internal service hooks (for example provenance and counters)
+7. **OutputSinks**: Abstract destinations for skims and metadata
 
-All managers use **compile-time wiring** through C++ - the Analyzer is agnostic to concrete plugin types and interacts only through interfaces.
+The core is wired in C++ through interfaces and dependency-aware plugin ordering. `Analyzer` owns core managers and services, injects a shared `ManagerContext`, then executes plugin lifecycle hooks in a deterministic order.
 
 ### Data Flow
 
@@ -357,11 +385,13 @@ int main(int argc, char **argv) {
     );
     
     // Apply ML model (from config)
-    auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
-    onnxMgr->applyAllModels();
+    auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
+    if (onnxMgr) {
+        onnxMgr->applyAllModels();
+    }
     
     // Save outputs
-    analyzer.save();
+    analyzer.run();
     
     return 0;
 }
@@ -441,6 +471,10 @@ All managers support:
 - Multi-output models
 - Thread-safe inference with ROOT ImplicitMT
 
+Execution entry points:
+- `save()` always writes the configured skim output and finalizes plugins/services.
+- `run()` conditionally writes skim output when `enableSkim=1|true|True`, saves ND histograms (if `histogramManager` is registered), and finalizes plugins/services.
+
 ### Systematic Uncertainties
 
 Built-in support for systematic variations:
@@ -490,23 +524,21 @@ Features:
 
 ### Production Manager
 
-Unified production management system for batch analyses:
+Unified production management system for batch analyses.
+
+Legacy compatibility submission scripts have been removed. New production workflows should use LAW discovery tasks to generate job configs and `core/python/production_monitor.py` / `core/python/production_manager.py` for submission, monitoring, validation, and resubmission.
+
+Recommended workflow:
 
 ```bash
-# Create and submit a production
-python core/python/production_submit.py \
-    --name my_analysis \
-    --config cfg/config.txt \
-    --sample-config cfg/samples.txt \
-    --exe build/analyses/MyAnalysis/myanalysis \
-    --submit
+# Discover files via Rucio and build job configs
+law run GetRucioFileList --submit-config analyses/myAnalysis/cfg/submit_config.txt --name myRun
+law run SkimTask --submit-config analyses/myAnalysis/cfg/submit_config.txt --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml --name mySkimRun --file-source rucio --file-source-name myRun --exe build/analyses/MyAnalysis/myanalysis
 
-# Monitor progress
-python core/python/production_monitor.py monitor --name my_analysis
-
-# Validate outputs and resubmit failures
-python core/python/production_monitor.py validate --name my_analysis
-python core/python/production_monitor.py resubmit --name my_analysis
+# Monitor and validate
+python core/python/production_monitor.py monitor --name mySkimRun
+python core/python/production_monitor.py validate --name mySkimRun
+python core/python/production_monitor.py resubmit --name mySkimRun
 ```
 
 Features:
@@ -522,17 +554,11 @@ Features:
 
 ### HTCondor Submission
 
-Framework includes Python scripts for batch submission:
-
-```bash
-python core/python/generateSubmissionFilesNANO.py \
-    --exe build/analyses/MyAnalysis/myanalysis \
-    --stage-outputs \
-    --spool
-```
+Legacy batch submission scripts have been removed. Batch submission now uses LAW discovery tasks and the production manager toolchain.
 
 Features:
-- Rucio-based dataset discovery (NANO) or CERN Open Data
+- Rucio-based dataset discovery via LAW
+- Open Data discovery via LAW tasks
 - Automatic input/output staging
 - XRootD support
 - Shared executable staging

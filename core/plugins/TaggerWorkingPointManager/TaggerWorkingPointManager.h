@@ -133,8 +133,8 @@ struct WPCollectionSelection {
  *
  * ## Typical usage — Jets (b-tagging with DeepJet)
  * @code
- *   auto* twm = analyzer->getPlugin<TaggerWorkingPointManager>("btagManager");
- *   auto* cm  = analyzer->getPlugin<CorrectionManager>("corrections");
+ *   auto twm = analyzer->getPlugin<TaggerWorkingPointManager>("btagManager");
+ *   auto cm  = analyzer->getPlugin<CorrectionManager>("corrections");
  *
  *   // 1. Declare kinematic column names.
  *   twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -173,7 +173,7 @@ struct WPCollectionSelection {
  *
  * ## Typical usage — Jets (charm-tagging with CvsL + CvsB)
  * @code
- *   auto* ctwm = analyzer->getPlugin<TaggerWorkingPointManager>("ctagManager");
+ *   auto ctwm = analyzer->getPlugin<TaggerWorkingPointManager>("ctagManager");
  *
  *   // 1. Declare kinematic columns.
  *   ctwm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -198,7 +198,7 @@ struct WPCollectionSelection {
  *
  * ## Typical usage — Taus (DeepTau ID)
  * @code
- *   auto* tauTwm = analyzer->getPlugin<TaggerWorkingPointManager>("tauIdManager");
+ *   auto tauTwm = analyzer->getPlugin<TaggerWorkingPointManager>("tauIdManager");
  *
  *   // 1. Declare tau kinematic column names.
  *   tauTwm->setObjectColumns("Tau_pt", "Tau_eta", "Tau_phi", "Tau_mass");

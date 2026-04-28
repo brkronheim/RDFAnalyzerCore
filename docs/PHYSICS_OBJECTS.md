@@ -779,17 +779,8 @@ analyzer.Define("goodJets",
     {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
 );
 
-auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
-
-// Declare columns, strip NanoAOD JEC, apply new JEC
-jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
-jes->setMETColumns("MET_pt", "MET_phi");
-jes->removeExistingCorrections("Jet_rawFactor");
-cm->registerCorrection(
-    "jec_nominal",
-    "jet_jerc.json.gz",
-    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+    auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
     {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
 cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
 jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");

@@ -59,7 +59,7 @@ struct WeightVariation {
  *
  * Typical usage:
  * @code
- *   auto* wm = analyzer->getPlugin<WeightManager>("weights");
+ *   auto wm = analyzer->getPlugin<WeightManager>("weights");
  *
  *   // Register components.
  *   wm->addScaleFactor("pileup_sf",    "pu_weight");

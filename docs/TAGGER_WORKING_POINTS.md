@@ -101,8 +101,8 @@ The `defineWorkingPointCollection()` selection strings (`pass_<wp>`, `fail_<wp>`
 #include <PhysicsObjectCollection.h>
 
 // Get plugin instances from the analyzer.
-auto *twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
-auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare object kinematic columns.
 twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -167,8 +167,8 @@ vector overload of `addWorkingPoint`.
 #include <TaggerWorkingPointManager.h>
 #include <CorrectionManager.h>
 
-auto *ctwm = analyzer.getPlugin<TaggerWorkingPointManager>("ctagManager");
-auto *cm   = analyzer.getPlugin<CorrectionManager>("corrections");
+auto ctwm = analyzer.getPlugin<TaggerWorkingPointManager>("ctagManager");
+auto cm   = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare object kinematic columns.
 ctwm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -256,7 +256,7 @@ This method schedules exactly that fixed-WP event weight. The input vectors must
 be ordered exactly like the registered working points.
 
 ```cpp
-auto *twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
+auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
 
 twm->setObjectColumns("Jet_pt_corr_nominal", "Jet_eta", "Jet_phi", "Jet_mass_corr_nominal");
 twm->setTaggerColumn("Jet_btagPNetB");
@@ -311,8 +311,8 @@ The same plugin works identically for taus — the only difference is the
 input column names and working-point thresholds.
 
 ```cpp
-auto *tauTwm = analyzer.getPlugin<TaggerWorkingPointManager>("tauIdManager");
-auto *cm     = analyzer.getPlugin<CorrectionManager>("corrections");
+auto tauTwm = analyzer.getPlugin<TaggerWorkingPointManager>("tauIdManager");
+auto cm     = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare tau kinematic columns.
 tauTwm->setObjectColumns("Tau_pt", "Tau_eta", "Tau_phi", "Tau_mass");
@@ -577,8 +577,8 @@ cm->registerCorrection(
     "deepjet_fractions",
     "deepjet_fractions.json",
     "DeepJetFractions",
-    {"Jet_pt", "Jet_eta", "Jet_wp_category"});
-// Note: "Jet_wp_category" is defined by execute() after calling
+    {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
+  // Note: "Jet_pt_wp_category" is defined by execute() after calling
 // setTaggerColumn + addWorkingPoint.
 
 // Enable fraction reweighting.
@@ -673,7 +673,7 @@ After calling `applySystematicSet()`, the manager produces:
 Register these with `WeightManager` to apply them:
 
 ```cpp
-auto *wm = analyzer.getPlugin<WeightManager>("weights");
+auto wm = analyzer.getPlugin<WeightManager>("weights");
 wm->addScaleFactor("btag_nominal", "deepjet_sf_central_weight");
 wm->addWeightVariation("btagHF",
     "deepjet_sf_hf_up_weight",
@@ -718,9 +718,9 @@ DeepJet, including fraction reweighting and systematic variations:
 // -------------------------------------------------------------------------
 // Setup
 // -------------------------------------------------------------------------
-auto *jtm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
-auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
-auto *wm  = analyzer.getPlugin<WeightManager>("weights");
+auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto wm  = analyzer.getPlugin<WeightManager>("weights");
 
 // 1. Declare jet columns.
 twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");

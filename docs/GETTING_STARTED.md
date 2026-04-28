@@ -4,7 +4,7 @@ This guide will help you get up and running with RDFAnalyzerCore quickly — fro
 
 ## Prerequisites
 
-- ROOT 6.30/02 or later (progress bar support was added around 6.28)
+- ROOT 6.30/02 or later (progress bar support requires 6.30+)
 - CMake 3.19.0 or later
 - C++17 compatible compiler
 - Git
@@ -40,9 +40,15 @@ This will:
 - Download ONNX Runtime automatically
 - Build the core framework
 - Discover and build any analyses in the `analyses/` directory
-- Run tests to verify the installation
 
 The build artifacts will be placed in the `build/` directory.
+
+To verify your build, run:
+
+```bash
+cd build
+ctest --output-on-failure
+```
 
 ### 4. Run the Example Analysis
 
@@ -405,13 +411,13 @@ datasets:
 
 ## Running with Batch Processing
 
-Once your analysis works locally, scale it up to many datasets using the LAW workflow manager included in the `law/` directory.
+Once your analysis works locally, scale it up to many datasets using the LAW workflow manager included in `core/python/law/`.
 
 ### Quick Batch Submission with `SkimTask`
 
 1. **Source the LAW environment**
    ```bash
-   source law/env.sh
+   source core/python/law/env.sh
    ```
 
 2. **Index available tasks**
@@ -425,7 +431,7 @@ Once your analysis works locally, scale it up to many datasets using the LAW wor
      --exe ./build/analyses/MyFirstAnalysis/myAnalysis \
      --name myRun \
      --dataset-manifest analyses/MyFirstAnalysis/datasets.yaml \
-         --submit-config law/submit_config.txt \
+         --submit-config core/python/law/submit_config.txt \
          --workflow htcondor
    ```
 
@@ -457,7 +463,9 @@ RDFAnalyzerCore/
 │   └── analyses/
 │       └── MyFirstAnalysis/
 │           └── myAnalysis   ← your compiled executable
-├── law/                 # LAW batch-processing workflow
+├── core/
+│   ├── python/
+│   │   └── law/         # LAW batch-processing workflow
 ├── docs/                # Documentation
 ├── cmake/               # CMake helper modules
 └── README.md            # Main technical documentation
@@ -567,8 +575,8 @@ propagation — with just a handful of API calls:
 #include <JetEnergyScaleManager.h>
 #include <PhysicsObjectCollection.h>
 
-auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare which branches hold jet/MET kinematics.
 jes->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");;
@@ -690,8 +698,8 @@ fixed-WP SFs as a plain product of per-object weights.
 ```cpp
 #include <TaggerWorkingPointManager.h>
 
-auto *twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
-auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare object kinematic columns (jets, taus, or fat-jets).
 twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");

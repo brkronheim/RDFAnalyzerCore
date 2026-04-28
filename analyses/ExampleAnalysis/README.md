@@ -9,7 +9,7 @@ This analysis selects events with exactly two good muons and reconstructs the Z 
 ## Features Demonstrated
 
 ### 1. **Config-Driven Histogram Booking (NDHistogramManager)**
-- Histograms are defined in `histograms.txt` configuration file
+- Histograms are defined in `histograms.yaml` configuration file
 - No manual histogram booking code required
 - Automatically supports systematic variations
 - Histograms defined:
@@ -44,20 +44,25 @@ This analysis selects events with exactly two good muons and reconstructs the Z 
 
 ## Configuration Files
 
-### `cfg.txt` - Main Configuration
+### `cfg.yaml` - Main Configuration
 - Input data files from ATLAS Open Data (PHYSLITE format)
 - Output file path
 - Thread count (-1 = auto-detect)
 - References to additional config files:
-  - `histogramConfig`: Histogram definitions
-  - `floatConfig`: Float parameters (normalization scale)
-  - `intConfig`: Integer parameters (sample type)
-  - `saveConfig`: Output branch selection
+  - `histogramConfig`: Histogram definitions (`histograms.yaml`)
+  - `floatConfig`: Float parameters (`floats.yaml`)
+  - `intConfig`: Integer parameters (`ints.yaml`)
+  - `saveConfig`: Output branch selection (`output.txt`)
 
-### `histograms.txt` - Histogram Definitions
-Defines histograms using simple key=value format:
-```
-name=ZBosonMass variable=ZBosonMass weight=normScale bins=60 lowerBound=70.0 upperBound=110.0
+### `histograms.yaml` - Histogram Definitions
+Defines histograms using YAML mappings, e.g.:
+```yaml
+- name: ZBosonMass
+  variable: ZBosonMass
+  weight: normScale
+  bins: 60
+  lowerBound: 70.0
+  upperBound: 110.0
 ```
 
 Each histogram specification includes:
@@ -67,11 +72,11 @@ Each histogram specification includes:
 - `bins`, `lowerBound`, `upperBound`: Binning specification
 - `label`: (optional) Axis label
 
-### `floats.txt` - Float Parameters
+### `floats.yaml` - Float Parameters
 - `normScale`: Overall normalization factor for MC
 - `sampleNorm`: Sample cross-section × luminosity
 
-### `ints.txt` - Integer Parameters
+### `ints.yaml` - Integer Parameters
 - `type`: Sample type identifier
 
 ### `output.txt` - Output Branches
@@ -93,13 +98,13 @@ cmake --build build -j$(nproc)
 ### Run locally (single file)
 ```bash
 cd build/analyses/ExampleAnalysis
-./analysis ../../analyses/ExampleAnalysis/cfg.txt
+./analysis ../../analyses/ExampleAnalysis/cfg.yaml
 ```
 
 **Note**: This analysis uses ATLAS Open Data files hosted on EOS via XRootD. Access requires either:
 - Running on lxplus at CERN
 - Having XRootD access to eospublic.cern.ch
-- Modifying `cfg.txt` to use local ROOT files
+- Modifying `cfg.yaml` to use local ROOT files
 
 ### Run with LAW (file discovery + local multi-dataset skim)
 
@@ -121,7 +126,7 @@ law run GetXRDFSFileList \
 law run SkimTask \
   --name exampleRun \
   --exe build/analyses/ExampleAnalysis/analysis \
-  --submit-config analyses/ExampleAnalysis/cfg.txt \
+  --submit-config analyses/ExampleAnalysis/cfg.yaml \
   --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
   --workers 4
 
@@ -129,7 +134,7 @@ law run SkimTask \
 law run SkimTask \
   --name exampleRun \
   --exe build/analyses/ExampleAnalysis/analysis \
-  --submit-config analyses/ExampleAnalysis/cfg.txt \
+  --submit-config analyses/ExampleAnalysis/cfg.yaml \
   --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
   --no-make-test-job \
   --workers 4
@@ -138,7 +143,7 @@ law run SkimTask \
 law run SkimTask \
   --name exampleRun \
   --exe build/analyses/ExampleAnalysis/analysis \
-  --submit-config analyses/ExampleAnalysis/cfg.txt \
+  --submit-config analyses/ExampleAnalysis/cfg.yaml \
   --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
   --file-source xrdfs \
   --file-source-name exampleFiles \
@@ -151,9 +156,9 @@ law run SkimTask \
 law run FullAnalysisDAG \
   --name exampleRun \
   --exe build/analyses/ExampleAnalysis/analysis \
-  --submit-config analyses/ExampleAnalysis/cfg.txt \
+  --submit-config analyses/ExampleAnalysis/cfg.yaml \
   --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
-  --hist-config analyses/ExampleAnalysis/hist_config.txt \
+  --hist-config analyses/ExampleAnalysis/histograms.yaml \
   --datacard-config analyses/ExampleAnalysis/datacard_config.yaml
 ```
 
@@ -166,7 +171,7 @@ law run FullAnalysisDAG \
 ## Output
 
 ### Skimmed ROOT File
-Location specified by `saveFile` in `cfg.txt`
+Location specified by `saveFile` in `cfg.yaml`
 - Contains selected events with branches listed in `output.txt`
 - Includes `ZBosonMass` variable in GeV
 
@@ -227,7 +232,7 @@ Extract individual muon pT values in GeV for histogramming.
 ## Extending This Example
 
 ### Adding More Histograms
-Edit `histograms.txt` to add new histogram definitions:
+Edit `histograms.yaml` to add new histogram definitions:
 ```
 name=muon_eta variable=LeadingMuonEta weight=normScale bins=50 lowerBound=-2.5 upperBound=2.5
 ```

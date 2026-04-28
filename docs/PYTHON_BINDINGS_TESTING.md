@@ -34,7 +34,7 @@ Expected output:
 #### 2. Run Basic Tests
 
 ```bash
-python3 core/bindings/test_bindings.py
+python3 core/tests/cpp/test_python_bindings.py
 ```
 
 This runs a suite of tests that verify:
@@ -286,7 +286,7 @@ cmake --build build -j$(nproc)
 
 When adding new functionality to the Python bindings:
 
-1. **Add method tests** in `core/bindings/test_bindings.py`:
+1. **Add method tests** in `core/python/bindings/test_bindings.py`:
    ```python
    def test_new_method():
        """Test new method works"""

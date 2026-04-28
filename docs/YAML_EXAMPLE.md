@@ -126,18 +126,7 @@ write_config(config, "config.yaml")
 ```
 
 ### Generate Submission Files
-```bash
-# Using YAML config - output will also be YAML
-python core/python/generateSubmissionFilesNANO.py \
-    -c analysis_config.yaml \
-    -n my_analysis \
-    -s 30 \
-    -x /path/to/x509 \
-    -e ./build/analyzer
-
-# The generated submit_config.yaml in each job directory 
-# will also be in YAML format
-```
+Submission file generation is now handled through the LAW workflow and YAML-first manifest handling. The legacy script `core/python/generateSubmissionFilesNANO.py` has been removed.
 
 ## Benefits of YAML
 

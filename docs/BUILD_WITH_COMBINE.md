@@ -21,8 +21,8 @@ cmake --build build -j$(nproc)
 ## Requirements
 
 Building Combine requires:
-- ROOT 6.24+ with development headers
-- Python 2.7 or 3.6+
+- ROOT 6.30+ with development headers
+- Python 3.8+
 - Boost libraries
 - Git
 
@@ -57,7 +57,7 @@ combine -M AsymptoticLimits datacards/datacard.txt
 
 ## Complete Workflow
 
-See `docs/COMBINE_INTEGRATION.md` for the complete analysis workflow from data processing to limit extraction.
+See [Combine Integration Guide](COMBINE_INTEGRATION.md) for the complete analysis workflow from data processing to limit extraction.
 
 ## Troubleshooting
 
@@ -103,6 +103,6 @@ Total with all components: ~15 minutes
 ## Documentation
 
 For complete usage documentation, see:
-- [Combine Integration Guide](docs/COMBINE_INTEGRATION.md) - Complete workflow
-- [Datacard Generator](docs/DATACARD_GENERATOR.md) - Creating datacards
+- [Combine Integration Guide](COMBINE_INTEGRATION.md) - Complete workflow
+- [Datacard Generator](DATACARD_GENERATOR.md) - Creating datacards
 - [CMS Combine Documentation](https://cms-analysis.github.io/HiggsAnalysis-CombinedLimit/)

@@ -63,496 +63,16 @@ The Production Manager is designed to address common challenges in large-scale b
 
 ## Quick Start
 
+`core/python/production_submit.py` has been removed and is no longer available. New productions should be created via LAW file-discovery tasks such as `law run GetRucioFileList` / `law run SkimTask`, and `core/python/production_manager.py` or `production_monitor.py` should be used for submission, status, validation, and resubmission.
+
 ### 1. Create a Production
 
-```bash
-python core/python/production_submit.py \
-    --name my_analysis \
-    --config cfg/analysis_config.txt \
-    --sample-config cfg/samples.txt \
-    --exe build/analyses/MyAnalysis/myanalysis \
-    --submit
-```
-
-This will:
-1. Discover input files from Rucio
-2. Generate job configurations
-3. Submit jobs to HTCondor
-4. Save state to `condorSub_my_analysis/production_state.json`
-
-### 2. Monitor Progress
-
-```bash
-# Interactive monitoring with curses interface
-python core/python/production_monitor.py monitor --name my_analysis
-
-# Simple text-based monitoring
-python core/python/production_monitor.py monitor --name my_analysis --simple
-
-# One-time status check
-python core/python/production_monitor.py status --name my_analysis
-```
+The current recommended workflow uses LAW tasks to generate job configurations from YAML dataset manifests. For example, use `law run GetRucioFileList` / `law run SkimTask` with `--file-source rucio` or `--file-source opendata`.
 
 ### 3. Validate Outputs
 
 ```bash
-python core/python/production_monitor.py validate --name my_analysis
-```
-
-### 4. Resubmit Failed Jobs
-
-```bash
-python core/python/production_monitor.py resubmit --name my_analysis
-```
-
-## Architecture
-
-### Components
-
-```
-production_manager.py          # Core ProductionManager class
-├── ProductionConfig          # Configuration dataclass
-├── Job                       # Job tracking dataclass
-├── JobStatus                 # Job status enumeration
-└── ProductionManager         # Main manager class
-
-production_submit.py          # Production creation and submission
-production_monitor.py         # Monitoring and management CLI
-test_production_manager.py    # Test suite
-```
-
-### State Management
-
-Production state is persisted to `production_state.json` in the work directory:
-
-```json
-{
-  "production_name": "my_analysis",
-  "timestamp": 1234567890.0,
-  "jobs": {
-    "0": {
-      "job_id": 0,
-      "config_path": "/path/to/config.txt",
-      "output_path": "/path/to/output.root",
-      "status": "completed",
-      "condor_job_id": "12345.0",
-      "submit_time": 1234567890.0,
-      "attempts": 1
-    }
-  }
-}
-```
-
-### Job Lifecycle
-
-```
-CREATED → SUBMITTED → RUNNING → COMPLETED → VALIDATED
-                          ↓
-                       FAILED/MISSING_OUTPUT
-                          ↓
-                      (resubmit)
-```
-
-## Usage Guide
-
-### Creating a Production
-
-#### Option 1: Using production_submit.py (Recommended)
-
-```bash
-python core/python/production_submit.py \
-    --name my_production \
-    --config cfg/base_config.txt \
-    --sample-config cfg/samples.txt \
-    --exe /path/to/analyzer \
-    --output-dir /eos/user/u/username/outputs \
-    --size 30 \
-    --backend htcondor \
-    --stage-inputs \
-    --stage-outputs \
-    --submit
-```
-
-Options:
-- `--name`: Production name (required)
-- `--config`: Base analysis configuration (required)
-- `--sample-config`: Sample list for data discovery (required)
-- `--exe`: Path to analysis executable (required)
-- `--output-dir`: Output directory (default: from config)
-- `--size`: GB per job (default: 30)
-- `--backend`: htcondor or dask (default: htcondor)
-- `--stage-inputs`: Copy input files to worker nodes
-- `--stage-outputs`: Copy outputs back from worker nodes
-- `--submit`: Submit jobs immediately
-- `--dry-run`: Generate but don't submit
-
-#### Option 2: Using ProductionManager API
-
-```python
-from pathlib import Path
-from production_manager import ProductionManager, ProductionConfig
-
-# Create config
-config = ProductionConfig(
-    name="my_production",
-    work_dir=Path("condorSub_my_production"),
-    exe_path=Path("/path/to/analyzer"),
-    base_config="cfg/config.txt",
-    output_dir=Path("/eos/user/u/username/outputs"),
-    backend="htcondor",
-    stage_inputs=True,
-    stage_outputs=True,
-)
-
-# Create manager
-manager = ProductionManager(config)
-
-# Generate jobs
-file_lists = [
-    "root://xrootd/file1.root,root://xrootd/file2.root",
-    "root://xrootd/file3.root,root://xrootd/file4.root",
-]
-manager.generate_jobs(file_lists)
-
-# Submit
-manager.submit_jobs()
-
-# Monitor
-manager.update_status()
-manager.print_progress()
-```
-
-### Monitoring Productions
-
-#### Interactive Monitoring
-
-```bash
-# Curses interface (default)
-python core/python/production_monitor.py monitor --name my_production
-
-# Simple text interface
-python core/python/production_monitor.py monitor --name my_production --simple
-
-# Custom refresh interval (seconds)
-python core/python/production_monitor.py monitor --name my_production --refresh 60
-```
-
-The curses interface shows:
-- Total jobs and status breakdown
-- Progress bars for completion, validation, and failures
-- Recent job activity with runtimes
-- Real-time updates
-
-Press `q` to quit the monitor.
-
-#### One-Time Status Check
-
-```bash
-python core/python/production_monitor.py status --name my_production
-```
-
-#### List All Productions
-
-```bash
-# List productions in current directory
-python core/python/production_monitor.py list
-
-# List productions in specific directory
-python core/python/production_monitor.py list --dir /path/to/submissions
-```
-
-### Validating Outputs
-
-```bash
-python core/python/production_monitor.py validate --name my_production
-```
-
-This will:
-1. Check if output files exist
-2. Verify files are non-empty
-3. Attempt to open with ROOT to verify integrity
-4. Update job status to VALIDATED or MISSING_OUTPUT
-
-### Resubmitting Failed Jobs
-
-```bash
-# Resubmit with default retry limit (3)
-python core/python/production_monitor.py resubmit --name my_production
-
-# Resubmit with custom retry limit
-python core/python/production_monitor.py resubmit --name my_production --max-attempts 5
-```
-
-Only jobs that haven't exceeded the maximum attempts will be resubmitted.
-
-## Resilience and Recovery
-
-### State Persistence
-
-The Production Manager automatically saves state after every operation:
-- Job generation
-- Status updates
-- Submission
-- Validation
-
-If your session is interrupted:
-
-```bash
-# Resume by creating a new manager with the same work directory
-python core/python/production_monitor.py status --work-dir condorSub_my_production
-```
-
-The manager will automatically load the previous state and continue from where it left off.
-
-### Handling Connection Failures
-
-The Production Manager is designed to handle connection failures gracefully:
-
-1. **AFS/EOS Token Expiration**: State is saved locally, so you can renew tokens and resume
-2. **Network Interruptions**: Monitor can be restarted anytime
-3. **Batch System Issues**: Job status is queried fresh each time
-
-### Working in AFS/EOS
-
-```bash
-# Production in EOS
-python core/python/production_submit.py \
-    --name my_prod \
-    --work-dir /eos/user/u/username/productions/my_prod \
-    --output-dir /eos/user/u/username/outputs \
-    --config cfg/config.txt \
-    --sample-config cfg/samples.txt \
-    --exe ./analyzer \
-    --stage-outputs
-```
-
-Note: When working in EOS, use `--stage-outputs` to avoid issues with worker node access.
-
-Use `--eos-sched` flag when submitting to EOS scheduler:
-
-```bash
-python core/python/production_submit.py \
-    --name my_prod \
-    --work-dir /eos/user/u/username/productions/my_prod \
-    --config cfg/config.txt \
-    --sample-config cfg/samples.txt \
-    --exe ./analyzer \
-    --eos-sched \
-    --stage-outputs
-```
-
-## Shared Library Management
-
-The Production Manager automatically discovers and stages shared libraries (.so files) required by your C++ executable.
-
-### Automatic Discovery
-
-When submitting jobs, the Production Manager:
-1. Uses `ldd` to find all shared library dependencies
-2. Filters out system libraries (already on worker nodes)
-3. Copies custom libraries to `work_dir/lib/`
-4. Transfers them to worker nodes
-5. Sets `LD_LIBRARY_PATH` on execution
-
-### Manual Library Staging
-
-If automatic discovery doesn't work, you can manually stage libraries:
-
-```bash
-# Create lib directory in work dir
-mkdir -p condorSub_my_prod/lib
-
-# Copy your custom libraries
-cp /path/to/libMyLibrary.so condorSub_my_prod/lib/
-cp /path/to/libAnotherLib.so condorSub_my_prod/lib/
-
-# Submit - libraries will be transferred automatically
-python production_submit.py --name my_prod ...
-```
-
-## Backend Support
-
-### HTCondor Backend
-
-Default backend using traditional HTCondor submission:
-
-```bash
-python core/python/production_submit.py \
-    --backend htcondor \
-    ...
-```
-
-Features:
-- Uses existing condor submission infrastructure
-- Supports input/output staging with xrdcp
-- Integrates with existing resubmit_jobs.py
-- Well-tested and stable
-- **Automatic .so file transfer and LD_LIBRARY_PATH setup**
-
-### DASK Backend
-
-Python-based backend using DASK distributed:
-
-```bash
-# Install DASK first
-pip install dask distributed dask-jobqueue
-
-python core/python/production_submit.py \
-    --backend dask \
-    ...
-```
-
-Features:
-- Pure Python submission
-- Dynamic scaling
-- Better for interactive analysis
-- Integration with Python workflows
-- **Python wrapper for C++ executables (cpp_wrapper.py)**
-- **Automatic shared library discovery and transfer**
-- **Compatible with HTCondor via dask-jobqueue**
-
-The DASK backend wraps C++ executables in Python to enable:
-- Proper environment setup on worker nodes
-- Shared library path configuration
-- Error handling and logging
-- Integration with Python-based workflows
-
-Note: DASK backend requires dask-jobqueue package.
-
-## Examples
-
-### Example 1: Simple Production
-
-```bash
-# Generate and submit
-python core/python/production_submit.py \
-    --name ttbar_analysis \
-    --config cfg/ttbar.txt \
-    --sample-config cfg/ttbar_samples.txt \
-    --exe build/analyses/TTbar/ttbar \
-    --submit
-
-# Monitor
-python core/python/production_monitor.py monitor --name ttbar_analysis
-```
-
-### Example 2: Production with Staging
-
-For analyses with large input files or unreliable xrootd access:
-
-```bash
-python core/python/production_submit.py \
-    --name large_production \
-    --config cfg/config.txt \
-    --sample-config cfg/samples.txt \
-    --exe ./analyzer \
-    --stage-inputs \
-    --stage-outputs \
-    --submit
-```
-
-### Example 3: Resume After Interruption
-
-```bash
-# Original submission was interrupted
-# Resume by checking status
-python core/python/production_monitor.py status --name my_prod
-
-# Submit any jobs that weren't submitted (using production_submit.py --submit)
-# Or manually trigger submission:
-cd condorSub_my_prod && condor_submit condor_submit.sub
-
-# Continue monitoring
-python core/python/production_monitor.py monitor --name my_prod
-```
-
-### Example 4: Manage Multiple Productions
-
-```bash
-# List all productions
-python core/python/production_monitor.py list
-
-# Check status of each
-for prod in prod1 prod2 prod3; do
-    echo "=== $prod ==="
-    python core/python/production_monitor.py status --name $prod
-done
-
-# Resubmit failures in all
-for prod in prod1 prod2 prod3; do
-    python core/python/production_monitor.py resubmit --name $prod
-done
-```
-
-## Troubleshooting
-
-### Jobs Not Submitting
-
-1. Check HTCondor is available:
-   ```bash
-   condor_q
-   ```
-
-2. Verify executable exists:
-   ```bash
-   ls -l /path/to/analyzer
-   ```
-
-3. Check work directory permissions:
-   ```bash
-   ls -ld condorSub_*
-   ```
-
-### Jobs Failing Immediately
-
-1. Check job logs:
-   ```bash
-   cat condorSub_my_prod/condor_logs/log_*.stderr
-   ```
-
-2. Test job locally (after generation):
-   ```bash
-   # Test by running the job's config directly
-   cd condorSub_my_prod/job_0
-   /path/to/analyzer job_config.txt
-   ```
-
-3. Check configuration:
-   ```bash
-   cat condorSub_my_prod/job_0/job_config.txt
-   ```
-
-### Output Validation Failing
-
-1. Check output directory exists and is writable:
-   ```bash
-   ls -ld /path/to/outputs
-   ```
-
-2. Check for disk space:
-   ```bash
-   df -h /path/to/outputs
-   ```
-
-3. Verify ROOT files manually:
-   ```bash
-   root -l /path/to/outputs/output_0.root
-   ```
-
-### State File Corruption
-
-If `production_state.json` becomes corrupted:
-
-```bash
-# Backup current state
-cp condorSub_my_prod/production_state.json condorSub_my_prod/production_state.json.bak
-
-# Try to recover or regenerate
-# (This will lose progress information but preserve job definitions)
-python core/python/production_submit.py \
-    --name my_prod \
-    --work-dir condorSub_my_prod \
-    ...
+# production_submit.py has been removed; use LAW discovery tasks and production_monitor.py instead.
 ```
 
 ### Permission Denied in AFS/EOS
@@ -583,10 +103,10 @@ eos ls -l /eos/user/...  # For EOS
 
 The Production Manager integrates with existing RDFAnalyzerCore tools:
 
-- **generateSubmissionFilesNANO.py**: Used for data discovery
 - **submission_backend.py**: Shared HTCondor submission logic
 - **resubmit_jobs.py**: Can still be used for manual resubmission
 - **validate_config.py**: Automatic configuration validation
+- The legacy `generateSubmissionFilesNANO.py` and `generateSubmissionFilesOpenData.py` scripts have been removed; use LAW workflows instead.
 
 ## Law Workflow Integration
 
@@ -594,25 +114,25 @@ The Production Manager integrates with the Law (Luigi Analysis Workflow) task fr
 
 ### Available Law Tasks
 
-#### NANO Analysis Tasks
+#### Analysis and Discovery Tasks
 
-Law tasks for CMS NanoAOD analysis workflow:
+Law tasks for dataset discovery and skim submission:
 
-- **`SubmitNANOJobs`**: Submit analysis jobs to HTCondor or DASK
-  - Automatically discovers input datasets
-  - Generates per-file job configurations
-  - Stages shared libraries and executables
-  - Tracks job submission status
+- **`GetRucioFileList`**: Discover input file lists from Rucio using a dataset manifest YAML or legacy sample-config compatibility layer.
+  - Writes per-dataset JSON lists consumed by `SkimTask` / `PrepareSkimJobs`
+  - Preserves Rucio group metadata and replica selection
+  - Supports `--submit-config`, `--name`, `--x509`, and `--exe`
 
-- **`MonitorNANOJobs`**: Monitor running jobs
-  - Queries batch system for job status
-  - Reports progress and completion rate
-  - Identifies failed jobs for resubmission
+- **`SkimTask`**: Run skim/extraction jobs over datasets discovered via Rucio, XRootD, or explicit file lists.
+  - Accepts `--dataset-manifest .../datasets.yaml`
+  - Supports the `--file-source rucio` workflow source
+  - Produces per-branch skim outputs and cache sidecars
 
-- **`ValidateNANOOutputs`**: Validate ROOT output files
-  - Checks file integrity (ROOT file structure)
-  - Verifies expected trees and branches exist
-  - Reports validation failures
+- **`SubmitSkimJobs`**: Build and submit skim jobs to HTCondor or Dask.
+  - Uses the same analysis manifest and submit configuration
+  - Generates job directories and shared input staging
+
+- **`MonitorSkimJobs`**: Monitor running skim jobs and report failures for resubmission.
 
 #### Plotting Tasks
 
@@ -644,23 +164,22 @@ Law tasks for CMS combine statistical analysis:
 
 ### Example Law Workflows
 
-#### Basic NANO Analysis
+#### Basic LAW Rucio Analysis
 
 ```bash
-# Submit analysis jobs
-law run SubmitNANOJobs \
-    --config cfg/analysis.txt \
-    --dataset /DoubleMuon/Run2022*/NANOAOD \
-    --backend htcondor \
-    --work-dir condorSub_myanalysis
+# Discover files via Rucio
+law run GetRucioFileList \
+    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --name myRun --x509 /tmp/x509 --exe build/bin/myanalysis
 
-# Monitor progress
-law run MonitorNANOJobs \
-    --work-dir condorSub_myanalysis
-
-# Validate outputs
-law run ValidateNANOOutputs \
-    --work-dir condorSub_myanalysis
+# Run skim jobs using the discovered Rucio file lists
+law run SkimTask \
+    --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
+    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --name mySkimRun \
+    --file-source rucio \
+    --file-source-name myRun \
+    --exe build/bin/myanalysis
 ```
 
 #### Statistical Analysis Workflow
@@ -696,26 +215,41 @@ law run MakePlots \
 
 ### Law Task Dependencies
 
-Law automatically manages task dependencies. For example, `ValidateNANOOutputs` depends on `SubmitNANOJobs`, so running:
+Law automatically manages task dependencies. For example, `SkimTask` can depend on `GetRucioFileList` when `--file-source rucio` is enabled, so running:
 
 ```bash
-law run ValidateNANOOutputs --config cfg/analysis.txt
+law run SkimTask \
+    --dataset-manifest cfg/datasets.yaml \
+    --submit-config cfg/submit_config.txt \
+    --name mySkimRun \
+    --file-source rucio --file-source-name myRun
 ```
 
 Will automatically:
-1. Submit jobs (if not already done)
-2. Wait for jobs to complete
-3. Validate outputs
+1. Discover input files (if configured)
+2. Schedule the skim workflow
+3. Track job completion and write outputs
 
 ### Task Configuration
 
-Law tasks use the same configuration files as the Production Manager:
+Law tasks use dataset manifests in YAML and submit-config templates for runtime settings.
 
+Example dataset manifest:
+
+```yaml
+datasets:
+  - name: mydataset
+    files:
+      - root://xrootd.example.org//path/to/file1.root
+      - root://xrootd.example.org//path/to/file2.root
 ```
-# analysis.txt - Same format as before
-fileList=/path/to/inputs/*.root
-saveFile=output.root
-threads=-1
+
+Submit config templates remain compatible with existing backends:
+
+```ini
+[submit]
+queue = 1
+memory = 4GB
 ```
 
 Additional Law-specific configuration can be provided via command-line parameters or Law config files (`law.cfg`).

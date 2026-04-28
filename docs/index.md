@@ -106,6 +106,8 @@ New to RDFAnalyzerCore? Start here:
   - Data management
   - Plugin interfaces
   - Manager implementations
+- **[Search Documentation](SEARCH.html)** - Keyword search across all site pages
+- **[Doxygen API Documentation](doxygen/index.html)** - Generated C++ API docs from source
 
 ## Developer Documentation
 
@@ -226,7 +228,7 @@ int main(int argc, char **argv) {
     );
     
     // Apply ML model
-    auto* onnx = analyzer.getPlugin<IOnnxManager>("onnx");
+    auto onnx = analyzer.getPlugin<OnnxManager>("onnx");
     onnx->applyAllModels();
     
     // Save

@@ -38,7 +38,9 @@ aux/Run3/*
 aux/Run2/*
 docs/doxygen/*
 analyses/*
-law/index
+core/python/law/index
 
+AGENTS/
+analyticFit_ci_run/
 python_env.tar.gz
 submit_config.txt

@@ -87,7 +87,7 @@ echo ""
 
 # Run the test suite
 echo "Running test suite..."
-python3 core/test/test_python_bindings.py
+python3 core/tests/cpp/test_python_bindings.py
 
 echo ""
 echo "=========================================="

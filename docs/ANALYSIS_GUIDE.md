@@ -204,7 +204,7 @@ Plugins are configured via config files but accessed in C++:
 
 ```cpp
 // Get plugin from analyzer
-auto* onnxManager = analyzer.getPlugin<IOnnxManager>("onnx");
+auto onnxManager = analyzer.getPlugin<OnnxManager>("onnx");
 
 // Use plugin
 onnxManager->applyAllModels();
@@ -402,7 +402,7 @@ analyzer.Define("has_jets",
 
 ```cpp
 // Get ONNX manager
-auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
 
 // Apply all configured models
 onnxMgr->applyAllModels();
@@ -458,8 +458,8 @@ file=aux/bdts/signal_bdt.txt name=bdt_score inputVariables=var1,var2,var3 runVar
 ```
 
 ```cpp
-auto* bdtMgr = analyzer.getPlugin<IBDTManager>("bdt");
-bdtMgr->applyAllModels();
+auto bdtMgr = analyzer.getPlugin<BDTManager>("bdt");
+bdtMgr->applyAllBDTs();
 ```
 
 ### Using SOFIE Models (Maximum Performance)
@@ -494,7 +494,7 @@ std::vector<float> classifierInference(const std::vector<float>& input) {
 #### 3. Register and Use Model
 
 ```cpp
-auto* sofieMgr = analyzer.getPlugin<ISofieManager>("sofie");
+auto sofieMgr = analyzer.getPlugin<SofieManager>("sofie");
 
 // Register model manually (not auto-loaded like ONNX/BDT)
 auto inferenceFunc = std::make_shared<SofieInferenceFunction>(classifierInference);
@@ -632,8 +632,8 @@ integrates with `CorrectionManager` for correctionlib evaluations and with
 #include <JetEnergyScaleManager.h>
 #include <PhysicsObjectCollection.h>
 
-auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto cm = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare jet/MET column names.
 jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -722,7 +722,7 @@ NDHistogramManager provides sophisticated N-dimensional histogramming with suppo
 #include <plots.h>  // For histInfo, selectionInfo
 
 // Get histogram manager
-auto* histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
+auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
 
 // Define histogram metadata
 std::vector<histInfo> hists = {
@@ -806,7 +806,7 @@ SystematicManager tracks systematic variations and propagates them through the a
 
 ```cpp
 // Get systematic manager
-auto* sysMgr = analyzer.getSystematicManager();
+auto& sysMgr = analyzer.getSystematicManager();
 
 // Define variable with systematic variations
 dataManager->Define("jet_pt_corrected",
@@ -819,7 +819,7 @@ dataManager->Define("jet_pt_corrected",
         return pt;  // Nominal
     },
     {"jet_pt", "jet_jes_up", "jet_jes_down"},
-    *sysMgr  // Pass systematic manager
+    sysMgr  // Pass systematic manager
 );
 ```
 
@@ -875,8 +875,8 @@ analyzer.Define("goodJets",
 corrected `PhysicsObjectCollection` outputs:
 
 ```cpp
-auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto cm = analyzer.getPlugin<CorrectionManager>("corrections");
 
 jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
 jes->setMETColumns("MET_pt", "MET_phi");
@@ -1073,7 +1073,7 @@ Add a `WeightManager` plugin to your analysis and retrieve it via
 ```cpp
 #include <plugins/WeightManager/WeightManager.h>
 
-auto* wm = analyzer.getPlugin<WeightManager>("weights");
+auto wm = analyzer.getPlugin<WeightManager>("weights");
 ```
 
 ### Adding Weight Components
@@ -1154,7 +1154,7 @@ for (const auto& entry : wm->getAuditEntries()) {
 void myAnalysis() {
     Analyzer analyzer("config.txt");
 
-    auto* wm = analyzer.getPlugin<WeightManager>("weights");
+    auto wm = analyzer.getPlugin<WeightManager>("weights");
 
     // Define SF columns on the dataframe first.
     analyzer.Define("lepton_sf_col", computeLeptonSF, {"lep_pt", "lep_eta"});
@@ -1194,7 +1194,7 @@ branches are built independently inside the plugin.
 ```cpp
 #include <plugins/RegionManager/RegionManager.h>
 
-auto* rm = analyzer.getPlugin<RegionManager>("regions");
+auto rm = analyzer.getPlugin<RegionManager>("regions");
 ```
 
 ### Defining Boolean Filter Columns
@@ -1279,9 +1279,9 @@ to the RegionManager iterate over all regions internally.
 int main(int argc, char* argv[]) {
     Analyzer analyzer(argv[1]);
 
-    auto* rm  = analyzer.getPlugin<RegionManager>("regions");
-    auto* ndh = analyzer.getPlugin<NDHistogramManager>("NDHistogramManager");
-    auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+    auto rm = analyzer.getPlugin<RegionManager>("regions");
+    auto ndh = analyzer.getPlugin<NDHistogramManager>("NDHistogramManager");
+    auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 
     // Step 1 — define boolean selection columns.
     analyzer.Define("isPresel",        passPreselection,    {"lep_pt", "met"});
@@ -1323,7 +1323,7 @@ one) in a single event-loop pass.
 ```cpp
 #include <plugins/CutflowManager/CutflowManager.h>
 
-auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 ```
 
 ### Adding Cuts
@@ -1400,8 +1400,8 @@ for (const auto& [name, count] : cfm->getRegionCutflowCounts("signal")) {
 void myAnalysis() {
     Analyzer analyzer("config.txt");
 
-    auto* rm  = analyzer.getPlugin<RegionManager>("regions");
-    auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+    auto rm = analyzer.getPlugin<RegionManager>("regions");
+    auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 
     // Define all boolean columns before the first addCut().
     analyzer.Define("leptonPtCut", passLeptonPt, {"lep_pt"});
@@ -1514,7 +1514,7 @@ int main(int argc, char **argv) {
 
     // ===== Apply ML Models =====
     
-    auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
+    auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
     if (onnxMgr) {
         onnxMgr->applyAllModels();
         
@@ -1548,7 +1548,7 @@ int main(int argc, char **argv) {
 
     // ===== Book Histograms =====
     
-    auto* histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
+    auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
     if (histMgr) {
         std::vector<histInfo> hists = {
             histInfo("h_njets", "n_good_jets", "N_{jets}", "event_weight", 10, 0, 10),
@@ -1651,7 +1651,7 @@ Save intermediate processing steps:
 analyzer.Filter("preselection", ...);
 
 // Save snapshot
-auto df = analyzer.getDataFrame();
+auto df = analyzer.getDF();
 df.Snapshot("Events", "preselection_output.root", {"useful_branches"});
 
 // Continue processing

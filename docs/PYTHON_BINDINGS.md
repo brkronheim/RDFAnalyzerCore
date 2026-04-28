@@ -31,7 +31,7 @@ analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
 analyzer.Filter("pt_cut", "pt_gev > 20.0", ["pt_gev"])
 ```
 
-Legacy aliases (`DefineJIT`, `FilterJIT`, `DefineFromVector`) remain available.
+**Deprecated Aliases**: `DefineJIT`, `FilterJIT`, `DefineFromVector` remain available for backward compatibility but prefer using `Define` and `Filter` directly.
 
 ### Plugin and framework control
 
@@ -314,7 +314,7 @@ analyzer.AddPlugin("correction", "CorrectionManager")
 analyzer.SetupPlugin("correction")
 
 # Apply specific correction
-analyzer.applyCorrection("correction", "muon_sf", ["muon_pt", "muon_eta"])
+analyzer.applyCorrection("correction", "muon_sf", ["nominal"], ["muon_pt", "muon_eta"])
 
 # Get correction features
 features = analyzer.getCorrectionFeatures("correction", "muon_sf")
@@ -665,7 +665,7 @@ Planned features for future releases:
 
 Contributions are welcome! To add new Python bindings:
 
-1. Edit `core/bindings/python_bindings.cpp`
+1. Edit `core/python/bindings/python_bindings.cpp`
 2. Add new methods to the `AnalyzerPythonWrapper` class
 3. Expose via pybind11 in the `PYBIND11_MODULE` section
 4. Add documentation and examples

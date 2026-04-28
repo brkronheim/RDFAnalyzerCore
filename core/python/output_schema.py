@@ -9,7 +9,7 @@ Provides explicit, versioned schema definitions for all framework output types:
     ``TDirectory`` of the meta-output ROOT file, written by ``ProvenanceService``.
   - **Cutflows** – Event-count histograms written by ``CounterService``.
   - **LAW artifacts** – Task output files produced by the law workflow tasks
-    in ``law/nano_tasks.py`` and ``law/opendata_tasks.py``.
+    in ``law/rucio_tasks.py`` and ``law/opendata_tasks.py``.
   - **Intermediate artifacts** – Cached intermediate results such as
     preselection outputs, reduced skims, column snapshots, and
     object-enriched skims that can be reused across workflow stages.
@@ -842,8 +842,8 @@ class CutflowSchema:
 class LawArtifactSchema:
     """Schema definition for a single LAW task artifact.
 
-    Law workflow tasks (``PrepareNANOSample``, ``BuildNANOSubmission``,
-    ``SubmitNANOJobs``, ``MonitorNANOJobs``, ``RunNANOAnalysisJob``, …)
+    Law workflow tasks (``PrepareSkimJobs``, ``BuildSkimSubmission``,
+    ``SubmitSkimJobs``, ``MonitorSkimJobs``, ``RunSkimAnalysisJob``, …)
     each produce one or more output files.  This schema records the expected
     artifact type, path pattern, and serialisation format.
 

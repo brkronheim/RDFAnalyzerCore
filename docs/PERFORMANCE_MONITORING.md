@@ -10,10 +10,10 @@ For CPU hotspot analysis of direct RDF jobs, prefer Linux `perf` over ad hoc wal
 
 Two complementary systems work together:
 
-- **`PerformanceRecorder`** (in `law/performance_recorder.py`) – a context manager that measures wall-clock time, peak subprocess RSS and data throughput, writing the results to a `.perf.json` sidecar file co-located with the branch output.
-- **Failure handler** (in `law/failure_handler.py`) – classifies each exception into a `FailureCategory`, consults a per-category `RetryPolicy`, and accumulates all failure events in a `DiagnosticSummary` that is printed at the end of the run.
+- **`PerformanceRecorder`** (in `core/python/law/performance_recorder.py`) – a context manager that measures wall-clock time, peak subprocess RSS and data throughput, writing the results to a `.perf.json` sidecar file co-located with the branch output.
+- **Failure handler** (in `core/python/law/failure_handler.py`) – classifies each exception into a `FailureCategory`, consults a per-category `RetryPolicy`, and accumulates all failure events in a `DiagnosticSummary` that is printed at the end of the run.
 
-Both systems are integrated transparently into `DaskWorkflowProxy` (`law/workflow_executors.py`).  Task authors typically do not need to call them directly.
+Both systems are integrated transparently into `DaskWorkflowProxy` (`core/python/law/workflow_executors.py`).  Task authors typically do not need to call them directly.
 
 ---
 

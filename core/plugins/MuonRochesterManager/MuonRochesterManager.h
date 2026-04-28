@@ -28,8 +28,8 @@ class Analyzer;
  *
  * ## Typical CMS NanoAOD usage
  * @code
- *   auto* roc = analyzer->getPlugin<MuonRochesterManager>("roc");
- *   auto* cm  = analyzer->getPlugin<CorrectionManager>("corrections");
+ *   auto roc = analyzer->getPlugin<MuonRochesterManager>("roc");
+ *   auto cm  = analyzer->getPlugin<CorrectionManager>("corrections");
  *
  *   // 1. Declare muon and MET column names.
  *   roc->setObjectColumns("Muon_pt", "Muon_eta", "Muon_phi", "Muon_mass");

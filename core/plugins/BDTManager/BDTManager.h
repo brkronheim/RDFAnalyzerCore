@@ -8,7 +8,6 @@
 #include <RtypesCore.h>
 #include <fastforest.h>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -21,7 +20,7 @@ class Analyzer;
  *
  * This manager encapsulates the logic for managing Boosted Decision Trees (BDTs),
  * including loading from configuration, storing, and applying them to data.
- * Implements the IBDTManager interface for dependency injection.
+ * It is registered through the pluggable-manager API used by Analyzer.
  */
 class BDTManager
     : public NamedObjectManager<std::shared_ptr<fastforest::FastForest>> {

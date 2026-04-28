@@ -4,7 +4,7 @@
 > - [Getting Started with ONNX](../docs/GETTING_STARTED.md#machine-learning-integration)
 > - [ONNX Configuration Reference](../docs/CONFIG_REFERENCE.md#onnx-manager-configuration)
 > - [Using ONNX in Analyses](../docs/ANALYSIS_GUIDE.md#using-onnx-models-recommended)
-> - [ONNX API Reference](../docs/API_REFERENCE.md#ionnxmanager)
+> - [ONNX API Reference](../docs/API_REFERENCE.md#onnxmanager)
 > - [Multi-Output Model Support](ONNX_MULTI_OUTPUT.md)
 
 ## Overview
@@ -16,7 +16,7 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 - **File**: `cmake/SetupOnnxRuntime.cmake`
 - Automatically downloads ONNX Runtime binaries from official Microsoft releases during CMake configuration
 - Supports Linux (x64, aarch64) and macOS (x64, arm64)
-- Version: 1.20.0
+- Version: 1.24.1
 - No manual installation or building required
 - Sets up proper RPATH for runtime library loading
 
@@ -47,12 +47,12 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 - `getModelOutputNames(modelName)`: Get ONNX output tensor names
 
 ### 3. Comprehensive Unit Tests
-- **File**: `core/test/testOnnxManager.cc`
-- **Test Configuration**: `core/test/cfg/onnx_models.txt`
+- **File**: `core/tests/cpp/testOnnxManager.cc`
+- **Test Configuration**: `core/tests/cpp/cfg/onnx_models.txt`
 - **Test Models**: 
-  - `core/test/cfg/test_model.onnx` - Single output model
-  - `core/test/cfg/test_model2.onnx` - Single output model
-  - `core/test/cfg/test_model_multi_output.onnx` - Multi-output model
+   - `core/tests/cpp/cfg/test_model.onnx` - Single output model
+   - `core/tests/cpp/cfg/test_model2.onnx` - Single output model
+   - `core/tests/cpp/cfg/test_model_multi_output.onnx` - Multi-output model
 
 **Test Coverage**:
 - Constructor and manager creation
@@ -84,12 +84,18 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 
 Create a configuration file (e.g., `cfg/onnx_models.txt`):
 ```
-file=path/to/model.onnx name=model_output inputVariables=var1,var2,var3 runVar=should_run
+file=path/to/model.onnx name=model_output inputVariables=var1,var2,var3 runVar=should_run useCuda=false
 ```
 
 Add to main config:
 ```
 onnxConfig=cfg/onnx_models.txt
+```
+
+Optional CUDA settings for models built with ONNX Runtime CUDA support:
+```
+useCuda=true
+cudaDeviceId=0
 ```
 
 ### Input Padding for Fixed-Size Models
@@ -107,8 +113,8 @@ file=transformer.onnx name=ParT inputVariables=pt,eta,phi paddingSize=128
 
 **Behavior**:
 - Input vectors shorter than `paddingSize` are zero-padded to the specified size
-- Input vectors longer than `paddingSize` are truncated to the specified size
-- Omitting `paddingSize` preserves existing behavior (no padding/truncation)
+- Input vectors longer than the model's expected packed input size are rejected with a runtime error
+- Omitting `paddingSize` preserves existing behavior for fixed known shapes, but dynamic dimensions still require `paddingSize` or explicit `inputShapes`
 
 **Example**:
 
@@ -243,8 +249,8 @@ Potential improvements for future work:
 ## Limitations
 
 1. **Float Input**: Input features are converted to float32
-2. **Fixed Shape Input**: Currently expects (1, N) shaped input tensors for single input models
-3. **CPU Only**: ONNX Runtime is configured for CPU inference only
+2. **Fixed Shape Input**: Dynamic ONNX dimensions require either `paddingSize` or explicit `inputShapes` to resolve; otherwise model loading can fail
+3. **CPU by Default**: ONNX Runtime uses CPU inference unless built with `ONNXRUNTIME_USE_CUDA=ON` and the model is configured with `useCuda=true`
 4. **Single Scalar Output Per Tensor**: Each output tensor must produce a single scalar value
 
 ## References

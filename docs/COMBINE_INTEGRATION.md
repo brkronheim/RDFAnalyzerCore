@@ -17,7 +17,7 @@ RDFAnalyzerCore provides a complete workflow from analysis to statistical infere
 
 - ROOT 6.30+ with Python bindings
 - CMake 3.19+
-- Python 3.6+ with PyYAML
+- Python 3.8+ with PyYAML
 - Git
 
 ### Build Options

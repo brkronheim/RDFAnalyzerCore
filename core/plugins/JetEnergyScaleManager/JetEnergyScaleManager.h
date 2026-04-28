@@ -59,8 +59,8 @@ struct JESVariationEntry {
  *
  * ## Typical CMS NanoAOD usage (full workflow)
  * @code
- *   auto* jes = analyzer->getPlugin<JetEnergyScaleManager>("jes");
- *   auto* cm  = analyzer->getPlugin<CorrectionManager>("corrections");
+ *   auto jes = analyzer->getPlugin<JetEnergyScaleManager>("jes");
+ *   auto cm  = analyzer->getPlugin<CorrectionManager>("corrections");
  *
  *   // 1. Declare jet and MET columns.
  *   jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
