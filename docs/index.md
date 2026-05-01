@@ -9,6 +9,12 @@ New to RDFAnalyzerCore? Start here:
 - **[Getting Started Guide](GETTING_STARTED.md)** - Installation, setup, and your first analysis
 - **[Quick Start](GETTING_STARTED.md#quick-start)** - Get running in 5 minutes
 
+## Who should read what?
+
+- **Developers**: [Architecture](ARCHITECTURE.md), [API Reference](API_REFERENCE.md), [Plugin Development](PLUGIN_DEVELOPMENT.md)
+- **Analyzers**: [Getting Started](GETTING_STARTED.md), [Analysis Guide](ANALYSIS_GUIDE.md), [Configuration Reference](CONFIG_REFERENCE.md)
+- **Agents/automation**: [INDEX](INDEX.md), [Errors and Tracing](ERRORS_AND_TRACING.md), [Validation Reports](VALIDATION_REPORTS.md)
+
 ## User Documentation
 
 ### Building Analyses

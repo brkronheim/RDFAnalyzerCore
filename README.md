@@ -92,6 +92,17 @@ cd build/analyses/ExampleAnalysis
 - **[ONNX Implementation](docs/ONNX_IMPLEMENTATION.md)** - ONNX manager details
 - **[ONNX Multi-Output](docs/ONNX_MULTI_OUTPUT.md)** - Multi-output model support
 
+
+## Documentation Paths by Audience
+
+If you are reading docs for a specific role, start here:
+
+- **Developers (framework contributors)**: `docs/ARCHITECTURE.md`, `docs/API_REFERENCE.md`, `docs/PLUGIN_DEVELOPMENT.md`, `docs/DOXYGEN_GUIDE.md`
+- **Analyzers (analysis authors)**: `docs/GETTING_STARTED.md`, `docs/ANALYSIS_GUIDE.md`, `docs/CONFIG_REFERENCE.md`, `docs/CONFIG_HISTOGRAMS.md`, `docs/NUISANCE_GROUPS.md`
+- **Agents/automation tooling**: `docs/INDEX.md`, `docs/ERRORS_AND_TRACING.md`, `docs/CONFIGURATION_VALIDATION.md`, `docs/OUTPUT_SCHEMA.md`, `docs/VALIDATION_REPORTS.md`
+
+The docs are intentionally layered: `GETTING_STARTED` and `ANALYSIS_GUIDE` show workflow, while `API_REFERENCE` and headers in `core/interface/` are the source of truth for signatures and behavior.
+
 ## Requirements
 
 - ROOT 6.30/02 or later (progress bar support requires 6.30+)
@@ -120,9 +131,8 @@ RDFAnalyzerCore/
 │   ├── interface/     # Public headers and interfaces
 │   ├── src/          # Core implementations
 │   ├── plugins/      # Plugin managers (BDT, ONNX, etc.)
-│   ├── bindings/     # Python bindings (pybind11)
 │   ├── python/       # HTCondor submission scripts
-│   └── test/         # Unit tests
+│   └── tests/        # Core test targets
 ├── analyses/          # Analysis repositories (git submodules/clones)
 ├── examples/          # Python binding examples
 ├── docs/             # Documentation

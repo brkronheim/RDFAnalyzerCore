@@ -11,6 +11,10 @@ This guide will help you get up and running with RDFAnalyzerCore quickly — fro
 
 ## Quick Start
 
+
+> **Important:** ROOT is a C++ framework and is **not** installed via `pip install ROOT`.
+> Use `source env.sh` (CVMFS environments) or source an existing ROOT installation with `source <root-install>/bin/thisroot.sh`.
+
 ### 1. Clone the Repository
 
 ```bash
