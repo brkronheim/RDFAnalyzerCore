@@ -7,8 +7,7 @@
 #include <TObject.h>
 #include <api/ILogger.h>
 #include <api/IOutputSink.h>
-#include <cmath>
-#include <numeric>
+#include <algorithm>
 #include <sstream>
 #include <stdexcept>
 
@@ -45,13 +44,22 @@ void WeightManager::addNormalization(const std::string &name, double value) {
 void WeightManager::addWeightVariation(const std::string &name,
                                         const std::string &upColumn,
                                         const std::string &downColumn) {
+  addWeightVariation(name, name, upColumn, downColumn);
+}
+
+void WeightManager::addWeightVariation(const std::string &name,
+                                        const std::string &componentName,
+                                        const std::string &upColumn,
+                                        const std::string &downColumn) {
   if (name.empty())
     throw std::invalid_argument("WeightManager::addWeightVariation: name must not be empty");
+  if (componentName.empty())
+    throw std::invalid_argument("WeightManager::addWeightVariation: componentName must not be empty");
   if (upColumn.empty())
     throw std::invalid_argument("WeightManager::addWeightVariation: upColumn must not be empty");
   if (downColumn.empty())
     throw std::invalid_argument("WeightManager::addWeightVariation: downColumn must not be empty");
-  variations_m.push_back({name, upColumn, downColumn});
+  variations_m.push_back({name, componentName, upColumn, downColumn});
 }
 
 // ---------------------------------------------------------------------------
@@ -62,6 +70,9 @@ void WeightManager::defineNominalWeight(const std::string &outputColumn) {
   if (outputColumn.empty())
     throw std::invalid_argument("WeightManager::defineNominalWeight: outputColumn must not be empty");
   nominalOutputColumn_m = outputColumn;
+  if (dataManager_m) {
+    materializeScheduledWeights(false);
+  }
 }
 
 void WeightManager::defineVariedWeight(const std::string &variationName,
@@ -74,6 +85,9 @@ void WeightManager::defineVariedWeight(const std::string &variationName,
   if (outputColumn.empty())
     throw std::invalid_argument("WeightManager::defineVariedWeight: outputColumn must not be empty");
   variedColumnSpecs_m.push_back({variationName, direction, outputColumn});
+  if (dataManager_m) {
+    materializeScheduledWeights(false);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,9 +165,7 @@ void WeightManager::defineWeightColumn(const std::string &outputColumn,
   std::string prevCol = outputColumn + "_wm_acc_0_";
   {
     const std::string sfCol0 = sfColumns[0];
-    auto newDf = df.Define(prevCol,
-        [](double sf) { return sf; },
-        {sfCol0});
+    auto newDf = df.Define(prevCol, "static_cast<double>(" + sfCol0 + ")");
     df = newDf;
   }
 
@@ -163,8 +175,7 @@ void WeightManager::defineWeightColumn(const std::string &outputColumn,
     const std::string sfColI = sfColumns[i];
     const std::string pCol = prevCol;
     auto newDf = df.Define(nextCol,
-        [](double acc, double sf) { return acc * sf; },
-        {pCol, sfColI});
+                 pCol + " * static_cast<double>(" + sfColI + ")");
     df = newDf;
     prevCol = nextCol;
   }
@@ -177,6 +188,83 @@ void WeightManager::defineWeightColumn(const std::string &outputColumn,
       {lastAcc});
 
   dataManager_m->setDataFrame(finalDf);
+}
+
+void WeightManager::materializeScheduledWeights(bool shouldBookAudit) {
+  if (!dataManager_m)
+    throw std::runtime_error("WeightManager::materializeScheduledWeights: context not set");
+
+  if (!nominalOutputColumn_m.empty() && !nominalMaterialized_m) {
+    std::vector<std::string> sfCols;
+    sfCols.reserve(scaleFactors_m.size());
+    for (const auto &[name, col] : scaleFactors_m) {
+      sfCols.push_back(col);
+    }
+
+    defineWeightColumn(nominalOutputColumn_m, sfCols);
+    nominalMaterialized_m = true;
+  }
+
+  for (const auto &spec : variedColumnSpecs_m) {
+    const auto alreadyDefined = std::any_of(
+        variedColumns_m.begin(), variedColumns_m.end(),
+        [&](const auto &entry) {
+          return entry.first.variationName == spec.variationName &&
+                 entry.first.direction == spec.direction;
+        });
+    if (alreadyDefined) {
+      continue;
+    }
+
+    const WeightVariation *var = nullptr;
+    for (const auto &v : variations_m) {
+      if (v.name == spec.variationName) {
+        var = &v;
+        break;
+      }
+    }
+    if (!var) {
+      throw std::runtime_error(
+          "WeightManager::materializeScheduledWeights: variation \"" +
+          spec.variationName +
+          "\" was not registered via addWeightVariation()");
+    }
+
+    const std::string variedSfCol =
+        (spec.direction == "up") ? var->upColumn : var->downColumn;
+
+    std::vector<std::string> sfCols;
+    bool replaced = false;
+    for (const auto &[sfName, sfCol] : scaleFactors_m) {
+      if (sfName == var->componentName) {
+        sfCols.push_back(variedSfCol);
+        replaced = true;
+      } else {
+        sfCols.push_back(sfCol);
+      }
+    }
+    if (!replaced) {
+      sfCols.push_back(variedSfCol);
+    }
+
+    defineWeightColumn(spec.outputColumn, sfCols);
+    variedColumns_m.push_back({{spec.variationName, spec.direction}, spec.outputColumn});
+  }
+
+  if (shouldBookAudit && !auditsBooked_m) {
+    if (!nominalOutputColumn_m.empty()) {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      bookAudit(nominalOutputColumn_m, nominalOutputColumn_m, df);
+    }
+
+    for (const auto &[key, col] : variedColumns_m) {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const std::string label =
+          col + " (" + key.variationName + " " + key.direction + ")";
+      bookAudit(label, col, df);
+    }
+    auditsBooked_m = true;
+  }
 }
 
 void WeightManager::bookAudit(const std::string &label,
@@ -205,74 +293,7 @@ void WeightManager::execute() {
   if (!dataManager_m)
     throw std::runtime_error("WeightManager::execute: context not set");
 
-  // ---------- Define nominal weight column ----------
-  if (!nominalOutputColumn_m.empty()) {
-    std::vector<std::string> sfCols;
-    sfCols.reserve(scaleFactors_m.size());
-    for (const auto &[name, col] : scaleFactors_m)
-      sfCols.push_back(col);
-
-    defineWeightColumn(nominalOutputColumn_m, sfCols);
-  }
-
-  // ---------- Define varied weight columns ----------
-  for (const auto &spec : variedColumnSpecs_m) {
-    // Find the variation
-    const WeightVariation *var = nullptr;
-    for (const auto &v : variations_m) {
-      if (v.name == spec.variationName) {
-        var = &v;
-        break;
-      }
-    }
-    if (!var) {
-      throw std::runtime_error(
-          "WeightManager::execute: variation \"" + spec.variationName +
-          "\" was not registered via addWeightVariation()");
-    }
-
-    const std::string variedSfCol =
-        (spec.direction == "up") ? var->upColumn : var->downColumn;
-
-    // Build SF column list: replace the matched SF for this variation (if it
-    // exists in scaleFactors_m), or append the varied column otherwise.
-    std::vector<std::string> sfCols;
-    bool replaced = false;
-    for (const auto &[sfName, sfCol] : scaleFactors_m) {
-      // Match by column name: the nominal SF column that shares a name with
-      // var->upColumn / var->downColumn's "base" may differ.
-      // Convention: we match the scale factor whose name matches the variation name.
-      if (sfName == spec.variationName) {
-        sfCols.push_back(variedSfCol);
-        replaced = true;
-      } else {
-        sfCols.push_back(sfCol);
-      }
-    }
-    if (!replaced) {
-      // No matching SF was found; append the varied column as an extra factor.
-      sfCols.push_back(variedSfCol);
-    }
-
-    defineWeightColumn(spec.outputColumn, sfCols);
-
-    // Record the mapping for getWeightColumn().
-    variedColumns_m.push_back({{spec.variationName, spec.direction}, spec.outputColumn});
-  }
-
-  // ---------- Book audit actions ----------
-  // Audit the nominal column (if defined).
-  if (!nominalOutputColumn_m.empty()) {
-    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-    bookAudit(nominalOutputColumn_m, nominalOutputColumn_m, df);
-  }
-
-  // Audit each varied column.
-  for (const auto &[key, col] : variedColumns_m) {
-    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-    const std::string label = col + " (" + key.variationName + " " + key.direction + ")";
-    bookAudit(label, col, df);
-  }
+  materializeScheduledWeights(true);
 }
 
 // ---------------------------------------------------------------------------

@@ -233,7 +233,7 @@ def main():
         print("Examples completed successfully!")
         print("\nNext steps:")
         print("1. Modify the configuration for your analysis")
-        print("2. Use production_submit.py for automatic data discovery")
+        print("2. Use LAW discovery tasks and production_manager.py for automatic data discovery")
         print("3. Use production_monitor.py for real-time monitoring")
         print("4. See docs/PRODUCTION_MANAGER.md for complete documentation")
         

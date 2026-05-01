@@ -9,7 +9,7 @@ Provides explicit, versioned schema definitions for all framework output types:
     ``TDirectory`` of the meta-output ROOT file, written by ``ProvenanceService``.
   - **Cutflows** – Event-count histograms written by ``CounterService``.
   - **LAW artifacts** – Task output files produced by the law workflow tasks
-    in ``law/nano_tasks.py`` and ``law/opendata_tasks.py``.
+    in ``law/rucio_tasks.py`` and ``law/opendata_tasks.py``.
   - **Intermediate artifacts** – Cached intermediate results such as
     preselection outputs, reduced skims, column snapshots, and
     object-enriched skims that can be reused across workflow stages.
@@ -575,6 +575,20 @@ class HistogramSchema:
         Axis specifications shared across all histograms in this schema.
         Individual histograms may add extra axes; these represent the common
         (required) axes.
+    axis_labels : dict[str, list[str]]
+        Optional axis-role to category-label mapping extracted from the
+        histogram booking configuration. Typical keys are ``channel``,
+        ``control``, ``sample``, and ``systematic``.
+    sample_metadata : dict[str, dict]
+        Optional metadata keyed by analysis sample alias. This is intended for
+        downstream automation such as manifest-aware process synthesis,
+        stitched-sample grouping, and STXS bin merging.
+    sample_combinations : dict[str, dict]
+        Optional pre-resolved sample-combination definitions compatible with
+        the datacard generator ``sample_combinations`` block.
+    processes : dict[str, dict]
+        Optional pre-resolved process definitions compatible with the
+        datacard generator ``processes`` block.
     """
 
     CURRENT_VERSION: ClassVar[int] = HISTOGRAM_SCHEMA_VERSION
@@ -583,6 +597,10 @@ class HistogramSchema:
     output_file: str = ""
     histogram_names: List[str] = field(default_factory=list)
     axes: List[HistogramAxisSpec] = field(default_factory=list)
+    axis_labels: Dict[str, List[str]] = field(default_factory=dict)
+    sample_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    sample_combinations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    processes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ I/O
 
@@ -592,6 +610,22 @@ class HistogramSchema:
             "output_file": self.output_file,
             "histogram_names": list(self.histogram_names),
             "axes": [ax.to_dict() for ax in self.axes],
+            "axis_labels": {
+                str(axis_name): list(labels)
+                for axis_name, labels in self.axis_labels.items()
+            },
+            "sample_metadata": {
+                str(sample_name): dict(metadata)
+                for sample_name, metadata in self.sample_metadata.items()
+            },
+            "sample_combinations": {
+                str(combo_name): dict(combo_cfg)
+                for combo_name, combo_cfg in self.sample_combinations.items()
+            },
+            "processes": {
+                str(process_name): dict(process_cfg)
+                for process_name, process_cfg in self.processes.items()
+            },
         }
         return d
 
@@ -606,6 +640,26 @@ class HistogramSchema:
             output_file=data.get("output_file", ""),
             histogram_names=list(data.get("histogram_names", [])),
             axes=axes,
+            axis_labels={
+                str(axis_name): list(labels)
+                for axis_name, labels in (data.get("axis_labels") or {}).items()
+                if isinstance(labels, list)
+            },
+            sample_metadata={
+                str(sample_name): dict(metadata)
+                for sample_name, metadata in (data.get("sample_metadata") or {}).items()
+                if isinstance(metadata, dict)
+            },
+            sample_combinations={
+                str(combo_name): dict(combo_cfg)
+                for combo_name, combo_cfg in (data.get("sample_combinations") or {}).items()
+                if isinstance(combo_cfg, dict)
+            },
+            processes={
+                str(process_name): dict(process_cfg)
+                for process_name, process_cfg in (data.get("processes") or {}).items()
+                if isinstance(process_cfg, dict)
+            },
         )
 
     # ------------------------------------------------------------------ validation
@@ -622,6 +676,35 @@ class HistogramSchema:
         for i, ax in enumerate(self.axes):
             for e in ax.validate():
                 errors.append(f"HistogramSchema.axes[{i}]: {e}")
+        for axis_name, labels in self.axis_labels.items():
+            if not axis_name:
+                errors.append("HistogramSchema.axis_labels keys must not be empty.")
+            if not isinstance(labels, list):
+                errors.append(
+                    f"HistogramSchema.axis_labels['{axis_name}'] must be a list of strings."
+                )
+                continue
+            if any(not isinstance(label, str) or not label for label in labels):
+                errors.append(
+                    f"HistogramSchema.axis_labels['{axis_name}'] must contain only non-empty strings."
+                )
+        for field_name, mapping in (
+            ("sample_metadata", self.sample_metadata),
+            ("sample_combinations", self.sample_combinations),
+            ("processes", self.processes),
+        ):
+            if not isinstance(mapping, dict):
+                errors.append(f"HistogramSchema.{field_name} must be a mapping.")
+                continue
+            for key, value in mapping.items():
+                if not isinstance(key, str) or not key:
+                    errors.append(
+                        f"HistogramSchema.{field_name} keys must be non-empty strings."
+                    )
+                if not isinstance(value, dict):
+                    errors.append(
+                        f"HistogramSchema.{field_name}['{key}'] must be a mapping."
+                    )
         return errors
 
 
@@ -759,8 +842,8 @@ class CutflowSchema:
 class LawArtifactSchema:
     """Schema definition for a single LAW task artifact.
 
-    Law workflow tasks (``PrepareNANOSample``, ``BuildNANOSubmission``,
-    ``SubmitNANOJobs``, ``MonitorNANOJobs``, ``RunNANOAnalysisJob``, …)
+    Law workflow tasks (``PrepareSkimJobs``, ``BuildSkimSubmission``,
+    ``SubmitSkimJobs``, ``MonitorSkimJobs``, ``RunSkimAnalysisJob``, …)
     each produce one or more output files.  This schema records the expected
     artifact type, path pattern, and serialisation format.
 

@@ -4,7 +4,7 @@
 > - [ONNX Implementation Summary](ONNX_IMPLEMENTATION.md)
 > - [Using Multi-Output Models](../docs/ANALYSIS_GUIDE.md#multi-output-models)
 > - [ONNX Configuration](../docs/CONFIG_REFERENCE.md#onnx-manager-configuration)
-> - [ONNX API Reference](../docs/API_REFERENCE.md#ionnxmanager)
+> - [ONNX API Reference](../docs/API_REFERENCE.md#onnxmanager)
 
 ## Overview
 This document describes the enhancements made to OnnxManager to support models with multiple outputs and ensure proper deferred execution pattern.

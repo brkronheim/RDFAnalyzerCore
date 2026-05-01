@@ -59,8 +59,8 @@ struct JESVariationEntry {
  *
  * ## Typical CMS NanoAOD usage (full workflow)
  * @code
- *   auto* jes = analyzer->getPlugin<JetEnergyScaleManager>("jes");
- *   auto* cm  = analyzer->getPlugin<CorrectionManager>("corrections");
+ *   auto jes = analyzer->getPlugin<JetEnergyScaleManager>("jes");
+ *   auto cm  = analyzer->getPlugin<CorrectionManager>("corrections");
  *
  *   // 1. Declare jet and MET columns.
  *   jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -251,10 +251,10 @@ public:
                        const std::string &outputMassColumn = "");
 
   /**
-   * @brief Apply a CMS correctionlib-based JES/JER correction via CorrectionManager.
-   *
-   * Calls @p cm.applyCorrectionVec() to evaluate the correctionlib formula
-   * and store per-jet scale factors, then schedules the pT/mass update.
+  * @brief Schedule a CMS correctionlib-based JES/JER correction via CorrectionManager.
+  *
+  * The correctionlib evaluation is deferred to execute() so later scheduled
+  * steps may depend on columns produced by earlier jet corrections.
    *
    * The intermediate SF column name follows CorrectionManager's convention:
    * @c correctionName + "_" + joined(@p stringArgs, "_").
@@ -279,7 +279,9 @@ public:
                           bool applyToMass = true,
                           const std::string &inputMassColumn = "",
                           const std::string &outputMassColumn = "",
-                          const std::vector<std::string> &inputColumns = {});
+                          const std::vector<std::string> &inputColumns = {},
+                          bool outputIsRelativeDelta = false,
+                          float relativeDeltaDirection = 1.0f);
 
   /**
    * @brief Schedule CMS JER smearing from correctionlib resolution and scale-factor payloads.
@@ -641,11 +643,18 @@ private:
 
   // ---- Correction steps ---------------------------------------------------
   struct CorrectionStep {
+    bool evaluateScaleFactor = false;
+    CorrectionManager *correctionManager = nullptr;
+    std::string correctionName;
+    std::vector<std::string> correctionStringArgs;
+    std::vector<std::string> correctionInputColumns;
     std::string inputPtColumn;
     std::string sfColumn;
     std::string outputPtColumn;
     std::string inputMassColumn;
     std::string outputMassColumn;
+    float scaleFactorOffset = 0.0f;
+    float scaleFactorMultiplier = 1.0f;
   };
   std::vector<CorrectionStep> correctionSteps_m;
 
@@ -705,6 +714,7 @@ private:
   ISystematicManager *systematicManager_m = nullptr;
   ILogger *logger_m = nullptr;
   IOutputSink *metaSink_m = nullptr;
+  bool executionPending_m = false;
 
   // ---- Internal helpers ---------------------------------------------------
 

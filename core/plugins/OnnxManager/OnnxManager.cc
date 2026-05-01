@@ -1,4 +1,5 @@
 #include <OnnxManager.h>
+#include <SystematicBundle.h>
 #include <analyzer.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
@@ -34,6 +35,34 @@ std::vector<std::string> splitString(const std::string &value, char delimiter) {
     }
   }
   return tokens;
+}
+
+std::string toLowerCopy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return value;
+}
+
+SystematicBundleMode parseBundleMode(const std::string &rawValue,
+                                     const std::string &modelName) {
+  if (rawValue.empty()) {
+    return SystematicBundleMode::Off;
+  }
+
+  const auto normalized = toLowerCopy(trim(rawValue));
+  if (normalized == "off" || normalized == "false" || normalized == "0") {
+    return SystematicBundleMode::Off;
+  }
+  if (normalized == "auto" || normalized == "on" || normalized == "true" ||
+      normalized == "1") {
+    return SystematicBundleMode::Auto;
+  }
+  if (normalized == "required" || normalized == "require") {
+    return SystematicBundleMode::Required;
+  }
+
+  throw std::runtime_error("OnnxManager: Invalid systematicBundle value '" +
+                           rawValue + "' for model '" + modelName + "'.");
 }
 
 std::vector<int64_t> parseShape(const std::string &shapeString,
@@ -136,10 +165,318 @@ int64_t elementCount(const std::vector<int64_t> &shape,
                          });
 }
 
+int64_t trailingElementCount(const std::vector<int64_t> &shape,
+                             const std::string &modelName,
+                             size_t tensorIndex,
+                             const std::string &tensorKind) {
+  if (shape.empty()) {
+    throw std::runtime_error("OnnxManager: Cannot compute trailing element count for empty " +
+                             tensorKind + " shape in model '" + modelName +
+                             "' tensor index " + std::to_string(tensorIndex));
+  }
+
+  if (shape.size() == 1) {
+    return 1;
+  }
+
+  return std::accumulate(shape.begin() + 1, shape.end(), int64_t{1},
+                         [&](int64_t acc, int64_t dim) {
+                           if (dim <= 0) {
+                             throw std::runtime_error(
+                                 "OnnxManager: Non-positive trailing dimension in " +
+                                 tensorKind + " shape for model '" + modelName +
+                                 "' tensor index " + std::to_string(tensorIndex));
+                           }
+                           return acc * dim;
+                         });
+}
+
+std::vector<int64_t> resolveRuntimeInputShape(std::vector<int64_t> shape,
+                                              int64_t activeBatchSize,
+                                              int64_t paddingSize,
+                                              const std::string &modelName,
+                                              size_t inputIndex) {
+  if (shape.empty()) {
+    throw std::runtime_error("OnnxManager: ONNX input shape is empty for model '" +
+                             modelName + "' input index " +
+                             std::to_string(inputIndex));
+  }
+
+  if (shape[0] <= 0) {
+    shape[0] = std::max<int64_t>(activeBatchSize, int64_t{1});
+  } else if (activeBatchSize > shape[0]) {
+    throw std::runtime_error("OnnxManager: Active systematic batch size " +
+                             std::to_string(activeBatchSize) +
+                             " exceeds fixed ONNX batch dimension " +
+                             std::to_string(shape[0]) + " for model '" +
+                             modelName + "' input index " +
+                             std::to_string(inputIndex));
+  }
+
+  for (size_t d = 1; d < shape.size(); ++d) {
+    if (shape[d] <= 0) {
+      if (paddingSize > 0) {
+        shape[d] = paddingSize;
+      } else {
+        throw std::runtime_error(
+            "OnnxManager: Dynamic ONNX dimension found for model '" + modelName +
+            "' input index " + std::to_string(inputIndex) +
+            " with no paddingSize/inputShapes provided.");
+      }
+    }
+  }
+
+  return shape;
+}
+
+bool supportsScalarPerVariationOutputs(
+    const std::vector<std::vector<int64_t>> &outputShapes,
+    const std::string &modelName) {
+  for (size_t i = 0; i < outputShapes.size(); ++i) {
+    const auto &shape = outputShapes[i];
+    if (shape.empty()) {
+      continue;
+    }
+    const auto rowWidth = trailingElementCount(shape, modelName, i, "output");
+    if (rowWidth != 1) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool supportsBundledInputLayout(IDataFrameProvider &dataManager,
+                                const std::vector<std::string> &columns) {
+  if (columns.empty()) {
+    return true;
+  }
+
+  auto df = dataManager.getDataFrame();
+  size_t vectorColumns = 0;
+  for (const auto &column : columns) {
+    if (df.GetColumnType(column).find("RVec") != std::string::npos) {
+      ++vectorColumns;
+    }
+  }
+
+  if (vectorColumns == 0) {
+    return true;
+  }
+
+  // The bundled path supports exactly one vector-valued ONNX input. Multiple
+  // vector-valued inputs still need a dedicated packer because the current
+  // SystematicBundle helper rejects mixed vector/scalar multi-input layouts.
+  return columns.size() == 1 && vectorColumns == 1;
+}
+
 const Ort::MemoryInfo &cpuMemoryInfo() {
   static const Ort::MemoryInfo memoryInfo =
       Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
   return memoryInfo;
+}
+
+struct OnnxScratchBuffers {
+  std::vector<std::vector<float>> ownedInputs;
+  std::vector<Ort::Value> inputTensors;
+  std::vector<float> outputs;
+};
+
+const std::vector<float> &runBundledModelOutputs(
+    Ort::Session &session,
+    const std::vector<std::vector<int64_t>> &inputShapes,
+    const std::vector<int64_t> &inputRowElementCounts,
+    int64_t paddingSize,
+    const std::vector<const char *> &inputNamePtrs,
+    const std::vector<const char *> &outputNamePtrs,
+    const ROOT::VecOps::RVec<Float_t> &inputVector,
+    const ROOT::VecOps::RVec<bool> &activeMask,
+    float disabledValue,
+    const std::string &modelName) {
+  const size_t nVariations = activeMask.size();
+  const size_t nOutputs = outputNamePtrs.size();
+  const int64_t perVariationInputElements = std::accumulate(
+      inputRowElementCounts.begin(), inputRowElementCounts.end(), int64_t{0});
+
+  thread_local OnnxScratchBuffers scratch;
+  scratch.outputs.assign(nOutputs * nVariations, disabledValue);
+
+  if (nVariations == 0) {
+    return scratch.outputs;
+  }
+
+  const int64_t expectedInputSize = perVariationInputElements *
+                                    static_cast<int64_t>(nVariations);
+  if (static_cast<int64_t>(inputVector.size()) != expectedInputSize) {
+    throw std::runtime_error(
+        "OnnxManager: Systematic bundle input size does not match the expected variation-major layout for model '" +
+        modelName + "'. Got " + std::to_string(inputVector.size()) +
+        " elements, expected " + std::to_string(expectedInputSize) + ".");
+  }
+
+  std::vector<size_t> activeIndices;
+  activeIndices.reserve(nVariations);
+  for (size_t i = 0; i < nVariations; ++i) {
+    if (activeMask[i]) {
+      activeIndices.push_back(i);
+    }
+  }
+
+  if (activeIndices.empty()) {
+    return scratch.outputs;
+  }
+
+  const auto &memoryInfo = cpuMemoryInfo();
+  if (scratch.ownedInputs.size() < inputShapes.size()) {
+    scratch.ownedInputs.resize(inputShapes.size());
+  }
+  scratch.inputTensors.clear();
+  scratch.inputTensors.reserve(inputShapes.size());
+
+  std::vector<int64_t> perInputOffsets(inputRowElementCounts.size(), 0);
+  int64_t runningOffset = 0;
+  for (size_t i = 0; i < inputRowElementCounts.size(); ++i) {
+    perInputOffsets[i] = runningOffset;
+    runningOffset += inputRowElementCounts[i];
+  }
+
+  const int64_t activeBatchSize = static_cast<int64_t>(activeIndices.size());
+  for (size_t i = 0; i < inputShapes.size(); ++i) {
+    const auto runtimeShape = resolveRuntimeInputShape(
+        inputShapes[i], activeBatchSize, paddingSize, modelName, i);
+    const int64_t expectedElements = elementCount(runtimeShape, modelName, i);
+    const int64_t rowElements = inputRowElementCounts[i];
+
+    auto &buffer = scratch.ownedInputs[i];
+    buffer.assign(static_cast<size_t>(expectedElements), 0.0f);
+
+    for (size_t row = 0; row < activeIndices.size(); ++row) {
+      const size_t variationIndex = activeIndices[row];
+      const int64_t sourceOffset =
+          static_cast<int64_t>(variationIndex) * perVariationInputElements +
+          perInputOffsets[i];
+      const int64_t destinationOffset =
+          static_cast<int64_t>(row) * rowElements;
+      std::copy_n(inputVector.begin() + sourceOffset, rowElements,
+                  buffer.begin() + destinationOffset);
+    }
+
+    scratch.inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
+        memoryInfo, buffer.data(), buffer.size(), runtimeShape.data(),
+        runtimeShape.size()));
+  }
+
+  auto outputTensors = session.Run(
+      Ort::RunOptions{nullptr}, inputNamePtrs.data(), scratch.inputTensors.data(),
+      scratch.inputTensors.size(), outputNamePtrs.data(), outputNamePtrs.size());
+
+  for (size_t outputIndex = 0; outputIndex < outputTensors.size(); ++outputIndex) {
+    auto tensorInfo = outputTensors[outputIndex].GetTensorTypeAndShapeInfo();
+    const auto runtimeShape = tensorInfo.GetShape();
+    const int64_t totalElements = tensorInfo.GetElementCount();
+    const float *outputData = outputTensors[outputIndex].GetTensorData<float>();
+
+    int64_t runtimeBatchSize = 1;
+    int64_t rowElements = 1;
+    if (!runtimeShape.empty()) {
+      runtimeBatchSize = runtimeShape[0];
+      if (runtimeBatchSize <= 0) {
+        throw std::runtime_error("OnnxManager: Invalid runtime output batch dimension for model '" +
+                                 modelName + "' output index " +
+                                 std::to_string(outputIndex));
+      }
+      if (runtimeBatchSize < activeBatchSize) {
+        throw std::runtime_error("OnnxManager: Runtime output batch dimension " +
+                                 std::to_string(runtimeBatchSize) +
+                                 " is smaller than the active systematic batch size " +
+                                 std::to_string(activeBatchSize) + " for model '" +
+                                 modelName + "' output index " +
+                                 std::to_string(outputIndex));
+      }
+      if (totalElements % runtimeBatchSize != 0) {
+        throw std::runtime_error("OnnxManager: Runtime output shape for model '" +
+                                 modelName + "' output index " +
+                                 std::to_string(outputIndex) +
+                                 " is not divisible by its batch dimension.");
+      }
+      rowElements = totalElements / runtimeBatchSize;
+    }
+
+    if (rowElements != 1) {
+      throw std::runtime_error("OnnxManager: Bundled inference currently supports only scalar-per-variation outputs; model '" +
+                               modelName + "' output index " +
+                               std::to_string(outputIndex) + " has row width " +
+                               std::to_string(rowElements) + ".");
+    }
+
+    for (size_t row = 0; row < activeIndices.size(); ++row) {
+      const size_t variationIndex = activeIndices[row];
+      scratch.outputs[outputIndex * nVariations + variationIndex] =
+          outputData[row * rowElements];
+    }
+  }
+
+  return scratch.outputs;
+}
+
+const std::vector<float> &runModelOutputs(
+  Ort::Session &session,
+    const std::vector<std::vector<int64_t>> &inputShapes,
+    const std::vector<int64_t> &inputElementCounts,
+    const std::vector<const char *> &inputNamePtrs,
+    const std::vector<const char *> &outputNamePtrs,
+    const ROOT::VecOps::RVec<Float_t> &inputVector,
+    int64_t totalExpectedElements) {
+  if (static_cast<int64_t>(inputVector.size()) > totalExpectedElements) {
+    throw std::runtime_error(
+        "OnnxManager: Packed input size exceeds expected ONNX input size.");
+  }
+
+  const auto &memoryInfo = cpuMemoryInfo();
+  thread_local OnnxScratchBuffers scratch;
+  if (scratch.ownedInputs.size() < inputShapes.size()) {
+    scratch.ownedInputs.resize(inputShapes.size());
+  }
+  scratch.inputTensors.clear();
+  scratch.inputTensors.reserve(inputShapes.size());
+
+  size_t cursor = 0;
+  for (size_t i = 0; i < inputShapes.size(); ++i) {
+    const int64_t expectedElements = inputElementCounts[i];
+    const size_t available = inputVector.size() - cursor;
+    const size_t toCopy =
+        std::min<size_t>(available, static_cast<size_t>(expectedElements));
+
+    auto &buffer = scratch.ownedInputs[i];
+    if (buffer.size() != static_cast<size_t>(expectedElements)) {
+      buffer.resize(static_cast<size_t>(expectedElements));
+    }
+
+    if (toCopy > 0) {
+      std::copy_n(inputVector.begin() + static_cast<std::ptrdiff_t>(cursor),
+                  static_cast<std::ptrdiff_t>(toCopy), buffer.begin());
+    }
+    if (toCopy < static_cast<size_t>(expectedElements)) {
+      std::fill(buffer.begin() + static_cast<std::ptrdiff_t>(toCopy),
+                buffer.end(), 0.0f);
+    }
+    cursor += toCopy;
+
+    scratch.inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
+        memoryInfo, buffer.data(), buffer.size(), inputShapes[i].data(),
+        inputShapes[i].size()));
+  }
+
+  auto outputTensors = session.Run(
+      Ort::RunOptions{nullptr}, inputNamePtrs.data(), scratch.inputTensors.data(),
+      scratch.inputTensors.size(), outputNamePtrs.data(), outputNamePtrs.size());
+
+  scratch.outputs.resize(outputTensors.size());
+  for (size_t i = 0; i < outputTensors.size(); ++i) {
+    const float *outputData = outputTensors[i].GetTensorData<float>();
+    scratch.outputs[i] = outputData[0];
+  }
+
+  return scratch.outputs;
 }
 } // namespace
 
@@ -170,8 +507,136 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
   const auto &inputElementCounts = model_inputElementCounts_m.at(modelName);
   const auto &inputNames = model_inputNames_m.at(modelName);
   const auto &outputNames = model_outputNames_m.at(modelName);
+  const auto &outputShapes = model_outputShapes_m.at(modelName);
   const auto &inputNamePtrs = model_inputNamePtrs_m.at(modelName);
   const auto &outputNamePtrs = model_outputNamePtrs_m.at(modelName);
+  const int64_t paddingSize = model_paddingSize_m.at(modelName);
+
+  const auto bundleModeIt = model_bundleModes_m.find(modelName);
+  const SystematicBundleMode bundleMode =
+      (bundleModeIt != model_bundleModes_m.end())
+          ? bundleModeIt->second
+          : SystematicBundleMode::Off;
+  const bool bundleRequested = bundleMode != SystematicBundleMode::Off;
+
+  if (bundleRequested) {
+    const bool scalarInputs = supportsBundledInputLayout(*dataManager_m, inputFeatures);
+    const bool scalarOutputs = supportsScalarPerVariationOutputs(outputShapes, modelName);
+    const bool bundleSupported = scalarInputs && scalarOutputs;
+
+    if (!bundleSupported) {
+      if (bundleMode == SystematicBundleMode::Required) {
+        throw std::runtime_error(
+            "OnnxManager: systematicBundle is required for model '" + modelName +
+            "' but the model uses unsupported input/output shapes for the bundled path.");
+      }
+    } else {
+      const auto variationLabels = resolveVariationLabels(
+          *systematicManager_m, *dataManager_m,
+          ISystematicManager::CANONICAL_SYST_BRANCH_NAME);
+      const size_t nVariations = variationLabels.size();
+      const auto &selectionMaskColumn = model_selectionMaskColumns_m.at(modelName);
+      const bool hasInputSystematics = std::any_of(
+          inputFeatures.begin(), inputFeatures.end(),
+          [&](const std::string &feature) {
+            return hasUsableSystematicColumns(*dataManager_m, *systematicManager_m,
+                                              feature, variationLabels);
+          });
+      const bool hasRunVarSystematics = hasUsableSystematicColumns(
+          *dataManager_m, *systematicManager_m, runVar, variationLabels);
+      const bool hasSelectionMaskSystematics =
+          !selectionMaskColumn.empty() &&
+          hasUsableSystematicColumns(*dataManager_m, *systematicManager_m,
+                                     selectionMaskColumn, variationLabels);
+
+      const std::string bundleTag = modelName + outputSuffix;
+      const std::string inputBundleName =
+          makeBundleColumnName(bundleTag, "input");
+      const std::string runMaskBundleName =
+          makeBundleColumnName(bundleTag, "run_mask");
+      const std::string selectionMaskBundleName =
+          makeBundleColumnName(bundleTag, "selection_mask");
+      const std::string resultBundleName =
+          makeBundleColumnName(bundleTag, "result");
+
+      definePackedInputBundle(*dataManager_m, *systematicManager_m, inputFeatures,
+                              variationLabels, inputBundleName,
+                              hasInputSystematics);
+      defineSelectionMaskBundle(*dataManager_m, *systematicManager_m, runVar,
+                                variationLabels, runMaskBundleName,
+                                hasRunVarSystematics);
+      if (!selectionMaskColumn.empty()) {
+        defineSelectionMaskBundle(*dataManager_m, *systematicManager_m,
+                                  selectionMaskColumn, variationLabels,
+                                  selectionMaskBundleName,
+                                  hasSelectionMaskSystematics);
+      }
+
+      auto df = dataManager_m->getDataFrame();
+      if (!selectionMaskColumn.empty()) {
+        auto bundledLambda = [session, inputShapes, inputRowElementCounts = model_inputRowElementCounts_m.at(modelName),
+                              paddingSize, inputNamePtrs, outputNamePtrs,
+                              modelName, numOutputs = outputNames.size(),
+                              nVariations](const ROOT::VecOps::RVec<Float_t> &inputVector,
+                                           const ROOT::VecOps::RVec<bool> &runMask,
+                                           const ROOT::VecOps::RVec<bool> &selectionMask)
+            -> ROOT::VecOps::RVec<Float_t> {
+          ROOT::VecOps::RVec<bool> activeMask(nVariations, false);
+          for (size_t i = 0; i < nVariations; ++i) {
+            const bool runEnabled = (i < runMask.size()) ? runMask[i] : false;
+            const bool selectionEnabled =
+                (i < selectionMask.size()) ? selectionMask[i] : false;
+            activeMask[i] = runEnabled && selectionEnabled;
+          }
+          const auto &outputs = runBundledModelOutputs(
+              *session, inputShapes, inputRowElementCounts, paddingSize,
+              inputNamePtrs, outputNamePtrs, inputVector, activeMask, -1.0f,
+              modelName);
+          return ROOT::VecOps::RVec<Float_t>(outputs.begin(), outputs.end());
+        };
+        df = df.Define(resultBundleName, bundledLambda,
+                       {inputBundleName, runMaskBundleName,
+                        selectionMaskBundleName});
+      } else {
+        auto bundledLambda = [session, inputShapes, inputRowElementCounts = model_inputRowElementCounts_m.at(modelName),
+                              paddingSize, inputNamePtrs, outputNamePtrs,
+                              modelName, numOutputs = outputNames.size(),
+                              nVariations](const ROOT::VecOps::RVec<Float_t> &inputVector,
+                                           const ROOT::VecOps::RVec<bool> &runMask)
+            -> ROOT::VecOps::RVec<Float_t> {
+          ROOT::VecOps::RVec<bool> activeMask(nVariations, false);
+          for (size_t i = 0; i < nVariations; ++i) {
+            activeMask[i] = (i < runMask.size()) ? runMask[i] : false;
+          }
+          const auto &outputs = runBundledModelOutputs(
+              *session, inputShapes, inputRowElementCounts, paddingSize,
+              inputNamePtrs, outputNamePtrs, inputVector, activeMask, -1.0f,
+              modelName);
+          return ROOT::VecOps::RVec<Float_t>(outputs.begin(), outputs.end());
+        };
+        df = df.Define(resultBundleName, bundledLambda,
+                       {inputBundleName, runMaskBundleName});
+      }
+      dataManager_m->setDataFrame(df);
+
+      if (outputNames.size() == 1) {
+        fanOutScalarResultBundle(*dataManager_m, *systematicManager_m,
+                                 modelName + outputSuffix, variationLabels,
+                                 resultBundleName, true);
+      } else {
+        std::vector<std::string> outputBaseNames;
+        outputBaseNames.reserve(outputNames.size());
+        for (size_t i = 0; i < outputNames.size(); ++i) {
+          outputBaseNames.push_back(modelName + "_output" +
+                                    std::to_string(i) + outputSuffix);
+        }
+        fanOutMultiOutputResultBundle(*dataManager_m, *systematicManager_m,
+                                      outputBaseNames, variationLabels,
+                                      resultBundleName, true);
+      }
+      return;
+    }
+  }
 
   // Auto-create packed model input from configured inputVariables for all models.
   dataManager_m->DefineVector("input_" + modelName, inputFeatures, "Float_t", *systematicManager_m);
@@ -188,44 +653,9 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
       if (!runVar) {
         return -1.0f;
       }
-
-      if (static_cast<int64_t>(inputVector.size()) > totalExpectedElements) {
-        throw std::runtime_error(
-            "OnnxManager: Packed input size exceeds expected ONNX input size.");
-      }
-
-      const auto &memoryInfo = cpuMemoryInfo();
-      std::vector<std::vector<float>> ownedInputs;
-      ownedInputs.reserve(inputShapes.size());
-      std::vector<Ort::Value> inputTensors;
-      inputTensors.reserve(inputShapes.size());
-
-      size_t cursor = 0;
-      for (size_t i = 0; i < inputShapes.size(); ++i) {
-        const int64_t expectedElements = inputElementCounts[i];
-        const size_t available = inputVector.size() - cursor;
-        const size_t toCopy =
-            std::min<size_t>(available, static_cast<size_t>(expectedElements));
-
-        auto &buffer = ownedInputs.emplace_back(
-            static_cast<size_t>(expectedElements), 0.0f);
-        std::copy_n(inputVector.begin() + static_cast<std::ptrdiff_t>(cursor),
-                    static_cast<std::ptrdiff_t>(toCopy),
-                    buffer.begin());
-        cursor += toCopy;
-
-        inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
-            memoryInfo, buffer.data(), buffer.size(),
-            inputShapes[i].data(), inputShapes[i].size()));
-      }
-
-      auto output_tensors = session->Run(
-          Ort::RunOptions{nullptr},
-          inputNamePtrs.data(), inputTensors.data(), inputTensors.size(),
-          outputNamePtrs.data(), outputNamePtrs.size());
-
-      float *output_data = output_tensors[0].GetTensorMutableData<float>();
-      return output_data[0];
+      return runModelOutputs(*session, inputShapes, inputElementCounts,
+                             inputNamePtrs, outputNamePtrs, inputVector,
+                             totalExpectedElements)[0];
     };
 
     std::string outputColName = modelName + outputSuffix;
@@ -242,45 +672,12 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
       if (!runVar) {
         return outputs;
       }
-
-      if (static_cast<int64_t>(inputVector.size()) > totalExpectedElements) {
-        throw std::runtime_error(
-            "OnnxManager: Packed input size exceeds expected ONNX input size.");
-      }
-
-      const auto &memoryInfo = cpuMemoryInfo();
-      std::vector<std::vector<float>> ownedInputs;
-      ownedInputs.reserve(inputShapes.size());
-      std::vector<Ort::Value> inputTensors;
-      inputTensors.reserve(inputShapes.size());
-
-      size_t cursor = 0;
-      for (size_t i = 0; i < inputShapes.size(); ++i) {
-        const int64_t expectedElements = inputElementCounts[i];
-        const size_t available = inputVector.size() - cursor;
-        const size_t toCopy =
-            std::min<size_t>(available, static_cast<size_t>(expectedElements));
-
-        auto &buffer = ownedInputs.emplace_back(
-            static_cast<size_t>(expectedElements), 0.0f);
-        std::copy_n(inputVector.begin() + static_cast<std::ptrdiff_t>(cursor),
-                    static_cast<std::ptrdiff_t>(toCopy),
-                    buffer.begin());
-        cursor += toCopy;
-
-        inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
-            memoryInfo, buffer.data(), buffer.size(),
-            inputShapes[i].data(), inputShapes[i].size()));
-      }
-
-      auto output_tensors = session->Run(
-          Ort::RunOptions{nullptr},
-          inputNamePtrs.data(), inputTensors.data(), inputTensors.size(),
-          outputNamePtrs.data(), outputNamePtrs.size());
-
+      const auto modelOutputs =
+          runModelOutputs(*session, inputShapes, inputElementCounts,
+                          inputNamePtrs, outputNamePtrs, inputVector,
+                          totalExpectedElements);
       for (size_t i = 0; i < numOutputs; i++) {
-        float *output_data = output_tensors[i].GetTensorMutableData<float>();
-        outputs[i] = output_data[0];
+        outputs[i] = modelOutputs[i];
       }
 
       return outputs;
@@ -307,6 +704,35 @@ void OnnxManager::applyAllModels(const std::string &outputSuffix) {
   for (const auto &modelName : getAllModelNames()) {
     applyModel(modelName, outputSuffix);
   }
+}
+
+Float_t OnnxManager::runScalarModel(
+    const std::string &modelName,
+    const ROOT::VecOps::RVec<Float_t> &inputVector) const {
+  const auto &session = this->objects_m.at(modelName);
+  const auto &inputShapes = model_inputShapes_m.at(modelName);
+  const auto &inputElementCounts = model_inputElementCounts_m.at(modelName);
+  const auto &inputNamePtrs = model_inputNamePtrs_m.at(modelName);
+  const auto &outputNamePtrs = model_outputNamePtrs_m.at(modelName);
+
+  if (outputNamePtrs.size() != 1) {
+    throw std::runtime_error("OnnxManager: Model '" + modelName +
+                             "' does not have exactly one output.");
+  }
+
+  const int64_t totalExpectedElements = std::accumulate(
+      inputElementCounts.begin(), inputElementCounts.end(), int64_t{0});
+  return runModelOutputs(*session, inputShapes, inputElementCounts,
+                         inputNamePtrs, outputNamePtrs, inputVector,
+                         totalExpectedElements)[0];
+}
+
+void OnnxManager::setModelFeatures(const std::string &modelName,
+                                   const std::vector<std::string> &features) {
+  if (objects_m.find(modelName) == objects_m.end()) {
+    throw std::runtime_error("OnnxManager: Model not found: " + modelName);
+  }
+  features_m[modelName] = features;
 }
 
 /**
@@ -427,10 +853,6 @@ void OnnxManager::loadModelsFromConfig(
     const IConfigurationProvider &configProvider,
     const std::vector<std::unordered_map<std::string, std::string>> &modelConfig) {
 
-  Ort::SessionOptions session_options;
-  session_options.SetIntraOpNumThreads(1);
-  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
-
   for (const auto &entryKeys : modelConfig) {
     const std::string &modelName = entryKeys.at("name");
 
@@ -536,20 +958,43 @@ void OnnxManager::loadModelsFromConfig(
 
     size_t num_output_nodes = session->GetOutputCount();
     std::vector<std::string> output_names;
+    std::vector<std::vector<int64_t>> outputShapes;
     for (size_t i = 0; i < num_output_nodes; i++) {
       auto output_name = session->GetOutputNameAllocated(i, allocator);
       output_names.push_back(std::string(output_name.get()));
+
+      auto typeInfo = session->GetOutputTypeInfo(i);
+      auto tensorInfo = typeInfo.GetTensorTypeAndShapeInfo();
+      outputShapes.push_back(tensorInfo.GetShape());
     }
+
+    auto bundleModeIt = entryKeys.find("systematicBundle");
+    const auto bundleMode = parseBundleMode(
+        (bundleModeIt != entryKeys.end()) ? bundleModeIt->second : "",
+        modelName);
+    auto selectionMaskIt = entryKeys.find("selectionMaskColumn");
+    const std::string selectionMaskColumn =
+        (selectionMaskIt != entryKeys.end()) ? selectionMaskIt->second : "";
 
     objects_m.emplace(modelName, session);
     features_m.emplace(modelName, inputVariableVector);
     model_runVars_m.emplace(modelName, entryKeys.at("runVar"));
     model_inputNames_m.emplace(modelName, input_names);
     model_outputNames_m.emplace(modelName, output_names);
+    model_outputShapes_m.emplace(modelName, outputShapes);
     model_paddingSize_m.emplace(modelName, paddingSize);
     model_inputShapes_m.emplace(modelName, resolvedInputShapes);
     model_inputElementCounts_m.emplace(modelName, inputElementCounts);
+    std::vector<int64_t> inputRowElementCounts;
+    inputRowElementCounts.reserve(resolvedInputShapes.size());
+    for (size_t i = 0; i < resolvedInputShapes.size(); ++i) {
+      inputRowElementCounts.push_back(
+          trailingElementCount(resolvedInputShapes[i], modelName, i, "input"));
+    }
+    model_inputRowElementCounts_m.emplace(modelName, inputRowElementCounts);
     model_useCuda_m.emplace(modelName, useCuda);
+    model_selectionMaskColumns_m.emplace(modelName, selectionMaskColumn);
+    model_bundleModes_m.emplace(modelName, bundleMode);
 
 
     const auto &storedInputNames = model_inputNames_m.at(modelName);

@@ -1,0 +1,10 @@
+# =============================================================================
+# ints.yaml — Scalar integer constants for ExampleAnalysis (ATLAS dimuon)
+#
+# Migrated from ints.txt.  Each key becomes a constant integer column in
+# the RDataFrame.
+# =============================================================================
+
+# Sample type code (used by TriggerManager to select the trigger group).
+# 10 = Z→μμ MC sample (ATLAS type code convention).
+type: 10

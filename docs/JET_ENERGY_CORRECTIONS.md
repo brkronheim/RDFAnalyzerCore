@@ -65,8 +65,8 @@ after all plugins are configured.
 #include <PhysicsObjectCollection.h>
 
 // Assume analyzer already has a JetEnergyScaleManager plugin registered.
-auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare jet and MET column names.
 jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -753,8 +753,8 @@ systematic workflow using all features of the plugin.
 int main(int argc, char** argv) {
     Analyzer analyzer(argv[1]);
 
-    auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-    auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+    auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+    auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
     // -----------------------------------------------------------------------
     // 1. Declare column names
@@ -874,7 +874,7 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     // 11. Book histograms and save
     // -----------------------------------------------------------------------
-    auto* nhm = analyzer.getPlugin<INDHistogramManager>("histograms");
+    auto nhm = analyzer.getPlugin<INDHistogramManager>("histograms");
     nhm->bookHistogram("dijetMass",    "dijetMass",    "event_weight", 50, 0, 1000);
     nhm->bookHistogram("dijetMassUp",  "dijetMass_TotalUp", "event_weight", 50, 0, 1000);
 

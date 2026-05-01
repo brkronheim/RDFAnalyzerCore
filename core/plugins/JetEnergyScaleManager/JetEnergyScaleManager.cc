@@ -1,4 +1,5 @@
 #include <JetEnergyScaleManager.h>
+#include <TInterpreter.h>
 #include <analyzer.h>
 #include <ROOT/RVec.hxx>
 #include <api/ILogger.h>
@@ -9,16 +10,77 @@
 
 namespace {
 
-std::string buildPackedInputExpression(const std::vector<std::string> &inputColumns) {
-  std::string expr =
-      "ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> _out(" +
-      inputColumns[0] + ".size());\n";
-  for (const auto &column : inputColumns) {
-    expr += "for (size_t _i = 0; _i < _out.size(); ++_i)"
-            " _out[_i].push_back(static_cast<double>(" +
-            column + "[_i]));\n";
+bool isVectorColumnType(const std::string &columnType) {
+  return columnType.find("RVec") != std::string::npos;
+}
+
+void ensureFlattenHelperDeclared() {
+  static const bool declared = []() {
+    return gInterpreter->Declare(R"cpp(
+#include <ROOT/RVec.hxx>
+#include <algorithm>
+#include <type_traits>
+
+namespace jet_energy_scale_detail {
+
+template <typename... Args>
+ROOT::VecOps::RVec<double> FlattenInputs(const Args &...args) {
+  using ROOT::VecOps::RVec;
+  std::size_t nFills = 0U;
+  bool sawVectorInput = false;
+  auto updateSize = [&](auto const &arg) {
+    if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
+      if (!sawVectorInput) {
+        nFills = 1U;
+      }
+    } else {
+      sawVectorInput = true;
+      nFills = std::max<std::size_t>(nFills, arg.size());
+    }
+  };
+  (updateSize(args), ...);
+
+  if (sawVectorInput && nFills == 0U) {
+    return RVec<double>{};
   }
-  expr += "return _out;";
+
+  const std::size_t stride = sizeof...(Args);
+  RVec<double> out;
+  out.reserve(nFills * stride);
+  for (std::size_t i = 0; i < nFills; ++i) {
+    auto pushVal = [&](auto const &arg) {
+      if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
+        out.emplace_back(static_cast<double>(arg));
+      } else {
+        const auto idx = (i < arg.size()) ? i : arg.size() - 1;
+        out.emplace_back(static_cast<double>(arg[idx]));
+      }
+    };
+    (pushVal(args), ...);
+  }
+  return out;
+}
+
+} // namespace jet_energy_scale_detail
+    )cpp");
+  }();
+
+  if (!declared) {
+    throw std::runtime_error(
+        "JetEnergyScaleManager: failed to declare flatten helper in Cling");
+  }
+}
+
+std::string buildFlattenInputExpression(
+    const std::vector<std::string> &inputColumns) {
+  std::string expr = "jet_energy_scale_detail::FlattenInputs(";
+  for (size_t index = 0; index < inputColumns.size(); ++index) {
+    if (index != 0) {
+      expr += ", ";
+    }
+    expr += inputColumns[index];
+  }
+  expr += ")";
   return expr;
 }
 
@@ -69,6 +131,7 @@ void JetEnergyScaleManager::setJetColumns(const std::string &ptColumn,
   etaColumn_m = etaColumn;
   phiColumn_m = phiColumn;
   massColumn_m = massColumn;
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +148,7 @@ void JetEnergyScaleManager::setMETColumns(const std::string &metPtColumn,
         "JetEnergyScaleManager::setMETColumns: metPhiColumn must not be empty");
   metPtColumn_m = metPtColumn;
   metPhiColumn_m = metPhiColumn;
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +166,7 @@ void JetEnergyScaleManager::removeExistingCorrections(
   rawFactorColumn_m = rawFactorColumn;
   rawPtColumn_m = ptColumn_m + "_raw";
   rawMassColumn_m = massColumn_m.empty() ? "" : massColumn_m + "_raw";
+  executionPending_m = true;
 }
 
 void JetEnergyScaleManager::setRawPtColumn(const std::string &rawPtColumn) {
@@ -112,6 +177,7 @@ void JetEnergyScaleManager::setRawPtColumn(const std::string &rawPtColumn) {
     throw std::runtime_error("JetEnergyScaleManager::setRawPtColumn: "
                              "removeExistingCorrections() was already called");
   rawPtColumn_m = rawPtColumn;
+  executionPending_m = true;
 }
 
 void JetEnergyScaleManager::setJERSmearingColumns(
@@ -129,6 +195,7 @@ void JetEnergyScaleManager::setJERSmearingColumns(
   genJetPtColumn_m = genJetPtColumn;
   rhoColumn_m = rhoColumn;
   eventColumn_m = eventColumn;
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +247,7 @@ void JetEnergyScaleManager::applyCorrection(
   }
 
   correctionSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 void JetEnergyScaleManager::applyCorrectionlib(
@@ -188,20 +256,26 @@ void JetEnergyScaleManager::applyCorrectionlib(
     const std::string &inputPtColumn, const std::string &outputPtColumn,
     bool applyToMass, const std::string &inputMassColumn,
     const std::string &outputMassColumn,
-    const std::vector<std::string> &inputColumns) {
-  // Ask the CorrectionManager to evaluate the correctionlib formula and store
-  // per-jet scale factors in a new RVec<Float_t> column immediately.
-  cm.applyCorrectionVec(correctionName, stringArgs, inputColumns);
-
-  // The SF column name follows CorrectionManager::makeBranchName convention:
-  //   correctionName + "_" + stringArgs[0] + "_" + stringArgs[1] + ...
+  const std::vector<std::string> &inputColumns,
+  bool outputIsRelativeDelta,
+  float relativeDeltaDirection) {
   std::string sfColumn = correctionName;
   for (const auto &arg : stringArgs)
     sfColumn += "_" + arg;
 
-  // Schedule the element-wise pT (and mass) multiplication for execute().
   applyCorrection(inputPtColumn, sfColumn, outputPtColumn, applyToMass,
                   inputMassColumn, outputMassColumn);
+
+  auto &step = correctionSteps_m.back();
+  step.evaluateScaleFactor = true;
+  step.correctionManager = &cm;
+  step.correctionName = correctionName;
+  step.correctionStringArgs = stringArgs;
+  step.correctionInputColumns = inputColumns;
+  if (outputIsRelativeDelta) {
+    step.scaleFactorOffset = 1.0f;
+    step.scaleFactorMultiplier = relativeDeltaDirection;
+  }
 }
 
 void JetEnergyScaleManager::applyJERSmearing(
@@ -252,6 +326,7 @@ void JetEnergyScaleManager::applyJERSmearing(
                                 : outputMassColumn;
   }
   jerSmearingSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +348,7 @@ void JetEnergyScaleManager::registerSystematicSources(
           "source names must not be empty");
   }
   systematicSets_m[setName] = sources;
+  executionPending_m = true;
 }
 
 const std::vector<std::string> &
@@ -304,33 +380,20 @@ void JetEnergyScaleManager::applySystematicSet(
   const auto &sources = getSystematicSources(setName); // throws if not found
 
   for (const auto &source : sources) {
-    // Output pT column names for this source.
     const std::string upPtCol = outputPtPrefix + "_" + source + "_up";
     const std::string dnPtCol = outputPtPrefix + "_" + source + "_down";
 
-    // Apply up and down corrections via CorrectionManager (SF column defined now).
-    // String argument order: {source, "up"} / {source, "down"} as per CMS convention.
-    // The explicit outputBranch parameter is used to keep naming consistent.
-    const std::string sfUpCol = correctionName + "_" + source + "_up";
-    const std::string sfDnCol = correctionName + "_" + source + "_down";
-    cm.applyCorrectionVec(correctionName, {source, "up"}, inputColumns, sfUpCol);
-    cm.applyCorrectionVec(correctionName, {source, "down"}, inputColumns, sfDnCol);
-
-    // Schedule pT (and optionally mass) correction for execute().
-    // Derive explicit mass column names so they follow the same pattern.
     const std::string inMass = inputMassColumn.empty()
                                    ? deriveMassColumnName(inputPtColumn)
                                    : inputMassColumn;
     const std::string upMasCol = applyToMass ? deriveMassColumnName(upPtCol) : "";
     const std::string dnMasCol = applyToMass ? deriveMassColumnName(dnPtCol) : "";
 
-    applyCorrection(inputPtColumn, sfUpCol, upPtCol, applyToMass,
-                    inMass, upMasCol);
-    applyCorrection(inputPtColumn, sfDnCol, dnPtCol, applyToMass,
-                    inMass, dnMasCol);
+    applyCorrectionlib(cm, correctionName, {source, "up"}, inputPtColumn,
+                       upPtCol, applyToMass, inMass, upMasCol, inputColumns);
+    applyCorrectionlib(cm, correctionName, {source, "down"}, inputPtColumn,
+                       dnPtCol, applyToMass, inMass, dnMasCol, inputColumns);
 
-    // Register the variation (mass columns may be empty when applyToMass is
-    // false or when the prefix substitution cannot be made).
     addVariation(source, upPtCol, dnPtCol,
                  applyToMass ? upMasCol : "",
                  applyToMass ? dnMasCol : "");
@@ -363,6 +426,7 @@ void JetEnergyScaleManager::addVariation(const std::string &systematicName,
   entry.upMassColumn = upMassColumn;
   entry.downMassColumn = downMassColumn;
   variations_m.push_back(std::move(entry));
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +470,7 @@ void JetEnergyScaleManager::propagateMET(
   step.outputMETPhiColumn = outputMETPhiColumn;
   step.jetPtThreshold = jetPtThreshold;
   metPropagationSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +484,7 @@ void JetEnergyScaleManager::setInputJetCollection(
         "JetEnergyScaleManager::setInputJetCollection: "
         "collectionColumn must not be empty");
   inputJetCollectionColumn_m = collectionColumn;
+  executionPending_m = true;
 }
 
 void JetEnergyScaleManager::defineCollectionOutput(
@@ -443,6 +509,7 @@ void JetEnergyScaleManager::defineCollectionOutput(
   step.correctedMassColumn = correctedMassColumn;
   step.outputCollectionColumn = outputCollectionColumn;
   collectionOutputSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 void JetEnergyScaleManager::defineVariationCollections(
@@ -467,6 +534,7 @@ void JetEnergyScaleManager::defineVariationCollections(
   step.collectionPrefix = collectionPrefix;
   step.variationMapColumn = variationMapColumn;
   variationCollectionsSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -509,11 +577,19 @@ JetEnergyScaleManager::getVariations() const {
 void JetEnergyScaleManager::execute() {
   if (!dataManager_m)
     throw std::runtime_error("JetEnergyScaleManager::execute: context not set");
+  if (!executionPending_m)
+    return;
 
   // 1. Define raw-pT and raw-mass columns (if removeExistingCorrections was called).
   if (!rawFactorColumn_m.empty()) {
-    {
-      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+    const auto existingColumns = df.GetColumnNames();
+    const auto hasColumn = [&existingColumns](const std::string &columnName) {
+      return std::find(existingColumns.begin(), existingColumns.end(), columnName) !=
+             existingColumns.end();
+    };
+
+    if (!hasColumn(rawPtColumn_m)) {
       const std::string ptCol = ptColumn_m;
       const std::string rawFactor = rawFactorColumn_m;
       const std::string rawPtCol = rawPtColumn_m;
@@ -526,12 +602,13 @@ void JetEnergyScaleManager::execute() {
           {ptCol, rawFactor});
       dataManager_m->setDataFrame(newDf);
     }
-    if (!massColumn_m.empty() && !rawMassColumn_m.empty()) {
-      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+    if (!massColumn_m.empty() && !rawMassColumn_m.empty() &&
+        !hasColumn(rawMassColumn_m)) {
+      ROOT::RDF::RNode massDf = dataManager_m->getDataFrame();
       const std::string massCol = massColumn_m;
       const std::string rawFactor = rawFactorColumn_m;
       const std::string rawMassCol = rawMassColumn_m;
-      auto newDf = df.Define(
+      auto newDf = massDf.Define(
           rawMassCol,
           [](const ROOT::VecOps::RVec<Float_t> &mass,
              const ROOT::VecOps::RVec<Float_t> &rawFactor) {
@@ -544,6 +621,19 @@ void JetEnergyScaleManager::execute() {
 
   // 2. Apply each registered correction step.
   for (const auto &step : correctionSteps_m) {
+    if (step.evaluateScaleFactor) {
+      if (!step.correctionManager) {
+        throw std::runtime_error(
+            "JetEnergyScaleManager::execute: missing CorrectionManager for deferred correction '" +
+            step.correctionName + "'");
+      }
+      step.correctionManager->applyCorrectionVec(
+          step.correctionName,
+          step.correctionStringArgs,
+          step.correctionInputColumns,
+          step.sfColumn);
+    }
+
     // Corrected pT.
     {
       ROOT::RDF::RNode df = dataManager_m->getDataFrame();
@@ -552,8 +642,12 @@ void JetEnergyScaleManager::execute() {
       const std::string outputPt = step.outputPtColumn;
       auto newDf = df.Define(
           outputPt,
-          [](const ROOT::VecOps::RVec<Float_t> &pt,
-             const ROOT::VecOps::RVec<Float_t> &sf) { return pt * sf; },
+          [offset = step.scaleFactorOffset,
+           multiplier = step.scaleFactorMultiplier](
+              const ROOT::VecOps::RVec<Float_t> &pt,
+              const ROOT::VecOps::RVec<Float_t> &sf) {
+            return pt * (offset + multiplier * sf);
+          },
           {inputPt, sf});
       dataManager_m->setDataFrame(newDf);
     }
@@ -565,8 +659,12 @@ void JetEnergyScaleManager::execute() {
       const std::string outputMass = step.outputMassColumn;
       auto newDf = df.Define(
           outputMass,
-          [](const ROOT::VecOps::RVec<Float_t> &mass,
-             const ROOT::VecOps::RVec<Float_t> &sf) { return mass * sf; },
+          [offset = step.scaleFactorOffset,
+           multiplier = step.scaleFactorMultiplier](
+              const ROOT::VecOps::RVec<Float_t> &mass,
+              const ROOT::VecOps::RVec<Float_t> &sf) {
+            return mass * (offset + multiplier * sf);
+          },
           {inputMass, sf});
       dataManager_m->setDataFrame(newDf);
     }
@@ -582,31 +680,46 @@ void JetEnergyScaleManager::execute() {
 
     {
       ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      ensureFlattenHelperDeclared();
       auto newDf = df.Define(resInputCol,
-                             buildPackedInputExpression(step.ptResolutionInputs));
+                             buildFlattenInputExpression(step.ptResolutionInputs));
       dataManager_m->setDataFrame(newDf);
     }
 
     {
       ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      ensureFlattenHelperDeclared();
       auto newDf = df.Define(sfInputCol,
-                             buildPackedInputExpression(step.scaleFactorInputs));
+                             buildFlattenInputExpression(step.scaleFactorInputs));
       dataManager_m->setDataFrame(newDf);
     }
 
     {
       ROOT::RDF::RNode df = dataManager_m->getDataFrame();
       const auto resolution = step.ptResolutionCorrection;
+      const auto featureCount = step.ptResolutionInputs.size();
       auto newDf = df.Define(
           jerResCol,
-          [resolution](const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> &inputMatrix)
+          [resolution, featureCount](const ROOT::VecOps::RVec<double> &flatInputVector)
               -> ROOT::VecOps::RVec<Float_t> {
-            ROOT::VecOps::RVec<Float_t> result(inputMatrix.size());
-            for (std::size_t i = 0; i < inputMatrix.size(); ++i) {
+            if (featureCount == 0) {
+              throw std::runtime_error("JetEnergyScaleManager: empty JER resolution feature list");
+            }
+            if (flatInputVector.size() % featureCount != 0) {
+              throw std::runtime_error("JetEnergyScaleManager: invalid flattened JER resolution input size");
+            }
+            const std::size_t objectCount = flatInputVector.size() / featureCount;
+            ROOT::VecOps::RVec<Float_t> result(objectCount);
+            for (std::size_t i = 0; i < objectCount; ++i) {
               std::vector<correction::Variable::Type> values;
-              values.reserve(inputMatrix[i].size());
-              for (double value : inputMatrix[i])
+              values.reserve(featureCount);
+              const auto begin = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
+              const auto end = begin + static_cast<std::ptrdiff_t>(featureCount);
+              for (auto it = begin; it != end; ++it)
+                {
+                double value = *it;
                 values.emplace_back(value);
+                }
               result[i] = static_cast<Float_t>(resolution->evaluate(values));
             }
             return result;
@@ -619,20 +732,29 @@ void JetEnergyScaleManager::execute() {
       ROOT::RDF::RNode df = dataManager_m->getDataFrame();
       const auto scaleFactor = step.scaleFactorCorrection;
       const auto systematic = step.systematic;
+      const auto featureCount = step.scaleFactorInputs.size();
       auto newDf = df.Define(
           jerSfCol,
-          [scaleFactor, systematic](const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> &inputMatrix)
+          [scaleFactor, systematic, featureCount](const ROOT::VecOps::RVec<double> &flatInputVector)
               -> ROOT::VecOps::RVec<Float_t> {
-            ROOT::VecOps::RVec<Float_t> result(inputMatrix.size());
-            for (std::size_t i = 0; i < inputMatrix.size(); ++i) {
+            if (featureCount == 0) {
+              throw std::runtime_error("JetEnergyScaleManager: empty JER scale-factor feature list");
+            }
+            if (flatInputVector.size() % featureCount != 0) {
+              throw std::runtime_error("JetEnergyScaleManager: invalid flattened JER scale-factor input size");
+            }
+            const std::size_t objectCount = flatInputVector.size() / featureCount;
+            ROOT::VecOps::RVec<Float_t> result(objectCount);
+            for (std::size_t i = 0; i < objectCount; ++i) {
               std::vector<correction::Variable::Type> values;
-              values.reserve(inputMatrix[i].size() + 1U);
+              values.reserve(featureCount + 1U);
               std::size_t numericIndex = 0;
+              const auto begin = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
               for (const auto &input : scaleFactor->inputs()) {
                 if (input.type() == correction::Variable::VarType::string) {
                   values.emplace_back(systematic);
                 } else {
-                  values.emplace_back(inputMatrix[i].at(numericIndex));
+                  values.emplace_back(*(begin + static_cast<std::ptrdiff_t>(numericIndex)));
                   ++numericIndex;
                 }
               }
@@ -964,6 +1086,7 @@ void JetEnergyScaleManager::execute() {
   metPropagationSteps_m.clear();
   collectionOutputSteps_m.clear();
   variationCollectionsSteps_m.clear();
+  executionPending_m = false;
 }
 
 // ---------------------------------------------------------------------------

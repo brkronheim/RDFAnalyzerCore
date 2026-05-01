@@ -14,8 +14,8 @@ The tool lives in `core/python/validate_config.py` and supports two independent 
 ## CLI Usage
 
 ```
-python -m validate_config --config path/to/submit_config.txt [--mode {auto,nano,opendata}]
-python -m validate_config --analysis-config path/to/analysis.yaml
+python core/python/validate_config.py --config path/to/submit_config.txt [--mode {auto,nano,opendata}]
+python core/python/validate_config.py --analysis-config path/to/analysis.yaml
 ```
 
 The two modes are mutually exclusive; exactly one of `--config` or `--analysis-config` must be supplied.
@@ -39,7 +39,7 @@ The two modes are mutually exclusive; exactly one of `--config` or `--analysis-c
 
 ```
 Config validation warnings:
-- Missing 'norm' in sample config (line 4): 'norm' will be calculated on the fly and is deprecated
+- Missing 'norm' in sample config (line 4): 'norm' has been removed in favor of automatic weight calculation from `sum_weights`. Use `sum_weights` field in dataset manifests instead.
 Config validation OK
 ```
 
@@ -86,7 +86,7 @@ If the following keys are present and non-empty, the referenced files must exist
 | `sampleConfig` | Yes – error if absent |
 | `floatConfig` | Yes – error if absent |
 | `intConfig` | Yes – error if absent |
-| `saveConfig` | No – warning if absent |
+| `saveConfig` | No – warnings are emitted only when the file is provided but not found |
 
 Paths are resolved relative to the parent directory of the submit config file.
 
@@ -96,16 +96,18 @@ When `threads` is present its value must be an integer, the string `auto`, or th
 
 ### Sample config validation
 
-The sample config (pointed to by `sampleConfig`) is validated according to its format:
+The sample config (pointed to by `sampleConfig`) is validated according to its format.
 
-- **YAML (`.yaml` / `.yml`)** – loaded via `DatasetManifest.load_yaml()` and then mode-specific field checks are applied (see below).
+- **YAML (`.yaml` / `.yml`)** – loaded via `DatasetManifest.load_yaml()` and then mode-specific field checks are applied (see below). This is the preferred format for new workflows.
 - **Text (any other extension)** – parsed as `key=value` entries and mode-specific checks are applied.
+
+> **Note:** Legacy text sample configs are deprecated and supported only for backward compatibility. New workflows should use YAML manifests and the explicit compatibility helper `core/python/rucio_discovery.py:load_legacy_sample_config()` only when necessary.
 
 #### Mode detection
 
 When `--mode auto` is used (the default) the mode is inferred from the sample config content:
 
-- **OpenData** – any entry that has a purely numeric `das` field (a CERN Open Data record ID) triggers OpenData mode.
+- **OpenData** – for YAML sample configs, any entry with a purely numeric `das` field triggers OpenData mode. For text sample configs, the presence of a `recids` entry triggers OpenData mode.
 - **NANO** – everything else.
 
 #### NANO mode sample checks
@@ -123,8 +125,8 @@ Each sample entry is expected to contain:
 
 | Check | Severity |
 |-------|----------|
-| A `recids` entry must be present | Error |
-| Each sample entry must have a `das` field (record ID) | Error |
+| A `recids` entry must be present for text sample configs | Error |
+| Each sample entry must have a `das` field (record ID) for OpenData YAML manifests | Error |
 | Numeric fields (`xsec`, `norm`, `kfac`, `extraScale`, `lumi`) must be valid floats | Error |
 | `type` field must be a valid integer | Error |
 
@@ -235,6 +237,8 @@ Checks that each plugin name is in the known registry and that all declared conf
 | `GoldenJsonManager` | `json_files` | `list` |
 | `KinematicFitManager` | `fits` | `list` |
 | `NamedObjectManager` | `objects` | `list` |
+| `JetEnergyScaleManager` | `jet_columns`, `met_columns`, `raw_factor_column`, `corrections`, `systematic_sets`, `variations` | `dict`, `dict`, `str`, `list`, `dict`, `list` |
+| `TaggerWorkingPointManager` | `jet_columns`, `tagger_column`, `working_points`, `input_collection`, `corrections`, `fraction_correction`, `systematic_sets`, `variations`, `wp_collections` | `dict`, `str`, `list`, `str`, `list`, `dict`, `dict`, `list`, `list` |
 
 All plugins have an empty `required_keys` list – every key is optional.  A plugin entry can therefore be as minimal as `PluginName: true`.
 

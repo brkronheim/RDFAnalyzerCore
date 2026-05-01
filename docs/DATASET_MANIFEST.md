@@ -308,7 +308,7 @@ lumi_all  = manifest.lumi_for()             # global lumi
 Classmethod. Auto-detect format and load a manifest:
 
 - Files ending in `.yaml` / `.yml` are loaded as YAML manifests.
-- All other files are interpreted as legacy key=value text configs.
+- All other files are interpreted as **DEPRECATED** legacy key=value text configs. Use YAML manifests for new analyses.
 
 #### `DatasetManifest.load_yaml(path: str) -> DatasetManifest`
 
@@ -578,24 +578,8 @@ This makes every dataset selection fully auditable and reproducible: given the m
 
 ## Legacy Format Compatibility
 
-For backward compatibility, `DatasetManifest.load()` also accepts the legacy key=value text format used by older submission scripts:
-
-```text
-lumi=59740.0
-WL=T2_DE_RWTH,T2_CH_CERN
-BL=T2_US_Vanderbilt
-
-name=DYJets_2018 xsec=6077.22 das=/DYJetsToLL/... type=mc kfac=1.0 norm=1234567.0 year=2018
-name=SingleMuon_2018C das=/SingleMuon/... type=data year=2018 era=Run2018C
-```
-
-Global directives:
-- `lumi=<float>` — integrated luminosity
-- `WL=site1,site2` — site whitelist
-- `BL=site1,site2` — site blacklist
-
-Per-sample recognised fields: `name`, `xsec`, `das`, `type` (`"mc"`/`"data"`), `kfac`, `extraScale`, `filterEfficiency`, `norm` (sum of weights), `year`, `era`, `campaign`, `process`, `group`, `stitch_id`, `parent`, `fileList` (comma-separated file paths).
+`DatasetManifest.load()` now supports only explicit YAML manifest files. Legacy text-format sample configs are no longer handled by `DatasetManifest.load()` and must be parsed through an explicit compatibility helper such as `core/python/rucio_discovery.py:load_legacy_sample_config()` when necessary.
 
 For YAML manifests, keep framework typing in `dtype` and place any analysis-specific integer code in `sample_type`. Submission tools can then materialize that numeric code into per-job integer configs without overloading the main config `type` key.
 
-The YAML format is preferred for new analyses; the legacy format is maintained solely for compatibility with existing submission scripts.
+The YAML format is preferred for new analyses; legacy key=value text format support is deprecated and isolated behind explicit compatibility adapters.

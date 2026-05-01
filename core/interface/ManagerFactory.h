@@ -18,40 +18,6 @@ class ISystematicManager;
 class ManagerFactory {
 public:
     /**
-     * @brief Create a BDT manager instance
-     * @param configProvider Reference to the configuration provider
-     * @return Unique pointer to the BDT manager interface
-     */
-    //static std::unique_ptr<IBDTManager> createBDTManager(
-    //    IConfigurationProvider& configProvider);
-    
-    /**
-     * @brief Create a correction manager instance
-     * @param configProvider Reference to the configuration provider
-     * @return Unique pointer to the correction manager interface
-     */
-    //static std::unique_ptr<ICorrectionManager> createCorrectionManager(
-    //    IConfigurationProvider& configProvider);
-    
-    /**
-     * @brief Create a trigger manager instance
-     * @param configProvider Reference to the configuration provider
-     * @return Unique pointer to the trigger manager interface
-     */
-    //static std::unique_ptr<ITriggerManager> createTriggerManager(
-    //    IConfigurationProvider& configProvider);
-    
-    /**
-     * @brief Create an ND histogram manager instance
-     * @param dataFrameProvider Reference to the dataframe provider
-     * @param configProvider Reference to the configuration provider
-     * @param systematicManager Reference to the systematic manager
-     * @return Unique pointer to the ND histogram manager interface
-     */
-    //static std::unique_ptr<INDHistogramManager> createNDHistogramManager(
-    //    IConfigurationProvider& configProvider);
-
-    /**
      * @brief Create a configuration manager instance
      * @param configFile Path to the configuration file
      * @return Unique pointer to the configuration provider interface

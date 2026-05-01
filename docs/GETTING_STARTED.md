@@ -4,7 +4,7 @@ This guide will help you get up and running with RDFAnalyzerCore quickly — fro
 
 ## Prerequisites
 
-- ROOT 6.30/02 or later (progress bar support was added around 6.28)
+- ROOT 6.30/02 or later (progress bar support requires 6.30+)
 - CMake 3.19.0 or later
 - C++17 compatible compiler
 - Git
@@ -20,14 +20,14 @@ cd RDFAnalyzerCore
 
 ### 2. Set Up Environment
 
-On lxplus (CERN computing):
+On a CVMFS-backed HEP host such as lxplus, cmsconnect, or a site-managed analysis node:
 ```bash
 source env.sh
 ```
 
 This script sets up ROOT and other required dependencies from CVMFS.
 
-For local installations, ensure ROOT is available in your PATH and environment.
+If you are using a standalone ROOT installation instead, source that environment before building.
 
 ### 3. Build the Framework
 
@@ -40,9 +40,15 @@ This will:
 - Download ONNX Runtime automatically
 - Build the core framework
 - Discover and build any analyses in the `analyses/` directory
-- Run tests to verify the installation
 
 The build artifacts will be placed in the `build/` directory.
+
+To verify your build, run:
+
+```bash
+cd build
+ctest --output-on-failure
+```
 
 ### 4. Run the Example Analysis
 
@@ -275,7 +281,6 @@ int main(int argc, char **argv) {
 From the repository root, run a full build. CMake will automatically discover your new analysis directory:
 
 ```bash
-cd /path/to/RDFAnalyzerCore
 source build.sh
 ```
 
@@ -405,13 +410,13 @@ datasets:
 
 ## Running with Batch Processing
 
-Once your analysis works locally, scale it up to many datasets using the LAW workflow manager included in the `law/` directory.
+Once your analysis works locally, scale it up to many datasets using the LAW workflow manager included in `core/python/law/`.
 
 ### Quick Batch Submission with `SkimTask`
 
 1. **Source the LAW environment**
    ```bash
-   source law/env.sh
+   source core/python/law/env.sh
    ```
 
 2. **Index available tasks**
@@ -425,7 +430,7 @@ Once your analysis works locally, scale it up to many datasets using the LAW wor
      --exe ./build/analyses/MyFirstAnalysis/myAnalysis \
      --name myRun \
      --dataset-manifest analyses/MyFirstAnalysis/datasets.yaml \
-         --submit-config law/submit_config.txt \
+         --submit-config core/python/law/submit_config.txt \
          --workflow htcondor
    ```
 
@@ -457,7 +462,9 @@ RDFAnalyzerCore/
 │   └── analyses/
 │       └── MyFirstAnalysis/
 │           └── myAnalysis   ← your compiled executable
-├── law/                 # LAW batch-processing workflow
+├── core/
+│   ├── python/
+│   │   └── law/         # LAW batch-processing workflow
 ├── docs/                # Documentation
 ├── cmake/               # CMake helper modules
 └── README.md            # Main technical documentation
@@ -471,9 +478,9 @@ RDFAnalyzerCore/
 
 Ensure ROOT is properly sourced before building:
 ```bash
-source env.sh                          # On lxplus / CVMFS
+source env.sh                          # CVMFS-backed environment
 # OR
-source /path/to/root/bin/thisroot.sh   # Local installation
+source <root-install>/bin/thisroot.sh  # Standalone ROOT installation
 ```
 
 ### ONNX Runtime Download Fails
@@ -567,8 +574,8 @@ propagation — with just a handful of API calls:
 #include <JetEnergyScaleManager.h>
 #include <PhysicsObjectCollection.h>
 
-auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare which branches hold jet/MET kinematics.
 jes->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");;
@@ -680,13 +687,18 @@ per-object WP categories, applying correctionlib-based scale factors, and
 producing WP-filtered `PhysicsObjectCollection` outputs — with full systematic
 variation support.
 
+For CMS BTV **fixed working point** weights, the recommended event-weight
+formula is category-dependent and uses analyzer-derived MC efficiencies. Use
+`defineFixedWorkingPointWeight()` for that workflow rather than treating the
+fixed-WP SFs as a plain product of per-object weights.
+
 ### Defining Working Points and Applying Scale Factors
 
 ```cpp
 #include <TaggerWorkingPointManager.h>
 
-auto *twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
-auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare object kinematic columns (jets, taus, or fat-jets).
 twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -717,6 +729,20 @@ twm->applySystematicSet(*cm, "deepjet_sf", "standard",
                          "Jet_btagDeepFlavB"});
 // → creates "deepjet_sf_hf_up_weight", "deepjet_sf_hf_down_weight", …
 ```
+
+For BTV fixed-WP corrections, first merge the appropriate flavour-family SF
+payloads (for example `<tagger>_comb` plus `<tagger>_light` for b-tagging),
+then build the event weight with:
+
+```cpp
+twm->defineFixedWorkingPointWeight(
+    {"btag_sf_L_central", "btag_sf_M_central", "btag_sf_T_central"},
+    {"btag_eff_L", "btag_eff_M", "btag_eff_T"},
+    "btag_weight_nominal");
+```
+
+The efficiency columns are analyzer-derived MC tagging efficiencies and are not
+shipped by the CMS BTV payloads.
 
 ### WP-Based Collection Selections
 
@@ -764,6 +790,9 @@ kinematics), all variation collections contain the same objects as the nominal.
 The weight difference is tracked via the separate weight columns.
 
 ### Generator-Level Fraction Reweighting
+
+This is an optional analyzer-specific utility. It is not the CMS BTV
+recommended fixed-WP event-weight method.
 
 For the most accurate results, use a correctionlib payload encoding the
 generator-level MC fractions of objects in each WP category at given (pT, η):

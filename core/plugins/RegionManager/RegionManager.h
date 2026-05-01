@@ -45,7 +45,7 @@ class Analyzer;
  *   analyzer->Define("pass_control", [](float mva){ return mva < 0.4f; }, {"mva"});
  *
  *   // 2. Declare regions (parent before child).
- *   auto* rm = analyzer->getPlugin<RegionManager>("regions");
+ *   auto rm = analyzer->getPlugin<RegionManager>("regions");
  *   rm->declareRegion("presel",  "pass_presel");
  *   rm->declareRegion("signal",  "pass_signal",  "presel");
  *   rm->declareRegion("control", "pass_control", "presel");

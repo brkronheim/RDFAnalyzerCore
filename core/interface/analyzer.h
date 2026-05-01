@@ -361,6 +361,10 @@ private:
    */
   std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins;
   /**
+   * @brief Stable dependency-respecting plugin order used for lifecycle hooks.
+   */
+  std::vector<std::string> pluginOrder_m;
+  /**
    * @brief Optional analysis services (internal only for now).
    */
   std::vector<std::unique_ptr<IAnalysisService>> services_m;

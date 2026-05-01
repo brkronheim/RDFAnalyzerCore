@@ -141,32 +141,36 @@ User Analysis
 ```cpp
 class Analyzer {
 public:
-    // Construction
-    Analyzer(const std::string& configFile, 
-             std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins = {});
+    // Construction (config-file and dependency-injected variants)
+    Analyzer(std::string configFile,
+             std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& plugins = {});
     
     // Analysis operations
-    Analyzer* Define(const std::string& name, ...);
-    Analyzer* Filter(const std::string& name, ...);
+    Analyzer* Define(std::string name, ...);
+    Analyzer* Filter(std::string name, ...);
     Analyzer* DefinePerSample(...);
+    Analyzer* DefineVector(...);
+    Analyzer* bookConfigHistograms();
+    Analyzer* bookCounterIntHistogram(...);
     
     // Plugin access
     template<typename T>
-    T* getPlugin(const std::string& role);
+    std::shared_ptr<T> getPlugin(const std::string& role) const;
     
     // Execution
-    void save();
+    Analyzer* save();
+    Analyzer* run();
     
     // Access to underlying managers
-    IConfigurationProvider* getConfigProvider();
-    IDataFrameProvider* getDataManager();
-    ISystematicManager* getSystematicManager();
+    IConfigurationProvider& getConfigurationProvider() const;
+    IDataFrameProvider& getDataFrameProvider() const;
+    ISystematicManager& getSystematicManager() const;
 };
 ```
 
 **Design Notes**:
 - Returns `this` for method chaining: `analyzer.Define(...)->Filter(...)->Define(...)`
-- Template method `getPlugin<T>` provides type-safe plugin access
+- Template method `getPlugin<T>` provides type-safe plugin access via `std::shared_ptr`
 - Owns all managers via unique_ptr (RAII)
 
 ### ConfigurationManager
@@ -186,14 +190,17 @@ public:
 class IConfigurationProvider {
 public:
     virtual std::string get(const std::string& key) const = 0;
-    virtual bool has(const std::string& key) const = 0;
-    virtual std::map<std::string, std::string> getAll() const = 0;
+    virtual void set(const std::string& key, const std::string& value) = 0;
+    virtual const std::unordered_map<std::string, std::string>& getConfigMap() const = 0;
     
     // Specialized parsers
-    virtual std::vector<std::pair<std::string, std::string>> 
-        getPairs(const std::string& configFile) const = 0;
-    virtual std::vector<std::map<std::string, std::string>> 
-        getMultiKeyConfigs(const std::string& configFile) const = 0;
+    virtual std::vector<std::unordered_map<std::string, std::string>>
+        parseMultiKeyConfig(const std::string& configFile,
+                            const std::vector<std::string>& requiredEntryKeys) const = 0;
+    virtual std::unordered_map<std::string, std::string>
+        parsePairBasedConfig(const std::string& configFile) const = 0;
+    virtual std::vector<std::string>
+        parseVectorConfig(const std::string& configFile) const = 0;
 };
 ```
 
@@ -221,11 +228,12 @@ ConfigurationManager ──uses──► IConfigAdapter (interface)
 ```cpp
 class IDataFrameProvider {
 public:
-    virtual ROOT::RDF::RNode& getDataFrame() = 0;
+    virtual ROOT::RDF::RNode getDataFrame() = 0;
     virtual void Define(const std::string& name, ...) = 0;
     virtual void Filter(...) = 0;
     virtual void DefinePerSample(...) = 0;
     virtual void DefineVector(...) = 0;
+    virtual void Redefine(const std::string& name, ...) = 0;
     // ... other RDataFrame operations
 };
 ```
@@ -240,7 +248,7 @@ currentNode = currentNode.Define("var", ...);
 currentNode = currentNode.Filter(...);
 
 // User always gets the current node
-auto& df = dataManager->getDataFrame();  // Returns currentNode
+auto df = dataManager->getDataFrame();
 ```
 
 ### SystematicManager
@@ -299,11 +307,14 @@ dataManager->Define("corrected_pt",
 ```cpp
 class IOutputSink {
 public:
-    virtual void write(const std::string& treeName, 
-                      const ROOT::RDF::RNode& df,
-                      const std::vector<std::string>& columns) = 0;
-    virtual void writeObject(TObject* obj, const std::string& name) = 0;
-    virtual TFile* getFile() = 0;
+    virtual void writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec) = 0;
+    virtual void writeDataFrame(ROOT::RDF::RNode& df,
+                                const IConfigurationProvider& configProvider,
+                                const IDataFrameProvider* dataFrameProvider,
+                                const ISystematicManager* systematicManager,
+                                OutputChannel channel) = 0;
+    virtual std::string resolveOutputFile(const IConfigurationProvider& configProvider,
+                                          OutputChannel channel) = 0;
 };
 ```
 
@@ -343,9 +354,13 @@ The plugin system enables extensibility without modifying Analyzer.
 class IPluggableManager {
 public:
     virtual ~IPluggableManager() = default;
-    virtual void initialize() = 0;
-    virtual void finalize() = 0;
-    virtual std::string getName() const = 0;
+    virtual std::string type() const = 0;
+    virtual void setupFromConfigFile() = 0;
+    virtual std::vector<std::string> getDependencies() const { return {}; }
+    virtual void initialize() {}
+    virtual void execute() {}
+    virtual void finalize() {}
+    virtual void reportMetadata() {}
 };
 ```
 
@@ -353,8 +368,8 @@ public:
 ```cpp
 struct ManagerContext {
     IConfigurationProvider& config;
-    IDataFrameProvider& dataManager;
-    ISystematicManager& systematicManager;
+    IDataFrameProvider& data;
+    ISystematicManager& systematics;
     ILogger& logger;
     IOutputSink& skimSink;
     IOutputSink& metaSink;
@@ -372,7 +387,7 @@ public:
 
 ```cpp
 template<typename T>
-class NamedObjectManager : public IPluggableManager, public IContextAware {
+class NamedObjectManager : public IPluggableManager {
 protected:
     std::unordered_map<std::string, T> objects_;
     ManagerContext* context_;
@@ -420,15 +435,16 @@ public:
 
 5. **Usage**: Analysis code retrieves and uses plugins
    ```cpp
-   auto* onnx = analyzer.getPlugin<IOnnxManager>("onnx");
-   onnx->applyAllModels();
+    auto onnx = analyzer.getPlugin<OnnxManager>("onnx");
+    if (onnx) onnx->applyAllModels();
    ```
 
-6. **Finalization**: Framework calls `finalize()` on all plugins
+6. **Finalization**: Framework calls `finalize()` then `reportMetadata()` on all plugins
    ```cpp
-   // In Analyzer destructor or save()
-   for (auto& [role, plugin] : plugins_) {
-       plugin->finalize();
+    // In Analyzer::save()/run()
+    for (const auto& role : pluginOrder_) {
+         plugins_.at(role)->finalize();
+         plugins_.at(role)->reportMetadata();
    }
    ```
 
@@ -437,17 +453,17 @@ public:
 **Type-Safe Access**:
 ```cpp
 template<typename T>
-T* Analyzer::getPlugin(const std::string& role) {
+std::shared_ptr<T> Analyzer::getPlugin(const std::string& role) const {
     auto it = plugins_.find(role);
     if (it == plugins_.end()) return nullptr;
-    return dynamic_cast<T*>(it->second.get());
+    return std::dynamic_pointer_cast<T>(it->second);
 }
 ```
 
 **Usage**:
 ```cpp
-// Request specific interface
-auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
+// Request a concrete manager plugin
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
 if (onnxMgr) {
     onnxMgr->applyModel("my_model");
 }
@@ -465,7 +481,7 @@ public:
     OnnxManager(IConfigurationProvider& config) {
         // Read onnxConfig from main config
         if (config.has("onnxConfig")) {
-            auto modelConfigs = config.getMultiKeyConfigs(
+            auto modelConfigs = config.parseMultiKeyConfig(
                 config.get("onnxConfig"));
             loadObjects(modelConfigs);
         }
@@ -509,18 +525,15 @@ void OnnxManager::applyModel(const std::string& modelName) {
 
 #### 3. Metadata Collection
 
-Plugins that collect information for output:
+Services that collect information for metadata output:
 
 ```cpp
-class CounterService : public IPluggableManager {
+class CounterService : public IAnalysisService {
 public:
-    void finalize() override {
+    void finalize(ROOT::RDF::RNode& df) override {
         // Write counters to metadata sink
-        TH1D* hist = new TH1D("counters", "Event Counts", ...);
-        for (const auto& [sample, count] : counters_) {
-            hist->Fill(sample.c_str(), count);
-        }
-        context_->metaSink.writeObject(hist, "event_counters");
+        OutputSpec spec{"event_counters.root", "Event Counts", {}};
+        ctx_.metaSink.writeDataFrame(df, spec);
     }
 };
 ```
@@ -554,7 +567,7 @@ public:
    └─► Book histograms
 
 5. Execution Trigger
-   ├─► Call analyzer.save() or
+    ├─► Call analyzer.save() / analyzer.run() or
    ├─► Access histogram pointers or
    └─► Trigger other RDataFrame actions
 
@@ -604,17 +617,18 @@ Plugins integrate at specific points in the flow:
 
 ```cpp
 // Pre-execution
-auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
-onnxMgr->applyAllModels();  // Adds Define operations to dataframe
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
+if (onnxMgr) onnxMgr->applyAllModels();  // Adds Define operations to dataframe
 
 // Execution
 analyzer.save();  // Triggers event loop
 
-// Post-execution
-// In Analyzer::save():
-for (auto& [role, plugin] : plugins_) {
-    plugin->finalize();  // Plugins write metadata
-}
+// Post-execution (inside Analyzer::save()/run())
+// 1) finalize() services (except provenance)
+// 2) finalize() plugins
+// 3) reportMetadata() plugins
+// 4) collect plugin/service provenance contributions
+// 5) finalize provenance service last
 ```
 
 ## Manager Lifecycle
@@ -663,8 +677,8 @@ analyzer.Define("myvar", ...);
 analyzer.Filter("mycut", ...);
 
 // Get and use plugins
-auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
-onnxMgr->applyModel("model");
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
+if (onnxMgr) onnxMgr->applyModel("model");
 ```
 
 ### Execution and Cleanup
@@ -673,19 +687,13 @@ onnxMgr->applyModel("model");
 // 3. Trigger execution
 analyzer.save();
 
-// Inside Analyzer::save():
-//   a. Finalize plugins
-for (auto& [role, plugin] : plugins_) {
-    plugin->finalize();
-}
-
-//   b. Write skim
-auto columns = getOutputColumns();
-skimSink_->write("Events", dataManager_->getDataFrame(), columns);
-
-//   c. Close output files
-skimSink_->close();
-metaSink_->close();
+// Inside Analyzer::save()/run():
+//   a. execute() all plugins in dependency order
+//   b. write skim (always in save(), conditional in run())
+//   c. finalize non-provenance services
+//   d. finalize() and reportMetadata() all plugins
+//   e. collect plugin/service provenance entries
+//   f. finalize provenance service last
 
 // 4. Destruction (RAII)
 // Analyzer destructor runs
@@ -831,11 +839,8 @@ class CounterService : public IAnalysisService {
             std::cout << "Sum weights: " << *sumW << std::endl;
         }
         
-        // Write histogram
-        TH1D* hist = new TH1D("counters", "Counters", 2, 0, 2);
-        hist->SetBinContent(1, *count);
-        if (sumW) hist->SetBinContent(2, *sumW);
-        sink.writeObject(hist, "event_counters");
+        OutputSpec spec{"event_counters.root", "Counters", {}};
+        sink.writeDataFrame(df.getDataFrame(), spec);
     }
 };
 ```

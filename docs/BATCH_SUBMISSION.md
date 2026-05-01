@@ -1,7 +1,7 @@
 # HTCondor Batch Submission Guide
 
 This guide explains how to submit RDFAnalyzerCore analyses to HTCondor using
-the **law-based workflows** in the `law/` directory.  All batch submission is
+the **law-based workflows** in `core/python/law/`. All batch submission is
 managed through [law](https://github.com/riga/law) (Luigi Analysis Workflow),
 which provides dependency tracking, automatic resubmission, and restart-safe
 monitoring.
@@ -12,8 +12,9 @@ monitoring.
 - [Quick Start](#quick-start)
 - [Prerequisites](#prerequisites)
 - [Environment Setup](#environment-setup)
-- [NANO / Rucio Submission](#nanorucio-submission)
+- [Rucio Submission (Primary)](#rucio-submission-primary)
 - [CERN Open Data Submission](#cern-open-data-submission)
+- [Legacy Compatibility Notes](#legacy-compatibility-notes)
 - [Common Parameters](#common-parameters)
 - [Configuration File Format](#configuration-file-format)
 - [Monitoring and Resubmission](#monitoring-and-resubmission)
@@ -24,22 +25,25 @@ monitoring.
 
 ## Overview
 
-RDFAnalyzerCore provides two law-based submission workflows:
+RDFAnalyzerCore provides one primary skim submission workflow with pluggable
+file-discovery backends:
 
-| Workflow | Module | Data Source |
-|----------|--------|-------------|
-| NANO / Rucio | `law/nano_tasks.py` | CMS NanoAOD via Rucio |
-| CERN Open Data | `law/opendata_tasks.py` | CERN Open Data Portal |
+| Workflow Layer | Primary Module | Notes |
+|----------------|----------------|-------|
+| Skim/build/submit/monitor orchestration | `core/python/law/analysis_tasks.py` | Primary workflow surface for local, HTCondor, and Dask execution |
+| Rucio file discovery | `core/python/law/rucio_tasks.py` | Primary CMS NanoAOD discovery backend (`--file-source rucio`) |
+| Open Data file discovery | `core/python/law/opendata_tasks.py` | Open Data backend (`--file-source opendata`) |
+| XRootD directory discovery | `core/python/law/xrdfs_tasks.py` | XRootD directory listing backend (`--file-source xrdfs`) |
 
-Each workflow consists of four law tasks that run in sequence:
+For HTCondor skim production, the primary sequence is:
 
-1. **Prepare\*Sample** – discovers input files and creates per-job configuration
+1. **PrepareSkimJobs** – discovers input files and creates per-job configuration
    directories (one branch per sample, runs in parallel).
-2. **Build\*Submission** – assembles `condor_submit.sub`, run scripts, and
+2. **BuildSkimSubmission** – assembles `condor_submit.sub`, run scripts, and
    stages the executable, `aux/`, x509 proxy, and local shared libraries into
    `shared_inputs/`.
-3. **Submit\*Jobs** – runs `condor_submit` and records the cluster ID.
-4. **Monitor\*Jobs** – blocking polling loop that verifies EOS outputs,
+3. **SubmitSkimJobs** – runs `condor_submit` and records the cluster ID.
+4. **MonitorSkimJobs** – blocking polling loop that verifies EOS outputs,
    resubmits held/failed jobs, and writes `all_outputs_verified.txt`.
 
 Law tracks task outputs so you can run the final task directly and earlier
@@ -51,16 +55,18 @@ steps execute automatically if not yet complete.
 
 ```bash
 # 1. Set up the law environment (run once per session from the repo root)
-source law/env.sh
+source core/python/law/env.sh
 
 # 2. Index the task registry (run once, or after adding new modules)
 law index
 
-# 3. Run the full NANO workflow (PrepareNANOSample → BuildNANOSubmission →
-#    SubmitNANOJobs are run automatically as dependencies)
-law run MonitorNANOJobs --workers 4 \
+# 3. Run the primary Rucio-backed skim workflow (PrepareSkimJobs →
+#    BuildSkimSubmission → SubmitSkimJobs are run automatically as dependencies)
+law run MonitorSkimJobs --workers 4 \
   --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun \
+  --file-source rucio \
   --x509 x509 \
   --exe build/analyses/myAnalysis/myanalysis
 ```
@@ -76,10 +82,10 @@ law run MonitorNANOJobs --workers 4 \
   ```bash
   pip install --user law luigi requests
   ```
-- **HTCondor** environment (available on LXPLUS and compatible clusters)
+- **HTCondor** environment (available on lxplus, cmsconnect, and other compatible clusters)
 - **Compiled analysis executable** (see [Analysis Guide](ANALYSIS_GUIDE.md))
 
-### For NANO / Rucio submissions
+### For Rucio submissions
 
 - **VOMS proxy** (minimum 20 minutes validity):
   ```bash
@@ -105,7 +111,7 @@ law run MonitorNANOJobs --workers 4 \
 ```bash
 # Source the law environment from the repository root (sets PYTHONPATH,
 # LAW_HOME, and LAW_CONFIG_FILE automatically)
-source law/env.sh
+source core/python/law/env.sh
 
 # Index the task registry
 law index
@@ -113,13 +119,15 @@ law index
 
 ---
 
-## NANO / Rucio Submission
+## Rucio Submission (Primary)
 
 ### Sample config format
 
-The sample configuration describes the datasets to process and is referenced
-by the `sampleConfig` key inside the main submit config.  Two formats are
-accepted:
+The sample configuration describes the datasets to process. In the primary
+workflow, pass a typed dataset manifest via `--dataset-manifest` and keep
+`sampleConfig=` in the submit config only for compatibility paths.
+
+Two formats are accepted for dataset manifests:
 
 #### Preferred format – YAML dataset manifest
 
@@ -127,6 +135,10 @@ Use a YAML manifest for production workflows.  It provides richer metadata,
 supports multi-year analyses, and is validated by the framework at submission
 time.  See `core/python/example_dataset_manifest.yaml` for a fully annotated
 example.
+
+> **Preferred:** pass a YAML manifest via `sampleConfig=` in the submit config.
+> Legacy `.txt` dataset manifests are deprecated compatibility paths only and
+> should not be used for new workflows.
 
 ```yaml
 # Luminosity in fb^-1 (used as default; lumi_by_year takes precedence when set)
@@ -167,10 +179,11 @@ Pass the manifest as `sampleConfig` in the submit config file:
 sampleConfig=analyses/myAnalysis/cfg/samples.yaml
 ```
 
-#### Legacy format – key=value text file
+#### DEPRECATED: Legacy key=value text format
 
-The legacy flat text format is still fully supported for backward
-compatibility.  Each line contains space-separated `key=value` pairs.
+The legacy flat text format is **DEPRECATED** and maintained only for
+backward compatibility with older submission scripts.  Each line contains
+space-separated `key=value` pairs.
 
 > **Note on luminosity units**: The YAML manifest uses **fb^-1** for the `lumi`
 > field, while the legacy text format uses **pb^-1**.  Ensure you use the
@@ -202,13 +215,15 @@ name=wjets das=/WJetsToLNu.../NANOAODSIM     xsec=61526.7 type=1 norm=1.0 kfac=1
 | `extraScale` | Additional scaling factor (optional) |
 | `site` | Preferred site for this sample (optional) |
 
-### Running the workflow
+### Running the primary workflow
 
 ```bash
-# Run all four tasks in sequence (law resolves dependencies automatically)
-law run MonitorNANOJobs --workers 4 \
+# Run the full primary sequence (law resolves dependencies automatically)
+law run MonitorSkimJobs --workers 4 \
   --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --dataset-manifest analyses/myAnalysis/cfg/samples.yaml \
   --name myRun22 \
+  --file-source rucio \
   --x509 x509 \
   --exe build/analyses/myAnalysis/myanalysis \
   --root-setup env.sh \
@@ -221,13 +236,15 @@ law run MonitorNANOJobs --workers 4 \
 To run only up to the submission file generation (without submitting):
 
 ```bash
-law run BuildNANOSubmission --workers 4 \
+law run BuildSkimSubmission --workers 4 \
   --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --dataset-manifest analyses/myAnalysis/cfg/samples.yaml \
   --name myRun22 --x509 x509 \
+  --file-source rucio \
   --exe build/analyses/myAnalysis/myanalysis
 ```
 
-### NANO-specific parameters
+### Rucio-specific parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -241,12 +258,16 @@ law run BuildNANOSubmission --workers 4 \
 
 ### Sample config format
 
-The same two formats accepted by NANO submission are supported here.
+The same two manifest formats are supported here.
 
 #### Preferred format – YAML dataset manifest
 
 For Open Data workflows, each entry's `das` field stores a comma-separated
 list of CERN Open Data **record IDs** (instead of DAS paths).
+
+> **Preferred:** pass a YAML manifest via `sampleConfig=` in the submit config.
+> Legacy `.txt` dataset manifests are deprecated compatibility paths only and
+> should not be used for new Open Data workflows.
 
 ```yaml
 lumi: 11.58   # fb^-1
@@ -263,9 +284,8 @@ datasets:
     xsec: 1.0
 ```
 
-#### Legacy format – key=value text file
+#### DEPRECATED: Legacy key=value text format
 
-> **Note on luminosity units**: The YAML manifest uses **fb^-1** for the `lumi`
 > field, while the legacy text format uses **pb^-1**.  Ensure you use the
 > correct unit for the format you choose.
 
@@ -292,9 +312,11 @@ name=ZEE   das=SMZee_1 type=11 xsec=1.0 norm=1.0
 ### Running the workflow
 
 ```bash
-law run MonitorOpenDataJobs --workers 4 \
+law run MonitorSkimJobs --workers 4 \
   --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --dataset-manifest analyses/myAnalysis/cfg/opendata_manifest.yaml \
   --name openDataRun \
+  --file-source opendata \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20 \
   --container-setup cmssw-el8
@@ -303,9 +325,11 @@ law run MonitorOpenDataJobs --workers 4 \
 To run only up to submission file generation:
 
 ```bash
-law run BuildOpenDataSubmission --workers 4 \
+law run BuildSkimSubmission --workers 4 \
   --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --dataset-manifest analyses/myAnalysis/cfg/opendata_manifest.yaml \
   --name openDataRun \
+  --file-source opendata \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20
 ```
@@ -327,7 +351,7 @@ These parameters apply to **all** law submission tasks:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--submit-config` | *(required)* | Path to submit config file |
-| `--name` | *(required)* | Submission name; creates `condorSub_{name}/` |
+| `--name` | *(required)* | Submission name; creates `skimRun_{name}/` |
 | `--exe` | *(required)* | Path to the compiled C++ executable |
 | `--stage-in` | `False` | xrdcp input files to worker node before running |
 | `--root-setup` | `""` | Path to a setup script; contents embedded in inner runscript |
@@ -348,7 +372,7 @@ These parameters apply to **all** law submission tasks:
 ## Python Environment for Remote Jobs
 
 To use the RDFAnalyzerCore Python bindings (`rdfanalyzer`) or any other Python
-packages on remote condor worker nodes, use `law/setup_python_env.sh` to
+packages on remote condor worker nodes, use `core/python/law/setup_python_env.sh` to
 create a portable tarball and pass it to law tasks via `--python-env`.
 
 ### Step 1: Set up the environment inside the container
@@ -358,11 +382,11 @@ This ensures binary compatibility between local and remote nodes.
 
 ```bash
 # Basic usage (packages law, luigi, requests + rdfanalyzer.so)
-cmssw-el9 --command-to-run "bash law/setup_python_env.sh"
+cmssw-el9 --command-to-run "bash core/python/law/setup_python_env.sh"
 
 # With extra packages
 cmssw-el9 --command-to-run \
-  "bash law/setup_python_env.sh --extras 'numpy uproot numba' --output python_env.tar.gz"
+  "bash core/python/law/setup_python_env.sh --extras 'numpy uproot numba' --output python_env.tar.gz"
 ```
 
 The script installs packages into a staging directory using
@@ -381,15 +405,17 @@ and copies the compiled `rdfanalyzer*.so` module from `build/python/`.
 ### Step 2: Pass the tarball to law tasks
 
 ```bash
-law run MonitorNANOJobs --workers 4 \
+law run MonitorSkimJobs --workers 4 \
   --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
+  --file-source rucio \
   --name myRun --x509 x509 \
   --exe build/analyses/myAnalysis/myanalysis \
   --container-setup cmssw-el9 \
   --python-env python_env.tar.gz
 ```
 
-The `Build*Submission` task copies the tarball into `condorSub_{name}/shared_inputs/`
+The `BuildSkimSubmission` task copies the tarball into `skimRun_{name}/shared_inputs/`
 and adds it to `transfer_input_files` so every worker node receives it.
 
 ### What happens on the worker node
@@ -419,7 +445,7 @@ analyzer = rdfanalyzer.Analyzer("submit_config.txt")
 
 ```
 saveDirectory=/eos/user/u/username/output
-sampleConfig=config/samples.txt
+sampleConfig=config/samples.yaml
 
 # Optional plugin configs copied to every job
 bdtConfig=config/bdts.txt
@@ -432,7 +458,7 @@ onnxConfig=config/onnx_models.txt
 saveDirectory=/eos/user/u/username/output
 saveTree=Events
 treeList=Events
-sampleConfig=config/samples.txt
+sampleConfig=config/samples.yaml
 enableCounters=true
 enableSkim=false
 ```
@@ -447,17 +473,17 @@ The `Monitor*Jobs` tasks run a blocking poll loop:
 2. **Held jobs**: remove from queue and resubmit automatically.
 3. **Failed jobs** (non-zero exit code): resubmit if `--max-retries` not reached.
 4. **Completed jobs**: verify the expected EOS output exists via `xrdfs stat`.
-5. Write `condorSub_{name}/all_outputs_verified.txt` when all outputs confirmed.
+5. Write `skimRun_{name}/all_outputs_verified.txt` when all outputs confirmed.
 
 **State persistence**: monitoring state is saved to
-`condorSub_{name}/monitor_state.json` after each poll cycle.  If you interrupt
+`skimRun_{name}/monitor_state.json` after each poll cycle.  If you interrupt
 the monitor task (Ctrl+C), restart it with the same parameters and it will
 resume from where it left off.
 
 ```bash
 # Restart monitoring after an interruption
-law run MonitorNANOJobs --workers 1 \
-  --submit-config ... --name myRun [other params as before]
+law run MonitorSkimJobs --workers 1 \
+  --submit-config ... --dataset-manifest ... --file-source rucio --name myRun [other params as before]
 ```
 
 ---
@@ -500,7 +526,7 @@ The Prepare tasks run as law LocalWorkflows with one branch per sample.
 Set `--workers N` to discover files for up to N samples in parallel:
 
 ```bash
-law run PrepareNANOSample --workers 8 [other params]
+law run PrepareSkimJobs --workers 8 --file-source rucio [other params]
 ```
 
 ---
@@ -511,14 +537,14 @@ law run PrepareNANOSample --workers 8 [other params]
 
 Delete the offending output and re-run:
 ```bash
-rm condorSub_myRun/branch_outputs/sample_0.json
-law run PrepareNANOSample [params]
+rm rucioFileList_myRun/sample_0.json
+law run PrepareSkimJobs --file-source rucio [params]
 ```
 
 ### law index fails
 
 ```bash
-source law/env.sh
+source core/python/law/env.sh
 law index
 ```
 
@@ -541,23 +567,23 @@ voms-proxy-init -voms cms -rfc --valid 168:0
 ### Checking generated files
 
 ```bash
-ls -la condorSub_myRun/job_0/
-cat condorSub_myRun/job_0/submit_config.txt
-cat condorSub_myRun/condor_runscript.sh
+ls -la skimRun_myRun/jobs/sample/job_0/
+cat skimRun_myRun/jobs/sample/job_0/submit_config.txt
+cat skimRun_myRun/condor_submissions/sample/condor_runscript.sh
 ```
 
 ### Job logs
 
 ```bash
-cat condorSub_myRun/condor_logs/log_<cluster>_<process>.stdout
-cat condorSub_myRun/condor_logs/log_<cluster>_<process>.stderr
+cat skimRun_myRun/condor_submissions/sample/condor_logs/log_<cluster>_<process>.stdout
+cat skimRun_myRun/condor_submissions/sample/condor_logs/log_<cluster>_<process>.stderr
 ```
 
 ---
 
 ## See Also
 
-- [law/README.md](../law/README.md) – law workflow quick reference
+- [core/python/law/README.md](../core/python/law/README.md) – law workflow quick reference
 - [Configuration Reference](CONFIG_REFERENCE.md) – config file formats
 - [Analysis Guide](ANALYSIS_GUIDE.md) – building analyses
 - [Getting Started](GETTING_STARTED.md) – setup and installation

@@ -15,9 +15,30 @@ namespace {
 
 using ActionMap = std::unordered_map<std::string, std::string>;
 
+bool inferIsMC(IConfigurationProvider &configManager);
+
+void defineRelativeUncertaintyScaleFactors(IDataFrameProvider &dataManager,
+                                           ISystematicManager &systematicManager,
+                                           const std::string &inputColumn,
+                                           const std::string &upColumn,
+                                           const std::string &downColumn);
+
 bool isTruthy(const std::string &value) {
   return value == "1" || value == "true" || value == "True" ||
          value == "yes" || value == "Yes";
+}
+
+bool hasValue(const std::string &value) {
+  return !value.empty();
+}
+
+bool hasAnyValue(std::initializer_list<std::string> values) {
+  for (const auto &value : values) {
+    if (!value.empty()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::string toLower(std::string value) {
@@ -34,6 +55,16 @@ std::string requireValue(const std::unordered_map<std::string, std::string> &con
   if (it == config.end() || it->second.empty()) {
     throw std::runtime_error(typeName + ": missing required key '" + key +
                              "' in config file '" + configFile + "'");
+  }
+  return it->second;
+}
+
+std::string getValue(const std::unordered_map<std::string, std::string> &config,
+                     const std::string &key,
+                     const std::string &defaultValue = "") {
+  const auto it = config.find(key);
+  if (it == config.end()) {
+    return defaultValue;
   }
   return it->second;
 }
@@ -177,6 +208,69 @@ float getResolvedFloat(const ActionMap &action,
   }
   return std::stof(resolvePlaceholders(it->second, configManager, localValues, owner));
 }
+
+int getResolvedInt(const ActionMap &action,
+                   const std::string &key,
+                   IConfigurationProvider &configManager,
+                   const ActionMap &localValues,
+                   const std::string &owner,
+                   int defaultValue = 0) {
+  const auto it = action.find(key);
+  if (it == action.end() || it->second.empty()) {
+    return defaultValue;
+  }
+  return std::stoi(resolvePlaceholders(it->second, configManager, localValues, owner));
+}
+
+std::string getResolvedAliasedOrDefault(const ActionMap &action,
+                                        const std::vector<std::string> &keys,
+                                        IConfigurationProvider &configManager,
+                                        const ActionMap &localValues,
+                                        const std::string &owner,
+                                        const std::string &defaultValue = "") {
+  return getResolvedAliasedValue(action, keys, configManager, localValues, owner,
+                                 defaultValue);
+}
+
+std::string appendDirectionalSuffix(const std::string &prefix,
+                                    const std::string &direction) {
+  if (prefix.empty()) {
+    return "";
+  }
+  return prefix + "_" + direction;
+}
+
+std::string composeIndexedKey(const std::string &prefix,
+                              int index,
+                              const std::string &suffix) {
+  std::ostringstream ss;
+  ss << prefix << index << suffix;
+  return ss.str();
+}
+
+std::string getConfigValue(IConfigurationProvider &configManager,
+                           const std::string &key) {
+  return configManager.get(key);
+}
+
+bool getConfigBool(IConfigurationProvider &configManager,
+                   const std::string &key,
+                   bool defaultValue = false) {
+  const std::string value = configManager.get(key);
+  if (value.empty()) {
+    return defaultValue;
+  }
+  return isTruthy(value);
+}
+
+
+
+
+
+
+
+
+
 
 bool inferIsMC(IConfigurationProvider &configManager) {
   const std::string primaryDataset = toLower(configManager.get("primaryDataset"));
@@ -437,13 +531,17 @@ void applyJetWorkflowAction(JetEnergyScaleManager &manager,
     if (!correctionManager) {
       throw std::runtime_error(owner + ": applyCorrectionlib action requires CorrectionManager");
     }
+    const std::string defaultInputPtColumn =
+        getValue(localValues, "rawPtColumn", getValue(localValues, "ptColumn"));
     manager.applyCorrectionlib(
         *correctionManager,
         requireResolvedAliasedValue(action, {"correction", "correctionName"}, configManager,
                                     localValues, owner),
         getResolvedList(action, "stringArgs", configManager, localValues, owner),
-        requireResolvedValue(action, "inputPtColumn", configManager, localValues, owner),
-        requireResolvedValue(action, "outputPtColumn", configManager, localValues, owner),
+        getResolvedValue(action, "inputPtColumn", configManager, localValues, owner,
+                         defaultInputPtColumn),
+        getResolvedValue(action, "outputPtColumn", configManager, localValues, owner,
+                         getValue(localValues, "correctedPtColumn")),
         getResolvedBool(action, "applyToMass", configManager, localValues, owner, false),
         getResolvedValue(action, "inputMassColumn", configManager, localValues, owner),
         getResolvedValue(action, "outputMassColumn", configManager, localValues, owner),
@@ -531,6 +629,408 @@ std::vector<std::string> collectVariationNames(const std::vector<VariationEntry>
 
 } // namespace
 
+// Compact workflow helper functions in global namespace
+// Implementation of compact workflow helpers in global namespace
+template <typename ManagerT>
+void applyRelativePtUncertaintySystematic(
+    ManagerT &manager,
+    CorrectionManager &correctionManager,
+    IDataFrameProvider &dataManager,
+    ISystematicManager &systematicManager,
+    IConfigurationProvider &configManager,
+    const ActionMap &action,
+    const ActionMap &localValues,
+    const std::string &owner) {
+  const std::string correctionName = requireResolvedAliasedValue(
+    action, {"correction", "correctionName"}, configManager, localValues, owner);
+  const std::string systematicName = requireResolvedValue(
+    action, "systematicName", configManager, localValues, owner);
+  const std::string inputPtColumn = getResolvedValue(
+    action, "inputPtColumn", configManager, localValues, owner,
+    localValues.at("ptColumn"));
+  const std::string uncertaintyColumn = getResolvedAliasedValue(
+    action, {"uncertaintyColumn", "outputUncertaintyColumn"}, configManager,
+    localValues, owner, systematicName + "_uncertainty");
+  const std::string scaleFactorPrefix = getResolvedValue(
+    action, "scaleFactorPrefix", configManager, localValues, owner,
+    systematicName + "_sf");
+  const std::string outputPtPrefix = getResolvedValue(
+    action, "outputPtPrefix", configManager, localValues, owner,
+    inputPtColumn + "_" + systematicName);
+  const bool applyToMass = getResolvedBool(
+    action, "applyToMass", configManager, localValues, owner, false);
+  const std::string inputMassColumn = getResolvedValue(
+    action, "inputMassColumn", configManager, localValues, owner);
+  const std::string outputMassPrefix = getResolvedValue(
+    action, "outputMassPrefix", configManager, localValues, owner);
+
+  correctionManager.applyCorrectionVec(
+    correctionName,
+    getResolvedList(action, "stringArgs", configManager, localValues, owner),
+    getResolvedList(action, "inputColumns", configManager, localValues, owner),
+    uncertaintyColumn);
+
+  defineRelativeUncertaintyScaleFactors(
+    dataManager, systematicManager, uncertaintyColumn,
+    appendDirectionalSuffix(scaleFactorPrefix, "up"),
+    appendDirectionalSuffix(scaleFactorPrefix, "down"));
+
+  const std::string upMassColumn = outputMassPrefix.empty()
+                     ? ""
+                     : appendDirectionalSuffix(outputMassPrefix, "up");
+  const std::string downMassColumn = outputMassPrefix.empty()
+                     ? ""
+                     : appendDirectionalSuffix(outputMassPrefix, "down");
+
+  manager.applyCorrection(
+    inputPtColumn,
+    appendDirectionalSuffix(scaleFactorPrefix, "up"),
+    appendDirectionalSuffix(outputPtPrefix, "up"),
+    applyToMass,
+    inputMassColumn,
+    upMassColumn);
+  manager.applyCorrection(
+    inputPtColumn,
+    appendDirectionalSuffix(scaleFactorPrefix, "down"),
+    appendDirectionalSuffix(outputPtPrefix, "down"),
+    applyToMass,
+    inputMassColumn,
+    downMassColumn);
+  manager.addVariation(
+    systematicName,
+    appendDirectionalSuffix(outputPtPrefix, "up"),
+    appendDirectionalSuffix(outputPtPrefix, "down"),
+    upMassColumn,
+    downMassColumn);
+}
+
+template <typename ManagerT>
+void applyResolutionSmearingSystematic(
+    ManagerT &manager,
+    CorrectionManager &correctionManager,
+    IConfigurationProvider &configManager,
+    const ActionMap &action,
+    const ActionMap &localValues,
+    const std::string &owner) {
+  const std::string correctionName = requireResolvedAliasedValue(
+    action, {"correction", "correctionName"}, configManager, localValues, owner);
+  const std::string systematicName = requireResolvedValue(
+    action, "systematicName", configManager, localValues, owner);
+  const std::string inputPtColumn = getResolvedValue(
+    action, "inputPtColumn", configManager, localValues, owner,
+    localValues.at("ptColumn"));
+  const std::string nominalOutputPtColumn = getResolvedAliasedOrDefault(
+    action, {"outputPtColumn", "nominalOutputPtColumn"}, configManager, localValues,
+    owner, localValues.at("correctedPtColumn"));
+  const std::string outputPtPrefix = getResolvedValue(
+    action, "outputPtPrefix", configManager, localValues, owner,
+    inputPtColumn + "_" + systematicName);
+  const std::string sigmaColumnPrefix = getResolvedValue(
+    action, "sigmaColumnPrefix", configManager, localValues, owner,
+    systematicName + "_sigma");
+  const std::string randomColumn = getResolvedValue(
+    action, "randomColumn", configManager, localValues, owner,
+    sigmaColumnPrefix + "_random");
+  const std::string randomSizeColumn = getResolvedValue(
+    action, "sizeColumn", configManager, localValues, owner, inputPtColumn);
+  const std::string runColumn = getResolvedValue(
+    action, "runColumn", configManager, localValues, owner,
+    getValue(localValues, "runColumn"));
+  const std::string lumiColumn = getResolvedValue(
+    action, "lumiColumn", configManager, localValues, owner,
+    getValue(localValues, "lumiColumn"));
+  const std::string eventColumn = getResolvedValue(
+    action, "eventColumn", configManager, localValues, owner,
+    getValue(localValues, "eventColumn"));
+  const std::string salt = getResolvedValue(
+    action, "salt", configManager, localValues, owner, systematicName);
+
+  if (!getResolvedBool(action, "skipRandomDefinition", configManager, localValues,
+             owner, false)) {
+  manager.defineReproducibleGaussian(randomColumn, randomSizeColumn, runColumn,
+                     lumiColumn, eventColumn, salt);
+  }
+
+  auto nominalStringArgs =
+      getResolvedList(action, "nominalStringArgs", configManager, localValues, owner);
+  auto upStringArgs =
+      getResolvedList(action, "upStringArgs", configManager, localValues, owner);
+  auto downStringArgs =
+      getResolvedList(action, "downStringArgs", configManager, localValues, owner);
+  if (nominalStringArgs.empty()) {
+    nominalStringArgs = {"smear"};
+  }
+  if (upStringArgs.empty()) {
+    upStringArgs = {"smear_up"};
+  }
+  if (downStringArgs.empty()) {
+    downStringArgs = {"smear_down"};
+  }
+
+  correctionManager.applyCorrectionVec(
+    correctionName,
+    nominalStringArgs,
+    getResolvedList(action, "inputColumns", configManager, localValues, owner),
+    appendDirectionalSuffix(sigmaColumnPrefix, "nominal"));
+  correctionManager.applyCorrectionVec(
+    correctionName,
+    upStringArgs,
+    getResolvedList(action, "inputColumns", configManager, localValues, owner),
+    appendDirectionalSuffix(sigmaColumnPrefix, "up"));
+  correctionManager.applyCorrectionVec(
+    correctionName,
+    downStringArgs,
+    getResolvedList(action, "inputColumns", configManager, localValues, owner),
+    appendDirectionalSuffix(sigmaColumnPrefix, "down"));
+
+  manager.applyResolutionSmearing(inputPtColumn,
+                  appendDirectionalSuffix(sigmaColumnPrefix, "nominal"),
+                  randomColumn,
+                  nominalOutputPtColumn);
+  manager.applyResolutionSmearing(inputPtColumn,
+                  appendDirectionalSuffix(sigmaColumnPrefix, "up"),
+                  randomColumn,
+                  appendDirectionalSuffix(outputPtPrefix, "up"));
+  manager.applyResolutionSmearing(inputPtColumn,
+                  appendDirectionalSuffix(sigmaColumnPrefix, "down"),
+                  randomColumn,
+                  appendDirectionalSuffix(outputPtPrefix, "down"));
+  manager.addVariation(systematicName,
+             appendDirectionalSuffix(outputPtPrefix, "up"),
+             appendDirectionalSuffix(outputPtPrefix, "down"));
+}
+
+void applyScaleResolutionSystematics(
+    MuonRochesterManager &manager,
+    IConfigurationProvider &configManager,
+    const ActionMap &action,
+    const ActionMap &localValues,
+    const std::string &owner) {
+  const bool isMC = inferIsMC(configManager);
+  const std::string jsonFile = requireResolvedValue(
+    action, "jsonFile", configManager, localValues, owner);
+  const std::string inputPtColumn = getResolvedValue(
+    action, "inputPtColumn", configManager, localValues, owner,
+    localValues.at("ptColumn"));
+  const std::string nominalOutputPtColumn = getResolvedAliasedOrDefault(
+    action, {"outputPtColumn", "nominalOutputPtColumn"}, configManager, localValues,
+    owner, localValues.at("correctedPtColumn"));
+
+  manager.applyScaleAndResolution(jsonFile, !isMC, inputPtColumn, nominalOutputPtColumn,
+                  "nom", "nom");
+  if (!isMC) {
+  return;
+  }
+
+  const std::string scaleSystematicName = getResolvedValue(
+    action, "scaleSystematicName", configManager, localValues, owner, "muon_scale");
+  const std::string scaleOutputPtPrefix = getResolvedValue(
+    action, "scaleOutputPtPrefix", configManager, localValues, owner,
+    inputPtColumn + "_scale");
+  const std::string smearSystematicName = getResolvedValue(
+    action, "resolutionSystematicName", configManager, localValues, owner,
+    "muon_smear");
+  const std::string smearOutputPtPrefix = getResolvedValue(
+    action, "resolutionOutputPtPrefix", configManager, localValues, owner,
+    inputPtColumn + "_smear");
+
+  manager.applyScaleAndResolution(jsonFile, false, inputPtColumn,
+                  appendDirectionalSuffix(scaleOutputPtPrefix, "up"),
+                  "up", "nom");
+  manager.applyScaleAndResolution(jsonFile, false, inputPtColumn,
+                  appendDirectionalSuffix(scaleOutputPtPrefix, "down"),
+                  "down", "nom");
+  manager.applyScaleAndResolution(jsonFile, false, inputPtColumn,
+                  appendDirectionalSuffix(smearOutputPtPrefix, "up"),
+                  "nom", "up");
+  manager.applyScaleAndResolution(jsonFile, false, inputPtColumn,
+                  appendDirectionalSuffix(smearOutputPtPrefix, "down"),
+                  "nom", "down");
+  manager.addVariation(scaleSystematicName,
+             appendDirectionalSuffix(scaleOutputPtPrefix, "up"),
+             appendDirectionalSuffix(scaleOutputPtPrefix, "down"));
+  manager.addVariation(smearSystematicName,
+             appendDirectionalSuffix(smearOutputPtPrefix, "up"),
+             appendDirectionalSuffix(smearOutputPtPrefix, "down"));
+}
+
+void applyCorrectionlibVariation(
+    JetEnergyScaleManager &manager,
+    CorrectionManager &correctionManager,
+    IConfigurationProvider &configManager,
+    const ActionMap &action,
+    const ActionMap &localValues,
+    const std::string &owner) {
+  const std::string correctionName = requireResolvedAliasedValue(
+    action, {"correction", "correctionName"}, configManager, localValues, owner);
+  const std::string systematicName = requireResolvedValue(
+    action, "systematicName", configManager, localValues, owner);
+  const std::string inputPtColumn = requireResolvedValue(
+    action, "inputPtColumn", configManager, localValues, owner);
+  const bool applyToMass = getResolvedBool(
+    action, "applyToMass", configManager, localValues, owner, true);
+  const std::string inputMassColumn = getResolvedValue(
+    action, "inputMassColumn", configManager, localValues, owner);
+  const std::string outputPtPrefix = requireResolvedValue(
+    action, "outputPtPrefix", configManager, localValues, owner);
+  const std::string outputMassPrefix = getResolvedValue(
+    action, "outputMassPrefix", configManager, localValues, owner);
+  const auto inputColumns = getResolvedList(action, "inputColumns", configManager,
+                      localValues, owner);
+  const bool outputIsRelativeDelta = getResolvedBool(
+    action, "outputIsRelativeDelta", configManager, localValues, owner, false);
+
+  const std::string upPtColumn = appendDirectionalSuffix(outputPtPrefix, "up");
+  const std::string downPtColumn = appendDirectionalSuffix(outputPtPrefix, "down");
+  const std::string upMassColumn = outputMassPrefix.empty()
+                     ? ""
+                     : appendDirectionalSuffix(outputMassPrefix, "up");
+  const std::string downMassColumn = outputMassPrefix.empty()
+                     ? ""
+                     : appendDirectionalSuffix(outputMassPrefix, "down");
+
+  manager.applyCorrectionlib(
+    correctionManager,
+    correctionName,
+    getResolvedList(action, "upStringArgs", configManager, localValues, owner),
+    inputPtColumn,
+    upPtColumn,
+    applyToMass,
+    inputMassColumn,
+    upMassColumn,
+    inputColumns,
+    outputIsRelativeDelta,
+    1.0f);
+  manager.applyCorrectionlib(
+    correctionManager,
+    correctionName,
+    getResolvedList(action, "downStringArgs", configManager, localValues, owner),
+    inputPtColumn,
+    downPtColumn,
+    applyToMass,
+    inputMassColumn,
+    downMassColumn,
+    inputColumns,
+    outputIsRelativeDelta,
+    -1.0f);
+  manager.addVariation(systematicName, upPtColumn, downPtColumn,
+             upMassColumn, downMassColumn);
+
+  const std::string baseMETPtColumn = getResolvedValue(
+    action, "baseMETPtColumn", configManager, localValues, owner);
+  const std::string baseMETPhiColumn = getResolvedValue(
+    action, "baseMETPhiColumn", configManager, localValues, owner);
+  const std::string nominalJetPtColumn = getResolvedAliasedOrDefault(
+    action, {"nominalJetPtColumn", "nominalPtColumn"}, configManager,
+    localValues, owner);
+  const std::string outputMETPtPrefix = getResolvedValue(
+    action, "outputMETPtPrefix", configManager, localValues, owner);
+  const std::string outputMETPhiPrefix = getResolvedValue(
+    action, "outputMETPhiPrefix", configManager, localValues, owner);
+  const float ptThreshold = getResolvedFloat(
+    action, "ptThreshold", configManager, localValues, owner, 15.0f);
+  if (hasAnyValue({baseMETPtColumn, baseMETPhiColumn, nominalJetPtColumn,
+           outputMETPtPrefix, outputMETPhiPrefix})) {
+  manager.propagateMET(baseMETPtColumn, baseMETPhiColumn, nominalJetPtColumn,
+             upPtColumn,
+             appendDirectionalSuffix(outputMETPtPrefix, "up"),
+             appendDirectionalSuffix(outputMETPhiPrefix, "up"),
+             ptThreshold);
+  manager.propagateMET(baseMETPtColumn, baseMETPhiColumn, nominalJetPtColumn,
+             downPtColumn,
+             appendDirectionalSuffix(outputMETPtPrefix, "down"),
+             appendDirectionalSuffix(outputMETPhiPrefix, "down"),
+             ptThreshold);
+  }
+}
+
+void applyIndexedCorrectionlibVariations(
+    JetEnergyScaleManager &manager,
+    CorrectionManager &correctionManager,
+    IConfigurationProvider &configManager,
+    const ActionMap &action,
+    const ActionMap &localValues,
+    const std::string &owner) {
+  const std::string slotPrefix = requireResolvedValue(
+    action, "slotPrefix", configManager, localValues, owner);
+  const int firstIndex = getResolvedInt(action, "firstIndex", configManager,
+                    localValues, owner, 1);
+  const int lastIndex = getResolvedInt(action, "lastIndex", configManager,
+                     localValues, owner,
+                     getResolvedInt(action, "slotCount", configManager,
+                            localValues, owner, 0));
+  if (lastIndex < firstIndex) {
+  throw std::runtime_error(owner + ": invalid indexed systematic range");
+  }
+
+  const std::string registrationNamePrefix = getResolvedValue(
+    action, "registrationNamePrefix", configManager, localValues, owner, "");
+  const std::string systematicNamePrefix = getResolvedValue(
+    action, "systematicNamePrefix", configManager, localValues, owner, "");
+  const std::string file = requireResolvedValue(
+    action, "file", configManager, localValues, owner);
+  const std::string correctionFieldSuffix = getResolvedValue(
+    action, "correctionFieldSuffix", configManager, localValues, owner,
+    "CorrectionName");
+  const std::string labelFieldSuffix = getResolvedValue(
+    action, "labelFieldSuffix", configManager, localValues, owner, "Label");
+  const std::string enabledFieldSuffix = getResolvedValue(
+    action, "enabledFieldSuffix", configManager, localValues, owner, "Enabled");
+  const std::string inputPtColumn = requireResolvedValue(
+    action, "inputPtColumn", configManager, localValues, owner);
+  const std::string inputMassColumn = getResolvedValue(
+    action, "inputMassColumn", configManager, localValues, owner);
+  const bool applyToMass = getResolvedBool(
+    action, "applyToMass", configManager, localValues, owner, true);
+  const std::string outputPtPrefix = requireResolvedValue(
+    action, "outputPtPrefix", configManager, localValues, owner);
+  const std::string outputMassPrefix = getResolvedValue(
+    action, "outputMassPrefix", configManager, localValues, owner);
+  const auto inputVariables = getResolvedList(
+    action, "inputVariables", configManager, localValues, owner);
+
+  for (int index = firstIndex; index <= lastIndex; ++index) {
+  const std::string enabledKey = composeIndexedKey(slotPrefix, index, enabledFieldSuffix);
+  if (!getConfigBool(configManager, enabledKey, false)) {
+    continue;
+  }
+
+  const std::string label = getConfigValue(
+    configManager, composeIndexedKey(slotPrefix, index, labelFieldSuffix));
+  const std::string correctionName = getConfigValue(
+    configManager, composeIndexedKey(slotPrefix, index, correctionFieldSuffix));
+  if (label.empty() || correctionName.empty()) {
+    throw std::runtime_error(owner + ": indexed systematic slot '" +
+                 std::to_string(index) +
+                 "' is missing label or correction name");
+  }
+
+  const std::string registeredName = registrationNamePrefix + label;
+  correctionManager.registerCorrection(registeredName, file, correctionName,
+                     inputVariables);
+
+  ActionMap expandedAction = action;
+  expandedAction["correction"] = registeredName;
+  expandedAction["systematicName"] = systematicNamePrefix + label;
+  expandedAction["outputPtPrefix"] = outputPtPrefix + "_" + label;
+  if (!outputMassPrefix.empty()) {
+    expandedAction["outputMassPrefix"] = outputMassPrefix + "_" + label;
+  }
+  if (action.count("outputMETPtPrefix") != 0) {
+    expandedAction["outputMETPtPrefix"] =
+      getResolvedValue(action, "outputMETPtPrefix", configManager, localValues, owner) +
+      "_" + label;
+  }
+  if (action.count("outputMETPhiPrefix") != 0) {
+    expandedAction["outputMETPhiPrefix"] =
+      getResolvedValue(action, "outputMETPhiPrefix", configManager, localValues, owner) +
+      "_" + label;
+  }
+  applyCorrectionlibVariation(manager, correctionManager, configManager,
+                expandedAction, localValues, owner);
+  }
+}
+
 CorrectedCollectionManagerBase::CorrectedCollectionManagerBase(
   std::string configKey, CorrectionManager *correctionManager)
   : configKey_m(std::move(configKey)), correctionManager_m(correctionManager) {}
@@ -560,6 +1060,21 @@ CorrectedCollectionManagerBase::parseSpec(const std::string &configFile) const {
   spec.etaColumn = config.count("etaColumn") ? config.at("etaColumn") : "";
   spec.phiColumn = config.count("phiColumn") ? config.at("phiColumn") : "";
   spec.massColumn = config.count("massColumn") ? config.at("massColumn") : "";
+  spec.metPtColumn = getValue(config, "metPtColumn");
+  spec.metPhiColumn = getValue(config, "metPhiColumn");
+  spec.rawFactorColumn = getValue(config, "rawFactorColumn");
+  spec.rawPtColumn = getValue(config, "rawPtColumn");
+  spec.jerGenJetPtColumn = getValue(config, "jerGenJetPtColumn");
+  spec.jerRhoColumn = getValue(config, "jerRhoColumn");
+  spec.jerEventColumn = getValue(config, "jerEventColumn");
+  spec.runColumn = getValue(config, "runColumn");
+  spec.lumiColumn = getValue(config, "lumiColumn");
+  spec.eventColumn = getValue(config, "eventColumn");
+  spec.chargeColumn = getValue(config, "chargeColumn");
+  spec.genPtColumn = getValue(config, "genPtColumn");
+  spec.nLayersColumn = getValue(config, "nLayersColumn");
+  spec.u1Column = getValue(config, "u1Column");
+  spec.u2Column = getValue(config, "u2Column");
   spec.correctedPtColumn = requireValue(config, "correctedPtColumn", type(), configFile);
   spec.correctedMassColumn = config.count("correctedMassColumn") ? config.at("correctedMassColumn") : "";
   spec.outputCollection = requireValue(config, "outputCollection", type(), configFile);
@@ -608,6 +1123,21 @@ void CorrectedCollectionManagerBase::applyWorkflowConfig(
       {"etaColumn", spec.etaColumn},
       {"phiColumn", spec.phiColumn},
       {"massColumn", spec.massColumn},
+        {"metPtColumn", spec.metPtColumn},
+        {"metPhiColumn", spec.metPhiColumn},
+        {"rawFactorColumn", spec.rawFactorColumn},
+        {"rawPtColumn", spec.rawPtColumn},
+        {"jerGenJetPtColumn", spec.jerGenJetPtColumn},
+        {"jerRhoColumn", spec.jerRhoColumn},
+        {"jerEventColumn", spec.jerEventColumn},
+        {"runColumn", spec.runColumn},
+        {"lumiColumn", spec.lumiColumn},
+        {"eventColumn", spec.eventColumn},
+        {"chargeColumn", spec.chargeColumn},
+        {"genPtColumn", spec.genPtColumn},
+        {"nLayersColumn", spec.nLayersColumn},
+        {"u1Column", spec.u1Column},
+        {"u2Column", spec.u2Column},
       {"correctedPtColumn", spec.correctedPtColumn},
       {"correctedMassColumn", spec.correctedMassColumn},
       {"outputCollection", spec.outputCollection},
@@ -655,8 +1185,10 @@ void CorrectedCollectionManagerBase::setupFromConfigFile() {
     defineAutoInputCollection(spec_m);
   }
 
+  applyImplicitSetup(spec_m);
   applyWorkflowConfig(spec_m);
   bindCollectionSpec(spec_m);
+  materializeWrappedOutputs();
   configured_m = true;
 }
 
@@ -766,6 +1298,25 @@ CorrectedJetCollectionManager::create(Analyzer &an, const std::string &role,
   return plugin;
 }
 
+void CorrectedJetCollectionManager::applyImplicitSetup(
+    const CorrectedCollectionSpec &spec) {
+  manager_m.setJetColumns(spec.ptColumn, spec.etaColumn, spec.phiColumn,
+                          spec.massColumn);
+  if (hasAnyValue({spec.metPtColumn, spec.metPhiColumn})) {
+    manager_m.setMETColumns(spec.metPtColumn, spec.metPhiColumn);
+  }
+  if (hasValue(spec.rawFactorColumn)) {
+    manager_m.removeExistingCorrections(spec.rawFactorColumn);
+  }
+  if (hasValue(spec.rawPtColumn)) {
+    manager_m.setRawPtColumn(spec.rawPtColumn);
+  }
+  if (hasAnyValue({spec.jerGenJetPtColumn, spec.jerRhoColumn, spec.jerEventColumn})) {
+    manager_m.setJERSmearingColumns(spec.jerGenJetPtColumn, spec.jerRhoColumn,
+                                    spec.jerEventColumn);
+  }
+}
+
 void CorrectedJetCollectionManager::bindCollectionSpec(
     const CorrectedCollectionSpec &spec) {
   manager_m.setInputJetCollection(spec.inputCollection);
@@ -782,8 +1333,28 @@ std::vector<std::string> CorrectedJetCollectionManager::getVariationNames() cons
 void CorrectedJetCollectionManager::applyWorkflowAction(
     const ActionMap &action,
     const ActionMap &localValues) {
+  const std::string owner = type();
+  const std::string actionType = toLower(
+      requireResolvedValue(action, "type", configManager(), localValues, owner));
+  if (actionType == "applycorrectionlibvariation") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyCorrectionlibVariation action requires CorrectionManager");
+    }
+    applyCorrectionlibVariation(manager_m, *correctionManager(), configManager(),
+                                action, localValues, owner);
+    return;
+  }
+  if (actionType == "applyindexedcorrectionlibvariations") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyIndexedCorrectionlibVariations action requires CorrectionManager");
+    }
+    applyIndexedCorrectionlibVariations(manager_m, *correctionManager(),
+                                        configManager(), action, localValues,
+                                        owner);
+    return;
+  }
   applyJetWorkflowAction(manager_m, correctionManager(), configManager(), action,
-                         localValues, type());
+                         localValues, owner);
 }
 
 CorrectedFatJetCollectionManager::CorrectedFatJetCollectionManager(
@@ -807,6 +1378,25 @@ CorrectedFatJetCollectionManager::create(Analyzer &an, const std::string &role,
   return plugin;
 }
 
+void CorrectedFatJetCollectionManager::applyImplicitSetup(
+    const CorrectedCollectionSpec &spec) {
+  manager_m.setJetColumns(spec.ptColumn, spec.etaColumn, spec.phiColumn,
+                          spec.massColumn);
+  if (hasAnyValue({spec.metPtColumn, spec.metPhiColumn})) {
+    manager_m.setMETColumns(spec.metPtColumn, spec.metPhiColumn);
+  }
+  if (hasValue(spec.rawFactorColumn)) {
+    manager_m.removeExistingCorrections(spec.rawFactorColumn);
+  }
+  if (hasValue(spec.rawPtColumn)) {
+    manager_m.setRawPtColumn(spec.rawPtColumn);
+  }
+  if (hasAnyValue({spec.jerGenJetPtColumn, spec.jerRhoColumn, spec.jerEventColumn})) {
+    manager_m.setJERSmearingColumns(spec.jerGenJetPtColumn, spec.jerRhoColumn,
+                                    spec.jerEventColumn);
+  }
+}
+
 void CorrectedFatJetCollectionManager::bindCollectionSpec(
     const CorrectedCollectionSpec &spec) {
   manager_m.setInputJetCollection(spec.inputCollection);
@@ -823,8 +1413,28 @@ std::vector<std::string> CorrectedFatJetCollectionManager::getVariationNames() c
 void CorrectedFatJetCollectionManager::applyWorkflowAction(
     const ActionMap &action,
     const ActionMap &localValues) {
+  const std::string owner = type();
+  const std::string actionType = toLower(
+      requireResolvedValue(action, "type", configManager(), localValues, owner));
+  if (actionType == "applycorrectionlibvariation") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyCorrectionlibVariation action requires CorrectionManager");
+    }
+    applyCorrectionlibVariation(manager_m, *correctionManager(), configManager(),
+                                action, localValues, owner);
+    return;
+  }
+  if (actionType == "applyindexedcorrectionlibvariations") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyIndexedCorrectionlibVariations action requires CorrectionManager");
+    }
+    applyIndexedCorrectionlibVariations(manager_m, *correctionManager(),
+                                        configManager(), action, localValues,
+                                        owner);
+    return;
+  }
   applyJetWorkflowAction(manager_m, correctionManager(), configManager(), action,
-                         localValues, type());
+                         localValues, owner);
 }
 
 CorrectedElectronCollectionManager::CorrectedElectronCollectionManager(
@@ -848,6 +1458,15 @@ CorrectedElectronCollectionManager::create(Analyzer &an, const std::string &role
   return plugin;
 }
 
+void CorrectedElectronCollectionManager::applyImplicitSetup(
+    const CorrectedCollectionSpec &spec) {
+  manager_m.setObjectColumns(spec.ptColumn, spec.etaColumn, spec.phiColumn,
+                             spec.massColumn);
+  if (hasAnyValue({spec.metPtColumn, spec.metPhiColumn})) {
+    manager_m.setMETColumns(spec.metPtColumn, spec.metPhiColumn);
+  }
+}
+
 void CorrectedElectronCollectionManager::bindCollectionSpec(
     const CorrectedCollectionSpec &spec) {
   manager_m.setInputCollection(spec.inputCollection);
@@ -867,6 +1486,23 @@ void CorrectedElectronCollectionManager::applyWorkflowAction(
   const std::string owner = type();
   const std::string actionType = toLower(
       requireResolvedValue(action, "type", configManager(), localValues, owner));
+  if (actionType == "applyrelativeptuncertaintysystematic") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyRelativePtUncertaintySystematic action requires CorrectionManager");
+    }
+    applyRelativePtUncertaintySystematic(manager_m, *correctionManager(), dataManager(),
+                                         systematicManager(), configManager(), action,
+                                         localValues, owner);
+    return;
+  }
+  if (actionType == "applyresolutionsmearingsystematic") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyResolutionSmearingSystematic action requires CorrectionManager");
+    }
+    applyResolutionSmearingSystematic(manager_m, *correctionManager(),
+                                      configManager(), action, localValues, owner);
+    return;
+  }
   if (actionType == "applycorrectionlib") {
     if (!correctionManager()) {
       throw std::runtime_error(owner + ": applyCorrectionlib action requires CorrectionManager");
@@ -876,8 +1512,10 @@ void CorrectedElectronCollectionManager::applyWorkflowAction(
         requireResolvedAliasedValue(action, {"correction", "correctionName"},
                                     configManager(), localValues, owner),
         getResolvedList(action, "stringArgs", configManager(), localValues, owner),
-        requireResolvedValue(action, "inputPtColumn", configManager(), localValues, owner),
-        requireResolvedValue(action, "outputPtColumn", configManager(), localValues, owner),
+      getResolvedValue(action, "inputPtColumn", configManager(), localValues, owner,
+               getValue(localValues, "ptColumn")),
+      getResolvedValue(action, "outputPtColumn", configManager(), localValues, owner,
+               getValue(localValues, "correctedPtColumn")),
         getResolvedBool(action, "applyToMass", configManager(), localValues, owner, false),
         getResolvedValue(action, "inputMassColumn", configManager(), localValues, owner),
         getResolvedValue(action, "outputMassColumn", configManager(), localValues, owner),
@@ -908,6 +1546,23 @@ CorrectedMuonCollectionManager::create(Analyzer &an, const std::string &role,
   return plugin;
 }
 
+void CorrectedMuonCollectionManager::applyImplicitSetup(
+    const CorrectedCollectionSpec &spec) {
+  manager_m.setObjectColumns(spec.ptColumn, spec.etaColumn, spec.phiColumn,
+                             spec.massColumn);
+  if (hasAnyValue({spec.metPtColumn, spec.metPhiColumn})) {
+    manager_m.setMETColumns(spec.metPtColumn, spec.metPhiColumn);
+  }
+  if (hasValue(spec.chargeColumn)) {
+    manager_m.setRochesterInputColumns(spec.chargeColumn, spec.genPtColumn,
+                                       spec.nLayersColumn, spec.u1Column,
+                                       spec.u2Column);
+  }
+  if (hasAnyValue({spec.lumiColumn, spec.eventColumn})) {
+    manager_m.setScaleResolutionEventColumns(spec.lumiColumn, spec.eventColumn);
+  }
+}
+
 void CorrectedMuonCollectionManager::bindCollectionSpec(
     const CorrectedCollectionSpec &spec) {
   manager_m.setInputCollection(spec.inputCollection);
@@ -928,6 +1583,29 @@ void CorrectedMuonCollectionManager::applyWorkflowAction(
   const std::string actionType = toLower(
       requireResolvedValue(action, "type", configManager(), localValues, owner));
 
+  if (actionType == "applyrelativeptuncertaintysystematic") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyRelativePtUncertaintySystematic action requires CorrectionManager");
+    }
+    applyRelativePtUncertaintySystematic(manager_m, *correctionManager(), dataManager(),
+                                         systematicManager(), configManager(), action,
+                                         localValues, owner);
+    return;
+  }
+  if (actionType == "applyresolutionsmearingsystematic") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyResolutionSmearingSystematic action requires CorrectionManager");
+    }
+    applyResolutionSmearingSystematic(manager_m, *correctionManager(),
+                                      configManager(), action, localValues, owner);
+    return;
+  }
+  if (actionType == "applyscaleresolutionsystematics") {
+    applyScaleResolutionSystematics(manager_m, configManager(), action,
+                                    localValues, owner);
+    return;
+  }
+
   if (actionType == "applycorrectionlib") {
     if (!correctionManager()) {
       throw std::runtime_error(owner + ": applyCorrectionlib action requires CorrectionManager");
@@ -937,8 +1615,10 @@ void CorrectedMuonCollectionManager::applyWorkflowAction(
         requireResolvedAliasedValue(action, {"correction", "correctionName"},
                                     configManager(), localValues, owner),
         getResolvedList(action, "stringArgs", configManager(), localValues, owner),
-        requireResolvedValue(action, "inputPtColumn", configManager(), localValues, owner),
-        requireResolvedValue(action, "outputPtColumn", configManager(), localValues, owner),
+      getResolvedValue(action, "inputPtColumn", configManager(), localValues, owner,
+               getValue(localValues, "ptColumn")),
+      getResolvedValue(action, "outputPtColumn", configManager(), localValues, owner,
+               getValue(localValues, "correctedPtColumn")),
         getResolvedBool(action, "applyToMass", configManager(), localValues, owner, false),
         getResolvedValue(action, "inputMassColumn", configManager(), localValues, owner),
         getResolvedValue(action, "outputMassColumn", configManager(), localValues, owner),
@@ -1018,6 +1698,15 @@ CorrectedTauCollectionManager::create(Analyzer &an, const std::string &role,
   return plugin;
 }
 
+void CorrectedTauCollectionManager::applyImplicitSetup(
+    const CorrectedCollectionSpec &spec) {
+  manager_m.setObjectColumns(spec.ptColumn, spec.etaColumn, spec.phiColumn,
+                             spec.massColumn);
+  if (hasAnyValue({spec.metPtColumn, spec.metPhiColumn})) {
+    manager_m.setMETColumns(spec.metPtColumn, spec.metPhiColumn);
+  }
+}
+
 void CorrectedTauCollectionManager::bindCollectionSpec(
     const CorrectedCollectionSpec &spec) {
   manager_m.setInputCollection(spec.inputCollection);
@@ -1037,6 +1726,23 @@ void CorrectedTauCollectionManager::applyWorkflowAction(
   const std::string owner = type();
   const std::string actionType = toLower(
       requireResolvedValue(action, "type", configManager(), localValues, owner));
+  if (actionType == "applyrelativeptuncertaintysystematic") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyRelativePtUncertaintySystematic action requires CorrectionManager");
+    }
+    applyRelativePtUncertaintySystematic(manager_m, *correctionManager(), dataManager(),
+                                         systematicManager(), configManager(), action,
+                                         localValues, owner);
+    return;
+  }
+  if (actionType == "applyresolutionsmearingsystematic") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyResolutionSmearingSystematic action requires CorrectionManager");
+    }
+    applyResolutionSmearingSystematic(manager_m, *correctionManager(),
+                                      configManager(), action, localValues, owner);
+    return;
+  }
   if (actionType == "applycorrectionlib") {
     if (!correctionManager()) {
       throw std::runtime_error(owner + ": applyCorrectionlib action requires CorrectionManager");
@@ -1046,8 +1752,10 @@ void CorrectedTauCollectionManager::applyWorkflowAction(
         requireResolvedAliasedValue(action, {"correction", "correctionName"},
                                     configManager(), localValues, owner),
         getResolvedList(action, "stringArgs", configManager(), localValues, owner),
-        requireResolvedValue(action, "inputPtColumn", configManager(), localValues, owner),
-        requireResolvedValue(action, "outputPtColumn", configManager(), localValues, owner),
+      getResolvedValue(action, "inputPtColumn", configManager(), localValues, owner,
+               getValue(localValues, "ptColumn")),
+      getResolvedValue(action, "outputPtColumn", configManager(), localValues, owner,
+               getValue(localValues, "correctedPtColumn")),
         getResolvedBool(action, "applyToMass", configManager(), localValues, owner, false),
         getResolvedValue(action, "inputMassColumn", configManager(), localValues, owner),
         getResolvedValue(action, "outputMassColumn", configManager(), localValues, owner),
@@ -1078,6 +1786,15 @@ CorrectedPhotonCollectionManager::create(Analyzer &an, const std::string &role,
   return plugin;
 }
 
+void CorrectedPhotonCollectionManager::applyImplicitSetup(
+    const CorrectedCollectionSpec &spec) {
+  manager_m.setObjectColumns(spec.ptColumn, spec.etaColumn, spec.phiColumn,
+                             spec.massColumn);
+  if (hasAnyValue({spec.metPtColumn, spec.metPhiColumn})) {
+    manager_m.setMETColumns(spec.metPtColumn, spec.metPhiColumn);
+  }
+}
+
 void CorrectedPhotonCollectionManager::bindCollectionSpec(
     const CorrectedCollectionSpec &spec) {
   manager_m.setInputCollection(spec.inputCollection);
@@ -1097,6 +1814,23 @@ void CorrectedPhotonCollectionManager::applyWorkflowAction(
   const std::string owner = type();
   const std::string actionType = toLower(
       requireResolvedValue(action, "type", configManager(), localValues, owner));
+  if (actionType == "applyrelativeptuncertaintysystematic") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyRelativePtUncertaintySystematic action requires CorrectionManager");
+    }
+    applyRelativePtUncertaintySystematic(manager_m, *correctionManager(), dataManager(),
+                                         systematicManager(), configManager(), action,
+                                         localValues, owner);
+    return;
+  }
+  if (actionType == "applyresolutionsmearingsystematic") {
+    if (!correctionManager()) {
+      throw std::runtime_error(owner + ": applyResolutionSmearingSystematic action requires CorrectionManager");
+    }
+    applyResolutionSmearingSystematic(manager_m, *correctionManager(),
+                                      configManager(), action, localValues, owner);
+    return;
+  }
   if (actionType == "applycorrectionlib") {
     if (!correctionManager()) {
       throw std::runtime_error(owner + ": applyCorrectionlib action requires CorrectionManager");
@@ -1106,8 +1840,10 @@ void CorrectedPhotonCollectionManager::applyWorkflowAction(
         requireResolvedAliasedValue(action, {"correction", "correctionName"},
                                     configManager(), localValues, owner),
         getResolvedList(action, "stringArgs", configManager(), localValues, owner),
-        requireResolvedValue(action, "inputPtColumn", configManager(), localValues, owner),
-        requireResolvedValue(action, "outputPtColumn", configManager(), localValues, owner),
+      getResolvedValue(action, "inputPtColumn", configManager(), localValues, owner,
+               getValue(localValues, "ptColumn")),
+      getResolvedValue(action, "outputPtColumn", configManager(), localValues, owner,
+               getValue(localValues, "correctedPtColumn")),
         getResolvedBool(action, "applyToMass", configManager(), localValues, owner, false),
         getResolvedValue(action, "inputMassColumn", configManager(), localValues, owner),
         getResolvedValue(action, "outputMassColumn", configManager(), localValues, owner),

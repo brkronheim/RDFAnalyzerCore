@@ -203,7 +203,7 @@ class DatacardGenerator:
                 print(f"Error reading file {file_path}: {e}")
                 continue
     
-    def _read_histograms_from_file(self, root_file, sample_name: str) -> None:
+    def _read_histograms_from_file(self, root_file, sample_name: str, prefix: str = "") -> None:
         """
         Read all 1D histograms from a ROOT file using uproot.
         
@@ -215,6 +215,12 @@ class DatacardGenerator:
         for key in root_file.keys(cycle=False):
             try:
                 obj = root_file[key]
+                hist_name = key.split(';')[0]
+                full_name = f"{prefix}/{hist_name}" if prefix else hist_name
+
+                if hasattr(obj, 'keys') and not (hasattr(obj, 'axes') and hasattr(obj, 'values')):
+                    self._read_histograms_from_file(obj, sample_name, full_name)
+                    continue
                 
                 # Check if it's a TH1 histogram (not TH2, TH3, etc.)
                 if hasattr(obj, 'axes') and hasattr(obj, 'values'):
@@ -225,13 +231,46 @@ class DatacardGenerator:
                         edges = obj.axis().edges()
                         
                         # Create Histogram1D object
-                        hist_name = key.split(';')[0]  # Remove cycle number
-                        hist = Histogram1D(values, edges, hist_name)
-                        self.histograms[sample_name][hist_name] = hist
+                        hist = Histogram1D(values, edges, full_name)
+                        self.histograms[sample_name][full_name] = hist
                         
             except Exception as e:
                 print(f"  Warning: Could not read {key}: {e}")
                 continue
+
+    def _resolve_histogram_candidates(
+        self, sample: str, observable: str, region: str, systematic: str = ""
+    ) -> List[str]:
+        """Build a list of plausible histogram names and paths."""
+        syst_suffix = f"_{systematic}" if systematic else ""
+        candidates = [
+            f"{observable}_{region}{syst_suffix}",
+            f"{region}_{observable}{syst_suffix}",
+            f"{observable}{syst_suffix}",
+            f"{observable}_{sample}{syst_suffix}",
+        ]
+
+        if sample:
+            candidates.extend([
+                f"{sample}/{observable}_{region}{syst_suffix}",
+                f"{sample}/{region}_{observable}{syst_suffix}",
+                f"{sample}/{observable}{syst_suffix}",
+            ])
+        if region:
+            candidates.extend([
+                f"{region}/{observable}{syst_suffix}",
+                f"{region}/{sample}/{observable}{syst_suffix}",
+                f"{sample}/{region}/{observable}{syst_suffix}",
+            ])
+
+        deduplicated: List[str] = []
+        seen = set()
+        for candidate in candidates:
+            candidate = candidate.strip("/")
+            if candidate and candidate not in seen:
+                deduplicated.append(candidate)
+                seen.add(candidate)
+        return deduplicated
     
     def combine_samples(self, region: str, process: str) -> Optional[Histogram1D]:
         """
@@ -339,23 +378,19 @@ class DatacardGenerator:
         """
         if sample not in self.histograms:
             return None
-        
-        # Build histogram name with systematic suffix
-        syst_suffix = ""
-        if systematic:
-            syst_suffix = f"_{systematic}"
-        
-        # Try different naming conventions
-        possible_names = [
-            f"{observable}_{region}{syst_suffix}",
-            f"{region}_{observable}{syst_suffix}",
-            f"{observable}{syst_suffix}",
-            f"{observable}_{sample}{syst_suffix}",
+
+        sample_histograms = self.histograms[sample]
+        for hist_name in self._resolve_histogram_candidates(sample, observable, region, systematic):
+            if hist_name in sample_histograms:
+                return sample_histograms[hist_name]
+
+        desired_suffixes = [
+            name for name in self._resolve_histogram_candidates("", observable, region, systematic)
         ]
-        
-        for hist_name in possible_names:
-            if hist_name in self.histograms[sample]:
-                return self.histograms[sample][hist_name]
+        for hist_name, histogram in sample_histograms.items():
+            for suffix in desired_suffixes:
+                if hist_name.endswith("/" + suffix):
+                    return histogram
         
         return None
     

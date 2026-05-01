@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import warnings
 from dataclasses import dataclass, field, fields, asdict
 from typing import Any, Dict, List, Optional, Union
 
@@ -212,6 +213,9 @@ class DatasetEntry:
     parent : str or None
         Name of the parent ``DatasetEntry`` from which this dataset was
         derived.  Enables lineage tracking for skimmed / filtered datasets.
+    site : str or None
+        Optional site override used by legacy submission flows for remote
+        discovery preferences.
     """
 
     name: str
@@ -242,6 +246,7 @@ class DatasetEntry:
 
     # -- provenance ---
     parent: Optional[str] = None
+    site: Optional[str] = None
 
     # -- extensible per-dataset metadata ---
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -268,11 +273,9 @@ class DatasetEntry:
     # ------------------------------------------------------------------ helpers
 
     def to_legacy_dict(self) -> Dict[str, str]:
-        """Return a ``{key: str}`` dict compatible with ``getSampleList`` /
-        ``_get_sample_list``.
-
-        Only fields that have non-``None`` values are included; all values are
-        converted to strings as required by the legacy text-config format.
+        """Return a ``{key: str}`` dict with all non-``None`` values converted to
+        strings.  Used when writing legacy on-disk ``submit_config.txt`` job
+        configs or emitting per-job float/int config files.
         """
         d: Dict[str, str] = {"name": self.name}
 
@@ -310,12 +313,19 @@ class DatasetEntry:
             d["group"] = self.group
         if self.parent is not None:
             d["parent"] = self.parent
+        if self.site is not None:
+            d["site"] = self.site
         return d
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the full entry as a plain Python dict (suitable for YAML
         serialisation).  ``None`` values are preserved."""
         return asdict(self)
+
+    @classmethod
+    def from_legacy_dict(cls, data: Dict[str, str]) -> "DatasetEntry":
+        """Construct a typed entry from a legacy ``key=value`` sample dict."""
+        return _entry_from_legacy_kv(data)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DatasetEntry":
@@ -418,21 +428,23 @@ class DatasetManifest:
 
     @classmethod
     def load(cls, path: str) -> "DatasetManifest":
-        """Auto-detect format and load a manifest.
+        """Load a YAML dataset manifest file.
 
         * Files ending in ``.yaml`` / ``.yml`` are loaded as YAML manifests.
-        * All other files are interpreted as legacy key=value text configs and
-          wrapped into a thin :class:`DatasetManifest` for uniform access.
+        * All other file types are no longer supported.
 
         Parameters
         ----------
         path : str
-            Path to the manifest or legacy sample-config file.
+            Path to the YAML manifest file.
         """
         ext = os.path.splitext(path)[1].lower()
         if ext in (".yaml", ".yml"):
             return cls.load_yaml(path)
-        return cls.load_text(path)
+        raise ValueError(
+            "DatasetManifest.load() only supports YAML manifest files with "
+            ".yaml or .yml extensions. Legacy text format support has been removed."
+        )
 
     @classmethod
     def load_yaml(cls, path: str) -> "DatasetManifest":
@@ -464,6 +476,8 @@ class DatasetManifest:
                 f"Dataset manifest '{path}' must be a YAML mapping at the top level."
             )
 
+        _validate_manifest_yaml(raw, path)
+
         lumi = float(raw.get("lumi", 1.0))
         whitelist = raw.get("whitelist") or []
         blacklist = raw.get("blacklist") or []
@@ -481,58 +495,6 @@ class DatasetManifest:
             entries.append(DatasetEntry.from_dict(item))
 
         return cls(datasets=entries, lumi=lumi, whitelist=whitelist, blacklist=blacklist, lumi_by_year=lumi_by_year)
-
-    @classmethod
-    def load_text(cls, path: str) -> "DatasetManifest":
-        """Load a legacy key=value text sample-config and wrap it as a
-        :class:`DatasetManifest`.
-
-        The legacy format supports the following global directives:
-
-        * ``lumi=<float>``
-        * ``WL=site1,site2``   (whitelist)
-        * ``BL=site1,site2``   (blacklist)
-
-        Per-sample lines must contain ``name=<identifier>`` and may carry any
-        of the following recognised fields::
-
-            name=ttbar xsec=98.34 das=/TTto2L2Nu/... type=mc kfac=1.0
-            extraScale=1.0 norm=1234567.8 year=2022 era=C campaign=Run3...
-            process=ttbar group=ttbar stitch_id=0 parent=~
-
-        Parameters
-        ----------
-        path : str
-            Path to the legacy sample-config file.
-        """
-        lumi = 1.0
-        whitelist: List[str] = []
-        blacklist: List[str] = []
-        entries: List[DatasetEntry] = []
-
-        with open(path) as fh:
-            for line in fh:
-                line = line.split("#")[0].strip()
-                if not line:
-                    continue
-                parts = line.split()
-                kv: Dict[str, str] = {}
-                for part in parts:
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        kv[k.strip()] = v.strip()
-
-                if "lumi" in kv:
-                    lumi = float(kv["lumi"])
-                elif "WL" in kv:
-                    whitelist = [s for s in kv["WL"].split(",") if s]
-                elif "BL" in kv:
-                    blacklist = [s for s in kv["BL"].split(",") if s]
-                elif "name" in kv:
-                    entry = _entry_from_legacy_kv(kv)
-                    entries.append(entry)
-
-        return cls(datasets=entries, lumi=lumi, whitelist=whitelist, blacklist=blacklist)
 
     def save_yaml(self, path: str) -> None:
         """Serialise the manifest to a YAML file.
@@ -733,13 +695,6 @@ class DatasetManifest:
 
         return errors
 
-    # ------------------------------------------------------------------ conversion
-
-    def to_legacy_sample_dict(self) -> Dict[str, Dict[str, str]]:
-        """Return a ``{name: legacy_dict}`` mapping compatible with the
-        ``getSampleList`` / ``_get_sample_list`` return value."""
-        return {e.name: e.to_legacy_dict() for e in self.datasets}
-
     def __len__(self) -> int:
         return len(self.datasets)
 
@@ -757,6 +712,142 @@ class DatasetManifest:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _validate_manifest_yaml(raw: Dict[str, Any], path: str) -> None:
+    """Validate the top-level YAML manifest schema and dataset structure."""
+    allowed_top_keys = {"lumi", "lumi_by_year", "whitelist", "blacklist", "datasets"}
+    extra_top_keys = set(raw) - allowed_top_keys
+    if extra_top_keys:
+        raise ValueError(
+            f"Dataset manifest '{path}' contains unknown top-level keys: "
+            f"{', '.join(sorted(extra_top_keys))}"
+        )
+
+    if "datasets" not in raw:
+        raise ValueError(f"Dataset manifest '{path}' must contain a top-level 'datasets' list.")
+
+    if not isinstance(raw["datasets"], list):
+        raise ValueError(
+            f"Dataset manifest '{path}' 'datasets' field must be a YAML sequence."
+        )
+
+    if "whitelist" in raw and raw["whitelist"] is not None:
+        if not isinstance(raw["whitelist"], list) or any(not isinstance(item, str) for item in raw["whitelist"]):
+            raise ValueError(
+                f"Dataset manifest '{path}' 'whitelist' must be a list of strings."
+            )
+
+    if "blacklist" in raw and raw["blacklist"] is not None:
+        if not isinstance(raw["blacklist"], list) or any(not isinstance(item, str) for item in raw["blacklist"]):
+            raise ValueError(
+                f"Dataset manifest '{path}' 'blacklist' must be a list of strings."
+            )
+
+    if "lumi_by_year" in raw and raw["lumi_by_year"] is not None:
+        if not isinstance(raw["lumi_by_year"], dict):
+            raise ValueError(
+                f"Dataset manifest '{path}' 'lumi_by_year' must be a mapping from year to luminosity."
+            )
+        for key, value in raw["lumi_by_year"].items():
+            try:
+                int(key)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Dataset manifest '{path}' 'lumi_by_year' keys must be integers, got {key!r}."
+                )
+            try:
+                float(value)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Dataset manifest '{path}' 'lumi_by_year[{key}]' must be numeric."
+                )
+
+    for dataset_index, item in enumerate(raw["datasets"]):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"Dataset manifest '{path}' entry #{dataset_index} must be a YAML mapping."
+            )
+        _validate_dataset_entry(item, path, dataset_index)
+
+
+def _validate_dataset_entry(raw_entry: Dict[str, Any], path: str, index: int) -> None:
+    """Validate a single dataset entry inside the YAML manifest."""
+    dataset_label = raw_entry.get("name", f"entry #{index}")
+
+    if "name" not in raw_entry or not isinstance(raw_entry["name"], str):
+        raise ValueError(
+            f"Dataset manifest '{path}' entry #{index} must contain a string 'name' field."
+        )
+
+    known_entry_keys = {f.name for f in fields(DatasetEntry)}
+    unknown_entry_keys = set(raw_entry) - known_entry_keys
+    if unknown_entry_keys:
+        raise ValueError(
+            f"Dataset manifest '{path}' entry '{dataset_label}' contains unknown keys: "
+            f"{', '.join(sorted(unknown_entry_keys))}"
+        )
+
+    if "dtype" in raw_entry and raw_entry["dtype"] is not None:
+        if not isinstance(raw_entry["dtype"], str):
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}': 'dtype' must be a string."
+            )
+        if raw_entry["dtype"] not in {"mc", "data"}:
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}' contains invalid dtype {raw_entry['dtype']!r}."
+            )
+
+    if "files" in raw_entry and raw_entry["files"] is not None:
+        if not isinstance(raw_entry["files"], list) or any(not isinstance(item, str) for item in raw_entry["files"]):
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}': 'files' must be a list of strings."
+            )
+
+    if "friend_trees" in raw_entry and raw_entry["friend_trees"] is not None:
+        if not isinstance(raw_entry["friend_trees"], list):
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}': 'friend_trees' must be a YAML sequence."
+            )
+        for ft_index, ft in enumerate(raw_entry["friend_trees"]):
+            if not isinstance(ft, dict):
+                raise ValueError(
+                    f"Dataset manifest '{path}' entry '{dataset_label}' friend_trees[{ft_index}] must be a YAML mapping."
+                )
+            _validate_friend_tree_config(ft, path, dataset_label, ft_index)
+
+
+def _validate_friend_tree_config(raw_friend_tree: Dict[str, Any], path: str, dataset_label: str, index: int) -> None:
+    """Validate a single FriendTreeConfig mapping in a dataset entry."""
+    if "alias" not in raw_friend_tree or not isinstance(raw_friend_tree["alias"], str):
+        raise ValueError(
+            f"Dataset manifest '{path}' entry '{dataset_label}' friend_trees[{index}] must contain a string 'alias' field."
+        )
+
+    if "tree_name" in raw_friend_tree and raw_friend_tree["tree_name"] is not None:
+        if not isinstance(raw_friend_tree["tree_name"], str):
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}' friend_trees[{index}] 'tree_name' must be a string."
+            )
+
+    if "files" in raw_friend_tree and raw_friend_tree["files"] is not None:
+        if not isinstance(raw_friend_tree["files"], list) or any(not isinstance(item, str) for item in raw_friend_tree["files"]):
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}' friend_trees[{index}] 'files' must be a list of strings."
+            )
+
+    if "directory" in raw_friend_tree and raw_friend_tree["directory"] is not None:
+        if not isinstance(raw_friend_tree["directory"], str):
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}' friend_trees[{index}] 'directory' must be a string."
+            )
+
+    for list_key in ("globs", "antiglobs", "index_branches"):
+        if list_key in raw_friend_tree and raw_friend_tree[list_key] is not None:
+            if not isinstance(raw_friend_tree[list_key], list) or any(not isinstance(item, str) for item in raw_friend_tree[list_key]):
+                raise ValueError(
+                    f"Dataset manifest '{path}' entry '{dataset_label}' friend_trees[{index}] '{list_key}' must be a list of strings."
+                )
+
 
 def _entry_from_legacy_kv(kv: Dict[str, str]) -> DatasetEntry:
     """Construct a :class:`DatasetEntry` from a legacy key=value dict."""
@@ -779,8 +870,18 @@ def _entry_from_legacy_kv(kv: Dict[str, str]) -> DatasetEntry:
         except ValueError:
             return None
 
-    # "type" in the legacy config is the MC-type / dataset-type string
-    dtype = kv.get("type", "mc")
+    raw_type = kv.get("type")
+    dtype = kv.get("dtype", "mc")
+    sample_type = _int("sample_type")
+    if raw_type is not None:
+        lowered = raw_type.lower()
+        if lowered in {"mc", "data"}:
+            dtype = lowered
+        else:
+            try:
+                sample_type = int(raw_type)
+            except ValueError:
+                dtype = raw_type
 
     return DatasetEntry(
         name=kv["name"],
@@ -790,6 +891,7 @@ def _entry_from_legacy_kv(kv: Dict[str, str]) -> DatasetEntry:
         process=kv.get("process"),
         group=kv.get("group"),
         stitch_id=_int("stitch_id"),
+        sample_type=sample_type,
         xsec=_float("xsec"),
         filter_efficiency=_float("filterEfficiency", 1.0),
         kfac=_float("kfac", 1.0),
@@ -800,5 +902,6 @@ def _entry_from_legacy_kv(kv: Dict[str, str]) -> DatasetEntry:
         das=kv.get("das"),
         files=[f for f in kv.get("fileList", "").split(",") if f],
         parent=kv.get("parent"),
+        site=kv.get("site"),
         extra={},
     )

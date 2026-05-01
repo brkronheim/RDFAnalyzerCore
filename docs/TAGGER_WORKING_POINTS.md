@@ -13,15 +13,16 @@ object collection** — including Jets, FatJets, and Taus.
 3. [Quick start: Jets (b-tagging)](#quick-start-jets-b-tagging)
 4. [Quick start: Jets (charm-tagging, multi-score)](#quick-start-jets-charm-tagging-multi-score)
 5. [Quick start: Taus (DeepTau ID)](#quick-start-taus-deeptau-id)
-6. [API reference](#api-reference)
-7. [Generator-level fraction reweighting](#generator-level-fraction-reweighting)
-8. [Pre-processing: computing fraction histograms](#pre-processing-computing-fraction-histograms)
-9. [Systematic variations and collections](#systematic-variations-and-collections)
-10. [Complete CMS NanoAOD workflow](#complete-cms-nanoaod-workflow)
-11. [Integration with WeightManager](#integration-with-weightmanager)
-12. [Config-file driven setup](#config-file-driven-setup)
-13. [No-filter annotated collection](#no-filter-annotated-collection)
-14. [Further reading](#further-reading)
+6. [Fixed-WP BTV event reweighting](#fixed-wp-btv-event-reweighting)
+7. [API reference](#api-reference)
+8. [Generator-level fraction reweighting](#generator-level-fraction-reweighting)
+9. [Pre-processing: computing fraction histograms](#pre-processing-computing-fraction-histograms)
+10. [Systematic variations and collections](#systematic-variations-and-collections)
+11. [Complete CMS NanoAOD workflow](#complete-cms-nanoaod-workflow)
+12. [Integration with WeightManager](#integration-with-weightmanager)
+13. [Config-file driven setup](#config-file-driven-setup)
+14. [No-filter annotated collection](#no-filter-annotated-collection)
+15. [Further reading](#further-reading)
 
 ---
 
@@ -50,6 +51,9 @@ Key features:
   MC object fractions per WP category, for proper distribution reweighting.
 - **Systematic source sets** — bulk application of named uncertainty sources
   matching the JetEnergyScaleManager API.
+- **BTV fixed-WP event weights** — build the CMS-recommended tagged / fail /
+  intermediate-bin event weight from per-WP SF columns and analyzer-derived MC
+  efficiency columns via `defineFixedWorkingPointWeight()`.
 - **WP-filtered PhysicsObjectCollections** — objects passing/failing specific WP
   criteria as named RDF columns.
 - **Variation collections + map** — per-systematic up/down object collections and a
@@ -97,8 +101,8 @@ The `defineWorkingPointCollection()` selection strings (`pass_<wp>`, `fail_<wp>`
 #include <PhysicsObjectCollection.h>
 
 // Get plugin instances from the analyzer.
-auto *twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
-auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare object kinematic columns.
 twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -163,8 +167,8 @@ vector overload of `addWorkingPoint`.
 #include <TaggerWorkingPointManager.h>
 #include <CorrectionManager.h>
 
-auto *ctwm = analyzer.getPlugin<TaggerWorkingPointManager>("ctagManager");
-auto *cm   = analyzer.getPlugin<CorrectionManager>("corrections");
+auto ctwm = analyzer.getPlugin<TaggerWorkingPointManager>("ctagManager");
+auto cm   = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare object kinematic columns.
 ctwm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -217,14 +221,98 @@ histograms for each discriminant, create two separate
 
 ---
 
+## Fixed-WP BTV event reweighting
+
+For CMS BTV **fixed working point** corrections, the recommended event weight is
+not a simple product of per-object scale factors. The per-event factor depends
+on whether a jet:
+
+- fails the loosest WP,
+- passes a looser WP but fails a tighter WP, or
+- passes the tightest WP under consideration.
+
+For working points $[L, M, T]$ with analyzer-derived MC efficiencies
+$\epsilon_L$, $\epsilon_M$, $\epsilon_T$ and per-WP SFs $SF_L$, $SF_M$,
+$SF_T$, the per-jet factor is:
+
+$$
+w_j = \begin{cases}
+\dfrac{1 - SF_L \epsilon_L}{1 - \epsilon_L}, & \text{fail } L \\
+\dfrac{SF_L \epsilon_L - SF_M \epsilon_M}{\epsilon_L - \epsilon_M}, & \text{pass } L \text{ fail } M \\
+\dfrac{SF_M \epsilon_M - SF_T \epsilon_T}{\epsilon_M - \epsilon_T}, & \text{pass } M \text{ fail } T \\
+SF_T, & \text{pass } T
+\end{cases}
+$$
+
+and the full event weight is the product over all jets where the analysis uses
+the tag decision.
+
+When an intermediate-bin numerator becomes negative, the manager follows the BTV
+recommendation and replaces that per-jet factor with unity.
+
+### `defineFixedWorkingPointWeight(perWPSFColumns, perWPEffColumns, outputWeightColumn)`
+
+This method schedules exactly that fixed-WP event weight. The input vectors must
+be ordered exactly like the registered working points.
+
+```cpp
+auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
+
+twm->setObjectColumns("Jet_pt_corr_nominal", "Jet_eta", "Jet_phi", "Jet_mass_corr_nominal");
+twm->setTaggerColumn("Jet_btagPNetB");
+twm->addWorkingPoint("L", 0.047f);
+twm->addWorkingPoint("M", 0.245f);
+twm->addWorkingPoint("T", 0.6734f);
+twm->setInputObjectCollection("taggerJets");
+
+// Per-WP SF columns already merged across flavour families, one RVec per jet.
+// Per-WP efficiency columns come from analyzer-derived MC efficiencies.
+twm->defineFixedWorkingPointWeight(
+    {"btag_sf_L_central", "btag_sf_M_central", "btag_sf_T_central"},
+    {"btag_eff_L", "btag_eff_M", "btag_eff_T"},
+    "btag_weight_nominal");
+
+twm->defineFixedWorkingPointWeight(
+    {"btag_sf_L_up", "btag_sf_M_up", "btag_sf_T_up"},
+    {"btag_eff_L", "btag_eff_M", "btag_eff_T"},
+    "btag_weight_up");
+
+twm->defineFixedWorkingPointWeight(
+    {"btag_sf_L_down", "btag_sf_M_down", "btag_sf_T_down"},
+    {"btag_eff_L", "btag_eff_M", "btag_eff_T"},
+    "btag_weight_down");
+```
+
+### BTV payload split by flavour family
+
+The shipped CMS BTV correctionlib payloads do **not** provide one universal
+fixed-WP correction per tagger. Analyses must merge the appropriate flavour
+families before calling `defineFixedWorkingPointWeight()`:
+
+- **b-tagging**:
+  use `<tagger>_comb` for hadron flavour 4 and 5 jets, and `<tagger>_light`
+  for flavour 0 jets.
+- **c-tagging**:
+  use `<tagger>_wc` for flavour 4 jets, `<tagger>_tnp` for flavour 5 jets, and
+  `<tagger>_light` for flavour 0 jets.
+
+### Analyzer-derived efficiencies
+
+The BTV payloads ship SFs and working-point values, but **not** the MC tagging
+efficiencies used in the fixed-WP event-weight formula. Those efficiencies must
+be derived by the analysis in the relevant phase space and supplied as
+per-working-point correction columns.
+
+---
+
 ## Quick start: Taus (DeepTau ID)
 
 The same plugin works identically for taus — the only difference is the
 input column names and working-point thresholds.
 
 ```cpp
-auto *tauTwm = analyzer.getPlugin<TaggerWorkingPointManager>("tauIdManager");
-auto *cm     = analyzer.getPlugin<CorrectionManager>("corrections");
+auto tauTwm = analyzer.getPlugin<TaggerWorkingPointManager>("tauIdManager");
+auto cm     = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare tau kinematic columns.
 tauTwm->setObjectColumns("Tau_pt", "Tau_eta", "Tau_phi", "Tau_mass");
@@ -357,6 +445,11 @@ twm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
 //   "deepjet_sf_central_weight" (per-event weight)
 ```
 
+This simple per-event product is useful for generic object weights, but it is
+**not** the CMS BTV fixed-WP prescription for tagged / fail / intermediate WP
+categories. For that use case, build the per-WP SF columns first and then call
+[`defineFixedWorkingPointWeight`](#definefixedworkingpointweightperwpsfcolumns-perwpeffcolumns-outputweightcolumn).
+
 ### `setFractionCorrection(cm, fractionCorrectionName, inputColumns)`
 
 Enable generator-level fraction reweighting.  See
@@ -442,6 +535,12 @@ See [Pre-processing: computing fraction histograms](#pre-processing-computing-fr
 
 ## Generator-level fraction reweighting
 
+This section describes an optional analyzer-specific reweighting utility. It is
+not the CMS BTV recommended fixed-WP event-weight procedure for b-tagging or
+c-tagging. For BTV fixed-WP corrections, use
+[`defineFixedWorkingPointWeight`](#definefixedworkingpointweightperwpsfcolumns-perwpeffcolumns-outputweightcolumn)
+with analyzer-derived MC efficiencies instead.
+
 ### Motivation
 
 When applying b-tag SFs, the scale factor for a jet in WP category `c` is:
@@ -478,8 +577,8 @@ cm->registerCorrection(
     "deepjet_fractions",
     "deepjet_fractions.json",
     "DeepJetFractions",
-    {"Jet_pt", "Jet_eta", "Jet_wp_category"});
-// Note: "Jet_wp_category" is defined by execute() after calling
+    {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
+  // Note: "Jet_pt_wp_category" is defined by execute() after calling
 // setTaggerColumn + addWorkingPoint.
 
 // Enable fraction reweighting.
@@ -574,7 +673,7 @@ After calling `applySystematicSet()`, the manager produces:
 Register these with `WeightManager` to apply them:
 
 ```cpp
-auto *wm = analyzer.getPlugin<WeightManager>("weights");
+auto wm = analyzer.getPlugin<WeightManager>("weights");
 wm->addScaleFactor("btag_nominal", "deepjet_sf_central_weight");
 wm->addWeightVariation("btagHF",
     "deepjet_sf_hf_up_weight",
@@ -619,9 +718,9 @@ DeepJet, including fraction reweighting and systematic variations:
 // -------------------------------------------------------------------------
 // Setup
 // -------------------------------------------------------------------------
-auto *jtm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
-auto *cm  = analyzer.getPlugin<CorrectionManager>("corrections");
-auto *wm  = analyzer.getPlugin<WeightManager>("weights");
+auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto wm  = analyzer.getPlugin<WeightManager>("weights");
 
 // 1. Declare jet columns.
 twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");

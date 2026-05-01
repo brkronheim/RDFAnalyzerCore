@@ -2,6 +2,7 @@
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ISystematicManager.h>
+#include <filesystem>
 #include <fnmatch.h>
 #include <iostream>
 #include <unordered_set>
@@ -77,11 +78,18 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec
   std::cout << "Executing Snapshot" << std::endl;
   std::cout << "Tree: " << spec.treeName << std::endl;
   std::cout << "SaveFile: " << spec.outputFile << std::endl;
+
+  const std::filesystem::path outputPath(spec.outputFile);
+  if (outputPath.has_parent_path()) {
+    std::filesystem::create_directories(outputPath.parent_path());
+  }
+
   ROOT::RDF::RSnapshotOptions options;
   options.fCompressionAlgorithm = ROOT::RCompressionSetting::EAlgorithm::kZSTD;
   options.fCompressionLevel = 5;  // 505 ZSTD compression level, good balance between speed and size
+
   if (spec.columns.empty()) {
-    df.Snapshot(spec.treeName, spec.outputFile, "*", options);
+    df.Snapshot(spec.treeName, spec.outputFile, ".*", options);
   } else {
     df.Snapshot(spec.treeName, spec.outputFile, spec.columns, options);
   }

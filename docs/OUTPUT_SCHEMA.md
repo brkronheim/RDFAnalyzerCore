@@ -19,7 +19,7 @@ The framework covers six output categories:
 | **Histograms** | `NDHistogramManager` | `HistogramSchema` |
 | **Metadata / provenance** | `ProvenanceService` | `MetadataSchema` |
 | **Cutflows** | `CounterService` | `CutflowSchema` |
-| **LAW artifacts** | `law/nano_tasks.py`, `law/opendata_tasks.py` | `LawArtifactSchema` |
+| **LAW artifacts** | `core/python/law/analysis_tasks.py`, `core/python/law/rucio_tasks.py`, `core/python/law/opendata_tasks.py` | `LawArtifactSchema` |
 | **Intermediate artifacts** | Pipeline caching layer | `IntermediateArtifactSchema` |
 
 ---
@@ -44,7 +44,7 @@ The framework covers six output categories:
 | `framework_hash` | `str \| None` | Git commit hash of RDFAnalyzerCore at job-submission time. |
 | `user_repo_hash` | `str \| None` | Git commit hash of the user analysis repository. |
 | `config_mtime` | `str \| None` | UTC ISO 8601 modification time of the job configuration file. |
-| `dataset_manifest_provenance` | `DatasetManifestProvenance \| None` | Identity and query record for the dataset manifest used. |
+| `dataset_manifest_provenance` | `DatasetManifestProvenance \| None` | Identity and query record for the dataset manifest used. When present, its manifest hash is included in the recorded provenance used by `provenance()` and `resolve()`. |
 
 At least one of `skim`, `histograms`, `metadata`, `cutflow`, `law_artifacts`, or `intermediate_artifacts` must be populated; `validate()` returns an error if all are absent.
 
@@ -57,7 +57,7 @@ At least one of `skim`, `histograms`, `metadata`, `cutflow`, `law_artifacts`, or
 | `validate` | `() -> list[str]` | Run structural validation on all contained schemas. Returns a (possibly empty) list of error strings. |
 | `check_version_compatibility` | `(manifest: OutputManifest) -> None` | Static method. Raise `SchemaVersionError` if any stored schema version differs from the current code version. |
 | `provenance` | `() -> ProvenanceRecord` | Build a `ProvenanceRecord` from the manifest's recorded hashes and timestamps. |
-| `resolve` | `(current_provenance=None) -> dict[str, ArtifactResolutionStatus]` | Convenience wrapper for `resolve_manifest()` that uses this manifest's stored provenance as the baseline. |
+| `resolve` | `(current_provenance=None) -> dict[str, ArtifactResolutionStatus]` | Convenience wrapper for `resolve_manifest()` that uses this manifest's stored provenance as the baseline. Returns statuses for scalar outputs, LAW artifacts, and intermediate artifacts. |
 
 ### YAML Example
 
@@ -169,6 +169,10 @@ Describes `THnSparseF` histogram objects saved by `NDHistogramManager` into the 
 | `output_file` | `str` | `""` | Path or pattern of the meta-output ROOT file. Must not be empty. |
 | `histogram_names` | `list[str]` | `[]` | Names of the `THnSparseF` objects expected in the file. |
 | `axes` | `list[HistogramAxisSpec]` | `[]` | Axis specifications shared across all histograms in this schema. |
+| `axis_labels` | `dict[str, list[str]]` | `{}` | Optional label payloads inferred from histogram config axes such as channel, control-region, or sample-category labels. |
+| `sample_metadata` | `dict[str, dict]` | `{}` | Optional per-sample or per-alias metadata used by downstream tools to resolve fit groupings. |
+| `sample_combinations` | `dict[str, dict]` | `{}` | Optional pre-resolved sample-combination definitions, compatible with the datacard generator `sample_combinations` block. |
+| `processes` | `dict[str, dict]` | `{}` | Optional pre-resolved process definitions, compatible with the datacard generator `processes` block. |
 
 ```python
 from output_schema import HistogramSchema, HistogramAxisSpec
@@ -180,8 +184,21 @@ histograms = HistogramSchema(
         HistogramAxisSpec(variable="Muon_pt", bins=50, lower_bound=0.0, upper_bound=200.0, label="Muon p_{T} [GeV]"),
         HistogramAxisSpec(variable="Muon_eta", bins=30, lower_bound=-3.0, upper_bound=3.0, label="#eta"),
     ],
+    axis_labels={"sample": ["inclusive", "wh_301", "wh_302"]},
+    sample_metadata={
+        "wh_301": {"process": "wh", "stxs_bin": "wh_301", "tags": ["signal", "stxs"]},
+        "wh_302": {"process": "wh", "stxs_bin": "wh_302", "tags": ["signal", "stxs"]},
+    },
+    sample_combinations={
+        "wh_lowpt": {"method": "sum", "samples": ["wh_301", "wh_302"]},
+    },
+    processes={
+        "signal": {"samples": ["wh_lowpt"], "signal": True},
+    },
 )
 ```
+
+These extra histogram fields are intended for downstream automation rather than ROOT I/O validation alone. In the LAW pipeline, `HistFillTask` now writes an `output_manifest.yaml` next to each histogram output and can populate these fields from an optional metadata YAML referenced by `manifestMetadataConfig` or `fitMetadataConfig` in the job configuration. `ManifestDatacardTask` can then reuse the stored `sample_metadata`, `sample_combinations`, and `processes` blocks when the fit YAML leaves them unspecified.
 
 ---
 

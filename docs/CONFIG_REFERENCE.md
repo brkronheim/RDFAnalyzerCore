@@ -324,13 +324,19 @@ type=setJetColumns ptColumn=Jet_pt etaColumn=Jet_eta phiColumn=Jet_phi massColum
 type=removeExistingCorrections rawFactorColumn=Jet_rawFactor sample=mc
 type=registerCorrection sample=mc name=vhqq_jec_nominal file=${jmeFile} correctionName=${jecCompoundCorrection} inputVariables=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
 type=applyCorrectionlib sample=mc correction=vhqq_jec_nominal inputPtColumn=Jet_pt_raw outputPtColumn=${correctedPtColumn} applyToMass=true inputMassColumn=Jet_mass_raw outputMassColumn=${correctedMassColumn} inputColumns=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
-type=defineRelativeUncertaintyScaleFactors sample=mc inputColumn=vhqq_electron_scale_uncertainty upColumn=vhqq_electron_scale_sf_up downColumn=vhqq_electron_scale_sf_down
-type=applyScaleAndResolution sample=mc jsonFile=${muonScaleResolutionFile} isData=false inputPtColumn=Muon_pt outputPtColumn=Muon_pt_corr_nominal scaleVariation=nom resolutionVariation=nom
+type=applyResolutionSmearingSystematic sample=mc correction=vhqq_electron_smear systematicName=electron_smear
+type=applyRelativePtUncertaintySystematic sample=mc correction=vhqq_electron_smear systematicName=electron_scale stringArgs=escale
+type=applyScaleResolutionSystematics jsonFile=${muonScaleResolutionFile}
 ```
+
+Compact actions support implicit defaults for common fields (input/output pt
+columns, naming prefixes, and standard string args), so workflows only need to
+specify correction-specific details.
 
 Supported workflow action families:
 
 - Common: `registerCorrection`, `applyCorrectionVec`, `defineRelativeUncertaintyScaleFactors`
+- Compact high-level actions: `applyRelativePtUncertaintySystematic`, `applyResolutionSmearingSystematic`, `applyScaleResolutionSystematics`, `applyCorrectionlibVariation`, `applyIndexedCorrectionlibVariations`
 - Jet / fatjet: `setJetColumns`, `setMETColumns`, `removeExistingCorrections`, `setRawPtColumn`, `setJERSmearingColumns`, `applyCorrection`, `applyCorrectionlib`, `applyJERSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`, `applySystematicSet`
 - Electron / photon / tau: `setObjectColumns`, `setMETColumns`, `defineReproducibleGaussian`, `applyCorrection`, `applyCorrectionlib`, `applyResolutionSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`
 - Muon additions: `setRochesterInputColumns`, `setScaleResolutionEventColumns`, `applyScaleAndResolution`, `applyRochesterCorrection`, `applyRochesterSystematicSet`
@@ -372,7 +378,7 @@ WeightManager = WeightManager
 
 **Registered programmatically in C++**:
 ```cpp
-auto* wm = analyzer->getPlugin<WeightManager>("weights");
+auto wm = analyzer.getPlugin<WeightManager>("weights");
 
 // Scale factors: named per-event multiplicative corrections (dataframe columns)
 wm->addScaleFactor("pileup_sf",  "pu_weight");
@@ -414,7 +420,7 @@ analyzer->Define("pass_signal",  [](float mva){ return mva > 0.8f; }, {"mva"});
 analyzer->Define("pass_control", [](float mva){ return mva < 0.4f; }, {"mva"});
 
 // 2. Declare regions (parent before child)
-auto* rm = analyzer->getPlugin<RegionManager>("regions");
+auto rm = analyzer.getPlugin<RegionManager>("regions");
 rm->declareRegion("presel",  "pass_presel");
 rm->declareRegion("signal",  "pass_signal",  "presel");  // child of presel
 rm->declareRegion("control", "pass_control", "presel");  // child of presel
@@ -453,7 +459,7 @@ Each key is a run number; the value is a list of `[lumi_min, lumi_max]` certifie
 
 **Apply the filter in C++**:
 ```cpp
-auto* gjm = analyzer->getPlugin<GoldenJsonManager>("goldenJson");
+auto gjm = analyzer.getPlugin<GoldenJsonManager>("goldenJson");
 gjm->applyGoldenJson();
 ```
 
@@ -481,7 +487,7 @@ analyzer->Define("pass_ptCut",  [](float pt){ return pt > 30.f; },          {"pt
 analyzer->Define("pass_etaCut", [](float eta){ return std::abs(eta) < 2.4f; }, {"eta"});
 
 // 2. Register cuts (also applies each filter to the dataframe)
-auto* cfm = analyzer->getPlugin<CutflowManager>("cutflow");
+auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 cfm->addCut("ptCut",  "pass_ptCut");
 cfm->addCut("etaCut", "pass_etaCut");
 

@@ -47,7 +47,7 @@ The manager now broadcasts the scalar input across the jet loop automatically. A
 ### Registration pattern
 
 ```cpp
-auto* cm = analyzer.getPlugin<CorrectionManager>("correctionManager");
+auto cm = analyzer.getPlugin<CorrectionManager>("correctionManager");
 
 cm->registerCorrection(
     "jec_nominal",
@@ -112,7 +112,7 @@ cm->applyCorrectionVec("electron_scale_data", {"scale"}, {}, "electron_scale_sf"
 
 1. Define raw jet columns.
 2. Evaluate nominal JEC with `CorrectionManager`.
-3. Apply the nominal JEC with `JetEnergyScaleManager::applyCorrection(...)`.
+3. Apply the nominal JEC with `JetEnergyScaleManager::applyCorrectionlib(...)`.
 4. Register JES sources as separate corrections and apply each up/down shift.
 5. Register JER resolution and scale-factor payloads.
 6. Call `setJERSmearingColumns(...)` once.
@@ -268,6 +268,12 @@ ptColumn=Jet_pt
 etaColumn=Jet_eta
 phiColumn=Jet_phi
 massColumn=Jet_mass
+metPtColumn=PuppiMET_pt
+metPhiColumn=PuppiMET_phi
+rawFactorColumn=Jet_rawFactor
+jerGenJetPtColumn=Jet_genMatchedPt
+jerRhoColumn=fixedGridRhoFastjetAll
+jerEventColumn=event
 correctedPtColumn=Jet_pt_corr_nominal
 correctedMassColumn=Jet_mass_corr_nominal
 outputCollection=CorrectedJets
@@ -278,6 +284,20 @@ workflowConfig=cfg/corrected_jets_workflow.txt
 If `inputCollection` is omitted, the plugin auto-builds one from
 `ptColumn/etaColumn/phiColumn/massColumn`. If `inputCollection` is provided,
 the raw component columns are not needed.
+
+The wrappers now also use the top-level corrected-collection spec to perform
+the repetitive manager setup implicitly:
+
+- jets / fatjets: `setJetColumns()` plus optional `setMETColumns()`,
+    `removeExistingCorrections()`, `setRawPtColumn()`, and
+    `setJERSmearingColumns()`
+- electrons / photons / taus: `setObjectColumns()` plus optional
+    `setMETColumns()`
+- muons: `setObjectColumns()` plus optional `setMETColumns()`,
+    `setRochesterInputColumns()`, and `setScaleResolutionEventColumns()`
+
+That means the workflow file no longer needs to repeat the same column wiring
+that is already present in the wrapper spec.
 
 If `workflowConfig` is present, the wrapper executes its rows in order during
 `setupFromConfigFile()`. Each row must define `type=...`. Optional
@@ -292,6 +312,76 @@ This lets analyses move setup code such as correction registration,
 `applyResolutionSmearing()`, `applyScaleAndResolution()`, `addVariation()`, and
 `propagateMET()` out of analysis C++ and into declarative configs while keeping
 the same `CorrectedJets`, `CorrectedElectrons`, and `CorrectedMuons` interface.
+
+### Compact workflow actions
+
+The recommended pattern is now to describe only the correction-specific inputs
+and let the wrapper expand the nominal/up/down branches, variation
+registration, and optional MET propagation automatically.
+
+Common compact actions:
+
+- `applyRelativePtUncertaintySystematic`
+    Evaluates a correctionlib uncertainty column, converts it into up/down scale
+    factors, applies those factors to the target pt column, and registers the
+    resulting systematic variation.
+- `applyResolutionSmearingSystematic`
+    Evaluates nominal/up/down smearing widths, defines the reproducible random
+    column when needed, materializes the nominal and shifted smeared pt columns,
+    and registers the variation.
+- `applyScaleResolutionSystematics`
+    Drives the Run 3 muon scale-and-resolution workflow, including nominal,
+    scale up/down, and resolution up/down outputs with the two registered muon
+    variation families.
+- `applyCorrectionlibVariation`
+    Applies a single correctionlib up/down systematic pair, registers the
+    variation, and optionally propagates both shifts to MET.
+- `applyIndexedCorrectionlibVariations`
+    Expands indexed config slots such as `vhqqJesSlot1...vhqqJesSlot12` into the
+    repeated register/apply/addVariation/propagateMET sequence used by VHqq JES.
+
+Compact actions now support implicit defaults so workflow rows can stay short:
+
+- `applyRelativePtUncertaintySystematic`
+    Defaults `inputPtColumn` to `${ptColumn}`, `uncertaintyColumn` to
+    `${systematicName}_uncertainty`, `scaleFactorPrefix` to
+    `${systematicName}_sf`, and `outputPtPrefix` to
+    `${inputPtColumn}_${systematicName}`.
+- `applyResolutionSmearingSystematic`
+    Defaults `inputPtColumn` to `${ptColumn}`, nominal output to
+    `${correctedPtColumn}`, `outputPtPrefix` to
+    `${inputPtColumn}_${systematicName}`, `sigmaColumnPrefix` to
+    `${systematicName}_sigma`, and string args to
+    `smear` / `smear_up` / `smear_down`.
+- `applyScaleResolutionSystematics`
+    Defaults `inputPtColumn` to `${ptColumn}`, nominal output to
+    `${correctedPtColumn}`, and MC variations to
+    `muon_scale` (`${inputPtColumn}_scale_up/down`) and
+    `muon_smear` (`${inputPtColumn}_smear_up/down`).
+
+The low-level actions remain supported for unusual workflows, but they are no
+longer the preferred way to encode standard electron, muon, tau, photon, or
+jet correction chains.
+
+Example compact electron workflow:
+
+```yaml
+- type: registerCorrection
+    sample: mc
+    name: vhqq_electron_smear
+    file: ${vhqqElectronScaleSmearingFile}
+    correctionName: ${vhqqElectronSmearingCorrection}
+    inputVariables: Electron_pt,Electron_r9,Electron_scEta
+- type: applyResolutionSmearingSystematic
+    sample: mc
+    correction: vhqq_electron_smear
+    systematicName: electron_smear
+- type: applyRelativePtUncertaintySystematic
+    sample: mc
+    correction: vhqq_electron_smear
+    stringArgs: escale
+    systematicName: electron_scale
+```
 
 ### Systematic behavior
 

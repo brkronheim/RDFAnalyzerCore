@@ -57,6 +57,7 @@ void ObjectEnergyManagerBase::setObjectColumns(
   etaColumn_m  = etaColumn;
   phiColumn_m  = phiColumn;
   massColumn_m = massColumn;
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,7 @@ void ObjectEnergyManagerBase::setMETColumns(const std::string &metPtColumn,
         type() + "::setMETColumns: metPhiColumn must not be empty");
   metPtColumn_m  = metPtColumn;
   metPhiColumn_m = metPhiColumn;
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +110,7 @@ void ObjectEnergyManagerBase::defineReproducibleGaussian(
   // Hash the salt string at schedule time so the lambda captures only a uint64_t.
   step.saltHash = std::hash<std::string>{}(salt);
   gaussianColumnSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +145,7 @@ void ObjectEnergyManagerBase::applyCorrection(
                                 : outputMassColumn;
   }
   correctionSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 void ObjectEnergyManagerBase::applyCorrectionlib(
@@ -187,6 +191,7 @@ void ObjectEnergyManagerBase::applyResolutionSmearing(
   step.randomColumn   = randomColumn;
   step.outputPtColumn = outputPtColumn;
   smearingSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +211,7 @@ void ObjectEnergyManagerBase::registerSystematicSources(
       throw std::invalid_argument(
           type() + "::registerSystematicSources: source names must not be empty");
   systematicSets_m[setName] = sources;
+  executionPending_m = true;
 }
 
 const std::vector<std::string> &
@@ -287,6 +293,7 @@ void ObjectEnergyManagerBase::addVariation(
   entry.upMassColumn  = upMassColumn;
   entry.downMassColumn = downMassColumn;
   variations_m.push_back(std::move(entry));
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +337,7 @@ void ObjectEnergyManagerBase::propagateMET(
   step.outputMETPhiColumn = outputMETPhiColumn;
   step.ptThreshold        = ptThreshold;
   metPropagationSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +350,7 @@ void ObjectEnergyManagerBase::setInputCollection(
     throw std::invalid_argument(
         type() + "::setInputCollection: collectionColumn must not be empty");
   inputCollectionColumn_m = collectionColumn;
+  executionPending_m = true;
 }
 
 void ObjectEnergyManagerBase::defineCollectionOutput(
@@ -364,6 +373,7 @@ void ObjectEnergyManagerBase::defineCollectionOutput(
   step.correctedMassColumn    = correctedMassColumn;
   step.outputCollectionColumn = outputCollectionColumn;
   collectionOutputSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 void ObjectEnergyManagerBase::defineVariationCollections(
@@ -388,6 +398,7 @@ void ObjectEnergyManagerBase::defineVariationCollections(
   step.collectionPrefix        = collectionPrefix;
   step.variationMapColumn      = variationMapColumn;
   variationCollectionsSteps_m.push_back(std::move(step));
+  executionPending_m = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +448,8 @@ void ObjectEnergyManagerBase::appendObjectProvenanceEntries(
 void ObjectEnergyManagerBase::execute() {
   if (!dataManager_m)
     throw std::runtime_error(type() + "::execute: context not set");
+  if (!executionPending_m)
+    return;
 
   // 0. Define reproducible per-object Gaussian random columns.
   //    These must be defined before any smearing steps that consume them.
@@ -757,6 +770,7 @@ void ObjectEnergyManagerBase::execute() {
   metPropagationSteps_m.clear();
   collectionOutputSteps_m.clear();
   variationCollectionsSteps_m.clear();
+  executionPending_m = false;
 }
 
 // ---------------------------------------------------------------------------
