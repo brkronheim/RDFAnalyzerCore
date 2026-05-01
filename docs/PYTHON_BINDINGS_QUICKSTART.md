@@ -2,6 +2,8 @@
 
 ## Installation
 
+> **Prerequisite:** Do not attempt `pip install ROOT`. Use `source env.sh` on supported hosts or `source <root-install>/bin/thisroot.sh` with a standalone ROOT installation.
+
 ```bash
 # Build RDFAnalyzerCore with Python bindings
 source env.sh  # On a CVMFS-backed host, or source your ROOT installation

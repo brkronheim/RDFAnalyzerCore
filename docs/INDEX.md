@@ -16,7 +16,7 @@
 **Getting Started**
 - [Installation](./GETTING_STARTED.md) - Build requirements
 - [Quick Start](./GETTING_STARTED.md) - Minimal example
-- [Examples](./examples/config_histograms/README.md) - Working examples
+- [Examples](../examples/README.md) - Runnable examples and scripts
 
 **Analysis Guide**
 - [Building Analyses](./ANALYSIS_GUIDE.md) - Step-by-step tutorials
@@ -77,6 +77,20 @@
 - [Schema](./OUTPUT_SCHEMA.md) - Output format
 - [Validation](./VALIDATION_REPORTS.md) - Validation
 
+## Role-Based Navigation
+
+- **Developers (framework maintainers)**
+  - Start: [Architecture](./ARCHITECTURE.md)
+  - Then: [API Reference](./API_REFERENCE.md), [Plugin Development](./PLUGIN_DEVELOPMENT.md), [Doxygen Guide](./DOXYGEN_GUIDE.md)
+
+- **Analyzers (analysis builders)**
+  - Start: [Getting Started](./GETTING_STARTED.md)
+  - Then: [Analysis Guide](./ANALYSIS_GUIDE.md), [Configuration Reference](./CONFIG_REFERENCE.md), [Config Histograms](./CONFIG_HISTOGRAMS.md), [Nuisance Groups](./NUISANCE_GROUPS.md)
+
+- **Agents (automation + validation)**
+  - Start: [Documentation Index](./INDEX.md)
+  - Then: [Errors and Tracing](./ERRORS_AND_TRACING.md), [Configuration Validation](./CONFIGURATION_VALIDATION.md), [Output Schema](./OUTPUT_SCHEMA.md), [Validation Reports](./VALIDATION_REPORTS.md)
+
 ## Documentation Quality
 
 Documentation is maintained as code-adjacent guidance. For API truth, treat C++ headers in `core/interface/` as canonical and use these docs as usage-oriented references.
@@ -119,5 +133,5 @@ Current high-priority core areas:
 
 ---
 
-**Last Updated:** 2026-04-26
+**Last Updated:** 2026-05-01
 **Compatibility:** ROOT 6.30+, C++17, optional Python 3.8+

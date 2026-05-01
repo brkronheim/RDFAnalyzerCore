@@ -559,6 +559,9 @@ class Analyzer:
 
 ## Configuration Files
 
+> **Environment note:** ROOT must come from CVMFS/site packages or a local ROOT build. It is not distributed as a pip package named `ROOT`; source `env.sh` or `thisroot.sh` before using Python bindings.
+
+
 Python bindings use the same configuration files as the C++ framework:
 
 ```
@@ -655,13 +658,9 @@ Common causes:
 
 ## Future Enhancements
 
-Planned features for future releases:
+Planned improvements focus on ergonomics and coverage (for example, expanded end-to-end examples and additional validation utilities).
 
-- [ ] Plugin manager bindings (BDT, ONNX, Corrections, Histograms)
-- [ ] Direct RDataFrame access for advanced users
-- [ ] Systematic variation control from Python
-- [ ] Callback functions for custom event processing
-- [ ] Helper utilities for common patterns
+Current plugin manager bindings are already available; refer to the plugin management sections above for supported APIs.
 
 ## Contributing
 
