@@ -14,6 +14,20 @@ std::string serializeConfigNode(const YAML::Node &node) {
     return node.as<std::string>();
   }
 
+  if (node.IsSequence()) {
+    // Build flow-style [item1, item2, ...] representation manually.
+    // Relying on YAML::Emitter << YAML::Flow is not reliable across yaml-cpp
+    // versions when nodes were parsed in block style.
+    std::string result = "[";
+    bool first = true;
+    for (const auto& item : node) {
+      if (!first) result += ", ";
+      result += item.as<std::string>();
+      first = false;
+    }
+    return result + "]";
+  }
+
   YAML::Emitter emitter;
   emitter << YAML::Flow << node;
   if (!emitter.good()) {

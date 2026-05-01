@@ -89,7 +89,7 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec
   options.fCompressionLevel = 5;  // 505 ZSTD compression level, good balance between speed and size
 
   if (spec.columns.empty()) {
-    df.Snapshot(spec.treeName, spec.outputFile, "*", options);
+    df.Snapshot(spec.treeName, spec.outputFile, ".*", options);
   } else {
     df.Snapshot(spec.treeName, spec.outputFile, spec.columns, options);
   }
