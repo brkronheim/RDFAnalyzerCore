@@ -59,9 +59,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import warnings
 import traceback
 from pathlib import Path
+from typing import Optional
 
 import luigi  # type: ignore
 import law  # type: ignore
@@ -103,6 +106,197 @@ from failure_handler import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
+# Runtime I/O throughput monitor (Linux only)
+# ---------------------------------------------------------------------------
+
+class _IOThroughputMonitor:
+    """Background thread that tracks a process's read throughput via /proc.
+
+    Reads ``/proc/{pid}/io`` (Linux only) at a configurable interval and
+    computes a rolling average throughput.  When the sustained throughput
+    falls below *threshold_mbs* the :attr:`was_slow` flag is set.
+
+    This provides a passive signal for slow XRootD sources.  Since the
+    analysis executable reads files in its own thread(s), this monitor works
+    for single-threaded and multi-threaded workloads without any code changes
+    to the compiled binary.
+
+    Parameters
+    ----------
+    pid:
+        PID of the subprocess to monitor.
+    threshold_mbs:
+        Throughput (MB/s) below which the job is considered slow.
+    poll_interval:
+        Seconds between ``/proc`` samples.
+    grace_s:
+        Seconds of consistently low throughput before ``was_slow`` is set.
+    """
+
+    def __init__(
+        self,
+        pid: int,
+        threshold_mbs: float = 1.0,
+        poll_interval: float = 5.0,
+        grace_s: float = 60.0,
+    ) -> None:
+        self._pid = pid
+        self._threshold = threshold_mbs
+        self._interval = poll_interval
+        self._grace = grace_s
+        self.was_slow: bool = False
+        self.avg_throughput_mbs: float = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        """Start the background monitoring thread."""
+        if sys.platform == "linux":
+            self._thread.start()
+
+    def stop(self) -> None:
+        """Stop the monitoring thread."""
+        self._stop.set()
+        self._thread.join(timeout=max(self._interval * 2, 5.0))
+
+    def _read_bytes_read(self) -> int:
+        """Return cumulative bytes read by *pid* from ``/proc``, or -1."""
+        try:
+            with open(f"/proc/{self._pid}/io") as fh:
+                for line in fh:
+                    if line.startswith("read_bytes:"):
+                        return int(line.split(":")[1].strip())
+        except (OSError, ValueError):
+            pass
+        return -1
+
+    def _run(self) -> None:
+        prev_bytes = self._read_bytes_read()
+        if prev_bytes < 0:
+            return
+        prev_time = time.monotonic()
+        below_since: Optional[float] = None
+        samples: list[float] = []
+
+        while not self._stop.is_set():
+            self._stop.wait(self._interval)
+            now_bytes = self._read_bytes_read()
+            if now_bytes < 0:
+                break
+            now_time = time.monotonic()
+            delta_bytes = now_bytes - prev_bytes
+            delta_time = now_time - prev_time
+            if delta_time > 0 and delta_bytes >= 0:
+                tput = (delta_bytes / (1024.0 * 1024.0)) / delta_time
+                samples.append(tput)
+                if samples:
+                    self.avg_throughput_mbs = sum(samples) / len(samples)
+                if tput < self._threshold:
+                    if below_since is None:
+                        below_since = now_time
+                    elif (now_time - below_since) >= self._grace:
+                        self.was_slow = True
+                else:
+                    below_since = None
+            prev_bytes = now_bytes
+            prev_time = now_time
+
+
+# ---------------------------------------------------------------------------
+# XRootD site optimisation helper
+# ---------------------------------------------------------------------------
+
+def _optimize_job_config_xrootd(config_path: str) -> None:
+    """Rewrite XRootD URLs in *config_path* to use the fastest available site.
+
+    Reads the ``fileList`` key from the job config, calls
+    :func:`xrootd_site_selector.optimize_file_list` to probe all known CMS
+    redirectors in parallel, and overwrites the config with the best URLs.
+
+    This is a best-effort optimisation: if the site selector is not
+    importable, no redirectors are reachable, or the config has no XRootD
+    files, the config is left unchanged and no error is raised.
+
+    Parameters
+    ----------
+    config_path:
+        Absolute path to the per-job ``submit_config.txt`` (or ``.yaml``).
+    """
+    if not os.path.isfile(config_path):
+        return
+
+    # Lazy import so the function remains picklable even when the selector
+    # module is not available on the submit node at serialisation time.
+    try:
+        _law_dir = os.path.dirname(os.path.abspath(__file__))
+        _core_python = os.path.abspath(os.path.join(_law_dir, "..", "core", "python"))
+        if _core_python not in sys.path:
+            sys.path.insert(0, _core_python)
+        from xrootd_site_selector import optimize_file_list  # type: ignore[import]
+    except ImportError:
+        return  # selector not available; skip optimisation silently
+
+    # Read the config (support both key=value text and YAML).
+    cfg: dict[str, str] = {}
+    is_yaml = config_path.endswith((".yaml", ".yml"))
+    try:
+        if is_yaml:
+            import yaml  # type: ignore[import]
+            with open(config_path) as fh:
+                raw = yaml.safe_load(fh)
+            cfg = {k: str(v) for k, v in (raw or {}).items()}
+        else:
+            with open(config_path) as fh:
+                for line in fh:
+                    line = line.split("#")[0].strip()
+                    if not line or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip()
+    except Exception:
+        return
+
+    file_list_raw = cfg.get("fileList", "")
+    if not file_list_raw:
+        return
+
+    files = [f.strip() for f in file_list_raw.split(",") if f.strip()]
+    optimizable_indices = [
+        i for i, f in enumerate(files)
+        if f.startswith("/store/") or f.startswith("/eos/")
+    ]
+    if not optimizable_indices:
+        return  # nothing to optimise
+
+    # XRDFS discovery already chose the redirector for fully qualified
+    # root:// URLs. Preserve those URLs as-is and only optimise bare LFNs.
+    optimizable_files = [files[i] for i in optimizable_indices]
+    optimized_files = optimize_file_list(optimizable_files)
+    if optimized_files == optimizable_files:
+        return  # no change
+
+    optimized = list(files)
+    for index, optimized_file in zip(optimizable_indices, optimized_files):
+        optimized[index] = optimized_file
+
+    cfg["fileList"] = ",".join(optimized)
+
+    # Write back the updated config.
+    try:
+        if is_yaml:
+            import yaml  # type: ignore[import]
+            with open(config_path, "w") as fh:
+                yaml.dump(cfg, fh, default_flow_style=False, sort_keys=False)
+        else:
+            with open(config_path, "w") as fh:
+                for k, v in cfg.items():
+                    if not k.startswith("__"):
+                        fh.write(f"{k}={v}\n")
+    except Exception:
+        pass  # best-effort; leave the original if write fails
+
+
+# ---------------------------------------------------------------------------
 # Pure function: execute one analysis job (picklable → usable on Dask workers)
 # ---------------------------------------------------------------------------
 
@@ -112,6 +306,7 @@ def _run_analysis_job(
     root_setup: str = "",
     container_setup: str = "",
     config_relpath: str = "submit_config.txt",
+    stream_output: bool = False,
 ) -> str:
     """
     Run a single analysis job in *job_dir* by invoking *exe_path* with a
@@ -150,6 +345,10 @@ def _run_analysis_job(
         ``--command-to-run`` (for CMSSW wrappers) or ``bash -c``.
     config_relpath:
         Config path relative to *job_dir* passed to the analysis executable.
+    stream_output:
+        When ``True``, stream the child process stdout/stderr live to the
+        current terminal while keeping a bounded stderr tail for error
+        reporting. Intended for interactive local LAW runs.
 
     Returns
     -------
@@ -161,6 +360,24 @@ def _run_analysis_job(
     RuntimeError
         If the analysis process exits with a non-zero return code.
     """
+    # ------------------------------------------------------------------
+    # XRootD site optimisation (best-effort; never aborts the job)
+    # ------------------------------------------------------------------
+    # When the config contains XRootD file URLs, probe all known CMS
+    # redirectors from the current worker node and substitute the fastest
+    # site-specific URL before the analysis executable opens the files.
+    # The optimisation is skipped when XRD_OPTIMIZE_SITES=0 is set.
+    if os.environ.get("XRD_OPTIMIZE_SITES", "1") != "0":
+        config_abs = os.path.join(job_dir, config_relpath)
+        try:
+            _optimize_job_config_xrootd(config_abs)
+        except Exception as _xrd_exc:
+            warnings.warn(
+                f"XRootD site optimisation failed (will use original URLs): {_xrd_exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     cmd_parts: list[str] = []
 
     # Optional ROOT / CMSSW environment setup
@@ -199,19 +416,80 @@ def _run_analysis_job(
 
     task_label = f"analysis_job:{os.path.basename(job_dir)}"
 
+    def _append_tail(buf: bytearray, chunk: bytes, max_bytes: int = 2000) -> None:
+        buf.extend(chunk)
+        overflow = len(buf) - max_bytes
+        if overflow > 0:
+            del buf[:overflow]
+
+    def _write_stream(target, chunk: bytes) -> None:
+        buffer = getattr(target, "buffer", None)
+        if buffer is not None:
+            buffer.write(chunk)
+            buffer.flush()
+            return
+        target.write(chunk.decode(errors="replace"))
+        target.flush()
+
+    def _stream_subprocess_output(proc: subprocess.Popen) -> tuple[str, str]:
+        stdout_tail = bytearray()
+        stderr_tail = bytearray()
+
+        def _drain_stream(stream, sink, tail_buf: bytearray) -> None:
+            try:
+                while True:
+                    chunk = stream.read(4096)
+                    if not chunk:
+                        break
+                    _append_tail(tail_buf, chunk)
+                    _write_stream(sink, chunk)
+            finally:
+                stream.close()
+
+        stdout_thread = threading.Thread(
+            target=_drain_stream,
+            args=(proc.stdout, sys.stdout, stdout_tail),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_drain_stream,
+            args=(proc.stderr, sys.stderr, stderr_tail),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        stdout_thread.join()
+        stderr_thread.join()
+
+        return (
+            stdout_tail.decode(errors="replace"),
+            stderr_tail.decode(errors="replace"),
+        )
+
     if _PerformanceRecorder is not None:
         input_bytes = _estimate_job_input_bytes(job_dir) if _estimate_job_input_bytes else 0
         with _PerformanceRecorder(task_label) as rec:
-            proc = subprocess.Popen(
-                full_cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            popen_kwargs = {
+                "args": full_cmd,
+                "shell": True,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+            }
+            if stream_output:
+                popen_kwargs["bufsize"] = 0
+            else:
+                popen_kwargs["text"] = True
+            proc = subprocess.Popen(**popen_kwargs)
             rec.monitor_process(proc.pid)
-            stdout_data, stderr_data = proc.communicate()
-            returncode = proc.returncode
+            slow_detector = _IOThroughputMonitor(proc.pid)
+            slow_detector.start()
+            if stream_output:
+                stdout_data, stderr_data = _stream_subprocess_output(proc)
+                returncode = proc.wait()
+            else:
+                stdout_data, stderr_data = proc.communicate()
+                returncode = proc.returncode
+            slow_detector.stop()
             rec.set_throughput(input_bytes)
 
         # Write performance metrics (best-effort; log a warning on failure)
@@ -224,6 +502,15 @@ def _run_analysis_job(
                 stacklevel=2,
             )
 
+        if slow_detector.was_slow:
+            warnings.warn(
+                f"Slow XRootD throughput detected during job in {job_dir!r} "
+                f"(avg {slow_detector.avg_throughput_mbs:.2f} MB/s).  "
+                "Consider re-running with a different site or enabling stage-in.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
         if returncode != 0:
             stderr_tail = stderr_data[-2000:] if stderr_data else ""
             raise RuntimeError(
@@ -232,11 +519,24 @@ def _run_analysis_job(
             )
     else:
         # Fallback: original subprocess.run path (no performance recording)
-        result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
-        if result.returncode != 0:
+        if stream_output:
+            proc = subprocess.Popen(
+                full_cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            _, stderr_data = _stream_subprocess_output(proc)
+            returncode = proc.wait()
+            stderr_tail = stderr_data[-2000:] if stderr_data else ""
+        else:
+            result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
+            returncode = result.returncode
             stderr_tail = result.stderr[-2000:] if result.stderr else ""
+        if returncode != 0:
             raise RuntimeError(
-                f"Analysis job failed (exit {result.returncode}) in {job_dir!r}."
+                f"Analysis job failed (exit {returncode}) in {job_dir!r}."
                 + (f"\nstderr:\n{stderr_tail}" if stderr_tail else "")
             )
 

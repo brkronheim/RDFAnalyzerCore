@@ -84,8 +84,18 @@ def query_rucio(
     max_files_per_group: int = 50,
     WL: list[str] | None = None,
     BL: list[str] | None = None,
-) -> dict[int, str]:
-    """Query Rucio replicas and return grouped XRootD URL strings."""
+) -> dict:
+    """Query Rucio replicas and return grouped XRootD URL strings with per-file redirectors.
+
+    Returns
+    -------
+    dict
+        ``{"groups": dict[int, str], "site_redirectors": dict[str, list[str]]}``
+
+        * ``"groups"`` maps ``group_index`` to a comma-separated string of XRootD URLs.
+        * ``"site_redirectors"`` maps each bare LFN to the ordered list of redirectors
+          that should be probed on the worker node.
+    """
     if whitelist is None and WL is not None:
         whitelist = WL
     if blacklist is None and BL is not None:
@@ -95,7 +105,7 @@ def query_rucio(
 
     if not dataset_path or not isinstance(dataset_path, str) or not dataset_path.startswith("/"):
         print(f"Warning: invalid Rucio dataset path: {dataset_path!r} - skipping")
-        return {}
+        return {"groups": {}, "site_redirectors": {}}
 
     max_retries = 5
     backoff = 0.5
@@ -119,23 +129,51 @@ def query_rucio(
                     f"Error: Rucio failed for {dataset_path!r} after "
                     f"{max_retries} attempts: {exc}"
                 )
-                return {}
+                return {"groups": {}, "site_redirectors": {}}
         except Exception as exc:
             print(f"Error: unexpected Rucio error for {dataset_path!r}: {exc}")
-            return {}
+            return {"groups": {}, "site_redirectors": {}}
 
     if not replicas:
         print(f"Warning: no replicas found for {dataset_path!r}")
-        return {}
+        return {"groups": {}, "site_redirectors": {}}
+
+    import re as _re
 
     groups: dict[int, str] = {}
+    per_file_redirectors: dict[str, list[str]] = {}
     running_size = 0.0
     running_files = 0
     group = 0
 
     for filedata in replicas:
         size_gb = filedata.get("bytes", 0) * 1e-9
-        redirector = RUCIO_REDIRECTOR
+
+        # Strip any existing redirector from the file name so we always work
+        # with a bare LFN.
+        file_name = filedata["name"]
+        if file_name.startswith("root://"):
+            m = _re.match(r"root://[^/]+/+(.*)", file_name)
+            if m:
+                file_name = "/" + m.group(1)
+
+        # Collect site-specific redirectors from Rucio states for site-aware
+        # probing on the worker node.
+        states = filedata.get("states", {})
+        site_redirectors: list[str] = []
+        seen_redirectors: set[str] = set()
+        for site_key, state_val in states.items():
+            if state_val != "AVAILABLE" or "Tape" in site_key:
+                continue
+            site = site_key.replace("_Disk", "")
+            if blacklist and any(b.lower() in site.lower() for b in blacklist):
+                continue
+            redir = f"root://xrootd-cms.infn.it//store/test/xrootd/{site}/"
+            if redir not in seen_redirectors:
+                site_redirectors.append(redir)
+                seen_redirectors.add(redir)
+        per_file_redirectors[file_name] = site_redirectors
+
         running_size += size_gb
         running_files += 1
         if running_size > file_split_gb or running_files >= max_files_per_group:
@@ -143,13 +181,13 @@ def query_rucio(
             running_size = size_gb
             running_files = 1
 
-        url = ensure_xrootd_redirector(filedata["name"], redirector)
+        url = ensure_xrootd_redirector(file_name, RUCIO_REDIRECTOR)
         if group in groups:
             groups[group] += "," + url
         else:
             groups[group] = url
 
-    return groups
+    return {"groups": groups, "site_redirectors": per_file_redirectors}
 
 
 def load_legacy_sample_config(config_file: str) -> SampleConfigData:

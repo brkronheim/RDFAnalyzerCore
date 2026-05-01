@@ -72,19 +72,19 @@ def test_query_rucio_groups_and_retry(monkeypatch):
             ]
 
     monkeypatch.setattr(rucio_discovery.time, "sleep", lambda *_: None)
-    groups = rucio_discovery.query_rucio(
+    result = rucio_discovery.query_rucio(
         "/A/B/C",
         file_split_gb=1.1,
         client=FakeClient(),
         max_files_per_group=2,
     )
 
-    assert groups == {
+    assert result["groups"] == {
         0: "root://cms-xrd-global.cern.ch//store/mc/part1.root",
         1: "root://cms-xrd-global.cern.ch//store/mc/part2.root",
     }
 
 
 def test_query_rucio_invalid_dataset_returns_empty():
-    groups = rucio_discovery.query_rucio("not_a_path", file_split_gb=1.0, client=object())
-    assert groups == {}
+    result = rucio_discovery.query_rucio("not_a_path", file_split_gb=1.0, client=object())
+    assert result == {"groups": {}, "site_redirectors": {}}

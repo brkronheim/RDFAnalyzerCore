@@ -195,3 +195,19 @@ TEST_F(BaseConfigSetup, ParsePairBasedConfigWithDuplicateKeys) {
   EXPECT_THROW({ config->parsePairBasedConfig(tempFile); }, std::runtime_error);
   std::remove(tempFile.c_str());
 } 
+
+TEST_F(BaseConfigSetup, ParsePairBasedConfigPreservesYamlSequenceValues) {
+  std::string tempFile = (std::filesystem::current_path() / "temp_pairs.yaml").string();
+  std::ofstream file(tempFile);
+  file << "fileList: input.root\n";
+  file << "goldenJsonFiles:\n";
+  file << "  - cfg/24_B_golden.json\n";
+  file << "  - cfg/24_C_golden.json\n";
+  file.close();
+
+  auto map = config->parsePairBasedConfig(tempFile);
+  EXPECT_EQ(map.at("fileList"), "input.root");
+  EXPECT_EQ(map.at("goldenJsonFiles"), "[cfg/24_B_golden.json, cfg/24_C_golden.json]");
+
+  std::remove(tempFile.c_str());
+}

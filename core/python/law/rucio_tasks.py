@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -76,6 +77,7 @@ from rucio_discovery import (  # noqa: E402
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
+
 
 # Backward-compatible private aliases retained for compatibility imports/tests.
 _get_proxy_path = get_proxy_path
@@ -225,6 +227,7 @@ class GetRucioFileList(RucioMixin, law.LocalWorkflow):
         all_urls: list[str] = []
         seen_urls: set[str] = set()
         rucio_groups: list[str] = []
+        all_site_redirectors: dict[str, list[str]] = {}
 
         # Explicit file list overrides Rucio discovery
         explicit_files = entry.files
@@ -279,10 +282,13 @@ class GetRucioFileList(RucioMixin, law.LocalWorkflow):
                                 f"Rucio query failed for entry {entry!r}: {exc}"
                             ) from exc
 
+            all_site_redirectors: dict[str, list[str]] = {}
             for das_entry in das_entries:
-                partial = partial_results.get(das_entry, {})
-                for gkey in sorted(partial.keys()):
-                    group_str = partial[gkey]
+                result = partial_results.get(das_entry, {"groups": {}, "site_redirectors": {}})
+                partial_groups = result.get("groups", {})
+                partial_site_redir = result.get("site_redirectors", {})
+                for gkey in sorted(partial_groups.keys()):
+                    group_str = partial_groups[gkey]
                     group_urls = [
                         u.strip() for u in group_str.split(",") if u.strip()
                     ]
@@ -291,6 +297,7 @@ class GetRucioFileList(RucioMixin, law.LocalWorkflow):
                         seen_urls.update(new_urls)
                         all_urls.extend(new_urls)
                         rucio_groups.append(",".join(new_urls))
+                all_site_redirectors.update(partial_site_redir)
         else:
             self.publish_message(
                 f"No Rucio path or explicit files for sample {name!r}; "
@@ -307,6 +314,8 @@ class GetRucioFileList(RucioMixin, law.LocalWorkflow):
         payload: dict = {"sample": name, "files": fixed_urls}
         if rucio_groups:
             payload["groups"] = rucio_groups
+        if all_site_redirectors:
+            payload["site_redirectors"] = all_site_redirectors
 
         Path(self.output().path).parent.mkdir(parents=True, exist_ok=True)
         with open(self.output().path, "w") as fh:

@@ -6,6 +6,7 @@
 #include <fnmatch.h>
 #include <iostream>
 #include <unordered_set>
+#include <ROOT/RSnapshotOptions.hxx>
 
 static std::string makeMetaFileName(const std::string& saveFile) {
   if (saveFile.empty()) {
@@ -83,10 +84,14 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec
     std::filesystem::create_directories(outputPath.parent_path());
   }
 
+  ROOT::RDF::RSnapshotOptions options;
+  options.fCompressionAlgorithm = ROOT::RCompressionSetting::EAlgorithm::kZSTD;
+  options.fCompressionLevel = 5;  // 505 ZSTD compression level, good balance between speed and size
+
   if (spec.columns.empty()) {
-    df.Snapshot(spec.treeName, spec.outputFile);
+    df.Snapshot(spec.treeName, spec.outputFile, "*", options);
   } else {
-    df.Snapshot(spec.treeName, spec.outputFile, spec.columns);
+    df.Snapshot(spec.treeName, spec.outputFile, spec.columns, options);
   }
 
   std::cout << "Done Saving" << std::endl;
