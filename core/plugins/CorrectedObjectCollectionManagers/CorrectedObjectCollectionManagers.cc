@@ -877,6 +877,8 @@ void applyCorrectionlibVariation(
     action, "outputMassPrefix", configManager, localValues, owner);
   const auto inputColumns = getResolvedList(action, "inputColumns", configManager,
                       localValues, owner);
+  const bool outputIsRelativeDelta = getResolvedBool(
+    action, "outputIsRelativeDelta", configManager, localValues, owner, false);
 
   const std::string upPtColumn = appendDirectionalSuffix(outputPtPrefix, "up");
   const std::string downPtColumn = appendDirectionalSuffix(outputPtPrefix, "down");
@@ -896,7 +898,9 @@ void applyCorrectionlibVariation(
     applyToMass,
     inputMassColumn,
     upMassColumn,
-    inputColumns);
+    inputColumns,
+    outputIsRelativeDelta,
+    1.0f);
   manager.applyCorrectionlib(
     correctionManager,
     correctionName,
@@ -906,7 +910,9 @@ void applyCorrectionlibVariation(
     applyToMass,
     inputMassColumn,
     downMassColumn,
-    inputColumns);
+    inputColumns,
+    outputIsRelativeDelta,
+    -1.0f);
   manager.addVariation(systematicName, upPtColumn, downPtColumn,
              upMassColumn, downMassColumn);
 

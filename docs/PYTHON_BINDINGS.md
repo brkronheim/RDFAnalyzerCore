@@ -71,7 +71,7 @@ pip install pybind11 numpy numba
 
 ```bash
 # From the RDFAnalyzerCore root directory
-source env.sh  # On lxplus
+source env.sh  # On a CVMFS-backed host
 cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
@@ -82,7 +82,8 @@ The Python module `rdfanalyzer.so` will be built in `build/python/`.
 
 ```python
 import sys
-sys.path.insert(0, '/path/to/RDFAnalyzerCore/build/python')
+from pathlib import Path
+sys.path.insert(0, str(Path("build/python").resolve()))
 import rdfanalyzer
 ```
 
@@ -615,7 +616,8 @@ Complete examples are available in the `examples/` directory:
 Ensure the module is in your Python path:
 ```python
 import sys
-sys.path.insert(0, '/path/to/RDFAnalyzerCore/build/python')
+from pathlib import Path
+sys.path.insert(0, str(Path("build/python").resolve()))
 ```
 
 ### ROOT JIT compilation errors

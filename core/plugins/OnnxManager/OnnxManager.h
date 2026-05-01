@@ -4,6 +4,7 @@
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
 #include <NamedObjectManager.h>
+#include <SystematicBundle.h>
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
 #include <onnxruntime_cxx_api.h>
@@ -69,6 +70,14 @@ public:
   Float_t runScalarModel(
       const std::string &modelName,
       const ROOT::VecOps::RVec<Float_t> &inputVector) const;
+
+  /**
+   * @brief Override the configured feature columns for a loaded ONNX model.
+   * @param modelName Name of the model
+   * @param features Replacement feature column list
+   */
+  void setModelFeatures(const std::string &modelName,
+                        const std::vector<std::string> &features);
 
   /**
    * @brief Get an ONNX session object by key
@@ -194,9 +203,29 @@ private:
   std::unordered_map<std::string, std::vector<std::vector<int64_t>>> model_inputShapes_m;
 
   /**
+   * @brief Map from model name to inferred ONNX output shapes.
+   */
+  std::unordered_map<std::string, std::vector<std::vector<int64_t>>> model_outputShapes_m;
+
+  /**
    * @brief Map from model name to flattened element count per ONNX input tensor.
    */
   std::unordered_map<std::string, std::vector<int64_t>> model_inputElementCounts_m;
+
+  /**
+   * @brief Map from model name to flattened element count per batch row for each ONNX input tensor.
+   */
+  std::unordered_map<std::string, std::vector<int64_t>> model_inputRowElementCounts_m;
+
+  /**
+   * @brief Optional selection-mask column used by the systematic bundle path.
+   */
+  std::unordered_map<std::string, std::string> model_selectionMaskColumns_m;
+
+  /**
+   * @brief Per-model systematic bundle mode.
+   */
+  std::unordered_map<std::string, SystematicBundleMode> model_bundleModes_m;
 
   /**
    * @brief Cached C-string pointers for ONNX input names (to avoid per-event allocation).

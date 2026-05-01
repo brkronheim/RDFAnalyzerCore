@@ -192,9 +192,9 @@ pip install numpy
 
 **Solution:** Source ROOT environment:
 ```bash
-source env.sh  # On lxplus
+source env.sh  # On a CVMFS-backed host
 # or
-source /path/to/root/bin/thisroot.sh
+source <root-install>/bin/thisroot.sh
 ```
 
 ## Performance Testing

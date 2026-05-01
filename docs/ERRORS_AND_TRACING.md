@@ -17,9 +17,9 @@ libRDF.so: file not found
 **Solution:**
 ```bash
 # Source ROOT environment
-source env.sh  # lxplus
+source env.sh  # CVMFS-backed environment
 # or
-source /path/to/root/bin/thisroot.sh
+source <root-install>/bin/thisroot.sh
 ```
 
 **Python Specific:**
@@ -42,7 +42,8 @@ ModuleNotFoundError: No module named 'rdfanalyzer'
 **Solution:**
 ```python
 import sys
-sys.path.insert(0, '/path/to/RDFAnalyzerCore/build/python')
+from pathlib import Path
+sys.path.insert(0, str(Path("build/python").resolve()))
 ```
 
 **Build Issue:**

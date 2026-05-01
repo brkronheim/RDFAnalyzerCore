@@ -41,7 +41,7 @@ Before running these examples, ensure you have:
 
 1. Built RDFAnalyzerCore with Python bindings:
    ```bash
-   source env.sh  # On lxplus
+   source env.sh  # On a CVMFS-backed host
    cmake -S . -B build
    cmake --build build -j$(nproc)
    ```
@@ -177,16 +177,17 @@ For complete documentation, see:
 Add the Python module to your path:
 ```python
 import sys
-sys.path.insert(0, '/path/to/RDFAnalyzerCore/build/python')
+from pathlib import Path
+sys.path.insert(0, str(Path("build/python").resolve()))
 ```
 
 ### ROOT not setup
 
 Ensure ROOT environment is loaded:
 ```bash
-source env.sh  # On lxplus
+source env.sh  # On a CVMFS-backed host
 # or
-source /path/to/root/bin/thisroot.sh
+source <root-install>/bin/thisroot.sh
 ```
 
 ### Performance issues

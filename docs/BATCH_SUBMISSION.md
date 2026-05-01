@@ -82,7 +82,7 @@ law run MonitorSkimJobs --workers 4 \
   ```bash
   pip install --user law luigi requests
   ```
-- **HTCondor** environment (available on LXPLUS and compatible clusters)
+- **HTCondor** environment (available on lxplus, cmsconnect, and other compatible clusters)
 - **Compiled analysis executable** (see [Analysis Guide](ANALYSIS_GUIDE.md))
 
 ### For Rucio submissions

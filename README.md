@@ -52,7 +52,7 @@ Clone the repository:
 ```
 git clone git@github.com:brkronheim/RDFAnalyzerCore.git
 cd RDFAnalyzerCore
-source env.sh  # On lxplus
+source env.sh  # On a CVMFS-backed host
 source build.sh
 
 # Run example
@@ -176,6 +176,7 @@ All framework behavior is controlled through text configuration files:
 - Main configuration: I/O, performance, plugin configs
 - Plugin configs: Model definitions, corrections, triggers
 - Output configs: Branch selection, histogram definitions
+- Analysis-local registries can also live in YAML when they are primarily data, such as the VHqq run-era payload and trigger map in `analyses/VHbbcc/VHqqRDF/cfg/year_settings.yaml`
 
 **Example**:
 ```
@@ -191,7 +192,7 @@ See [Configuration Reference](docs/CONFIG_REFERENCE.md) for complete documentati
 
 ## Installation and Building
 
-### On lxplus (CERN)
+### On a CVMFS-backed HEP host
 
 ```bash
 # Clone repository
@@ -205,13 +206,13 @@ source env.sh
 source build.sh
 ```
 
-### Local Installation
+### Standalone ROOT Installation
 
 Ensure ROOT and CMake are available:
 
 ```bash
 # Setup ROOT
-source /path/to/root/bin/thisroot.sh
+source <root-install>/bin/thisroot.sh
 
 # Build
 cmake -S . -B build

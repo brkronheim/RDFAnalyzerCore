@@ -1017,7 +1017,6 @@ build/
 ### Step 1 — Environment setup
 
 ```bash
-cd /path/to/RDFAnalyzerCore
 source core/python/law/env.sh
 ```
 

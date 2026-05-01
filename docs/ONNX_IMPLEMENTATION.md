@@ -115,6 +115,8 @@ file=transformer.onnx name=ParT inputVariables=pt,eta,phi paddingSize=128
 - Input vectors shorter than `paddingSize` are zero-padded to the specified size
 - Input vectors longer than the model's expected packed input size are rejected with a runtime error
 - Omitting `paddingSize` preserves existing behavior for fixed known shapes, but dynamic dimensions still require `paddingSize` or explicit `inputShapes`
+- When `systematicBundle=auto|required` is configured for scalar input features, OnnxManager batches all active systematic evaluations for an event into one ONNX call and pads any remaining fixed batch slots with zeros.
+- `selectionMaskColumn=<column>` can be combined with `systematicBundle` to skip masked variations while keeping their output columns at the disabled sentinel value.
 
 **Example**:
 

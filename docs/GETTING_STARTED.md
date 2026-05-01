@@ -20,14 +20,14 @@ cd RDFAnalyzerCore
 
 ### 2. Set Up Environment
 
-On lxplus (CERN computing):
+On a CVMFS-backed HEP host such as lxplus, cmsconnect, or a site-managed analysis node:
 ```bash
 source env.sh
 ```
 
 This script sets up ROOT and other required dependencies from CVMFS.
 
-For local installations, ensure ROOT is available in your PATH and environment.
+If you are using a standalone ROOT installation instead, source that environment before building.
 
 ### 3. Build the Framework
 
@@ -281,7 +281,6 @@ int main(int argc, char **argv) {
 From the repository root, run a full build. CMake will automatically discover your new analysis directory:
 
 ```bash
-cd /path/to/RDFAnalyzerCore
 source build.sh
 ```
 
@@ -479,9 +478,9 @@ RDFAnalyzerCore/
 
 Ensure ROOT is properly sourced before building:
 ```bash
-source env.sh                          # On lxplus / CVMFS
+source env.sh                          # CVMFS-backed environment
 # OR
-source /path/to/root/bin/thisroot.sh   # Local installation
+source <root-install>/bin/thisroot.sh  # Standalone ROOT installation
 ```
 
 ### ONNX Runtime Download Fails

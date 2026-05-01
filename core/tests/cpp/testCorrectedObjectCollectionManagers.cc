@@ -377,6 +377,57 @@ TEST_F(CorrectedObjectCollectionManagersTest, JetWrapperReadsWorkflowConfig) {
   EXPECT_NEAR(metDown.GetValue()[0], 95.0f, 0.01f);
 }
 
+TEST_F(CorrectedObjectCollectionManagersTest,
+       JetWrapperWorkflowSupportsRelativeDeltaVariations) {
+  config->set("type", "mc_test");
+  config->set("correctedJetCollectionConfig",
+              "cfg/test_corrected_jets_relative_delta_workflow.txt");
+  config->set("testJesSlot1Enabled", "true");
+  config->set("testJesSlot1Label", "total");
+  config->set("testJesSlot1CorrectionName", "test_correction");
+
+  DataManager dm(1);
+  defineRVecColumn(dm, "Jet_pt", 100.0f, *systematics);
+  defineRVecColumn(dm, "Jet_eta", 1.2f, *systematics);
+  defineRVecColumn(dm, "Jet_phi", 0.0f, *systematics);
+  defineRVecColumn(dm, "Jet_mass", 20.0f, *systematics);
+  defineRVecColumn(dm, "Jet_rawFactor", 0.1f, *systematics);
+  defineRVecColumn(dm, "jet_nominal_sf", 1.1f, *systematics);
+  defineRVecColumn(dm, "Jet_corr_arg", 0.5f, *systematics);
+  defineIntRVecColumn(dm, "Jet_bin", 1, *systematics);
+  defineScalarColumn(dm, "MET_pt", 50.0f, *systematics);
+  defineScalarColumn(dm, "MET_phi", 0.0f, *systematics);
+
+  JetEnergyScaleManager jetManager;
+  auto jetContext = context(dm);
+  jetManager.setContext(jetContext);
+  jetManager.setupFromConfigFile();
+
+  auto correctionManager = std::make_unique<CorrectionManager>(*config);
+  correctionManager->setContext(jetContext);
+
+  CorrectedJetCollectionManager wrapper(jetManager, correctionManager.get());
+  wrapper.setContext(jetContext);
+  wrapper.setupFromConfigFile();
+
+  jetManager.execute();
+  wrapper.execute();
+
+  auto nominal = dm.getDataFrame().Take<PhysicsObjectCollection>("CorrectedJets");
+  auto up = dm.getDataFrame().Take<PhysicsObjectCollection>("CorrectedJets_jes_totalUp");
+  auto down = dm.getDataFrame().Take<PhysicsObjectCollection>("CorrectedJets_jes_totalDown");
+  auto metNominal = dm.getDataFrame().Take<float>("MET_pt_corr_nominal");
+  auto metUp = dm.getDataFrame().Take<float>("MET_pt_jes_total_up");
+  auto metDown = dm.getDataFrame().Take<float>("MET_pt_jes_total_down");
+
+  EXPECT_NEAR(static_cast<float>(nominal.GetValue()[0].at(0).Pt()), 110.0f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(up.GetValue()[0].at(0).Pt()), 121.0f, 0.01f);
+  EXPECT_NEAR(static_cast<float>(down.GetValue()[0].at(0).Pt()), 55.0f, 0.01f);
+  EXPECT_NEAR(metNominal.GetValue()[0], 40.0f, 0.01f);
+  EXPECT_NEAR(metUp.GetValue()[0], 29.0f, 0.01f);
+  EXPECT_NEAR(metDown.GetValue()[0], 95.0f, 0.01f);
+}
+
 TEST_F(CorrectedObjectCollectionManagersTest, ElectronWrapperWorkflowCanDriveCorrectionManager) {
   config->set("type", "mc_test");
   config->set("correctedElectronCollectionConfig",

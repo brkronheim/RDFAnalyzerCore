@@ -5,9 +5,9 @@ This example demonstrates how to convert an existing text config to YAML format.
 ## Original Text Config (config.txt)
 
 ```
-directory=/home/user/data
-saveFile=/home/user/output/results.root
-saveDirectory=/home/user/output/
+directory=data
+saveFile=output/results.root
+saveDirectory=output/
 saveTree=Events
 threads=-1
 antiglobs=output.root,hists.root
@@ -23,9 +23,9 @@ intConfig=cfg/ints.txt
 ## Equivalent YAML Config (config.yaml)
 
 ```yaml
-directory: /home/user/data
-saveFile: /home/user/output/results.root
-saveDirectory: /home/user/output/
+directory: data
+saveFile: output/results.root
+saveDirectory: output/
 saveTree: Events
 threads: "-1"
 antiglobs: output.root,hists.root

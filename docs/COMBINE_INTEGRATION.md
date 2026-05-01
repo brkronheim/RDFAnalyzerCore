@@ -53,7 +53,7 @@ cmake -S . -B build \
 git clone https://github.com/brkronheim/RDFAnalyzerCore.git
 cd RDFAnalyzerCore
 
-# Setup ROOT environment (on lxplus)
+# Setup ROOT environment
 source env.sh
 
 # Configure with Combine support

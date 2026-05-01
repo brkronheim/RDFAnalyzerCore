@@ -256,7 +256,9 @@ void JetEnergyScaleManager::applyCorrectionlib(
     const std::string &inputPtColumn, const std::string &outputPtColumn,
     bool applyToMass, const std::string &inputMassColumn,
     const std::string &outputMassColumn,
-    const std::vector<std::string> &inputColumns) {
+  const std::vector<std::string> &inputColumns,
+  bool outputIsRelativeDelta,
+  float relativeDeltaDirection) {
   std::string sfColumn = correctionName;
   for (const auto &arg : stringArgs)
     sfColumn += "_" + arg;
@@ -270,6 +272,10 @@ void JetEnergyScaleManager::applyCorrectionlib(
   step.correctionName = correctionName;
   step.correctionStringArgs = stringArgs;
   step.correctionInputColumns = inputColumns;
+  if (outputIsRelativeDelta) {
+    step.scaleFactorOffset = 1.0f;
+    step.scaleFactorMultiplier = relativeDeltaDirection;
+  }
 }
 
 void JetEnergyScaleManager::applyJERSmearing(
@@ -636,8 +642,12 @@ void JetEnergyScaleManager::execute() {
       const std::string outputPt = step.outputPtColumn;
       auto newDf = df.Define(
           outputPt,
-          [](const ROOT::VecOps::RVec<Float_t> &pt,
-             const ROOT::VecOps::RVec<Float_t> &sf) { return pt * sf; },
+          [offset = step.scaleFactorOffset,
+           multiplier = step.scaleFactorMultiplier](
+              const ROOT::VecOps::RVec<Float_t> &pt,
+              const ROOT::VecOps::RVec<Float_t> &sf) {
+            return pt * (offset + multiplier * sf);
+          },
           {inputPt, sf});
       dataManager_m->setDataFrame(newDf);
     }
@@ -649,8 +659,12 @@ void JetEnergyScaleManager::execute() {
       const std::string outputMass = step.outputMassColumn;
       auto newDf = df.Define(
           outputMass,
-          [](const ROOT::VecOps::RVec<Float_t> &mass,
-             const ROOT::VecOps::RVec<Float_t> &sf) { return mass * sf; },
+          [offset = step.scaleFactorOffset,
+           multiplier = step.scaleFactorMultiplier](
+              const ROOT::VecOps::RVec<Float_t> &mass,
+              const ROOT::VecOps::RVec<Float_t> &sf) {
+            return mass * (offset + multiplier * sf);
+          },
           {inputMass, sf});
       dataManager_m->setDataFrame(newDf);
     }

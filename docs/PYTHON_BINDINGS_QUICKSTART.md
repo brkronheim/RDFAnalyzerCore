@@ -4,7 +4,7 @@
 
 ```bash
 # Build RDFAnalyzerCore with Python bindings
-source env.sh
+source env.sh  # On a CVMFS-backed host, or source your ROOT installation
 cmake -S . -B build
 cmake --build build -j$(nproc)
 
@@ -16,7 +16,8 @@ pip install pybind11 numpy numba
 
 ```python
 import sys
-sys.path.insert(0, '/path/to/RDFAnalyzerCore/build/python')
+from pathlib import Path
+sys.path.insert(0, str(Path("build/python").resolve()))
 import rdfanalyzer
 
 # Create analyzer

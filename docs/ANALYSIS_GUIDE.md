@@ -158,7 +158,6 @@ int main(int argc, char **argv) {
 ### Step 6: Build and Run
 
 ```bash
-cd /path/to/RDFAnalyzerCore
 source build.sh
 cd build/analyses/MyAnalysis
 ./myanalysis cfg/main_config.txt

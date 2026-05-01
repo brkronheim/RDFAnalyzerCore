@@ -21,16 +21,16 @@ RDFAnalyzerCore now supports configuration files in both text (`.txt`) and YAML 
 
 ### Text Format (`.txt`)
 ```
-directory=/home/user/testDir
-saveFile=/home/user/outDir/output.root
+directory=data/testDir
+saveFile=output/output.root
 threads=-1
 globs=root,test
 ```
 
 ### YAML Format (`.yaml` or `.yml`)
 ```yaml
-directory: /home/user/testDir
-saveFile: /home/user/outDir/output.root
+directory: data/testDir
+saveFile: output/output.root
 threads: "-1"
 globs: root,test
 ```

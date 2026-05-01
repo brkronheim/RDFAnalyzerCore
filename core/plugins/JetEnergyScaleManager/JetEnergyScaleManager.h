@@ -279,7 +279,9 @@ public:
                           bool applyToMass = true,
                           const std::string &inputMassColumn = "",
                           const std::string &outputMassColumn = "",
-                          const std::vector<std::string> &inputColumns = {});
+                          const std::vector<std::string> &inputColumns = {},
+                          bool outputIsRelativeDelta = false,
+                          float relativeDeltaDirection = 1.0f);
 
   /**
    * @brief Schedule CMS JER smearing from correctionlib resolution and scale-factor payloads.
@@ -651,6 +653,8 @@ private:
     std::string outputPtColumn;
     std::string inputMassColumn;
     std::string outputMassColumn;
+    float scaleFactorOffset = 0.0f;
+    float scaleFactorMultiplier = 1.0f;
   };
   std::vector<CorrectionStep> correctionSteps_m;
 

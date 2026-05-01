@@ -62,6 +62,18 @@ add_executable(testDataManager testDataManager.cc)
 target_link_libraries(testDataManager coreAll gtest gtest_main)
 add_test(NAME DataManagerTest COMMAND testDataManager)
 
+add_executable(testSystematicBundle testSystematicBundle.cc)
+target_link_libraries(testSystematicBundle coreAll gtest gtest_main)
+add_test(NAME SystematicBundleTest COMMAND testSystematicBundle)
+
+add_executable(testColumnProjection testColumnProjection.cc)
+target_link_libraries(testColumnProjection coreAll gtest gtest_main)
+add_test(NAME ColumnProjectionTest COMMAND testColumnProjection)
+
+add_executable(testWorkingPointRecipe testWorkingPointRecipe.cc)
+target_link_libraries(testWorkingPointRecipe coreAll gtest gtest_main)
+add_test(NAME WorkingPointRecipeTest COMMAND testWorkingPointRecipe)
+
 
 
 

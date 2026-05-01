@@ -88,6 +88,14 @@ TEST_F(OnnxManagerTest, GetModelFeatures_Invalid) {
                std::runtime_error);
 }
 
+TEST_F(OnnxManagerTest, SetModelFeatures_Valid) {
+  onnxManager->setModelFeatures("test_model", {"alt1", "alt2"});
+  const auto &features = onnxManager->getModelFeatures("test_model");
+  ASSERT_EQ(features.size(), 2);
+  EXPECT_EQ(features[0], "alt1");
+  EXPECT_EQ(features[1], "alt2");
+}
+
 // RunVar retrieval
 TEST_F(OnnxManagerTest, GetRunVar_Valid) {
   EXPECT_NO_THROW({
@@ -103,11 +111,12 @@ TEST_F(OnnxManagerTest, GetRunVar_Invalid) {
 // All model names
 TEST_F(OnnxManagerTest, GetAllModelNames) {
   const auto &names = onnxManager->getAllModelNames();
-  EXPECT_EQ(names.size(), 4);
+  EXPECT_EQ(names.size(), 5);
   EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model") != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model2") != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_multi") != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_padded") != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_fixed_batch") != names.end());
 }
 
 // Base class interface
@@ -180,11 +189,12 @@ TEST_F(OnnxManagerTest, ConstCorrectness) {
     EXPECT_TRUE(model != nullptr);
     EXPECT_EQ(features.size(), 3);
     EXPECT_EQ(runVar, "run_number");
-    EXPECT_EQ(names.size(), 4);
+    EXPECT_EQ(names.size(), 5);
     EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model") != names.end());
     EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model2") != names.end());
     EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_multi") != names.end());
     EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_padded") != names.end());
+    EXPECT_TRUE(std::find(names.begin(), names.end(), "test_model_fixed_batch") != names.end());
     EXPECT_TRUE(obj != nullptr);
     EXPECT_EQ(objFeatures.size(), 3);
   });
@@ -342,6 +352,82 @@ TEST_F(OnnxManagerTest, ApplyModel_WithPadding) {
   EXPECT_FLOAT_EQ(result->at(1), 6.0f);
 }
 
+TEST_F(OnnxManagerTest, ApplyModel_FixedBatchSystematicBundlePadsAndMasks) {
+  systematicManager->registerSystematic("JES", {"feature1", "feature2", "feature3", "sel"});
+
+  dataManager->Define("feature1", [](ULong64_t) -> float { return 1.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2", [](ULong64_t) -> float { return 2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3", [](ULong64_t) -> float { return 3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature1_JESUp", [](ULong64_t) -> float { return 10.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2_JESUp", [](ULong64_t) -> float { return 20.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3_JESUp", [](ULong64_t) -> float { return 30.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature1_JESDown", [](ULong64_t) -> float { return -1.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature2_JESDown", [](ULong64_t) -> float { return -2.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("feature3_JESDown", [](ULong64_t) -> float { return -3.0f; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("sel", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("sel_JESUp", [](ULong64_t) -> bool { return false; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("sel_JESDown", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+
+  onnxManager->applyModel("test_model_fixed_batch");
+
+  auto df = dataManager->getDataFrame();
+  auto nominal = df.Take<float>("test_model_fixed_batch");
+  auto up = df.Take<float>("test_model_fixed_batch_JESUp");
+  auto down = df.Take<float>("test_model_fixed_batch_JESDown");
+
+  ASSERT_EQ(nominal->size(), 2);
+  ASSERT_EQ(up->size(), 2);
+  ASSERT_EQ(down->size(), 2);
+
+  EXPECT_FLOAT_EQ(nominal->at(0), 6.0f);
+  EXPECT_FLOAT_EQ(nominal->at(1), 6.0f);
+  EXPECT_FLOAT_EQ(up->at(0), -1.0f);
+  EXPECT_FLOAT_EQ(up->at(1), -1.0f);
+  EXPECT_FLOAT_EQ(down->at(0), -6.0f);
+  EXPECT_FLOAT_EQ(down->at(1), -6.0f);
+}
+
+TEST_F(OnnxManagerTest, ApplyModel_FixedBatchSystematicBundleSupportsSingleVectorInput) {
+  systematicManager->registerSystematic("JES", {"packed_features", "sel"});
+
+  dataManager->Define(
+      "packed_features",
+      [](ULong64_t) -> ROOT::VecOps::RVec<float> { return {1.0f, 2.0f, 3.0f}; },
+      {"rdfentry_"}, *systematicManager);
+  dataManager->Define(
+      "packed_features_JESUp",
+      [](ULong64_t) -> ROOT::VecOps::RVec<float> { return {10.0f, 20.0f, 30.0f}; },
+      {"rdfentry_"}, *systematicManager);
+  dataManager->Define(
+      "packed_features_JESDown",
+      [](ULong64_t) -> ROOT::VecOps::RVec<float> { return {-1.0f, -2.0f, -3.0f}; },
+      {"rdfentry_"}, *systematicManager);
+  dataManager->Define("run_number", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("sel", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("sel_JESUp", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+  dataManager->Define("sel_JESDown", [](ULong64_t) -> bool { return true; }, {"rdfentry_"}, *systematicManager);
+
+  onnxManager->setModelFeatures("test_model_fixed_batch", {"packed_features"});
+  onnxManager->applyModel("test_model_fixed_batch");
+
+  auto df = dataManager->getDataFrame();
+  auto nominal = df.Take<float>("test_model_fixed_batch");
+  auto up = df.Take<float>("test_model_fixed_batch_JESUp");
+  auto down = df.Take<float>("test_model_fixed_batch_JESDown");
+
+  ASSERT_EQ(nominal->size(), 2);
+  ASSERT_EQ(up->size(), 2);
+  ASSERT_EQ(down->size(), 2);
+
+  EXPECT_FLOAT_EQ(nominal->at(0), 6.0f);
+  EXPECT_FLOAT_EQ(nominal->at(1), 6.0f);
+  EXPECT_FLOAT_EQ(up->at(0), 60.0f);
+  EXPECT_FLOAT_EQ(up->at(1), 60.0f);
+  EXPECT_FLOAT_EQ(down->at(0), -6.0f);
+  EXPECT_FLOAT_EQ(down->at(1), -6.0f);
+}
+
 /**
  * @brief Test that useCuda defaults to false for models without the useCuda config key
  */
@@ -350,6 +436,7 @@ TEST_F(OnnxManagerTest, GetUseCuda_DefaultFalse) {
   EXPECT_FALSE(onnxManager->getUseCuda("test_model2"));
   EXPECT_FALSE(onnxManager->getUseCuda("test_model_multi"));
   EXPECT_FALSE(onnxManager->getUseCuda("test_model_padded"));
+  EXPECT_FALSE(onnxManager->getUseCuda("test_model_fixed_batch"));
 }
 
 /**

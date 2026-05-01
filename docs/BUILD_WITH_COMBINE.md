@@ -6,7 +6,7 @@ To build RDFAnalyzerCore with CMS Combine support:
 
 ```bash
 # Setup ROOT environment first
-source env.sh  # on lxplus, or source your ROOT installation
+source env.sh  # on a CVMFS-backed host, or source your ROOT installation
 
 # Configure with Combine
 cmake -S . -B build -DBUILD_COMBINE=ON
@@ -26,7 +26,7 @@ Building Combine requires:
 - Boost libraries
 - Git
 
-These should already be available if you're on lxplus or have a proper ROOT installation.
+These should already be available on CVMFS-backed HEP hosts or with a properly configured standalone ROOT installation.
 
 ## What Gets Built
 
