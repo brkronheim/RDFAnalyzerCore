@@ -2,28 +2,26 @@
 
 A ready-to-use starting point for a realistic CMS NanoAOD analysis built with
 RDFAnalyzerCore.  The template covers the full workflow from raw NanoAOD to
-histograms and cutflow tables, demonstrating every major framework feature.
-It is designed to be **extended, not rewritten**: users add their analysis logic
-on top of the provided base without touching the framework boilerplate.
+histograms and cutflow tables, and is designed to be **extended, not rewritten**.
 
-Both a **C++ core** (``analysis.cc``) and a **Python base class**
-(``analysis_wrapper.py``) are provided.  They read the same ``cfg.yaml`` and
-``collections.yaml``, so you can use either interface or mix both.
+## Single C++ implementation — two entry points
 
----
+All analysis logic lives in **`analysis_setup.h`**:
 
-## What this template demonstrates
+```
+analysis_setup.h          ← single C++ implementation (object collections,
+    │                         cuts, regions, plugins, weights, histograms)
+    │
+    ├── analysis.cc           ← standalone binary  (main → setupCMSAnalysis → run)
+    │
+    └── analysis_bindings.cc  ← Python pybind11 module (cms_analysis_template)
+              │
+              └── analysis_wrapper.py  ← CMSAnalysisBase Python base class
+```
 
-| Feature | C++ (`analysis.cc`) | Python (`analysis_wrapper.py`) |
-|---------|---------------------|-------------------------------|
-| Multiple object collections at different WPs | `buildLooseMuons`, `buildTightMuons`, … | `CMSAnalysisBase` reads `collections.yaml` |
-| ΔR overlap removal | `PhysicsObjectCollection::removeOverlap` | `_rdf_drOverlapMask` Cling helper |
-| Multiple analysis regions | `RegionManager::declareRegion` | User adds on `analyzer` |
-| Sequential + N-1 cutflow | `CutflowManager::addCut` | User adds on `analyzer` |
-| Config-driven triggers | `TriggerManager::applyAllTriggers` | `CMSAnalysisBase._apply_triggers` |
-| Event weights / SFs | `WeightManager` | User adds on `analyzer` |
-| Config-driven histograms | `NDHistogramManager` | `NDHistogramManager` plugin |
-| **Extend without rewriting** | Add functions + calls | Subclass `CMSAnalysisBase` |
+There is **no Python re-implementation** of analysis logic.  The Python
+wrapper calls `setupCMSAnalysis(Analyzer&)` in compiled C++ and exposes the
+configured `rdfanalyzer.Analyzer` for further extension.
 
 ---
 
@@ -31,59 +29,97 @@ Both a **C++ core** (``analysis.cc``) and a **Python base class**
 
 ```
 CMSAnalysisTemplate/
-├── analysis.cc              ← C++ core (compile & run directly)
-├── analysis_wrapper.py      ← Python base class (CMSAnalysisBase)
-├── CMakeLists.txt           ← CMake build target
-├── cfg.yaml                 ← Main config (data run)
-├── cfg_mc.yaml              ← Main config (MC run variant)
-├── collections.yaml         ← Object collection definitions (Python + docs)
-├── triggers.yaml            ← Trigger paths (TriggerManager)
-├── histograms.yaml          ← Histogram definitions (NDHistogramManager)
-├── floats.yaml              ← Float constants
-├── ints.yaml                ← Integer constants
-└── README.md                ← This file
+├── analysis_setup.h        ← single C++ implementation (collections, cuts, …)
+├── analysis.cc             ← C++ binary entry point (~30 lines)
+├── analysis_bindings.cc    ← pybind11 module (cms_analysis_template)
+├── analysis_wrapper.py     ← Python base class (CMSAnalysisBase)
+├── CMakeLists.txt          ← builds both the binary and the Python module
+├── cfg.yaml                ← main config (data run)
+├── cfg_mc.yaml             ← main config (MC variant)
+├── collections.yaml        ← collection cut documentation (reference / corrections)
+├── triggers.yaml           ← trigger paths (TriggerManager)
+├── histograms.yaml         ← histogram definitions (NDHistogramManager)
+├── floats.yaml             ← float-valued constants
+├── ints.yaml               ← integer-valued constants
+└── README.md               ← this file
 ```
 
 ---
 
-## Python usage (no compilation required for extensions)
+## Build
 
-The Python base class uses the compiled ``rdfanalyzer`` module to drive the
-analysis.  It reads ``cfg.yaml`` and ``collections.yaml``, sets up the
-framework boilerplate, and exposes the underlying analyzer object for extension.
+```bash
+source env.sh
+cmake -S . -B build && cmake --build build -j$(nproc)
+export PYTHONPATH=$PWD/build/python:$PYTHONPATH
+```
+
+This builds both:
+
+* `build/analyses/CMSAnalysisTemplate/cms_analysis_template` — the C++ binary
+* `build/python/cms_analysis_template*.so` — the Python extension module
+
+---
+
+## C++ usage
+
+### Run directly
+
+```bash
+cd build/analyses/CMSAnalysisTemplate
+./cms_analysis_template ../../../analyses/CMSAnalysisTemplate/cfg.yaml
+```
+
+### Extend in C++
+
+To add analysis logic, edit `analysis_setup.h`.  The `setupCMSAnalysis(Analyzer&)`
+function contains all plugin registrations, collection definitions, event cuts,
+region declarations, and weight setup.  `analysis.cc` remains a thin wrapper:
+
+```cpp
+// analysis.cc — stays minimal; all work is in analysis_setup.h
+#include "analysis_setup.h"
+int main(int argc, char **argv) {
+    Analyzer an(argv[1]);
+    setupCMSAnalysis(an);   // C++ setup from analysis_setup.h
+    an.run();
+    return 0;
+}
+```
+
+---
+
+## Python usage
+
+The Python wrapper uses the compiled `cms_analysis_template` pybind11 module
+to run the same `setupCMSAnalysis` C++ function, then exposes the analyzer
+object for Python-level extensions.  Performance is identical to the C++ binary
+for the parts covered by the template.
 
 ### Prerequisites
 
 ```bash
-source env.sh                                # set up ROOT + compiler
-cmake -S . -B build && cmake --build build -j$(nproc)
-export PYTHONPATH=$PWD/build/python:$PYTHONPATH
-pip install pyyaml                           # for YAML config parsing
+pip install pyyaml   # for config validation only
+# ensure PYTHONPATH contains build/python
 ```
 
-### Option 1 — Extend the analyzer directly (simplest)
+### Option 1 — extend the analyzer directly (simplest)
 
 ```python
 from analyses.CMSAnalysisTemplate.analysis_wrapper import CMSAnalysisBase
-import sys
 
 base = CMSAnalysisBase("analyses/CMSAnalysisTemplate/cfg.yaml")
+an   = base.analyzer   # C++ setup already applied by cms_analysis_template
+                       # all collections, regions, plugins from analysis_setup.h
+                       # are registered and ready
 
-# base.analyzer is a fully-initialized rdfanalyzer.Analyzer.
-# All collections from collections.yaml are already defined as:
-#   {name}_mask, {name}_pt, {name}_eta, {name}_phi, {name}_mass, {name}_n
-an = base.analyzer
-
-# Add your analysis logic on top:
-an.Define("MT",
-    "sqrt(2*tightMuons_pt[0]*MET_pt*(1-cos(tightMuons_phi[0]-MET_phi)))")
-an.Filter("MT_cut", "MT > 40.f")
-an.Define("nJets", "(int)goodJets_n")
-
-base.run()   # saves output defined in cfg.yaml
+# Extend with Python-level ROOT JIT expressions
+an.Define("myVar", "TransverseMass * 2.0f")
+an.Filter("extra_cut", "myVar > 80.f")
+base.run()
 ```
 
-### Option 2 — Subclass for reusable analyses
+### Option 2 — subclass for a reusable analysis
 
 ```python
 from analyses.CMSAnalysisTemplate.analysis_wrapper import CMSAnalysisBase
@@ -91,41 +127,30 @@ from analyses.CMSAnalysisTemplate.analysis_wrapper import CMSAnalysisBase
 class WmuNuAnalysis(CMSAnalysisBase):
     """W → μν analysis built on the CMS template."""
 
-    def build_analysis(self):
-        an = self.analyzer  # collections already built by base class
-
-        # Derived quantities
-        an.Define("MT",
-            "sqrt(2*tightMuons_pt[0]*MET_pt*(1-cos(tightMuons_phi[0]-MET_phi)))")
-        an.Define("nJets", "(int)goodJets_n")
-
-        # Event selection
-        an.Filter("one_tight_muon", "(int)tightMuons_n == 1")
-        an.Filter("no_loose_muon",  "(int)looseMuons_n == 1")   # no extra loose muon
-        an.Filter("no_electron",    "(int)looseElectrons_n == 0")
-        an.Filter("MET_cut",        "MET_pt > 30.f")
-        an.Filter("MT_cut",         "MT > 40.f")
-
-        # Add extra plugin for cutflow (optional)
-        an.AddPlugin("cutflow", "CutflowManager")
+    def build_analysis(self) -> None:
+        # self.analyzer is fully configured by C++ setup at this point
+        an = self.analyzer
+        an.Define("MT2", "TransverseMass * 2.0f")
+        an.Filter("highMT", "MT2 > 100.f")
 
 
 if __name__ == "__main__":
+    import sys
     WmuNuAnalysis(sys.argv[1]).run()
 ```
 
-### Option 3 — Command line
+### Option 3 — command line
 
 ```bash
-# Run the base template (collections + triggers; no additional cuts)
+# Run the full template
 python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
     --config analyses/CMSAnalysisTemplate/cfg.yaml
 
-# Validate config only
+# Validate configs and exit
 python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
     --config analyses/CMSAnalysisTemplate/cfg.yaml --validate-only
 
-# Run and inspect results
+# Run and print results summary
 python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
     --config analyses/CMSAnalysisTemplate/cfg.yaml \
     --results output/cms_template_output.root
@@ -133,35 +158,46 @@ python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
 
 ---
 
-## C++ usage
+## How the Python–C++ bridge works
 
-### Build
-
-```bash
-source env.sh
-cmake -S . -B build && cmake --build build -j$(nproc)
-# or build only this target:
-cmake --build build --target cms_analysis_template -j$(nproc)
+```
+Python:  an = rdfanalyzer.Analyzer("cfg.yaml")
+                    │
+Python:  an._get_analyzer_ptr()  → uintptr_t (raw Analyzer* address)
+                    │
+C++:     cms_analysis_template.setup_analysis(ptr)
+             reinterpret_cast<Analyzer*>(ptr)
+             setupCMSAnalysis(*an)   ← same function as the C++ binary uses
+                    │
+Python:  an.Define(...)  ← extend with ROOT JIT expressions
+         an.save()       ← trigger the event loop
 ```
 
-### Run
+Both the C++ binary and the Python module call the **identical** compiled
+`setupCMSAnalysis` function.  There is no Python JIT duplication.
 
-```bash
-cd build/analyses/CMSAnalysisTemplate
-./cms_analysis_template ../../../analyses/CMSAnalysisTemplate/cfg.yaml
-```
+---
 
-### Single-threaded debugging
+## What `setupCMSAnalysis` registers
 
-Set `threads: "0"` in `cfg.yaml`, then rerun.
+| Step | Description |
+|------|-------------|
+| Plugins | `NDHistogramManager`, `CutflowManager`, `TriggerManager`, `RegionManager`, `WeightManager` |
+| Triggers | `TriggerManager::applyAllTriggers()` (reads `triggers.yaml`) |
+| Collections | `looseMuons`, `tightMuons`, `looseElectrons`, `tightElectrons`, `preJets`, `goodJets`, `cleanJets` |
+| Event cuts | One tight muon, no extra muon, no electron, MET > 30, m_T > 40 (via `CutflowManager`) |
+| Derived columns | `TransverseMass`, `nCleanJets`, `LeadMuPt`, `LeadMuEta`, `LeadMuPhi`, `LeadJetPt`, `LeadJetEta` |
+| Region booleans | `pass_signal`, `pass_wCR`, `pass_topCR` |
+| Regions | `signal` (nJets ≥ 1, m_T > 60), `wCR` (nJets = 0), `topCR` (nJets ≥ 2) |
+| Weights | `eventWeight = 1.0` (stub), `weight_nominal` |
+| Histograms | `NDHistogramManager::bookConfigHistograms()` (reads `histograms.yaml`) |
 
 ---
 
 ## Object collections
 
-Collections are specified in `collections.yaml` and built automatically by
-`CMSAnalysisBase`.  The C++ `analysis.cc` implements them as standalone
-functions that produce `PhysicsObjectCollection` objects.
+Collections are implemented in `analysis_setup.h` and produce
+`PhysicsObjectCollection` objects on the dataframe.
 
 ### Muon working points
 
@@ -177,63 +213,42 @@ functions that produce `PhysicsObjectCollection` objects.
 | `looseElectrons` | cut-based ≥ 1 (veto) | > 10 GeV | < 2.5 (no gap) |
 | `tightElectrons` | cut-based ≥ 4 (tight) | > 30 GeV | < 2.5 (no gap) |
 
-The barrel-endcap gap (1.444 < |η_SC| < 1.566) is vetoed for both WPs.
+Barrel-endcap gap (1.444 < |η_SC| < 1.566) is vetoed for both WPs.
 
-### Jets (`goodJets`)
+### Jets
 
-Tight jetID (≥ 2), pT > 30 GeV, |η| < 4.7, with ΔR > 0.4 overlap removal
-against both `tightMuons` and `tightElectrons`.
-
-### Column naming convention (Python)
-
-For each collection `{name}`, the Python base class defines:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `{name}_mask`  | `RVec<bool>`  | per-object selection (after OR removal) |
-| `{name}_pt`    | `RVec<float>` | pT of selected objects |
-| `{name}_eta`   | `RVec<float>` | η |
-| `{name}_phi`   | `RVec<float>` | φ |
-| `{name}_mass`  | `RVec<float>` | mass |
-| `{name}_n`     | `int`         | multiplicity |
-
----
-
-## Analysis regions (C++)
-
-Regions are declared on the main dataframe after the shared preselection:
-
-| Region | Filter column | Condition |
-|--------|---------------|-----------|
-| `signal` | `pass_signal` | nJets ≥ 1 **and** m_T > 60 GeV |
-| `wCR`    | `pass_wCR`    | nJets == 0 |
-| `topCR`  | `pass_topCR`  | nJets ≥ 2 |
+`preJets`: tight jetID ≥ 2, pT > 30 GeV, |η| < 4.7  
+`goodJets`: `preJets` with ΔR > 0.4 overlap removal vs. `tightMuons`  
+`cleanJets`: `goodJets` with ΔR > 0.4 overlap removal vs. `tightElectrons`
 
 ---
 
 ## Adding CMS corrections
 
-The template runs without correction files by default.  To add corrections:
+Corrections are applied in `analysis_setup.h` before the collection builders.
+`collections.yaml` documents which corrected column name each collection uses.
 
 ### Muon Rochester corrections
 
 ```cpp
-// In analysis.cc, after registering plugins:
+// In setupCMSAnalysis(), before the collection defines:
 auto roc = MuonRochesterManager::create(an);
 roc->applyRochesterCorrection(*cm, "rochester", "Muon_pt", "Muon_pt_roc");
-```
 
-Then replace `"Muon_pt"` with `"Muon_pt_roc"` in the collection builders,
-**and** update `collections.yaml` to use `pt: Muon_pt_roc` for Python users.
+// Then use "Muon_pt_roc" in buildLooseMuons / buildTightMuons:
+an.Define("looseMuons", buildLooseMuons,
+    {"Muon_pt_roc", "Muon_eta", "Muon_phi", "Muon_mass",
+     "Muon_looseId", "Muon_pfRelIso04_all"});
+```
 
 ### Electron energy-scale corrections
 
 ```cpp
 auto esc = ElectronEnergyScaleManager::create(an);
-esc->applyCorrectionlib(*cm, "electron_scale", {"scale"}, {}, "Electron_pt", "Electron_pt_esc");
+esc->applyCorrectionlib(*cm, "electron_scale", {"scale"}, {},
+    "Electron_pt", "Electron_pt_esc");
+// Use "Electron_pt_esc" in buildLooseElectrons / buildTightElectrons
 ```
-
-Update `collections.yaml`: `pt: Electron_pt_esc`.
 
 ### Jet energy corrections (JEC/JER)
 
@@ -243,9 +258,14 @@ See `docs/CMS_CORRECTIONS.md` and `docs/JET_ENERGY_CORRECTIONS.md`.
 
 ## Adding MC event weights
 
+In `setupCMSAnalysis()`, replace the unit-weight stub:
+
 ```cpp
-weightMgr->addScaleFactor("pileup",   "puWeight");
-weightMgr->addScaleFactor("muon_id",  "muonIdSF");
+// Replace the placeholder block in analysis_setup.h:
+an.Define("puWeight",   ...);  // pileup correction column
+an.Define("muonIdSF",  ...);   // muon ID scale factor column
+weightMgr->addScaleFactor("pileup",  "puWeight");
+weightMgr->addScaleFactor("muon_id", "muonIdSF");
 weightMgr->addNormalization("xsec_lumi", xsec * lumi / sumWeights);
 weightMgr->defineNominalWeight("weight_nominal");
 ```
@@ -254,7 +274,7 @@ weightMgr->defineNominalWeight("weight_nominal");
 
 ## Adding histograms
 
-Edit `histograms.yaml` only — no C++ changes needed:
+Edit `histograms.yaml` — no C++ changes needed:
 
 ```yaml
 - name: MyNewVariable
@@ -270,14 +290,15 @@ Edit `histograms.yaml` only — no C++ changes needed:
 
 ## Adding a new analysis region
 
-1. Define a boolean column:
-   ```cpp
-   an.Define("pass_myRegion", myRegionPredicate, {"someColumn"});
-   ```
-2. Declare the region:
-   ```cpp
-   regionMgr->declareRegion("myRegion", "pass_myRegion");
-   ```
+In `analysis_setup.h`:
+
+```cpp
+// 1. Define a boolean column
+an.Define("pass_myRegion", myRegionPredicate, {"someColumn"});
+
+// 2. Declare the region
+regionMgr->declareRegion("myRegion", "pass_myRegion");
+```
 
 ---
 
