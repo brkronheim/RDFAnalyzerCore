@@ -105,6 +105,21 @@ public:
   }
 
   /**
+   * @brief Redefine an existing variable in the dataframe.
+   * @tparam F Callable type for the variable redefinition
+   * @param name Name of the variable to redefine
+   * @param f Callable to compute the new variable value
+   * @param columns Input columns
+   * @return Pointer to this Analyzer (for chaining)
+   */
+  template <typename F>
+  Analyzer *Redefine(std::string name, F f,
+                    const std::vector<std::string> &columns = {}) {
+    dataFrameProvider_m->Redefine(name, f, columns);
+    return this;
+  }
+
+  /**
    * @brief Define a filter (selection) in the dataframe. Systematics are handled automatically.
    * @tparam F Callable type for the filter
    * @param name Name of the filter
@@ -345,6 +360,10 @@ private:
    * @brief Map of plugin role names to pluggable manager instances.
    */
   std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins;
+  /**
+   * @brief Stable dependency-respecting plugin order used for lifecycle hooks.
+   */
+  std::vector<std::string> pluginOrder_m;
   /**
    * @brief Optional analysis services (internal only for now).
    */

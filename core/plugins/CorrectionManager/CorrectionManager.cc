@@ -4,10 +4,216 @@
 #include <api/IDataFrameProvider.h>
 #include <api/ILogger.h>
 #include <api/ISystematicManager.h>
+#include <TInterpreter.h>
 #include <algorithm>
 #include <cctype>
 #include <iostream>
 #include <stdexcept>
+
+namespace {
+
+bool isVectorColumnType(const std::string &columnType) {
+  return columnType.find("RVec") != std::string::npos;
+}
+
+void ensureFlattenHelperDeclared() {
+  static const bool declared = []() {
+    return gInterpreter->Declare(R"cpp(
+#include <ROOT/RVec.hxx>
+#include <algorithm>
+#include <type_traits>
+
+namespace correction_manager_detail {
+
+template <typename... Args>
+ROOT::VecOps::RVec<double> FlattenInputs(const Args &...args) {
+  using ROOT::VecOps::RVec;
+  std::size_t nFills = 0U;
+  bool sawVectorInput = false;
+  auto updateSize = [&](auto const &arg) {
+    if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
+      if (!sawVectorInput) {
+        nFills = 1U;
+      }
+    } else {
+      sawVectorInput = true;
+      nFills = std::max<std::size_t>(nFills, arg.size());
+    }
+  };
+  (updateSize(args), ...);
+
+  if (sawVectorInput && nFills == 0U) {
+    return RVec<double>{};
+  }
+
+  const std::size_t stride = sizeof...(Args);
+  RVec<double> out;
+  out.reserve(nFills * stride);
+  for (std::size_t i = 0; i < nFills; ++i) {
+    auto pushVal = [&](auto const &arg) {
+      if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
+        out.emplace_back(static_cast<double>(arg));
+      } else {
+        const auto idx = (i < arg.size()) ? i : arg.size() - 1;
+        out.emplace_back(static_cast<double>(arg[idx]));
+      }
+    };
+    (pushVal(args), ...);
+  }
+  return out;
+}
+
+} // namespace correction_manager_detail
+    )cpp");
+  }();
+
+  if (!declared) {
+    throw std::runtime_error(
+        "CorrectionManager: failed to declare flatten helper in Cling");
+  }
+}
+
+std::string buildFlattenRVecExpression(
+    const std::vector<std::string> &inputColumns) {
+  std::string expression = "correction_manager_detail::FlattenInputs(";
+  for (size_t index = 0; index < inputColumns.size(); ++index) {
+    if (index != 0) {
+      expression += ", ";
+    }
+    expression += inputColumns[index];
+  }
+  expression += ")";
+  return expression;
+}
+
+Float_t evaluateScalarCorrection(
+  const correction::Correction::Ref &correction,
+    const std::vector<std::string> &stringArgs,
+    ROOT::VecOps::RVec<double> &inputVector) {
+  std::vector<std::variant<int, double, std::string>> values;
+  auto stringArgIt = stringArgs.begin();
+  auto doubleArgIt = inputVector.begin();
+  for (const auto &varType : correction->inputs()) {
+    if (varType.typeStr() == "string") {
+      values.push_back(*stringArgIt);
+      ++stringArgIt;
+    } else if (varType.typeStr() == "int") {
+      values.push_back(int(*doubleArgIt));
+      ++doubleArgIt;
+    } else {
+      values.push_back(*doubleArgIt);
+      ++doubleArgIt;
+    }
+  }
+  return correction->evaluate(values);
+}
+
+Float_t evaluateScalarCorrection(
+    const correction::CompoundCorrection::Ref &correction,
+    const std::vector<std::string> &stringArgs,
+    ROOT::VecOps::RVec<double> &inputVector) {
+  std::vector<std::variant<int, double, std::string>> values;
+  auto stringArgIt = stringArgs.begin();
+  auto doubleArgIt = inputVector.begin();
+  for (const auto &varType : correction->inputs()) {
+    if (varType.typeStr() == "string") {
+      values.push_back(*stringArgIt);
+      ++stringArgIt;
+    } else {
+      values.push_back(*doubleArgIt);
+      ++doubleArgIt;
+    }
+  }
+  return correction->evaluate(values);
+}
+
+ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
+    const correction::Correction::Ref &correction,
+    const std::vector<std::string> &stringArgs,
+    const ROOT::VecOps::RVec<double> &flatInputVector,
+    size_t featureCount) {
+  if (featureCount == 0) {
+    throw std::runtime_error("evaluateVectorCorrection: featureCount must be positive");
+  }
+  if (flatInputVector.size() % featureCount != 0) {
+    throw std::runtime_error(
+        "evaluateVectorCorrection: flattened input size is not divisible by featureCount");
+  }
+
+  const size_t objectCount = flatInputVector.size() / featureCount;
+  ROOT::VecOps::RVec<Float_t> result(objectCount);
+  for (size_t i = 0; i < objectCount; ++i) {
+    std::vector<std::variant<int, double, std::string>> values;
+    auto stringArgIt = stringArgs.begin();
+    auto doubleArgIt = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
+    for (const auto &varType : correction->inputs()) {
+      if (varType.typeStr() == "string") {
+        values.push_back(*stringArgIt);
+        ++stringArgIt;
+      } else if (varType.typeStr() == "int") {
+        values.push_back(int(*doubleArgIt));
+        ++doubleArgIt;
+      } else {
+        values.push_back(*doubleArgIt);
+        ++doubleArgIt;
+      }
+    }
+    result[i] = correction->evaluate(values);
+  }
+  return result;
+}
+
+ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
+    const correction::CompoundCorrection::Ref &correction,
+    const std::vector<std::string> &stringArgs,
+    const ROOT::VecOps::RVec<double> &flatInputVector,
+    size_t featureCount) {
+  if (featureCount == 0) {
+    throw std::runtime_error("evaluateVectorCorrection: featureCount must be positive");
+  }
+  if (flatInputVector.size() % featureCount != 0) {
+    throw std::runtime_error(
+        "evaluateVectorCorrection: flattened input size is not divisible by featureCount");
+  }
+
+  const size_t objectCount = flatInputVector.size() / featureCount;
+  ROOT::VecOps::RVec<Float_t> result(objectCount);
+  for (size_t i = 0; i < objectCount; ++i) {
+    std::vector<std::variant<int, double, std::string>> values;
+    auto stringArgIt = stringArgs.begin();
+    auto doubleArgIt = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
+    for (const auto &varType : correction->inputs()) {
+      if (varType.typeStr() == "string") {
+        values.push_back(*stringArgIt);
+        ++stringArgIt;
+      } else {
+        values.push_back(*doubleArgIt);
+        ++doubleArgIt;
+      }
+    }
+    result[i] = correction->evaluate(values);
+  }
+  return result;
+}
+
+template <typename CorrectionSetT>
+auto lookupCorrectionOrCompound(const CorrectionSetT &correctionSet,
+                                const std::string &name)
+    -> std::pair<correction::Correction::Ref, correction::CompoundCorrection::Ref> {
+  try {
+    return {correctionSet->at(name), nullptr};
+  } catch (const std::out_of_range &) {
+  }
+
+  const auto compoundIt = correctionSet->compound().find(name);
+  if (compoundIt != correctionSet->compound().end()) {
+    return {nullptr, compoundIt->second};
+  }
+
+  throw std::runtime_error("Correction '" + name + "' was not found as either a regular or compound correction");
+}
+
+} // namespace
 
 /**
  * @brief Construct a new CorrectionManager object
@@ -73,15 +279,20 @@ void CorrectionManager::registerCorrection(
     const std::string &file,
     const std::string &correctionlibName,
     const std::vector<std::string> &inputVariables) {
-  if (objects_m.count(name)) {
+  if (objects_m.count(name) || compoundObjects_m.count(name)) {
     throw std::runtime_error(
         "CorrectionManager::registerCorrection: a correction named '" + name +
         "' is already registered. Use a unique name for each correction.");
   }
-  correction::Correction::Ref corr;
   try {
     auto correctionSet = correction::CorrectionSet::from_file(file);
-    corr = correctionSet->at(correctionlibName);
+    const auto [corr, compoundCorr] =
+        lookupCorrectionOrCompound(correctionSet, correctionlibName);
+    if (corr) {
+      objects_m.emplace(name, corr);
+    } else {
+      compoundObjects_m.emplace(name, compoundCorr);
+    }
   } catch (const std::exception &e) {
     throw std::runtime_error(
         "CorrectionManager::registerCorrection: failed to load correction '" +
@@ -90,7 +301,6 @@ void CorrectionManager::registerCorrection(
   }
   std::cout << "CorrectionManager: registering correction '" << name
             << "' from file '" << file << "'" << std::endl;
-  objects_m.emplace(name, corr);
   features_m.emplace(name, inputVariables);
 }
 
@@ -125,29 +335,31 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
 
   std::cout << "Defining input features for correction " << correctionName << std::endl;
   dataManager_m->DefineVector(inputColName, resolvedInputs, "double", *systematicManager_m);
-  auto correction = this->objects_m.at(correctionName);
-  auto stringArgs = stringArguments;
-  auto correctionLambda =
-      [correction,
-       stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
-    std::vector<std::variant<int, double, std::string>> values;
-    auto stringArgIt = stringArgs.begin();
-    auto doubleArgIt = inputVector.begin();
-    for (const auto &varType : correction->inputs()) {
-      if (varType.typeStr() == "string") {
-        values.push_back(*stringArgIt);
-        ++stringArgIt;
-      } else if (varType.typeStr() == "int") {
-        values.push_back(int(*doubleArgIt));
-        ++doubleArgIt;
-      } else {
-        values.push_back(*doubleArgIt);
-        ++doubleArgIt;
-      }
-    }
-    return correction->evaluate(values);
-  };
-  dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+  if (const auto corrIt = this->objects_m.find(correctionName);
+      corrIt != this->objects_m.end()) {
+    auto correction = corrIt->second;
+    auto stringArgs = stringArguments;
+    auto correctionLambda =
+        [correction, stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
+      return evaluateScalarCorrection(correction, stringArgs, inputVector);
+    };
+    dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+    return;
+  }
+
+  if (const auto compoundIt = compoundObjects_m.find(correctionName);
+      compoundIt != compoundObjects_m.end()) {
+    auto correction = compoundIt->second;
+    auto stringArgs = stringArguments;
+    auto correctionLambda =
+        [correction, stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
+      return evaluateScalarCorrection(correction, stringArgs, inputVector);
+    };
+    dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+    return;
+  }
+
+  throw std::runtime_error("CorrectionManager::applyCorrection: unknown correction '" + correctionName + "'");
 }
 
 /**
@@ -158,6 +370,15 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
 correction::Correction::Ref
 CorrectionManager::getCorrection(const std::string &key) const {
   return getObject(key);
+}
+
+correction::CompoundCorrection::Ref
+CorrectionManager::getCompoundCorrection(const std::string &key) const {
+  const auto it = compoundObjects_m.find(key);
+  if (it != compoundObjects_m.end()) {
+    return it->second;
+  }
+  throw std::runtime_error("Compound correction not found: " + key);
 }
 
 /**
@@ -218,9 +439,10 @@ void CorrectionManager::applyCorrectionVec(
     }
   }
 
-  // Build an intermediate column of type RVec<RVec<double>> that packs the
-  // per-object feature values.  Element [i][j] holds the value of input
-  // feature j for the i-th object in the collection.
+  // Build an intermediate flattened RVec<double> that packs the per-object
+  // feature values in row-major order. The stride is the number of input
+  // features, so element block [i * stride : (i + 1) * stride) stores the
+  // values for the i-th object.
   if (resolvedInputs.empty()) {
     throw std::runtime_error(
         "applyCorrectionVec: correction '" + correctionName +
@@ -235,50 +457,65 @@ void CorrectionManager::applyCorrectionVec(
     const auto existingColumns = dfNode.GetColumnNames();
     if (std::find(existingColumns.begin(), existingColumns.end(),
                   inputVecName) == existingColumns.end()) {
-      std::string expr =
-          "ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>> _out(" +
-          resolvedInputs[0] + ".size());\n";
+      ensureFlattenHelperDeclared();
+      bool hasVectorInput = false;
+      std::vector<bool> isVectorInput;
+      isVectorInput.reserve(resolvedInputs.size());
       for (const auto &f : resolvedInputs) {
-        expr += "for (size_t _i = 0; _i < _out.size(); ++_i)"
-                " _out[_i].push_back(static_cast<double>(" +
-                f + "[_i]));\n";
+        const bool columnIsVector = isVectorColumnType(dfNode.GetColumnType(f));
+        isVectorInput.push_back(columnIsVector);
+        if (columnIsVector) {
+          hasVectorInput = true;
+        }
       }
-      expr += "return _out;";
-      dfNode = dfNode.Define(inputVecName, expr);
+
+      if (!hasVectorInput) {
+        throw std::runtime_error(
+            "applyCorrectionVec: at least one input column must be an RVec for correction '" +
+            correctionName + "'");
+      }
+
+      dfNode = dfNode.Define(
+          inputVecName,
+          buildFlattenRVecExpression(resolvedInputs));
       dataManager_m->setDataFrame(dfNode);
     }
   }
 
   // Lambda that applies the correction to every object in the collection.
-  auto correction = this->objects_m.at(correctionName);
-  auto stringArgs = stringArguments;
-  auto correctionLambda =
-      [correction, stringArgs](
-          const ROOT::VecOps::RVec<ROOT::VecOps::RVec<double>>
-              &inputMatrix) -> ROOT::VecOps::RVec<Float_t> {
-    ROOT::VecOps::RVec<Float_t> result(inputMatrix.size());
-    for (size_t i = 0; i < inputMatrix.size(); ++i) {
-      std::vector<std::variant<int, double, std::string>> values;
-      auto stringArgIt = stringArgs.begin();
-      auto doubleArgIt = inputMatrix[i].begin();
-      for (const auto &varType : correction->inputs()) {
-        if (varType.typeStr() == "string") {
-          values.push_back(*stringArgIt);
-          ++stringArgIt;
-        } else if (varType.typeStr() == "int") {
-          values.push_back(int(*doubleArgIt));
-          ++doubleArgIt;
-        } else {
-          values.push_back(*doubleArgIt);
-          ++doubleArgIt;
-        }
-      }
-      result[i] = correction->evaluate(values);
-    }
-    return result;
-  };
-  dataManager_m->Define(branchName, correctionLambda, {inputVecName},
-                        *systematicManager_m);
+  if (const auto corrIt = this->objects_m.find(correctionName);
+      corrIt != this->objects_m.end()) {
+    auto correction = corrIt->second;
+    auto stringArgs = stringArguments;
+    const size_t featureCount = resolvedInputs.size();
+    auto correctionLambda =
+        [correction, stringArgs, featureCount](const ROOT::VecOps::RVec<double>
+                                                   &flatInputVector) -> ROOT::VecOps::RVec<Float_t> {
+      return evaluateVectorCorrection(correction, stringArgs, flatInputVector,
+                                      featureCount);
+    };
+    dataManager_m->Define(branchName, correctionLambda, {inputVecName},
+                          *systematicManager_m);
+    return;
+  }
+
+  if (const auto compoundIt = compoundObjects_m.find(correctionName);
+      compoundIt != compoundObjects_m.end()) {
+    auto correction = compoundIt->second;
+    auto stringArgs = stringArguments;
+    const size_t featureCount = resolvedInputs.size();
+    auto correctionLambda =
+        [correction, stringArgs, featureCount](const ROOT::VecOps::RVec<double>
+                                                   &flatInputVector) -> ROOT::VecOps::RVec<Float_t> {
+      return evaluateVectorCorrection(correction, stringArgs, flatInputVector,
+                                      featureCount);
+    };
+    dataManager_m->Define(branchName, correctionLambda, {inputVecName},
+                          *systematicManager_m);
+    return;
+  }
+
+  throw std::runtime_error("CorrectionManager::applyCorrectionVec: unknown correction '" + correctionName + "'");
 }
 
 /**
@@ -309,12 +546,17 @@ void CorrectionManager::registerCorrectionlib(
     // load correction object from json
     auto correctionF =
         correction::CorrectionSet::from_file(entryKeys.at("file"));
-    auto correction = correctionF->at(entryKeys.at("correctionName"));
+    const auto [correction, compoundCorrection] =
+        lookupCorrectionOrCompound(correctionF, entryKeys.at("correctionName"));
 
     // Add the correction and feature list to their maps
     std::cout << "Adding correction " << entryKeys.at("name") << "!"
               << std::endl;
-    objects_m.emplace(entryKeys.at("name"), correction);
+    if (correction) {
+      objects_m.emplace(entryKeys.at("name"), correction);
+    } else {
+      compoundObjects_m.emplace(entryKeys.at("name"), compoundCorrection);
+    }
     features_m.emplace(entryKeys.at("name"), inputVariableVector);
   }
 } 
@@ -345,12 +587,17 @@ void CorrectionManager::setupFromConfigFile() {
     // load correction object from json
     auto correctionF =
       correction::CorrectionSet::from_file(entryKeys.at("file"));
-    auto correction = correctionF->at(entryKeys.at("correctionName"));
+    const auto [correction, compoundCorrection] =
+      lookupCorrectionOrCompound(correctionF, entryKeys.at("correctionName"));
 
     // Add the correction and feature list to their maps
     std::cout << "Adding correction " << entryKeys.at("name") << "!"
               << std::endl;
-    objects_m.emplace(entryKeys.at("name"), correction);
+    if (correction) {
+      objects_m.emplace(entryKeys.at("name"), correction);
+    } else {
+      compoundObjects_m.emplace(entryKeys.at("name"), compoundCorrection);
+    }
     features_m.emplace(entryKeys.at("name"), inputVariableVector);
   }
 

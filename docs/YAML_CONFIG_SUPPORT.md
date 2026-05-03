@@ -21,16 +21,16 @@ RDFAnalyzerCore now supports configuration files in both text (`.txt`) and YAML 
 
 ### Text Format (`.txt`)
 ```
-directory=/home/user/testDir
-saveFile=/home/user/outDir/output.root
+directory=data/testDir
+saveFile=output/output.root
 threads=-1
 globs=root,test
 ```
 
 ### YAML Format (`.yaml` or `.yml`)
 ```yaml
-directory: /home/user/testDir
-saveFile: /home/user/outDir/output.root
+directory: data/testDir
+saveFile: output/output.root
 threads: "-1"
 globs: root,test
 ```
@@ -100,15 +100,7 @@ write_config(config, "output.txt")   # Writes as text
 
 ### Submission File Generation
 
-The submission file generation scripts preserve the config format:
-
-```bash
-# If you provide a YAML config, submission configs will be YAML
-python core/python/generateSubmissionFilesNANO.py -c config.yaml ...
-
-# If you provide a text config, submission configs will be text
-python core/python/generateSubmissionFilesNANO.py -c config.txt ...
-```
+The submission file generation path has been updated to use LAW and YAML-first workflows. The legacy script `core/python/generateSubmissionFilesNANO.py` has been removed, and new generations should be done with LAW discovery tasks and `core/python/production_manager.py` / `production_monitor.py`.
 
 ## Migration Guide
 
@@ -126,7 +118,7 @@ You can also use both formats side-by-side in the same analysis. The framework w
 ### Python Tests
 Run the Python test suite:
 ```bash
-python3 core/test/test_yaml_config.py
+python3 core/tests/cpp/test_yaml_config.py
 ```
 
 ### C++ Tests
@@ -135,7 +127,7 @@ The C++ test suite includes tests for YAML configs:
 ./test.sh
 ```
 
-Specific YAML tests are in `core/test/testConfigurationManager_YamlParsing.cc`.
+Specific YAML tests are in `core/tests/cpp/testConfigurationManager_YamlParsing.cc`.
 
 ## Implementation Details
 

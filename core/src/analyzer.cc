@@ -175,6 +175,7 @@ void Analyzer::wirePluginManagers() {
         throw std::runtime_error(
             "Analyzer: circular dependency detected among registered plugins.");
     }
+    pluginOrder_m = order;
 
     // -----------------------------------------------------------------
     // 3. setContext + setupFromConfigFile in topological order.
@@ -215,6 +216,7 @@ Analyzer *Analyzer::addPlugin(const std::string &role, std::shared_ptr<IPluggabl
         provenanceService_m->addEntry("plugin." + role, plugin->type());
     }
     plugins.emplace(role, std::move(plugin));
+    pluginOrder_m.push_back(role);
     return this;
 }
 
@@ -341,8 +343,11 @@ Analyzer *Analyzer::save() {
     auto df = dataFrameProvider_m->getDataFrame();
 
     // Pre-execution hook
-    for (auto& [role, plugin] : plugins) {
-        if (plugin) plugin->execute();
+    for (const auto& role : pluginOrder_m) {
+        auto it = plugins.find(role);
+        if (it != plugins.end() && it->second) {
+            it->second->execute();
+        }
     }
 
     skimSink_m->writeDataFrame(df,
@@ -361,11 +366,17 @@ Analyzer *Analyzer::save() {
     }
 
     // Post-execution plugin hooks
-    for (auto& [role, plugin] : plugins) {
-        if (plugin) plugin->finalize();
+    for (const auto& role : pluginOrder_m) {
+        auto it = plugins.find(role);
+        if (it != plugins.end() && it->second) {
+            it->second->finalize();
+        }
     }
-    for (auto& [role, plugin] : plugins) {
-        if (plugin) plugin->reportMetadata();
+    for (const auto& role : pluginOrder_m) {
+        auto it = plugins.find(role);
+        if (it != plugins.end() && it->second) {
+            it->second->reportMetadata();
+        }
     }
 
     // Collect structured provenance contributions from plugins and services,
@@ -379,8 +390,11 @@ Analyzer *Analyzer::run() {
     auto df = dataFrameProvider_m->getDataFrame();
 
     // Pre-execution hook
-    for (auto& [role, plugin] : plugins) {
-        if (plugin) plugin->execute();
+    for (const auto& role : pluginOrder_m) {
+        auto it = plugins.find(role);
+        if (it != plugins.end() && it->second) {
+            it->second->execute();
+        }
     }
 
     // Conditionally write a skim when enableSkim=1/true/True is set in config
@@ -412,11 +426,17 @@ Analyzer *Analyzer::run() {
     }
 
     // Post-execution plugin hooks
-    for (auto& [role, plugin] : plugins) {
-        if (plugin) plugin->finalize();
+    for (const auto& role : pluginOrder_m) {
+        auto it = plugins.find(role);
+        if (it != plugins.end() && it->second) {
+            it->second->finalize();
+        }
     }
-    for (auto& [role, plugin] : plugins) {
-        if (plugin) plugin->reportMetadata();
+    for (const auto& role : pluginOrder_m) {
+        auto it = plugins.find(role);
+        if (it != plugins.end() && it->second) {
+            it->second->reportMetadata();
+        }
     }
 
     // Collect structured provenance contributions from plugins and services,

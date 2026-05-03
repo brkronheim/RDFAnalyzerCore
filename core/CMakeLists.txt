@@ -10,6 +10,7 @@ endif()
 
 add_subdirectory(extern)
 add_subdirectory(src)
+add_subdirectory(python/bindings)
 
 # Optional custom ROOT dictionary (user-provided)
 if(RDF_CUSTOM_DICT_HEADERS AND RDF_CUSTOM_DICT_LINKDEF)
@@ -58,11 +59,9 @@ target_link_libraries(coreAll INTERFACE
     -Wl,--end-group
 )
 
-add_subdirectory(bindings)
-
 # Only build tests if requested
 if(BUILD_TESTS)
-    add_subdirectory(test)
+    add_subdirectory(tests)
 endif()
 
 

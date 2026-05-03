@@ -23,7 +23,7 @@ class RegionManager;
  * This manager encapsulates the logic for creating, storing, and writing
  * N-dimensional histograms (THnSparseD) using ROOT's RDataFrame. It is designed
  * to be used by the Analyzer class and centralizes all histogram-related
- * operations. Implements the INDHistogramManager interface for dependency injection.
+ * operations. It is registered through the pluggable-manager API used by Analyzer.
  *
  * ### Region-aware mode
  *

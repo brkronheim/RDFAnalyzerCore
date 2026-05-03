@@ -6,6 +6,25 @@
 #include <vector>
 #include <api/IDataFrameProvider.h>
 
+namespace {
+
+bool endsWith(const std::string &value, const std::string &suffix) {
+  return value.size() >= suffix.size() &&
+         value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::string normalizeSystematicName(const std::string &syst) {
+  if (endsWith(syst, "Up")) {
+    return syst.substr(0, syst.size() - 2);
+  }
+  if (endsWith(syst, "Down")) {
+    return syst.substr(0, syst.size() - 4);
+  }
+  return syst;
+}
+
+} // namespace
+
 /**
  * @brief Register a systematic and its affected variables
  * @param syst Name of the systematic
@@ -13,11 +32,26 @@
  */
 void SystematicManager::registerSystematic(
     const std::string &syst, const std::set<std::string> &affectedVariables) {
+  const std::string normalizedSyst = normalizeSystematicName(syst);
   for (const auto &var : affectedVariables) {
-    systematicToVariableMap_m[syst].insert(var);
-    variableToSystematicMap_m[var].insert(syst);
+    systematicToVariableMap_m[normalizedSyst].insert(var);
+    variableToSystematicMap_m[var].insert(normalizedSyst);
   }
-  systematics_m.insert(syst);
+  systematics_m.insert(normalizedSyst);
+}
+
+void SystematicManager::registerVariationColumns(
+    const std::string &variable, const std::string &systematicName,
+    const std::string &upColumn, const std::string &downColumn) {
+  if (variable.empty() || systematicName.empty() || upColumn.empty() ||
+      downColumn.empty()) {
+    return;
+  }
+
+  const std::string normalizedSyst = normalizeSystematicName(systematicName);
+  registerSystematic(normalizedSyst, {variable});
+  variationColumnMap_m[variable][normalizedSyst + "Up"] = upColumn;
+  variationColumnMap_m[variable][normalizedSyst + "Down"] = downColumn;
 }
 
 /**
@@ -36,7 +70,7 @@ const std::set<std::string> &SystematicManager::getSystematics() const {
 const std::set<std::string> &
 SystematicManager::getVariablesForSystematic(const std::string &syst) const {
   static const std::set<std::string> empty;
-  auto it = systematicToVariableMap_m.find(syst);
+  auto it = systematicToVariableMap_m.find(normalizeSystematicName(syst));
   return it != systematicToVariableMap_m.end() ? it->second : empty;
 }
 
@@ -50,6 +84,22 @@ SystematicManager::getSystematicsForVariable(const std::string &var) const {
   static const std::set<std::string> empty;
   auto it = variableToSystematicMap_m.find(var);
   return it != variableToSystematicMap_m.end() ? it->second : empty;
+}
+
+std::string SystematicManager::getVariationColumnName(
+    const std::string &variable, const std::string &syst) const {
+  auto varIt = variationColumnMap_m.find(variable);
+  if (varIt != variationColumnMap_m.end()) {
+    auto explicitIt = varIt->second.find(syst);
+    if (explicitIt != varIt->second.end()) {
+      return explicitIt->second;
+    }
+  }
+
+  if (isVariableAffectedBySystematic(variable, syst)) {
+    return variable + "_" + syst;
+  }
+  return variable;
 }
 
 /**

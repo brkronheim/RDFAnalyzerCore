@@ -1,0 +1,66 @@
+{
+  "schema_version": 2,
+  "description": "Mock jet energy corrections for unit testing. Mimics the structure of CMS JME Run3 correctionlib payloads.",
+  "corrections": [
+    {
+      "name": "Summer22_22Sep2023_V3_MC_L1FastJet_AK4PFPuppi",
+      "description": "Mock L1 jet energy correction (pileup offset)",
+      "version": 1,
+      "inputs": [
+        {"name": "JetArea", "type": "real"},
+        {"name": "JetEta",  "type": "real"},
+        {"name": "JetPt",   "type": "real"},
+        {"name": "Rho",     "type": "real"}
+      ],
+      "output": {"name": "correction", "type": "real"},
+      "data": 1.05
+    },
+    {
+      "name": "Summer22_22Sep2023_V3_MC_L2Relative_AK4PFPuppi",
+      "description": "Mock L2 jet energy correction (relative calibration)",
+      "version": 1,
+      "inputs": [
+        {"name": "JetArea", "type": "real"},
+        {"name": "JetEta",  "type": "real"},
+        {"name": "JetPt",   "type": "real"},
+        {"name": "Rho",     "type": "real"}
+      ],
+      "output": {"name": "correction", "type": "real"},
+      "data": 0.98
+    },
+    {
+      "name": "Summer22_22Sep2023_V3_MC_L3Absolute_AK4PFPuppi",
+      "description": "Mock L3 jet energy correction (absolute calibration)",
+      "version": 1,
+      "inputs": [
+        {"name": "JetArea", "type": "real"},
+        {"name": "JetEta",  "type": "real"},
+        {"name": "JetPt",   "type": "real"},
+        {"name": "Rho",     "type": "real"}
+      ],
+      "output": {"name": "correction", "type": "real"},
+      "data": 1.0
+    }
+  ],
+  "compound_corrections": [
+    {
+      "name": "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+      "description": "Mock compound L1L2L3 jet energy correction chain",
+      "inputs": [
+        {"name": "JetArea", "type": "real"},
+        {"name": "JetEta",  "type": "real"},
+        {"name": "JetPt",   "type": "real"},
+        {"name": "Rho",     "type": "real"}
+      ],
+      "output": {"name": "correction", "type": "real"},
+      "inputs_update": ["JetPt"],
+      "input_op": "*",
+      "output_op": "last",
+      "stack": [
+        "Summer22_22Sep2023_V3_MC_L1FastJet_AK4PFPuppi",
+        "Summer22_22Sep2023_V3_MC_L2Relative_AK4PFPuppi",
+        "Summer22_22Sep2023_V3_MC_L3Absolute_AK4PFPuppi"
+      ]
+    }
+  ]
+}

@@ -30,6 +30,16 @@ jobs:
         uses: actions/checkout@v4
       - name: Setup Pages
         uses: actions/configure-pages@v5
+      - name: Install Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen
+      - name: Build Doxygen API docs
+        run: |
+          rm -rf docs/doxygen
+          doxygen Doxyfile
+      - name: Build docs search index
+        run: python3 docs/build_search_index.py
       - name: Build with Jekyll
         uses: actions/jekyll-build-pages@v1
         with:

@@ -40,6 +40,10 @@ nav_links:
     url: PLUGIN_DEVELOPMENT.html
   - title: API Reference
     url: API_REFERENCE.html
+  - title: Search
+    url: SEARCH.html
+  - title: Doxygen Docs
+    url: doxygen/index.html
 
 # Exclude files from build
 exclude:

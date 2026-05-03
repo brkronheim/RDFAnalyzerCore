@@ -54,7 +54,7 @@ class RegionManager;
  *   analyzer->Define("pass_etaCut", [](float eta) { return std::abs(eta) < 2.4f; }, {"eta"});
  *
  *   // 2. Register cuts with the manager (also applies each filter).
- *   auto* cfm = analyzer->getPlugin<CutflowManager>("cutflow");
+ *   auto cfm = analyzer->getPlugin<CutflowManager>("cutflow");
  *   cfm->addCut("ptCut",  "pass_ptCut");
  *   cfm->addCut("etaCut", "pass_etaCut");
  *

@@ -60,6 +60,22 @@ public:
                                     const std::set<std::string> &affectedVariables) = 0;
 
     /**
+     * @brief Register explicit up/down column names for a variable under a systematic family.
+     *
+     * This is used when the actual variation columns do not follow the default
+     * `variable_variationLabel` naming pattern.
+     *
+     * @param variable        Nominal/base variable name.
+     * @param systematicName  Base systematic family name without Up/Down.
+     * @param upColumn        Column name to use for the Up variation.
+     * @param downColumn      Column name to use for the Down variation.
+     */
+    virtual void registerVariationColumns(const std::string &variable,
+                                          const std::string &systematicName,
+                                          const std::string &upColumn,
+                                          const std::string &downColumn) = 0;
+
+    /**
      * @brief Get the set of all registered systematics
      * @return Reference to the set of systematic names
      */

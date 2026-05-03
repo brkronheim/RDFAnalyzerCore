@@ -119,6 +119,31 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
             "variations": list,
         },
     },
+    "TaggerWorkingPointManager": {
+        "required_keys": [],
+        "optional_keys": [
+            "jet_columns",
+            "tagger_column",
+            "working_points",
+            "input_collection",
+            "corrections",
+            "fraction_correction",
+            "systematic_sets",
+            "variations",
+            "wp_collections",
+        ],
+        "key_types": {
+            "jet_columns": dict,
+            "tagger_column": str,
+            "working_points": list,
+            "input_collection": str,
+            "corrections": list,
+            "fraction_correction": dict,
+            "systematic_sets": dict,
+            "variations": list,
+            "wp_collections": list,
+        },
+    },
 }
 
 
@@ -971,6 +996,28 @@ def _validate_yaml_sample_config(sample_config_path: str, mode: str = "auto"):
 
 
 def validate_submit_config(config_path: str, mode: str = "auto"):
+    """Validate a submit configuration file.
+
+    **YAML-first approach:** If the ``sampleConfig`` file has a ``.yaml`` or
+    ``.yml`` extension, it is treated as a modern YAML dataset manifest and
+    validated via the rich :class:`~dataset_manifest.DatasetManifest` API.
+    Otherwise, it falls back to legacy key=value text format parsing.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to the submit config file.
+    mode : str
+        Inference mode for sample config format detection: ``"nano"``,
+        ``"opendata"``, or ``"auto"`` (default). In ``"auto"`` mode, YAML
+        manifests are introspected to infer the submission type, and text
+        configs are auto-detected based on field presence.
+
+    Returns
+    -------
+    tuple[list[str], list[str]]
+        ``(errors, warnings)`` lists.
+    """
     errors = []
     warnings = []
     config_path = os.path.abspath(config_path)
@@ -1009,12 +1056,18 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
         sample_config_path = _resolve_path(config_path, sample_config)
         if os.path.exists(sample_config_path):
             ext = os.path.splitext(sample_config_path)[1].lower()
+            # YAML-first: check for YAML extension first
             if ext in (".yaml", ".yml"):
-                # Validate as a DatasetManifest YAML file
+                # Validate as a DatasetManifest YAML file (modern approach)
                 errs, warns = _validate_yaml_sample_config(sample_config_path, mode)
                 errors.extend(errs)
                 warnings.extend(warns)
             else:
+                # Legacy text format (key=value). Emit deprecation note.
+                warnings.append(
+                    f"Sample config '{sample_config}' uses legacy text format. "
+                    "Consider migrating to YAML dataset manifest (.yaml) for better tooling support."
+                )
                 entries = _parse_sample_config(sample_config_path)
                 has_recids = any("recids" in e for e in entries)
                 mode_local = mode.lower()
@@ -1056,7 +1109,8 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
                             )
                         if "norm" not in e:
                             warnings.append(
-                                f"Missing 'norm' in sample config (line {e['__line__']}): 'norm' will be calculated on the fly and is deprecated"
+                                f"Missing 'norm' in sample config (line {e['__line__']}): "
+                                "use 'sum_weights' in YAML manifests; text format is deprecated"
                             )
                         elif not _is_float(e["norm"]):
                             errors.append(

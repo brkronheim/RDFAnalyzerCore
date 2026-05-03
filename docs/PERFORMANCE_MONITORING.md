@@ -2,16 +2,18 @@
 
 RDFAnalyzerCore automatically records execution metrics and classifies failures for every branch task in a LAW workflow.  This gives operators a quick way to identify slow jobs, memory-hungry samples, and systematic failure patterns without diving into individual log files.
 
+For CPU hotspot analysis of direct RDF jobs, prefer Linux `perf` over ad hoc wall-time measurements. The framework has non-trivial startup overhead from configuration parsing, plugin setup, histogram booking, and RDataFrame graph construction, so sampling should target the steady-state event loop rather than process startup.
+
 ---
 
 ## Overview
 
 Two complementary systems work together:
 
-- **`PerformanceRecorder`** (in `law/performance_recorder.py`) – a context manager that measures wall-clock time, peak subprocess RSS and data throughput, writing the results to a `.perf.json` sidecar file co-located with the branch output.
-- **Failure handler** (in `law/failure_handler.py`) – classifies each exception into a `FailureCategory`, consults a per-category `RetryPolicy`, and accumulates all failure events in a `DiagnosticSummary` that is printed at the end of the run.
+- **`PerformanceRecorder`** (in `core/python/law/performance_recorder.py`) – a context manager that measures wall-clock time, peak subprocess RSS and data throughput, writing the results to a `.perf.json` sidecar file co-located with the branch output.
+- **Failure handler** (in `core/python/law/failure_handler.py`) – classifies each exception into a `FailureCategory`, consults a per-category `RetryPolicy`, and accumulates all failure events in a `DiagnosticSummary` that is printed at the end of the run.
 
-Both systems are integrated transparently into `DaskWorkflowProxy` (`law/workflow_executors.py`).  Task authors typically do not need to call them directly.
+Both systems are integrated transparently into `DaskWorkflowProxy` (`core/python/law/workflow_executors.py`).  Task authors typically do not need to call them directly.
 
 ---
 
@@ -162,6 +164,80 @@ job_outputs/
 ```
 
 If `performance_recorder.py` cannot be imported on a worker (e.g. the module is not on the worker's `sys.path`), recording is silently skipped and the analysis job continues normally.
+
+---
+
+## Profiling With `perf`
+
+The most reliable profiling workflow for RDFAnalyzerCore is:
+
+1. run the analysis in a dedicated shell or background process,
+2. wait until the event loop is in steady state,
+3. attach `perf` to the live PID for a bounded sampling window,
+4. compare results across feature toggles.
+
+This avoids mixing one-time startup costs with per-event processing.
+
+### Recommended build settings
+
+For profiling your own RDFAnalyzerCore code, use a debuggable optimized build such as `RelWithDebInfo`.
+
+If you need better stack unwinding in `perf`, rebuild with frame pointers enabled:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -fno-omit-frame-pointer"
+cmake --build build -j
+```
+
+This improves call stacks for RDFAnalyzerCore itself. It will not recover symbol names that are already stripped in third-party shared libraries.
+
+### Profiling a direct CLI analysis
+
+Start the job in its own shell and log to a file:
+
+```bash
+./build/analyses/VHbbcc/VHqqRDF/vhqq_analysis \
+    analyses/VHbbcc/VHqqRDF/cfg/local_2024_2mu_example.yaml \
+    > /tmp/vhqq_run.log 2>&1 &
+echo $! > /tmp/vhqq.pid
+```
+
+Wait until startup is over and the log shows progress lines from the event loop, then attach `perf`:
+
+```bash
+perf record -F 99 -g -p "$(cat /tmp/vhqq.pid)" -o /tmp/vhqq.perf.data -- sleep 30
+perf report --stdio -i /tmp/vhqq.perf.data --sort comm,dso,symbol | head -n 120
+```
+
+For top-level counters instead of samples:
+
+```bash
+perf stat -e task-clock,cycles,instructions,branches,branch-misses,cache-misses \
+    -p "$(cat /tmp/vhqq.pid)" -- sleep 30
+```
+
+### RDFAnalyzerCore-specific guidance
+
+- Avoid benchmarking the first 20 to 30 seconds of a complex analysis unless you explicitly care about startup cost.
+- Use a fresh shell or a dedicated background process for each profiling run; reusing an interactive shell can accidentally interrupt the previous job.
+- For multithreaded RDataFrame jobs, profile the real `ImplicitMT` configuration rather than a synthetic single-thread range test when the question is overall throughput.
+- `RDataFrame::Range` disables `ImplicitMT`, so small range-limited microbenchmarks are not representative of multithreaded production behavior.
+
+### Feature-toggle comparisons
+
+For profiling studies, expose analysis features through config switches instead of editing code between runs. In VHqqRDF, the DNN path supports:
+
+```yaml
+vhqqEnableDNN: "true"
+vhqqRunDNNOnlyInSignalRegion: "true"
+vhqqDnnDisabledValue: "-1.0"
+```
+
+- `vhqqEnableDNN=false` disables inference entirely and fills the score with `vhqqDnnDisabledValue`.
+- `vhqqRunDNNOnlyInSignalRegion=true` only runs inference for events that pass the reconstructed signal-region selection.
+
+This makes it straightforward to compare `perf` output with and without the model while keeping the same analysis graph and output schema.
 
 ---
 

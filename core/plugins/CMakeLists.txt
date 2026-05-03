@@ -3,9 +3,11 @@
 set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/BDTManager
     ${CMAKE_CURRENT_SOURCE_DIR}/CorrectionManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/CorrectedObjectCollectionManagers
     ${CMAKE_CURRENT_SOURCE_DIR}/CutflowManager
     ${CMAKE_CURRENT_SOURCE_DIR}/ElectronEnergyScaleManager
     ${CMAKE_CURRENT_SOURCE_DIR}/JetEnergyScaleManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/TaggerWorkingPointManager
     ${CMAKE_CURRENT_SOURCE_DIR}/KinematicFitManager
     ${CMAKE_CURRENT_SOURCE_DIR}/GoldenJsonManager
     ${CMAKE_CURRENT_SOURCE_DIR}/MuonRochesterManager
@@ -30,10 +32,12 @@ add_library(corePlugins STATIC)
 # Add subdirectories
 add_subdirectory(BDTManager)
 add_subdirectory(CorrectionManager)
+add_subdirectory(CorrectedObjectCollectionManagers)
 add_subdirectory(CutflowManager)
 add_subdirectory(ObjectEnergyManagerBase)
 add_subdirectory(ElectronEnergyScaleManager)
 add_subdirectory(JetEnergyScaleManager)
+add_subdirectory(TaggerWorkingPointManager)
 add_subdirectory(KinematicFitManager)
 add_subdirectory(GoldenJsonManager)
 add_subdirectory(MuonRochesterManager)
@@ -53,10 +57,12 @@ add_subdirectory(WeightManager)
 target_sources(corePlugins PRIVATE
     $<TARGET_OBJECTS:BDTManager>
     $<TARGET_OBJECTS:CorrectionManager>
+    $<TARGET_OBJECTS:CorrectedObjectCollectionManagers>
     $<TARGET_OBJECTS:CutflowManager>
     $<TARGET_OBJECTS:ObjectEnergyManagerBase>
     $<TARGET_OBJECTS:ElectronEnergyScaleManager>
     $<TARGET_OBJECTS:JetEnergyScaleManager>
+    $<TARGET_OBJECTS:TaggerWorkingPointManager>
     $<TARGET_OBJECTS:KinematicFitManager>
     $<TARGET_OBJECTS:GoldenJsonManager>
     $<TARGET_OBJECTS:MuonRochesterManager>
@@ -74,10 +80,12 @@ target_sources(corePlugins PRIVATE
 target_link_libraries(corePlugins
     BDTManager
     CorrectionManager
+    CorrectedObjectCollectionManagers
     CutflowManager
     ObjectEnergyManagerBase
     ElectronEnergyScaleManager
     JetEnergyScaleManager
+    TaggerWorkingPointManager
     KinematicFitManager
     GoldenJsonManager
     MuonRochesterManager

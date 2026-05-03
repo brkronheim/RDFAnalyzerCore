@@ -17,8 +17,8 @@ This guide shows how to use the **region-aware binding** API introduced by
 ## 1 — Declare Regions with `RegionManager`
 
 ```cpp
-// Register RegionManager with the Analyzer.
-auto* rm = analyzer.getPlugin<RegionManager>("regions");
+// Get the registered RegionManager plugin from the Analyzer.
+auto rm = analyzer.getPlugin<RegionManager>("regions");
 
 // Define the boolean filter columns on the dataframe first.
 analyzer.Define("pass_presel",  [](float pt) { return pt > 20.f; }, {"pt"});
@@ -36,7 +36,7 @@ rm->declareRegion("control", "pass_control", "presel");   // presel AND pass_con
 ## 2 — Region-Scoped Cutflows
 
 ```cpp
-auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 
 // Register cuts (applied to the *global* dataframe as usual).
 cfm->addCut("ptCut",  "pass_ptCut");
@@ -79,7 +79,7 @@ small `TH1D` objects.
 ## 3 — Region-Scoped Histograms
 
 ```cpp
-auto* hm = analyzer.getPlugin<NDHistogramManager>("histograms");
+auto hm = analyzer.getPlugin<NDHistogramManager>("histograms");
 
 // Bind BEFORE bookConfigHistograms().
 hm->bindToRegionManager(rm);
@@ -174,7 +174,7 @@ print(report.to_text())
 ```cpp
 // analysis.cc
 
-Analyzer analyzer;
+Analyzer analyzer("config.txt");
 
 // 1. Define boolean columns.
 analyzer.Define("pass_presel",  preselFn,  {"pt", "eta"});
@@ -183,18 +183,18 @@ analyzer.Define("pass_control", controlFn, {"mll"});
 analyzer.Define("pass_ptCut",   ptCutFn,   {"pt"});
 
 // 2. Declare regions.
-auto* rm = analyzer.getPlugin<RegionManager>("regions");
+auto rm = analyzer.getPlugin<RegionManager>("regions");
 rm->declareRegion("presel",  "pass_presel");
 rm->declareRegion("signal",  "pass_signal",  "presel");
 rm->declareRegion("control", "pass_control", "presel");
 
 // 3. Register cuts and bind cutflow manager.
-auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 cfm->addCut("ptCut", "pass_ptCut");
 cfm->bindToRegionManager(rm);  // must be before run()
 
 // 4. Bind histogram manager and book.
-auto* hm = analyzer.getPlugin<NDHistogramManager>("histograms");
+auto hm = analyzer.getPlugin<NDHistogramManager>("histograms");
 hm->bindToRegionManager(rm);  // must be before bookConfigHistograms()
 hm->bookConfigHistograms();
 

@@ -1,0 +1,2 @@
+type=registerCorrection sample=mc name=electron_uncertainty file=aux/correction.json correctionName=test_correction inputVariables=Electron_corr_arg,Electron_bin
+type=applyRelativePtUncertaintySystematic correction=electron_uncertainty systematicName=electron_scale stringArgs=A

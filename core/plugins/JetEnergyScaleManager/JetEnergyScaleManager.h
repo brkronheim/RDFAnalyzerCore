@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 #include <memory>
+#include <correction.h>
 
 class Analyzer;
 
@@ -58,8 +59,8 @@ struct JESVariationEntry {
  *
  * ## Typical CMS NanoAOD usage (full workflow)
  * @code
- *   auto* jes = analyzer->getPlugin<JetEnergyScaleManager>("jes");
- *   auto* cm  = analyzer->getPlugin<CorrectionManager>("corrections");
+ *   auto jes = analyzer->getPlugin<JetEnergyScaleManager>("jes");
+ *   auto cm  = analyzer->getPlugin<CorrectionManager>("corrections");
  *
  *   // 1. Declare jet and MET columns.
  *   jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -211,6 +212,19 @@ public:
    */
   void setRawPtColumn(const std::string &rawPtColumn);
 
+  /**
+   * @brief Declare the auxiliary columns needed for JER smearing.
+   *
+   * @param genJetPtColumn Matched generator-jet pT per reco jet (0 or -1 if unmatched).
+   * @param rhoColumn      Per-event rho column used by the JER payload.
+   * @param eventColumn    Event identifier used to derive reproducible random numbers.
+   *
+   * @throws std::invalid_argument if any argument is empty.
+   */
+  void setJERSmearingColumns(const std::string &genJetPtColumn,
+                             const std::string &rhoColumn,
+                             const std::string &eventColumn);
+
   // -------------------------------------------------------------------------
   // Applying corrections
   // -------------------------------------------------------------------------
@@ -237,10 +251,10 @@ public:
                        const std::string &outputMassColumn = "");
 
   /**
-   * @brief Apply a CMS correctionlib-based JES/JER correction via CorrectionManager.
-   *
-   * Calls @p cm.applyCorrectionVec() to evaluate the correctionlib formula
-   * and store per-jet scale factors, then schedules the pT/mass update.
+  * @brief Schedule a CMS correctionlib-based JES/JER correction via CorrectionManager.
+  *
+  * The correctionlib evaluation is deferred to execute() so later scheduled
+  * steps may depend on columns produced by earlier jet corrections.
    *
    * The intermediate SF column name follows CorrectionManager's convention:
    * @c correctionName + "_" + joined(@p stringArgs, "_").
@@ -265,7 +279,40 @@ public:
                           bool applyToMass = true,
                           const std::string &inputMassColumn = "",
                           const std::string &outputMassColumn = "",
-                          const std::vector<std::string> &inputColumns = {});
+                          const std::vector<std::string> &inputColumns = {},
+                          bool outputIsRelativeDelta = false,
+                          float relativeDeltaDirection = 1.0f);
+
+  /**
+   * @brief Schedule CMS JER smearing from correctionlib resolution and scale-factor payloads.
+   *
+   * The nominal or shifted JER scale factor is evaluated at execute time after
+   * any preceding JEC columns already exist in the dataframe.
+   *
+   * @param cm                      CorrectionManager holding the registered corrections.
+   * @param ptResolutionCorrection  Correction name for the pt-resolution payload.
+   * @param scaleFactorCorrection   Correction name for the scale-factor payload.
+   * @param inputPtColumn           Corrected jet pT to smear.
+   * @param outputPtColumn          Output smeared jet pT column.
+   * @param systematic              Scale-factor variation string, usually one of
+   *                                "nom", "up", or "down".
+   * @param applyToMass            Also smear the jet mass with the same factor.
+   * @param inputMassColumn        Explicit input mass column; auto-derived if empty.
+   * @param outputMassColumn       Explicit output mass column; auto-derived if empty.
+   * @param ptResolutionInputs     Optional override for pt-resolution numeric inputs.
+   * @param scaleFactorInputs      Optional override for scale-factor numeric inputs.
+   */
+  void applyJERSmearing(CorrectionManager &cm,
+                        const std::string &ptResolutionCorrection,
+                        const std::string &scaleFactorCorrection,
+                        const std::string &inputPtColumn,
+                        const std::string &outputPtColumn,
+                        const std::string &systematic = "nom",
+                        bool applyToMass = true,
+                        const std::string &inputMassColumn = "",
+                        const std::string &outputMassColumn = "",
+                        const std::vector<std::string> &ptResolutionInputs = {},
+                        const std::vector<std::string> &scaleFactorInputs = {});
 
   // -------------------------------------------------------------------------
   // CMS systematic source sets
@@ -590,16 +637,39 @@ private:
   std::string rawFactorColumn_m;
   std::string rawPtColumn_m;
   std::string rawMassColumn_m;
+  std::string genJetPtColumn_m;
+  std::string rhoColumn_m;
+  std::string eventColumn_m;
 
   // ---- Correction steps ---------------------------------------------------
   struct CorrectionStep {
+    bool evaluateScaleFactor = false;
+    CorrectionManager *correctionManager = nullptr;
+    std::string correctionName;
+    std::vector<std::string> correctionStringArgs;
+    std::vector<std::string> correctionInputColumns;
     std::string inputPtColumn;
     std::string sfColumn;
     std::string outputPtColumn;
     std::string inputMassColumn;
     std::string outputMassColumn;
+    float scaleFactorOffset = 0.0f;
+    float scaleFactorMultiplier = 1.0f;
   };
   std::vector<CorrectionStep> correctionSteps_m;
+
+  struct JERSmearingStep {
+    correction::Correction::Ref ptResolutionCorrection;
+    correction::Correction::Ref scaleFactorCorrection;
+    std::vector<std::string> ptResolutionInputs;
+    std::vector<std::string> scaleFactorInputs;
+    std::string systematic;
+    std::string inputPtColumn;
+    std::string outputPtColumn;
+    std::string inputMassColumn;
+    std::string outputMassColumn;
+  };
+  std::vector<JERSmearingStep> jerSmearingSteps_m;
 
   // ---- Systematic variations ----------------------------------------------
   std::vector<JESVariationEntry> variations_m;
@@ -644,6 +714,7 @@ private:
   ISystematicManager *systematicManager_m = nullptr;
   ILogger *logger_m = nullptr;
   IOutputSink *metaSink_m = nullptr;
+  bool executionPending_m = false;
 
   // ---- Internal helpers ---------------------------------------------------
 

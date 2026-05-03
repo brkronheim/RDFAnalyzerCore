@@ -38,6 +38,7 @@ struct WeightAuditEntry {
  */
 struct WeightVariation {
   std::string name;        ///< Variation label (e.g. "pileup")
+  std::string componentName; ///< Scale-factor component replaced by this variation.
   std::string upColumn;    ///< Dataframe column for the "up" shift
   std::string downColumn;  ///< Dataframe column for the "down" shift
 };
@@ -58,7 +59,7 @@ struct WeightVariation {
  *
  * Typical usage:
  * @code
- *   auto* wm = analyzer->getPlugin<WeightManager>("weights");
+ *   auto wm = analyzer->getPlugin<WeightManager>("weights");
  *
  *   // Register components.
  *   wm->addScaleFactor("pileup_sf",    "pu_weight");
@@ -131,31 +132,54 @@ public:
                           const std::string &upColumn,
                           const std::string &downColumn);
 
+  /**
+   * @brief Register a systematic weight variation that replaces a specific
+   *        nominal scale-factor component.
+   *
+   * This overload is useful when multiple nuisance labels affect the same
+   * nominal component, for example many b-tag or c-tag uncertainty sources
+   * that all replace the nominal `btag` or `ctag` factor.
+   *
+   * @param name                Variation label used by defineVariedWeight().
+   * @param componentName       Name of the nominal scale-factor component to
+   *                            replace. Must match a prior addScaleFactor()
+   *                            name.
+   * @param upColumn            Dataframe column for the "up" shift.
+   * @param downColumn          Dataframe column for the "down" shift.
+   */
+  void addWeightVariation(const std::string &name,
+                          const std::string &componentName,
+                          const std::string &upColumn,
+                          const std::string &downColumn);
+
   // -------------------------------------------------------------------------
   // Weight column definition (deferred to execute())
   // -------------------------------------------------------------------------
 
   /**
-   * @brief Schedule definition of the nominal weight column on the dataframe.
+   * @brief Define or schedule the nominal weight column on the dataframe.
    *
    * The column is the product of all registered scale factor columns and
-   * all registered scalar normalizations.  The column is actually defined
-   * on the dataframe inside execute(), which is called by the framework
-   * immediately before the computation is triggered.
+   * all registered scalar normalizations. If the manager context has already
+   * been set, the column is defined immediately so downstream consumers such
+   * as histogram booking can reference it before execute(). Otherwise the
+   * definition is deferred until execute().
    *
    * @param outputColumn Name of the column to define (default: "weight_nominal").
    */
   void defineNominalWeight(const std::string &outputColumn = "weight_nominal");
 
   /**
-   * @brief Schedule definition of a varied weight column on the dataframe.
+   * @brief Define or schedule a varied weight column on the dataframe.
    *
    * The varied column replaces the scale factor for the named variation with
    * its up or down variant while keeping all other components at nominal.
    * The scalar normalizations are still applied.
    *
    * defineVariedWeight() may be called multiple times to register several
-   * systematic columns; all are created in execute().
+   * systematic columns. If the manager context has already been set, each
+   * column is defined immediately; otherwise creation is deferred until
+   * execute().
    *
    * @param variationName Name of the variation (must match a prior
    *                      addWeightVariation() call).
@@ -301,6 +325,8 @@ private:
   IDataFrameProvider *dataManager_m = nullptr;
   ILogger *logger_m = nullptr;
   IOutputSink *metaSink_m = nullptr;
+  bool nominalMaterialized_m = false;
+  bool auditsBooked_m = false;
 
   // ---- Internal helpers ---------------------------------------------------
 
@@ -313,6 +339,10 @@ private:
    */
   void defineWeightColumn(const std::string &outputColumn,
                           const std::vector<std::string> &sfColumns);
+
+  /// Materialize any scheduled nominal/varied weight columns that have not
+  /// yet been defined. When requested, also book lazy audit actions once.
+  void materializeScheduledWeights(bool shouldBookAudit);
 
   /// Book lazy RDF actions to audit the named column.
   void bookAudit(const std::string &label, const std::string &column,

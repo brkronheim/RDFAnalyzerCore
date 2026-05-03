@@ -258,6 +258,89 @@ dataManager.Define("corrected_jet_pt",
 );
 ```
 
+### Corrected Object Collection Plugin Configuration
+
+These plugins provide config-driven full corrected object collections on top of
+the existing jet and object energy managers.
+
+**Main config options**:
+
+- `correctedJetCollectionConfig=path/to/corrected_jets.txt`
+- `correctedFatJetCollectionConfig=path/to/corrected_fatjets.txt`
+- `correctedElectronCollectionConfig=path/to/corrected_electrons.txt`
+- `correctedMuonCollectionConfig=path/to/corrected_muons.txt`
+- `correctedTauCollectionConfig=path/to/corrected_taus.txt`
+- `correctedPhotonCollectionConfig=path/to/corrected_photons.txt`
+
+**Pair-based config format**:
+
+```text
+inputCollection=goodJets
+ptColumn=Jet_pt
+etaColumn=Jet_eta
+phiColumn=Jet_phi
+massColumn=Jet_mass
+correctedPtColumn=Jet_pt_corr_nominal
+correctedMassColumn=Jet_mass_corr_nominal
+outputCollection=CorrectedJets
+variationMapColumn=CorrectedJets_variations
+workflowConfig=cfg/corrected_jets_workflow.txt
+```
+
+**Parameters**:
+
+- `inputCollection`: Existing `PhysicsObjectCollection` column to correct.
+- `ptColumn`, `etaColumn`, `phiColumn`, `massColumn`: Raw component columns used
+  to auto-build `inputCollection` when it is omitted.
+- `correctedPtColumn`: Required corrected pt branch produced by the underlying
+  correction manager.
+- `correctedMassColumn`: Optional corrected mass branch. Required for jets and
+  fatjets when mass systematics should propagate into the corrected collection.
+- `outputCollection`: Nominal corrected `PhysicsObjectCollection` column name.
+- `variationMapColumn`: Optional `PhysicsObjectVariationMap` output column.
+- `workflowConfig`: Optional multi-entry workflow config executed in order to
+  configure `CorrectionManager` and the underlying jet/object correction
+  manager.
+
+**Notes**:
+
+- If `inputCollection` is omitted, the plugin auto-builds an input collection
+  from the raw component branches.
+- `workflowConfig` rows can be gated with `sample=mc`, `sample=data`, or
+  `sample=all`.
+- `workflowConfig` values support `${...}` placeholders that resolve against
+  top-level config keys and corrected-wrapper spec values such as
+  `${correctedPtColumn}` or `${outputCollection}`.
+- The plugin registers collection-level systematics with
+  `SystematicManager`, so downstream code can work directly with
+  `outputCollection` under systematic substitution.
+- Variation collections use the same suffix convention as branch-level
+  systematics: `outputCollection_systematicNameUp/Down`.
+
+**Workflow action examples**:
+
+```text
+type=setJetColumns ptColumn=Jet_pt etaColumn=Jet_eta phiColumn=Jet_phi massColumn=Jet_mass
+type=removeExistingCorrections rawFactorColumn=Jet_rawFactor sample=mc
+type=registerCorrection sample=mc name=vhqq_jec_nominal file=${jmeFile} correctionName=${jecCompoundCorrection} inputVariables=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+type=applyCorrectionlib sample=mc correction=vhqq_jec_nominal inputPtColumn=Jet_pt_raw outputPtColumn=${correctedPtColumn} applyToMass=true inputMassColumn=Jet_mass_raw outputMassColumn=${correctedMassColumn} inputColumns=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+type=applyResolutionSmearingSystematic sample=mc correction=vhqq_electron_smear systematicName=electron_smear
+type=applyRelativePtUncertaintySystematic sample=mc correction=vhqq_electron_smear systematicName=electron_scale stringArgs=escale
+type=applyScaleResolutionSystematics jsonFile=${muonScaleResolutionFile}
+```
+
+Compact actions support implicit defaults for common fields (input/output pt
+columns, naming prefixes, and standard string args), so workflows only need to
+specify correction-specific details.
+
+Supported workflow action families:
+
+- Common: `registerCorrection`, `applyCorrectionVec`, `defineRelativeUncertaintyScaleFactors`
+- Compact high-level actions: `applyRelativePtUncertaintySystematic`, `applyResolutionSmearingSystematic`, `applyScaleResolutionSystematics`, `applyCorrectionlibVariation`, `applyIndexedCorrectionlibVariations`
+- Jet / fatjet: `setJetColumns`, `setMETColumns`, `removeExistingCorrections`, `setRawPtColumn`, `setJERSmearingColumns`, `applyCorrection`, `applyCorrectionlib`, `applyJERSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`, `applySystematicSet`
+- Electron / photon / tau: `setObjectColumns`, `setMETColumns`, `defineReproducibleGaussian`, `applyCorrection`, `applyCorrectionlib`, `applyResolutionSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`
+- Muon additions: `setRochesterInputColumns`, `setScaleResolutionEventColumns`, `applyScaleAndResolution`, `applyRochesterCorrection`, `applyRochesterSystematicSet`
+
 ### Trigger Manager Configuration
 
 **Main config option**: `triggerConfig=path/to/triggers.txt`
@@ -295,7 +378,7 @@ WeightManager = WeightManager
 
 **Registered programmatically in C++**:
 ```cpp
-auto* wm = analyzer->getPlugin<WeightManager>("weights");
+auto wm = analyzer.getPlugin<WeightManager>("weights");
 
 // Scale factors: named per-event multiplicative corrections (dataframe columns)
 wm->addScaleFactor("pileup_sf",  "pu_weight");
@@ -337,7 +420,7 @@ analyzer->Define("pass_signal",  [](float mva){ return mva > 0.8f; }, {"mva"});
 analyzer->Define("pass_control", [](float mva){ return mva < 0.4f; }, {"mva"});
 
 // 2. Declare regions (parent before child)
-auto* rm = analyzer->getPlugin<RegionManager>("regions");
+auto rm = analyzer.getPlugin<RegionManager>("regions");
 rm->declareRegion("presel",  "pass_presel");
 rm->declareRegion("signal",  "pass_signal",  "presel");  // child of presel
 rm->declareRegion("control", "pass_control", "presel");  // child of presel
@@ -376,7 +459,7 @@ Each key is a run number; the value is a list of `[lumi_min, lumi_max]` certifie
 
 **Apply the filter in C++**:
 ```cpp
-auto* gjm = analyzer->getPlugin<GoldenJsonManager>("goldenJson");
+auto gjm = analyzer.getPlugin<GoldenJsonManager>("goldenJson");
 gjm->applyGoldenJson();
 ```
 
@@ -404,7 +487,7 @@ analyzer->Define("pass_ptCut",  [](float pt){ return pt > 30.f; },          {"pt
 analyzer->Define("pass_etaCut", [](float eta){ return std::abs(eta) < 2.4f; }, {"eta"});
 
 // 2. Register cuts (also applies each filter to the dataframe)
-auto* cfm = analyzer->getPlugin<CutflowManager>("cutflow");
+auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 cfm->addCut("ptCut",  "pass_ptCut");
 cfm->addCut("etaCut", "pass_etaCut");
 

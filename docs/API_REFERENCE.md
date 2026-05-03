@@ -9,9 +9,14 @@ Complete API documentation for RDFAnalyzerCore interfaces and key classes.
 - [Data Management](#data-management)
 - [Plugin Interfaces](#plugin-interfaces)
 - [Manager Implementations](#manager-implementations)
+    - [CorrectionManager](#correctionmanager)
+    - [CorrectedObjectCollectionManagers](#correctedobjectcollectionmanagers)
   - [WeightManager](#weightmanager)
   - [RegionManager](#regionmanager)
   - [CutflowManager](#cutflowmanager)
+    - [ObjectEnergyManagerBase](#objectenergymanagerbase)
+    - [ElectronEnergyScaleManager](#electronenergyscalemanager)
+    - [MuonRochesterManager](#muonrochestermanager)
   - [JetEnergyScaleManager](#jetenergyscalemanager)
   - [PhysicsObjectCollection](#physicsobjectcollection)
   - [ProvenanceService](#provenanceservice)
@@ -26,8 +31,16 @@ The main facade class that orchestrates the analysis.
 ### Construction
 
 ```cpp
-Analyzer(const std::string& configFile,
-         std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins = {});
+Analyzer(std::string configFile,
+         std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& plugins = {});
+
+Analyzer(std::unique_ptr<IConfigurationProvider> configProvider,
+         std::unique_ptr<IDataFrameProvider> dataFrameProvider,
+         std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& plugins,
+         std::unique_ptr<ISystematicManager> systematicManager,
+         std::unique_ptr<ILogger> logger,
+         std::unique_ptr<IOutputSink> skimSink,
+         std::unique_ptr<IOutputSink> metaSink);
 ```
 
 **Parameters**:
@@ -40,8 +53,8 @@ Analyzer(const std::string& configFile,
 Analyzer analyzer("config.txt");
 
 // With custom plugins
-std::unordered_map<std::string, std::unique_ptr<IPluggableManager>> plugins;
-plugins["custom"] = std::make_unique<MyPlugin>(...);
+std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins;
+plugins["custom"] = std::make_shared<MyPlugin>(...);
 Analyzer analyzer("config.txt", std::move(plugins));
 ```
 
@@ -50,10 +63,10 @@ Analyzer analyzer("config.txt", std::move(plugins));
 #### Define
 
 ```cpp
-Analyzer* Define(const std::string& name,
+template<typename F>
+Analyzer* Define(std::string name,
                  F function,
-                 const std::vector<std::string>& columns = {},
-                 ISystematicManager* sysMgr = nullptr);
+                 const std::vector<std::string>& columns = {});
 ```
 
 Define a new DataFrame column.
@@ -62,7 +75,6 @@ Define a new DataFrame column.
 - `name`: Name of the new column
 - `function`: Lambda or function to compute the column
 - `columns`: Input column names (empty for no dependencies)
-- `sysMgr`: Optional systematic manager for variation support
 
 **Returns**: `this` for method chaining
 
@@ -84,8 +96,7 @@ analyzer.Define("corrected_pt",
         if (sys == "down") return pt * 0.9;
         return pt;
     },
-    {"pt"},
-    analyzer.getSystematicManager()
+    {"pt"}
 );
 ```
 
@@ -93,7 +104,7 @@ analyzer.Define("corrected_pt",
 
 ```cpp
 template<typename F>
-Analyzer* DefinePerSample(const std::string& name, F function);
+Analyzer* DefinePerSample(std::string name, F function);
 ```
 
 Define a column that depends on the sample being processed.
@@ -114,18 +125,16 @@ analyzer.DefinePerSample("cross_section",
 #### Filter
 
 ```cpp
-Analyzer* Filter(const std::string& name,
+template<typename F>
+Analyzer* Filter(std::string name,
                  F function,
-                 const std::vector<std::string>& columns = {});
-
-Analyzer* Filter(F function,
                  const std::vector<std::string>& columns = {});
 ```
 
 Apply an event filter.
 
 **Parameters**:
-- `name`: Optional name for the filter (appears in reports)
+- `name`: Filter label (stored internally as `pass_<name>`)
 - `function`: Lambda returning bool (true = keep event)
 - `columns`: Input column names
 
@@ -137,8 +146,8 @@ analyzer.Filter("pt_cut",
     {"jet_pt"}
 );
 
-// Unnamed filter
-analyzer.Filter(
+// Another named filter
+analyzer.Filter("jet_mult",
     [](int n_jets) { return n_jets >= 4; },
     {"n_jets"}
 );
@@ -150,41 +159,41 @@ analyzer.Filter(
 
 ```cpp
 template<typename T>
-T* getPlugin(const std::string& role);
+std::shared_ptr<T> getPlugin(const std::string& role) const;
 ```
 
 Retrieve a plugin by role name with type checking.
 
 **Template Parameter**: Interface type to cast to
 
-**Returns**: Pointer to plugin, or nullptr if not found
+**Returns**: Shared pointer to plugin, or `nullptr` if not found
 
 **Example**:
 ```cpp
-auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
 if (onnxMgr) {
     onnxMgr->applyAllModels();
 }
 
-auto* histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
+auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogramManager");
 ```
 
 ### Manager Access
 
 ```cpp
-IConfigurationProvider* getConfigProvider();
-IDataFrameProvider* getDataManager();
-ISystematicManager* getSystematicManager();
+IConfigurationProvider& getConfigurationProvider() const;
+IDataFrameProvider& getDataFrameProvider() const;
+ISystematicManager& getSystematicManager() const;
 ```
 
 Access core managers.
 
 **Example**:
 ```cpp
-auto* config = analyzer.getConfigProvider();
-std::string outputFile = config->get("saveFile");
+auto& config = analyzer.getConfigurationProvider();
+std::string outputFile = config.get("saveFile");
 
-auto df = analyzer.getDataManager()->getDataFrame();
+auto df = analyzer.getDataFrameProvider().getDataFrame();
 ```
 
 ### Execution
@@ -192,22 +201,37 @@ auto df = analyzer.getDataManager()->getDataFrame();
 #### save
 
 ```cpp
-void save();
+Analyzer* save();
 ```
 
 Trigger the event loop and save outputs.
 
 This method:
-1. Finalizes all plugins
-2. Writes the skim output to `saveFile`
-3. Writes histograms/metadata to `metaFile`
+1. Executes plugin pre-run hooks
+2. Writes the skim output
+3. Finalizes services/plugins and reports metadata
+4. Collects plugin/service provenance contributions
+
+#### run
+
+```cpp
+Analyzer* run();
+```
+
+Unified run entry point with optional skim writing.
+
+This method:
+1. Executes plugin pre-run hooks
+2. Writes skim only if `enableSkim=1|true|True`
+3. Saves ND histograms when `histogramManager` is registered
+4. Finalizes services/plugins, reports metadata, and writes provenance
 
 **Example**:
 ```cpp
 analyzer.Define(...);
 analyzer.Filter(...);
 // ... define analysis ...
-analyzer.save();  // Execute and write outputs
+analyzer.run();  // Execute unified flow
 ```
 
 ## Configuration Interfaces
@@ -222,8 +246,11 @@ Interface for accessing configuration values.
 
 ```cpp
 virtual std::string get(const std::string& key) const = 0;
-virtual bool has(const std::string& key) const = 0;
-virtual std::map<std::string, std::string> getAll() const = 0;
+virtual void set(const std::string& key, const std::string& value) = 0;
+virtual const std::unordered_map<std::string, std::string>& getConfigMap() const = 0;
+virtual std::vector<std::string> getList(const std::string& key,
+                                         const std::vector<std::string>& defaultValue = {},
+                                         const std::string& delimiter = ",") const = 0;
 ```
 
 Basic key-value retrieval.
@@ -231,15 +258,19 @@ Basic key-value retrieval.
 **Example**:
 ```cpp
 std::string saveFile = config->get("saveFile");
-bool hasThreads = config->has("threads");
-auto allConfig = config->getAll();
+config->set("threads", "8");
+auto allConfig = config->getConfigMap();
 ```
 
 #### Specialized Parsers
 
 ```cpp
-virtual std::vector<std::pair<std::string, std::string>> 
-    getPairs(const std::string& configFile) const = 0;
+virtual std::vector<std::unordered_map<std::string, std::string>>
+    parseMultiKeyConfig(const std::string& configFile,
+                        const std::vector<std::string>& requiredEntryKeys) const = 0;
+
+virtual std::unordered_map<std::string, std::string>
+    parsePairBasedConfig(const std::string& configFile) const = 0;
 ```
 
 Parse a config file with key=value pairs.
@@ -248,14 +279,15 @@ Parse a config file with key=value pairs.
 {% raw %}
 ```cpp
 // For file with: "const1=1.0\nconst2=2.0"
-auto pairs = config->getPairs("constants.txt");
+auto pairs = config->parsePairBasedConfig("constants.txt");
 // Returns: {{"const1", "1.0"}, {"const2", "2.0"}}
 ```
 {% endraw %}
 
 ```cpp
 virtual std::vector<std::map<std::string, std::string>> 
-    getMultiKeyConfigs(const std::string& configFile) const = 0;
+    parseMultiKeyConfig(const std::string& configFile,
+                        const std::vector<std::string>& requiredEntryKeys) const = 0;
 ```
 
 Parse a config file with multi-key lines (plugin configs).
@@ -264,7 +296,9 @@ Parse a config file with multi-key lines (plugin configs).
 {% raw %}
 ```cpp
 // For file with: "file=model.onnx name=score inputVariables=pt,eta"
-auto configs = config->getMultiKeyConfigs("onnx_models.txt");
+auto configs = config->parseMultiKeyConfig(
+    config->get("onnxConfig"),
+    {"file", "name", "inputVariables"});
 // Returns: [{{"file": "model.onnx", "name": "score", 
 //             "inputVariables": "pt,eta"}}]
 ```
@@ -293,7 +327,7 @@ Interface for DataFrame operations.
 #### DataFrame Access
 
 ```cpp
-virtual ROOT::RDF::RNode& getDataFrame() = 0;
+virtual ROOT::RDF::RNode getDataFrame() = 0;
 ```
 
 Get the current DataFrame node.
@@ -383,20 +417,35 @@ Constructor automatically:
 Base interface for all plugins.
 
 ```cpp
-class IPluggableManager {
+class IPluggableManager : public IContextAware {
 public:
     virtual ~IPluggableManager() = default;
-    virtual void initialize() = 0;
-    virtual void finalize() = 0;
-    virtual std::string getName() const = 0;
+    virtual std::string type() const = 0;
+    virtual void setupFromConfigFile() = 0;
+    virtual std::vector<std::string> getDependencies() const { return {}; }
+    virtual std::vector<std::string> getRequiredColumns() const { return {}; }
+    virtual std::vector<std::string> getProducedColumns() const { return {}; }
+    virtual void initialize() {}
+    virtual void execute() {}
+    virtual void finalize() {}
+    virtual void reportMetadata() {}
+    virtual std::unordered_map<std::string, std::string>
+    collectProvenanceEntries() const { return {}; }
 };
 ```
 
 #### Methods
 
-- `initialize()`: Called after construction and context setting
-- `finalize()`: Called before saving outputs
-- `getName()`: Returns plugin identifier
+- `type()`: Returns the plugin type name for metadata and diagnostics.
+- `setupFromConfigFile()`: Load plugin-specific configuration after context injection.
+- `getDependencies()`: Declare plugin role dependencies for wiring order.
+- `getRequiredColumns()`: Declare dataframe inputs used by the plugin.
+- `getProducedColumns()`: Declare dataframe outputs produced by the plugin.
+- `initialize()`: Called after all plugins are wired and configured.
+- `execute()`: Called immediately before the RDataFrame computation.
+- `finalize()`: Called after the RDataFrame computation completes.
+- `reportMetadata()`: Called after finalize() for metadata emission.
+- `collectProvenanceEntries()`: Contribute structured provenance entries.
 
 ### IContextAware
 
@@ -407,8 +456,8 @@ Interface for plugins that need access to core managers.
 ```cpp
 struct ManagerContext {
     IConfigurationProvider& config;
-    IDataFrameProvider& dataManager;
-    ISystematicManager& systematicManager;
+    IDataFrameProvider& data;
+    ISystematicManager& systematics;
     ILogger& logger;
     IOutputSink& skimSink;
     IOutputSink& metaSink;
@@ -422,7 +471,7 @@ public:
 
 **Example**:
 ```cpp
-class MyPlugin : public IPluggableManager, public IContextAware {
+class MyPlugin : public IPluggableManager {
 public:
     void setContext(const ManagerContext& ctx) override {
         context_ = &ctx;
@@ -445,7 +494,7 @@ Base class for plugins managing collections of named objects.
 
 ```cpp
 template<typename T>
-class NamedObjectManager : public IPluggableManager, public IContextAware {
+class NamedObjectManager : public IPluggableManager {
 protected:
     std::unordered_map<std::string, T> objects_;
     ManagerContext* context_;
@@ -482,71 +531,63 @@ Get all object names.
 
 ## Manager Implementations
 
-### IBDTManager
+### BDTManager
 
 **Header**: `core/plugins/BDTManager/BDTManager.h`
 
-Interface for BDT model management.
+Class for BDT model management.
 
 ```cpp
-class IBDTManager : public IPluggableManager {
+class BDTManager : public NamedObjectManager<std::shared_ptr<fastforest::FastForest>> {
 public:
-    virtual void applyModel(const std::string& modelName, 
-                           const std::string& outputSuffix = "") = 0;
-    virtual void applyAllModels(const std::string& outputSuffix = "") = 0;
-    virtual std::vector<std::string> getAllModelNames() const = 0;
-    virtual std::vector<std::string> getModelFeatures(
-        const std::string& modelName) const = 0;
-    virtual std::string getRunVar(const std::string& modelName) const = 0;
+    void applyBDT(const std::string& bdtName);
+    void applyAllBDTs();
+    std::shared_ptr<fastforest::FastForest> getBDT(const std::string& key) const;
+    const std::vector<std::string>& getBDTFeatures(const std::string& key) const;
+    const std::string& getRunVar(const std::string& bdtName) const;
 };
 ```
 
 #### Methods
 
 ```cpp
-void applyModel(const std::string& modelName, 
-                const std::string& outputSuffix = "");
+void applyBDT(const std::string& bdtName);
 ```
 
 Apply a specific BDT model to the DataFrame.
 
 **Parameters**:
-- `modelName`: Name of the configured model
-- `outputSuffix`: Optional suffix for output column name
+- `bdtName`: Name of the configured model
 
 ```cpp
-void applyAllModels(const std::string& outputSuffix = "");
+void applyAllBDTs();
 ```
 
 Apply all configured BDT models.
 
 **Example**:
 ```cpp
-auto* bdtMgr = analyzer.getPlugin<IBDTManager>("bdt");
-bdtMgr->applyModel("signal_bdt");  // Creates "signal_bdt" column
-bdtMgr->applyAllModels();          // Apply all configured models
+auto bdtMgr = analyzer.getPlugin<BDTManager>("bdt");
+bdtMgr->applyBDT("signal_bdt");   // Creates "signal_bdt" column
+bdtMgr->applyAllBDTs();             // Apply all configured models
 ```
 
-### IOnnxManager
+### OnnxManager
 
 **Header**: `core/plugins/OnnxManager/OnnxManager.h`
 
-Interface for ONNX model management.
+Class for ONNX model management.
 
 ```cpp
-class IOnnxManager : public IPluggableManager {
+class OnnxManager : public NamedObjectManager<std::shared_ptr<Ort::Session>> {
 public:
-    virtual void applyModel(const std::string& modelName, 
-                           const std::string& outputSuffix = "") = 0;
-    virtual void applyAllModels(const std::string& outputSuffix = "") = 0;
-    virtual std::vector<std::string> getAllModelNames() const = 0;
-    virtual std::vector<std::string> getModelFeatures(
-        const std::string& modelName) const = 0;
-    virtual std::string getRunVar(const std::string& modelName) const = 0;
-    virtual std::vector<std::string> getModelInputNames(
-        const std::string& modelName) const = 0;
-    virtual std::vector<std::string> getModelOutputNames(
-        const std::string& modelName) const = 0;
+    void applyModel(const std::string& modelName, const std::string& outputSuffix = "");
+    void applyAllModels(const std::string& outputSuffix = "");
+    std::shared_ptr<Ort::Session> getModel(const std::string& key) const;
+    const std::vector<std::string>& getModelFeatures(const std::string& key) const;
+    const std::string& getRunVar(const std::string& modelName) const;
+    const std::vector<std::string>& getModelInputNames(const std::string& modelName) const;
+    const std::vector<std::string>& getModelOutputNames(const std::string& modelName) const;
 };
 ```
 
@@ -554,37 +595,35 @@ public:
 
 **Example**:
 ```cpp
-auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
 
 // Apply single-output model
 onnxMgr->applyModel("classifier");  // Creates "classifier" column
 
 // Apply multi-output model
-onnxMgr->applyModel("transformer");  
+onnxMgr->applyModel("transformer");
 // Creates: transformer_output0, transformer_output1, ...
 ```
 
-### ISofieManager
+### SofieManager
 
 **Header**: `core/plugins/SofieManager/SofieManager.h`
 
-Interface for SOFIE model management.
+Class for SOFIE model management.
 
 ```cpp
-class ISofieManager : public IPluggableManager {
+class SofieManager : public NamedObjectManager<std::shared_ptr<SofieInferenceFunction>> {
 public:
-    virtual void registerModel(
+    void registerModel(
         const std::string& name,
-        std::shared_ptr<SofieInferenceFunction> func,
+        std::shared_ptr<SofieInferenceFunction> inferenceFunc,
         const std::vector<std::string>& features,
-        const std::string& runVar) = 0;
-    
-    virtual void applyModel(const std::string& modelName) = 0;
-    virtual void applyAllModels() = 0;
-    virtual std::vector<std::string> getAllModelNames() const = 0;
-    virtual std::vector<std::string> getModelFeatures(
-        const std::string& modelName) const = 0;
-    virtual std::string getRunVar(const std::string& modelName) const = 0;
+        const std::string& runVar);
+    void applyModel(const std::string& modelName);
+    void applyAllModels();
+    std::shared_ptr<SofieInferenceFunction> getModel(const std::string& key) const;
+    const std::vector<std::string>& getModelFeatures(const std::string& key) const;
+    const std::string& getRunVar(const std::string& modelName) const;
 };
 ```
 
@@ -599,7 +638,7 @@ std::vector<float> myInference(const std::vector<float>& input) {
     return session.infer(input.data());
 }
 
-auto* sofieMgr = analyzer.getPlugin<ISofieManager>("sofie");
+auto sofieMgr = analyzer.getPlugin<SofieManager>("sofie");
 auto func = std::make_shared<SofieInferenceFunction>(myInference);
 sofieMgr->registerModel("my_model", func, {"pt", "eta"}, "run_model");
 sofieMgr->applyModel("my_model");
@@ -612,76 +651,258 @@ sofieMgr->applyModel("my_model");
 Applies scale factors and other corrections loaded from correctionlib JSON
 files.
 
+> **See also**: [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
+
+The manager now supports both correctionlib `corrections` and `compound_corrections` through the same registration and application APIs.
+
 #### `applyCorrection`
 
 ```cpp
 void applyCorrection(const std::string& correctionName,
-                     const std::vector<std::string>& stringArguments);
+                     const std::vector<std::string>& stringArguments,
+                     const std::vector<std::string>& inputColumns = {},
+                     const std::string& outputBranch = "");
 ```
 
-Evaluates the named correction once per event using **scalar** input columns
-and defines a new `Float_t` column called `correctionName` in the dataframe.
+Evaluates the named correction once per event using scalar input columns and
+defines a `Float_t` output column.
 
-- `correctionName`: Key registered in the configuration (the `name` field).
+- `correctionName`: Key registered in the configuration or via `registerCorrection(...)`.
 - `stringArguments`: Constant string values for all `string`-typed inputs
   declared in the correctionlib JSON, supplied in the order they appear in the
   JSON.
+- `inputColumns`: Optional override for the numeric RDF input columns.
+- `outputBranch`: Optional explicit output column name.
+
+When `outputBranch` is empty, the derived name is:
+
+- `correctionName` if there are no string arguments
+- `correctionName_<arg1>_<arg2>_...` otherwise
 
 **Example**:
 ```cpp
-// muon_pt and muon_eta are scalar float columns
 correctionManager.applyCorrection("muon_sf", {"nominal"});
-// Adds a Float_t column "muon_sf" to the dataframe
+// Adds a Float_t column "muon_sf_nominal" to the dataframe
+
+correctionManager.applyCorrection(
+    "pileup_weight", {"up"}, {}, "pileup_weight_up");
 ```
 
 #### `applyCorrectionVec`
 
 ```cpp
 void applyCorrectionVec(const std::string& correctionName,
-                        const std::vector<std::string>& stringArguments);
+                        const std::vector<std::string>& stringArguments,
+                        const std::vector<std::string>& inputColumns = {},
+                        const std::string& outputBranch = "");
 ```
 
-Evaluates the named correction **for every object in a collection** (e.g. all
-jets in an event) and defines a new `ROOT::VecOps::RVec<Float_t>` column
-called `correctionName` in the dataframe.
+Evaluates the named correction for every object in a collection and defines a
+`ROOT::VecOps::RVec<Float_t>` output column.
 
-Use this method instead of `applyCorrection` when the input columns registered
-via `inputVariables` are **RVec** columns (one vector per event, one element
-per object).
+Use this method instead of `applyCorrection` when at least one registered
+numeric input is an `RVec`.
 
-- `correctionName`: Key registered in the configuration.
+- `correctionName`: Key registered in the configuration or via `registerCorrection(...)`.
 - `stringArguments`: Constant string values applied to every object in the
   collection (same semantics as in `applyCorrection`).
+- `inputColumns`: Optional override for the numeric RDF input columns.
+- `outputBranch`: Optional explicit output column name.
 
-The method internally creates a temporary column that packs all per-object
-feature vectors into a `RVec<RVec<double>>`, then applies the correction
-lambda element-wise.
+The method packs vector inputs per object and broadcasts scalar event inputs
+across the object loop automatically. This matches CMS payloads that mix
+per-jet features with per-event quantities like `rho`.
 
 **Example**:
 ```cpp
-// jet_pt and jet_eta are RVec<float> columns (one entry per jet per event)
 correctionManager.applyCorrectionVec("jet_sf", {"nominal"});
-// Adds an RVec<Float_t> column "jet_sf" (one scale factor per jet)
+// Adds an RVec<Float_t> column "jet_sf_nominal"
 
 // Use the per-jet scale factors downstream:
 analyzer.Define("corrected_jet_pt",
     [](const ROOT::VecOps::RVec<float>& pt,
        const ROOT::VecOps::RVec<Float_t>& sf) { return pt * sf; },
-    {"jet_pt", "jet_sf"}
+    {"jet_pt", "jet_sf_nominal"}
 );
+
+// Mixed vector + scalar inputs are also supported.
+correctionManager.applyCorrectionVec(
+    "jec_nominal", {},
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"},
+    "Jet_jec_sf_nominal");
 ```
 
-#### `getCorrection` / `getCorrectionFeatures`
+#### `registerCorrection`
+
+```cpp
+void registerCorrection(const std::string& name,
+                        const std::string& file,
+                        const std::string& correctionlibName,
+                        const std::vector<std::string>& inputVariables);
+```
+
+Registers either a regular correction or a compound correction from a JSON file.
+
+#### `getCorrection` / `getCompoundCorrection` / `getCorrectionFeatures`
 
 ```cpp
 correction::Correction::Ref getCorrection(const std::string& key) const;
+correction::CompoundCorrection::Ref getCompoundCorrection(const std::string& key) const;
 const std::vector<std::string>& getCorrectionFeatures(const std::string& key) const;
 ```
 
 Low-level accessors for the loaded correction objects and their registered
 input-variable lists. Typically not needed in analysis code.
 
-### IKinematicFitManager
+---
+
+### ObjectEnergyManagerBase
+
+**Header**: `core/plugins/ObjectEnergyManagerBase/ObjectEnergyManagerBase.h`
+
+Shared base implementation for electron, photon, tau, and muon object-energy corrections.
+
+> **See also**: [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
+
+Key capabilities:
+
+- `applyCorrection(...)` for multiplicative object-scale updates
+- `applyResolutionSmearing(...)` for additive Gaussian smearing
+- `applyCorrectionlib(...)` for direct `CorrectionManager` integration
+- `defineReproducibleGaussian(...)` for deterministic MC smearing
+- `propagateMET(...)` for Type-1 style MET updates
+- `addVariation(...)` and variation-collection outputs
+
+`execute()` now clears queued correction and variation steps after materializing them. This makes explicit pre-materialization safe when downstream `Define(...)` calls need corrected columns immediately.
+
+### CorrectedObjectCollectionManagers
+
+**Header**: `core/plugins/CorrectedObjectCollectionManagers/CorrectedObjectCollectionManagers.h`
+
+Thin wrapper plugins that expose corrected full-object collections directly to
+analysis code.
+
+Available concrete managers:
+
+- `CorrectedJetCollectionManager`
+- `CorrectedFatJetCollectionManager`
+- `CorrectedElectronCollectionManager`
+- `CorrectedMuonCollectionManager`
+- `CorrectedTauCollectionManager`
+- `CorrectedPhotonCollectionManager`
+
+Shared behavior:
+
+- optionally auto-build an input `PhysicsObjectCollection` from raw component
+    branches
+- optionally replay an ordered `workflowConfig` into `CorrectionManager` and
+    the underlying correction manager
+- schedule nominal corrected collection materialization on the underlying
+    correction manager
+- schedule varied collection outputs and optional
+    `PhysicsObjectVariationMap`
+- register the nominal collection base name with `SystematicManager`
+
+Systematic behavior:
+
+- the underlying correction manager registers a base systematic family such as
+    `jes_total`, `ees`, `stat`, or `pes`
+- explicit nominal-to-directional mappings are recorded through
+    `registerVariationColumns(...)`
+- downstream `Define(...)` calls that consume the nominal collection name can
+    automatically materialize derived `...Up` and `...Down` outputs
+
+Typical config keys:
+
+```text
+correctedJetCollectionConfig=cfg/corrected_jets.txt
+correctedElectronCollectionConfig=cfg/corrected_electrons.txt
+correctedMuonCollectionConfig=cfg/corrected_muons.txt
+```
+
+Pair-based config files may also include:
+
+```text
+workflowConfig=cfg/corrected_jets_workflow.txt
+```
+
+When present, `workflowConfig` is parsed as a multi-entry config whose rows are
+executed in order during `setupFromConfigFile()`. Each row must define
+`type=...`. Optional `sample=mc|data|all` gates a row on the current sample
+class, inferred from the top-level `type` / `primaryDataset` config. Values of
+the form `${key}` resolve against top-level config keys and corrected-wrapper
+spec values like `${correctedPtColumn}` and `${outputCollection}`.
+
+Supported workflow action families:
+
+- Common: `registerCorrection`, `applyCorrectionVec`, `defineRelativeUncertaintyScaleFactors`
+- Compact high-level actions: `applyRelativePtUncertaintySystematic`, `applyResolutionSmearingSystematic`, `applyScaleResolutionSystematics`, `applyCorrectionlibVariation`, `applyIndexedCorrectionlibVariations`
+- Jet / fatjet low-level actions: `setJetColumns`, `setMETColumns`, `removeExistingCorrections`, `setRawPtColumn`, `setJERSmearingColumns`, `applyCorrection`, `applyCorrectionlib`, `applyJERSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`, `applySystematicSet`
+- Electron / photon / tau low-level actions: `setObjectColumns`, `setMETColumns`, `defineReproducibleGaussian`, `applyCorrection`, `applyCorrectionlib`, `applyResolutionSmearing`, `addVariation`, `propagateMET`, `registerSystematicSources`
+- Muon low-level additions: `setRochesterInputColumns`, `setScaleResolutionEventColumns`, `applyScaleAndResolution`, `applyRochesterCorrection`, `applyRochesterSystematicSet`
+
+Recommended usage:
+
+- Put stable column wiring such as `ptColumn`, `etaColumn`, `phiColumn`,
+    `massColumn`, MET columns, and Rochester/JER setup columns in the corrected
+    wrapper spec file.
+- Use the compact high-level actions in `workflowConfig` for the actual
+    correction families.
+- Drop back to the low-level row-by-row actions only when a workflow does not
+    match one of the compact patterns.
+
+Compact-action defaults:
+
+- `applyRelativePtUncertaintySystematic` can omit `inputPtColumn`,
+    `uncertaintyColumn`, `scaleFactorPrefix`, and `outputPtPrefix`.
+- `applyResolutionSmearingSystematic` can omit `inputPtColumn`, nominal output,
+    `outputPtPrefix`, `sigmaColumnPrefix`, and string args.
+- `applyScaleResolutionSystematics` can omit `inputPtColumn`, nominal output,
+    and scale/smear naming fields.
+- Low-level `applyCorrectionlib` rows in corrected object workflows can omit
+    `inputPtColumn`/`outputPtColumn`; wrappers default these from the corrected
+    collection spec.
+
+See [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md) for the full configuration format
+and usage pattern.
+
+### ElectronEnergyScaleManager
+
+**Header**: `core/plugins/ElectronEnergyScaleManager/ElectronEnergyScaleManager.h`
+
+Thin concrete wrapper over `ObjectEnergyManagerBase` for electron workflows.
+
+Typical CMS usage combines:
+
+- `CorrectionManager` for `SmearAndSyst` or compound `Scale` payload evaluation
+- `defineReproducibleGaussian(...)` for MC smearing
+- `applyResolutionSmearing(...)` and `applyCorrection(...)` for nominal and shifted outputs
+
+See [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md) for a full Run 3 pattern.
+
+### MuonRochesterManager
+
+**Header**: `core/plugins/MuonRochesterManager/MuonRochesterManager.h`
+
+Concrete object-energy manager for CMS muon momentum corrections.
+
+Additional public methods beyond the shared object-energy API:
+
+```cpp
+void setRochesterInputColumns(charge, genPt, nLayers, u1, u2);
+void setScaleResolutionEventColumns(lumiColumn, eventColumn);
+void applyRochesterCorrection(cm, correctionName, inputPtColumn, outputPtColumn);
+void applyRochesterSystematicSet(cm, correctionName, setName, inputPtColumn, outputPtPrefix);
+void applyScaleAndResolution(jsonFile, isData, inputPtColumn, outputPtColumn,
+                             scaleVariation = "nom",
+                             resolutionVariation = "nom");
+```
+
+Use `applyScaleAndResolution(...)` for the newer Run 3 split-schema payloads that expose separate `a_*`, `m_*`, `k_*`, `cb_params`, and `poly_params` corrections.
+
+---
+
+### KinematicFitManager
 
 **Header**: `core/plugins/KinematicFitManager/KinematicFitManager.h`
 
@@ -729,7 +950,7 @@ runVar=do_kfit
 #### Methods
 
 ```cpp
-class IKinematicFitManager : public IPluggableManager {
+class KinematicFitManager : public IPluggableManager {
 public:
     virtual void applyAllFits() = 0;
     virtual void applyFit(const std::string& fitName) = 0;
@@ -749,7 +970,7 @@ auto kfitMgr = std::make_unique<KinematicFitManager>(
 analyzer.addPlugin("kinematicFit", std::move(kfitMgr));
 
 // Apply fits (defines output columns)
-analyzer.getPlugin<IKinematicFitManager>("kinematicFit")->applyAllFits();
+analyzer.getPlugin<KinematicFitManager>("kinematicFit")->applyAllFits();
 
 // Fitted four-momentum columns are now available:
 // kfit_lep1_pt, kfit_lep1_eta, kfit_lep1_phi, kfit_lep1_mass, etc.
@@ -766,7 +987,7 @@ For each fit with `outputPrefix={prefix}`, the following columns are defined:
 - `{prefix}chi2` - Fit χ² value
 - `{prefix}status` - Fit status (0 = success)
 
-### IGoldenJsonManager
+### GoldenJsonManager
 
 **Header**: `core/plugins/GoldenJsonManager/GoldenJsonManager.h`
 
@@ -795,7 +1016,7 @@ goldenJsonConfig=cfg/golden_json_files.txt
 #### Methods
 
 ```cpp
-class IGoldenJsonManager : public IPluggableManager {
+class GoldenJsonManager : public IPluggableManager {
 public:
     virtual void applyGoldenJson() = 0;
     virtual bool isGoodLumiSection(unsigned int run,
@@ -815,7 +1036,7 @@ auto goldenJson = std::make_unique<GoldenJsonManager>(
 analyzer.addPlugin("goldenJson", std::move(goldenJson));
 
 // Apply filter (automatic - reads run/luminosityBlock branches)
-analyzer.getPlugin<IGoldenJsonManager>("goldenJson")->applyGoldenJson();
+analyzer.getPlugin<GoldenJsonManager>("goldenJson")->applyGoldenJson();
 ```
 
 The plugin automatically filters events where `(run, luminosityBlock)` is not certified. For MC samples (when config has `type != "data"`), the plugin does nothing.
@@ -826,14 +1047,14 @@ The plugin automatically filters events where `(run, luminosityBlock)` is not ce
 - Embedded JSON parser (no external dependencies)
 - Fast lookup via hash-based data structure
 
-### ITriggerManager
+### TriggerManager
 
 **Header**: `core/plugins/TriggerManager/TriggerManager.h`
 
 Interface for trigger logic.
 
 ```cpp
-class ITriggerManager : public IPluggableManager {
+class TriggerManager : public IPluggableManager {
 public:
     virtual void defineTriggerFlags() = 0;
     virtual std::vector<std::string> getTriggerGroupNames() const = 0;
@@ -895,7 +1116,7 @@ struct selectionInfo {
 ```cpp
 #include <plots.h>
 
-auto* histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
+auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogramManager");
 
 std::vector<histInfo> hists = {
     histInfo("h_pt", "jet_pt", "p_{T}", "weight", 50, 0, 500),
@@ -1304,6 +1525,8 @@ Plugin for applying CMS Jet Energy Scale (JES) and Jet Energy Resolution
 (JER) corrections to jet collections, with support for named systematic source
 sets, Type-1 MET propagation, and clean `PhysicsObjectCollection` integration.
 
+> **See also**: [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md) and [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
+
 #### Configuration Methods
 
 ```cpp
@@ -1314,11 +1537,14 @@ void setMETColumns(metPtCol, metPhiCol);
 // Stripping existing corrections
 void removeExistingCorrections(rawFactorColumn);
 void setRawPtColumn(rawPtColumn);                  // alternative
+void setJERSmearingColumns(genJetPtColumn, rhoColumn, eventColumn);
 
 // Applying scale-factor corrections
 void applyCorrection(inputPt, sfCol, outputPt,
                      applyToMass=true, inputMass="", outputMass="");
 void applyCorrectionlib(cm, correctionName, stringArgs, inputPt, outputPt, ...);
+void applyJERSmearing(cm, ptResolutionCorrection, scaleFactorCorrection,
+                      inputPt, outputPt, systematic="nom", ...);
 
 // CMS systematic source sets
 void registerSystematicSources(setName, sources);
@@ -1353,8 +1579,8 @@ const std::vector<std::string>& getSystematicSources(setName) const;
 #### CMS NanoAOD Usage
 
 ```cpp
-auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto cm = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Column declarations
 jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -1363,21 +1589,35 @@ jes->setMETColumns("MET_pt", "MET_phi");
 // 2. Strip NanoAOD JEC → raw pT
 jes->removeExistingCorrections("Jet_rawFactor");
 
-// 3. Apply new L1L2L3 JEC
-jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
-                        "Jet_pt_raw", "Jet_pt_jec");
+// 3. Evaluate the nominal compound JEC via CorrectionManager
+cm->registerCorrection(
+    "jec_nominal", "jet_jerc.json.gz",
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
 
-// 4. Register reduced JES set (Total only) and apply
+// 4. Apply the resulting scale factors to jet pt and mass
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec",
+                     true, "Jet_mass_raw", "Jet_mass_jec");
+
+// 5. Register reduced JES set (Total only) and apply
 jes->registerSystematicSources("reduced", {"Total"});
 jes->applySystematicSet(*cm, "jes_unc", "reduced",
                         "Jet_pt_jec", "Jet_pt_jes");
 
-// 5. Propagate JEC to MET
+// 6. Configure and apply JER smearing
+jes->setJERSmearingColumns("Jet_genMatchedPt",
+                           "Rho_fixedGridRhoFastjetAll",
+                           "event");
+jes->applyJERSmearing(*cm, "jer_pt_resolution", "jer_scale_factor",
+                      "Jet_pt_jec", "Jet_pt_jer_nominal");
+
+// 7. Propagate JEC to MET
 jes->propagateMET("MET_pt", "MET_phi",
                   "Jet_pt_raw", "Jet_pt_jec",
                   "MET_pt_jec", "MET_phi_jec");
 
-// 6. PhysicsObjectCollection integration
+// 8. PhysicsObjectCollection integration
 jes->setInputJetCollection("goodJets");
 jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
 jes->defineVariationCollections("goodJets_jec", "goodJets",
@@ -1387,6 +1627,17 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
 //   "goodJets_TotalUp"     : PhysicsObjectCollection (JES up)
 //   "goodJets_TotalDown"   : PhysicsObjectCollection (JES down)
 //   "goodJets_variations"  : PhysicsObjectVariationMap
+
+analyzer.Define("selectedJetPts",
+    [](const PhysicsObjectCollection& jets) {
+        ROOT::VecOps::RVec<float> pts;
+        for (std::size_t i = 0; i < jets.size(); ++i) {
+            pts.push_back(static_cast<float>(jets.at(i).Pt()));
+        }
+        return pts;
+    },
+    {"goodJets"}, analyzer.getSystematicManager());
+// Also materializes: selectedJetPts_TotalUp, selectedJetPts_TotalDown
 ```
 
 See [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md) for the complete
@@ -1711,25 +1962,41 @@ for key in d.GetListOfKeys():
 
 **Header**: `core/interface/api/ISystematicManager.h`
 
-Interface for tracking systematic variations.
+Interface for tracking systematic families, affected variables, and explicit
+nominal-to-variation column mappings.
 
 ```cpp
 class ISystematicManager {
 public:
-    virtual void registerSystematic(const std::string& name) = 0;
-    virtual std::vector<std::string> getSystematicNames() const = 0;
-    virtual bool hasSystematic(const std::string& name) const = 0;
+    virtual void registerSystematic(const std::string& syst,
+                                    const std::set<std::string>& affectedVariables) = 0;
+    virtual void registerVariationColumns(const std::string& variable,
+                                          const std::string& systematicName,
+                                          const std::string& upColumn,
+                                          const std::string& downColumn) = 0;
+    virtual const std::set<std::string>& getSystematics() const = 0;
+    virtual const std::set<std::string>& getVariablesForSystematic(const std::string& syst) const = 0;
+    virtual const std::set<std::string>& getSystematicsForVariable(const std::string& var) const = 0;
+    virtual std::string getVariationColumnName(const std::string& variable,
+                                               const std::string& syst) const = 0;
 };
 ```
 
 **Example**:
 ```cpp
-auto* sysMgr = analyzer.getSystematicManager();
-sysMgr->registerSystematic("jes_up");
-sysMgr->registerSystematic("jes_down");
+auto& sysMgr = analyzer.getSystematicManager();
+sysMgr.registerSystematic("jes_total", {"Jet_pt_corr_nominal"});
+sysMgr.registerVariationColumns(
+    "Jet_pt_corr_nominal",
+    "jes_total",
+    "Jet_pt_jes_total_up",
+    "Jet_pt_jes_total_down");
 
-auto systematics = sysMgr->getSystematicNames();
-// Returns: ["nominal", "jes_up", "jes_down"]
+const auto& systematics = sysMgr.getSystematics();
+// Contains: "jes_total"
+
+sysMgr.getVariationColumnName("Jet_pt_corr_nominal", "jes_totalUp");
+// Returns: "Jet_pt_jes_total_up"
 ```
 
 ### IOutputSink
@@ -1741,12 +2008,14 @@ Interface for output destinations.
 ```cpp
 class IOutputSink {
 public:
-    virtual void write(const std::string& treeName,
-                      const ROOT::RDF::RNode& df,
-                      const std::vector<std::string>& columns) = 0;
-    virtual void writeObject(TObject* obj, const std::string& name) = 0;
-    virtual TFile* getFile() = 0;
-    virtual void close() = 0;
+    virtual void writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec) = 0;
+    virtual void writeDataFrame(ROOT::RDF::RNode& df,
+                                const IConfigurationProvider& configProvider,
+                                const IDataFrameProvider* dataFrameProvider,
+                                const ISystematicManager* systematicManager,
+                                OutputChannel channel) = 0;
+    virtual std::string resolveOutputFile(const IConfigurationProvider& configProvider,
+                                          OutputChannel channel) = 0;
 };
 ```
 
