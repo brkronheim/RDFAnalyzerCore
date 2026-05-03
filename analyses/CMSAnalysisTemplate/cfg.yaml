@@ -1,0 +1,56 @@
+# =============================================================================
+# cfg.yaml — Main configuration for the CMS analysis template (data run)
+#
+# This config runs the template on a CMS Open Data NanoAOD file.  Edit the
+# fileList, saveFile, and plugin config paths to point at your actual data.
+#
+# ── Build & run ───────────────────────────────────────────────────────────────
+#   cmake -S . -B build && cmake --build build -j$(nproc)
+#   cd build/analyses/CMSAnalysisTemplate
+#   ./cms_analysis_template ../../../analyses/CMSAnalysisTemplate/cfg.yaml
+# =============================================================================
+
+# ---- Input files (NanoAOD) --------------------------------------------------
+# Comma-separated list of ROOT files.  Supports XRootD (root://…) and local
+# paths (/path/to/file.root).  The example below uses CMS Open Data.
+fileList: >-
+  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/SingleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/0013/6CF29E5D-B85C-8A47-AB56-4E6B47E88B98.root
+
+# CMS NanoAOD stores events in the "Events" TTree
+treeList: Events
+
+# ---- Output -----------------------------------------------------------------
+saveFile: output/cms_template_output.root
+saveDirectory: output/
+saveTree: Events
+saveConfig: output.yaml
+
+# Set to "1" or "true" to write the skimmed tree; "0" or "false" for histograms only
+enableSkim: "0"
+
+# ---- Sample type (used by TriggerManager to select the correct trigger group)
+# "0" = data; "1" = MC signal; "2" = MC background (see triggers.yaml)
+type: "0"
+
+# ---- Performance ------------------------------------------------------------
+# -1 = use all available hardware threads.
+# Set "0" for single-threaded debugging.
+threads: "-1"
+batch: "False"
+
+# ---- File filters -----------------------------------------------------------
+antiglobs: output.root, hists.root
+
+# ---- Plugin configuration files (YAML format) ------------------------------
+
+# Trigger paths (TriggerManager)
+triggerConfig: triggers.yaml
+
+# Config-driven histogram definitions (NDHistogramManager)
+histogramConfig: histograms.yaml
+
+# Scalar float constants loaded as constant columns
+floatConfig: floats.yaml
+
+# Scalar integer constants loaded as constant columns
+intConfig: ints.yaml

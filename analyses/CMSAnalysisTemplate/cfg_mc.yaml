@@ -1,0 +1,45 @@
+# =============================================================================
+# cfg_mc.yaml — Main configuration for the CMS analysis template (MC run)
+#
+# This variant is identical to cfg.yaml except that:
+#   - type: "1"  (MC signal — selects the MC trigger group in triggers.yaml)
+#   - The fileList points at a MC NanoAOD sample.
+#
+# In a real analysis you would also uncomment the WeightManager lines in
+# analysis.cc to apply pileup weights, muon ID/ISO scale factors, etc.
+# =============================================================================
+
+# ---- Input files (NanoAOD MC) -----------------------------------------------
+# Replace with your MC file list.
+fileList: >-
+  root://eospublic.cern.ch//eos/opendata/cms/mc/RunIISummer20UL16NanoAODv9/WJetsToLNu_TuneCP5_13TeV-amcatnloFXFX-pythia8/NANOAODSIM/106X_mcRun2_asymptotic_v17-v2/2500000/0194C79B-0E18-DD4E-8E3E-18CBFA84B50B.root
+
+# CMS NanoAOD stores events in the "Events" TTree
+treeList: Events
+
+# ---- Output -----------------------------------------------------------------
+saveFile: output/cms_template_mc_output.root
+saveDirectory: output/
+saveTree: Events
+saveConfig: output_mc.yaml
+
+# Set to "1" or "true" to write the skimmed tree
+enableSkim: "0"
+
+# ---- Sample type ------------------------------------------------------------
+# "1" = MC (selects MC trigger group — typically no trigger requirement for MC,
+#       or a trigger efficiency weight applied instead)
+type: "1"
+
+# ---- Performance ------------------------------------------------------------
+threads: "-1"
+batch: "False"
+
+# ---- File filters -----------------------------------------------------------
+antiglobs: output.root, hists.root
+
+# ---- Plugin configuration files --------------------------------------------
+triggerConfig: triggers.yaml
+histogramConfig: histograms.yaml
+floatConfig: floats.yaml
+intConfig: ints.yaml
