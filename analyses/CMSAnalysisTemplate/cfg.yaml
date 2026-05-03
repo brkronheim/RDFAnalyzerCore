@@ -54,3 +54,11 @@ floatConfig: floats.yaml
 
 # Scalar integer constants loaded as constant columns
 intConfig: ints.yaml
+
+# ---- Object collection definitions (used by CMSAnalysisBase Python wrapper) --
+# Specifies loose/tight muon, electron, and jet collections with cuts and
+# ΔR overlap-removal.  The Python wrapper (analysis_wrapper.py) reads this
+# file and defines all collection columns automatically via ROOT JIT.
+# The C++ analysis (analysis.cc) uses these specs as documentation / reference
+# for the collection-builder functions defined there.
+collectionsConfig: collections.yaml

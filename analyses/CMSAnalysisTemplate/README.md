@@ -2,23 +2,28 @@
 
 A ready-to-use starting point for a realistic CMS NanoAOD analysis built with
 RDFAnalyzerCore.  The template covers the full workflow from raw NanoAOD to
-histograms and cutflow tables, demonstrating every major framework feature in
-a single, well-commented C++ source file plus a Python wrapper.
+histograms and cutflow tables, demonstrating every major framework feature.
+It is designed to be **extended, not rewritten**: users add their analysis logic
+on top of the provided base without touching the framework boilerplate.
+
+Both a **C++ core** (``analysis.cc``) and a **Python base class**
+(``analysis_wrapper.py``) are provided.  They read the same ``cfg.yaml`` and
+``collections.yaml``, so you can use either interface or mix both.
 
 ---
 
 ## What this template demonstrates
 
-| Feature | Where |
-|---------|-------|
-| **Multiple object collections at different working points** (loose + tight muons, loose + tight electrons, jets) | `analysis.cc` — `buildLooseMuons`, `buildTightMuons`, `buildLooseElectrons`, `buildTightElectrons`, `buildPreJets` |
-| **ΔR overlap removal** between jets and selected leptons | `analysis.cc` — `PhysicsObjectCollection::removeOverlap` |
-| **Multiple analysis regions** with a shared preselection node | `analysis.cc` — `RegionManager::declareRegion` |
-| **Sequential + N-1 cutflow tables** | `analysis.cc` — `CutflowManager::addCut` |
-| **Config-driven trigger selection** | `triggers.yaml` + `TriggerManager::applyAllTriggers` |
-| **Event weights** (scale factors + normalisations) | `analysis.cc` — `WeightManager` |
-| **Config-driven histograms** (no histogram code in analysis.cc) | `histograms.yaml` + `NDHistogramManager` |
-| **Python wrapper** for running, config validation, and result inspection | `analysis_wrapper.py` |
+| Feature | C++ (`analysis.cc`) | Python (`analysis_wrapper.py`) |
+|---------|---------------------|-------------------------------|
+| Multiple object collections at different WPs | `buildLooseMuons`, `buildTightMuons`, … | `CMSAnalysisBase` reads `collections.yaml` |
+| ΔR overlap removal | `PhysicsObjectCollection::removeOverlap` | `_rdf_drOverlapMask` Cling helper |
+| Multiple analysis regions | `RegionManager::declareRegion` | User adds on `analyzer` |
+| Sequential + N-1 cutflow | `CutflowManager::addCut` | User adds on `analyzer` |
+| Config-driven triggers | `TriggerManager::applyAllTriggers` | `CMSAnalysisBase._apply_triggers` |
+| Event weights / SFs | `WeightManager` | User adds on `analyzer` |
+| Config-driven histograms | `NDHistogramManager` | `NDHistogramManager` plugin |
+| **Extend without rewriting** | Add functions + calls | Subclass `CMSAnalysisBase` |
 
 ---
 
@@ -26,11 +31,12 @@ a single, well-commented C++ source file plus a Python wrapper.
 
 ```
 CMSAnalysisTemplate/
-├── analysis.cc              ← C++ analysis core
-├── analysis_wrapper.py      ← Python API + CLI wrapper
+├── analysis.cc              ← C++ core (compile & run directly)
+├── analysis_wrapper.py      ← Python base class (CMSAnalysisBase)
 ├── CMakeLists.txt           ← CMake build target
 ├── cfg.yaml                 ← Main config (data run)
 ├── cfg_mc.yaml              ← Main config (MC run variant)
+├── collections.yaml         ← Object collection definitions (Python + docs)
 ├── triggers.yaml            ← Trigger paths (TriggerManager)
 ├── histograms.yaml          ← Histogram definitions (NDHistogramManager)
 ├── floats.yaml              ← Float constants
@@ -40,57 +46,122 @@ CMSAnalysisTemplate/
 
 ---
 
-## Build
+## Python usage (no compilation required for extensions)
+
+The Python base class uses the compiled ``rdfanalyzer`` module to drive the
+analysis.  It reads ``cfg.yaml`` and ``collections.yaml``, sets up the
+framework boilerplate, and exposes the underlying analyzer object for extension.
+
+### Prerequisites
 
 ```bash
-# Source ROOT and compiler environment
-source env.sh
-
-# Build all targets (including the template)
+source env.sh                                # set up ROOT + compiler
 cmake -S . -B build && cmake --build build -j$(nproc)
+export PYTHONPATH=$PWD/build/python:$PYTHONPATH
+pip install pyyaml                           # for YAML config parsing
+```
 
-# Build only this analysis target
-cmake --build build --target cms_analysis_template -j$(nproc)
+### Option 1 — Extend the analyzer directly (simplest)
+
+```python
+from analyses.CMSAnalysisTemplate.analysis_wrapper import CMSAnalysisBase
+import sys
+
+base = CMSAnalysisBase("analyses/CMSAnalysisTemplate/cfg.yaml")
+
+# base.analyzer is a fully-initialized rdfanalyzer.Analyzer.
+# All collections from collections.yaml are already defined as:
+#   {name}_mask, {name}_pt, {name}_eta, {name}_phi, {name}_mass, {name}_n
+an = base.analyzer
+
+# Add your analysis logic on top:
+an.Define("MT",
+    "sqrt(2*tightMuons_pt[0]*MET_pt*(1-cos(tightMuons_phi[0]-MET_phi)))")
+an.Filter("MT_cut", "MT > 40.f")
+an.Define("nJets", "(int)goodJets_n")
+
+base.run()   # saves output defined in cfg.yaml
+```
+
+### Option 2 — Subclass for reusable analyses
+
+```python
+from analyses.CMSAnalysisTemplate.analysis_wrapper import CMSAnalysisBase
+
+class WmuNuAnalysis(CMSAnalysisBase):
+    """W → μν analysis built on the CMS template."""
+
+    def build_analysis(self):
+        an = self.analyzer  # collections already built by base class
+
+        # Derived quantities
+        an.Define("MT",
+            "sqrt(2*tightMuons_pt[0]*MET_pt*(1-cos(tightMuons_phi[0]-MET_phi)))")
+        an.Define("nJets", "(int)goodJets_n")
+
+        # Event selection
+        an.Filter("one_tight_muon", "(int)tightMuons_n == 1")
+        an.Filter("no_loose_muon",  "(int)looseMuons_n == 1")   # no extra loose muon
+        an.Filter("no_electron",    "(int)looseElectrons_n == 0")
+        an.Filter("MET_cut",        "MET_pt > 30.f")
+        an.Filter("MT_cut",         "MT > 40.f")
+
+        # Add extra plugin for cutflow (optional)
+        an.AddPlugin("cutflow", "CutflowManager")
+
+
+if __name__ == "__main__":
+    WmuNuAnalysis(sys.argv[1]).run()
+```
+
+### Option 3 — Command line
+
+```bash
+# Run the base template (collections + triggers; no additional cuts)
+python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
+    --config analyses/CMSAnalysisTemplate/cfg.yaml
+
+# Validate config only
+python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
+    --config analyses/CMSAnalysisTemplate/cfg.yaml --validate-only
+
+# Run and inspect results
+python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
+    --config analyses/CMSAnalysisTemplate/cfg.yaml \
+    --results output/cms_template_output.root
 ```
 
 ---
 
-## Run
+## C++ usage
 
-### C++ binary directly
+### Build
+
+```bash
+source env.sh
+cmake -S . -B build && cmake --build build -j$(nproc)
+# or build only this target:
+cmake --build build --target cms_analysis_template -j$(nproc)
+```
+
+### Run
 
 ```bash
 cd build/analyses/CMSAnalysisTemplate
 ./cms_analysis_template ../../../analyses/CMSAnalysisTemplate/cfg.yaml
 ```
 
-### Via the Python wrapper
-
-```bash
-# Validate config, build, and run
-python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
-    --config analyses/CMSAnalysisTemplate/cfg.yaml \
-    --build
-
-# Validate config only (no run)
-python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
-    --config analyses/CMSAnalysisTemplate/cfg.yaml \
-    --validate-only
-
-# Run quietly and inspect results
-python analyses/CMSAnalysisTemplate/analysis_wrapper.py \
-    --config analyses/CMSAnalysisTemplate/cfg.yaml \
-    --quiet \
-    --results output/cms_template_output.root
-```
-
 ### Single-threaded debugging
 
-Edit `cfg.yaml`: set `threads: "0"`, then rerun.
+Set `threads: "0"` in `cfg.yaml`, then rerun.
 
 ---
 
 ## Object collections
+
+Collections are specified in `collections.yaml` and built automatically by
+`CMSAnalysisBase`.  The C++ `analysis.cc` implements them as standalone
+functions that produce `PhysicsObjectCollection` objects.
 
 ### Muon working points
 
@@ -98,11 +169,6 @@ Edit `cfg.yaml`: set `threads: "0"`, then rerun.
 |------------|----|-----------|----|-----|
 | `looseMuons` | `Muon_looseId` | < 0.25 | > 10 GeV | < 2.4 |
 | `tightMuons` | `Muon_tightId` | < 0.15 | > 26 GeV | < 2.4 |
-
-Two collections of the same object type exist simultaneously in the
-dataframe.  `tightMuons` is a strict subset of `looseMuons`.
-The second-muon veto uses the loose collection to count muons not selected
-by the tight working point.
 
 ### Electron working points
 
@@ -113,130 +179,82 @@ by the tight working point.
 
 The barrel-endcap gap (1.444 < |η_SC| < 1.566) is vetoed for both WPs.
 
-### Jets
+### Jets (`goodJets`)
 
-| Collection | ID | pT | |η| | Processing |
-|------------|----|----|-----|------------|
-| `preJets`   | tight ≥ 2 | > 30 GeV | < 4.7 | none |
-| `goodJets`  | same | same | same | ΔR(jet,μ) > 0.4 |
-| `cleanJets` | same | same | same | + ΔR(jet,e) > 0.4 |
+Tight jetID (≥ 2), pT > 30 GeV, |η| < 4.7, with ΔR > 0.4 overlap removal
+against both `tightMuons` and `tightElectrons`.
+
+### Column naming convention (Python)
+
+For each collection `{name}`, the Python base class defines:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `{name}_mask`  | `RVec<bool>`  | per-object selection (after OR removal) |
+| `{name}_pt`    | `RVec<float>` | pT of selected objects |
+| `{name}_eta`   | `RVec<float>` | η |
+| `{name}_phi`   | `RVec<float>` | φ |
+| `{name}_mass`  | `RVec<float>` | mass |
+| `{name}_n`     | `int`         | multiplicity |
 
 ---
 
-## Analysis regions
+## Analysis regions (C++)
 
-Regions are declared on the main dataframe after the shared preselection
-(trigger + 1 tight muon + no extra muon + no electron + MET > 30 + m_T > 40)
-has been applied:
+Regions are declared on the main dataframe after the shared preselection:
 
 | Region | Filter column | Condition |
 |--------|---------------|-----------|
 | `signal` | `pass_signal` | nJets ≥ 1 **and** m_T > 60 GeV |
-| `wCR`    | `pass_wCR`    | nJets == 0 (W+jets enriched) |
-| `topCR`  | `pass_topCR`  | nJets ≥ 2 (top-quark enriched) |
-
-All regions share the same preselection node; they are not exclusive by
-construction — you can make them exclusive by adjusting the predicates.
-
-To retrieve per-region dataframes for booking region-specific histograms:
-
-```cpp
-auto signalDF = regionMgr->getRegionDataFrame("signal");
-auto wCRDF    = regionMgr->getRegionDataFrame("wCR");
-```
+| `wCR`    | `pass_wCR`    | nJets == 0 |
+| `topCR`  | `pass_topCR`  | nJets ≥ 2 |
 
 ---
 
 ## Adding CMS corrections
 
-The template is written to run without correction files so that it compiles
-and executes out of the box.  To add CMS corrections:
+The template runs without correction files by default.  To add corrections:
 
 ### Muon Rochester corrections
 
 ```cpp
 // In analysis.cc, after registering plugins:
-auto cm  = CorrectionManager::create(an);
 auto roc = MuonRochesterManager::create(an);
-
-cm->registerCorrection("rochester",
-    "RoccoR2016aUL.json.gz",
-    "RoccoR2016aUL",
-    {"Muon_charge", "Muon_eta", "Muon_phi",
-     "Muon_pt", "Muon_genPt", "Muon_nTrackerLayers",
-     "Muon_u1", "Muon_u2"});
-
-roc->setObjectColumns("Muon_pt", "Muon_eta", "Muon_phi", "Muon_mass");
-roc->setRochesterInputColumns(
-    "Muon_charge_f",      // Int_t → Float_t cast
-    "Muon_genPt",         // 0.0 for data
-    "Muon_nTrackerLayers_f",
-    "Muon_u1",            // reproducible Gaussian random
-    "Muon_u2");
 roc->applyRochesterCorrection(*cm, "rochester", "Muon_pt", "Muon_pt_roc");
 ```
 
-Then replace `"Muon_pt"` with `"Muon_pt_roc"` in the collection builders.
+Then replace `"Muon_pt"` with `"Muon_pt_roc"` in the collection builders,
+**and** update `collections.yaml` to use `pt: Muon_pt_roc` for Python users.
 
 ### Electron energy-scale corrections
 
 ```cpp
 auto esc = ElectronEnergyScaleManager::create(an);
-esc->setObjectColumns("Electron_pt", "Electron_eta", "Electron_phi", "Electron_mass");
-esc->applyCorrectionlib(*cm, "electron_scale",
-    {"scale"}, {}, "Electron_pt", "Electron_pt_esc");
+esc->applyCorrectionlib(*cm, "electron_scale", {"scale"}, {}, "Electron_pt", "Electron_pt_esc");
 ```
 
-Then replace `"Electron_pt"` with `"Electron_pt_esc"` in the collection builders.
+Update `collections.yaml`: `pt: Electron_pt_esc`.
 
 ### Jet energy corrections (JEC/JER)
 
-```cpp
-auto jes = JetEnergyScaleManager::create(an);
-jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
-jes->setMETColumns("MET_pt", "MET_phi");
-jes->removeExistingCorrections("Jet_rawFactor");
-
-cm->registerCorrection("jec_l1l2l3",
-    "jet_jerc.json.gz",
-    "Summer19UL16_V7_MC_L1L2L3Res_AK4PFPuppi",
-    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
-jes->applyCorrectionlib(*cm, "jec_l1l2l3", {}, {}, "Jet_pt_raw", "Jet_pt_jec");
-```
-
-See `docs/CMS_CORRECTIONS.md` and `docs/JET_ENERGY_CORRECTIONS.md` for the
-full API reference.
+See `docs/CMS_CORRECTIONS.md` and `docs/JET_ENERGY_CORRECTIONS.md`.
 
 ---
 
 ## Adding MC event weights
 
-Uncomment and adapt the WeightManager block in `analysis.cc`:
-
 ```cpp
-// Per-event scale-factor columns must be defined before this call.
-weightMgr->addScaleFactor("pileup",    "puWeight");
-weightMgr->addScaleFactor("muon_id",   "muonIdSF");
-weightMgr->addScaleFactor("muon_iso",  "muonIsoSF");
+weightMgr->addScaleFactor("pileup",   "puWeight");
+weightMgr->addScaleFactor("muon_id",  "muonIdSF");
 weightMgr->addNormalization("xsec_lumi", xsec * lumi / sumWeights);
 weightMgr->defineNominalWeight("weight_nominal");
-
-// Systematic variations (swap one SF component at a time)
-weightMgr->addWeightVariation("pileup", "puWeight",
-                               "puWeightUp", "puWeightDown");
-weightMgr->defineVariedWeight("pileup", "up",   "weight_pileup_up");
-weightMgr->defineVariedWeight("pileup", "down", "weight_pileup_down");
 ```
-
-Then use `weight_pileup_up` / `weight_pileup_down` in `histograms.yaml` for
-systematic histogram variants.
 
 ---
 
 ## Adding histograms
 
-Edit `histograms.yaml` only — no C++ changes are needed as long as the column
-already exists in the dataframe:
+Edit `histograms.yaml` only — no C++ changes needed:
 
 ```yaml
 - name: MyNewVariable
@@ -252,23 +270,13 @@ already exists in the dataframe:
 
 ## Adding a new analysis region
 
-1. Define a boolean column in `analysis.cc`:
-
+1. Define a boolean column:
    ```cpp
    an.Define("pass_myRegion", myRegionPredicate, {"someColumn"});
    ```
-
-2. Declare the region after all `pass_*` columns are defined:
-
+2. Declare the region:
    ```cpp
    regionMgr->declareRegion("myRegion", "pass_myRegion");
-   ```
-
-3. Book region-specific histograms using the per-region dataframe:
-
-   ```cpp
-   ROOT::RDF::RNode regionDF = regionMgr->getRegionDataFrame("myRegion");
-   // book histograms on regionDF ...
    ```
 
 ---

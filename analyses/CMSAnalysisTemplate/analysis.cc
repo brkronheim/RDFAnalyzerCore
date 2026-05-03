@@ -43,15 +43,31 @@
  *     isTopControlRegion) with your analysis regions.
  *  3. Add or remove Define/Filter calls for your derived quantities.
  *  4. Update histograms.yaml to book the histograms you need.
- *  5. Update corrections.yaml / triggers.yaml / floats.yaml as required.
+ *  5. Update collections.yaml to match your cut changes (Python users).
+ *  6. Update corrections.yaml / triggers.yaml / floats.yaml as required.
  *
- * ## Build and run
+ * ## Python alternative
+ *
+ * If you prefer to drive the analysis from Python, use ``analysis_wrapper.py``
+ * instead of this file.  The Python wrapper reads the same ``cfg.yaml`` and
+ * ``collections.yaml`` and exposes the underlying ``rdfanalyzer.Analyzer``
+ * object so you can add ``Define`` / ``Filter`` calls directly::
+ *
+ *   from analysis_wrapper import CMSAnalysisBase
+ *   base = CMSAnalysisBase("cfg.yaml")   # plugins + collections set up
+ *   an   = base.analyzer                 # extend with your analysis logic
+ *   an.Define("MT", "sqrt(2*tightMuons_pt[0]*MET_pt*(1-cos(tightMuons_phi[0]-MET_phi)))")
+ *   an.Filter("MT_cut", "MT > 40.f")
+ *   base.run()
+ *
+ * ## Build and run (C++)
  *
  *   cmake -S . -B build && cmake --build build -j$(nproc)
  *   cd build/analyses/CMSAnalysisTemplate
  *   ./cms_analysis_template ../../../analyses/CMSAnalysisTemplate/cfg.yaml
  *
  * @see README.md for full documentation.
+ * @see analysis_wrapper.py for the Python interface.
  * @see docs/ANALYSIS_GUIDE.md for the framework API guide.
  * @see docs/CMS_CORRECTIONS.md for the corrections stack documentation.
  */

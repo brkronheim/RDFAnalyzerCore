@@ -43,3 +43,4 @@ triggerConfig: triggers.yaml
 histogramConfig: histograms.yaml
 floatConfig: floats.yaml
 intConfig: ints.yaml
+collectionsConfig: collections.yaml
