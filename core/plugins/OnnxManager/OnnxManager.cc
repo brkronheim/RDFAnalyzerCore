@@ -165,6 +165,43 @@ int64_t elementCount(const std::vector<int64_t> &shape,
                          });
 }
 
+std::vector<int64_t> resolveOutputShape(std::vector<int64_t> shape,
+                                        const std::string &modelName,
+                                        size_t outputIndex) {
+  if (shape.empty()) {
+    throw std::runtime_error("OnnxManager: ONNX output shape is empty for model '" +
+                             modelName + "' output index " +
+                             std::to_string(outputIndex));
+  }
+
+  for (size_t d = 0; d < shape.size(); ++d) {
+    if (shape[d] <= 0) {
+      shape[d] = 1;
+    }
+  }
+  return shape;
+}
+
+int64_t outputElementCount(const std::vector<int64_t> &shape,
+                           const std::string &modelName,
+                           size_t outputIndex) {
+  if (shape.empty()) {
+    throw std::runtime_error("OnnxManager: Cannot compute element count for empty shape in model '" +
+                             modelName + "' output index " + std::to_string(outputIndex));
+  }
+
+  return std::accumulate(shape.begin(), shape.end(), int64_t{1},
+                         [&](int64_t acc, int64_t dim) {
+                           if (dim <= 0) {
+                             throw std::runtime_error(
+                                 "OnnxManager: Non-positive resolved dimension in model '" +
+                                 modelName + "' output index " +
+                                 std::to_string(outputIndex));
+                           }
+                           return acc * dim;
+                         });
+}
+
 int64_t trailingElementCount(const std::vector<int64_t> &shape,
                              const std::string &modelName,
                              size_t tensorIndex,
@@ -505,6 +542,7 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
   const auto &session = this->objects_m.at(modelName);
   const auto &inputShapes = model_inputShapes_m.at(modelName);
   const auto &inputElementCounts = model_inputElementCounts_m.at(modelName);
+  const auto &outputElementCounts = model_outputElementCounts_m.at(modelName);
   const auto &inputNames = model_inputNames_m.at(modelName);
   const auto &outputNames = model_outputNames_m.at(modelName);
   const auto &outputShapes = model_outputShapes_m.at(modelName);
@@ -645,7 +683,7 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
       inputElementCounts.begin(), inputElementCounts.end(), int64_t{0});
   const size_t numOutputs = outputNames.size();
 
-  if (numOutputs == 1) {
+  if (numOutputs == 1 && outputElementCounts[0] == 1) {
     auto onnxLambda = [session, inputShapes, inputElementCounts,
                        inputNamePtrs, outputNamePtrs, totalExpectedElements](
         const ROOT::VecOps::RVec<Float_t> &inputVector,
@@ -666,10 +704,13 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
                             inputNamePtrs, outputNamePtrs,
                             numOutputs, totalExpectedElements](
         const ROOT::VecOps::RVec<Float_t> &inputVector,
-        bool runVar) -> ROOT::VecOps::RVec<Float_t> {
-      ROOT::VecOps::RVec<Float_t> outputs(numOutputs, -1.0f);
+        bool runVar) -> std::vector<ROOT::VecOps::RVec<Float_t>> {
+      std::vector<ROOT::VecOps::RVec<Float_t>> outputs(numOutputs);
 
       if (!runVar) {
+        for (auto &output : outputs) {
+          output = ROOT::VecOps::RVec<Float_t>(1, -1.0f);
+        }
         return outputs;
       }
       const auto modelOutputs =
@@ -677,7 +718,7 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
                           inputNamePtrs, outputNamePtrs, inputVector,
                           totalExpectedElements);
       for (size_t i = 0; i < numOutputs; i++) {
-        outputs[i] = modelOutputs[i];
+        outputs[i] = ROOT::VecOps::RVec<Float_t>(1, modelOutputs[i]);
       }
 
       return outputs;
@@ -687,11 +728,30 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
     dataManager_m->Define(multiOutputColName, onnxLambdaMulti, {"input_" + modelName, runVar}, *systematicManager_m);
 
     for (size_t i = 0; i < numOutputs; i++) {
-      std::string outputColName = modelName + "_output" + std::to_string(i) + outputSuffix;
-      auto indexLambda = [i](const ROOT::VecOps::RVec<Float_t> &outputs) -> Float_t {
-        return outputs[i];
-      };
-      dataManager_m->Define(outputColName, indexLambda, {multiOutputColName}, *systematicManager_m);
+      const bool scalarOutput = outputElementCounts[i] == 1;
+      const bool singleVectorOutput = numOutputs == 1 && !scalarOutput;
+      const std::string outputColName = singleVectorOutput
+          ? modelName + outputSuffix
+          : modelName + "_output" + std::to_string(i) + outputSuffix;
+
+      if (scalarOutput) {
+        auto indexLambda = [i](const std::vector<ROOT::VecOps::RVec<Float_t>> &outputs) -> Float_t {
+          if (i >= outputs.size() || outputs[i].empty()) {
+            return -1.0f;
+          }
+          return outputs[i][0];
+        };
+        dataManager_m->Define(outputColName, indexLambda, {multiOutputColName}, *systematicManager_m);
+      } else {
+        auto vectorLambda = [i](const std::vector<ROOT::VecOps::RVec<Float_t>> &outputs)
+            -> ROOT::VecOps::RVec<Float_t> {
+          if (i >= outputs.size()) {
+            return ROOT::VecOps::RVec<Float_t>{-1.0f};
+          }
+          return outputs[i];
+        };
+        dataManager_m->Define(outputColName, vectorLambda, {multiOutputColName}, *systematicManager_m);
+      }
     }
   }
 }
@@ -804,6 +864,22 @@ const std::vector<std::string> &OnnxManager::getModelOutputNames(const std::stri
     return it->second;
   }
   throw std::runtime_error("Output names not found for ONNX model: " + modelName);
+}
+
+const std::vector<std::vector<int64_t>> &OnnxManager::getModelOutputShapes(const std::string &modelName) const {
+  auto it = model_outputShapes_m.find(modelName);
+  if (it != model_outputShapes_m.end()) {
+    return it->second;
+  }
+  throw std::runtime_error("Output shapes not found for ONNX model: " + modelName);
+}
+
+const std::vector<int64_t> &OnnxManager::getModelOutputElementCounts(const std::string &modelName) const {
+  auto it = model_outputElementCounts_m.find(modelName);
+  if (it != model_outputElementCounts_m.end()) {
+    return it->second;
+  }
+  throw std::runtime_error("Output element counts not found for ONNX model: " + modelName);
 }
 
 /**
@@ -958,14 +1034,19 @@ void OnnxManager::loadModelsFromConfig(
 
     size_t num_output_nodes = session->GetOutputCount();
     std::vector<std::string> output_names;
-    std::vector<std::vector<int64_t>> outputShapes;
+    std::vector<std::vector<int64_t>> resolvedOutputShapes;
+    std::vector<int64_t> outputElementCounts;
+    resolvedOutputShapes.reserve(num_output_nodes);
+    outputElementCounts.reserve(num_output_nodes);
     for (size_t i = 0; i < num_output_nodes; i++) {
       auto output_name = session->GetOutputNameAllocated(i, allocator);
       output_names.push_back(std::string(output_name.get()));
 
       auto typeInfo = session->GetOutputTypeInfo(i);
       auto tensorInfo = typeInfo.GetTensorTypeAndShapeInfo();
-      outputShapes.push_back(tensorInfo.GetShape());
+      auto resolvedShape = resolveOutputShape(tensorInfo.GetShape(), modelName, i);
+      resolvedOutputShapes.push_back(resolvedShape);
+      outputElementCounts.push_back(outputElementCount(resolvedShape, modelName, i));
     }
 
     auto bundleModeIt = entryKeys.find("systematicBundle");
@@ -981,10 +1062,11 @@ void OnnxManager::loadModelsFromConfig(
     model_runVars_m.emplace(modelName, entryKeys.at("runVar"));
     model_inputNames_m.emplace(modelName, input_names);
     model_outputNames_m.emplace(modelName, output_names);
-    model_outputShapes_m.emplace(modelName, outputShapes);
+    model_outputShapes_m.emplace(modelName, resolvedOutputShapes);
     model_paddingSize_m.emplace(modelName, paddingSize);
     model_inputShapes_m.emplace(modelName, resolvedInputShapes);
     model_inputElementCounts_m.emplace(modelName, inputElementCounts);
+    model_outputElementCounts_m.emplace(modelName, outputElementCounts);
     std::vector<int64_t> inputRowElementCounts;
     inputRowElementCounts.reserve(resolvedInputShapes.size());
     for (size_t i = 0; i < resolvedInputShapes.size(); ++i) {

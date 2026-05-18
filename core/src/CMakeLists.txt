@@ -23,6 +23,7 @@ target_include_directories(core PUBLIC
 target_link_libraries(core PUBLIC
     fastforest
     correctionlib
+    Boost::headers
     ROOT::ROOTDataFrame
     ROOT::ROOTVecOps
     ROOT::Core

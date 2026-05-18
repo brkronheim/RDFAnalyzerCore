@@ -20,7 +20,7 @@ ulimit -n 10000
 # Compiler: use the system GCC 11.5.0 that ships in the cmssw-el9 container.
 # This matches the compiler used to build the ROOT below.
 export CC=/usr/bin/gcc
-export CXX=/usr/bin/g++
+export CXX=/usr/bin/g++m
 export FC=/usr/bin/gfortran
 
 # ---------------------------------------------------------------------------
