@@ -353,11 +353,12 @@ class ProductionManager:
             base_config['__orig_metaFile'] = str(meta_output_path)
             base_config['batch'] = 'True'
 
-            # Handle special inline float/int config content (keep backward compatibility
-            # with generateSubmissionFilesNANO.py which appends lines into per-job files).
-            # If `extra_config` provides `floatConfig`/`intConfig` as content (contains '\n'
-            # or an '=' sign and is not a filename), write that content into a file in the
-            # job directory and set the job config to reference the filename.
+            # Handle special inline float/int config content.
+            # If `extra_config` provides `floatConfig`/`intConfig` as inline content
+            # (contains '\n' or an '=' sign and is not a filename), write that content
+            # into a file in the job directory and set the job config to reference the
+            # filename.  This allows callers to pass normalisation lines (e.g.
+            # ``normScale=3.14``) directly rather than via a pre-written file on disk.
             if extra_config is None:
                 extra_config = {}
 
@@ -394,110 +395,69 @@ class ProductionManager:
                     copied_cfg = _copy_file_to_job(src_cfg, job_dir)
                     base_config[cfg_key] = copied_cfg.name
 
-            # Pre-populate per-job files from base config sources (if present)
-            base_float_src = _resolve_path(base_config.get('floatConfig', ''))
-            if base_float_src:
+            def _merge_lines_into_file(target_path: Path, lines: list[str]) -> None:
+                existing = []
+                if target_path.exists():
+                    with open(target_path, 'r') as _f:
+                        existing = [l.rstrip('\n') for l in _f if l.rstrip('\n')]
+                seen = set(existing)
+                merged = list(existing)
+                for ln in lines:
+                    if ln in seen:
+                        continue
+                    seen.add(ln)
+                    merged.append(ln)
+                with open(target_path, 'w') as _f:
+                    for ln in merged:
+                        _f.write(ln + '\n')
+
+            def _materialize_config_key(key: str, default_name: str) -> Optional[Path]:
+                if key not in base_config:
+                    return None
+                config_value = base_config.get(key, '')
+                config_path = _resolve_path(str(config_value))
+                if config_path and config_path.exists() and config_path.is_file():
+                    dst = _copy_file_to_job(config_path, job_dir)
+                    base_config[key] = dst.name
+                    return dst
+                return None
+
+            def _process_extra_config(key: str, default_name: str) -> None:
+                if key not in extra_config:
+                    return
+                target_path = job_dir / default_name
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                value = extra_config[key]
+                if _is_inline_content(value):
+                    lines = [ln for ln in str(value).splitlines() if ln.strip()]
+                    _merge_lines_into_file(target_path, lines)
+                    base_config[key] = target_path.name
+                    return
+
+                src = _resolve_path(str(value))
+                if src and src.exists() and src.is_file():
+                    copied = _copy_file_to_job(src, job_dir)
+                    base_config[key] = copied.name
+                else:
+                    base_config[key] = str(value)
+
+            # Pre-populate per-job config files from base config sources.
+            float_path = _materialize_config_key('floatConfig', float_filename)
+            if float_path is None:
                 float_path = job_dir / float_filename
                 float_path.parent.mkdir(parents=True, exist_ok=True)
-                # copy contents preserving existing ordering/deduplication behavior
-                existing = []
                 if float_path.exists():
-                    with open(float_path, 'r') as _f:
-                        existing = [l.rstrip('\n') for l in _f if l.rstrip('\n')]
-                with open(base_float_src, 'r') as _f:
-                    base_lines = [l.rstrip('\n') for l in _f if l.rstrip('\n')]
-                seen = set(existing)
-                merged = list(existing)
-                for ln in base_lines:
-                    if ln in seen:
-                        continue
-                    seen.add(ln)
-                    merged.append(ln)
-                with open(float_path, 'w') as _f:
-                    for ln in merged:
-                        _f.write(ln + '\n')
-                base_config['floatConfig'] = os.path.basename(str(float_path))
+                    float_path = float_path
 
-            base_int_src = _resolve_path(base_config.get('intConfig', ''))
-            if base_int_src:
+            int_path = _materialize_config_key('intConfig', int_filename)
+            if int_path is None:
                 int_path = job_dir / int_filename
                 int_path.parent.mkdir(parents=True, exist_ok=True)
-                existing = []
                 if int_path.exists():
-                    with open(int_path, 'r') as _f:
-                        existing = [l.rstrip('\n') for l in _f if l.rstrip('\n')]
-                with open(base_int_src, 'r') as _f:
-                    base_lines = [l.rstrip('\n') for l in _f if l.rstrip('\n')]
-                seen = set(existing)
-                merged = list(existing)
-                for ln in base_lines:
-                    if ln in seen:
-                        continue
-                    seen.add(ln)
-                    merged.append(ln)
-                with open(int_path, 'w') as _f:
-                    for ln in merged:
-                        _f.write(ln + '\n')
-                base_config['intConfig'] = os.path.basename(str(int_path))
+                    int_path = int_path
 
-            # Process floatConfig
-            if 'floatConfig' in extra_config and _is_inline_content(extra_config['floatConfig']):
-                float_lines = [ln for ln in str(extra_config['floatConfig']).splitlines() if ln.strip()]
-                float_path = job_dir / float_filename
-                # create parent directory if the configured filename contains subdirs
-                float_path.parent.mkdir(parents=True, exist_ok=True)
-                # Deduplicate while preserving order if file already exists
-                existing = []
-                if float_path.exists():
-                    with open(float_path, 'r') as _f:
-                        existing = [l.rstrip('\n') for l in _f if l.rstrip('\n')]
-                seen = set(existing)
-                merged = list(existing)
-                for ln in float_lines:
-                    if ln in seen:
-                        continue
-                    seen.add(ln)
-                    merged.append(ln)
-                with open(float_path, 'w') as _f:
-                    for ln in merged:
-                        _f.write(ln + '\n')
-                base_config['floatConfig'] = os.path.basename(str(float_path))
-            elif 'floatConfig' in extra_config:
-                float_src = _resolve_path(str(extra_config['floatConfig']))
-                if float_src and float_src.exists() and float_src.is_file():
-                    copied_float = _copy_file_to_job(float_src, job_dir)
-                    base_config['floatConfig'] = copied_float.name
-                else:
-                    base_config['floatConfig'] = str(extra_config['floatConfig'])
-
-            # Process intConfig
-            if 'intConfig' in extra_config and _is_inline_content(extra_config['intConfig']):
-                int_lines = [ln for ln in str(extra_config['intConfig']).splitlines() if ln.strip()]
-                int_path = job_dir / int_filename
-                # create parent directory if the configured filename contains subdirs
-                int_path.parent.mkdir(parents=True, exist_ok=True)
-                existing = []
-                if int_path.exists():
-                    with open(int_path, 'r') as _f:
-                        existing = [l.rstrip('\n') for l in _f if l.rstrip('\n')]
-                seen = set(existing)
-                merged = list(existing)
-                for ln in int_lines:
-                    if ln in seen:
-                        continue
-                    seen.add(ln)
-                    merged.append(ln)
-                with open(int_path, 'w') as _f:
-                    for ln in merged:
-                        _f.write(ln + '\n')
-                base_config['intConfig'] = os.path.basename(str(int_path))
-            elif 'intConfig' in extra_config:
-                int_src = _resolve_path(str(extra_config['intConfig']))
-                if int_src and int_src.exists() and int_src.is_file():
-                    copied_int = _copy_file_to_job(int_src, job_dir)
-                    base_config['intConfig'] = copied_int.name
-                else:
-                    base_config['intConfig'] = str(extra_config['intConfig'])
+            _process_extra_config('floatConfig', float_filename)
+            _process_extra_config('intConfig', int_filename)
 
             # Merge any remaining keys from extra_config (e.g. 'type')
             for k, v in extra_config.items():
@@ -1579,7 +1539,7 @@ def main():
     # Execute command
     if args.command == "create":
         logger.error("Create command requires custom implementation")
-        logger.error("Use generateSubmissionFilesNANO.py or generateSubmissionFilesOpenData.py")
+        logger.error("Use 'law run GetRucioFileList' / 'law run SkimTask' to create productions.")
         sys.exit(1)
         
     elif args.command == "submit":

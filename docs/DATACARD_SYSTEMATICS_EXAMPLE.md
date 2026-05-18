@@ -132,13 +132,13 @@ int main(int argc, char** argv) {
         analyzer.getConfigurationProvider());
     analyzer.addPlugin("histogramManager", std::move(histManager));
     
-    auto* sysMgr = analyzer.getSystematicManager();
+    auto& sysMgr = analyzer.getSystematicManager();
     
     // Register systematics
-    sysMgr->registerSystematic("JES_up");
-    sysMgr->registerSystematic("JES_down");
-    sysMgr->registerSystematic("btag_up");
-    sysMgr->registerSystematic("btag_down");
+    sysMgr.registerSystematic("JES_up");
+    sysMgr.registerSystematic("JES_down");
+    sysMgr.registerSystematic("btag_up");
+    sysMgr.registerSystematic("btag_down");
     
     // Define variables with systematic awareness
     analyzer.Define("jet_pt",

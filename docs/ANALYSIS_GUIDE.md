@@ -14,6 +14,8 @@ This comprehensive guide walks you through creating a complete analysis with RDF
 - [Corrections and Scale Factors](#corrections-and-scale-factors)
 - [Histogramming](#histogramming)
 - [Systematics](#systematics)
+  - [SystematicManager Integration](#systematicmanager-integration)
+  - [Systematics on PhysicsObjectCollections](#systematics-on-physicsobjectcollections)
 - [Managing Event Weights](#managing-event-weights)
 - [Analysis Regions](#analysis-regions)
 - [Cutflow and Event Selection Monitoring](#cutflow-and-event-selection-monitoring)
@@ -156,7 +158,6 @@ int main(int argc, char **argv) {
 ### Step 6: Build and Run
 
 ```bash
-cd /path/to/RDFAnalyzerCore
 source build.sh
 cd build/analyses/MyAnalysis
 ./myanalysis cfg/main_config.txt
@@ -202,7 +203,7 @@ Plugins are configured via config files but accessed in C++:
 
 ```cpp
 // Get plugin from analyzer
-auto* onnxManager = analyzer.getPlugin<IOnnxManager>("onnx");
+auto onnxManager = analyzer.getPlugin<OnnxManager>("onnx");
 
 // Use plugin
 onnxManager->applyAllModels();
@@ -400,7 +401,7 @@ analyzer.Define("has_jets",
 
 ```cpp
 // Get ONNX manager
-auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
 
 // Apply all configured models
 onnxMgr->applyAllModels();
@@ -456,8 +457,8 @@ file=aux/bdts/signal_bdt.txt name=bdt_score inputVariables=var1,var2,var3 runVar
 ```
 
 ```cpp
-auto* bdtMgr = analyzer.getPlugin<IBDTManager>("bdt");
-bdtMgr->applyAllModels();
+auto bdtMgr = analyzer.getPlugin<BDTManager>("bdt");
+bdtMgr->applyAllBDTs();
 ```
 
 ### Using SOFIE Models (Maximum Performance)
@@ -492,7 +493,7 @@ std::vector<float> classifierInference(const std::vector<float>& input) {
 #### 3. Register and Use Model
 
 ```cpp
-auto* sofieMgr = analyzer.getPlugin<ISofieManager>("sofie");
+auto sofieMgr = analyzer.getPlugin<SofieManager>("sofie");
 
 // Register model manually (not auto-loaded like ONNX/BDT)
 auto inferenceFunc = std::make_shared<SofieInferenceFunction>(classifierInference);
@@ -630,8 +631,8 @@ integrates with `CorrectionManager` for correctionlib evaluations and with
 #include <JetEnergyScaleManager.h>
 #include <PhysicsObjectCollection.h>
 
-auto* jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto* cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto cm = analyzer.getPlugin<CorrectionManager>("corrections");
 
 // 1. Declare jet/MET column names.
 jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -650,9 +651,14 @@ analyzer.Define("goodJets",
 // 3. Strip NanoAOD JEC → raw pT.
 jes->removeExistingCorrections("Jet_rawFactor");
 
-// 4. Apply new L1L2L3 JEC via correctionlib.
-jes->applyCorrectionlib(*cm, "jec_l1l2l3", {"L3Residual"},
-                        "Jet_pt_raw", "Jet_pt_jec");
+// 4. Evaluate the nominal compound JEC and apply it.
+cm->registerCorrection(
+    "jec_nominal",
+    "jet_jerc.json.gz",
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");
 
 // 5. Register and apply CMS JES systematic set (reduced: "Total" only).
 jes->registerSystematicSources("reduced", {"Total"});
@@ -674,6 +680,18 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
 //   "goodJets_TotalUp"    PhysicsObjectCollection (JES up)
 //   "goodJets_TotalDown"  PhysicsObjectCollection (JES down)
 //   "goodJets_variations" PhysicsObjectVariationMap (all of the above)
+
+// 8. Downstream Define calls can stay on the nominal collection name.
+analyzer.Define("selectedJetPts",
+    [](const PhysicsObjectCollection& jets) {
+        ROOT::VecOps::RVec<float> pts;
+        for (std::size_t i = 0; i < jets.size(); ++i) {
+            pts.push_back(static_cast<float>(jets.at(i).Pt()));
+        }
+        return pts;
+    },
+    {"goodJets"}, *sysMgr);
+// Also defines: selectedJetPts_TotalUp, selectedJetPts_TotalDown
 ```
 
 #### Applying the full CMS JES source set
@@ -688,7 +706,7 @@ jes->registerSystematicSources("full", {
     "RelativePtHF", "RelativeBal", "RelativeSample"
 });
 jes->applySystematicSet(*cm, "jes_unc", "full", "Jet_pt_jec", "Jet_pt_jes");
-// Creates 34 variation columns (17 sources × up/down)
+// Creates 34 variation columns and registers 17 systematic families.
 ```
 
 ## Histogramming
@@ -703,7 +721,7 @@ NDHistogramManager provides sophisticated N-dimensional histogramming with suppo
 #include <plots.h>  // For histInfo, selectionInfo
 
 // Get histogram manager
-auto* histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
+auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
 
 // Define histogram metadata
 std::vector<histInfo> hists = {
@@ -787,7 +805,7 @@ SystematicManager tracks systematic variations and propagates them through the a
 
 ```cpp
 // Get systematic manager
-auto* sysMgr = analyzer.getSystematicManager();
+auto& sysMgr = analyzer.getSystematicManager();
 
 // Define variable with systematic variations
 dataManager->Define("jet_pt_corrected",
@@ -800,18 +818,24 @@ dataManager->Define("jet_pt_corrected",
         return pt;  // Nominal
     },
     {"jet_pt", "jet_jes_up", "jet_jes_down"},
-    *sysMgr  // Pass systematic manager
+    sysMgr  // Pass systematic manager
 );
 ```
 
 #### Registering Systematics
 
 ```cpp
-// Register systematic variations
-sysMgr->registerSystematic("jes_up");
-sysMgr->registerSystematic("jes_down");
-sysMgr->registerSystematic("jer_up");
-sysMgr->registerSystematic("jer_down");
+// Register a base systematic family and its affected nominal variable.
+sysMgr->registerSystematic("jes", {"jet_pt_corrected"});
+
+// If the real source columns do not follow the default
+// jet_pt_corrected_jesUp / jet_pt_corrected_jesDown naming, register the
+// explicit mapping once.
+sysMgr->registerVariationColumns(
+    "jet_pt_corrected",
+    "jes",
+    "jet_pt_jes_up",
+    "jet_pt_jes_down");
 ```
 
 #### Histograms with Systematics
@@ -822,6 +846,153 @@ When booking histograms with NDHistogramManager, an automatic systematic axis is
 // Histograms are automatically filled for all systematic variations
 // Access via: hist[channel][region][systematic]
 ```
+
+### Systematics on PhysicsObjectCollections
+
+The preferred way to apply systematic variations in CMS analyses is through
+`PhysicsObjectCollection` and the object-energy manager plugins.  This approach
+removes all boilerplate: you define your physics selection once on the nominal
+collection, and the framework automatically propagates every systematic
+variation to every downstream column.
+
+#### Step 1 — Define your object collection on the nominal kinematics
+
+```cpp
+analyzer.Define("goodJets",
+    [](const RVec<float>& pt, const RVec<float>& eta,
+       const RVec<float>& phi, const RVec<float>& mass) {
+        return PhysicsObjectCollection(pt, eta, phi, mass,
+                                       (pt > 25.f) && (abs(eta) < 2.4f));
+    },
+    {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
+);
+```
+
+#### Step 2 — Apply CMS corrections and register systematic sources
+
+`JetEnergyScaleManager` handles the entire JEC/JES/JER pipeline, including
+corrected `PhysicsObjectCollection` outputs:
+
+```cpp
+auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto cm = analyzer.getPlugin<CorrectionManager>("corrections");
+
+jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+jes->setMETColumns("MET_pt", "MET_phi");
+
+// Strip NanoAOD embedded JEC → raw pT
+jes->removeExistingCorrections("Jet_rawFactor");
+
+// Evaluate the nominal compound JEC from a correctionlib payload.
+// Mixed per-jet RVec inputs and scalar rho are handled automatically.
+cm->registerCorrection(
+    "jec_nominal",
+    "jet_jerc.json.gz",
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");
+
+// Register all CMS JES uncertainty sources and apply them in one call.
+jes->registerSystematicSources("reduced", {"Total"});
+jes->applySystematicSet(*cm, "jes_unc", "reduced",
+                        "Jet_pt_jec", "Jet_pt_jes");
+
+// Type-1 MET propagation for JEC and JES
+jes->propagateMET("MET_pt", "MET_phi",
+                  "Jet_pt_raw", "Jet_pt_jec",
+                  "MET_pt_jec", "MET_phi_jec");
+```
+
+#### Step 3 — Produce corrected collections for nominal + all variations
+
+```cpp
+jes->setInputJetCollection("goodJets");
+// Define a corrected nominal collection
+jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+// Define per-variation collections and assemble a variation map
+jes->defineVariationCollections("goodJets_jec", "goodJets",
+                                "goodJets_variations");
+```
+
+After `analyzer.save()`:
+
+| Column | Description |
+|--------|-------------|
+| `goodJets_jec` | Nominal JEC-corrected `PhysicsObjectCollection` |
+| `goodJets_TotalUp` | JES Total up variation `PhysicsObjectCollection` |
+| `goodJets_TotalDown` | JES Total down variation `PhysicsObjectCollection` |
+| `goodJets_variations` | `PhysicsObjectVariationMap` keyed by `"nominal"`, `"TotalUp"`, `"TotalDown"` |
+
+#### Step 4 — Write downstream code once; automatic propagation does the rest
+
+Because `defineVariationCollections` registers `goodJets` with `SystematicManager`,
+any downstream `Define` that passes `*sysMgr` is **automatically duplicated for
+every registered variation**:
+
+```cpp
+// Written once — automatically becomes:
+//   selectedJetPts           (consumes goodJets_jec)
+//   selectedJetPts_TotalUp   (consumes goodJets_TotalUp)
+//   selectedJetPts_TotalDown (consumes goodJets_TotalDown)
+analyzer.Define("selectedJetPts",
+    [](const PhysicsObjectCollection& jets) {
+        RVec<float> pts;
+        for (std::size_t i = 0; i < jets.size(); ++i)
+            pts.push_back(static_cast<float>(jets.at(i).Pt()));
+        return pts;
+    },
+    {"goodJets"}, *sysMgr
+);
+```
+
+No manual duplication of your physics logic is needed.
+
+#### Using the full CMS JES source set
+
+```cpp
+jes->registerSystematicSources("full", {
+    "AbsoluteCal", "AbsoluteScale", "AbsoluteMPFBias",
+    "FlavorQCD", "Fragmentation", "PileUpDataMC",
+    "PileUpPtRef", "RelativeFSR", "RelativeJEREC1",
+    "RelativeJEREC2", "RelativeJERHF",
+    "RelativePtBB", "RelativePtEC1", "RelativePtEC2",
+    "RelativePtHF", "RelativeBal", "RelativeSample"
+});
+jes->applySystematicSet(*cm, "jes_unc", "full", "Jet_pt_jec", "Jet_pt_jes");
+// Creates 34 variation columns and registers 17 systematic families in one call.
+```
+
+#### Manual corrected-kinematics approach (non-JES use cases)
+
+For object types without a dedicated manager (or custom corrections), call
+`withCorrectedPt` or `withCorrectedKinematics` directly:
+
+```cpp
+// Electron energy scale correction
+analyzer.Define("goodElectrons_scaled",
+    [](const PhysicsObjectCollection& electrons,
+       const RVec<float>& pt_scaled) {
+        return electrons.withCorrectedPt(pt_scaled);
+    },
+    {"goodElectrons", "Electron_pt_scale"}
+);
+
+// Full 4-vector replacement (e.g. tau energy scale with mass rescaling)
+analyzer.Define("goodTaus_corrected",
+    [](const PhysicsObjectCollection& taus,
+       const RVec<float>& pt_corr, const RVec<float>& eta_corr,
+       const RVec<float>& phi_corr, const RVec<float>& mass_corr) {
+        return taus.withCorrectedKinematics(pt_corr, eta_corr,
+                                            phi_corr, mass_corr);
+    },
+    {"goodTaus", "Tau_pt_tes", "Tau_eta_tes",
+     "Tau_phi_tes", "Tau_mass_tes"}
+);
+```
+
+> **Full reference**: [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md) and
+> [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
 
 ## Managing Event Weights
 
@@ -901,7 +1072,7 @@ Add a `WeightManager` plugin to your analysis and retrieve it via
 ```cpp
 #include <plugins/WeightManager/WeightManager.h>
 
-auto* wm = analyzer.getPlugin<WeightManager>("weights");
+auto wm = analyzer.getPlugin<WeightManager>("weights");
 ```
 
 ### Adding Weight Components
@@ -982,7 +1153,7 @@ for (const auto& entry : wm->getAuditEntries()) {
 void myAnalysis() {
     Analyzer analyzer("config.txt");
 
-    auto* wm = analyzer.getPlugin<WeightManager>("weights");
+    auto wm = analyzer.getPlugin<WeightManager>("weights");
 
     // Define SF columns on the dataframe first.
     analyzer.Define("lepton_sf_col", computeLeptonSF, {"lep_pt", "lep_eta"});
@@ -1022,7 +1193,7 @@ branches are built independently inside the plugin.
 ```cpp
 #include <plugins/RegionManager/RegionManager.h>
 
-auto* rm = analyzer.getPlugin<RegionManager>("regions");
+auto rm = analyzer.getPlugin<RegionManager>("regions");
 ```
 
 ### Defining Boolean Filter Columns
@@ -1107,9 +1278,9 @@ to the RegionManager iterate over all regions internally.
 int main(int argc, char* argv[]) {
     Analyzer analyzer(argv[1]);
 
-    auto* rm  = analyzer.getPlugin<RegionManager>("regions");
-    auto* ndh = analyzer.getPlugin<NDHistogramManager>("NDHistogramManager");
-    auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+    auto rm = analyzer.getPlugin<RegionManager>("regions");
+    auto ndh = analyzer.getPlugin<NDHistogramManager>("NDHistogramManager");
+    auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 
     // Step 1 — define boolean selection columns.
     analyzer.Define("isPresel",        passPreselection,    {"lep_pt", "met"});
@@ -1151,7 +1322,7 @@ one) in a single event-loop pass.
 ```cpp
 #include <plugins/CutflowManager/CutflowManager.h>
 
-auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 ```
 
 ### Adding Cuts
@@ -1228,8 +1399,8 @@ for (const auto& [name, count] : cfm->getRegionCutflowCounts("signal")) {
 void myAnalysis() {
     Analyzer analyzer("config.txt");
 
-    auto* rm  = analyzer.getPlugin<RegionManager>("regions");
-    auto* cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+    auto rm = analyzer.getPlugin<RegionManager>("regions");
+    auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
 
     // Define all boolean columns before the first addCut().
     analyzer.Define("leptonPtCut", passLeptonPt, {"lep_pt"});
@@ -1342,7 +1513,7 @@ int main(int argc, char **argv) {
 
     // ===== Apply ML Models =====
     
-    auto* onnxMgr = analyzer.getPlugin<IOnnxManager>("onnx");
+    auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
     if (onnxMgr) {
         onnxMgr->applyAllModels();
         
@@ -1376,7 +1547,7 @@ int main(int argc, char **argv) {
 
     // ===== Book Histograms =====
     
-    auto* histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
+    auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
     if (histMgr) {
         std::vector<histInfo> hists = {
             histInfo("h_njets", "n_good_jets", "N_{jets}", "event_weight", 10, 0, 10),
@@ -1479,7 +1650,7 @@ Save intermediate processing steps:
 analyzer.Filter("preselection", ...);
 
 // Save snapshot
-auto df = analyzer.getDataFrame();
+auto df = analyzer.getDF();
 df.Snapshot("Events", "preselection_output.root", {"useful_branches"});
 
 // Continue processing

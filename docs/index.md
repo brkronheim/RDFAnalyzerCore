@@ -9,6 +9,12 @@ New to RDFAnalyzerCore? Start here:
 - **[Getting Started Guide](GETTING_STARTED.md)** - Installation, setup, and your first analysis
 - **[Quick Start](GETTING_STARTED.md#quick-start)** - Get running in 5 minutes
 
+## Who should read what?
+
+- **Developers**: [Architecture](ARCHITECTURE.md), [API Reference](API_REFERENCE.md), [Plugin Development](PLUGIN_DEVELOPMENT.md)
+- **Analyzers**: [Getting Started](GETTING_STARTED.md), [Analysis Guide](ANALYSIS_GUIDE.md), [Configuration Reference](CONFIG_REFERENCE.md)
+- **Agents/automation**: [INDEX](INDEX.md), [Errors and Tracing](ERRORS_AND_TRACING.md), [Validation Reports](VALIDATION_REPORTS.md)
+
 ## User Documentation
 
 ### Building Analyses
@@ -81,6 +87,13 @@ New to RDFAnalyzerCore? Start here:
   - Type-1 MET propagation
   - PhysicsObjectCollection integration and variation maps
 
+- **[CMS Correction Stack](CMS_CORRECTIONS.md)** - Unified CMS correction-manager workflow
+  - Regular and compound correctionlib support
+  - Mixed scalar/vector correction inputs
+  - Jet, electron, and muon correction patterns
+  - Corrected full-object collection plugins
+  - Minimal-code analysis integration
+
 ### Batch Processing & Performance
 
 - **[LAW Tasks](LAW_TASKS.md)** - Luigi/LAW workflow task reference
@@ -99,6 +112,8 @@ New to RDFAnalyzerCore? Start here:
   - Data management
   - Plugin interfaces
   - Manager implementations
+- **[Search Documentation](SEARCH.html)** - Keyword search across all site pages
+- **[Doxygen API Documentation](doxygen/index.html)** - Generated C++ API docs from source
 
 ## Developer Documentation
 
@@ -142,7 +157,9 @@ Framework is extensible via plugins:
 - **OnnxManager**: Neural networks and ML models
 - **SofieManager**: Build-time compiled models
 - **CorrectionManager**: Scale factors and corrections
-- **JetEnergyScaleManager**: JES/JER corrections, CMS systematic sets, MET propagation, and PhysicsObjectCollection integration
+- **JetEnergyScaleManager**: JES/JER corrections, JER smearing, CMS systematic sets, MET propagation, and PhysicsObjectCollection integration
+- **ElectronEnergyScaleManager**: Electron scale and smearing workflows via ObjectEnergyManagerBase
+- **MuonRochesterManager**: Rochester and Run 3 muon scale-resolution workflows
 - **TriggerManager**: Trigger logic
 - **NDHistogramManager**: N-dimensional histograms
 - **WeightManager**: Nominal and varied event weights
@@ -185,6 +202,7 @@ Efficient processing with automatic optimization.
 - **Add ML model**: [ONNX Configuration](CONFIG_REFERENCE.md#onnx-manager-configuration)
 - **Apply corrections**: [CorrectionManager](CONFIG_REFERENCE.md#correction-manager-configuration)
 - **Apply JES/JER corrections**: [Jet Energy Corrections](JET_ENERGY_CORRECTIONS.md)
+- **Apply CMS object corrections**: [CMS Correction Stack](CMS_CORRECTIONS.md)
 - **Book histograms**: [Histogramming Guide](ANALYSIS_GUIDE.md#histogramming)
 - **Handle systematics**: [Systematics Guide](ANALYSIS_GUIDE.md#systematics)
 - **Submit to batch**: [HTCondor Scripts](ANALYSIS_GUIDE.md#advanced-topics)
@@ -216,7 +234,7 @@ int main(int argc, char **argv) {
     );
     
     // Apply ML model
-    auto* onnx = analyzer.getPlugin<IOnnxManager>("onnx");
+    auto onnx = analyzer.getPlugin<OnnxManager>("onnx");
     onnx->applyAllModels();
     
     // Save

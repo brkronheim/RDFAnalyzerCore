@@ -20,7 +20,7 @@ It supports:
 ## Installation
 
 The script requires:
-- Python 3.6+
+- Python 3.8+
 - PyYAML
 - uproot (for reading ROOT files without PyROOT dependency)
 - numpy

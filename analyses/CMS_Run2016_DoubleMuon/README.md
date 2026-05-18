@@ -146,7 +146,7 @@ an.Define("hasTwoMuons",     hasExactlyTwoMuons, {"goodMuons"});
 an.Define("hasOppositeSign", hasOppositeSign,    {"goodMuons","Muon_charge"});
 an.Define("inMassWindow",    inMassWindow,       {"goodMuons"});
 
-auto *cfm = an.getPlugin<CutflowManager>("cutflowManager");
+auto cfm = an.getPlugin<CutflowManager>("cutflowManager");
 cfm->addCut("DimuonPair",   "hasTwoMuons");      // applies filter + tracks N-1
 cfm->addCut("OppositeSign", "hasOppositeSign");
 cfm->addCut("MassWindow",   "inMassWindow");
@@ -541,7 +541,7 @@ Edit `triggers.yaml` only:
 ```cpp
 auto regionMgr = std::make_unique<RegionManager>();
 an.addPlugin("regionManager", std::move(regionMgr));
-auto *rm = an.getPlugin<RegionManager>("regionManager");
+auto rm = an.getPlugin<RegionManager>("regionManager");
 rm->declareRegion("signal",   "inMassWindow");
 rm->declareRegion("sideband", "!inMassWindow");
 cfm->bindToRegionManager(rm);   // per-region cutflow tables

@@ -1,0 +1,466 @@
+#include <SystematicManager.h>
+#include <test_util.h>
+#include <gtest/gtest.h>
+#include <set>
+#include <string>
+#include <vector>
+
+class SystematicManagerTest : public ::testing::Test {
+protected:
+  void SetUp() override { ChangeToTestSourceDir(); systematicManager = new SystematicManager(); }
+
+  void TearDown() override { delete systematicManager; }
+
+  SystematicManager *systematicManager = nullptr;
+};
+
+TEST_F(SystematicManagerTest, ConstructorCreatesEmptyManager) {
+  SystematicManager manager;
+
+  EXPECT_TRUE(manager.getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, RegisterSystematicBasic) {
+  std::set<std::string> affectedVars = {"var1", "var2", "var3"};
+  systematicManager->registerSystematic("test_syst", affectedVars);
+
+  const auto &systematics = systematicManager->getSystematics();
+  EXPECT_EQ(systematics.size(), 1);
+  EXPECT_TRUE(systematics.find("test_syst") != systematics.end());
+
+  const auto &varsForSyst =
+      systematicManager->getVariablesForSystematic("test_syst");
+  EXPECT_EQ(varsForSyst.size(), 3);
+  EXPECT_TRUE(varsForSyst.find("var1") != varsForSyst.end());
+  EXPECT_TRUE(varsForSyst.find("var2") != varsForSyst.end());
+  EXPECT_TRUE(varsForSyst.find("var3") != varsForSyst.end());
+}
+
+TEST_F(SystematicManagerTest, RegisterMultipleSystematics) {
+  std::set<std::string> vars1 = {"var1", "var2"};
+  std::set<std::string> vars2 = {"var2", "var3"};
+  std::set<std::string> vars3 = {"var1", "var3"};
+
+  systematicManager->registerSystematic("syst1", vars1);
+  systematicManager->registerSystematic("syst2", vars2);
+  systematicManager->registerSystematic("syst3", vars3);
+
+  const auto &systematics = systematicManager->getSystematics();
+  EXPECT_EQ(systematics.size(), 3);
+  EXPECT_TRUE(systematics.find("syst1") != systematics.end());
+  EXPECT_TRUE(systematics.find("syst2") != systematics.end());
+  EXPECT_TRUE(systematics.find("syst3") != systematics.end());
+}
+
+TEST_F(SystematicManagerTest, GetVariablesForSystematic) {
+  std::set<std::string> affectedVars = {"var1", "var2", "var3"};
+  systematicManager->registerSystematic("test_syst", affectedVars);
+
+  const auto &varsForSyst =
+      systematicManager->getVariablesForSystematic("test_syst");
+  EXPECT_EQ(varsForSyst.size(), 3);
+  EXPECT_TRUE(varsForSyst.find("var1") != varsForSyst.end());
+  EXPECT_TRUE(varsForSyst.find("var2") != varsForSyst.end());
+  EXPECT_TRUE(varsForSyst.find("var3") != varsForSyst.end());
+}
+
+TEST_F(SystematicManagerTest, GetVariablesForNonexistentSystematic) {
+  const auto &varsForSyst =
+      systematicManager->getVariablesForSystematic("nonexistent");
+  EXPECT_TRUE(varsForSyst.empty());
+}
+
+TEST_F(SystematicManagerTest, GetSystematicsForVariable) {
+  std::set<std::string> vars1 = {"var1", "var2"};
+  std::set<std::string> vars2 = {"var2", "var3"};
+  std::set<std::string> vars3 = {"var1", "var3"};
+
+  systematicManager->registerSystematic("syst1", vars1);
+  systematicManager->registerSystematic("syst2", vars2);
+  systematicManager->registerSystematic("syst3", vars3);
+
+  // var1 is affected by syst1 and syst3
+  const auto &systForVar1 =
+      systematicManager->getSystematicsForVariable("var1");
+  EXPECT_EQ(systForVar1.size(), 2);
+  EXPECT_TRUE(systForVar1.find("syst1") != systForVar1.end());
+  EXPECT_TRUE(systForVar1.find("syst3") != systForVar1.end());
+
+  // var2 is affected by syst1 and syst2
+  const auto &systForVar2 =
+      systematicManager->getSystematicsForVariable("var2");
+  EXPECT_EQ(systForVar2.size(), 2);
+  EXPECT_TRUE(systForVar2.find("syst1") != systForVar2.end());
+  EXPECT_TRUE(systForVar2.find("syst2") != systForVar2.end());
+
+  // var3 is affected by syst2 and syst3
+  const auto &systForVar3 =
+      systematicManager->getSystematicsForVariable("var3");
+  EXPECT_EQ(systForVar3.size(), 2);
+  EXPECT_TRUE(systForVar3.find("syst2") != systForVar3.end());
+  EXPECT_TRUE(systForVar3.find("syst3") != systForVar3.end());
+}
+
+TEST_F(SystematicManagerTest, GetSystematicsForNonexistentVariable) {
+  const auto &systForVar =
+      systematicManager->getSystematicsForVariable("nonexistent");
+  EXPECT_TRUE(systForVar.empty());
+}
+
+TEST_F(SystematicManagerTest, RegisterSystematicWithEmptyVariables) {
+  std::set<std::string> emptyVars;
+  systematicManager->registerSystematic("empty_syst", emptyVars);
+
+  const auto &systematics = systematicManager->getSystematics();
+  EXPECT_EQ(systematics.size(), 1);
+  EXPECT_TRUE(systematics.find("empty_syst") != systematics.end());
+
+  const auto &varsForSyst =
+      systematicManager->getVariablesForSystematic("empty_syst");
+  EXPECT_TRUE(varsForSyst.empty());
+}
+
+TEST_F(SystematicManagerTest, RegisterSystematicWithDuplicateVariables) {
+  std::set<std::string> vars = {"var1", "var1", "var2"}; // var1 appears twice
+  systematicManager->registerSystematic("duplicate_syst", vars);
+
+  const auto &varsForSyst =
+      systematicManager->getVariablesForSystematic("duplicate_syst");
+  EXPECT_EQ(varsForSyst.size(), 2); // Should only contain unique variables
+  EXPECT_TRUE(varsForSyst.find("var1") != varsForSyst.end());
+  EXPECT_TRUE(varsForSyst.find("var2") != varsForSyst.end());
+}
+
+TEST_F(SystematicManagerTest, RegisterExistingSystematics) {
+  std::vector<std::string> systConfig = {"syst1", "syst2", "syst3"};
+  std::vector<std::string> columnList = {"var1_syst1Up", "var2_syst2Up",
+                                         "var3_syst3Up"};
+
+  systematicManager->registerExistingSystematics(systConfig, columnList);
+
+  const auto &systematics = systematicManager->getSystematics();
+  EXPECT_EQ(systematics.size(), 3);
+  EXPECT_TRUE(systematics.find("syst1") != systematics.end());
+  EXPECT_TRUE(systematics.find("syst2") != systematics.end());
+  EXPECT_TRUE(systematics.find("syst3") != systematics.end());
+
+  // Each systematic should affect its corresponding variable
+  const auto &varsForSyst1 =
+      systematicManager->getVariablesForSystematic("syst1");
+  EXPECT_EQ(varsForSyst1.size(), 1);
+  EXPECT_TRUE(varsForSyst1.find("var1") != varsForSyst1.end());
+
+  const auto &varsForSyst2 =
+      systematicManager->getVariablesForSystematic("syst2");
+  EXPECT_EQ(varsForSyst2.size(), 1);
+  EXPECT_TRUE(varsForSyst2.find("var2") != varsForSyst2.end());
+
+  const auto &varsForSyst3 =
+      systematicManager->getVariablesForSystematic("syst3");
+  EXPECT_EQ(varsForSyst3.size(), 1);
+  EXPECT_TRUE(varsForSyst3.find("var3") != varsForSyst3.end());
+}
+
+TEST_F(SystematicManagerTest, RegisterExistingSystematicsWithEmptyConfig) {
+  std::vector<std::string> emptySystConfig;
+  std::vector<std::string> columnList = {"var1", "var2"};
+
+  systematicManager->registerExistingSystematics(emptySystConfig, columnList);
+
+  const auto &systematics = systematicManager->getSystematics();
+  EXPECT_TRUE(systematics.empty());
+}
+
+TEST_F(SystematicManagerTest, RegisterExistingSystematicsWithEmptyColumns) {
+  std::vector<std::string> systConfig = {"syst1", "syst2"};
+  std::vector<std::string> emptyColumnList;
+
+  systematicManager->registerExistingSystematics(systConfig, emptyColumnList);
+
+  const auto &systematics = systematicManager->getSystematics();
+  EXPECT_EQ(systematics.size(), 0); // No variables match the pattern
+}
+
+TEST_F(SystematicManagerTest, ComplexSystematicRelationships) {
+  // Create a complex scenario with overlapping systematics
+  std::set<std::string> vars1 = {"var1", "var2", "var3"};
+  std::set<std::string> vars2 = {"var2", "var4"};
+  std::set<std::string> vars3 = {"var1", "var5"};
+  std::set<std::string> vars4 = {"var3", "var4", "var5"};
+
+  systematicManager->registerSystematic("syst1", vars1);
+  systematicManager->registerSystematic("syst2", vars2);
+  systematicManager->registerSystematic("syst3", vars3);
+  systematicManager->registerSystematic("syst4", vars4);
+
+  // Test all systematics
+  const auto &systematics = systematicManager->getSystematics();
+  EXPECT_EQ(systematics.size(), 4);
+
+  // Test variable relationships
+  const auto &systForVar1 =
+      systematicManager->getSystematicsForVariable("var1");
+  EXPECT_EQ(systForVar1.size(), 2);
+  EXPECT_TRUE(systForVar1.find("syst1") != systForVar1.end());
+  EXPECT_TRUE(systForVar1.find("syst3") != systForVar1.end());
+
+  const auto &systForVar2 =
+      systematicManager->getSystematicsForVariable("var2");
+  EXPECT_EQ(systForVar2.size(), 2);
+  EXPECT_TRUE(systForVar2.find("syst1") != systForVar2.end());
+  EXPECT_TRUE(systForVar2.find("syst2") != systForVar2.end());
+
+  const auto &systForVar3 =
+      systematicManager->getSystematicsForVariable("var3");
+  EXPECT_EQ(systForVar3.size(), 2);
+  EXPECT_TRUE(systForVar3.find("syst1") != systForVar3.end());
+  EXPECT_TRUE(systForVar3.find("syst4") != systForVar3.end());
+
+  const auto &systForVar4 =
+      systematicManager->getSystematicsForVariable("var4");
+  EXPECT_EQ(systForVar4.size(), 2);
+  EXPECT_TRUE(systForVar4.find("syst2") != systForVar4.end());
+  EXPECT_TRUE(systForVar4.find("syst4") != systForVar4.end());
+
+  const auto &systForVar5 =
+      systematicManager->getSystematicsForVariable("var5");
+  EXPECT_EQ(systForVar5.size(), 2);
+  EXPECT_TRUE(systForVar5.find("syst3") != systForVar5.end());
+  EXPECT_TRUE(systForVar5.find("syst4") != systForVar5.end());
+}
+
+TEST_F(SystematicManagerTest, OverwriteSystematic) {
+  std::set<std::string> vars1 = {"var1", "var2"};
+  std::set<std::string> vars2 = {"var3", "var4"};
+
+  systematicManager->registerSystematic("test_syst", vars1);
+  systematicManager->registerSystematic("test_syst", vars2); // Overwrite
+
+  const auto &systematics = systematicManager->getSystematics();
+  EXPECT_EQ(systematics.size(), 1);
+
+  const auto &varsForSyst =
+      systematicManager->getVariablesForSystematic("test_syst");
+  EXPECT_EQ(varsForSyst.size(), 4); // Both sets are added, not overwritten
+  EXPECT_TRUE(varsForSyst.find("var1") != varsForSyst.end());
+  EXPECT_TRUE(varsForSyst.find("var2") != varsForSyst.end());
+  EXPECT_TRUE(varsForSyst.find("var3") != varsForSyst.end());
+  EXPECT_TRUE(varsForSyst.find("var4") != varsForSyst.end());
+}
+
+TEST_F(SystematicManagerTest, IsVariableAffectedBySystematic) {
+  std::set<std::string> affectedVars = {"var1", "var2"};
+  systematicManager->registerSystematic("syst1", affectedVars);
+  systematicManager->registerSystematic("syst2", {"var3"});
+
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("var1", "syst1"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("var2", "syst1"));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic("var3", "syst1"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("var3", "syst2"));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic("var1", "syst2"));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic("var1", "nonexistent"));
+}
+
+TEST_F(SystematicManagerTest, GetVariationColumnName) {
+  systematicManager->registerSystematic("jes", {"pt", "mass"});
+
+  // Affected variable: returns variable + "_" + syst
+  EXPECT_EQ(systematicManager->getVariationColumnName("pt", "jes"), "pt_jes");
+  EXPECT_EQ(systematicManager->getVariationColumnName("mass", "jes"), "mass_jes");
+
+  // Unaffected variable: returns variable unchanged
+  EXPECT_EQ(systematicManager->getVariationColumnName("eta", "jes"), "eta");
+
+  // Unknown systematic: returns variable unchanged
+  EXPECT_EQ(systematicManager->getVariationColumnName("pt", "unknown"), "pt");
+}
+
+TEST_F(SystematicManagerTest, RegisterVariationColumnsSupportsDirectionalLookups) {
+  systematicManager->registerVariationColumns(
+      "Jet_pt_corr_nominal", "jes_total", "Jet_pt_jes_total_up",
+      "Jet_pt_jes_total_down");
+
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic(
+      "Jet_pt_corr_nominal", "jes_total"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic(
+      "Jet_pt_corr_nominal", "jes_totalUp"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic(
+      "Jet_pt_corr_nominal", "jes_totalDown"));
+  EXPECT_EQ(systematicManager->getVariationColumnName(
+                "Jet_pt_corr_nominal", "jes_totalUp"),
+            "Jet_pt_jes_total_up");
+  EXPECT_EQ(systematicManager->getVariationColumnName(
+                "Jet_pt_corr_nominal", "jes_totalDown"),
+            "Jet_pt_jes_total_down");
+}
+
+TEST_F(SystematicManagerTest, IsBranchNameMaterializedFalseInitially) {
+  // No branchName should be materialized before any makeSystList call
+  EXPECT_FALSE(systematicManager->isBranchNameMaterialized("SystematicCounter"));
+  EXPECT_FALSE(systematicManager->isBranchNameMaterialized("AnyName"));
+  EXPECT_FALSE(systematicManager->isBranchNameMaterialized(""));
+}
+
+TEST_F(SystematicManagerTest, CanonicalBranchNameConstant) {
+  // The canonical branch name must match the value used by NDHistogramManager
+  EXPECT_STREQ(ISystematicManager::CANONICAL_SYST_BRANCH_NAME, "SystematicCounter");
+}
+
+// ---------------------------------------------------------------------------
+// autoRegisterSystematics tests
+// ---------------------------------------------------------------------------
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_EmptyColumns) {
+  const auto result = systematicManager->autoRegisterSystematics({});
+  EXPECT_TRUE(result.registered.empty());
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_NoVariationColumns) {
+  // Columns that don't follow the baseVar_systUp/Down pattern
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "eta", "phi", "mass", "weight"});
+  EXPECT_TRUE(result.registered.empty());
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_SingleCompletePair) {
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "pt_jesUp", "pt_jesDown"});
+
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first,  "pt");
+  EXPECT_EQ(result.registered[0].second, "jes");
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+
+  // Systematic should now be registered
+  const auto& systs = systematicManager->getSystematics();
+  ASSERT_EQ(systs.size(), 1u);
+  EXPECT_NE(systs.find("jes"), systs.end());
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("pt", "jes"));
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_MultipleCompletePairs) {
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "pt_jesUp", "pt_jesDown",
+       "eta",
+       "energy", "energy_jerUp", "energy_jerDown",
+       "energy_jesUp", "energy_jesDown"});
+
+  ASSERT_EQ(result.registered.size(), 3u);
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+
+  const auto& systs = systematicManager->getSystematics();
+  EXPECT_NE(systs.find("jes"), systs.end());
+  EXPECT_NE(systs.find("jer"), systs.end());
+
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("pt",     "jes"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("energy", "jer"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("energy", "jes"));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic("pt",    "jer"));
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_MissingDown) {
+  std::vector<std::string> missingDownCols{"pt", "pt_jesUp"};  // no pt_jesDown
+  const auto result = systematicManager->autoRegisterSystematics(missingDownCols);
+
+  EXPECT_TRUE(result.registered.empty());
+  ASSERT_EQ(result.missingDown.size(), 1u);
+  EXPECT_EQ(result.missingDown[0], "pt_jesUp");
+  EXPECT_TRUE(result.missingUp.empty());
+
+  // Should NOT be registered (incomplete pair)
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_MissingUp) {
+  std::vector<std::string> missingUpCols{"pt", "pt_jesDown"};  // no pt_jesUp
+  const auto result = systematicManager->autoRegisterSystematics(missingUpCols);
+
+  EXPECT_TRUE(result.registered.empty());
+  EXPECT_TRUE(result.missingDown.empty());
+  ASSERT_EQ(result.missingUp.size(), 1u);
+  EXPECT_EQ(result.missingUp[0], "pt_jesDown");
+
+  // Should NOT be registered
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_MixedCompleteAndIncomplete) {
+  // construct the vector separately to avoid a gcc ICE with a large
+  // braced initializer passed directly to the function call.
+  std::vector<std::string> mixedCols{
+      "pt", "pt_jesUp", "pt_jesDown",   // complete
+      "energy", "energy_jerUp",          // missing Down
+      "mass", "mass_scalDown"};          // missing Up
+  const auto result = systematicManager->autoRegisterSystematics(mixedCols);
+
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first,  "pt");
+  EXPECT_EQ(result.registered[0].second, "jes");
+
+  ASSERT_EQ(result.missingDown.size(), 1u);
+  EXPECT_EQ(result.missingDown[0], "energy_jerUp");
+
+  ASSERT_EQ(result.missingUp.size(), 1u);
+  EXPECT_EQ(result.missingUp[0], "mass_scalDown");
+
+  // Only the complete pair is registered
+  const auto& systs = systematicManager->getSystematics();
+  ASSERT_EQ(systs.size(), 1u);
+  EXPECT_NE(systs.find("jes"), systs.end());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_CompoundVariableName) {
+  // Variable names containing underscores
+  std::vector<std::string> compoundCols{
+      "my_var_name", "my_var_name_jesUp", "my_var_name_jesDown"};
+  const auto result = systematicManager->autoRegisterSystematics(compoundCols);
+
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first,  "my_var_name");
+  EXPECT_EQ(result.registered[0].second, "jes");
+  EXPECT_TRUE(result.missingDown.empty());
+  EXPECT_TRUE(result.missingUp.empty());
+
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("my_var_name", "jes"));
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_Idempotent) {
+  // Calling auto-register twice should not create duplicate registrations.
+  const std::vector<std::string> cols = {"pt", "pt_jesUp", "pt_jesDown"};
+  systematicManager->autoRegisterSystematics(cols);
+  systematicManager->autoRegisterSystematics(cols);
+
+  ASSERT_EQ(systematicManager->getSystematics().size(), 1u);
+  const auto& vars = systematicManager->getVariablesForSystematic("jes");
+  ASSERT_EQ(vars.size(), 1u);
+  EXPECT_NE(vars.find("pt"), vars.end());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_DoesNotAffectManualRegistrations) {
+  // Pre-register a different systematic manually
+  systematicManager->registerSystematic("btag", {"weight"});
+
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"pt", "pt_jesUp", "pt_jesDown"});
+
+  ASSERT_EQ(result.registered.size(), 1u);
+
+  // Both the manual and auto-detected systematics should be present
+  const auto& systs = systematicManager->getSystematics();
+  ASSERT_EQ(systs.size(), 2u);
+  EXPECT_NE(systs.find("btag"), systs.end());
+  EXPECT_NE(systs.find("jes"),  systs.end());
+}
+
+int main(int argc, char **argv) {
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}

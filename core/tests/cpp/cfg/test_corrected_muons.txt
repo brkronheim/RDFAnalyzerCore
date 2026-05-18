@@ -1,0 +1,7 @@
+ptColumn=Muon_pt
+etaColumn=Muon_eta
+phiColumn=Muon_phi
+massColumn=Muon_mass
+correctedPtColumn=Muon_pt_corr_nominal
+outputCollection=CorrectedMuons
+variationMapColumn=CorrectedMuons_variations

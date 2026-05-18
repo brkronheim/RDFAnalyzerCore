@@ -1,9 +1,9 @@
 # LAW Task System Reference
 
-> **Quick start**: See [`law/README.md`](../law/README.md) for environment setup
+> **Quick start**: See [`core/python/law/README.md`](../core/python/law/README.md) for environment setup
 > and an introduction to the broader batch-submission workflows.  This document
 > is a detailed reference for the analysis-specific tasks defined in
-> [`law/analysis_tasks.py`](../law/analysis_tasks.py) and their supporting modules.
+> [`core/python/law/analysis_tasks.py`](../core/python/law/analysis_tasks.py) and their supporting modules.
 
 ---
 
@@ -19,6 +19,7 @@
 8. [Failure Handling](#8-failure-handling)
 9. [Performance Recording](#9-performance-recording)
 10. [Complete Workflow Example](#10-complete-workflow-example)
+11. [FullAnalysisDAG](#11-fullanalysisdag)
 
 ---
 
@@ -35,15 +36,28 @@ YAML manifest:
 | Skim pass | `SkimTask` | Run exe per dataset to produce skimmed ROOT files |
 | Histogram fill | `HistFillTask` | Fill histograms, optionally reading skim outputs |
 | Stitching weights | `StitchingDerivationTask` | Derive MC stitching scale factors |
-| File discovery | `GetXRDFSFileList` | Discover ROOT files via xrdfs ls (parallel BFS) |
-| File discovery | `GetNANOFileList` | Query Rucio for NanoAOD file lists (parallel) |
-| File discovery | `GetOpenDataFileList` | Fetch file lists from CERN Open Data Portal |
+| File discovery | `GetXRDFSFileList` | Discover ROOT files via xrdfs ls (parallel BFS); auto-chained from `SkimTask` with `--file-source xrdfs` |
+| File discovery | `GetRucioFileList` | Query Rucio for NanoAOD file lists (parallel); auto-chained from `SkimTask` with `--file-source rucio` |
+| File discovery | `GetRucioFileList` | Generic Rucio file-discovery task |
+| File discovery | `GetOpenDataFileList` | Fetch file lists from CERN Open Data Portal; auto-chained from `SkimTask` with `--file-source opendata` |
+| Merge skim outputs | `MergeSkims` | hadd per-job skim ROOT files into merged skim outputs |
+| Merge histograms | `MergeHistograms` | hadd per-job histogram ROOT files into merged histograms |
+| Merge cutflows | `MergeCutflows` | hadd per-job cutflow ROOT files into merged cutflow outputs |
+| Merge metadata | `MergeMetadata` | write a merged provenance manifest without ROOT merging |
+| Merge orchestration | `MergeAll` | orchestrate all applicable merge sub-tasks for a run |
+| Single plot | `MakePlot` | create one ROOT stack plot from a meta ROOT file |
+| Batch plots | `MakePlots` | create multiple plots from a JSON plot-config file |
+| Manifest-aware plotting | `ManifestPlotTask` | create plots from a merged manifest and histogram ROOT file |
+| Datacard generation | `CreateDatacard` | generate CMS Combine datacards and shape files from ROOT inputs |
+| Combine fitting | `RunCombine` | run CMS Combine on generated datacards |
+| Manifest-aware datacards | `ManifestDatacardTask` | generate datacards from a merged `OutputManifest` with coverage validation |
+| Manifest-aware fits | `ManifestFitTask` | run Combine or lightweight analysis fits on manifest datacards |
 
-All analysis tasks live in `law/analysis_tasks.py` and are invoked with the
-standard LAW command:
+Most analysis tasks live in `core/python/law/analysis_tasks.py`; merge tasks live in `core/python/law/merge_tasks.py`.
+They are invoked with the standard LAW command:
 
 ```bash
-source law/env.sh
+source core/python/law/env.sh
 law run <TaskName> [parameters]
 ```
 
@@ -67,10 +81,27 @@ Supporting modules:
 
 | Module | Purpose |
 |--------|---------|
-| `law/branch_map_policy.py` | Multi-dimensional branch map generation |
-| `law/workflow_executors.py` | Dask distributed execution back-end |
-| `law/failure_handler.py` | Smart retry logic with failure classification |
-| `law/performance_recorder.py` | Wall-time, RSS and throughput metrics |
+| `core/python/law/branch_map_policy.py` | Multi-dimensional branch map generation |
+| `core/python/law/workflow_executors.py` | Dask distributed execution back-end |
+| `core/python/law/failure_handler.py` | Smart retry logic with failure classification |
+| `core/python/law/performance_recorder.py` | Wall-time, RSS and throughput metrics |
+
+---
+
+## 11. FullAnalysisDAG
+
+`FullAnalysisDAG` is defined in `core/python/law/dag_tasks.py` and wires the complete
+analysis pipeline as a single LAW task. It forwards `--file-source` to
+`SkimTask`, which automatically chains the corresponding file-list task for
+`xrdfs`, `rucio`, and `opendata`.
+
+When `--manifest-path` is provided together with `--skip-merge`, the DAG
+bypasses skim/histfill/merge and consumes a pre-existing merged
+`output_manifest.yaml` directly for datacard, plot, and fit stages.
+
+`FullAnalysisDAG` also forwards `merge_input_dir` to downstream manifest-aware
+tasks so that `MergeAll` is required automatically when the pipeline is run
+end-to-end.
 
 ---
 
@@ -137,7 +168,7 @@ Logging verbosity.  Valid values: `"debug"`, `"info"`, `"warning"`, `"error"`.
 ## 3. SkimTask
 
 ```python
-class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow)
+class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow, DaskWorkflow)
 ```
 
 ### Purpose
@@ -173,7 +204,7 @@ File-list source controlling where input files are discovered.  Valid values:
 |-------|--------|-----------------------|
 | `""` (default) | Dataset manifest `files` / `das` fields | None |
 | `xrdfs` | `GetXRDFSFileList` output (auto-chained) | `--file-source-name` |
-| `nano` | `GetNANOFileList` output (run manually) | `--file-source-name` |
+| `rucio` | `GetRucioFileList` output (run manually) | `--file-source-name` |
 | `opendata` | `GetOpenDataFileList` output (run manually) | `--file-source-name` |
 
 When `--file-source xrdfs` is set, `PrepareSkimJobs.requires()` automatically
@@ -254,13 +285,26 @@ law run SkimTask \
     --file-source xrdfs \
     --file-source-name myFiles
 
+# Manual Rucio discovery followed by SkimTask
+law run GetRucioFileList \
+    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --name myRun --x509 /tmp/x509 \
+    --exe build/analyses/myAnalysis/myanalysis
+
+law run SkimTask \
+    --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+    --exe build/analyses/myAnalysis/myanalysis \
+    --name mySkimRun \
+    --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
+    --file-source rucio --file-source-name myRun
+
 # Same task, different executor: delegate to concrete per-dataset HTCondor submission
 law run SkimTask \
         --submit-config analyses/myAnalysis/cfg/skim_config.txt \
         --exe build/analyses/myAnalysis/myanalysis \
         --name mySkimRun \
         --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-        --file-source nano \
+    --file-source rucio \
         --workflow htcondor
 ```
 
@@ -510,7 +554,7 @@ law run StitchingDerivationTask \
 
 ## 6. BranchMapPolicy
 
-Source: `law/branch_map_policy.py`
+Source: `core/python/law/branch_map_policy.py`
 
 The branch map system allows analysis tasks to branch over multiple dimensions
 of the analysis parameter space.  By default tasks create one branch per
@@ -645,7 +689,7 @@ The three dimensions multiply.  Use `max_branches` as a safety cap.
 
 ## 7. Dask Executor
 
-Source: `law/workflow_executors.py`
+Source: `core/python/law/workflow_executors.py`
 
 ### Overview
 
@@ -736,7 +780,7 @@ class MyTask(MyMixin, DaskWorkflow):
 
 ## 8. Failure Handling
 
-Source: `law/failure_handler.py`
+Source: `core/python/law/failure_handler.py`
 
 The failure handler module provides smart retry logic that classifies each
 exception into a category and applies a per-category retry policy with
@@ -865,7 +909,7 @@ Key methods:
 
 ## 9. Performance Recording
 
-Source: `law/performance_recorder.py`
+Source: `core/python/law/performance_recorder.py`
 
 ### `PerformanceRecorder` Context Manager
 
@@ -973,8 +1017,7 @@ build/
 ### Step 1 — Environment setup
 
 ```bash
-cd /path/to/RDFAnalyzerCore
-source law/env.sh
+source core/python/law/env.sh
 ```
 
 ### Step 2 — Run skim pass

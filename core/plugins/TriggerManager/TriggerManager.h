@@ -16,7 +16,7 @@ class Analyzer;
  *
  * This manager encapsulates the logic for managing trigger groups and vetoes,
  * including loading from configuration, storing, and providing access to them.
- * Implements the ITriggerManager interface for dependency injection.
+ * It is registered through the pluggable-manager API used by Analyzer.
  */
 class TriggerManager : public NamedObjectManager<std::vector<std::string>> {
 public:

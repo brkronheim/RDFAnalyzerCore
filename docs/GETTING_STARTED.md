@@ -4,12 +4,16 @@ This guide will help you get up and running with RDFAnalyzerCore quickly — fro
 
 ## Prerequisites
 
-- ROOT 6.30/02 or later (progress bar support was added around 6.28)
+- ROOT 6.30/02 or later (progress bar support requires 6.30+)
 - CMake 3.19.0 or later
 - C++17 compatible compiler
 - Git
 
 ## Quick Start
+
+
+> **Important:** ROOT is a C++ framework and is **not** installed via `pip install ROOT`.
+> Use `source env.sh` (CVMFS environments) or source an existing ROOT installation with `source <root-install>/bin/thisroot.sh`.
 
 ### 1. Clone the Repository
 
@@ -20,14 +24,14 @@ cd RDFAnalyzerCore
 
 ### 2. Set Up Environment
 
-On lxplus (CERN computing):
+On a CVMFS-backed HEP host such as lxplus, cmsconnect, or a site-managed analysis node:
 ```bash
 source env.sh
 ```
 
 This script sets up ROOT and other required dependencies from CVMFS.
 
-For local installations, ensure ROOT is available in your PATH and environment.
+If you are using a standalone ROOT installation instead, source that environment before building.
 
 ### 3. Build the Framework
 
@@ -40,9 +44,15 @@ This will:
 - Download ONNX Runtime automatically
 - Build the core framework
 - Discover and build any analyses in the `analyses/` directory
-- Run tests to verify the installation
 
 The build artifacts will be placed in the `build/` directory.
+
+To verify your build, run:
+
+```bash
+cd build
+ctest --output-on-failure
+```
 
 ### 4. Run the Example Analysis
 
@@ -275,7 +285,6 @@ int main(int argc, char **argv) {
 From the repository root, run a full build. CMake will automatically discover your new analysis directory:
 
 ```bash
-cd /path/to/RDFAnalyzerCore
 source build.sh
 ```
 
@@ -405,13 +414,13 @@ datasets:
 
 ## Running with Batch Processing
 
-Once your analysis works locally, scale it up to many datasets using the LAW workflow manager included in the `law/` directory.
+Once your analysis works locally, scale it up to many datasets using the LAW workflow manager included in `core/python/law/`.
 
 ### Quick Batch Submission with `SkimTask`
 
 1. **Source the LAW environment**
    ```bash
-   source law/env.sh
+   source core/python/law/env.sh
    ```
 
 2. **Index available tasks**
@@ -425,7 +434,7 @@ Once your analysis works locally, scale it up to many datasets using the LAW wor
      --exe ./build/analyses/MyFirstAnalysis/myAnalysis \
      --name myRun \
      --dataset-manifest analyses/MyFirstAnalysis/datasets.yaml \
-         --submit-config law/submit_config.txt \
+         --submit-config core/python/law/submit_config.txt \
          --workflow htcondor
    ```
 
@@ -457,7 +466,9 @@ RDFAnalyzerCore/
 │   └── analyses/
 │       └── MyFirstAnalysis/
 │           └── myAnalysis   ← your compiled executable
-├── law/                 # LAW batch-processing workflow
+├── core/
+│   ├── python/
+│   │   └── law/         # LAW batch-processing workflow
 ├── docs/                # Documentation
 ├── cmake/               # CMake helper modules
 └── README.md            # Main technical documentation
@@ -471,9 +482,9 @@ RDFAnalyzerCore/
 
 Ensure ROOT is properly sourced before building:
 ```bash
-source env.sh                          # On lxplus / CVMFS
+source env.sh                          # CVMFS-backed environment
 # OR
-source /path/to/root/bin/thisroot.sh   # Local installation
+source <root-install>/bin/thisroot.sh  # Standalone ROOT installation
 ```
 
 ### ONNX Runtime Download Fails
@@ -516,6 +527,322 @@ ctest -R TestName -V   # -V for verbose output
 
 ---
 
+## Applying Systematics to Physics Object Collections
+
+One of the most powerful features of RDFAnalyzerCore is how easily it supports
+applying systematic variations directly to **physics object collections** (jets,
+electrons, muons, taus, …). This is particularly streamlined for CMS-style
+corrections using correctionlib payloads.
+
+### Manual Kinematic Corrections
+
+`PhysicsObjectCollection` provides first-class support for corrected kinematics.
+Once you have a collection, you can produce a corrected version in one call:
+
+```cpp
+#include <PhysicsObjectCollection.h>
+
+// Build a jet collection
+analyzer.Define("goodJets",
+    [](const RVec<float>& pt, const RVec<float>& eta,
+       const RVec<float>& phi, const RVec<float>& mass) {
+        return PhysicsObjectCollection(pt, eta, phi, mass,
+                                       (pt > 25.f) && (abs(eta) < 2.4f));
+    },
+    {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
+);
+
+// Apply a corrected-pT column to the collection — produces a new collection
+// with updated 4-vectors and the same object selection.
+analyzer.Define("goodJets_corrected",
+    [](const PhysicsObjectCollection& jets,
+       const RVec<float>& corrected_pt) {
+        return jets.withCorrectedPt(corrected_pt);
+    },
+    {"goodJets", "Jet_pt_corrected"}
+);
+```
+
+`withCorrectedKinematics(pt, eta, phi, mass)` is available when all four
+4-vector components are corrected (e.g. JES corrections with mass rescaling).
+
+### CMS-Style Corrections with JetEnergyScaleManager
+
+For CMS NanoAOD analyses, the **`JetEnergyScaleManager`** plugin handles the
+full JES/JER workflow — including stripping the embedded NanoAOD JEC,
+applying a new correctionlib-based JEC, propagating uncertainties, building
+corrected `PhysicsObjectCollection` outputs, and performing Type-1 MET
+propagation — with just a handful of API calls:
+
+```cpp
+#include <JetEnergyScaleManager.h>
+#include <PhysicsObjectCollection.h>
+
+auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+
+// 1. Declare which branches hold jet/MET kinematics.
+jes->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");;
+jes->setMETColumns("MET_pt", "MET_phi");
+
+// 2. Build a selected jet collection (any selection criteria you like).
+analyzer.Define("goodJets",
+    [](const RVec<float>& pt, const RVec<float>& eta,
+       const RVec<float>& phi, const RVec<float>& mass) {
+        return PhysicsObjectCollection(pt, eta, phi, mass,
+                                       (pt > 25.f) && (abs(eta) < 2.4f));
+    },
+    {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass"}
+);
+
+// 3. Strip the NanoAOD JEC (applies Jet_rawFactor) to get raw pT.
+jes->removeExistingCorrections("Jet_rawFactor");
+
+// 4. Evaluate the nominal compound JEC from the correctionlib payload.
+//    Mixed per-jet (RVec) and per-event (scalar rho) inputs are handled automatically.
+cm->registerCorrection(
+    "jec_nominal",
+    "jet_jerc.json.gz",
+    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
+    {"Jet_area", "Jet_eta", "Jet_pt_raw", "Rho_fixedGridRhoFastjetAll"});
+cm->applyCorrectionVec("jec_nominal", {}, {}, "Jet_jec_sf_nominal");
+jes->applyCorrection("Jet_pt_raw", "Jet_jec_sf_nominal", "Jet_pt_jec");
+
+// 5. Register CMS JES systematic sources and apply them in one call.
+//    Each source automatically produces _up and _down variation columns.
+jes->registerSystematicSources("reduced", {"Total"});
+jes->applySystematicSet(*cm, "jes_unc", "reduced",
+                        "Jet_pt_jec", "Jet_pt_jes");
+
+// 6. Propagate JEC and JES variations to MET (Type-1 correction).
+jes->propagateMET("MET_pt", "MET_phi",
+                  "Jet_pt_raw", "Jet_pt_jec",
+                  "MET_pt_jec", "MET_phi_jec");
+
+// 7. Produce corrected PhysicsObjectCollection columns for nominal + all
+//    systematic variations, and bundle them into a variation map.
+jes->setInputJetCollection("goodJets");
+jes->defineCollectionOutput("Jet_pt_jec", "goodJets_jec");
+jes->defineVariationCollections("goodJets_jec", "goodJets",
+                                "goodJets_variations");
+```
+
+After `analyzer.save()` this creates:
+
+| Column | Description |
+|--------|-------------|
+| `goodJets_jec` | `PhysicsObjectCollection` — nominal JEC-corrected jets |
+| `goodJets_TotalUp` | `PhysicsObjectCollection` — JES Total up variation |
+| `goodJets_TotalDown` | `PhysicsObjectCollection` — JES Total down variation |
+| `goodJets_variations` | `PhysicsObjectVariationMap` — all of the above keyed by name |
+
+### Automatic Systematic Propagation
+
+Because `JetEnergyScaleManager` registers the nominal collection name with
+`SystematicManager`, any **downstream** `Define(...)` call that consumes the
+nominal collection is **automatically expanded** into up/down variants:
+
+```cpp
+// Defined once — the framework automatically creates:
+//   selectedJetPts             (nominal)
+//   selectedJetPts_TotalUp     (JES up)
+//   selectedJetPts_TotalDown   (JES down)
+analyzer.Define("selectedJetPts",
+    [](const PhysicsObjectCollection& jets) {
+        RVec<float> pts;
+        for (std::size_t i = 0; i < jets.size(); ++i)
+            pts.push_back(static_cast<float>(jets.at(i).Pt()));
+        return pts;
+    },
+    {"goodJets"}, *sysMgr   // ← passing sysMgr enables automatic propagation
+);
+```
+
+No manual duplication of your physics logic for each systematic — the
+framework handles it.
+
+### Using the Full CMS JES Source Set
+
+For a complete set of CMS Run 3 JES uncertainty sources, expand the
+registration call:
+
+```cpp
+jes->registerSystematicSources("full", {
+    "AbsoluteCal", "AbsoluteScale", "AbsoluteMPFBias",
+    "FlavorQCD", "Fragmentation", "PileUpDataMC",
+    "PileUpPtRef", "RelativeFSR", "RelativeJEREC1",
+    "RelativeJEREC2", "RelativeJERHF",
+    "RelativePtBB", "RelativePtEC1", "RelativePtEC2",
+    "RelativePtHF", "RelativeBal", "RelativeSample"
+});
+jes->applySystematicSet(*cm, "jes_unc", "full", "Jet_pt_jec", "Jet_pt_jes");
+// Creates 34 variation columns and registers 17 systematic families in one call.
+```
+
+---
+
+## Working-Point Tagger Corrections with TaggerWorkingPointManager
+
+For CMS analyses that apply b-tagging or other tagger-based selections (e.g.
+with DeepJet, RobustParTAK4, ParticleNet, or DeepTau), the
+**`TaggerWorkingPointManager`** plugin handles the full working-point (WP)
+workflow for **any physics object** — registering WP thresholds, computing
+per-object WP categories, applying correctionlib-based scale factors, and
+producing WP-filtered `PhysicsObjectCollection` outputs — with full systematic
+variation support.
+
+For CMS BTV **fixed working point** weights, the recommended event-weight
+formula is category-dependent and uses analyzer-derived MC efficiencies. Use
+`defineFixedWorkingPointWeight()` for that workflow rather than treating the
+fixed-WP SFs as a plain product of per-object weights.
+
+### Defining Working Points and Applying Scale Factors
+
+```cpp
+#include <TaggerWorkingPointManager.h>
+
+auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
+auto cm  = analyzer.getPlugin<CorrectionManager>("corrections");
+
+// 1. Declare object kinematic columns (jets, taus, or fat-jets).
+twm->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+
+// 2. Set the tagger discriminator score column.
+twm->setTaggerColumn("Jet_btagDeepFlavB");
+
+// 3. Register working points in ascending threshold order.
+twm->addWorkingPoint("loose",  0.0521f);
+twm->addWorkingPoint("medium", 0.3033f);
+twm->addWorkingPoint("tight",  0.7489f);
+
+// 4. Declare the input PhysicsObjectCollection.
+twm->setInputObjectCollection("goodJets");
+
+// 5. Apply nominal SF from a correctionlib payload.
+twm->applyCorrectionlib(*cm, "deepjet_sf", {"central"},
+                        {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
+                         "Jet_btagDeepFlavB"});
+// → creates per-event weight column "deepjet_sf_central_weight"
+
+// 6. Register and apply CMS b-tag systematic sources.
+twm->registerSystematicSources("standard",
+    {"hf", "lf", "hfstats1", "hfstats2", "lfstats1", "lfstats2",
+     "cferr1", "cferr2"});
+twm->applySystematicSet(*cm, "deepjet_sf", "standard",
+                        {"Jet_hadronFlavour", "Jet_eta", "Jet_pt",
+                         "Jet_btagDeepFlavB"});
+// → creates "deepjet_sf_hf_up_weight", "deepjet_sf_hf_down_weight", …
+```
+
+For BTV fixed-WP corrections, first merge the appropriate flavour-family SF
+payloads (for example `<tagger>_comb` plus `<tagger>_light` for b-tagging),
+then build the event weight with:
+
+```cpp
+twm->defineFixedWorkingPointWeight(
+    {"btag_sf_L_central", "btag_sf_M_central", "btag_sf_T_central"},
+    {"btag_eff_L", "btag_eff_M", "btag_eff_T"},
+    "btag_weight_nominal");
+```
+
+The efficiency columns are analyzer-derived MC tagging efficiencies and are not
+shipped by the CMS BTV payloads.
+
+### WP-Based Collection Selections
+
+The manager supports expressive selection strings for filtering object collections:
+
+```cpp
+// Jets passing the medium WP (score ≥ 0.3033).
+twm->defineWorkingPointCollection("pass_medium", "goodJets_bmedium");
+
+// Jets failing the loose WP (score < 0.0521) — b-tag control region.
+twm->defineWorkingPointCollection("fail_loose", "goodJets_bfail");
+
+// Jets passing loose but failing medium (i.e. between the two WPs).
+twm->defineWorkingPointCollection("pass_loose_fail_medium", "goodJets_bL_notM");
+
+// Jets passing the tight WP.
+twm->defineWorkingPointCollection("pass_tight", "goodJets_btight");
+```
+
+The per-object WP category column (`<ptCol>_wp_category`, e.g. `Jet_pt_wp_category`) is also
+available for direct use in downstream selections:
+
+| category | meaning for [loose, medium, tight] WPs     |
+|----------|--------------------------------------------|
+| 0        | score < loose threshold (fail all)         |
+| 1        | loose ≤ score < medium                     |
+| 2        | medium ≤ score < tight                     |
+| 3        | score ≥ tight (pass all)                   |
+
+### Systematic Variation Collections
+
+After defining WP-filtered collections, build systematic variation collections
+and a variation map for downstream propagation:
+
+```cpp
+twm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
+                                 "goodJets_btag_variations");
+// Creates:
+//   goodJets_btag_hfUp, goodJets_btag_hfDown     (per-variation collections)
+//   goodJets_btag_variations  (PhysicsObjectVariationMap)
+```
+
+Because tagger corrections modify only the **event weight** (not object
+kinematics), all variation collections contain the same objects as the nominal.
+The weight difference is tracked via the separate weight columns.
+
+### Generator-Level Fraction Reweighting
+
+This is an optional analyzer-specific utility. It is not the CMS BTV
+recommended fixed-WP event-weight method.
+
+For the most accurate results, use a correctionlib payload encoding the
+generator-level MC fractions of objects in each WP category at given (pT, η):
+
+```cpp
+// Register the fraction correctionlib.
+cm->registerCorrection("deepjet_frac", "deepjet_fractions.json",
+                        "DeepJetFractions",
+                        {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
+// Enable fraction-weighted SFs (must be called before applyCorrectionlib).
+twm->setFractionCorrection(*cm, "deepjet_frac",
+                           {"Jet_pt", "Jet_eta", "Jet_pt_wp_category"});
+```
+
+This ensures the per-event weights properly reflect the generator-level object
+distributions when making WP-based selections.
+
+### Pre-Processing: Computing Fraction Distributions
+
+The fraction correctionlib payload is computed in a **dedicated pre-processing
+run** using `defineFractionHistograms()`:
+
+```cpp
+// In a dedicated fraction_calc analysis (run before the main analysis):
+twm->defineFractionHistograms(
+    "deepjet_frac",                             // output prefix
+    {20.f, 30.f, 50.f, 100.f, 200.f, 500.f},  // pT bin edges [GeV]
+    {0.f, 1.5f, 2.4f},                          // |η| bin edges
+    "Jet_hadronFlavour");                        // flavour-separated histograms
+```
+
+This books per-(pT, η, flavour) tagger-score histograms in the metadata ROOT
+file under `tagger_fractions/`.  The fraction of objects in each WP category can
+then be read from these histograms and stored in a correctionlib JSON for use
+in the main analysis.
+
+### Further Reading
+
+- **Complete JES/JER reference**: [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md)
+- **Tagger WP corrections reference**: [TAGGER_WORKING_POINTS.md](TAGGER_WORKING_POINTS.md)
+- **CMS correction stack**: [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
+- **All PhysicsObjectCollection APIs**: [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
+- **Analysis guide (JES/JER workflow, electron/muon corrections)**: [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
+
+---
+
 ## Getting Help
 
 - **Documentation**: See the `docs/` directory for detailed guides
@@ -534,10 +861,11 @@ Now that your first analysis is running, explore the full power of the framework
 3. **Architecture overview**: How the framework is structured in [ARCHITECTURE.md](ARCHITECTURE.md)
 4. **Plugin development**: Write your own plugins in [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md)
 5. **Machine learning**: Integrate BDTs or neural networks — [ONNX_IMPLEMENTATION.md](ONNX_IMPLEMENTATION.md), [SOFIE_IMPLEMENTATION.md](SOFIE_IMPLEMENTATION.md)
-6. **Scale corrections**: Apply per-event scale factors with `CorrectionManager` — [API_REFERENCE.md](API_REFERENCE.md)
-7. **Systematics & nuisance groups**: Register and propagate uncertainties — [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md)
-8. **Batch processing**: Submit hundreds of jobs — [LAW_TASKS.md](LAW_TASKS.md) and [BATCH_SUBMISSION.md](BATCH_SUBMISSION.md)
-9. **Physics objects**: Overlap removal, combinatorics — [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
-10. **Output validation**: Validate and inspect outputs — [VALIDATION_REPORTS.md](VALIDATION_REPORTS.md)
+6. **CMS corrections & systematics**: Apply JES/JER, electron, muon corrections with automatic variation propagation — [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md), [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md)
+7. **Tagger working-point corrections**: Apply b-tag / tagger SFs with WP-filtered collections and fraction reweighting — [TAGGER_WORKING_POINTS.md](TAGGER_WORKING_POINTS.md)
+8. **Physics object collections**: Overlap removal, combinatorics, corrected kinematics — [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md)
+9. **Systematics & nuisance groups**: Register and propagate uncertainties — [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md)
+10. **Batch processing**: Submit hundreds of jobs — [LAW_TASKS.md](LAW_TASKS.md) and [BATCH_SUBMISSION.md](BATCH_SUBMISSION.md)
+11. **Output validation**: Validate and inspect outputs — [VALIDATION_REPORTS.md](VALIDATION_REPORTS.md)
 
 Happy analyzing!

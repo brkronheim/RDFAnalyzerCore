@@ -6,7 +6,7 @@ To build RDFAnalyzerCore with CMS Combine support:
 
 ```bash
 # Setup ROOT environment first
-source env.sh  # on lxplus, or source your ROOT installation
+source env.sh  # on a CVMFS-backed host, or source your ROOT installation
 
 # Configure with Combine
 cmake -S . -B build -DBUILD_COMBINE=ON
@@ -21,12 +21,12 @@ cmake --build build -j$(nproc)
 ## Requirements
 
 Building Combine requires:
-- ROOT 6.24+ with development headers
-- Python 2.7 or 3.6+
+- ROOT 6.30+ with development headers
+- Python 3.8+
 - Boost libraries
 - Git
 
-These should already be available if you're on lxplus or have a proper ROOT installation.
+These should already be available on CVMFS-backed HEP hosts or with a properly configured standalone ROOT installation.
 
 ## What Gets Built
 
@@ -57,7 +57,7 @@ combine -M AsymptoticLimits datacards/datacard.txt
 
 ## Complete Workflow
 
-See `docs/COMBINE_INTEGRATION.md` for the complete analysis workflow from data processing to limit extraction.
+See [Combine Integration Guide](COMBINE_INTEGRATION.md) for the complete analysis workflow from data processing to limit extraction.
 
 ## Troubleshooting
 
@@ -103,6 +103,6 @@ Total with all components: ~15 minutes
 ## Documentation
 
 For complete usage documentation, see:
-- [Combine Integration Guide](docs/COMBINE_INTEGRATION.md) - Complete workflow
-- [Datacard Generator](docs/DATACARD_GENERATOR.md) - Creating datacards
+- [Combine Integration Guide](COMBINE_INTEGRATION.md) - Complete workflow
+- [Datacard Generator](DATACARD_GENERATOR.md) - Creating datacards
 - [CMS Combine Documentation](https://cms-analysis.github.io/HiggsAnalysis-CombinedLimit/)

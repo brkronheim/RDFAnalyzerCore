@@ -1,0 +1,12 @@
+# =============================================================================
+# floats.yaml — Scalar float constants for ExampleAnalysis (ATLAS dimuon)
+#
+# Migrated from floats.txt.  Each key becomes a constant column in the
+# RDataFrame accessible by any Define, Filter, or histogram weight expression.
+# =============================================================================
+
+# Per-event normalisation weight = xsec * filter_efficiency / sum_weights
+normScale: 1.5715650132731668e-12
+
+# Sum of generator event weights (used to compute normScale)
+sampleNorm: 1196323400000000.0

@@ -56,9 +56,13 @@ public:
                 std::vector<std::string> newColumnsUp;
                 std::vector<std::string> newColumnsDown;
                 for (const auto &col : columns) {
-                    if (systematicManager.getSystematicsForVariable(col).find(syst) != systematicManager.getSystematicsForVariable(col).end()) {
-                        newColumnsUp.push_back(col + "_" + syst + "Up");
-                        newColumnsDown.push_back(col + "_" + syst + "Down");
+                    const std::string upColumn =
+                        systematicManager.getVariationColumnName(col, syst + "Up");
+                    const std::string downColumn =
+                        systematicManager.getVariationColumnName(col, syst + "Down");
+                    if (upColumn != col || downColumn != col) {
+                        newColumnsUp.push_back(upColumn);
+                        newColumnsDown.push_back(downColumn);
                         nAffected++;
                     } else {
                         newColumnsUp.push_back(col);

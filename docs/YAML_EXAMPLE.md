@@ -5,9 +5,9 @@ This example demonstrates how to convert an existing text config to YAML format.
 ## Original Text Config (config.txt)
 
 ```
-directory=/home/user/data
-saveFile=/home/user/output/results.root
-saveDirectory=/home/user/output/
+directory=data
+saveFile=output/results.root
+saveDirectory=output/
 saveTree=Events
 threads=-1
 antiglobs=output.root,hists.root
@@ -23,9 +23,9 @@ intConfig=cfg/ints.txt
 ## Equivalent YAML Config (config.yaml)
 
 ```yaml
-directory: /home/user/data
-saveFile: /home/user/output/results.root
-saveDirectory: /home/user/output/
+directory: data
+saveFile: output/results.root
+saveDirectory: output/
 saveTree: Events
 threads: "-1"
 antiglobs: output.root,hists.root
@@ -126,18 +126,7 @@ write_config(config, "config.yaml")
 ```
 
 ### Generate Submission Files
-```bash
-# Using YAML config - output will also be YAML
-python core/python/generateSubmissionFilesNANO.py \
-    -c analysis_config.yaml \
-    -n my_analysis \
-    -s 30 \
-    -x /path/to/x509 \
-    -e ./build/analyzer
-
-# The generated submit_config.yaml in each job directory 
-# will also be in YAML format
-```
+Submission file generation is now handled through the LAW workflow and YAML-first manifest handling. The legacy script `core/python/generateSubmissionFilesNANO.py` has been removed.
 
 ## Benefits of YAML
 

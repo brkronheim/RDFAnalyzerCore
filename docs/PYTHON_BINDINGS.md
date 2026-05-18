@@ -31,7 +31,7 @@ analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
 analyzer.Filter("pt_cut", "pt_gev > 20.0", ["pt_gev"])
 ```
 
-Legacy aliases (`DefineJIT`, `FilterJIT`, `DefineFromVector`) remain available.
+**Deprecated Aliases**: `DefineJIT`, `FilterJIT`, `DefineFromVector` remain available for backward compatibility but prefer using `Define` and `Filter` directly.
 
 ### Plugin and framework control
 
@@ -71,7 +71,7 @@ pip install pybind11 numpy numba
 
 ```bash
 # From the RDFAnalyzerCore root directory
-source env.sh  # On lxplus
+source env.sh  # On a CVMFS-backed host
 cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
@@ -82,7 +82,8 @@ The Python module `rdfanalyzer.so` will be built in `build/python/`.
 
 ```python
 import sys
-sys.path.insert(0, '/path/to/RDFAnalyzerCore/build/python')
+from pathlib import Path
+sys.path.insert(0, str(Path("build/python").resolve()))
 import rdfanalyzer
 ```
 
@@ -314,7 +315,7 @@ analyzer.AddPlugin("correction", "CorrectionManager")
 analyzer.SetupPlugin("correction")
 
 # Apply specific correction
-analyzer.applyCorrection("correction", "muon_sf", ["muon_pt", "muon_eta"])
+analyzer.applyCorrection("correction", "muon_sf", ["nominal"], ["muon_pt", "muon_eta"])
 
 # Get correction features
 features = analyzer.getCorrectionFeatures("correction", "muon_sf")
@@ -558,6 +559,9 @@ class Analyzer:
 
 ## Configuration Files
 
+> **Environment note:** ROOT must come from CVMFS/site packages or a local ROOT build. It is not distributed as a pip package named `ROOT`; source `env.sh` or `thisroot.sh` before using Python bindings.
+
+
 Python bindings use the same configuration files as the C++ framework:
 
 ```
@@ -615,7 +619,8 @@ Complete examples are available in the `examples/` directory:
 Ensure the module is in your Python path:
 ```python
 import sys
-sys.path.insert(0, '/path/to/RDFAnalyzerCore/build/python')
+from pathlib import Path
+sys.path.insert(0, str(Path("build/python").resolve()))
 ```
 
 ### ROOT JIT compilation errors
@@ -653,19 +658,15 @@ Common causes:
 
 ## Future Enhancements
 
-Planned features for future releases:
+Planned improvements focus on ergonomics and coverage (for example, expanded end-to-end examples and additional validation utilities).
 
-- [ ] Plugin manager bindings (BDT, ONNX, Corrections, Histograms)
-- [ ] Direct RDataFrame access for advanced users
-- [ ] Systematic variation control from Python
-- [ ] Callback functions for custom event processing
-- [ ] Helper utilities for common patterns
+Current plugin manager bindings are already available; refer to the plugin management sections above for supported APIs.
 
 ## Contributing
 
 Contributions are welcome! To add new Python bindings:
 
-1. Edit `core/bindings/python_bindings.cpp`
+1. Edit `core/python/bindings/python_bindings.cpp`
 2. Add new methods to the `AnalyzerPythonWrapper` class
 3. Expose via pybind11 in the `PYBIND11_MODULE` section
 4. Add documentation and examples

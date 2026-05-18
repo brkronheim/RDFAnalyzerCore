@@ -4,7 +4,7 @@
 > - [ONNX Implementation](ONNX_IMPLEMENTATION.md) - Alternative ML backend
 > - [Using SOFIE in Analyses](ANALYSIS_GUIDE.md#using-sofie-models)
 > - [SOFIE Configuration](CONFIG_REFERENCE.md#sofie-manager-configuration)
-> - [SOFIE API Reference](API_REFERENCE.md#isofiemanager)
+> - [SOFIE API Reference](API_REFERENCE.md#sofieManager)
 
 ## Overview
 
@@ -83,7 +83,7 @@ sofieConfig=cfg/sofie_models.txt
 
 ### 3. Comprehensive Unit Tests
 
-**File**: `core/test/testSofieManager.cc`
+**File**: `core/tests/cpp/testSofieManager.cc`
 
 **Test Coverage**:
 - Constructor and manager creation
@@ -296,18 +296,9 @@ int main(int argc, char** argv) {
     // Create analyzer
     Analyzer analyzer(argv[1]);
     
-    // Create SOFIE manager
-    auto sofieMgr = std::make_unique<SofieManager>(*analyzer.getConfigProvider());
-    ManagerContext ctx{
-        *analyzer.getConfigProvider(),
-        *analyzer.getDataManager(),
-        *analyzer.getSystematicManager(),
-        *analyzer.getLogger(),
-        *analyzer.getSkimSink(),
-        *analyzer.getMetaSink()
-    };
-    sofieMgr->setContext(ctx);
-    
+    // Create SOFIE manager and register it with the Analyzer
+    auto sofieMgr = SofieManager::create(analyzer, "sofie");
+
     // Register model
     auto inferenceFunc = std::make_shared<SofieInferenceFunction>(classifierInference);
     std::vector<std::string> features = {"jet_pt", "jet_eta", "jet_phi", "jet_mass"};
