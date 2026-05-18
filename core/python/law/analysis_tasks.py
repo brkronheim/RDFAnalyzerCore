@@ -152,6 +152,11 @@ for _p in (_HERE, _CORE_PYTHON):
 
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
 from dataset_manifest import DatasetManifest, DatasetEntry  # noqa: E402
+from derivation_correctionlib import (  # noqa: E402
+    _build_correctionlib_cset as _shared_build_correctionlib_cset,
+    _derive_stitch_weights as _shared_derive_stitch_weights,
+    _read_intweight_sign_hist as _shared_read_intweight_sign_hist,
+)
 from submission_backend import (  # noqa: E402
     ensure_xrootd_redirector,
     get_copy_file_list,
@@ -1671,12 +1676,20 @@ def _write_job_config(
 
     # Ensure each entry is accessible via XRootD redirector when appropriate.
     # Do not modify local filenames (input_*.root) or other non-EOS paths.
+    redirector = (
+        str(template_config.get("xrootdRedirector", "") or "").strip()
+        or str(template_config.get("redirector", "") or "").strip()
+    )
+
     normalized_files = []
     for f in file_list:
         if not f:
             continue
         if f.startswith("/") or f.startswith("store/") or f.startswith("root://"):
-            normalized_files.append(ensure_xrootd_redirector(f))
+            if redirector:
+                normalized_files.append(ensure_xrootd_redirector(f, redirector))
+            else:
+                normalized_files.append(ensure_xrootd_redirector(f))
         else:
             normalized_files.append(f)
 
@@ -3883,272 +3896,25 @@ def _read_intweight_sign_hist(
     meta_file: str,
     sample_name: str,
 ) -> list[float]:
-    """Read ``counter_intWeightSignSum_{sample_name}`` from *meta_file*.
-
-    **uproot is the preferred reader** because it requires no ROOT installation
-    and runs in any Python environment.  PyROOT is used as a fallback for
-    environments (e.g. CMSSW) where uproot is unavailable.
-
-    Parameters
-    ----------
-    meta_file:
-        Path to a merged meta ROOT file containing CounterService histograms.
-    sample_name:
-        The sample name key embedded in the histogram name, i.e. the value
-        of the ``sample`` / ``type`` config key used during the analysis run.
-
-    Returns
-    -------
-    list[float]
-        Bin contents of ``counter_intWeightSignSum_{sample_name}`` ordered by
-        bin index (bin k corresponds to stitch_id = k).
-
-    Raises
-    ------
-    RuntimeError
-        If the histogram is not found in the file, or neither uproot nor
-        PyROOT is available.
-    """
-    hist_name = f"counter_intWeightSignSum_{sample_name}"
-
-    # ---- uproot (preferred) -----------------------------------------------
-    try:
-        import uproot  # type: ignore
-
-        with uproot.open(meta_file) as root_file:
-            # uproot key strings include cycle numbers, e.g. "histName;1"
-            keys_no_cycle = {k.split(";")[0]: k for k in root_file.keys()}
-            if hist_name not in keys_no_cycle:
-                raise RuntimeError(
-                    f"Histogram '{hist_name}' not found in '{meta_file}'. "
-                    f"Available histograms: {sorted(keys_no_cycle)}"
-                )
-            return root_file[keys_no_cycle[hist_name]].values().tolist()
-
-    except ImportError:
-        pass  # fall through to PyROOT
-
-    # ---- PyROOT fallback --------------------------------------------------
-    try:
-        import ROOT  # type: ignore
-
-        tfile = ROOT.TFile.Open(meta_file, "READ")
-        if not tfile or tfile.IsZombie():
-            raise RuntimeError(f"Cannot open ROOT file: '{meta_file}'")
-        hist = tfile.Get(hist_name)
-        if not hist:
-            tfile.Close()
-            raise RuntimeError(
-                f"Histogram '{hist_name}' not found in '{meta_file}'."
-            )
-        values = [hist.GetBinContent(b) for b in range(1, hist.GetNbinsX() + 1)]
-        tfile.Close()
-        return values
-
-    except ImportError:
-        raise RuntimeError(
-            "Neither uproot nor ROOT (PyROOT) is importable. "
-            "Install uproot (``pip install uproot``) to read counter histograms "
-            "without a full ROOT installation."
-        )
+    return _shared_read_intweight_sign_hist(meta_file, sample_name)
 
 
 def _derive_stitch_weights(
     group_name: str,
     meta_files: dict[str, str],
 ) -> dict[str, list[float]]:
-    """Compute per-bin stitching scale factors for one group.
-
-    For each stitch bin *k*, the scale factor for sample *n* is::
-
-        b_n(k) = C_n(k) / Σ_m C_m(k)
-
-    where ``C_n(k)`` is the net signed count (positive minus negative weight
-    events) in bin *k* of sample *n*'s
-    ``counter_intWeightSignSum_{sample_name}`` histogram.
-
-    Bins where all samples have ``C_m(k) = 0`` (no events contribute) are
-    assigned a scale factor of 0 for every sample.
-
-    Parameters
-    ----------
-    group_name:
-        Human-readable name for the group (used only in error messages).
-    meta_files:
-        Mapping from ``sample_name`` to absolute path of the merged meta
-        ROOT file for that sample.
-
-    Returns
-    -------
-    dict[str, list[float]]
-        Mapping from ``sample_name`` to its array of per-bin scale factors.
-        The arrays have the same length as the histogram (up to the last
-        non-zero bin across all samples; trailing zero-only bins are trimmed
-        to keep the correctionlib output compact).
-    """
-    import numpy as np  # type: ignore
-
-    sample_names = list(meta_files.keys())
-
-    # ---- read C_n(k) for every sample in the group -------------------------
-    sign_counts: dict[str, "np.ndarray"] = {}
-    ref_len: Optional[int] = None
-
-    for sample_name, meta_file in meta_files.items():
-        if not os.path.isfile(meta_file):
-            raise RuntimeError(
-                f"[StitchingDerivationTask] Meta file not found for sample "
-                f"'{sample_name}' in group '{group_name}': '{meta_file}'"
-            )
-        values = _read_intweight_sign_hist(meta_file, sample_name)
-        arr = np.array(values, dtype=np.float64)
-
-        if ref_len is None:
-            ref_len = len(arr)
-        elif len(arr) != ref_len:
-            raise RuntimeError(
-                f"[StitchingDerivationTask] Histogram length mismatch in "
-                f"group '{group_name}': sample '{sample_name}' has "
-                f"{len(arr)} bins but previous samples had {ref_len} bins. "
-                "All samples in a group must use the same stitch variable "
-                "with the same binning."
-            )
-        sign_counts[sample_name] = arr
-
-    assert ref_len is not None  # guaranteed: meta_files is non-empty
-
-    # ---- Σ_m C_m(k) for each bin k ----------------------------------------
-    total = np.zeros(ref_len, dtype=np.float64)
-    for arr in sign_counts.values():
-        total += arr
-
-    # ---- b_n(k) = C_n(k) / Σ_m C_m(k); guard against division by zero ----
-    # np.where evaluates both branches before masking, so suppress the
-    # expected divide-by-zero warning for bins where total = 0.
-    scale_factors: dict[str, "np.ndarray"] = {}
-    with np.errstate(invalid="ignore", divide="ignore"):
-        for sample_name in sample_names:
-            c_n = sign_counts[sample_name]
-            scale_factors[sample_name] = np.where(total != 0.0, c_n / total, 0.0)
-
-    # ---- trim trailing all-zero bins to keep the correctionlib file compact -
-    # Find the highest bin index where at least one sample has a non-zero total
-    non_zero_mask = total != 0.0
-    if np.any(non_zero_mask):
-        last_active = int(np.where(non_zero_mask)[0][-1])
-        n_used = last_active + 1
-    else:
-        # All bins are zero; keep at least one bin so correctionlib is valid
-        n_used = 1
-
-    return {
-        name: arr[:n_used].tolist()
-        for name, arr in scale_factors.items()
-    }
+    return _shared_derive_stitch_weights(
+        group_name,
+        meta_files,
+        _read_intweight_sign_hist,
+    )
 
 
 def _build_correctionlib_cset(
     all_scale_factors: dict[str, dict[str, list[float]]],
     description: str = "Stitching scale factors derived from counter_intWeightSignSum histograms",
 ) -> "correctionlib.schemav2.CorrectionSet":
-    """Build a correctionlib :class:`CorrectionSet` from derived scale factors.
-
-    One :class:`~correctionlib.schemav2.Correction` is created per group.
-    Each correction takes two inputs:
-
-    * ``sample_name`` (string) – identifies which sample's factors to return
-    * ``stitch_id``   (int)    – integer bin from ``counterIntWeightBranch``
-
-    and returns the stitching scale factor ``b_n(stitch_id)``.
-
-    The internal structure is a ``Category`` node (keyed by ``sample_name``)
-    containing per-sample ``Binning`` nodes (keyed by integer ``stitch_id``
-    value).  Out-of-range stitch IDs are clamped to the nearest edge.
-
-    Parameters
-    ----------
-    all_scale_factors:
-        ``{group_name: {sample_name: [b_n(0), b_n(1), ...]}}``
-    description:
-        Top-level description string for the ``CorrectionSet``.
-
-    Returns
-    -------
-    correctionlib.schemav2.CorrectionSet
-    """
-    try:
-        import correctionlib.schemav2 as cs  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "correctionlib is required to write stitching scale factors as a "
-            "correction JSON.  Install it with: pip install correctionlib"
-        ) from exc
-
-    corrections = []
-
-    for group_name, sample_factors in all_scale_factors.items():
-        # All arrays in a group have the same trimmed length
-        n_bins = max(len(v) for v in sample_factors.values())
-        # Integer edges: stitch_id=k maps to interval [k, k+1)
-        edges = [float(k) for k in range(n_bins + 1)]
-
-        cat_items = []
-        for sample_name, factors in sample_factors.items():
-            # Pad to n_bins if a sample's array is shorter (shouldn't normally
-            # happen after trimming, but defensively handled)
-            padded = factors + [0.0] * (n_bins - len(factors))
-            binning = cs.Binning(
-                nodetype="binning",
-                input="stitch_id",
-                edges=edges,
-                content=padded,
-                flow="clamp",
-            )
-            cat_items.append(cs.CategoryItem(key=sample_name, value=binning))
-
-        correction = cs.Correction(
-            name=group_name,
-            description=(
-                f"Binwise stitching scale factors for group '{group_name}'. "
-                f"Evaluate: cset[\"{group_name}\"].evaluate(sample_name, stitch_id). "
-                "b_n(k) = C_n(k) / sum_m C_m(k) where C_n(k) is the net signed "
-                "event count (positive minus negative weight events) for sample n "
-                "in stitch bin k."
-            ),
-            version=1,
-            inputs=[
-                cs.Variable(
-                    name="sample_name",
-                    type="string",
-                    description="Sample identifier (matches meta_files key in stitch config)",
-                ),
-                cs.Variable(
-                    name="stitch_id",
-                    type="int",
-                    description=(
-                        "Integer stitching bin ID stored per event by "
-                        "counterIntWeightBranch"
-                    ),
-                ),
-            ],
-            output=cs.Variable(
-                name="weight",
-                type="real",
-                description="Stitching scale factor b_n(k) = C_n(k) / sum_m C_m(k)",
-            ),
-            data=cs.Category(
-                nodetype="category",
-                input="sample_name",
-                content=cat_items,
-            ),
-        )
-        corrections.append(correction)
-
-    return cs.CorrectionSet(
-        schema_version=2,
-        description=description,
-        corrections=corrections,
-    )
+    return _shared_build_correctionlib_cset(all_scale_factors, description)
 
 
 class StitchingDerivationTask(law.Task):

@@ -259,6 +259,8 @@ def _optimize_job_config_xrootd(config_path: str) -> None:
     file_list_raw = cfg.get("fileList", "")
     if not file_list_raw:
         return
+    if str(cfg.get("xrootdRedirector", "") or cfg.get("redirector", "")).strip():
+        return
 
     files = [f.strip() for f in file_list_raw.split(",") if f.strip()]
     optimizable_indices = [

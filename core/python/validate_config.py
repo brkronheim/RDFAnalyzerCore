@@ -65,6 +65,23 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "optional_keys": ["corrections"],
         "key_types": {"corrections": list},
     },
+    "DerivationManager": {
+        "required_keys": [],
+        "optional_keys": [
+            "enabled",
+            "mode",
+            "stitching",
+            "taggerEfficiencies",
+            "stxs",
+        ],
+        "key_types": {
+            "enabled": bool,
+            "mode": str,
+            "stitching": dict,
+            "taggerEfficiencies": dict,
+            "stxs": dict,
+        },
+    },
     "BDTManager": {
         "required_keys": [],
         "optional_keys": ["models"],
@@ -725,6 +742,7 @@ _ANALYSIS_CONFIG_KNOWN_KEYS = {
     "histogram_config",
     "friend_trees",
     "plugins",
+    "derivations",
 }
 
 
@@ -856,6 +874,14 @@ def validate_analysis_config(
     # --------------------------------------------------------------- plugins
     if "plugins" in data:
         errs, warns = validate_plugin_config(data["plugins"], source_context)
+        errors.extend(errs)
+        warnings.extend(warns)
+
+    # ------------------------------------------------------------ derivations
+    if "derivations" in data:
+        errs, warns = validate_plugin_config(
+            {"DerivationManager": data["derivations"]}, source_context
+        )
         errors.extend(errs)
         warnings.extend(warns)
 
