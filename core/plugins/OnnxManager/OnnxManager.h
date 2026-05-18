@@ -103,6 +103,20 @@ public:
   const std::vector<std::string> &getModelOutputNames(const std::string &modelName) const;
 
   /**
+   * @brief Get the resolved output shapes for an ONNX model
+   * @param modelName Name of the model
+   * @return Reference to the vector of output tensor shapes
+   */
+  const std::vector<std::vector<int64_t>> &getModelOutputShapes(const std::string &modelName) const;
+
+  /**
+   * @brief Get the flattened element count for each ONNX output tensor
+   * @param modelName Name of the model
+   * @return Reference to the vector of output tensor element counts
+   */
+  const std::vector<int64_t> &getModelOutputElementCounts(const std::string &modelName) const;
+
+  /**
    * @brief Get the padding size for an ONNX model
    * @param modelName Name of the model
    * @return Padding size (0 if no padding configured)
@@ -188,6 +202,16 @@ private:
    * @brief Map from model name to flattened element count per ONNX input tensor.
    */
   std::unordered_map<std::string, std::vector<int64_t>> model_inputElementCounts_m;
+
+  /**
+   * @brief Map from model name to resolved ONNX output shapes.
+   */
+  std::unordered_map<std::string, std::vector<std::vector<int64_t>>> model_outputShapes_m;
+
+  /**
+   * @brief Map from model name to flattened element count per ONNX output tensor.
+   */
+  std::unordered_map<std::string, std::vector<int64_t>> model_outputElementCounts_m;
 
   /**
    * @brief Cached C-string pointers for ONNX input names (to avoid per-event allocation).

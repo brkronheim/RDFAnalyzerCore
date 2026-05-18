@@ -154,7 +154,12 @@ if(ROOT_CORE_LOCATION)
 	# Some ROOT binaries depend on libtbb/libgslcblas that may not be in system paths
 	# on cmssw-el9 worker nodes. Resolve them at configure time and propagate both link
 	# libraries and RPATH entries.
-	find_library(RDF_TBB_LIB NAMES tbb)
+	set(RDF_ENV_LIBRARY_DIRS "")
+	if(DEFINED ENV{LD_LIBRARY_PATH})
+		string(REPLACE ":" ";" RDF_ENV_LIBRARY_DIRS "$ENV{LD_LIBRARY_PATH}")
+	endif()
+
+	find_library(RDF_TBB_LIB NAMES tbb HINTS ${RDF_ENV_LIBRARY_DIRS})
 	if(RDF_TBB_LIB)
 		get_filename_component(RDF_TBB_LIB_DIR "${RDF_TBB_LIB}" DIRECTORY)
 		list(APPEND RDF_ROOT_TRANSITIVE_LIBS "${RDF_TBB_LIB}")
@@ -164,7 +169,7 @@ if(ROOT_CORE_LOCATION)
 		message(WARNING "Could not find libtbb for ROOT::Imt. Link failures may occur if libImt.so is used.")
 	endif()
 
-	find_library(RDF_CBLAS_LIB NAMES gslcblas openblas cblas blas)
+	find_library(RDF_CBLAS_LIB NAMES gslcblas openblas cblas blas HINTS ${RDF_ENV_LIBRARY_DIRS})
 	if(RDF_CBLAS_LIB)
 		get_filename_component(RDF_CBLAS_LIB_DIR "${RDF_CBLAS_LIB}" DIRECTORY)
 		list(APPEND RDF_ROOT_TRANSITIVE_LIBS "${RDF_CBLAS_LIB}")
@@ -174,7 +179,7 @@ if(ROOT_CORE_LOCATION)
 		message(WARNING "Could not find libgslcblas/openblas for ROOT::TMVA. Link failures may occur if libTMVA.so is used.")
 	endif()
 
-	find_library(RDF_GSL_LIB NAMES gsl)
+	find_library(RDF_GSL_LIB NAMES gsl HINTS ${RDF_ENV_LIBRARY_DIRS})
 	if(RDF_GSL_LIB)
 		get_filename_component(RDF_GSL_LIB_DIR "${RDF_GSL_LIB}" DIRECTORY)
 		list(APPEND RDF_ROOT_TRANSITIVE_LIBS "${RDF_GSL_LIB}")

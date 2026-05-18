@@ -312,6 +312,24 @@ TEST_F(OnnxManagerTest, GetInputOutputNames) {
   EXPECT_EQ(outputNames[1], "output_product");
 }
 
+TEST_F(OnnxManagerTest, GetOutputShapesAndElementCounts) {
+  const auto &outputShapes = onnxManager->getModelOutputShapes("test_model_multi");
+  const auto &outputElementCounts = onnxManager->getModelOutputElementCounts("test_model_multi");
+
+  ASSERT_EQ(outputShapes.size(), 2);
+  ASSERT_EQ(outputElementCounts.size(), 2);
+
+  EXPECT_FALSE(outputShapes[0].empty());
+  EXPECT_FALSE(outputShapes[1].empty());
+  EXPECT_EQ(outputElementCounts[0], 1);
+  EXPECT_EQ(outputElementCounts[1], 1);
+}
+
+TEST_F(OnnxManagerTest, GetOutputShapesAndElementCounts_Invalid) {
+  EXPECT_THROW(onnxManager->getModelOutputShapes("nonexistent_model"), std::runtime_error);
+  EXPECT_THROW(onnxManager->getModelOutputElementCounts("nonexistent_model"), std::runtime_error);
+}
+
 /**
  * @brief Test that paddingSize is stored and retrieved correctly
  */
