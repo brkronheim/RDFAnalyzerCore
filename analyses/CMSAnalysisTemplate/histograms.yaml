@@ -1,0 +1,90 @@
+# =============================================================================
+# histograms.yaml — Config-driven histogram definitions (NDHistogramManager)
+#
+# Format: YAML sequence of maps.  Required keys per entry:
+#   name        : histogram identifier (must be unique)
+#   variable    : RDataFrame column to histogram
+#   weight      : RDataFrame column used as per-event weight
+#   bins        : number of bins
+#   lowerBound  : histogram lower edge
+#   upperBound  : histogram upper edge
+# Optional:
+#   label       : ROOT x-axis title (supports TLatex)
+#
+# The weight column "weight_nominal" is defined by WeightManager.  For data
+# running with eventWeight = 1.0, "weight_nominal" evaluates to 1.0 × 1.0
+# (the scalar normalization product defaults to 1.0 when no normalization is
+# registered).
+#
+# Add or remove entries here to change the histogram suite — no C++ changes
+# are needed as long as the variable columns exist in the dataframe.
+# =============================================================================
+
+# ---- Muon kinematics --------------------------------------------------------
+- name: LeadMuPt
+  variable: LeadMuPt
+  weight: weight_nominal
+  bins: 50
+  lowerBound: 0.0
+  upperBound: 200.0
+  label: "Leading Muon p_{T} [GeV]"
+
+- name: LeadMuEta
+  variable: LeadMuEta
+  weight: weight_nominal
+  bins: 50
+  lowerBound: -2.5
+  upperBound: 2.5
+  label: "Leading Muon #eta"
+
+- name: LeadMuPhi
+  variable: LeadMuPhi
+  weight: weight_nominal
+  bins: 64
+  lowerBound: -3.2
+  upperBound: 3.2
+  label: "Leading Muon #phi [rad]"
+
+# ---- Missing transverse energy (MET) ----------------------------------------
+- name: MET_pt
+  variable: MET_pt
+  weight: weight_nominal
+  bins: 50
+  lowerBound: 0.0
+  upperBound: 200.0
+  label: "MET p_{T} [GeV]"
+
+# ---- Transverse mass m_T(μ, MET) -------------------------------------------
+- name: TransverseMass
+  variable: TransverseMass
+  weight: weight_nominal
+  bins: 60
+  lowerBound: 0.0
+  upperBound: 300.0
+  label: "m_{T}(#mu, MET) [GeV]"
+
+# ---- Jet multiplicity -------------------------------------------------------
+- name: nCleanJets
+  variable: nCleanJets
+  weight: weight_nominal
+  bins: 8
+  lowerBound: -0.5
+  upperBound: 7.5
+  label: "Number of Selected Jets (p_{T}>30 GeV)"
+
+# ---- Leading jet kinematics -------------------------------------------------
+- name: LeadJetPt
+  variable: LeadJetPt
+  weight: weight_nominal
+  bins: 50
+  lowerBound: 30.0
+  upperBound: 500.0
+  label: "Leading Jet p_{T} [GeV]"
+
+- name: LeadJetEta
+  variable: LeadJetEta
+  weight: weight_nominal
+  bins: 50
+  lowerBound: -5.0
+  upperBound: 5.0
+  label: "Leading Jet #eta"

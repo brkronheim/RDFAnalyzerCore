@@ -704,6 +704,31 @@ public:
         return analyzer_;
     }
 
+    /**
+     * @brief Return the raw address of the underlying Analyzer as a uintptr_t.
+     *
+     * This is an **expert-level** bridge method intended for use by compiled
+     * analysis-setup modules (pybind11 extensions) that need to call C++
+     * functions accepting ``Analyzer&`` without needing the full
+     * AnalyzerPythonWrapper definition.
+     *
+     * Usage::
+     *
+     *   # Python
+     *   import rdfanalyzer, cms_analysis_template
+     *   an = rdfanalyzer.Analyzer("cfg.yaml")
+     *   cms_analysis_template.setup_analysis(an._get_analyzer_ptr())
+     *
+     * @warning The pointer is valid **only while this Python object is alive**.
+     * Storing and later dereferencing the pointer after the Python object has
+     * been garbage-collected is a use-after-free error and will cause undefined
+     * behaviour (crashes, data corruption, or silent wrong results).  Always
+     * consume the pointer within the same scope as the live analyzer object.
+     */
+    uintptr_t getAnalyzerPtr() {
+        return reinterpret_cast<uintptr_t>(&analyzer_);
+    }
+
 private:
     template <typename T>
     T& requirePlugin(const std::string& role, const std::string& typeName) {
@@ -1006,6 +1031,31 @@ PYBIND11_MODULE(rdfanalyzer, m) {
         .def("save", &AnalyzerPythonWrapper::save,
                "Trigger computation and save the analysis results",
                py::return_value_policy::reference_internal)
+        .def("_get_analyzer_ptr", &AnalyzerPythonWrapper::getAnalyzerPtr,
+               R"pbdoc(
+               Return the raw address of the underlying Analyzer as an integer.
+
+               Expert-level bridge for compiled C++ analysis-setup modules.
+               Pass the returned value to a pybind11 extension function that
+               accepts ``uintptr_t`` and casts it to ``Analyzer*``, so the
+               extension can apply compiled analysis logic to this analyzer
+               without requiring the full AnalyzerPythonWrapper definition.
+
+               Example::
+
+                   import rdfanalyzer, cms_analysis_template
+                   an = rdfanalyzer.Analyzer("cfg.yaml")
+                   cms_analysis_template.setup_analysis(an._get_analyzer_ptr())
+
+               .. warning::
+
+                   The pointer is valid **only while this Python object is alive**.
+                   Storing it and dereferencing it after the analyzer has been
+                   garbage-collected is a use-after-free error that causes
+                   undefined behaviour (crashes, data corruption, wrong results).
+                   Always consume the pointer within the same scope as the live
+                   analyzer object and never store it for later use.
+               )pbdoc")
         .def("configMap", &AnalyzerPythonWrapper::configMap,
              py::arg("key"),
                "Get a configuration value by key")
