@@ -3,6 +3,7 @@
 #include <DataManager.h>
 #include <ManagerFactory.h>
 #include <NDHistogramManager.h>
+#include <RegionManager.h>
 #include <api/IPluggableManager.h>
 #include <ROOT/RDataFrame.hxx>
 #include <TH1D.h>
@@ -509,6 +510,39 @@ TEST_F(NDHistogramManagerConfigTest, AutoDetectDoesNotDuplicateManualRegistratio
   const auto& systs = systematicManager->getSystematics();
   ASSERT_EQ(systs.size(), 1u);
   EXPECT_NE(systs.find("jes"), systs.end());
+}
+
+TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsWithBoundRegionManager) {
+  dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
+  dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("w2", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
+  dataManager->Define("pass_presel", []() { return true; }, {}, *systematicManager);
+  dataManager->Define("pass_signal", []() { return true; }, {}, *systematicManager);
+
+  RegionManager regionManager;
+  ManagerContext regionCtx{*configManager, *dataManager, *systematicManager,
+                           *logger, *skimSink, *metaSink};
+  regionManager.setContext(regionCtx);
+  regionManager.declareRegion("presel", "pass_presel");
+  regionManager.declareRegion("signal", "pass_signal", "presel");
+
+  histogramManager->bindToRegionManager(&regionManager);
+  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  histogramManager->setupFromConfigFile();
+
+  EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
+  ASSERT_EQ(histogramManager->GetHistos().size(), 4u);
+
+  auto histPtr = histogramManager->GetHistos().front().GetPtr();
+  ASSERT_NE(histPtr, nullptr);
+  EXPECT_GT(histPtr->GetEntries(), 0.0);
 }
 
 // ---------------------------------------------------------------------------

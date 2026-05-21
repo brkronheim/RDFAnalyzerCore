@@ -305,15 +305,19 @@ private:
   std::vector<std::pair<VariedColumnKey, std::string>> variedColumns_m;
 
   // ---- Lazy audit RDF results (booked in execute(), read in finalize()) ---
+  struct AuditAccumulator {
+    double sumWeights = 0.0;
+    double minWeight = 0.0;
+    double maxWeight = 0.0;
+    ULong64_t negativeCount = 0;
+    ULong64_t zeroCount = 0;
+    ULong64_t entryCount = 0;
+  };
+
   struct AuditPending {
     std::string name;
     std::string column;
-    ROOT::RDF::RResultPtr<double> sumResult;
-    ROOT::RDF::RResultPtr<double> meanResult;
-    ROOT::RDF::RResultPtr<double> minResult;
-    ROOT::RDF::RResultPtr<double> maxResult;
-    ROOT::RDF::RResultPtr<ULong64_t> negCount;
-    ROOT::RDF::RResultPtr<ULong64_t> zeroCount;
+    ROOT::RDF::RResultPtr<AuditAccumulator> aggregateResult;
   };
   std::vector<AuditPending> auditPending_m;
 

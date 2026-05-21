@@ -299,6 +299,29 @@ TEST_F(WeightManagerTest, NominalWeightWithTwoScaleFactors) {
   EXPECT_DOUBLE_EQ(e.maxWeight, 1.0);
 }
 
+TEST_F(WeightManagerTest, NominalWeightWithIntegerScaleFactor) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("sf_int",
+             [](ULong64_t i) { return static_cast<int>(i) + 1; },
+             {"rdfentry_"}, *systematicManager);
+
+  mgr->addScaleFactor("sf_int", "sf_int");
+  mgr->addNormalization("norm", 0.5);
+  mgr->defineNominalWeight("weight_nominal");
+
+  mgr->execute();
+  mgr->finalize();
+
+  ASSERT_EQ(mgr->getAuditEntries().size(), 1u);
+  const auto &e = mgr->getAuditEntries()[0];
+  EXPECT_DOUBLE_EQ(e.sumWeights, 3.0);
+  EXPECT_DOUBLE_EQ(e.meanWeight, 1.0);
+  EXPECT_DOUBLE_EQ(e.minWeight, 0.5);
+  EXPECT_DOUBLE_EQ(e.maxWeight, 1.5);
+}
+
 // ---------------------------------------------------------------------------
 // Negative-weight counting
 // ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@
 #include <TFile.h>
 #include <TH1F.h>
 #include <THnSparse.h>
+#include <cctype>
 #include <cmath>
 #include <unordered_map>
 #include <unordered_set>
@@ -57,6 +58,335 @@ struct ColumnCache {
   }
 };
 
+namespace {
+
+enum class NDHistogramTypeToken {
+  Bool,
+  Float,
+  Double,
+  Int,
+  UInt,
+  Short,
+  UShort,
+  Char,
+  UChar,
+  Long64,
+  ULong64,
+  Unsupported,
+};
+
+std::string removeNDHistogramTypeWhitespace(std::string value) {
+  value.erase(std::remove_if(value.begin(), value.end(),
+                             [](unsigned char c) { return std::isspace(c) != 0; }),
+              value.end());
+  return value;
+}
+
+bool isNDHistogramRVecType(const std::string &columnType) {
+  return columnType.find("RVec<") != std::string::npos;
+}
+
+std::string extractNDHistogramRVecElementType(const std::string &columnType) {
+  const auto rvecPos = columnType.find("RVec<");
+  if (rvecPos == std::string::npos) {
+    return columnType;
+  }
+
+  const auto start = columnType.find('<', rvecPos);
+  const auto end = columnType.rfind('>');
+  if (start == std::string::npos || end == std::string::npos || end <= start + 1) {
+    return columnType;
+  }
+  return columnType.substr(start + 1, end - start - 1);
+}
+
+NDHistogramTypeToken tokenizeNDHistogramType(const std::string &typeName) {
+  const auto normalized = removeNDHistogramTypeWhitespace(typeName);
+
+  if (normalized == "Bool_t" || normalized == "bool") {
+    return NDHistogramTypeToken::Bool;
+  }
+  if (normalized == "Float_t" || normalized == "float") {
+    return NDHistogramTypeToken::Float;
+  }
+  if (normalized == "Double_t" || normalized == "double") {
+    return NDHistogramTypeToken::Double;
+  }
+  if (normalized == "Int_t" || normalized == "int") {
+    return NDHistogramTypeToken::Int;
+  }
+  if (normalized == "UInt_t" || normalized == "unsignedint") {
+    return NDHistogramTypeToken::UInt;
+  }
+  if (normalized == "Short_t" || normalized == "short") {
+    return NDHistogramTypeToken::Short;
+  }
+  if (normalized == "UShort_t" || normalized == "unsignedshort") {
+    return NDHistogramTypeToken::UShort;
+  }
+  if (normalized == "Char_t" || normalized == "char") {
+    return NDHistogramTypeToken::Char;
+  }
+  if (normalized == "UChar_t" || normalized == "unsignedchar") {
+    return NDHistogramTypeToken::UChar;
+  }
+  if (normalized == "Long64_t" || normalized == "longlong") {
+    return NDHistogramTypeToken::Long64;
+  }
+  if (normalized == "ULong64_t" || normalized == "unsignedlonglong") {
+    return NDHistogramTypeToken::ULong64;
+  }
+
+  return NDHistogramTypeToken::Unsupported;
+}
+
+std::string buildScalarBroadcastExpression(const std::string &referenceColumn,
+                                           const std::string &scalarColumn) {
+  return "ROOT::VecOps::RVec<Float_t>(" + referenceColumn +
+         ".size(), static_cast<Float_t>(" + scalarColumn + "))";
+}
+
+std::string buildRegionMembershipBoolExpression(
+    const std::vector<std::string> &filterChain) {
+  std::string expr = filterChain[0];
+  for (std::size_t index = 1; index < filterChain.size(); ++index) {
+    expr += " && " + filterChain[index];
+  }
+  return "static_cast<bool>(" + expr + ")";
+}
+
+template <typename ReferenceT, typename ScalarT>
+ROOT::VecOps::RVec<Float_t> broadcastScalarToReference(
+    const ROOT::VecOps::RVec<ReferenceT> &reference, ScalarT value) {
+  return ROOT::VecOps::RVec<Float_t>(reference.size(),
+                                     static_cast<Float_t>(value));
+}
+
+template <typename ReferenceT, typename ScalarT>
+ROOT::RDF::RNode defineBroadcastFloatVector(ROOT::RDF::RNode df,
+                                            const std::string &name,
+                                            const std::string &referenceColumn,
+                                            const std::string &scalarColumn) {
+  return df.Define(
+      name,
+      [](const ROOT::VecOps::RVec<ReferenceT> &reference,
+         ScalarT value) -> ROOT::VecOps::RVec<Float_t> {
+        return broadcastScalarToReference(reference, value);
+      },
+      {referenceColumn, scalarColumn});
+}
+
+template <typename ReferenceT>
+ROOT::RDF::RNode dispatchBroadcastFloatVectorByScalar(
+    ROOT::RDF::RNode df, const std::string &name,
+    const std::string &referenceColumn, const std::string &scalarColumn,
+    NDHistogramTypeToken scalarType) {
+  switch (scalarType) {
+  case NDHistogramTypeToken::Bool:
+    return defineBroadcastFloatVector<ReferenceT, Bool_t>(df, name, referenceColumn,
+                                                          scalarColumn);
+  case NDHistogramTypeToken::Float:
+    return defineBroadcastFloatVector<ReferenceT, Float_t>(df, name, referenceColumn,
+                                                           scalarColumn);
+  case NDHistogramTypeToken::Double:
+    return defineBroadcastFloatVector<ReferenceT, Double_t>(df, name, referenceColumn,
+                                                            scalarColumn);
+  case NDHistogramTypeToken::Int:
+    return defineBroadcastFloatVector<ReferenceT, Int_t>(df, name, referenceColumn,
+                                                         scalarColumn);
+  case NDHistogramTypeToken::UInt:
+    return defineBroadcastFloatVector<ReferenceT, UInt_t>(df, name, referenceColumn,
+                                                          scalarColumn);
+  case NDHistogramTypeToken::Short:
+    return defineBroadcastFloatVector<ReferenceT, Short_t>(df, name, referenceColumn,
+                                                           scalarColumn);
+  case NDHistogramTypeToken::UShort:
+    return defineBroadcastFloatVector<ReferenceT, UShort_t>(df, name, referenceColumn,
+                                                            scalarColumn);
+  case NDHistogramTypeToken::Char:
+    return defineBroadcastFloatVector<ReferenceT, Char_t>(df, name, referenceColumn,
+                                                          scalarColumn);
+  case NDHistogramTypeToken::UChar:
+    return defineBroadcastFloatVector<ReferenceT, UChar_t>(df, name, referenceColumn,
+                                                           scalarColumn);
+  case NDHistogramTypeToken::Long64:
+    return defineBroadcastFloatVector<ReferenceT, Long64_t>(df, name, referenceColumn,
+                                                            scalarColumn);
+  case NDHistogramTypeToken::ULong64:
+    return defineBroadcastFloatVector<ReferenceT, ULong64_t>(df, name,
+                                                             referenceColumn,
+                                                             scalarColumn);
+  case NDHistogramTypeToken::Unsupported:
+    throw std::runtime_error("NDHistogramManager: unsupported scalar type in compiled broadcast path");
+  }
+
+  throw std::runtime_error("NDHistogramManager: unreachable scalar broadcast dispatch");
+}
+
+ROOT::RDF::RNode dispatchBroadcastFloatVector(
+    ROOT::RDF::RNode df, const std::string &name,
+    const std::string &referenceColumn, NDHistogramTypeToken referenceType,
+    const std::string &scalarColumn, NDHistogramTypeToken scalarType) {
+  switch (referenceType) {
+  case NDHistogramTypeToken::Bool:
+    return dispatchBroadcastFloatVectorByScalar<Bool_t>(df, name, referenceColumn,
+                                                        scalarColumn, scalarType);
+  case NDHistogramTypeToken::Float:
+    return dispatchBroadcastFloatVectorByScalar<Float_t>(df, name, referenceColumn,
+                                                         scalarColumn, scalarType);
+  case NDHistogramTypeToken::Double:
+    return dispatchBroadcastFloatVectorByScalar<Double_t>(df, name, referenceColumn,
+                                                          scalarColumn, scalarType);
+  case NDHistogramTypeToken::Int:
+    return dispatchBroadcastFloatVectorByScalar<Int_t>(df, name, referenceColumn,
+                                                       scalarColumn, scalarType);
+  case NDHistogramTypeToken::UInt:
+    return dispatchBroadcastFloatVectorByScalar<UInt_t>(df, name, referenceColumn,
+                                                        scalarColumn, scalarType);
+  case NDHistogramTypeToken::Short:
+    return dispatchBroadcastFloatVectorByScalar<Short_t>(df, name, referenceColumn,
+                                                         scalarColumn, scalarType);
+  case NDHistogramTypeToken::UShort:
+    return dispatchBroadcastFloatVectorByScalar<UShort_t>(df, name, referenceColumn,
+                                                          scalarColumn, scalarType);
+  case NDHistogramTypeToken::Char:
+    return dispatchBroadcastFloatVectorByScalar<Char_t>(df, name, referenceColumn,
+                                                        scalarColumn, scalarType);
+  case NDHistogramTypeToken::UChar:
+    return dispatchBroadcastFloatVectorByScalar<UChar_t>(df, name, referenceColumn,
+                                                         scalarColumn, scalarType);
+  case NDHistogramTypeToken::Long64:
+    return dispatchBroadcastFloatVectorByScalar<Long64_t>(df, name, referenceColumn,
+                                                          scalarColumn, scalarType);
+  case NDHistogramTypeToken::ULong64:
+    return dispatchBroadcastFloatVectorByScalar<ULong64_t>(df, name,
+                                                           referenceColumn,
+                                                           scalarColumn,
+                                                           scalarType);
+  case NDHistogramTypeToken::Unsupported:
+    throw std::runtime_error("NDHistogramManager: unsupported reference vector type in compiled broadcast path");
+  }
+
+  throw std::runtime_error("NDHistogramManager: unreachable reference broadcast dispatch");
+}
+
+template <typename InputT>
+ROOT::RDF::RNode defineRegionChainInit(ROOT::RDF::RNode df,
+                                       const std::string &name,
+                                       const std::string &column) {
+  return df.Define(
+      name,
+      [](InputT value) { return static_cast<bool>(value); },
+      {column});
+}
+
+template <typename InputT>
+ROOT::RDF::RNode defineRegionChainAppend(ROOT::RDF::RNode df,
+                                         const std::string &name,
+                                         const std::string &currentColumn,
+                                         const std::string &nextColumn) {
+  return df.Define(
+      name,
+      [](bool current, InputT value) {
+        return current && static_cast<bool>(value);
+      },
+      {currentColumn, nextColumn});
+}
+
+ROOT::RDF::RNode dispatchRegionChainInit(ROOT::RDF::RNode df,
+                                         const std::string &name,
+                                         const std::string &column,
+                                         NDHistogramTypeToken inputType) {
+  switch (inputType) {
+  case NDHistogramTypeToken::Bool:
+    return defineRegionChainInit<Bool_t>(df, name, column);
+  case NDHistogramTypeToken::Float:
+    return defineRegionChainInit<Float_t>(df, name, column);
+  case NDHistogramTypeToken::Double:
+    return defineRegionChainInit<Double_t>(df, name, column);
+  case NDHistogramTypeToken::Int:
+    return defineRegionChainInit<Int_t>(df, name, column);
+  case NDHistogramTypeToken::UInt:
+    return defineRegionChainInit<UInt_t>(df, name, column);
+  case NDHistogramTypeToken::Short:
+    return defineRegionChainInit<Short_t>(df, name, column);
+  case NDHistogramTypeToken::UShort:
+    return defineRegionChainInit<UShort_t>(df, name, column);
+  case NDHistogramTypeToken::Char:
+    return defineRegionChainInit<Char_t>(df, name, column);
+  case NDHistogramTypeToken::UChar:
+    return defineRegionChainInit<UChar_t>(df, name, column);
+  case NDHistogramTypeToken::Long64:
+    return defineRegionChainInit<Long64_t>(df, name, column);
+  case NDHistogramTypeToken::ULong64:
+    return defineRegionChainInit<ULong64_t>(df, name, column);
+  case NDHistogramTypeToken::Unsupported:
+    throw std::runtime_error("NDHistogramManager: unsupported region filter type in compiled path");
+  }
+
+  throw std::runtime_error("NDHistogramManager: unreachable region chain init dispatch");
+}
+
+ROOT::RDF::RNode dispatchRegionChainAppend(ROOT::RDF::RNode df,
+                                           const std::string &name,
+                                           const std::string &currentColumn,
+                                           const std::string &nextColumn,
+                                           NDHistogramTypeToken inputType) {
+  switch (inputType) {
+  case NDHistogramTypeToken::Bool:
+    return defineRegionChainAppend<Bool_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::Float:
+    return defineRegionChainAppend<Float_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::Double:
+    return defineRegionChainAppend<Double_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::Int:
+    return defineRegionChainAppend<Int_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::UInt:
+    return defineRegionChainAppend<UInt_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::Short:
+    return defineRegionChainAppend<Short_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::UShort:
+    return defineRegionChainAppend<UShort_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::Char:
+    return defineRegionChainAppend<Char_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::UChar:
+    return defineRegionChainAppend<UChar_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::Long64:
+    return defineRegionChainAppend<Long64_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::ULong64:
+    return defineRegionChainAppend<ULong64_t>(df, name, currentColumn, nextColumn);
+  case NDHistogramTypeToken::Unsupported:
+    throw std::runtime_error("NDHistogramManager: unsupported region filter type in compiled path");
+  }
+
+  throw std::runtime_error("NDHistogramManager: unreachable region chain append dispatch");
+}
+
+ROOT::RDF::RNode defineCompiledRegionMembershipChain(
+    ROOT::RDF::RNode df, const std::string &outputColumn,
+    const std::vector<std::string> &filterChain,
+    const std::vector<NDHistogramTypeToken> &filterTypes) {
+  if (filterChain.empty()) {
+    throw std::runtime_error("NDHistogramManager: empty region filter chain");
+  }
+
+  std::string currentName =
+      (filterChain.size() == 1) ? outputColumn : outputColumn + "__chain_0";
+  df = dispatchRegionChainInit(df, currentName, filterChain[0], filterTypes[0]);
+  for (std::size_t index = 1; index < filterChain.size(); ++index) {
+    const std::string nextName =
+        (index + 1 == filterChain.size())
+            ? outputColumn
+            : outputColumn + "__chain_" + std::to_string(index);
+    df = dispatchRegionChainAppend(df, nextName, currentName, filterChain[index],
+                                   filterTypes[index]);
+    currentName = nextName;
+  }
+  return df;
+}
+
+} // namespace
+
 // Helper function to handle per-axis logic for varVector and DefineVector
 static void HandleAxisVarVector(
     ROOT::RDF::RNode& df,
@@ -84,8 +414,19 @@ static void HandleAxisVarVector(
       }
       const std::string expandedName = column + "_FillRVec_" + refVector + tagSuffix;
       if (!cache.Has(expandedName)) {
-        const std::string expr = "ROOT::VecOps::RVec<Float_t>(" + refVector + ".size(), static_cast<Float_t>(" + column + "))";
-        df = df.Define(expandedName, expr);
+        const std::string refType = cache.GetType(refVector);
+        const auto refToken =
+            tokenizeNDHistogramType(extractNDHistogramRVecElementType(refType));
+        const auto colToken = tokenizeNDHistogramType(colType);
+        const bool useFallback = refToken == NDHistogramTypeToken::Unsupported ||
+                                 colToken == NDHistogramTypeToken::Unsupported;
+        if (useFallback) {
+          df = df.Define(expandedName,
+                         buildScalarBroadcastExpression(refVector, column));
+        } else {
+          df = dispatchBroadcastFloatVector(df, expandedName, refVector, refToken,
+                                            column, colToken);
+        }
         dataManager_m->setDataFrame(df);
         cache.Refresh();
       }
@@ -929,13 +1270,28 @@ std::string NDHistogramManager::ensureRegionMembershipColumn() {
     }
 
     const auto chain = regionManager_m->getFilterChain(name);
-    std::string expr = chain[0];
-    for (std::size_t j = 1; j < chain.size(); ++j) {
-      expr += " && " + chain[j];
+    std::vector<NDHistogramTypeToken> filterTypes;
+    filterTypes.reserve(chain.size());
+    bool useFallback = false;
+    for (const auto &filterColumn : chain) {
+      const std::string filterType = dataManager_m->getDataFrame().GetColumnType(filterColumn);
+      if (isNDHistogramRVecType(filterType)) {
+        useFallback = true;
+        break;
+      }
+      const auto token = tokenizeNDHistogramType(filterType);
+      if (token == NDHistogramTypeToken::Unsupported) {
+        useFallback = true;
+        break;
+      }
+      filterTypes.push_back(token);
     }
-    // Wrap as bool cast to be safe with different column types.
-    expr = "static_cast<bool>(" + expr + ")";
-    df = df.Define(boolCol, expr);
+
+    if (useFallback) {
+      df = df.Define(boolCol, buildRegionMembershipBoolExpression(chain));
+    } else {
+      df = defineCompiledRegionMembershipChain(df, boolCol, chain, filterTypes);
+    }
     dataManager_m->setDataFrame(df);
   }
 
@@ -953,10 +1309,13 @@ std::string NDHistogramManager::ensureRegionMembershipColumn() {
       continue;
     }
 
-    const std::string expr =
-        "static_cast<float>(" + boolColNames[i] + ") * " +
-        std::to_string(static_cast<float>(i + 1)) + "f";
-    df = df.Define(idxCol, expr);
+    const float regionIndex = static_cast<float>(i + 1);
+    df = df.Define(
+        idxCol,
+        [regionIndex](bool inRegion) {
+          return inRegion ? regionIndex : 0.0f;
+        },
+        {boolColNames[i]});
     dataManager_m->setDataFrame(df);
   }
 

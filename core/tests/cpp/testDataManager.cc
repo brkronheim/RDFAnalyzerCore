@@ -180,6 +180,56 @@ TEST_F(DataManagerTest, DefineVectorCreatesVectorColumn) {
   });
 }
 
+TEST_F(DataManagerTest, DefineVectorConcatenatesRVecColumnsAndCasts) {
+  dataManager->Define(
+      "vec1",
+      []() -> ROOT::VecOps::RVec<int> { return {1, 2}; },
+      {}, *systematicManager);
+  dataManager->Define(
+      "vec2",
+      []() -> ROOT::VecOps::RVec<double> { return {3.5, 4.5}; },
+      {}, *systematicManager);
+
+  EXPECT_NO_THROW({
+    dataManager->DefineVector("vec_concat", {"vec1", "vec2"}, "Float_t",
+                              *systematicManager);
+    auto df = dataManager->getDataFrame();
+    auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("vec_concat");
+    ASSERT_EQ(result->size(), df.Count().GetValue());
+    ASSERT_FALSE(result->empty());
+    ASSERT_EQ((*result)[0].size(), 4u);
+    EXPECT_FLOAT_EQ((*result)[0][0], 1.0f);
+    EXPECT_FLOAT_EQ((*result)[0][1], 2.0f);
+    EXPECT_FLOAT_EQ((*result)[0][2], 3.5f);
+    EXPECT_FLOAT_EQ((*result)[0][3], 4.5f);
+  });
+}
+
+TEST_F(DataManagerTest, DefineVectorRejectsMixedScalarAndRVecInputs) {
+  dataManager->Define("scalar_col", []() { return 1.0f; }, {},
+                      *systematicManager);
+  dataManager->Define(
+      "vector_col",
+      []() -> ROOT::VecOps::RVec<float> { return {2.0f, 3.0f}; },
+      {}, *systematicManager);
+
+  EXPECT_THROW(
+      { dataManager->DefineVector("mixed_vec", {"scalar_col", "vector_col"},
+                                  "Float_t", *systematicManager); },
+      std::runtime_error);
+}
+
+TEST_F(DataManagerTest, DefineVectorWithNoInputsCreatesEmptyVectorColumn) {
+  EXPECT_NO_THROW({
+    dataManager->DefineVector("empty_vec", {}, "float", *systematicManager);
+    auto df = dataManager->getDataFrame();
+    auto result = df.Take<ROOT::VecOps::RVec<float>>("empty_vec");
+    ASSERT_EQ(result->size(), df.Count().GetValue());
+    ASSERT_FALSE(result->empty());
+    EXPECT_TRUE((*result)[0].empty());
+  });
+}
+
 /**
  * @brief Test Filter_m applies a filter to the dataframe
  *

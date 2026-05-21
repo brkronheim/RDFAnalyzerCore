@@ -1,18 +1,16 @@
 #include <JetEnergyScaleManager.h>
+#include <RDFColumnPacker.h>
 #include <TInterpreter.h>
 #include <analyzer.h>
 #include <ROOT/RVec.hxx>
 #include <api/ILogger.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <sstream>
 #include <stdexcept>
 
 namespace {
-
-bool isVectorColumnType(const std::string &columnType) {
-  return columnType.find("RVec") != std::string::npos;
-}
 
 void ensureFlattenHelperDeclared() {
   static const bool declared = []() {
@@ -82,6 +80,18 @@ std::string buildFlattenInputExpression(
   }
   expr += ")";
   return expr;
+}
+
+ROOT::RDF::RNode defineFlattenedJERInputs(
+    ROOT::RDF::RNode df, const std::string &outputColumn,
+    const std::vector<std::string> &inputColumns) {
+  return rdfcolumnpacker::defineFlattenedNumericInputs(
+      df, outputColumn, inputColumns, "JetEnergyScaleManager",
+      [](ROOT::RDF::RNode df, const std::string &columnName,
+         const std::vector<std::string> &columns) {
+        ensureFlattenHelperDeclared();
+        return df.Define(columnName, buildFlattenInputExpression(columns));
+      });
 }
 
 uint64_t splitmix64(uint64_t value) {
@@ -680,17 +690,15 @@ void JetEnergyScaleManager::execute() {
 
     {
       ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-      ensureFlattenHelperDeclared();
-      auto newDf = df.Define(resInputCol,
-                             buildFlattenInputExpression(step.ptResolutionInputs));
+      auto newDf = defineFlattenedJERInputs(df, resInputCol,
+                                            step.ptResolutionInputs);
       dataManager_m->setDataFrame(newDf);
     }
 
     {
       ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-      ensureFlattenHelperDeclared();
-      auto newDf = df.Define(sfInputCol,
-                             buildFlattenInputExpression(step.scaleFactorInputs));
+      auto newDf = defineFlattenedJERInputs(df, sfInputCol,
+                                            step.scaleFactorInputs);
       dataManager_m->setDataFrame(newDf);
     }
 
@@ -713,13 +721,19 @@ void JetEnergyScaleManager::execute() {
             for (std::size_t i = 0; i < objectCount; ++i) {
               std::vector<correction::Variable::Type> values;
               values.reserve(featureCount);
-              const auto begin = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
-              const auto end = begin + static_cast<std::ptrdiff_t>(featureCount);
-              for (auto it = begin; it != end; ++it)
-                {
-                double value = *it;
-                values.emplace_back(value);
+              std::size_t numericIndex = 0U;
+              const auto begin = flatInputVector.begin() +
+                                 static_cast<std::ptrdiff_t>(i * featureCount);
+              for (const auto &input : resolution->inputs()) {
+                const double value =
+                    *(begin + static_cast<std::ptrdiff_t>(numericIndex));
+                if (input.type() == correction::Variable::VarType::integer) {
+                  values.emplace_back(static_cast<int>(value));
+                } else {
+                  values.emplace_back(value);
                 }
+                ++numericIndex;
+              }
               result[i] = static_cast<Float_t>(resolution->evaluate(values));
             }
             return result;
@@ -753,6 +767,10 @@ void JetEnergyScaleManager::execute() {
               for (const auto &input : scaleFactor->inputs()) {
                 if (input.type() == correction::Variable::VarType::string) {
                   values.emplace_back(systematic);
+                } else if (input.type() == correction::Variable::VarType::integer) {
+                  values.emplace_back(static_cast<int>(
+                      *(begin + static_cast<std::ptrdiff_t>(numericIndex))));
+                  ++numericIndex;
                 } else {
                   values.emplace_back(*(begin + static_cast<std::ptrdiff_t>(numericIndex)));
                   ++numericIndex;

@@ -53,7 +53,13 @@ public:
 
 
   /**
-   * @brief Define a vector variable in the dataframe. If all columns are scalars, creates a vector from them. If all columns are RVecs, concatenates and casts them to the target type. Mixed types are not supported and will throw an error at runtime. Uses a JIT lambda for type deduction and concatenation.
+   * @brief Define a vector variable in the dataframe.
+   *
+   * If all input columns are scalars, creates a vector from them. If all input
+   * columns are RVecs, concatenates and casts them to the target type. Mixed
+   * scalar/RVec input is rejected. Common framework types use compiled
+   * RDataFrame callables; unsupported type combinations fall back to the legacy
+   * JIT expression path for compatibility.
    * @param name Name of the variable
    * @param columns Input columns (scalars or vectors)
    * @param type Data type (default: Float_t)

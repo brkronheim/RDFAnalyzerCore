@@ -9,6 +9,7 @@
  */
 
 #include <ConfigurationManager.h>
+#include <CorrectionManager.h>
 #include <DataManager.h>
 #include <DefaultLogger.h>
 #include <JetEnergyScaleManager.h>
@@ -411,6 +412,91 @@ TEST_F(JetEnergyScaleManagerTest, ChainedCorrectionStepsApplySequentially) {
   EXPECT_FLOAT_EQ(ptJec.GetValue()[0][0],   200.0f);
   EXPECT_FLOAT_EQ(ptJesUp.GetValue()[0][0], 220.0f);
 }
+
+  TEST_F(JetEnergyScaleManagerTest,
+       ApplyJERSmearingSupportsMixedScalarAndRVecCorrectionInputs) {
+    auto dm = std::make_unique<DataManager>(1);
+    auto mgr = makeMgr(*dm);
+
+    auto correctionConfig =
+      ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    auto correctionManager = std::make_unique<CorrectionManager>(*correctionConfig);
+    auto correctionContext = makeContext(*config, *dm, *systematicManager, *logger,
+                       *skimSink, *metaSink);
+    correctionManager->setContext(correctionContext);
+
+    correctionManager->registerCorrection(
+      "jer_resolution", "aux/correction.json", "test_correction2",
+      {"jer_res_feature", "jer_res_bin"});
+    correctionManager->registerCorrection(
+      "jer_scale_factor", "aux/correction.json", "test_correction",
+      {"jer_sf_feature", "jer_sf_bin"});
+
+    dm->Define(
+      "Jet_pt_raw",
+      []() -> ROOT::VecOps::RVec<Float_t> { return {55.0f, 110.0f}; }, {},
+      *systematicManager);
+    dm->Define(
+      "Jet_eta",
+      []() -> ROOT::VecOps::RVec<Float_t> { return {0.3f, -1.1f}; }, {},
+      *systematicManager);
+    dm->Define(
+      "GenJet_pt",
+      []() -> ROOT::VecOps::RVec<Float_t> { return {50.0f, 100.0f}; }, {},
+      *systematicManager);
+    dm->Define("rho_fixedGridRhoFastjetAll", []() { return 21.0; }, {},
+         *systematicManager);
+    dm->Define("event_id", []() -> ULong64_t { return 101ULL; }, {},
+         *systematicManager);
+    dm->Define(
+      "jer_res_feature",
+      []() -> ROOT::VecOps::RVec<Float_t> { return {0.5f, 2.5f}; }, {},
+      *systematicManager);
+    dm->Define("jer_res_bin", []() -> Int_t { return 1; }, {},
+         *systematicManager);
+    dm->Define(
+      "jer_sf_feature",
+      []() -> ROOT::VecOps::RVec<Float_t> { return {0.5f, 1.5f}; }, {},
+      *systematicManager);
+    dm->Define("jer_sf_bin", []() -> Int_t { return 2; }, {},
+         *systematicManager);
+
+    mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "");
+    mgr->setJERSmearingColumns("GenJet_pt", "rho_fixedGridRhoFastjetAll",
+                 "event_id");
+    mgr->applyJERSmearing(*correctionManager, "jer_resolution",
+              "jer_scale_factor", "Jet_pt_raw", "Jet_pt_jer",
+              "B", false, "", "", {"jer_res_feature", "jer_res_bin"},
+              {"jer_sf_feature", "jer_sf_bin"});
+
+    EXPECT_NO_THROW(mgr->execute());
+
+    auto jerResolution = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>(
+      "_jer_resolution_Jet_pt_jer");
+    auto jerScaleFactor = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>(
+      "_jer_scale_factor_Jet_pt_jer");
+
+    ASSERT_EQ(jerResolution->size(), 1u);
+    ASSERT_EQ(jerScaleFactor->size(), 1u);
+    ASSERT_EQ((*jerResolution)[0].size(), 2u);
+    ASSERT_EQ((*jerScaleFactor)[0].size(), 2u);
+
+    const auto resolution = correctionManager->getCorrection("jer_resolution");
+    const auto scaleFactor = correctionManager->getCorrection("jer_scale_factor");
+    const auto expectedRes0 =
+      static_cast<float>(resolution->evaluate({0.5, 1}));
+    const auto expectedRes1 =
+      static_cast<float>(resolution->evaluate({2.5, 1}));
+    const auto expectedSf0 =
+      static_cast<float>(scaleFactor->evaluate({0.5, 2, std::string("B")}));
+    const auto expectedSf1 =
+      static_cast<float>(scaleFactor->evaluate({1.5, 2, std::string("B")}));
+
+    EXPECT_NEAR((*jerResolution)[0][0], expectedRes0, 1e-6f);
+    EXPECT_NEAR((*jerResolution)[0][1], expectedRes1, 1e-6f);
+    EXPECT_NEAR((*jerScaleFactor)[0][0], expectedSf0, 1e-6f);
+    EXPECT_NEAR((*jerScaleFactor)[0][1], expectedSf1, 1e-6f);
+  }
 
   TEST_F(JetEnergyScaleManagerTest,
        ChainedCorrectionlibStepsDeferIntermediateColumnResolution) {

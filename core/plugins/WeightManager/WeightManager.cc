@@ -8,8 +8,191 @@
 #include <api/ILogger.h>
 #include <api/IOutputSink.h>
 #include <algorithm>
+#include <cctype>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
+
+namespace {
+
+enum class WeightScalarTypeToken {
+  Bool,
+  Float,
+  Double,
+  Int,
+  UInt,
+  Short,
+  UShort,
+  Char,
+  UChar,
+  Long64,
+  ULong64,
+  Unsupported,
+};
+
+std::string removeWeightTypeWhitespace(std::string value) {
+  value.erase(std::remove_if(value.begin(), value.end(),
+                             [](unsigned char c) { return std::isspace(c) != 0; }),
+              value.end());
+  return value;
+}
+
+bool isUnsupportedWeightVectorType(const std::string &columnType) {
+  return columnType.find("RVec<") != std::string::npos;
+}
+
+WeightScalarTypeToken tokenizeWeightScalarType(const std::string &typeName) {
+  const auto normalized = removeWeightTypeWhitespace(typeName);
+
+  if (normalized == "Bool_t" || normalized == "bool") {
+    return WeightScalarTypeToken::Bool;
+  }
+  if (normalized == "Float_t" || normalized == "float") {
+    return WeightScalarTypeToken::Float;
+  }
+  if (normalized == "Double_t" || normalized == "double") {
+    return WeightScalarTypeToken::Double;
+  }
+  if (normalized == "Int_t" || normalized == "int") {
+    return WeightScalarTypeToken::Int;
+  }
+  if (normalized == "UInt_t" || normalized == "unsignedint") {
+    return WeightScalarTypeToken::UInt;
+  }
+  if (normalized == "Short_t" || normalized == "short") {
+    return WeightScalarTypeToken::Short;
+  }
+  if (normalized == "UShort_t" || normalized == "unsignedshort") {
+    return WeightScalarTypeToken::UShort;
+  }
+  if (normalized == "Char_t" || normalized == "char") {
+    return WeightScalarTypeToken::Char;
+  }
+  if (normalized == "UChar_t" || normalized == "unsignedchar") {
+    return WeightScalarTypeToken::UChar;
+  }
+  if (normalized == "Long64_t" || normalized == "longlong") {
+    return WeightScalarTypeToken::Long64;
+  }
+  if (normalized == "ULong64_t" || normalized == "unsignedlonglong") {
+    return WeightScalarTypeToken::ULong64;
+  }
+
+  return WeightScalarTypeToken::Unsupported;
+}
+
+std::string buildLegacyWeightInitExpression(const std::string &column) {
+  return "static_cast<double>(" + column + ")";
+}
+
+std::string buildLegacyWeightMultiplyExpression(const std::string &accumulator,
+                                                const std::string &column) {
+  return accumulator + " * static_cast<double>(" + column + ")";
+}
+
+template <typename InputT>
+ROOT::RDF::RNode defineWeightAccumulatorInit(ROOT::RDF::RNode df,
+                                             const std::string &name,
+                                             const std::string &column) {
+  return df.Define(
+      name,
+      [](InputT value) { return static_cast<double>(value); },
+      {column});
+}
+
+template <typename InputT>
+ROOT::RDF::RNode defineWeightAccumulatorMultiply(ROOT::RDF::RNode df,
+                                                 const std::string &name,
+                                                 const std::string &accumulator,
+                                                 const std::string &column) {
+  return df.Define(
+      name,
+      [](double acc, InputT value) { return acc * static_cast<double>(value); },
+      {accumulator, column});
+}
+
+ROOT::RDF::RNode dispatchWeightAccumulatorInit(ROOT::RDF::RNode df,
+                                               const std::string &name,
+                                               const std::string &column,
+                                               WeightScalarTypeToken inputType) {
+  switch (inputType) {
+  case WeightScalarTypeToken::Bool:
+    return defineWeightAccumulatorInit<Bool_t>(df, name, column);
+  case WeightScalarTypeToken::Float:
+    return defineWeightAccumulatorInit<Float_t>(df, name, column);
+  case WeightScalarTypeToken::Double:
+    return defineWeightAccumulatorInit<Double_t>(df, name, column);
+  case WeightScalarTypeToken::Int:
+    return defineWeightAccumulatorInit<Int_t>(df, name, column);
+  case WeightScalarTypeToken::UInt:
+    return defineWeightAccumulatorInit<UInt_t>(df, name, column);
+  case WeightScalarTypeToken::Short:
+    return defineWeightAccumulatorInit<Short_t>(df, name, column);
+  case WeightScalarTypeToken::UShort:
+    return defineWeightAccumulatorInit<UShort_t>(df, name, column);
+  case WeightScalarTypeToken::Char:
+    return defineWeightAccumulatorInit<Char_t>(df, name, column);
+  case WeightScalarTypeToken::UChar:
+    return defineWeightAccumulatorInit<UChar_t>(df, name, column);
+  case WeightScalarTypeToken::Long64:
+    return defineWeightAccumulatorInit<Long64_t>(df, name, column);
+  case WeightScalarTypeToken::ULong64:
+    return defineWeightAccumulatorInit<ULong64_t>(df, name, column);
+  case WeightScalarTypeToken::Unsupported:
+    throw std::runtime_error("WeightManager::defineWeightColumn: unsupported scalar input type in compiled path");
+  }
+
+  throw std::runtime_error("WeightManager::defineWeightColumn: unreachable init dispatch");
+}
+
+ROOT::RDF::RNode dispatchWeightAccumulatorMultiply(ROOT::RDF::RNode df,
+                                                   const std::string &name,
+                                                   const std::string &accumulator,
+                                                   const std::string &column,
+                                                   WeightScalarTypeToken inputType) {
+  switch (inputType) {
+  case WeightScalarTypeToken::Bool:
+    return defineWeightAccumulatorMultiply<Bool_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::Float:
+    return defineWeightAccumulatorMultiply<Float_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::Double:
+    return defineWeightAccumulatorMultiply<Double_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::Int:
+    return defineWeightAccumulatorMultiply<Int_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::UInt:
+    return defineWeightAccumulatorMultiply<UInt_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::Short:
+    return defineWeightAccumulatorMultiply<Short_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::UShort:
+    return defineWeightAccumulatorMultiply<UShort_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::Char:
+    return defineWeightAccumulatorMultiply<Char_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::UChar:
+    return defineWeightAccumulatorMultiply<UChar_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::Long64:
+    return defineWeightAccumulatorMultiply<Long64_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::ULong64:
+    return defineWeightAccumulatorMultiply<ULong64_t>(df, name, accumulator, column);
+  case WeightScalarTypeToken::Unsupported:
+    throw std::runtime_error("WeightManager::defineWeightColumn: unsupported scalar input type in compiled path");
+  }
+
+  throw std::runtime_error("WeightManager::defineWeightColumn: unreachable multiply dispatch");
+}
+
+bool shouldUseLegacyWeightDefines(const std::vector<std::string> &columnTypes,
+                                  const std::vector<WeightScalarTypeToken> &typeTokens) {
+  return std::any_of(columnTypes.begin(), columnTypes.end(),
+                     [](const std::string &columnType) {
+                       return isUnsupportedWeightVectorType(columnType);
+                     }) ||
+         std::any_of(typeTokens.begin(), typeTokens.end(),
+                     [](WeightScalarTypeToken token) {
+                       return token == WeightScalarTypeToken::Unsupported;
+                     });
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // setContext
@@ -157,16 +340,29 @@ void WeightManager::defineWeightColumn(const std::string &outputColumn,
     return;
   }
 
-  // Generic approach: accumulate the product of scale factors step by step
-  // using a chain of Define() calls, since the number of SF columns is only
-  // known at runtime and variadic lambdas cannot be formed statically.
+  std::vector<std::string> columnTypes;
+  columnTypes.reserve(sfColumns.size());
+  std::vector<WeightScalarTypeToken> typeTokens;
+  typeTokens.reserve(sfColumns.size());
+  for (const auto &sfColumn : sfColumns) {
+    const std::string columnType = df.GetColumnType(sfColumn);
+    columnTypes.push_back(columnType);
+    typeTokens.push_back(tokenizeWeightScalarType(columnType));
+  }
+
+  const bool useLegacyDefines = shouldUseLegacyWeightDefines(columnTypes, typeTokens);
+
+  // Accumulate the product of scale factors step by step since the number of
+  // inputs is only known at runtime. Common scalar types use compiled lambdas;
+  // unsupported types keep the legacy string-Define fallback.
 
   // Define the first accumulator column
   std::string prevCol = outputColumn + "_wm_acc_0_";
-  {
+  if (useLegacyDefines) {
     const std::string sfCol0 = sfColumns[0];
-    auto newDf = df.Define(prevCol, "static_cast<double>(" + sfCol0 + ")");
-    df = newDf;
+    df = df.Define(prevCol, buildLegacyWeightInitExpression(sfCol0));
+  } else {
+    df = dispatchWeightAccumulatorInit(df, prevCol, sfColumns[0], typeTokens[0]);
   }
 
   // Multiply in subsequent SF columns
@@ -174,9 +370,12 @@ void WeightManager::defineWeightColumn(const std::string &outputColumn,
     std::string nextCol = outputColumn + "_wm_acc_" + std::to_string(i) + "_";
     const std::string sfColI = sfColumns[i];
     const std::string pCol = prevCol;
-    auto newDf = df.Define(nextCol,
-                 pCol + " * static_cast<double>(" + sfColI + ")");
-    df = newDf;
+    if (useLegacyDefines) {
+      df = df.Define(nextCol, buildLegacyWeightMultiplyExpression(pCol, sfColI));
+    } else {
+      df = dispatchWeightAccumulatorMultiply(df, nextCol, pCol, sfColI,
+                                             typeTokens[i]);
+    }
     prevCol = nextCol;
   }
 
@@ -270,18 +469,44 @@ void WeightManager::materializeScheduledWeights(bool shouldBookAudit) {
 void WeightManager::bookAudit(const std::string &label,
                                const std::string &column,
                                ROOT::RDF::RNode &df) {
+  const auto identity = [] {
+    AuditAccumulator accumulator;
+    accumulator.minWeight = std::numeric_limits<double>::max();
+    accumulator.maxWeight = std::numeric_limits<double>::lowest();
+    return accumulator;
+  }();
+
   AuditPending ap;
   ap.name = label;
   ap.column = column;
-  ap.sumResult  = df.Sum<double>(column);
-  ap.meanResult = df.Mean<double>(column);
-  ap.minResult  = df.Min<double>(column);
-  ap.maxResult  = df.Max<double>(column);
-  ap.negCount   = df.Filter([](double w) { return w < 0.0; }, {column}).Count();
-  // Exact equality to 0.0 is intentional: in HEP analyses a weight of exactly
-  // zero is typically used to veto out-of-range events.  Near-zero but
-  // non-zero weights are not considered zero here.
-  ap.zeroCount  = df.Filter([](double w) { return w == 0.0; }, {column}).Count();
+  ap.aggregateResult = df.Aggregate(
+      [](AuditAccumulator &accumulator, double weight) {
+        accumulator.sumWeights += weight;
+        accumulator.minWeight = std::min(accumulator.minWeight, weight);
+        accumulator.maxWeight = std::max(accumulator.maxWeight, weight);
+        accumulator.negativeCount += static_cast<ULong64_t>(weight < 0.0);
+        // Exact equality to 0.0 is intentional: in HEP analyses a weight of exactly
+        // zero is typically used to veto out-of-range events. Near-zero but
+        // non-zero weights are not considered zero here.
+        accumulator.zeroCount += static_cast<ULong64_t>(weight == 0.0);
+        accumulator.entryCount += 1U;
+      },
+      [](AuditAccumulator left, AuditAccumulator right) {
+        if (left.entryCount == 0U) {
+          return right;
+        }
+        if (right.entryCount == 0U) {
+          return left;
+        }
+        left.sumWeights += right.sumWeights;
+        left.minWeight = std::min(left.minWeight, right.minWeight);
+        left.maxWeight = std::max(left.maxWeight, right.maxWeight);
+        left.negativeCount += right.negativeCount;
+        left.zeroCount += right.zeroCount;
+        left.entryCount += right.entryCount;
+        return left;
+      },
+      column, identity);
   auditPending_m.push_back(std::move(ap));
 }
 
@@ -305,15 +530,18 @@ void WeightManager::finalize() {
   auditEntries_m.reserve(auditPending_m.size());
 
   for (auto &ap : auditPending_m) {
+    const auto &aggregate = ap.aggregateResult.GetValue();
     WeightAuditEntry entry;
     entry.name          = ap.name;
     entry.column        = ap.column;
-    entry.sumWeights    = ap.sumResult.GetValue();
-    entry.meanWeight    = ap.meanResult.GetValue();
-    entry.minWeight     = ap.minResult.GetValue();
-    entry.maxWeight     = ap.maxResult.GetValue();
-    entry.negativeCount = static_cast<long long>(ap.negCount.GetValue());
-    entry.zeroCount     = static_cast<long long>(ap.zeroCount.GetValue());
+    entry.sumWeights    = aggregate.sumWeights;
+    entry.meanWeight    = aggregate.entryCount == 0U
+                              ? 0.0
+                              : aggregate.sumWeights / static_cast<double>(aggregate.entryCount);
+    entry.minWeight     = aggregate.entryCount == 0U ? 0.0 : aggregate.minWeight;
+    entry.maxWeight     = aggregate.entryCount == 0U ? 0.0 : aggregate.maxWeight;
+    entry.negativeCount = static_cast<long long>(aggregate.negativeCount);
+    entry.zeroCount     = static_cast<long long>(aggregate.zeroCount);
     auditEntries_m.push_back(std::move(entry));
   }
 

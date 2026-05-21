@@ -1,4 +1,5 @@
 #include <CorrectionManager.h>
+#include <RDFColumnPacker.h>
 #include <analyzer.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
@@ -9,12 +10,17 @@
 #include <cctype>
 #include <iostream>
 #include <stdexcept>
+#include <variant>
 
 namespace {
 
-bool isVectorColumnType(const std::string &columnType) {
-  return columnType.find("RVec") != std::string::npos;
-}
+using CorrectionValue = std::variant<int, double, std::string>;
+
+enum class CorrectionInputKind {
+  String,
+  Int,
+  Double,
+};
 
 void ensureFlattenHelperDeclared() {
   static const bool declared = []() {
@@ -86,50 +92,87 @@ std::string buildFlattenRVecExpression(
   return expression;
 }
 
-Float_t evaluateScalarCorrection(
-  const correction::Correction::Ref &correction,
-    const std::vector<std::string> &stringArgs,
-    ROOT::VecOps::RVec<double> &inputVector) {
-  std::vector<std::variant<int, double, std::string>> values;
-  auto stringArgIt = stringArgs.begin();
-  auto doubleArgIt = inputVector.begin();
+std::vector<CorrectionInputKind>
+buildCorrectionInputKinds(const correction::Correction::Ref &correction) {
+  std::vector<CorrectionInputKind> inputKinds;
+  inputKinds.reserve(correction->inputs().size());
   for (const auto &varType : correction->inputs()) {
     if (varType.typeStr() == "string") {
-      values.push_back(*stringArgIt);
-      ++stringArgIt;
+      inputKinds.push_back(CorrectionInputKind::String);
     } else if (varType.typeStr() == "int") {
-      values.push_back(int(*doubleArgIt));
-      ++doubleArgIt;
+      inputKinds.push_back(CorrectionInputKind::Int);
     } else {
-      values.push_back(*doubleArgIt);
-      ++doubleArgIt;
+      inputKinds.push_back(CorrectionInputKind::Double);
     }
   }
+  return inputKinds;
+}
+
+std::vector<CorrectionInputKind>
+buildCorrectionInputKinds(const correction::CompoundCorrection::Ref &correction) {
+  std::vector<CorrectionInputKind> inputKinds;
+  inputKinds.reserve(correction->inputs().size());
+  for (const auto &varType : correction->inputs()) {
+    if (varType.typeStr() == "string") {
+      inputKinds.push_back(CorrectionInputKind::String);
+    } else {
+      inputKinds.push_back(CorrectionInputKind::Double);
+    }
+  }
+  return inputKinds;
+}
+
+template <typename DoubleIterator>
+void populateCorrectionValues(std::vector<CorrectionValue> &values,
+                              const std::vector<CorrectionInputKind> &inputKinds,
+                              const std::vector<std::string> &stringArgs,
+                              DoubleIterator doubleArgIt) {
+  values.clear();
+  auto stringArgIt = stringArgs.begin();
+  for (const auto inputKind : inputKinds) {
+    switch (inputKind) {
+    case CorrectionInputKind::String:
+      values.emplace_back(*stringArgIt);
+      ++stringArgIt;
+      break;
+    case CorrectionInputKind::Int:
+      values.emplace_back(static_cast<int>(*doubleArgIt));
+      ++doubleArgIt;
+      break;
+    case CorrectionInputKind::Double:
+      values.emplace_back(*doubleArgIt);
+      ++doubleArgIt;
+      break;
+    }
+  }
+}
+
+Float_t evaluateScalarCorrection(
+    const correction::Correction::Ref &correction,
+    const std::vector<std::string> &stringArgs,
+    const std::vector<CorrectionInputKind> &inputKinds,
+    const ROOT::VecOps::RVec<double> &inputVector) {
+  std::vector<CorrectionValue> values;
+  values.reserve(inputKinds.size());
+  populateCorrectionValues(values, inputKinds, stringArgs, inputVector.begin());
   return correction->evaluate(values);
 }
 
 Float_t evaluateScalarCorrection(
     const correction::CompoundCorrection::Ref &correction,
     const std::vector<std::string> &stringArgs,
-    ROOT::VecOps::RVec<double> &inputVector) {
-  std::vector<std::variant<int, double, std::string>> values;
-  auto stringArgIt = stringArgs.begin();
-  auto doubleArgIt = inputVector.begin();
-  for (const auto &varType : correction->inputs()) {
-    if (varType.typeStr() == "string") {
-      values.push_back(*stringArgIt);
-      ++stringArgIt;
-    } else {
-      values.push_back(*doubleArgIt);
-      ++doubleArgIt;
-    }
-  }
+    const std::vector<CorrectionInputKind> &inputKinds,
+    const ROOT::VecOps::RVec<double> &inputVector) {
+  std::vector<CorrectionValue> values;
+  values.reserve(inputKinds.size());
+  populateCorrectionValues(values, inputKinds, stringArgs, inputVector.begin());
   return correction->evaluate(values);
 }
 
 ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
     const correction::Correction::Ref &correction,
     const std::vector<std::string> &stringArgs,
+    const std::vector<CorrectionInputKind> &inputKinds,
     const ROOT::VecOps::RVec<double> &flatInputVector,
     size_t featureCount) {
   if (featureCount == 0) {
@@ -142,22 +185,11 @@ ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
 
   const size_t objectCount = flatInputVector.size() / featureCount;
   ROOT::VecOps::RVec<Float_t> result(objectCount);
+  std::vector<CorrectionValue> values;
+  values.reserve(inputKinds.size());
   for (size_t i = 0; i < objectCount; ++i) {
-    std::vector<std::variant<int, double, std::string>> values;
-    auto stringArgIt = stringArgs.begin();
     auto doubleArgIt = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
-    for (const auto &varType : correction->inputs()) {
-      if (varType.typeStr() == "string") {
-        values.push_back(*stringArgIt);
-        ++stringArgIt;
-      } else if (varType.typeStr() == "int") {
-        values.push_back(int(*doubleArgIt));
-        ++doubleArgIt;
-      } else {
-        values.push_back(*doubleArgIt);
-        ++doubleArgIt;
-      }
-    }
+    populateCorrectionValues(values, inputKinds, stringArgs, doubleArgIt);
     result[i] = correction->evaluate(values);
   }
   return result;
@@ -166,6 +198,7 @@ ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
 ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
     const correction::CompoundCorrection::Ref &correction,
     const std::vector<std::string> &stringArgs,
+    const std::vector<CorrectionInputKind> &inputKinds,
     const ROOT::VecOps::RVec<double> &flatInputVector,
     size_t featureCount) {
   if (featureCount == 0) {
@@ -178,19 +211,11 @@ ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
 
   const size_t objectCount = flatInputVector.size() / featureCount;
   ROOT::VecOps::RVec<Float_t> result(objectCount);
+  std::vector<CorrectionValue> values;
+  values.reserve(inputKinds.size());
   for (size_t i = 0; i < objectCount; ++i) {
-    std::vector<std::variant<int, double, std::string>> values;
-    auto stringArgIt = stringArgs.begin();
     auto doubleArgIt = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
-    for (const auto &varType : correction->inputs()) {
-      if (varType.typeStr() == "string") {
-        values.push_back(*stringArgIt);
-        ++stringArgIt;
-      } else {
-        values.push_back(*doubleArgIt);
-        ++doubleArgIt;
-      }
-    }
+    populateCorrectionValues(values, inputKinds, stringArgs, doubleArgIt);
     result[i] = correction->evaluate(values);
   }
   return result;
@@ -339,9 +364,10 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
       corrIt != this->objects_m.end()) {
     auto correction = corrIt->second;
     auto stringArgs = stringArguments;
+    auto inputKinds = buildCorrectionInputKinds(correction);
     auto correctionLambda =
-        [correction, stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
-      return evaluateScalarCorrection(correction, stringArgs, inputVector);
+        [correction, stringArgs, inputKinds](const ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
+      return evaluateScalarCorrection(correction, stringArgs, inputKinds, inputVector);
     };
     dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
     return;
@@ -351,9 +377,10 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
       compoundIt != compoundObjects_m.end()) {
     auto correction = compoundIt->second;
     auto stringArgs = stringArguments;
+    auto inputKinds = buildCorrectionInputKinds(correction);
     auto correctionLambda =
-        [correction, stringArgs](ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
-      return evaluateScalarCorrection(correction, stringArgs, inputVector);
+        [correction, stringArgs, inputKinds](const ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
+      return evaluateScalarCorrection(correction, stringArgs, inputKinds, inputVector);
     };
     dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
     return;
@@ -457,13 +484,10 @@ void CorrectionManager::applyCorrectionVec(
     const auto existingColumns = dfNode.GetColumnNames();
     if (std::find(existingColumns.begin(), existingColumns.end(),
                   inputVecName) == existingColumns.end()) {
-      ensureFlattenHelperDeclared();
       bool hasVectorInput = false;
-      std::vector<bool> isVectorInput;
-      isVectorInput.reserve(resolvedInputs.size());
       for (const auto &f : resolvedInputs) {
-        const bool columnIsVector = isVectorColumnType(dfNode.GetColumnType(f));
-        isVectorInput.push_back(columnIsVector);
+        const std::string columnType = dfNode.GetColumnType(f);
+        const bool columnIsVector = rdfcolumnpacker::isRVecColumnType(columnType);
         if (columnIsVector) {
           hasVectorInput = true;
         }
@@ -475,9 +499,15 @@ void CorrectionManager::applyCorrectionVec(
             correctionName + "'");
       }
 
-      dfNode = dfNode.Define(
-          inputVecName,
-          buildFlattenRVecExpression(resolvedInputs));
+      dfNode = rdfcolumnpacker::defineFlattenedNumericInputs(
+          dfNode, inputVecName, resolvedInputs, "CorrectionManager",
+          [](ROOT::RDF::RNode df, const std::string &outputColumn,
+             const std::vector<std::string> &inputColumns) {
+            ensureFlattenHelperDeclared();
+            return df.Define(outputColumn,
+                             buildFlattenRVecExpression(inputColumns));
+          });
+
       dataManager_m->setDataFrame(dfNode);
     }
   }
@@ -487,11 +517,12 @@ void CorrectionManager::applyCorrectionVec(
       corrIt != this->objects_m.end()) {
     auto correction = corrIt->second;
     auto stringArgs = stringArguments;
+    auto inputKinds = buildCorrectionInputKinds(correction);
     const size_t featureCount = resolvedInputs.size();
     auto correctionLambda =
-        [correction, stringArgs, featureCount](const ROOT::VecOps::RVec<double>
+      [correction, stringArgs, inputKinds, featureCount](const ROOT::VecOps::RVec<double>
                                                    &flatInputVector) -> ROOT::VecOps::RVec<Float_t> {
-      return evaluateVectorCorrection(correction, stringArgs, flatInputVector,
+      return evaluateVectorCorrection(correction, stringArgs, inputKinds, flatInputVector,
                                       featureCount);
     };
     dataManager_m->Define(branchName, correctionLambda, {inputVecName},
@@ -503,11 +534,12 @@ void CorrectionManager::applyCorrectionVec(
       compoundIt != compoundObjects_m.end()) {
     auto correction = compoundIt->second;
     auto stringArgs = stringArguments;
+    auto inputKinds = buildCorrectionInputKinds(correction);
     const size_t featureCount = resolvedInputs.size();
     auto correctionLambda =
-        [correction, stringArgs, featureCount](const ROOT::VecOps::RVec<double>
+      [correction, stringArgs, inputKinds, featureCount](const ROOT::VecOps::RVec<double>
                                                    &flatInputVector) -> ROOT::VecOps::RVec<Float_t> {
-      return evaluateVectorCorrection(correction, stringArgs, flatInputVector,
+      return evaluateVectorCorrection(correction, stringArgs, inputKinds, flatInputVector,
                                       featureCount);
     };
     dataManager_m->Define(branchName, correctionLambda, {inputVecName},

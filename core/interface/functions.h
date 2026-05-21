@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <numeric>
+#include <type_traits>
 
 #include <Math/Math.h>
 #include <Math/Vector4D.h>
@@ -127,6 +128,65 @@ ROOT::VecOps::RVec<S> castRVec(const ROOT::VecOps::RVec<T> &values) {
  */
 template <typename T> ROOT::VecOps::RVec<T> defineVector(T val1) {
   return (ROOT::VecOps::RVec<T>({val1}));
+}
+
+/**
+ * @brief Creates an empty RVec of the requested type.
+ * @tparam T Element type
+ * @return Empty vector
+ */
+template <typename T> ROOT::VecOps::RVec<T> defineEmptyVector() {
+  return ROOT::VecOps::RVec<T>{};
+}
+
+/**
+ * @brief Casts a scalar value into a single-element RVec.
+ * @tparam T Output element type
+ * @tparam U Input scalar type
+ * @param value Input value
+ * @return Single-element vector containing the cast value
+ */
+template <typename T, typename U>
+ROOT::VecOps::RVec<T> castValueToVector(const U &value) {
+  return ROOT::VecOps::RVec<T>{static_cast<T>(value)};
+}
+
+/**
+ * @brief Appends a scalar value to an existing vector after casting.
+ * @tparam T Output element type
+ * @tparam U Input scalar type
+ * @param existing Existing vector
+ * @param value Input scalar value
+ * @return New vector with value appended
+ */
+template <typename T, typename U>
+ROOT::VecOps::RVec<T> appendScalarCastToVector(
+    const ROOT::VecOps::RVec<T> &existing, const U &value) {
+  ROOT::VecOps::RVec<T> out;
+  out.reserve(existing.size() + 1U);
+  out.insert(out.end(), existing.begin(), existing.end());
+  out.emplace_back(static_cast<T>(value));
+  return out;
+}
+
+/**
+ * @brief Concatenates an existing vector with another vector after casting.
+ * @tparam T Output element type
+ * @tparam U Input element type
+ * @param existing Existing vector
+ * @param values Vector to append
+ * @return Concatenated vector with cast elements
+ */
+template <typename T, typename U>
+ROOT::VecOps::RVec<T> concatenateCastRVec(
+    const ROOT::VecOps::RVec<T> &existing,
+    const ROOT::VecOps::RVec<U> &values) {
+  ROOT::VecOps::RVec<T> out;
+  out.reserve(existing.size() + values.size());
+  out.insert(out.end(), existing.begin(), existing.end());
+  std::transform(values.begin(), values.end(), std::back_inserter(out),
+                 [](const U &value) { return static_cast<T>(value); });
+  return out;
 }
 
 // =========================
