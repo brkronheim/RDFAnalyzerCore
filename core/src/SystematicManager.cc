@@ -67,23 +67,27 @@ const std::set<std::string> &SystematicManager::getSystematics() const {
  * @param syst Name of the systematic
  * @return Reference to the set of variable names
  */
-const std::set<std::string> &
+std::set<std::string>
 SystematicManager::getVariablesForSystematic(const std::string &syst) const {
-  static const std::set<std::string> empty;
   auto it = systematicToVariableMap_m.find(normalizeSystematicName(syst));
-  return it != systematicToVariableMap_m.end() ? it->second : empty;
+  if (it != systematicToVariableMap_m.end()) {
+    return it->second;
+  }
+  return {};
 }
 
 /**
  * @brief Get the set of systematics affecting a given variable
  * @param var Name of the variable
- * @return Reference to the set of systematic names
+ * @return Set of systematic names
  */
-const std::set<std::string> &
+std::set<std::string>
 SystematicManager::getSystematicsForVariable(const std::string &var) const {
-  static const std::set<std::string> empty;
   auto it = variableToSystematicMap_m.find(var);
-  return it != variableToSystematicMap_m.end() ? it->second : empty;
+  if (it != variableToSystematicMap_m.end()) {
+    return it->second;
+  }
+  return {};
 }
 
 std::string SystematicManager::getVariationColumnName(

@@ -282,7 +282,6 @@ private:
   ILogger* logger_m = nullptr;
   IOutputSink* skimSink_m = nullptr;
   IOutputSink* metaSink_m = nullptr;
-  bool countersFinalized_m = false;
   std::string histogramBackend_m = "root";
   RegionManager* regionManager_m = nullptr;
 };

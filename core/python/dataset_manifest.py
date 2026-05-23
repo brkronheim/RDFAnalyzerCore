@@ -330,9 +330,26 @@ class DatasetEntry:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DatasetEntry":
         """Construct a ``DatasetEntry`` from a plain dict (e.g. loaded from
-        YAML).  Unknown keys are silently ignored for forward-compatibility."""
+        YAML).
+
+        Unknown top-level keys are preserved under ``extra`` for forward-
+        compatibility and to support compact manifests where analysis-specific
+        metadata (e.g. ``ptcut``) is declared directly on the dataset entry.
+        """
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in data.items() if k in known}
+        extra: Dict[str, Any] = {}
+        raw_extra = filtered.get("extra")
+        if isinstance(raw_extra, dict):
+            extra.update(raw_extra)
+
+        for key, value in data.items():
+            if key not in known:
+                extra[key] = value
+
+        if extra:
+            filtered["extra"] = extra
+
         # Deserialise nested FriendTreeConfig objects
         if "friend_trees" in filtered and isinstance(filtered["friend_trees"], list):
             filtered["friend_trees"] = [
@@ -779,13 +796,11 @@ def _validate_dataset_entry(raw_entry: Dict[str, Any], path: str, index: int) ->
             f"Dataset manifest '{path}' entry #{index} must contain a string 'name' field."
         )
 
-    known_entry_keys = {f.name for f in fields(DatasetEntry)}
-    unknown_entry_keys = set(raw_entry) - known_entry_keys
-    if unknown_entry_keys:
-        raise ValueError(
-            f"Dataset manifest '{path}' entry '{dataset_label}' contains unknown keys: "
-            f"{', '.join(sorted(unknown_entry_keys))}"
-        )
+    if "extra" in raw_entry and raw_entry["extra"] is not None:
+        if not isinstance(raw_entry["extra"], dict):
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}': 'extra' must be a YAML mapping."
+            )
 
     if "dtype" in raw_entry and raw_entry["dtype"] is not None:
         if not isinstance(raw_entry["dtype"], str):

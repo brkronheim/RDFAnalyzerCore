@@ -1,17 +1,19 @@
 #include <SystematicManager.h>
 #include <test_util.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
 class SystematicManagerTest : public ::testing::Test {
 protected:
-  void SetUp() override { ChangeToTestSourceDir(); systematicManager = new SystematicManager(); }
+  void SetUp() override {
+    ChangeToTestSourceDir();
+    systematicManager = std::make_unique<SystematicManager>();
+  }
 
-  void TearDown() override { delete systematicManager; }
-
-  SystematicManager *systematicManager = nullptr;
+  std::unique_ptr<SystematicManager> systematicManager;
 };
 
 TEST_F(SystematicManagerTest, ConstructorCreatesEmptyManager) {

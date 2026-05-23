@@ -103,7 +103,7 @@ analyzer.DefineFromVector('weight', weights.ctypes.data, len(weights), 'double')
 # Or ensure array lives long enough
 weights = np.array([1.0, 2.0])
 analyzer.DefineFromPointer('weight', weights.ctypes.data, len(weights), 'double')
-# Ensure 'weights' stays in scope until analyzer.save() or analyzer.run()
+# Ensure 'weights' stays in scope until analyzer.run() or analyzer.run()
 ```
 
 ### 5. Systematic Variations Errors
@@ -308,7 +308,7 @@ If you encounter an error not listed here:
 try:
     analyzer = rdfanalyzer.Analyzer('config.txt')
     analyzer.Define('x', 'pt > 25.0', ['pt'])
-    analyzer.save()
+    analyzer.run()
 except RuntimeError as e:
     print(f"Analysis error: {e}")
     sys.exit(1)

@@ -35,18 +35,10 @@ protected:
   void SetUp() override {
     ChangeToTestSourceDir();
     std::string configFile = "cfg/config.txt";
-    config = new ConfigurationManager(configFile);
+    config = std::make_unique<ConfigurationManager>(configFile);
   }
 
-  /**
-   * @brief Tear down the test fixture
-   *
-   * Cleans up the ConfigurationManager instance to prevent memory leaks.
-   */
-  void TearDown() override { delete config; }
-
-  ConfigurationManager *config =
-      nullptr; ///< The configuration manager instance for testing
+  std::unique_ptr<ConfigurationManager> config;
 };
 
 // ============================================================================
@@ -806,7 +798,7 @@ TEST_F(BaseConfigSetup, MemoryManagement) {
  * ConfigurationManager instances can retrieve data but cannot modify it.
  */
 TEST_F(BaseConfigSetup, ConstCorrectness) {
-  const ConfigurationManager *constConfig = config;
+  const ConfigurationManager *constConfig = config.get();
 
   // Should be able to call const methods
   auto map = constConfig->getConfigMap();

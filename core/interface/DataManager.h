@@ -46,10 +46,12 @@ public:
   void setDataFrame(const ROOT::RDF::RNode &node) override;
 
   /**
-   * @brief Get the main TChain pointer
-   * @return Pointer to the main TChain
+   * @brief Get the main TChain reference
+   * @return Reference to the main TChain
+   *
+   * The returned reference is valid for the lifetime of this DataManager.
    */
-  TChain *getChain() const;
+  TChain &getChain() const;
 
 
   /**

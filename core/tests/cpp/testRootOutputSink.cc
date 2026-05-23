@@ -88,7 +88,7 @@ TEST_F(RootOutputSinkTest, ExactColumnNamesAreWritten) {
   RootOutputSink sink;
   auto df = dm->getDataFrame();
   ASSERT_NO_THROW(
-      sink.writeDataFrame(df, config, dm.get(), &sm, OutputChannel::Skim));
+      sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
 
   TFile f(outputPath.c_str(), "READ");
   ASSERT_FALSE(f.IsZombie());
@@ -112,7 +112,7 @@ TEST_F(RootOutputSinkTest, GlobPatternExpandsMatchingColumns) {
   RootOutputSink sink;
   auto df = dm->getDataFrame();
   ASSERT_NO_THROW(
-      sink.writeDataFrame(df, config, dm.get(), &sm, OutputChannel::Skim));
+      sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
 
   TFile f(outputPath.c_str(), "READ");
   ASSERT_FALSE(f.IsZombie());
@@ -136,7 +136,7 @@ TEST_F(RootOutputSinkTest, MixedExactAndGlobPatterns) {
   RootOutputSink sink;
   auto df = dm->getDataFrame();
   ASSERT_NO_THROW(
-      sink.writeDataFrame(df, config, dm.get(), &sm, OutputChannel::Skim));
+      sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
 
   TFile f(outputPath.c_str(), "READ");
   ASSERT_FALSE(f.IsZombie());
@@ -161,5 +161,5 @@ TEST_F(RootOutputSinkTest, GlobPatternWithNoMatchDoesNotThrow) {
   auto df = dm->getDataFrame();
   // When the glob matches nothing, columns is empty so all columns are snapshotted.
   ASSERT_NO_THROW(
-      sink.writeDataFrame(df, config, dm.get(), &sm, OutputChannel::Skim));
+      sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
 }

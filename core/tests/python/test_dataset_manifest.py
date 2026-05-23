@@ -156,7 +156,7 @@ class TestDatasetEntry:
         assert e2.dtype == e.dtype
         assert e2.extra == e.extra
 
-    def test_from_dict_ignores_unknown_keys(self):
+    def test_from_dict_promotes_unknown_keys_to_extra(self):
         d = {
             "name": "s",
             "dtype": "data",
@@ -165,6 +165,7 @@ class TestDatasetEntry:
         e = DatasetEntry.from_dict(d)
         assert e.name == "s"
         assert e.dtype == "data"
+        assert e.extra["unknown_future_field"] == "value"
 
     def test_from_dict_preserves_extra_metadata(self):
         d = {
@@ -406,16 +407,17 @@ class TestDatasetManifestYAML:
         with pytest.raises(ValueError, match="unknown top-level keys"):
             DatasetManifest.load_yaml(str(p))
 
-    def test_load_yaml_rejects_unknown_dataset_keys(self, tmp_path):
-        p = tmp_path / "bad_dataset.yaml"
+    def test_load_yaml_promotes_unknown_dataset_keys_to_extra(self, tmp_path):
+        p = tmp_path / "dataset_extra.yaml"
         p.write_text(textwrap.dedent("""\
             datasets:
               - name: ttbar_2022
                 dtype: mc
                 unsupportedField: yes
         """))
-        with pytest.raises(ValueError, match="unknown keys"):
-            DatasetManifest.load_yaml(str(p))
+        m = DatasetManifest.load_yaml(str(p))
+        assert len(m.datasets) == 1
+        assert m.datasets[0].extra["unsupportedField"] is True
 
     def test_load_yaml_rejects_invalid_dtype(self, tmp_path):
         p = tmp_path / "bad_dtype.yaml"

@@ -196,14 +196,15 @@ All framework behavior is controlled through text configuration files:
 **Example**:
 ```
 # Main config
-fileList=data.root
+# fileList supports glob patterns (wildcards) for input files, e.g.:
+fileList=/eos/user/b/bkronhei/lawmc/Zto2Nu_150pt_NANOGEN_22/nano/nano_*.root
 saveFile=output.root
 threads=-1
 bdtConfig=cfg/bdts.txt
 onnxConfig=cfg/onnx_models.txt
 ```
 
-See [Configuration Reference](docs/CONFIG_REFERENCE.md) for complete documentation.
+See [Configuration Reference](docs/CONFIG_REFERENCE.md) for complete documentation, including details on glob/wildcard support for fileList.
 
 ## Installation and Building
 
@@ -415,7 +416,10 @@ int main(int argc, char **argv) {
 
 **Configuration** (`config.txt`):
 ```
+# fileList can be a comma-separated list or a glob pattern:
 fileList=data1.root,data2.root
+# or
+fileList=/eos/user/b/bkronhei/lawmc/Zto2Nu_150pt_NANOGEN_22/nano/nano_*.root
 saveFile=output.root
 threads=-1
 onnxConfig=cfg/onnx_models.txt

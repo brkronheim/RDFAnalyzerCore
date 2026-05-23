@@ -1293,7 +1293,7 @@ wm.defineNominalWeight("weight_nominal");
 wm.defineVariedWeight("pileup", "up",   "weight_pileup_up");
 wm.defineVariedWeight("pileup", "down", "weight_pileup_down");
 
-analyzer.save();  // Execute event loop
+analyzer.run();  // Execute event loop
 
 // Inspect audit entries after run
 for (const auto& e : wm.getAuditEntries()) {
@@ -1497,7 +1497,7 @@ cfm.addCut("b-tag",         "pass_btag");
 // Optional: bind to RegionManager for per-region cutflows
 cfm.bindToRegionManager(analyzer.getPlugin<RegionManager>("regions"));
 
-analyzer.save();
+analyzer.run();
 
 // Inspect results
 std::cout << "Total events: " << cfm.getTotalCount() << "\n";
@@ -1886,9 +1886,9 @@ with PyROOT or uproot.
 | `env.container_tag` | Container/runtime tag (`CONTAINER_TAG`, `APPTAINER_NAME`, `SINGULARITY_NAME`, or `DOCKER_IMAGE`) |
 | `executor.num_threads` | Number of ROOT implicit-MT threads at finalize() time |
 | `config.hash` | MD5 digest of the serialised configuration map (sorted key=value pairs) |
-| `filelist.hash` | MD5 digest of the file referenced by the `fileList` config key |
+| `filelist.hash` | MD5 digest of a cheap fingerprint for the `fileList` value; local files use path, size, and modification time, while remote or non-stat'able paths fall back to the path or URI string |
 | `plugin.<role>` | Type name of each registered plugin, keyed by its role |
-| `file.hash.<cfg_key>` | MD5 digest of any config value that looks like a file path (`.json`, `.root`, `.onnx`, `.bdt`, `.pt`, `.pb`, `.xml`, `.yaml`, `.yml`) |
+| `file.hash.<cfg_key>` | MD5 digest of a cheap fingerprint for any config value that looks like a file path (`.json`, `.root`, `.onnx`, `.bdt`, `.pt`, `.pb`, `.xml`, `.yaml`, `.yml`); local files use path, size, and modification time, while remote or non-stat'able paths fall back to the path or URI string |
 
 #### Methods
 
@@ -1942,7 +1942,7 @@ prov->recordDatasetManifestProvenance(
     "Run2022C,Run2022D"
 );
 
-analyzer.save();
+analyzer.run();
 ```
 
 ```python

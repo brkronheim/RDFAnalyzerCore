@@ -20,10 +20,9 @@ protected:
   void SetUp() override {
     ChangeToTestSourceDir();
     std::string configFile = "cfg/config.txt";
-    config = new ConfigurationManager(configFile);
+    config = std::make_unique<ConfigurationManager>(configFile);
   }
-  void TearDown() override { delete config; }
-  ConfigurationManager *config = nullptr;
+  std::unique_ptr<ConfigurationManager> config;
 };
 
 // Multi-Key Configuration Tests

@@ -155,8 +155,8 @@ TEST_F(DataManagerTest, SetDataFrameUpdatesNode) {
  * Verifies that getChain returns a non-null pointer when constructed with a config file.
  */
 TEST_F(DataManagerTest, GetChainReturnsValidPointer) {
-  auto chain = dynamic_cast<DataManager*>(dataManager.get())->getChain();
-  EXPECT_NE(chain, nullptr);
+  auto& chain = dynamic_cast<DataManager*>(dataManager.get())->getChain();
+  EXPECT_TRUE(chain.GetEntries() >= 0);
   // Optionally check chain properties if needed
 }
 

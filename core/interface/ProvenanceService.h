@@ -30,14 +30,20 @@
  *                              the time finalize() is called (0 = single-threaded).
  *  - config.hash             : MD5 digest of the serialised configuration map
  *                              (all key=value pairs sorted by key).
- *  - filelist.hash           : MD5 digest of the file referenced by the "fileList"
- *                              configuration key, if present.
+ *  - filelist.hash           : MD5 digest of a cheap file-reference fingerprint
+ *                              for the value of the "fileList" configuration
+ *                              key, if present. For local regular files this
+ *                              fingerprint is derived from the path, file size,
+ *                              and modification time. For remote URIs or paths
+ *                              that cannot be stat'ed locally, it falls back to
+ *                              the path / URI string itself.
  *  - plugin.<role>           : Type name of each registered plugin, keyed by
  *                              its role (e.g. plugin.histogramManager).
- *  - file.hash.<cfg_key>     : MD5 digest of any configuration value that looks
- *                              like a file path with a recognised extension
- *                              (.json, .root, .onnx, .bdt, .pt, .pb, .xml,
- *                               .yaml, .yml).
+ *  - file.hash.<cfg_key>     : MD5 digest of a cheap file-reference fingerprint
+ *                              for any configuration value that looks like a
+ *                              file path with a recognised extension (.json,
+ *                              .root, .onnx, .bdt, .pt, .pb, .xml, .yaml,
+ *                              .yml).
  *
  * Dataset manifest identity can be recorded explicitly via
  * recordDatasetManifestProvenance():
@@ -127,7 +133,7 @@ private:
     void collectBuildInfo();
     void collectRuntimeInfo(const IConfigurationProvider& config);
 
-    /// Compute MD5 hex digest of a file's contents; returns "<not found>" on error.
+    /// Compute a cheap MD5 fingerprint for a file reference or URI.
     static std::string hashFile(const std::string& path);
     /// Run a shell command and return trimmed stdout; returns "" on failure.
     static std::string runCommand(const std::string& cmd);

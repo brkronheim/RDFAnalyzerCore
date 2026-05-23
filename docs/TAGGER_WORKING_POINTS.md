@@ -142,7 +142,7 @@ twm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
                                  "goodJets_btag_variations");
 ```
 
-After `analyzer.save()`:
+After `analyzer.run()`:
 
 | Column                        | Type                        | Description                                    |
 |-------------------------------|-----------------------------|------------------------------------------------|

@@ -112,7 +112,7 @@ int main(int argc, char **argv) {
     analyzer.bookConfigHistograms();
     
     // Save outputs
-    analyzer.save();
+    analyzer.run();
     
     return 0;
 }

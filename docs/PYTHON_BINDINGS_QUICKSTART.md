@@ -32,7 +32,7 @@ analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
 analyzer.Filter("high_pt", "pt_gev > 25.0", ["pt_gev"])
 
 # Save
-analyzer.save()
+analyzer.run()
 ```
 
 ## Numba Integration

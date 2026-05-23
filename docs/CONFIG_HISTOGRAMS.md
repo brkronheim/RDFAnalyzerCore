@@ -101,7 +101,7 @@ analyzer.bookConfigHistograms();
 
 ```cpp
 // Trigger dataframe execution and save histograms
-analyzer.save();
+analyzer.run();
 ```
 
 ## Complete Example
@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
     // (config histograms and manual histograms work together)
     
     // Execute dataframe and save results
-    analyzer.save();
+    analyzer.run();
 
     return 0;
 }

@@ -122,10 +122,10 @@ class ReproducibilityReport:
       timestamp) and the ROOT version.
     * **Analysis** – runtime git info of the analysis repository.
     * **Environment** – container tag and thread-pool size.
-    * **Configuration** – deterministic hash of the configuration map and of
-      the file-list file.
-    * **File hashes** – MD5 digests of auxiliary input files referenced by
-      configuration values (``file.hash.*`` entries).
+        * **Configuration** – deterministic hash of the configuration map and a
+            cheap fingerprint of the file-list reference.
+        * **File hashes** – MD5 digests of cheap fingerprints for auxiliary input
+            files referenced by configuration values (``file.hash.*`` entries).
     * **Dataset manifest** – identity of the dataset manifest that was used
       (file hash, query parameters, resolved dataset names).
     * **Plugins** – per-plugin provenance entries contributed via

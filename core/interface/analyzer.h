@@ -166,7 +166,7 @@ public:
     auto storeVar = [var](unsigned int, const ROOT::RDF::RSampleInfo) -> T {
       return (var);
     };
-    std::cout << "Defining variable " << name << " to be " << var << std::endl;
+    //std::cout << "Defining variable " << name << " to be " << var << std::endl;
     dataFrameProvider_m->DefinePerSample(name, storeVar);
     return (this);
   }
@@ -186,7 +186,7 @@ public:
    * @brief Book histograms defined in config file
    * 
    * This method should be called after all Define and Filter operations
-   * are complete, but before save(). It triggers the NDHistogramManager
+   * are complete, but before run(). It triggers the NDHistogramManager
    * to book all histograms that were loaded from the config file.
    * @return Pointer to this Analyzer (for chaining)
    */
@@ -196,7 +196,7 @@ public:
    * @brief Book an integer-branch counter histogram on the CounterService.
    *
    * Call this after the integer branch (e.g. a stitching code) has been defined
-   * via Define(), and before the event loop runs (before save()). The histogram
+   * via Define(), and before the event loop runs (before run()). The histogram
    * range must be known in advance. This forwards to CounterService and keeps
    * all result pointers alive so the event loop executes only once.
    *
@@ -210,10 +210,47 @@ public:
                                     double low, double high);
 
   /**
-   * @brief Save the configured branches to the output file and trigger the computation of the dataframe.
-   * @return Pointer to this Analyzer (for chaining)
+   * @brief Get the column names currently known to the dataframe.
+   *
+   * This is a safe alternative to getDataFrameUnsafe().GetColumnNames().
+   * It queries the dataframe's column metadata without triggering the
+   * event loop.
+   *
+   * @return A vector of column name strings.
    */
-  Analyzer *save();
+  std::vector<std::string> GetColumnNames();
+
+  /**
+   * @brief Check whether a column exists in the dataframe.
+   *
+   * Safe alternative to calling getDataFrameUnsafe() and then manually
+   * searching GetColumnNames().
+   *
+   * @param name The column name to look up.
+   * @return true if the column is known to the dataframe.
+   */
+  bool HasColumn(const std::string& name);
+
+  /**
+   * @brief Get the type string of a column.
+   *
+   * Safe alternative to getDataFrameUnsafe().GetColumnType(name).
+   *
+   * @param name The column name.
+   * @return The type string (e.g. "Float_t", "Int_t", "ROOT::VecOps::RVec<float>").
+   */
+  std::string GetColumnType(const std::string& name);
+
+  /**
+   * @brief Return the first column from @p candidates that exists in the dataframe.
+   *
+   * Iterates the candidate list in order and returns the first name that
+   * HasColumn(name) is true for.  If none match, returns an empty string.
+   *
+   * @param candidates Ordered list of candidate column names.
+   * @return The first matching column name, or an empty string.
+   */
+  std::string FirstAvailableColumn(const std::vector<std::string>& candidates);
 
   /**
    * @brief Unified run/save entry point.
@@ -223,8 +260,8 @@ public:
    *  - Saves all histograms booked on the NDHistogramManager (if one is registered).
    *  - Finalizes all analysis services (e.g. CounterService).
    *
-   * Use this instead of manually calling save() followed by a separate
-   * NDHistogramManager::saveHists() call.
+   * This is the single entry point for triggering computation.
+   * There is no separate save() — use run() for all cases.
    *
    * @return Pointer to this Analyzer (for chaining)
    */
@@ -232,9 +269,17 @@ public:
 
   /**
    * @brief Get the underlying RDataFrame node.
+   *
+   * @warning This returns a raw RNode and bypasses the Analyzer API.
+   *          Only use this if you need direct access to the dataframe for
+   *          advanced operations not supported by the Analyzer interface.
+   *          For standard use cases, prefer Define(), Filter(),
+   *          bookConfigHistograms(), and run() — they preserve systematic
+   *          expansion, provenance tracking, and consistent lifecycle.
+   *
    * @return The current RNode
    */
-  ROOT::RDF::RNode getDF();
+  ROOT::RDF::RNode getDataFrameUnsafe();
 
   /**
    * @brief Get a configuration value by key.
@@ -321,6 +366,9 @@ public:
   Analyzer *setTaskMetadata(const std::string& key, const std::string& value);
 
 private:
+  // Grant the Python binding wrappers access to the no-warning getDF().
+  friend class AnalyzerPythonWrapper;
+
   /**
    * @brief Verbosity level for logging and debug output (higher = more verbose)
    */
@@ -369,11 +417,11 @@ private:
    */
   std::vector<std::unique_ptr<IAnalysisService>> services_m;
   /**
-   * @brief Non-owning pointer to the ProvenanceService (owned by services_m).
-   * Kept separately so addPlugin() can register plugin provenance entries
-   * after initializeServices() has run.
+   * @brief Shared ownership of the ProvenanceService.
+   * Stored as shared_ptr (not in services_m) so that the pointer remains
+   * valid regardless of services_m mutations.
    */
-  ProvenanceService* provenanceService_m = nullptr;
+  std::shared_ptr<ProvenanceService> provenanceService_m;
   /**
    * @brief Task-level provenance metadata contributed via setTaskMetadata().
    * Entries are stored here until finalize time, then forwarded to the
@@ -381,6 +429,7 @@ private:
    */
   std::unordered_map<std::string, std::string> taskMetadata_m;
   bool preFilterNotified_m = false;
+  bool eventLoopTriggered_m = false;
   ///**
   // * @brief Initialize the analyzer with the provided dependencies
   // */
@@ -390,11 +439,15 @@ private:
    */
   void wirePluginManagers();
   void initializeServices(ManagerContext& ctx);
+  void reorderPlugins();
+  // No-warning accessor for internal use. External callers should use
+  // getDataFrameUnsafe() which prints a cautionary message.
+  ROOT::RDF::RNode getDF();
   /**
    * @brief Collect structured provenance contributions from all plugins and
    * services, inject task metadata, then finalize the ProvenanceService.
    *
-   * Called at the end of save() and run() to ensure all plugin/service
+   * Called at the end of run() to ensure all plugin/service
    * provenance contributions are captured before the provenance record is
    * written to disk.
    */

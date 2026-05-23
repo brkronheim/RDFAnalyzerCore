@@ -16,9 +16,11 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
+#include <filesystem>
+#include <iostream>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -58,22 +60,35 @@ std::string ProvenanceService::hashFile(const std::string& path) {
     if (path.empty()) {
         return "<empty path>";
     }
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        return "<not found>";
+    namespace fs = std::filesystem;
+
+    std::error_code ec;
+    const fs::path filePath(path);
+    const fs::file_status status = fs::status(filePath, ec);
+
+    std::ostringstream fingerprint;
+    fingerprint << "path=" << path << '\n';
+
+    if (!ec && fs::exists(status) && fs::is_regular_file(status)) {
+        const auto fileSize = fs::file_size(filePath, ec);
+        if (!ec) {
+            fingerprint << "size=" << fileSize << '\n';
+        }
+
+        ec.clear();
+        const auto writeTime = fs::last_write_time(filePath, ec);
+        if (!ec) {
+            fingerprint << "mtime=" << writeTime.time_since_epoch().count() << '\n';
+        }
+
+        fingerprint << "kind=local_regular_file";
+        return hashString(fingerprint.str());
     }
-    TMD5 md5;
-    std::array<char, 8192> buf{};
-    while (file.read(buf.data(), static_cast<std::streamsize>(buf.size()))) {
-        md5.Update(reinterpret_cast<const UChar_t*>(buf.data()),
-                   static_cast<UInt_t>(file.gcount()));
-    }
-    if (file.gcount() > 0) {
-        md5.Update(reinterpret_cast<const UChar_t*>(buf.data()),
-                   static_cast<UInt_t>(file.gcount()));
-    }
-    md5.Final();
-    return std::string(md5.AsString());
+
+    // Remote URIs and non-stat'able paths still need a stable provenance token
+    // without forcing any I/O against potentially large or inaccessible files.
+    fingerprint << "kind=path_only";
+    return hashString(fingerprint.str());
 }
 
 std::string ProvenanceService::serializeConfigMap(

@@ -157,8 +157,7 @@ public:
     template<typename T>
     std::shared_ptr<T> getPlugin(const std::string& role) const;
     
-    // Execution
-    Analyzer* save();
+    // Execution (single entry point — replaces old save())
     Analyzer* run();
     
     // Access to underlying managers
@@ -441,7 +440,7 @@ public:
 
 6. **Finalization**: Framework calls `finalize()` then `reportMetadata()` on all plugins
    ```cpp
-    // In Analyzer::save()/run()
+    // In Analyzer::run()
     for (const auto& role : pluginOrder_) {
          plugins_.at(role)->finalize();
          plugins_.at(role)->reportMetadata();
@@ -567,7 +566,7 @@ public:
    └─► Book histograms
 
 5. Execution Trigger
-    ├─► Call analyzer.save() / analyzer.run() or
+    ├─► Call analyzer.run()  // single entry point
    ├─► Access histogram pointers or
    └─► Trigger other RDataFrame actions
 
@@ -601,7 +600,7 @@ currentNode_ = currentNode_.Filter("cut1", ...);  // Returns new RNode
 currentNode_ = currentNode_.Define("var2", ...);  // Returns new RNode
 
 // Execution
-analyzer.save();
+analyzer.run();
 // Triggers: currentNode_.Snapshot(...) 
 // RDataFrame event loop runs now
 ```
@@ -621,9 +620,9 @@ auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
 if (onnxMgr) onnxMgr->applyAllModels();  // Adds Define operations to dataframe
 
 // Execution
-analyzer.save();  // Triggers event loop
+analyzer.run();  // Triggers event loop
 
-// Post-execution (inside Analyzer::save()/run())
+// Post-execution (inside Analyzer::run())
 // 1) finalize() services (except provenance)
 // 2) finalize() plugins
 // 3) reportMetadata() plugins
@@ -685,15 +684,16 @@ if (onnxMgr) onnxMgr->applyModel("model");
 
 ```cpp
 // 3. Trigger execution
-analyzer.save();
+analyzer.run();
 
-// Inside Analyzer::save()/run():
+// Inside Analyzer::run():
 //   a. execute() all plugins in dependency order
-//   b. write skim (always in save(), conditional in run())
-//   c. finalize non-provenance services
-//   d. finalize() and reportMetadata() all plugins
-//   e. collect plugin/service provenance entries
-//   f. finalize provenance service last
+//   b. write skim (controlled by enableSkim config)
+//   c. save histograms (via NDHistogramManager)
+//   d. finalize non-provenance services
+//   e. finalize() and reportMetadata() all plugins
+//   f. collect plugin/service provenance entries
+//   g. finalize provenance service last
 
 // 4. Destruction (RAII)
 // Analyzer destructor runs
@@ -953,7 +953,7 @@ TEST(AnalyzerTest, EndToEnd) {
     Analyzer analyzer("test_analysis.txt");
     analyzer.Define(...);
     analyzer.Filter(...);
-    EXPECT_NO_THROW(analyzer.save());
+    EXPECT_NO_THROW(analyzer.run());
 }
 ```
 

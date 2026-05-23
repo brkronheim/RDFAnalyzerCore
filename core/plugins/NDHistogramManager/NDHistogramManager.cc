@@ -881,17 +881,6 @@ void NDHistogramManager::saveHists() {
     return;
   }
   SaveHists(trackedHistInfos_m, trackedRegionNames_m, *configManager_m);
-
-  if (countersFinalized_m || !logger_m || !skimSink_m || !metaSink_m) {
-    return;
-  }
-  const auto& configMap = configManager_m->getConfigMap();
-  auto cit = configMap.find("enableCounters");
-  if (cit == configMap.end()) { return; }
-  const auto& val = cit->second;
-  if (val == "1" || val == "true" || val == "True") {
-    countersFinalized_m = true;
-  }
 }
 
 void NDHistogramManager::saveHists(std::vector<std::vector<histInfo>> &fullHistList,
@@ -900,26 +889,6 @@ void NDHistogramManager::saveHists(std::vector<std::vector<histInfo>> &fullHistL
     throw std::runtime_error("NDHistogramManager: ConfigurationManager not set");
   }
   SaveHists(fullHistList, allRegionNames, *configManager_m);
-
-  if (countersFinalized_m || !logger_m || !skimSink_m || !metaSink_m) {
-    return;
-  }
-
-  const auto& configMap = configManager_m->getConfigMap();
-  auto it = configMap.find("enableCounters");
-  if (it == configMap.end()) {
-    return;
-  }
-  const auto& val = it->second;
-  const bool enabled = (val == "1" || val == "true" || val == "True");
-  if (!enabled) {
-    return;
-  }
-
-  // Counters are enabled globally and managed by Analyzer. Do not run a local
-  // CounterService here (that would cause duplicate counting); mark counters
-  // as finalized for this manager so subsequent calls are no-ops.
-  countersFinalized_m = true;
 }
 
 void NDHistogramManager::SaveHists(

@@ -230,7 +230,7 @@ import cProfile, pstats
 
 profile = cProfile.Profile()
 profile.enable()
-analyzer.save()
+analyzer.run()
 profile.disable()
 
 stats = pstats.Stats(profile)

@@ -629,13 +629,15 @@ Keys under `config.*` (stored as-is) and `filelist.*` namespaces (prefixed with
 | Provenance key      | Appears as            | Description |
 |---------------------|-----------------------|-------------|
 | `config.hash`       | `hash`                | Deterministic hash of the full configuration map. |
-| `filelist.hash`     | `filelist_hash`       | Hash of the file-list file. |
+| `filelist.hash`     | `filelist_hash`       | Hash of a cheap fingerprint for the file-list reference. |
 | `filelist.path`     | `filelist_path`       | Path to the file-list file. |
 
 ### `file_hashes` property
 
-Keys under the `file.hash.*` namespace.  Each entry maps an auxiliary input
-filename to its MD5 digest.
+Keys under the `file.hash.*` namespace. Each entry maps an auxiliary input
+filename to the MD5 digest of a cheap file-reference fingerprint. Local files
+use path, size, and modification time; remote or non-stat'able paths fall back
+to the path or URI string.
 
 ```
 file.hash.weights.root  →  "d41d8cd98f00b204e9800998ecf8427e"

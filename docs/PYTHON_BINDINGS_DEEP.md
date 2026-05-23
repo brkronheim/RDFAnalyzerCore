@@ -321,7 +321,7 @@ analyzer.DefineFromPointer(
 )
 
 # Save
-analyzer.save()
+analyzer.run()
 ```
 
 This demonstrates: numba integration and systematic setup with the Python binding.

@@ -94,7 +94,7 @@ TEST_F(AnalyzerTriggerLogicTest, DataTriggersAndVetoes) {
     // Get the trigger manager and apply triggers
     auto triggerPlugin = analyzer.getPlugin<TriggerManager>("trigger");
     triggerPlugin->applyAllTriggers();
-    auto df = analyzer.getDF();
+    auto df = analyzer.getDataFrameUnsafe();
     auto result = df.Count();
     EXPECT_EQ(result.GetValue(), 2UL);
 
@@ -129,7 +129,7 @@ TEST_F(AnalyzerTriggerLogicTest, DataTriggersAndVetoes) {
     // Get the trigger manager and apply triggers
     auto triggerPlugin2 = analyzer2.getPlugin<TriggerManager>("trigger");
     triggerPlugin2->applyAllTriggers();
-    auto df2 = analyzer2.getDF();
+    auto df2 = analyzer2.getDataFrameUnsafe();
     auto result2 = df2.Count();
     EXPECT_EQ(result2.GetValue(), 0UL);
 }
@@ -164,7 +164,7 @@ TEST_F(AnalyzerTriggerLogicTest, MCTriggers) {
     // Get the trigger manager and apply triggers
     auto triggerPlugin = analyzer.getPlugin<TriggerManager>("trigger");
     triggerPlugin->applyAllTriggers();
-    auto df = analyzer.getDF();
+    auto df = analyzer.getDataFrameUnsafe();
     auto result = df.Count();
     EXPECT_EQ(result.GetValue(), 2UL);
 }

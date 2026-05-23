@@ -433,7 +433,7 @@ See [DATACARD_SYSTEMATICS_EXAMPLE.md](DATACARD_SYSTEMATICS_EXAMPLE.md) for compr
 
 4. **Run and save**:
 ```cpp
-analyzer.save();
+analyzer.run();
 ```
 
 The output ROOT file can then be used as input to the datacard generator.

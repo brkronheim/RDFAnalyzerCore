@@ -322,7 +322,7 @@ int main(int argc, char** argv) {
         {"classifier"});
     
     // Save
-    analyzer.save();
+    analyzer.run();
     
     return 0;
 }

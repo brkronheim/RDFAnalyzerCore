@@ -122,7 +122,7 @@ analyzer.FilterJIT("pt_cut", "pt_gev > 20.0", ["pt_gev"])
 analyzer.FilterJIT("jet_selection", "n_high_pt_jets >= 4", ["n_high_pt_jets"])
 
 # Save results
-analyzer.save()
+analyzer.run()
 ```
 
 **Supported C++ syntax:**
@@ -175,7 +175,7 @@ analyzer.DefineFromPointer("delta_r", delta_r_ptr,
                            "double(double, double)", 
                            ["delta_eta", "delta_phi"])
 
-analyzer.save()
+analyzer.run()
 ```
 
 **Numba type mappings:**
@@ -233,7 +233,7 @@ analyzer.DefineFromVector("scale_factor",
 analyzer.DefineJIT("weighted_pt", "pt * event_weight", 
                    ["pt", "event_weight"])
 
-analyzer.save()
+analyzer.run()
 ```
 
 **Important notes:**

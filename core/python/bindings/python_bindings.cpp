@@ -432,7 +432,7 @@ public:
     }
 
     std::vector<std::string> GetColumnNames() {
-        auto names = analyzer_.getDF().GetColumnNames();
+        auto names = analyzer_.GetColumnNames();
         return std::vector<std::string>(names.begin(), names.end());
     }
 
@@ -684,9 +684,12 @@ public:
     
     /**
      * @brief Save the analysis results
+     *
+     * This calls analyzer_.run() which is the single entry point
+     * for triggering computation and saving outputs.
      */
     AnalyzerPythonWrapper& save() {
-        analyzer_.save();
+        analyzer_.run();
         return *this;
     }
     
@@ -806,7 +809,7 @@ PYBIND11_MODULE(rdfanalyzer, m) {
         >>> analyzer = rdfanalyzer.Analyzer("config.txt")
         >>> analyzer.DefineJIT("pt_gev", "pt / 1000.0", ["pt"])
         >>> analyzer.FilterJIT("high_pt", "pt_gev > 25.0", ["pt_gev"])
-        >>> analyzer.save()
+        >>> analyzer.run()
         
         Using numba-compiled functions:
         

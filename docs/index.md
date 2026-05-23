@@ -176,7 +176,7 @@ Built on ROOT RDataFrame's lazy evaluation:
 ```cpp
 analyzer.Define("var", ...);    // Queued
 analyzer.Filter("cut", ...);    // Queued
-analyzer.save();                // Executes all at once
+analyzer.run();                // Executes all at once
 ```
 
 Efficient processing with automatic optimization.
@@ -238,7 +238,7 @@ int main(int argc, char **argv) {
     onnx->applyAllModels();
     
     // Save
-    analyzer.save();
+    analyzer.run();
     return 0;
 }
 ```

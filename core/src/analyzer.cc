@@ -9,6 +9,7 @@
 #include <ProvenanceService.h>
 #include <NDHistogramManager.h>
 #include <functions.h>
+#include <iostream>
 #include <util.h>
 #include <algorithm>
 #include <memory>
@@ -17,6 +18,11 @@
 #include <stdexcept>
 #include <SystematicManager.h>
 #include <api/ManagerContext.h> // for wiring plugins and services
+
+// Forward declaration of helper defined at file scope below.
+static void registerPluginProvenance(
+    ProvenanceService* svc,
+    const std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>& plugins);
 
 // Dependency-injected constructor (shared_ptr plugin map)
 Analyzer::Analyzer(
@@ -43,8 +49,9 @@ Analyzer::Analyzer(
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
         dataManager->finalizeSetup(*configProvider_m);
     }
+    initializeServices(managerContext_m);
     wirePluginManagers();
-    //initialize();
+    registerPluginProvenance(provenanceService_m.get(), plugins);
 }
 
 // Dependency-injected constructor (unique_ptr plugin map — backward compat)
@@ -72,8 +79,9 @@ Analyzer::Analyzer(
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
         dataManager->finalizeSetup(*configProvider_m);
     }
+    initializeServices(managerContext_m);
     wirePluginManagers();
-    //initialize();
+    registerPluginProvenance(provenanceService_m.get(), plugins);
 }
 
 Analyzer::Analyzer(std::string configFile,
@@ -92,8 +100,9 @@ Analyzer::Analyzer(std::string configFile,
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
         dataManager->finalizeSetup(*configProvider_m);
     }
+    initializeServices(managerContext_m);
     wirePluginManagers();
-    //initialize();
+    registerPluginProvenance(provenanceService_m.get(), plugins);
 }
 
 // Config-file constructor (unique_ptr plugin map — backward compat)
@@ -114,8 +123,9 @@ Analyzer::Analyzer(std::string configFile,
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
         dataManager->finalizeSetup(*configProvider_m);
     }
+    initializeServices(managerContext_m);
     wirePluginManagers();
-    //initialize();
+    registerPluginProvenance(provenanceService_m.get(), plugins);
 }
 
 /*
@@ -127,9 +137,8 @@ void Analyzer::initialize() {
 */
 
 void Analyzer::wirePluginManagers() {
-    // -----------------------------------------------------------------
-    // 1. Validate that all declared dependencies are registered.
-    // -----------------------------------------------------------------
+    // Validate + topological sort + lifecycle hooks all in one pass.
+    // Dependency validation.
     for (auto& [role, plugin] : plugins) {
         if (!plugin) continue;
         for (const auto& dep : plugin->getDependencies()) {
@@ -141,10 +150,7 @@ void Analyzer::wirePluginManagers() {
         }
     }
 
-    // -----------------------------------------------------------------
-    // 2. Topological sort via Kahn's algorithm.
-    // -----------------------------------------------------------------
-    // Build in-degree map and adjacency list (role -> roles that depend on it).
+    // Topological sort via Kahn's algorithm.
     std::unordered_map<std::string, int> inDegree;
     std::unordered_map<std::string, std::vector<std::string>> dependents;
     for (auto& [role, plugin] : plugins) {
@@ -177,22 +183,15 @@ void Analyzer::wirePluginManagers() {
     }
     pluginOrder_m = order;
 
-    // -----------------------------------------------------------------
-    // 3. setContext + setupFromConfigFile in topological order.
-    // -----------------------------------------------------------------
+    // setContext + setupFromConfigFile in topological order.
     for (const auto& role : order) {
         auto& plugin = plugins.at(role);
         if (!plugin) continue;
-        std::cout << "Wiring plugin for role: " << role << std::endl;
         plugin->setContext(managerContext_m);
         plugin->setupFromConfigFile();
     }
 
-    initializeServices(managerContext_m);
-
-    // -----------------------------------------------------------------
-    // 4. initialize() in topological order.
-    // -----------------------------------------------------------------
+    // initialize() in topological order.
     for (const auto& role : order) {
         auto& plugin = plugins.at(role);
         if (!plugin) continue;
@@ -200,8 +199,49 @@ void Analyzer::wirePluginManagers() {
     }
 }
 
+void Analyzer::reorderPlugins() {
+    // Re-run Kahn's algorithm over the current plugin set.
+    std::unordered_map<std::string, int> inDegree;
+    std::unordered_map<std::string, std::vector<std::string>> dependents;
+    for (auto& [role, plugin] : plugins) {
+        if (!inDegree.count(role)) inDegree[role] = 0;
+        if (!plugin) continue;
+        for (const auto& dep : plugin->getDependencies()) {
+            if (plugins.find(dep) == plugins.end()) {
+                throw std::runtime_error(
+                    "Plugin '" + role + "' declares dependency '" + dep +
+                    "' which is not registered.");
+            }
+            inDegree[role]++;
+            dependents[dep].push_back(role);
+        }
+    }
+
+    std::queue<std::string> ready;
+    for (auto& [role, deg] : inDegree) {
+        if (deg == 0) ready.push(role);
+    }
+
+    std::vector<std::string> order;
+    while (!ready.empty()) {
+        std::string cur = ready.front();
+        ready.pop();
+        order.push_back(cur);
+        for (const auto& dep : dependents[cur]) {
+            if (--inDegree[dep] == 0) ready.push(dep);
+        }
+    }
+
+    if (order.size() != plugins.size()) {
+        throw std::runtime_error(
+            "Analyzer: circular dependency detected among registered plugins.");
+    }
+    pluginOrder_m = std::move(order);
+}
+
 Analyzer *Analyzer::addPlugin(const std::string &role, std::shared_ptr<IPluggableManager> plugin) {
     if (!plugin) return this;
+    // Validate that the new plugin's dependencies exist.
     for (const auto& dep : plugin->getDependencies()) {
         if (plugins.find(dep) == plugins.end()) {
             throw std::runtime_error(
@@ -209,14 +249,24 @@ Analyzer *Analyzer::addPlugin(const std::string &role, std::shared_ptr<IPluggabl
                 "' which is not registered.");
         }
     }
-    plugin->setContext(managerContext_m);
-    plugin->setupFromConfigFile();
-    plugin->initialize();
-    if (provenanceService_m) {
-        provenanceService_m->addEntry("plugin." + role, plugin->type());
-    }
+
+    // Insert the new plugin.
     plugins.emplace(role, std::move(plugin));
     pluginOrder_m.push_back(role);
+
+    // Re-run topological sort over the full set to ensure order is valid.
+    // (Existing plugins that depend on the new role will now be ordered correctly.)
+    reorderPlugins();
+
+    // Lifecycle hooks for the new plugin only.
+    auto& inserted = plugins.at(role);
+    inserted->setContext(managerContext_m);
+    inserted->setupFromConfigFile();
+    inserted->initialize();
+
+    if (provenanceService_m) {
+        provenanceService_m->addEntry("plugin." + role, inserted->type());
+    }
     return this;
 }
 
@@ -231,18 +281,14 @@ Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::unique_ptr<I
 }
 
 void Analyzer::initializeServices(ManagerContext& ctx) {
-    // ProvenanceService: always enabled
+    // ProvenanceService: always enabled. Plugin provenance entries are
+    // registered after wirePluginManagers() returns.
+    // Owned via shared_ptr (not in services_m) to decouple its lifetime
+    // from the services_m vector.
     {
-        auto svc = std::make_unique<ProvenanceService>();
+        auto svc = std::make_shared<ProvenanceService>();
         svc->initialize(ctx);
-        // Record provenance for all plugins wired so far
-        for (const auto& [role, plugin] : plugins) {
-            if (plugin) {
-                svc->addEntry("plugin." + role, plugin->type());
-            }
-        }
-        provenanceService_m = svc.get();
-        services_m.emplace_back(std::move(svc));
+        provenanceService_m = std::move(svc);
     }
 
     const auto& configMap = configProvider_m->getConfigMap();
@@ -254,6 +300,17 @@ void Analyzer::initializeServices(ManagerContext& ctx) {
             auto service = std::make_unique<CounterService>();
             service->initialize(ctx);
             services_m.emplace_back(std::move(service));
+        }
+    } 
+}
+
+// Register provenance for all wired plugins. Called after wirePluginManagers().
+static void registerPluginProvenance(ProvenanceService* svc,
+    const std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>& plugins) {
+    if (!svc) return;
+    for (const auto& [role, plugin] : plugins) {
+        if (plugin) {
+            svc->addEntry("plugin." + role, plugin->type());
         }
     }
 }
@@ -325,8 +382,8 @@ void Analyzer::collectAndRegisterProvenance(ROOT::RDF::RNode& df) {
         // Collect structured provenance contributions from non-provenance services.
         // Services choose their own key namespacing (no prefix is added by the
         // framework to allow services like CounterService to use descriptive keys).
+        // Note: ProvenanceService is NOT in services_m (owned via shared_ptr).
         for (const auto& svc : services_m) {
-            if (svc.get() == provenanceService_m) continue;
             for (const auto& [k, v] : svc->collectProvenanceEntries()) {
                 provenanceService_m->addEntry(k, v);
             }
@@ -339,54 +396,14 @@ void Analyzer::collectAndRegisterProvenance(ROOT::RDF::RNode& df) {
     }
 }
 
-Analyzer *Analyzer::save() {
-    auto df = dataFrameProvider_m->getDataFrame();
-
-    // Pre-execution hook
-    for (const auto& role : pluginOrder_m) {
-        auto it = plugins.find(role);
-        if (it != plugins.end() && it->second) {
-            it->second->execute();
-        }
-    }
-
-    skimSink_m->writeDataFrame(df,
-                               *configProvider_m,
-                               dataFrameProvider_m.get(),
-                               systematicManager_m.get(),
-                               OutputChannel::Skim);
-
-    // Finalize all non-provenance services (e.g. CounterService).
-    // ProvenanceService is finalized last so it captures contributions from
-    // plugins and other services.
-    for (auto& service : services_m) {
-        if (service.get() != provenanceService_m) {
-            service->finalize(df);
-        }
-    }
-
-    // Post-execution plugin hooks
-    for (const auto& role : pluginOrder_m) {
-        auto it = plugins.find(role);
-        if (it != plugins.end() && it->second) {
-            it->second->finalize();
-        }
-    }
-    for (const auto& role : pluginOrder_m) {
-        auto it = plugins.find(role);
-        if (it != plugins.end() && it->second) {
-            it->second->reportMetadata();
-        }
-    }
-
-    // Collect structured provenance contributions from plugins and services,
-    // then finalize ProvenanceService so it writes all collected entries.
-    collectAndRegisterProvenance(df);
-
-    return this;
-}
-
 Analyzer *Analyzer::run() {
+    if (eventLoopTriggered_m) {
+        throw std::runtime_error(
+            "Analyzer::run() called twice — the event loop would be "
+            "re-triggered. Create a new Analyzer instance for a second run.");
+    }
+    eventLoopTriggered_m = true;
+
     auto df = dataFrameProvider_m->getDataFrame();
 
     // Pre-execution hook
@@ -405,7 +422,6 @@ Analyzer *Analyzer::run() {
         if (val == "1" || val == "true" || val == "True") {
             skimSink_m->writeDataFrame(df,
                                        *configProvider_m,
-                                       dataFrameProvider_m.get(),
                                        systematicManager_m.get(),
                                        OutputChannel::Skim);
         }
@@ -419,10 +435,9 @@ Analyzer *Analyzer::run() {
     // Finalize all non-provenance services (e.g. CounterService).
     // ProvenanceService is finalized last so it captures contributions from
     // plugins and other services.
+    // Note: ProvenanceService is NOT in services_m (owned via shared_ptr).
     for (auto& service : services_m) {
-        if (service.get() != provenanceService_m) {
-            service->finalize(df);
-        }
+        service->finalize(df);
     }
 
     // Post-execution plugin hooks
@@ -446,7 +461,39 @@ Analyzer *Analyzer::run() {
     return this;
 }
 
+std::vector<std::string> Analyzer::GetColumnNames() {
+    return dataFrameProvider_m->getDataFrame().GetColumnNames();
+}
+
+bool Analyzer::HasColumn(const std::string& name) {
+    const auto names = GetColumnNames();
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+std::string Analyzer::GetColumnType(const std::string& name) {
+    return dataFrameProvider_m->getDataFrame().GetColumnType(name);
+}
+
+std::string Analyzer::FirstAvailableColumn(const std::vector<std::string>& candidates) {
+    for (const auto& c : candidates) {
+        if (!c.empty() && HasColumn(c)) {
+            return c;
+        }
+    }
+    return {};
+}
+
+ROOT::RDF::RNode Analyzer::getDataFrameUnsafe() {
+    std::cerr << "WARNING [Analyzer::getDataFrameUnsafe()]: Returning raw RNode. "
+              << "This bypasses systematic expansion, provenance tracking, and "
+              << "the standard lifecycle. Only use this for advanced operations "
+              << "that the Analyzer API (Define/Filter/run) does not support."
+              << std::endl;
+    return dataFrameProvider_m->getDataFrame();
+}
+
 ROOT::RDF::RNode Analyzer::getDF() {
+    // No warning — for internal (Analyzer) use only.
     return dataFrameProvider_m->getDataFrame();
 }
 

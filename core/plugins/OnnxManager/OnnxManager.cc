@@ -316,6 +316,7 @@ struct OnnxScratchBuffers {
   std::vector<std::vector<float>> ownedInputs;
   std::vector<Ort::Value> inputTensors;
   std::vector<float> outputs;
+  std::vector<std::vector<float>> outputVectors;
 };
 
 const std::vector<float> &runBundledModelOutputs(
@@ -455,10 +456,11 @@ const std::vector<float> &runBundledModelOutputs(
   return scratch.outputs;
 }
 
-const std::vector<float> &runModelOutputs(
-  Ort::Session &session,
+const std::vector<std::vector<float>> &runModelOutputs(
+    Ort::Session &session,
     const std::vector<std::vector<int64_t>> &inputShapes,
     const std::vector<int64_t> &inputElementCounts,
+    const std::vector<int64_t> &outputElementCounts,
     const std::vector<const char *> &inputNamePtrs,
     const std::vector<const char *> &outputNamePtrs,
     const ROOT::VecOps::RVec<Float_t> &inputVector,
@@ -480,40 +482,64 @@ const std::vector<float> &runModelOutputs(
   for (size_t i = 0; i < inputShapes.size(); ++i) {
     const int64_t expectedElements = inputElementCounts[i];
     const size_t available = inputVector.size() - cursor;
-    const size_t toCopy =
-        std::min<size_t>(available, static_cast<size_t>(expectedElements));
 
-    auto &buffer = scratch.ownedInputs[i];
-    if (buffer.size() != static_cast<size_t>(expectedElements)) {
-      buffer.resize(static_cast<size_t>(expectedElements));
+    // Zero-copy path: create Ort tensor directly from the RVec data buffer
+    // when the input is fully available (no padding needed).
+    // ONNX Runtime does not modify input tensors during forward inference,
+    // so const_cast is safe here.
+    if (static_cast<int64_t>(available) >= expectedElements) {
+      scratch.inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
+          memoryInfo,
+          const_cast<float *>(inputVector.data() +
+                              static_cast<std::ptrdiff_t>(cursor)),
+          static_cast<size_t>(expectedElements), inputShapes[i].data(),
+          inputShapes[i].size()));
+      cursor += static_cast<size_t>(expectedElements);
+    } else {
+      // Fallback: copy available data and zero-fill the remainder.
+      auto &buffer = scratch.ownedInputs[i];
+      if (buffer.size() != static_cast<size_t>(expectedElements)) {
+        buffer.resize(static_cast<size_t>(expectedElements));
+      }
+      const size_t toCopy = available;
+      if (toCopy > 0) {
+        std::copy_n(inputVector.begin() + static_cast<std::ptrdiff_t>(cursor),
+                    static_cast<std::ptrdiff_t>(toCopy), buffer.begin());
+      }
+      if (toCopy < static_cast<size_t>(expectedElements)) {
+        std::fill(buffer.begin() + static_cast<std::ptrdiff_t>(toCopy),
+                  buffer.end(), 0.0f);
+      }
+      cursor += toCopy;
+      scratch.inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
+          memoryInfo, buffer.data(), buffer.size(), inputShapes[i].data(),
+          inputShapes[i].size()));
     }
-
-    if (toCopy > 0) {
-      std::copy_n(inputVector.begin() + static_cast<std::ptrdiff_t>(cursor),
-                  static_cast<std::ptrdiff_t>(toCopy), buffer.begin());
-    }
-    if (toCopy < static_cast<size_t>(expectedElements)) {
-      std::fill(buffer.begin() + static_cast<std::ptrdiff_t>(toCopy),
-                buffer.end(), 0.0f);
-    }
-    cursor += toCopy;
-
-    scratch.inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
-        memoryInfo, buffer.data(), buffer.size(), inputShapes[i].data(),
-        inputShapes[i].size()));
   }
 
   auto outputTensors = session.Run(
       Ort::RunOptions{nullptr}, inputNamePtrs.data(), scratch.inputTensors.data(),
       scratch.inputTensors.size(), outputNamePtrs.data(), outputNamePtrs.size());
 
-  scratch.outputs.resize(outputTensors.size());
+  scratch.outputVectors.resize(outputTensors.size());
   for (size_t i = 0; i < outputTensors.size(); ++i) {
+    auto tensorInfo = outputTensors[i].GetTensorTypeAndShapeInfo();
+    const int64_t runtimeElements = tensorInfo.GetElementCount();
+    const int64_t expectedElements =
+        (i < outputElementCounts.size()) ? outputElementCounts[i] : runtimeElements;
+    if (runtimeElements < expectedElements) {
+      throw std::runtime_error(
+          "OnnxManager: Runtime output tensor has fewer elements than expected.");
+    }
     const float *outputData = outputTensors[i].GetTensorData<float>();
-    scratch.outputs[i] = outputData[0];
+    auto &output = scratch.outputVectors[i];
+    if (output.capacity() < static_cast<size_t>(expectedElements)) {
+      output.reserve(static_cast<size_t>(expectedElements));
+    }
+    output.assign(outputData, outputData + expectedElements);
   }
 
-  return scratch.outputs;
+  return scratch.outputVectors;
 }
 } // namespace
 
@@ -676,8 +702,30 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
     }
   }
 
-  // Auto-create packed model input from configured inputVariables for all models.
-  dataManager_m->DefineVector("input_" + modelName, inputFeatures, "Float_t", *systematicManager_m);
+  // Build a single-pass packed input column using a JIT expression,
+  // avoiding the O(N×total) sequential-append chain in DefineVector’s
+  // compiled RVec path (each intermediate Define copies all prior data).
+  {
+    auto df = dataManager_m->getDataFrame();
+    const auto existingColumns = df.GetColumnNames();
+    const std::string packedColName = "input_" + modelName;
+    if (std::find(existingColumns.begin(), existingColumns.end(),
+                  packedColName) == existingColumns.end()) {
+      std::string expr = "ROOT::VecOps::RVec<Float_t> __v; __v.reserve(";
+      for (size_t j = 0; j < inputFeatures.size(); ++j) {
+        if (j > 0) expr += " + ";
+        expr += inputFeatures[j] + ".size()";
+      }
+      expr += ");\n";
+      for (const auto &f : inputFeatures) {
+        expr += "for (auto &__x : " + f +
+                ") __v.push_back(static_cast<Float_t>(__x));\n";
+      }
+      expr += "return __v;";
+      df = df.Define(packedColName, expr);
+      dataManager_m->setDataFrame(df);
+    }
+  }
 
   const int64_t totalExpectedElements = std::accumulate(
       inputElementCounts.begin(), inputElementCounts.end(), int64_t{0});
@@ -685,15 +733,21 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
 
   if (numOutputs == 1 && outputElementCounts[0] == 1) {
     auto onnxLambda = [session, inputShapes, inputElementCounts,
-                       inputNamePtrs, outputNamePtrs, totalExpectedElements](
+                       outputElementCounts, inputNamePtrs, outputNamePtrs,
+                       totalExpectedElements](
         const ROOT::VecOps::RVec<Float_t> &inputVector,
         bool runVar) -> Float_t {
       if (!runVar) {
         return -1.0f;
       }
-      return runModelOutputs(*session, inputShapes, inputElementCounts,
-                             inputNamePtrs, outputNamePtrs, inputVector,
-                             totalExpectedElements)[0];
+      const auto &outputs =
+          runModelOutputs(*session, inputShapes, inputElementCounts,
+                          outputElementCounts, inputNamePtrs, outputNamePtrs,
+                          inputVector, totalExpectedElements);
+      if (outputs.empty() || outputs[0].empty()) {
+        return -1.0f;
+      }
+      return outputs[0][0];
     };
 
     std::string outputColName = modelName + outputSuffix;
@@ -701,24 +755,32 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
 
   } else {
     auto onnxLambdaMulti = [session, inputShapes, inputElementCounts,
-                            inputNamePtrs, outputNamePtrs,
+                            outputElementCounts, inputNamePtrs, outputNamePtrs,
                             numOutputs, totalExpectedElements](
         const ROOT::VecOps::RVec<Float_t> &inputVector,
         bool runVar) -> std::vector<ROOT::VecOps::RVec<Float_t>> {
       std::vector<ROOT::VecOps::RVec<Float_t>> outputs(numOutputs);
 
       if (!runVar) {
-        for (auto &output : outputs) {
-          output = ROOT::VecOps::RVec<Float_t>(1, -1.0f);
+        for (size_t i = 0; i < outputs.size(); ++i) {
+          const auto width = (i < outputElementCounts.size() && outputElementCounts[i] > 0)
+                                 ? static_cast<size_t>(outputElementCounts[i])
+                                 : size_t{1};
+          outputs[i] = ROOT::VecOps::RVec<Float_t>(width, -1.0f);
         }
         return outputs;
       }
-      const auto modelOutputs =
+      const auto &modelOutputs =
           runModelOutputs(*session, inputShapes, inputElementCounts,
-                          inputNamePtrs, outputNamePtrs, inputVector,
-                          totalExpectedElements);
+                          outputElementCounts, inputNamePtrs, outputNamePtrs,
+                          inputVector, totalExpectedElements);
       for (size_t i = 0; i < numOutputs; i++) {
-        outputs[i] = ROOT::VecOps::RVec<Float_t>(1, modelOutputs[i]);
+        if (i >= modelOutputs.size()) {
+          outputs[i] = ROOT::VecOps::RVec<Float_t>(1, -1.0f);
+          continue;
+        }
+        outputs[i] = ROOT::VecOps::RVec<Float_t>(modelOutputs[i].begin(),
+                                                 modelOutputs[i].end());
       }
 
       return outputs;
@@ -772,6 +834,7 @@ Float_t OnnxManager::runScalarModel(
   const auto &session = this->objects_m.at(modelName);
   const auto &inputShapes = model_inputShapes_m.at(modelName);
   const auto &inputElementCounts = model_inputElementCounts_m.at(modelName);
+  const auto &outputElementCounts = model_outputElementCounts_m.at(modelName);
   const auto &inputNamePtrs = model_inputNamePtrs_m.at(modelName);
   const auto &outputNamePtrs = model_outputNamePtrs_m.at(modelName);
 
@@ -782,9 +845,14 @@ Float_t OnnxManager::runScalarModel(
 
   const int64_t totalExpectedElements = std::accumulate(
       inputElementCounts.begin(), inputElementCounts.end(), int64_t{0});
-  return runModelOutputs(*session, inputShapes, inputElementCounts,
-                         inputNamePtrs, outputNamePtrs, inputVector,
-                         totalExpectedElements)[0];
+  const auto &outputs =
+      runModelOutputs(*session, inputShapes, inputElementCounts,
+                      outputElementCounts, inputNamePtrs, outputNamePtrs,
+                      inputVector, totalExpectedElements);
+  if (outputs.empty() || outputs[0].empty()) {
+    return -1.0f;
+  }
+  return outputs[0][0];
 }
 
 void OnnxManager::setModelFeatures(const std::string &modelName,
@@ -939,6 +1007,7 @@ void OnnxManager::loadModelsFromConfig(
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(1);
     session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+    session_options.EnableCpuMemArena();
 
     // Parse optional useCuda flag
     bool useCuda = false;

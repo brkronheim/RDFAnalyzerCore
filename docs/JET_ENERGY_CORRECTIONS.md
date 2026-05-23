@@ -878,7 +878,7 @@ int main(int argc, char** argv) {
     nhm->bookHistogram("dijetMass",    "dijetMass",    "event_weight", 50, 0, 1000);
     nhm->bookHistogram("dijetMassUp",  "dijetMass_TotalUp", "event_weight", 50, 0, 1000);
 
-    analyzer.save();
+    analyzer.run();
     return 0;
 }
 ```

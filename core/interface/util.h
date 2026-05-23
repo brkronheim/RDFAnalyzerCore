@@ -19,10 +19,43 @@
 #include <ROOT/RDFHelpers.hxx>
 #include <ROOT/RDataFrame.hxx>
 #include <TChain.h>
+#include <TError.h>
 
 #include <api/IConfigurationProvider.h>
 
 #include <plots.h>
+
+/**
+ * @brief RAII guard that temporarily suppresses ROOT non-fatal warnings.
+ *
+ * Saves the current gErrorIgnoreLevel and raises it to kError so that
+ * kWarning-level messages (e.g. "no dictionary for class ..." when opening
+ * NanoAOD files that contain residual CMSSW objects) are silenced. The
+ * original level is restored when the guard goes out of scope.
+ *
+ * Example usage:
+ * @code
+ *   {
+ *     ROOTWarningGuard guard;
+ *     chain->Add("file.root");  // dictionary warnings suppressed
+ *   }
+ * @endcode
+ */
+class ROOTWarningGuard {
+public:
+  ROOTWarningGuard() : fSavedLevel(gErrorIgnoreLevel) {
+    gErrorIgnoreLevel = kError;
+  }
+  ~ROOTWarningGuard() { gErrorIgnoreLevel = fSavedLevel; }
+  // Non-copyable, non-movable
+  ROOTWarningGuard(const ROOTWarningGuard &) = delete;
+  ROOTWarningGuard &operator=(const ROOTWarningGuard &) = delete;
+  ROOTWarningGuard(ROOTWarningGuard &&) = delete;
+  ROOTWarningGuard &operator=(ROOTWarningGuard &&) = delete;
+
+private:
+  Int_t fSavedLevel;
+};
 
 /**
  * @brief Specification for a single friend tree or sidecar input.

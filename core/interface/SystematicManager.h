@@ -41,15 +41,15 @@ public:
    * @param syst Name of the systematic
    * @return Reference to the set of variable names
    */
-  const std::set<std::string> &
+  std::set<std::string>
   getVariablesForSystematic(const std::string &syst) const override;
 
   /**
    * @brief Get the set of systematics affecting a given variable
    * @param var Name of the variable
-   * @return Reference to the set of systematic names
+   * @return Set of systematic names
    */
-  const std::set<std::string> &
+  std::set<std::string>
   getSystematicsForVariable(const std::string &var) const override;
 
   /**

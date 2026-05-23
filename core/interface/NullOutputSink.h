@@ -11,7 +11,6 @@ public:
   void writeDataFrame(ROOT::RDF::RNode&, const OutputSpec&) override {}
   void writeDataFrame(ROOT::RDF::RNode&,
                       const IConfigurationProvider&,
-                      const IDataFrameProvider*,
                       const ISystematicManager*,
                       OutputChannel) override {}
   std::string resolveOutputFile(const IConfigurationProvider& configProvider,

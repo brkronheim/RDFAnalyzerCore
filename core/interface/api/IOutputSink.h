@@ -37,7 +37,6 @@ public:
 
   virtual void writeDataFrame(ROOT::RDF::RNode& df,
                               const IConfigurationProvider& configProvider,
-                              const IDataFrameProvider* dataFrameProvider,
                               const ISystematicManager* systematicManager,
                               OutputChannel channel) = 0;
 

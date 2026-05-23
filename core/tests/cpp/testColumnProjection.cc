@@ -33,7 +33,7 @@ TEST(ColumnProjection, MemberProjectionDefinesMultipleColumns) {
       rdfanalysis::column::memberProjection("enabled_flag",
                                             &TestClassification::enabled));
 
-  auto df = analyzer.getDF();
+  auto df = analyzer.getDataFrameUnsafe();
   auto counts = df.Take<int>("count_value");
   auto flags = df.Take<bool>("enabled_flag");
 
@@ -58,7 +58,7 @@ TEST(ColumnProjection, IndexProjectionUnpacksPackedVectors) {
       rdfanalysis::column::indexProjection<FloatVec>("weight_up", 1),
       rdfanalysis::column::indexProjection<FloatVec>("weight_down", 2));
 
-  auto df = analyzer.getDF();
+  auto df = analyzer.getDataFrameUnsafe();
   auto nominal = df.Take<float>("weight_nominal");
   auto up = df.Take<float>("weight_up");
   auto down = df.Take<float>("weight_down");
@@ -82,7 +82,7 @@ TEST(ColumnProjection, SizeProjectionCountsCollectionEntries) {
       analyzer, "values",
       rdfanalysis::column::sizeProjection<FloatVec>("value_count"));
 
-  auto df = analyzer.getDF();
+  auto df = analyzer.getDataFrameUnsafe();
   auto counts = df.Take<int>("value_count");
 
   ASSERT_EQ(counts->size(), 2UL);

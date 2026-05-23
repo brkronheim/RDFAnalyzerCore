@@ -212,7 +212,7 @@ analyzer = rdfanalyzer.Analyzer("config.txt")
 start = time.time()
 analyzer.DefineJIT("pt_gev", "pt / 1000.0", ["pt"])
 # ... more operations
-analyzer.save()
+analyzer.run()
 elapsed = time.time() - start
 
 print(f"Analysis completed in {elapsed:.2f} seconds")
@@ -239,7 +239,7 @@ ptr = ctypes.cast(convert.address, ctypes.c_void_p).value
 start = time.time()
 analyzer.DefineFromPointer("pt_gev", ptr, "double(double)", ["pt"])
 # ... more operations
-analyzer.save()
+analyzer.run()
 elapsed = time.time() - start
 
 print(f"Analysis completed in {elapsed:.2f} seconds")

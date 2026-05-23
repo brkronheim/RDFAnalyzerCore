@@ -34,6 +34,22 @@ static std::vector<std::string> parseSaveColumns(const IConfigurationProvider& c
   std::vector<std::string> saveVector;
   std::unordered_set<std::string> seen;
   const auto saveVectorInit = configProvider.parseVectorConfig(it->second);
+
+  // Quick check: if there's a single "*" entry, return all columns.
+  if (saveVectorInit.size() == 1) {
+    std::string single = saveVectorInit[0];
+    single = single.substr(0, single.find(" "));
+    if (single == "*") {
+      saveVector.reserve(availableColumns.size());
+      for (const auto& col : availableColumns) {
+        if (seen.insert(col).second) {
+          saveVector.push_back(col);
+        }
+      }
+      return saveVector;
+    }
+  }
+
   for (auto val : saveVectorInit) {
     val = val.substr(0, val.find(" "));
     if (val.empty()) {
@@ -58,6 +74,13 @@ static void expandSystematicColumns(std::vector<std::string>& columns,
     return;
   }
   const unsigned int baseSize = columns.size();
+  // Pre-allocate to avoid repeated reallocation during the expansion loop.
+  size_t extra = 0;
+  for (unsigned int i = 0; i < baseSize; ++i) {
+    extra += 2 * systematicManager->getSystematicsForVariable(columns[i]).size();
+  }
+  columns.reserve(baseSize + extra);
+
   for (unsigned int i = 0; i < baseSize; ++i) {
     const auto& systs = systematicManager->getSystematicsForVariable(columns[i]);
     for (const auto& syst : systs) {
@@ -99,7 +122,6 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec
 
 void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df,
                                     const IConfigurationProvider& configProvider,
-                                    const IDataFrameProvider*,
                                     const ISystematicManager* systematicManager,
                                     OutputChannel channel) {
   const auto& configMap = configProvider.getConfigMap();
@@ -114,26 +136,45 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df,
     throw std::runtime_error("RootOutputSink: outputFile is empty");
   }
 
-  std::vector<std::string> columns = parseSaveColumns(configProvider, df.GetColumnNames());
-  expandSystematicColumns(columns, systematicManager);
+  // Resolve and cache columns once.  GetColumnNames() is called only when
+  // the cache is cold, which in practice means exactly once per sink lifetime.
+  if (!columnsCached_) {
+    cachedColumns_ = parseSaveColumns(configProvider, df.GetColumnNames());
+    expandSystematicColumns(cachedColumns_, systematicManager);
+    columnsCached_ = true;
+  }
 
-  if (columns.empty() && configMap.find("saveConfig") == configMap.end()) {
+  if (cachedColumns_.empty() && configMap.find("saveConfig") == configMap.end()) {
     std::cout << "Warning: No 'saveConfig' provided. Snapshotting full dataframe." << std::endl;
   }
 
-  OutputSpec spec{outputFile, saveTree, columns};
+  OutputSpec spec{outputFile, saveTree, cachedColumns_};
   writeDataFrame(df, spec);
 }
 
 std::string RootOutputSink::resolveOutputFile(const IConfigurationProvider& configProvider,
                                               OutputChannel channel) {
+  // Return cached path if already resolved for this channel.
+  if (channel == OutputChannel::Skim && !cachedSkimFile_.empty()) {
+    return cachedSkimFile_;
+  }
+  if (channel == OutputChannel::Meta && !cachedMetaFile_.empty()) {
+    return cachedMetaFile_;
+  }
+
+  std::string result;
   if (channel == OutputChannel::Meta) {
     std::string metaFile = configProvider.get("metaFile");
     if (!metaFile.empty()) {
-      return metaFile;
+      result = metaFile;
+    } else {
+      const std::string saveFile = configProvider.get("saveFile");
+      result = makeMetaFileName(saveFile);
     }
-    const std::string saveFile = configProvider.get("saveFile");
-    return makeMetaFileName(saveFile);
+    cachedMetaFile_ = result;
+  } else {
+    result = configProvider.get("saveFile");
+    cachedSkimFile_ = result;
   }
-  return configProvider.get("saveFile");
+  return result;
 }

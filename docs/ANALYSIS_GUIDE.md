@@ -149,7 +149,7 @@ int main(int argc, char **argv) {
     // (see next sections for examples)
 
     // Save results
-    analyzer.save();
+    analyzer.run();
 
     return 0;
 }
@@ -213,7 +213,7 @@ onnxManager->applyAllModels();
 
 ```cpp
 // Trigger execution and save outputs
-analyzer.save();
+analyzer.run();
 ```
 
 This separation means:
@@ -915,7 +915,7 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
                                 "goodJets_variations");
 ```
 
-After `analyzer.save()`:
+After `analyzer.run()`:
 
 | Column | Description |
 |--------|-------------|
@@ -1306,7 +1306,7 @@ int main(int argc, char* argv[]) {
     ndh->saveHists();
 
     // Step 6 — execute.
-    analyzer.save();
+    analyzer.run();
     return 0;
 }
 ```
@@ -1579,7 +1579,7 @@ int main(int argc, char **argv) {
 
     // ===== Save Output =====
     
-    analyzer.save();
+    analyzer.run();
 
     std::cout << "Analysis complete!" << std::endl;
     return 0;
@@ -1649,8 +1649,10 @@ Save intermediate processing steps:
 // After preselection
 analyzer.Filter("preselection", ...);
 
-// Save snapshot
-auto df = analyzer.getDF();
+// Save snapshot (getDataFrameUnsafe() returns a raw RNode — bypasses systematic
+// expansion and provenance tracking. Only use this for advanced
+// operations not supported by the standard Analyzer API.)
+auto df = analyzer.getDataFrameUnsafe();
 df.Snapshot("Events", "preselection_output.root", {"useful_branches"});
 
 // Continue processing

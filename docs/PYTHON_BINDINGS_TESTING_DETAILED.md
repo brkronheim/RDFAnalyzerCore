@@ -67,7 +67,7 @@ try:
     print('Define and Filter work')
     
     # Save
-    analyzer.save()
+    analyzer.run()
     print('Save completed')
 finally:
     os.unlink(config)

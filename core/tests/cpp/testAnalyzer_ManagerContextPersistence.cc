@@ -44,7 +44,7 @@ TEST(AnalyzerManagerContextPersistence, CounterServiceCtxOutlivesCaller) {
   analyzer.Filter("keep_event", [](bool keepEvent) { return keepEvent; }, {"keep_event"});
 
   // If Analyzer had passed a temporary ManagerContext to services, this would crash
-  EXPECT_NO_THROW(analyzer.save());
+  EXPECT_NO_THROW(analyzer.run());
 
   TFile skimFile(skimPath.c_str(), "READ");
   ASSERT_FALSE(skimFile.IsZombie());

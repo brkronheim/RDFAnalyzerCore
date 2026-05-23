@@ -7,6 +7,7 @@
 #include <TH1D.h>
 #include <api/ILogger.h>
 #include <cmath>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -1422,12 +1423,11 @@ void TaggerWorkingPointManager::finalize() {
   for (auto &entry : fractionHistResults_m) {
     const TH1D &histRef = entry.result.GetValue();
     // Clone to set directory ownership without modifying the cached result.
-    TH1D *histClone = static_cast<TH1D *>(histRef.Clone(entry.name.c_str()));
+    auto histClone = std::unique_ptr<TH1D>(static_cast<TH1D *>(histRef.Clone(entry.name.c_str())));
     if (histClone) {
       histClone->SetDirectory(fragDir);
       fragDir->cd();
       histClone->Write(entry.name.c_str(), TObject::kOverwrite);
-      delete histClone;
     }
   }
   outFile.Close();

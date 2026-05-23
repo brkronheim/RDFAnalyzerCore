@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
     );
     
     // Execute and save
-    analyzer.save();
+    analyzer.run();
     
     return 0;
 }
@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
         sysMgr  // Pass systematic manager
     );
     
-    analyzer.save();
+    analyzer.run();
     return 0;
 }
 ```

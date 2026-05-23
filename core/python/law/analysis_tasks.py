@@ -1591,6 +1591,14 @@ def _dataset_job_metadata(dataset: DatasetEntry) -> dict[str, str]:
     if legacy_type is not None:
         metadata["type"] = str(legacy_type)
 
+    # Forward analysis-specific dataset metadata (for example ptcut) into
+    # per-job submit configs. Standard metadata keys above win on collisions.
+    if isinstance(dataset.extra, dict):
+        for key, value in dataset.extra.items():
+            if key in metadata or key is None:
+                continue
+            _store(str(key), value)
+
     return metadata
 
 

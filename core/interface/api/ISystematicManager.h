@@ -86,14 +86,14 @@ public:
      * @param syst Name of the systematic
      * @return Reference to the set of variable names
      */
-    virtual const std::set<std::string> &getVariablesForSystematic(const std::string &syst) const = 0;
+    virtual std::set<std::string> getVariablesForSystematic(const std::string &syst) const = 0;
 
     /**
      * @brief Get the set of systematics affecting a given variable
      * @param var Name of the variable
-     * @return Reference to the set of systematic names
+     * @return Set of systematic names
      */
-    virtual const std::set<std::string> &getSystematicsForVariable(const std::string &var) const = 0;
+    virtual std::set<std::string> getSystematicsForVariable(const std::string &var) const = 0;
 
     /**
      * @brief Register existing systematics from configuration

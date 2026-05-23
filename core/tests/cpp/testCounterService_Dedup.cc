@@ -52,7 +52,7 @@ TEST(CounterServiceDedupTest, AnalyzerPlusNDHistogramManagerRunsCounterOnlyOnce)
 
   // capture stdout to count CounterService finalize calls
   testing::internal::CaptureStdout();
-  analyzer.save();
+  analyzer.run();
 
   std::string out = testing::internal::GetCapturedStdout();
 

@@ -379,6 +379,36 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertEqual(cfg["norm"], "12345.0")
             self.assertEqual(cfg["parent"], "parent_sample")
 
+    def test_manifest_extra_metadata_is_injected_into_job_config(self):
+        """Per-job configs include DatasetEntry.extra key/value pairs such as ptcut."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir)
+            dataset = DatasetEntry(
+                name="dy0j",
+                files=["f.root"],
+                dtype="mc",
+                extra={"ptcut": 150, "sample_label": "z2nu"},
+            )
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(job_dir, template, dataset, out_dir)
+
+            cfg = {}
+            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k] = v
+
+            self.assertEqual(cfg["ptcut"], "150")
+            self.assertEqual(cfg["sample_label"], "z2nu")
+
     def test_rewrite_job_output_destinations(self):
         """Concrete skim jobs can rewrite their final save targets independently."""
         mod = self._import()

@@ -239,10 +239,16 @@ makeTChain(const IConfigurationProvider &configProvider) {
   // setup ROOT threads now before any dataframes are created
   setupROOTThreads(configProvider);
 
+  // Permanently suppress non-fatal ROOT warnings (e.g. "no dictionary for
+  // class ..." when opening NanoAOD files with residual CMSSW objects).
+  // These warnings are emitted during TChain::Add(), RDataFrame construction,
+  // and lazy evaluation, so the suppression must outlive the makeTChain scope.
+  gErrorIgnoreLevel = kError;
+
   std::vector<std::unique_ptr<TChain>> tchainVector;
   auto treeListVec = getTreeList(configProvider);
   for (const auto &tree : treeListVec) {
-    tchainVector.emplace_back(new TChain(tree.c_str()));
+    tchainVector.emplace_back(std::make_unique<TChain>(tree.c_str()));
   }
 
   std::vector<std::string> globs = configProvider.getList("globs", {".root"});

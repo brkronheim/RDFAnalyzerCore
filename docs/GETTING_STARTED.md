@@ -263,7 +263,7 @@ int main(int argc, char **argv) {
     an.bookConfigHistograms();
 
     // 5. Execute the dataframe and write all output
-    an.save();
+    an.run();
 
     return 0;
 }
@@ -627,7 +627,7 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
                                 "goodJets_variations");
 ```
 
-After `analyzer.save()` this creates:
+After `analyzer.run()` this creates:
 
 | Column | Description |
 |--------|-------------|

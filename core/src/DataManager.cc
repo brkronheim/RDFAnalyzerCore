@@ -477,7 +477,7 @@ void DataManager::setDataFrame(const ROOT::RDF::RNode &node) { df_m = node; }
  * @brief Get the main TChain pointer
  * @return Pointer to the main TChain
  */
-TChain *DataManager::getChain() const { return chain_vec_m[0].get(); }
+TChain &DataManager::getChain() const { return *chain_vec_m[0]; }
 
 /**
  * @brief Define a vector variable in the dataframe.
@@ -497,7 +497,7 @@ void DataManager::DefineVector(std::string name,
                                std::string type,
                                ISystematicManager &systematicManager) {
   (void)systematicManager;
-  std::cout << "[DataManager] Defining vector column " << name << std::endl;
+  //std::cout << "[DataManager] Defining vector column " << name << std::endl;
 
   const auto existingColumns = df_m.GetColumnNames();
   if (std::find(existingColumns.begin(), existingColumns.end(), name) != existingColumns.end()) {
@@ -595,9 +595,12 @@ void DataManager::DefineVector(std::string name,
     throw std::runtime_error("DefineVector: unsupported target type in compiled path.");
   }
 
+  /*
   std::cout << "[DataManager] Vector column " << name
             << " defined via compiled RDataFrame transforms."
             << std::endl;
+  */
+
 }
 
 
@@ -802,7 +805,7 @@ void DataManager::registerOptionalBranches(
       const Bool_t defaultBool = defaultValStr == "1" ||
                                  defaultValStr == "true" ||
                                  defaultValStr == "True";
-      std::cout << "Defining optional branch " << varName << " with default " << defaultValStr << " and type number " << varType << std::endl;
+      //std::cout << "Defining optional branch " << varName << " with default " << defaultValStr << " and type number " << varType << std::endl;
       switch (varType) {
       case 0:
         df_m = saveVar<UInt_t>(std::stoul(defaultValStr), varName, df_m);
@@ -899,6 +902,10 @@ void DataManager::finalizeSetup(const IConfigurationProvider &configProvider,
  * @brief Attach a single friend tree specified by @p spec to the main TChain.
  */
 void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
+  // Suppress non-fatal ROOT warnings (e.g. missing dictionaries for CMSSW
+  // residual objects in NanoAOD files) during friend file discovery.
+  ROOTWarningGuard warningGuard;
+
   auto friendChain = std::make_unique<TChain>(spec.treeName.c_str());
 
   if (!spec.files.empty()) {
