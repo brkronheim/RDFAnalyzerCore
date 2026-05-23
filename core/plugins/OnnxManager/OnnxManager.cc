@@ -125,10 +125,8 @@ std::vector<int64_t> resolveShape(std::vector<int64_t> shape,
                              std::to_string(inputIndex));
   }
 
-  if (shape[0] <= 0) {
-    shape[0] = 1;
-  }
-
+  // Preserve a dynamic (≤ 0) leading batch dimension so the runtime
+  // resolveRuntimeInputShape() can replace it with the active batch size.
   for (size_t d = 1; d < shape.size(); ++d) {
     if (shape[d] <= 0) {
       if (paddingSize > 0) {
@@ -155,12 +153,10 @@ int64_t elementCount(const std::vector<int64_t> &shape,
 
   return std::accumulate(shape.begin(), shape.end(), int64_t{1},
                          [&](int64_t acc, int64_t dim) {
-                           if (dim <= 0) {
-                             throw std::runtime_error(
-                                 "OnnxManager: Non-positive resolved dimension in model '" +
-                                 modelName + "' input index " +
-                                 std::to_string(inputIndex));
-                           }
+                           // Treat dynamic (≤ 0) dimensions as 1 for
+                           // buffer-sizing purposes; the real value is
+                           // substituted at runtime.
+                           if (dim <= 0) return acc;
                            return acc * dim;
                          });
 }
@@ -174,7 +170,9 @@ std::vector<int64_t> resolveOutputShape(std::vector<int64_t> shape,
                              std::to_string(outputIndex));
   }
 
-  for (size_t d = 0; d < shape.size(); ++d) {
+  // Preserve a dynamic (≤ 0) leading batch dimension so the runtime can
+  // match the actual output batch from ORT at inference time.
+  for (size_t d = 1; d < shape.size(); ++d) {
     if (shape[d] <= 0) {
       shape[d] = 1;
     }
@@ -192,12 +190,9 @@ int64_t outputElementCount(const std::vector<int64_t> &shape,
 
   return std::accumulate(shape.begin(), shape.end(), int64_t{1},
                          [&](int64_t acc, int64_t dim) {
-                           if (dim <= 0) {
-                             throw std::runtime_error(
-                                 "OnnxManager: Non-positive resolved dimension in model '" +
-                                 modelName + "' output index " +
-                                 std::to_string(outputIndex));
-                           }
+                           // Treat dynamic (≤ 0) dimensions as 1 for
+                           // buffer-sizing purposes.
+                           if (dim <= 0) return acc;
                            return acc * dim;
                          });
 }
@@ -218,12 +213,9 @@ int64_t trailingElementCount(const std::vector<int64_t> &shape,
 
   return std::accumulate(shape.begin() + 1, shape.end(), int64_t{1},
                          [&](int64_t acc, int64_t dim) {
-                           if (dim <= 0) {
-                             throw std::runtime_error(
-                                 "OnnxManager: Non-positive trailing dimension in " +
-                                 tensorKind + " shape for model '" + modelName +
-                                 "' tensor index " + std::to_string(tensorIndex));
-                           }
+                           // Treat dynamic (≤ 0) dimensions as 1 for
+                           // buffer-sizing purposes.
+                           if (dim <= 0) return acc;
                            return acc * dim;
                          });
 }
@@ -487,13 +479,20 @@ const std::vector<std::vector<float>> &runModelOutputs(
     // when the input is fully available (no padding needed).
     // ONNX Runtime does not modify input tensors during forward inference,
     // so const_cast is safe here.
+    // Normalise a dynamic (≤ 0) leading batch dimension to 1 for the
+    // low-level ORT tensor – ONNX Runtime needs a concrete shape here.
+    auto runtimeShape = inputShapes[i];
+    if (!runtimeShape.empty() && runtimeShape[0] <= 0) {
+      runtimeShape[0] = 1;
+    }
+
     if (static_cast<int64_t>(available) >= expectedElements) {
       scratch.inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
           memoryInfo,
           const_cast<float *>(inputVector.data() +
                               static_cast<std::ptrdiff_t>(cursor)),
-          static_cast<size_t>(expectedElements), inputShapes[i].data(),
-          inputShapes[i].size()));
+          static_cast<size_t>(expectedElements), runtimeShape.data(),
+          runtimeShape.size()));
       cursor += static_cast<size_t>(expectedElements);
     } else {
       // Fallback: copy available data and zero-fill the remainder.
@@ -512,8 +511,8 @@ const std::vector<std::vector<float>> &runModelOutputs(
       }
       cursor += toCopy;
       scratch.inputTensors.emplace_back(Ort::Value::CreateTensor<float>(
-          memoryInfo, buffer.data(), buffer.size(), inputShapes[i].data(),
-          inputShapes[i].size()));
+          memoryInfo, buffer.data(), buffer.size(), runtimeShape.data(),
+          runtimeShape.size()));
     }
   }
 
