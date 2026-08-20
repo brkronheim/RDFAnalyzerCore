@@ -6,6 +6,7 @@
 #include <NullOutputSink.h>
 #include <RootOutputSink.h>
 #include <CounterService.h>
+#include <TaggerEfficiencyService.h>
 #include <ProvenanceService.h>
 #include <NDHistogramManager.h>
 #include <functions.h>
@@ -301,7 +302,19 @@ void Analyzer::initializeServices(ManagerContext& ctx) {
             service->initialize(ctx);
             services_m.emplace_back(std::move(service));
         }
-    } 
+    }
+
+    // TaggerEfficiencyService: enabled via enableTaggerEfficiency config key.
+    auto teIt = configMap.find("enableTaggerEfficiency");
+    if (teIt != configMap.end()) {
+        const auto& val = teIt->second;
+        const bool enabled = (val == "1" || val == "true" || val == "True");
+        if (enabled) {
+            auto service = std::make_unique<TaggerEfficiencyService>();
+            service->initialize(ctx);
+            services_m.emplace_back(std::move(service));
+        }
+    }
 }
 
 // Register provenance for all wired plugins. Called after wirePluginManagers().
@@ -322,7 +335,7 @@ Analyzer *Analyzer::DefineVector(std::string name, const std::vector<std::string
 
 Analyzer *Analyzer::bookConfigHistograms() {
     // Get the NDHistogramManager plugin if it exists
-    auto histogramManager = getPlugin<NDHistogramManager>("histogramManager");
+    auto histogramManager = findPlugin<NDHistogramManager>("histogramManager");
     if (histogramManager) {
         histogramManager->bookConfigHistograms();
     }
@@ -428,7 +441,7 @@ Analyzer *Analyzer::run() {
     }
 
     // Save ND histograms (uses internally tracked histInfo / regionNames)
-    if (auto histogramManager = getPlugin<NDHistogramManager>("histogramManager")) {
+    if (auto histogramManager = findPlugin<NDHistogramManager>("histogramManager")) {
         histogramManager->saveHists();
     }
 

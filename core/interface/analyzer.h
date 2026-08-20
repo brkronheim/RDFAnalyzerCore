@@ -306,10 +306,35 @@ public:
    * @brief Get a plugin by role name and cast to the desired interface.
    * @tparam T Interface type to cast to
    * @param key Role name of the plugin
-   * @return Pointer to the plugin as T, or nullptr if not found or wrong type
+   * @return Pointer to the plugin as T
+   * @throws std::out_of_range if no plugin with that key is registered,
+   *         or std::bad_cast if the registered plugin cannot be cast to T.
    */
   template<typename T>
   std::shared_ptr<T> getPlugin(const std::string& key) const {
+    auto it = plugins.find(key);
+    if (it == plugins.end()) {
+      throw std::out_of_range("Plugin '" + key + "' not found. "
+          "Make sure the plugin is registered with addPlugin(\"" + key + "\", ...) "
+          "before calling getPlugin.");
+    }
+    auto cast = std::dynamic_pointer_cast<T>(it->second);
+    if (!cast) {
+      throw std::bad_cast();
+    }
+    return cast;
+  }
+
+  /**
+   * @brief Find a plugin by role name without throwing.
+   * @tparam T Interface type to cast to
+   * @param key Role name of the plugin
+   * @return Pointer to the plugin as T, or nullptr if not found or wrong type
+   *
+   * Use this when the plugin is optional.
+   */
+  template<typename T>
+  std::shared_ptr<T> findPlugin(const std::string& key) const noexcept {
     auto it = plugins.find(key);
     if (it != plugins.end()) {
       return std::dynamic_pointer_cast<T>(it->second);

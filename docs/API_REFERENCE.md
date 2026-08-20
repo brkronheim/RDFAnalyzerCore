@@ -989,7 +989,7 @@ For each fit with `outputPrefix={prefix}`, the following columns are defined:
 
 ### GoldenJsonManager
 
-**Header**: `core/plugins/GoldenJsonManager/GoldenJsonManager.h`
+**Header**: `core/plugins/cms/GoldenJsonManager/GoldenJsonManager.h`
 
 Interface for CMS golden JSON certification filtering.
 

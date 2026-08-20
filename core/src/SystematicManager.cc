@@ -54,6 +54,19 @@ void SystematicManager::registerVariationColumns(
   variationColumnMap_m[variable][normalizedSyst + "Down"] = downColumn;
 }
 
+void SystematicManager::registerVariationColumn(
+    const std::string &variable, const std::string &variationLabel,
+    const std::string &column) {
+  if (variable.empty() || variationLabel.empty() || column.empty()) {
+    return;
+  }
+
+  explicitVariationLabels_m.insert(variationLabel);
+  explicitVariationToVariableMap_m[variationLabel].insert(variable);
+  variableToExplicitVariationMap_m[variable].insert(variationLabel);
+  variationColumnMap_m[variable][variationLabel] = column;
+}
+
 /**
  * @brief Get the set of all registered systematics
  * @return Reference to the set of systematic names
@@ -73,6 +86,10 @@ SystematicManager::getVariablesForSystematic(const std::string &syst) const {
   if (it != systematicToVariableMap_m.end()) {
     return it->second;
   }
+  auto explicitIt = explicitVariationToVariableMap_m.find(syst);
+  if (explicitIt != explicitVariationToVariableMap_m.end()) {
+    return explicitIt->second;
+  }
   return {};
 }
 
@@ -85,7 +102,16 @@ std::set<std::string>
 SystematicManager::getSystematicsForVariable(const std::string &var) const {
   auto it = variableToSystematicMap_m.find(var);
   if (it != variableToSystematicMap_m.end()) {
-    return it->second;
+    auto result = it->second;
+    auto explicitIt = variableToExplicitVariationMap_m.find(var);
+    if (explicitIt != variableToExplicitVariationMap_m.end()) {
+      result.insert(explicitIt->second.begin(), explicitIt->second.end());
+    }
+    return result;
+  }
+  auto explicitIt = variableToExplicitVariationMap_m.find(var);
+  if (explicitIt != variableToExplicitVariationMap_m.end()) {
+    return explicitIt->second;
   }
   return {};
 }
@@ -247,6 +273,9 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
      systList.push_back(syst + "Up");
      systList.push_back(syst + "Down");
    }
+   for (const auto &label : explicitVariationLabels_m) {
+     systList.push_back(label);
+   }
 
    // Define integer counter columns for this branchName namespace.
    // Columns that already exist in the dataframe are silently skipped.
@@ -275,6 +304,10 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
      ensureColumn(branchName + "_" + syst + "Up", var);
      var++;
      ensureColumn(branchName + "_" + syst + "Down", var);
+   }
+   for (const auto &label : explicitVariationLabels_m) {
+     var++;
+     ensureColumn(branchName + "_" + label, var);
    }
 
    // Cache the list for this branchName so future calls are no-ops.

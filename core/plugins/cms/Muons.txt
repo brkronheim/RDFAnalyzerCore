@@ -1,0 +1,686 @@
+Muon Recommendations For Analysis¶
+
+This page provides a comprehensive overview of the recommendations for muon selection, isolation, and momentum assignment. For corrections and scale factors for these selections, see the Corrections page.
+
+⚠ Note that this page covers Run 2 UL and Run 3 recommendations. For information on Run 2 pre-UL and Run 1 analysis, see this Twiki. However, be aware that the usage of pre-UL samples and data is strongly discouraged and those samples are no longer maintained by the POG.
+Muon Selection¶
+
+The muon reconstruction in CMS is optimized for maximum efficiency. The collection of reconstructed muons therefore contains muons from a large variety of sources, including potentially misreconstructed muons. A muon identification requirement is therefore necessary to select only those muons relevant for a given analysis. The choice of muon ID must be evaluated by each analysis for their needs.
+
+The Muon POG supports a wide variety of muon ID selections, which are directly accessible in the different data formats (RECO/AOD; MiniAOD, nanoAOD).
+
+Please note that in nanoAODs the Muon collection is preselected with some basic requirements:
+pt > 15 || (pt > 3 && (passed('CutBasedIdLoose') || passed('SoftCutBasedId') || passed('SoftMvaId') || passed('CutBasedIdGlobalHighPt') || passed('CutBasedIdTrkHighPt')))
+i.e., muons below 3 GeV are discarded, and those between 3 and 15 GeV are kept only if they pass one of the cut-based IDs.
+Particle-flow (PF) Cut-Based IDs¶
+
+The following general-purpose selectors define some simple working points points that are generally good for most use cases, and are consistent with PF selection of other objects in the event.
+Loose Muon ID¶
+
+Particle identified as a muon by the Particle-Flow event reconstruction, and that is also reconstructed either as a global-muon or as an arbitrated tracker-muon. Studied in MUO-10-004. This identification criteria is designed to be highly efficienct, for prompt muons, as well as from muons from heavy and light quark decays. Please consider complementing it by applying impact parameter cuts is used in analyses with prompt muon signals.
+
+To evaluate the loose ID for muons in different data formats, see this table:
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	bool muon::isLooseMuon(const reco::Muon & recoMu);
+pat::Muon (MiniAOD) 	muon.isLooseMuon()
+NanoAOD 	Muon_looseId
+
+The ID requirements and how to access them individually (for RECO or PAT muons) are summarized in this table:
+Plain-text description 	Technical description 	Comments
+Particle-Flow muon id 	recoMu.isPFMuon() 	Can be complemented by muon quality cuts similar to those used in the Tight Muon selection.
+Is Global OR Tracker Muon 	recoMu.isGlobalMuon() OR recoMu.isTrackerMuon() 	Avoid using muons which are only non-arbitrated Tracker muons or only Standalone muons
+Medium Muon ID¶
+
+Loose muon (i.e. PF muon that is either a global or an arbitrated tracker muon) with additional track-quality and muon-quality requirements. Described in this presentation by C. Botta & G. Petrucciani. This identification criteria is designed to be highly efficienct for prompt muons and for muons from heavy quark decays. Please consider complement it by impact parameter cuts on top of it, if you plan to use it to recostruct signatures with prompt muon decays.
+
+To evaluate the medium ID for muons in different data formats, see this table:
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	bool muon::isMediumMuon(const reco::Muon & recoM, bool run2016_hip_mitigation);
+pat::Muon (MiniAOD) 	muon.isMediumMuon() or muon.passed(reco::Muon::CutBasedIdMedium)
+NanoAOD 	Muon_mediumId
+
+⚠ If using muons in the 2026 preVFP/APV era the criteria on the fraction of tracker hits is adjusted and depens on the run number. For correct evaluation:
+
+    AOD: The run2016_hip_mitigation should be set to True.
+    MiniAOD: muon.passed(reco::Muon::CutBasedIdMedium) should be used.
+    NanoAOD: Muon_mediumId is correct and no additional treatment is required.
+
+The ID requirements and how to access them individually (for RECO or PAT muons) are summarized in this table:
+Plain-text description 	Technical description
+Loose muon ID 	muon::isLooseMuon(recoMu)
+Fraction of valid tracker hits 	recoMu.innerTrack()->validFraction() > (272728 <= run() && run() <= 278808)? 0.49 : 0.8
+
+In addition, either of the following sets of requirements (1. or 2.) must be satisfied:
+	Plain-text description 	Technical description
+1. Good Global muon 	Global muon 	recoMu.isGlobalMuon()
+	Normalized global-track χ2 	recoMu.globalTrack()->normalizedChi2() < 3
+	Tracker-Standalone position match 	recoMu.combinedQuality().chi2LocalPosition < 12
+	Kick finder 	recoMu.combinedQuality().trkKink < 20
+	Segment compatibility 	muon::segmentCompatibility(recoMu) > 0.303
+		
+2. Tight segment compatibility 	Segment compatibility 	muon::segmentCompatibility(recoMu) > 0.451
+
+In C++, the Medium ID selection can be implemented as follows.
+
+bool isMediumMuon(const reco::Muon & recoMu)
+   {
+     bool validFracionThreshold=((272728 >= iEvent.run() && iEvent.run() >= 278808)? 0.49 : 0.8)
+
+      bool goodGlob = recoMu.isGlobalMuon() &&
+                      recoMu.globalTrack()->normalizedChi2() < 3 &&
+                      recoMu.combinedQuality().chi2LocalPosition < 12 &&
+                      recoMu.combinedQuality().trkKink < 20;
+      bool isMedium = muon::isLooseMuon(recoMu) &&
+                      recoMu.innerTrack()->validFraction() > validFracionThreshold &&
+                      muon::segmentCompatibility(recoMu) > (goodGlob ? 0.303 : 0.451);
+      return isMedium;
+   }
+
+Tight Muon ID¶
+
+Global muon with additional muon-quality requirements. Studied in MUO-10-002 and MUO-10-004; widely used in physics analyses. Tight Muon ID selects a subset of the Particle-Flow muons.
+
+Note that the tight muon ID exhibits an inefficiency for muons with pT above 200 GeV, which increases with muon pT. It is therefore not recommneded for use in analyses where a significant fraction of muons has pt > 200 GeV. The high-pT muon ID should be used instead.
+
+To evaluate the tight ID for muons in different data formats, see this table:
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	bool muon::isTightMuon(const reco::Muon & recoMu);
+pat::Muon (MiniAOD) 	muon.isTightMuon()
+NanoAOD 	Muon_tightId
+
+The ID requirements and how to access them individually (for RECO or PAT muons) are summarized in this table:
+Plain-text description 	Technical description 	Comments
+The candidate is reconstructed as a Global Muon 	recoMu.isGlobalMuon() 	
+Particle-Flow muon id 	recoMu.isPFMuon() 	The exclusive effect of this requirement is very small, i.e. PFMuon is keeping almost all Tight Muons without this cut
+χ2/ndof of the global-muon track fit < 10 	recoMu.globalTrack()->normalizedChi2() < 10. 	To suppress hadronic punch-through and muons from decays in flight (see CMS AN 2008/098).
+At least one muon-chamber hit included in the global-muon track fit 	recoMu.globalTrack()->hitPattern().numberOfValidMuonHits() > 0 	To suppress hadronic punch-through and muons from decays in flight.
+Muon segments in at least two muon stations. This implies that the muon is also an arbitrated tracker muon, see SWGuideTrackerMuons 	recoMu.numberOfMatchedStations() > 1 	To suppress punch-through and accidental track-to-segment matches.%BR% Also makes selection consistent with the logic of the muon trigger, which requires segments in at least two muon stations to obtain a meaningful estimate of the muon pT.
+Its tracker track has transverse impact parameter dxy < 2 mm w.r.t. the primary vertex 	fabs(recoMu.muonBestTrack()->dxy(vertex->position())) < 0.2 Or dB() < 0.2 on pat::Muon 	To suppress cosmic muons and further suppress muons from decays in flight (see CMS AN 2008/098). The 2 mm cut preserves efficiency for muons from decays of b and c hadrons. It is a loose cut and can be tightened further with minimal loss of efficiency for prompt muons if background from cosmic muons is an issue. Another way to obtain a better cosmic-ray suppression is to complement the dxy cut with a cut on the opening angle α or use a dedicated cosmic-id algorithm (see Section 7.1 of MUO-10-004). innerTrack() is also supported for dxy cut, as the performance of the two is very close.
+The longitudinal distance of the tracker track wrt. the primay vertex is dz < 5 mm 	fabs(recoMu.muonBestTrack()->dz(vertex->position())) < 0.5 	Loose cut to further suppress cosmic muons, muons from decays in flight and tracks from PU. innerTrack() is also supported for dz cut, as the performance of the two is very close.
+Number of pixel hits > 0 	recoMu.innerTrack()->hitPattern().numberOfValidPixelHits() > 0 	To further suppress muons from decays in flight.
+Cut on number of tracker layers with hits > 5 	recoMu.innerTrack()->hitPattern().trackerLayersWithMeasurement() > 5 	To guarantee a good pT measurement, for which some minimal number of measurement points in the tracker is needed.%BR% Also suppresses muons from decays in flight.
+Non-PF Cut-Based IDs¶
+
+The following cut-based IDs are not based on the PF event description, and are optimized for special regimes and use cases.
+Soft Muon ID¶
+
+Developed in BPH. For more details, see I. Krätschmer's talk.
+
+To evaluate the soft ID for muons in different data formats, see this table:
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	bool muon::isSoftMuon(const reco::Muon & recoMu);
+pat::Muon (MiniAOD) 	muon.isSoftMuon()
+NanoAOD 	Muon_softId
+
+The ID requirements and how to access them individually (for RECO or PAT muons) are summarized in this table:
+Plain-text description 	Technical description 	Comments
+Tracker track matched with at least one muon segment (in any station) in both X and Y coordinates (< 3 sigma) (TMOneStationTight) and arbitrated 	muon::isGoodMuon(recoMu, TMOneStationTight) 	Loose requirement, which can be tightened further (e.g., by requiring at least two matched segments) if needed
+Cut on number of tracker layers with hits > 5 	recoMu.innerTrack()->hitPattern().trackerLayersWithMeasurement() > 5 	To guarantee a good pT measurement, for which some minimal number of measurement points in the tracker is needed.%BR% Also suppresses muons from decays in flight.
+Number of pixel layers > 0 	recoMu.innerTrack()->hitPattern().pixelLayersWithMeasurement() > 0 	To further suppress muons from decays in flight.
+Track high-purity flag 	recoMu.innerTrack()->quality(reco::TrackBase::highPurity) or (272728 > run() && run() < 278808) 	Rejects bad quality tracks, basically just few outliers. Not applying when VFP mitigation is necessary
+Loose transverse and longitudinal impact parameter cuts, dxy < 0.3 cm and dz < 20 cm w.r.t. the primary vertex 	fabs(recoMu.innerTrack()->dxy(vertex->position())) < 0.3 && fabs(recoMu.innerTrack()->dz(vertex->position())) < 20. 	Loose compatibility with the PV or rather with the beamspot
+
+NOTE: Please consider this option ONLY if you do not make use of the Particle-Flow event description in your analysis. In case you do, start from the Loose ID and then consider possible further quality cuts.
+High-pT Muon ID¶
+
+This selection aims to provide the best reconstruction of the muon track parameters for high-pT muons (pT > 200 GeV), without relying on external information in the event. In this high-pT region, the muon detectors can improve the momentum resolution of the inner tracker. This ID is a variant of the tight muon ID which avoids the inefficiency at high pT, at the cost of an increased fake rate. If the fake rate is found to be too high for a given analysis, the medium ID can be used at the cost of a few percent in efficiency.
+
+To evaluate the high-pT ID for muons in different data formats, see this table:
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	bool muon::isHighPtMuon(const reco::Muon & recoMu);
+pat::Muon (MiniAOD) 	muon.isHighPtMuon()
+NanoAOD 	Muon_highPtId
+
+The ID requirements and how to access them individually (for RECO or PAT muons) are summarized in this table:
+Plain-text description 	Technical description 	Comments
+The candidate is reconstructed as a Global Muon 	recoMu.isGlobalMuon() 	
+At least one muon-chamber hit included in the global-muon track fit or in the TuneP 	recoMu.globalTrack()->hitPattern().numberOfValidMuonHits() > 0 OR muon.tunePMuonBestTrack()>hitPattern().numberOfValidMuonHits()>0 	To suppress hadronic punch-through and muons from decays in flight.
+Muon segments in at least two muon stations. This implies that the muon is also an arbitrated tracker muon, see SWGuideTrackerMuons. If the muon only has one matched station it must be a tracker muon and must satisfy at least one of these conditions: has one or zero expected matched station based on the extrapolation of the inner track, the single matched station should not be the first muon station, or has at least two matched RPC layers. 	recoMu.numberOfMatchedStations() > 1 OR If muon.numberOfMatchedStations()==1: (muon.isTrackerMuon() and ( muon.expectedNnumberOfMatchedStations()> or ( !(muon.stationMask()==1) and !(muon.stationMask()==16) ) or muon.numberOfMatchedRPCLayers()>2 ) 	To suppress punch-through and accidental track-to-segment matches. Also makes selection consistent with the logic of the muon trigger, which requires segments in at least two muon stations to obtain a meaningful estimate of the muon pT. The requirement on the expected matched station is to ensure that if the muon is passing through a crack and that no segment is reconstructed it is not a reconstruction failure but really a geometrical feature that should not necessarily eliminate the muon.
+
+If we only find one matched station it should not be the first station to ensure that we are not keeping punch through that usually gets stopped after the first station.
+The pT relative error of the muon best track is less than 30% 	recoMu.tunePMuonBestTrack()->ptError()/recoMu.tunePMuonBestTrack()->pt() > 0.3 	
+Its tracker track has transverse impact parameter dxy < 2 mm w.r.t. the primary vertex 	fabs(recoMu.innerTrack()->dxy(vertex->position())) < 0.2 OR dB() < 0.2 on pat::Muon 	To suppress cosmic muons and further suppress muons from decays in flight (see CMS AN 2008/098). The 2 mm cut preserves efficiency for muons from decays of b and c hadrons. It is a loose cut and can be tightened further with minimal loss of efficiency for prompt muons if background from cosmic muons is an issue. Another way to obtain a better cosmic-ray suppression is to complement the dxy cut with a cut on the opening angle α or use a dedicated cosmic-id algorithm (see Section 7.1 of MUO-10-004). tunePMuonBestTrack does not improve the precision of the muon track with respect to the vertex position.
+The longitudinal distance of the tracker track wrt. the primary vertex is dz < 5 mm 	fabs(recoMu.innerTrack()->dz(vertex->position())) < 0.5 	Loose cut to further suppress cosmic muons, muons from decays in flight and tracks from PU. tunePMuonBestTrack does not improve the precision of the muon track with respect to the vertex position.
+Number of pixel hits > 0 	`recoMu.innerTrack()->hitPattern().numberOfValidPixelHits() > 0= 	To further suppress muons from decays in flight.
+Cut on number of tracker layers with hits > 5 	recoMu.innerTrack()->hitPattern().trackerLayersWithMeasurement() > 5 	To guarantee a good pT measurement, for which some minimal number of measurement points in the tracker is needed. Also suppresses muons from decays in flight.
+
+NOTE: The high-pT selection does not use the Particle-Flow algorithm. Please consider this option ONLY if you do not use the Particle-Flow event description in your analysis. If you do, start from the Loose (or Tight) ID and then consider possible addition (or removal) of further quality cuts.
+
+NOTE 2: Muon pT assignment details: When using the High-pT selector, you should obtain the muon momentum from the muon track determined by the TuneP algorithm. To have access to the best muon track determined by the TuneP algorithm and its type, you can use the following functions, respectively:
+Data Format 	Accessing TuneP momentum assignment
+reco::Muon (RECO/AOD) 	recoMu.tunePMuonBestTrack().pt();
+pat::Muon (MiniAOD) 	muon.tunePMuonBestTrack().pt()
+NanoAOD 	Muon_pt* Muon_tunepRelPt
+
+The pT assignment as obtained from the TuneP algorithm can be used anyway, independently of the adopted selection. Anyhow it is recommended not to use it directly for analyses that make use of Particle-Flow AND rely on quantities computed on the basis of the PF muon pT (e.g. PF MET). In fact, when using Particle-Flow the muon pT assignment can be further adjusted on the basis of the global event description. In this case, it is therefore advisable to stick with the estimation of the muon pT made by PF.
+HighPt Tracker Muon¶
+
+A small variation with respect to the previous seletor, tries to improve the reconstruction for boosted Z, in which two close-by high-pT muons (pT > 200 GeV) may appear. As the muon is not required to be a global muon, the momentum resolution might be degraded with respect to the previous selector.
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	bool muon::isTrackerHighPtMuon(const reco::Muon & recoMu);
+pat::Muon (MiniAOD) 	bool muon::isTrackerHighPtMuon(const pat::Muon & patMu);
+NanoAOD 	N/A
+
+The ID requirements and how to access them individually (for RECO or PAT muons) are summarized in this table:
+Plain-text description 	Technical description 	Comments
+The candidate is reconstructed as a Tracker Muon 	recoMu.isTrackerMuon() 	
+Track exists 	recoMu.track().isNonnull() 	
+Muon segments in at least two muon stations. This implies that the muon is also an arbitrated tracker muon, see SWGuideTrackerMuons. 	recoMu.numberOfMatchedStations() > 1 	To suppress punch-through and accidental track-to-segment matches. Also makes selection consistent with the logic of the muon trigger, which requires segments in at least two muon stations to obtain a meaningful estimate of the muon pT.
+The pT relative error of the muon best track is less than 30% 	recoMu.tunePMuonBestTrack()->ptError()/recoMu.tunePMuonBestTrack()->pt() > 0.3 	
+Its tracker track has transverse impact parameter dxy < 2 mm w.r.t. the primary vertex 	fabs(recoMu.innerTrack()->dxy(vertex->position())) < 0.2 OR dB() < 0.2 on pat::Muon 	To suppress cosmic muons and further suppress muons from decays in flight (see CMS AN 2008/098). The 2 mm cut preserves efficiency for muons from decays of b and c hadrons. It is a loose cut and can be tightened further with minimal loss of efficiency for prompt muons if background from cosmic muons is an issue. Another way to obtain a better cosmic-ray suppression is to complement the dxy cut with a cut on the opening angle α or use a dedicated cosmic-id algorithm (see Section 7.1 of MUO-10-004). tunePMuonBestTrack does not improve the precision of the muon track with respect to the vertex position.
+The longitudinal distance of the tracker track wrt. the primary vertex is dz < 5 mm 	fabs(recoMu.innerTrack()->dz(vertex->position())) < 0.5 	Loose cut to further suppress cosmic muons, muons from decays in flight and tracks from PU. tunePMuonBestTrack does not improve the precision of the muon track with respect to the vertex position.
+Number of pixel hits > 0 	`recoMu.innerTrack()->hitPattern().numberOfValidPixelHits() > 0= 	To further suppress muons from decays in flight.
+Cut on number of tracker layers with hits > 5 	recoMu.innerTrack()->hitPattern().trackerLayersWithMeasurement() > 5 	To guarantee a good pT measurement, for which some minimal number of measurement points in the tracker is needed. Also suppresses muons from decays in flight.
+
+NOTE: Same consideration about the usage of Particle-Flow algorithms as for the high-pT identification applies here.
+Trigger Identification¶
+
+Muon HLT reconstruction in 2018 introduced identification requirements, a simple ID selection based on robust inputs that can be used online.
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	bool muon::isLooseTriggerMuon(const reco::Muon& muon);
+pat::Muon (MiniAOD) 	bool muon::isLooseTriggerMuon(const pat::Muon & patMu);
+NanoAOD 	Muon_triggerIdLoose
+
+The ID requirements and how to access them individually (for RECO or PAT muons) are summarized in this table:
+Plain-text description 	Technical description 	Comments
+Tracker track matched with at least one muon segment (in any station) in both X and Y coordinates (< 3 sigma) (TMOneStationTight) and arbitrated 	muon::isGoodMuon(recoMu, TMOneStationTight) 	Loose requirement, which can be tightened further (e.g., by requiring at least two matched segments) if needed
+Cut on number of tracker layers with hits > 5 	recoMu.innerTrack()->hitPattern().trackerLayersWithMeasurement() > 5 	To guarantee a good pT measurement, for which some minimal number of measurement points in the tracker is needed.%BR% Also suppresses muons from decays in flight.
+Number of pixel layers > 0 	recoMu.innerTrack()->hitPattern().pixelLayersWithMeasurement() > 0 	To further suppress muons from decays in flight.
+χ2/ndof of the global-muon track fit < 20 only if it is global 	!(muon.isGlobalMuon()) or recoMu.globalTrack()->normalizedChi2() < 20. 	
+Muon segments in at least two muon stations or expected number of matched stations less than two 	recoMu.numberOfMatchedStations() > 1 or recoMu.expectedNumberOfMatchedStations() <2 	
+In-time Muon Selector¶
+
+This selector is designed to discard out-of-time muons. You can quickly check if a muon is on time using the corresponding flag. If available, this selector trusts the RPC time, otherwise it takes the value calculated from the DT/CSC. This selector rejects about 0.08% of the muons with a mis-tagging efficiency of 0.000002%. For analyses using muon::CutBasedTightId out-of time muons should not be an issue, for looser muon selections it might be an issue. More details can be found in this talk by Piotr Traczyk.
+
+Can be accessed for RECO or PAT muons using this function:
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	bool outOfTimeMuon(const reco::Muon& muon);
+pat::Muon (MiniAOD) 	bool outOfTimeMuon(const pat::Muon & patMu);
+NanoAOD 	Muon_inTimeMuon
+Multivariate discriminants (MVA IDs)¶
+
+Several discriminants based on MVAs have been developed, targeting different use cases.
+Soft Muon MVA¶
+
+The soft muon MVA is a Boosted Decision Tree (BDT) has been initially developed at the beginning of Run 2 for the Bmm4 analysis, and aims at reducing the fake rate from hadrons for low pT muons originating from B hadron in the barrel. It consists of a BDT trained for global muons, with pT > 4 GeV and |η| < 1.4, coming from Bs/d mesons.
+
+The Run 2 version is documented at this link.
+
+For Run 3, a new version has been trained with much looser phase space restrictions (pT > 2 GeV and |η| < 2.4). It is documented in MUO-24-001
+Run 3
+Run 2
+
+For Run3, This ID is currently available starting with CMSSW 12_4_0 and the 2024 Data/MC. It will be made available for earlier datasets with ReMini/ReNano processings in the future.
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	computeSoftMvaRun3(*softMuonMvaRun3Booster_, muon) using the SoftMuonMvaRun3Estimator and see [here][https://github.com/cms-sw/cmssw/blob/master/PhysicsTools/PatAlgos/plugins/PATMuonProducer.cc] for example implementation.
+pat::Muon (MiniAOD) 	muon.softMvaRun3Value(); (from CMSSW_12_4_0)
+NanoAOD 	Muon_softMvaRun3 (from NanoAOD v14)
+Muon MVA¶
+
+This MVA is designed for medium-pT muons (pT > 10 GeV) and discriminates prompt muons and muons from heavy flavor decays in jets against fake muons and decays-in-flight. The training and performance are documented in MUO-22-001. Two working points are provided, Medium and Tight.
+
+The MVA scores can be accssed as follows:
+Data Format 	ID evaluation
+reco::Muon (RECO/AOD) 	muonMvaIDEstimator().computeMVAID(muon)[1] using the MuonMvaIDEstimator. See PatMuonProducer for implementation example
+pat::Muon (MINIAOD) 	muon.mvaIDValue()
+NanoAOD 	Muon_mvaMuID (starting from NanoAOD v11)
+
+The two working points can accessed as follows:
+Data Format 	Working point selection
+reco::Muon (RECO/AOD) 	muonMvaIDEstimator().computeMVAID(muon)[1] > 0.08 (0.2) for Medium (Tight) WP
+pat::Muon (MINIAOD) 	muon.passed('MvaIDwpMedium'), muon.passed('MvaIDwpTight')
+NanoAOD 	Muon_mvaMuID_WP, 1=MVAIDwpMedium,2=MVAIDwpTight (starting from NanoAOD v11)
+
+Note: The final version of this ID has been integrated in CMSSW_13_2_X, previous versions use an outdated version.
+Prompt MVA (formerly ttH MVA)¶
+
+This MVA includes isolation information to discriminate between prompt muons and all other backgrounds, including muons from heavy flavor decays in jets. The training and performance are documented in MUO-22-001.
+|This MVA was originally developed in the ttH analysis and is widely known as the ttH MVA. Since CMSSW 12_4_X, the name was changed to promptMVA in all data formats to mark that this MVA is now centrally supported by Muon POG.
+A similar variable is also existing for electrons.
+
+The MVA scores can be accssed as follows:
+Data Format 	ID evaluation
+NanoAOD 	Muon_mvaTTH (NanoAOD <= v13)
+NanoAOD 	Muon_promptMVA (NanoAOD >= v14)
+
+Note: The promptMVA has been retrained for Run 3 and from CMSSW 12_4_0 and NanoAOD v14, the new training is available in Run 3 datasets.
+Low pT MVA¶
+
+This MVA was trained with the same variables as the ttH MVA, but with a different training (see backups in this talk):
+
+    H->ZZ->4l as signal, DYJets for background
+    Training uses muons preselected with: pt>5 && looseID && sip3D<4. && abs(dxy)<0.5 && abs(dz) < 1
+
+Data Format 	ID evaluation
+NanoAOD 	Muon_mvaLowPt
+
+The training was done on Run2 MC.
+Obsolete/deprecated IDs¶
+Lepton MVA¶
+
+The lepton MVA has been developed in the context of the ttH multilepton and some SUSY multilepton analyses. It was trained to discriminate fake muons in a semileptonic ttbar sample (mainly leptonic B decays) against prompt leptons in a ttH sample. There is a twiki documenting the main features of the MVA link, and there you can also find links to talks on the performance of some of the working points. You can find all the details of the most recent training in the AN supporting the ttH multilepton (AN2018_098).
+
+This variable was present as Muon_mvaId in nanoAODs up to v10 and was then removed. This variable stores the output of a selector applied to PAT muons. The possible values are 1=MvaLoose, 2=MvaMedium, 3=MvaTight, 4=MvaVTight, 5=MvaVVTight. The score was not saved, as the similar, improved Muon_mvaTT (see above) was present. It was removed after NanoAOD v10 and replaced by the Muon MVA.
+Muon Isolation¶
+
+Many muons are produced from the decay of both light- and heavy-flavor hadrons in jets. For analyses targeting prompt muon production, these can be rejected by using isolation criteria. Here again, a set of different options are supported by the POG from which each analysis can pick according to their needs.
+
+Note: If the ttH/PromptMuon MVA is used, no further isolation selection should be applied.
+Particle-Flow isolation¶
+
+PF-based combined relative isolation with Δβ corrections (see here) for PU mitigation, uses a (ΔR) cone size of 0.4 and is defined as follows:
+
+    (∑pT(ch.had from PV) + max(0, ∑ET(neut.had) + ∑ET(phot) − 0.5*∑pT(ch.had from PU)))/pT(μ)
+
+(mu->pfIsolationR04().sumChargedHadronPt + max(0., mu->pfIsolationR04().sumNeutralHadronEt + mu->pfIsolationR04().sumPhotonEt - 0.5*mu->pfIsolationR04().sumPUPt))/mu->pt()
+
+Working point 	Muon selector 	Cut value 	efficiency
+Very Loose 	Muon::PFIsoVeryLoose 	0.4 	
+Loose 	Muon::PFIsoLoose 	0.25 	ε~0.98
+Medium 	Muon::PFIsoMedium 	0.20 	
+Tight 	Muon::PFIsoTight 	0.15 	ε~0.95
+Very Tight 	Muon::PFIsoVeryTight 	0.10 	
+Very very Tight 	Muon::PFIsoVeryVeryTight 	0.05 	
+
+The result of the different working points for a muon can accessed as follows:
+Data Format 	Isolation WP evaluation
+reco::Muon (AOD) 	Follow the implemention above and apply the cut value by hand
+pat::Muon (MiniAOD) 	muon.passed('PFIsoVeryLoose'), muon.passed('PFIsoLoose'), muon.passed('PFIsoMedium'), muon.passed('PFIsoTight'), muon.passed('PFIsoVeryTight') , muon.passed('PFIsoVeryVeryTight')
+NanoAOD 	Muon_pfIsoId (1=PFIsoVeryLoose, 2=PFIsoLoose, 3=PFIsoMedium, 4=PFIsoTight, 5=PFIsoVeryTight, 6=PFIsoVeryVeryTight)
+
+To access the value of the relative combined PF isolation directly, the C++ code example above can be used on pat::Muons in MINIAOD. In NanoAOD Muon_pfRelIso04_all can be used.
+Tracker-based Isolation¶
+
+The tracker based relative isolation is computed using tracks from the leading PV in the event, which are in a cone of size (ΔR) < 0.3.
+
+    ∑pT(tracker tracks from PV)/pT(μ)
+
+mu->isolationR03().sumPt/mu->pt()
+
+Working point 	Muon selector 	Cut value 	efficiency
+Loose 	Muon::TkIsoLoose 	0.10 	ε~0.98
+Tight 	Muon::TkIsoTight 	0.05 	ε~0.95
+Data Format 	Isolation WP evaluation
+reco::Muon (AOD) 	Follow the implemention above and apply the cut value by hand
+pat::Muon (MiniAOD) 	muon.passed('TkIsoLoose'), muon.passed('TkIsoTight')
+NanoAOD 	Muon_tkIsoId (1=TkIsoLoose, 2=TkIsoTight)
+
+To access the value of the combined PF isolation directly, the C++ code example above can be used on pat::Muons in MINIAOD. In NanoAOD Muon_tkRelIso can be used.
+
+Note: The relative tracker isolation is usually used for analyses using high-pT muons. Therefore, the Muon_tkRelIso in NanoAOD is calculated using the tuneP muon momentum assignment. The selector values are based on the default muon pT instead.
+Mini Isolation¶
+
+Miniisolation allows to recover efficiency when muons are produced in the decay chain of a boosted object. In such cases, it is likely that, when the boost is large, the muon overlaps with a jet produced in the same decay chain, failing a standard isolation cut. Miniisolation is constructed by defining a cone whose radius varies with the pt 0.2 and 0.05. Isolation is then calculated for that muon on that cone, reducing the probability of the overlap for more boosted topologies. More information on the definition of miniiso and its performance can be found here. Four working points are provided in the standard selectors, which are calculated using effective area corrections.
+
+Four working points are availabe:
+Working point 	Muon selector 	Cut value
+Loose 	Muon::MiniIsoLoose 	0.40
+Medium 	Muon::MiniIsoMedium 	0.20
+Tight 	Muon::MiniIsoTight 	0.10
+Very Tight 	Muon::MiniIsoVeryTight 	0.05
+Data Format 	Isolation WP evaluation
+reco::Muon (AOD) 	it's complicated
+pat::Muon (MiniAOD) 	muon.passed('MiniIsoLoose'), muon.passed('MiniIsoMedium'), muon.passed('MiniIsoTight'), muon.passed('MiniIsoVeryTight')
+NanoAOD 	Muon_miniIsoId (1=MiniIsoLoose, 2=MiniIsoMedium, 3=MiniIsoTight, 4=MiniIsoVeryTight)
+
+To access the value of the relative combined PF isolation directly, the code example here pat::Muons in MINIAOD. In NanoAOD Muon_miniPFRelIso_all can be used.
+Multi Isolation¶
+
+Multiisolation is defined to select muons coming from prompt decays from muons coming from other sources. One working point is supported: a muon passes the Muon::MultiIsoMedium selector if it passes requirements in miniiso, on the pt of the closest jet and on the relative pt of the muon and the closest jet.
+Data Format 	Iso evaluation
+reco::Muon (AOD) 	see PatMuonProducer
+pat::Muon (MINIAOD) 	muon.passed('MultiIsoLoose'), muon.passed('MultiIsoMedium')
+NanoAOD 	Muon_multiIsoId (1=MultiIsoLoose, 2=MultiIsoMedium)
+
+Note: The loose working point is meaningless.
+PUPPI isolation¶
+
+NOT SUPPORTED YET
+Muon Momentum Assignment¶
+
+Muon momentum is measured using multiple algorithms based on varying amount of information. Standalone muons use only muon system information, tracker muons only the tracker hits. Global muons perform a combined fit to all signal in both tracker and muon system. For high-pT muons additional algorithms are used to mitigate the effects of bremstrahlung and showering of the muons in the muon system, see MUO-17-001.
+
+Out of all these options, the best track fit is selected for the final momentum assignment. Two options are availabe at the pat::Muon level:
+
+    muon.muonBestTrack().pt() returns the pT of the track selected to be the best measurement of the muon parameters (including PFlow global information)
+    muon.tunePMuonBestTrack().pt() retuns the pT of the track selected to be the best measurement of the muon parameters (from muon information alone)
+
+The first option is recommended for all analyses relying on particle flow information (and is the default muon momentum available as just muon.pt(), while the second option is mostly for high-pT muon analyses that don't use particle flow information.
+
+In NanoAOD, the first option is accessed simply as Muon_pt, while the second is available as Muon_pt * Muon_tunepRelPt.
+Basic Momentum corrections¶
+
+The momentum assignment is affected by biases resulted from the imprecise knowledge of the detector material, magnetic field, and alignment. For high-pT muons, usually not enough statistics is available to derive corrections for these effects, and systmatic uncertainties are assigned to cover them, see here.
+
+For medium pT muons, momentum corrections are available that correct the momentum scale in data and the scale and resolution in MC to bring them in agreement. These corrections are usually not required for analyses that are not senstive to percent-level effects in the muon momementum assigned, but recommended in all other cases. A dedicated correction for low-pT muon is being prepared.
+
+
+Muon correction recommendations¶
+
+There are two general types of corrections that need to be considered in an analysis: First, there are corrections to the muon efficiencies for reconstruction, identification, isolation, and trigger in form of Data/MC scale factors that need to be applied to muons in MC events. Second, corrections can be applied to correct the muon momentum assignment, both in data and MC.
+
+The recommended corrections differ based on muon momentum and are usually provided for three pT regimes: Low pT (pT < 30 GeV), medium pT (30 GeV < pT < 200 GeV), and high-pT (pT > 200 GeV). Note: This does not imply that different sets of corrections are supposed to be applied within one analysis, depending on muon pT. Rather, analysts are supposed to pick the corrections corresponding to the pT ranges that covers the bulk of their muons.
+Note on correlations¶
+
+To keep the overall uncertainties as small as possible, systematic and statistical uncertainties on the scale factor measurement are treated as separate sources of systematic uncertainty. See recommendations from TOP PAG for details: https://twiki.cern.ch/twiki/bin/view/CMS/TopSystematics#Muon_identification_isolation_mo
+
+The main takeaway are the following recommendations regarding the correlation of uncertainties among data taking periods:
+
+    Systematic uncertainties on the scale factor measurements should be considered correlated among data taking periods.
+    Statistical uncertainties on the scale factor measurement should be considered uncorrelated among the different years.
+
+
+Tracking Efficiency:
+
+Run2:
+
+Official tracking POG SFs, where the probe is a standalone muon and it is required to be matched to a generalTrack in its vicinity, are independent of momentum. The SFs are found to be above 0.99, and are considered equivalent to unity. You can find the detailed plots per and pT bins in this twiki. The recommendation are to not apply them, unless you target a precison analysis.
+
+Run3:
+
+No info yet
+
+L1 Trigger prefiring¶
+
+Run2:
+
+Incorrect assignment of the muons to the LHC bunch crossings in the L1 trigger can lead to a loss of trigger efficiency, an effect known as "trigger prefiring". This efficiency loss is not modeled in MC and is invisible to the methods used to derive efficiencies and Data/MC scale factors provided below. The size of the effect strongly depends on muon eta and averages about 0.5% for 2018. For analyses aiming at percent precision, a recipe to produce event weights based on (mini)AOD to correct the MC is available at https://twiki.cern.ch/twiki/bin/view/CMS/L1PrefiringWeightRecipe.
+
+These weights are included in nanoAOD starting from version V9.
+
+Run3:
+
+In Run 3, L1 trigger prefiring was significantly reduced and currently, the L1 DPG does not recommend any corrections for the residual efficiency loss.
+
+Low pT (pT < 30 GeV)¶
+
+Analyses looking for Jpsi or Upsilon resonances, or simply using muons below 30 GeV in final state, should follow the recommendations below. The main related PAGs are B physics and EXO.
+
+Warning, important Note: All the efficiencies are computed with the two muons having a deltaR cut of 0.3 in order to avoid overlapping muon. If you do not apply such a selection in your analysis you might want to check your signal and background distribution as a function of deltaR and use a dedicated correction for muon within deltaR = 0.3.
+Low pT: Prompt Muons¶
+Low pT: RECO efficiencies¶
+
+The probe is a general Track and the passing probe is a trackerMuon.
+
+Run2:
+
+Important Note: The RECO efficiencies for pT > 10 GeV should be taken from the medium pT section. Only for lower pTs, the values from the json files linked in this table can be used. Please refer to the medium pT section below for more details.
+Year 	MuonPOG file 	presentation 	Notes on uncertainties
+2016preVFP 	JSON 	slides 	Statistical uncertainty only
+2016postVFP 	JSON 	slides 	Statistical uncertainty only
+2017 	JSON 	slides 	Statistical uncertainty only
+2018 	JSON 	slides 	Statistical uncertainty only
+
+Run3:
+
+No correction is recommended for Run 3 data. Data/MC scale factors are expected to be 1 and therefore no correction is needed/provided.
+
+Low pT: ID efficiencies¶
+
+The probe is a trackerMuon. TrackerMuon efficiency computed in the reconstruction section needs to be applied on top of the ID SF.
+
+The working points are Loose, Soft, Medium & Tight ID.
+
+Run2:
+
+Year 	MuonPOG file 	XPOG file 	presentation 	Notes on uncertainties
+2016preVFP 	JSON 	JSON 	slides 	Statistical uncertainty only
+2016postVFP 	JSON 	JSON 	slides 	Statistical uncertainty only
+2017 	JSON 	JSON 		Statistical uncertainty only
+2018 	JSON 	JSON 		Statistical uncertainty only
+
+Run3:
+
+Year 	MuonPOG file 	XPOG file 	presentation 	Notes on uncertainties 	Details
+2022 	JSON 	JSON 	slides 	Stat + Syst 	Results for Eras BCD
+2022EE 	JSON 	JSON 	slides 	Stat + Syst 	Results for Eras EFG
+2023 	JSON 	JSON 	slides 	Stat + Syst 	Resuts for Era C
+2023BPix 	JSON 	JSON 	slides 	Stat + Syst 	Results for Era D
+2024 	JSON 	🛠 	slides 	Stat + Syst 	Results for Eras CDEFGHI
+
+
+Low pT: Trigger efficiencies¶
+
+We do not provide low pT trigger recommendations.
+Medium pT (30 GeV < pT < 200 GeV)¶
+
+Analysis looking for Z, W, Higgs bosons and TOP or tau decays should follow the recommendations below. The main related PAGs are SMP, HIG, SUSY, TOP, EXO, B2G.
+Medium pT: Prompt Muons¶
+Medium pT: RECO efficiencies¶
+
+The probe is a general Track and the passing probe is a trackerMuon.
+Run 2
+Run 3
+
+Important Note: In the past, the uncertainties for the RECO scale factors used to be very large. The problem was that asking for general tracks on the denominator resulted in an overwhelming amount of background events on failing probes for low/medium pt range (up to ~40 GeV). The Z peak is faintly seen on the mass distribution, so each systematic variation was catching significantly different yields for signal, and as a consequence, the efficiency obtained from the fits differed a lot. Therefore, the measurement is performed now on a higher pT bin only (40 < pT < 60 GeV), where the Z peak is prominent enough and the systematic uncertainties from TnP are reasonable. In any case, the recommendation is to apply that correction in the pt range [10 - 200] GeV, given that the RECO efficiency plateau is already reached at very low pT (below 10 GeV).
+Year 	MuonPOG file 	XPOG file 	presentation 	Notes on uncertainties
+2016preVFP 	JSON 	JSON 	slides 	Stat + Syst
+2016postVFP 	JSON 	JSON 	slides 	Stat + Syst
+2017 	JSON 	JSON 	slides 	Stat + Syst
+2018 	JSON 	JSON 	slides 	Stat + Syst
+Medium pT: ID efficiencies¶
+
+The probe is a trackerMuon, so TrackerMuon efficiency computed in the reconstruction section needs to be applied on top of the ID SF. The events are selected with IsoMu24 on the tag. The ID working points are Loose, Medium, MediumPrompt, Tight, Soft and High pT.
+
+All the efficiencies are computed with the impact parameter cuts dxy < 0.2 cm and dz < 0.5 cm applied on the probe. This leads to several effects, depending of the ID used in the analysis:
+
+    If you are using tight or high pT ID in your analysis, those dxy and dz cuts are part of the selectors. Since they are applied on the probe this means that we are not measuring their inefficiency. With high luminosity, muons from signal can be produced from a vertex different from the PV. These dxy and dz cuts are then rejecting signal events. We recommend analyzers to estimate in their framework the signal MC loss with pileup and assign the value as additional systematic.
+    If you are using tighter dxy and dz cuts to select your signal, you need to perform the same MC check as decribed above, for the values of dxy and dz used in your analysis.
+    If you are using medium or loose ID in your analysis, those dxy and dz cuts are not part of the selectors, so in principle it does not introduce any bias.
+
+Run 2
+Run 3
+
+Root files contain histograms with both statistical (ended in "_stat") and systematic (ended in "_syst") uncertainties. The combined uncertainty can be accessed by getting the bin error of the nominal histogram. JSON files contain an entry for the central value, one for the statistical and one for the systematic uncertainty.
+Year 	MuonPOG file 	XPOG file 	Root file 	presentation 	Notes on uncertainties
+2016preVFP 	JSON 	JSON 	root 	slides 	Stat + Syst
+2016postVFP 	JSON 	JSON 	root 	slides 	Stat + Syst
+2017 	JSON 	JSON 	root 	slides 	Stat + Syst
+2018 	JSON 	JSON 	root 	slides 	Stat + Syst
+Medium pT: ISO efficiencies¶
+
+Note: The isolation efficiencies are computed with TnP on DY events and might not be representative of high jets multiplicity environment, or boosted muons topology. Additional systematics, not provided in these recommendations, need to be estimated by analyzers.
+
+The isolation working points provided are: LoosePFIso on top of Loose, Medium, MediumpPrompt and Tight IDs; TightPFIso on top of Medium, MediumPrompt and Tight IDs; LooseMiniIso on top of Loose and Medium IDs; MediumMiniIso on top of Medium ID; TightMiniIso on top of Medium ID; LooseTkIso on top of HighPt ID; TightTkIso on top of HighPt ID
+Run 2
+Run 3
+
+Root files contain histograms with both statistical (ended in "_stat") and systematic (ended in "_syst") uncertainties. The combined uncertainty can be accessed by getting the bin error of the nominal histogram. JSON files contain an entry for the central value, one for the statistical and one for the systematic uncertainty.
+Year 	MuonPOG file 	XPOG file 	Root file 	presentation 	Notes on uncertainties
+2016preVFP 	JSON 	JSON 	root 	slides 	Stat + Syst
+2016postVFP 	JSON 	JSON 	root 	slides 	Stat + Syst
+2017 	JSON 	JSON 	root 	slides 	Stat + Syst
+2018 	JSON 	JSON 	root 	slides 	Stat + Syst
+Medium pT: Trigger efficiencies¶
+Run 2
+Run 3
+
+For year 2016, Scale Factors are provided for (IsoMu24 or IsoTkMu24) and (Mu50 or TkMu50). For the first one the probe is passing tight ID and PFIso < 0.15. For the second one the probe is passing High pT ID and tracker isolation < 0.10. For years 2017 and 2018, Scale Factors are provided for IsoMu27 and (Mu50 or OldMu100 or TkMu100). For the first one the probe is passing tight ID and PFIso < 0.15. For the second one the probe is passing High pT ID and tracker isolation < 0.10. For completeness please refer to the associated presentations below.
+Year 	MuonPOG file 	XPOG file 	Root file 	presentation 	Notes on uncertainties
+2016preVFP 	JSON 	JSON 	root 	slides 	Stat + Syst
+2016postVFP 	JSON 	JSON 	root 	slides 	Stat + Syst
+2017 	JSON 	JSON 	root 	slides 	Stat + Syst
+2018 	JSON 	JSON 	root 	slides 	Stat + Syst
+Medium pT: Scale and Resolution¶
+
+For Run 2, the recommended corrections to use are the Rochester corrections. Instructions to apply the corrections are found in the Rochester twiki.
+
+‼ Since Run 3, the official corrections are produced centrally by the Muon POG. They are available, together with the scripts for their application, in the Muon POG central correction repository. Additional instructions can be found in the Muon POG tool documentation.
+Run 2
+Run 3
+
+Look at the Rochester twiki and apply the correction labeled as Run2.v5.
+High pT (pT > 200 GeV)¶
+
+We recommend all the analyses with at least one high-pT muon in the final state (or, practically, using HLT_Mu50 as their main trigger) to consider the recommendations given in this section. The main related PAG are EXO, B2G, SUSY, HIG. If you are working with muons over a large pT spectrum, such as 50 GeV to 1 TeV, then please consider using the high-pT recommendations over the full spectrum, since the high-pT recommendations are also valid for lower momentum. The SFs start as low as pT = 50 GeV.
+
+Further descriptions on each study are well documented in AN-2018/008 and in the corresponding paper MUO-17-001.
+
+    We recommend you to use the latest version of high-pT muon ID for the full Run-2 and Run-3 analyses, a detailed description can be found in this twiki.
+    Please note that both TuneP algorithm and high-pT muon ID do not rely on Particle-Flow algorithm. Therefore, it is not recommended to use any Particle-Flow quantities directly, e.g. PF MET and PF isolation, without a dedicated study/corrections. You can use e.g. PF MET but correcting the pT of the muon (PF) with the one given by TuneP.
+    The muon momentum (or pT) obtained from the muon track determined by the TuneP algorithm should be used.
+
+High pT: Prompt Muons¶
+High pT: RECO efficiencies¶
+
+    These reconstruction efficiencies for high-pT muons stand for the GlobalMuon reconstruction efficiency, as all the supported ID efficiencies are computed on top of GlobalMuons. The probe is a trackerMuon and the passing probe needs to be Global. Note that this is not the same as the reconstruction efficiency from the medium and low-pT sections, where the probe was a general Track and the passing probe a trackerMuon.
+    Be careful that the SF are given as a function of momentum p and not pT.
+
+Run 2
+Run 3
+
+Note: The relatively large uncertainties for signal muons above p = 1500 GeV may lead to a significant signal systematic uncertainty. These large uncertainties, though only seen in 2016, are the results of dedicated studies in very detail and still valid. It is recommended to apply uncertainties as inscribed. report from EXO MOC, relevant study.
+Year 	MuonPOG file 	XPOG file 	presentation 	Notes on uncertainties
+2016preVFP 	JSON 	JSON 	slides 	Stat + Syst
+2016postVFP 	JSON 	JSON 	slides 	Stat + Syst
+2017 	JSON 	JSON 	slides 	Stat + Syst
+2018 	JSON 	JSON 	slides 	Stat + Syst
+High pT: ID and ISO efficiencies¶
+
+Identification
+
+    The ID working points provided are: Medium, Tight, High-pT and Tracker High-pT IDs.
+    Note: Tight ID efficiency drops toward high-pT values, so it is not recommended.
+
+Isolation
+
+    The isolation working points are: Loose Relative Tracker Isolation over Medium, High-pT and Tracker High-pT IDs, and Tight Relative Tracker Isolation over the same ID working points.
+
+Run 2
+Run 3
+
+Special treatment for pathological events with poor inner track quality
+
+    W' group reported several events containing a very high pT muon (2-3 TeV) which has large pT differences among various TeV refitters used in the TuneP algorithm. All those muons were found to be having poor quality inner track, i.e. not high purity. For single muon analyses, we propose to require an additional inner track quality cut, TrackBase::highPurity.
+    MC based study: presentation.
+    Efficiency measured using the extended TnP method: presentation.
+
+Year 	MuonPOG file 	XPOG file 	presentation 	Notes on uncertainties
+2016preVFP 	JSON 	JSON 	slides 	Stat + Syst
+2016postVFP 	JSON 	JSON 	slides 	Stat + Syst
+2017 	JSON 	JSON 	slides 	Stat + Syst
+2018 	JSON 	JSON 	slides 	Stat + Syst
+High pT: Trigger efficiency¶
+Run 2
+Run 3
+
+    The recommended path for 2016 is the OR between: HLT_Mu50 || HLT_TkMu50, and for 2017 & 2018: HLT_Mu50 || HLT_TkMu100 || HLT_OldMu100
+    Note on HLT efficiencies for preVFP: There was an issue with the CSCs in the L1 trigger at the beginning of 2016, which prevented triggering on close-by muons. Therefore, a cut is added when both the tag and the probe muons have || > 1.24, which fixes the efficiencies, but reduces the statistics for very forward muons.
+
+Year 	MuonPOG file 	XPOG file 	presentation 	Notes on uncertainties
+2016preVFP 	JSON 	JSON 	slides 	Stat + Syst
+2016postVFP 	JSON 	JSON 	slides 	Stat + Syst
+2017 	JSON 	JSON 	slides 	Stat + Syst
+2018 	JSON 	JSON 	slides 	Stat + Syst
+High pT: Momentum Scale¶
+
+Momentum assignment of high-pT muons relies more and more on the muon system so that we cannot fully rely on the scale bias measured at Z peak with Rochester method, for which only the tracker information are used in the momentum determination. Bias in the muon system such as misalignment, are not measured with the standard method. Therefore, high-pT muon dedicated momentum scale measurement, namely Generalized Endpoint (GE) method, have been performed. The GE method injects a range of additive biases (κb) in different bins to the simulation and minimize the difference between data in the q/pT distribution. The value for which the simulated distribution reproduced the data one, correspond to the scale bias. A detailed description (containing also Legacy results) can be found in AN-2018/008.
+
+Note: the corrections described in this section only apply to muons with transverse momentum larger than 200 GeV. Do not mix up the GE corrections with the scale and smearing corrections applied at medium pT.
+
+Note: analyses that include muons in a very large pT spectrum (across the 200 GeV threshold) can treat the muon momentum scale following two approaches, depending on the specific details of the analysis:
+
+    If muons with pT < 200 GeV represent a significant fraction of the analyzed sample or, more generally, have a significant impact on the analysis sensitivity, it is recommended that both the medium pT (so-called Rochester corrections in Run2) and GE methods are considered, as follows:
+        muons with pT < 200 GeV are corrected using the medium pT scale and smearing corrections, assigning a systematic uncertainty from variations of the individual components of the correction.
+        muons with pT > 200 GeV are left uncorrected, and their systematic uncertainties are computed using the GE method (see below).
+    If muons with pT < 200 GeV represent a small fraction of the sample and have a negligible impact on the final results, then the analyzers can choose to skip the medium pT corrections, leave all muons uncorrected, and only apply systematic uncertainties from the GE method to all muons, including those with pT < 200 GeV (see below). In case of doubts, e.g. if the impact of low-pT muons is still unclear, it is advisable to follow the first approach (i.e. Rochester at low pT and GE at high pT).
+
+Note: in addition, for all analyses having muon signal candidates above 500 GeV, we recommend an additional sanity check: manually shift the pT of the muon using the scale biases measured from the medium pT corrections and/or GE method and check the effect on the analysis results. This check is really important, because the systematic uncertainties described above do not cover in case of major scale bias in data on a given event.
+Run 2
+Run 3
+
+The weight of the muon system in the pT determination changes with momentum and, ideally, we should provide scale correction as a function of the momentum, and of the muon. Unfortunately, since we don't have enough statistics, we can only perform a few and bins and a single pT bin. For this reason, the results of the GE method should be used to estimate a systematic uncertainty on the muon momentum scale but should not be applied as a correction.
+
+Note: this recommendation is only for Run 2. From Run 3 we recommend to apply the bias corrections derived with the GE method, similarly to what is done with medium pT corrections.
+
+The values of the bias κb to be used in different different bins are:
+
+2016 preBPix maps in
+						
+	-0.075 (0.088) 	-0.053 (0.055) 	-0.020 (0.029) 	-0.009 (0.029) 	-0.010 (0.040) 	0.078 (0.067)
+	-0.049 (0.101) 	-0.100 (0.040) 	0.072 (0.030) 	0.057 (0.034) 	-0.036 (0.043) 	-0.073 (0.102)
+	-0.007 (0.060) 	0.003 (0.038) 	-0.015 (0.030) 	-0.003 (0.036) 	0.060 (0.040) 	-0.196 (0.084)
+
+2016 postVFP maps in
+						
+	0.002 (0.078) 	0.049 (0.046) 	-0.045 (0.033) 	-0.061 (0.033) 	0.016 (0.043) 	-0.108 (0.109)
+	-0.005 (0.089) 	-0.064 (0.039) 	0.023 (0.032) 	-0.004 (0.031) 	0.041 (0.045) 	-0.023 (0.114)
+	0.026 (0.086) 	-0.142 (0.046) 	0.039 (0.031) 	0.000 (0.032) 	0.003 (0.042) 	-0.091 (0.073)
+
+2017 maps in
+						
+	-0.049 (0.070) 	-0.032 (0.029) 	0.027 (0.024) 	-0.026 (0.021) 	0.012 (0.025) 	-0.151 (0.087)
+	-0.048 (0.044) 	0.001 (0.031) 	0.039 (0.027) 	0.027 (0.022) 	-0.007 (0.023) 	0.058 (0.057)
+	-0.025 (0.044) 	-0.019 (0.030) 	-0.049 (0.021) 	0.018 (0.025) 	0.000 (0.026) 	0.004 (0.063)
+
+2018 maps in
+						
+	-0.089 (0.050) 	-0.005 (0.025) 	-0.014 (0.018) 	0.020 (0.017) 	0.042 (0.031) 	-0.012 (0.044)
+	0.057 (0.052) 	-0.028 (0.025) 	-0.009 (0.017) 	0.007 (0.019) 	-0.068 (0.027) 	-0.235 (0.054)
+	0.149 (0.057) 	0.021 (0.021) 	-0.028 (0.017) 	0.000 (0.020) 	-0.059 (0.027) 	0.025 (0.039)
+
+More details about the method can be found in this presentation.
+High pT: Momentum Resolution¶
+
+The momentum resolution in simulation is adjusted to match that observed in data through a smearing procedure that is applied consistently across datasets. In general, the agreement between data and simulation is first evaluated as a function of kinematic variables such as pseudorapidity. In regions where the resolutions are already consistent, no modification is applied, while in regions where the simulation shows better resolution than data, an additional smearing is introduced. This is implemented by redefining the momentum with a stochastic term, where the magnitude of the smearing is governed by a parametrized resolution function that depends on the particle momentum and detector region. The functional form of this parametrization remains fixed, while its coefficients are determined separately for each dataset and are listed in the following.
+
+Systematic uncertainties associated with this procedure are estimated by varying the resolution within its uncertainty, propagating the resulting changes through the full analysis chain, and taking the deviation from the nominal result as the corresponding systematic effect.
+
+More precisely, the systematic on the muon momentum resolution is estimated by varying the fit window, the number of bins, and the fit function when extracting the Z mass resolution in the above method. We recommend a shift both for barrel and endcap muons for all the data taking periods. This value was found to cover the changes to the Data/MC agreement from these variations, and also to cover the residual Data/MC disagreements after smearing.
+
+The new assignment to be used for the evaluation of the systematic uncertainty is obtained from the following formula:
+
+where defines a normal distribution centered at and with width of , and the factor corresponds to the shift uncertainty.
+
+The values of for barrel and forward muons are the same as for the nominal case, and are specified below for each data taking period. The only exception is for the 2016 preVFP era, where no nominal smearing is recommended on the MC, and only an uncertainty of is recommended. The corresponding values of to be used for the uncertainty assesment are specified in the relevant section.
+
+A more detailed description of the methods be found in AN-2018/008.
+Run 2
+Run 3
+
+The specific results for the UL datasets can be found in these slides.
+
+Below we summarize the values of the additional smearing to be applied to MC in each data taking period as well as the recommendations to assign systematic uncertainties to it.
+
+2016
+
+MC smearing
+
+We observe very good agreement between the resolution in data and MC for the the preVFP and postVFP dataests: no extra smearing to the MC needs to be done (see slides 5 and 6 of the slides linked above).
+
+Systematic uncertainty
+
+The values of to be used for the derivation of the smearing systematic uncertainty are:
+
+    2016 preVFP:
+
+    2016 postVFP:
+
+2017
+
+MC smearing
+
+We observe very good agreement between the resolution in data and MC for central muons ; no extra smearing to the MC needs to be done for them. For forward muons we observe that the resolution in MC is about better than in data; the MC needs to be smeared to match the data.
+
+The extra smearing is obtained from the following formula:
+
+where defines a normal distribution centered at and with width of , and the factor corresponds to a smearing.
+
+The values of are:
+
+2018
+
+MC smearing
+
+We observe very good agreement between the resolution in data and MC for central muons ; no extra smearing to the MC needs to be done for them. For forward muons we observe that the resolution in MC is about better than in data; the MC needs to be smeared to match the data.
+
+The extra smearing is obtained from the following formula:
+
+where defines a normal distribution centered at and with width of , and the factor corresponds to a smearing.
+
+The values of are:
+
+
+
+For any other infomration ask. This was taken from: https://muon-wiki.docs.cern.ch/guidelines/corrections/#high-pt-momentum-resolution
+

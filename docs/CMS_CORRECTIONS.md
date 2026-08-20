@@ -1,5 +1,19 @@
 # CMS Correction Stack
 
+> **Note:** This document describes the **generic correction manager patterns** — how
+> the `CorrectionManager`, `JetEnergyScaleManager`, `ElectronEnergyScaleManager`, etc.
+> work at the framework level.  For the **CMS-specific convenience functions** that
+> wire these managers up for standard CMS analysis years (payload paths, flags,
+> column names), see:
+> - [`core/plugins/cms/README.md`](../core/plugins/cms/README.md) — implementation status matrix
+> - [`docs/CMS_STANDARD_STACK.md`](CMS_STANDARD_STACK.md) — user recipe with call order and flags
+>
+> Key distinction: photon energy scale is available through the generic
+> `PhotonEnergyScaleManager` framework plugin but is **not** centrally wired by
+> `CmsCorrections` — only photon ID/CSEV scale factors are part of the default
+> CMS stack (via `defineCmsPhotonScaleFactors()`).  Analyses needing photon
+> energy corrections should configure them directly using the patterns below.
+
 This guide documents the current RDFAnalyzerCore workflow for CMS correctionlib payloads and the object-energy managers built on top of it. The goal is to keep analysis code short while still exposing the full correction content from the JSON payloads shipped with the analysis.
 
 ## Overview

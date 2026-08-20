@@ -15,6 +15,20 @@
 #include <SystematicManager.h>
 #include <ROOT/TThreadExecutor.hxx>
 
+/**
+ * @file testOnnxManager.cc
+ *
+ * @note KNOWN LIMITATION: The test ONNX model ("test_model") expects
+ * batched/vector-shaped inputs, but the test cases (ApplyModel_Valid,
+ * ApplyModel_RunVarFalse) define features as scalar float columns via
+ * DataManager::Define().  This type mismatch (vector expected vs scalar
+ * provided) can cause the ONNX runtime session to behave unexpectedly or
+ * return incorrect results under certain input configurations.  This is a
+ * pre-existing test limitation, not a VHbb STXS regression.  To reproduce
+ * production-like ONNX inference, the test fixtures would need to define
+ * proper vector-typed columns matching the model's expected input shape.
+ */
+
 class OnnxManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {

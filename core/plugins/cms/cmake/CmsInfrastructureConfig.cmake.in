@@ -1,0 +1,34 @@
+@PACKAGE_INIT@
+
+# CmsInfrastructureConfig.cmake — found by find_package(CmsInfrastructure)
+#
+# Provides the CmsInfrastructure target for linking into analysis executables.
+#
+# In standalone mode the user builds and installs this package, then:
+#
+#   find_package(CmsInfrastructure REQUIRED)
+#   target_link_libraries(my_analysis PRIVATE CmsInfrastructure)
+#
+# This file is auto-generated from CmsInfrastructureConfig.cmake.in by
+# CMake's configure_package_config_file().
+
+include(CMakeFindDependencyMacro)
+
+# Find transitive dependencies
+find_dependency(ROOT COMPONENTS Core RIO Tree Net Hist Graf Graf3d Gpad TreePlayer ROOTDataFrame)
+find_dependency(yaml-cpp)
+
+# Import the CmsInfrastructure target
+if(NOT TARGET CmsInfrastructure)
+  include("${CMAKE_CURRENT_LIST_DIR}/CmsInfrastructureTargets.cmake" OPTIONAL RESULT_VARIABLE _targets_file)
+  if(NOT TARGET CmsInfrastructure)
+    # Fallback: create an imported target from the installed archive
+    add_library(CmsInfrastructure UNKNOWN IMPORTED)
+    set_target_properties(CmsInfrastructure PROPERTIES
+      IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/libCmsInfrastructure.a"
+      INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include;${PACKAGE_PREFIX_DIR}/include/cms"
+    )
+  endif()
+endif()
+
+check_required_components(CmsInfrastructure)

@@ -133,6 +133,8 @@ INTERMEDIATE_ARTIFACT_SCHEMA_VERSION: int = 1
 REGION_DEFINITION_VERSION: int = 1
 #: Current version of :class:`NuisanceGroupDefinition`.
 NUISANCE_GROUP_DEFINITION_VERSION: int = 1
+#: Current version of :class:`SystematicColumnInventory`.
+SYSTEMATIC_COLUMN_INVENTORY_VERSION: int = 1
 #: Current version of :class:`OutputManifest`.
 OUTPUT_MANIFEST_VERSION: int = 1
 
@@ -146,6 +148,7 @@ SCHEMA_REGISTRY: Dict[str, int] = {
     "intermediate_artifact": INTERMEDIATE_ARTIFACT_SCHEMA_VERSION,
     "region_definition": REGION_DEFINITION_VERSION,
     "nuisance_group_definition": NUISANCE_GROUP_DEFINITION_VERSION,
+    "systematic_column_inventory": SYSTEMATIC_COLUMN_INVENTORY_VERSION,
     "output_manifest": OUTPUT_MANIFEST_VERSION,
 }
 
@@ -1147,6 +1150,125 @@ def validate_region_hierarchy(regions: "List[RegionDefinition]") -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# SystematicColumnInventory
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SystematicColumnInventory:
+    """Inventory of systematic variation columns produced by the analysis.
+
+    Records per-systematic metadata about the concrete column names,
+    producer components, and affected observables.  This inventory is
+    emitted as part of the merged :class:`OutputManifest` after Pass 3
+    merging and can be consumed by downstream validation and datacard
+    automation.
+
+    Attributes
+    ----------
+    schema_version : int
+        Schema format version.  Must equal :attr:`CURRENT_VERSION`.
+    entries : list[SystematicColumnEntry]
+        Ordered list of systematic column entries.
+    """
+
+    CURRENT_VERSION: ClassVar[int] = SYSTEMATIC_COLUMN_INVENTORY_VERSION
+
+    schema_version: int = SYSTEMATIC_COLUMN_INVENTORY_VERSION
+    entries: List["SystematicColumnEntry"] = field(default_factory=list)
+
+    # ------------------------------------------------------------------ I/O
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "entries": [e.to_dict() for e in self.entries],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SystematicColumnInventory":
+        entries = [
+            SystematicColumnEntry.from_dict(e)
+            for e in data.get("entries", [])
+        ]
+        return cls(
+            schema_version=data.get("schema_version", SYSTEMATIC_COLUMN_INVENTORY_VERSION),
+            entries=entries,
+        )
+
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if self.schema_version != self.CURRENT_VERSION:
+            errors.append(
+                f"SystematicColumnInventory version mismatch: file has "
+                f"{self.schema_version}, code expects {self.CURRENT_VERSION}."
+            )
+        for i, entry in enumerate(self.entries):
+            for e in entry.validate():
+                errors.append(f"entries[{i}]: {e}")
+        return errors
+
+
+@dataclass
+class SystematicColumnEntry:
+    """A single systematic variation entry in the column inventory.
+
+    Attributes
+    ----------
+    family : str
+        Grouping key for this systematic (e.g. ``"jes"``, ``"btag"``,
+        ``"lumi"``, ``"pileup"``).
+    base_name : str
+        Base name of the systematic variation (e.g. ``"JES"``, ``"btag"``).
+    up_column : str
+        Concrete dataframe column name for the up variation
+        (e.g. ``"weight_jesTotalUp"``).  Empty string if not produced.
+    down_column : str
+        Concrete dataframe column name for the down variation
+        (e.g. ``"weight_jesTotalDown"``).  Empty string if not produced.
+    nominal_column : str
+        Name of the nominal / central column that this variation is relative
+        to (e.g. ``"weight_nominal"``).  Empty string when not applicable.
+    producer : str
+        Name of the framework component that creates this variation
+        (e.g. ``"WeightManager"``, ``"NDHistogramManager"``,
+        ``"CorrectionLib"``).
+    affected_observable : str
+        What physics object or observable this variation modifies
+        (e.g. ``"weight"``, ``"jet_pt"``, ``"dijet_mass"``, ``"met"``).
+        Empty string when the effect is global.
+    """
+
+    family: str = ""
+    base_name: str = ""
+    up_column: str = ""
+    down_column: str = ""
+    nominal_column: str = ""
+    producer: str = ""
+    affected_observable: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SystematicColumnEntry":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if not self.base_name:
+            errors.append("SystematicColumnEntry.base_name must not be empty.")
+        if not self.family:
+            errors.append("SystematicColumnEntry.family must not be empty.")
+        if not self.up_column and not self.down_column:
+            errors.append(
+                f"SystematicColumnEntry '{self.base_name}': at least one of "
+                "up_column or down_column must be non-empty."
+            )
+        return errors
+
+
 # NuisanceGroupDefinition
 # ---------------------------------------------------------------------------
 
@@ -1347,6 +1469,13 @@ class OutputManifest:
         to select a subset of datasets, and the names of the resolved
         dataset entries.  ``None`` when no dataset manifest was used or the
         information was not captured.
+    column_inventory : SystematicColumnInventory or None
+        Inventory of systematic variation columns produced by the analysis.
+        Populated after Pass 3 merging.  ``None`` when not yet available.
+    coverage_report : dict or None
+        Summary of the most recent coverage validation run.  Keys include
+        ``"pass"``, ``"fail"``, ``"warn"`` counts.  ``None`` when no
+        coverage check has been performed.
     """
 
     CURRENT_VERSION: ClassVar[int] = OUTPUT_MANIFEST_VERSION
@@ -1366,6 +1495,8 @@ class OutputManifest:
         user_repo_hash: Optional[str] = None,
         config_mtime: Optional[str] = None,
         dataset_manifest_provenance: Optional["DatasetManifestProvenance"] = None,
+        column_inventory: Optional["SystematicColumnInventory"] = None,
+        coverage_report: Optional[Dict[str, int]] = None,
     ) -> None:
         self.manifest_version: int = manifest_version
         self.skim: Optional[SkimSchema] = skim
@@ -1382,6 +1513,8 @@ class OutputManifest:
         self.dataset_manifest_provenance: Optional[DatasetManifestProvenance] = (
             dataset_manifest_provenance
         )
+        self.column_inventory: Optional[SystematicColumnInventory] = column_inventory
+        self.coverage_report: Optional[Dict[str, int]] = coverage_report
 
     # ------------------------------------------------------------------ I/O
 
@@ -1413,6 +1546,12 @@ class OutputManifest:
                 if self.dataset_manifest_provenance is not None
                 else None
             ),
+            "column_inventory": (
+                self.column_inventory.to_dict()
+                if self.column_inventory is not None
+                else None
+            ),
+            "coverage_report": self.coverage_report,
         }
 
     @classmethod
@@ -1460,6 +1599,12 @@ class OutputManifest:
             if dmp_data is not None
             else None
         )
+        ci_data = data.get("column_inventory")
+        column_inventory = (
+            SystematicColumnInventory.from_dict(ci_data)
+            if ci_data is not None
+            else None
+        )
         return cls(
             manifest_version=data.get("manifest_version", OUTPUT_MANIFEST_VERSION),
             skim=skim,
@@ -1474,6 +1619,8 @@ class OutputManifest:
             user_repo_hash=data.get("user_repo_hash"),
             config_mtime=data.get("config_mtime"),
             dataset_manifest_provenance=dataset_manifest_provenance,
+            column_inventory=column_inventory,
+            coverage_report=data.get("coverage_report"),
         )
 
     def save_yaml(self, path: str) -> None:

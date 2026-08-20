@@ -1,0 +1,6 @@
+enableCounters=true
+metaFile=/eos/user/b/bkronhei/RDFAnalyzerCore/core/tests/cpp/aux/test_analyzer_managercontext_meta.root
+sample=TestSample
+fileList=test_data_minimal/dummy.root
+saveTree=Events
+saveFile=test_analyzer_managercontext_skim.root

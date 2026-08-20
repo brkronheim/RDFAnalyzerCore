@@ -1,0 +1,20 @@
+# Build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+*.o
+*.a
+*.so
+*.dylib
+
+# Extracted Rochester data (built from roccor.Run2.v5.tgz)
+roccor_data/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*~

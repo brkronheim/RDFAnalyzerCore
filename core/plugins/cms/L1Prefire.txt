@@ -1,0 +1,17 @@
+L1 PreFiring corrections
+
+The 2016 NanoAOD files also contain a set of branches labeled “L1PreFiringWeight”. In 2016 and 2017, the gradual timing shift of the ECAL was not properly propagated to the L1 trigger system, resulting in a significant fraction of high-η “trigger primitives” being mistakenly associated to the previous bunch crossing. Since Level-1 rules forbid two consecutive bunch crossings from firing, an unpleasant consequence of this is that events can effectively “self veto” if a significant amount of ECAL energy is found in the region 2.0<|η|<3.0. The effect is strongly η- and pT-dependent and prefiring rates can be large for high-momentum jets in the forward regions of the detector. A similar effect is present in the muon system, where the bunch crossing assignment of the muon candidates can be wrong due to the limited time resolution of the muon detectors. This effect was most pronounced in 2016, and the magnitude varies between 0% and 3%.
+
+The L1PreFiring table in NanoAOD provides weights that analysts can apply to simulation to correct for these effects, so that simulation better represents data. The weights carry associated uncertainties, represented in alternate branches.
+Object property 	Type 	Description
+L1PreFiringWeight_Dn 	Float_t 	L1 pre-firing event correction weight (1-probability), down var.
+L1PreFiringWeight_ECAL_Dn 	Float_t 	ECAL L1 pre-firing event correction weight (1-probability), down var.
+L1PreFiringWeight_ECAL_Nom 	Float_t 	ECAL L1 pre-firing event correction weight (1-probability)
+L1PreFiringWeight_ECAL_Up 	Float_t 	ECAL L1 pre-firing event correction weight (1-probability), up var.
+L1PreFiringWeight_Muon_Nom 	Float_t 	Muon L1 pre-firing event correction weight (1-probability)
+L1PreFiringWeight_Muon_StatDn 	Float_t 	Muon L1 pre-firing event correction weight (1-probability), down var. stat.
+L1PreFiringWeight_Muon_StatUp 	Float_t 	Muon L1 pre-firing event correction weight (1-probability), up var. stat.
+L1PreFiringWeight_Muon_SystDn 	Float_t 	Muon L1 pre-firing event correction weight (1-probability), down var. syst.
+L1PreFiringWeight_Muon_SystUp 	Float_t 	Muon L1 pre-firing event correction weight (1-probability), up var. syst.
+L1PreFiringWeight_Nom 	Float_t 	L1 pre-firing event correction weight (1-probability)
+L1PreFiringWeight_Up 	Float_t 	L1 pre-firing event correction weight (1-probability), up var.

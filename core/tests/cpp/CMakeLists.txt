@@ -74,7 +74,8 @@ add_executable(testWorkingPointRecipe testWorkingPointRecipe.cc)
 target_link_libraries(testWorkingPointRecipe coreAll gtest gtest_main)
 add_test(NAME WorkingPointRecipeTest COMMAND testWorkingPointRecipe)
 
-
+# CMS infrastructure tests moved to core/plugins/cms/test/
+# They are registered automatically via add_subdirectory(test) in cms/CMakeLists.txt
 
 
 
@@ -157,6 +158,10 @@ add_test(NAME RegionManagerTest COMMAND testRegionManager)
 add_executable(testWeightManager testWeightManager.cc)
 target_link_libraries(testWeightManager coreAll gtest gtest_main)
 add_test(NAME WeightManagerTest COMMAND testWeightManager)
+
+add_executable(testGenWeightManager testGenWeightManager.cc)
+target_link_libraries(testGenWeightManager coreAll gtest gtest_main)
+add_test(NAME GenWeightManagerTest COMMAND testGenWeightManager)
 
 add_executable(testGoldenJsonManager testGoldenJsonManager.cc)
 target_link_libraries(testGoldenJsonManager coreAll gtest gtest_main)

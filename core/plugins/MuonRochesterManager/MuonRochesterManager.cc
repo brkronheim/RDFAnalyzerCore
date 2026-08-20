@@ -4,6 +4,7 @@
 // the Rochester-specific extensions and emits the vtable for this class.
 
 #include <MuonRochesterManager.h>
+#include <RoccoR.h>
 #include <analyzer.h>
 #include <api/ILogger.h>
 #include <cmath>
@@ -211,6 +212,44 @@ void MuonRochesterManager::applyScaleAndResolution(
 }
 
 // ---------------------------------------------------------------------------
+// Run 2 Rochester kFactor corrections via RoccoR
+// ---------------------------------------------------------------------------
+
+void MuonRochesterManager::applyRoccoRCorrection(
+    const std::string &kFactorFile, bool isData, bool applySmearing,
+    const std::string &inputPtColumn, const std::string &outputPtColumn,
+    bool applyToMass, const std::string &inputMassColumn,
+    const std::string &outputMassColumn) {
+  if (kFactorFile.empty())
+    throw std::invalid_argument(
+        "MuonRochesterManager::applyRoccoRCorrection: kFactorFile must not be empty");
+  if (inputPtColumn.empty())
+    throw std::invalid_argument(
+        "MuonRochesterManager::applyRoccoRCorrection: inputPtColumn must not be empty");
+  if (outputPtColumn.empty())
+    throw std::invalid_argument(
+        "MuonRochesterManager::applyRoccoRCorrection: outputPtColumn must not be empty");
+  if (chargeColumn_m.empty() || nLayersColumn_m.empty() ||
+      getEtaColumn().empty() || getPhiColumn().empty()) {
+    throw std::runtime_error(
+        "MuonRochesterManager::applyRoccoRCorrection: configure object and Rochester columns before scheduling corrections");
+  }
+
+  RoccoRStep step;
+  step.kFactorFile = kFactorFile;
+  step.isData = isData;
+  step.applySmearing = applySmearing;
+  step.inputPtColumn = inputPtColumn;
+  step.outputPtColumn = outputPtColumn;
+  step.applyToMass = applyToMass;
+  step.inputMassColumn = inputMassColumn;
+  step.outputMassColumn = outputMassColumn;
+  roccorSteps_m.push_back(std::move(step));
+
+  execute();
+}
+
+// ---------------------------------------------------------------------------
 // Accessors
 // ---------------------------------------------------------------------------
 
@@ -327,6 +366,56 @@ void MuonRochesterManager::execute() {
   }
 
   scaleResolutionSteps_m.clear();
+
+  // Process RoccoR-based kFactor steps (Run 2)
+  for (const auto &step : roccorSteps_m) {
+    auto roccor = std::make_shared<RoccoR>(step.kFactorFile);
+
+    ROOT::RDF::RNode df = getCurrentDataFrame();
+    auto newDf = df.Define(
+        step.outputPtColumn,
+        [roccor, isData = step.isData, applySmearing = step.applySmearing](
+            const ROOT::VecOps::RVec<Float_t> &pt,
+            const ROOT::VecOps::RVec<Float_t> &eta,
+            const ROOT::VecOps::RVec<Float_t> &phi,
+            const ROOT::VecOps::RVec<Int_t> &charge,
+            const ROOT::VecOps::RVec<Float_t> &genPt,
+            const ROOT::VecOps::RVec<UChar_t> &nLayers)
+            -> ROOT::VecOps::RVec<Float_t> {
+          ROOT::VecOps::RVec<Float_t> output(pt.size(), 0.0f);
+          for (std::size_t i = 0; i < pt.size(); ++i) {
+            const double ptIn = pt[i];
+            if (!std::isfinite(ptIn) || ptIn <= 0.0) {
+              output[i] = pt[i];
+              continue;
+            }
+            const double etaIn = eta[i];
+            const double phiIn = phi[i];
+            const int chargeIn = charge[i];
+            const double gt = genPt[i];
+
+            if (isData) {
+              // Data: scale only
+              const double sf = roccor->kScaleDT(chargeIn, ptIn, etaIn, phiIn);
+              output[i] = static_cast<float>(ptIn * sf);
+            } else if (applySmearing && gt > 0.0) {
+              // MC with gen-match: apply spread smearing
+              const double sf = roccor->kSpreadMC(chargeIn, ptIn, etaIn, phiIn, gt);
+              output[i] = static_cast<float>(ptIn * sf);
+            } else {
+              // MC without gen-match or scale-only: apply scale correction
+              const double sf = roccor->kScaleMC(chargeIn, ptIn, etaIn, phiIn);
+              output[i] = static_cast<float>(ptIn * sf);
+            }
+          }
+          return output;
+        },
+        {step.inputPtColumn, getEtaColumn(), getPhiColumn(), chargeColumn_m,
+         genPtColumn_m, nLayersColumn_m});
+    setCurrentDataFrame(newDf);
+  }
+
+  roccorSteps_m.clear();
 }
 
 // ---------------------------------------------------------------------------

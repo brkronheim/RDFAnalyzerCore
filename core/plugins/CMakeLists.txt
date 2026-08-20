@@ -6,10 +6,11 @@ set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/CorrectedObjectCollectionManagers
     ${CMAKE_CURRENT_SOURCE_DIR}/CutflowManager
     ${CMAKE_CURRENT_SOURCE_DIR}/ElectronEnergyScaleManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/GenWeightManager
     ${CMAKE_CURRENT_SOURCE_DIR}/JetEnergyScaleManager
     ${CMAKE_CURRENT_SOURCE_DIR}/TaggerWorkingPointManager
     ${CMAKE_CURRENT_SOURCE_DIR}/KinematicFitManager
-    ${CMAKE_CURRENT_SOURCE_DIR}/GoldenJsonManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/JetVetoMapManager
     ${CMAKE_CURRENT_SOURCE_DIR}/MuonRochesterManager
     ${CMAKE_CURRENT_SOURCE_DIR}/NDHistogramManager
     ${CMAKE_CURRENT_SOURCE_DIR}/ObjectEnergyManagerBase
@@ -21,6 +22,7 @@ set(PLUGIN_SOURCE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/OnnxManager
     ${CMAKE_CURRENT_SOURCE_DIR}/SofieManager
     ${CMAKE_CURRENT_SOURCE_DIR}/WeightManager
+    ${CMAKE_CURRENT_SOURCE_DIR}/cms
     # Extern headers needed so plugin .cc files can #include <analyzer.h>
     ${CMAKE_CURRENT_SOURCE_DIR}/../extern/correctionlib/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../extern/XGBoost-FastForest/include
@@ -36,10 +38,11 @@ add_subdirectory(CorrectedObjectCollectionManagers)
 add_subdirectory(CutflowManager)
 add_subdirectory(ObjectEnergyManagerBase)
 add_subdirectory(ElectronEnergyScaleManager)
+add_subdirectory(GenWeightManager)
 add_subdirectory(JetEnergyScaleManager)
 add_subdirectory(TaggerWorkingPointManager)
 add_subdirectory(KinematicFitManager)
-add_subdirectory(GoldenJsonManager)
+add_subdirectory(JetVetoMapManager)
 add_subdirectory(MuonRochesterManager)
 add_subdirectory(NDHistogramManager)
 add_subdirectory(PhotonEnergyScaleManager)
@@ -49,6 +52,8 @@ add_subdirectory(TriggerManager)
 add_subdirectory(OnnxManager)
 add_subdirectory(SofieManager)
 add_subdirectory(WeightManager)
+add_subdirectory(StxsManager)
+add_subdirectory(cms)
 
 # Explicitly embed all OBJECT library object files into the static archive.
 # This ensures libcorePlugins.a contains every plugin's symbols, so executables
@@ -61,10 +66,11 @@ target_sources(corePlugins PRIVATE
     $<TARGET_OBJECTS:CutflowManager>
     $<TARGET_OBJECTS:ObjectEnergyManagerBase>
     $<TARGET_OBJECTS:ElectronEnergyScaleManager>
+    $<TARGET_OBJECTS:GenWeightManager>
     $<TARGET_OBJECTS:JetEnergyScaleManager>
     $<TARGET_OBJECTS:TaggerWorkingPointManager>
     $<TARGET_OBJECTS:KinematicFitManager>
-    $<TARGET_OBJECTS:GoldenJsonManager>
+    $<TARGET_OBJECTS:JetVetoMapManager>
     $<TARGET_OBJECTS:MuonRochesterManager>
     $<TARGET_OBJECTS:NDHistogramManager>
     $<TARGET_OBJECTS:PhotonEnergyScaleManager>
@@ -74,6 +80,8 @@ target_sources(corePlugins PRIVATE
     $<TARGET_OBJECTS:OnnxManager>
     $<TARGET_OBJECTS:SofieManager>
     $<TARGET_OBJECTS:WeightManager>
+    $<TARGET_OBJECTS:StxsManager>
+    $<TARGET_OBJECTS:CmsInfrastructure>
 )
 
 # Link all plugin libraries to corePlugins
@@ -84,10 +92,10 @@ target_link_libraries(corePlugins
     CutflowManager
     ObjectEnergyManagerBase
     ElectronEnergyScaleManager
+    GenWeightManager
     JetEnergyScaleManager
     TaggerWorkingPointManager
     KinematicFitManager
-    GoldenJsonManager
     MuonRochesterManager
     NDHistogramManager
     PhotonEnergyScaleManager
@@ -97,6 +105,8 @@ target_link_libraries(corePlugins
     OnnxManager
     SofieManager
     WeightManager
+    StxsManager
+    CmsInfrastructure
     fastforest
     correctionlib
     OnnxRuntime::OnnxRuntime

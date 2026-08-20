@@ -1,0 +1,255 @@
+Analysis Recommendationslink
+
+Starting from Run 3, PUPPI jets are the default jet collection. Corrections for AK4 CHS jets will be provided at a later stage. AK8 CHS jets are not supported. Please use PUPPI jets or contact us if you have questions.
+
+Different formats are provided by the JERC group (txt, tarballs, db, json). Please find below the links to the different formats.
+
+The default JEC versions applied in various MiniAOD and NanoAOD campaigns are documented here. Analysts should undo the existing JECs and reapply the recommended versions listed in the tables below for each year, unless explicitly stated otherwise.
+Jet Energy Scalelink
+Click for recommendations ...
+
+
+
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+						
+
+						
+						
+						
+						
+
+						
+						
+						
+
+						
+						
+						
+						
+						
+						
+						
+
+						
+						
+						
+						
+						
+						
+
+
+
+Jet Energy Resolutionlink
+Reminder
+
+Data files are not used for the smearing.
+Click for recommendations ...
+
+
+
+The JER smearing should be applied after correcting the jets with the JECs listed in the previous section. Similarly, for evaluating JER uncertainties, first apply the nominal JEC, and then perform the corresponding JER variations (up/down). The JER smearing is applied only on MC. Visit the Application Methods for more details.
+
+Links to the repositories hosting the Text, Tar, DB, and JSON files. Visit the JERC viewer to visualize these JECs interactively.
+2022 (PreEE)link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer22_22Sep2023_JRV2_MC 	Summer22/ReReco 	V2 	Announcement
+2022 (PostEE)link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer22EE_22Sep2023_JRV2_MC 	Summer22EE/ReReco 	V2 	Announcement
+2023 (PreBPix)link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer23Prompt23_RunCv1234_JRV2_MC 	Summer23/ReReco 	V2 	Announcement
+2023 (PostBPix)link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer23BPixPrompt23_RunD_JRV2_MC 	Summer23BPix/Prompt 	V2 	Announcement
+2024link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer24Prompt24_JRV1_MC 	Summer24/Prompt 	V1 	Announcement
+2025link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer24Prompt25_JRV1_MC 	Summer24/Prompt 	V1 	Announcement
+NOTE: 2.5<|eta|<3.0link
+
+In this η region, the Data/MC agreement of the jet eta distribution is found to be very poor. An ad hoc mitigation strategy was discussed and applied on a case-by-case basis to improve the Data/MC agreement:
+
+(a) The analyzer may impose a higher jet ( pT ) threshold (e.g. ( pT > 50 ) GeV), as done in analyses such as H → Zγ.
+
+(b) The stochastic component of the JER smearing may be omitted. In practice, this means that the jet ( pT ) is corrected only when a matched gen-jet is found (scaling method). If no match is available, no stochastic smearing is applied. This approach was followed in certain analyses (e.g. H → WW, H → μμ, VBF SUSY).
+
+It is important to emphasize that this recommendation was analysis-specific and tailored to the needs of the respective analyses; it is not a general prescription from JME. Any analysis intending to adopt option (b) must obtain explicit approval from JME/JERC.
+Run 2link
+
+Recommendations for NanoAODv9 datasets that contain AK4 CHS and AK8 PUPPI jets are available at the Twiki page.
+
+In the table below, we provide the latest recommendations for the NanoAODv15 datasets, which contain AK4 and AK8 PUPPI jets.
+2016 (PreVFP)link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer20UL16APV_JRV5_MC 	Summer19or20/UL16APV 	V5 	Announcement
+2016 (PostVFP)link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer20UL16_JRV5_MC 	Summer19or20/UL16 	V5 	Announcement
+2017link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer19UL17_JRV4_MC 	Summer19/UL17 	V4 	Announcement
+2018link
+JER Correction Tag Name 	MC/Data Processing 	Version 	Notes
+Summer19UL18_JRV3_MC 	Summer19/UL18 	V3 	Announcement
+
+
+
+Jet Veto Mapslink
+
+Procedure to derive the maps is discussed here. These maps should be applied similarly both on Data and MC, to keep the phase-spaces equal.
+
+The effect of applying jet veto maps can vary depending on the specific analysis being conducted, and it is imperative to assess this impact rigorously by creating jet eta-phi maps, before and after applying the veto maps and checking the impact on other relevant distributions. As a general guideline for Run3, we recommend rejecting events (read the reason here) that contain jets within the vetoed regions to prevent the introduction of spurious MET in the event. We encourage you to include a detailed description in your AN outlining how this vetoing procedure is implemented to provide transparency and clarity in your methodology.
+Reminder
+
+Jet veto maps are mandatory for Run 3 analyses.
+Click for recommendations ...
+
+
+
+Run 3link
+
+The safest procedure would be to veto events if ANY jet with a minimal selection lies in the veto regions.
+
+The “minimal selection” would be (old recommendations):
+
+    jet pT > 15 GeV
+    tightLepVeto jet ID (in v15 NanoAOD, the Jet_jetId branch is not available. To apply jet ID selections manually, please refer to the JetID page).
+    (jet charged EM fraction + jet neutral EM fraction) < 0.9
+
+The selection on EM fraction is motivated from Type-1 MET correction. As you can see in 2022, we have two vetomaps: one for RunCD and one for RunEFG. When preparing MC samples that will be compared to RunCD, it is advisable to use the vetomap specifically derived for RunCD. Similarly, for MC smaples related to RunEFG, it is recommended to utilize the vetomap that has been derived for RunEFG. This ensures accurate and relevant comparisons in your analyses.
+2022link
+Jetveto Tag Name 	MC & Data 	Version 	Recommended Map Name 	Histogram Preview 	JSON 	ROOT 	Notes
+Summer22_23Sep2023 	RunCD 	V1 	jetvetomap 	RunCD Map 	link 	link 	Announcement
+Summer22EE_23Sep2023 	RunEFG 	V1 	jetvetomap 	RunEFG Map 	link 	link 	Announcement, Affected by EE+ leak
+2023link
+Jetveto Tag Name 	MC & Data 	Version 	Recommended Map Name 	Histogram Preview 	JSON 	ROOT 	Notes
+Summer23Prompt23 	RunC 	V1 	jetvetomap 	RunC Map 	link 	link 	Announcement
+Summer23BPixPrompt23 	RunD 	V1 	jetvetomap 	RunD MapPlusBPix 	link 	link 	Announcement
+2024link
+Jetveto Tag Name 	MC & Data 	Version 	Recommended Map Name 	Histogram Preview 	JSON 	ROOT 	Notes
+Summer24Prompt24 	RunBCDEFGHI 	V1 	jetvetomap 	RunBtoI MapNoFPix 	link 	link 	Announcement
+2025link
+Jetveto Tag Name 	MC & Data 	Version 	Recommended Map Name 	Histogram Preview 	JSON 	ROOT 	Notes
+Winter25Prompt25 	RunCDEFG 	V1 	jetvetomap 	RunCtoG Map 	link 	link 	Announcement
+
+
+
+Run 2link
+
+All JERC analysers and anybody doing precision measurements with jets should use the strictest veto maps (more details on Run-2 Twiki). Recommended for analyses strongly relying on events with large MET. The safest procedure would be to veto jets with axis aligned with the veto regions. [NOTE: this is different between Run2 and Run3]
+
+The nominal “loose selection” would be:
+
+    jet pT > 15 GeV
+    tight jet ID
+    PU jet ID for CHS jets with pT < 50 GeV
+    (jet charged EM fraction + jet neutral EM fraction) < 0.9
+    jets that don’t overlap with PF muon (dR < 0.2)
+
+Tag 	MC/Data 	Version 	JSON 	Root file 	Notes
+Summer19UL16 	all 	V0 	link 	link 	Same map to be used for APV and non APV eras
+Summer19UL17 	all 	V2 	link 	link 	-
+Summer19UL18 	all 	V1 	link 	link 	-
+
+
+
+Uncertainites and Correlationslink
+
+Both, JER and JES uncertainties should be applied in the analysis. They should be treated uncorrelated between JES and JER.
+
+Some Pointers:
+
+    Using the full set allows for ease of any foreseeable combinations. While it is possible to "collapse" the full set into a reduced set or a single NP, it is not possible to "expand" back to a larger set.
+    Create distributions showing nominal with up/down variations to monitor the impact of statistical variations.
+    Create impact plots to ensure that the fit does not constrain JES and JER NPs.
+    For any non-standard approaches, please get in touch with the JME/JERC convenors.
+
+Jet Energy Scalelink
+Case I:link
+
+For precision measurements and analyses that are sensitive to JES, i.e. that are able to constrain the JES nuisance parameters in their likelihood fit of signal and sideband regions, should use the full set of 27 sources (per year) listed here. The correlations are listed per-source in the "Correlations(Ideal)" column in the table.
+Case II: Default link
+
+For analyses that are mildly sensitive to JES, we provide a reduced set of uncertainty sources. The reduced set is obtained by roughly grouping together uncertainty sources by detector regions, such that the correlations between jets in the central and forward regions are reasonably well modeled. In many cases this description is sufficient and using the reduced set of sources, instead of the full set, is appropriate. Each analysis that uses the reduced set should demonstrate that they do not over-constrain the JES nuisance parameters in their likelihood fit of signal and sideband regions.
+
+The recommended 11 sources (per year) consist of 6 uncertainty sources that are fully correlated across all 4 years and 5 uncertainties that are uncorrelated across years, as listed in the “JetMET grouping and correlation” column in the table. This gives a total number of 6 + 5*4 = 26 nuisance parameters for Run 2 UL analyses.
+Case III:link
+
+Looser conditions should be discussed with JME/JERC conveners and approved by the JME group.
+
+For instance: Analyses that can demonstrate that the single JES nuisance parameter remains unconstrained w.r.t. their assigned uncertainty, should present at the JME/JERC meetings and get approved by the JME group. Additionally, as a starting point, the JES uncertainty should be considered uncorrelated across years.
+Case IV: Run 2 vs Run 3link
+
+For analyses aiming to combine Run 2 and Run 3 data, the current recommendation for uncertainty correlations can be found in these slides. Please note that this guidance is subject to change once dedicated Run 3 uncertainties are derived — currently, the uncertainties are copied from the 2018 (Run 2) values.
+NOTE: Correlations between AK4 and AK8link
+
+For a given year, the jet energy corrections and uncertainties for AK4 and AK8 jets should be treated as fully correlated. Apply the same uncertainty scheme (e.g., 27 individual nuisances, 11 regrouped, or 1 total) simultaneously to both jet types in any event. This requirement applies specifically to analyses where there are non-overlapping AK4 and AK8 jets. If AK8 uncertainties are not available, it is recommended to apply the corresponding AK4 uncertainties to AK8 jets.
+Jet Energy Resolutionlink
+
+Our recommendation is to treat JER uncertainties as uncorrelated across all years in Run 2.
+
+NOTE: current JER SFs are flat in pt, but we are testing pt-dependent SFs that will be made avaiable soon!
+Case I:link
+
+For analyses that are sensitive to JER, i.e. analyses that are able to constrain the single JER nuisance parameter per year w.r.t. their assigned uncertainty (e.g. using control regions), we provide a preliminary recipe to split uncertainties.
+
+For full Run 2 analyses, the JER uncertainty can be broken up into 6 nuisance parameters per year that should be considered correlated among all jets in all events per year, but uncorrelated across years:
+
+    in region |eta| < 1.93 use one pT bin: (0,Inf)
+    in region 1.93 < |eta| < 2.5 use one pT bin: (0,Inf)
+    in region 2.5 < |eta| < 3 use two pT bins: (0,50) and (50,Inf)
+    in region 3 < |eta| < 5 use two pT bins: (0,50) and (50,Inf)
+
+Please note that the JER uncertainty split does not imply a splitting of events. Each JER variation is defined only within a specific ((pT, eta)) bin: jets falling inside that bin receive the corresponding up/down variation, while all other jets remain at their nominal JER.
+Case II: Default link
+
+For analyses that can demonstrate that the single JER nuisance parameter remains unconstrained w.r.t. their assigned uncertainty, no further treatment is needed. The JER uncertainty should be considered uncorrelated across years.
+Useful linkslink
+
+    JSON
+    JEC database
+        txtfiles
+        tarballs
+        dbs
+        jsonfiles
+    JER database
+        txtfiles
+        tarballs
+        dbs
+    JERC protolab: for developers only

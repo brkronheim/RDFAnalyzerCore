@@ -161,18 +161,14 @@ public:
 
     // Set the fill function pointer based on configuration
     // (This logic can be expanded for more fast paths as needed)
-    if (!channel_hasSystematic_m && !controlRegion_hasSystematic_m && !sampleCategory_hasSystematic_m && !weight_hasSystematic_m && !systematic_hasMultiFill_m &&
-        !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m) {
-      // Fast path: single fill, no systematic
+    if (!channel_hasSystematic_m && !controlRegion_hasSystematic_m && !sampleCategory_hasSystematic_m && !weight_hasSystematic_m &&
+        !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
       fillFunc_ = &THnMulti::SingleNoSystematicFill;
-    } else if (systematic_hasMultiFill_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m) {
-      // Fast path: single systematic fill
+    } else if (hasSystematic_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
       fillFunc_ = &THnMulti::SingleSystematicFill;
-    } else if (!systematic_hasMultiFill_m && (channel_hasMultiFill_m || controlRegion_hasMultiFill_m || sampleCategory_hasMultiFill_m || weight_hasMultiFill_m)) {
-      // Fast path: multi fill, no systematic
+    } else if (!hasSystematic_m && (channel_hasMultiFill_m || controlRegion_hasMultiFill_m || sampleCategory_hasMultiFill_m || weight_hasMultiFill_m || systematic_hasMultiFill_m)) {
       fillFunc_ = &THnMulti::MultiNoSystematicFill;
     } else {
-      // General case
       fillFunc_ = &THnMulti::GeneralFill;
     }
   }
@@ -684,14 +680,12 @@ public:
         name_m.c_str(), title_m.c_str(), dim_m,
         nbins_m.data(), xmin_m.data(), xmax_m.data());
     fFinalResult->Sumw2();
-
-    // Select fill function fast path (same logic as THnMulti)
-    if (!channel_hasSystematic_m && !controlRegion_hasSystematic_m && !sampleCategory_hasSystematic_m && !weight_hasSystematic_m && !systematic_hasMultiFill_m &&
-        !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m) {
+    if (!channel_hasSystematic_m && !controlRegion_hasSystematic_m && !sampleCategory_hasSystematic_m && !weight_hasSystematic_m &&
+        !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
       fillFunc_ = &BHnMulti::SingleNoSystematicFill;
-    } else if (systematic_hasMultiFill_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m) {
+    } else if (hasSystematic_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
       fillFunc_ = &BHnMulti::SingleSystematicFill;
-    } else if (!systematic_hasMultiFill_m && (channel_hasMultiFill_m || controlRegion_hasMultiFill_m || sampleCategory_hasMultiFill_m || weight_hasMultiFill_m)) {
+    } else if (!hasSystematic_m && (channel_hasMultiFill_m || controlRegion_hasMultiFill_m || sampleCategory_hasMultiFill_m || weight_hasMultiFill_m || systematic_hasMultiFill_m)) {
       fillFunc_ = &BHnMulti::MultiNoSystematicFill;
     } else {
       fillFunc_ = &BHnMulti::GeneralFill;
@@ -771,6 +765,7 @@ public:
           baseFillCounter >= static_cast<int>(systematicVariation.size())) {
         break;
       }
+
       const double weight = static_cast<double>(baseHistogramWeights[weightCounter]);
       if (weight != 0.0) {
         fillHist_(slot, weight,
@@ -934,12 +929,18 @@ private:
   /// Fill one bin in the per-thread Boost histogram (dispatches via std::visit on Boost >= 1.76).
   void fillHist_(unsigned int slot, double weight,
                  double ch, double cr, double sc, double sv, double bv) {
+    // SystematicCounter values are discrete bin indices (0, 1, 2, ...).
+    // Filling a Boost regular axis exactly on bin edges can merge a few bins
+    // into the previous bin, so shift to the bin centre before filling.
+    const double systematicCenter = sv + 0.5;
 #if BOOST_VERSION >= 107600
     std::visit([&](auto& hists) {
-      hists[slot](boost::histogram::weight(weight), ch, cr, sc, sv, bv);
+      hists[slot](boost::histogram::weight(weight), ch, cr, sc,
+                  systematicCenter, bv);
     }, fPerThreadHists);
 #else
-    fPerThreadHists[slot](boost::histogram::weight(weight), ch, cr, sc, sv, bv);
+    fPerThreadHists[slot](boost::histogram::weight(weight), ch, cr, sc,
+                          systematicCenter, bv);
 #endif
   }
 

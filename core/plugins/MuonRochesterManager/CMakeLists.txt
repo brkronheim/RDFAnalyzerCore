@@ -1,4 +1,4 @@
-add_library(MuonRochesterManager OBJECT MuonRochesterManager.cc)
+add_library(MuonRochesterManager OBJECT MuonRochesterManager.cc RoccoR.cc)
 target_include_directories(MuonRochesterManager PUBLIC
     ${PLUGIN_SOURCE_DIRECTORIES}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../interface
@@ -9,4 +9,5 @@ target_link_libraries(MuonRochesterManager PUBLIC
     ROOT::ROOTVecOps
     ROOT::Core
     correctionlib
+    Boost::boost
 )

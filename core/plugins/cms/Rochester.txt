@@ -1,0 +1,103 @@
+Rochester corrections
+
+PLEASE NOTE: Muon wiki pages are being migrated to the new Muon POG wiki. This Twiki is now frozen and kept only as a reference.
+Some content may be obsolete; please refer to the new pages (and add any updates or improvements therein).
+Recent documentation on muon corrections is now maintained here.
+
+``Rochester corrections'' for muon momentum scale and resolution developed by Rochester group.
+
+Contacts
+
+    Aleko Khukhunaishvili
+    Arie Bodek 
+
+Run2 corrections
+
+If you use or have used the corrections in your analysis, please let us know the analysis title or CADI line (aleko.khukhunaishvili at cern.ch)
+Don't hesitate to contact directly if you have any questions, problems or requests.
+
+Checkout needed tag of the RoccoR package from gitlab.
+
+git clone https://gitlab.cern.ch/akhukhun/roccor.git RoccoR
+
+And follow instructions in README file.
+
+Or, download and untar the package from the tables below:
+
+Version 	Run year and samples 	Package 	Presentation 	Remark
+Run2.v5 	2016, 2017, 2018
+EOY and UL 	roccor.Run2.v5.tgz 	slides 	Contains both EOY 201?.txt and Legacy 201?UL.txt corrections
+Run2.v4 	2016, 2017, 2018 EOY
+2017 UL 	roccor.Run2.v4.tgz 	slides 	v3 + RoccoR2017UL.txt
+
+Run year 	Production version 	Package 	Remark
+2016
+2017
+2018 	Run2.v3
+Run2018{A..C}-17Sep2018, Run2018DPromptReco
+Run2017{B..F}-31Mar2018
+Run2016{B..H}-17Jul2018 	roccor.Run2.v3.tgz 	The package contains:
+README
+RoccoR.h
+RoccoR.cc
+RoccoR2016.txt
+RoccoR2017.txt
+RoccoR2018.txt
+2016
+2017 	Run2.v2
+Run2017{B..F}-17Nov2017
+Run2016{B..H}-07Aug17 	roccor.Run2.v2.tgz 	2016 and 2017 rereco calibrations. The package contains:
+README
+RoccoR.h
+RoccoR.cc
+RoccoR2016.txt
+RoccoR2017.txt
+Updated 2016 MC.
+2016
+2017 	Run2.v1
+Run2017{B..F}-17Nov2017
+Run2016{B..H}-07Aug17
+MC: RunIIFall17MiniAOD-RECOSIMstep_94X_mc2017_realistic_v10 	roccor.Run2.v1.tgz 	2016 and 2017 rereco calibrations. The package contains:
+README
+RoccoR.h
+RoccoR.cc
+RoccoR2016v1.txt
+RoccoR2017v1.txt
+Please note that recommended MC functions changed wrt v0.
+2017 	Run2017{B..F}-17Nov2017
+MC: RunIIFall17MiniAOD-RECOSIMstep_94X_mc2017_realistic_v10 	roccor.2017.v0.tgz 	First version of full 2017 calibration. The package contains:
+README
+RoccoR.h
+RoccoR.cc
+RoccoR2017v0.txt text file with calibration coefficients.
+2016 	ReReco(B-G)+Prompt(H)
+MC: RunIISummer16MiniAODv2-PUMoriond17_80X_mcRun2_asymptotic_2016_TrancheIV_v6 	roccor.2016.v3.tgz 	First version of full 2016 calibration. The format has been updated. The package contains:
+README
+RoccoR.h
+RoccoR.cc
+rcdata.2016.v3 directory with text files.
+Unpack in empty directory if you do it in terminal.
+
+Run year 	Production version 	Package 	Manual 	Remark
+2016 	Prompt(80X) 	rochcor80x_070616v2.tgz 	Manual for this version (Same with 76x release, but class name is changed from "rochcor2015" to "rochcor2016") 	Correction for 2016 Prompt(80x) sample. 2.66/fb data is used. Report for this version in Muon POG working meeting (July.13th, 2016). The correction only contains the statistical uncertainty of the correction.
+2015 	ReReco(76X, time dependence) 	rochcor76x_tdep.tgz 	Manual for this version 	Correction for Rereco(76x) sample. Since data has time dependence, the correction is extracted to consider time dependence in data (before and after run=260528). The instruction is same with previous version (76x), but need to add RunNumber in data. The file naming is same with previous version. Report for this version in Muon POG (May.18th, 2016) is lined at HERE. The correction for Run2 data only contains the statistical uncertainty of the correction. Latest version of Rochester correction for the 2015 dataset, it is recommended to switch to this one, and switch to 76X in case any of the old ones was still used.
+ReReco(76X) 	rochcor76x_v2.tgz 	Manual for this version 	Preliminary result for Run2 25ns Rereco(76x) sample. The package for resolution function is changed compared to Prompt version. Please check the manual. Report for this version in Muon POG (Mar.9th, 2016) is lined at HERE
+PromptReco(74X) 	rochcor2015_2fb.tgz 	Manual for this version 	First preliminary result for Run2 25ns PromptReco sample. Report for this version in Muon POG is linked at HERE If an accurate knowledge of the momentum corrections is needed is recommended to switch to 76X.
+
+REMARK : 76X release is updated for systematic uncertainty assignment (error of global scale factor was wrong). The release version is v2. The change doesn't affect on the central result at all. The systematic error from smearing the central correction value will be reduced in v2, especially near Z peak region.
+
+Show more validation plots from prompt reconstruction
+
+
+Run1 corrections
+
+Run year 	Production version 	Package 	Manual 	Remark
+2012 	Jan22 ReReco(for SMP-14-022) 	rochcor2012jan22_wasym_final.tgz 	Manual for this version 	This correction is improved for better precision for W asymmetry analysis (SMP-14-022). 16x24 phi, eta binning with improvement in detector resolution and dE/dx correction. Report for this version in Muon POG is lined at HERE (latest updates for dE/dx correction is not included in the slide)
+Jan22 ReReco 	rochcor2012jan22.tgz 	Same with 2012 Reco+Prompt version 	no "runopt" option, one correction for 2012A+B+C+D
+Reco+Prompt 	rochcor2012v2.tgz 	Same with 42x except no "sysdev" option 	"runopt=0" for 2012A+B+C and "runopt=1" for 2012D
+2011 	44x 	rochcor_wasym_44x_v4.tgz 	Same with 42x manual except 	"Fall11-PU_S6-START44_V9B" Powheg MC used for this study. Please confirm MC version.
+For MC, void momcor_mc(TLorentzVector& mu, float charge, int sysdev); 	 
+For data, void momcor_data(TLorentzVector& mu, float charge, int sysdev, int runopt);
+42x 	rochcor_v4.1.tgz 	rochcor_v4_1_manual.pdf 	No REMARK
+
+    Original webpage for Rochester correction : http://www-cdf.fnal.gov/~jyhan/cms_momscl/cms_rochcor_manual.html 

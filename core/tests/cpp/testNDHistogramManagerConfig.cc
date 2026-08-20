@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <unordered_map>
 #include <plots.h>
 #include <SystematicManager.h>
 #include <DefaultLogger.h>
@@ -60,6 +61,164 @@ protected:
   std::unique_ptr<NullOutputSink> skimSink;
   std::unique_ptr<NullOutputSink> metaSink;
 };
+
+namespace {
+
+std::unordered_map<std::string, float> collectSystematicContents(
+    THnSparseF &hist, const std::vector<std::string> &systList) {
+  std::unordered_map<std::string, float> contents;
+  std::vector<Int_t> indices(hist.GetNdimensions());
+
+  for (Long64_t bin = 0; bin < hist.GetNbins(); ++bin) {
+    const float content = hist.GetBinContent(bin, indices.data());
+    if (content == 0.0f) {
+      continue;
+    }
+
+    const int systematicIndex = indices[3] - 1;
+    if (systematicIndex < 0 ||
+        systematicIndex >= static_cast<int>(systList.size())) {
+      continue;
+    }
+
+    contents[systList[systematicIndex]] += content;
+  }
+
+  return contents;
+}
+
+std::string findSingleColumnWithPrefix(ROOT::RDF::RNode df,
+                                       const std::string &prefix) {
+  const auto columns = df.GetColumnNames();
+  std::string match;
+  for (const auto &column : columns) {
+    if (column.rfind(prefix, 0) != 0) {
+      continue;
+    }
+    if (column.find("__defineVector_") != std::string::npos) {
+      continue;
+    }
+    if (!match.empty()) {
+      throw std::runtime_error("multiple columns matched prefix: " + prefix);
+    }
+    match = column;
+  }
+  if (match.empty()) {
+    throw std::runtime_error("no column matched prefix: " + prefix);
+  }
+  return match;
+}
+
+void defineExplicitWeightVariationColumns(IDataFrameProvider &dataManager,
+                                          SystematicManager &systematicManager) {
+  dataManager.Define("obs", []() { return 5.0f; }, {}, systematicManager);
+  dataManager.Define("weight_nominal", []() { return 1.0f; }, {},
+                     systematicManager);
+  dataManager.Define("weight_nominal_double_weight",
+                     []() { return 2.0f; }, {}, systematicManager);
+  dataManager.Define("weight_nominal_triple_weight",
+                     []() { return 3.0f; }, {}, systematicManager);
+
+  systematicManager.registerVariationColumn(
+      "weight_nominal", "double_weight", "weight_nominal_double_weight");
+  systematicManager.registerVariationColumn(
+      "weight_nominal", "triple_weight", "weight_nominal_triple_weight");
+}
+
+void definePdfStyleWeightVariationColumns(IDataFrameProvider &dataManager,
+                                          SystematicManager &systematicManager,
+                                          int firstLhaId, int count) {
+  dataManager.Define("pdf_obs", []() { return 5.0f; }, {}, systematicManager);
+  dataManager.Define("pdf_weight_nominal", []() { return 1.0f; }, {},
+                     systematicManager);
+
+  for (int offset = 0; offset < count; ++offset) {
+    const std::string label = "pdf_" + std::to_string(firstLhaId + offset);
+    const std::string column = "pdf_weight_nominal_" + label;
+    const float value = 1000.0f + static_cast<float>(offset);
+    dataManager.Define(column, [value]() { return value; }, {},
+                       systematicManager);
+    systematicManager.registerVariationColumn("pdf_weight_nominal", label,
+                                              column);
+  }
+}
+
+void expectExplicitWeightVariationsAffectHistogram(
+    NDHistogramManager &histogramManager, IDataFrameProvider &dataManager,
+    SystematicManager &systematicManager) {
+  histInfo info("weight_syst_hist", "obs", "obs", "weight_nominal", 10,
+                0.0f, 10.0f);
+
+  histogramManager.setupFromConfigFile();
+  histogramManager.BookSingleHistogram(info);
+
+  ASSERT_EQ(histogramManager.GetHistos().size(), 1u);
+
+  const auto systList =
+      systematicManager.makeSystList("SystematicCounter", dataManager);
+  auto histPtr = histogramManager.GetHistos().front().GetPtr();
+  ASSERT_NE(histPtr, nullptr);
+
+  const auto contents = collectSystematicContents(*histPtr, systList);
+  ASSERT_EQ(contents.size(), 3u);
+  EXPECT_FLOAT_EQ(contents.at("Nominal"), 1.0f);
+  EXPECT_FLOAT_EQ(contents.at("double_weight"), 2.0f);
+  EXPECT_FLOAT_EQ(contents.at("triple_weight"), 3.0f);
+}
+
+void expectPdfStyleSystematicVectorsStaySequential(
+    NDHistogramManager &histogramManager, IDataFrameProvider &dataManager,
+    SystematicManager &systematicManager, int firstLhaId, int count) {
+  histInfo info("pdf_diag_hist", "pdf_obs", "pdf_obs", "pdf_weight_nominal",
+                10, 0.0f, 10.0f);
+
+  histogramManager.setupFromConfigFile();
+  histogramManager.BookSingleHistogram(info);
+
+  auto df = dataManager.getDataFrame();
+  const auto systValues =
+      df.Take<ROOT::VecOps::RVec<Float_t>>("SystematicCounter_systVector")
+          .GetValue();
+  ASSERT_EQ(systValues.size(), 1u);
+  ASSERT_EQ(systValues.front().size(), static_cast<std::size_t>(count + 1));
+
+  for (int index = 0; index <= count; ++index) {
+    EXPECT_FLOAT_EQ(systValues.front().at(index), static_cast<float>(index));
+  }
+
+  const std::string weightVectorColumn =
+      findSingleColumnWithPrefix(df, "pdf_weight_nominal_systVector_");
+  const auto weightValues =
+      df.Take<ROOT::VecOps::RVec<Float_t>>(weightVectorColumn).GetValue();
+  ASSERT_EQ(weightValues.size(), 1u);
+  ASSERT_EQ(weightValues.front().size(), static_cast<std::size_t>(count + 1));
+  EXPECT_FLOAT_EQ(weightValues.front().at(0), 1.0f);
+
+  for (int offset = 0; offset < count; ++offset) {
+    EXPECT_FLOAT_EQ(weightValues.front().at(offset + 1),
+                    1000.0f + static_cast<float>(offset));
+  }
+
+  const auto systList =
+      systematicManager.makeSystList("SystematicCounter", dataManager);
+  ASSERT_EQ(systList.size(), static_cast<std::size_t>(count + 1));
+  EXPECT_EQ(systList.at(22), "pdf_325321");
+  EXPECT_EQ(systList.at(23), "pdf_325322");
+  EXPECT_EQ(systList.at(51), "pdf_325350");
+  EXPECT_EQ(systList.at(54), "pdf_325353");
+
+  auto histPtr = histogramManager.GetHistos().front().GetPtr();
+  ASSERT_NE(histPtr, nullptr);
+  const auto contents = collectSystematicContents(*histPtr, systList);
+  ASSERT_EQ(contents.size(), static_cast<std::size_t>(count + 1));
+  EXPECT_FLOAT_EQ(contents.at("Nominal"), 1.0f);
+  EXPECT_FLOAT_EQ(contents.at("pdf_325321"), 1021.0f);
+  EXPECT_FLOAT_EQ(contents.at("pdf_325322"), 1022.0f);
+  EXPECT_FLOAT_EQ(contents.at("pdf_325350"), 1050.0f);
+  EXPECT_FLOAT_EQ(contents.at("pdf_325353"), 1053.0f);
+}
+
+} // namespace
 
 TEST_F(NDHistogramManagerConfigTest, SetupFromConfigFileNoHistogramConfig) {
   // Test that setupFromConfigFile works when no histogram config is specified
@@ -328,6 +487,30 @@ TEST_F(NDHistogramManagerConfigTest, BoostBackendFunctionallyEquivalentToRoot) {
   const auto boostCount = boostManager->GetHistos().size();
 
   EXPECT_EQ(rootCount, boostCount);
+}
+
+TEST_F(NDHistogramManagerConfigTest,
+       ExplicitWeightVariationsChangeHistogramContent) {
+  defineExplicitWeightVariationColumns(*dataManager, *systematicManager);
+  expectExplicitWeightVariationsAffectHistogram(*histogramManager, *dataManager,
+                                                *systematicManager);
+}
+
+TEST_F(NDHistogramManagerConfigTest,
+       ExplicitWeightVariationsChangeHistogramContentWithBoostBackend) {
+  defineExplicitWeightVariationColumns(*dataManager, *systematicManager);
+  configManager->set("histogramBackend", "boost");
+  expectExplicitWeightVariationsAffectHistogram(*histogramManager, *dataManager,
+                                                *systematicManager);
+}
+
+TEST_F(NDHistogramManagerConfigTest,
+    PdfStyleSystematicVectorsStaySequentialWithBoostBackend) {
+  definePdfStyleWeightVariationColumns(*dataManager, *systematicManager,
+                  325300, 103);
+  configManager->set("histogramBackend", "boost");
+  expectPdfStyleSystematicVectorsStaySequential(*histogramManager, *dataManager,
+                     *systematicManager, 325300, 103);
 }
 
 TEST_F(NDHistogramManagerConfigTest, BoostBackendNoConfigHistograms) {

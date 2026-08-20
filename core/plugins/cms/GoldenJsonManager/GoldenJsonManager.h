@@ -110,6 +110,4 @@ private:
   void loadJsonFile(const std::string &filename);
 };
 
-
-
 #endif // GOLDENJSONMANAGER_H_INCLUDED

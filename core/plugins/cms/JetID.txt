@@ -1,0 +1,835 @@
+
+# Run2 Jet ID
+
+Jet Identification for the 13 TeV UL data
+Contacts: M.Diamantopoulou, D.Karasavvas ,N.Saoulidou, E.Tziaferi
+
+    Jet Identification for the 13 TeV UL data
+    Recommendations for the 13 TeV UL data analysis, Run2016 (106X) (APV and non-APV runs)
+    Recommendations for the 13 TeV UL data analysis, Run2017/2018 (106X)
+        Usage with NanoAOD
+            NanoAODv9
+            NanoAODv15 
+        PUPPI jets multiplicities
+        Jet fractions 
+
+Recommendations for the 13 TeV UL data analysis, Run2016 (106X) (APV and non-APV runs)
+
+In the following table, the JetID criteria for AK4CHS and AK4 PUPPI jets are listed. The criteria both for AK4CHS and AK4 PUPPI jets are valid for all run eras 2016B-H.
+
+Please note: For AK8 jets, the corresponding (CHS or PUPPI) AK4 jet ID should be used.
+
+For AK4CHS, the efficiency is more than 98-99% for all eta regions, whereas the background rejection is more than 98% for |η|<3. Analyses that use simulated AK4CHS jets should use the same criteria and no scale factors are required.
+
+Please see the Analysis Note with all the completed studies.
+
+For AK4 PUPPI, the efficiency is more than 98-99% for all eta regions, whereas the background rejection is more than 98% for |η|<2.7. Analyses that use simulated AK4 PUPPI jets should use the same criteria and no scale factors are required.
+
+For more details on the performance of the AK4CHS JetID criteria on the running periods that were affected by the APV issue see here.
+
+For more details on the performance of the AK4 PUPPI JetID criteria on the running periods that were affected by the APV issue see here.
+
+For more details on the performance of both the AK4CHS and AK4 PUPPI JetID criteria on the running periods that were not affected by the APV issue see here.
+
+We generally recommend to apply the jet ID criteria listed below including those marked as "for LepVeto" for all analyses. For analyses that perform any special cleaning or selections between jets and leptons, the jet ID can also be applied without the vetoing on leptons to avoid possible biases.
+
+A general good practice for jet analyses is to make plots of the observables used for jet ID (and not only the boolean). They help checking if there is residual noise left after all ID/analyses selections in the specific analysis phase space.
+
+For AK4CHS jets
+PF Jet ID 	abs(η) <= 2.4 	2.4 < abs(η) <= 2.7 	2.7 < abs(η) <= 3.0 	3.0 < abs(η) <= 5.0
+Neutral Hadron Fraction 	< 0.90 	< 0.90 	< 0.90 	>0.2
+Neutral EM Fraction 	< 0.90 	< 0.99 	>0. and < 0.99 	< 0.9
+Number of Constituents 	> 1 	- 	- 	-
+Muon Fraction 	< 0.80 (for LepVeto) 	- 	- 	-
+Charged Hadron Fraction 	> 0 	- 	- 	-
+Charged Multiplicity 	> 0 	- 	- 	-
+Charged EM Fraction 	< 0.80 (for LepVeto) 	- 	- 	-
+Number of Neutral Particles 	- 	- 	> 1 	> 10
+
+For AK4 PUPPI jets
+PF Jet ID 	abs(η) <= 2.4 	2.4 < abs(η) <= 2.7 	2.7 < abs(η) <= 3.0 	3.0 < abs(η) <= 5.0
+Neutral Hadron Fraction 	< 0.90 	< 0.98 	- 	-
+Neutral EM Fraction 	< 0.90 	< 0.99 	- 	< 0.9
+Number of Constituents 	> 1 	- 	- 	-
+Muon Fraction 	< 0.80 (for LepVeto) 	- 	- 	-
+Charged Hadron Fraction 	> 0 	- 	- 	-
+Charged Multiplicity 	> 0 	- 	- 	-
+Charged EM Fraction 	< 0.80 (for LepVeto) 	- 	- 	-
+Number of Neutral Particles 	- 	- 	>=1 	> 2
+
+For abs (eta) <= 2.4 - apply (for AK4CHS and AK4 PUPPI, includes lepton veto)
+
+JetID = (abs(eta)<=2.4 && CEMF<0.8 && CHM>0 && CHF>0 && NumConst>1 && NEMF<0.9 && MUF <0.8 && NHF < 0.9 );
+
+For 2.4 < abs(eta) <=2.7 - apply (for AK4CHS, includes lepton veto)
+
+JetID = ( abs(eta)>2.4 && abs(eta)<=2.7 && NEMF<0.99 && NHF < 0.9 );
+
+For 2.7 < abs (eta) <= 3.0 - apply (for AK4CHS)
+
+JetID = ( NEMF>0.0 && NEMF<0.99 && NHF<0.9 && NumNeutralParticle>1 && abs(eta)>2.7 && abs(eta)<=3.0 )
+
+For abs ( eta ) > 3.0 - apply (for AK4CHS)
+
+JetID = (NEMF<0.90 && NHF>0.2 && NumNeutralParticle>10 && abs(eta)>3.0 )
+
+For 2.4 < abs(eta) <= 2.7 - apply (for AK4 PUPPI, includes lepton veto)
+
+JetID = ( abs(eta)>2.4 && abs(eta)<=2.7 && NEMF<0.99 && NHF < 0.98 );
+
+For 2.7 < abs(eta) <= 3.0 - apply (for AK4 PUPPI)
+
+JetID = ( NumNeutralParticle>=1 && abs(eta)>2.7 && abs(eta)<=3.0 )
+
+For abs(eta) > 3.0 - apply (for AK4 PUPPI)
+
+JetID = (NEMF<0.90 && NumNeutralParticle>2 && abs(eta)>3.0 )
+
+Recommendations for the 13 TeV UL data analysis, Run2017/2018 (106X)
+
+In the following table, the JetID criteria for AK4CHS and AK4 PUPPI jets are listed. The criteria both for AK4CHS and AK4 PUPPI jets are valid for all run eras 2017B-F and 2018A-D.
+
+Please note: For AK8 jets, the corresponding (CHS or PUPPI) AK4 jet ID should be used.
+
+For AK4CHS, the efficiency is more than 98-99% for all eta regions, whereas the background rejection is more than 98% for |η|<3. Analyses that use simulated AK4CHS jets should use the same criteria and no scale factors are required. For more details see here.
+
+For AK4 PUPPI, the efficiency is more than 98-99% for all eta regions, whereas the background rejection is more than 98% for |η|<2.7. Analyses that use simulated AK4 PUPPI jets should use the same criteria and no scale factors are required. For more details see here.
+
+We generally recommend to apply the jet ID criteria listed below including those marked as "for LepVeto" for all analyses. For analyses that perform any special cleaning or selections between jets and leptons, the jet ID can also be applied without the vetoing on leptons to avoid possible biases.
+
+A general good practice for jet analyses is to make plots of the observables used for jet ID (and not only the boolean). They help checking if there is residual noise left after all ID/analyses selections in the specific analysis phase space.
+
+For AK4CHS jets
+PF Jet ID 	abs(η) <= 2.6 	2.6 < abs(η) <= 2.7 	2.7 < abs(η) <= 3.0 	3.0 < abs(η) <= 5.0
+Neutral Hadron Fraction 	< 0.90 	< 0.90 	- 	>0.2
+Neutral EM Fraction 	< 0.90 	< 0.99 	>0.01 and < 0.99 	< 0.9
+Number of Constituents 	> 1 	- 	- 	-
+Muon Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Charged Hadron Fraction 	> 0 	- 	- 	-
+Charged Multiplicity 	> 0 	> 0 	- 	-
+Charged EM Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Number of Neutral Particles 	- 	- 	> 1 	> 10
+
+For AK4 PUPPI jets
+PF Jet ID 	abs(η) <= 2.6 	2.6 < abs(η) <= 2.7 	2.7 < abs(η) <= 3.0 	3.0 < abs(η) <= 5.0
+Neutral Hadron Fraction 	< 0.90 	< 0.90 	< 0.9999 	-
+Neutral EM Fraction 	< 0.90 	< 0.99 	- 	< 0.9
+Number of Constituents 	> 1 	- 	- 	-
+Muon Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Charged Hadron Fraction 	> 0 	- 	- 	-
+Charged Multiplicity 	> 0 	- 	- 	-
+Charged EM Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Number of Neutral Particles 	- 	- 	- 	> 2
+
+For abs (eta) <= 2.6 - apply (for AK4CHS and AK4 PUPPI, includes lepton veto)
+
+JetID = (abs(eta)<=2.6 && CEMF<0.8 && CHM>0 && CHF>0 && NumConst>1 && NEMF<0.9 && MUF <0.8 && NHF < 0.9 );
+
+For 2.6 < abs(eta) <=2.7 - apply (for AK4CHS, includes lepton veto)
+
+JetID = ( abs(eta)>2.6 && abs(eta)<=2.7 && CEMF<0.8 && CHM>0 && NEMF<0.99 && MUF <0.8 && NHF < 0.9 );
+
+For 2.7 < abs (eta) <= 3.0 - apply (for AK4CHS)
+
+JetID = ( NEMF>0.01 && NEMF<0.99 && NumNeutralParticle>1 && abs(eta)>2.7 && abs(eta)<=3.0 )
+
+For abs ( eta ) > 3.0 - apply (for AK4CHS)
+
+JetID = (NEMF<0.90 && NHF>0.2 && NumNeutralParticle>10 && abs(eta)>3.0 )
+
+For 2.6 < abs(eta) <= 2.7 - apply (for AK4 PUPPI, includes lepton veto)
+
+JetID = ( abs(eta)>2.6 && abs(eta)<=2.7 && CEMF<0.8 && NEMF<0.99 && MUF <0.8 && NHF < 0.9 );
+
+For 2.7 < abs(eta) <= 3.0 - apply (for AK4 PUPPI)
+
+JetID = ( NHF<0.9999 && abs(eta)>2.7 && abs(eta)<=3.0 )
+
+For abs(eta) > 3.0 - apply (for AK4 PUPPI)
+
+JetID = (NEMF<0.90 && NumNeutralParticle>2 && abs(eta)>3.0 )
+
+A selector module for CMSSW is in preparation in PFJetIDSelectionFunctor. It can be used with such a code sniplet:
+
+tightJetId = cms.EDProducer("PatJetIDValueMapProducer",
+           filterParams=cms.PSet(
+             version = cms.string('RUN2ULCHS'),
+             quality = cms.string('TIGHT'),
+           ),
+                          src = cms.InputTag("slimmedJets")
+)
+
+Usage with NanoAOD
+
+NanoAODv9
+
+In NanoAODv9, there is a flag called Jet_jetId corresponding to the different working points described in the recommendations above. If a jet has jetId value equal to 6, it means that the jet passes both tight and tightLepVeto working points. When it is equal to 2, then it passes tight but fails tightLepVeto.
+
+        jetId==2 means: pass tight ID, fail tightLepVeto
+        jetId==6 means: pass tight and tightLepVeto ID. 
+
+Reminder that the Jet collection is the AK4 CHS jet collection
+
+NanoAODv15
+
+In NanoAODv15, the Jet collection is the AK4 Puppi jet collection and Jet_jetId flag has been removed. Analyzers need to implement the jet Id selection. The correction-lib json files to implement the jet Id is currently being prepared. Alternatively, analyzers can implement the selections in their analyses by following the pseudocodes below:
+
+a) 2016
+
+bool Jet_passJetIdTight = false;
+if (abs(Jet_eta) <= 2.4) 
+  Jet_passJetIdTight = (Jet_neHEF < 0.9) && (Jet_neEmEF < 0.9) && (Jet_chMultiplicity+Jet_neMultiplicity > 1) && (Jet_chHEF > 0.0) && (Jet_chMultiplicity > 0);
+else if (abs(Jet_eta) > 2.4 && abs(Jet_eta) <= 2.7)
+  Jet_passJetIdTight = (Jet_neHEF < 0.98) && (Jet_neEmEF < 0.99);
+else if (abs(Jet_eta) > 2.7 && abs(Jet_eta) <= 3.0)
+  Jet_passJetIdTight = Jet_neMultiplicity >= 1;
+else if (abs(Jet_eta) > 3.0)
+  Jet_passJetIdTight = (Jet_neMultiplicity > 2) && (Jet_neEmEF < 0.9);
+
+bool Jet_passJetIdTightLepVeto = false;
+if (abs(Jet_eta) <= 2.4) Jet_passJetIdTightLepVeto = Jet_passJetIdTight && (Jet_muEF < 0.8) && (Jet_chEmEF < 0.8);
+else Jet_passJetIdTightLepVeto = Jet_passJetIdTight;
+
+b) 2017 & 2018
+
+bool Jet_passJetIdTight = false;
+if (abs(Jet_eta) <= 2.6) 
+  Jet_passJetIdTight = (Jet_neHEF < 0.9) && (Jet_neEmEF < 0.9) && (Jet_chMultiplicity+Jet_neMultiplicity > 1) && (Jet_chHEF > 0.0) && (Jet_chMultiplicity > 0);
+else if (abs(Jet_eta) > 2.6 && abs(Jet_eta) <= 2.7)
+  Jet_passJetIdTight = (Jet_neHEF < 0.90) && (Jet_neEmEF < 0.99);
+else if (abs(Jet_eta) > 2.7 && abs(Jet_eta) <= 3.0)
+  Jet_passJetIdTight = Jet_neHEF < 0.9999;
+else if (abs(Jet_eta) > 3.0)
+  Jet_passJetIdTight = (Jet_neMultiplicity > 2) && (Jet_neEmEF < 0.9);
+
+bool Jet_passJetIdTightLepVeto = false;
+if (abs(Jet_eta) <= 2.7) Jet_passJetIdTightLepVeto = Jet_passJetIdTight && (Jet_muEF < 0.8) && (Jet_chEmEF < 0.8);
+else Jet_passJetIdTightLepVeto = Jet_passJetIdTight;
+
+PUPPI jets multiplicities
+
+If you are using ULMiniAODv2 for your analysis, note that for PUPPI jets, weighted multiplicties (of type float) were used:
+
+jet->userFloat("patPuppiJetSpecificProducer:puppiMultiplicity")
+jet->userFloat("patPuppiJetSpecificProducer:neutralPuppiMultiplicity")
+
+Jet fractions
+
+Note: All fractions are calculated with the raw/uncorrected energy of the jet (only then they add up to unity). So the PF JetID has to be applied before the jet energy corrections and jet energy resolution smearing (discussed here). To do this on a MINIAOD jet, you can get them as:
+
+ NHF  = pfjet->neutralHadronEnergyFraction();
+ NEMF = pfjet->neutralEmEnergyFraction();
+ CHF  = pfjet->chargedHadronEnergyFraction();
+ MUF  = pfjet->muonEnergyFraction();
+ CEMF = pfjet->chargedEmEnergyFraction();
+ NumConst = pfjet->chargedMultiplicity()+pfjet->neutralMultiplicity();
+ NumNeutralParticles =pfjet->neutralMultiplicity();
+ CHM      = pfjet->chargedMultiplicity(); 
+
+OR you can refine them (not recommended)
+
+            auto CHF          = jet.chargedHadronEnergy() / jet.correctedP4(0).E()  ;  
+            auto NHF          = jet.neutralHadronEnergy() / jet.correctedP4(0).E()  ;  
+            auto CM           = jet.chargedMultiplicity()  ;                  
+            auto NM           = jet.neutralMultiplicity()  ;                  
+            auto NEF          = jet.neutralEmEnergy() / jet.correctedP4(0).E()  ;      
+            auto CEF          = jet.chargedEmEnergy() / jet.correctedP4(0).E()  ;      
+            auto MUF          = jet.muonEnergy() / jet.correctedP4(0).E()  ;           
+            auto NumConst = jet.numberOfDaughters() ;   
+
+
+
+# Run3 Jet ID
+
+Jet Identification for the 13.6 TeV data
+Contacts: M.Kotsarini, N.Saoulidou, E.Tziaferi
+
+In the following tables, the JetID criteria for AK4PUPPI and AK4CHS jets are listed.
+
+Please note: For AK8 jets, the corresponding (CHS or PUPPI) AK4 jet ID should be used.
+
+We generally recommend to apply the jet ID criteria listed below including those marked as "for LepVeto" for all analyses. For analyses that perform any special cleaning or selections between jets and leptons, the jet ID can also be applied without the vetoing on leptons to avoid possible biases.
+
+A general good practice for jet analyses is to make plots of the observables used for jet ID (and not only the boolean). They help checking if there is residual noise left after all ID/analyses selections in the specific analysis phase space.
+
+For more details on the jet ID prerformance, efficiency, background rejection and time stability of jet variables over time see
+
+AN for 2022 prompt-reco CDE and FG data AN-2023-034
+
+AN for 2022 re-reco CDE, FG and 2023 CD data AN-2024/037
+
+Presentation at JMAR meeting on prompt-reco 2024 F and G data link For 2024 data, these are the preliminary JetID criteria. To be tested when the re-reco 2024 CDE will be available.
+
+    Jet Identification for the 13.6 TeV data
+    Recommendations for the 13.6 TeV data analysis: runs 2022 prompt reco CDE
+    Recommendations for the 13.6 TeV data analysis: runs 2022 re-reco CDE, 2022 FG, 2023 BCD, and 2024 FG
+        nanoAOD Flags 
+
+Recommendations for the 13.6 TeV data analysis: runs 2022 prompt reco CDE
+
+For both PUPPI and CHS, the efficiency is more than 98-99% for all eta regions, whereas the background rejection is more than 98% for |η|<2.7.
+
+For more details on the performance of the AK4 PUPPI and CHS JetID criteria see here and in the attachment at the bottom of the page.
+
+For AK4 PUPPI jets
+PF Jet ID 	abs(η) <= 2.6 	2.6 < abs(η) <= 2.7 	2.7 < abs(η) <= 3.0 	3.0 < abs(η) <= 5.0
+Neutral Hadron Fraction 	< 0.90 	< 0.90 	< 0.9999 	-
+Neutral EM Fraction 	< 0.90 	< 0.99 	- 	< 0.9
+Number of Constituents 	> 1 	- 	- 	-
+Muon Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Charged Hadron Fraction 	> 0.01 	- 	- 	-
+Charged Multiplicity 	> 0 	- 	- 	-
+Charged EM Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Number of Neutral Particles 	- 	- 	- 	> 2
+
+For AK4CHS jets
+PF Jet ID 	abs(η) <= 2.6 	2.6 < abs(η) <= 2.7 	2.7 < abs(η) <= 3.0 	3.0 < abs(η) <= 5.0
+Neutral Hadron Fraction 	< 0.90 	< 0.90 	- 	>0.2
+Neutral EM Fraction 	< 0.90 	< 0.99 	< 0.99 	< 0.9
+Number of Constituents 	> 1 	- 	- 	-
+Muon Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Charged Hadron Fraction 	> 0.01 	- 	- 	-
+Charged Multiplicity 	> 0 	> 0 	- 	-
+Charged EM Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Number of Neutral Particles 	- 	- 	> 1 	> 10
+
+For abs (eta) <= 2.6 - apply (for AK4PUPPI and AK4CHS, includes lepton veto)
+
+JetID = (abs(eta)<=2.6 && CEMF<0.8 && CHM>0 && CHF>0.01 && NumConst>1 && NEMF<0.9 && MUF <0.8 && NHF < 0.9 );
+
+For 2.6 < abs(eta) <= 2.7 - apply (for AK4 PUPPI, includes lepton veto)
+
+JetID = ( abs(eta)>2.6 && abs(eta)<=2.7 && CEMF<0.8 && NEMF<0.99 && MUF <0.8 && NHF < 0.9 );
+
+For 2.7 < abs(eta) <= 3.0 - apply (for AK4PUPPI)
+
+JetID = ( NHF<0.9999 && abs(eta)>2.7 && abs(eta)<=3.0 )
+
+For abs(eta) > 3.0 - apply (for AK4PUPPI)
+
+JetID = (NEMF<0.90 && NumNeutralParticle>2 && abs(eta)>3.0 )
+
+For 2.6 < abs(eta) <=2.7 - apply (for AK4CHS, includes lepton veto)
+
+JetID = ( abs(eta)>2.6 && abs(eta)<=2.7 && CEMF<0.8 && CHM>0 && NEMF<0.99 && MUF <0.8 && NHF < 0.9 );
+
+For 2.7 < abs (eta) <= 3.0 - apply (for AK4CHS)
+
+JetID = ( NEMF<0.99 && NumNeutralParticle>1 && abs(eta)>2.7 && abs(eta)<=3.0 )
+
+For abs ( eta ) > 3.0 - apply (for AK4CHS)
+
+JetID = (NEMF<0.90 && NumNeutralParticle>10 && abs(eta)>3.0 )
+
+Recommendations for the 13.6 TeV data analysis: runs 2022 re-reco CDE, 2022 FG, 2023 BCD, and 2024 FG
+
+For both PUPPI and CHS, the efficiency is more than 98-99% for all eta regions, whereas the background rejection is more than 98% for |η|<2.7.
+
+For more details on the performance of the AK4 PUPPI and CHS JetID criteria see here
+
+For AK4 PUPPI jets
+PF Jet ID 	abs(η) <= 2.6 	2.6 < abs(η) <= 2.7 	2.7 < abs(η) <= 3.0 	3.0 < abs(η) <= 5.0
+Neutral Hadron Fraction 	< 0.99 	< 0.90 	< 0.99 	-
+Neutral EM Fraction 	< 0.90 	< 0.99 	- 	< 0.4
+Number of Constituents 	> 1 	- 	- 	-
+Muon Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Charged Hadron Fraction 	> 0.01 	- 	- 	-
+Charged Multiplicity 	> 0 	- 	- 	-
+Charged EM Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Number of Neutral Particles 	- 	- 	- 	>= 2
+
+For AK4CHS jets
+PF Jet ID 	abs(η) <= 2.6 	2.6 < abs(η) <= 2.7 	2.7 < abs(η) <= 3.0 	3.0 < abs(η) <= 5.0
+Neutral Hadron Fraction 	< 0.99 	< 0.90 	< 0.99 	-
+Neutral EM Fraction 	< 0.90 	< 0.99 	< 0.99 	< 0.4
+Number of Constituents 	> 1 	- 	- 	-
+Muon Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Charged Hadron Fraction 	> 0.01 	- 	- 	-
+Charged Multiplicity 	> 0 	> 0 	- 	-
+Charged EM Fraction 	< 0.80 (for LepVeto) 	< 0.80 (for LepVeto) 	- 	-
+Number of Neutral Particles 	- 	- 	> 1 	> 10
+
+For abs (eta) <= 2.6 - apply (for AK4PUPPI and AK4CHS, includes lepton veto)
+
+JetID = (abs(eta)<=2.6 && CEMF<0.8 && CHM>0 && CHF>0.01 && NumConst>1 && NEMF<0.9 && MUF <0.8 && NHF < 0.99 );
+
+For 2.6 < abs(eta) <= 2.7 - apply (for AK4 PUPPI, includes lepton veto)
+
+JetID = ( abs(eta)>2.6 && abs(eta)<=2.7 && CEMF<0.8 && NEMF<0.99 && MUF <0.8 && NHF < 0.9 );
+
+For 2.7 < abs(eta) <= 3.0 - apply (for AK4PUPPI)
+
+JetID = ( NHF<0.99 && abs(eta)>2.7 && abs(eta)<=3.0 )
+
+For abs(eta) > 3.0 - apply (for AK4PUPPI)
+
+JetID = (NEMF<0.40 && NumNeutralParticle>=2 && abs(eta)>3.0 )
+
+For 2.6 < abs(eta) <=2.7 - apply (for AK4CHS, includes lepton veto)
+
+JetID = ( abs(eta)>2.6 && abs(eta)<=2.7 && CEMF<0.8 && CHM>0 && NEMF<0.99 && MUF <0.8 && NHF < 0.9 );
+
+For 2.7 < abs (eta) <= 3.0 - apply (for AK4CHS)
+
+JetID = ( NEMF<0.99 && NHF<0.99 && NumNeutralParticle>1 && abs(eta)>2.7 && abs(eta)<=3.0 )
+
+For abs ( eta ) > 3.0 - apply (for AK4CHS)
+
+JetID = (NEMF<0.40 && NumNeutralParticle>10 && abs(eta)>3.0 )
+
+A selector module for CMSSW is in preparation in PFJetIDSelectionFunctor. It can be used with such a code sniplet:
+
+tightJetId = cms.EDProducer("PatJetIDValueMapProducer",
+           filterParams=cms.PSet(
+             version = cms.string('RUN2ULCHS'),
+             quality = cms.string('TIGHT'),
+           ),
+                          src = cms.InputTag("slimmedJets")
+)
+
+Note that jet energy fractions are the same before and after jet energy resolution smearing (discussed here).
+
+nanoAOD Flags
+
+In nanoAOD format, there is flag called Jet_jetId corresponding to the different working points described in the recommendations above. If a jet has jetId value equal to 6, it means that the jet passes both tight and tightLepVeto working points. When it is equal to 2, then it passes tight but fails tightLepVeto.
+
+        jetId==2 means: pass tight ID, fail tightLepVeto
+        jetId==6 means: pass tight and tightLepVeto ID. 
+
+Please note that there is a bug in Nanov12 & Nanov13 & Nanov14 and a special recipe is needed in order to obtain the correct JetID recommendations:
+
+Nanov12:
+
+bool Jet_passJetIdTight = false;
+if (abs(Jet_eta) <= 2.7) Jet_passJetIdTight = Jet_jetId & (1 << 1);
+else if (abs(Jet_eta) > 2.7 && abs(Jet_eta) <= 3.0) Jet_passJetIdTight = (Jet_jetId & (1 << 1)) && (Jet_neHEF < 0.99);
+else if (abs(Jet_eta) > 3.0) Jet_passJetIdTight = (Jet_jetId & (1 << 1)) && (Jet_neEmEF < 0.4);
+
+bool Jet_passJetIdTightLepVeto = false;
+if (abs(Jet_eta) <= 2.7) Jet_passJetIdTightLepVeto = Jet_passJetIdTight && (Jet_muEF < 0.8) && (Jet_chEmEF < 0.8);
+else Jet_passJetIdTightLepVeto = Jet_passJetIdTight;
+
+Nanov13, NanoV14 and NanoV15: Please use the dedicated json file developed. Please find an example here. Here is a pseudocode if you want to manually implement the jet Id selection with NanoAOD:
+
+bool Jet_passJetIdTight = false;
+if (abs(Jet_eta) <= 2.6) 
+  Jet_passJetIdTight = (Jet_neHEF < 0.99) && (Jet_neEmEF < 0.9) && (Jet_chMultiplicity+Jet_neMultiplicity > 1) && (Jet_chHEF > 0.01) && (Jet_chMultiplicity > 0);
+else if (abs(Jet_eta) > 2.6 && abs(Jet_eta) <= 2.7)
+  Jet_passJetIdTight = (Jet_neHEF < 0.90) && (Jet_neEmEF < 0.99);
+else if (abs(Jet_eta) > 2.7 && abs(Jet_eta) <= 3.0)
+  Jet_passJetIdTight = (Jet_neHEF < 0.99);
+else if (abs(Jet_eta) > 3.0)
+  Jet_passJetIdTight = (Jet_neMultiplicity >= 2) && (Jet_neEmEF < 0.4);
+
+bool Jet_passJetIdTightLepVeto = false;
+if (abs(Jet_eta) <= 2.7) Jet_passJetIdTightLepVeto = Jet_passJetIdTight && (Jet_muEF < 0.8) && (Jet_chEmEF < 0.8);
+else Jet_passJetIdTightLepVeto = Jet_passJetIdTight;
+
+
+PU ID Run2:
+
+ We recommend generally applying the PU JetID to CHS jets in Run2. Analyses mainly using low pT (<50 GeV) jets or forward jets will profit the most from the PU JetID. Note that PileUpJetID should only be applied to JEC corrected jets with pT < 50 GeV and not applied above. The main reason for this is that the PileUpJetID BDT is trained with jets pt <50 GeV where there is the highest composition of PU jets, and therefore the region where a PileUpJetID is needed. For jets with pt above 50 GeV, currently the discriminator spits out a meaningless number that causes complications in analyses.
+
+
+Contents:
+
+    Jet identification in high pile-up environment (PileupJetID) for Ultra Legacy Data
+        Introduction
+        Recommendations for 2016 UL data & MC
+            Working Points
+            Trainings 
+        Recommendations for 2017 UL data & MC
+            Working Points
+            Trainings 
+        Recommendations for 2018 UL data & MC
+            Working Points (Same as UL17)
+            Trainings 
+        Data/MC Efficiency & Mistag Scale Factors
+        Further questions? Contact us! 
+
+Introduction
+
+PileupJet ID is a BDT trained discriminator aiming to discriminate prompt jets from pile-up jets. It uses several jet shape and kinematic features, listed below.
+
+Input variable 	Description
+nvtx 	Number of primary vertices
+beta 	fraction of jet tracks associated to the primary vertex
+dR2Mean 	pT^2-weighted average square distance of jet constituents from the jet axis
+frac01 	fraction of constituents' pT contained in the region dR < 0.1 around the jet axis
+frac02 	fraction of constituents' pT contained in the ring 0.1 < dR < 0.2 around the jet axis
+frac03 	fraction of constituents' pT contained in the ring 0.2 < dR < 0.3 around the jet axis
+frac04 	fraction of constituents' pT contained in the ring 0.3 < dR < 0.4 around the jet axis
+jetR 	fraction of jet pT carried by the leading constituent
+jetRchg 	fraction of the jet pT carried by the leading charged constituent
+majW 	major axis of the jet ellipsoid in the eta-phi plane
+minW 	minor axis of the jet ellipsoid in the eta-phi plane
+nCharged 	number of constituents
+ptD 	pT-weighted average pT of contituents
+pull 	magnitude of the pull vector
+
+Recommendations for 2016 UL data & MC
+Please re-run the Pileup ID when processing UL16 APV and UL16 nonAPV MiniAODv2 samples. This is needed because UL16 APV and UL16 nonAPV MiniAODv2 production campaigns use CMSSW_10_6_25 and the PUID training for both is only available from CMSSW_10_6_26 onwards. Instructions to re-run pileup ID can be found below.
+
+Working Points
+
+Three working points are implemented: Loose, Medium and Tight. Loose WP corresponds to 99% (95%) efficiency for prompt jets with |η| < 2.5 (|η| > 2.5). Medium (Tight) WP corresponds to 90% (80%) efficiency for prompt jets.
+
+Working points are evaluated in jet pT and η bins:
+
+    Four jet pT bins: 10-20, 20-30, 30-40 and 40-50 GeV
+    Four jet η bins: |η|<2.5, 2.5 < |η| < 2.75, 2.75 < |η| < 3.0 and 3.0 < |η| < 5.0 
+
+The same WPs are used for APV and non-APV samples.
+
+CHS (AK4) Jets
+
+Tight WPs 	abs(η) < 2.5 	2.5 < abs(η) < 2.75 	2.75 < abs(η) < 3.0 	3.0 < abs(η) < 5.0
+10 < pT < 20 	0.71 	-0.32 	-0.30 	-0.22
+20 < pT < 30 	0.87 	-0.08 	-0.16 	-0.12
+30 < pT < 40 	0.94 	0.24 	0.05 	0.10
+40 < pT < 50 	0.97 	0.48 	0.26 	0.29
+
+Medium WPs 	abs(η) < 2.5 	2.5 < abs(η) < 2.75 	2.75 < abs(η) < 3.0 	3.0 < abs(η) < 5.0
+10 < pT < 20 	0.20 	-0.56 	-0.43 	-0.38
+20 < pT < 30 	0.62 	-0.39 	-0.32 	-0.29
+30 < pT < 40 	0.86 	-0.10 	-0.15 	-0.08
+40 < pT < 50 	0.93 	0.19 	0.04 	0.12
+
+Loose WPs 	abs(η) < 2.5 	2.5 < abs(η) < 2.75 	2.75 < abs(η) < 3.0 	3.0 < abs(η) < 5.0
+10 < pT < 20 	-0.95 	-0.70 	-0.52 	-0.49
+20 < pT < 30 	-0.90 	-0.57 	-0.43 	-0.42
+30 < pT < 40 	-0.71 	-0.36 	-0.29 	-0.23
+40 < pT < 50 	-0.42 	-0.09 	-0.14 	-0.02
+
+#Tight Id   
+Pt010_Tight   = cms.vdouble(0.71, -0.32, -0.30, -0.22), 
+Pt1020_Tight = cms.vdouble(0.71, -0.32, -0.30, -0.22),
+Pt2030_Tight = cms.vdouble(0.87, -0.08, -0.16, -0.12),
+Pt3040_Tight = cms.vdouble(0.94, 0.24, 0.05, 0.10),
+Pt4050_Tight = cms.vdouble(0.97, 0.48, 0.26, 0.29)
+#Medium Id
+Pt010_Medium  = cms.vdouble(0.20, -0.56, -0.43, -0.38),
+Pt1020_Medium = cms.vdouble(0.20, -0.56, -0.43, -0.38),
+Pt2030_Medium = cms.vdouble(0.62, -0.39, -0.32, -0.29),
+Pt3040_Medium = cms.vdouble(0.86, -0.10, -0.15, -0.08),
+Pt4050_Medium = cms.vdouble(0.93, 0.19, 0.04, 0.12),
+#Loose Id 
+Pt010_Loose = cms.vdouble(-0.95, -0.70, -0.52, -0.49),
+Pt1020_Loose = cms.vdouble(-0.95, -0.70, -0.52, -0.49),
+Pt2030_Loose = cms.vdouble(-0.90, -0.57, -0.43, -0.42),
+Pt3040_Loose = cms.vdouble(-0.71, -0.36, -0.29, -0.23),
+Pt4050_Loosse = cms.vdouble(-0.42, -0.09, -0.14, -0.02),
+
+Trainings
+CHS (AK4) Jets
+
+Training files for UL16 APV and nonAPV eras are available from CMSSW releases >= CMSSW_10_6_26. We recommend using CMSSW_10_6_30, in line with recommendations by PPD (Twiki).
+
+To re-run the Pileup ID, add the following lines in your python config:
+
+    1from RecoJets.JetProducers.PileupJetID_cfi import pileupJetId as _pileupJetId
+    2from RecoJets.JetProducers.PileupJetID_cfi import _chsalgos_106X_UL16     #  (or _chsalgos_106X_UL16APV for APV samples)
+    3process.pileupJetIdUpdated = _pileupJetId.clone( 
+    4        jets=cms.InputTag(Your JEC corrected jets here),
+    5        inputIsCorrected=True,
+    6        applyJec=False,
+    7        vertexes=cms.InputTag("offlineSlimmedPrimaryVertices"),
+    8        algos = cms.VPSet(_chsalgos_106X_UL16),
+    9)
+
+The module process.pileupJetIdUpdated should be added to your Path.
+
+The updated Pileup ID can be accessed with the userFloat:
+
+pileupJetIdUpdated:fullDiscriminant
+
+or with the flag:
+
+ 
+pileupJetIdUpdated:fullId 
+
+The flag represents passtightID*4+passmediumID*2+ passlooseID*1, so that:
+
+    puId==0 means 000: fail all PU ID;
+    puId==1 means 001: pass loose ID, fail medium, fail tight;
+    puId==3 means 011: pass loose and medium ID, fail tight;
+    puId==7 means 111: pass loose, medium, tight ID. 
+
+ 
+passPUIDloose = bool(jet.userInt("pileupJetIdUpdated:fullId") & (1 << 0)) || (jet.pt() > 50.0);
+passPUIDmedium = bool(jet.userInt("pileupJetIdUpdated:fullId") & (1 << 1)) || (jet.pt() > 50.0);
+passPUIDtight = bool(jet.userInt("pileupJetIdUpdated:fullId") & (1 << 2)) || (jet.pt() > 50.0);
+
+More information about the trainings and working points can be found here
+
+
+NOTE (Specifically for 2016 UL): As you notice in the instructions above, the Tight and Loose bit flags are flipped with each other (when compared to 2017 UL and 2018 UL). This is due to an accidental switch of the working point cut values defined in the PileupJetIDCutParams _cfi.py file. All 2016 (APV and non-APV) UL NanoAODv9 samples are affected.
+
+Recommendations for 2017 UL data & MC
+Working Points
+
+Three working points are implemented: Loose, Medium and Tight. Loose WP corresponds to 99% (95%) efficiency for prompt jets with |η| < 2.5 (|η| > 2.5). Medium (Tight) WP corresponds to 90% (80%) efficiency for prompt jets.
+
+Working points are evaluated in jet pT and η bins:
+
+    Four jet pT bins: 10-20, 20-30, 30-40 and 40-50 GeV
+    Four jet η bins: |η|<2.5, 2.5 < |η| < 2.75, 2.75 < |η| < 3.0 and 3.0 < |η| < 5.0 
+
+CHS (AK4) Jets
+
+Tight WPs 	abs(η) < 2.5 	2.5 < abs(η) < 2.75 	2.75 < abs(η) < 3.0 	3.0 < abs(η) < 5.0
+10 < pT < 20 	0.77 	0.38 	-0.31 	-0.21
+20 < pT < 30 	0.90 	0.60 	-0.12 	-0.13
+30 < pT < 40 	0.96 	0.82 	0.20 	0.09
+40 < pT < 50 	0.98 	0.92 	0.47 	0.29
+
+Medium WPs 	abs(η) < 2.5 	2.5 < abs(η) < 2.75 	2.75 < abs(η) < 3.0 	3.0 < abs(η) < 5.0
+10 < pT < 20 	0.26 	-0.33 	-0.54 	-0.37
+20 < pT < 30 	0.68 	-0.04 	-0.43 	-0.30
+30 < pT < 40 	0.90 	0.36 	-0.16 	-0.09
+40 < pT < 50 	0.96 	0.61 	0.14 	0.12
+
+Loose WPs 	abs(η) < 2.5 	2.5 < abs(η) < 2.75 	2.75 < abs(η) < 3.0 	3.0 < abs(η) < 5.0
+10 < pT < 20 	-0.95 	-0.72 	-0.68 	-0.47
+20 < pT < 30 	-0.88 	-0.55 	-0.60 	-0.43
+30 < pT < 40 	-0.63 	-0.18 	-0.43 	-0.24
+40 < pT < 50 	-0.19 	0.22 	-0.13 	-0.03
+
+#Tight Id
+Pt1020_Tight = cms.vdouble( 0.77, 0.38, -0.31, -0.21),
+Pt2030_Tight = cms.vdouble( 0.90, 0.60, -0.12, -0.13),
+Pt3040_Tight = cms.vdouble( 0.96, 0.82, 0.20, 0.09),
+Pt4050_Tight = cms.vdouble( 0.98, 0.92, 0.47, 0.29),
+#Medium Id
+Pt1020_Medium = cms.vdouble( 0.26, -0.33, -0.54, -0.37),
+Pt2030_Medium = cms.vdouble( 0.68, -0.04, -0.43, -0.30),
+Pt3040_Medium = cms.vdouble( 0.90, 0.36, -0.16, -0.09),
+Pt4050_Medium = cms.vdouble( 0.96, 0.61, 0.14, 0.12),
+#Loose Id
+Pt1020_Loose = cms.vdouble(-0.95, -0.72, -0.68, -0.47),
+Pt2030_Loose = cms.vdouble(-0.88, -0.55, -0.60, -0.43),
+Pt3040_Loose = cms.vdouble(-0.63, -0.18, -0.43, -0.24),
+Pt4050_Loose = cms.vdouble(-0.19, 0.22, -0.13, -0.03)
+
+Trainings
+CHS (AK4) Jets
+
+Training files for UL17 are available from CMSSW releases >= CMSSW_10_6_15. We recommend using CMSSW_10_6_30, in line with recommendations by PPD (Twiki).
+
+To re-run the Pileup ID, add the following lines in your python config:
+
+    1from RecoJets.JetProducers.PileupJetID_cfi import pileupJetId as _pileupJetId
+    2from RecoJets.JetProducers.PileupJetID_cfi import _chsalgos_106X_UL17
+    3process.pileupJetIdUpdated = _pileupJetId.clone( 
+    4        jets=cms.InputTag(Your JEC corrected jets here),
+    5        inputIsCorrected=True,
+    6        applyJec=False,
+    7        vertexes=cms.InputTag("offlineSlimmedPrimaryVertices"),
+    8        algos = cms.VPSet(_chsalgos_106X_UL17),
+    9)
+
+The module process.pileupJetIdUpdated should be added to your Path.
+
+The updated Pileup ID can be accessed with the userFloat:
+
+pileupJetIdUpdated:fullDiscriminant
+
+or with the flag:
+
+ 
+pileupJetIdUpdated:fullId 
+
+The flag represents passlooseID*4+passmediumID*2+passtightID*1, so that:
+
+    puId==0 means 000: fail all PU ID;
+    puId==4 means 100: pass loose ID, fail medium, fail tight;
+    puId==6 means 110: pass loose and medium ID, fail tight;
+    puId==7 means 111: pass loose, medium, tight ID. 
+
+ 
+passPUIDloose = bool(jet.userInt("pileupJetIdUpdated:fullId") & (1 << 2)) || (jet.pt() > 50.0);
+passPUIDmedium = bool(jet.userInt("pileupJetIdUpdated:fullId") & (1 << 1)) || (jet.pt() > 50.0);
+passPUIDtight = bool(jet.userInt("pileupJetIdUpdated:fullId") & (1 << 0)) || (jet.pt() > 50.0);
+
+More information about the trainings and working points can be found here
+Recommendations for 2018 UL data & MC
+NOTE: Please re-run the Pileup ID when processing UL18 MiniAODv2 samples. This is needed because UL18 MiniAODv2 production campaign use CMSSW_10_6_20 and the PUID training for UL18 is only available from CMSSW_10_6_21 onwards. Instructions to re-run pileup ID can be found below.
+
+Working Points (Same as UL17)
+
+Three working points are implemented: Loose, Medium and Tight. Loose WP corresponds to 99% (95%) efficiency for prompt jets with |η| < 2.5 (|η| > 2.5). Medium (Tight) WP corresponds to 90% (80%) efficiency for prompt jets.
+
+Working points are evaluated in jet pT and η bins:
+
+    Four jet pT bins: 10-20, 20-30, 30-40 and 40-50 GeV
+    Four jet η bins: |η|<2.5, 2.5 < |η| < 2.75, 2.75 < |η| < 3.0 and 3.0 < |η| < 5.0 
+
+CHS (AK4) Jets
+
+Tight WPs 	abs(η) < 2.5 	2.5 < abs(η) < 2.75 	2.75 < abs(η) < 3.0 	3.0 < abs(η) < 5.0
+10 < pT < 20 	0.77 	0.38 	-0.31 	-0.21
+20 < pT < 30 	0.90 	0.60 	-0.12 	-0.13
+30 < pT < 40 	0.96 	0.82 	0.20 	0.09
+40 < pT < 50 	0.98 	0.92 	0.47 	0.29
+
+Medium WPs 	abs(η) < 2.5 	2.5 < abs(η) < 2.75 	2.75 < abs(η) < 3.0 	3.0 < abs(η) < 5.0
+10 < pT < 20 	0.26 	-0.33 	-0.54 	-0.37
+20 < pT < 30 	0.68 	-0.04 	-0.43 	-0.30
+30 < pT < 40 	0.90 	0.36 	-0.16 	-0.09
+40 < pT < 50 	0.96 	0.61 	0.14 	0.12
+
+Loose WPs 	abs(η) < 2.5 	2.5 < abs(η) < 2.75 	2.75 < abs(η) < 3.0 	3.0 < abs(η) < 5.0
+10 < pT < 20 	-0.95 	-0.72 	-0.68 	-0.47
+20 < pT < 30 	-0.88 	-0.55 	-0.60 	-0.43
+30 < pT < 40 	-0.63 	-0.18 	-0.43 	-0.24
+40 < pT < 50 	-0.19 	0.22 	-0.13 	-0.03
+
+#Tight Id
+Pt1020_Tight = cms.vdouble( 0.77, 0.38, -0.31, -0.21),
+Pt2030_Tight = cms.vdouble( 0.90, 0.60, -0.12, -0.13),
+Pt3040_Tight = cms.vdouble( 0.96, 0.82, 0.20, 0.09),
+Pt4050_Tight = cms.vdouble( 0.98, 0.92, 0.47, 0.29),
+#Medium Id
+Pt1020_Medium = cms.vdouble( 0.26, -0.33, -0.54, -0.37),
+Pt2030_Medium = cms.vdouble( 0.68, -0.04, -0.43, -0.30),
+Pt3040_Medium = cms.vdouble( 0.90, 0.36, -0.16, -0.09),
+Pt4050_Medium = cms.vdouble( 0.96, 0.61, 0.14, 0.12),
+#Loose Id
+Pt1020_Loose = cms.vdouble(-0.95, -0.72, -0.68, -0.47),
+Pt2030_Loose = cms.vdouble(-0.88, -0.55, -0.60, -0.43),
+Pt3040_Loose = cms.vdouble(-0.63, -0.18, -0.43, -0.24),
+Pt4050_Loose = cms.vdouble(-0.19, 0.22, -0.13, -0.03)
+
+Trainings
+CHS (AK4) Jets
+
+Training files for UL18 are available from CMSSW releases >= CMSSW_10_6_21. We recommend using CMSSW_10_6_30, in line with recommendations by PPD (Twiki).
+
+To re-run the Pileup ID, add the following lines in your python config:
+
+    1from RecoJets.JetProducers.PileupJetID_cfi import pileupJetId as _pileupJetId
+    2from RecoJets.JetProducers.PileupJetID_cfi import _chsalgos_106X_UL18
+    3process.pileupJetIdUpdated = _pileupJetId.clone( 
+    4        jets=cms.InputTag(Your JEC corrected jets here),
+    5        inputIsCorrected=True,
+    6        applyJec=False,
+    7        vertexes=cms.InputTag("offlineSlimmedPrimaryVertices"),
+    8        algos = cms.VPSet(_chsalgos_106X_UL18),
+    9)
+
+The module process.pileupJetIdUpdated should be added to your Path.
+
+The updated Pileup ID can be accessed with the userFloat:
+
+pileupJetIdUpdated:fullDiscriminant
+
+or with the flag:
+
+pileupJetIdUpdated:fullId 
+
+The flag represents passlooseID*4+passmediumID*2+passtightID*1, so that:
+
+    puId==0 means 000: fail all PU ID;
+    puId==4 means 100: pass loose ID, fail medium, fail tight;
+    puId==6 means 110: pass loose and medium ID, fail tight;
+    puId==7 means 111: pass loose, medium, tight ID. 
+
+ 
+passPUIDloose = bool(jet.userInt("pileupJetIdUpdated:fullId") & (1 << 2)) || (jet.pt() > 50.0);
+passPUIDmedium = bool(jet.userInt("pileupJetIdUpdated:fullId") & (1 << 1)) || (jet.pt() > 50.0);
+passPUIDtight = bool(jet.userInt("pileupJetIdUpdated:fullId") & (1 << 0)) || (jet.pt() > 50.0);
+
+More information about the trainings and working points can be found here
+
+Data/MC Efficiency & Mistag Scale Factors
+
+The PileUpJetID efficiency scale factors (SF) are available for the three recommended working points (Loose, Medium & Tight) and for each Ultra-Legacy era (UL2016 APV, UL2016 nonAPV, UL2017 & UL2018). In MC, we define AK4 CHS jets that are geometrically matched (ΔR < 0.4) to AK4 Gen jets to be HardScatter jets (HS-jet). The geometrical matching to AK4 Gen jets is to ensure that the SFs are applied for real jets (i.e jets from the Hard Scatter vertex). Jets failing the matching criterion are considered PileUp jets.
+
+HOW TO USE THE SFs IN YOUR ANALYSIS ? : We recommend to use a procedure similar to what is done for applying b-tagging scale factors: https://twiki.cern.ch/twiki/bin/view/CMS/BTagSFMethods (method 1.a).
+
+Efficiency Scale Factors
+
+The SFs should be applied for any AK4 CHS jet in MC that passes the PileUpJetID and is also labelled as a HardScatter jet .
+
+The SF’s are binned in jet η and pT bins:
+
+    Jet η bins : 0<η<1.479, 1.479<η<2.0, 2.0<η<2.5, 2.5<η<2.75, 2.75<η <3.0, 3.0<η<5.0 and the corresponding negative η bins.
+    Jet pT bins: 20-25, 25-30, 30-40, 40-50 in GeV. 
+
+It is highly recommended for analyzers to read the efficiency SFs that are stored in JSON format using the correction-lib interface (Github). The SF's were merged to the jsonPOG-integration Gitlab repository (Gitlab, MR) and an example code on how to access them using correction-lib interface can be found here. The SFs are also available in ROOT's 2D histograms (TH2) stored in the root file attached with this twiki (PUID_106XTraining_ULRun2_EffSFandUncties_v1.root).
+
+The efficiency SFs were presented and approved in this JMAR meeting: https://indico.cern.ch/event/1118864/#6-pileup-jet-id-sf-ul16apv-ul1
+
+Mistag Scale Factors
+
+There are no mistag scale factors available. 
+
+
+PU ID Run3:
+
+ Jet identification in high pile-up environment (PileupJetID) for Run 3 data
+
+Complete: 1
+
+In Run 3, the default AK4 jets switched from CHS to PUPPI jets. Consequently, the PU JetID is derived based on PUPPI jets. Analyses mainly using low pT (<50 GeV) jets or forward jets will profit the most from the PU JetID. Note that PileUpJetID should only be applied to JEC corrected jets with pT < 50 GeV and not applied above. The main reason for this is that the PileUpJetID BDT is trained with jets pt <50 GeV where there is the highest composition of PU jets, and therefore the region where a PileUpJetID is needed. For jets with pt above 50 GeV, currently the discriminator spits out a meaningless number that causes complications in analyses.
+
+
+Contents:
+
+    Jet identification in high pile-up environment (PileupJetID) for Run 3 data
+        Introduction
+        Recommendations for 2022-2024 data & MC based on MiniAODv6--NanoAODv15
+        Data/MC Efficiency & Mistag Scale Factors
+        Further questions? Contact us! 
+
+Introduction
+
+PileupJet ID is a BDT trained discriminator aiming to discriminate prompt jets from pile-up jets. It uses several jet shape and kinematic features, listed below. Work in progress, under construction
+
+Input variable 	Description
+nvtx 	Number of primary vertices
+beta 	fraction of jet tracks associated to the primary vertex
+dR2Mean 	pT^2-weighted average square distance of jet constituents from the jet axis
+frac01 	fraction of constituents' pT contained in the region dR < 0.1 around the jet axis
+frac02 	fraction of constituents' pT contained in the ring 0.1 < dR < 0.2 around the jet axis
+frac03 	fraction of constituents' pT contained in the ring 0.2 < dR < 0.3 around the jet axis
+frac04 	fraction of constituents' pT contained in the ring 0.3 < dR < 0.4 around the jet axis
+jetR 	fraction of jet pT carried by the leading constituent
+jetRchg 	fraction of the jet pT carried by the leading charged constituent
+majW 	major axis of the jet ellipsoid in the eta-phi plane
+minW 	minor axis of the jet ellipsoid in the eta-phi plane
+nCharged 	number of constituents
+ptD 	pT-weighted average pT of contituents
+pull 	magnitude of the pull vector
+
+Recommendations for 2022-2024 data & MC based on MiniAODv6--NanoAODv15
+Work in progress, under construction
+
+Data/MC Efficiency & Mistag Scale Factors
+
+The PileUpJetID efficiency scale factors (SF) are available for the three recommended working points (Loose, Medium & Tight) and for each Ultra-Legacy era (UL2016 APV, UL2016 nonAPV, UL2017 & UL2018). In MC, we define AK4 CHS jets that are geometrically matched (ΔR < 0.4) to AK4 Gen jets to be HardScatter jets (HS-jet). The geometrical matching to AK4 Gen jets is to ensure that the SFs are applied for real jets (i.e jets from the Hard Scatter vertex). Jets failing the matching criterion are considered PileUp jets.
+
+HOW TO USE THE SFs IN YOUR ANALYSIS ? : We recommend to use a procedure similar to what is done for applying b-tagging scale factors: https://twiki.cern.ch/twiki/bin/view/CMS/BTagSFMethods (method 1.a).
+
+Efficiency Scale Factors
+
+The SFs should be applied for any AK4 CHS jet in MC that passes the PileUpJetID and is also labelled as a HardScatter jet .
+
+The SF’s are binned in jet η and pT bins:
+
+    Jet η bins : 0<η<1.479, 1.479<η<2.0, 2.0<η<2.5, 2.5<η<2.75, 2.75<η <3.0, 3.0<η<5.0 and the corresponding negative η bins.
+    Jet pT bins: 20-25, 25-30, 30-40, 40-50 in GeV. 
+
+Work in progress, under construction [To adapt to Run 3]
+
+It is highly recommended for analyzers to read the efficiency SFs that are stored in JSON format using the correction-lib interface (Github). The SF's were merged to the jsonPOG-integration Gitlab repository (Gitlab, MR) and an example code on how to access them using correction-lib interface can be found here. The SFs are also available in ROOT's 2D histograms (TH2) stored in the root file attached with this twiki (PUID_106XTraining_ULRun2_EffSFandUncties_v1.root).
+
+The efficiency SFs were presented and approved in this JMAR meeting: https://indico.cern.ch/event/1118864/#6-pileup-jet-id-sf-ul16apv-ul1
+
+Mistag Scale Factors
+
+There are no mistag scale factors available.
+
+Further questions? Contact us!
+
+Is the information in this twiki enough? Do you have further comments or question? Do not hesitate in contacting us! Below you have a sorted list of people who to contact. 

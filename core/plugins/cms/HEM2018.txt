@@ -1,0 +1,26 @@
+ JME recommends to veto events if ANY jet with a loose selection lies in the region affected by the HEM issue.
+
+The nominal “loose selection” is:
+
+    jet pT > 15 GeV
+    tight jet ID with lep veto OR [tight jet ID & (jet EM fraction < 0.9) & (jets that don’t overlap with PF muon (dR < 0.2)]
+    PU jet ID for AK4chs jets with pT < 50 GeV (No PUjetID required for PUPPI jets)
+
+We recommend creating a jet 𝜂
+-𝜙
+map to show the impact before and after applying the HEM cleaning. An example of the 2D map can be seen here.
+
+The eras with the HEM15/16 issue are the last of 2018RunB (runs>=319077), 2018RunC, and 2018RunD.
+And the corresponding regions were confirmed to be the following eta and phi.
+jets with -1.57 <phi< -0.87 and -2.5<eta<-1.3
+jets with -1.57 <phi< -0.87 and -3.0<eta<-2.5
+
+
+For data, you are correct, you apply the veto for run>=319077 based on eta-phi impacted by HEM.
+
+For the MC, you should apply the veto to approximately the same fraction of events as in the data.
+To determine this fraction, you can calculate:
+𝑙⁢𝑢⁢𝑚⁢𝑖⁢𝑛⁢𝑜⁢𝑠⁢𝑖⁢𝑡⁢𝑦 𝑎⁢𝑓⁡𝑡⁢𝑒⁢𝑟 𝑟⁢𝑢⁢𝑛 319077
+𝑡⁢𝑜⁢𝑡⁢𝑎⁢𝑙 2018 𝑙⁢𝑢⁢𝑚⁢𝑖⁢𝑛⁢𝑜⁢𝑠⁢𝑖⁢𝑡⁢𝑦
+.
+Once you have this fraction, you can use it to randomly select a similar proportion of events in your MC using the event numbers field and apply the same veto to those selected events as you would for the data.

@@ -79,6 +79,8 @@ for _p in (_HERE, _CORE_PYTHON):
 from output_schema import (  # noqa: E402
     OutputManifest,
     MergeInputValidationError,
+    SystematicColumnInventory,
+    SystematicColumnEntry,
     merge_manifests,
     validate_merge_inputs,
 )
@@ -93,6 +95,43 @@ DEFAULT_MANIFEST_GLOB = "**/output_manifest.yaml"
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _derive_systematic_family(base_name: str) -> str:
+    """Map a systematic base name to a family grouping key.
+
+    Examples:
+      - ``"jesTotal"``, ``"jesAbsolute"`` -> ``"jes"``
+      - ``"jer"`` -> ``"jer"``
+      - ``"btag"``, ``"btagHF"`` -> ``"btag"``
+      - ``"ctag"`` -> ``"ctag"``
+      - ``"muon_id"``, ``"muon_iso"`` -> ``"muon"``
+      - ``"electron_id"``, ``"electron_reco"`` -> ``"electron"``
+      - ``"pileup"`` -> ``"pileup"``
+      - ``"lumi"`` -> ``"lumi"``
+      - ``"stxs_acceptance"``, ``"stxs_delta1"`` -> ``"stxs"``
+      - ``"vjet_"`` prefixed -> ``"vjet"``
+      - Everything else -> ``"other"``
+    """
+    lower = base_name.lower()
+
+    # Known family prefixes (longest-first for specificity)
+    known_prefixes = [
+        ("jes", "jes"),
+        ("jer", "jer"),
+        ("btag", "btag"),
+        ("ctag", "ctag"),
+        ("muon", "muon"),
+        ("electron", "electron"),
+        ("pileup", "pileup"),
+        ("lumi", "lumi"),
+        ("stxs", "stxs"),
+        ("vjet", "vjet"),
+    ]
+    for prefix, family in known_prefixes:
+        if lower.startswith(prefix):
+            return family
+    return "other"
 
 
 def _find_hadd() -> str:
@@ -500,6 +539,29 @@ class MergeHistograms(MergeMixin, law.Task):
             f"{len(groups)} group(s): {sorted(groups.keys())}"
         )
 
+        # ---- Pre-merge coverage prediction ----
+        # Collect all histogram names across input manifests to predict
+        # which systematic variations will be available post-merge.
+        coverage_prediction: Dict[str, List[str]] = {}
+        for _, m in hist_manifests:
+            if m.histograms and m.histograms.histogram_names:
+                for name in m.histograms.histogram_names:
+                    lower = name.lower()
+                    for suffix in ("up", "down"):
+                        if lower.endswith(suffix):
+                            base = name[:-len(suffix)].rstrip("_-")
+                            if base:
+                                coverage_prediction.setdefault(base, []).append(name)
+        if coverage_prediction:
+            n_complete = sum(
+                1 for v in coverage_prediction.values()
+                if any("up" in x.lower() for x in v) and any("down" in x.lower() for x in v)
+            )
+            self.publish_message(
+                f"Pre-merge coverage prediction: {len(coverage_prediction)} systematic "
+                f"base(s) detected, {n_complete} with both up+down variations."
+            )
+
         merged_output_files: Dict[str, str] = {}
         with PerformanceRecorder("MergeHistograms") as rec:
             for basename, paths in groups.items():
@@ -519,6 +581,63 @@ class MergeHistograms(MergeMixin, law.Task):
         groups_meta = {k: v for k, v in sorted(merged_output_files.items())}
         with open(os.path.join(out_dir, "merged_histogram_groups.json"), "w") as fh:
             json.dump(groups_meta, fh, indent=2)
+
+        # ---- Build systematic column inventory from histogram names ----
+        all_hist_names: List[str] = []
+        for _, m in hist_manifests:
+            if m.histograms and m.histograms.histogram_names:
+                all_hist_names.extend(m.histograms.histogram_names)
+
+        if all_hist_names:
+            # Deduplicate while preserving order
+            seen: set = set()
+            unique_names: List[str] = []
+            for n in all_hist_names:
+                if n not in seen:
+                    seen.add(n)
+                    unique_names.append(n)
+
+            # Derive systematic variations from histogram names
+            # (e.g. "h_jesUp" -> base="jes", direction="up")
+            syst_entries: Dict[str, SystematicColumnEntry] = {}
+            for name in unique_names:
+                lower = name.lower()
+                direction = None
+                base = None
+                for suffix, d in [("up", "up"), ("down", "down")]:
+                    if lower.endswith(suffix):
+                        base_candidate = name[:-len(suffix)].rstrip("_-")
+                        if base_candidate:
+                            base = base_candidate
+                            direction = d
+                            break
+
+                if base and direction:
+                    if base not in syst_entries:
+                        # Determine family from common prefixes
+                        family = _derive_systematic_family(base)
+                        syst_entries[base] = SystematicColumnEntry(
+                            family=family,
+                            base_name=base,
+                            nominal_column="weight_nominal",
+                            producer="NDHistogramManager",
+                            affected_observable="weight",
+                        )
+                    entry = syst_entries[base]
+                    if direction == "up":
+                        entry.up_column = name
+                    elif direction == "down":
+                        entry.down_column = name
+
+            if syst_entries:
+                merged.column_inventory = SystematicColumnInventory(
+                    entries=list(syst_entries.values())
+                )
+                self.publish_message(
+                    f"Built systematic column inventory with "
+                    f"{len(syst_entries)} entries: "
+                    f"{sorted(syst_entries.keys())}"
+                )
 
         merged.save_yaml(self.output().path)
         self.publish_message(f"Merged manifest written to: {self.output().path}")

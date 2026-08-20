@@ -1,0 +1,2545 @@
+Run 2 General:
+
+    A note about IDs in UL UPDATED
+    HEEP ID Scale Factor for UL UPDATED
+    Scale and smearing corrections for UL: UPDATED
+    Recipe for running scales and smearings using EgammaPostRecoTools
+    Links to the talks for approval of UL scales and smearing corrections (2017 and 2018 for now)
+    NEW Access of SFs using JSON files
+    General note about ID SFs
+    NEW EOS location for root files:
+    SFs for Electrons UL 2017
+    HLT Zvtx Scale Factor
+    SFs for Photons UL 2017
+        CSEV and pixel veto SFs UL 2017
+    SFs for Electrons UL 2018
+    SFs for Photons UL 2018
+        CSEV and pixel veto SFs UL 2018
+    SFs for Photons UL 2016 (preVFP)
+        CSEV and pixel veto SFs UL 2016 (preVFP) 
+    SFs for Electrons UL 2016 (preVFP)
+    SFs for Photons UL 2016 (postVFP)
+        CSEV and pixel veto SFs UL 2016 (postVFP) 
+    SFs for Electrons UL 2016 (postVFP)
+    A note on Combining Systematics between years UPDATED 
+
+A note about IDs in UL UPDATED
+
+    NOTE: This recipe applies to all UL miniAOD samples (v1 or v2 or any other version)
+    The electron ID and photon IDs remain to be the Fall17V2 IDs for ULs as described here: https://twiki.cern.ch/twiki/bin/view/CMS/EgammaIDRecipesRun2
+    In addition, in case you would like to access the HEEP track isolation variable, it is already included in GsfElectron class https://github.com/cms-sw/cmssw/blob/CMSSW_10_6_X/DataFormats/EgammaCandidates/interface/GsfElectron.h#L553 so, to access this variable, just use the getter function as you normally do for other variable, like this-> ele.dr03TkSumPtHEEP(). 
+
+HEEP ID Scale Factor for UL UPDATED
+
+* Updated the UL2016 SF on 3rd March 2023,
+
+For UL 2016, 2017 and 2018, HEEP V7.0 ID is recommended. The scale factors are the following:
+
+Full 2016:
+
+0.985 +/- 0.001 (stat) +/- 0.004 (syst) in barrel
+
+0.990 +/- 0.003 (stat) +/- 0.007 (syst) in endcaps
+
+2017:
+
+0.979 +/- 0.001 (stat) +/- 0.005 (syst) in barrel
+
+0.987 +/- 0.002 (stat) +/- 0.010 (syst) in endcaps
+
+2018:
+
+0.973 +/- 0.001 (stat) +/- 0.004 (syst) in barrel
+
+0.980 +/- 0.002 (stat) +/- 0.011 (syst) in endcaps
+
+For more details, see: https://indico.cern.ch/event/1255216/contributions/5273071/attachments/2594851/4478919/HEEP%20ID%202016UL%20for%20EGamma.pdf (Minor caveat in 2016, which is resolved in the following talk),
+
+more updated talk: https://indico.cern.ch/event/1259725/contributions/5294821/attachments/2603712/4496433/HEEP%20ID%202016UL%20Update%20for%20EGamma.pdf (final version)
+
+Scale and smearing corrections for UL: UPDATED
+
+    Updated 14th Oct 2024: Unfortunately, it was found that Run2 UL NanoAODv9 had been produced with outdated energy correction files described below (see notes on 14th Sept 2021). The detailed impacts of outdated correction files can be seen in the presentation [link]. The effect on electrons is marginal. However, there can be non-negligible loss of photons due to the different R9 values between electrons and photons. The issue can be treated by 1) vetoing the affected region in the era 2016preVFP (1.5 < |η| < 2 & R9 > 0.98), or 2) reprocessing NanoAOD privately (recipes to be announced). Note that this issue will be fixed from NanoAODv15 and onwards. 
+
+    Updated 17th February 2023, https://cms-talk.web.cern.ch/t/ul2016-miniaod-issue-with-s-s-solvable-on-the-fly-by-using-egamma-postreco-tool/20461 Make sure to use egamma postreco tool as described below, specially for 2016UL. See the cmsTalk post for more details. 
+
+    Updated on 9th Nov, 2021: The uncertainties provided for UL are the quadrature sum of all the sources (for re-reco we provided the values of each source separately). Please use energyScaleUp/energyScaleDown for the shifts. These are the only two variables which should be used for uncertainties on energy scale in UL 
+
+    Updated on 14th Sept, 2021: It was notified by the S+S experts that in the UL2016 files, for electrons with |Eta| between 1.5 to 2 and R9 > 0.98 the scale correction was set as 0. So effectively particles satisfying this criteria would be removed in data (but not MC). This is a very small fraction of the overall stats, and doesn't affect the agreement at the Z peak. In addition, an issue was found in the post VFP file where the scales for the R9>0.96 for |Eta| between 1.0 to 1.44 was set to 1 [Not excluding any events but not applying the derived scale]. With this update, this bug is taken care of. Nothing changes in the instructions at the user level. Please keep following the same as given below. However, make sure that if you checked out things before 14th Sept for UL2016, please redo the commands so that you get the most updated files. 
+
+    * Updated on 12th July, 2021: We missed "runEnergyCorrections=True" in setupEgammaPostRecoSeq, so added it to True. However, this is by default set to True, so should not affect anything but just to be sure. 
+
+    Updated on 7th April, 2021: Recipe to apply scaling systematics to the MC 
+
+    HELP For reference about how to access variables pre and post scale and smearing corrections, read this: https://twiki.cern.ch/twiki/bin/viewauth/CMS/EgammaMiniAODV2#Applying_the_Energy_Scale_and_sm 
+
+    ALERT! WARNING
+
+    Normally we recommend to apply both scale and smearing systematics to the MC, as mentioned here: https://twiki.cern.ch/twiki/bin/viewauth/CMS/EgammaMiniAODV2#Applying_the_Energy_Scale_and_sm. However, in the UL samples (both Summer20MiniAOD and Summer20MiniAODv2) the scale systematics for the MC were not included (due to the txt files). This problem can be solved in 2 ways:
+
+        By applying the scale systematics to data and the smearing systematics to MC.
+
+        By following the recipe below ("Recipe for running scales and smearings using EgammaPostRecoTools ") to be able to compute the scale systematics in MC and apply both scale and smearing systematics to the MC (recommended solution).
+
+For pre-UL samples, we recommend to apply both scale and smearing systematics to the MC (without the need of running EgammaPostRecoTools).
+
+HELP A few more things to keep in mind:
+
+    The following data and MC:
+        MC: /*/*Summer20UL*MiniAODv2*/*
+        Data: /*/Run201*UL*MiniAODv2*/MINIAOD 
+
+have the 2017UL and 2018UL scale and smearing corrections included in the miniAOD files, thus, if you are using them, you just need to access the corrected variables as described here: https://twiki.cern.ch/twiki/bin/viewauth/CMS/EgammaMiniAODV2#Applying_the_Energy_Scale_and_s. This also applies for Summer20MiniAOD (v1), but we recommend to use Summer20MiniAODv2, as the most recent campaign. Note again that in these samples (both Summer20MiniAOD and Summer20MiniAODv2) scale systematics are applied to data and not to MC, so this simple recipe applies only in case you are happy with the scaling systematics being applied to data. If you are not using the samples above, or you prefer (as we recommend) to apply the scale systematics to the MC, please check the steps below for including the scale and smearing corrections on the fly in your analysis ("Recipe for running scales and smearings using EgammaPostRecoTools ").
+
+    The updates related to CMSSW are already merged in 10_6_19 and beyond. So the recipe for versions before 10_6_19 and starting from 10_6_19 are different as given below. Preference would be if you use CMSSW_10_6_19 and above. 
+
+    In case you are running these corrections anyway, then please consider using the steps which applies scaling systematics to the MC since that would make UL consistent with the previous re-recos 
+
+    NOTE: These corrections only apply for electron/photon objects with |eta| < 2.5 
+
+    Please note that for using previous eras, just change the name to previous era e.g. '2017-Nov17ReReco' 
+
+    HELP Note: To change the era to:
+        2016ULpreVFP : era='2016preVFP-UL'
+        2016ULpostVFP : era='2016postVFP-UL'
+        2017 UL, era='2017-UL'
+        2018 UL, era='2018-UL' 
+
+    ALERT! WARNING In case you are checking out multiple packages, please always do git cms-init before checking out any packages always - otherwise it can complain and create problems in checking out from git 
+
+Recipe for running scales and smearings using EgammaPostRecoTools
+
+    RECIPE for CMSSW_10_6_X where X >= 19 (scaling systematics applied to MC as done with pre UL and this is what we recommend)
+
+          setenv SCRAM_ARCH slc7_amd64_gcc700  #### for bash shell: export SCRAM_ARCH=slc7_amd64_gcc820
+          cmsrel CMSSW_10_6_19
+          cd CMSSW_10_6_19/src
+          cmsenv
+          git cms-init  
+
+          git cms-addpkg RecoEgamma/EgammaTools  ### essentially just checkout the package from CMSSW
+          git clone https://github.com/cms-egamma/EgammaPostRecoTools.git
+          mv EgammaPostRecoTools/python/EgammaPostRecoTools.py RecoEgamma/EgammaTools/python/.
+          git clone -b ULSSfiles_correctScaleSysMC https://github.com/jainshilpi/EgammaAnalysis-ElectronTools.git EgammaAnalysis/ElectronTools/data/
+          git cms-addpkg EgammaAnalysis/ElectronTools
+
+          scram b -j 8
+         
+
+    RECIPE for CMSSW_10_6_X where X >= 19 (scaling systematics still applied to data - this is what has gone in Summer20MiniAODv2 samples and hence the recipe still stays here. We will remove this recipe soon since the above one is the one which is recommended)
+
+          setenv SCRAM_ARCH slc7_amd64_gcc700  #### for bash shell: export SCRAM_ARCH=slc7_amd64_gcc820
+          cmsrel CMSSW_10_6_19
+          cd CMSSW_10_6_19/src
+          cmsenv
+          git cms-init  
+
+          git cms-addpkg RecoEgamma/EgammaTools  ### essentially just checkout the package from CMSSW
+          git clone https://github.com/cms-egamma/EgammaPostRecoTools.git
+          mv EgammaPostRecoTools/python/EgammaPostRecoTools.py RecoEgamma/EgammaTools/python/.
+          git clone https://github.com/cms-data/EgammaAnalysis-ElectronTools.git EgammaAnalysis/ElectronTools/data/
+          git cms-addpkg EgammaAnalysis/ElectronTools
+
+          scram b -j 8
+         
+
+    RECIPE for CMSSW_10_6_X where X < 19 (scaling systematics still applied to data)
+
+          setenv SCRAM_ARCH slc7_amd64_gcc700  #### for bash shell: export SCRAM_ARCH=slc7_amd64_gcc820
+          cmsrel CMSSW_10_6_2
+          cd CMSSW_10_6_2/src
+          cmsenv
+          git cms-init  
+          
+          #### *The step below depends on the CMSSW version. So please read carefully* 
+          git cms-merge-topic jainshilpi:ULV1_backport106X_forUsers  ### if CMSSW < 10_6_16
+          ##### for working in CMSSW_10_6_16 and beyond, please use this: git cms-merge-topic jainshilpi:ULV1_backport10616_forUsers
+
+          git clone https://github.com/cms-egamma/EgammaPostRecoTools.git
+          mv EgammaPostRecoTools/python/EgammaPostRecoTools.py RecoEgamma/EgammaTools/python/.
+          git clone https://github.com/cms-data/EgammaAnalysis-ElectronTools.git EgammaAnalysis/ElectronTools/data/
+          git cms-addpkg EgammaAnalysis/ElectronTools
+
+          scram b -j 8
+        
+
+Then to run it, copy and paste this config snippet to your config file.
+
+
+from RecoEgamma.EgammaTools.EgammaPostRecoTools import setupEgammaPostRecoSeq
+setupEgammaPostRecoSeq(process,
+                       runEnergyCorrections=True,
+                       runVID=False, #saves CPU time by not needlessly re-running VID, if you want the Fall17V2 IDs, set this to True or remove (default is True)
+                       era='2017-UL')    
+#a sequence egammaPostRecoSeq has now been created and should be added to your path, eg process.p=cms.Path(process.egammaPostRecoSeq)
+
+Links to the talks for approval of UL scales and smearing corrections (2017 and 2018 for now)
+
+    https://indico.cern.ch/event/879921/contributions/3825881/attachments/2022015/3381352/ul2018_validationSuite_v7.pdf
+    https://indico.cern.ch/event/890328/contributions/3801123/attachments/2013185/3364541/ul2018_validationSuite_VF.pdf
+    https://indico.cern.ch/event/881539/contributions/3727624/attachments/1981161/3299285/ul2017_validationSuite_20200131_vF.pdf
+    https://indico.cern.ch/event/881539/contributions/3727624/attachments/1981161/3299281/ul2017_validationSuite_cmsWeek_VF.pdf 
+
+NEW Access of SFs using JSON files
+
+The task of accessing SFs has now been made easier and simpler. You just need to copy one JSON file per object and then use the year, pT, eta and the ID name to get the SFs for that object. All the information is given here. If you do not want to use JSON format, then please go below to access the SFs via the root files.
+
+General note about ID SFs
+
+SFs in the region 1.44 < |η| < 1.57, corresponding to the transition between the barrel and endcaps of ECAL, are not provided by the EGM POG since this region is excluded by most physics analyses.
+
+NEW EOS location for root files:
+All the UL root files (described below) are also available here on eos: /eos/cms/store/group/phys_egamma/UL_SF_EGammaFiles/
+
+SFs for Electrons UL 2017
+
+Electron reconstruction SFs: In general for the bin of 10 to 20 GeV, background is huge. So the systematics are higher than the other pT bins.
+
+  	  	Root Files 	PDF Files 	Reference Slides 	Link to all Plots in EOS
+Reco SF 	  	below 20: egammaEffi_ptBelow20.txt_EGM2D_UL2017.root , above 20: egammaEffi_ptAbove20.txt_EGM2D_UL2017.root 	SF_UL2017.pdf 	Link, Link , Fits improved + altMC syst: 15May 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/ElectronReconstructionSFs/
+Cut Based ID 	Veto 	egammaEffi.txt_EGM2D_Veto_UL17.root 	egammaEffi.txt_egammaPlots_Veto_UL17.pdf 	Link
+	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Electrons/Veto
+Loose 	egammaEffi.txt_EGM2D_Loose_UL17.root 	egammaEffi.txt_egammaPlots_Loose_UL17.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Electrons/Loose
+Medium 	egammaEffi.txt_EGM2D_Medium_UL17.root 	egammaEffi.txt_egammaPlots_Medium_UL17.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Electrons/Medium
+Tight 	egammaEffi.txt_EGM2D_Tight_UL17.root 	egammaEffi.txt_egammaPlots_Tight_UL17.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Electrons/Tight
+MVA ID 	WP 80 noIso 	egammaEffi.txt_EGM2D_MVA80noIso_UL17.root 	egammaEffi.txt_egammaPlots_MVA80noIso_UL17.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Electrons/MVANoIso80
+WP 90 noIso 	egammaEffi.txt_EGM2D_MVA90noIso_UL17.root 	egammaEffi.txt_egammaPlots_MVA90noIso_UL17.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Electrons/MVANoIso90
+WP 80 Iso 	egammaEffi.txt_EGM2D_MVA80iso_UL17.root 	egammaEffi.txt_egammaPlots_MVA80iso_UL17.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Electrons/MVAIso80
+WP 90 Iso 	egammaEffi.txt_EGM2D_MVA90iso_UL17.root 	egammaEffi.txt_egammaPlots_MVA90iso_UL17.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Electrons/MVAIso90
+
+HLT Zvtx Scale Factor
+
+    there is an allowed Z region for an electron to be in the HLT which is obtained by the online beamspot. There were problems in the begining of 2017, which means that the z region was too small and efficiency suffered. This can not be determined with Z->ee tag & probe as the tag & probe have the same zvtx. Care must be taken with e-mu tag and probe as this will include it as the muon triggers were not as effected
+        for more details, please see this talk from the 07/02/18 EGM Meeting 
+    the MC efficiency is one so the efficiency of the online Z region cut in the HLT and the scale factor for MC are identical
+    events selected using electron triggers which use pixel matching require an additional scale factor. As it is event level, it should be applied only once per event, no matter how many electrons were required to be triggered
+    this only needs to be applied in 2017, 2016 & 2018 are fine
+    these numbers are considered final by E/gamma (and are unchanged), and still needed in UL2017 because the issue was in trigger which is not possible to fix by re-reco.
+        the 2018 number measured to be > 0.99976 and is taken to be 1.0 as a 0.02% inefficiency dwarfed by other efficiency systematics 
+
+Era 	2016 	2017B 	2017C 	2017DEF 	2017BCDEF 	2018
+SF 	1.0±0.0 	0.934±0.005 	0.992±0.001 	1.000 	0.991±0.001 	1.0±0.0
+
+SFs for Photons UL 2017
+
+  	  	Root Files 	PDF Files 	Reference Slides 	Link to all Plots in EOS
+Cut Based ID 	Loose 	egammaEffi.txt_EGM2D_PHO_Loose_UL17.root 	egammaEffi.txt_egammaPlots_PHO_Loose_UL17.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Photons/Loose
+Medium 	egammaEffi.txt_EGM2D_PHO_Medium_UL17.root 	egammaEffi.txt_egammaPlots_PHO_Medium_UL17.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Photons/Medium
+Tight 	egammaEffi.txt_EGM2D_PHO_Tight_UL17.root 	egammaEffi.txt_egammaPlots_PHO_Tight_UL17.pdf
+	Link
+	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Photons/Tight
+MVA ID 	WP 80 	egammaEffi.txt_EGM2D_PHO_MVA80_UL17.root 	egammaEffi.txt_egammaPlots_PHO_MVA80_UL17.pdf 	Link
+	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Photons/MVA80
+WP 90 	egammaEffi.txt_EGM2D_PHO_MVA90_UL17.root 	egammaEffi.txt_egammaPlots_PHO_MVA90_UL17.pdf 	Link
+	/eos/cms/store/group/phys_egamma/SF-Repository/UL17/Photons/MVA90
+
+CSEV and pixel veto SFs UL 2017
+
+  	  	Root Files 	Reference Slides
+Electron Veto 	PV 	HasPix_SummaryPlot_UL17.root 	Link
+CSEV 	CSEV_SummaryPlot_UL17.root
+  	  	 
+
+SFs for Electrons UL 2018
+
+Electron reconstruction SFs: In general for the bin of 10 to 20 GeV, background is huge. So the systematics are higher than the other pT bins.
+
+  	  	Root Files 	PDF Files 	Reference Slides 	Link to all Plots in EOS
+Reco SF 	  	egammaEffi_ptBelow20.txt_EGM2D_UL2018.root ; egammaEffi_ptAbove20.txt_EGM2D_UL2018.root 	SF_UL2018.pdf 	First presentation; Second presentation; Third presentation 	Work in Progress
+Cut Based ID 	Veto 	egammaEffi.txt_Ele_Veto_EGM2D.root 	egammaEffi.txt_Ele_Veto_egammaPlots.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Electrons/Veto
+Loose 	egammaEffi.txt_Ele_Loose_EGM2D.root 	egammaEffi.txt_Ele_Loose_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Electrons/Loose
+Medium 	egammaEffi.txt_Ele_Medium_EGM2D.root 	egammaEffi.txt_Ele_Medium_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Electrons/Medium
+Tight 	egammaEffi.txt_Ele_Tight_EGM2D.root 	egammaEffi.txt_Ele_Tight_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Electrons/Tight
+MVA ID 	WP 80 noIso 	egammaEffi.txt_Ele_wp80noiso_EGM2D.root 	egammaEffi.txt_Ele_wp80noiso_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Electrons/wp80noiso
+WP 90 noIso 	egammaEffi.txt_Ele_wp90noiso_EGM2D.root 	egammaEffi.txt_Ele_wp90noiso_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Electrons/wp90noiso
+WP 80 Iso 	egammaEffi.txt_Ele_wp80iso_EGM2D.root 	egammaEffi.txt_Ele_wp80iso_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Electrons/wp80iso
+WP 90 Iso 	egammaEffi.txt_Ele_wp90iso_EGM2D.root 	egammaEffi.txt_Ele_wp90iso_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Electrons/wp90iso
+
+SFs for Photons UL 2018
+
+  	  	Root Files 	PDF Files 	Reference Slides 	Link to all Plots in EOS
+Cut Based ID 	Loose 	egammaEffi.txt_EGM2D_Pho_Loose_UL18.root 	egammaEffi.txt_egammaPlots_Pho_Loose_UL18.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Photons/Loose/
+Medium 	egammaEffi.txt_EGM2D_Pho_Med_UL18.root 	egammaEffi.txt_egammaPlots_Pho_Med_UL18.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Photons/Medium/
+Tight 	egammaEffi.txt_EGM2D_Pho_Tight.root_UL18.root 	egammaEffi.txt_egammaPlots_Pho_Tight.pdf_UL18.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Photons/Tight
+MVA ID 	WP 80 	egammaEffi.txt_EGM2D_Pho_wp80.root_UL18.root 	egammaEffi.txt_egammaPlots_Pho_wp80.pdf_UL18.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Photons/MVA80
+WP 90 	egammaEffi.txt_EGM2D_Pho_wp90.root_UL18.root 	egammaEffi.txt_egammaPlots_Pho_wp90.pdf_UL18.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL18/Photons/MVA90
+
+CSEV and pixel veto SFs UL 2018
+
+  	  	Root Files 	Reference Slides
+Electron Veto 	PV 	HasPix_SummaryPlot_UL18.root 	Link
+CSEV 	CSEV_SummaryPlot_UL18CSEV_SummaryPlot_UL18.root
+Note 	  	 
+
+SFs for Photons UL 2016 (preVFP)
+
+  	  	Root Files 	PDF Files 	Reference Slides 	Link to all Plots in EOS
+Cut Based ID 	Loose 	egammaEffi.txt_EGM2D_Pho_Loose_UL16.root 	egammaEffi.txt_egammaPlots_Pho_Loose_UL16.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Photons/Loose/
+Medium 	egammaEffi.txt_EGM2D_Pho_Medium_UL16.root 	egammaEffi.txt_egammaPlots_Pho_Medium_UL16.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Photons/Medium/
+Tight 	egammaEffi.txt_EGM2D_Pho_Tight_UL16.root 	egammaEffi.txt_egammaPlots_Pho_Tight_UL16.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Photons/Tight
+MVA ID 	WP 80 	egammaEffi.txt_EGM2D_Pho_wp80_UL16.root 	egammaEffi.txt_egammaPlots_Pho_wp80_UL16.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Photons/MVA80
+WP 90 	egammaEffi.txt_EGM2D_Pho_wp90_UL16.root 	egammaEffi.txt_egammaPlots_Pho_wp90_UL16.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Photons/MVA90
+
+CSEV and pixel veto SFs UL 2016 (preVFP)
+
+
+  	  	Root Files 	Reference Slides
+Electron Veto 	PV 	HasPix_SummaryPlot_UL16_preVFP.root 	Link ; Link
+CSEV 	CSEV_SummaryPlot_UL16_preVFP.root
+Note 	  	 
+SFs for Electrons UL 2016 (preVFP)
+
+Electron reconstruction SFs: In general for the bin of 10 to 20 GeV, background is huge. So the systematics are higher than the other pT bins.
+
+  	  	Root Files 	PDF Files 	Reference Slides 	Link to all Plots in EOS
+Cut Based ID 	Veto 	egammaEffi.txt_Ele_Veto_preVFP_EGM2D.root 	egammaEffi.txt_Ele_Veto_preVFP_egammaPlots.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Electrons/Veto
+Loose 	egammaEffi.txt_Ele_Loose_preVFP_EGM2D.root 	egammaEffi.txt_Ele_Loose_preVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Electrons/Loose
+Medium 	egammaEffi.txt_Ele_Medium_preVFP_EGM2D.root 	egammaEffi.txt_Ele_Medium_preVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Electrons/Medium
+Tight 	egammaEffi.txt_Ele_Tight_preVFP_EGM2D.root 	egammaEffi.txt_Ele_Tight_preVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Electrons/Tight
+MVA ID 	WP 80 noIso 	egammaEffi.txt_Ele_wp80noiso_preVFP_EGM2D.root 	egammaEffi.txt_Ele_wp80noiso_preVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Electrons/wp80noiso
+WP 90 noIso 	egammaEffi.txt_Ele_wp90noiso_preVFP_EGM2D.root 	egammaEffi.txt_Ele_wp90noiso_preVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Electrons/wp90noiso
+WP 80 Iso 	egammaEffi.txt_Ele_wp80iso_preVFP_EGM2D.root 	egammaEffi.txt_Ele_wp80iso_preVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Electrons/wp80iso
+WP 90 Iso 	egammaEffi.txt_Ele_wp90iso_preVFP_EGM2D.root 	egammaEffi.txt_Ele_wp90iso_preVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/Electrons/wp90iso
+Reco SF 	  	egammaEffi_ptBelow20.txt_EGM2D_UL2016preVFP.root ; egammaEffi_ptAbove20.txt_EGM2D_UL2016preVPF.root 	SF_UL2016preVFP.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/preVFP/ElectronReconstructionSFs
+
+SFs for Photons UL 2016 (postVFP)
+
+  	  	Root Files 	PDF Files 	Reference Slides 	Link to all Plots in EOS
+Cut Based ID 	Loose 	egammaEffi.txt_EGM2D_Pho_Loose_UL16_postVFP.root 	egammaEffi.txt_egammaPlots_Pho_Loose_UL16_postVFP.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Photons/Loose/
+Medium 	egammaEffi.txt_EGM2D_Pho_Medium_UL16_postVFP.root 	egammaEffi.txt_egammaPlots_Pho_Medium_UL16_postVFP.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Photons/Medium/
+Tight 	egammaEffi.txt_EGM2D_Pho_Tight_UL16_postVFP.root 	egammaEffi.txt_egammaPlots_Pho_Tight_UL16_postVFP.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Photons/Tight
+MVA ID 	WP 80 	egammaEffi.txt_EGM2D_Pho_wp80_UL16_postVFP.root 	egammaEffi.txt_egammaPlots_Pho_wp80_UL16_postVFP.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Photons/MVA80
+WP 90 	egammaEffi.txt_EGM2D_Pho_wp90_UL16_postVFP.root 	egammaEffi.txt_egammaPlots_Pho_wp90_UL16_postVFP.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Photons/MVA90
+
+CSEV and pixel veto SFs UL 2016 (postVFP)
+
+
+  	  	Root Files 	Reference Slides
+Electron Veto 	PV 	HasPix_SummaryPlot_UL16_postVFP.root 	Link ; Link
+CSEV 	CSEV_SummaryPlot_UL16_postVFP.root 	Link ; Link
+  	 
+SFs for Electrons UL 2016 (postVFP)
+
+Electron reconstruction SFs: In general for the bin of 10 to 20 GeV, background is huge. So the systematics are higher than the other pT bins.
+
+  	  	Root Files 	PDF Files 	Reference Slides 	Link to all Plots in EOS
+Cut Based ID 	Veto 	egammaEffi.txt_Ele_Veto_postVFP_EGM2D.root 	egammaEffi.txt_Ele_Veto_postVFP_egammaPlots.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Electrons/Veto
+Loose 	egammaEffi.txt_Ele_Loose_postVFP_EGM2D.root 	egammaEffi.txt_Ele_Loose_postVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Electrons/Loose
+Medium 	egammaEffi.txt_Ele_Medium_postVFP_EGM2D.root 	egammaEffi.txt_Ele_Medium_postVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Electrons/Medium
+Tight 	egammaEffi.txt_Ele_Tight_postVFP_EGM2D.root 	egammaEffi.txt_Ele_Tight_postVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Electrons/Tight
+MVA ID 	WP 80 noIso 	egammaEffi.txt_Ele_wp80noiso_postVFP_EGM2D.root 	egammaEffi.txt_Ele_wp80noiso_postVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Electrons/wp80noiso
+WP 90 noIso 	egammaEffi.txt_Ele_wp90noiso_postVFP_EGM2D.root 	egammaEffi.txt_Ele_wp90noiso_postVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Electrons/wp90noiso
+WP 80 Iso 	egammaEffi.txt_Ele_wp80iso_postVFP_EGM2D.root 	egammaEffi.txt_Ele_wp80iso_postVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Electrons/wp80iso
+WP 90 Iso 	egammaEffi.txt_Ele_wp90iso_postVFP_EGM2D.root 	egammaEffi.txt_Ele_wp90iso_postVFP_egammaPlots.pdf 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/Electrons/wp90iso
+Reco SF 	  	egammaEffi_ptBelow20.txt_EGM2D_UL2016postVFP.root ; egammaEffi_ptAbove20.txt_EGM2D_UL2016postVPF.root 	SF_UL2016postVFP.pdf 	Link 	/eos/cms/store/group/phys_egamma/SF-Repository/UL16/postVFP/ElectronReconstructionSFs
+
+Apart from the above, there are some IDs which are not maintained by EGM POG. If you happen to use any of those IDs, be aware that EGM POG will not provide SF. One such ID is top lepton-MVA ID. Recent developments of that ID is documented here: - TOP MVA ID (UL) latest trainings and SF: https://indico.cern.ch/event/1146238/contributions/4972953/attachments/2484113/4264915/EGMTopLeptonID.pdf 
+
+
+Run 2 Recipies:
+
+
+
+    E/Gamma ID Tasks and personpower
+    New Procedure for Non-Standard ID Usage in CMS
+    Instructions for applying electron and photon ID
+        VID Usage Tutorial (old, some parts superseeded by egamma post reco tools)
+        Cut based electron identification
+        MVA based electron Identification
+        HEEP (high energy) electron Identification
+        Cut based photon identification
+        MVA based photon identification 
+    Recipes for computing quantities used in identification and selection criteria
+        Computation of particle based isolation
+        Computation of shower shape 
+    Efficiencies and scale factors
+        Electron efficiencies and scale factors
+            102X series - Dataset 2018, Autumn 18 MC
+            102X series - Fall17V2 IDs Scale factors for 2018
+            94X series - Fall17V2 Scale factors for 2017
+            94X series - Fall17V1 Scale factors for 2017
+            94X series - Fall17V2 Scale factors for 2016 Legacy re-reco
+            80X series - 80X Scale factors for 2016 Legacy re-reco
+            Older Efficiencies and Scale Factors 
+        Photon efficiencies and scale factors
+            102X series - Fall17V2 IDs Scale factors for 2018
+            94X series - Fall17V2 IDs Scale factors for 2017
+            94X series - Fall17V1 Scale factors for 2017
+            94X series - Fall17V2 Scale factors for 2016 Legacy re-reco
+            80X series - 80X Scale factors for 2016 Legacy re-reco
+            Electron Veto (CSEV or pixel seed veto) Scale Factors
+            Older Efficiencies and Scale Factors 
+    Summary of available Egamma POG ntuples 
+
+The purpose of this page is to document the implementation details for electron and photon ID to be used for analyses of 2015+ data as well as MC exercises in 2014.
+
+E/Gamma ID Tasks and personpower
+
+Electrons and Photons Identification Activities:
+
+Electron ID 	HEEP 	Photon ID 	High Pt Photons ID
+Cut based: Tom Cornelis and Ilya Kravchenko (UNL) 	Wenxing Fang (Beihang University (CN)) 	Cut based: Ashim Roy and Debabrata Bhowmik (Saha Institute, Kolkata,India) 	 
+MVA (+Iso): Jonas Rembser supervised by Philippe Busson and Jean-Baptiste Sauvan (LLR) 	  	MVA: Kuntal Mondal 	 
+Electrons and Photons Scale Factors Computation:
+
+Electrons SFs 	Photons SFs 	Pixel Veto 	SFs Implementation in CMSSW
+Dalmin Pai,Hyejin Kwon 	Thien Hien,Jess Wong 	Victoria Quilatan 	Daniela Schaefer
+
+New Procedure for Non-Standard ID Usage in CMS
+
+Starting from 2017 we would like to introduce an official policy for electron/photon ID usage in CMS with a clear timeline and recommendations for analyses to be approved by E/gamma.
+
+The EGamma POG strongly recommends to use standard electron and photon ID working points and tools. Those are developed and optimized by e/gamma experts. Details on their implementation are provided together with corresponding approved scale factors. The official e/gamma ID are all implemented in the VID format in CMSSW, and this is the tool we recommend to use rather than re-implement the IDs by hand in your analyses.
+
+If an analysis needs an ID which is not an e/gamma maintained ID, we ask the analyzers to present the performance of their own ID together with a physics motivation at one of our e/gamma ID meeting. All the non-standard IDs must be approved well in advance by e/gamma (about a month) and we now require for all non-standard IDs, to produce a VID implementation. We are preparing a detailed tutorial about the VID implementation and usage in CMS. The documentation in the twiki will be updated shortly.
+
+Data/MC scale factors should be provided to e/gamma in the same format as centrally provided ones so we can transmit the results to other users. The tag and probe tool is available and well documented in the corresponding twiki.
+
+In order to have a clear overview of the status of analyses in CMS not using standard IDs, we will ask soon to PAG contacts to provide a list of all E/gamma using analyses, together with trigger, ID, energy regression version, CMSSW version information, typical energy range of analysis (including signal). A google spreadsheet will be circulated soon.
+
+If you are using standard photon ID for high pT region (>200 GeV ), some detailed studies of efficiency and SF is needed. Please consult this twiki for our recommendation:
+
+https://twiki.cern.ch/twiki/bin/view/CMS/EGMPhotonIDHighPtPhotons
+
+Please contact EGM POG if you need more details on this.
+
+Instructions for applying electron and photon ID
+
+Please make sure that you read this twiki: https://twiki.cern.ch/twiki/bin/view/CMS/EgammaPostRecoRecipes
+
+Users no longer need to configure the E/gamma IDs (VID) by hand, post reco tool will do it all for you.
+
+The latest RunII electron ID names are:
+
+cutBasedElectronID-Fall17-94X-V2-veto, cutBasedElectronID-Fall17-94X-V2-loose, cutBasedElectronID-Fall17-94X-V2-medium, cutBasedElectronID-Fall17-94X-V2-tight, mvaEleID-Fall17-iso-V2-wp90, mvaEleID-Fall17-iso-V2-wp80, mvaEleID-Fall17-noIso-V2-wp90, mvaEleID-Fall17-noIso-V2-wp80. There are two other electron MVA IDs, which is not supported by EGM anymore, which means that EGM will not provide scale factor for them, and if you use them you need to produce scale factor yourself and give a presentation in EGM POG for the approval of the scale factor. These two unsupported IDs are: mvaEleID-Fall17-noIso-V2-wpLoose, mvaEleID-Fall17-iso-V2-wpHZZ .
+
+Electron IDs live under RecoEgamma /ElectronIdentification/python/Identification in CMSSW
+
+The latest RunII photon ID names are:
+
+cutBasedPhotonID-Fall17-94X-V2-loose, cutBasedPhotonID-Fall17-94X-V2-medium, cutBasedPhotonID-Fall17-94X-V2-tight, mvaPhoID-RunIIFall17-v2-wp90, mvaPhoID-RunIIFall17-v2-wp80
+
+Photon IDs live under RecoEgamma /PhotonIdentification/python/Identification in CMSSW
+
+In your ntuplizer, you can access any EGM ID decision inslide patelectron/patphoton loop like this:
+
+for(const auto& pho : iEvent.get(phoToken_) ) {
+
+bool pass_loose = pho.photonID("cutBasedPhotonID-Fall17-94X-V2-loose");
+
+}
+
+similarly,
+
+for(const auto& ele : iEvent.get(eleToken_) ) {
+
+bool isPassMVAiso90 = ele.electronID("mvaEleID-Fall17-iso-V2-wp90");
+
+}
+
+Example ntuplizer: https://github.com/cms-egamma/ggAnalysis/tree/102X-egpos2019/ggNtuplizer
+
+Example of how to setup egamma post reco tool in your python config: https://github.com/cms-egamma/ggAnalysis/blob/102X-egpos2019/ggNtuplizer/test/run_mc2018_102X.py
+
+Link to recent CMSPOS EGM tutorial: https://twiki.cern.ch/twiki/bin/view/CMS/SWGuideCMSPhysicsObjectSchoolAACHEN2019EGamma
+VID Usage Tutorial (old, some parts superseeded by egamma post reco tools)
+
+The VID (versioned identification) framework is the framework used by E/Gamma POG to implement the different selections for Electrons and Photons. All standard IDs are implemented in this way. It is highly recommended that users who have a custom set of ID requirements use the VID implementation. The framework produces an unsigned int which is a bitmap of which cuts passed and failed for a given ID. In the easiest implementation in the ntuplizer only a single bit is saved saying if the electron/photon passed the required ID. The tutorial (watch out, it's old) is available here
+
+Cut based electron identification
+
+See CutBasedElectronIdentificationRun2
+
+MVA based electron Identification
+
+See MultivariateElectronIdentificationRun2
+
+HEEP (high energy) electron Identification
+
+See HEEPElectronIdentificationRun2
+
+Cut based photon identification
+
+See CutBasedPhotonIdentificationRun2
+
+MVA based photon identification
+
+General purpose MVA: see MultivariatePhotonIdentificationRun2
+
+Recipes for computing quantities used in identification and selection criteria
+
+Computation of particle based isolation
+
+See EgammaPFBasedIsolationRun2
+
+Computation of shower shape
+
+See EgammaShowerShapeRun2
+
+Efficiencies and scale factors
+
+The reccomended ID for analysis looking at the three years is Fall17V2 ID. Egamma provides scale factors also for other previously approved (Fall17V1 for 2017 and 80X for 2016) and still in use IDs. For additional details see here
+
+General guidelines to compute the scale factors using the Tag and Probe are given here ElectronScaleFactorsRun2
+
+EGamma POG approved scale factors are provided as a TH2F histogram and can be in links below. The 2 dimensions are:
+
+    x-axis: SuperCluster Eta
+    y-axis: pT 
+
+The value can be access with usual GetBinContent and the recommended systematic is the error (GetBinError). The pT range is limited to 150GeV. For pT > 150 GeV the highest pT bin scale factor should to be used.
+
+Scale factors for ultra legacy (UL) datasets are (will be) available here : https://twiki.cern.ch/twiki/bin/view/CMS/EgammaUL2016To2018
+
+Currently UL2017 SF are available. In next weeks/months, we will have UL2018 and UL2016 SF as well.
+
+Below, you will find rereco18 , rereco17 and legacy16 SFs. The recommended ID is Fall17V2 for 2016, 2017 and 2018, for rereco and UL.
+Electron efficiencies and scale factors
+
+These are the most recent scale factors, approved for reReco ABC - prompt D and Autumn18 mc
+102X series - Dataset 2018, Autumn 18 MC
+
+
+More...
+
+    egammaEffi.txt_EGM2D_updatedAll.root: Electron Reco SFs for 2018 from pT > 10 GeV, in bins of eta using Autumn 18 samples</verbatim> 
+
+Slides presented by Ming-Yan: https://indico.cern.ch/event/794628/contributions/3303043/attachments/1791305/2923400/RECOSFs_0208_update.pdf
+
+
+102X series - Fall17V2 IDs Scale factors for 2018
+
+These are the most recent scale factors, approved for reReco ABC - prompt D and Autumn18 mc.
+
+These Scale factors refer to the V2 IDs derived on 2017 V2 samples. This ID perform well on 2018 data, and Scale Factors were derived also for 2018 data. These are the reccomended IDs and Scale Factors until a new ID optimized on 2018 samples is rederived.
+
+
+More...
+
+
+Veto cut-based ID WP
+
+    Run2018: scale factor (root file) summary plot (2D) 
+
+Loose cut-based ID WP
+
+    Run2018: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+Medium cut-based ID WP
+
+    Run2018: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+Tight cut-based ID WP
+
+    Run2018: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+
+More...
+
+MVA80 ID WP + iso
+
+    Run2018: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+MVA90 ID WP + iso
+
+    Run2018: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+MVA80 ID WP w/o iso
+
+    Run2018: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+MVA90 ID WP w/o iso
+
+    Run2018: scale factor (root file) summary plot (vs pT) 2018_ElectronMVA90noiso_pt_r1.pdf (vs eta) 2018_ElectronMVA90noiso_eta_r1.pdf (2D) 2018_ElectronMVA90noiso_2D_r1.pdf 
+
+94X series - Fall17V2 Scale factors for 2017
+
+These Scale factors refer to the V2 IDs derived on 2017 V2 samples.
+
+
+More...
+
+* Electron Reconstruction Efficiencies pT>20 Gev (root file)
+
+* <a href="https://twiki.cern.ch/twiki/pub/CMS/Egamma2017DataRecommendations/egammaEffi.txt_EGM2D_runBCDEF_passingRECO_lowEt.root" target="_blank">Electron Reconstruction Efficiencies 20<pT (root file) </a>
+
+Link to the presentation on Electron ID SFs: https://indico.cern.ch/event/755652/contributions/3131649/attachments/1712933/2762198/Electron_ID_V2_SFs_on_2017_and_2018_data_20180910.pdf#search=Dalmin%20Pai
+
+
+
+More...
+
+
+Veto cut-based ID WP
+
+    Run2017: scale factor (root file) summary plot (2D) 
+
+Loose cut-based ID WP
+
+    Run2017: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+Medium cut-based ID WP
+
+    Run2017: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+Tight cut-based ID WP
+
+    Run2017: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+
+More...
+
+MVA80 ID WP + iso
+
+    Run2017: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+MVA90 ID WP + iso
+
+    Run2017: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+MVA80 ID WP w/o iso
+
+    Run2017: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+MVA90 ID WP w/o iso
+
+    Run2017: scale factor (root file) summary plot (vs. pT) (vs. eta) (2D) 
+
+94X series - Fall17V1 Scale factors for 2017
+
+
+More...
+
+
+Recommendation for RECONSTRUCTION SFs can be found here: https://twiki.cern.ch/twiki/bin/view/CMS/Egamma2017DataRecommendations#Electron_Reconstruction_Scale_Fa
+
+
+
+More...
+
+Moriond'18 full dataset: 42.6/fb
+
+MVA90 ID WP +iso
+
+Run B:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run C:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run D:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run E:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run F:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run BCDEF:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+MVA80 ID WP +iso
+
+Run B:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run C:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run D:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run E:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run F:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run BCDEF:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+MVA90 ID WP w/o iso
+
+Run B:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run C:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run D:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run E:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run F:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run BCDEF:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+MVA80 ID WP w/o iso
+
+Run B:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run C:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run D:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run E:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run F:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run BCDEF:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+
+More...
+
+Moriond'18 full dataset: 42.6/fb
+
+
+Veto cut-based Id WP
+
+RUNB:
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNC:
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUND:
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNE:
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNF:
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNBCDEF:
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Loose cut-based Id WP
+
+RUNB:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNC:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUND:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNE:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNF:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNBCDEF:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Medium cut-based Id WP
+
+RUNB:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNC:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUND:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNE:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNF:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNBCDEF:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Tight cut-based Id WP
+
+RUNB:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNC:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUND:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNE:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNF:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUNBCDEF:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+94X series - Fall17V2 Scale factors for 2016 Legacy re-reco
+
+These scale factors are computed for the full 2016 Legacy ReReco dataset, using the Fall17V2 2017 ID.
+
+They apply to the 94X re-miniAOD of that legacy /*/Run2016*17Jul2018*/* when comparing against all flavours of Summer16 MC.
+
+
+More...
+
+
+Veto cut-based ID WP
+
+* Electron Cut-based WP Veto (root file) Electron Cut-based WP Veto (pdf file)
+
+
+Loose cut-based ID WP
+
+* Electron Cut-based WP Loose (root file) Electron Cut-based WP Loose (pdf file)
+
+
+Medium cut-based ID WP
+
+* Electron Cut-based WP Medium (root file) Electron Cut-based WP Medium (pdf file)
+
+
+Tight cut-based ID WP
+
+* Electron Cut-based WP Tight (root file) Electron Cut-based WP Tight (pdf file)
+
+
+
+More...
+
+MVA80 ID WP + iso
+
+* Electron MVA WP 80 + iso (root file) Electron MVA WP 80 + iso (pdf file)
+
+MVA90 ID WP + iso
+
+* Electron MVA WP 90 + iso (root file) Electron MVA WP 90 + iso (pdf file)
+
+MVA80 ID WP w/o iso
+
+* Electron MVA WP 80 w/o iso (root file) Electron MVA WP 80 w/o iso (pdf file)
+
+MVA90 ID WP w/o iso
+
+* Electron MVA WP 90 w/o iso (root file) Electron MVA WP 90 w/o iso (pdf file)
+
+
+80X series - 80X Scale factors for 2016 Legacy re-reco
+
+These scale factors are computed for the full 2016 Legacy ReReco dataset, using the 2016 80X ID.
+
+They apply to both the 80X legacy /*/Run2016*07Aug17*/* and the 94X re-miniAOD of that legacy /*/Run2016*17Jul2018*/* when comparing against all flavours of Summer16 MC. This is because no variable was modified for E/gamma objects in the 94X re-miniAOD of the 80X samples, there were only additions.
+
+
+More...
+
+* Electron Reconstruction Efficiencies pT>20 Gev (root file) (pdf file)
+
+* Electron Reconstruction Efficiencies 20<pT (pdf file)
+
+
+
+More...
+
+
+Veto cut-based ID WP
+
+* Electron Cut-based WP Veto (root file) Electron Cut-based WP Veto (pdf file)
+
+
+Loose cut-based ID WP
+
+* Electron Cut-based WP Loose (root file) Electron Cut-based WP Loose (pdf file)
+
+
+Medium cut-based ID WP
+
+* Electron Cut-based WP Medium (root file) Electron Cut-based WP Medium (pdf file)
+
+
+Tight cut-based ID WP
+
+* Electron Cut-based WP Tight (root file) Electron Cut-based WP Tight (pdf file)
+
+
+
+More...
+
+MVA80 ID WP
+
+* Electron MVA WP 80 (root file) https://twiki.cern.ch/twiki/pub/CMS/EgammaIDRecipesRun2/80X_2016_MVA80Xwp80.pdf
+
+MVA90 ID WP
+
+* Electron MVA WP 90 (root file) https://twiki.cern.ch/twiki/pub/CMS/EgammaIDRecipesRun2/80X_2016_MVA80Xwp90.pdf
+
+
+Older Efficiencies and Scale Factors
+
+
+More...
+
+80X series - Moriond 2017 recommandation
+
+
+More...
+
+Moriond'17 full dataset: 36.3/fb
+
+    Reconstruction scale factor (root file) : scale factors summary (pdf file) 
+
+WARNING Additional Systematic uncertainties:
+
+    More information Electron reconstruction efficiency approval
+    low pT electrons (pT < 20GeV). Scale factors are found to be flat with pT. Nevertheless the pT dependence is hard to verify below 20GeV. An additional systematic of 1% is recommended for electrons with pT < 20GeV
+    high pT electrons (pT > 80GeV). Scale factors are found to be flat with pT. Nevertheless an additional syst of 1% is recommended for pT > 80GeV (see approval presentation)
+    Different data samples. Scale factors are found to be data-taking period dependent (tracker inefficiency, old hip effect). If you are not using the full dataset please contact egm conveners. 
+
+
+More...
+
+Moriond'17 full dataset: 36.3/fb
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file)
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+WARNING Scale factors, especially in the endcaps, are found to be quite time dependent, therefore if the subpart of the full Moriond17 should be used, please ask egm conveners.
+
+See this presentation for further details: Electron ID approval
+
+
+
+More...
+
+Moriond'17 full dataset 36.3/fb
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run G-H 2016 dataset 16.1/fb
+
+We now provide also the Electron Tight ID SF of RunGH with 2016 datasets. These are the first official period-dependent scale factors from 2016 datasets. For this work we kindly thanks Dalmin Pai.
+
+* Tight cut-based ID WP scale factor (root file) : scale factors summary(pdf file)
+
+WARNING Scale factors, especially in the endcaps, are found to be quite time dependent, therefore if the subpart of the full Moriond17 should be used, different from run G-H for which results are now public few lines above, please ask egm conveners.
+
+See this presentation for further details: Electron ID approval
+
+
+
+More...
+
+Moriond'17 full dataset 35.9/fb
+
+    Scale_factor(root file) 
+
+See this presentation here: HEEP_ID_approve
+
+WARNING Additional Systematic uncertainties:
+
+    barrel: 1% below 90 GeV and 2% <1TeV and 3% > 1TeV, either quote a flat 3% for high pt analyses or have a linearly increasing function to cover this.
+    endcap: 1% below 90 GeV, 2% < 300 and 4% > 400 GeV, either quote a flat 4% for high pt analyses or have a linearly increasing function to cover this. 
+
+
+More...
+
+Some multilepton analysis using low Pt electrons (pt<10 GeV) could use the ID developed for HZZ. See here for more details: HZZ slides
+
+* Scale_factor(root file) * Scale_factor(summary plot)
+
+
+80X series - Ichep2016 recommandation
+
+
+More...
+
+
+More...
+
+ICHEP full dataset: 12.9/fb
+
+    Gsf tracking scale factor (root file) : scale factors summary (pdf file) 
+
+WARNING Additionnal Systematic uncertainties:
+
+    More information Gsf tracking efficiency approval
+    low pT electrons (pT < 20GeV). Scale factors are found to be flat with pT. Nevertheless the pT dependence is hard to verify below 20GeV. An additional systematic of 3% is recommended for electrons with pT < 20GeV
+    Different data samples. Scale factors are found to be PU dependent. They can be applied to periods different from ICHEP dataset with an additional systematic of 1% . If necessary, nVtx dependent scale factors are provided (without systematics) and can be used to test the PU dependence, in that case the difference between nVtx dependent scale factors and nominal scale factors is advised as systematic. ( nVtx Gsf tracking scale factors (root file) : nVtx scale factors summary (pdf file)) 
+
+
+More...
+
+ICHEP full dataset: 12.9/fb
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file)
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+WARNING Scale factors in the endcaps are quite time dependent, therefore if the subpart of the full ICHEP2016 should be used, please ask egm conveners, runB, runC and runD scale factors can be made available on demand (runB only is below).
+
+runB only
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file)
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+See this presentation for further details: Electron ID approval
+
+
+
+More...
+
+ICHEP2016 full dataset 12.9/fb
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+WARNING Scale factors in the endcaps are quite time dependent, therefore if the subpart of the full ICHEP2016 should be used, please ask egm conveners, runB, runC and runD scale factors can be made available on demand (runB only is below).
+
+See this presentation for further details: Electron ID approval
+
+run B (2016) period 1 run < 273726 (0.5/fb) no systematics
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+runB (2016) period 2 run >= 273726 (5/fb)
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+The 2 runB periods should be combined according to the analysis luminosity (can add the 2 TH2D histograms properly weighted). Only systematic from period 2 should be used overall (so combined 2D histogram should have the errors set from the histogram of period 2).
+
+
+
+76X and 74X ScaleFactors
+
+
+More...
+
+76X series
+
+
+More...
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+
+More...
+
+Downloading information:
+
+    WP80 scale factor (root file) : scale factors summary (pdf file)
+    WP90 scale factor root file : scale factors summary (pdf file) 
+
+
+More...
+
+Special Format The transition region 1.444 < |eta| < 1.566 is actually computed for all gsfElectrons which are in gaps. Hence this SF should be applied to gsfElectron for which isGap() function returns true
+
+Downloading information:
+
+    HZZ loose WP (root file) : scale factors summary (pdf file) 
+
+
+More...
+
+Downloading information:
+
+    reco SFs (root file) : scale factors summary (pdf file) 
+
+74X series
+
+
+More...
+
+Downloading information:
+
+    Veto cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file)
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+
+More...
+
+Downloading information:
+
+    WP80 scale factor (root file) : scale factors summary (pdf file)
+    WP90 scale factor root file : scale factors summary (pdf file) 
+
+
+More...
+
+Special Format The transition region 1.444 < |eta| < 1.566 is actually computed for all gsfElectrons which are in gaps. Hence this SF should be applied to gsfElectron for which isGap() function returns true
+
+Downloading information:
+
+    HZZ loose WP (root file) : scale factors summary (pdf file) 
+
+
+More...
+
+Downloading information:
+
+    reco SFs (root file) : scale factors summary (pdf file) 
+
+
+
+Photon efficiencies and scale factors
+
+The scale factor to reconstruct a supercluster with H/E<0.5 is assumed to be 100%. In addition to ID scale factors, analysis using it should apply the electron veto scale factors. Check the dedicated entry in this section.
+
+102X series - Fall17V2 IDs Scale factors for 2018
+
+These are the most recent scale factors, approved for reReco ABC - prompt D and Autumn18 mc.
+
+These Scale factors refer to the V2 IDs derived on 2017 V2 samples. This ID perform well on 2018 data, and Scale Factors were derived also for 2018 data. These are the reccomended IDs and Scale Factors until a new ID optimized on 2018 samples is rederived.
+
+<!-- More...
+
+
+
+More...
+
+
+Loose cut-based ID WP
+
+* Run2018: scale factor Photons Cut-based WP Loose (root file) Photons Cut-based WP Loose (pdf file)
+
+
+Medium cut-based ID WP
+
+* Run2018: scale factor Photons Cut-based WP Medium (root file) Photons Cut-based WP Medium (pdf file)
+
+
+Tight cut-based ID WP
+
+* Run2018: scale factor Photons Cut-based WP Tight (root file) [[https://twiki.cern.ch/twiki/pub/CMS/EgammaIDRecipesRun2/2018_PhotonsTight.pdf] [Photons Cut-based WP Tight (pdf file)]]
+
+
+
+More...
+
+MVA80 ID WP
+
+*Run2018: scale factor Photons MVA WP 80 (root file) Photons MVA WP 80 (pdf file)
+
+MVA90 ID WP
+
+*Run2018: scale factor Photons MVA WP 90 (root file) Photons MVA WP 90 )pdf file)
+
+
+94X series - Fall17V2 IDs Scale factors for 2017
+
+These Scale factors refer to the V2 IDs derived on 2017 V2 samples.
+
+<!-- More...
+
+
+
+More...
+
+
+Loose cut-based ID WP
+
+* Run2017: scale factor Photons Cut-based WP Loose (root file) Photons Cut-based WP Loose (pdf file)
+
+
+Medium cut-based ID WP
+
+* Run2017: scale factor Photons Cut-based WP Medium (root file) Photons Cut-based WP Medium (pdf file)
+
+Update as on Oct 27, 2020:
+
+    For the highest pT bins (pT > 200 GeV) of the EB for medium ID SFs, a special treatment is done to make sure that the systematics are assigned to the flatness of the SFs. Detailed discussion is here: https://twiki.cern.ch/twiki/bin/view/CMS/EGMPhotonIDHighPtPhotons and the dedicated talk here: https://indico.cern.ch/event/879924/contributions/3872624/attachments/2042983/3422039/Photon_ID_EGamma_meeting0521.pdf
+    Also, for the pT bin of 100 to 200, in the EB, there are slightly high uncertainties due to limites statistics of the alternate MC. In case your analysis is highly constrained by it and uses only madgraph, then you can use all the systematics other than due to alternate MC. We calculate this to be ~2.4% for 0 < |eta| < 0.8 and ~1.4% for 0.8 <|eta | <1.4442 
+
+
+Tight cut-based ID WP
+
+* Run2017: scale factor Photons Cut-based WP Tight (root file) Photons Cut-based WP Tight (pdf file)
+
+
+
+More...
+
+MVA80 ID WP
+
+* Run2017: scale factor Photons MVA WP 80 (root file) Photons Cut-based MVA WP 80 (pdf file)
+
+MVA90 ID WP
+
+* Run2017: scale factor Photons MVA WP 90 (root file) Photons Cut-based MVA WP 90 (pdf file)
+
+
+94X series - Fall17V1 Scale factors for 2017
+
+
+More...
+
+MVA90 ID WP
+
+Run B:
+
+    MVA90 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run C: * MVA90 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+Run D: * MVA90 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+Run E: * MVA90 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+Run F: * MVA90 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+Run BCDEF: * MVA90 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+MVA80 ID WP
+
+Run B:
+
+    MVA80 ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Run C: * MVA80 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+Run D: * MVA80 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+Run E: * MVA80 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+Run F: * MVA80 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+Run BCDEF: * MVA80 ID WP scale factor (root file) : scale factors summary (pdf file)
+
+
+
+More...
+
+
+Loose cut-based Id WP
+
+RUN B:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN C:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN D:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN E:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN F:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN BCDEF:
+
+    Loose cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Medium cut-based Id WP
+
+RUN B:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN C:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN D:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN E:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN F:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN BCDEF:
+
+    Medium cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+Tight cut-based Id WP
+
+RUN B:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN C:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN D:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN E:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN F:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+RUN BCDEF:
+
+    Tight cut-based ID WP scale factor (root file) : scale factors summary (pdf file) 
+
+94X series - Fall17V2 Scale factors for 2016 Legacy re-reco
+
+These scale factors are computed for the full 2016 Legacy reReco dataset, using the 2016 ID.
+
+
+More...
+
+
+Loose cut-based ID WP
+
+* Photon Cut-based WP Loose (root file) Photon Cut-based WP Loose (pdf file)
+
+
+Medium cut-based ID WP
+
+
+*NEW (Updated on 27th Oct, 2020) Photon Cut-based WP Medium (root file) Photon Cut-based WP Medium (pdf file)
+
+
+OLD Photon Cut-based WP Medium (root file) Photon Cut-based WP Medium (pdf file) The uncertainties in the bin of Pt:100-200 and Eta: -1.444 to -0.8, was ~15% due to alternate signal fit. This could be further optimized. The new plots are above after re-optimizing the alternate signal fit.
+
+
+Tight cut-based ID WP
+
+* Photon Cut-based WP Tight (root file) Photon Cut-based WP Tight (pdf file)
+
+
+
+More...
+
+
+MVA ID 80 WP
+
+* Photon MVA WP 80 (root file) Photon MVA WP 80 (pdf file)
+
+
+MVA ID 90 WP
+
+* Photon MVA WP 90 (root file) Photon MVA WP 90 (pdf file)
+
+
+80X series - 80X Scale factors for 2016 Legacy re-reco
+
+These scale factors are computed for the full 2016 Legacy ReReco dataset, using the 2016 80X ID.
+
+They apply to both the 80X legacy /*/Run2016*07Aug17*/* and the 94X re-miniAOD of that legacy /*/Run2016*17Jul2018*/* when comparing against all flavours of Summer16 MC. This is because no variable was modified for E/gamma objects in the 94X re-miniAOD of the 80X samples, there were only additions.
+
+
+More...
+
+
+Loose cut-based ID WP
+
+* Photon Cut-based WP Loose (root file) Photon Cut-based WP Loose (pdf file)
+
+
+Medium cut-based ID WP
+
+* Photon Cut-based WP Medium (root file) Photon Cut-based WP Medium (pdf file)
+
+
+Tight cut-based ID WP
+
+* Photon Cut-based WP Tight (root file) Photon Cut-based WP Tight (pdf file)
+
+
+
+More...
+
+MVA80 ID WP
+
+* Photon Cut-based WP Tight (root file) Photon Cut-based WP Tight (pdf file)
+
+MVA90 ID WP
+
+* Photon Cut-based WP Tight (root file) Photon Cut-based WP Tight (pdf file)
+
+
+Electron Veto (CSEV or pixel seed veto) Scale Factors
+
+
+More...
+
+SFs for 2018 dataset (approved for reReco ABC - prompt D and Autumn18 mc)
+
+Plots: eleVeto_plots_2018.pdf
+
+Root files: (pixel veto) HasPix_2018.root , (CSEV) CSEV_2018.root
+
+One (slightly old) presentation about 2018 SF, where you can check the MC samples used, event selection etc. https://indico.cern.ch/event/842062/contributions/3534198/attachments/1895555/3127190/eleVeto_2018.pdf For 2018, the SFs are binned in pT and 2 bins in eta
+
+UPDATE as of 11 Nov, 2020 for 2018 photon veto SFs
+
+Following the presentation here (analysis which is constrained by high uncertainties in 2018 pixel SFs), we revisited our uncertainties. It was studied that the high uncertainties are because of alternate generator (nominal: DYjets mc@NLO and alt: DYjets madgraph). So now we provide rootfiles with break up of uncertainties in case any analysis does not want to use the one due to alternate generator (case: when in the analysis, used MC sample is mc@NLO, then in that case systematics due to madgraph may be neglected and vice versa). We provide the following root files:
+
+    Nominal as DYjets (MC@NLO) and alternate as DYjets (MADGRAPH) : 2018_CSEV_SF_DYJets_MCatNLO_asNominal.root, 2018_HasPix_SF_DYJets_MCatNLO_asNominal.root
+    Nominal as DYjets (MADGRAPH) and alternate as DYjets (MC@NLO): 2018_CSEV_SF_DY_MADGRAPH_asNominal.root, 2018_HasPix_SF_DY_MADGRAPH_asNominal.root 
+
+Note : The statistical errors also updated in these wrt the previous rootfiles for 2018 since now bayes divide is used to quote the uncertainties on the efficiencies and then linear propagation of errors is used to quote the uncertainties on the SFs. Ealier, binomial errors were used to quote on efficiencies. The changes are quite small since the statistics was good enough but slightly on the higher side this time.
+
+Also, all the studies on the above are documented here: eleVeto2018Unc_follow-up_11Nov2020.pdf
+
+SFs for (Re-reco) 2017 dataset: Electron Veto (CSEV or pixel seed veto) SFs with Re-reco 2017 and Fall 17 MC dataset (42.5/fb) Presentation: https://indico.cern.ch/event/732983/contributions/3215694/attachments/1752833/2840736/EleVetoSF_20181114.pdf The 2017 dataset SFs may be updated. These are provided for the inclusive pT binning and 2 bins in eta.
+
+    PixelSeed_ScaleFactors_2017.root: Electron Veto SFs for 2017 dataset</verbatim>
+    CSEV_ScaleFactors_2017.root: Electron Veto SFs for 2017 dataset</verbatim> 
+
+SFs for (Moriond 17) 2016 dataset: Electron Veto (CSEV or pixel seed veto) SFs with Moriond'17 dataset (36.3/fb)
+
+    ScalingFactors_80X_Summer16.root: ScalingFactors _80X_Summer16.root</verbatim>
+    EleVetoScalingFactors_Moriond17.pdf: EleVetoScalingFactors _Moriond17.pdf</verbatim> 
+
+See this presentation for further details: VetoSF approval
+
+WARNING We recommend all cut based photon IDs to use the same electron veto SF as the study showed no differences. These are provided for the inclusive pT binning and 2 bins in eta.
+
+
+Older Efficiencies and Scale Factors
+
+
+More...
+
+80X series - Moriond'17 recommandations
+
+
+More...
+
+Moriond'17 dataset 36.3/fb
+
+    Loose cut-based scale factors (root file) : scale factors summary (pdf file)
+    Medium cut-based scale factors (root file) : scale factors summary (pdf file)
+    Tight cut-based scale factors (root file) : scale factors summary (pdf file)
+    MVA ID WP90 scale factors (root file) : scale factors summary (pdf file) 
+
+WARNING Scale factors in the endcaps are quite time dependent, therefore if the subpart of the full Moriond'17 should be used, please ask egm conveners.
+
+See this presentation for further details: Photon ID approval
+
+Electron Veto (CSEV or pixel seed veto) SFs with Moriond'17 dataset (36.3/fb)
+
+    ScalingFactors_80X_Summer16.root: ScalingFactors _80X_Summer16.root</verbatim>
+    EleVetoScalingFactors_Moriond17.pdf: EleVetoScalingFactors _Moriond17.pdf</verbatim> 
+
+WARNING We recommend all cut based photon IDs to use the same electron veto SF as the study showed no differences.
+
+See this presentation for further details: VetoSF approval
+
+
+80X series - ICHEP'16 recommendations
+
+
+More...
+
+
+More...
+
+ICHEP2016 runB dataset 5.9/fb
+
+    Loose cut-based scale factors (root file) : scale factors summary (pdf file)
+    Medium cut-based scale factors (root file) : scale factors summary (pdf file)
+    Tight cut-based scale factors (root file) : scale factors summary (pdf file)
+    MVA ID scale factors (root file) : scale factors summary (pdf file) 
+
+ICHEP2016 full dataset 12.9/fb
+
+    Loose cut-based scale factors (root file) : scale factors summary (pdf file)
+    Medium cut-based scale factors (root file) : scale factors summary (pdf file)
+    Tight cut-based scale factors (root file) : scale factors summary (pdf file)
+    MVA ID scale factors (root file) : scale factors summary (pdf file) 
+
+WARNING Scale factors in the endcaps are quite time dependent, therefore if the subpart of the full ICHEP2016 should be used, please ask egm conveners, runB, runC and runD scale factors can be made available on demand (runB only is below).
+
+    egm IDs are not meant to be used in 1.4442 < |etaSC| < 1.566 though scale factors where measured in this region
+    work is on-going to improve syst. uncertainties for low pT photons (20<pT<30 GeV) 
+
+See this presentation for further details: Photon ID approval
+
+Electron Veto (CSEV or pixel seed veto) SFs with 2015 and ICHEP 2016 full dataset (12.9/fb)
+
+    2015 76X scaling factors (root file)</verbatim>
+    2016 ICHEP 80X scaling factors (root file)</verbatim>
+    scale factors summary (pdf file)</verbatim> 
+
+WARNING We recommend all cut based photon IDs to use the same electron veto SF as the study showed no differences.
+
+
+
+76X and 74X ScaleFactors
+
+
+More...
+
+76X series
+
+
+More...
+
+    Loose cut-based scale factors (root file)
+    Medium cut-based scale factors (root file)
+    Tight cut-based scale factors (root file)
+    MVA WP90 scale factors (root file) 
+
+If you would like to apply statistic errors and systematic errors separately. The following file provide complete tables for SFs and errors in each WPs.
+
+    complete 76X SFs and errors tables(pdf file) 
+
+74X series
+
+
+More...
+
+    Loose cut-based scale factors (root file) : scale factors summary (pdf file)
+    Medium cut-based scale factors (root file) : scale factors summary (pdf file)
+    Tight cut-based scale factors (root file) : scale factors summary (pdf file) 
+
+
+More...
+
+    WP90 scale factors (root file) : scale factors summary (pdf file) 
+
+    2017Feb-A-Popov_TriggerSF_Run2016GH_v1.root: The Single-Electron HLT scale factors</verbatim> 
+
+    2017Feb-A-Popov_TriggerSF_Run2016BCDEF_v1.root: The Single-Electron HLT scale factors</verbatim> 
+
+    2017Feb-A-Popov_TriggerSF_Run2016All_v1.root: The Single-Electron HLT scale factors</verbatim> 
+
+
+
+Summary of available Egamma POG ntuples
+
+2016
+Rereco version: /*/Run2016*17Jul2018*/* (legacy rereco)
+MC samples: /*/*RunIISummer16MiniAODv3*/*
+egamma ntuples: /eos/cms/store/group/phys_egamma/soffi/TnP/ntuples_04162018-Legacy2016
+Regression: PF/SC/Egamma 74X /74X/74X trained
+Scale and smearing: embedded in MiniAOD V2
+JSON: Cert_271036-284044_13TeV_23Sep2016ReReco_Collisions16_JSON.txt
+
+2017
+Rereco version: /*/Run2017*31Mar2018*/*
+MC samples: /*/*12Apr2018*/*
+egamma ntuples: /eos/cms/store/group/phys_egamma/soffi/TnP/ntuples_01162018/Moriond18_V1
+egamma ntuples with same tag but additional variables: /eos/cms/store/group/phys_egamma/micheli/TnP/ntuples_2017_20181116
+latest version with V2 ID and with 10_2 ntuples : /eos/cms/store/group/phys_egamma/swmukher/tnp/ID_V2_2017/
+Regression: PF/SC/Egamma 94X /74X/80X trained
+Scale and smearing: embedded in MiniAOD V2
+JSON: Cert_294927-306462_13TeV_PromptReco_Collisions17_JSON.txt
+
+2018
+Rereco version: /*/17Sep2018 (for A-C), promptReco (for D)/*
+MC samples: /*/*RunIIAutumn18DRPremix -102X_upgrade2018_realistic*/*
+egamma ntuples:/eos/cms/store/group/phys_egamma/swmukher/NtupleForRecoSF/Rereco2018Data_Autumn18MC_AOD
+Regression: PF/SC/Egamma 74X /74X/74X trained
+Scale and smearing: embedded in MiniAOD V2
+JSON: Cert_314472-325175_13TeV_PromptReco_Collisions18_JSON.txt
+
+    egammaPlots_MWP_PhoSFs_2016_LegacyReReco_New.pdf: Cutbased Medium Photon ID Scale factors plots(new version) for 2016 LagacyReReco 
+
+    egammaPlots_MWP_PhoSFs_2016_LegacyReReco_New.root: Cutbased Medium Photon ID Scale factors plots(new version) for 2016. Root File. 
+
+
+Run 3 General:
+
+Scale factors and corrections for 2024 Prompt reconstruction
+
+This section discusses the corrections to be applied to the Summer24 simulation. All the corrections described are also available under /cvmfs/cms-griddata.cern.ch/cat/metadata/EGM/. It is recommended to fetch the latest versions from there.
+
+Electrons
+
+Electron and Electron ID JSON formats
+
+Only momentarily, the electron reconstruction and ID SFs have been split into two different json files. They will be merged into one as soon as possible, for the next version of the 2024 SFs.
+
+Electron (reconstruction) json format guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+electron_v1.json(.gz) 	"Electron-ID-SF" 	"2024" 	"sf", "sfup", "sfdown" 	"Reco20to75", "RecoAbove75" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+The numbers in "Reco20to75","RecoAbove75" are pTs of the electron, basically 20<pT<75 GeV, pT>75 GeV. Note that the "RecoBelow20" bin is still missing, for the moment.
+
+Electron ID json format guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+electronID_v1.json(.gz) 	"Electron-ID-SF" 	"2024" 	"sf", "sfup", "sfdown" 	"Veto", "Loose", "Medium", "Tight", "wp80iso", "wp90iso", "wp80noiso", "wp90noiso" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+Note that the ID SFs for low-pT electrons (namely 10<pT<20 GeV) are still missing and will be included in the next version of the corrections.
+
+SFs for Electrons in 2024 Prompt
+
+2024 	  	Root Files 	JSON 	PDF File
+Reco SF 	20 < pT < 75 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleReco/midPt/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2024_Prompt/electron_v1.json.gz 	
+pT > 75 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleReco/highPt/egammaEffi.txt_EGM2D.root 	
+Cut-based ID 	Veto 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleID/passingCutBasedVeto122XV1/merged_EGamma_SF2D_Veto.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2024_Prompt/electronID_v1.json.gz 	
+Loose 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleID/passingCutBasedLoose122XV1/merged_EGamma_SF2D_Loose.root 	  	
+Medium 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleID/passingCutBasedMedium122XV1/merged_EGamma_SF2D_Medium.root 	
+Tight 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleID/passingCutBasedTight122XV1/merged_EGamma_SF2D_Tight.root 	
+MVA ID (Iso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleID/passingMVA122Xwp80isoV1/merged_EGamma_SF2D_wp80iso.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleID/passingMVA122Xwp90isoV1/merged_EGamma_SF2D_wp90iso.root 	
+MVA ID (NoIso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleID/passingMVA122Xwp80noisoV1/merged_EGamma_SF2D_wp80noiso.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/EleID/passingMVA122Xwp90noisoV1/merged_EGamma_SF2D_wp90noiso.root 	
+
+The histogram to be accessed in the rootfiles is the TH2D called "EGamma_SF2D". It has eta on the x axis and pT on the y axis.
+
+Photons
+
+Photon JSON format
+
+Photon json format guide (IDs):
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+photonID_v1.json(.gz) 	"Photon-ID-SF" 	"2024" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+Note that the ID SFs for low-pT photons (namely 10<pT<20 GeV) are still missing and will be included in the next version of the corrections.
+
+Photon json format guide (Vetos):
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	R9
+photon_veto_v1.json(.gz) 	"Photon-CSEV-SF" 	"2024" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+photon_veto_v1.json(.gz) 	"Photon-PixVeto-SF" 	"2024" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , R9 )
+
+The CSEV (Conversion-Safe Electron Veto) and Pixel Veto SFs must be retrieved using the photon eta and R9 (Photon_r9 variable in NanoAOD). Note that the json correction file is the same as for the photon ID corrections, but the input variables are different.
+
+SFs for Photons in 2024 Prompt
+
+2024 Prompt 	  	Root Files 	JSON 	PDF File
+Cut-based Loose 	  	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/PhoID/passingCutBasedLoose122XV1/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2024_Prompt/photonID_v1.json.gz 	
+Cut-based Medium 	  	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/PhoID/passingCutBasedMedium122XV1/egammaEffi.txt_EGM2D.root 	
+Cut-based Tight 	  	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/PhoID/passingCutBasedTight122XV1/egammaEffi.txt_EGM2D.root 	
+MVA ID WP 80 	  	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/PhoID/passingMVA122XV1wp80/egammaEffi.txt_EGM2D.root 	
+MVA ID WP 90 	  	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/PhoID/passingMVA122XV1wp90/PtUnder20_egammaEffi.txt_EGM2D.root 	
+CSEV 	Loose, Medium, Tight, MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/vetos/2024Prompt_CSEV.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2024_Prompt/photon_veto_v1.json.gz 	
+PixVeto 	Loose, Medium,Tight, MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2024/vetos/2024Prompt_HasPix.root 	
+The histogram to be accessed is the TH2D called "EGamma_SF2D". It has eta on the x axis and pT on the y axis. In json format, the corrections below 20 GeV need to be retrieved using the value type "*Below20".
+
+For CSEV and Pixel Veto SFs, the histograms to be accessed are TH1Fs called "hsp_CSEV_*" and "hsp_HasPix_*" respectively, where the wildcard is on the photon ID working point. Each of these histograms has 6 bins: ["EBInc","EBHighR9","EBLowR9","EEInc","EEHighR9","EELowR9"], where "Inc" means inclusive in R9, high R9 means > 0.96, and Low R9 means < 0.96. The json corrections will automatically pick either the low or the high R9 corrections based on the parsed R9 value, so the "inclusive" bins won't be used. If fetching the corrections from the TH1, we recommend to use the high- and low-R9 split ones, rather than the inclusive ones.
+
+Scale factors and corrections for 2023 Prompt reconstruction
+
+The 2023PromptC scale factors must be used with preBPIX MC, whereas the 2023PromptD scale factors must be used with postBPIX MC.
+
+All the corrections described in this section are also available under /cvmfs/cms.cern.ch/rsync/cms-nanoAOD/jsonpog-integration/POG/EGM/.
+
+The eos location of the TnP ntuples used to obtain the Prompt 2023 scale factors can be found in this spreadsheet.
+
+Electrons
+
+Electron and Electron HLT JSON formats
+
+Electron json format guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt 	phi
+electron.json(.gz) 	"Electron-ID-SF" 	"2023PromptC" 	"sf", "sfup", "sfdown" 	"RecoBelow20", "Reco20to75", "RecoAbove75", "Veto", "Loose", "Medium", "Tight", "wp80iso", "wp90iso", "wp80noiso", "wp90noiso" 	float value 	float value 	float value
+electron.json(.gz) 	"Electron-ID-SF" 	"2023PromptD" 	"sf", "sfup", "sfdown" 	"RecoBelow20", "Reco20to75", "RecoAbove75", "Veto", "Loose", "Medium", "Tight", "wp80iso", "wp90iso", "wp80noiso", "wp90noiso" 	float value 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt , phi )
+
+The numbers in "RecoBelow20","Reco20to75","RecoAbove75" are pTs of the electron, basically pT<20 GeV, 20<pT<75 GeV, pT>75 GeV.
+
+IMPORTANT: in order to address the data/MC disagreement introduced by the BPIX issue that showed up in Era 2023D, some of the EGM SFs (notably for electron and photon IDs) have also been derived specifically for objects that end up in the negative barrel and at -1.2 < phi < -0.8. For this reason, the corresponding json corrections have to be accessed using an extra argument: the phi of the electron/photon. Even though electron reconstruction SFs were NOT derived in a phi-dependent way, they should be accessed the same way as the ID ones. This was done to simplify their usage, since they are in the same json file as the ID ones, but the actual value used as the "phi" input will not matter in that case. In addition, also the 2023C (preBPIX) electron and photon jsons require a "phi" argument, though its value will not matter - the idea is the same: to simplify the analysis of 2023 Prompt data altogether.
+
+Electron HLT json format guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+electronHlt.json(.gz) 	"Electron-HLT-SF", 	"2023PromptC" 	"sf", "sfup", "sfdown" 	"HLT_SF_Ele30_LooseID", "HLT_SF_Ele30_MediumID", "HLT_SF_Ele30_TightID", "HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+"Electron-HLT-DataEff" 	"2023PromptC" 	"nom", "up", "down" 	"HLT_SF_Ele30_LooseID", "HLT_SF_Ele30_MediumID", "HLT_SF_Ele30_TightID", "HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+"Electron-HLT-McEff" 	"2023PromptC" 	"nom", "up", "down" 	"HLT_SF_Ele30_LooseID", "HLT_SF_Ele30_MediumID", "HLT_SF_Ele30_TightID", "HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+electronHlt.json(.gz) 	"Electron-HLT-SF", 	"2023PromptD" 	"sf", "sfup", "sfdown" 	"HLT_SF_Ele30_LooseID", "HLT_SF_Ele30_MediumID", "HLT_SF_Ele30_TightID", "HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+"Electron-HLT-DataEff" 	"2023PromptD" 	"nom", "up", "down" 	"HLT_SF_Ele30_LooseID", "HLT_SF_Ele30_MediumID", "HLT_SF_Ele30_TightID", "HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+"Electron-HLT-McEff" 	"2023PromptD" 	"nom", "up", "down" 	"HLT_SF_Ele30_LooseID", "HLT_SF_Ele30_MediumID", "HLT_SF_Ele30_TightID", "HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+SFs for Electrons in 2023PromptC
+
+2023 PromptC 	  	Root Files 	JSON 	PDF File
+Reco SF 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/SF_prompt_2023_19012024/lowpT/Run3_2023C_New_lowpT_mergeEta_Added_symmetrizationsystEta_29052024/passingRECO/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2023_PromptCD/2023PromptC/electron.json.gz 	
+20 < pT < 75 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/SF_prompt_2023_19012024/midpT/Run3_2023C_New_midpT2_eta/passingRECO/egammaEffi.txt_EGM2D.root 	
+pT > 75 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/SF_prompt_2023_19012024/highpT/Run3_2023C_New_highpt1_eta/passingRECO/egammaEffi.txt_EGM2D.root 	
+Cut-based ID 	Loose 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleID/passingCutBasedLoose122XV1/egammaEffi.txt_EGM2D.root 	
+Veto 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleID/passingCutBasedVeto122XV1/egammaEffi.txt_EGM2D.root 	
+Medium 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleID/passingCutBasedMedium122XV1/egammaEffi.txt_EGM2D.root 	
+Tight 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleID/passingCutBasedTight122XV1/egammaEffi.txt_EGM2D.root 	
+MVA ID (Iso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleID/passingMVA122Xwp80isoV1/egammaEffi.txt_EGM2D.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleID/passingMVA122Xwp90isoV1/egammaEffi.txt_EGM2D.root 	
+MVA ID (NoIso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleID/passingMVA122Xwp80noisoV1/egammaEffi.txt_EGM2D.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleID/passingMVA122Xwp90noisoV1/egammaEffi.txt_EGM2D.root 	
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 loose cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleHLT/HLT_SF_Ele30_LooseID/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2023_PromptCD/2023PromptC/electronHlt.json.gz 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 medium cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleHLT/HLT_SF_Ele30_MediumID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 tight cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023ForPrompt23C/tnpEleHLT/HLT_SF_Ele30_TightID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 wp80iso MVA ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleHLT/HLT_SF_Ele30_MVAiso80ID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 wp90iso MVA ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpEleHLT/HLT_SF_Ele30_MVAiso90ID/egammaEffi.txt_EGM2D.root 	 
+The histogram to be accessed in the rootfiles is the TH2D called "EGamma_SF2D". It has eta on the x axis and pT on the y axis.
+
+Concerning electron HLT SFs, the plan is to produce more combinations of triggers and offline IDs and to publish them with time. Disclaimer: the electron trigger efficiency (and in general the data/MC SFs as well) are quite dependent on the offline electron selection. The trigger SFs listed in this twiki are calculated using offline electrons with only ID requirements applied. There isn't a general prescription on which other cutoffs would make the SFs much different from those, but as a rule, if you apply strong additional isolation requirements or special impact parameter thresholds, or if you remove cuts from the standard IDs, you should re-measure them and resent them to the EGM POG.
+
+SFs for Electrons in 2023PromptD
+
+2023 PromptD 	  	Root Files 	JSON 	PDF File
+Reco SF 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/SF_prompt_2023_19012024/lowpT/Run3_2023D_New_lowpT_mergeEta_Added_symmetrizationsystEta_29052024/passingRECO/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2023_PromptCD/2023PromptD/electron.json.gz 	
+20 < pT < 75 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/SF_prompt_2023_19012024/midpT/Run3_2023D_New_midpT_eta2/passingRECO/egammaEffi.txt_EGM2D.root 	
+pT > 75 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/SF_prompt_2023_19012024/highpT/Run3_2023D_New_highpt_eta2/passingRECO/egammaEffi.txt_EGM2D.root 	
+Cut-based ID 	Loose 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingCutBasedLoose122XV1/NoHole_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingCutBasedLoose122XV1/Hole_egammaEffi.txt_EGM2D.root 	
+Veto 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingCutBasedVeto122XV1/NoHole_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingCutBasedVeto122XV1/Hole_egammaEffi.txt_EGM2D.root 	
+Medium 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingCutBasedMedium122XV1/NoHole_egammaEffi.txt_EGM2D.root, eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingCutBasedMedium122XV1/Hole_egammaEffi.txt_EGM2D.root 	
+Tight 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingCutBasedTight122XV1/NoHole_egammaEffi.txt_EGM2D.root, eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingCutBasedTight122XV1/Hole_egammaEffi.txt_EGM2D.root 	
+MVA ID (Iso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingMVA122Xwp80isoV1/NoHole_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingMVA122Xwp80isoV1/Hole_egammaEffi.txt_EGM2D.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingMVA122Xwp90isoV1/NoHole_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingMVA122Xwp90isoV1/Hole_egammaEffi.txt_EGM2D.root 	
+MVA ID (NoIso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingMVA122Xwp80noisoV1/NoHole_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingMVA122Xwp80noisoV1/Hole_egammaEffi.txt_EGM2D.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingMVA122Xwp90noisoV1/NoHole_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleID/passingMVA122Xwp90noisoV1/Hole_egammaEffi.txt_EGM2D.root 	
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 loose cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleHLT/HLT_SF_Ele30_LooseID/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2023_PromptCD/2023PromptD/electronHlt.json.gz 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 medium cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleHLT/HLT_SF_Ele30_MediumID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 tight cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023ForPrompt23D/tnpEleHLT/HLT_SF_Ele30_TightID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 wp80iso MVA ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleHLT/HLT_SF_Ele30_MVAiso80ID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 wp90iso MVA ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpEleHLT/HLT_SF_Ele30_MVAiso90ID/egammaEffi.txt_EGM2D.root 	 
+The histogram to be accessed in the rootfiles is the TH2D called "EGamma_SF2D". It has eta on the x axis and pT on the y axis. There are two electron ID rootfiles for 2023D: one named Hole and one named NoHole. If you are getting the corrections via rootfile and not via json, then you should use the Hole rootfiles for electrons at -1.5 < eta < 0 and -1.2 < phi < -0.8.
+
+Concerning electron HLT SFs, the plan is to produce more combinations of triggers and offline IDs and to publish them with time. Disclaimer: the electron trigger efficiency (and in general the data/MC SFs as well) are quite dependent on the offline electron selection. The trigger SFs listed in this twiki are calculated using offline electrons with only ID requirements applied. There isn't a general prescription on which other cutoffs would make the SFs much different from those, but as a rule, if you apply strong additional isolation requirements or special impact parameter thresholds, or if you remove cuts from the standard IDs, you should re-measure them and resent them to the EGM POG.
+
+ID SFs for high pt Electrons in 2023
+
+Analyses using high-pT electrons or photons should apply dedicated corrections specifically derived for such boosted objects. These scale factors differ from those used in the standard pT range and are valid for pT > 100 GeV. It is recommended to decorrelate the uncertainties across different years for both electron and photon corrections. The SFs are provided for the Tight WP of the cut based ID.
+
+The JSON files are available at:
+
+2023PromptC: /eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_high_pt/2023_Summer23/electronID_highPt.json.gz
+
+2023PromptD: /eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_high_pt/2023_Summer23BPix/electronID_highPt.json.gz
+
+HEEP ID SFs for 2023
+
+In the year 2023 the following SFs (electron pt > 35 GeV) for the HEEP ID can be used:
+
+Year Era 	Barrel SF 	Endcap SF
+2023PromptC (preBPIX) 	1.006 +/- 0.004 	0.988 +/- 0.005
+2023PromptD (postBPIX) 	1.009 +/- 0.005 	0.988 +/- 0.004
+
+For additional information please have a look at the following AN-2024/229 and presentation: HEPP ID SFs presentation
+
+(2023 scale smearing correction is not applied yet, to be updated)
+
+Photons
+
+Photon JSON format
+
+Photon json format guide (IDs):
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt 	phi
+photon.json(.gz) 	"Photon-ID-SF" 	"2023PromptC" 	"sf", "sfup", "sfdown" 	"LooseBelow20", "Loose", "MediumBelow20", "Medium", "TightBelow20", "Tight", "wp80Below20", "wp80", "wp90Below20", "wp90" 	float value 	float value 	float value
+photon.json(.gz) 	"Photon-ID-SF" 	"2023PromptD" 	"sf", "sfup", "sfdown" 	"LooseBelow20", "Loose", "MediumBelow20", "Medium", "TightBelow20", "Tight", "wp80Below20", "wp80", "wp90Below20", "wp90" 	float value 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt , phi )
+
+"Below20" refers to the pT of the photon. These SFs have a different eta binning with respect to those above 20 GeV.
+
+IMPORTANT: in order to address the data/MC disagreement introduced by the BPIX issue that showed up in Era 2023D, some of the EGM SFs (notably for electron and photon IDs) have also been derived specifically for objects that end up in the negative barrel and at -1.2 < phi < -0.8. For this reason, the corresponding json corrections have to be accessed using an extra argument: the phi of the electron/photon. In addition, also the 2023C (preBPIX) electron and photon jsons require a "phi" argument, though its value will not matter - the idea is to simplify the analysis of 2023 Prompt data altogether.
+
+Photon json format guide (Vetos):
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	R9
+photon.json(.gz) 	"Photon-CSEV-SF" 	"2023PromptC" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+photon.json(.gz) 	"Photon-CSEV-SF" 	"2023PromptD" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+photon.json(.gz) 	"Photon-PixVeto-SF" 	"2023PromptC" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+photon.json(.gz) 	"Photon-PixVeto-SF" 	"2023PromptD" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , R9 )
+
+The CSEV (Conversion-Safe Electron Veto) and Pixel Veto SFs must be retrieved using the photon eta and R9 (Photon_r9 variable in NanoAOD). Note that the json correction file is the same as for the photon ID corrections, but the input variables are different.
+
+SFs for Photons in 2023PromptC
+
+2023 PromptC 	  	Root Files 	JSON 	PDF File
+Cut-based Loose 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingCutBasedLoose122XV1/PtUnder20_egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2023_PromptCD/2023PromptC/photon.json.gz 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingCutBasedLoose122XV1/PtOver20_egammaEffi.txt_EGM2D.root 	
+Cut-based Medium 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingCutBasedMedium122XV1/PtUnder20_egammaEffi.txt_EGM2D.root 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingCutBasedMedium122XV1/PtOver20_egammaEffi.txt_EGM2D.root 	
+Cut-based Tight 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingCutBasedTight122XV1/PtUnder20_egammaEffi.txt_EGM2D.root 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingCutBasedTight122XV1/PtOver20_egammaEffi.txt_EGM2D.root 	
+MVA ID WP 80 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingMVA122XV1wp80/PtUnder20_egammaEffi.txt_EGM2D.root 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingMVA122XV1wp80/PtOver20_egammaEffi.txt_EGM2D.root 	
+MVA ID WP 90 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingMVA122XV1wp90/PtUnder20_egammaEffi.txt_EGM2D.root 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23C/tnpPhoID/passingMVA122XV1wp90/PtOver20_egammaEffi.txt_EGM2D.root 	
+CSEV 	Loose, Medium, Tight, MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ec/prrout/Run3_2023_Egamma_pixelveto_CSEV_SF/Run3_2023C/CSEV_SummaryPlot_2023C_withsyst_preBpix.root 	
+PixVeto 	Loose, Medium,Tight, MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ec/prrout/Run3_2023_Egamma_pixelveto_CSEV_SF/Run3_2023C/HasPix_SummaryPlot_2023C_withsyst_preBpix.root 	
+For ID SFs, there are two rootfiles per working point: one for 10 < pT < 20 GeV, one for photon pT > 20 GeV. The histogram to be accessed is the TH2D called "EGamma_SF2D". It has eta on the x axis and pT on the y axis. In json format, the corrections below 20 GeV need to be retrieved using the value type "*Below20".
+
+For CSEV and Pixel Veto SFs, the histograms to be accessed are TH1Fs called "hsp_CSEV_*" and "hsp_HasPix_*" respectively, where the wildcard is on the photon ID working point. Each of these histograms has 6 bins: ["EBInc","EBHighR9","EBLowR9","EEInc","EEHighR9","EELowR9"], where "Inc" means inclusive in R9, high R9 means > 0.96, and Low R9 means < 0.96. The json corrections will automatically pick either the low or the high R9 corrections based on the parsed R9 value, so the "inclusive" bins won't be used.
+
+SFs for Photons in 2023PromptD
+
+2023 PromptD 	  	Root Files 	JSON 	PDF File
+Cut-based Loose 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedLoose122XV1/NoHole_PtUnder20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedLoose122XV1/Hole_PtUnder20_egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2023_PromptCD/2023PromptD/photon.json.gz 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedLoose122XV1/NoHole_PtOver20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedLoose122XV1/Hole_PtOver20_egammaEffi.txt_EGM2D.root 	
+Cut-based Medium 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedMedium122XV1/NoHole_PtUnder20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedMedium122XV1/Hole_PtUnder20_egammaEffi.txt_EGM2D.root 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedMedium122XV1/NoHole_PtOver20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedMedium122XV1/Hole_PtOver20_egammaEffi.txt_EGM2D.root 	
+Cut-based Tight 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedTight122XV1/NoHole_PtUnder20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedTight122XV1/Hole_PtUnder20_egammaEffi.txt_EGM2D.root 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedTight122XV1/NoHole_PtOver20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingCutBasedTight122XV1/Hole_PtOver20_egammaEffi.txt_EGM2D.root 	
+MVA ID WP 80 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingMVA122XV1wp80/NoHole_PtUnder20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingMVA122XV1wp80/Hole_PtUnder20_egammaEffi.txt_EGM2D.root 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingMVA122XV1wp80/NoHole_PtOver20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingMVA122XV1wp80/Hole_PtOver20_egammaEffi.txt_EGM2D.root 	
+MVA ID WP 90 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingMVA122XV1wp90/NoHole_PtUnder20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingMVA122XV1wp90/Hole_PtUnder20_egammaEffi.txt_EGM2D.root 	
+pT > 20 GeV 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingMVA122XV1wp90/NoHole_PtOver20_egammaEffi.txt_EGM2D.root, /eos/cms/store/group/phys_egamma/ScaleFactors/Data2023/ForPrompt23D/tnpPhoID/passingMVA122XV1wp90/Hole_PtOver20_egammaEffi.txt_EGM2D.root 	
+CSEV 	Loose, Medium, Tight, MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ec/prrout/Run3_2023_Egamma_pixelveto_CSEV_SF/Run3_2023D/Inclusive_Case_3/CSEV_SummaryPlot_2023D_withsyst_postBpix.root 	
+PixVeto 	Loose, Medium,Tight, MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ec/prrout/Run3_2023_Egamma_pixelveto_CSEV_SF/Run3_2023D/Inclusive_Case_3/HasPix_SummaryPlot_2023D_withsyst_postBpix.root 	
+For ID SFs, there are two rootfiles per working point: one for 10 < pT < 20 GeV, one for photon pT > 20 GeV. The histogram to be accessed is the TH2D called "EGamma_SF2D". It has eta on the x axis and pT on the y axis. In json format, the corrections below 20 GeV need to be retrieved using the value type "*Below20". In addition, there are two photon ID rootfiles for 2023D: one named Hole and one named NoHole. If you are getting the corrections via rootfile and not via json, then you should use the Hole rootfiles for electrons at -1.5 < eta < 0 and -1.2 < phi < -0.8.
+
+For CSEV and Pixel Veto SFs, the histograms to be accessed are TH1Fs called "hsp_CSEV_*" and "hsp_HasPix_*" respectively, where the wildcard is on the photon ID working point. Each of these histograms has 6 bins: ["EBInc","EBHighR9","EBLowR9","EEInc","EEHighR9","EELowR9"], where "Inc" means inclusive in R9, high R9 means > 0.96, and Low R9 means < 0.96. The json corrections will automatically pick either the low or the high R9 corrections based on the parsed R9 value, so the "inclusive" bins won't be used.
+
+ID SFs for high pt Photons in 2023
+
+Analyses using high-pT electrons or photons should apply dedicated corrections specifically derived for such boosted objects. These scale factors differ from those used in the standard pT range and are valid for pT > 100 GeV. It is recommended to decorrelate the uncertainties across different years for both electron and photon corrections. The SFs are provided for the Tight WP of the cut based ID.
+
+The JSON files are available at:
+
+2023PromptC: /eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_high_pt/2023_Summer23/photonID_highPt.json.gz
+
+2023PromptD: /eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_high_pt/2023_Summer23BPix/photonID_highPt.json.gz
+
+Scale factors and corrections for 2022Re-recoBCD and 2022Re-recoE+PromptFG
+
+More...
+
+All the corrections described in this section are also available under /cvmfs/cms.cern.ch/rsync/cms-nanoAOD/jsonpog-integration/POG/EGM/.
+
+The eos location of the TnP ntuples used to obtain the 2022 scale factors can be found in this spreadsheet.
+
+Electrons
+
+This JSON has 1 basic format (two files, each for 2022Re-recoBCD and 2022Re-recoE+PromptFG)
+
+Electron and Electron HLT JSON formats
+
+Electron json format guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+electron.json(.gz) 	"Electron-ID-SF" 	2022Re-recoBCD 	"sf", "sfup","sfdown" 	"RecoBelow20","Reco20to75","RecoAbove75","Veto", "Loose", "Medium", "Tight", "wp80iso", "wp90iso", "wp80noiso", "wp90noiso" 	float value 	float value
+electron.json(.gz) 	"Electron-ID-SF" 	2022Re-recoE+PromptFG 	"sf", "sfup","sfdown" 	"RecoBelow20","Reco20to75","RecoAbove75","Veto", "Loose", "Medium", "Tight", "wp80iso", "wp90iso", "wp80noiso", "wp90noiso" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+The numbers in "RecoBelow20","Reco20to75","RecoAbove75" are pTs of the electron, basically GeV, 20<pT<75 GeV, pT>75 GeV (the reasons for these are a bit involved, but please use them accordingly).
+
+N.B.: For the electron reconstruction SFs, in general in the low pT bin (10 to 20 GeV) the background in Zee events is very large. So the systematics are higher than the other pT bins. We are working on improving these and will keep the collaboration posted.
+
+N.B.: The electron MVA noIso IDs are bugged in NanoAOD versions <= 12, in that in the barrel they are actually the Iso IDs.
+
+Electron HLT json format guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+electronHlt.json(.gz) 	"Electron-HLT-SF", 	2022Re-recoBCD 	"sf", "sfup", "sfdown" 	"HLT_SF_Ele30_LooseID","HLT_SF_Ele30_MediumID","HLT_SF_Ele30_TightID","HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+"Electron-HLT-DataEff" 	2022Re-recoBCD 	"nom", "up", "down" 	"HLT_SF_Ele30_LooseID","HLT_SF_Ele30_MediumID","HLT_SF_Ele30_TightID","HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+"Electron-HLT-McEff" 	2022Re-recoBCD 	"nom", "up", "down" 	"HLT_SF_Ele30_LooseID","HLT_SF_Ele30_MediumID","HLT_SF_Ele30_TightID","HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+electronHlt.json(.gz) 	"Electron-HLT-SF", 	2022Re-recoE+PromptFG 	"sf", "sfup", "sfdown" 	"HLT_SF_Ele30_LooseID","HLT_SF_Ele30_MediumID","HLT_SF_Ele30_TightID","HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+"Electron-HLT-DataEff" 	2022Re-recoE+PromptFG 	"nom", "up", "down" 	"HLT_SF_Ele30_LooseID","HLT_SF_Ele30_MediumID","HLT_SF_Ele30_TightID","HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+"Electron-HLT-McEff" 	2022Re-recoE+PromptFG 	"nom", "up", "down" 	"HLT_SF_Ele30_LooseID","HLT_SF_Ele30_MediumID","HLT_SF_Ele30_TightID","HLT_SF_Ele30_MVAiso80ID", "HLT_SF_Ele30_MVAiso90ID" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+SFs for Electrons in 2022Re-recoBCD
+
+2022 Prompt 	  	Root Files 	JSON 	PDF File
+Reco SF 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/New_SF_19122023/lowpT/Run3_2022BCD_PreEEMC/passingRECO/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2022_recoBCDE_PromptFG/2022Re-recoBCD/electron.json.gz 	https://indico.cern.ch/event/1360344/contributions/5749358/attachments/2779819/4845035/2024-01-12.pdf
+20 < pT 75 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/New_SF_19122023/midpT/Run3_2022BCD_New_midpT7/passingRECO/egammaEffi.txt_EGM2D.root 	
+pT > 75 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/New_SF_19122023/highpT/Run3_2022BCD_New_highpt6/passingRECO/egammaEffi.txt_EGM2D.root 	
+Cut Based ID 	Loose 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleID/passingCutBasedLoose122XV1/egammaEffi.txt_EGM2D.root 	
+Veto 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleID/passingCutBasedVeto122XV1/egammaEffi.txt_EGM2D.root 	
+Medium 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleID/passingCutBasedMedium122XV1/egammaEffi.txt_EGM2D.root 	
+Tight 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleID/passingCutBasedTight122XV1/egammaEffi.txt_EGM2D.root 	
+MVA ID (Iso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleID/passingMVA122Xwp80isoV1/egammaEffi.txt_EGM2D.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleID/passingMVA122Xwp90isoV1/egammaEffi.txt_EGM2D.root 	
+MVA ID (NoIso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleID/passingMVA122Xwp80noisoV1/egammaEffi.txt_EGM2D.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleID/passingMVA122Xwp90noisoV1/egammaEffi.txt_EGM2D.root 	
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 loose cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleHLT/HLT_SF_Ele30_LooseID/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2022_recoBCDE_PromptFG/2022Re-recoBCD/electronHlt.json.gz 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 medium cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleHLT/HLT_SF_Ele30_MediumID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 tight cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleHLT/HLT_SF_Ele30_TightID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 wp80iso MVA ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleHLT/HLT_SF_Ele30_MVAiso80ID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 wp90iso MVA ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpEleHLT/HLT_SF_Ele30_MVAiso90ID/egammaEffi.txt_EGM2D.root 	 
+SFs for Electrons in 2022Re-recoE+PromptFG
+
+2022 Prompt 	  	Root Files 	JSON 	PDF File
+Reco SF 	10 < pT < 20 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/New_SF_19122023/lowpT/Run3_2022EFG_PostEEMC/passingRECO/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2022_recoBCDE_PromptFG/2022Re-recoE+PromptFG/electron.json.gz 	https://indico.cern.ch/event/1360344/contributions/5749358/attachments/2779819/4845035/2024-01-12.pdf
+20 < pT < 75 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/New_SF_19122023/midpT/Run3_2022EFG_New_midpT5/passingRECO/egammaEffi.txt_EGM2D.root 	
+pT > 75 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/New_SF_19122023/highpT/Run3_2022EFG_New_highpt5/passingRECO/egammaEffi.txt_EGM2D.root 	
+Cut Based ID 	Loose 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleID/passingCutBasedLoose122XV1/egammaEffi.txt_EGM2D.root 	
+Veto 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleID/passingCutBasedVeto122XV1/egammaEffi.txt_EGM2D.root 	
+Medium 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleID/passingCutBasedMedium122XV1/egammaEffi.txt_EGM2D.root 	
+Tight 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleID/passingCutBasedTight122XV1/egammaEffi.txt_EGM2D.root 	
+MVA ID (Iso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleID/passingMVA122Xwp80isoV1/egammaEffi.txt_EGM2D.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleID/passingMVA122Xwp90isoV1/egammaEffi.txt_EGM2D.root 	
+MVA ID (NoIso) 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleID/passingMVA122Xwp80noisoV1/egammaEffi.txt_EGM2D.root 	
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleID/passingMVA122Xwp90noisoV1/egammaEffi.txt_EGM2D.root 	
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 loose cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleHLT/HLT_SF_Ele30_LooseID/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2022_recoBCDE_PromptFG/2022Re-recoE+PromptFG/electronHlt.json.gz 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 medium cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleHLT/HLT_SF_Ele30_MediumID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 tight cut-based ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleHLT/HLT_SF_Ele30_TightID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 wp80iso MVA ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleHLT/HLT_SF_Ele30_MVAiso80ID/egammaEffi.txt_EGM2D.root 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 wp90iso MVA ID 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpEleHLT/HLT_SF_Ele30_MVAiso90ID/egammaEffi.txt_EGM2D.root 	 
+Using the Electron JSONs for Scale factors
+
+More examples for electrons for JSONs:
+
+evaluator["Electron-ID-SF"].evaluate("2022Re-recoBCD","sf","RecoBelow20",-1.1, 15.0)
+
+evaluator["Electron-ID-SF"].evaluate("2022Re-recoBCD","sf","Reco20to75",1.1, 25.0)
+
+evaluator["Electron-ID-SF"].evaluate("2022Re-recoBCD","sf","Medium",-1.1, 34.0)
+
+evaluator["Electron-ID-SF"].evaluate("2022Re-recoBCD","sfup","Medium",1.1, 34.0)
+
+evaluator["Electron-ID-SF"].evaluate("2022Re-recoBCD","sfdown","Tight",1.1, 34.0)
+
+ID SFs for high pt Electrons in 2022
+
+Analyses using high-pT electrons or photons should apply dedicated corrections specifically derived for such boosted objects. These scale factors differ from those used in the standard pT range and are valid for pT > 100 GeV. It is recommended to decorrelate the uncertainties across different years for both electron and photon corrections. The SFs are provided for the Tight WP of the cut based ID.
+
+The JSON files are available at:
+
+2022Re-recoBCD: /eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_high_pt/2022_Summer22/electronID_highPt.json.gz
+
+2022Re-recoE+PromptFG: /eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_high_pt/2022_Summer22EE/electronID_highPt.json.gz
+
+HEEP ID SFs for 2022
+
+In the year 2022 the following SFs (electron pt > 80 GeV) for the HEEP ID can be used:
+Year Era 	Barrel SF 	Endcap SF
+2022Re-recoBCD (preEE) 	1.007 +/- 0.009 	1.019 +/- 0.015
+2022Re-recoE+PromptFG (postEE) 	0.997 +/- 0.008 	0.997 +/- 0.013
+These SFs should be used only for electrons with pt larger than 80 GeV, for additional information please have a look at the following AN-2024/229 and presentation: HEPP ID SFs presentation
+
+(2022 Standard (inclusive) electron scale smearing corrections are applied)
+Photons
+
+This JSON has 2 formats (again with two files, each for 2022Re-recoBCD and 2022Re-recoE+PromptFG)
+
+Photon JSON format
+
+Photon json format guide (IDs):
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+photon.json(.gz) 	"Photon-ID-SF" 	"2022Re-recoBCD" 	"sf", "sfup","sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+photon.json(.gz) 	"Photon-ID-SF" 	"2022Re-recoE+PromptFG" 	"sf", "sfup","sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+Photon json format guide (Vetos):
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	R9
+photon.json(.gz) 	"Photon-CSEV-SF" 	"2023PromptC" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+photon.json(.gz) 	"Photon-CSEV-SF" 	"2023PromptD" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+photon.json(.gz) 	"Photon-PixVeto-SF" 	"2023PromptC" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+photon.json(.gz) 	"Photon-PixVeto-SF" 	"2023PromptD" 	"sf", "sfup", "sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , R9 )
+
+The CSEV (Conversion-Safe Electron Veto) and Pixel Veto SFs must be retrieved using the photon eta and R9 (Photon_r9 variable in NanoAOD). Note that the json correction file is the same as for the photon ID corrections, but the input variables are different.
+
+SFs for Photons in 2022Re-recoBCD
+
+2022 Prompt 	  	Root Files 	JSONs
+Cut Based ID 	Loose 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpPhoID/passingCutBasedLoose122XV1/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2022_recoBCDE_PromptFG/2022Re-recoBCD/photon.json.gz
+Medium 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpPhoID/passingCutBasedMedium122XV1/egammaEffi.txt_EGM2D.root
+Tight 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpPhoID/passingCutBasedTight122XV1/egammaEffi.txt_EGM2D.root
+MVA ID 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpPhoID/passingMVA122XV1wp80/egammaEffi.txt_EGM2D.root
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/tnpPhoID/passingMVA122XV1wp90/egammaEffi.txt_EGM2D.root
+CSEV 	Loose, Medium, Tight, MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/CSEV_SummaryPlot_22_preEE.root
+PixVeto 	Loose, Medium,Tight, MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoBCD/HasPix_SummaryPlot_22_preEE.root
+For CSEV and Pixel Veto SFs, the histograms to be accessed are TH1Fs called "hsp_CSEV_*" and "hsp_HasPix_*" respectively, where the wildcard is on the photon ID working point. Each of these histograms has 6 bins: ["EBInc","EBHighR9","EBLowR9","EEInc","EEHighR9","EELowR9"], where "Inc" means inclusive in R9, high R9 means > 0.96, and Low R9 means < 0.96. The json corrections will automatically pick either the low or the high R9 corrections based on the parsed R9 value, so the "inclusive" bins won't be used.
+
+SFs for Photons in 2022Re-recoE+PromptFG
+
+2022 Prompt 	  	Root Files 	JSONs
+Cut Based ID 	Loose 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpPhoID/passingCutBasedLoose122XV1/egammaEffi.txt_EGM2D.root 	/eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_2022_recoBCDE_PromptFG/2022Re-recoE+PromptFG/photon.json.gz
+Medium 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpPhoID/passingCutBasedMedium122XV1/egammaEffi.txt_EGM2D.root
+Tight 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpPhoID/passingCutBasedTight122XV1/egammaEffi.txt_EGM2D.root
+MVA ID 	WP 80 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpPhoID/passingMVA122XV1wp80/egammaEffi.txt_EGM2D.root
+WP 90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/tnpPhoID/passingMVA122XV1wp90/egammaEffi.txt_EGM2D.root
+CSEV 	Loose,Medium,Tight, and MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ ForRe -recoE+PromptFG/CSEV_SummaryPlot_22.root
+PixVeto 	Loose,Medium,Tight, and MVA80, MVA90 	/eos/cms/store/group/phys_egamma/ScaleFactors/Data2022/ForRe-recoE+PromptFG/HasPix_SummaryPlot_22.root
+For CSEV and Pixel Veto SFs, the histograms to be accessed are TH1Fs called "hsp_CSEV_*" and "hsp_HasPix_*" respectively, where the wildcard is on the photon ID working point. Each of these histograms has 6 bins: ["EBInc","EBHighR9","EBLowR9","EEInc","EEHighR9","EELowR9"], where "Inc" means inclusive in R9, high R9 means > 0.96, and Low R9 means < 0.96. The json corrections will automatically pick either the low or the high R9 corrections based on the parsed R9 value, so the "inclusive" bins won't be used.
+
+Using the Photon JSONs for Scale factors
+
+
+evaluator["Photon-ID-SF"].evaluate("2022Re-recoBCD","sfup","Medium",1.1, 34.0)
+evaluator["Photon-CSEV-SF"].evaluate("2022Re-recoBCD","sf","Loose",1.1, 0.98)
+
+ID SFs for high pt Photons in 2022
+
+Analyses using high-pT electrons or photons should apply dedicated corrections specifically derived for such boosted objects. These scale factors differ from those used in the standard pT range and are valid for pT > 100 GeV. It is recommended to decorrelate the uncertainties across different years for both electron and photon corrections. The SFs are provided for the Tight WP of the cut based ID.
+
+The JSON files are available at:
+
+2022Re-recoBCD: /eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_high_pt/2022_Summer22/photonID_highPt.json.gz
+
+2022Re-recoE+PromptFG: /eos/cms/store/group/phys_egamma/correctionlibJSONs/Run3_high_pt/2022_Summer22EE/photonID_highPt.json.gz
+
+Scale factors and corrections for 2022PromptFG
+
+More...
+
+The SFs in this section are OUTDATED, please use the Scale factors and corrections for 2022Re-recoBCD and 2022Re-recoE+PromptFG instead. If for any reason you would prefer to use just Prompt F+G scale factors get in contact with the EGM team.
+
+Electron JSON
+
+This JSON has 1 format
+
+Electron JSON Format:
+
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+Format Guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+electron.json 	"2022FG-Electron-ID-SF" 	"2022FG" 	"sf", "sfup","sfdown" 	"RecoBelow20","Reco20to75","RecoAbove75","Veto", "Loose", "Medium", "Tight", "wp80iso", "wp90iso" 	float value 	float value
+Electron reconstruction SFs: In general for the low pT bin of 10 to 20 GeV, the background is huge. So the systematics are higher than the other pT bins.
+
+Electron HLT JSON ( For the very first time in Run3)
+
+This JSON has 1 format
+
+Electron JSON Format:
+
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+Format Guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+electron.json 	"Electron-HLT-SF" 	"2022FG" 	"sf", "sfup","sfdown" 	"HLT_Ele30_WPTight_Gsf_and_Loose_ID", "HLT_Ele30_WPTight_Gsf_and_Medium_ID", "HLT_Ele30_WPTight_Gsf_and_Tight_ID" 	float value 	float value
+
+Photon JSON
+
+This JSON has 2 formats
+
+Photon JSON Format 1 for ID SFs:
+
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , eta , pt )
+
+Format Guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	eta 	pt
+photon.json 	"2022FG-Photon-ID-SF" 	"2022FG" 	"sf", "sfup","sfdown" 	"Loose", "Medium", "Tight", "wp80", "wp90" 	float value 	float value
+
+Photon JSON Format 2 for CSEV AND Pix veto SFs:
+
+evaluator[ JSON Map Name ].evaluate( year , Value Type , Working Point , Bin )
+
+Format Guide:
+JSON to use 	JSON Map Name 	year 	Value Type 	Working Point 	Bin
+photon.json 	"2022FG-Photon-CSEV-SF", "2022FG-Photon-PixVeto-SF" 	"2016preVFP", "2016postVFP", "2017","2018" 	"sf", "sfup","sfdown" 	"Loose", "Medium", "Tight", "MVA" 	"EBInc","EBHighR9", "EBLowR9", "EEInc", "EEHighR9", "EELowR9"
+
+SFs for Electrons Prompt 2022 F+G
+
+2022 Prompt 	  	Root Files 	PDF File 	JSON 	Link to all Plots in EOS
+Reco SF 	Low pT < 20 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/Promptreco_F_G/lowpT/SF_plots/egammaEffi.txt_EGM2D.root 		/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/electron.json, /eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/electron.json.gz 	To be added
+Mid pT [20, 75] GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/Promptreco_F_G/midpT/PassingRECO/data_Run2022_PromptrecoFG/SF_plots_Mod_fnal/egammaEffi.txt_EGM2D.root 		To be added
+High pT > 75 GeV 	/eos/cms/store/group/phys_egamma/validation/web/Run3_egm_reco_SF/Promptreco_F_G/highpT/PassingRECO/egammaEffi.txt_EGM2D.root 		To be added
+Cut Based ID 	Loose 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpEleID_PromptReco2022FG/passingCutBasedLoose122XV1/egammaEffi.txt_EGM2D.root 		To be added
+Veto 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpEleID_PromptReco2022FG/passingCutBasedVeto122XV1/egammaEffi.txt_EGM2D.root 		To be added
+Medium 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpEleID_PromptReco2022FG/passingCutBasedMedium122XV1/egammaEffi.txt_EGM2D.root 		To be added
+Tight 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpEleID_PromptReco2022FG/passingCutBasedTight122XV1/egammaEffi.txt_EGM2D.root 		To be added
+MVA ID (Iso) 	WP 80 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpEleID_PromptReco2022FG/passingMVA122Xwp80isoV1/egammaEffi.txt_EGM2D.root 		To be added
+WP 90 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpEleID_PromptReco2022FG/passingMVA122Xwp90isoV1/egammaEffi.txt_EGM2D.root 		To be added
+MVA ID (NoIso) 	WP 80 	not to be used 		To be added
+WP 90 	not to be used 		To be added
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 loose cut-based ID 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpEleTrigger/HLT_Ele30_WPTight_Gsf/HLT_Ele30_LooseCutBasedID_2D.root 	  	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/electron_hlt.json.gz, /eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/electron_hlt.json 	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 medium cut-based ID 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpEleTrigger/HLT_Ele30_WPTight_Gsf/HLT_Ele30_MediumCutBasedID_2D.root 	  	 
+Trigger SFs 	HLT_Ele30_WPTight_Gsf & Run3 tight cut-based ID 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpEleTrigger/HLT_Ele30_WPTight_Gsf/HLT_Ele30_TightCutBasedID_2D.root 	  	 
+
+Using the Electron JSONs for Scale factors
+
+Usage of trigger SFs using JSONs:
+
+example evaluator:
+
+evaluator["Electron-HLT-SF"].evaluate("2022FG","sf","HLT_Ele30_WPTight_Gsf_and_Loose_ID",-1.99,60.3)
+
+the last two arguments are always eta and pT.
+
+for printing the sfs ():
+
+valsf= evaluator["Electron-HLT-SF"].evaluate("2022FG","sf","HLT_Ele30_WPTight_Gsf_and_Loose_ID",-1.00,60.3)
+print("sf is:"+str(valsf))
+
+valsf= evaluator["Electron-HLT-SF"].evaluate("2022FG","sf","HLT_Ele30_WPTight_Gsf_and_Medium_ID",-1.99,60.3)
+print("sf is:"+str(valsf))
+
+valsf= evaluator["Electron-HLT-SF"].evaluate("2022FG","sf","HLT_Ele30_WPTight_Gsf_and_Tight_ID",-0.99,100.0)
+print("sf is:"+str(valsf))
+
+Disclaimer on trigger SFs: the electron trigger efficiency (and in general the data/MC SFs as well) are quite dependent on the offline electron selection. The trigger SFs listed in this twiki are calculated using offline electrons with only ID requirements applied. There isn't a general prescription on which other cutoffs would make the SFs much different from those, but as a rule, if you apply strong additional isolation requirements or special impact parameter thresholds, or if you remove cuts from the standard IDs, you should re-measure them and present them to the EGM POG. If you want to use the EGM TnP tool, the necessary ntuples can be found here: /eos/cms/store/group/phys_egamma/ec/tnpTuples/rsalvatico/ntuples_Run3/
+
+More examples for electrons for JSONs:
+
+evaluator["2022FG-Electron-ID-SF"].evaluate("2022FG","sf","RecoBelow20",-1.1, 15.0)
+
+evaluator["2022FG-Electron-ID-SF"].evaluate("2022FG","sf","Reco20to75",1.1, 25.0)
+
+evaluator["2022FG-Electron-ID-SF"].evaluate("2022FG","sf","Medium",-1.1, 34.0)
+
+evaluator["2022FG-Electron-ID-SF"].evaluate("2022FG","sfup","Medium",1.1, 34.0)
+
+evaluator["2022FG-Electron-ID-SF"].evaluate("2022FG","sfdown","Tight",1.1, 34.0)
+
+SFs for Photons Prompt 2022 F+G
+
+2022 Prompt 	  	Root Files 	PDF File 	JSONs 	Link to all Plots in EOS
+Cut Based ID 	Loose 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpPhoID_PromptReco2022FG/passingCutBasedLoose122XV1/egammaEffi.txt_EGM2D.root 		/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/photon.json, /eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/photon.json.gz 	To be added
+Medium 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpPhoID_PromptReco2022FG/passingCutBasedMedium122XV1/egammaEffi.txt_EGM2D.root 		To be added
+Tight 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpPhoID_PromptReco2022FG/passingCutBasedTight122XV1/egammaEffi.txt_EGM2D.root 		To be added
+MVA ID 	WP 80 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpPhoID_PromptReco2022FG/passingMVA122XV1wp80/egammaEffi.txt_EGM2D.root 		To be added
+WP 90 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/tnpPhoID_PromptReco2022FG/passingMVA122XV1wp90/egammaEffi.txt_EGM2D.root 		To be added
+CSEV 	Loose,Medium,Tight, and MVA 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/CSEV_SummaryPlot_22.root 	  	To be added
+PixVeto 	Loose,Medium,Tight, and MVA 	/eos/cms/store/group/phys_egamma/akapoor/SFs_PromptReco2022FG/HasPix_SummaryPlot_22.root 	  	To be added
+
+Using the Photon JSONs for Scale factors
+
+
+evaluator["2022FG-Photon-ID-SF"].evaluate("2022FG","sfup","Medium",1.1, 34.0)
+
+evaluator["2022FG-Photon-CSEV-SF"].evaluate("2022FG","sf","Loose","EBInc")
+
+evaluator["2022FG-Photon-PixVeto-SF"].evaluate("2022FG","sf","Loose","EBInc")
+
+evaluator["2022FG-Photon-PixVeto-SF"].evaluate("2022FG","sfup","Loose","EBInc")
+
+evaluator["2022FG-Photon-PixVeto-SF"].evaluate("2022FG","sfdown","Loose","EBInc")
+
+2022, 2023, and 2024 Scale and Smearing corrections
+
+PLEASE CHECK THE NEW DOCUMENTATION PAGE HERE:
+
+https://egammapog.docs.cern.ch/Run3/SaS/
+
+Correctionlib JSONs:
+
+The 2022, 2023, and 2024 Scale and Smearing corrections are provided separately for electrons and photons. In addition, two "flavours" can be used for 2022 and 2023: a standard one, and an eT-dependent one (marked as such in the json file name). The eT-dependent corrections generally yield a better data/MC agreement for objects in the phase space they were derived upon. For 2024, only eT-dependent corrections are available. The Scale and Smearing corrections should not be used for electrons and photons below ~15 GeV and should be used with caution between 15 and 20 GeV, as they were not tuned for this pT range. They might also be ineffective at very high pT (hundreds of GeV).
+
+We recommend to use the eT-dependent corrections and to get in contact with the EGM POG should you observe unexpected/unwanted behaviours. For an explanation of the two different methods used to derive the standard and et-dependent corrections, please follow the links.
+
+Please note that the correct eta to use to fetch the electron and photon S&S corrections is the supercluster eta (that is Electron(Photon)_superclusterEta in NanoAOD v15). For NanoAOD versions < 15 this variable is not directly available, but one can calculate it as "Electron_eta + Electron_deltaEtaSC". This is unfortunately not the case for photons, for which deltaEtaSC does not exist. In this latter case, Photon_eta can be used instead. Ultimately, the difference between using supercluster era or eta should be minimal.
+
+Scale and Smearing Example
+
+CHECKOUT THE LATEST APPLICATION EXAMPLE:
+
+https://gitlab.cern.ch/cms-analysis-corrections/EGM/examples/-/blob/latest/egmScaleAndSmearingExample.py
+
+The purpose of scale and smearing (more formal: energy scale and resolution corrections) is to correct and calibrate electron and photon energies in data and MC. This step is performed after the MC-based semi-parametric EGamma energy regression, which is applied to both MC and data (aiming to correct for inherent imperfections that are not in principle related to data/MC differences like crystal-by-crystal differences, intermodule gaps, ...). The scale and smearing values are extracted from matching the Zee peaks in data and MC. Usually, energies in data are shifted to the right since, on average, the measured energy is underestimated compared to MC. The energies in MC are smeared out stochastically since the predicted resolution in MC is optimistic. More information on the methodology can be found in https://indico.cern.ch/event/1259025/#49-introduction-to-residual-sc.
+
+You have to consider the following points when applying scale and smearing:
+
+    Energies in data are scaled. Do not apply scale corrections to MC in your analysis.
+    Energies in MC are smeared. Do not apply the smearing to data in your analysis.
+    To consider uncertainties in the statistical analysis, apply them to MC on top of corrected (smeared, but not scaled) nominal quantities. 
+
+In Run 3, separate JSONs exist for electrons and photons again (was also present in early Run 2, but not in UL Run 2). Make sure you pick the right one for the object that you are considering.
+
+The schematic is the same, with a basic example provided here, and a second example for the eT-dependent corrections available here. 
+
+
+Run 3 Cut based Electron:
+
+Electron ID Working Points (WP) definition
+
+Four standard working points are provided
+
+    Veto (average efficiency ~95%)
+        Use this working point for third lepton veto or counting 
+    Loose (average efficiency ~90%)
+        Use this working point when backgrounds are rather low 
+    Medium (average efficiency ~80%)
+        This is a good starting point for generic measurements involving W or Z 
+    Tight (average efficiency ~70%)
+        Use this working point for measurements where backgrounds are a serious problem 
+
+Note that for measurements focusing on high energy (~1+ TeV) electrons, a dedicated HEEP ID is provided see a dedicated link on the EgammaIDRecipesRun2 twiki. HEEP ID for Run3 has not been developed yet, till then Run2 HEEP ID mentioned above can be used and expected to provide reasonable performance. In case you find worse performance using the Run2 HEEP ID till we mention a dedicated HEEP ID for Run3 please report to us.
+
+Working points for Run3 v1 ID (trained with 122X samples)
+
+Offline selection criteria for v1
+
+The following tables contain the cuts for the cut-based electron ID Working Points derived using the Winter22 samples (122X). More information can be found on the slides of this EGM presentation
+
+122X-tuned selection, barrel cuts ( |eta supercluster| <= 1.479)
+  	Veto (122X) 	Loose (122X) 	Medium (122X) 	Tight (122X) 	Access in CMSSW
+full5x5_sigmaIetaIeta < 	0.0117 	0.0107 	0.0103 	0.0101 	link
+abs(dEtaSeed) < 	0.0071 	0.00691 	0.00481 	0.00411 	link
+abs(dPhiIn) < 	0.208 	0.175 	0.127 	0.116 	link
+H/E < 	0.05+1.28/ESC+0.0422ρ/ESC 	0.05+1.28/ESC+0.0422ρ/ESC 	0.0241+1.28/ESC+0.0422ρ/ESC 	0.02+1.16/ESC+0.0422ρ/ESC 	link
+relIsoWithEA < 	0.406+0.535/pT 	0.194+0.535/pT 	0.0837+0.535/pT 	0.0388+0.535/pT 	link
+abs(1/E-1/p) < 	0.178 	0.138 	0.0966 	0.023 	link
+expected missing inner hits <= 	2 	1 	1 	1 	link
+pass conversion veto 	yes 	yes 	yes 	yes 	link
+
+122X-tuned selection, endcap cuts ( |eta supercluster| > 1.479)
+  	Veto (122X) 	Loose (122X) 	Medium (122X) 	Tight (122X) 	Access in CMSSW
+full5x5_sigmaIetaIeta < 	0.0298 	0.0275 	0.0272 	0.027 	link
+abs(dEtaSeed) < 	0.0173 	0.0121 	0.00951 	0.00938 	link
+abs(dPhiIn) < 	0.234 	0.228 	0.221 	0.164 	link
+H/E < 	0.05+2.3/ESC+0.262*ρ/ESC 	0.05+2.3/ESC+0.262*ρ/ESC 	0.05+2.3/ESC+0.262*ρ/ESC 	0.02+0.5/ESC+0.262*ρ/ESC 	link
+relIsoWithEA < 	0.342+0.519/pT 	0.184+0.519/pT 	0.0741+0.519/pT 	0.0544+0.519/pT 	link
+abs(1/E-1/p) < 	0.137 	0.127 	0.111 	0.018 	link
+expected missing inner hits <= 	3 	1 	1 	1 	link
+pass conversion veto 	yes 	yes 	yes 	yes 	link
+
+Effective areas: Winter22 122X effective areas. More details about how they were derived can be found in this presentation
+
+Impact parameter cuts: As before, the d0 and dz cuts are NOT part of the tuned ID. The reasons for this decision include: efficiency strongly dependent on the physics of the event, measurements wanting to have impact parameter handling different from per-electron d0/dz, relatively low discriminating power of the variables. Instead an average analysis is recommended to use safe highly efficient (when PV is properly found) baseline cuts given in the table below. The d0 and dz are NOT applied in the VID framework, and are left for regular users to cut on explicitly if desired. Since the IP cuts are not included in the standard Cut Based ID, SF should be recomputed or computed on top of the existing ones to account for the ulterior selection.
+
+  	barrel 	endcap
+d0, cm 	0.05 	0.10
+dz, cm 	0.10 	0.20
+
+Applying Individual Cuts of a Selection
+
+[Courtesy: Sam Harper's EGM tutorial in CMSPOS 2019, Aachen]
+
+Many times it is useful to add or remove individual cuts of a selection. This could be for side band studies, removing isolation cuts or for studying the efficiency of a single cut or an "N-1" efficiency/distribution where "N-1" means "apply all N selections except the 1 under study".
+
+Our ID framework also provides a mechanism for this, for each ID we save a 32-bit int with the bits corresponding to whether an individual cut passed/failed.
+
+For the electron cut based selection (veto, loose, medium, tight) the summary of the bits are:
+
+cutbased.png
+
+For example say we wanted to require just the GsfEleFull5x5SigmaIEtaIEtaCut and GsfEleHadronicOverEMCut cuts, we just sum the numbers say in hex, its 0x10+0x20 = 0x30. Adding the missing hits cut, we get 0x230. All cuts is 0x3FF. All cuts except sigmaIEtaIEta is 0x3EF.
+
+For more details, you can have a look at the section named 'Applying Individual Cuts of a Selection' under 'Exercise2: Electron and Photon Identification' in this twiki: Exercise CMSPOS 2019.
+
+For a more detailed explanation on how to do this in NanoAOD, using the Electron_vidNestedWPBitmap branch, have a look at Exercise CMSDAS 2020 , and in particular at the end of section "Exercise 3b: Working with individual cuts of an ID (optional)". 
+
+
+Run3 MVA electron:
+
+MVA Based Electron ID for Run 3
+
+This twiki describes different aspects of the usage and development of the MVA based identification criteria for Run 3. It included several recommendations by EGM POG including the official scale factors. It also documents the guidelines and useful tools for development of custom ID criteria and for the derivation of the scale factors. Please contact EGM POG if you need more details.
+
+NOTE: there is a bug in the Run3 noIso MVA electron IDs, in that the barrel IDs implement isolation (they are in fact exactly the Iso ones). This affects the IDs embedded in slimmedElectrons in Run3 MiniAOD (v3, v4) and the electron IDs in NanoAOD (v11, v12). If you are working on MiniAOD and need to use these noIso IDs, please refer to the recipe below, which makes use of EgammaPostRecoTools. If you are working on NanoAOD, these IDs will only be fixed in v13 and before that we invite you to get in contact with us to assess your particular situation.
+
+Electron MVA ID Working Points (WP) definition
+
+There are two different types of id developed for Run 3 - isolated and non-isolated. For both IDs, two working points, wp80 and wp90, are defined. These correspond to the 80% and 90% efficiency using the training datasets.
+
+Recipes and implementation
+
+Recipes for regular users: common part
+
+The 122X electron IDs are fully integrated in CMSSW. Instructions for previous Run2 releases prior to that involve merging in a private branch and are found under this link. One should start with creating the release the usual way:
+
+cmsrel CMSSW_12_6_0
+cd CMSSW_12_6_0/src
+cmsenv
+
+and proceed with the user analysis code (see example below).
+
+VID-based recipe (provides pass/fail decision and MVA value)
+
+The VID-based implementation not only computes MVA values for all electrons, but also applies the cuts for three working points listed in the table above. Both the pass/fail decisions and the MVA values are available for all electrons.
+
+The presently recommended VID tags for this tuning (which are also the names of the ValueMaps containing the pass/fail decisions) are the following.
+
+The General Purpose MVA (iso and noIso):
+
+egmGsfElectronIDs:mvaEleID-RunIIIWinter22-iso-V1-wp80 
+egmGsfElectronIDs:mvaEleID-RunIIIWinter22-iso-V1-wp90 
+egmGsfElectronIDs:mvaEleID-RunIIIWinter22-noIso-V1-wp80 
+egmGsfElectronIDs:mvaEleID-RunIIIWinter22-noIso-V1-wp90 
+
+In order to use this implementation, one needs to include the right sequence in the CMSSW job and pick up the right ValueMaps with the needed info in the user analyzer/ntupler downstream. The following simple example demonstrates all of this. The example universally runs on AOD and miniAOD input formats and uses the General Purpose WPs.
+
+The main configuration python file of the example: runElectrons_VID_MVA_Spring16_GeneralPurpose_demo.py.
+
+    The AOD vs miniAOD format is set by this flag
+    The ID sequence is set up on these lines
+    The names of the ValueMap with the decisions and MVA values are passed to an example analyzer module on these lines
+    The ID sequence is added to the path here 
+
+An example user analyzer/ntupler module: ElectronNtuplerVIDwithMVADemo.cc. This module simply retrieves the specified value maps from the event record for the ID decisions, the MVA values, and the MVA categories for all electrons. It is fairly straightforward to follow, but further guidance can be provided by EGM ID conveners individually if needed. This example can be used for any MVA with VID, triggering or non-triggering.
+
+MVA producer-based recipe
+. The MVA ValueMap producer is part of the VID sequence, so following the VID-based recipe above is sufficient to have the MVA values ValueMap created in the event record. However if one wishes to have only the necessary minimum, one needs to include just the following piece in the main python config of cmsRun:
+
+# Load the producer for MVA IDs. Make sure it is also added to the sequence!
+process.load("RecoEgamma.ElectronIdentification.ElectronMVAValueMapProducer_cfi")
+
+and subsequently add this producer to the main sequence, like
+
+process.p = cms.Path(process.electronMVAValueMapProducer * process.myAnalyzer)
+
+In the script linked in the previous section, an example of the workflow to include the ValueMap as input and latch it to its collection is reported.
+
+Running EgammaPostRecoTools to include correct noIso IDs
+
+There is a bug in the Run3 noIso MVA electron IDs, in that the barrel IDs implement isolation (they are in fact exactly the Iso ones). This affects the IDs embedded in slimmedElectrons in Run3 MiniAOD (v3, v4). If you are working on MiniAOD and need to use these noIso IDs, you can run the EgammaPostRecoTools, that will take your slimmedElectrons collection and create a new collection with the same name and the correct IDs on top. The procedure is quite simple and is detailed below.
+
+You will need to use a CMSSW release >=13_3_0, as the fix is there starting from that release.
+
+cmsrel CMSSW_13_3_0
+cd CMSSW_13_3_0/src
+cmsenv
+git cms-init
+#now add in E/gamma Post reco tools and compile
+git clone git@github.com:cms-egamma/EgammaPostRecoTools.git EgammaUser/EgammaPostRecoTools
+scram b -j 8
+
+Then, in your Analyzer's cmsRun config file:
+
+from EgammaUser.EgammaPostRecoTools.EgammaPostRecoTools import setupEgammaPostRecoSeq
+setupEgammaPostRecoSeq(process,
+                       runEnergyCorrections=False, #Only set it to True if you want to pick the latest Scale&Smearing corrections.
+                       runVID=True,
+                       era='2022-Prompt',
+                       eleIDModules=[ 'RecoEgamma.ElectronIdentification.Identification.mvaElectronID_RunIIIWinter22_iso_V1_cff',
+                                      'RecoEgamma.ElectronIdentification.Identification.mvaElectronID_RunIIIWinter22_noIso_V1_cff',
+                                      'RecoEgamma.ElectronIdentification.Identification.cutBasedElectronID_Winter22_122X_V1_cff']
+                      )
+
+This will create a sequence "process.egammaPostRecoSeq" that you have to add to your Path:
+
+process.p = cms.Path ( process.egammaPostRecoSeq * process.MyAnalyzer)
+
+
+Run 3 Cut based Photon:
+
+Cut Based Photon ID for Run 3
+
+    This page documents a simple cut-based photon identification recommended by EGM for Run 3 analyses
+    The cut based ID is a simple to use and robust set of identification and selection criteria designed for analyses where ultimate performance may not be necessary 
+
+If you are using generic photon ID for high pT region (>200 GeV ), some detailed studies of efficiency and SF is needed. Please consult this twiki for our recommendation: https://twiki.cern.ch/twiki/bin/view/CMS/EGMPhotonIDHighPtPhotons . Please contact EGM POG if you need more details on this.
+
+Photon ID Working Points (WP) definition
+
+Three standard working points are provided
+
+    Loose (average efficiency ~90%)
+        Use this working point when backgrounds are rather low 
+    Medium (average efficiency ~80%)
+        This is a good starting point for generic measurements 
+    Tight (average efficiency ~70%)
+        Use this working point for measurements where backgrounds are a serious problem 
+
+Working points for Run3 v1 ID (trained with 122X samples)
+
+Offline selection criteria for Run3 v1 (Winter22 tuned with122X samples)
+
+Cuts optimized for non-triggering photons (Fall17 selection)
+
+BARREL 	Loose (89.5443%) 	Medium (79.4913%) 	Tight (69.7945%)
+Background Rejection 	Loose (74.4187%) 	Medium (78.4906%) 	Tight (81.15%)
+Rho corrected H/E 	0.129991 	0.0583054 	0.0417588
+$\sigma_{i\eta i\eta}$ 	0.0114521 	0.0100086 	0.00999299
+Rho corrected PF charged hadron isolation 	1.88518 	0.939289 	0.316306
+Rho corrected PF ECal isolation 	0.703789 + 0.000652035*pho_pt 	0.227697 + 0.000652035*pho_pt 	0.14189 + 0.000652035*pho_pt
+Rho corrected PF HCal isolation 	6.34397 + 0.0100547*pho_pt + 5.78332e-05*pho_pt^2 	2.18903 + 0.0100547*pho_pt + 5.78332e-05*pho_pt^2 	0.39057 + 0.0100547*pho_pt + 5.78332e-05 + *pho_pt^2
+
+ENDCAP 	Loose (89.6041%) 	Medium (79.5244%) 	Tight (69.2276%)
+Background Rejection 	Loose (71.2209%) 	Medium (75.7253%) 	Tight (79.0944%)
+Rho corrected H/E 	0.153428 	0.00518075 	0.00254267
+$\sigma_{i\eta i\eta}$ 	0.0276744 	0.0268736 	0.0268702
+Rho corrected PF charged hadron isolation 	1.65396 	0.970286 	0.292664
+Rho corrected PF ECal isolation 	6.61585 + 0.000195486*pho_pt 	1.124 + 0.000195486*pho_pt 	1.04269 + 0.000195486*pho_pt
+Rho corrected PF HCal isolation 	1.85881 + 0.0116989*pho_pt + 7.47603e-05*pho_pt^2 	0.0336699 + 0.0116989*pho_pt + 7.47603e-05*pho_pt^2 	0.0292617 + 0.0116989*pho_pt + 7.47603e-05 + *pho_pt^2
+
+Applying Individual Cuts of a Selection
+
+Many times it is useful to add or remove individual cuts of a selection. This could be for side band studies, removing isolation cuts or for studying the efficiency of a single cut or an "N-1" efficiency/distribution where "N-1" means "apply all N selections except the 1 under study".
+
+Our ID framework also provides a mechanism for this, for each ID we save a 32-bit int with the bits corresponding to whether an individual cut passed/failed.
+
+For the photon cut based selection (loose, medium, tight) the summary of the bits are:
+
+bit nr 	cut 	decimal 	hex
+0 	MinPtCut 	1 	0x1
+1 	PhoSCEtaMultiRangeCut 	2 	0x2
+2 	PhoFull5x5SigmaIEtaIEtaCut 	4 	0x4
+3 	PhoHcalOverEcalWithEACut 	8 	0x8
+4 	ChgHadIsoWithEAQuadScalingCut 	16 	0x10
+5 	ECalClusIsoWithEAQuadScalingCut 	32 	0x20
+6 	HCalClusIsoWithEAQuadScalingCut 	64 	
+
+0x40
+
+The Photon_vidNestedWPBitmap branch in NanoAOD samples keeps this information ( LINK). In order to access the bit map decision for different ID cuts (0:fail, 1:loose, 2:medium, 3:tight), one can use the following piece of code.
+
+ std::vector<bool> parsePhotonVIDCuts(int bitMap, int cutLevel){
+// * | Int_t VID compressed bitmap ( [[MinPtCut][MinPtCut]],PhoSCEtaMultiRangeCut,PhoFull5x5SigmaIEtaIEtaCut,PhoHcalOverEcalWithEACut,ChgHadIsoWithEAQuadScalingCut,ECalClusIsoWithEAQuadScalingCut,HCalClusIsoWithEAQuadScalingCut), 2 bits per cut*
+   bool passSIEIE = (bitMap>>4&3) >= cutLevel;
+   bool passHoverE = (bitMap>>6&3) >= cutLevel;
+   bool passChIso = (bitMap>>8&3) >= cutLevel;
+   bool passEcalIso = (bitMap>>10&3) >= cutLevel;
+   bool passHcalIso = (bitMap>>12&3) >= cutLevel;
+   bool passID = passHoverE && passSIEIE && passChIso && passEcalIso && passHcalIso;
+   std::vector<bool> cuts;
+   cuts.push_back(passID);
+   cuts.push_back(passSIEIE);
+   cuts.push_back(passHoverE);
+   cuts.push_back(passChIso);
+   cuts.push_back(passEcalIso);
+   cuts.push_back(passHcalIso);
+   return cuts;
+}
+}
+
+or have a look at Exercise CMSDAS 2020 , and in particular at the end of section "Exercise 3b: Working with individual cuts of an ID (optional)". 
+
+Run3 MVA Photon:
+
+Introduction
+
+This page discusses EGM recommendations for a general purpose multivariate photon identification methods or Run 3. In the MVA approach, one forms a single discriminator variable that is computed based on multiple parameters of the photon object and provides the best separation between the signal and backgrounds. One can then cut on discriminator value or use the distribution of the values for a shape based statistical analysis.
+
+New general purpose photon MVA tunings are normally derived by EGM for each new dataset of real data or new MC production.
+
+While the MVA discriminators provided by EGM are expected to be used in bulk of CMS analyses, the MVA cut values are usually analysis specific. EGM provides one or two baseline working points, but it is expected that individual analyses will optimize the cut values as they find necessary for the optimal analysis sensitivity.
+
+*Important notice*: If you are using generic photon ID for high pT region (>200 GeV ), some detailed studies of efficiency and SF is needed. Please consult this twiki for our recommendation: EGMPhotonIDHighPtPhotonsRun3 . Please contact EGM POG if you need more details on this.
+
+Recipes for Run 3
+Photon MVA Development
+
+Links to the past presentation:
+
+Below are the links to several updated by Prasant in EGM POG on the Run 3 Id development.
+
+    https://indico.cern.ch/event/1204272/#2-update-on-run3-photon-mva-id
+    https://indico.cern.ch/event/1182858/#2-update-on-run3-photon-mva-id
+    https://indico.cern.ch/event/1188686/#2-update-on-run3-photon-mva-id
+    https://indico.cern.ch/event/1192144/#2-update-on-run3-photon-mva-id
+    https://indico.cern.ch/event/1192146/#2-update-on-run3-photon-mva-id
+    https://indico.cern.ch/event/1192145/#2-update-on-run3-photon-mva-id 
+
+For exact cut values see here: https://github.com/cms-sw/cmssw/blob/master/RecoEgamma/PhotonIdentification/python/Identification/mvaPhotonID_Winter22_122X_V1_cff.py
+Datasets used for training:
+
+    /Gjet_Pt-10to40_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/Run3Winter22MiniAODFlatPU0to70_122X_mcRun3_2021_realistic_v9-v2/MINIAODSIM
+    /Gjet_Pt-40toInf_DoubleEMEnriched_TuneCP5_13p6TeV_pythia8/Run3Winter22MiniAODFlatPU0to70_122X_mcRun3_2021_realistic_v9-v2/MINIAODSIM 
+
+Event Selection
+
+The events are selected based on the following criteria. The signal events are then reweighted to match the background in the phase space.
+
+    Double EM Enriched γ+jets MC samples used both for signal and background
+    Photon Pt > 10 GeV
+    Ecal acceptance cut : |η| < 2.5 and NOT in barrel–endcap overlap (1.4442 < |η| < 1.566)
+    Signal : prompt photons matched to gen matching criteria
+    Background : fake photons 
+
+    Gen matching criteria:
+        PDG ID == 22
+        IsPromptFinalState () and fromHardProcessFinalState()
+        dR(recoPhoton, genPhoton) < 0.10
+        Relative pT difference between reco and gen photon (dpT/pT < 0.20) 
+
+Photon Id Usage in Analysis
+Photon Id usage in AOD and MIniAOD
+
+Recipes and implementation
+
+Recipes for regular users: common part
+
+The 122X photon IDs are fully integrated in CMSSW. Instructions for previous Run2 releases prior to that involve merging in a private branch and are found under this link. One should start with creating the release the usual way:
+
+cmsrel CMSSW_12_6_0
+cd CMSSW_12_6_0/src
+cmsenv
+
+and proceed with the user analysis code (see example below).
+
+VID-based recipe (provides pass/fail decision and MVA value)
+
+The VID-based implementation not only computes MVA values for all photons but also applies the cuts for three working points listed in the table above. Both the pass/fail decisions and the MVA values are available for all electrons.
+
+The presently recommended VID tags for this tuning (which are also the names of the ValueMaps containing the pass/fail decisions) are the following.
+
+The General Purpose MVA (iso and noIso):
+
+egmGsfElectronIDs:mvaPhoID-RunIIIWinter22-v1-wp80
+egmGsfElectronIDs:mvaPhoID-RunIIIWinter22-v1-wp90
+
+In order to use this implementation, one needs to include the right sequence in the CMSSW job and pick up the right ValueMaps with the needed info in the user analyzer/ntupler downstream. The following simple example demonstrates all of this for electron collections - to apply on photon just replace the respective tags in the reco collections and ID labels. The example universally runs on AOD and miniAOD input formats and uses the General Purpose WPs.
+
+The main configuration python file of the example: runElectrons_VID_MVA_Spring16_GeneralPurpose_demo.py.
+
+    The AOD vs miniAOD format is set by this flag
+    The ID sequence is set up on these lines
+    The names of the ValueMap with the decisions and MVA values are passed to an example analyzer module on these lines
+    The ID sequence is added to the path here 
+
+An example user analyzer/ntupler module: ElectronNtuplerVIDwithMVADemo.cc. This module simply retrieves the specified value maps from the event record for the ID decisions, the MVA values, and the MVA categories for all electrons. It is fairly straightforward to follow, but further guidance can be provided by EGM ID conveners individually if needed. This example can be used for any MVA with VID, triggering or non-triggering.
+
+MVA producer-based recipe
+. The MVA ValueMap producer is part of the VID sequence, so following the VID-based recipe above is sufficient to have the MVA values ValueMap created in the event record. However if one wishes to have only the necessary minimum, one needs to include just the following piece in the main python config of cmsRun:
+
+# Load the producer for MVA IDs. Make sure it is also added to the sequence!
+process.load("RecoEgamma.PhotonIdentification.PhotonMVAValueMapProducer_cfi")
+
+and subsequently add this producer to the main sequence, like
+
+process.p = cms.Path(process.photonMVAValueMapProducer * process.myAnalyzer)
+
+In the script linked in the previous section, an example of the workflow to include the ValueMap as input and latch it to its collection is reported: 

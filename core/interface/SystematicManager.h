@@ -30,6 +30,10 @@ public:
                                 const std::string &upColumn,
                                 const std::string &downColumn) override;
 
+    void registerVariationColumn(const std::string &variable,
+                                                             const std::string &variationLabel,
+                                                             const std::string &column) override;
+
   /**
    * @brief Get the set of all registered systematics
    * @return Reference to the set of systematic names
@@ -94,6 +98,11 @@ private:
       variableToSystematicMap_m;
   std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
       variationColumnMap_m;
+  std::set<std::string> explicitVariationLabels_m;
+  std::unordered_map<std::string, std::set<std::string>>
+      explicitVariationToVariableMap_m;
+  std::unordered_map<std::string, std::set<std::string>>
+      variableToExplicitVariationMap_m;
   /// Per-branchName cache: maps each materialized branchName to its systList.
   /// Enables multiple callers to safely share or isolate counter namespaces.
   std::unordered_map<std::string, std::vector<std::string>>

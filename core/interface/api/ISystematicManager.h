@@ -3,7 +3,6 @@
 
 #include <set>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 class IDataFrameProvider;
@@ -74,6 +73,21 @@ public:
                                           const std::string &systematicName,
                                           const std::string &upColumn,
                                           const std::string &downColumn) = 0;
+
+    /**
+     * @brief Register an explicit variation label and column for a variable.
+     *
+     * This supports non-paired variations such as PDF replicas or individual
+     * LHE scale points that should appear directly on the histogram systematic
+     * axis instead of being expanded into Up/Down pairs.
+     *
+     * @param variable        Nominal/base variable name.
+     * @param variationLabel  Exact label to use on the systematic axis.
+     * @param column          Column name to use for this variation.
+     */
+    virtual void registerVariationColumn(const std::string &variable,
+                                         const std::string &variationLabel,
+                                         const std::string &column) = 0;
 
     /**
      * @brief Get the set of all registered systematics

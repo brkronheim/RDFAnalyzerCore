@@ -1,0 +1,98 @@
+FatJet_area	Float_t	jet catchment area, for JECs
+FatJet_btagDDBvLV2	Float_t	DeepDoubleX V2(mass-decorrelated) discriminator for H(Z)->bb vs QCD
+FatJet_btagDDCvBV2	Float_t	DeepDoubleX V2 (mass-decorrelated) discriminator for H(Z)->cc vs H(Z)->bb
+FatJet_btagDDCvLV2	Float_t	DeepDoubleX V2 (mass-decorrelated) discriminator for H(Z)->cc vs QCD
+FatJet_btagDeepB	Float_t	DeepCSV b+bb tag discriminator
+FatJet_btagHbb	Float_t	Higgs to BB tagger discriminator
+FatJet_electronIdx3SJ	Short_t(index to Electron)	index of electron matched to jet
+FatJet_eta	Float_t	eta
+FatJet_genJetAK8Idx	Short_t(index to Genjetak8)	index of matched gen AK8 jet
+FatJet_hadronFlavour	UChar_t	flavour from hadron ghost clustering
+FatJet_jetId	UChar_t	Jet ID flags bit1 is loose (always false in 2017 since it does not exist), bit2 is tight, bit3 is tightLepVeto
+FatJet_lsf3	Float_t	Lepton Subjet Fraction (3 subjets)
+FatJet_mass	Float_t	mass
+FatJet_msoftdrop	Float_t	Corrected soft drop mass with PUPPI
+FatJet_muonIdx3SJ	Short_t(index to Muon)	index of muon matched to jet
+FatJet_n2b1	Float_t	N2 with beta=1 (for jets with raw pT>250 GeV)
+FatJet_n3b1	Float_t	N3 with beta=1 (for jets with raw pT>250 GeV)
+FatJet_nBHadrons	UChar_t	number of b-hadrons
+FatJet_nCHadrons	UChar_t	number of c-hadrons
+FatJet_nConstituents	UChar_t	Number of particles in the jet
+FatJet_particleNetWithMass_H4qvsQCD	Float_t	ParticleNet tagger (w/ mass) H(->VV->qqqq) vs QCD discriminator
+FatJet_particleNetWithMass_HbbvsQCD	Float_t	ParticleNet tagger (w/mass) H(->bb) vs QCD discriminator
+FatJet_particleNetWithMass_HccvsQCD	Float_t	ParticleNet tagger (w/mass) H(->cc) vs QCD discriminator
+FatJet_particleNetWithMass_QCD	Float_t	ParticleNet tagger (w/ mass) QCD(bb,cc,b,c,others) sum
+FatJet_particleNetWithMass_TvsQCD	Float_t	ParticleNet tagger (w/ mass) top vs QCD discriminator
+FatJet_particleNetWithMass_WvsQCD	Float_t	ParticleNet tagger (w/ mass) W vs QCD discriminator
+FatJet_particleNetWithMass_ZvsQCD	Float_t	ParticleNet tagger (w/ mass) Z vs QCD discriminator
+FatJet_particleNet_QCD	Float_t	ParticleNet tagger QCD(0+1+2HF) sum
+FatJet_particleNet_QCD0HF	Float_t	ParticleNet tagger QCD 0 HF (b/c) score
+FatJet_particleNet_QCD1HF	Float_t	ParticleNet tagger QCD 1 HF (b/c) score
+FatJet_particleNet_QCD2HF	Float_t	ParticleNet tagger QCD 2 HF (b/c) score
+FatJet_particleNet_XbbVsQCD	Float_t	ParticleNet X->bb vs. QCD score: Xbb/(Xbb+QCD)
+FatJet_particleNet_XccVsQCD	Float_t	ParticleNet X->cc vs. QCD score: Xcc/(Xcc+QCD)
+FatJet_particleNet_XggVsQCD	Float_t	ParticleNet X->gg vs. QCD score: Xgg/(Xgg+QCD)
+FatJet_particleNet_XqqVsQCD	Float_t	ParticleNet X->qq (uds) vs. QCD score: Xqq/(Xqq+QCD)
+FatJet_particleNet_XteVsQCD	Float_t	ParticleNet X->e tau_h vs. QCD score: Xte/(Xte+QCD)
+FatJet_particleNet_XtmVsQCD	Float_t	ParticleNet X->mu tau_h vs. QCD score: Xtm/(Xtm+QCD)
+FatJet_particleNet_XttVsQCD	Float_t	ParticleNet X->tau_h tau_h vs. QCD score: Xtt/(Xtt+QCD)
+FatJet_particleNet_massCorr	Float_t	ParticleNet mass regression, relative correction to JEC-corrected jet mass (no softdrop)
+FatJet_phi	Float_t	phi
+FatJet_pt	Float_t	pt
+FatJet_rawFactor	Float_t	1 - Factor to get back to raw pT
+FatJet_subJetIdx1	Short_t(index to Subjet)	index of first subjet
+FatJet_subJetIdx2	Short_t(index to Subjet)	index of second subjet
+FatJet_tau1	Float_t	Nsubjettiness (1 axis)
+FatJet_tau2	Float_t	Nsubjettiness (2 axis)
+FatJet_tau3	Float_t	Nsubjettiness (3 axis)
+FatJet_tau4	Float_t	Nsubjettiness (4 axis)
+nFatJet	Int_t	slimmedJetsAK8, i.e. ak8 fat jets for boosted analysis
+
+
+Jet_PNetRegPtRawCorr	Float_t	ParticleNet universal flavor-aware visible pT regression (no neutrinos), correction relative to raw jet pT
+Jet_PNetRegPtRawCorrNeutrino	Float_t	ParticleNet universal flavor-aware pT regression neutrino correction, relative to visible. To apply full regression, multiply raw jet pT by both PNetRegPtRawCorr and PNetRegPtRawCorrNeutrino.
+Jet_PNetRegPtRawRes	Float_t	ParticleNet universal flavor-aware jet pT resolution estimator, (q84 - q16)/2
+Jet_area	Float_t	jet catchment area, for JECs
+Jet_btagDeepFlavB	Float_t	DeepJet b+bb+lepb tag discriminator
+Jet_btagDeepFlavCvB	Float_t	DeepJet c vs b+bb+lepb discriminator
+Jet_btagDeepFlavCvL	Float_t	DeepJet c vs uds+g discriminator
+Jet_btagDeepFlavQG	Float_t	DeepJet g vs uds discriminator
+Jet_btagPNetB	Float_t	ParticleNet b vs. udscg
+Jet_btagPNetCvB	Float_t	ParticleNet c vs. b
+Jet_btagPNetCvL	Float_t	ParticleNet c vs. udsg
+Jet_btagPNetQvG	Float_t	ParticleNet q (udsbc) vs. g
+Jet_btagPNetTauVJet	Float_t	ParticleNet tau vs. jet
+Jet_btagRobustParTAK4B	Float_t	RobustParTAK4 b+bb+lepb tag discriminator
+Jet_btagRobustParTAK4CvB	Float_t	RobustParTAK4 c vs b+bb+lepb discriminator
+Jet_btagRobustParTAK4CvL	Float_t	RobustParTAK4 c vs uds+g discriminator
+Jet_btagRobustParTAK4QG	Float_t	RobustParTAK4 g vs uds discriminator
+Jet_chEmEF	Float_t	charged Electromagnetic Energy Fraction
+Jet_chHEF	Float_t	charged Hadron Energy Fraction
+Jet_electronIdx1	Short_t(index to Electron)	index of first matching electron
+Jet_electronIdx2	Short_t(index to Electron)	index of second matching electron
+Jet_eta	Float_t	eta
+Jet_genJetIdx	Short_t(index to Genjet)	index of matched gen jet
+Jet_hadronFlavour	UChar_t	flavour from hadron ghost clustering
+Jet_hfadjacentEtaStripsSize	Int_t	eta size of the strips next to the central tower strip in HF (noise discriminating variable)
+Jet_hfcentralEtaStripSize	Int_t	eta size of the central tower strip in HF (noise discriminating variable)
+Jet_hfsigmaEtaEta	Float_t	sigmaEtaEta for HF jets (noise discriminating variable)
+Jet_hfsigmaPhiPhi	Float_t	sigmaPhiPhi for HF jets (noise discriminating variable)
+Jet_jetId	UChar_t	Jet ID flag: bit2 is tight, bit3 is tightLepVeto
+Jet_mass	Float_t	mass
+Jet_muEF	Float_t	muon Energy Fraction
+Jet_muonIdx1	Short_t(index to Muon)	index of first matching muon
+Jet_muonIdx2	Short_t(index to Muon)	index of second matching muon
+Jet_muonSubtrFactor	Float_t	1-(muon-subtracted raw pt)/(raw pt)
+Jet_nConstituents	UChar_t	Number of particles in the jet
+Jet_nElectrons	UChar_t	number of electrons in the jet
+Jet_nMuons	UChar_t	number of muons in the jet
+Jet_nSVs	UChar_t	number of secondary vertices in the jet
+Jet_neEmEF	Float_t	neutral Electromagnetic Energy Fraction
+Jet_neHEF	Float_t	neutral Hadron Energy Fraction
+Jet_partonFlavour	Short_t	flavour from parton matching
+Jet_phi	Float_t	phi
+Jet_pt	Float_t	pt
+Jet_rawFactor	Float_t	1 - Factor to get back to raw pT
+Jet_svIdx1	Short_t(index to Sv)	index of first matching secondary vertex
+Jet_svIdx2	Short_t(index to Sv)	index of second matching secondary vertex
+nJet	Int_t	slimmedJetsPuppi, i.e. ak4 PFJets Puppi with JECs applied, after basic selection (pt > 15)

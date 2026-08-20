@@ -1,0 +1,62 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 19, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "standalone",
+      "displayName": "Standalone Build",
+      "description": "Build CmsInfrastructure outside RDFAnalyzerCore",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "RDFANALYZER_CORE_DIR": {
+          "type": "PATH",
+          "description": "Path to the RDFAnalyzerCore repository root"
+        }
+      },
+      "required": ["RDFANALYZER_CORE_DIR"]
+    },
+    {
+      "name": "standalone-debug",
+      "displayName": "Standalone Debug Build",
+      "inherits": "standalone",
+      "binaryDir": "${sourceDir}/build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "standalone-release",
+      "displayName": "Standalone Release Build",
+      "inherits": "standalone",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "standalone",
+      "configurePreset": "standalone",
+      "jobs": 0
+    },
+    {
+      "name": "standalone-debug",
+      "configurePreset": "standalone-debug",
+      "jobs": 0
+    },
+    {
+      "name": "standalone-release",
+      "configurePreset": "standalone-release",
+      "jobs": 0
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "standalone",
+      "configurePreset": "standalone-debug",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

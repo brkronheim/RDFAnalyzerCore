@@ -1,4 +1,4 @@
-#include <GoldenJsonManager.h>
+#include "GoldenJsonManager.h"
 #include <analyzer.h>
 #include <api/ILogger.h>
 
@@ -162,6 +162,26 @@ void GoldenJsonManager::setupFromConfigFile() {
 
   std::cout << "GoldenJsonManager: loading golden JSON files from '" << configFile
             << "'..." << std::endl;
+
+  // Detect whether configFile is itself a JSON file (starts with '{' after
+  // trimming whitespace) or a list file (YAML sequence / text lines).
+  {
+    std::ifstream probe(configFile);
+    if (probe.is_open()) {
+      std::string firstLine;
+      std::getline(probe, firstLine);
+      // Trim leading whitespace
+      auto start = firstLine.find_first_not_of(" \t\r\n");
+      if (start != std::string::npos && firstLine[start] == '{') {
+        // Direct JSON file — load it straight away.
+        loadJsonFile(configFile);
+        return;
+      }
+    }
+  }
+
+  // Otherwise treat configFile as a list of JSON file paths (YAML sequence
+  // or plain text, one path per line, '#' comments ignored).
   const auto jsonFiles = configManager_m->parseVectorConfig(configFile);
   if (jsonFiles.empty()) {
     throw std::runtime_error(
@@ -227,46 +247,47 @@ void GoldenJsonManager::applyGoldenJson() {
   }
 
   if (sampleType != "data") {
+    std::cout << "GoldenJsonManager: sample type is '" << sampleType
+              << "', not 'data' — skipping golden JSON filter." << std::endl;
     return;
   }
 
-  // Share the validity map via shared_ptr to avoid a full copy into the lambda.
-  auto validLumisPtr = std::make_shared<
-      std::unordered_map<unsigned int,
-                         std::vector<std::pair<unsigned int, unsigned int>>>>(
-      validLumis_m);
+  if (validLumis_m.empty()) {
+    throw std::runtime_error(
+        "GoldenJsonManager: no golden JSON data loaded — call "
+        "setupFromConfigFile() before applyGoldenJson()");
+  }
+
+  std::cout << "GoldenJsonManager: applying golden JSON filter over "
+            << validLumis_m.size() << " certified runs..." << std::endl;
 
   dataManager_m->Filter(
-      [validLumisPtr](unsigned int run, unsigned int lumi) -> bool {
-        auto it = validLumisPtr->find(run);
-        if (it == validLumisPtr->end()) {
-          return false;
-        }
-        for (const auto &range : it->second) {
-          if (lumi >= range.first && lumi <= range.second) {
-            return true;
-          }
-        }
-        return false;
+      [this](unsigned int run, unsigned int lumi) -> bool {
+        return isValid(run, lumi);
       },
       {"run", "luminosityBlock"});
 }
 
 void GoldenJsonManager::initialize() {
-  std::cout << "GoldenJsonManager: initialized with " << validLumis_m.size()
-            << " certified run(s)." << std::endl;
+  if (logger_m) {
+    logger_m->log(ILogger::Level::Info,
+                  "GoldenJsonManager: loaded " +
+                      std::to_string(validLumis_m.size()) +
+                      " certified runs from golden JSON");
+  }
 }
 
 void GoldenJsonManager::reportMetadata() {
-  if (!logger_m) return;
-  logger_m->log(ILogger::Level::Info,
-                "GoldenJsonManager: " + std::to_string(validLumis_m.size()) +
-                " certified run(s) loaded.");
+  if (logger_m) {
+    logger_m->log(ILogger::Level::Info,
+                  "GoldenJsonManager: certified run count = " +
+                      std::to_string(validLumis_m.size()));
+  }
 }
 
 std::shared_ptr<GoldenJsonManager> GoldenJsonManager::create(
-    Analyzer& an, const std::string& role) {
-    auto plugin = std::make_shared<GoldenJsonManager>();
-    an.addPlugin(role, plugin);
-    return plugin;
+    Analyzer &an, const std::string &role) {
+  auto manager = std::make_shared<GoldenJsonManager>();
+  an.addPlugin(role, manager);
+  return manager;
 }

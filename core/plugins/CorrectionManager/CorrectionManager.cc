@@ -147,6 +147,39 @@ void populateCorrectionValues(std::vector<CorrectionValue> &values,
   }
 }
 
+/// Evaluate a correction with safe fallback for out-of-range inputs.
+///
+/// Attempts `correction->evaluate(values)` and returns the result. If the
+/// evaluation throws `std::out_of_range` (common when a correction's binning
+/// has `flow: "error"` and an input falls outside the defined edges), the
+/// fallback value is returned instead. No exception ever propagates to the
+/// caller in this case — the error is contained at the lowest level.
+///
+/// For any other exception type the evaluation is still re-thrown as a
+/// `std::runtime_error` with a descriptive message, since those indicate
+/// genuine problems (corrupt files, schema mismatches, etc.).
+template <typename CorrectionRef>
+Float_t safeEvaluate(const CorrectionRef &correction,
+                     std::vector<CorrectionValue> &values,
+                     Float_t fallback = 1.0f) {
+  try {
+    return correction->evaluate(values);
+  } catch (const std::out_of_range &) {
+    // Input outside defined binning range — return the fallback value.
+    // This is the common case for per-object corrections that are
+    // applied to all objects but only valid for a subset (e.g. electron
+    // reconstruction SFs binned by pT, muon isolation SFs with a
+    // minimum-pt edge).  No exception escapes to RDataFrame.
+    return fallback;
+  } catch (const std::exception &e) {
+    throw std::runtime_error(
+        std::string("Error evaluating correction '") + correction->name() +
+        "': " + e.what() +
+        ". This indicates a genuine problem (corrupt file, schema "
+        "mismatch, or missing correction) and should be investigated.");
+  }
+}
+
 Float_t evaluateScalarCorrection(
     const correction::Correction::Ref &correction,
     const std::vector<std::string> &stringArgs,
@@ -155,7 +188,7 @@ Float_t evaluateScalarCorrection(
   std::vector<CorrectionValue> values;
   values.reserve(inputKinds.size());
   populateCorrectionValues(values, inputKinds, stringArgs, inputVector.begin());
-  return correction->evaluate(values);
+  return safeEvaluate(correction, values);
 }
 
 Float_t evaluateScalarCorrection(
@@ -166,7 +199,7 @@ Float_t evaluateScalarCorrection(
   std::vector<CorrectionValue> values;
   values.reserve(inputKinds.size());
   populateCorrectionValues(values, inputKinds, stringArgs, inputVector.begin());
-  return correction->evaluate(values);
+  return safeEvaluate(correction, values);
 }
 
 ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
@@ -190,7 +223,7 @@ ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
   for (size_t i = 0; i < objectCount; ++i) {
     auto doubleArgIt = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
     populateCorrectionValues(values, inputKinds, stringArgs, doubleArgIt);
-    result[i] = correction->evaluate(values);
+    result[i] = safeEvaluate(correction, values);
   }
   return result;
 }
@@ -216,7 +249,7 @@ ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
   for (size_t i = 0; i < objectCount; ++i) {
     auto doubleArgIt = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
     populateCorrectionValues(values, inputKinds, stringArgs, doubleArgIt);
-    result[i] = correction->evaluate(values);
+    result[i] = safeEvaluate(correction, values);
   }
   return result;
 }

@@ -437,7 +437,7 @@ static void HandleAxisVarVector(
         std::vector<std::string> systematicVariations;
         for (const auto& syst : allSystematics) {
         std::string columnName = systematicManager_m->getVariationColumnName(variable, syst);
-        if (!refVector.empty()) {
+        if (!isWeight && !refVector.empty()) {
           columnName = ensureExpandedVector(columnName);
         }
         systematicVariations.push_back(columnName);
@@ -933,24 +933,61 @@ void NDHistogramManager::SaveHists(
     commonAxisSize.push_back(regionNameList.size());
   }
 
-  int histIndex = 0;
-  std::unordered_map<std::string, TH1F> histMap;
+  // Pre-build directory names matching the extraction code's dirName format.
+  // dirName = channel/control/category  (from indices[0], indices[1], indices[2]).
   std::unordered_set<std::string> dirSet;
+  if (allRegionNames.size() >= 3) {
+    for (size_t ci = 0; ci < allRegionNames[0].size(); ++ci) {
+      for (size_t si = 0; si < allRegionNames[1].size(); ++si) {
+        for (size_t mi = 0; mi < allRegionNames[2].size(); ++mi) {
+          dirSet.insert(allRegionNames[0][ci] + "/" +
+                        allRegionNames[1][si] + "/" +
+                        allRegionNames[2][mi]);
+        }
+      }
+    }
+  }
+
+  // Create all directories once, before extracting any histogram data.
+  // ROOT's mkdir handles nested paths: the first '/' is replaced with '_' to
+  // produce a flat top-level name, while remaining slashes create subdirs.
+  for (const auto &dirName : dirSet) {
+    std::string newDir(dirName);
+    {
+      const size_t firstSlash = newDir.find('/');
+      if (firstSlash != std::string::npos) {
+        newDir[firstSlash] = '_';
+      }
+    }
+    saveFile.cd();
+    if (!newDir.empty()) {
+      saveFile.mkdir(newDir.c_str());
+    }
+  }
+
   std::cout << "Processing " << histos_m.size() << " histograms for saving..." << std::endl;
+  int histIndex = 0;
   for (auto &histo_m : histos_m) {
+    // Local map — only holds TH1Fs for the current config histogram.
+    // Written and discarded before processing the next histogram.
+    std::unordered_map<std::string, TH1F> histMap;
+
     auto hist = histo_m.GetPtr();
     const Int_t currentHistogramSize = hist->GetNbins();
     const Int_t dim = hist->GetNdimensions();
     std::vector<Int_t> indices(dim);
       
     std::string histName = allNames[histIndex];
-    //std::cout << "Processing histogram name: " << histName << std::endl;
     for (int i = 0; i < currentHistogramSize; i++) {
       Float_t content = hist->GetBinContent(i, indices.data());
       if (content == 0) {
         continue;
       }
       Float_t error = hist->GetBinError2(i);
+
+      // Reset histName for each bin — it may be extended below with a
+      // systematic suffix and must not accumulate suffixes across bins.
+      histName = allNames[histIndex];
 
       std::string dirName = "";
       const Int_t regionAxes = std::min(static_cast<Int_t>(allRegionNames.size()), dim - 1);
@@ -980,47 +1017,53 @@ void NDHistogramManager::SaveHists(
         }
       }
 
-      if (histMap.count(dirName + "/" + histName) == 0) {
-        // std::cout << "Booking histogram: " << dirName + "/" + histName << std::endl;
-        histMap[dirName + "/" + histName] =
+      const std::string key = dirName + "/" + histName;
+      if (histMap.count(key) == 0) {
+        histMap[key] =
             TH1F(histName.c_str(),
                  (allNames[histIndex] + ";" + allNames[histIndex] +
                   ";Counts").c_str(),
                  allBins[histIndex], allLowerBounds[histIndex],
                  allUpperBounds[histIndex]);
-        dirSet.emplace(dirName);
       }
 
       const Int_t valueAxisIndex = regionAxes;
       if (valueAxisIndex < dim) {
-        // std::cout << "Booking histogram: " << dirName + "/" + histName << std::endl;
-        histMap[dirName + "/" + histName].SetBinContent(
-          indices[valueAxisIndex], content);
-        histMap[dirName + "/" + histName].SetBinError(
-          indices[valueAxisIndex], std::sqrt(error));
+        histMap[key].SetBinContent(indices[valueAxisIndex], content);
+        histMap[key].SetBinError(indices[valueAxisIndex], std::sqrt(error));
+      }
+    }
+
+    // Write TH1Fs for this config histogram immediately, then discard the map.
+    for (auto &pair : histMap) {
+      const std::string &fullKey = pair.first;
+      // Key format: "channel/control/category/histname" — dirName has two
+      // slashes (channel/control/category).  Extract the directory part by
+      // finding the LAST slash (before the histname).
+      const size_t lastSlash = fullKey.rfind('/');
+      std::string dirPart;
+      if (lastSlash != std::string::npos) {
+        dirPart = fullKey.substr(0, lastSlash);
+      }
+      std::string newDir(dirPart);
+      {
+        const size_t midSlash = newDir.find('/');
+        if (midSlash != std::string::npos) {
+          newDir[midSlash] = '_';
         }
+      }
+      saveFile.cd();
+      if (!newDir.empty()) {
+        saveFile.cd(newDir.c_str());
+      }
+      pair.second.Write();
+      // Prevent the TH1F from remaining associated with the ROOT directory.
+      // Without this, the TH1F destructor (when histMap is cleared) may
+      // trigger a double-free with the TFile's directory cleanup.
+      pair.second.SetDirectory(nullptr);
     }
 
     histIndex++;
-  }
-
-  for (const auto &dirName : dirSet) {
-    std::string newDir(dirName);
-    if (newDir.find('/') != std::string::npos) {
-      newDir[newDir.find('/')] = '_';
-    }
-    saveFile.cd();
-    if (!newDir.empty()) {
-      saveFile.mkdir(newDir.c_str());
-      saveFile.cd(newDir.c_str());
-    }
-    for (auto &pair : histMap) {
-      //std::cout << "Saving histogram: " << pair.first << std::endl;
-      if (pair.first.rfind(dirName + "/", 0) == 0) {
-        pair.second.Write();
-      }
-    }
-    saveFile.cd();
   }
 }
 

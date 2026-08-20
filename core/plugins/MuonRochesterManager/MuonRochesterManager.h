@@ -191,6 +191,35 @@ public:
                                const std::string &scaleVariation = "nom",
                                const std::string &resolutionVariation = "nom");
 
+  /**
+   * @brief Apply Run 2 Rochester kFactor corrections using the RoccoR library.
+   *
+   * Loads the RoccoR kFactor text file and applies the scale correction to
+   * muon pT. For MC, both scale and smearing are applied using gen-matched
+   * pT if available; for data, only the scale correction is applied.
+   *
+   * The RoccoR correction requires the same input columns as the correctionlib
+   * workflow (charge, genPt, nLayers). These must be set via
+   * setRochesterInputColumns() before calling this method.
+   *
+   * @param kFactorFile    Path to the RoccoR text file (e.g. RoccoR2018UL.txt).
+   * @param isData         Whether the sample is data.
+   * @param applySmearing  Whether to apply resolution smearing (MC only).
+   * @param inputPtColumn  Input muon pT column.
+   * @param outputPtColumn Output corrected muon pT column.
+   * @param applyToMass    Whether to propagate the correction to the mass.
+   * @param inputMassColumn Input muon mass column.
+   * @param outputMassColumn Output muon mass column.
+   */
+  void applyRoccoRCorrection(const std::string &kFactorFile,
+                             bool isData,
+                             bool applySmearing,
+                             const std::string &inputPtColumn,
+                             const std::string &outputPtColumn,
+                             bool applyToMass = false,
+                             const std::string &inputMassColumn = "",
+                             const std::string &outputMassColumn = "");
+
   // -------------------------------------------------------------------------
   // Accessors
   // -------------------------------------------------------------------------
@@ -257,6 +286,18 @@ private:
   std::string lumiColumn_m;
   std::string eventColumn_m;
   std::vector<ScaleResolutionStep> scaleResolutionSteps_m;
+
+  struct RoccoRStep {
+    std::string kFactorFile;
+    bool isData = false;
+    bool applySmearing = false;
+    std::string inputPtColumn;
+    std::string outputPtColumn;
+    bool applyToMass = false;
+    std::string inputMassColumn;
+    std::string outputMassColumn;
+  };
+  std::vector<RoccoRStep> roccorSteps_m;
 };
 
 

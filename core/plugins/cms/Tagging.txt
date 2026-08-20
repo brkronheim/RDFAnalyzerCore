@@ -1,0 +1,458 @@
+Scale Factor Uncertainties and Correlations Across Yearslink
+AK4 b-tagginglink
+AK4 working-point-based SFs (fixedWP SFs)link
+Details...
+General Remarkslink
+
+    Different SFs are applied to jets based on the jet flavor (jet_hadronFlavour):
+        SFb/SFc: for b and c jets (hadron flavor 5 and 4) either mujets or comb SFs are to be applied (mujets: SFs derived from QCD-enriched regions; comb: additionally also SFs from t¯t enriched regions)
+        SFlight: for light jets (hadron flavor 0) "incl" SFs
+    One common multiplicative SF is to be applied to the nominal prediction
+    Separate uncertainties are applied for b/c jets and light jets (details below)
+
+Uncertaintieslink
+
+    Only one data-taking era is analyzed: Use simple up and down uncertainties
+    More than one data-taking era is analyzed: A breakdown of SFb/c and SFlight into up/down_correlated/uncorrelated is to be used. The uncorrelated uncertainties are to be decorrelated between eras, and the correlated uncertainties are to be correlated between eras.
+        With this scheme, you should have 10 separate uncertainties when analyzing all of Run II:
+
+        btagSFbc_correlated, btagSFlight_correlated
+        btagSFbc_2018, btagSFlight_2018
+        btagSFbc_2017, btagSFlight_2017
+        btagSFbc_2016postVFP, btagSFlight_2016postVFP
+        btagSFbc_2016preVFP, btagSFlight_2016preVFP 
+
+        And similarly for Run III.
+    Special cases where the impact of b-tagging uncertainties is very high: A further breakdown of the SFb/c uncertainties can be used (please contact the BTV conveners / PAG contacts to confirm if this should be used in your analysis):
+        The mujets SFb/c uncertainties are split into up/down_jes/pileup/statistic/type3
+        The comb SFb/c uncertainties are split into up/down_isr/fsr/hdamp/jes/jer/pileup/qcdscale/statistic/topmass/type3
+        In both cases, all of these uncertainties are to be correlated between eras, except the statistic uncertainty source, which is to be decorrelated between years
+        No further breakdown is available for the SFlight scale factors, hence the up/down_correlated/uncorrelated sources should be used
+        Nomenclature of these uncertainties are based on discussions from these slides
+            type3 refers to the combination of uncertainties specific to a subset of the SF derivation methods (see S4 of the set of slides)
+            The different uncertainty sources, e.g. isr/fsr/jes/etc correspond to the usual implementation of these uncertainties in CMS and their effect on the SFs.
+
+AK4 shape correction SFs (iterativeFit)link
+Details...
+General Remarkslink
+
+    Different SFs are applied to jets based on the jet flavor (jet_hadronFlavour)
+        For b and light jets (hadron flavor 5 and 0)
+        For c jets (hadron flavor 4) no SF is applied, i.e. a flat SF of 1
+    One common multiplicative SF is to be applied to the nominal prediction
+    Separate uncertainties are applied for b/light jets and c jets (details below)
+
+Uncertaintieslink
+
+    Applied to b/light jets (each of the sources correlated between jet flavors): hf/lf/hfstats1/hfstats2/lfstats1/lfstats2
+    Applied to c jets: cferr1/cferr2
+    Correlated between eras: hf/lf/cferr1/cferr2
+    Decorrelated between eras: hfstats1/hfstats2/lfstats1/lfstats2
+    For each JES source used in your analysis, the respective up/down_jesXXX varied SF is to be applied to the JES-varied template instead of the nominal one
+
+AK4 c-tagginglink
+AK4 working-point-based SFs (fixedWP SFs)link
+Details...
+General Remarkslink
+
+    Different SFs are applied to jets based on the jet flavor (jet_hadronFlavour)
+        For b jets (hadron flavor 5): TnP
+        For c jets (hadron flavor 4): wcharm or wc
+        For light-jets (hadron flavor 0): incl or light
+    One common multiplicative SF is to be applied to the nominal prediction
+    Separate uncertainties are applied for b jets, c jets and light jets (details below)
+    Note: Only one WP can be used at a time, and also no b-tagging WP can be used in addition when using these SFs
+
+Uncertaintieslink
+
+    Applied to b jets: up/down
+    Applied to c jets: up/down
+    Applied to light jets: up/down
+    Each are correlated between eras
+
+AK4 shape correction SFs (iterativeFit)link
+Details...
+General Remarkslink
+
+    The same SFs are applied to all jets
+    When using these SFs, the b-tagging WPs can also be used, as the correction of CvsL and CvsB distributions also corrects the b-tagging distribution
+    More details can be found on this TWiki page (CTaggerShapeCalibration)
+
+Uncertaintieslink
+
+    13 uncertainty sources: Extrap, Interp, LHEScaleWeight_muF, LHEScaleWeight_muR, PSWeightFSR, PSWeightISR, PUWeight, Stat, XSec_BRUnc_DYJets_b, XSec_BRUnc_DYJets_c, XSec_BRUnc_WJets_c, jer, jesTotal
+    All sources are correlated across the different eras, except for the Stat source, which is decorrelated across eras
+    Correlate all uncertainty sources across jet flavors
+
+
+
+Recommendations for Fixed Working Point SFslink
+
+On this page the recommendations for using the fixed working point (WP) b-tagging scale factors are summarized.
+
+The BTV POG measures the b-tagging efficiency scale factors (SF=ϵData/ϵMC) for b and light flavour jets. The scale factors in general depend on the jet flavour, jet pT, and jet |η|.
+Treatment of charm jets and charm tagging
+
+In the default b-tagging methods, dedicated scale factors are not derived for charm jets, nor is it attempted to identify charm jets among b and light jets. In the WP-based scale factor methods, charm jets are treated together with b jets, i.e. common scale factors and uncertainties are applied for both.
+
+Dedicated c-tagging methods are also provided by BTV, where c-jets are explicitly identified with c-tagging working points. The methods described below are valid for both the b-tagging working points and c-tagging working points. However, both cannot be used together, as the scale factor corrections are not multiplicative. If you require both the identification of b and c jets, the recommendation is to use the shape correction c-tagging scale factors.
+Treatment of quark and gluon jets and quark-gluon tagging
+
+Recommendations for qg-tagging follow the same principles as in b-tagging, and in case of using both b-tagging and qg-tagging the event weights should be calculated for each tagger independent of each other.
+
+The group of scale factors discussed here correct the b-tagging efficiency in bins of tagger working points. For example, a binary differentiation between b-tagged jets and non-b-tagged jets can be made via one of the BTV-provided working points (see here). Event selections can be performed using this binary information, e.g. only selecting events with at least two of the selected jets passing the working point for data analyis. Also, multiple working points can be used, such as a looser working point for basic event selection, and an additional tighter working point for subcategorization of events. This WP-binned information can also be used as input to a BDT/DNN/etc.
+
+General guidelines
+
+All jets where you query the tagging status in your analysis have to undergo the scale factor procedures outlined below. That explicitly also means if control regions are constructed by requiring "zero b-tagged jets", the tagging efficiency of jets in this analysis region still has to be corrected, and corresponding uncertainties have to be applied. Or, if an analysis uses only jets with pT > 30 GeV, the tagging scale factors only have to be applied to these jets, and all other jets can be ignored.
+
+Please also note, in the following, the difference between a "b jet" (which is based on truth-level generator information) and a "b-tagged jet" (which is based on the WP selection described above). Jets referred to as "b-tagged" can be both "b jets" or "light jets".
+Scale factor recommendations for event reweightinglink
+
+The default recommendation for scale factor application is Method 1a (with possible extension to multiple working points).
+Method 1a) Event reweighting using scale factors and MC b-tagging efficiencies
+
+The goal of this method is to predict the correct event yield in data by only changing the weight of the selected simulated events, i.e., simulated events that pass the event selections. With this method, there is no migration of events from one b-tag multiplicity bin to another, i.e. no event can contribute to multiple bins with adjusted weights. Each simulated event with a certain number of b-tags will continue to have that number of b-tags.
+
+The scale factors are applied as a multiplicative event weight, wSF, considering all jets where the b-tagging information is used in the analysis (see note in the introduction), and with
+
+wSF=∏i=tagged jetsSFi[pT,η,flav]⋅ϵi[pT,η,flav]ϵi[pT,η,flav]⋅∏j=not  tagged jets1−SFj[pT,η,flav]ϵj[pT,η,flav]1−ϵj[pT,η,flav].
+
+Here, ϵ are the b-tagging efficiencies obtained from simulation (see below), and SF are the scale factors provided by the BTV POG. Please note, that the separation here is "tagged" and "not tagged", i.e. depending on whether a jet passes the defined working point (reco-level information).
+Method 1a) - Extension to multiple working points
+
+The formula above can be extended to multiple working points, by using the difference in efficiencies for the jets tagged at a looser but not a tigher working point, e.g.:
+
+wSF=∏i=tagged at T WPSFTi[pT,η,flav]ϵTi[pT,η,flav]ϵTi[pT,η,flav]⋅∏j=tagged at L WP but not T WPSFLj[pT,η,flav]ϵLj[pT,η,flav]−SFTj[pT,η,flav]ϵTj[pT,η,flav]ϵLj[pT,η,flav]−ϵTj[pT,η,flav]⋅∏k=not tagged at L WP1−SFLk[pT,η,flav]ϵLk[pT,η,flav]1−ϵLk[pT,η,flav].
+
+Caveats to event reweighting with multiple working points
+
+The application of the formula introduced in the method "Extension to multiple working points" has some caveats that analyzers should be aware of. When two or more working points are considered in the calibration, additional factors appear in the product to account for jets that satisfy a looser working point but fail a tighter one:
+
+∏j=tagged at L WP but not T WPSFLj[pT,η,flav]ϵLj[pT,η,flav]−SFTj[pT,η,flav]ϵTj[pT,η,flav]ϵLj[pT,η,flav]−ϵTj[pT,η,flav].
+
+The denominator of this fraction is positive definite, since by construction the efficiency of passing a looser working point is always greater than that of passing a tighter one (i.e. ϵLj[pT,η,flav]>ϵTj[pT,η,flav]). However, there exist corner cases in which the numerator can become negative. This may occur in specific (pT, η) bins for a given jet flavor, when the measured scale factor for the tighter working point exceeds that of the looser one (i.e. SFTj[pT,η,flav]>SFLj[pT,η,flav]).
+
+Because the overall expression represents a product of probabilities, a negative contribution is unphysical.
+It is therefore recommended to set these intermediate factors to unity whenever the numerator becomes negative, thereby preventing the resulting event weight from acquiring an unphysical negative value.
+b-tagging efficiencies in simulationlink
+
+The application of these working-point-based scale factors requires the knowledge of the b-tagging efficiency in simulation, so that this can be corrected to data via the scale factors provided by BTV. In principle, BTV could also provide a common set of b-tagging efficiencies for data analysis, but many studies have shown that these efficiencies strongly depend on the analyzed phase space and jet selection. Therefore, the derivation of tagging efficiencies is left to the analyzers.
+
+In summary, a b-tagging efficiency ϵ in pT and |η| bins is defined as
+
+ϵ[pT,η,flav]=Nb-tagged jets[pT,η,flav]Ntotal jets[pT,η,flav],
+
+i.e. the fraction of jets of a certain truth-jet flavour passing the working point in question. It is important to note that this tagging efficiency is evaluated per individual jet truth flavour, i.e. b jets, c jets, and light jets individually. This tagging efficiency has some dependency on jet pT and η, and should therefore be derived in corresponding bins.
+Binning recommendations
+
+pT: A recommended binning is along the same lines as is used in the scale factor derivation, e.g. [20, 30, 50, 70, 100, 140, 200, 300, 600, 1000].
+
+η: A recommended binning depends on the available simulation statistics, one could e.g. only use one single bin, or separate into barrel and endcap regions, or use a few homogeneous bins.
+
+Processes: Efficiencies should also be derived individually for different groups of simulated events. For example, the tagging efficiency can be a few percent different for t¯t events and multijet events. Common sense can be used when grouping processes together.
+
+Important
+
+Please note that the derivation of these efficiency maps only makes sense if no b-tagging related event selections have been applied yet. Best practice is to derive these efficiencies after the analysis event selection, but omitting any b-tagging selection, such as the number of b-tagged jets, etc.
+
+
+
+Recommendations for Shape Correction SFslink
+
+On this page the recommendations for using the shape correction b-tagging scale factors are summarized.
+
+Important
+
+Please check your analysis's specific needs first before you apply this reweighting. If you are interested in using the whole b-tagging discriminant distribution in your analysis, e.g. using b-tagging variables to separate signal and background, then this method is for you. Note that, this reweighting will result in larger b-tagging uncertainties than the working point based reweighting.
+
+If you are using a working point based selection only, please refer to other scale-factor methods from BTV.
+
+Contact: Svenja Diekmann, Felix Zinn
+General informationlink
+
+The goal of this method is to predict correct b-tagging discriminant distributions as well as event yields (see note below) in data by only changing the weight of selected MC events, i.e., MC events that did not pass the selection do not need to be added back. It is important to point out that with this method there is no migration of events from one b-tag multiplicity bin to an other, as each event gets a weight based on jet scale factors. In general, the jet scale factors depend on pT, η and the b-tagging discriminant D. The b-tag event weight ω is obtained by
+
+ωevent=∏NjetsiSF(Di,pTi,ηi),
+
+which takes all selected jets into account.
+Effect on event yieldslink
+
+As the name already suggests, the event weights extracted with this method are supposed to only change the shape of the b-tagging discriminant.
+
+The expected event yields should be preserved after the reweighting, before any b-tagging selection criteria are applied. This means that the number of events (i.e. the sum of event weights) before and after applying b-tag weights should be identical. As analysis phase spaces can be arbitrary, and in general might vary significantly from that of the scale factor measurement (tag-and-probe selection with exactly two jets), it is not possible to ensure this correct normalisation in general. Therefore, analysts need to measure the sum of event weights before and after applying b-tag event weights, without requiring any b-tag selection in both cases. The ratio r=∑ωbefore/∑ωafter represents a phase space extrapolation and should be multiplied to the b-tag event weight. Also, this extrapolation will in general depend on further variables, most notably the jet multiplicity. Especially in analyses with a large number of jets, the ratio r has to measured and applied per jet multiplicity bin, or any other affected variable.
+
+As also the composition of the jet flavour is phase space dependent and the application of the b-tagging event weights should not affect the composition of these, we strongly recommend to perform the normalisation reweighting per jet flavour, process and b-tagging uncertainty.
+
+All analyses are required to cross-check the normalisation of the b-tagging weight in their phase space.
+
+After selecting events to have a certain b-tag multiplicity, expected event yields should and are allowed to change (since b-tag event weights and b-tagging discriminant values are correlated).
+Systematic uncertaintieslink
+
+Different systematic uncertainties are included in the calculation of jet scale factors. They are listed and explained in the following:
+
+    JES: Use JES-shifted jets to derive the scale factors. This is done for the combined JES shift, as well as for the different JES sources. See the list below, and check JECUncertaintySources for the current list for each year. It should be noted that the JES is not an uncertainty intrinsic to the shape calibration method. The JES-varied scale factors are only provided to propagate the effect of various JES sources to the central b-tagging SF measurement.
+    Purity: Vary the contamination from udsg+c (b+c) jets in heavy (light) flavour regions by ± 20%.
+    Statistical: Account for statistical fluctuations in both data and MC by multiplying linear and quadratic functions to the statistical uncertainty per b-tag discriminant bin.
+    Charm jets: For charm jets, a flat scale factor of 1 is assigned, with an uncertainty that is based on the total relative uncertainty for b jets.
+
+Naming scheme:
+
+    jes: Combined JES uncertainty.
+    jes_x: Uncertainty due to JES source x.
+    lf: Contamination from udsg+c jets in HF region.
+    hf: Contamination from b+c jets in LF region.
+    Linear and quadratic statistical fluctuations:
+        hfstats1 / "hfstats2": b jets.
+        lfstats1 / "lfstats2": udsg jets.
+    cferr1 / cferr2: Uncertainty for charm jets.
+
+Up and down variations are prefixed with up_ and down_.
+
+Due to the iterative approach, the variations jes, lf, hf, hfstats1/2, and lfstats1/2 are applied to both b and udsg jets. For c-flavoured jets, only cferr1/2 is applied.
+Correlationslink
+Correlation across flavourslink
+
+Each of the scale factor variations lf, hf, hfstats1, hfstats2, lfstats1, and lfstats2 should be correlated between b- and light-jets, i.e. each of them should be applied simultaneously to b- and light-jets to calculate the uncertainty. This results in 6 uncertainties (12 up/down shifts) for b- and light-jets, and 2 uncertainties for c-jets and the additional JES uncertainties.
+Correlation across years (Run 2)link
+
+We provide a preliminary recommendation for correlating the b-tagging SF uncertainties in an analysis that is combining the three data-taking years from Run 2 (2016-2018):
+
+    The hfstats1/2 and lfstats1/2 uncertainties are statistical in nature and should thus be uncorrelated between the years.
+    The JES related uncertainties should be correlated with the JES shifts used in the analysis and thus should follow the correlation scheme recommended by the JERC group.
+    For the purity uncertainties (lf and hf), we recommend to correlate them between the years.
+    For the uncertainties on charm jets (cferr1 and cferr2), we also recommend to correlate them between the years.
+
+
+
+Recommendations for Boosted bb/cc Tagging SFslink
+
+This page summarizes the recommendations for using the boosted X→bb/cc tagging SFs.
+
+The description is divided into two parts. The first part outlines the use of the centrally derived tagging SFs based on fixed working points (WPs). The currently available SFs are derived from the Run 2 UL campaigns, employing three methods (the sfBDT, mu-tagged, and boosted Z→bb method) and the recommended WPs. These SFs are provided in the correctionlib format. The second part explains how to utilize the sfBDT framework to obtain SFs based on a custom tagging discriminant and custom WP by using a user-provided YAML card.
+Fixed working point scale factorslink
+General remarklink
+
+    Presented SFs are derived to correct the tagging efficiency on signal processes (SM Z/H→bb/cc, or BSM resonance X→bb/cc processes). They should be applied only to these signal processes (post tagger cut)
+    The "mistag SF" for background processes passing the tagger cut are topology-dependent and hence are not provided centrally. They need to be determined from the control regions. A usual simultaneous fit of the SR (with AK8 tagger cuts) and the CRs (with the same tagger cuts) should be used to constrain the background normalizations in situ.
+
+Read/use the SFslink
+
+To read the SFs, use the correctionlib package and refer to this SF campaigns page for the python code examples. The provided SFs are derived under Run 2 UL campaigns. Separate links are available for UL2016preVFP, UL2016postVFP, UL2017, and UL2018.
+
+The provided SFs are derived from three methods exploring largely orthogonal phase space, i.e. the sfBDT, mu-tagged, and boosted Z→bb methods (labelled sfbdt, mutag, and zbb) and their combined results (comb) using the BLUE combination strategy. Details of each method can be found in BTV-22-001 (AN-2021/005-v10). These scale factors are derived for each year condition (2016APV, 2016, 2017, 2018), each pT bin (450-500, 500-600, >600 GeV), and specific taggers and WPs. The considered taggers include ParticleNet, DeepAK8-MD, DeepDoubleX, and the double-b tagger. Detailed definitions of these taggers and discriminators can be found in Taggers and definitions of discriminators. The working points involve centrally recommended working points, with signal efficiencies of 40%, 60%, and 80% for X→bb tagging, and 15%, 30%, and 50% for X→cc tagging. The numerical values for each method can be found in the corresponding SF campaign links mentioned above.
+
+The "combined SF" is recommended for use in most of the cases. If the phase space under analysis overlaps with that of a specific method (for example, if the SF is to be cross-validated in the Z(→bb/cc)+jet phase space region), it is acceptable to use the SF from just one of the methods.
+
+Coverage of the three methods
+
+The sfbdt and mutag methods are used to derive all X→bb/cc SF results, while the zbb method is used exclusively for X→bb SF derivations. In addition, the zbb method does not yield specific SF points due to the method's constraints: the looser working points for the DeepDoubleX and double-b taggers, as well as all working points for the DeepAK8-MD tagger. The corresponding entry is absent from the correctionlib json file. The comb results are the combination of all valid methods for a given SF derivation point.
+
+For each SF derivation point (given year condition, specific tagger and WP, and pT bin), and for each method, the following values are provided in the json file:
+
+    central: the central value of the SF;
+    up/down: the up/down variation corresponding to the total uncertainty
+    up_uncorrelated/down_uncorrelated: The up/down variation contributed from the statistical uncertainty component;
+    up_correlated/down_correlated: The up/down variation contributed from the systematic uncertainty.
+
+Uncertainty treatmentslink
+
+In the case where only one tagger WP is used to define the SR in an analysis, we recommended the following approach to treat the correlation of uncertainties:
+
+    the "correlated" part of the uncertainty should be treated as correlated across all year conditions and jet pT bins;
+    the "uncorrelated" part should be treated fully uncorrelated across all year conditions and pT bins.
+
+In a customized analysis where multiple (≥2) tagger WPs are used, SFs should be derived from exclusive tagger bins (thus, a custom derivation is required). In this case, regarding the correlation of SFs in different tagger bins, it is generally recommended to treat them as uncorrelated, especially, between the most sensitive tagger bin (i.e. in the highest discriminant score region) with the other bins.
+
+Note that these nuisance parameters do not account for the uncertainty in the background mistagging rate. Therefore, it is necessary to introduce other mechanisms in analysis to consider this uncertainty, e.g., simultaneously fitting background-enriched regions and the signal region to estimate the background SF in situ.
+Instructions for deriving custom bb/cc tagging SFs with the sfBDT methodlink
+General remarklink
+
+Occasionally, analyzers may consider optimizing a specific tagger discriminant and WP, which requires the derivation of corresponding SF. This customization occurs in two areas: - On the tagger discriminant: Examples include dedicated tagger usage for W/Z tagging, where the targeted final states may involve multiple cases (e.g. bb, cc, cs, qq), leading to various choices of discriminants constructed from the tagger's raw scores. Moreover, the weight for each chosen raw score can be further adjusted to determine the most optimal discriminant. - On the WP: Since the sensitivity of the boosted-jet analyses largely depends on the tagger performance, the WP is often more dedicatedly optimized. In addition, some analyses may consider using "exclusive" WP bins (e.g. 0.8-0.95 and >0.95, for two bins), requiring SF derivation for these exclusive discriminant bins.
+
+This section will introduce how to use the boost-calib framework to run the sfBDT method to derive customized SFs. The link to the framework is: https://github.com/colizz/boohft-calib.
+
+For a detailed introduction to the sfBDT method, refer to the BTV-22-001 PAS and AN-21-005.
+User-provided inputlink
+
+This framework is maintained to assist analyzers in deriving SFs based on customized working points for X→bb/cc taggers. It is designed with a straightforward user interface: users only need to fill in a YAML card, which includes all configurations; there is no need to generate dedicated samples from the users' side. The YAML card is critical to the process, as it directly determines the SF result and ensures reproducibility.
+
+The YAML card contains the following information.
+
+    type: The type of calibration, which can be bb or cc.
+    year: The year for the UL condition, which can be 2016APV, 2016, 2017, or 2018.
+    pt_edges: Jet pT ranges used for deriving separate SFs.
+    tagger: Details of the tagger, including the tagger name/expression, the range, and the custom working points defined in the user's analysis.
+    main_analysis_tree: Information about the signal ROOT tree taken from the user's analysis, which is used to extract the signal tagger shape.
+
+Details on user-provided signal information
+
+A ROOT file taken from the analysis for the signal process is required by the framework to extract the "signal tagger shape template". This is crucial as it guides the framework on how to define sfBDT selections to make the proxy similar to the signal jets. Naively, this signal tagger shape should be skewed towards the highest X→bb or cc discriminant value, as the signal jets should involve genuine X→bb or cc jets.
+
+To guide the extraction, one needs to define in the YAML file how the tagger discriminant is calculated (a branch or an expression), the selection to be applied, and the weight for each event.
+
+It is recommended that a truth-matching requirement be included in the selection, such as (1) matching both GEN-level quarks to jets or (2) matching the GEN-level resonance to jets with a high pT requirement on the jet. This helps mitigate the effect of non-genuine signal jets from the signal sample on the tagger distribution.
+
+Example YAML card
+
+The framework provides an example card: cards/example_bb_PNetXbbVsQCD.yml. This card demonstrates how to derive SFs for the ParticleNet-MD bbvsQCD discriminant at the following working points: {HP: [0.9880, 1.], MP: [0.9734, 1.], LP: [0.9172, 1.]} and three pT bins. One can refer to this example card when setting up their customized card.
+Running the programlink
+
+For running on lxplus (currently with the EL9 system), one can load the preconfigured Miniconda environment:
+
+source /afs/cern.ch/work/c/coli/public/miniconda/bin/activate
+conda
+ activate boohft-calib
+# clone the repo
+git
+ clone https://github.com/colizz/boohft-calib.git && cd boohft-calib
+
+For setting up the environment on a local cluster
+
+Then, run the following command to execute the program in one go.
+
+python
+ launcher.py cards/example_bb_PNetXbbVsQCD.yml
+
+The program is designed for local parallelization (instructions in "Program optimization" below). By default, it runs in parallel on 5 CPU threads, which takes approximately 4 hours on lxplus. When running on a local cluster, it is recommended to try with more CPU threads for faster performance.
+Program componentslink
+
+The complete process for running boost-calib is divided into four steps. The terminal output showcases the progress of running the four steps successively. An outline is presented below.
+
+    Step 1: Run on all MC and data to collect HT and jet pT distributions and calculate reweighting factors. This step is implemented using the coffea framework, with histograms filled in parallel across multiple chunks.
+    Step 2: Run on all MC and data again, apply the SF to the MC, and calculate the appropriate sfBDT coastline selections based on the corrected MC's tagger and sfBDT distributions. This step is also parallelized using coffea.
+    Step 3: Using the sfBDT coastline selections, create distributions of various observables after each selection on the MC and compare them to data (for validation purposes). This step is also parallelized with coffea.
+    Step 4: Perform fitting. For each sfBDT coastline selection and fit scheme, a separate fit is executed. The fits are carried out using the combine framework. The fitting process is parallelized, and progress bars are displayed. Some fits (with central sfBDT selections) will include uncertainty breakdowns and computing impact plots, so they will take more time. Once all fits are completed, the results are summarized, and the final SF is computed.
+
+The framework stores all intermediate results in output/[routine-name], and summarizes key plots and results in a webpage format, stored in web/[routine-name]. This webpage allows direct result review or easy sharing with others. Additionally, the YAML card is included on the webpage to ensure reproducibility.
+Program configurationlink
+
+Program optimization for customized machine conditions
+
+The process supports checkpointing and optimizations on multiple threads.
+
+One can specify the number of threads for each of the four steps using --workers N1 N2 N3 N4 (or -w N1 N2 N3 N4). The first three steps use coffea's parallelization, while the fourth step involves parallel fits performed by combine. For instance, on a machine with 96 CPU threads, one may choose to use:
+
+python
+ launcher.py cards/example_bb_PNetXbbVsQCD.yml -w 10 10 10 70
+
+If no specification is provided, the default configuration --workers 5 5 5 5 is used.
+
+One can also choose to run specific steps by using the --run-step (-s) option, followed by four 1/0 flags to enable/disable the respective steps. For example, to run only steps 3 and 4:
+
+python
+ launcher.py cards/example_bb_PNetXbbVsQCD.yml -s 0011
+
+Setting parameters via command line
+
+The user-provided YAML card, along with a "base YAML card" that defines some basic settings, determines all the configurations for the SF. In a custom YAML card, one can override the default values set in the base YAML card. Additionally, all parameters can be overridden on the fly via the command line by using -o [arg_name] [arg_value]. For example, to modify the calibration type and change the routine name based on a provided card, try
+
+python
+ launcher.py cards/example_bb_PNetXbbVsQCD.yml -o type \"cc\" -o routine_name \"example_cc_ULNanoV9_PNetXbbVsQCD_ak8_inclWP\"
+
+For additional parameters, check the help menu with:
+
+python
+ launcher.py -h
+
+Instruction on defining tagging discriminantslink
+
+Besides the centrally supported definition of X→bb/cc tagger discriminants summarized in Taggers and definitions of discriminators, it is possible to construct a custom tagger discriminant for various tagging purposes. A summary of the Global Particle Transformer 3 (GloParT 3, supported since NanoAODv15) and ParticleNet jet tagger follows below.
+
+For the GloParT 3 tagger, the following tagging discriminant definitions are found to be optimal in different scenarios and are therefore recommended:
+
+    Xbb / (Xbb + QCD): for H/X → bb tagging.
+    Xcc / (Xcc + QCD): for H/X → cc tagging.
+    (Xbb + Xcc + Xqq) / (Xbb + Xcc + Xqq + QCD): for hadronic Z (bb/cc/qq) tagging.
+    (Xcs + (1/3)*Xqq) / (Xcs + (1/3)*Xqq + QCD): for hadronic W (cs/qq) tagging.
+
+For the ParticleNet tagger, the following tagging discriminant definitions are used according to the Run 2 analysis convention:
+
+    Xbb / (Xbb + QCD): for H/X → bb tagging.
+    Xcc / (Xcc + QCD): for H/X → cc tagging.
+    (Xbb + Xcc + Xqq) / (Xbb + Xcc + Xqq + QCD): for hadronic Z (bb/cc/qq) tagging.
+    (Xcc + Xqq) / (Xcc + Xqq + QCD): for hadronic W (cs/qq) tagging.
+
+Inspecting webpage resultslink
+
+It is helpful to inspect various figures and tables from the output webpage to assess the correctness of the results and identify potential anomalies. This section offers several recommendations. Below is a checklist summarizing the key points that will be discussed in detail below. This list also serves as a helpful reference when discussing result validity with the responsible persons in BTV and JME during the review process.
+
+Checklist
+
+    The user-provided signal tagger shape template appears as expected.
+    The sfBDT coastline shapes look as expected.
+    The inclusive (pass+fail) distributions on various observables are as expected, and the MC/data agreement looks good/is understandable.
+        The sfBDT distribution shows reasonable agreement between data and MC.
+        The original/transformed tagger discriminant distribution looks reasonable between data and MC. The SF in the targeted tagger bins can be roughly estimated from the data/MC agreement.
+    Regarding the derived SFs:
+        The SFs derived from the fits align with the expected from above.
+        The uncertainties, after taking into account the external ones from the sfBDT cut deviations and the reweighting schemes, are enlarged to a reasonable level.
+        The pulls of the nuisance parameters observed from the impact plots indicate healthy behaviour.
+
+Detailed instructions are as follows. They are provided based on our example webpage, which one can find at this link. This corresponds to the results after running the "example YAML card".
+
+Reviewing the signal template
+
+First, verify that the shape template for the tagger discriminant provided in the input signal ROOT file is correct. On the "2. sfBDT coastline" subpage, the top section displays the "signal distribution on original tagger discriminant" and "on transformed tagger discriminant" (see figures below). This distribution should be skewed towards the highest value (typically 1). If there are significant entries in the low-tagger-score region, this is unusual and may warrant a check on the selection applied, such as ensuring GEN-level truth-matching criteria are set correctly.
+
+Reviewing sfBDT coastline selections
+
+The "2. sfBDT coastline" subpage also displays the optimized sfBDT coastline selection based on the provided signal template, which is a set of selections on the sfBDT-tagger 2D plane. For bb or cc cases, the sfBDT coastline shapes should be similar to those produced from the example routine (see figures below). If the coastline in the high-tagger-score region shows a vertical drop and the starting point on the left side of the coastline is close to 1, this indicates that the sfBDT may lack sufficient capability to produce the proxy jet. If this situation arises, it is recommended not to use the sfBDT method, or to contact the maintainer in BTV and JME for further discussion.
+
+Reviewing observable distributions to gain insights on SFs
+
+In the "3. template writer" section, various jet observable plots are displayed after applying the reweighting factor (obtained from step 1) and different levels of the sfBDT coastline selection (obtained from step 2), as well as without selection. These plots can be reviewed carefully to provide insights for the SF that will be derived.
+
+    sfBDT distribution check: First, check the "inclusive, no coastline selection" distribution in the sfBDT section, which shows the data-MC agreement for the sfBDT discriminant without any selection applied. This typically displays good data-MC agreement (figure below).
+
+    Tagger discriminant check: In the "tagger discr" and "transformed tagger discr" plots, examine the "inclusive, no coastline selection" distribution, focusing on data-MC agreement in the high-score region. You can verify the specific WP you choose on the tagger discriminant. The corresponding threshold on the transformed tagger space can be found on the "2. sfBDT coastline" subpage. Compare this plot with those displaying different levels of sfBDT selection to assess any significant differences in data-MC agreement. Generally, the data-MC agreement level is similar. If there is a large variation among the different plots, it indicates the importance of fitting SFs with each sfBDT selection level and using the variation on fitted SFs to account for the impact of different sfBDT selections. As an example, the "transformed tagger discr" plots produced on different sfBDT selection levels (central, tight, and without an sfBDT cut) are shown below.
+
+    Target flavour distribution check: In the "transformed tagger discr" plot, check whether your target flavour (b or c) resembles a signal-like proxy after the sfBDT cut. In the transformed space, the signal process should display a uniform distribution, so the target flavour's distribution should appear uniform similarly (see above plots).
+
+    High tagger-selection check: After applying a high tagger selection, you may observe that the target flavour has become the dominant region. In this case, the data-MC ratio within this region can provide a useful SF estimate (e.g., to check if it deviates significantly from 1), which can serve as a valuable reference for the SF obtained later through fitting. From the above plots, it can be preliminarily inferred that the SF is close to 1.
+
+Reviewing the fit results
+
+In "4. SF summary" (e.g. this page from the example routine), you can review the final fit results. This page provides a summary of the final SF and associated uncertainty in both tabular and graphical forms at the top.
+
+If your analysis requires a complete breakdown of SF uncertainty, it can be found in the JSON file at the bottom of the page.
+
+{
+    "HP_pt450to500": {
+        "jer": {
+            "high": 0.0028916485542073967,
+            "low": 0.00283583602388414
+        },
+        "jes": {
+            "high": 0.0015241187127373408,
+            "low": 0.0016996664243347915
+        },
+        ...
+        "extVarRwgt": {
+            "high": 0.053661320412052294,
+            "low": 0.053661320412052294
+        },
+        "final": {
+            "central": 0.9971903376563357,
+            "high": 0.06625446380258516,
+            "low": 0.06595169678689859
+        }
+    },
+
+The uncertainty sources listed in the JSON file are grouped as follows. They involve both fit nuisances and external uncertainty sources.
+
+    fracBB, fracCC, fracLight, psWeightIsr, psWeightFsr, lumi_13TeV, l1PreFiring, pu, jer, jes: The nuisance parameters in the fit. The first three are theoretical uncertainties applied to QCD flavour modelling. The 4th and 5th account for parton shower modelling uncertainties. The remaining ones are common uncertainties to cover the modelling effect at the reconstruction level.
+
+    extVarRwgt and extSfBDTVariation: These are external uncertainties added post-fit by aggregating multiple fit results:
+        extVarRwgt accounts for the conservative estimate of the impact on the fit due to data-MC disagreements in sfBDT and the fit variable (log(mSV)). This uncertainty often constitutes a significant part of the total uncertainty. It is estimated by reweighting the variables and then fitting again, using the shift in the central SF as an additional uncertainty. The three SF plots displayed at the bottom of the page show the SF derived from the default scheme and two reweighting schemes for these variables, illustrating the source of this uncertainty.
+
+        extSfBDTVariation investigates the effect of varying sfBDT selection thresholds. We adjust sfBDT cuts independently in the pass and fail regions to create different proxy-to-signal similarity conditions, each producing a fitted SF. This results in 9x9=81 SFs. The SFs for each scheme are derived by smearing across these 81 variations, yielding the SF and expanded uncertainty for each scheme. A summary of the 81 SFs per scheme can be found by clicking on each detailed scheme link, located at the bottom of the sub-subpages (example figure below). Examining these SF variations helps us understand the impact of adjusting sfBDT cuts on the SF.
+
+Finally, each scheme's sub-subpage (e.g. the page for the default scheme) provides figures related to the likelihood template fit, including (see example figures below):
+
+    Pre/post-fit plots in the pass and fail regions:
+
+    The template change brought by each nuisance parameter (take psWeightFsr as an example):
+
+    The NLL scan on the main POI, and the impact plots. Impact plots are generally helpful in displaying various details of the fit, assisting the review process of the fit results.
+

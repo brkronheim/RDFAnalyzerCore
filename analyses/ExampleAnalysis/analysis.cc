@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
     an.bookConfigHistograms();
 
     // Execute the dataframe and save results
-    an.save();
+    an.run();
 
 }
 

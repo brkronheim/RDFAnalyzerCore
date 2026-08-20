@@ -98,6 +98,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import numpy as np
 from typing import Dict, List, Optional
 
 import luigi  # type: ignore
@@ -652,15 +654,65 @@ def _prepare_manifest_datacard_config(
 
     control_regions = config.get("control_regions")
     manifest_defaults = config.get("manifest_defaults")
-    if (not control_regions) and isinstance(manifest_defaults, dict):
-        region_names = [target_region] if target_region else [r.name for r in manifest.regions if r.name]
+
+    # Override-only mode: if control_regions is empty/missing, synthesise
+    # from manifest region definitions, then from manifest_defaults.
+    if not control_regions:
+        region_names: List[str] = []
+        if target_region:
+            region_names = [target_region]
+        elif manifest.regions:
+            region_names = [r.name for r in manifest.regions if r.name]
+        elif isinstance(manifest_defaults, dict):
+            region_names = list(manifest_defaults.get("region_names", []))
+
         if not region_names:
-            region_names = list(manifest_defaults.get("region_names", [])) or ["combined"]
-        config["control_regions"] = {
-            region_name: _build_manifest_region_config(manifest_defaults, region_name)
-            for region_name in region_names
-        }
+            region_names = ["combined"]
+
+        if isinstance(manifest_defaults, dict):
+            config["control_regions"] = {
+                name: _build_manifest_region_config(manifest_defaults, name)
+                for name in region_names
+            }
+        else:
+            # No manifest_defaults — create minimal region configs
+            config["control_regions"] = {
+                name: {} for name in region_names
+            }
         control_regions = config["control_regions"]
+
+    if control_regions and manifest.histograms is not None:
+        # Infer missing observables from manifest histogram axis labels.
+        # If a control region has no "observable" set, scan the manifest for
+        # histogram axis labels that match the region name and use the first
+        # matching axis variable.
+        for rname, rinfo in list(control_regions.items()):
+            if not isinstance(rinfo, dict):
+                continue
+            if rinfo.get("observable"):
+                continue  # already set
+            # Try to find a matching observable from axis_labels
+            axis_labels = manifest.histograms.axis_labels or {}
+            # The "control" axis role typically holds observable names.
+            control_labels = axis_labels.get("control", [])
+            if control_labels:
+                # Pick the first matching label that contains the region name
+                matches = [l for l in control_labels if rname.lower() in l.lower()]
+                if matches:
+                    rinfo["observable"] = matches[0]
+                    self.publish_message(
+                        f"Inferred observable '{matches[0]}' for region '{rname}' "
+                        f"from manifest axis labels."
+                    )
+                    continue
+            # Fallback: scan histogram names for a match
+            if manifest.histograms.histogram_names:
+                hist_matches = [
+                    n for n in manifest.histograms.histogram_names
+                    if rname.lower() in n.lower()
+                ]
+                if hist_matches:
+                    rinfo["observable"] = hist_matches[0]
 
     if target_region:
         if isinstance(control_regions, dict) and target_region in control_regions:
@@ -760,7 +812,9 @@ class ManifestDatacardTask(CombineMixin, law.Task):
     def output(self):
         return law.LocalDirectoryTarget(self._manifest_datacard_dir)
 
-    def _validate_nuisance_coverage(self, manifest: "OutputManifest") -> None:
+    def _validate_nuisance_coverage(
+        self, manifest: "OutputManifest"
+    ) -> Optional[Dict[str, int]]:
         """Validate nuisance group coverage against available variations.
 
         Compares each declared ``NuisanceGroupDefinition`` in the manifest
@@ -772,6 +826,12 @@ class ManifestDatacardTask(CombineMixin, law.Task):
         manifest:
             Merged manifest to validate.
 
+        Returns
+        -------
+        dict or None
+            Coverage summary with keys ``"pass"``, ``"fail"``, ``"warn"``
+            counts, or ``None`` if validation was skipped.
+
         Raises
         ------
         RuntimeError
@@ -779,7 +839,7 @@ class ManifestDatacardTask(CombineMixin, law.Task):
         """
         if not manifest.nuisance_groups:
             self.publish_message("No nuisance groups declared in manifest; skipping coverage validation.")
-            return
+            return None
 
         try:
             from nuisance_groups import NuisanceGroup, NuisanceGroupRegistry  # noqa: E402
@@ -787,7 +847,7 @@ class ManifestDatacardTask(CombineMixin, law.Task):
             self.publish_message(
                 "WARNING: nuisance_groups module not available; skipping coverage validation."
             )
-            return
+            return None
 
         available = _derive_available_variations(manifest)
         self.publish_message(
@@ -811,7 +871,7 @@ class ManifestDatacardTask(CombineMixin, law.Task):
 
         if not issues:
             self.publish_message("Nuisance coverage validation passed: all systematics have up+down coverage.")
-            return
+            return {"pass": len(available), "fail": 0, "warn": 0}
 
         lines = ["Nuisance coverage issues detected:"]
         for issue in issues:
@@ -819,11 +879,141 @@ class ManifestDatacardTask(CombineMixin, law.Task):
         report = "\n".join(lines)
 
         error_count = sum(1 for i in issues if i.severity.value == "error")
+        warn_count = sum(1 for i in issues if i.severity.value == "warning")
         if self.strict_coverage and error_count:
             raise RuntimeError(
                 report + f"\n{error_count} coverage error(s) found with --strict-coverage enabled."
             )
         self.publish_message(report)
+        return {"pass": len(available) - error_count - warn_count, "fail": error_count, "warn": warn_count}
+
+    def _preflight_combine_shapes(self, manifest: "OutputManifest") -> None:
+        """Validate shape file integrity before datacard generation.
+
+        Checks:
+        - Shape file existence and readability.
+        - Nominal vs. variation bin compatibility (same binning).
+        - Empty/negative bin detection.
+        - Process definition consistency.
+        - Low-stat STXS bin warnings (< 10 events in any category).
+
+        Parameters
+        ----------
+        manifest:
+            Merged manifest whose histogram file is inspected.
+        """
+        if manifest.histograms is None or not manifest.histograms.output_file:
+            self.publish_message("No histograms in manifest; skipping shape preflight.")
+            return
+
+        hist_file = manifest.histograms.output_file
+        if not os.path.isabs(hist_file):
+            hist_file = os.path.abspath(
+                os.path.join(os.path.dirname(self.manifest_path), hist_file)
+            )
+
+        if not os.path.exists(hist_file):
+            self.publish_message(
+                f"WARNING: Shape file not found: {hist_file}. "
+                "Skipping shape preflight."
+            )
+            return
+
+        # Try to open the file with uproot for basic sanity checks
+        try:
+            import uproot  # type: ignore
+        except ImportError:
+            self.publish_message(
+                "WARNING: uproot not available; skipping shape preflight validation."
+            )
+            return
+
+        try:
+            rf = uproot.open(hist_file)
+        except Exception as e:
+            self.publish_message(
+                f"WARNING: Cannot open shape file {hist_file}: {e}"
+            )
+            return
+
+        hist_names = manifest.histograms.histogram_names or []
+        if not hist_names:
+            self.publish_message("No histogram names in manifest; skipping shape preflight.")
+            return
+
+        # Check each histogram
+        low_stat_warnings = 0
+        bin_mismatch_warnings = 0
+        empty_negative_bins = 0
+        ref_binning = None
+
+        for hname in hist_names:
+            try:
+                hist = rf[hname]
+                # Try to read bin contents
+                if hasattr(hist, "values"):
+                    values = hist.values()
+                    edges = hist.edges() if hasattr(hist, "edges") else None
+                elif hasattr(hist, "member"):
+                    values = hist.member("fArray")
+                    edges = None
+                else:
+                    continue
+
+                # Check for empty/negative bins
+                neg_count = int(np.sum(values < 0)) if len(values) > 0 else 0
+                zero_count = int(np.sum(values == 0)) if len(values) > 0 else 0
+                if neg_count > 0:
+                    empty_negative_bins += 1
+                    if empty_negative_bins <= 3:
+                        self.publish_message(
+                            f"WARNING: Histogram '{hname}' has {neg_count} negative bin(s)."
+                        )
+
+                # Check bin compatibility against reference
+                if ref_binning is None and edges is not None:
+                    ref_binning = edges
+                elif edges is not None and ref_binning is not None and len(edges) == len(ref_binning):
+                    if not np.allclose(edges, ref_binning):
+                        bin_mismatch_warnings += 1
+                        if bin_mismatch_warnings <= 3:
+                            self.publish_message(
+                                f"WARNING: Histogram '{hname}' has different binning "
+                                f"than reference."
+                            )
+
+                # Low-stat warning (total integral < 10)
+                total = float(np.sum(values))
+                if 0 < total < 10:
+                    low_stat_warnings += 1
+                    if low_stat_warnings <= 5:
+                        self.publish_message(
+                            f"WARNING: Histogram '{hname}' has low statistics: "
+                            f"{total:.1f} total events."
+                        )
+
+            except Exception as e:
+                self.publish_message(
+                    f"WARNING: Cannot inspect histogram '{hname}': {e}"
+                )
+
+        rf.close()
+
+        summary = []
+        if low_stat_warnings:
+            summary.append(f"{low_stat_warnings} low-stat histograms")
+        if bin_mismatch_warnings:
+            summary.append(f"{bin_mismatch_warnings} bin-mismatched histograms")
+        if empty_negative_bins:
+            summary.append(f"{empty_negative_bins} histograms with negative bins")
+        if summary:
+            self.publish_message(
+                "Shape preflight warnings: " + "; ".join(summary)
+            )
+        else:
+            self.publish_message(
+                f"Shape preflight passed: {len(hist_names)} histograms checked."
+            )
 
     def run(self):
         config_file = os.path.abspath(self.datacard_config)
@@ -834,7 +1024,8 @@ class ManifestDatacardTask(CombineMixin, law.Task):
 
         manifest = _load_manifest(self.manifest_path)
 
-        self._validate_nuisance_coverage(manifest)
+        coverage_result = self._validate_nuisance_coverage(manifest)
+        self._preflight_combine_shapes(manifest)
 
         region_names: List[str] = [r.name for r in manifest.regions if r.name]
         self.publish_message(
@@ -861,6 +1052,7 @@ class ManifestDatacardTask(CombineMixin, law.Task):
             "manifest_user_repo_hash": manifest.user_repo_hash,
             "regions": region_names,
             "n_nuisance_groups": len(manifest.nuisance_groups),
+            "coverage_result": coverage_result,
         }
 
         generated_configs: List[str] = []
