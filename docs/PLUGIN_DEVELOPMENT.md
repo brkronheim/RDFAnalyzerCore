@@ -264,7 +264,7 @@ Use existing implementations as the source of truth for output naming convention
 Examples:
 
 - `OnnxManager`: single-output models create one column; multi-output models create `{modelName}_output0`, `{modelName}_output1`, and so on
-- `NDHistogramManager`: books lazy histogram results and saves them in `saveHists()` or `bookConfigHistograms()` workflows
+- `NDHistogramManager`: books lazy histogram results; `Analyzer::run()` saves its histograms for the `histogramManager` role
 - `CutflowManager`: books count actions in `execute()` and materializes summary histograms in `finalize()`
 
 ## Testing Checklist
@@ -274,7 +274,7 @@ For a new plugin, add tests under `core/tests/cpp/` and verify:
 - dependency validation behavior
 - config parsing and missing-key failure modes
 - correct column names or output object names
-- execution through `Analyzer::run()` or `Analyzer::save()`
+- execution through `Analyzer::run()`
 - provenance keys when the plugin contributes structured metadata
 
 ## Documentation Checklist

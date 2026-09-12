@@ -21,8 +21,10 @@
 // Maps are correctionlib JSON files under:
 //   /cvmfs/cms-griddata.cern.ch/cat/metadata/JME/<era>/latest/jetvetomaps.json.gz
 //
-// Configuration (via jetVetoMapConfig text file, one path per line):
+// Configuration (via jetVetoMapConfig):
 //   /path/to/jetvetomaps.json.gz
+// or a text file containing one payload path per line:
+//   /path/to/jet_veto_map_files.txt
 //
 // Uses CorrectionManager to evaluate the correctionlib payload, then defines
 // a filter column vetoing events where any selected jet falls in a veto region.

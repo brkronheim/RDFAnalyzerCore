@@ -253,7 +253,7 @@ void StxsManager::initialize() {
 // ===========================================================================
 // IPluggableManager — execute
 //
-// Called inside Analyzer::save()/run() just before triggering the event
+// Called inside Analyzer::run() just before triggering the event
 // loop. Here we book the standard STXS uncertainty histograms and register
 // weight variations with the WeightManager (if present).
 // ===========================================================================

@@ -79,11 +79,6 @@ int main(int argc, char **argv) {
     // Add NDHistogramManager plugin using the helper function
     NDHistogramManager::create(an);
 
-    // Register systematic variation for muon momentum scale
-    // This demonstrates how systematics propagate through the analysis
-    an.getSystematicManager().registerSystematic("muonScale_up", {"AnalysisMuonsAuxDyn.pt"});
-    an.getSystematicManager().registerSystematic("muonScale_down", {"AnalysisMuonsAuxDyn.pt"});
-
     // Define analysis variables and selections
     an.Define("goodMuons", getGoodMuons, {"AnalysisMuonsAuxDyn.DFCommonMuonPassIDCuts",
                                           "AnalysisMuonsAuxDyn.DFCommonMuonPassPreselection",
@@ -107,4 +102,3 @@ int main(int argc, char **argv) {
     an.run();
 
 }
-

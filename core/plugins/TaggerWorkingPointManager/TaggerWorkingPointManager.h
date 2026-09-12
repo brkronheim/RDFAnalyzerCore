@@ -910,6 +910,7 @@ private:
     ROOT::RDF::RResultPtr<TH1D> result;
   };
   std::vector<FractionHistResult> fractionHistResults_m;
+  bool executed_m = false;
 
   // ---- Config-file setup --------------------------------------------------
   std::string role_m = "taggerWorkingPoints";

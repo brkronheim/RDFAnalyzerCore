@@ -181,7 +181,7 @@ void setupAnalysis(Analyzer &an, const std::string &year, bool isMC) {
 - ✅ **Multi-channel SF masks** — per-channel weight composition (`weight_nominal_muon`, `weight_nominal_electron`, `weight_nominal_tau`). b-tag and c-tag scale factors included in all per-channel weights. `ChannelMask` flags `applyBTagSFs` and `applyCTagSFs` control per-channel activation.
 - ✅ **Per-channel systematic variations** — when `cfg.channels` is configured, `defineCmsNominalWeight()` now creates per-channel varied weight columns (`weight_nominal_muon_pileupUp/Down`, etc.) that only include systematics for components active in that channel. Columns are auto-registered with `SystematicManager` for discovery by `NDHistogramManager`.
 - ✅ **Pileup min-bias xsec uncertainty** — `defineCmsPileupMinbiasXsecWeights()` evaluates additional pileup weight variations for min-bias cross section uncertainty. Enabled via `CmsWeightConfig::applyPileupMinbiasXsec`.
-- ✅ **MET Type-1 corrections** — `configureCmsCorrectionWorkflow()` propagates JEC-corrected jet energies to PuppiMET via `JetEnergyScaleManager::propagateMET()`. Produces `PuppiMET_pt_corr_nominal` / `PuppiMET_phi_corr_nominal`. Enabled via `CmsCorrectionConfig::applyMetType1`.
+- ✅ **MET Type-1 corrections** — `configureCmsCorrectionWorkflow()` propagates the change from NanoAOD jets to fully calibrated nominal JEC/JER jet energies, plus JES variations, via `JetEnergyScaleManager::propagateMET()`. Produces `PuppiMET_pt_corr_nominal` / `PuppiMET_phi_corr_nominal`. Enabled via `CmsCorrectionConfig::applyMetType1`.
 - ✅ **FatJet raw pT/mass** — `CmsNanoAodCompat` defines `FatJet_pt_raw` and `FatJet_mass_raw` from `FatJet_rawFactor`.
 - ✅ **Muon genPt derivation** — `CmsNanoAodCompat` derives `Muon_genPt` from `Muon_genPartIdx` + `GenPart_pt` for Rochester corrections.
 - ✅ **Photon CSEV SFs in weight** — `defineCmsPhotonScaleFactors()` now produces `photon_csev_weight_nominal/up/down` and includes them in `defineCmsNominalWeight()` under the `applyPhotonSFs` flag.
@@ -220,10 +220,10 @@ marked with a note — the preference is to bundle everything possible with the 
 #### 1. Shape-based b-tag/c-tag for 2024+ (UParTAK4) 🔶 P2
 | | |
 |---|---|
-| **What's missing** | `particleNet_shape` corrections not available for 2024+ BTV payloads (only `UParTAK4_wp_values`). Falls back to FixedWP method. |
-| **External inputs needed** | None — waiting for BTV POG to release shape corrections for UParTAK4 in CAT CVMFS. |
+| **What's missing** | Continuous `UParTAK4_shape` corrections are not available in the currently installed 2024 BTV payload; it exposes working-point corrections only. |
+| **External inputs needed** | A BTV shape payload containing the configured continuous correction, supplied through `btagShapeFile` when it is separate from the era payload. |
 | **Difficulty** | Low (once payloads exist) |
-| **Approach** | Add `UParTAK4_shape` as a `btagMethod` option when correction names appear in the JSON. |
+| **Approach** | Select `btagMethod=Shape` and fail fast when the requested continuous correction is absent; fixed-WP event counting remains a separate explicit mode. |
 
 #### 2. ~~FatJet (AK8) energy corrections into standard workflow~~ ✅ Completed
 | | |
@@ -750,7 +750,7 @@ Each weight component's correction name, JSON source, and input variables.
 | PU Jet ID | `pileupJetId_sf` | `JME/.../jet_jerc.json.gz` | Run 2 | `abseta, pt, wp, syst` |
 | L1 Prefire | `L1PreFiringWeight_Nom/Up/Dn` | NanoAOD branches | 2016-17 | event-level |
 | MET XY-shift | Embedded parameters | N/A | Run 2 only | `metPt, metPhi, run, npv` |
-| MET Type-1 | `JetEnergyScaleManager::propagateMET()` | JEC JSON | All | JEC-corrected jets |
+| MET Type-1 | `JetEnergyScaleManager::propagateMET()` | JEC JSON | All | Fully calibrated JEC/JER-corrected jets |
 
 ### Year-Specific Trigger SF Names
 

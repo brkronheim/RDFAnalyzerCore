@@ -120,7 +120,7 @@ for version-dependent type differences.
 | `applyBtagCorrections` | false | Create b-tag TaggerWorkingPointManager (required for b-tag SFs) |
 | `applyCtagCorrections` | false | Create c-tag TaggerWorkingPointManager (required for c-tag SFs) |
 | `applyHemIssueFilter` | false | 2018 HEM issue jet veto |
-| `applyMetType1` | false | Propagate JEC to PuppiMET |
+| `applyMetType1` | false | Propagate the final calibrated jet shift to PuppiMET |
 | `jesMode` | Reduced | JES systematic granularity (Total/Reduced/Full) |
 
 ### `CmsWeightConfig` flags
@@ -148,8 +148,8 @@ for version-dependent type differences.
 
 | Column | Description | Gated by |
 |--------|-------------|----------|
-| `Jet_pt_corr_nominal` | JEC-corrected AK4 jet pT | `applyJetCorrections` |
-| `Jet_mass_corr_nominal` | JEC-corrected AK4 jet mass | `applyJetCorrections` |
+| `Jet_pt_corr_nominal` | JEC/JER-corrected AK4 jet pT | `applyJetCorrections` |
+| `Jet_mass_corr_nominal` | JEC/JER-corrected AK4 jet mass | `applyJetCorrections` |
 | `Jet_pt_jes_*_up/down` | JES systematic variations | `applyJetCorrections` |
 | `Jet_pt_jer_up/down` | JER systematic variations | `applyJetCorrections` |
 | `PuppiMET_pt_corr_nominal` | Type-1 MET corrected pT | `applyMetType1` |

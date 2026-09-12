@@ -7,13 +7,12 @@ The Production Manager provides a unified, cohesive system for managing batch an
 - [Overview](#overview)
 - [Features](#features)
 - [Quick Start](#quick-start)
-- [Architecture](#architecture)
-- [Usage Guide](#usage-guide)
-- [Monitoring](#monitoring)
-- [Resilience and Recovery](#resilience-and-recovery)
-- [Backend Support](#backend-support)
-- [Examples](#examples)
-- [Troubleshooting](#troubleshooting)
+- [Best Practices](#best-practices)
+- [Integration with Existing Tools](#integration-with-existing-tools)
+- [Law Workflow Integration](#law-workflow-integration)
+  - [Example Law Workflows](#example-law-workflows)
+- [Future Enhancements](#future-enhancements)
+- [Support](#support)
 
 ## Overview
 
@@ -281,7 +280,7 @@ Planned improvements:
 ## Support
 
 For issues or questions:
-- Check the [troubleshooting section](#troubleshooting)
+- Check the [AFS/EOS permissions guidance](#permission-denied-in-afseos)
 - Review existing issues on GitHub
 - Consult the main [README](../README.md) and [batch submission docs](BATCH_SUBMISSION.md)
 

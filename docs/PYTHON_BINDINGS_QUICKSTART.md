@@ -31,8 +31,8 @@ analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
 # Apply selection
 analyzer.Filter("high_pt", "pt_gev > 25.0", ["pt_gev"])
 
-# Save
-analyzer.run()
+# Save through the Python wrapper (calls C++ Analyzer::run())
+analyzer.save()
 ```
 
 ## Numba Integration

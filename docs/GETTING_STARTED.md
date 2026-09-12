@@ -58,25 +58,25 @@ ctest --output-on-failure
 
 ```bash
 cd analyses/ExampleAnalysis
-../../build/analyses/ExampleAnalysis/analysis cfg.txt
+../../build/analyses/ExampleAnalysis/analysis cfg.yaml
 ```
 
-This runs a Z→μμ analysis on ATLAS Open Data.
+This runs the Z→μμ example on ATLAS Open Data. Its configured inputs are remote EOS files, so you need XRootD access or must replace `fileList` in `cfg.yaml` with accessible ROOT files. The config sets `enableSkim: false`, so this run does not write an event tree to `saveFile`; `saveConfig: output.txt` is used only if skim writing is enabled. The booked histograms are written to `Output/ZMuMuL_meta.root`, derived from `saveFile` because this config does not set `metaFile`.
 
 ## Understanding the Output
 
-The framework produces two types of output:
+`Analyzer::run()` executes registered plugin hooks and writes the outputs requested by the config and analysis:
 
-1. **Skim Output** (`saveFile`): Event-level ROOT file with selected branches
-2. **Metadata/Histogram Output** (`metaFile`): Histograms, counters, and analysis metadata
+- **Skim output** (`saveFile`): An event-level ROOT file is written only when `enableSkim` is set to `true`, `True`, or `1`. `saveConfig` controls its branches; without `saveConfig`, the full dataframe is snapshotted.
+- **Metadata output** (`metaFile`): Configured histogram managers and services write histograms, counters, and metadata here. If `metaFile` is omitted, the framework derives a sibling path by inserting `_meta` before the `saveFile` extension.
 
-Output locations are specified in your `cfg.txt` configuration file.
+Output locations and skim behavior are specified in the main configuration file.
 
 ---
 
 ## Your First Analysis — Complete Walkthrough
 
-This section walks you through creating a complete working analysis from scratch. The structure mirrors `analyses/ExampleAnalysis/`.
+This section walks you through creating a complete working analysis from scratch. It uses a text-format `cfg.txt` and `histograms.txt`; the actual `analyses/ExampleAnalysis/` uses YAML config files, as shown in the run command above.
 
 ### Step 1: Create Your Analysis Directory
 
@@ -118,26 +118,32 @@ target_link_libraries(myAnalysis
 
 ### Step 3: Create the Main Config File (`cfg.txt`)
 
-The config file tells the framework where to find input data, where to write output, and which plugins to activate.
+The config file tells the framework where to find input data and outputs and gives paths to configuration files used by the analysis or its plugins. Plugins themselves are constructed and registered by analysis code.
 
 ```
 # cfg.txt — Main analysis configuration
 saveTree=Events
 threads=-1
 saveFile=output/skim.root
+metaFile=output/meta.root
+enableSkim=true
 fileList=/path/to/your/data.root
 histogramConfig=histograms.txt
+floatConfig=floats.txt
 ```
 
 Key options:
 
 | Key | Description |
 |-----|-------------|
-| `fileList` | Comma-separated list of input ROOT files (supports `xrootd://` paths) |
-| `saveFile` | Output path for the event-level skim ROOT file |
+| `fileList` | Comma-separated list of input ROOT files (including `root://` URLs) |
+| `saveFile` | Output path for the event-level skim ROOT file when `enableSkim` is true |
+| `enableSkim` | Set to `true`, `True`, or `1` to write an event-level skim during `run()` |
+| `metaFile` | Optional output path for histograms and metadata; defaults to a sibling of `saveFile` with `_meta` before the extension |
 | `saveTree` | Name of the TTree to write in the skim file |
 | `threads` | Number of threads (`-1` = all available) |
 | `histogramConfig` | Path to the histogram definitions file |
+| `floatConfig` | Path to a file defining float constants used by analysis code or histogram weights |
 | `treeList` | Comma-separated list of input TTrees to process |
 | `antiglobs` | File patterns to exclude from auto-discovered file lists |
 
@@ -158,9 +164,15 @@ name=SubleadingMuonPt variable=SubleadingMuonPt weight=normScale bins=50 lowerBo
 - `variable` must match a column name defined via `Define()` (or present in the input TTree).
 - `weight` is an optional event-weight column (omit the field to use no weight).
 
+Because these histogram examples use `normScale` as a weight, create `floats.txt` beside the config with a definition for that column:
+
+```text
+normScale=1.0
+```
+
 ### Step 5: Write Your Analysis Code (`analysis.cc`)
 
-Below is a complete, self-contained example based on the real `ExampleAnalysis`. It selects Z→μμ candidates and books histograms using `NDHistogramManager`.
+Below is a complete, self-contained example following the selection and histogram-booking pattern in `ExampleAnalysis`. It uses the tutorial's text-format `cfg.txt` and `histograms.txt` files.
 
 ```cpp
 #include "analyzer.h"
@@ -278,7 +290,7 @@ int main(int argc, char **argv) {
 | `Define(name, func, cols)` | Creates a new derived column from existing branches |
 | `Filter(name, func, cols)` | Applies a boolean selection; events failing are dropped |
 | `bookConfigHistograms()` | Reads `histogramConfig` and books all histograms in one call |
-| `save()` | Triggers event loop execution and writes skim + histogram files |
+| `run()` | Runs plugin hooks, conditionally writes the skim, saves registered ND histograms, and finalizes services and provenance |
 
 ### Step 6: Build the Analysis
 
@@ -296,8 +308,10 @@ For faster incremental rebuilds, you can skip the test suite:
 
 ### Step 7: Run the Analysis
 
-Always run the analysis executable from the directory containing `cfg.txt` so
-that relative paths in the config resolve correctly:
+Run from the analysis directory when your input or output paths are relative,
+so those paths resolve from the expected location. Referenced config files are
+resolved from the working directory when present, then from the main config's
+directory:
 
 ```bash
 cd analyses/MyFirstAnalysis
@@ -308,14 +322,17 @@ The executable always takes one argument: the path to `cfg.txt`.
 
 ### Step 8: Examine the Output
 
-After a successful run you will find two ROOT files:
+With the example config above (`enableSkim=true` and an explicit `metaFile`),
+the run writes these ROOT files. The skim is written only when `enableSkim` is
+enabled, and histogram output requires a registered histogram manager with
+booked histograms:
 
 | File | Contents |
 |------|---------|
 | `output/skim.root` | Flat TTree (`Events`) with all saved branches for selected events |
-| `output/meta.root` (if configured) | Histograms, cutflow counter, and analysis metadata |
+| `output/meta.root` | Histograms and metadata/counters produced by configured managers and services |
 
-Open them with ROOT:
+Open the skim with ROOT when it was enabled:
 ```bash
 root -l output/skim.root
 # In the ROOT prompt:
@@ -335,6 +352,7 @@ analyses/MyFirstAnalysis/
 ├── CMakeLists.txt     ← build target definition
 ├── cfg.txt            ← main config (I/O paths, plugins, options)
 ├── histograms.txt     ← histogram definitions (variable, bins, range)
+├── floats.txt         ← float constants such as normScale
 └── datasets.yaml      ← (optional) dataset manifest for batch processing
 ```
 
@@ -406,7 +424,7 @@ datasets:
 
 - Rebuild incrementally with `(cd build && make -j$(nproc))` (faster than re-running `build.sh`).
 - Use `source cleanBuild.sh` when you add new files or change `CMakeLists.txt`.
-- Always run the executable from the analysis directory so relative paths in `cfg.txt` resolve correctly.
+- Run from the analysis directory when your input/output paths are relative; referenced config files also fall back to the main config's directory.
 - Set `threads=1` in `cfg.txt` while debugging to get deterministic output and cleaner stack traces.
 - Use `source buildTest.sh` to build and run the unit test suite.
 

@@ -95,7 +95,12 @@ void GenWeightManager::setupFromConfigFile() {
   pdfAsDownOffset_m = configInt("genWeightPdfAsDownOffset", -1);
 }
 
-void GenWeightManager::execute() { defineVariationWeights(); }
+void GenWeightManager::execute() {
+  if (configManager_m && toLowerCopy(configManager_m->get("dtype")) == "data") {
+    return;
+  }
+  defineVariationWeights();
+}
 
 void GenWeightManager::defineVariationWeights() {
   if (materialized_m) {

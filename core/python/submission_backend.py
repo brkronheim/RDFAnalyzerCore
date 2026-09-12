@@ -26,7 +26,6 @@ void __FUNCNAME__() {
     char* buf = new char[to_read];
     Bool_t ok = f->ReadBuffer(buf, 0LL, to_read);
     delete[] buf;
-    sw.Stop();
     f->Close();
     delete f;
     if (ok) { printf(\"PROBE_RESULT:FAILED\\n\"); return; }
@@ -106,7 +105,8 @@ def get_copy_file_list(config_dict):
     transfer_list = []
     for key in config_dict:
         value = config_dict[key]
-        if ".txt" in value or ".yaml" in value or ".yml" in value:
+        if (".txt" in value or ".yaml" in value or ".yml" in value
+                or ".json" in value):
             transfer_list.append(value)
     return transfer_list
 
@@ -200,6 +200,8 @@ STAGE_COPY_TIMEOUT = 60        # per-xrdcp timeout in seconds
 # Total attempts per file: try up to MAX_ATTEMPTS site-specific redirectors
 # ranked by measured read throughput.
 MAX_ATTEMPTS = 3
+# Keep redirector probing within the one-CPU Condor request by default.
+XRD_PROBE_WORKERS = max(1, int(os.environ.get("XRD_PROBE_WORKERS", "1")))
 
 # ROOT macro template (TFile::Open + TFile::ReadBuffer).
 # TFile::ReadBuffer: kFALSE (0) = success, kTRUE (1) = failure.
@@ -243,10 +245,11 @@ def extract_lfn(url):
 
 
 def build_url(lfn, redirector):
-    # Always use // between redirector and LFN: required for both regular
-    # redirectors (root://cmsxrootd.fnal.gov/) and site-specific test
-    # redirectors (root://xrootd-cms.infn.it//store/test/xrootd/<site>/).
-    return redirector.rstrip("/") + "//" + lfn.lstrip("/")
+    base = redirector.rstrip("/")
+    path = "/" + lfn.lstrip("/")
+    if SITE_REDIRECTOR_MARKER in redirector:
+        return base + path
+    return base + "/" + path
 
 
 def is_site_specific_redirector(redirector):
@@ -356,7 +359,7 @@ def rank_redirectors_parallel(lfn, redirectors, local_site=""):
 
     results = []
     processed = set()
-    with ThreadPoolExecutor(max_workers=max(1, min(len(redirectors), 4))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(len(redirectors), XRD_PROBE_WORKERS))) as pool:
         futures = {{pool.submit(probe_one_redirector, lfn, r): r for r in redirectors}}
         try:
             for future in as_completed(futures, timeout=PROBE_TIMEOUT + PROBE_POOL_TIMEOUT_BUFFER):
@@ -886,6 +889,8 @@ PROBE_TIMEOUT = 10.0
 # Extra seconds added to PROBE_TIMEOUT when waiting for the thread pool.
 PROBE_POOL_TIMEOUT_BUFFER = 2.0
 PROBE_BYTES = 1 * 1024 * 1024
+# Keep redirector probing within the one-CPU Condor request by default.
+XRD_PROBE_WORKERS = max(1, int(os.environ.get("XRD_PROBE_WORKERS", "1")))
 
 # Compile-time blacklist (merged with runtime xrdBlacklist config key below).
 STATIC_BLACKLIST = {_bl_literal}
@@ -954,10 +959,11 @@ def extract_lfn(url):
 
 
 def build_url(lfn, redirector):
-    # Always use // between redirector and LFN: required for both regular
-    # redirectors (root://cmsxrootd.fnal.gov/) and site-specific test
-    # redirectors (root://xrootd-cms.infn.it//store/test/xrootd/<site>/).
-    return redirector.rstrip("/") + "//" + lfn.lstrip("/")
+    base = redirector.rstrip("/")
+    path = "/" + lfn.lstrip("/")
+    if SITE_REDIRECTOR_MARKER in redirector:
+        return base + path
+    return base + "/" + path
 
 
 def is_site_specific_redirector(redirector):
@@ -1079,7 +1085,7 @@ def select_best_url(url, redirectors, local_site="", blacklist=None):
 
     results = []
     processed = set()
-    with ThreadPoolExecutor(max_workers=max(1, min(len(active), 4))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(len(active), XRD_PROBE_WORKERS))) as pool:
         futures = {{pool.submit(probe_redirector, lfn, r): r for r in active}}
         try:
             for future in as_completed(futures, timeout=PROBE_TIMEOUT + PROBE_POOL_TIMEOUT_BUFFER):
@@ -1178,14 +1184,14 @@ for f in files:
             optimized.append(select_best_url(f, file_redirectors, local_site, blacklist))
         except Exception as exc:
             redirector_failures.append(f"{{lfn}} :: {{exc}}")
+            optimized.append(f)
     else:
         optimized.append(f)
 
 if redirector_failures:
-    print("[xrd-opt] ERROR: redirector selection failed for one or more files:")
+    print("[xrd-opt] WARNING: redirector selection failed; using original URLs:")
     for failure in redirector_failures:
         print(f"  [xrd-opt] {{failure}}")
-    sys.exit(42)
 
 cfg["fileList"] = ",".join(optimized)
 write_config(cfg, cfg_path)
@@ -1278,7 +1284,7 @@ def generate_condor_runscript(
     if config_runtime_path != config_file:
         materialize_config_block = (
             (f"mkdir -p {shlex.quote(config_runtime_dir)}\n" if config_runtime_dir else "")
-            + "for _cfg_payload in *.txt *.yaml *.yml; do\n"
+            + "for _cfg_payload in *.txt *.yaml *.yml *.json; do\n"
             + "  [ -f \"$_cfg_payload\" ] || continue\n"
             + f"  if [ \"$_cfg_payload\" != \"{config_file}\" ]; then cp -n \"$_cfg_payload\" {shlex.quote((config_runtime_dir or '.') + '/')} 2>/dev/null || true; fi\n"
             + "done\n"

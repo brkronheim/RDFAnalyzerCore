@@ -894,7 +894,7 @@ JetEnergyScaleManager();   // default-constructible
 ```
 
 Register with the framework via `Analyzer::registerPlugin()` before calling
-`Analyzer::save()`.
+`Analyzer::run()`.
 
 ### Configuration (call before execute)
 

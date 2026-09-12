@@ -1,4 +1,5 @@
 file(GLOB analyses_children RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "*")
+list(SORT analyses_children)
 foreach(child ${analyses_children})
 	if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${child}")
 		if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${child}/CMakeLists.txt")

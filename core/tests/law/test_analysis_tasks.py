@@ -24,6 +24,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -208,6 +209,42 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(job_dir, "floats.txt")))
             self.assertTrue(os.path.exists(os.path.join(job_dir, "ints.txt")))
 
+    def test_stitching_json_override_is_staged(self):
+        """A generated stitching JSON override is copied and rewritten."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            weights_path = os.path.join(tmpdir, "stitch_weights.json")
+            Path(weights_path).write_text("{}")
+            template = _write_submit_config_template(tmpdir)
+            dataset = DatasetEntry(name="sample", files=["f.root"], dtype="mc")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(
+                job_dir,
+                template,
+                dataset,
+                out_dir,
+                extra_overrides={
+                    "stitchMode": "correctionlib",
+                    "stitchWeights": weights_path,
+                },
+            )
+
+            cfg = {}
+            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
+                for line in fh:
+                    if "=" in line:
+                        key, value = line.strip().split("=", 1)
+                        cfg[key] = value
+
+            self.assertEqual(cfg["stitchMode"], "correctionlib")
+            self.assertEqual(cfg["stitchWeights"], "stitch_weights.json")
+            self.assertTrue(os.path.exists(os.path.join(job_dir, "stitch_weights.json")))
+
     def test_auxiliary_files_resolve_from_analysis_root(self):
         """cfg/... references are resolved relative to the analysis root."""
         mod = self._import()
@@ -323,6 +360,78 @@ class TestWriteJobConfig(unittest.TestCase):
 
             self.assertNotIn("counterWeightBranch", cfg)
 
+    def test_existing_data_test_job_drops_stale_generator_settings(self):
+        """A reused file-source test job is sanitized before execution."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "submit_config.txt")
+            Path(config_path).write_text(
+                "dtype=data\n"
+                "counterWeightBranch=genWeight\n"
+                "genWeightBaseWeightColumn=genWeight\n"
+                "genWeightNominalColumn=genWeight_nominal\n"
+                "saveFile=test.root\n"
+            )
+            config = mod.read_config(config_path)
+            mod._remove_mc_generator_config_for_data(config)
+
+            self.assertEqual(config["dtype"], "data")
+            self.assertNotIn("counterWeightBranch", config)
+            self.assertNotIn("genWeightBaseWeightColumn", config)
+            self.assertNotIn("genWeightNominalColumn", config)
+
+    def test_site_redirector_test_url_uses_bare_lfn(self):
+        """Site-specific replicas receive one separator before the LFN."""
+        mod = self._import()
+        calls = []
+
+        def select_best_url(url, redirectors):
+            calls.append((url, redirectors))
+            return url
+
+        fake_selector = types.SimpleNamespace(select_best_url=select_best_url)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            redirector_path = os.path.join(tmpdir, "site_redirectors.json")
+            with open(redirector_path, "w") as fh:
+                json.dump(
+                    {
+                        "/store/data/file.root": [
+                            "root://xrootd-cms.infn.it//store/test/xrootd/T1_US_FNAL/"
+                        ]
+                    },
+                    fh,
+                )
+
+            with patch.dict(sys.modules, {"xrootd_site_selector": fake_selector}):
+                result = mod._select_test_input_url(
+                    "root://cms-xrd-global.cern.ch//store/data/file.root",
+                    tmpdir,
+                )
+
+        self.assertEqual(calls[0][0], "/store/data/file.root")
+        self.assertEqual(
+            result,
+            "root://xrootd-cms.infn.it//store/test/xrootd/T1_US_FNAL/store/data/file.root",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "site_redirectors.json"), "w") as fh:
+                json.dump(
+                    {"/store/data/file.root": ["root://cms-xrd-global.cern.ch/"]},
+                    fh,
+                )
+            with patch.dict(sys.modules, {"xrootd_site_selector": fake_selector}):
+                generic_result = mod._select_test_input_url(
+                    "root://old.example//store/data/file.root",
+                    tmpdir,
+                )
+
+        self.assertEqual(
+            generic_result,
+            "root://cms-xrd-global.cern.ch//store/data/file.root",
+        )
+
     def test_manifest_metadata_is_injected_into_job_config(self):
         """Per-job configs include scalar dataset-manifest metadata and numeric type."""
         mod = self._import()
@@ -409,6 +518,67 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertEqual(cfg["ptcut"], "150")
             self.assertEqual(cfg["sample_label"], "z2nu")
 
+    def test_manifest_lumi_is_injected_into_job_config(self):
+        """The per-job luminosity can be supplied from the manifest container."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir, extra={"lumi": "1.0"})
+            dataset = DatasetEntry(name="mc", files=["f.root"], dtype="mc")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(
+                job_dir,
+                template,
+                dataset,
+                out_dir,
+                manifest_lumi=109.0,
+            )
+
+            config = {}
+            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
+                for line in fh:
+                    if "=" in line:
+                        key, value = line.strip().split("=", 1)
+                        config[key] = value
+
+            self.assertEqual(config["lumi"], "109.0")
+
+    def test_data_job_removes_all_generator_weight_settings(self):
+        """Data jobs do not carry MC-only generator-weight configuration."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(
+                tmpdir,
+                extra={
+                    "counterWeightBranch": "genWeight",
+                    "genWeightBaseWeightColumn": "genWeight",
+                    "genWeightPdfBranch": "LHEPdfWeight",
+                },
+            )
+            dataset = DatasetEntry(name="data", files=["f.root"], dtype="data")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(job_dir, template, dataset, out_dir)
+
+            config = {}
+            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
+                for line in fh:
+                    if "=" in line:
+                        key, value = line.strip().split("=", 1)
+                        config[key] = value
+
+            self.assertNotIn("counterWeightBranch", config)
+            self.assertNotIn("genWeightBaseWeightColumn", config)
+            self.assertNotIn("genWeightPdfBranch", config)
+
     def test_rewrite_job_output_destinations(self):
         """Concrete skim jobs can rewrite their final save targets independently."""
         mod = self._import()
@@ -441,6 +611,31 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertEqual(cfg["saveFile"], "/eos/user/b/test/sample/output_0.root")
             self.assertEqual(cfg["metaFile"], "/eos/user/b/test/sample/meta_0.root")
             self.assertEqual(cfg["sample"], "test")
+
+    def test_output_destination_override(self):
+        """An explicit output directory takes precedence over the template."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = os.path.join(tmpdir, "cfg.yaml")
+            Path(template).write_text("saveDirectory: template-output\n")
+
+            self.assertEqual(
+                mod._resolve_output_destination_base(
+                    template,
+                    {"saveDirectory": "template-output"},
+                    "/eos/user/b/test/vh",
+                ),
+                "/eos/user/b/test/vh",
+            )
+            self.assertEqual(
+                mod._resolve_output_destination_base(
+                    template,
+                    {"saveDirectory": "template-output"},
+                    "root://eosuser.cern.ch//eos/user/b/test/vh",
+                ),
+                "root://eosuser.cern.ch//eos/user/b/test/vh",
+            )
 
     def test_aux_directory_is_copied_and_rewritten(self):
         """Copied YAML payloads reference the staged aux/ directory."""
@@ -552,6 +747,149 @@ class TestWriteJobConfig(unittest.TestCase):
                         k, v = line.split("=", 1)
                         cfg[k] = v
             self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestSkimNormalization(unittest.TestCase):
+    """Tests for deferred per-job generator-weight accounting."""
+
+    def test_monitor_requires_post_job_normalization_artifact(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_test")
+            Path(run_dir).mkdir()
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe",
+                submit_config="submit_config.txt",
+                dataset_manifest="datasets.yaml",
+                name="test",
+            )
+            original_run_dir = analysis_tasks.MonitorSkimJobs._run_dir.fget
+            analysis_tasks.MonitorSkimJobs._run_dir = property(lambda self: run_dir)
+            try:
+                Path(task.output().path).write_text("done\n")
+                self.assertFalse(task.complete())
+                Path(task._normalization_path).write_text(
+                    '{"schema_version": 1, "datasets": {}}\n'
+                )
+                self.assertTrue(task.complete())
+            finally:
+                analysis_tasks.MonitorSkimJobs._run_dir = property(original_run_dir)
+
+
+    def test_file_source_planning_does_not_read_weight_counters(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{
+                    "name": "mc",
+                    "dtype": "mc",
+                    "year": 2024,
+                    "xsec": 2.0,
+                    "files": ["root://server/file.root"],
+                }],
+            )
+            file_list_dir = os.path.join(tmpdir, "files")
+            Path(file_list_dir).mkdir()
+            Path(os.path.join(file_list_dir, "mc.json")).write_text(
+                json.dumps({
+                    "sample": "mc",
+                    "files": ["root://server/file.root"],
+                })
+            )
+
+            with patch.object(
+                analysis_tasks,
+                "_shared_read_weight_sum",
+                side_effect=AssertionError("counter read during planning"),
+            ), patch.object(
+                analysis_tasks,
+                "_shared_read_weight_sign_sum",
+                side_effect=AssertionError("counter read during planning"),
+            ):
+                plans = analysis_tasks._plan_file_source_jobs(
+                    dataset_manifest_path=manifest_path,
+                    file_list_dir=file_list_dir,
+                    partition="file",
+                    files_per_job=1,
+                    entries_per_job=0,
+                    jobs_dir=os.path.join(tmpdir, "jobs"),
+                    outputs_dir=os.path.join(tmpdir, "outputs"),
+                )
+
+            self.assertEqual(len(plans), 1)
+            self.assertEqual(plans[0]["lumi"], 1.0)
+
+    def test_collector_sums_completed_job_counters_and_manifest_metadata(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{
+                    "name": "mc",
+                    "dtype": "mc",
+                    "year": 2024,
+                    "xsec": 2.0,
+                    "filter_efficiency": 0.5,
+                    "kfac": 2.0,
+                    "extra_scale": 1.5,
+                    "files": ["root://server/file.root"],
+                }, {
+                    "name": "data",
+                    "dtype": "data",
+                    "year": 2024,
+                    "files": ["root://server/data.root"],
+                }],
+            )
+            job_info = {
+                "mc": {
+                    0: {"meta": "meta_mc_0.root"},
+                    1: {"meta": "meta_mc_1.root"},
+                },
+                "data": {
+                    0: {"meta": "meta_data_0.root"},
+                },
+            }
+            state = {
+                "datasets": {
+                    "mc": {"jobs": {
+                        "0": {"status": "done"},
+                        "1": {"status": "done"},
+                    }},
+                    "data": {"jobs": {"0": {"status": "done"}}},
+                }
+            }
+
+            raw_sums = {"meta_mc_0.root": 10.0, "meta_mc_1.root": 20.0}
+            sign_sums = {"meta_mc_0.root": 8.0, "meta_mc_1.root": 12.0}
+            with patch.object(
+                analysis_tasks,
+                "_shared_read_weight_sum",
+                side_effect=lambda path, sample: raw_sums[path],
+            ), patch.object(
+                analysis_tasks,
+                "_shared_read_weight_sign_sum",
+                side_effect=lambda path, sample: sign_sums[path],
+            ):
+                result = analysis_tasks._collect_skim_normalization(
+                    dataset_manifest_path=manifest_path,
+                    dataset_job_info=job_info,
+                    state=state,
+                )
+
+            mc_result = result["datasets"]["mc"]
+            self.assertEqual(mc_result["sum_weights"], 30.0)
+            self.assertEqual(mc_result["sum_sign_weights"], 20.0)
+            self.assertEqual(mc_result["jobs"]["0"]["sum_weights"], 10.0)
+            self.assertEqual(mc_result["jobs"]["1"]["sum_weights"], 20.0)
+            self.assertEqual(mc_result["normalization"], 100.0)
+            self.assertEqual(mc_result["manifest_entry"]["xsec"], 2.0)
+            self.assertEqual(result["datasets"]["data"]["status"], "complete")
+            self.assertIsNone(result["datasets"]["data"]["sum_weights"])
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
@@ -1426,6 +1764,51 @@ class TestPrepareSkimJobs(unittest.TestCase):
             finally:
                 analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
 
+    def test_monitor_reactivates_permanent_failures_without_resetting_done_jobs(self):
+        import analysis_tasks
+
+        task = analysis_tasks.MonitorSkimJobs(
+            submit_config="submit_config.txt",
+            exe="vjetStitch",
+            name="run",
+            dataset_manifest="datasets.yaml",
+        )
+        state = {
+            "datasets": {
+                "sample": {
+                    "jobs": {
+                        "0": {"status": "done", "retries": 0},
+                        "1": {"status": "perm_fail", "retries": 3},
+                        "2": {"status": "perm_fail", "retries": 50},
+                    }
+                }
+            }
+        }
+
+        self.assertEqual(task.max_retries, 50)
+        self.assertEqual(task._reactivate_retryable_failures(state), 1)
+        self.assertEqual(state["datasets"]["sample"]["jobs"]["0"]["status"], "done")
+        self.assertEqual(state["datasets"]["sample"]["jobs"]["1"]["status"], "submitted")
+        self.assertEqual(state["datasets"]["sample"]["jobs"]["2"]["status"], "perm_fail")
+
+    def test_stitching_apply_forwards_retry_limit_to_monitor(self):
+        import analysis_tasks
+
+        task = analysis_tasks.StitchingApplyTask(
+            exe="/fake/exe",
+            submit_config="submit_config.txt",
+            name="run",
+            dataset_manifest="datasets.yaml",
+            stitch_config="stitch_config.yaml",
+            workflow="htcondor",
+        )
+
+        delegate = MagicMock()
+        with patch.object(analysis_tasks.StitchingApplyMonitorJobs, "req", return_value=delegate) as req:
+            self.assertIs(task.htcondor_delegate_task(), delegate)
+
+        self.assertEqual(req.call_args.kwargs["max_retries"], 50)
+
     def test_htcondor_remote_helper_methods_are_disabled(self):
         import analysis_tasks
 
@@ -1474,6 +1857,8 @@ class TestPrepareSkimJobs(unittest.TestCase):
             Path(os.path.join(shared_dir, exe_name)).write_text("#!/bin/sh\nexit 0\n")
             Path(os.path.join(shared_dir, "libexample.so")).write_text("fake-so")
             Path(os.path.join(shared_dir, "x509")).write_text("proxy")
+            weights_path = os.path.join(tmpdir, "derived_stitch_weights.json")
+            Path(weights_path).write_text("{\"corrections\": []}\n")
 
             cfg_src = os.path.join(tmpdir, "cfg")
             aux_src = os.path.join(tmpdir, "aux")
@@ -1517,6 +1902,8 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 dataset_manifest=manifest_path,
                 name="myRun",
                 file_source="rucio",
+                stitch_mode="correctionlib",
+                stitch_weights=weights_path,
             )
 
             orig_run_dir = analysis_tasks.BuildSkimSubmission._run_dir.fget
@@ -1540,6 +1927,15 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertTrue(os.path.isfile(runscript_path))
             self.assertTrue(os.path.isdir(os.path.join(submit_dir, "job_0")))
             self.assertTrue(os.path.isdir(os.path.join(submit_dir, "job_1")))
+            self.assertTrue(os.path.isfile(os.path.join(submit_dir, "job_0", "stitch_weights.json")))
+            self.assertIn(
+                "stitchWeights=stitch_weights.json",
+                Path(os.path.join(submit_dir, "job_0", "submit_config.txt")).read_text(),
+            )
+            self.assertIn(
+                "job_$(Process)/stitch_weights.json",
+                Path(submit_path).read_text(),
+            )
 
             job0_cfg = Path(os.path.join(submit_dir, "job_0", "submit_config.txt")).read_text()
             self.assertIn("saveDirectory=/tmp/out/sample", job0_cfg)
@@ -1697,6 +2093,119 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertIn(f"Output = {submit_dir}/condor_logs/resub_7_$(Cluster)_$(Process).stdout", resub_text)
             self.assertIn(f"Log = {submit_dir}/condor_logs/resub_7.log", resub_text)
             self.assertRegex(resub_text, r"(?m)^queue 1$")
+
+    def test_monitor_keeps_failed_retry_submission_retryable(self):
+        import analysis_tasks
+
+        task = analysis_tasks.MonitorSkimJobs(
+            submit_config="submit_config.txt",
+            exe="vjetStitch",
+            name="run",
+            dataset_manifest="datasets.yaml",
+        )
+        dataset_state = {"submission_dir": "/tmp/submission", "jobs": {}}
+        job_state = {"status": "submitted", "retries": 0, "cluster": "123", "proc": 7}
+
+        with patch.object(analysis_tasks, "_submit_single_skim_job", return_value=None), \
+                patch.object(task, "publish_message"):
+            task._try_resubmit(
+                "sample",
+                7,
+                dataset_state,
+                job_state,
+                reason="exit code 1",
+            )
+
+        self.assertEqual(job_state["status"], "submitted")
+        self.assertEqual(job_state["retries"], 0)
+
+    def test_condor_job_exceeded_runtime_uses_strict_150_percent_threshold(self):
+        import analysis_tasks
+
+        self.assertFalse(
+            analysis_tasks._condor_job_exceeded_runtime(
+                {"MaxRuntime": 100, "RemoteWallClockTime": 150}
+            )
+        )
+        self.assertTrue(
+            analysis_tasks._condor_job_exceeded_runtime(
+                {"MaxRuntime": 100, "RemoteWallClockTime": 151}
+            )
+        )
+        self.assertTrue(
+            analysis_tasks._condor_job_exceeded_runtime(
+                {"RemoteWallClockTime": 151},
+                fallback_max_runtime=100,
+            )
+        )
+
+    def test_monitor_splits_multi_file_retry_into_two_jobs(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            submission_dir = os.path.join(tmpdir, "submission")
+            source_job_dir = os.path.join(submission_dir, "job_7")
+            Path(source_job_dir).mkdir(parents=True)
+            save_path = os.path.join(tmpdir, "output.root")
+            meta_path = os.path.join(tmpdir, "meta.root")
+            Path(os.path.join(source_job_dir, "submit_config.txt")).write_text(
+                "fileList=root://server/a.root,root://server/b.root,root://server/c.root\n"
+                f"saveFile={save_path}\n"
+                f"metaFile={meta_path}\n"
+            )
+
+            task = analysis_tasks.MonitorSkimJobs(
+                submit_config="submit_config.txt",
+                exe="vjetStitch",
+                name="run",
+                dataset_manifest="datasets.yaml",
+            )
+            dataset_state = {
+                "submission_dir": submission_dir,
+                "shared_transfer_files": [],
+                "jobs": {"7": {}},
+            }
+            job_state = {"status": "submitted", "retries": 0, "cluster": "123", "proc": 7}
+            job_info = {
+                7: {
+                    "dir": source_job_dir,
+                    "save": save_path,
+                    "meta": meta_path,
+                }
+            }
+            submissions = []
+
+            def fake_submit(*args, **kwargs):
+                submissions.append(kwargs)
+                return str(100 + len(submissions))
+
+            with patch.object(analysis_tasks, "_submit_single_skim_job", side_effect=fake_submit), \
+                    patch.object(task, "publish_message"):
+                task._try_resubmit(
+                    "sample",
+                    7,
+                    dataset_state,
+                    job_state,
+                    reason="runtime exceeded",
+                    job_info=job_info,
+                )
+
+            self.assertEqual(len(submissions), 2)
+            self.assertEqual(
+                [
+                    analysis_tasks._skim_job_file_list(item["source_job_dir"])
+                    for item in submissions
+                ],
+                [
+                    ["root://server/a.root", "root://server/b.root"],
+                    ["root://server/c.root"],
+                ],
+            )
+            self.assertEqual(job_state["cluster"], "101")
+            self.assertEqual(job_info[8]["save"], f"{tmpdir}/output_part1.root")
+            self.assertEqual(job_info[8]["meta"], f"{tmpdir}/meta_part1.root")
+            self.assertEqual(dataset_state["jobs"]["8"]["cluster"], "102")
+            self.assertEqual(job_state["retries"], 1)
 
     def test_output_files_exist_batch_uses_xrootd_for_eos_like_paths(self):
         import analysis_tasks
@@ -1988,6 +2497,27 @@ class TestReadIntweightSignHist(unittest.TestCase):
 
         self.assertEqual(result, fake_values)
 
+    def test_weight_sign_sum_uproot_success(self):
+        """Returns the all-event signed total from the scalar counter."""
+        mod = self._import()
+
+        mock_hist = MagicMock()
+        mock_hist.values.return_value = __import__("numpy").array([7.0])
+
+        mock_file = MagicMock()
+        mock_file.keys.return_value = ["counter_weightSignSum_sampleA;1"]
+        mock_file.__getitem__ = MagicMock(return_value=mock_hist)
+        mock_file.__enter__ = MagicMock(return_value=mock_file)
+        mock_file.__exit__ = MagicMock(return_value=False)
+
+        mock_uproot = MagicMock()
+        mock_uproot.open.return_value = mock_file
+
+        with patch.dict(sys.modules, {"uproot": mock_uproot}):
+            result = mod._read_weight_sign_sum("/fake/meta.root", "sampleA")
+
+        self.assertEqual(result, 7.0)
+
     def test_histogram_not_found_raises(self):
         """RuntimeError is raised when the expected histogram is absent."""
         mod = self._import()
@@ -2076,6 +2606,64 @@ class TestDeriveStitchWeights(unittest.TestCase):
         np.testing.assert_allclose(result["s0"], [0.3, 0.1, 0.6], atol=1e-10)
         np.testing.assert_allclose(result["s1"], [0.7, 0.9, 0.4], atol=1e-10)
 
+    def test_formula_aggregates_partitioned_meta_files(self):
+        """Signed counters are summed when one sample has multiple jobs."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = {
+                "s0_job0": os.path.join(tmpdir, "s0_job0.root"),
+                "s0_job1": os.path.join(tmpdir, "s0_job1.root"),
+                "s1_job0": os.path.join(tmpdir, "s1_job0.root"),
+            }
+            for path in files.values():
+                Path(path).write_text("")
+
+            values = {
+                files["s0_job0"]: [10.0, 20.0],
+                files["s0_job1"]: [20.0, 30.0],
+                files["s1_job0"]: [70.0, 50.0],
+            }
+            with patch.object(
+                mod,
+                "_read_intweight_sign_hist",
+                side_effect=lambda path, sample: values[path],
+            ):
+                result = mod._derive_stitch_weights(
+                    "grp",
+                    {
+                        "s0": [files["s0_job0"], files["s0_job1"]],
+                        "s1": files["s1_job0"],
+                    },
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result["s0"], [0.3, 0.5], atol=1e-10)
+        np.testing.assert_allclose(result["s1"], [0.7, 0.5], atol=1e-10)
+
+    def test_formula_accepts_remote_meta_files(self):
+        """Remote metadata paths are passed to the histogram reader."""
+        mod = self._import()
+        sample_values = {
+            "s0": [30.0, 10.0],
+            "s1": [70.0, 90.0],
+        }
+        meta_files = {
+            name: f"root://eosuser.cern.ch//eos/test/{name}.root"
+            for name in sample_values
+        }
+
+        with patch.object(
+            mod,
+            "_read_intweight_sign_hist",
+            side_effect=self._mock_read(sample_values),
+        ):
+            result = mod._derive_stitch_weights("grp", meta_files)
+
+        import numpy as np
+        np.testing.assert_allclose(result["s0"], [0.3, 0.1], atol=1e-10)
+        np.testing.assert_allclose(result["s1"], [0.7, 0.9], atol=1e-10)
+
     def test_formula_sum_to_one(self):
         """Scale factors in each bin sum to 1 (or 0 when total = 0)."""
         mod = self._import()
@@ -2104,6 +2692,317 @@ class TestDeriveStitchWeights(unittest.TestCase):
         self.assertAlmostEqual(col_sums[0], 1.0, places=10)
         self.assertAlmostEqual(col_sums[1], 0.0, places=10)
         self.assertAlmostEqual(col_sums[2], 1.0, places=10)
+
+    def test_negative_signed_bins_are_zeroed(self):
+        """Negative net signed bins contribute zero to fractions."""
+        mod = self._import()
+
+        sample_values = {
+            "s0": [-10.0, 30.0],
+            "s1": [20.0, -5.0],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_files = {}
+            for name in sample_values:
+                path = os.path.join(tmpdir, f"{name}.root")
+                Path(path).write_text("")
+                meta_files[name] = path
+
+            with patch.object(mod, "_read_intweight_sign_hist",
+                              side_effect=self._mock_read(sample_values)):
+                result = mod._derive_stitch_weights("grp", meta_files)
+
+        import numpy as np
+        np.testing.assert_allclose(result["s0"], [0.0, 1.0])
+        np.testing.assert_allclose(result["s1"], [1.0, 0.0])
+
+    def test_cross_sections_use_inclusive_signed_bin_fractions(self):
+        """Inclusive cross sections are split by the inclusive counter."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_file = os.path.join(tmpdir, "inclusive.root")
+            Path(meta_file).write_text("")
+            with patch.object(
+                mod,
+                "_read_intweight_sign_hist",
+                return_value=[1.0, 3.0, 6.0],
+            ):
+                result = mod._derive_stitch_cross_sections(
+                    "wjets",
+                    {"inclusive": meta_file},
+                    "inclusive",
+                    1000.0,
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [100.0, 300.0, 600.0])
+
+    def test_resolver_combines_flavor_inclusive_samples(self):
+        """Run 3 2024 DY uses its three flavor-inclusive samples together."""
+        mod = self._import()
+
+        result = mod._resolve_stitch_inclusive_sample(
+            "DYto2L",
+            {
+                "inclusive_samples": {
+                    "run3_24": [
+                        "DYto2E-2Jets_FxFx",
+                        "DYto2Mu-2Jets_FxFx",
+                        "DYto2Tau-2Jets_FxFx",
+                    ]
+                }
+            },
+            [
+                "DYto2E-2Jets_FxFx",
+                "DYto2Mu-2Jets_FxFx",
+                "DYto2Tau-2Jets_FxFx",
+            ],
+            "run3_24",
+        )
+
+        w_result = mod._resolve_stitch_inclusive_sample(
+            "WtoLNu",
+            {
+                "inclusive_samples": {
+                    "run3_24": [
+                        "WtoENu-2Jets_FxFx",
+                        "WtoMuNu-2Jets_FxFx",
+                        "WtoTauNu-2Jets_FxFx",
+                    ]
+                }
+            },
+            [
+                "WtoENu-2Jets_FxFx",
+                "WtoMuNu-2Jets_FxFx",
+                "WtoTauNu-2Jets_FxFx",
+            ],
+            "run3_24",
+        )
+
+        self.assertEqual(
+            result,
+            [
+                "DYto2E-2Jets_FxFx",
+                "DYto2Mu-2Jets_FxFx",
+                "DYto2Tau-2Jets_FxFx",
+            ],
+        )
+        self.assertEqual(
+            w_result,
+            [
+                "WtoENu-2Jets_FxFx",
+                "WtoMuNu-2Jets_FxFx",
+                "WtoTauNu-2Jets_FxFx",
+            ],
+        )
+
+    def test_resolver_combines_nested_orthogonal_inclusive_samples(self):
+        """Inclusive anchors can be split across more than one axis."""
+        mod = self._import()
+        samples = [
+            "inclusive_e_0j",
+            "inclusive_e_1j",
+            "inclusive_mu_0j",
+            "inclusive_mu_1j",
+        ]
+
+        result = mod._resolve_stitch_inclusive_sample(
+            "generic_group",
+            {
+                "inclusive_samples": {
+                    "run3_24": [
+                        ["inclusive_e_0j", "inclusive_e_1j"],
+                        ["inclusive_mu_0j", "inclusive_mu_1j"],
+                    ]
+                }
+            },
+            samples,
+            "run3_24",
+        )
+
+        self.assertEqual(result, samples)
+
+    def test_cross_sections_combine_flavor_inclusive_counters(self):
+        """Cross sections aggregate the three flavor-inclusive counters."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_files = {}
+            values = {}
+            for index, sample_name in enumerate(
+                (
+                    "DYto2E-2Jets_FxFx",
+                    "DYto2Mu-2Jets_FxFx",
+                    "DYto2Tau-2Jets_FxFx",
+                )
+            ):
+                meta_file = os.path.join(tmpdir, f"{index}.root")
+                Path(meta_file).write_text("")
+                meta_files[sample_name] = meta_file
+                values[sample_name] = [float(index == 0), float(index != 0)]
+
+            with patch.object(
+                mod,
+                "_read_intweight_sign_hist",
+                side_effect=lambda path, sample: values[sample],
+            ):
+                result = mod._derive_stitch_cross_sections(
+                    "DYto2L",
+                    meta_files,
+                    [
+                        ["DYto2E-2Jets_FxFx"],
+                        ["DYto2Mu-2Jets_FxFx", "DYto2Tau-2Jets_FxFx"],
+                    ],
+                    300.0,
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [100.0, 200.0])
+
+    def test_cross_sections_zero_negative_inclusive_bins(self):
+        """Negative net inclusive bins receive zero physical cross section."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_file = os.path.join(tmpdir, "inclusive.root")
+            Path(meta_file).write_text("")
+            with patch.object(
+                mod,
+                "_read_intweight_sign_hist",
+                return_value=[-1.0, 3.0, 6.0],
+            ):
+                result = mod._derive_stitch_cross_sections(
+                    "wjets",
+                    {"inclusive": meta_file},
+                    "inclusive",
+                    1000.0,
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [0.0, 333.3333333333333, 666.6666666666666])
+
+    def test_cross_sections_aggregate_partitioned_inclusive_meta_files(self):
+        """Inclusive counters are summed across all source jobs."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = os.path.join(tmpdir, "inclusive_job0.root")
+            second = os.path.join(tmpdir, "inclusive_job1.root")
+            Path(first).write_text("")
+            Path(second).write_text("")
+            values = {
+                first: [1.0, 2.0],
+                second: [3.0, 4.0],
+            }
+            with patch.object(
+                mod,
+                "_read_intweight_sign_hist",
+                side_effect=lambda path, sample: values[path],
+            ):
+                result = mod._derive_stitch_cross_sections(
+                    "dy",
+                    {"inclusive": [first, second]},
+                    "inclusive",
+                    1000.0,
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [400.0, 600.0])
+
+    def test_cross_sections_accept_remote_meta_files(self):
+        """Remote inclusive metadata paths are passed to the histogram reader."""
+        mod = self._import()
+        meta_file = "root://eosuser.cern.ch//eos/test/inclusive.root"
+        with patch.object(
+            mod,
+            "_read_intweight_sign_hist",
+            return_value=[1.0, 3.0],
+        ):
+            result = mod._derive_stitch_cross_sections(
+                "wjets",
+                {"inclusive": meta_file},
+                "inclusive",
+                1000.0,
+            )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [250.0, 750.0])
+
+    def test_cross_sections_require_explicit_group_configuration(self):
+        """Core does not provide process-specific cross-section defaults."""
+        mod = self._import()
+
+        self.assertEqual(
+            mod._resolve_stitch_inclusive_cross_section(
+                "DYto2L", {}, {}, "run2"
+            ),
+            None,
+        )
+        self.assertEqual(
+            mod._resolve_stitch_inclusive_cross_section(
+                "WtoLNu", {}, {}, "run2"
+            ),
+            None,
+        )
+        self.assertEqual(
+            mod._resolve_stitch_inclusive_cross_section(
+                "generic_group",
+                {},
+                {"inclusive_cross_sections": {
+                    "generic_group": {"run3_22_23": 123.0}
+                }},
+                "run3_22_23",
+            ),
+            123.0,
+        )
+
+    def test_cross_section_era_aliases_are_normalized(self):
+        """Human-readable era aliases map to independent derivation eras."""
+        mod = self._import()
+
+        self.assertEqual(
+            mod._resolve_stitch_cross_section_era(
+                {"cross_section_era": "22/23"}, []
+            ),
+            "run3_22_23",
+        )
+        self.assertEqual(
+            mod._resolve_stitch_cross_section_era(
+                {"cross_section_era": "24"}, []
+            ),
+            "run3_24",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = os.path.join(tmpdir, "samples.yaml")
+            Path(manifest_path).write_text(
+                "datasets:\n  - name: sample24\n    year: 24\n"
+            )
+            self.assertEqual(
+                mod._resolve_stitch_cross_section_era(
+                    {},
+                    ["sample24"],
+                    source_dataset_manifest=manifest_path,
+                ),
+                "run3_24",
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = os.path.join(tmpdir, "mixed_samples.yaml")
+            Path(manifest_path).write_text(
+                "datasets:\n"
+                "  - name: sample18\n"
+                "    year: 18\n"
+                "  - name: sample22\n"
+                "    year: 22\n"
+            )
+            with self.assertRaises(RuntimeError):
+                mod._resolve_stitch_cross_section_era(
+                    {},
+                    ["sample18", "sample22"],
+                    source_dataset_manifest=manifest_path,
+                )
 
     def test_division_by_zero_guard(self):
         """Bins where all C_m(k) = 0 receive scale factor 0.0."""
@@ -2295,6 +3194,140 @@ class TestStitchingDerivationTask(unittest.TestCase):
         expected = os.path.join(analysis_tasks.WORKSPACE, "stitchWeights_run1")
         self.assertEqual(task._output_dir, expected)
 
+    def test_declarative_group_discovers_all_source_meta_files(self):
+        import analysis_tasks
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = os.path.join(tmpdir, "skimRun_counts", "outputs")
+            Path(os.path.join(source_dir, "sample_a", "job_0")).mkdir(parents=True)
+            Path(os.path.join(source_dir, "sample_a", "job_1")).mkdir(parents=True)
+            Path(os.path.join(source_dir, "sample_b")).mkdir(parents=True)
+            for path in (
+                os.path.join(source_dir, "sample_a", "job_0", "meta.root"),
+                os.path.join(source_dir, "sample_a", "job_1", "meta.root"),
+                os.path.join(source_dir, "sample_b", "meta.root"),
+            ):
+                Path(path).write_text("")
+
+            manifest_path = os.path.join(tmpdir, "datasets.yaml")
+            with open(manifest_path, "w") as fh:
+                yaml.safe_dump(
+                    {
+                        "datasets": [
+                            {"name": "sample_a", "group": "group_a"},
+                            {"name": "sample_b", "group": "group_a"},
+                        ]
+                    },
+                    fh,
+                )
+
+            stitch_config_path = os.path.join(tmpdir, "stitch.yaml")
+            with open(stitch_config_path, "w") as fh:
+                yaml.safe_dump({"groups": {"group_a": {"select": {"group": "group_a"}}}}, fh)
+
+            original_workspace = analysis_tasks.WORKSPACE
+            analysis_tasks.WORKSPACE = tmpdir
+            try:
+                result = analysis_tasks._resolve_stitch_meta_files(
+                    "group_a",
+                    {"select": {"group": "group_a"}},
+                    stitch_config_path,
+                    source_skim_name="counts",
+                    source_dataset_manifest=manifest_path,
+                )
+            finally:
+                analysis_tasks.WORKSPACE = original_workspace
+
+            self.assertEqual(set(result), {"sample_a", "sample_b"})
+            self.assertEqual(len(result["sample_a"]), 2)
+            self.assertTrue(str(result["sample_b"]).endswith("meta.root"))
+
+    def test_apply_task_requires_derivation_and_stages_weights(self):
+        import analysis_tasks
+
+        task = analysis_tasks.StitchingApplyTask(
+            stitch_config="stitch.yaml",
+            submit_config="submit_config.txt",
+            exe="vjetStitch",
+            dataset_manifest="datasets.yaml",
+            name="applyRun",
+        )
+
+        requirements = task.requires()
+        if isinstance(requirements, list):
+            derivation_requirements = requirements
+        else:
+            derivation_requirements = list(requirements.values())
+        self.assertTrue(
+            any(
+                isinstance(item, analysis_tasks.StitchingDerivationTask)
+                for item in derivation_requirements
+            )
+        )
+        self.assertEqual(task.stitch_mode, "correctionlib")
+        self.assertEqual(
+            task.stitch_weights,
+            os.path.join(
+                analysis_tasks.WORKSPACE,
+                "stitchWeights_applyRun",
+                "stitch_weights.json",
+            ),
+        )
+
+    def test_apply_task_forwards_htcondor_to_counter_pass(self):
+        import analysis_tasks
+
+        task = analysis_tasks.StitchingApplyTask(
+            stitch_config="stitch.yaml",
+            submit_config="submit_config.txt",
+            exe="vjetStitch",
+            dataset_manifest="datasets.yaml",
+            name="applyRun",
+            workflow="htcondor",
+            file_source="rucio",
+            file_source_name="inputFiles",
+        )
+
+        derivation = task.workflow_requires()["stitch_weights"]
+        counter_task = derivation.requires()
+
+        workflow_requirements = task.workflow_proxy.requires()
+        self.assertIn("delegate", workflow_requirements)
+        self.assertIs(
+            workflow_requirements["delegate"],
+            task.htcondor_delegate_task(),
+        )
+        self.assertIsInstance(
+            workflow_requirements["delegate"],
+            analysis_tasks.StitchingApplyMonitorJobs,
+        )
+        submit_task = workflow_requirements["delegate"].requires()
+        self.assertIsInstance(submit_task, analysis_tasks.StitchingApplySubmitJobs)
+        self.assertEqual(
+            submit_task.stitch_weights,
+            os.path.join(
+                analysis_tasks.WORKSPACE,
+                "stitchWeights_applyRun",
+                "stitch_weights.json",
+            ),
+        )
+        self.assertEqual(submit_task.stitch_mode, "correctionlib")
+        submit_requirements = submit_task.requires()
+        self.assertIsInstance(
+            submit_requirements["stitch_weights"],
+            analysis_tasks.StitchingDerivationTask,
+        )
+        self.assertIsInstance(
+            workflow_requirements["stitch_weights"],
+            analysis_tasks.StitchingDerivationTask,
+        )
+
+        self.assertEqual(counter_task.workflow, "htcondor")
+        self.assertEqual(counter_task.effective_workflow, "htcondor")
+        self.assertEqual(counter_task.file_source, "rucio")
+        self.assertEqual(counter_task.file_source_name, "inputFiles")
+
     def test_missing_config_raises(self):
         """run() raises RuntimeError when the stitch config file is absent."""
         task = self._make_task(stitch_config="/nonexistent/stitch.yaml")
@@ -2347,7 +3380,16 @@ class TestStitchingDerivationTask(unittest.TestCase):
             stitch_cfg = os.path.join(tmpdir, "stitch.yaml")
             with open(stitch_cfg, "w") as fh:
                 yaml.dump(
-                    {"groups": {"wjets_ht": {"meta_files": {"s0": meta0, "s1": meta1}}}},
+                    {
+                        "groups": {
+                            "wjets_ht": {
+                                "meta_files": {"s0": meta0, "s1": meta1},
+                                "inclusive_sample": "s0",
+                                "cross_section_era": "run2",
+                                "inclusive_cross_section_pb": 1000.0,
+                            }
+                        }
+                    },
                     fh,
                 )
 
@@ -2387,11 +3429,620 @@ class TestStitchingDerivationTask(unittest.TestCase):
                 sf_clamped = cset["wjets_ht"].evaluate("s0", 1)
                 self.assertAlmostEqual(sf_clamped, 0.1, places=10)
 
+                cross_sections_path = os.path.join(
+                    os.path.dirname(out_path), "stitch_cross_sections.json"
+                )
+                with open(cross_sections_path) as fh:
+                    cross_sections = json.load(fh)
+                derived = cross_sections["groups"]["wjets_ht"]
+                self.assertEqual(derived["era"], "run2")
+                self.assertEqual(derived["inclusive_sample"], "s0")
+                self.assertEqual(derived["inclusive_samples"], ["s0"])
+                self.assertAlmostEqual(
+                    derived["bin_fractions"][0], 0.75, places=10
+                )
+                self.assertAlmostEqual(
+                    derived["binned_cross_sections_pb"][1],
+                    1000.0 * 0.25,
+                    places=8,
+                )
+
             finally:
                 analysis_tasks.StitchingDerivationTask._output_dir = property(orig)
 
     def test_task_namespace(self):
         self.assertEqual(self._make_task().task_namespace, "")
+
+
+# ===========================================================================
+# StitchingValidationTask
+# ===========================================================================
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestStitchingValidationTask(unittest.TestCase):
+    """Tests for all-file stitching application validation."""
+
+    def test_validation_histogram_specs_are_configurable(self):
+        import analysis_tasks
+
+        default_specs = analysis_tasks._stitch_validation_histogram_specs({})
+        self.assertEqual(default_specs[0]["ratio_range"], [0.8, 1.2])
+
+        specs = analysis_tasks._stitch_validation_histogram_specs(
+            {
+                "validation": {
+                    "histograms": [
+                        {
+                            "name": "HT",
+                            "stitched_name": "HT_stitched",
+                            "label": "H_T [GeV]",
+                            "boundaries": [100, 250],
+                            "xlim": [0, 1000],
+                            "ratio_range": [0.8, 1.2],
+                        },
+                        {
+                            "name": "LHE_Vpt_fine",
+                            "stitched_name": "LHE_Vpt_fine_stitched",
+                            "label": "LHE VpT [GeV] (fine)",
+                            "boundaries": [],
+                            "xlim": [-5, 60],
+                        }
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(specs[0]["name"], "HT")
+        self.assertEqual(specs[0]["stitched_name"], "HT_stitched")
+        self.assertEqual(specs[0]["boundaries"], [100.0, 250.0])
+        self.assertEqual(specs[0]["xlim"], [0.0, 1000.0])
+        self.assertEqual(specs[0]["ratio_range"], [0.8, 1.2])
+        self.assertEqual(specs[1]["name"], "LHE_Vpt_fine")
+        self.assertEqual(specs[1]["stitched_name"], "LHE_Vpt_fine_stitched")
+        self.assertEqual(specs[1]["boundaries"], [])
+        self.assertEqual(specs[1]["xlim"], [-5.0, 60.0])
+
+    def test_sample_scale_uses_active_bin_cross_sections_and_signed_sum(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_file = os.path.join(tmpdir, "sample.root")
+            Path(meta_file).write_text("")
+            with patch.object(
+                analysis_tasks,
+                "_read_intweight_sign_hist",
+                return_value=[2.0, -1.0, 0.0],
+            ), patch.object(
+                analysis_tasks,
+                "_read_weight_sign_sum",
+                return_value=5.0,
+            ):
+                scale, cross_section, signed_sum = (
+                    analysis_tasks._stitch_validation_sample_scale(
+                        "sample",
+                        [meta_file],
+                        {"binned_cross_sections_pb": [10.0, 20.0, 30.0]},
+                    )
+                )
+
+        self.assertEqual(cross_section, 10.0)
+        self.assertEqual(signed_sum, 2.0)
+        self.assertEqual(scale, 5.0)
+
+    def test_sample_scale_requires_meaningful_positive_stitch_factors(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_file = os.path.join(tmpdir, "sample.root")
+            Path(meta_file).write_text("")
+            with patch.object(
+                analysis_tasks,
+                "_read_intweight_sign_hist",
+                return_value=[100.0, 1.0, -2.0, 1.0],
+            ):
+                scale, cross_section, signed_sum = (
+                    analysis_tasks._stitch_validation_sample_scale(
+                        "sample",
+                        [meta_file],
+                        {"binned_cross_sections_pb": [10.0, 20.0, 30.0, 40.0]},
+                        stitch_factors=[0.89, 4.4e-8, 0.5, 1e-6],
+                    )
+                )
+
+        self.assertEqual(cross_section, 10.0)
+        self.assertEqual(signed_sum, 100.0)
+        self.assertEqual(scale, 0.1)
+
+    def test_dy_ptz_zero_to50_excludes_reserved_zero_pt_bins(self):
+        import analysis_tasks
+        import importlib
+        import numpy as np
+
+        validation_adapter = importlib.import_module(
+            "analyses.rdfAnalyzerStitch.stitching_validation"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            submit_config = os.path.join(tmpdir, "submit_config.txt")
+            Path(submit_config).write_text("")
+            excluded_bins = analysis_tasks._stitch_validation_excluded_bins(
+                "DYJetsToLL_LHEFilterPtZ-0To50_FxFx",
+                "DYto2L",
+                {"era": "run2"},
+                submit_config,
+                21,
+                validation_adapter,
+            )
+            self.assertEqual(excluded_bins, {0, 7, 14})
+
+            meta_file = os.path.join(tmpdir, "sample.root")
+            Path(meta_file).write_text("")
+            bin_cross_sections = [float(index + 1) for index in range(21)]
+            with patch.object(
+                analysis_tasks,
+                "_read_intweight_sign_hist",
+                return_value=np.ones(21),
+            ):
+                _, sample_cross_section, signed_sum = (
+                    analysis_tasks._stitch_validation_sample_scale(
+                        "DYJetsToLL_LHEFilterPtZ-0To50_FxFx",
+                        [meta_file],
+                        {"binned_cross_sections_pb": bin_cross_sections},
+                        excluded_bins,
+                    )
+                )
+
+        self.assertEqual(signed_sum, 18.0)
+        self.assertEqual(sample_cross_section, 207.0)
+
+    def test_plot_normalization_removes_configured_weight_scale(self):
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+
+        entry = DatasetEntry(
+            name="sample",
+            xsec=100.0,
+            kfac=1.2,
+            filter_efficiency=0.5,
+            extra_scale=2.0,
+        )
+
+        self.assertAlmostEqual(
+            analysis_tasks._stitch_validation_configured_weight_scale(entry),
+            120.0,
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_configured_weight_scale(None),
+            1.0,
+        )
+
+    def test_process_and_year_labels_are_separate(self):
+        import analysis_tasks
+        import importlib
+
+        validation_adapter = importlib.import_module(
+            "analyses.rdfAnalyzerStitch.stitching_validation"
+        )
+
+        self.assertEqual(
+            analysis_tasks._stitch_validation_process_label(
+                "DYto2L", validation_adapter
+            ),
+            "DY",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_process_label(
+                "WtoLNu", validation_adapter
+            ),
+            "W",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_process_label(
+                "Zto2Nu", validation_adapter
+            ),
+            "Z",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_year_set(
+                None, "run2", validation_adapter
+            ),
+            "UL",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_year_set(
+                None, "run3_22_23", validation_adapter
+            ),
+            "22-23",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_year_set(
+                None, "run3_24", validation_adapter
+            ),
+            "24",
+        )
+
+    def test_plot_boundaries_and_ratio_use_variable_axes(self):
+        import analysis_tasks
+        import importlib
+        import numpy as np
+        from stitching_plotting import ratio_with_uncertainty
+
+        validation_adapter = importlib.import_module(
+            "analyses.rdfAnalyzerStitch.stitching_validation"
+        )
+
+        boundaries = {
+            "LHE_Vpt": [50.0, 100.0],
+            "LHE_NpNLO": [1.0, 2.0, 3.0],
+        }
+        process_boundaries = {"w": [100.0, 250.0]}
+        self.assertEqual(
+            analysis_tasks._stitch_validation_variable_boundaries(
+                "LHE_Vpt", "w", boundaries, process_boundaries, validation_adapter
+            ),
+            [100.0, 250.0],
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_variable_boundaries(
+                "LHE_NpNLO", "w", boundaries, process_boundaries, validation_adapter
+            ),
+            [1.0, 2.0, 3.0],
+        )
+        np.testing.assert_allclose(
+            ratio_with_uncertainty(
+                np.array([2.0, 0.0, -4.0]),
+                np.array([1.0, 0.0, 2.0]),
+            )[0],
+            np.array([2.0, np.nan, -2.0]),
+            equal_nan=True,
+        )
+    def test_missing_application_output_raises(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample_a", "group": "group_a"}],
+            )
+            original_workspace = analysis_tasks.WORKSPACE
+            analysis_tasks.WORKSPACE = tmpdir
+            try:
+                task = analysis_tasks.StitchingValidationTask(
+                    name="applyRun",
+                    dataset_manifest=manifest_path,
+                )
+                with self.assertRaises(RuntimeError) as ctx:
+                    task.run()
+            finally:
+                analysis_tasks.WORKSPACE = original_workspace
+
+            self.assertIn("sample_a", str(ctx.exception))
+
+    def test_incomplete_validation_report_is_not_cached_as_complete(self):
+        import analysis_tasks
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stitch_config_path = Path(tmpdir) / "stitch.yaml"
+            with stitch_config_path.open("w") as fh:
+                yaml.safe_dump(
+                    {
+                        "validation": {
+                            "histograms": [
+                                {"name": "LHE_Vpt"},
+                                {"name": "LHE_Vpt_fine"},
+                                {"name": "LHE_NpNLO"},
+                            ]
+                        }
+                    },
+                    fh,
+                )
+            output_dir = Path(tmpdir) / "stitchValidation_applyRun"
+            output_dir.mkdir()
+            existing_plot = output_dir / "stitch_W_UL_LHE_Vpt_comparison.png"
+            existing_plot.write_text("")
+            (output_dir / "stitch_validation.json").write_text(
+                json.dumps({"plots": [str(existing_plot)]})
+            )
+
+            original_workspace = analysis_tasks.WORKSPACE
+            analysis_tasks.WORKSPACE = tmpdir
+            try:
+                task = analysis_tasks.StitchingValidationTask(
+                    name="applyRun",
+                    dataset_manifest="manifest.yaml",
+                    stitch_config=str(stitch_config_path),
+                )
+                self.assertFalse(task.complete())
+
+                fine_plot = output_dir / (
+                    "stitch_W_UL_LHE_Vpt_fine_comparison.png"
+                )
+                fine_plot.write_text("")
+                njet_plot = output_dir / "stitch_W_UL_LHE_NpNLO_comparison.png"
+                njet_plot.write_text("")
+                (output_dir / "stitch_validation.json").write_text(
+                    json.dumps(
+                        {
+                            "plots": [
+                                str(existing_plot),
+                                str(fine_plot),
+                                str(njet_plot),
+                            ]
+                        }
+                    )
+                )
+                self.assertTrue(task.complete())
+            finally:
+                analysis_tasks.WORKSPACE = original_workspace
+
+    def test_condor_stageout_metadata_is_discoverable(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample_a", "group": "group_a"}],
+            )
+            submission_dir = (
+                Path(tmpdir)
+                / "skimRun_applyRun"
+                / "condor_submissions"
+                / "sample_a"
+                / "job_0"
+            )
+            submission_dir.mkdir(parents=True)
+            (submission_dir / "submit_config.txt").write_text(
+                "metaFile=/eos/user/test/meta_0.root\n"
+            )
+
+            original_workspace = analysis_tasks.WORKSPACE
+            analysis_tasks.WORKSPACE = tmpdir
+            try:
+                resolved = analysis_tasks._stitch_output_meta_files(
+                    "applyRun", manifest_path
+                )
+            finally:
+                analysis_tasks.WORKSPACE = original_workspace
+
+        self.assertEqual(
+            resolved,
+            {"sample_a": ["root://eosuser.cern.ch//eos/user/test/meta_0.root"]},
+        )
+
+    def test_validation_rejects_permanently_failed_application_jobs(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample_a", "group": "group_a"}],
+            )
+            summary_path = Path(tmpdir) / "skimRun_applyRun" / "all_outputs_verified.txt"
+            summary_path.parent.mkdir(parents=True)
+            summary_path.write_text(
+                "done=3\n"
+                "perm_fail=1\n"
+                "total=4\n"
+                "perm_failed_jobs=sample_a:2\n"
+            )
+
+            original_workspace = analysis_tasks.WORKSPACE
+            analysis_tasks.WORKSPACE = tmpdir
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"1 permanently failed job\(s\).*sample_a:2",
+                ):
+                    analysis_tasks._stitch_output_meta_files(
+                        "applyRun",
+                        manifest_path,
+                    )
+            finally:
+                analysis_tasks.WORKSPACE = original_workspace
+
+    def test_validates_all_partitioned_meta_files(self):
+        import analysis_tasks
+        import yaml
+
+        class FakeHistogram:
+            def to_numpy(self, flow=False):
+                return ([1.0, 2.0], [0.0, 1.0, 2.0])
+
+        class FakeRootFile:
+            def __init__(self, sample_name):
+                self.sample_name = sample_name
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def keys(self, recursive=True):
+                return [
+                    f"counter_intWeightSignSum_{self.sample_name};1",
+                    f"counter_weightSignSum_{self.sample_name};1",
+                    "all_Default/LHE_Vpt;1",
+                    "all_Default/LHE_Vpt_stitched;1",
+                    "all_Default/LHE_Vpt_fine;1",
+                    "all_Default/LHE_Vpt_fine_stitched;1",
+                    "all_Default/LHE_NpNLO;1",
+                    "all_Default/LHE_NpNLO_stitched;1",
+                ]
+
+            def __getitem__(self, key):
+                return FakeHistogram()
+
+        def fake_open(path):
+            path_parts = Path(path).parts
+            sample_index = path_parts.index("outputs") + 1
+            return FakeRootFile(path_parts[sample_index])
+
+        fake_uproot = types.SimpleNamespace(open=fake_open)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [
+                    {"name": "sample_a", "group": "group_a", "xsec": 10.0},
+                    {"name": "sample_b", "group": "group_a"},
+                ],
+            )
+            output_dir = Path(tmpdir) / "skimRun_applyRun" / "outputs"
+            for path in (
+                output_dir / "sample_a" / "job_0" / "meta.root",
+                output_dir / "sample_a" / "job_1" / "meta.root",
+                output_dir / "sample_b" / "meta.root",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+
+            weights_path = Path(tmpdir) / "stitch_weights.json"
+            weights_path.write_text(
+                json.dumps(
+                    {
+                        "corrections": [
+                            {
+                                "name": "group_a",
+                                "data": {
+                                    "nodetype": "category",
+                                    "content": [
+                                        {
+                                            "key": "sample_a",
+                                            "value": {
+                                                "nodetype": "binning",
+                                                "content": [1.0, 1.0],
+                                            },
+                                        },
+                                        {
+                                            "key": "sample_b",
+                                            "value": {
+                                                "nodetype": "binning",
+                                                "content": [1.0, 1.0],
+                                            },
+                                        },
+                                    ],
+                                },
+                            }
+                        ]
+                    }
+                )
+            )
+            stitch_config_path = Path(tmpdir) / "stitch.yaml"
+            with stitch_config_path.open("w") as fh:
+                yaml.safe_dump(
+                    {
+                        "validation": {
+                            "adapter": (
+                                "analyses.rdfAnalyzerStitch."
+                                "stitching_validation"
+                            ),
+                            "histograms": [
+                                {
+                                    "name": "LHE_Vpt",
+                                    "stitched_name": "LHE_Vpt_stitched",
+                                    "label": "LHE VpT [GeV]",
+                                },
+                                {
+                                    "name": "LHE_Vpt_fine",
+                                    "stitched_name": "LHE_Vpt_fine_stitched",
+                                    "label": "LHE VpT [GeV] (fine)",
+                                    "boundaries": [],
+                                    "xlim": [-5, 60],
+                                },
+                                {
+                                    "name": "LHE_NpNLO",
+                                    "stitched_name": "LHE_NpNLO_stitched",
+                                    "label": "LHE NpNLO",
+                                },
+                            ],
+                        },
+                        "groups": {
+                            "group_a": {"select": {"group": "group_a"}}
+                        },
+                    },
+                    fh,
+                )
+            cross_sections_path = Path(tmpdir) / "stitch_cross_sections.json"
+            cross_sections_path.write_text(
+                json.dumps(
+                    {
+                        "groups": {
+                            "group_a": {
+                                "era": "run2",
+                                "inclusive_sample": "sample_a",
+                                "binned_cross_sections_pb": [10.0, 20.0],
+                            }
+                        }
+                    }
+                )
+            )
+            submit_config_path = Path(tmpdir) / "submit_config.txt"
+            submit_config_path.write_text(
+                "stitchRun2PtBins_WtoLNu=0,100,130,220,250,280\n"
+            )
+
+            original_workspace = analysis_tasks.WORKSPACE
+            analysis_tasks.WORKSPACE = tmpdir
+            try:
+                with (
+                    patch.dict(sys.modules, {"uproot": fake_uproot}),
+                    patch.object(
+                        analysis_tasks,
+                        "_read_intweight_sign_hist",
+                        return_value=[1.0, 2.0],
+                    ),
+                    patch.object(
+                        analysis_tasks,
+                        "_read_weight_sign_sum",
+                        return_value=3.0,
+                    ),
+                ):
+                    task = analysis_tasks.StitchingValidationTask(
+                        name="applyRun",
+                        dataset_manifest=manifest_path,
+                        stitch_config=str(stitch_config_path),
+                        stitch_weights=str(weights_path),
+                        stitch_cross_sections=str(cross_sections_path),
+                        submit_config=str(submit_config_path),
+                    )
+                    task.run()
+                with open(task.output().path) as fh:
+                    report = json.load(fh)
+            finally:
+                analysis_tasks.WORKSPACE = original_workspace
+
+            self.assertEqual(report["samples"], 2)
+            self.assertEqual(report["meta_files"], 3)
+            self.assertEqual(report["groups"], ["group_a"])
+            self.assertEqual(
+                report["plot_boundaries"]["LHE_Vpt"],
+                [100.0, 130.0, 220.0, 250.0, 280.0],
+            )
+            self.assertEqual(report["plot_boundaries"]["LHE_NpNLO"], [1.0, 2.0, 3.0])
+            self.assertEqual(len(report["plots"]), 3)
+            self.assertTrue(all(os.path.isfile(path) for path in report["plots"]))
+            self.assertTrue(
+                any(path.endswith("_LHE_Vpt_comparison.png") for path in report["plots"])
+            )
+            self.assertTrue(
+                any(
+                    path.endswith("_LHE_Vpt_fine_comparison.png")
+                    for path in report["plots"]
+                )
+            )
+            import matplotlib.image as mpimg
+
+            plot_image = mpimg.imread(report["plots"][0])
+            self.assertEqual(plot_image.shape[:2], (1650, 1500))
+            normalization = report["plot_normalization"]["group_a_UL"]["samples"]
+            self.assertEqual(normalization["sample_a"]["cross_section_pb"], 30.0)
+            self.assertEqual(normalization["sample_a"]["signed_event_sum"], 6.0)
+            self.assertEqual(normalization["sample_a"]["scale"], 0.5)
+            self.assertEqual(normalization["sample_a"]["configured_weight_scale"], 10.0)
+            self.assertTrue(normalization["sample_a"]["is_inclusive_sample"])
+            self.assertFalse(normalization["sample_b"]["is_inclusive_sample"])
 
 
 # ===========================================================================
@@ -3059,7 +4710,13 @@ class TestAnalysisTasksModule(unittest.TestCase):
 
     def test_tasks_defined(self):
         import analysis_tasks
-        for name in ("SkimTask", "HistFillTask", "StitchingDerivationTask"):
+        for name in (
+            "SkimTask",
+            "HistFillTask",
+            "StitchingDerivationTask",
+            "StitchingApplyTask",
+            "StitchingValidationTask",
+        ):
             self.assertTrue(hasattr(analysis_tasks, name), f"{name} not defined")
 
     def test_helpers_defined(self):
@@ -3069,6 +4726,8 @@ class TestAnalysisTasksModule(unittest.TestCase):
             "_read_intweight_sign_hist",
             "_derive_stitch_weights",
             "_build_correctionlib_cset",
+            "_stitch_output_meta_files",
+            "_validate_stitch_meta_file",
             "_build_task_provenance",
             "_build_skim_manifest",
         ):
@@ -3076,7 +4735,13 @@ class TestAnalysisTasksModule(unittest.TestCase):
 
     def test_task_namespaces(self):
         import analysis_tasks
-        for cls_name in ("SkimTask", "HistFillTask", "StitchingDerivationTask"):
+        for cls_name in (
+            "SkimTask",
+            "HistFillTask",
+            "StitchingDerivationTask",
+            "StitchingApplyTask",
+            "StitchingValidationTask",
+        ):
             cls = getattr(analysis_tasks, cls_name)
             self.assertEqual(cls.task_namespace, "")
 

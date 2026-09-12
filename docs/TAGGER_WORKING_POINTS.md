@@ -42,8 +42,8 @@ Key features:
   thresholds (e.g. loose / medium / tight).
 - **Multi-score WPs** — a WP can require passing thresholds on *multiple*
   discriminant scores simultaneously (e.g. CMS charm-tagging uses both CvsL and
-  CvsB; see [`setTaggerColumns`](#settaggercolumns) and the vector overload of
-  [`addWorkingPoint`](#addworkingpoint)).
+  CvsB; see [setting multiple tagger columns](#set-multiple-tagger-columns) and
+  the [multi-score working-point API](#add-working-points).
 - **WP category column** — per-object integer category (0 = fail all, …, N = pass all).
 - **Correctionlib SF application** — per-object SFs from a correctionlib payload
   reduced to per-event weight columns.
@@ -370,7 +370,7 @@ Declare a **single** per-object tagger discriminator score column
 twm->setTaggerColumn("Jet_btagDeepFlavB");
 ```
 
-### `setTaggerColumns(taggerScoreColumns)`
+### Set multiple tagger columns
 
 Declare **multiple** per-object tagger discriminator score columns for
 multi-score working points.  Each column must be `RVec<Float_t>`.  The column
@@ -384,7 +384,7 @@ ctwm->setTaggerColumns({"Jet_btagDeepFlavCvL", "Jet_btagDeepFlavCvB"});
 Throws:
 - `std::invalid_argument` if the list is empty or any element is empty.
 
-### `addWorkingPoint(name, threshold)` / `addWorkingPoint(name, thresholds)`
+### Add working points
 
 Register a named working point.
 

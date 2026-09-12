@@ -44,6 +44,8 @@ MyAnalysis/
 ├── cfg/                     # Configuration directory
 │   ├── main_config.txt     # Main configuration
 │   ├── output.txt          # Branches to save
+│   ├── floats.txt          # Constant columns used by weights
+│   ├── histograms.txt      # Histogram definitions
 │   ├── bdts.txt           # BDT models (optional)
 │   ├── onnx_models.txt    # Neural networks (optional)
 │   ├── corrections.txt     # Scale factors (optional)
@@ -71,12 +73,16 @@ cd MyAnalysis
 # Tell CMake this is an analysis
 add_executable(myanalysis analysis.cc)
 
-# Link against the core framework
+# Link against RDFAnalyzerCore and ROOT
 target_link_libraries(myanalysis
     PRIVATE
-    RDFCore
+    coreAll
     ROOT::ROOTDataFrame
     ROOT::ROOTVecOps
+    ROOT::Core
+    ROOT::Hist
+    ROOT::MathCore
+    ROOT::RIO
 )
 
 # Set output directory
@@ -95,17 +101,18 @@ fileList=/path/to/data.root
 saveFile=output/myanalysis.root
 metaFile=output/histograms.root
 saveTree=Events
+enableSkim=true
+saveConfig=cfg/output.txt
+floatConfig=cfg/floats.txt
+histogramConfig=cfg/histograms.txt
 
 # ============== Performance ==============
 threads=-1
 batch=false
 
-# ============== Output Branches ==============
-saveConfig=cfg/output.txt
-
-# ============== Plugins ==============
-# Add as needed for your analysis
-# bdtConfig=cfg/bdts.txt
+# ============== Plugin configuration paths ==============
+# Referencing a plugin config does not construct the plugin. Create and
+# register each plugin in analysis.cc when the analysis uses it.
 # onnxConfig=cfg/onnx_models.txt
 # correctionConfig=cfg/corrections.txt
 # triggerConfig=cfg/triggers.txt
@@ -113,14 +120,26 @@ saveConfig=cfg/output.txt
 
 ### Step 4: Create Output Branch Configuration
 
-Create `cfg/output.txt` listing branches to keep:
+Create `cfg/output.txt` listing columns defined by this analysis that should be kept in the skim:
 
 ```
-selected_muon_pt
-selected_muon_eta
-selected_jet_pt
-selected_jet_mass
-event_weight
+ZBosonMass
+LeadingMuonPt
+SubleadingMuonPt
+```
+
+Create `cfg/floats.txt` with a constant weight column:
+
+```text
+normScale=1.0
+```
+
+Create `cfg/histograms.txt` with one histogram definition per line:
+
+```text
+name=ZBosonMass variable=ZBosonMass weight=normScale bins=60 lowerBound=70 upperBound=110 label=Z Boson Mass [GeV]
+name=LeadingMuonPt variable=LeadingMuonPt weight=normScale bins=50 lowerBound=20 upperBound=150 label=Leading Muon pT [GeV]
+name=SubleadingMuonPt variable=SubleadingMuonPt weight=normScale bins=50 lowerBound=20 upperBound=150 label=Subleading Muon pT [GeV]
 ```
 
 ### Step 5: Write Analysis Code
@@ -129,9 +148,7 @@ Create `analysis.cc`:
 
 ```cpp
 #include <analyzer.h>
-#include <ManagerFactory.h>
-#include <ConfigurationManager.h>
-#include <DataManager.h>
+#include <NDHistogramManager.h>
 
 #include <iostream>
 
@@ -145,8 +162,14 @@ int main(int argc, char **argv) {
     // Create analyzer with configuration file
     Analyzer analyzer(argv[1]);
 
+    // The factory creates and registers this manager as "histogramManager".
+    auto histManager = NDHistogramManager::create(analyzer);
+
     // Define your analysis variables and cuts here
-    // (see next sections for examples)
+    // They must include the columns referenced by cfg/histograms.txt and
+    // cfg/output.txt; see the sections below for examples.
+
+    analyzer.bookConfigHistograms();
 
     // Save results
     analyzer.run();
@@ -158,29 +181,32 @@ int main(int argc, char **argv) {
 ### Step 6: Build and Run
 
 ```bash
-source build.sh
-cd build/analyses/MyAnalysis
-./myanalysis cfg/main_config.txt
+# The steps above leave the shell in analyses/MyAnalysis.
+../../build.sh
+../../build/analyses/MyAnalysis/myanalysis cfg/main_config.txt
 ```
+
+Run from the analysis source directory so relative input/output paths and constant-file existence checks use the expected working directory.
 
 ## Config-Based Analysis Pattern
 
-The config-based approach follows this pattern:
+Configuration holds paths and values consumed by the framework and registered plugins. It does not construct plugins on its own.
 
 ### 1. Configuration Setup
 
-All behavioral configuration is in text files:
+Configuration files hold I/O, output, and manager settings; analysis code defines the physics behavior and constructs the managers it uses.
 
 ```cpp
 // Configuration is loaded by the Analyzer constructor
 Analyzer analyzer("cfg/main_config.txt");
 ```
 
-The Analyzer automatically:
+The Analyzer constructor:
 - Loads the main configuration
-- Initializes plugin managers based on config
 - Sets up the data pipeline
 - Configures output sinks
+
+The analysis then creates and registers the managers it needs. Each registered manager receives its context and reads its own config during setup.
 
 ### 2. Analysis Logic in C++
 
@@ -199,14 +225,16 @@ analyzer.Filter("my_cut", cutFunction, {"variable"});
 
 ### 3. Plugin Integration
 
-Plugins are configured via config files but accessed in C++:
+Plugins must be constructed and registered in C++. Their settings can be read from paths in the main config. The `create()` factories register managers under their documented default roles; `getPlugin<T>(role)` must use that same role if retrieving one later.
 
 ```cpp
-// Get plugin from analyzer
-auto onnxManager = analyzer.getPlugin<OnnxManager>("onnx");
+#include <OnnxManager.h>
+
+// Creates and registers the manager as "onnxManager".
+auto onnx = OnnxManager::create(analyzer);
 
 // Use plugin
-onnxManager->applyAllModels();
+onnx->applyAllModels();
 ```
 
 ### 4. Execution
@@ -400,8 +428,10 @@ analyzer.Define("has_jets",
 #### 3. Apply Model
 
 ```cpp
-// Get ONNX manager
-auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
+#include <OnnxManager.h>
+
+// The factory also registers the manager as "onnxManager".
+auto onnxMgr = OnnxManager::create(analyzer);
 
 // Apply all configured models
 onnxMgr->applyAllModels();
@@ -457,7 +487,10 @@ file=aux/bdts/signal_bdt.txt name=bdt_score inputVariables=var1,var2,var3 runVar
 ```
 
 ```cpp
-auto bdtMgr = analyzer.getPlugin<BDTManager>("bdt");
+#include <BDTManager.h>
+
+// The factory also registers the manager as "bdtManager".
+auto bdtMgr = BDTManager::create(analyzer);
 bdtMgr->applyAllBDTs();
 ```
 
@@ -493,7 +526,10 @@ std::vector<float> classifierInference(const std::vector<float>& input) {
 #### 3. Register and Use Model
 
 ```cpp
-auto sofieMgr = analyzer.getPlugin<SofieManager>("sofie");
+#include <SofieManager.h>
+
+// The factory also registers the manager as "sofieManager".
+auto sofieMgr = SofieManager::create(analyzer);
 
 // Register model manually (not auto-loaded like ONNX/BDT)
 auto inferenceFunc = std::make_shared<SofieInferenceFunction>(classifierInference);
@@ -629,10 +665,13 @@ integrates with `CorrectionManager` for correctionlib evaluations and with
 
 ```cpp
 #include <JetEnergyScaleManager.h>
+#include <CorrectionManager.h>
 #include <PhysicsObjectCollection.h>
 
-auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto cm = analyzer.getPlugin<CorrectionManager>("corrections");
+// Factories register the default roles "jetEnergyScaleManager" and
+// "correctionManager".
+auto jes = JetEnergyScaleManager::create(analyzer);
+auto cm = CorrectionManager::create(analyzer);
 
 // 1. Declare jet/MET column names.
 jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -681,18 +720,13 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
 //   "goodJets_TotalDown"  PhysicsObjectCollection (JES down)
 //   "goodJets_variations" PhysicsObjectVariationMap (all of the above)
 
-// 8. Downstream Define calls can stay on the nominal collection name.
-analyzer.Define("selectedJetPts",
-    [](const PhysicsObjectCollection& jets) {
-        ROOT::VecOps::RVec<float> pts;
-        for (std::size_t i = 0; i < jets.size(); ++i) {
-            pts.push_back(static_cast<float>(jets.at(i).Pt()));
-        }
-        return pts;
-    },
-    {"goodJets"}, *sysMgr);
-// Also defines: selectedJetPts_TotalUp, selectedJetPts_TotalDown
 ```
+
+The JEC manager creates its corrected collection and variation-map columns in
+its `execute()` hook. Those are not input columns available when the analysis
+body calls `Analyzer::Define`, so this example does not add a generic downstream
+definition that consumes them. See the Systematics section for the supported
+three-argument `Define` pattern when the varied input columns already exist.
 
 #### Applying the full CMS JES source set
 
@@ -719,9 +753,10 @@ NDHistogramManager provides sophisticated N-dimensional histogramming with suppo
 
 ```cpp
 #include <plots.h>  // For histInfo, selectionInfo
+#include <NDHistogramManager.h>
 
-// Get histogram manager
-auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
+// Creates and registers the manager under "histogramManager".
+auto histMgr = NDHistogramManager::create(analyzer);
 
 // Define histogram metadata
 std::vector<histInfo> hists = {
@@ -773,15 +808,9 @@ analyzer.Define("region",
 #### Saving Histograms
 
 ```cpp
-// Trigger execution by accessing histogram pointers
-auto& histos = histMgr->GetHistos();
-for (auto& h : histos) {
-    h.GetPtr();  // Force computation
-}
-
-// Save histograms to file
-std::vector<std::vector<histInfo>> fullHistList = {hists};
-histMgr->saveHists(fullHistList, regionNames);
+// Analyzer::run() executes booked actions and saves histograms from the
+// registered NDHistogramManager to the metadata output file.
+analyzer.run();
 ```
 
 ### Vector-Based Histograms
@@ -804,38 +833,36 @@ SystematicManager tracks systematic variations and propagates them through the a
 #### Defining Variables with Systematics
 
 ```cpp
-// Get systematic manager
+// Analyzer owns this manager and returns it by reference.
 auto& sysMgr = analyzer.getSystematicManager();
 
-// Define variable with systematic variations
-dataManager->Define("jet_pt_corrected",
+// Assume these input columns already exist in the dataframe. Map the nominal
+// input to its actual JES up/down columns before defining a derived variable.
+sysMgr.registerVariationColumns(
+    "jet_pt", "jes", "jet_pt_jes_up", "jet_pt_jes_down");
+
+// Analyzer::Define uses the registered mapping to define nominal and varied
+// output columns. Its callable receives input columns, not a variation label.
+analyzer.Define("jet_pt_corrected",
     [](const ROOT::VecOps::RVec<float>& pt,
-       const ROOT::VecOps::RVec<float>& jes_up,
-       const ROOT::VecOps::RVec<float>& jes_down,
-       const std::string& systematic) {
-        if (systematic == "jes_up") return pt * jes_up;
-        if (systematic == "jes_down") return pt * jes_down;
-        return pt;  // Nominal
+       const ROOT::VecOps::RVec<float>& scale) {
+        return pt * scale;
     },
-    {"jet_pt", "jet_jes_up", "jet_jes_down"},
-    sysMgr  // Pass systematic manager
-);
+    {"jet_pt", "jet_scale"});
 ```
 
 #### Registering Systematics
 
 ```cpp
-// Register a base systematic family and its affected nominal variable.
-sysMgr->registerSystematic("jes", {"jet_pt_corrected"});
+// For conventional columns jet_pt_jesUp / jet_pt_jesDown, register the
+// family against the varied input variable before calling Analyzer::Define.
+auto& sysMgr = analyzer.getSystematicManager();
+sysMgr.registerSystematic("jes", {"jet_pt"});
 
-// If the real source columns do not follow the default
-// jet_pt_corrected_jesUp / jet_pt_corrected_jesDown naming, register the
-// explicit mapping once.
-sysMgr->registerVariationColumns(
-    "jet_pt_corrected",
-    "jes",
-    "jet_pt_jes_up",
-    "jet_pt_jes_down");
+// If the source columns use other names, add an explicit mapping; this call
+// also registers "jes" as affecting "jet_pt".
+sysMgr.registerVariationColumns(
+    "jet_pt", "jes", "jet_pt_jes_up", "jet_pt_jes_down");
 ```
 
 #### Histograms with Systematics
@@ -851,9 +878,10 @@ When booking histograms with NDHistogramManager, an automatic systematic axis is
 
 The preferred way to apply systematic variations in CMS analyses is through
 `PhysicsObjectCollection` and the object-energy manager plugins.  This approach
-removes all boilerplate: you define your physics selection once on the nominal
-collection, and the framework automatically propagates every systematic
-variation to every downstream column.
+lets the manager produce nominal and varied object collections from one
+selection. Generic `Analyzer::Define` expansion applies only to variations
+registered before the definition is made; the JEC manager's deferred outputs
+have the lifecycle limitation described below.
 
 #### Step 1 — Define your object collection on the nominal kinematics
 
@@ -874,8 +902,11 @@ analyzer.Define("goodJets",
 corrected `PhysicsObjectCollection` outputs:
 
 ```cpp
-auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto cm = analyzer.getPlugin<CorrectionManager>("corrections");
+// Include <JetEnergyScaleManager.h> and <CorrectionManager.h> in the source.
+// Factories register the default roles "jetEnergyScaleManager" and
+// "correctionManager".
+auto jes = JetEnergyScaleManager::create(analyzer);
+auto cm = CorrectionManager::create(analyzer);
 
 jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
 jes->setMETColumns("MET_pt", "MET_phi");
@@ -924,29 +955,17 @@ After `analyzer.run()`:
 | `goodJets_TotalDown` | JES Total down variation `PhysicsObjectCollection` |
 | `goodJets_variations` | `PhysicsObjectVariationMap` keyed by `"nominal"`, `"TotalUp"`, `"TotalDown"` |
 
-#### Step 4 — Write downstream code once; automatic propagation does the rest
+#### Step 4 — Use the corrected outputs
 
-Because `defineVariationCollections` registers `goodJets` with `SystematicManager`,
-any downstream `Define` that passes `*sysMgr` is **automatically duplicated for
-every registered variation**:
-
-```cpp
-// Written once — automatically becomes:
-//   selectedJetPts           (consumes goodJets_jec)
-//   selectedJetPts_TotalUp   (consumes goodJets_TotalUp)
-//   selectedJetPts_TotalDown (consumes goodJets_TotalDown)
-analyzer.Define("selectedJetPts",
-    [](const PhysicsObjectCollection& jets) {
-        RVec<float> pts;
-        for (std::size_t i = 0; i < jets.size(); ++i)
-            pts.push_back(static_cast<float>(jets.at(i).Pt()));
-        return pts;
-    },
-    {"goodJets"}, *sysMgr
-);
-```
-
-No manual duplication of your physics logic is needed.
+`Analyzer::Define` accepts exactly three arguments: the output name, a
+callable, and its input columns. It expands definitions only for systematic
+variations already registered when the call is made. The JEC manager registers
+its corrected-collection variations during its `execute()` hook in
+`Analyzer::run()`, after analysis-body `Define` calls have been made. Therefore
+this API cannot use a pre-run `Define` to consume the JEC manager's later-created
+`goodJets_jec` or `goodJets_TotalUp/Down` columns. The JEC manager produces
+those outputs itself; this example stops at the manager outputs rather than
+claiming generic downstream `Define` calls can consume them in the same run.
 
 #### Using the full CMS JES source set
 
@@ -1011,8 +1030,12 @@ config file and in your analysis code:
    so that it can accumulate the sum-of-weights for normalisation:
 
    ```
+   enableCounters = true
    counterWeightBranch = genWeight
    ```
+
+   `enableCounters` defaults to `false`; set it to `true` or CounterService
+   will not be registered and these histograms will not be written.
 
    CounterService then writes two histograms to the meta ROOT file:
    - `counter_weightSum_<sample>` — sum of `genWeight` over all events (used as
@@ -1029,9 +1052,9 @@ config file and in your analysis code:
 
 For samples with negative-weight events (common in NLO generators) use
 `sign(genWeight)` instead of `genWeight` itself to avoid sign-weighted distortions
-while still properly normalising the sample.  In that case set
-`counterWeightBranch = genWeight` in the config (so `CounterService` tracks the
-true sum) and add the sign column as the scale factor:
+while still properly normalising the sample. Keep `enableCounters = true` and
+`counterWeightBranch = genWeight` in the config so `CounterService` tracks the
+true sum, then add the sign column as the scale factor:
 
 ```cpp
 // Define sign-of-weight column
@@ -1050,6 +1073,8 @@ this:
    column (produced by your analysis or CorrectionManager):
 
    ```
+   enableCounters = true
+   counterWeightBranch = genWeight
    counterIntWeightBranch = stitchBin
    ```
 
@@ -1061,18 +1086,18 @@ this:
    wm->addScaleFactor("stitchSF", "stitch_weight_col");
    ```
 
-See [LAW_TASKS.md — StitchingDerivationTask](LAW_TASKS.md#stitchingderivationtask) for
+See [LAW_TASKS.md — StitchingDerivationTask](LAW_TASKS.md#5-stitchingderivationtask) for
 details on deriving these weights from LAW.
 
 ### Registering WeightManager
 
-Add a `WeightManager` plugin to your analysis and retrieve it via
-`getPlugin<WeightManager>`:
+Create and register a `WeightManager` plugin with its factory:
 
 ```cpp
-#include <plugins/WeightManager/WeightManager.h>
+#include <WeightManager.h>
 
-auto wm = analyzer.getPlugin<WeightManager>("weights");
+// Creates and registers the manager under "weightManager".
+auto wm = WeightManager::create(analyzer);
 ```
 
 ### Adding Weight Components
@@ -1148,12 +1173,13 @@ for (const auto& entry : wm->getAuditEntries()) {
 
 ```cpp
 #include <analyzer.h>
-#include <plugins/WeightManager/WeightManager.h>
+#include <WeightManager.h>
 
 void myAnalysis() {
     Analyzer analyzer("config.txt");
 
-    auto wm = analyzer.getPlugin<WeightManager>("weights");
+    // Creates and registers the manager under "weightManager".
+    auto wm = WeightManager::create(analyzer);
 
     // Define SF columns on the dataframe first.
     analyzer.Define("lepton_sf_col", computeLeptonSF, {"lep_pt", "lep_eta"});
@@ -1191,9 +1217,10 @@ branches are built independently inside the plugin.
 ### Registering RegionManager
 
 ```cpp
-#include <plugins/RegionManager/RegionManager.h>
+#include <RegionManager.h>
 
-auto rm = analyzer.getPlugin<RegionManager>("regions");
+// Creates and registers the manager under "regionManager".
+auto rm = RegionManager::create(analyzer);
 ```
 
 ### Defining Boolean Filter Columns
@@ -1251,14 +1278,14 @@ entry to the meta ROOT output file.
 ### Using Regions with NDHistogramManager
 
 ```cpp
-ndh->bindToRegionManager(rm);
+ndh->bindToRegionManager(rm.get());
 // NDHistogramManager now fills histograms separately for each declared region.
 ```
 
 ### Using Regions with CutflowManager
 
 ```cpp
-cfm->bindToRegionManager(rm);
+cfm->bindToRegionManager(rm.get());
 // CutflowManager books per-region count actions in a single event-loop pass.
 ```
 
@@ -1271,16 +1298,18 @@ to the RegionManager iterate over all regions internally.
 
 ```cpp
 #include <analyzer.h>
-#include <plugins/RegionManager/RegionManager.h>
-#include <plugins/NDHistogramManager/NDHistogramManager.h>
-#include <plugins/CutflowManager/CutflowManager.h>
+#include <RegionManager.h>
+#include <NDHistogramManager.h>
+#include <CutflowManager.h>
 
 int main(int argc, char* argv[]) {
     Analyzer analyzer(argv[1]);
 
-    auto rm = analyzer.getPlugin<RegionManager>("regions");
-    auto ndh = analyzer.getPlugin<NDHistogramManager>("NDHistogramManager");
-    auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+    // Factories register the default roles "regionManager",
+    // "histogramManager", and "cutflowManager".
+    auto rm = RegionManager::create(analyzer);
+    auto ndh = NDHistogramManager::create(analyzer);
+    auto cfm = CutflowManager::create(analyzer);
 
     // Step 1 — define boolean selection columns.
     analyzer.Define("isPresel",        passPreselection,    {"lep_pt", "met"});
@@ -1293,8 +1322,8 @@ int main(int argc, char* argv[]) {
     rm->declareRegion("control",  "isControlRegion", "presel");
 
     // Step 3 — bind plugins so they operate per-region automatically.
-    ndh->bindToRegionManager(rm);  // each histogram gains a region axis
-    cfm->bindToRegionManager(rm);  // cutflow tables produced per region
+    ndh->bindToRegionManager(rm.get());  // each histogram gains a region axis
+    cfm->bindToRegionManager(rm.get());  // cutflow tables produced per region
 
     // Step 4 — register cuts (applies to the full dataframe; cfm tracks
     //           per-region counts separately via the bound RegionManager).
@@ -1303,7 +1332,6 @@ int main(int argc, char* argv[]) {
 
     // Step 5 — book config-driven histograms (fills all declared regions).
     ndh->bookConfigHistograms();
-    ndh->saveHists();
 
     // Step 6 — execute.
     analyzer.run();
@@ -1320,9 +1348,10 @@ one) in a single event-loop pass.
 ### Registering CutflowManager
 
 ```cpp
-#include <plugins/CutflowManager/CutflowManager.h>
+#include <CutflowManager.h>
 
-auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+// Creates and registers the manager under "cutflowManager".
+auto cfm = CutflowManager::create(analyzer);
 ```
 
 ### Adding Cuts
@@ -1353,7 +1382,7 @@ alongside the global ones, so global and per-region cutflows are computed in
 a single pass:
 
 ```cpp
-cfm->bindToRegionManager(rm);
+cfm->bindToRegionManager(rm.get());
 ```
 
 ### Output Written Automatically
@@ -1393,14 +1422,16 @@ for (const auto& [name, count] : cfm->getRegionCutflowCounts("signal")) {
 
 ```cpp
 #include <analyzer.h>
-#include <plugins/RegionManager/RegionManager.h>
-#include <plugins/CutflowManager/CutflowManager.h>
+#include <RegionManager.h>
+#include <CutflowManager.h>
 
 void myAnalysis() {
     Analyzer analyzer("config.txt");
 
-    auto rm = analyzer.getPlugin<RegionManager>("regions");
-    auto cfm = analyzer.getPlugin<CutflowManager>("cutflow");
+    // Factories register the default roles "regionManager" and
+    // "cutflowManager".
+    auto rm = RegionManager::create(analyzer);
+    auto cfm = CutflowManager::create(analyzer);
 
     // Define all boolean columns before the first addCut().
     analyzer.Define("leptonPtCut", passLeptonPt, {"lep_pt"});
@@ -1417,7 +1448,7 @@ void myAnalysis() {
     rm->declareRegion("signal", "isSignalRegion");
 
     // Bind for per-region cutflows.
-    cfm->bindToRegionManager(rm);
+    cfm->bindToRegionManager(rm.get());
 
     analyzer.run();
     // Results are written to the meta ROOT file automatically.
@@ -1430,7 +1461,8 @@ Here's a complete analysis putting it all together:
 
 ```cpp
 #include <analyzer.h>
-#include <ManagerFactory.h>
+#include <NDHistogramManager.h>
+#include <OnnxManager.h>
 #include <plots.h>
 #include <iostream>
 #include <cmath>
@@ -1468,6 +1500,11 @@ int main(int argc, char **argv) {
 
     // Initialize analyzer
     Analyzer analyzer(argv[1]);
+
+    // Factories register the default roles "onnxManager" and
+    // "histogramManager".
+    auto onnxMgr = OnnxManager::create(analyzer);
+    auto histMgr = NDHistogramManager::create(analyzer);
 
     // ===== Define Variables =====
     
@@ -1513,8 +1550,7 @@ int main(int argc, char **argv) {
 
     // ===== Apply ML Models =====
     
-    auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
-    if (onnxMgr) {
+    if (!onnxMgr->getAllModelNames().empty()) {
         onnxMgr->applyAllModels();
         
         // Use ML score
@@ -1547,38 +1583,24 @@ int main(int argc, char **argv) {
 
     // ===== Book Histograms =====
     
-    auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogram");
-    if (histMgr) {
-        std::vector<histInfo> hists = {
-            histInfo("h_njets", "n_good_jets", "N_{jets}", "event_weight", 10, 0, 10),
-            histInfo("h_leading_jet_pt", "leading_jet_pt", "Leading Jet p_{T}", 
-                    "event_weight", 50, 0, 500),
-            histInfo("h_mt", "mt_w", "M_{T}(W)", "event_weight", 40, 0, 200),
-        };
-        
-        std::vector<selectionInfo> selections = {
-            selectionInfo("region", 2, 0, 2),
-        };
-        
-        std::vector<std::vector<std::string>> regionNames = {
-            {"SR", "CR"},
-        };
-        
-        histMgr->bookND(hists, selections, "", regionNames);
-        
-        // Trigger computation
-        auto& histos = histMgr->GetHistos();
-        for (auto& h : histos) {
-            h.GetPtr();
-        }
-        
-        // Save
-        std::vector<std::vector<histInfo>> fullHistList = {hists};
-        histMgr->saveHists(fullHistList, regionNames);
-    }
+    std::vector<histInfo> hists = {
+        histInfo("h_njets", "n_good_jets", "N_{jets}", "event_weight", 10, 0, 10),
+        histInfo("h_leading_jet_pt", "leading_jet_pt", "Leading Jet p_{T}",
+                "event_weight", 50, 0, 500),
+        histInfo("h_mt", "mt_w", "M_{T}(W)", "event_weight", 40, 0, 200),
+    };
 
-    // ===== Save Output =====
-    
+    std::vector<selectionInfo> selections = {
+        selectionInfo("region", 2, 0, 2),
+    };
+
+    std::vector<std::vector<std::string>> regionNames = {
+        {"SR", "CR"},
+    };
+
+    histMgr->bookND(hists, selections, "", regionNames);
+
+    // ===== Execute and save configured outputs =====
     analyzer.run();
 
     std::cout << "Analysis complete!" << std::endl;
@@ -1612,13 +1634,13 @@ Use output of one analysis as input to another:
 
 ```cpp
 // First analysis: skim and save
-analyzer1.save();  // Creates skim_output.root
+analyzer1.run();   // Writes a skim only if enableSkim is true in the config
 
 // Second analysis: load skim
 // In config: fileList=skim_output.root
 Analyzer analyzer2("second_analysis_config.txt");
 analyzer2.Define(...);  // Further processing
-analyzer2.save();
+analyzer2.run();
 ```
 
 ### Per-Sample Processing

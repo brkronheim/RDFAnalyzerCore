@@ -66,6 +66,29 @@ void defineNanoAodCompatibilityColumns(Analyzer &an) {
   }
 
   // -----------------------------------------------------------------------
+  // Jet_hadronFlavour_int — Jet_hadronFlavour is UChar_t in NanoAODv15;
+  // convert it to Int_t for correctionlib and b-tag helper inputs.
+  // -----------------------------------------------------------------------
+  if (!hasColumn(an, "Jet_hadronFlavour_int") &&
+      hasColumn(an, "Jet_hadronFlavour")) {
+    if (columnType(an, "Jet_hadronFlavour").find("UChar") != std::string::npos) {
+      an.Define("Jet_hadronFlavour_int",
+                [](const ROOT::VecOps::RVec<UChar_t> &source) {
+                  ROOT::VecOps::RVec<int> converted(source.size(), 0);
+                  for (size_t i = 0; i < source.size(); ++i) {
+                    converted[i] = static_cast<int>(source[i]);
+                  }
+                  return converted;
+                },
+                {"Jet_hadronFlavour"});
+    } else {
+      an.Define("Jet_hadronFlavour_int",
+                [](const ROOT::VecOps::RVec<int> &source) { return source; },
+                {"Jet_hadronFlavour"});
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // FatJet_genJetIdx_int — same conversion for AK8 fat jets.
   // -----------------------------------------------------------------------
   if (!hasColumn(an, "FatJet_genJetIdx_int") && hasColumn(an, "FatJet_genJetIdx")) {
@@ -227,6 +250,23 @@ void defineNanoAodCompatibilityColumns(Analyzer &an) {
   // -----------------------------------------------------------------------
   if (!hasColumn(an, "Muon_genPt") && hasColumn(an, "Muon_genPartIdx") &&
       hasColumn(an, "GenPart_pt")) {
+    const auto genPartIdxType = columnType(an, "Muon_genPartIdx");
+    if (genPartIdxType.find("Short") != std::string::npos ||
+        genPartIdxType.find("short") != std::string::npos) {
+      an.Define("Muon_genPartIdx_int",
+                [](const ROOT::VecOps::RVec<Short_t> &source) {
+                  ROOT::VecOps::RVec<int> converted(source.size(), -1);
+                  for (size_t i = 0; i < source.size(); ++i) {
+                    converted[i] = static_cast<int>(source[i]);
+                  }
+                  return converted;
+                },
+                {"Muon_genPartIdx"});
+    } else {
+      an.Define("Muon_genPartIdx_int",
+                [](const ROOT::VecOps::RVec<int> &source) { return source; },
+                {"Muon_genPartIdx"});
+    }
     an.Define("Muon_genPt",
               [](const ROOT::VecOps::RVec<int> &genPartIdx,
                  const ROOT::VecOps::RVec<float> &genPartPt) {
@@ -239,7 +279,7 @@ void defineNanoAodCompatibilityColumns(Analyzer &an) {
                 }
                 return genPt;
               },
-              {"Muon_genPartIdx", "GenPart_pt"});
+              {"Muon_genPartIdx_int", "GenPart_pt"});
   }
 }
 

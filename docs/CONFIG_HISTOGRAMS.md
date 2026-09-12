@@ -6,7 +6,7 @@ This feature allows histograms to be defined in a configuration file and automat
 
 ## Configuration File Format
 
-Create a histogram configuration file with one histogram definition per line. Each line contains key=value pairs.
+The file extension selects the parser. Text files (`.txt`) use one histogram definition per line with `key=value` fields. YAML files (`.yaml` or `.yml`) use a sequence of mappings, as in `analyses/ExampleAnalysis/histograms.yaml`.
 
 ### Required Fields
 
@@ -39,6 +39,8 @@ Create a histogram configuration file with one histogram definition per line. Ea
 
 ## Example Configuration File
 
+Text format (`histograms.txt`):
+
 ```txt
 # Simple 1D histogram
 name=pt_hist variable=jet_pt weight=event_weight bins=50 lowerBound=0.0 upperBound=500.0 label=Jet pT [GeV] suffix=jets
@@ -48,6 +50,18 @@ name=eta_hist variable=jet_eta weight=event_weight bins=40 lowerBound=-5.0 upper
 
 # Full N-dimensional histogram with all separations
 name=mass_hist variable=dimuon_mass weight=event_weight bins=60 lowerBound=70.0 upperBound=110.0 channelVariable=channel channelBins=2 channelLowerBound=0.0 channelUpperBound=2.0 channelRegions=signal,control controlRegionVariable=region controlRegionBins=3 controlRegionLowerBound=0.0 controlRegionUpperBound=3.0 controlRegionRegions=SR,CR1,CR2 sampleCategoryVariable=sample sampleCategoryBins=2 sampleCategoryLowerBound=0.0 sampleCategoryUpperBound=2.0 sampleCategoryRegions=data,MC suffix=analysis
+```
+
+Equivalent YAML format (`histograms.yaml`):
+
+```yaml
+- name: pt_hist
+  variable: jet_pt
+  weight: event_weight
+  bins: 50
+  lowerBound: 0.0
+  upperBound: 500.0
+  label: "Jet pT [GeV]"
 ```
 
 ## Usage in Code
@@ -158,18 +172,14 @@ int main(int argc, char** argv) {
 
 ### Systematic Variations
 
-Config-defined histograms automatically handle systematic variations. If you register systematics that affect variables used in histograms, the histograms will be filled for each systematic variation.
+Histogram systematic handling is enabled by default. Before the first booking, `NDHistogramManager` scans available dataframe column names for complete `baseVariable_nameUp` / `baseVariable_nameDown` pairs and registers the matching systematic against the base variable. You can disable this behavior with `histogramSystematics: false` in the main config to book nominal-only histograms. A registered name alone does not calculate a shifted value: the analysis or an input source must provide the varied columns, or the analysis must define and map the variations itself.
 
 ```cpp
-// Register systematic
-analyzer.getSystematicManager().registerSystematic("JES_up", {"jet_pt", "jet_eta"});
+// Define a complete Up/Down pair using the expected baseVar_nameUp/Down form.
+analyzer.Define("jet_pt_JESUp", applyJESUp, {"jet_pt"});
+analyzer.Define("jet_pt_JESDown", applyJESDown, {"jet_pt"});
 
-// Define systematic variations
-analyzer.Define("jet_pt_JES_up", applyJESUp, {"jet_pt"})
-        .Define("jet_eta_JES_up", applyJESUpEta, {"jet_eta"});
-
-// Histograms using jet_pt and jet_eta will automatically 
-// include JES_up variation bins
+// NDHistogramManager can detect and register the pair during booking.
 analyzer.bookConfigHistograms();
 ```
 
@@ -235,4 +245,4 @@ The backend selection is transparent to users—the booking interface, filling, 
 - If no `histogramConfig` is specified in the main config, no config histograms are loaded
 - Missing required fields in the histogram config will throw an exception
 - Invalid config files will throw an exception with details
-- Histograms are saved to the file specified by `metaFile` or `saveFile` in the main config
+- Histograms are saved to `metaFile` when specified. Otherwise, the framework derives a sibling path by inserting `_meta` before the `saveFile` extension (for example, `output.root` becomes `output_meta.root`).

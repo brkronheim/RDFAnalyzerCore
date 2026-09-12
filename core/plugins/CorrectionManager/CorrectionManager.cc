@@ -595,6 +595,12 @@ void CorrectionManager::registerCorrectionlib(
   if (correctionConfigFile.empty()) {
     correctionConfigFile = configProvider.get("correctionlibConfig");
   }
+  if (correctionConfigFile.empty()) {
+    std::cout << "CorrectionManager: no correction config supplied; "
+                 "programmatic registration is enabled."
+              << std::endl;
+    return;
+  }
   std::cout << "CorrectionManager: Registering corrections from config file: " << correctionConfigFile << std::endl;
 
   const auto correctionConfig = configProvider.parseMultiKeyConfig(
@@ -637,7 +643,11 @@ void CorrectionManager::setupFromConfigFile() {
 
   auto correctionConfigFile = configManager_m->get("correctionConfig");
   if (correctionConfigFile.empty()) {
-    correctionConfigFile = "correctionlibConfig";
+    correctionConfigFile = configManager_m->get("correctionlibConfig");
+  }
+  if (correctionConfigFile.empty()) {
+    initialized_m = true;
+    return;
   }
 
   const auto correctionConfig = configManager_m->parseMultiKeyConfig(

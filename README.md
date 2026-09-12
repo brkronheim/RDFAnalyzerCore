@@ -38,8 +38,8 @@ analyzer.Filter("quality", isGood, {"jet_quality"});
 // Book histograms from config file (after all defines/filters)
 analyzer.bookConfigHistograms();
 
-// Save results
-analyzer.save();
+// Execute configured outputs
+analyzer.run();
 ```
 
 Config file format (`histograms.txt`):
@@ -55,9 +55,9 @@ cd RDFAnalyzerCore
 source env.sh  # On a CVMFS-backed host
 source build.sh
 
-# Run example
-cd build/analyses/ExampleAnalysis
-./analysis cfg.yaml
+# Run the example from its source directory so relative config files resolve
+cd analyses/ExampleAnalysis
+../../build/analyses/ExampleAnalysis/analysis cfg.yaml
 ```
 
 **New to the framework?** Check out the [Getting Started Guide](docs/GETTING_STARTED.md).
@@ -75,6 +75,9 @@ cd build/analyses/ExampleAnalysis
 
 - **[Getting Started](docs/GETTING_STARTED.md)** - Installation and first steps
 - **[Configuration Reference](docs/CONFIG_REFERENCE.md)** - Complete config file documentation
+- **[Generic Stitching](docs/STITCHING.md)** - Reusable counters, binning, and validation
+- **[V+jets Stitching Analysis](analyses/rdfAnalyzerStitch/README.md)** - Concrete Run 2/Run 3 configuration and production workflow
+- **[Agent analysis walkthrough](docs/ANALYSIS_WALKTHROUGH.md)** - How to trace an RDFAnalyzer analysis, with ExampleAnalysis as a compact illustration
 - **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Building analyses step-by-step
 - **[Python Bindings](docs/PYTHON_BINDINGS.md)** - Using the framework from Python
 - **[API Reference](docs/API_REFERENCE.md)** - Detailed API documentation
@@ -99,7 +102,7 @@ If you are reading docs for a specific role, start here:
 
 - **Developers (framework contributors)**: `docs/ARCHITECTURE.md`, `docs/API_REFERENCE.md`, `docs/PLUGIN_DEVELOPMENT.md`, `docs/DOXYGEN_GUIDE.md`
 - **Analyzers (analysis authors)**: `docs/GETTING_STARTED.md`, `docs/ANALYSIS_GUIDE.md`, `docs/CONFIG_REFERENCE.md`, `docs/CONFIG_HISTOGRAMS.md`, `docs/NUISANCE_GROUPS.md`
-- **Agents/automation tooling**: `docs/INDEX.md`, `docs/ERRORS_AND_TRACING.md`, `docs/CONFIGURATION_VALIDATION.md`, `docs/OUTPUT_SCHEMA.md`, `docs/VALIDATION_REPORTS.md`
+- **Agents/automation tooling**: [AGENTS.md](AGENTS.md), [analysis workflow skill](.agents/skills/rdfanalyzer-analysis/SKILL.md), [framework development skill](.agents/skills/rdfanalyzer-development/SKILL.md), and the [analysis walkthrough](docs/ANALYSIS_WALKTHROUGH.md); validation references are in `docs/INDEX.md`, `docs/CONFIGURATION_VALIDATION.md`, `docs/OUTPUT_SCHEMA.md`, and `docs/VALIDATION_REPORTS.md`.
 
 The docs are intentionally layered: `GETTING_STARTED` and `ANALYSIS_GUIDE` show workflow, while `API_REFERENCE` and headers in `core/interface/` are the source of truth for signatures and behavior.
 
@@ -187,11 +190,12 @@ Books and fills N-dimensional histograms.
 
 ### Configuration-Driven Design
 
-All framework behavior is controlled through text configuration files:
-- Main configuration: I/O, performance, plugin configs
-- Plugin configs: Model definitions, corrections, triggers
-- Output configs: Branch selection, histogram definitions
-- Analysis-local registries can also live in YAML when they are primarily data, such as the VHqq run-era payload and trigger map in `analyses/VHbbcc/VHqqRDF/cfg/year_settings.yaml`
+Configuration files hold I/O and performance settings, plugin settings, and output definitions. Analysis code defines physics behavior and constructs the managers it uses.
+
+- Main configuration: I/O, performance, and paths to manager configs
+- Plugin configs: Model definitions, corrections, trigger menus, and other manager data
+- Output configs: Branch selection and histogram definitions
+- Analysis-local registries can also live in YAML when they are primarily data. The [`ExampleAnalysis`](analyses/ExampleAnalysis/README.md) directory demonstrates how an analysis config references constants and histogram definitions; see the [walkthrough](docs/ANALYSIS_WALKTHROUGH.md) for a source-first trace of its behavior.
 
 **Example**:
 ```
@@ -456,7 +460,7 @@ analyzer.DefineFromPointer("pt_gev", func_ptr, "double(double)", ["pt"])
 
 # Apply filters and save
 analyzer.Filter("high_pt", "pt_gev > 25.0", ["pt_gev"])
-analyzer.save()
+analyzer.save()  # Python wrapper calls the C++ Analyzer::run()
 ```
 
 **Key Features:**
@@ -491,9 +495,7 @@ All managers support:
 - Multi-output models
 - Thread-safe inference with ROOT ImplicitMT
 
-Execution entry points:
-- `save()` always writes the configured skim output and finalizes plugins/services.
-- `run()` conditionally writes skim output when `enableSkim=1|true|True`, saves ND histograms (if `histogramManager` is registered), and finalizes plugins/services.
+`Analyzer::run()` is the execution entry point. It writes a skim only when `enableSkim=1|true|True`, saves ND histograms when the `histogramManager` plugin is registered, and finalizes services/plugins and provenance.
 
 ### Systematic Uncertainties
 

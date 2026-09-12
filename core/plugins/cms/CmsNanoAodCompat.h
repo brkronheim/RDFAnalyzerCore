@@ -13,10 +13,12 @@
 //   The following columns are defined (if not already present):
 //     PV_npvsGood_u32      — UInt_t copy of PV_npvsGood (UChar_t in v9)
 //     Jet_genJetIdx_int    — Int_t copy of Jet_genJetIdx (Short_t in v9)
+//     Jet_hadronFlavour_int — Int_t copy of Jet_hadronFlavour (UChar_t in v15)
 //     Jet_jetId_i          — Int_t copy of Jet_jetId (UChar_t in v12 or missing)
 //     Jet_puId_i           — Int_t copy of Jet_puId (UChar_t in v12 or missing)
 //     Jet_pt_raw           — Raw pT before JEC (from Jet_pt × (1-rawFactor))
 //     Jet_mass_raw         — Raw mass before JEC (from Jet_mass × (1-rawFactor))
+//     Muon_genPartIdx_int  — Int_t copy of Muon_genPartIdx (Short_t in v15)
 //
 //   Each column is defined once; if the column already exists on the
 //   dataframe, the definition is skipped.

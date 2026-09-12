@@ -8,6 +8,7 @@
 #include "CmsWeights.h"
 
 #include "CorrectionManager.h"
+#include "PhysicsObjectCollection.h"
 #include "TaggerWorkingPointManager.h"
 #include "WeightManager.h"
 #include "WorkingPointRecipe.h"
@@ -21,7 +22,6 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -73,6 +73,65 @@ bool fileExists(const std::string &path) {
   if (path.empty()) return false;
   if (path.rfind("root://", 0) == 0 || path.rfind("/eos/", 0) == 0) return true;
   return std::filesystem::exists(path);
+}
+
+void defineUnityVectorColumns(Analyzer &an,
+                              const std::vector<std::string> &columns) {
+  for (const auto &column : columns) {
+    an.Define(column, []() { return ROOT::VecOps::RVec<float>{}; }, {});
+  }
+}
+
+ROOT::VecOps::RVec<Float_t> boundedAbsEta(
+    const ROOT::VecOps::RVec<Float_t> &eta, Float_t upperBound) {
+  const Float_t safeUpperBound = std::nextafter(upperBound, 0.0f);
+  ROOT::VecOps::RVec<Float_t> result(eta.size(), 0.0f);
+  for (std::size_t index = 0; index < eta.size(); ++index) {
+    const Float_t value = std::fabs(eta[index]);
+    result[index] = std::isfinite(value)
+                        ? std::clamp(value, 0.0f, safeUpperBound)
+                        : 0.0f;
+  }
+  return result;
+}
+
+ROOT::VecOps::RVec<Float_t> boundedEta(
+    const ROOT::VecOps::RVec<Float_t> &eta, Float_t upperBound) {
+  const Float_t safeUpperBound = std::nextafter(upperBound, 0.0f);
+  ROOT::VecOps::RVec<Float_t> result(eta.size(), 0.0f);
+  for (std::size_t index = 0; index < eta.size(); ++index) {
+    result[index] = std::isfinite(eta[index])
+                        ? std::clamp(eta[index], -safeUpperBound,
+                                     safeUpperBound)
+                        : 0.0f;
+  }
+  return result;
+}
+
+ROOT::VecOps::RVec<Float_t> boundedBTagPt(
+    const ROOT::VecOps::RVec<Float_t> &pt) {
+  constexpr Float_t kMinPt = 20.0f;
+  const Float_t safeMaxPt = std::nextafter(1000.0f, 0.0f);
+  ROOT::VecOps::RVec<Float_t> result(pt.size(), kMinPt);
+  for (std::size_t index = 0; index < pt.size(); ++index) {
+    result[index] = std::isfinite(pt[index])
+                        ? std::clamp(pt[index], kMinPt, safeMaxPt)
+                        : kMinPt;
+  }
+  return result;
+}
+
+Float_t productSelectedJetScaleFactors(
+    const PhysicsObjectCollection &jets,
+    const ROOT::VecOps::RVec<Float_t> &scaleFactors) {
+  Float_t weight = 1.0f;
+  for (std::size_t position = 0; position < jets.size(); ++position) {
+    const Int_t index = jets.index(position);
+    if (index >= 0 && static_cast<std::size_t>(index) < scaleFactors.size()) {
+      weight *= scaleFactors[static_cast<std::size_t>(index)];
+    }
+  }
+  return weight;
 }
 
 void fillDefaultSourceNames(CmsWeightConfig &cfg) {
@@ -130,17 +189,23 @@ float productOrOne(const std::vector<float> &weights) {
   return product;
 }
 
+float productOrOneRVec(const ROOT::VecOps::RVec<float> &weights) {
+  float product = 1.0f;
+  for (const auto w : weights) product *= w;
+  return product;
+}
+
 float safeWeightRatio(float numerator, float denominator) {
   if (!std::isfinite(numerator) || !std::isfinite(denominator) ||
       std::fabs(denominator) < 1.0e-6f) return 1.0f;
   return numerator / denominator;
 }
 
-std::vector<float> mergeBTagScaleFactors(
-    const std::vector<int> &flavour,
-    const std::vector<float> &heavy,
-    const std::vector<float> &light) {
-  std::vector<float> result(flavour.size(), 1.0f);
+ROOT::VecOps::RVec<float> mergeBTagScaleFactors(
+    const ROOT::VecOps::RVec<int> &flavour,
+    const ROOT::VecOps::RVec<float> &heavy,
+    const ROOT::VecOps::RVec<float> &light) {
+  ROOT::VecOps::RVec<float> result(flavour.size(), 1.0f);
   for (size_t i = 0; i < flavour.size(); ++i) {
     result[i] = (flavour[i] == 4 || flavour[i] == 5)
                     ? (i < heavy.size() ? heavy[i] : 1.0f)
@@ -149,12 +214,12 @@ std::vector<float> mergeBTagScaleFactors(
   return result;
 }
 
-std::vector<float> mergeCTagScaleFactors(
-    const std::vector<int> &flavour,
-    const std::vector<float> &light,
-    const std::vector<float> &wc,
-    const std::vector<float> &tnp) {
-  std::vector<float> result(flavour.size(), 1.0f);
+ROOT::VecOps::RVec<float> mergeCTagScaleFactors(
+    const ROOT::VecOps::RVec<int> &flavour,
+    const ROOT::VecOps::RVec<float> &light,
+    const ROOT::VecOps::RVec<float> &wc,
+    const ROOT::VecOps::RVec<float> &tnp) {
+  ROOT::VecOps::RVec<float> result(flavour.size(), 1.0f);
   for (size_t i = 0; i < flavour.size(); ++i) {
     if (flavour[i] == 4) result[i] = i < wc.size() ? wc[i] : 1.0f;
     else if (flavour[i] == 5) result[i] = i < tnp.size() ? tnp[i] : 1.0f;
@@ -182,7 +247,13 @@ std::vector<float> selectElectronRecoScaleFactors(
 // ===========================================================================
 
 void defineCmsPileupWeights(Analyzer &an, const CmsWeightConfig &cfg) {
-  if (!cfg.isMC || !cfg.yearSettings) return;
+  if (!cfg.isMC || !cfg.yearSettings || !cfg.applyPileupWeights) {
+    rdfanalysis::weights::defineConstantColumns(
+        an, {"pileup_weight_nominal", "pileup_weight_up",
+             "pileup_weight_down"},
+        1.0f);
+    return;
+  }
   const auto &ys = *cfg.yearSettings;
   auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
 
@@ -199,68 +270,97 @@ void defineCmsPileupWeights(Analyzer &an, const CmsWeightConfig &cfg) {
 // ===========================================================================
 
 void defineCmsMuonScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
-  if (!cfg.isMC || !cfg.yearSettings) return;
+  if (!cfg.isMC || !cfg.yearSettings || !cfg.applyMuonScaleFactors) {
+    defineUnityVectorColumns(
+        an, {"muon_id_sf_nominal_vec", "muon_id_sf_systup_vec",
+             "muon_id_sf_systdown_vec", "muon_iso_sf_nominal_vec",
+             "muon_iso_sf_systup_vec", "muon_iso_sf_systdown_vec"});
+    return;
+  }
   const auto &ys = *cfg.yearSettings;
   auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
+
+  an.Define("SelectedMuon_absEta_sf",
+            [](const ROOT::VecOps::RVec<Float_t> &eta) {
+              return boundedAbsEta(eta, 2.4f);
+            },
+            {"SelectedMuon_absEta"});
+  an.Define("SelectedMuon_eta_sf",
+            [](const ROOT::VecOps::RVec<Float_t> &eta) {
+              return boundedEta(eta, 2.4f);
+            },
+            {"SelectedMuon_eta"});
 
   // Muon ID — always from POG muon_Z.json
   corrMgr->registerCorrection(
       "cms_muon_id_sf", ys.muonFile, ys.muonCorrection,
-      {"SelectedMuon_absEta", "SelectedMuon_pt"});
+      {"SelectedMuon_eta_sf", "SelectedMuon_pt"});
   corrMgr->applyCorrectionVec("cms_muon_id_sf", {"nominal"}, {}, "muon_id_sf_nominal_vec");
   corrMgr->applyCorrectionVec("cms_muon_id_sf", {"systup"}, {}, "muon_id_sf_systup_vec");
   corrMgr->applyCorrectionVec("cms_muon_id_sf", {"systdown"}, {}, "muon_id_sf_systdown_vec");
 
-  // Muon isolation — POG TightPFIso by default, with custom TightMiniIso
-  // override when cfg.triggerSfRoot points to analysis-specific JSONs.
+  // Muon isolation — POG TightPFIso by default, with an optional POG
+  // correction-name override or custom correctionlib payload.
   const std::string isoRoot =
       cfg.triggerSfRoot.empty() ? "" : cfg.triggerSfRoot;
   const std::string yearTag = triggerTagForYear(ys.canonicalYear);
-  const bool useCustomIso = !yearTag.empty() && !isoRoot.empty();
+  const bool useCustomIso = !cfg.muonIsoSfFile.empty() ||
+                            (!yearTag.empty() && !isoRoot.empty());
 
   if (useCustomIso) {
-    const std::string isoFile =
-        isoRoot + "/NUM_TightMiniIso_DEN_TightID_" + yearTag + "_schemaV2.json";
-    if (fileExists(isoFile)) {
-      constexpr float kPtMin = 15.0f;
-      an.Define("muon_iso_sf_nominal_vec",
-                [isoFile](const std::vector<float> &abseta,
-                          const std::vector<float> &pt) {
-                  std::vector<float> r(pt.size(), 1.0f);
-                  for (size_t i = 0; i < pt.size(); ++i)
-                    if (pt[i] >= kPtMin)
-                      r[i] = evalCorr3(isoFile, "NUM_TightMiniIso_DEN_TightID",
-                                       abseta[i], pt[i], "nominal");
-                  return r;
-                }, {"SelectedMuon_absEta", "SelectedMuon_pt"})
-          ->Define("muon_iso_sf_systup_vec",
-                [isoFile](const std::vector<float> &abseta,
-                          const std::vector<float> &pt) {
-                  std::vector<float> r(pt.size(), 1.0f);
-                  for (size_t i = 0; i < pt.size(); ++i)
-                    if (pt[i] >= kPtMin)
-                      r[i] = evalCorr3(isoFile, "NUM_TightMiniIso_DEN_TightID",
-                                       abseta[i], pt[i], "systup");
-                  return r;
-                }, {"SelectedMuon_absEta", "SelectedMuon_pt"})
-          ->Define("muon_iso_sf_systdown_vec",
-                [isoFile](const std::vector<float> &abseta,
-                          const std::vector<float> &pt) {
-                  std::vector<float> r(pt.size(), 1.0f);
-                  for (size_t i = 0; i < pt.size(); ++i)
-                    if (pt[i] >= kPtMin)
-                      r[i] = evalCorr3(isoFile, "NUM_TightMiniIso_DEN_TightID",
-                                       abseta[i], pt[i], "systdown");
-                  return r;
-                }, {"SelectedMuon_absEta", "SelectedMuon_pt"});
-      return;
+    const std::string isoFile = cfg.muonIsoSfFile.empty()
+        ? isoRoot + "/NUM_TightMiniIso_DEN_TightID_" + yearTag +
+              "_schemaV2.json"
+        : cfg.muonIsoSfFile;
+    if (!fileExists(isoFile)) {
+      throw std::runtime_error(
+          "CmsWeights::defineCmsMuonScaleFactors: custom muon isolation "
+          "payload was requested but is missing: '" + isoFile + "'.");
     }
+    const std::string isoCorrection = cfg.muonIsoCorrection.empty()
+        ? "NUM_TightMiniIso_DEN_TightID" : cfg.muonIsoCorrection;
+
+    constexpr float kPtMin = 15.0f;
+    an.Define("muon_iso_sf_nominal_vec",
+              [isoFile, isoCorrection](const std::vector<float> &abseta,
+                        const std::vector<float> &pt) {
+                std::vector<float> r(pt.size(), 1.0f);
+                for (size_t i = 0; i < pt.size(); ++i)
+                  if (pt[i] >= kPtMin)
+                    r[i] = evalCorr3(isoFile, isoCorrection,
+                                     abseta[i], pt[i], "nominal");
+                return r;
+              }, {"SelectedMuon_absEta_sf", "SelectedMuon_pt"})
+        ->Define("muon_iso_sf_systup_vec",
+              [isoFile, isoCorrection](const std::vector<float> &abseta,
+                        const std::vector<float> &pt) {
+                std::vector<float> r(pt.size(), 1.0f);
+                for (size_t i = 0; i < pt.size(); ++i)
+                  if (pt[i] >= kPtMin)
+                    r[i] = evalCorr3(isoFile, isoCorrection,
+                                     abseta[i], pt[i], "systup");
+                return r;
+              }, {"SelectedMuon_absEta_sf", "SelectedMuon_pt"})
+        ->Define("muon_iso_sf_systdown_vec",
+              [isoFile, isoCorrection](const std::vector<float> &abseta,
+                        const std::vector<float> &pt) {
+                std::vector<float> r(pt.size(), 1.0f);
+                for (size_t i = 0; i < pt.size(); ++i)
+                  if (pt[i] >= kPtMin)
+                    r[i] = evalCorr3(isoFile, isoCorrection,
+                                     abseta[i], pt[i], "systdown");
+                return r;
+              }, {"SelectedMuon_absEta_sf", "SelectedMuon_pt"});
+    return;
   }
 
-  // POG fallback: TightPFIso from muon_Z.json
+  // Standard POG isolation SF from muon_Z.json. Its eta input is signed,
+  // like the medium-ID correction above.
+  const std::string isoCorrection = cfg.muonIsoCorrection.empty()
+      ? "NUM_TightPFIso_DEN_MediumID" : cfg.muonIsoCorrection;
   corrMgr->registerCorrection(
-      "cms_muon_iso_sf", ys.muonFile, "NUM_TightPFIso_DEN_MediumID",
-      {"SelectedMuon_absEta", "SelectedMuon_pt"});
+      "cms_muon_iso_sf", ys.muonFile, isoCorrection,
+      {"SelectedMuon_eta_sf", "SelectedMuon_pt"});
   corrMgr->applyCorrectionVec("cms_muon_iso_sf", {"nominal"}, {}, "muon_iso_sf_nominal_vec");
   corrMgr->applyCorrectionVec("cms_muon_iso_sf", {"systup"}, {}, "muon_iso_sf_systup_vec");
   corrMgr->applyCorrectionVec("cms_muon_iso_sf", {"systdown"}, {}, "muon_iso_sf_systdown_vec");
@@ -271,7 +371,22 @@ void defineCmsMuonScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
 // ===========================================================================
 
 void defineCmsElectronScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
-  if (!cfg.isMC || !cfg.yearSettings) return;
+  if (!cfg.isMC || !cfg.yearSettings || !cfg.applyElectronScaleFactors) {
+    defineUnityVectorColumns(
+        an, {"electron_id_sf_nominal_vec", "electron_id_sf_up_vec",
+             "electron_id_sf_down_vec", "electron_reco_sf_below20_nominal_vec",
+             "electron_reco_sf_20to75_nominal_vec",
+             "electron_reco_sf_above75_nominal_vec",
+             "electron_reco_sf_below20_up_vec",
+             "electron_reco_sf_20to75_up_vec",
+             "electron_reco_sf_above75_up_vec",
+             "electron_reco_sf_below20_down_vec",
+             "electron_reco_sf_20to75_down_vec",
+             "electron_reco_sf_above75_down_vec",
+             "electron_reco_sf_nominal_vec", "electron_reco_sf_up_vec",
+             "electron_reco_sf_down_vec"});
+    return;
+  }
   const auto &ys = *cfg.yearSettings;
   auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
 
@@ -334,7 +449,7 @@ void defineCmsElectronScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
 }
 
 // ===========================================================================
-// b-tag scale factors (fixed-WP method via WorkingPointRecipe)
+// b-tag scale factors (fixed-WP or continuous-shape method)
 // ===========================================================================
 
 void defineCmsBTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
@@ -343,19 +458,89 @@ void defineCmsBTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
 
   const auto &ys = *cfg.yearSettings;
   const std::string taggerBase = jetTaggerBase(cfg.jetTagger);
-  const bool hasEfficiency = fileExists(cfg.btagEfficiencyFile) &&
-                             !cfg.btagEfficiencyCorrection.empty();
-  const bool hasSF = fileExists(ys.btvBTagFile);
-  const bool apply = cfg.applyBTagWeights && hasEfficiency && hasSF;
 
   std::vector<std::string> btagCols{
-      "btag_weight_nominal", "btag_weight_up", "btag_weight_down",
-      "btag_weight_jes_up", "btag_weight_jes_down"};
+      "btag_weight_nominal", "btag_weight_up", "btag_weight_down"};
+  const bool hasJesSource =
+      std::find(cfg.btagSourceNames.begin(), cfg.btagSourceNames.end(),
+                "jes") != cfg.btagSourceNames.end();
+  if (cfg.btagMethod == BTagMethod::Shape || hasJesSource) {
+    btagCols.push_back("btag_weight_jes_up");
+    btagCols.push_back("btag_weight_jes_down");
+  }
   for (const auto &src : cfg.btagSourceNames) {
     if (src == "jes") continue;
     btagCols.push_back("btag_weight_" + src + "_up");
     btagCols.push_back("btag_weight_" + src + "_down");
   }
+
+  if (cfg.btagMethod == BTagMethod::Shape) {
+    if (!cfg.applyBTagScaleFactors) {
+      rdfanalysis::weights::defineConstantColumns(an, btagCols, 1.0f);
+      return;
+    }
+
+    const std::string shapeName = cfg.btagShapeCorrection.empty()
+                                       ? taggerBase + "_shape"
+                                       : cfg.btagShapeCorrection;
+    const std::string shapeFile = cfg.btagShapeFile.empty()
+                                      ? ys.btvBTagFile
+                                      : cfg.btagShapeFile;
+    const bool hasShape = fileExists(shapeFile) &&
+                          hasCorrectionInFile(shapeFile, shapeName);
+    if (!hasShape) {
+      throw std::runtime_error(
+          "CmsWeights::defineCmsBTagScaleFactors: continuous b-tag "
+          "correction '" + shapeName + "' was not found in '" + shapeFile +
+          "'. Provide btagShapeFile/btagShapeCorrection or disable shape "
+          "scale factors.");
+    }
+
+    auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
+    corrMgr->registerCorrection(
+        "cms_btag_shape", shapeFile, shapeName,
+        {"Jet_hadronFlavour_int", "Jet_abseta", "Jet_pt_corr_nominal",
+       ys.btagBranch});
+
+    const auto defineShapeVariation =
+        [&](const std::string &variation, const std::string &outputColumn) {
+          const std::string scaleFactorColumn =
+              "cms_btag_shape_" + variation;
+          corrMgr->applyCorrectionVec("cms_btag_shape", {variation}, {},
+                                      scaleFactorColumn);
+          an.Define(outputColumn, productSelectedJetScaleFactors,
+                    {"TaggerJets", scaleFactorColumn});
+        };
+
+    defineShapeVariation("central", "btag_weight_nominal");
+    defineShapeVariation("up", "btag_weight_up");
+    defineShapeVariation("down", "btag_weight_down");
+    defineShapeVariation("up_jes", "btag_weight_jes_up");
+    defineShapeVariation("down_jes", "btag_weight_jes_down");
+    for (const auto &source : cfg.btagSourceNames) {
+      if (source == "jes") continue;
+      defineShapeVariation("up_" + source,
+                           "btag_weight_" + source + "_up");
+      defineShapeVariation("down_" + source,
+                           "btag_weight_" + source + "_down");
+    }
+    return;
+  }
+
+  const bool hasEfficiency = fileExists(cfg.btagEfficiencyFile) &&
+                             !cfg.btagEfficiencyCorrection.empty() &&
+                             hasCorrectionInFile(cfg.btagEfficiencyFile,
+                                                 cfg.btagEfficiencyCorrection);
+  const bool hasSF = fileExists(ys.btvBTagFile);
+  if (cfg.applyBTagWeights && (!hasEfficiency || !hasSF)) {
+    throw std::runtime_error(
+        "CmsWeights::defineCmsBTagScaleFactors: fixed-WP b-tag weights were "
+        "requested, but the efficiency correction or BTV scale-factor file "
+        "is missing. Efficiency file='" + cfg.btagEfficiencyFile +
+        "', correction='" + cfg.btagEfficiencyCorrection + "', SF file='" +
+        ys.btvBTagFile + "'.");
+  }
+  const bool apply = cfg.applyBTagWeights;
 
   if (!apply) {
     rdfanalysis::weights::defineConstantColumns(an, btagCols, 1.0f);
@@ -365,17 +550,35 @@ void defineCmsBTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
   auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
   auto btagMgr = an.getPlugin<TaggerWorkingPointManager>("btagManager");
 
+  an.Define("Jet_abseta_btag",
+            [](const ROOT::VecOps::RVec<Float_t> &eta) {
+              return boundedAbsEta(eta, 2.5f);
+            },
+            {"Jet_eta"});
+  an.Define("Jet_pt_corr_nominal_btag", boundedBTagPt,
+            {"Jet_pt_corr_nominal"});
+  an.Define("Jet_abseta_btag_eff",
+            [](const ROOT::VecOps::RVec<Float_t> &eta) {
+              return boundedAbsEta(eta, 2.4f);
+            },
+            {"Jet_eta"});
+  an.Define("Jet_pt_corr_nominal_btag_eff", boundedBTagPt,
+            {"Jet_pt_corr_nominal"});
+
   // Register corrections
   corrMgr->registerCorrection(
       "cms_btag_heavy_wp", ys.btvBTagFile, taggerBase + "_comb",
-      {"Jet_hadronFlavour", "Jet_abseta", "Jet_pt_corr_nominal"});
+      {"Jet_hadronFlavour_int", "Jet_abseta_btag",
+       "Jet_pt_corr_nominal_btag"});
   corrMgr->registerCorrection(
       "cms_btag_light_wp", ys.btvBTagFile, taggerBase + "_light",
-      {"Jet_hadronFlavour", "Jet_abseta", "Jet_pt_corr_nominal"});
+      {"Jet_hadronFlavour_int", "Jet_abseta_btag",
+       "Jet_pt_corr_nominal_btag"});
   corrMgr->registerCorrection(
       "cms_btag_efficiency", cfg.btagEfficiencyFile,
       cfg.btagEfficiencyCorrection,
-      {"Jet_hadronFlavour", "Jet_abseta", "Jet_pt_corr_nominal"});
+      {"Jet_hadronFlavour_int", "Jet_abseta_btag_eff",
+       "Jet_pt_corr_nominal_btag_eff"});
 
   const std::vector<std::string> workingPoints{"L", "M", "T", "XT", "XXT"};
 
@@ -400,7 +603,7 @@ void defineCmsBTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
           corrMgr->applyCorrectionVec("cms_btag_heavy_wp", {heavyVar, wp}, {}, heavy);
           corrMgr->applyCorrectionVec("cms_btag_light_wp", {lightVar, wp}, {}, light);
           an.Define(merged, mergeBTagScaleFactors,
-                    {"Jet_hadronFlavour", heavy, light});
+                    {"Jet_hadronFlavour_int", heavy, light});
           return merged;
         });
   };
@@ -408,8 +611,10 @@ void defineCmsBTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
   defineVar("central", "central", "central", "btag_weight_nominal");
   defineVar("up", "up", "up", "btag_weight_up");
   defineVar("down", "down", "down", "btag_weight_down");
-  defineVar("jes_up", "up_jes", "up_jes", "btag_weight_jes_up");
-  defineVar("jes_down", "down_jes", "down_jes", "btag_weight_jes_down");
+  if (hasJesSource) {
+    defineVar("jes_up", "up_jes", "up_jes", "btag_weight_jes_up");
+    defineVar("jes_down", "down_jes", "down_jes", "btag_weight_jes_down");
+  }
   for (const auto &src : cfg.btagSourceNames) {
     if (src == "jes") continue;
     defineVar(src + "_up", "up_" + src, "up_" + src,
@@ -497,17 +702,17 @@ void defineCmsCTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
   // Register corrections with resolved names
   corrMgr->registerCorrection(
       "cms_ctag_light_wp", ys.btvCTagFile, ctagLightName,
-      {"Jet_hadronFlavour", "Jet_abseta", "Jet_pt_corr_nominal"});
+      {"Jet_hadronFlavour_int", "Jet_abseta", "Jet_pt_corr_nominal"});
   corrMgr->registerCorrection(
       "cms_ctag_wc_wp", ys.btvCTagFile, ctagWcName,
-      {"Jet_hadronFlavour", "Jet_abseta", "Jet_pt_corr_nominal"});
+      {"Jet_hadronFlavour_int", "Jet_abseta", "Jet_pt_corr_nominal"});
   corrMgr->registerCorrection(
       "cms_ctag_tnp_wp", ys.btvCTagFile, ctagTnpName,
-      {"Jet_hadronFlavour", "Jet_abseta", "Jet_pt_corr_nominal"});
+      {"Jet_hadronFlavour_int", "Jet_abseta", "Jet_pt_corr_nominal"});
   corrMgr->registerCorrection(
       "cms_ctag_efficiency", cfg.ctagEfficiencyFile,
       cfg.ctagEfficiencyCorrection,
-      {"Jet_hadronFlavour", "Jet_abseta", "Jet_pt_corr_nominal"});
+      {"Jet_hadronFlavour_int", "Jet_abseta", "Jet_pt_corr_nominal"});
 
   const std::vector<std::string> workingPoints{"L", "M", "T"};
 
@@ -535,7 +740,7 @@ void defineCmsCTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
           corrMgr->applyCorrectionVec("cms_ctag_wc_wp", {wcVar, wp}, {}, wc);
           corrMgr->applyCorrectionVec("cms_ctag_tnp_wp", {tnpVar, wp}, {}, tnp);
           an.Define(merged, mergeCTagScaleFactors,
-                    {"Jet_hadronFlavour", light, wc, tnp});
+                    {"Jet_hadronFlavour_int", light, wc, tnp});
           return merged;
         });
   };
@@ -573,79 +778,95 @@ void defineCmsCTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
 // ===========================================================================
 
 void defineCmsTriggerScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
-  if (!cfg.isMC) {
+  if (!cfg.isMC || !cfg.applyTriggerScaleFactors) {
     an.Define("trig_sf_nominal", []() { return 1.0f; }, {});
     an.Define("trig_sf_up", []() { return 1.0f; }, {});
     an.Define("trig_sf_down", []() { return 1.0f; }, {});
     return;
   }
 
-  const bool hasOverride = !cfg.triggerSfRoot.empty();
-  if (hasOverride && !cfg.usePogTriggerSFs) {
-    // Analysis-specific trigger SFs — analysis code must define them.
-    // Default to unity so the pipeline runs without crashing.
-    an.Define("trig_sf_nominal", []() { return 1.0f; }, {});
-    an.Define("trig_sf_up", []() { return 1.0f; }, {});
-    an.Define("trig_sf_down", []() { return 1.0f; }, {});
-    return;
-  }
-
-  if (cfg.usePogTriggerSFs && cfg.yearSettings) {
-    // POG trigger SFs from muon/electron JSON files
-    const auto &ys = *cfg.yearSettings;
-    auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
-
-    // Muon trigger SF (from muon_Z.json)
-    corrMgr->registerCorrection(
-        "cms_muon_trig_sf", ys.muonFile,
-        "NUM_MediumID_DEN_TrackerMuons",
-        {"SelectedMuon_absEta", "SelectedMuon_pt"});
-    corrMgr->applyCorrectionVec("cms_muon_trig_sf", {"nominal"}, {},
-                                "muon_trig_sf_nominal_vec");
-    corrMgr->applyCorrectionVec("cms_muon_trig_sf", {"systup"}, {},
-                                "muon_trig_sf_up_vec");
-    corrMgr->applyCorrectionVec("cms_muon_trig_sf", {"systdown"}, {},
-                                "muon_trig_sf_down_vec");
-
-    // Electron trigger SF (from electron.json)
-    if (ys.electronCorrection == "Electron-ID-SF") {
-      corrMgr->registerCorrection(
-          "cms_electron_trig_sf", ys.electronFile, ys.electronCorrection,
-          {"SelectedElectron_scEta", "SelectedElectron_pt"});
-      corrMgr->applyCorrectionVec("cms_electron_trig_sf",
-          {ys.electronYearToken, "sf", "trigger"}, {},
-          "electron_trig_sf_nominal_vec");
-      corrMgr->applyCorrectionVec("cms_electron_trig_sf",
-          {ys.electronYearToken, "sfup", "trigger"}, {},
-          "electron_trig_sf_up_vec");
-      corrMgr->applyCorrectionVec("cms_electron_trig_sf",
-          {ys.electronYearToken, "sfdown", "trigger"}, {},
-          "electron_trig_sf_down_vec");
+  const bool hasDimuonTriggerFiles =
+      !cfg.dimuonTriggerMu17File.empty() || !cfg.dimuonTriggerMu8File.empty();
+  if (hasDimuonTriggerFiles) {
+    if (cfg.dimuonTriggerMu17File.empty() ||
+        cfg.dimuonTriggerMu8File.empty()) {
+      throw std::runtime_error(
+          "CmsWeights::defineCmsTriggerScaleFactors: both Mu17 and Mu8 "
+          "dimuon trigger payloads must be configured.");
+    }
+    if (!fileExists(cfg.dimuonTriggerMu17File) ||
+        !fileExists(cfg.dimuonTriggerMu8File)) {
+      throw std::runtime_error(
+          "CmsWeights::defineCmsTriggerScaleFactors: a configured dimuon "
+          "trigger payload is missing. Mu17='" + cfg.dimuonTriggerMu17File +
+          "', Mu8='" + cfg.dimuonTriggerMu8File + "'.");
     }
 
-    // Per-vector products for trigger SFs
-    an.Define("muon_trig_weight_nominal", productOrOne, {"muon_trig_sf_nominal_vec"})
-        ->Define("muon_trig_weight_up", productOrOne, {"muon_trig_sf_up_vec"})
-        ->Define("muon_trig_weight_down", productOrOne, {"muon_trig_sf_down_vec"})
-        ->Define("electron_trig_weight_nominal", productOrOne, {"electron_trig_sf_nominal_vec"})
-        ->Define("electron_trig_weight_up", productOrOne, {"electron_trig_sf_up_vec"})
-        ->Define("electron_trig_weight_down", productOrOne, {"electron_trig_sf_down_vec"});
+    auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
+    corrMgr->registerCorrection(
+        "cms_dimuon_trigger_mu17", cfg.dimuonTriggerMu17File,
+        cfg.dimuonTriggerMu17Correction,
+        {"SelectedMuonLead_absEta", "Muon1_pt"});
+    corrMgr->registerCorrection(
+        "cms_dimuon_trigger_mu8", cfg.dimuonTriggerMu8File,
+        cfg.dimuonTriggerMu8Correction,
+        {"SelectedMuonSublead_absEta", "Muon2_pt"});
 
-    // Combined trigger SF (muon × electron — analysis may redefine)
-    an.Define("trig_sf_nominal",
-              [](float mu, float el) { return mu * el; },
-              {"muon_trig_weight_nominal", "electron_trig_weight_nominal"})
-        ->Define("trig_sf_up",
-                 [](float mu, float el) { return mu * el; },
-                 {"muon_trig_weight_up", "electron_trig_weight_up"})
-        ->Define("trig_sf_down",
-                 [](float mu, float el) { return mu * el; },
-                 {"muon_trig_weight_down", "electron_trig_weight_down"});
-  } else {
+    const auto applyLegVariations = [&](const std::string &correction,
+                                        const std::string &prefix) {
+      corrMgr->applyCorrection(correction, {"nominal"}, {},
+                               prefix + "_nominal");
+      corrMgr->applyCorrection(correction, {"systup"}, {}, prefix + "_up");
+      corrMgr->applyCorrection(correction, {"systdown"}, {}, prefix + "_down");
+    };
+    applyLegVariations("cms_dimuon_trigger_mu17", "dimuon_trigger_mu17");
+    applyLegVariations("cms_dimuon_trigger_mu8", "dimuon_trigger_mu8");
+
+    const auto defineEventVariation = [&](const std::string &variation) {
+      const std::string mu17 = "dimuon_trigger_mu17_" + variation;
+      const std::string mu8 = "dimuon_trigger_mu8_" + variation;
+      const std::string output = "trig_sf_" + variation;
+      an.Define(
+          output,
+          [](Int_t nGoodMuons, Float_t leadPt, Float_t subleadPt,
+             Float_t mu17Sf, Float_t mu8Sf) {
+            if (nGoodMuons != 2) return 1.0f;
+            const Float_t leadFactor = leadPt >= 17.0f ? mu17Sf : 1.0f;
+            const Float_t subleadFactor = subleadPt >= 15.0f ? mu8Sf : 1.0f;
+            return leadFactor * subleadFactor;
+          },
+          {"nGoodMuons", "Muon1_pt", "Muon2_pt", mu17, mu8});
+    };
+    defineEventVariation("nominal");
+    defineEventVariation("up");
+    defineEventVariation("down");
+    return;
+  }
+
+  if (cfg.triggerSfFile.empty() || cfg.triggerSfCorrection.empty() ||
+      !fileExists(cfg.triggerSfFile)) {
+    std::cerr << "WARNING: CmsWeights::defineCmsTriggerScaleFactors — "
+                 "no path-specific trigger SF payload is configured; "
+                 "trigger weights are unity.\n";
     an.Define("trig_sf_nominal", []() { return 1.0f; }, {});
     an.Define("trig_sf_up", []() { return 1.0f; }, {});
     an.Define("trig_sf_down", []() { return 1.0f; }, {});
+    return;
   }
+
+  auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
+  corrMgr->registerCorrection("cms_trigger_sf", cfg.triggerSfFile,
+                              cfg.triggerSfCorrection,
+                              {"SelectedMuon_absEta", "SelectedMuon_pt"});
+  corrMgr->applyCorrectionVec("cms_trigger_sf", {"nominal"}, {},
+                              "trigger_sf_nominal_vec");
+  corrMgr->applyCorrectionVec("cms_trigger_sf", {"systup"}, {},
+                              "trigger_sf_up_vec");
+  corrMgr->applyCorrectionVec("cms_trigger_sf", {"systdown"}, {},
+                              "trigger_sf_down_vec");
+    an.Define("trig_sf_nominal", productOrOneRVec, {"trigger_sf_nominal_vec"})
+      ->Define("trig_sf_up", productOrOneRVec, {"trigger_sf_up_vec"})
+      ->Define("trig_sf_down", productOrOneRVec, {"trigger_sf_down_vec"});
 }
 
 // ===========================================================================
@@ -741,24 +962,24 @@ void defineCmsVecProductColumns(Analyzer &an, const CmsWeightConfig &cfg) {
   if (!cfg.isMC) return;
 
   // Muon ID per-object -> event-level product
-  an.Define("muon_id_weight_nominal", productOrOne, {"muon_id_sf_nominal_vec"})
-      ->Define("muon_id_weight_systup", productOrOne, {"muon_id_sf_systup_vec"})
-      ->Define("muon_id_weight_systdown", productOrOne, {"muon_id_sf_systdown_vec"});
+    an.Define("muon_id_weight_nominal", productOrOneRVec, {"muon_id_sf_nominal_vec"})
+      ->Define("muon_id_weight_systup", productOrOneRVec, {"muon_id_sf_systup_vec"})
+      ->Define("muon_id_weight_systdown", productOrOneRVec, {"muon_id_sf_systdown_vec"});
 
   // Muon ISO
-  an.Define("muon_iso_weight_nominal", productOrOne, {"muon_iso_sf_nominal_vec"})
-      ->Define("muon_iso_weight_systup", productOrOne, {"muon_iso_sf_systup_vec"})
-      ->Define("muon_iso_weight_systdown", productOrOne, {"muon_iso_sf_systdown_vec"});
+    an.Define("muon_iso_weight_nominal", productOrOneRVec, {"muon_iso_sf_nominal_vec"})
+      ->Define("muon_iso_weight_systup", productOrOneRVec, {"muon_iso_sf_systup_vec"})
+      ->Define("muon_iso_weight_systdown", productOrOneRVec, {"muon_iso_sf_systdown_vec"});
 
   // Electron ID
-  an.Define("electron_id_weight_nominal", productOrOne, {"electron_id_sf_nominal_vec"})
-      ->Define("electron_id_weight_up", productOrOne, {"electron_id_sf_up_vec"})
-      ->Define("electron_id_weight_down", productOrOne, {"electron_id_sf_down_vec"});
+    an.Define("electron_id_weight_nominal", productOrOneRVec, {"electron_id_sf_nominal_vec"})
+      ->Define("electron_id_weight_up", productOrOneRVec, {"electron_id_sf_up_vec"})
+      ->Define("electron_id_weight_down", productOrOneRVec, {"electron_id_sf_down_vec"});
 
   // Electron reco
-  an.Define("electron_reco_weight_nominal", productOrOne, {"electron_reco_sf_nominal_vec"})
-      ->Define("electron_reco_weight_up", productOrOne, {"electron_reco_sf_up_vec"})
-      ->Define("electron_reco_weight_down", productOrOne, {"electron_reco_sf_down_vec"});
+    an.Define("electron_reco_weight_nominal", productOrOneRVec, {"electron_reco_sf_nominal_vec"})
+      ->Define("electron_reco_weight_up", productOrOneRVec, {"electron_reco_sf_up_vec"})
+      ->Define("electron_reco_weight_down", productOrOneRVec, {"electron_reco_sf_down_vec"});
 }
 
 // ===========================================================================
@@ -767,7 +988,7 @@ void defineCmsVecProductColumns(Analyzer &an, const CmsWeightConfig &cfg) {
 
 void defineCmsNominalWeight(Analyzer &an, const CmsWeightConfig &cfg) {
   if (!cfg.isMC) {
-    an.Define("weight_nominal", []() { return 1.0f; }, {});
+    an.Define("weight_nominal", []() { return 1.0; }, {});
     return;
   }
 
@@ -782,6 +1003,8 @@ void defineCmsNominalWeight(Analyzer &an, const CmsWeightConfig &cfg) {
   wm->addScaleFactor("electron_id", "electron_id_weight_nominal");
   wm->addScaleFactor("electron_reco", "electron_reco_weight_nominal");
   wm->addScaleFactor("trigger", "trig_sf_nominal");
+  wm->addScaleFactor("btag", "btag_weight_nominal");
+  wm->addScaleFactor("ctag", "ctag_weight_nominal");
 
   // Systematic weight variations
   wm->addWeightVariation("pileup", "pileup_weight_up", "pileup_weight_down");
@@ -799,8 +1022,13 @@ void defineCmsNominalWeight(Analyzer &an, const CmsWeightConfig &cfg) {
 
   // b-tag variations
   wm->addWeightVariation("btag", "btag_weight_up", "btag_weight_down");
-  wm->addWeightVariation("btag_jes", "btag_weight_jes_up",
-                          "btag_weight_jes_down");
+  const bool hasJesSource =
+      std::find(cfg.btagSourceNames.begin(), cfg.btagSourceNames.end(),
+                "jes") != cfg.btagSourceNames.end();
+  if (cfg.btagMethod == BTagMethod::Shape || hasJesSource) {
+    wm->addWeightVariation("btag_jes", "btag_weight_jes_up",
+                            "btag_weight_jes_down");
+  }
   for (const auto &src : cfg.btagSourceNames) {
     if (src == "jes") continue;
     wm->addWeightVariation("btag_" + src, "btag_weight_" + src + "_up",
@@ -834,8 +1062,8 @@ void defineCmsNominalWeight(Analyzer &an, const CmsWeightConfig &cfg) {
 // Full standard weights setup
 // ===========================================================================
 
-void setupCmsStandardWeights(Analyzer &an, const CmsWeightConfig &cfg) {
-  fillDefaultSourceNames(const_cast<CmsWeightConfig&>(cfg));
+void setupCmsStandardWeights(Analyzer &an, CmsWeightConfig cfg) {
+  fillDefaultSourceNames(cfg);
 
   // Configure tagger working-point manager branches from year settings
   if (cfg.yearSettings) {
@@ -844,8 +1072,10 @@ void setupCmsStandardWeights(Analyzer &an, const CmsWeightConfig &cfg) {
     // b-tag: object columns + tagger branch + input collection + WPs
     setupBtagTaggerManager(an, ys, cfg.btagWorkingPoints);
 
-    // c-tag: object columns + tagger branches + input collection + WPs
-    setupCtagTaggerManager(an, ys, cfg.ctagWorkingPoints);
+    // c-tag setup is only needed when c-tag weights are enabled.
+    if (cfg.applyCTagWeights) {
+      setupCtagTaggerManager(an, ys, cfg.ctagWorkingPoints);
+    }
   }
 
   // Define all weight components in order
@@ -855,6 +1085,16 @@ void setupCmsStandardWeights(Analyzer &an, const CmsWeightConfig &cfg) {
   defineCmsElectronScaleFactors(an, cfg);
   defineCmsBTagScaleFactors(an, cfg);
   defineCmsCTagScaleFactors(an, cfg);
+  if (cfg.btagMethod == BTagMethod::FixedWP && cfg.applyBTagWeights) {
+    if (auto btagMgr = an.findPlugin<TaggerWorkingPointManager>("btagManager")) {
+      btagMgr->execute();
+    }
+  }
+  if (cfg.ctagMethod == BTagMethod::FixedWP && cfg.applyCTagWeights) {
+    if (auto ctagMgr = an.findPlugin<TaggerWorkingPointManager>("ctagManager")) {
+      ctagMgr->execute();
+    }
+  }
   defineCmsTriggerScaleFactors(an, cfg);
   defineCmsVecProductColumns(an, cfg);
   defineCmsNominalWeight(an, cfg);

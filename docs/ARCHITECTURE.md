@@ -26,12 +26,13 @@ RDFAnalyzerCore is built around several key principles:
 - New plugins can be added without changing Analyzer
 - Plugins interact through well-defined interfaces
 
-### 2. Configuration-Driven Behavior
+### 2. Configuration-Driven Settings
 
-**Goal**: Separate configuration from code.
+**Goal**: Keep runtime settings and analysis algorithms in the right places.
 
-- All runtime behavior controlled by text files
-- Same binary can run different analyses
+- Text/YAML files hold I/O, performance, plugin, and output settings
+- Analysis code defines physics logic and constructs the plugins it uses
+- Compatible configs can reuse an executable without changing its code
 - Configuration is versioned alongside code
 - No recompilation needed for config changes
 
@@ -157,7 +158,7 @@ public:
     template<typename T>
     std::shared_ptr<T> getPlugin(const std::string& role) const;
     
-    // Execution (single entry point — replaces old save())
+    // C++ execution entry point
     Analyzer* run();
     
     // Access to underlying managers
@@ -170,7 +171,7 @@ public:
 **Design Notes**:
 - Returns `this` for method chaining: `analyzer.Define(...)->Filter(...)->Define(...)`
 - Template method `getPlugin<T>` provides type-safe plugin access via `std::shared_ptr`
-- Owns all managers via unique_ptr (RAII)
+- Owns core providers, the logger, output sinks, and ordinary analysis services with `std::unique_ptr`; plugins and the provenance service use `std::shared_ptr`.
 
 ### ConfigurationManager
 
@@ -179,10 +180,16 @@ public:
 **Purpose**: Load and provide access to configuration values.
 
 **Responsibilities**:
-- Parse configuration files (key=value format)
-- Support nested configurations (plugin configs)
-- Provide type-safe value retrieval
+- Parse YAML (`.yaml`/`.yml`) and key/value text files
+- Parse referenced plugin and analysis configuration files
+- Return configuration values as strings and parse pair-, multi-key-, and vector-based config files
 - Handle defaults and missing keys
+
+`ConfigurationManager::get()` returns an empty string for a missing key after
+logging a warning. It does not perform typed conversion. Callers validate and
+convert values as needed. Relative config-file references resolve from the
+process working directory when present, then from the main config file's
+directory.
 
 **Key Interface** (`IConfigurationProvider`):
 ```cpp
@@ -207,8 +214,8 @@ public:
 ```
 ConfigurationManager ──uses──► IConfigAdapter (interface)
                                        │
-                                       ├─► TextConfigAdapter (text files)
-                                       └─► (Future: JsonConfigAdapter, etc.)
+                                       ├─► TextConfigAdapter (.txt and other non-YAML files)
+                                       └─► YamlConfigAdapter (.yaml / .yml)
 ```
 
 ### DataManager
@@ -228,12 +235,14 @@ ConfigurationManager ──uses──► IConfigAdapter (interface)
 class IDataFrameProvider {
 public:
     virtual ROOT::RDF::RNode getDataFrame() = 0;
-    virtual void Define(const std::string& name, ...) = 0;
-    virtual void Filter(...) = 0;
-    virtual void DefinePerSample(...) = 0;
-    virtual void DefineVector(...) = 0;
-    virtual void Redefine(const std::string& name, ...) = 0;
-    // ... other RDataFrame operations
+    virtual void setDataFrame(const ROOT::RDF::RNode& node) = 0;
+    virtual void DefineVector(std::string name,
+                              const std::vector<std::string>& columns,
+                              std::string type,
+                              ISystematicManager& systematics) = 0;
+
+    // Define, Filter, DefinePerSample, and Redefine are template helpers
+    // implemented on IDataFrameProvider rather than virtual interface calls.
 };
 ```
 
@@ -257,38 +266,39 @@ auto df = dataManager->getDataFrame();
 **Purpose**: Track systematic variations and propagate through analysis.
 
 **Responsibilities**:
-- Register systematic variation names
-- Generate per-sample systematic indices
-- Provide lists of active variations
-- Support systematic-aware variable definitions
+- Register systematic families and the nominal variables they affect
+- Map variables to explicit Up/Down columns or other named variation columns
+- Discover complete Up/Down pairs from dataframe column names
+- Build and cache shared systematic-counter columns when requested
 
 **Key Interface** (`ISystematicManager`):
 ```cpp
 class ISystematicManager {
 public:
-    virtual void registerSystematic(const std::string& name) = 0;
-    virtual std::vector<std::string> getSystematicNames() const = 0;
-    virtual bool hasSystematic(const std::string& name) const = 0;
-    // ... per-sample systematic handling
+    static constexpr const char* CANONICAL_SYST_BRANCH_NAME = "SystematicCounter";
+    virtual void registerSystematic(
+        const std::string& name,
+        const std::set<std::string>& affectedVariables) = 0;
+    virtual void registerVariationColumns(
+        const std::string& variable, const std::string& systematicName,
+        const std::string& upColumn, const std::string& downColumn) = 0;
+    virtual void registerVariationColumn(
+        const std::string& variable, const std::string& variationLabel,
+        const std::string& column) = 0;
+    virtual SystematicValidationResult autoRegisterSystematics(
+        const std::vector<std::string>& columnNames) = 0;
 };
 ```
 
 **Usage Pattern**:
 ```cpp
-// Register variations
-sysMgr->registerSystematic("jes_up");
-sysMgr->registerSystematic("jes_down");
+// Map the nominal input variable to its existing shifted columns.
+auto& sysMgr = analyzer.getSystematicManager();
+sysMgr.registerVariationColumns(
+    "jet_pt", "jes", "jet_pt_jesUp", "jet_pt_jesDown");
 
-// Define variable with systematic awareness
-dataManager->Define("corrected_pt",
-    [](float pt, const std::string& systematic) {
-        if (systematic == "jes_up") return pt * 1.02;
-        if (systematic == "jes_down") return pt * 0.98;
-        return pt;
-    },
-    {"jet_pt"},
-    *sysMgr  // Systematic manager propagates variations
-);
+// Analyzer::Define uses this mapping when defining derived columns.
+analyzer.Define("corrected_pt", correctJetPt, {"jet_pt"});
 ```
 
 ### OutputSink
@@ -309,7 +319,6 @@ public:
     virtual void writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec) = 0;
     virtual void writeDataFrame(ROOT::RDF::RNode& df,
                                 const IConfigurationProvider& configProvider,
-                                const IDataFrameProvider* dataFrameProvider,
                                 const ISystematicManager* systematicManager,
                                 OutputChannel channel) = 0;
     virtual std::string resolveOutputFile(const IConfigurationProvider& configProvider,
@@ -331,12 +340,8 @@ public:
 ```cpp
 class ILogger {
 public:
-    virtual void log(const std::string& message, 
-                    LogLevel level = LogLevel::INFO) = 0;
-    virtual void error(const std::string& message) = 0;
-    virtual void warn(const std::string& message) = 0;
-    virtual void info(const std::string& message) = 0;
-    virtual void debug(const std::string& message) = 0;
+    enum class Level { Trace, Debug, Info, Warn, Error };
+    virtual void log(Level level, const std::string& message) = 0;
 };
 ```
 
@@ -376,7 +381,7 @@ struct ManagerContext {
 
 class IContextAware {
 public:
-    virtual void setContext(const ManagerContext& ctx) = 0;
+    virtual void setContext(ManagerContext& ctx) = 0;
 };
 ```
 
@@ -387,17 +392,25 @@ public:
 ```cpp
 template<typename T>
 class NamedObjectManager : public IPluggableManager {
-protected:
-    std::unordered_map<std::string, T> objects_;
-    ManagerContext* context_;
-    
 public:
-    virtual void loadObjects(const std::vector<std::map<std::string, std::string>>& configs) = 0;
-    T getObject(const std::string& key) const;
-    std::vector<std::string> getAllKeys() const;
-    // ...
+    const T& getObject(const std::string& key) const;
+    const std::vector<std::string>& getFeatures(const std::string& key) const;
+    void setContext(ManagerContext& ctx) override;
+    void setupFromConfigFile() override;
+
+protected:
+    std::unordered_map<std::string, T> objects_m;
+    std::unordered_map<std::string, std::vector<std::string>> features_m;
+    IConfigurationProvider* configManager_m = nullptr;
+    IDataFrameProvider* dataManager_m = nullptr;
+    ISystematicManager* systematicManager_m = nullptr;
+    ILogger* logger_m = nullptr;
 };
 ```
+
+`NamedObjectManager` provides named-object and feature lookup plus access to
+context services for derived plugins. It does not prescribe how a derived
+manager parses or loads its objects.
 
 **Used by**:
 - `BDTManager` - manages `FastForest` objects
@@ -407,97 +420,58 @@ public:
 
 ### Plugin Lifecycle
 
-1. **Construction**: Plugins are created in user code
+1. **Construction and registration**: Analysis code creates and registers a
+   plugin, either with its factory or `Analyzer::addPlugin()`.
    ```cpp
-   auto onnxMgr = std::make_unique<OnnxManager>(*config);
+   Analyzer analyzer("config.yaml");
+   auto onnxMgr = OnnxManager::create(analyzer, "onnxManager");
    ```
 
-2. **Context Setting**: Plugins receive references to core managers
+2. **Wiring and initialization**: `addPlugin()` checks declared dependencies,
+   recomputes the dependency order, then calls `setContext()`,
+   `setupFromConfigFile()`, and `initialize()` for the new manager. Plugins
+   supplied in the Analyzer constructor map are wired in dependency order
+   during construction. Context injection uses a mutable `ManagerContext&`;
+   plugins should not build a temporary context themselves.
+
+3. **Usage**: Analysis code invokes the registered manager after wiring.
    ```cpp
-   ManagerContext ctx{config, dataManager, sysMgr, logger, skimSink, metaSink};
-   onnxMgr->setContext(ctx);
+   onnxMgr->applyAllModels();
+   analyzer.run();
    ```
 
-3. **Registration**: Plugins are registered with Analyzer
-   ```cpp
-   plugins["onnx"] = std::move(onnxMgr);
-   Analyzer analyzer(configFile, std::move(plugins));
-   ```
-
-4. **Initialization**: Framework calls `initialize()` on all plugins
-   ```cpp
-   // In Analyzer constructor
-   for (auto& [role, plugin] : plugins_) {
-       plugin->initialize();
-   }
-   ```
-
-5. **Usage**: Analysis code retrieves and uses plugins
-   ```cpp
-    auto onnx = analyzer.getPlugin<OnnxManager>("onnx");
-    if (onnx) onnx->applyAllModels();
-   ```
-
-6. **Finalization**: Framework calls `finalize()` then `reportMetadata()` on all plugins
-   ```cpp
-    // In Analyzer::run()
-    for (const auto& role : pluginOrder_) {
-         plugins_.at(role)->finalize();
-         plugins_.at(role)->reportMetadata();
-   }
-   ```
+4. **Run and finalization**: `Analyzer::run()` invokes plugin `execute()`
+   hooks, triggers configured output actions, finalizes analysis services and
+   plugins, asks plugins to report metadata, then finalizes provenance. A
+   plugin's `execute()` usually adds columns or books lazy actions before ROOT
+   evaluates the dataframe.
 
 ### Plugin Discovery and Access
 
-**Type-Safe Access**:
-```cpp
-template<typename T>
-std::shared_ptr<T> Analyzer::getPlugin(const std::string& role) const {
-    auto it = plugins_.find(role);
-    if (it == plugins_.end()) return nullptr;
-    return std::dynamic_pointer_cast<T>(it->second);
-}
-```
+`getPlugin<T>()` is for required plugins: it throws `std::out_of_range` if the role is absent and `std::bad_cast` if the registered object has another type. `findPlugin<T>()` is for optional plugins and returns `nullptr` when the role is absent or the type does not match.
 
 **Usage**:
 ```cpp
-// Request a concrete manager plugin
-auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
-if (onnxMgr) {
-    onnxMgr->applyModel("my_model");
-}
+// Request a required manager plugin
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnxManager");
+onnxMgr->applyModel("my_model");
 ```
 
 ### Common Plugin Patterns
 
 #### 1. Configuration-Loaded Objects
 
-Plugins like BDTManager and OnnxManager load objects from configuration:
+Managers such as `OnnxManager` load named objects from configuration. The
+base `NamedObjectManager` supplies object/feature lookup; the concrete manager
+owns its config schema and loading logic. For example, the current
+`OnnxManager` requires `file`, `name`, `inputVariables`, and `runVar` entries
+when it parses `onnxConfig`:
 
 ```cpp
-class OnnxManager : public NamedObjectManager<std::shared_ptr<Ort::Session>> {
-public:
-    OnnxManager(IConfigurationProvider& config) {
-        // Read onnxConfig from main config
-        if (config.has("onnxConfig")) {
-            auto modelConfigs = config.parseMultiKeyConfig(
-                config.get("onnxConfig"));
-            loadObjects(modelConfigs);
-        }
-    }
-    
-protected:
-    void loadObjects(const std::vector<std::map<...>>& configs) override {
-        for (const auto& cfg : configs) {
-            // Load ONNX model
-            auto session = std::make_shared<Ort::Session>(...);
-            objects_[cfg.at("name")] = session;
-            // Store metadata
-            features_[cfg.at("name")] = parseFeatures(cfg.at("inputVariables"));
-            runVars_[cfg.at("name")] = cfg.at("runVar");
-        }
-    }
-};
+const auto modelConfigs = configProvider.parseMultiKeyConfig(
+    configProvider.get("onnxConfig"),
+    {"file", "name", "inputVariables", "runVar"});
+loadModelsFromConfig(configProvider, modelConfigs);
 ```
 
 #### 2. DataFrame Augmentation
@@ -505,83 +479,51 @@ protected:
 Plugins that add columns to the dataframe:
 
 ```cpp
-void OnnxManager::applyModel(const std::string& modelName) {
-    auto session = getObject(modelName);
-    const auto& features = features_.at(modelName);
-    const auto& runVar = runVars_.at(modelName);
-    
-    // Add column via DataManager
-    context_->dataManager.Define(modelName,
-        [session, features, runVar](auto&&... args) {
-            if (!runVar_value) return -1.0f;
-            // Run inference
-            return runInference(session, features, args...);
-        },
-        features
-    );
-}
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnxManager");
+onnxMgr->applyModel("my_model");
 ```
+
+The manager uses its injected `IDataFrameProvider` and `ISystematicManager` to
+define inference output columns. The analysis must define each configured
+feature column before applying the model and must run the Analyzer to evaluate
+the resulting lazy graph.
 
 #### 3. Metadata Collection
 
-Services that collect information for metadata output:
-
-```cpp
-class CounterService : public IAnalysisService {
-public:
-    void finalize(ROOT::RDF::RNode& df) override {
-        // Write counters to metadata sink
-        OutputSpec spec{"event_counters.root", "Event Counts", {}};
-        ctx_.metaSink.writeDataFrame(df, spec);
-    }
-};
-```
+After execution, plugins can emit human-readable metadata from
+`reportMetadata()` and structured provenance entries from
+`collectProvenanceEntries()`. Analysis services can also return provenance
+entries. `Analyzer::run()` gathers these contributions and finalizes the
+`ProvenanceService` last so it can write a complete metadata record.
 
 ## Data Flow
 
 ### Typical Analysis Flow
 
 ```
-1. Construction
-   ├─► Parse configuration file
-   ├─► Create DataManager (build TChain)
-   ├─► Create SystematicManager
-   ├─► Create plugins
-   └─► Build RDataFrame
+1. **Analyzer construction**
+   ├─► Parse the main config and construct core providers, sinks, and logger
+   ├─► Build the input dataframe and load configured DataManager helpers
+   └─► Initialize enabled services
 
-2. Variable Definitions
-   ├─► Define base variables
-   ├─► Load plugin configurations
-   ├─► Apply aliases
-   └─► Register optional branches
+2. **Plugin registration**
+   ├─► Analysis code creates each manager it needs
+   ├─► Analyzer validates dependencies and orders plugin roles
+   └─► Inject context, load plugin config, and initialize plugins
 
-3. Event Selection
-   ├─► Apply trigger filters
-   ├─► Apply physics cuts
-   └─► Define regions/categories
+3. **Analysis graph construction**
+   ├─► Define derived columns and event filters
+   ├─► Apply manager operations and corrections
+   └─► Book histograms and other lazy actions
 
-4. Plugin Application
-   ├─► Apply BDT/ONNX models
-   ├─► Apply corrections
-   └─► Book histograms
+4. **Execution and output**
+   ├─► Call analyzer.run()
+   ├─► Execute plugin hooks and configured output actions
+   ├─► Write skim only when enableSkim is true; save booked histograms
+   └─► Finalize services, plugins, metadata, and provenance
 
-5. Execution Trigger
-    ├─► Call analyzer.run()  // single entry point
-   ├─► Access histogram pointers or
-   └─► Trigger other RDataFrame actions
-
-6. Lazy Evaluation
-   ├─► RDataFrame event loop executes
-   ├─► All Define/Filter/Apply operations happen
-   └─► Results are computed
-
-7. Output Writing
-   ├─► Write skim to saveFile
-   ├─► Write histograms to metaFile
-   └─► Call plugin finalize() methods
-
-8. Cleanup
-   └─► RAII destroys all managers
+5. **Cleanup**
+   └─► Analyzer releases owned managers and services
 ```
 
 ### RDataFrame Integration
@@ -601,8 +543,8 @@ currentNode_ = currentNode_.Define("var2", ...);  // Returns new RNode
 
 // Execution
 analyzer.run();
-// Triggers: currentNode_.Snapshot(...) 
-// RDataFrame event loop runs now
+// Runs the actions booked by the analysis, plugins, and services.
+// A skim Snapshot is booked only when enableSkim is true.
 ```
 
 ### Plugin Integration Points
@@ -615,8 +557,8 @@ Plugins integrate at specific points in the flow:
 4. **Post-Execution**: Write metadata, counters
 
 ```cpp
-// Pre-execution
-auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
+// Pre-execution when this analysis registered the optional ONNX manager
+auto onnxMgr = analyzer.findPlugin<OnnxManager>("onnxManager");
 if (onnxMgr) onnxMgr->applyAllModels();  // Adds Define operations to dataframe
 
 // Execution
@@ -648,24 +590,16 @@ dataManager_ = ManagerFactory::createDataManager(*config_);
 //   c. Create SystematicManager
 sysMgr_ = ManagerFactory::createSystematicManager();
 
-//   d. Create OutputSinks
-skimSink_ = std::make_unique<RootOutputSink>(config_->get("saveFile"));
-metaSink_ = std::make_unique<RootOutputSink>(config_->get("metaFile"));
+//   d. Create default-constructed OutputSinks
+skimSink_ = std::make_unique<RootOutputSink>();
+metaSink_ = std::make_unique<RootOutputSink>();
 
 //   e. Create Logger
 logger_ = std::make_unique<DefaultLogger>();
 
-//   f. Initialize plugins
-for (auto& [role, plugin] : plugins_) {
-    // Set context if plugin is context-aware
-    if (auto* ctxAware = dynamic_cast<IContextAware*>(plugin.get())) {
-        ManagerContext ctx{*config_, *dataManager_, *sysMgr_, *logger_, 
-                          *skimSink_, *metaSink_};
-        ctxAware->setContext(ctx);
-    }
-    // Initialize
-    plugin->initialize();
-}
+//   f. Validate dependencies and topologically order plugin roles
+//   g. Call setContext() and setupFromConfigFile() for each role in order
+//   h. Call initialize() for each role after setup is complete
 ```
 
 ### Usage Phase
@@ -675,9 +609,9 @@ for (auto& [role, plugin] : plugins_) {
 analyzer.Define("myvar", ...);
 analyzer.Filter("mycut", ...);
 
-// Get and use plugins
-auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
-if (onnxMgr) onnxMgr->applyModel("model");
+// Get and use a required plugin
+auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnxManager");
+onnxMgr->applyModel("model");
 ```
 
 ### Execution and Cleanup
@@ -691,13 +625,14 @@ analyzer.run();
 //   b. write skim (controlled by enableSkim config)
 //   c. save histograms (via NDHistogramManager)
 //   d. finalize non-provenance services
-//   e. finalize() and reportMetadata() all plugins
+//   e. finalize() all plugins, then reportMetadata() all plugins
 //   f. collect plugin/service provenance entries
 //   g. finalize provenance service last
 
 // 4. Destruction (RAII)
 // Analyzer destructor runs
-// All unique_ptrs are destroyed in reverse order
+// Owned core dependencies and services are released; shared plugin/service
+// objects remain alive while another shared_ptr still refers to them.
 ```
 
 ## Build System
@@ -718,7 +653,7 @@ RDFAnalyzerCore/
 │   │   ├── OnnxManager/
 │   │   │   └── CMakeLists.txt
 │   │   └── ... (other plugins)
-│   └── test/
+│   └── tests/
 │       └── CMakeLists.txt
 └── analyses/
     ├── CMakeLists.txt       # Analysis discovery
@@ -733,40 +668,37 @@ RDFAnalyzerCore/
    cmake -S . -B build
    ```
    - Finds ROOT, Boost
-   - Downloads ONNX Runtime
+   - Configures optional dependencies such as ONNX Runtime
    - Discovers analyses in `analyses/`
 
 2. **Core Library**:
    ```cmake
-   # In core/CMakeLists.txt
-   add_library(RDFCore SHARED
-       src/Analyzer.cc
-       src/ConfigurationManager.cc
-       src/DataManager.cc
-       # ...
-   )
-   target_link_libraries(RDFCore PUBLIC ROOT::ROOTDataFrame ...)
+   # core/src/CMakeLists.txt creates the central static library.
+   add_library(core STATIC ${CORE_SRC})
+   # core/CMakeLists.txt adds plugins and defines `coreAll`, an interface
+   # target that links the core and plugin archives together.
    ```
 
 3. **Plugins**:
    ```cmake
    # In core/plugins/OnnxManager/CMakeLists.txt
-   add_library(OnnxManager SHARED
-       OnnxManager.cc
-   )
+   add_library(OnnxManager OBJECT OnnxManager.cc)
    target_link_libraries(OnnxManager
-       PRIVATE RDFCore
-       PRIVATE onnxruntime::onnxruntime
+       PUBLIC ROOT::ROOTDataFrame ROOT::ROOTVecOps ROOT::Core
+              OnnxRuntime::OnnxRuntime
    )
+   # core/plugins/CMakeLists.txt adds plugin objects to corePlugins.
    ```
 
 4. **Analyses**:
    ```cmake
    # In analyses/CMakeLists.txt
-   file(GLOB ANALYSIS_DIRS LIST_DIRECTORIES true *)
-   foreach(dir ${ANALYSIS_DIRS})
-       if(EXISTS "${dir}/CMakeLists.txt")
-           add_subdirectory(${dir})
+   file(GLOB analyses_children RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "*")
+   list(SORT analyses_children)
+   foreach(child ${analyses_children})
+       if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${child}" AND
+          EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${child}/CMakeLists.txt")
+           add_subdirectory(${child})
        endif()
    endforeach()
    ```
@@ -804,44 +736,38 @@ cmake -S . -B build \
 
 # Core CMakeLists.txt generates dictionary
 if(RDF_CUSTOM_DICT_HEADERS AND RDF_CUSTOM_DICT_LINKDEF)
-    root_generate_dictionary(CustomDict
+    ROOT_GENERATE_DICTIONARY(G__${RDF_CUSTOM_DICT_TARGET}
         ${RDF_CUSTOM_DICT_HEADERS}
         LINKDEF ${RDF_CUSTOM_DICT_LINKDEF}
-        OPTIONS -I${RDF_CUSTOM_DICT_INCLUDE_DIRS}
     )
     add_library(${RDF_CUSTOM_DICT_TARGET} SHARED
+        G__${RDF_CUSTOM_DICT_TARGET}.cxx
         ${RDF_CUSTOM_DICT_SOURCES}
-        CustomDict.cxx
     )
-    target_link_libraries(RDFCore PRIVATE ${RDF_CUSTOM_DICT_TARGET})
+    target_include_directories(${RDF_CUSTOM_DICT_TARGET} PUBLIC
+        ${RDF_CUSTOM_DICT_INCLUDE_DIRS})
+    target_link_libraries(${RDF_CUSTOM_DICT_TARGET} PUBLIC
+        ROOT::Core ROOT::RIO ROOT::Tree)
+    target_link_libraries(core PUBLIC ${RDF_CUSTOM_DICT_TARGET})
 endif()
 ```
 
 ### Counter Service
 
-Automatic event counting and weight summation:
+`CounterService` is an optional `IAnalysisService`, enabled with
+`enableCounters=true`. Its `initialize(ManagerContext&)` hook books the
+pre-filter event count and any configured weight sums. `onPreFilter()` captures
+the dataframe before the first filter; `finalize(RNode&)` consumes the booked
+results and writes counter metadata. An integer-category histogram can be
+booked with `Analyzer::bookCounterIntHistogram()` after defining that column
+and before the event loop runs.
 
 ```cpp
 class CounterService : public IAnalysisService {
-    void run(IDataFrameProvider& df, IOutputSink& sink) override {
-        // Count events
-        auto count = df.getDataFrame().Count();
-        
-        // Sum weights
-        std::shared_ptr<double> sumW;
-        if (!weightBranch_.empty()) {
-            sumW = df.getDataFrame().Sum(weightBranch_);
-        }
-        
-        // Trigger computation
-        std::cout << "Events: " << *count << std::endl;
-        if (sumW) {
-            std::cout << "Sum weights: " << *sumW << std::endl;
-        }
-        
-        OutputSpec spec{"event_counters.root", "Counters", {}};
-        sink.writeDataFrame(df.getDataFrame(), spec);
-    }
+public:
+    void initialize(ManagerContext& ctx) override;
+    void onPreFilter(ROOT::RDF::RNode& df) override;
+    void finalize(ROOT::RDF::RNode& df) override;
 };
 ```
 
@@ -867,22 +793,22 @@ Thread-safety considerations:
 
 ### Systematic Variations
 
-Framework propagates systematics through Define operations:
+`Analyzer::Define(name, callable, columns)` passes its
+`ISystematicManager` to the dataframe provider. When an input column has a
+registered variation mapping, the provider defines the nominal output and
+matching `Up`/`Down` output columns by calling the same callable with the
+mapped input columns. The callable does not receive a systematic-name
+argument. Register explicit input-column mappings when they do not follow the
+default `baseVariable_systematicNameUp/Down` convention:
 
 ```cpp
-// SystematicManager generates systematic variations
-auto variations = sysMgr->getSystematicNames();  // ["nominal", "jes_up", "jes_down"]
+auto& systematics = analyzer.getSystematicManager();
+systematics.registerVariationColumns(
+    "jet_pt", "jes", "jet_pt_jesUp", "jet_pt_jesDown");
 
-// DataManager::Define with SystematicManager
-for (const auto& variation : variations) {
-    std::string varName = name + "_" + variation;
-    currentNode_ = currentNode_.Define(varName,
-        [func, variation](auto&&... args) {
-            return func(args..., variation);
-        },
-        columns
-    );
-}
+analyzer.Define("jet_pt_corrected", correctJetPt, {"jet_pt"});
+// The provider also defines jet_pt_corrected_jesUp and
+// jet_pt_corrected_jesDown using the mapped input columns.
 ```
 
 ## Design Patterns Used
@@ -903,7 +829,10 @@ Plugins are interchangeable strategies for specific tasks.
 Managers receive dependencies via **ManagerContext**.
 
 ### 6. RAII
-All resources managed via `unique_ptr`, automatic cleanup.
+Core providers, sinks, logger, and ordinary analysis services use
+`std::unique_ptr`; registered plugins and the provenance service use
+`std::shared_ptr`. This keeps ownership explicit while allowing analysis code
+to retain a plugin handle.
 
 ### 7. Interface Segregation
 Multiple small interfaces (`IPluggableManager`, `IContextAware`) instead of one large interface.
@@ -919,7 +848,7 @@ RDataFrame's lazy evaluation means:
 
 ### Memory Management
 
-- Use `unique_ptr` for ownership
+- Use smart pointers according to the API's ownership contract
 - Pass interfaces by reference
 - Avoid unnecessary copies
 - Let RDataFrame manage event data
@@ -940,7 +869,7 @@ Test individual managers in isolation:
 TEST(OnnxManagerTest, ModelLoading) {
     ConfigurationManager config("test_config.txt");
     OnnxManager mgr(config);
-    EXPECT_TRUE(mgr.hasModel("test_model"));
+    EXPECT_NO_THROW(mgr.getModel("test_model"));
 }
 ```
 

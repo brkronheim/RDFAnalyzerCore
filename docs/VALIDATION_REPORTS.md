@@ -17,15 +17,15 @@ the Python modules `core/python/validation_report.py` and
 2. [ValidationReport Overview](#2-validationreport-overview)
 3. [Report Entry Types](#3-report-entry-types)
 4. [ValidationReport Class](#4-validationreport-class)
-5. [generate_report_from_manifest()](#5-generate_report_from_manifest)
-6. [CLI Usage — validation_report.py](#6-cli-usage--validation_reportpy)
+5. [Generate report from manifest](#5-generate-report-from-manifest)
+6. [Validation report CLI usage](#6-validation-report-cli-usage)
 
 **Part B: ReproducibilityReport**
 
 7. [ReproducibilityReport Overview](#7-reproducibilityreport-overview)
 8. [Provenance Sections](#8-provenance-sections)
 9. [ReproducibilityReport Class](#9-reproducibilityreport-class)
-10. [CLI Usage — reproducibility_report.py](#10-cli-usage--reproducibility_reportpy)
+10. [Reproducibility report CLI usage](#10-reproducibility-report-cli-usage)
 11. [Integration with ProvenanceService](#11-integration-with-provenanceservice)
 12. [Usage Examples](#12-usage-examples)
 
@@ -455,7 +455,7 @@ Returns `True` when the report contains any warning-level finding:
 
 ---
 
-## 5. `generate_report_from_manifest()`
+## 5. Generate report from manifest
 
 ```python
 def generate_report_from_manifest(
@@ -502,7 +502,7 @@ checks whether `"region"` is in `known_regions` and appends the result.
 
 ---
 
-## 6. CLI Usage — `validation_report.py`
+## 6. Validation report CLI usage
 
 The module provides a CLI entry point that generates a validation report from an
 `OutputManifest` YAML file.
@@ -746,7 +746,7 @@ with other `build_report_from_*` helpers in the framework.
 
 ---
 
-## 10. CLI Usage — `reproducibility_report.py`
+## 10. Reproducibility report CLI usage
 
 ```
 usage: reproducibility_report.py [-h] [--load-yaml FILE] [--load-json FILE]

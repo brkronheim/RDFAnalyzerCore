@@ -809,7 +809,7 @@ PYBIND11_MODULE(rdfanalyzer, m) {
         >>> analyzer = rdfanalyzer.Analyzer("config.txt")
         >>> analyzer.DefineJIT("pt_gev", "pt / 1000.0", ["pt"])
         >>> analyzer.FilterJIT("high_pt", "pt_gev > 25.0", ["pt_gev"])
-        >>> analyzer.run()
+        >>> analyzer.save()
         
         Using numba-compiled functions:
         

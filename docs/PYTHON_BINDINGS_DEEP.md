@@ -320,8 +320,8 @@ analyzer.DefineFromPointer(
     ["jet_eta"],
 )
 
-# Save
-analyzer.run()
+# Save through the Python wrapper (calls C++ Analyzer::run())
+analyzer.save()
 ```
 
 This demonstrates: numba integration and systematic setup with the Python binding.

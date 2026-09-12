@@ -6,6 +6,10 @@ pyyaml>=5.4
 # LAW / Luigi integration (required for law/ workflow tasks)
 law>=0.1.0
 luigi>=3.0.0
+matplotlib>=3.5
+uproot>=5.0.0
+fsspec-xrootd>=0.2.0
+correctionlib>=2.0.0
 
 # For DASK backend (optional – required only for --workflow dask)
 # Install with: pip install dask[distributed]

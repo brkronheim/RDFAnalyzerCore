@@ -37,14 +37,16 @@ file-discovery backends:
 
 For HTCondor skim production, the primary sequence is:
 
-1. **PrepareSkimJobs** – discovers input files and creates per-job configuration
-   directories (one branch per sample, runs in parallel).
+1. **PrepareSkimJobs** – plans the run and creates per-dataset/per-job
+   configuration directories in one task. When `--file-source` is set, it
+   requires the corresponding file-discovery task.
 2. **BuildSkimSubmission** – assembles `condor_submit.sub`, run scripts, and
    stages the executable, `aux/`, x509 proxy, and local shared libraries into
    `shared_inputs/`.
 3. **SubmitSkimJobs** – runs `condor_submit` and records the cluster ID.
 4. **MonitorSkimJobs** – blocking polling loop that verifies EOS outputs,
-   resubmits held/failed jobs, and writes `all_outputs_verified.txt`.
+  resubmits held/failed jobs, collects per-job generator-weight counters into
+  `normalization.json`, and writes `all_outputs_verified.txt`.
 
 Law tracks task outputs so you can run the final task directly and earlier
 steps execute automatically if not yet complete.
@@ -70,6 +72,11 @@ law run MonitorSkimJobs --workers 4 \
   --x509 x509 \
   --exe build/analyses/myAnalysis/myanalysis
 ```
+
+Because this command uses `--file-source rucio`, its submit config must set
+`sampleConfig` to the discovery manifest. It can point to the same YAML file as
+`--dataset-manifest` when that file contains the fields required by both task
+interfaces. For `xrdfs`, file discovery reads the dataset manifest directly.
 
 ---
 
@@ -123,11 +130,12 @@ law index
 
 ### Sample config format
 
-The sample configuration describes the datasets to process. In the primary
-workflow, pass a typed dataset manifest via `--dataset-manifest` and keep
-`sampleConfig=` in the submit config only for compatibility paths.
-
-Two formats are accepted for dataset manifests:
+The primary `SkimTask` workflow reads its typed dataset list from YAML passed
+with `--dataset-manifest`. When `--file-source rucio` or `opendata` is
+selected, the automatically chained discovery task also reads `sampleConfig`
+from the submit config. It can point to the same YAML manifest when its schema
+contains the fields required by the discovery task. The `xrdfs` source uses
+the dataset manifest directly and does not need `sampleConfig`.
 
 #### Preferred format – YAML dataset manifest
 
@@ -136,9 +144,9 @@ supports multi-year analyses, and is validated by the framework at submission
 time.  See `core/python/example_dataset_manifest.yaml` for a fully annotated
 example.
 
-> **Preferred:** pass a YAML manifest via `sampleConfig=` in the submit config.
-> Legacy `.txt` dataset manifests are deprecated compatibility paths only and
-> should not be used for new workflows.
+> Use YAML for `--dataset-manifest` and, when Rucio/Open Data discovery is
+> selected, for `sampleConfig` as well. Legacy `.txt` sample configs are
+> deprecated compatibility inputs and should not be used for new workflows.
 
 ```yaml
 # Luminosity in fb^-1 (used as default; lumi_by_year takes precedence when set)
@@ -173,7 +181,9 @@ datasets:
     stitch_id: 0
 ```
 
-Pass the manifest as `sampleConfig` in the submit config file:
+The automatically chained discovery task uses `sampleConfig` from the submit
+config. The primary `SkimTask` still receives its typed dataset manifest via
+`--dataset-manifest`:
 
 ```
 sampleConfig=analyses/myAnalysis/cfg/samples.yaml
@@ -258,16 +268,17 @@ law run BuildSkimSubmission --workers 4 \
 
 ### Sample config format
 
-The same two manifest formats are supported here.
+The primary `SkimTask` input is a typed YAML manifest. The deprecated text
+format is supported only on the legacy discovery path.
 
 #### Preferred format – YAML dataset manifest
 
 For Open Data workflows, each entry's `das` field stores a comma-separated
 list of CERN Open Data **record IDs** (instead of DAS paths).
 
-> **Preferred:** pass a YAML manifest via `sampleConfig=` in the submit config.
-> Legacy `.txt` dataset manifests are deprecated compatibility paths only and
-> should not be used for new Open Data workflows.
+> Use YAML for `--dataset-manifest` and, when Open Data discovery is selected,
+> for `sampleConfig` as well. Legacy `.txt` sample configs are deprecated
+> compatibility inputs and should not be used for new workflows.
 
 ```yaml
 lumi: 11.58   # fb^-1
@@ -344,9 +355,20 @@ law run BuildSkimSubmission --workers 4 \
 
 ---
 
+## Legacy Compatibility Notes
+
+The primary skim workflow receives its typed dataset list with
+`--dataset-manifest`. When `--file-source rucio` or `opendata` is selected,
+LAW chains a discovery task that reads `sampleConfig` from the submit config.
+Point both parameters at the same YAML file when it has fields required by
+both task interfaces. The `sampleConfig` key is also accepted by standalone
+discovery tasks. Legacy key/value text is deprecated and supported only by
+compatibility discovery paths.
+
 ## Common Parameters
 
-These parameters apply to **all** law submission tasks:
+These options are shared by the primary skim-submission tasks; discovery and
+post-processing tasks can have additional task-specific parameters:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -458,10 +480,13 @@ onnxConfig=config/onnx_models.txt
 saveDirectory=/eos/user/u/username/output
 saveTree=Events
 treeList=Events
-sampleConfig=config/samples.yaml
 enableCounters=true
-enableSkim=false
+enableSkim=true
 ```
+
+Set `enableSkim=true` for skim submissions. The framework writes the event
+tree only when this option is enabled; LAW does not override it. Use
+`enableSkim=false` for histogram-only runs that should not create a skim.
 
 ---
 
@@ -472,8 +497,17 @@ The `Monitor*Jobs` tasks run a blocking poll loop:
 1. Every `--poll-interval` seconds, query `condor_q` and `condor_history`.
 2. **Held jobs**: remove from queue and resubmit automatically.
 3. **Failed jobs** (non-zero exit code): resubmit if `--max-retries` not reached.
-4. **Completed jobs**: verify the expected EOS output exists via `xrdfs stat`.
-5. Write `skimRun_{name}/all_outputs_verified.txt` when all outputs confirmed.
+4. **Overlong jobs**: remove and resubmit a running job when its
+  `RemoteWallClockTime` exceeds 150% of its Condor `MaxRuntime`.
+5. **Multi-file retries**: split a retry with more than one input file into two
+  balanced file groups, with separate output and metadata files for each part.
+6. **Completed jobs**: verify the expected EOS output exists via `xrdfs stat`.
+7. Write `skimRun_{name}/all_outputs_verified.txt` when all outputs confirmed.
+
+For MC, generator-weight sums are never scanned over the full dataset during
+preparation. Each partition writes its own counter to its metadata ROOT file;
+only after every job has finished does `MonitorSkimJobs` sum those counters and
+write the process normalization to `skimRun_{name}/normalization.json`.
 
 **State persistence**: monitoring state is saved to
 `skimRun_{name}/monitor_state.json` after each poll cycle.  If you interrupt
@@ -505,10 +539,12 @@ analysis.
 
 ### Output staging
 
-Output staging is **always active** in the law workflows.  After each job
-completes, the output ROOT files are xrdcp'd to their final EOS destination.
-The local basenames are stored in `saveFile` / `metaFile` and the EOS paths
-in `__orig_saveFile` / `__orig_metaFile`.
+The delegated HTCondor workflow enables output staging for each job: ROOT
+outputs are copied to their final EOS destinations after the job completes.
+The local basenames are stored in `saveFile` / `metaFile`, with final
+destinations in `__orig_saveFile` / `__orig_metaFile`. Local and Dask execution
+do not use this HTCondor staging mechanism; their output paths follow the
+configuration and executor setup.
 
 ### ROOT and container setup
 

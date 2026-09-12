@@ -54,6 +54,10 @@ add_executable(testCounterService testCounterService.cc)
 target_link_libraries(testCounterService core gtest gtest_main)
 add_test(NAME CounterServiceTest COMMAND testCounterService)
 
+add_executable(testCartesianBinning testCartesianBinning.cc)
+target_link_libraries(testCartesianBinning core gtest gtest_main)
+add_test(NAME CartesianBinningTest COMMAND testCartesianBinning)
+
 add_executable(testCounterService_Dedup testCounterService_Dedup.cc)
 target_link_libraries(testCounterService_Dedup coreAll gtest gtest_main)
 add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)

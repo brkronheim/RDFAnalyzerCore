@@ -524,6 +524,58 @@ TEST_F(TaggerWorkingPointManagerTest, FixedWPWeightSingleWorkingPointPassAndFail
   EXPECT_FLOAT_EQ(result[1], (1.0f - 1.10f * 0.60f) / (1.0f - 0.60f));
 }
 
+TEST_F(TaggerWorkingPointManagerTest,
+       FixedWPWeightMultipliesOnlyObjectsInInputCollection) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumn("Jet_btag");
+  mgr->addWorkingPoint("L", 0.30f);
+  mgr->setInputObjectCollection("goodJets");
+
+  dm->Define(
+      "goodJets",
+      [](ULong64_t) -> PhysicsObjectCollection {
+        const ROOT::VecOps::RVec<Float_t> pt{40.f, 50.f, 60.f};
+        const ROOT::VecOps::RVec<Float_t> eta{0.f, 0.f, 0.f};
+        const ROOT::VecOps::RVec<Float_t> phi{0.f, 0.f, 0.f};
+        const ROOT::VecOps::RVec<Float_t> mass{0.f, 0.f, 0.f};
+        const ROOT::VecOps::RVec<bool> good{true, false, true};
+        return PhysicsObjectCollection(pt, eta, phi, mass, good);
+      },
+      {"rdfentry_"}, *systematicManager);
+  dm->Define(
+      "Jet_btag",
+      [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> {
+        return {0.40f, 0.90f, 0.10f};
+      },
+      {"rdfentry_"}, *systematicManager);
+  dm->Define(
+      "sf_L",
+      [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> {
+        return {1.10f, 1.10f, 1.10f};
+      },
+      {"rdfentry_"}, *systematicManager);
+  dm->Define(
+      "eff_L",
+      [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> {
+        return {0.60f, 0.60f, 0.60f};
+      },
+      {"rdfentry_"}, *systematicManager);
+
+  mgr->defineFixedWorkingPointWeight({"sf_L"}, {"eff_L"},
+                                     "fixed_wp_weight");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<Float_t>("fixed_wp_weight").GetValue();
+  ASSERT_EQ(result.size(), 1u);
+  const float taggedJetFactor = 1.10f;
+  const float untaggedJetFactor =
+      (1.0f - 1.10f * 0.60f) / (1.0f - 0.60f);
+  EXPECT_FLOAT_EQ(result[0], taggedJetFactor * untaggedJetFactor);
+}
+
 TEST_F(TaggerWorkingPointManagerTest, FixedWPWeightIntermediateCategoryUsesBTVFormula) {
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);

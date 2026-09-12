@@ -2,9 +2,9 @@
 
 > **See Also**: 
 > - [ONNX Implementation](ONNX_IMPLEMENTATION.md) - Alternative ML backend
-> - [Using SOFIE in Analyses](ANALYSIS_GUIDE.md#using-sofie-models)
+> - [Using SOFIE in Analyses](ANALYSIS_GUIDE.md#using-sofie-models-maximum-performance)
 > - [SOFIE Configuration](CONFIG_REFERENCE.md#sofie-manager-configuration)
-> - [SOFIE API Reference](API_REFERENCE.md#sofieManager)
+> - [SOFIE API Reference](API_REFERENCE.md#sofiemanager)
 
 ## Overview
 

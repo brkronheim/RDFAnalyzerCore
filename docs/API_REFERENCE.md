@@ -90,14 +90,13 @@ analyzer.Define("pt_gev",
 );
 
 // With systematics
-analyzer.Define("corrected_pt",
-    [](float pt, const std::string& sys) {
-        if (sys == "up") return pt * 1.1;
-        if (sys == "down") return pt * 0.9;
-        return pt;
-    },
-    {"pt"}
-);
+// Register existing shifted inputs before defining their derived output.
+auto& systematics = analyzer.getSystematicManager();
+systematics.registerVariationColumns("pt", "jes", "pt_jesUp", "pt_jesDown");
+analyzer.Define("pt_gev_systematic", [](float pt) { return pt / 1000.0; }, {"pt"});
+// The provider also defines pt_gev_systematic_jesUp and
+// pt_gev_systematic_jesDown from the mapped
+// input columns; the callable receives only the listed input values.
 ```
 
 #### DefinePerSample
@@ -166,16 +165,19 @@ Retrieve a plugin by role name with type checking.
 
 **Template Parameter**: Interface type to cast to
 
-**Returns**: Shared pointer to plugin, or `nullptr` if not found
+**Returns**: Shared pointer to plugin
+
+**Throws**: `std::out_of_range` if the role is not registered, or `std::bad_cast` if the registered plugin cannot be converted to `T`. Use `findPlugin<T>()` for an optional lookup; it returns `nullptr` when the role is absent or has another type.
 
 **Example**:
 ```cpp
-auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
-if (onnxMgr) {
-    onnxMgr->applyAllModels();
-}
+auto onnxMgr = OnnxManager::create(analyzer);  // Registers as "onnxManager"
+onnxMgr->applyAllModels();
 
-auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogramManager");
+auto optionalOnnxMgr = analyzer.findPlugin<OnnxManager>("onnxManager");
+if (optionalOnnxMgr) optionalOnnxMgr->applyAllModels();
+
+auto histMgr = NDHistogramManager::create(analyzer);
 ```
 
 ### Manager Access
@@ -198,20 +200,6 @@ auto df = analyzer.getDataFrameProvider().getDataFrame();
 
 ### Execution
 
-#### save
-
-```cpp
-Analyzer* save();
-```
-
-Trigger the event loop and save outputs.
-
-This method:
-1. Executes plugin pre-run hooks
-2. Writes the skim output
-3. Finalizes services/plugins and reports metadata
-4. Collects plugin/service provenance contributions
-
 #### run
 
 ```cpp
@@ -223,8 +211,10 @@ Unified run entry point with optional skim writing.
 This method:
 1. Executes plugin pre-run hooks
 2. Writes skim only if `enableSkim=1|true|True`
-3. Saves ND histograms when `histogramManager` is registered
-4. Finalizes services/plugins, reports metadata, and writes provenance
+3. Saves ND histograms when the `histogramManager` role is registered
+4. Finalizes services, then plugins, reports plugin metadata, and writes provenance
+
+The skim snapshot is written only when `enableSkim` is set to `1`, `true`, or `True`. `saveFile` is the skim path; the metadata/histogram output uses `metaFile` when configured and otherwise derives a sibling `<stem>_meta.root` path from `saveFile`.
 
 **Example**:
 ```cpp
@@ -284,23 +274,17 @@ auto pairs = config->parsePairBasedConfig("constants.txt");
 ```
 {% endraw %}
 
-```cpp
-virtual std::vector<std::map<std::string, std::string>> 
-    parseMultiKeyConfig(const std::string& configFile,
-                        const std::vector<std::string>& requiredEntryKeys) const = 0;
-```
-
-Parse a config file with multi-key lines (plugin configs).
+Parse a config file with multi-key lines (plugin configs). It returns a vector of unordered maps, one per parsed entry.
 
 **Example**:
 {% raw %}
 ```cpp
-// For file with: "file=model.onnx name=score inputVariables=pt,eta"
+// For file with: "file=model.onnx name=score inputVariables=pt,eta runVar=has_jets"
 auto configs = config->parseMultiKeyConfig(
     config->get("onnxConfig"),
-    {"file", "name", "inputVariables"});
+    {"file", "name", "inputVariables", "runVar"});
 // Returns: [{{"file": "model.onnx", "name": "score", 
-//             "inputVariables": "pt,eta"}}]
+//             "inputVariables": "pt,eta", "runVar": "has_jets"}}]
 ```
 {% endraw %}
 
@@ -343,7 +327,7 @@ std::cout << "Events: " << *count << std::endl;
 
 ```cpp
 template<typename F>
-void Define(const std::string& name,
+void Define(std::string name,
             F function,
             const std::vector<std::string>& columns,
             ISystematicManager& sysMgr);
@@ -353,15 +337,15 @@ Define a new column with systematic support.
 
 ```cpp
 template<typename F>
-void DefinePerSample(const std::string& name, F function);
+void DefinePerSample(std::string name, F function);
 ```
 
 Define a per-sample column.
 
 ```cpp
-void DefineVector(const std::string& name,
+void DefineVector(std::string name,
                   const std::vector<std::string>& columns,
-                  const std::string& type,
+                  std::string type,
                   ISystematicManager& sysMgr);
 ```
 
@@ -383,10 +367,6 @@ dataManager->DefineVector("lepton_pts",
 ```cpp
 template<typename F>
 void Filter(F function, const std::vector<std::string>& columns);
-
-template<typename F>
-void Filter(const std::string& name, F function, 
-            const std::vector<std::string>& columns);
 ```
 
 Apply event filters.
@@ -465,7 +445,7 @@ struct ManagerContext {
 
 class IContextAware {
 public:
-    virtual void setContext(const ManagerContext& ctx) = 0;
+    virtual void setContext(ManagerContext& ctx) = 0;
 };
 ```
 
@@ -473,61 +453,50 @@ public:
 ```cpp
 class MyPlugin : public IPluggableManager {
 public:
-    void setContext(const ManagerContext& ctx) override {
+    void setContext(ManagerContext& ctx) override {
         context_ = &ctx;
     }
     
     void initialize() override {
-        context_->logger.info("MyPlugin initialized");
+        context_->logger.log(ILogger::Level::Info, "MyPlugin initialized");
     }
     
 private:
-    ManagerContext* context_;
+    ManagerContext* context_ = nullptr;
 };
 ```
 
 ### NamedObjectManager<T>
 
-**Header**: `core/interface/NamedObjectManager.h`
+**Header**: `core/plugins/NamedObjectManager/NamedObjectManager.h`
 
 Base class for plugins managing collections of named objects.
 
 ```cpp
 template<typename T>
 class NamedObjectManager : public IPluggableManager {
-protected:
-    std::unordered_map<std::string, T> objects_;
-    ManagerContext* context_;
-    
 public:
-    virtual void loadObjects(
-        const std::vector<std::map<std::string, std::string>>& configs) = 0;
-    
-    T getObject(const std::string& key) const;
-    bool hasObject(const std::string& key) const;
-    std::vector<std::string> getAllKeys() const;
+    const T& getObject(const std::string& key) const;
+    const std::vector<std::string>& getFeatures(const std::string& key) const;
+    std::string type() const override;
+    void setContext(ManagerContext& ctx) override;
+    void setupFromConfigFile() override;
 };
 ```
 
 #### Methods
 
 ```cpp
-T getObject(const std::string& key) const;
+const T& getObject(const std::string& key) const;
 ```
 
-Retrieve an object by name. Throws if not found.
+Retrieve an object by name. Throws `std::runtime_error` if the key is not found.
 
 ```cpp
-bool hasObject(const std::string& key) const;
+const std::vector<std::string>& getFeatures(const std::string& key) const;
 ```
 
-Check if an object exists.
-
-```cpp
-std::vector<std::string> getAllKeys() const;
-```
-
-Get all object names.
+Retrieve the feature names associated with an object. Throws `std::runtime_error` if the key is not found.
 
 ## Manager Implementations
 
@@ -536,6 +505,10 @@ Get all object names.
 **Header**: `core/plugins/BDTManager/BDTManager.h`
 
 Class for BDT model management.
+
+`BDTManager::create(analyzer)` immediately parses `bdtConfig`; set that key in
+the main config before creating the manager. Each model row requires `file`,
+`name`, `inputVariables`, and `runVar`.
 
 ```cpp
 class BDTManager : public NamedObjectManager<std::shared_ptr<fastforest::FastForest>> {
@@ -567,7 +540,7 @@ Apply all configured BDT models.
 
 **Example**:
 ```cpp
-auto bdtMgr = analyzer.getPlugin<BDTManager>("bdt");
+auto bdtMgr = BDTManager::create(analyzer);  // Registers as "bdtManager"
 bdtMgr->applyBDT("signal_bdt");   // Creates "signal_bdt" column
 bdtMgr->applyAllBDTs();             // Apply all configured models
 ```
@@ -577,6 +550,10 @@ bdtMgr->applyAllBDTs();             // Apply all configured models
 **Header**: `core/plugins/OnnxManager/OnnxManager.h`
 
 Class for ONNX model management.
+
+`OnnxManager::create(analyzer)` immediately parses `onnxConfig`; set that key
+in the main config before creating the manager. Each model row requires
+`file`, `name`, `inputVariables`, and `runVar`.
 
 ```cpp
 class OnnxManager : public NamedObjectManager<std::shared_ptr<Ort::Session>> {
@@ -595,7 +572,7 @@ public:
 
 **Example**:
 ```cpp
-auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
+auto onnxMgr = OnnxManager::create(analyzer);  // Registers as "onnxManager"
 
 // Apply single-output model
 onnxMgr->applyModel("classifier");  // Creates "classifier" column
@@ -638,7 +615,7 @@ std::vector<float> myInference(const std::vector<float>& input) {
     return session.infer(input.data());
 }
 
-auto sofieMgr = analyzer.getPlugin<SofieManager>("sofie");
+auto sofieMgr = SofieManager::create(analyzer);  // Registers as "sofieManager"
 auto func = std::make_shared<SofieInferenceFunction>(myInference);
 sofieMgr->registerModel("my_model", func, {"pt", "eta"}, "run_model");
 sofieMgr->applyModel("my_model");
@@ -809,8 +786,11 @@ Systematic behavior:
     `jes_total`, `ees`, `stat`, or `pes`
 - explicit nominal-to-directional mappings are recorded through
     `registerVariationColumns(...)`
-- downstream `Define(...)` calls that consume the nominal collection name can
-    automatically materialize derived `...Up` and `...Down` outputs
+- generic `Define(...)` systematic expansion only sees mappings registered
+  before that `Define(...)` call. Corrected-collection managers create their
+  outputs in plugin `execute()` hooks during `Analyzer::run()`, after the
+  analysis body has made its `Define(...)` calls, so do not assume those later
+  outputs will propagate through earlier definitions.
 
 Typical config keys:
 
@@ -906,55 +886,45 @@ Use `applyScaleAndResolution(...)` for the newer Run 3 split-schema payloads tha
 
 **Header**: `core/plugins/KinematicFitManager/KinematicFitManager.h`
 
-Interface for kinematic fitting of reconstructed decay topologies.
+Concrete manager for kinematic fitting of reconstructed decay topologies.
 
 Performs kinematic fitting using mass, momentum, and recoil constraints to improve four-momentum resolution of reconstructed particles. Supports flexible constraint configuration, collection-indexed particle selection, and optional resonance width (soft mass constraints).
 
 #### Configuration
 
-Create a kinematic fit configuration file with particle definitions and constraints:
+Set `kinematicFitConfig` in the main config. Each line in the referenced file
+defines one fit using required `name`, `particles`, and `constraints` fields.
+Particle specs use `label:ptCol:etaCol:phiCol:massCol:type[:collectionIndex]`;
+constraint indices are zero-based. Mass values and widths are in GeV.
 
 ```
-# kfit.txt
-name=VH_fit outputPrefix=kfit_
-particles=lep1,lep2,jet1,jet2,MET
-lep1.type=collection lep1.collection=Muon lep1.index=0
-lep2.type=collection lep2.collection=Muon lep2.index=1
-jet1.type=collection jet1.collection=Jet jet1.index=0
-jet2.type=collection jet2.collection=Jet jet2.index=1
-MET.type=recoil MET.collection=MET
+# main config
+kinematicFitConfig=cfg/kinematic_fits.txt
 
-# Mass constraints
-constraint1.type=mass constraint1.particles=lep1,lep2
-constraint1.targetMass=91188.0 constraint1.massSigma=2495.0
-constraint2.type=mass constraint2.particles=jet1,jet2
-constraint2.targetMass=125090.0 constraint2.massSigma=3000.0
-
-# Run control
-runVar=do_kfit
+# cfg/kinematic_fits.txt: a two-lepton Z-mass fit
+name=dileptonFit particles=mu1:mu1_pt:mu1_eta:mu1_phi:mu1_mass:lepton,mu2:mu2_pt:mu2_eta:mu2_phi:mu2_mass:lepton constraints=0+1:91.2:2.495
 ```
 
 **Configuration Parameters**:
 - `name`: Fit name (identifier)
-- `outputPrefix`: Prefix for output columns
-- `particles`: Comma-separated list of particle names
-- `{particle}.type`: Either `collection` (from branch) or `recoil` (MET)
-- `{particle}.collection`: Branch name to read from
-- `{particle}.index`: Collection index (for collection-type particles)
-- `constraint{N}.type`: Constraint type (`mass`, `pT`, or `recoil`)
-- `constraint{N}.particles`: Particles involved in constraint
-- `constraint{N}.targetMass`: Target mass value (MeV)
-- `constraint{N}.massSigma`: Resonance width for soft mass constraints (optional)
-- `runVar`: Optional column name to control per-event fit execution
+- `particles`: Comma-separated particle specs in the format shown above
+- `constraints`: Comma-separated mass constraints (`0+1:mass[:sigma]`,
+  `0+1+2:mass[:sigma]`) or pT constraints (`pt:idx:targetPt`)
+- `runVar`: Optional boolean column that enables the fit per event
+- `maxIterations`, `convergenceTolerance`, and resolution fields: optional
+  fit controls with defaults defined by `KinFitConfig`
+- `useGPU`: Optional GPU execution flag; requires a CUDA-enabled build
 
 #### Methods
 
 ```cpp
-class KinematicFitManager : public IPluggableManager {
+class KinematicFitManager : public NamedObjectManager<KinFitConfig> {
 public:
-    virtual void applyAllFits() = 0;
-    virtual void applyFit(const std::string& fitName) = 0;
-    virtual std::vector<std::string> getAllFitNames() const = 0;
+    static std::shared_ptr<KinematicFitManager> create(
+        Analyzer& an, const std::string& role = "kinematicFitManager");
+    void applyAllFits();
+    void applyFit(const std::string& fitName);
+    std::vector<std::string> getAllFitNames() const;
 };
 ```
 
@@ -963,35 +933,26 @@ public:
 ```cpp
 #include <KinematicFitManager.h>
 
-// Add plugin
-auto kfitMgr = std::make_unique<KinematicFitManager>(
-    analyzer.getConfigurationProvider()
-);
-analyzer.addPlugin("kinematicFit", std::move(kfitMgr));
+// The factory registers the manager and loads its configured fit definitions.
+auto kfitMgr = KinematicFitManager::create(analyzer);
 
 // Apply fits (defines output columns)
-analyzer.getPlugin<KinematicFitManager>("kinematicFit")->applyAllFits();
+kfitMgr->applyAllFits();
 
-// Fitted four-momentum columns are now available:
-// kfit_lep1_pt, kfit_lep1_eta, kfit_lep1_phi, kfit_lep1_mass, etc.
-// Also: kfit_chi2, kfit_status
+// For this config, outputs include:
+// dileptonFit_chi2, dileptonFit_converged,
+// dileptonFit_mu1_pt_fitted, dileptonFit_mu1_eta_fitted,
+// dileptonFit_mu1_phi_fitted, and corresponding mu2 columns.
 ```
 
-#### Output Columns
-
-For each fit with `outputPrefix={prefix}`, the following columns are defined:
-- `{prefix}{particle}_pt` - Fitted transverse momentum
-- `{prefix}{particle}_eta` - Fitted pseudorapidity
-- `{prefix}{particle}_phi` - Fitted azimuthal angle
-- `{prefix}{particle}_mass` - Fitted mass
-- `{prefix}chi2` - Fit χ² value
-- `{prefix}status` - Fit status (0 = success)
+For a fit named `{fit}`, the manager defines `{fit}_chi2`,
+`{fit}_converged`, and `{fit}_{particle}_{pt,eta,phi}_fitted` columns.
 
 ### GoldenJsonManager
 
 **Header**: `core/plugins/cms/GoldenJsonManager/GoldenJsonManager.h`
 
-Interface for CMS golden JSON certification filtering.
+Concrete manager for CMS golden JSON certification filtering.
 
 Filters data events based on run/luminosity-section validity from CMS golden JSON certification files. Automatically skips MC (when `type != "data"`). Supports multiple JSON files for different eras with automatic merging.
 
@@ -1016,12 +977,8 @@ goldenJsonConfig=cfg/golden_json_files.txt
 #### Methods
 
 ```cpp
-class GoldenJsonManager : public IPluggableManager {
-public:
-    virtual void applyGoldenJson() = 0;
-    virtual bool isGoodLumiSection(unsigned int run,
-                                  unsigned int lumiSection) const = 0;
-};
+void applyGoldenJson();
+bool isValid(unsigned int run, unsigned int lumiSection) const;
 ```
 
 #### Usage
@@ -1029,14 +986,11 @@ public:
 ```cpp
 #include <GoldenJsonManager.h>
 
-// Add plugin
-auto goldenJson = std::make_unique<GoldenJsonManager>(
-    analyzer.getConfigurationProvider()
-);
-analyzer.addPlugin("goldenJson", std::move(goldenJson));
+// The factory registers the manager and loads goldenJsonConfig.
+auto goldenJson = GoldenJsonManager::create(analyzer);
 
 // Apply filter (automatic - reads run/luminosityBlock branches)
-analyzer.getPlugin<GoldenJsonManager>("goldenJson")->applyGoldenJson();
+goldenJson->applyGoldenJson();
 ```
 
 The plugin automatically filters events where `(run, luminosityBlock)` is not certified. For MC samples (when config has `type != "data"`), the plugin does nothing.
@@ -1051,72 +1005,84 @@ The plugin automatically filters events where `(run, luminosityBlock)` is not ce
 
 **Header**: `core/plugins/TriggerManager/TriggerManager.h`
 
-Interface for trigger logic.
+Concrete trigger manager. `TriggerManager::create(analyzer)` requires
+`triggerConfig` in the main config; each row requires `name`, `sample`, and
+`triggers`, with optional `triggerVetos`.
 
 ```cpp
-class TriggerManager : public IPluggableManager {
+class TriggerManager : public NamedObjectManager<std::vector<std::string>> {
 public:
-    virtual void defineTriggerFlags() = 0;
-    virtual std::vector<std::string> getTriggerGroupNames() const = 0;
+    static std::shared_ptr<TriggerManager> create(
+        Analyzer& an, const std::string& role = "triggerManager");
+    const std::vector<std::string>& getTriggers(const std::string& group) const;
+    const std::vector<std::string>& getVetoes(const std::string& group) const;
+    std::vector<std::string> getAllGroups() const;
+    void applyAllTriggers();
 };
 ```
 
-### INDHistogramManager
+```cpp
+auto triggerMgr = TriggerManager::create(analyzer);
+triggerMgr->applyAllTriggers();
+```
+
+### NDHistogramManager
 
 **Header**: `core/plugins/NDHistogramManager/NDHistogramManager.h`
 
-Interface for N-dimensional histogram management.
+Concrete `IPluggableManager` plugin for N-dimensional histogram management. `Analyzer::run()` automatically saves its booked histograms when it is registered under the `histogramManager` role.
 
 ```cpp
-class INDHistogramManager : public IPluggableManager {
+class NDHistogramManager : public IPluggableManager {
 public:
-    virtual void bookND(
-        const std::vector<histInfo>& infos,
-        const std::vector<selectionInfo>& selections,
-        const std::string& suffix,
-        const std::vector<std::vector<std::string>>& regionNames) = 0;
-    
-    virtual void saveHists(
-        const std::vector<std::vector<histInfo>>& fullHistList,
-        const std::vector<std::vector<std::string>>& allRegionNames) = 0;
-    
-    virtual std::vector<THnMulti>& GetHistos() = 0;
+    void bookND(std::vector<histInfo>& infos,
+                std::vector<selectionInfo>& selections,
+                const std::string& suffix,
+                std::vector<std::vector<std::string>>& regionNames);
+    void bookConfigHistograms();
+    void saveHists();
 };
 ```
 
-#### Histogram Structures
+#### Histogram Description Classes
 
 ```cpp
-struct histInfo {
-    std::string name;          // Histogram name
-    std::string variable;      // DataFrame column to fill
-    std::string title;         // Axis title
-    std::string weight;        // Weight column
-    int nbins;                 // Number of bins
-    double xmin, xmax;        // Axis range
-    
-    histInfo(const std::string& name,
-             const std::string& variable,
-             const std::string& title,
-             const std::string& weight,
-             int nbins, double xmin, double xmax);
+class histInfo {
+public:
+    histInfo(const char name[], const char variable[], const char label[],
+             const char weight[], int bins, float lowerBound, float upperBound);
+    const std::string& name() const;
+    const std::string& variable() const;
+    const std::string& label() const;
+    const std::string& weight() const;
+    const int& bins() const;
+    const float& lowerBound() const;
+    const float& upperBound() const;
 };
 
-struct selectionInfo {
-    std::string name;          // Selection axis name
-    int nbins;                 // Number of bins
-    double xmin, xmax;        // Axis range
-    
-    selectionInfo(const std::string& name,
-                 int nbins, double xmin, double xmax);
+class selectionInfo {
+public:
+    selectionInfo();
+    selectionInfo(std::string variable, int bins, double lowerBound,
+                  double upperBound);
+    selectionInfo(std::string variable, int bins, double lowerBound,
+                  double upperBound, std::vector<std::string> regions);
+    const std::string& variable() const;
+    const int& bins() const;
+    const float& lowerBound() const;
+    const float& upperBound() const;
+    const std::vector<std::string>& regions() const;
 };
 ```
+
+These classes store immutable histogram and selection descriptions. Read their
+values through the getters; `histInfo` uses `label()` for the axis label.
 
 **Example**:
 ```cpp
 #include <plots.h>
 
-auto histMgr = analyzer.getPlugin<INDHistogramManager>("histogramManager");
+auto histMgr = NDHistogramManager::create(analyzer);
 
 std::vector<histInfo> hists = {
     histInfo("h_pt", "jet_pt", "p_{T}", "weight", 50, 0, 500),
@@ -1133,15 +1099,8 @@ std::vector<std::vector<std::string>> regionNames = {
 
 histMgr->bookND(hists, selections, "", regionNames);
 
-// Trigger computation
-auto& histos = histMgr->GetHistos();
-for (auto& h : histos) {
-    h.GetPtr();
-}
-
-// Save
-std::vector<std::vector<histInfo>> fullHistList = {hists};
-histMgr->saveHists(fullHistList, regionNames);
+// Analyzer::run() executes and saves histograms booked under this role.
+analyzer.run();
 ```
 
 ### WeightManager
@@ -1154,7 +1113,8 @@ produces per-component audit statistics written to the meta ROOT file.
 
 **Access pattern**:
 ```cpp
-auto& wm = *analyzer.getPlugin<WeightManager>("weights");
+// After WeightManager::create(analyzer) or addPlugin(..., "weightManager"):
+auto& wm = *analyzer.getPlugin<WeightManager>("weightManager");
 ```
 
 #### Base Weight (Generator Weight)
@@ -1167,8 +1127,10 @@ other scale factors multiply on top of:
 wm.addScaleFactor("genWeight", "genWeight");
 ```
 
-The generator weight branch is also tracked **independently** by `CounterService`
-via the `counterWeightBranch` config key.  CounterService writes the total sum
+The generator weight branch can also be tracked **independently** by
+`CounterService` via the `counterWeightBranch` config key. Enable the service
+with `enableCounters=true`; it is disabled by default, and setting only
+`counterWeightBranch` does not create it. CounterService writes the total sum
 of weights (`counter_weightSum_<sample>`) and the sum of weight signs
 (`counter_weightSignSum_<sample>`) to the meta ROOT file.  These are consumed by
 `StitchingDerivationTask` to derive per-bin stitching scale factors.  The two
@@ -1179,7 +1141,9 @@ roles are complementary:
 | `counterWeightBranch` in cfg.txt | Accumulate sum-of-weights for normalisation |
 | `wm.addScaleFactor("genWeight", "genWeight")` | Include generator weight in the per-event weight product |
 
-Both must reference the same branch for the analysis to be consistent.
+Both should reference the same branch for the analysis to be consistent. For
+example, set `enableCounters=true` and `counterWeightBranch=genWeight` in the
+main config when normalization counters are needed.
 
 #### WeightAuditEntry
 
@@ -1271,10 +1235,9 @@ column that was defined.
 ```cpp
 #include <WeightManager.h>
 
-auto weightPlugin = std::make_unique<WeightManager>();
-analyzer.addPlugin("weights", std::move(weightPlugin));
+WeightManager::create(analyzer);
 
-auto& wm = *analyzer.getPlugin<WeightManager>("weights");
+auto& wm = *analyzer.getPlugin<WeightManager>("weightManager");
 
 // Register scale factors (columns already defined)
 wm.addScaleFactor("pileup_sf", "pu_weight");
@@ -1318,7 +1281,8 @@ DataFrame is not modified.
 
 **Access pattern**:
 ```cpp
-auto& rm = *analyzer.getPlugin<RegionManager>("regions");
+// After RegionManager::create(analyzer) or addPlugin(..., "regionManager"):
+auto& rm = *analyzer.getPlugin<RegionManager>("regionManager");
 ```
 
 #### Methods
@@ -1368,20 +1332,18 @@ to (and including) the named region. For example, if `"signal"` has parent
 **Example**:
 ```cpp
 #include <RegionManager.h>
-#include <NDHistogramManager/NDHistogramManager.h>
+#include <NDHistogramManager.h>
 
-auto rmPlugin  = std::make_unique<RegionManager>();
-auto ndhPlugin = std::make_unique<NDHistogramManager>(configProvider);
-analyzer.addPlugin("regions", std::move(rmPlugin));
-analyzer.addPlugin("NDHistogramManager", std::move(ndhPlugin));
+auto rmPlugin  = RegionManager::create(analyzer);
+auto ndhPlugin = NDHistogramManager::create(analyzer);
 
 // Define boolean selection columns first
 analyzer.Define("pass_presel", [](float pt){ return pt > 20.f; }, {"jet_pt"});
 analyzer.Define("pass_sr",     [](float mva){ return mva > 0.8f; }, {"mva_score"});
 analyzer.Define("pass_cr",     [](float mva){ return mva < 0.4f; }, {"mva_score"});
 
-auto& rm  = *analyzer.getPlugin<RegionManager>("regions");
-auto& ndh = *analyzer.getPlugin<NDHistogramManager>("NDHistogramManager");
+auto& rm  = *rmPlugin;
+auto& ndh = *ndhPlugin;
 
 // Declare regions (parent before child)
 rm.declareRegion("presel",  "pass_presel");
@@ -1398,9 +1360,8 @@ if (!errors.empty()) {
     for (const auto& e : errors) std::cerr << e << "\n";
 }
 
-// Book and save — NDHistogramManager fills all regions in one event-loop pass.
+// Book histograms; Analyzer::run() saves them after the event loop.
 ndh.bookConfigHistograms();
-ndh.saveHists();
 ```
 
 > **Note**: Prefer binding plugins to `RegionManager` over retrieving raw per-region
@@ -1424,7 +1385,8 @@ state and applies the filter on the main analysis DataFrame. When bound to a
 
 **Access pattern**:
 ```cpp
-auto& cfm = *analyzer.getPlugin<CutflowManager>("cutflow");
+// After CutflowManager::create(analyzer) or addPlugin(..., "cutflowManager"):
+auto& cfm = *analyzer.getPlugin<CutflowManager>("cutflowManager");
 ```
 
 #### Methods
@@ -1481,21 +1443,28 @@ has been called. Throw `std::runtime_error` if `regionName` is unknown.
 #include <CutflowManager.h>
 #include <RegionManager.h>
 
-auto cfmPlugin = std::make_unique<CutflowManager>();
-analyzer.addPlugin("cutflow", std::move(cfmPlugin));
+auto cfmPlugin = CutflowManager::create(analyzer);
+auto rmPlugin = RegionManager::create(analyzer);
 
 // Define all boolean cut columns before first addCut()
 analyzer.Define("pass_pt",  [](float pt) { return pt > 30.f; },             {"jet_pt"});
 analyzer.Define("pass_eta", [](float eta){ return std::abs(eta) < 2.4f; },  {"jet_eta"});
 analyzer.Define("pass_btag",[](float b)  { return b > 0.7f; },              {"btag_score"});
 
-auto& cfm = *analyzer.getPlugin<CutflowManager>("cutflow");
+// Declare a region from an already-defined boolean selection column.
+analyzer.Define("pass_signal",
+    [](bool passPt, bool passEta, bool passBtag) {
+        return passPt && passEta && passBtag;
+    }, {"pass_pt", "pass_eta", "pass_btag"});
+rmPlugin->declareRegion("signal", "pass_signal");
+
+auto& cfm = *analyzer.getPlugin<CutflowManager>("cutflowManager");
 cfm.addCut("pT > 30 GeV",   "pass_pt");
 cfm.addCut("|eta| < 2.4",   "pass_eta");
 cfm.addCut("b-tag",         "pass_btag");
 
 // Optional: bind to RegionManager for per-region cutflows
-cfm.bindToRegionManager(analyzer.getPlugin<RegionManager>("regions"));
+cfm.bindToRegionManager(rmPlugin.get());
 
 analyzer.run();
 
@@ -1579,8 +1548,8 @@ const std::vector<std::string>& getSystematicSources(setName) const;
 #### CMS NanoAOD Usage
 
 ```cpp
-auto jes = analyzer.getPlugin<JetEnergyScaleManager>("jes");
-auto cm = analyzer.getPlugin<CorrectionManager>("corrections");
+auto jes = JetEnergyScaleManager::create(analyzer);
+auto cm = CorrectionManager::create(analyzer);
 
 // 1. Column declarations
 jes->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
@@ -1627,18 +1596,14 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
 //   "goodJets_TotalUp"     : PhysicsObjectCollection (JES up)
 //   "goodJets_TotalDown"   : PhysicsObjectCollection (JES down)
 //   "goodJets_variations"  : PhysicsObjectVariationMap
-
-analyzer.Define("selectedJetPts",
-    [](const PhysicsObjectCollection& jets) {
-        ROOT::VecOps::RVec<float> pts;
-        for (std::size_t i = 0; i < jets.size(); ++i) {
-            pts.push_back(static_cast<float>(jets.at(i).Pt()));
-        }
-        return pts;
-    },
-    {"goodJets"}, analyzer.getSystematicManager());
-// Also materializes: selectedJetPts_TotalUp, selectedJetPts_TotalDown
 ```
+
+`Analyzer::Define` takes exactly three arguments and expands over variation
+mappings that already exist when the analysis calls it. `JetEnergyScaleManager`
+registers and materializes its corrected variations in `execute()`, which runs
+inside `Analyzer::run()` after those analysis-body calls. The code above
+therefore stops at the manager outputs rather than promising that a pre-run
+`Define` will consume and propagate these later-created collections.
 
 See [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md) for the complete
 reference including the full systematic source list, MET propagation details,
@@ -1765,8 +1730,9 @@ auto corrJets = goodJets.withCorrectedKinematics(
     correctedPt, Jet_eta, Jet_phi, correctedMass);
 ```
 
-Both methods are **overridden** in `TypedPhysicsObjectCollection<T>` to
-return a typed collection and carry user-defined objects unchanged.
+`TypedPhysicsObjectCollection<T>` provides same-name methods that return a
+typed collection and carry user-defined objects unchanged. These methods hide
+the base methods; they do not override virtual functions.
 
 #### Combinatoric Free Functions
 
@@ -1929,21 +1895,18 @@ static helper so plugins can produce consistent hashes for their own
 
 **Example**:
 ```cpp
-// Add custom task-level metadata before the event loop
-ProvenanceService* prov =
-    analyzer.getService<ProvenanceService>("provenance");
-prov->addEntry("task.workflow_id", "wf_12345");
-prov->addEntry("task.attempt",     "1");
-
-// Record the dataset manifest used
-prov->recordDatasetManifestProvenance(
-    manifestHash,       // e.g. from DatasetManifest.file_hash
-    "{\"era\":\"2022\", \"type\":\"data\"}",
-    "Run2022C,Run2022D"
-);
+// Add custom task-level metadata before the event loop. Analyzer stores these
+// under task.workflow_id and task.attempt in the provenance output.
+analyzer.setTaskMetadata("workflow_id", "wf_12345")
+        ->setTaskMetadata("attempt", "1");
 
 analyzer.run();
 ```
+
+`Analyzer` owns its `ProvenanceService` and does not expose a public accessor.
+`setTaskMetadata()` is the supported analysis/workflow API for adding task
+metadata. `recordDatasetManifestProvenance()` is a service-level helper; user
+code cannot call it through `Analyzer` in the current public API.
 
 ```python
 # Read provenance from Python
@@ -1968,19 +1931,48 @@ nominal-to-variation column mappings.
 ```cpp
 class ISystematicManager {
 public:
+    virtual ~ISystematicManager() = default;
+    static constexpr const char* CANONICAL_SYST_BRANCH_NAME = "SystematicCounter";
+
     virtual void registerSystematic(const std::string& syst,
                                     const std::set<std::string>& affectedVariables) = 0;
     virtual void registerVariationColumns(const std::string& variable,
                                           const std::string& systematicName,
                                           const std::string& upColumn,
                                           const std::string& downColumn) = 0;
+    virtual void registerVariationColumn(const std::string& variable,
+                                         const std::string& variationLabel,
+                                         const std::string& column) = 0;
     virtual const std::set<std::string>& getSystematics() const = 0;
-    virtual const std::set<std::string>& getVariablesForSystematic(const std::string& syst) const = 0;
-    virtual const std::set<std::string>& getSystematicsForVariable(const std::string& var) const = 0;
+    virtual std::set<std::string> getVariablesForSystematic(const std::string& syst) const = 0;
+    virtual std::set<std::string> getSystematicsForVariable(const std::string& var) const = 0;
+    virtual void registerExistingSystematics(
+        const std::vector<std::string>& systConfig,
+        const std::vector<std::string>& columnList) = 0;
+    virtual SystematicValidationResult autoRegisterSystematics(
+        const std::vector<std::string>& columnNames) = 0;
+    virtual std::vector<std::string> makeSystList(
+        const std::string& branchName, IDataFrameProvider& dataManager) = 0;
+    virtual bool isBranchNameMaterialized(const std::string& branchName) const = 0;
+
+    // These two methods have default implementations in the interface.
+    virtual bool isVariableAffectedBySystematic(const std::string& variable,
+                                                const std::string& syst) const {
+        return getVariablesForSystematic(syst).count(variable) != 0;
+    }
     virtual std::string getVariationColumnName(const std::string& variable,
-                                               const std::string& syst) const = 0;
+                                               const std::string& syst) const {
+        return isVariableAffectedBySystematic(variable, syst)
+            ? variable + "_" + syst
+            : variable;
+    }
 };
 ```
+
+`SystematicValidationResult` and `IDataFrameProvider` are declared in the
+same public API headers. See
+[`ISystematicManager.h`](../core/interface/api/ISystematicManager.h) for the
+complete documented contract and method semantics.
 
 **Example**:
 ```cpp
@@ -2011,7 +2003,6 @@ public:
     virtual void writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec) = 0;
     virtual void writeDataFrame(ROOT::RDF::RNode& df,
                                 const IConfigurationProvider& configProvider,
-                                const IDataFrameProvider* dataFrameProvider,
                                 const ISystematicManager* systematicManager,
                                 OutputChannel channel) = 0;
     virtual std::string resolveOutputFile(const IConfigurationProvider& configProvider,
@@ -2026,30 +2017,20 @@ public:
 Interface for logging.
 
 ```cpp
-enum class LogLevel {
-    DEBUG,
-    INFO,
-    WARNING,
-    ERROR
-};
-
 class ILogger {
 public:
-    virtual void log(const std::string& message, 
-                    LogLevel level = LogLevel::INFO) = 0;
-    virtual void error(const std::string& message) = 0;
-    virtual void warn(const std::string& message) = 0;
-    virtual void info(const std::string& message) = 0;
-    virtual void debug(const std::string& message) = 0;
+    enum class Level { Trace, Debug, Info, Warn, Error };
+    virtual ~ILogger() = default;
+    virtual void log(Level level, const std::string& message) = 0;
 };
 ```
 
 **Example**:
 ```cpp
-auto* logger = context_->logger;
-logger->info("Processing started");
-logger->warn("Missing optional branch: " + branchName);
-logger->error("Configuration error: " + error);
+auto& logger = context_->logger;
+logger.log(ILogger::Level::Info, "Processing started");
+logger.log(ILogger::Level::Warn, "Missing optional branch: " + branchName);
+logger.log(ILogger::Level::Error, "Configuration error: " + error);
 ```
 
 ## Factory Classes
@@ -2126,18 +2107,17 @@ analyzer.Define("dilepton_mass",
 
 ## Type Aliases
 
-Common type aliases used throughout the framework:
+These aliases are local conveniences for analysis or plugin code; they are not
+framework-wide declarations. Framework APIs use the qualified ROOT types.
 
 ```cpp
-// RDataFrame node
+// Optional shorthand for ROOT types in local code
 using RNode = ROOT::RDF::RNode;
-
-// RVec (ROOT vector)
 template<typename T>
 using RVec = ROOT::VecOps::RVec<T>;
 
-// Lorentz vector
-using LorentzVector = ROOT::Math::LorentzVector<ROOT::Math::PtEtaPhiM4D<float>>;
+// This is the Lorentz-vector type used by PhysicsObjectCollection.
+using LorentzVector = PhysicsObjectCollection::LorentzVec;
 ```
 
 ## Error Handling
@@ -2146,14 +2126,12 @@ The framework uses exceptions for error reporting:
 
 ```cpp
 // Configuration errors
-if (!config->has("required_key")) {
+if (config->getConfigMap().find("required_key") == config->getConfigMap().end()) {
     throw std::runtime_error("Missing required configuration: required_key");
 }
 
-// Plugin errors
-if (!hasModel(name)) {
-    throw std::invalid_argument("Model not found: " + name);
-}
+// Model lookup: use the manager API, which reports a missing model.
+auto model = onnxManager->getModel(name);
 
 // File errors
 if (!file.is_open()) {

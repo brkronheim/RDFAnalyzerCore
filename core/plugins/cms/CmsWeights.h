@@ -33,6 +33,8 @@
 #include "CmsCorrections.h"
 #include "CmsYearConfig.h"
 
+#include <ROOT/RVec.hxx>
+
 #include <string>
 #include <vector>
 
@@ -89,6 +91,10 @@ struct CmsWeightConfig {
   /// Default is "M" (medium), which is the most commonly used for Run 2 UL.
   std::string puIdWorkingPoint = "M";
 
+  /// Optional dedicated payload for continuous b-tag corrections.  When empty,
+  /// the era b-tag payload is used.
+  std::string btagShapeFile;
+
   /// Override shape correction names (empty = auto-detect from tagger base).
   /// Auto-detected as: <taggerBase> + "_shape" for b-tag, "_cshape" for c-tag.
   /// Only used when btagMethod/ctagMethod == Shape.
@@ -108,10 +114,27 @@ struct CmsWeightConfig {
   std::string ctagEfficiencyFile;
   std::string ctagEfficiencyCorrection;
 
-  /// Trigger SF root directory (for custom tight mini-iso path).
-  /// When non-empty, overrides the default POG trigger SF lookup.
-  /// Set usePogTriggerSFs to false to skip POG trigger SFs entirely.
+  /// Root directory used by custom muon isolation payload lookup.
   std::string triggerSfRoot;
+  /// Optional explicit TightMiniIso SF payload override.
+  std::string muonIsoSfFile;
+  /// Optional correction name from the standard muon_Z.json payload.
+  /// Defaults to NUM_TightPFIso_DEN_MediumID when no custom iso file is used.
+  std::string muonIsoCorrection;
+  /// Optional Run-3 dimuon trigger-leg payloads. When both are configured,
+  /// the lead muon uses Mu17 and the sublead muon uses Mu8, as in VHccPoCo.
+  std::string dimuonTriggerMu17File;
+  std::string dimuonTriggerMu8File;
+  std::string dimuonTriggerMu17Correction =
+      "NUM_Mu17leg_DEN_MediumId_and_LooseMiniIso";
+  std::string dimuonTriggerMu8Correction =
+      "NUM_Mu8leg_DEN_MediumId_and_LooseMiniIso";
+  /// Path-specific trigger SF payload and correction for the selected HLT.
+  /// The correction is evaluated for each selected muon and multiplied.
+  std::string triggerSfFile;
+  std::string triggerSfCorrection;
+  /// Retained for configuration compatibility; path-specific trigger settings
+  /// control whether trigger scale factors are evaluated.
   bool usePogTriggerSFs = true;
 
   /// B-tag and c-tag source names for systematic variations.
@@ -224,10 +247,9 @@ void defineCmsBTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg);
 /// Requires TaggerWorkingPointManager ("ctagManager") to be configured.
 void defineCmsCTagScaleFactors(Analyzer &an, const CmsWeightConfig &cfg);
 
-/// Define trigger scale factors.
-/// When cfg.usePogTriggerSFs is true, reads POG trigger SFs from the
-/// muon/electron JSON files (Muon_triggerSF / Electron_triggerSF).
-/// When cfg.triggerSfRoot is set, loads analysis-specific JSONs instead.
+/// Define path-specific trigger scale factors from cfg.triggerSfFile and
+/// cfg.triggerSfCorrection. Missing settings produce unity columns and are
+/// reported by the correction audit.
 /// Result columns: trig_sf_nominal, trig_sf_up, trig_sf_down.
 void defineCmsTriggerScaleFactors(Analyzer &an, const CmsWeightConfig &cfg);
 
@@ -297,18 +319,18 @@ void setupCmsStandardWeights(Analyzer &an, CmsWeightConfig cfg);
 // ---------------------------------------------------------------------------
 
 /// Merge b-tag scale factors for heavy (flavour 4/5) and light (rest) jets.
-std::vector<float> mergeBTagScaleFactors(
-    const std::vector<int> &flavour,
-    const std::vector<float> &heavy,
-    const std::vector<float> &light);
+ROOT::VecOps::RVec<float> mergeBTagScaleFactors(
+  const ROOT::VecOps::RVec<int> &flavour,
+  const ROOT::VecOps::RVec<float> &heavy,
+  const ROOT::VecOps::RVec<float> &light);
 
 /// Merge c-tag scale factors: flavour 4 -> WC SF, flavour 5 -> TnP SF,
 /// rest -> light SF.
-std::vector<float> mergeCTagScaleFactors(
-    const std::vector<int> &flavour,
-    const std::vector<float> &light,
-    const std::vector<float> &wc,
-    const std::vector<float> &tnp);
+ROOT::VecOps::RVec<float> mergeCTagScaleFactors(
+  const ROOT::VecOps::RVec<int> &flavour,
+  const ROOT::VecOps::RVec<float> &light,
+  const ROOT::VecOps::RVec<float> &wc,
+  const ROOT::VecOps::RVec<float> &tnp);
 
 /// Select electron reconstruction SF per pT bin (<20, 20-75, >75 GeV).
 std::vector<float> selectElectronRecoScaleFactors(
@@ -319,6 +341,7 @@ std::vector<float> selectElectronRecoScaleFactors(
 
 /// Compute the product of a vector of weights with safeguards.
 float productOrOne(const std::vector<float> &weights);
+float productOrOneRVec(const ROOT::VecOps::RVec<float> &weights);
 
 /// Safe ratio with zero/NaN protection.
 float safeWeightRatio(float numerator, float denominator);

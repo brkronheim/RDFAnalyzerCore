@@ -157,7 +157,7 @@ public:
    * 
    * This method books all histograms that were loaded from the config file
    * during setupFromConfigFile(). It should be called after all filters and
-   * defines have been applied to the dataframe, typically right before save().
+   * defines have been applied to the dataframe, typically before run().
    *
    * When a RegionManager has been bound via bindToRegionManager(), each
    * configured histogram is booked with an additional *region axis* encoded
@@ -283,9 +283,10 @@ private:
   IOutputSink* skimSink_m = nullptr;
   IOutputSink* metaSink_m = nullptr;
   std::string histogramBackend_m = "root";
+  bool histogramSystematics_m = true;
   RegionManager* regionManager_m = nullptr;
 };
 
 
 
-#endif // NDHISTOGRAMMANAGER_H_INCLUDED 
+#endif // NDHISTOGRAMMANAGER_H_INCLUDED

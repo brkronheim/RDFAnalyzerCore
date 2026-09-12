@@ -30,7 +30,7 @@ The main configuration file controls the overall behavior of the framework. It's
 | `saveDirectory` | Path | (empty) | Local directory where intermediate outputs are saved |
 | `saveTree` | String | `Events` | Name of the output tree |
 | `treeList` | Comma-separated | `CollectionTree,POOLCollectionTree` | Tree names to search for in input files (tried in order) |
-| `metaFile` | Path | Same as `saveFile` | Separate file for histograms and metadata |
+| `metaFile` | Path | Derived from `saveFile` as `<stem>_meta.root` | Separate file for histograms and metadata |
 | `antiglobs` | Comma-separated | (empty) | Reject input files containing these strings |
 | `globs` | Comma-separated | (empty) | Accept only input files containing these strings |
 
@@ -79,10 +79,12 @@ Jet_eta          # Specific column
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `floatConfig` | Path | Configuration file with float constants to define |
-| `intConfig` | Path | Configuration file with integer constants to define |
+| `floatConfig` | Path | Configuration file with float constants to define. `DataManager` checks this path relative to the process working directory before registering constants. |
+| `intConfig` | Path | Configuration file with integer constants to define. `DataManager` checks this path relative to the process working directory before registering constants. |
 | `aliasConfig` | Path | Configuration file with branch aliases |
 | `optionalBranchesConfig` | Path | Configuration file listing branches that may not exist in all inputs |
+
+For other config files loaded through `ConfigurationManager`, a relative path is resolved from the process working directory if it exists there; otherwise it is resolved relative to the main config file. The constant-file existence check above is performed directly against the configured path by `DataManager`, so use a working-directory-relative or absolute path for `floatConfig` and `intConfig`.
 
 #### Float/Int Config Format
 
@@ -111,7 +113,7 @@ another_optional_branch
 
 ## Plugin Configurations
 
-Plugins are configured via separate files referenced from the main config.
+Plugins read settings from separate files referenced from the main config. Referencing a plugin config file does not construct or activate that plugin; the analysis must create and register each manager in C++.
 
 ### BDT Manager Configuration
 
@@ -547,6 +549,7 @@ The YAML config is validated at startup against a JSON Schema. See **[CONFIGURAT
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `histogramBackend` | String | `"root"` | Histogram backend: `"root"` (THnSparseF) or `"boost"` (Boost.Histogram) |
+| `histogramSystematics` | Boolean | `true` | Enable histogram systematic variations and auto-detect complete `baseVariable_nameUp` / `baseVariable_nameDown` column pairs. Set to `false` for nominal-only histograms. |
 
 **ROOT backend** (`"root"`, default): stores histograms as `THnSparseF` objects in the meta ROOT output file.  This is compatible with all downstream tools and is the correct choice for most analyses.
 
@@ -570,17 +573,27 @@ Track event counts and weight sums per sample.
 |--------|------|---------|-------------|
 | `enableCounters` | Boolean | `false` | Enable the CounterService |
 | `counterWeightBranch` | String | (empty) | Column name for per-event weights (e.g., `genWeight`) |
-| `counterIntWeightBranch` | String | (empty) | Column name for integer-valued weights (e.g., stitching codes) |
+| `counterIntWeightBranch` | String | (empty) | Column name for an integer event category (e.g., a stitching code) |
+| `counterIntWeightBranchNBins` | Integer | `10` | Number of bins for automatic integer-category booking |
+| `counterIntWeightBranchMin` | Number | `-0.5` | Lower edge for automatic integer-category booking |
+| `counterIntWeightBranchMax` | Number | `9.5` | Upper edge for automatic integer-category booking |
 
 **When enabled**, the CounterService logs:
 - Total entries per sample
 - Sum of `counterWeightBranch` (if set)
 - Sum of `counterIntWeightBranch` (if set)
 
-**For integer weights**, a histogram is written to the metadata file:
+**For integer categories**, a histogram is written to the metadata file:
 - Name: `counter_intWeightSum_<sample>`
 - X-axis: Integer values from `counterIntWeightBranch`
 - Bin content: Sum of `counterWeightBranch` for events with that integer value
+- Signed companion: `counter_intWeightSignSum_<sample>` with the signed event count
+
+The automatic booking defaults to integer IDs `0` through `9`. Configure the
+bin count and range when a classifier uses a different valid-ID range. An
+analysis that needs a custom underflow or invalid-event policy should define
+and filter its integer branch explicitly before calling
+`Analyzer::bookCounterIntHistogram`.
 
 **Example**:
 ```
@@ -639,7 +652,10 @@ Boolean values can be specified as:
 
 ### Path Handling
 
-- Relative paths are resolved relative to the working directory
+- Relative paths used as configuration-file references are first checked relative to the working directory, then resolved relative to the main config file's directory if not found.
+- Input and output paths are generally passed through as written and are interpreted by their consumers; check the analysis working-directory convention when they are relative.
+- Some loaders perform an existence check before config-path resolution. For example, `DataManager` checks relative `floatConfig` and `intConfig` files from the process working directory, so run from the directory containing those files or use suitable paths.
+- Unless `metaFile` is set explicitly, the ROOT metadata/histogram path is derived from `saveFile` by inserting `_meta` before its extension (for example, `output.root` becomes `output_meta.root`).
 - XRootD URLs are supported for remote file access: `root://server//path/file.root`
 - EOS paths: `root://eospublic.cern.ch//eos/path/file.root`
 

@@ -66,8 +66,8 @@ try:
     analyzer.Filter('pass', 'good', ['good'])
     print('Define and Filter work')
     
-    # Save
-    analyzer.run()
+    # Save through the Python wrapper (calls C++ Analyzer::run())
+    analyzer.save()
     print('Save completed')
 finally:
     os.unlink(config)

@@ -7,6 +7,8 @@
 - **[Getting Started](./GETTING_STARTED.md)** - Installation and first steps
 - **[Python Bindings](./PYTHON_BINDINGS_QUICKSTART.md)** - Using RDFAnalyzerCore from Python
 - **[Configuration Reference](./CONFIG_REFERENCE.md)** - All config options
+- **[Generic Stitching](./STITCHING.md)** - Reusable counters, binning, and validation
+- **[Agent analysis walkthrough](./ANALYSIS_WALKTHROUGH.md)** - Trace framework execution through a compact ExampleAnalysis
 - **[Error Handling](./ERRORS_AND_TRACING.md)** - Common errors and solutions
 
 ## Documentation Structure
@@ -89,6 +91,7 @@
 
 - **Agents (automation + validation)**
   - Start: [Documentation Index](./INDEX.md)
+  - Analysis workflow: [analysis skill](../.agents/skills/rdfanalyzer-analysis/SKILL.md), [framework development skill](../.agents/skills/rdfanalyzer-development/SKILL.md), and [the analysis walkthrough](./ANALYSIS_WALKTHROUGH.md)
   - Then: [Errors and Tracing](./ERRORS_AND_TRACING.md), [Configuration Validation](./CONFIGURATION_VALIDATION.md), [Output Schema](./OUTPUT_SCHEMA.md), [Validation Reports](./VALIDATION_REPORTS.md)
 
 ## Documentation Quality

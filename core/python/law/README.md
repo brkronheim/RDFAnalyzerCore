@@ -21,6 +21,8 @@ integrate with their outputs.
   - [SkimTask](#skimtask)
   - [HistFillTask](#histfilltask)
   - [StitchingDerivationTask](#stitchingderivationtask)
+  - [StitchingApplyTask](#stitchingapplytask)
+  - [StitchingValidationTask](#stitchingvalidationtask)
 - [Prerequisites](#prerequisites)
 - [Environment Setup](#environment-setup)
 - [Rucio Workflow](#rucio-workflow)
@@ -207,16 +209,60 @@ groups:
 Each key under `meta_files` is the `sampleName` used by `CounterService` when
 booking `counter_intWeightSignSum_{sampleName}` histograms.
 
+One sample can provide multiple metadata files, which is useful when a file
+source splits a dataset into several jobs:
+
+```yaml
+groups:
+  wjets_ht:
+    meta_files:
+      wjets_ht_0:
+        - skimRun_myRun/outputs/WJets_HT0/job_0/meta.root
+        - skimRun_myRun/outputs/WJets_HT0/job_1/meta.root
+      wjets_ht_1: skimRun_myRun/outputs/WJets_HT1/meta.root
+```
+
+When `StitchingDerivationTask` is given `--source-skim-name` and a dataset
+manifest, a group may instead use `samples` or a manifest `select` mapping.
+The task discovers all `meta.root` files below each selected sample and sums
+their counter histograms.
+
+An inclusive anchor can be one sample or a collection of samples. Use
+`inclusive_samples` for a flat or nested collection when the inclusive sample
+is split across orthogonal axes. A mapping can select different collections for
+different cross-section eras. Cross sections are configured by group in the
+same YAML; Core does not provide process-specific defaults.
+
+```yaml
+groups:
+  generic_group:
+    meta_files:
+      sample_a: outputs/sample_a/meta.root
+      sample_b: outputs/sample_b/meta.root
+    inclusive_samples:
+      run3_24:
+        - [sample_a, sample_b]
+inclusive_cross_sections:
+  generic_group:
+    run3_24: 100.0
+```
+
 **Output**: `stitchWeights_<name>/stitch_weights.json` — a
 [correctionlib](https://github.com/cms-nanoAOD/correctionlib) `CorrectionSet`
 with one `Correction` per stitching group.
+
+The same derivation writes
+`stitchWeights_<name>/stitch_cross_sections.json`. For each group with an
+inclusive anchor, it records the inclusive sample set, signed event fraction
+in each stitch bin, and corresponding binned cross section in pb. Manifest
+years select `run2`, `run3_22_23`, or `run3_24`; mixed eras are rejected.
 
 **Algorithm**: reads `counter_intWeightSignSum_*` histograms from each meta
 ROOT file, computes per-bin signed counts `C_n(k) = P_n(k) − N_n(k)`, and
 derives the scale factor:
 
 ```
-b_n(k) = C_n(k) / Σ_m C_m(k)
+b_n(k) = max(C_n(k), 0) / Σ_m max(C_m(k), 0)
 ```
 
 Usage from Python:
@@ -226,6 +272,51 @@ import correctionlib
 cset = correctionlib.CorrectionSet.from_file("stitchWeights_myStitch/stitch_weights.json")
 sf = cset["wjets_ht"].evaluate("wjets_ht_0", stitch_id)
 ```
+
+### StitchingApplyTask
+
+Runs the complete stitching cycle with the existing `SkimTask` executors:
+
+1. A counter pass named `<name>_counts` runs with `stitchMode=none`.
+2. `StitchingDerivationTask` writes `stitchWeights_<name>/stitch_weights.json`.
+3. The application pass runs as `<name>` with `stitchMode=correctionlib`,
+   staging the generated JSON into each job as `stitchWeights`.
+
+The derived cross-section report is used by `StitchingValidationTask` for
+plot normalization. Before applying that normalization, validation removes
+the per-dataset application weight scale (`xsec * kfac * filter_efficiency *
+extra_scale`) already present in the ROOT histograms. The application
+executable continues to use the scalar per-dataset factors from the manifest
+together with the derived binwise stitching factor.
+
+The task accepts the same file-source and executor parameters as `SkimTask`.
+Use `analyses/rdfAnalyzerStitch/README.md` for a complete command and the
+analysis-specific declarative group configuration.
+
+### StitchingValidationTask
+
+Validates a completed `StitchingApplyTask` run across every application
+metadata file, including all partitions of file-source jobs. It checks the
+derived correction JSON against the configured group names and verifies the
+signed counter plus stitched validation histograms in each `meta.root` file.
+When the application monitor reports permanently failed jobs in
+`skimRun_<name>/all_outputs_verified.txt`, validation stops before reading
+metadata; failed jobs must be repaired or rerun before producing plots.
+
+```bash
+law run StitchingValidationTask \
+  --name myStitch \
+  --stitch-config analyses/myAnalysis/cfg/stitch_config.yaml \
+  --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml
+```
+
+The report is written to
+`stitchValidation_<name>/stitch_validation.json`.
+
+By default, validation retains the existing V+jets histogram requirements.
+Other analyses can declare `validation.histograms` in the stitch YAML with a
+`name`, optional `stitched_name`, label, boundaries, x-axis limits, and ratio
+range. Those names drive both output validation and comparison plots.
 
 ---
 
@@ -525,9 +616,9 @@ from analysis outputs and running statistical fits.
    `combineRun_<name>/combine_results/`.
 
 The YAML config format is documented in
-[docs/DATACARD_GENERATOR.md](../docs/DATACARD_GENERATOR.md).  An example
+[docs/DATACARD_GENERATOR.md](../../../docs/DATACARD_GENERATOR.md).  An example
 configuration is available at
-[core/python/example_datacard_config.yaml](../core/python/example_datacard_config.yaml).
+[core/python/example_datacard_config.yaml](../example_datacard_config.yaml).
 
 ### Prerequisites
 
@@ -724,7 +815,7 @@ in the analysis config):
   compatible with downstream tools including Combine.
 
 Both backends write identical output files; `histogramBackend` is purely an
-internal performance knob.  See [CONFIG_REFERENCE.md — Histogram Backend](../docs/CONFIG_REFERENCE.md#histogram-backend)
+internal performance knob.  See [CONFIG_REFERENCE.md — Histogram Backend](../../../docs/CONFIG_REFERENCE.md#histogram-backend)
 for configuration details.
 
 ---
@@ -749,7 +840,7 @@ These parameters apply to **both** NANO and Open Data workflows:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--max-retries` | `3` | Max resubmission attempts per failed job |
+| `--max-retries` | `50` | Max resubmission attempts per failed job |
 | `--poll-interval` | `120` | Seconds between condor_q polls |
 
 ---
@@ -960,7 +1051,7 @@ is `None` (no limit).
 > **Note**: multi-dimensional branching is an advanced feature intended for
 > large-scale grid productions.  For most analyses, the default
 > `dataset_only()` policy is sufficient.  See
-> [docs/LAW_TASKS.md](../docs/LAW_TASKS.md) for the full API reference.
+> [docs/LAW_TASKS.md](../../../docs/LAW_TASKS.md) for the full API reference.
 
 ### Dask Executor
 

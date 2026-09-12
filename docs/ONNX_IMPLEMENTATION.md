@@ -1,10 +1,10 @@
 # ONNX Manager Implementation Summary
 
 > **See Also**: 
-> - [Getting Started with ONNX](../docs/GETTING_STARTED.md#machine-learning-integration)
-> - [ONNX Configuration Reference](../docs/CONFIG_REFERENCE.md#onnx-manager-configuration)
-> - [Using ONNX in Analyses](../docs/ANALYSIS_GUIDE.md#using-onnx-models-recommended)
-> - [ONNX API Reference](../docs/API_REFERENCE.md#onnxmanager)
+> - [Getting Started Guide](GETTING_STARTED.md)
+> - [ONNX Configuration Reference](CONFIG_REFERENCE.md#onnx-manager-configuration)
+> - [Using ONNX in Analyses](ANALYSIS_GUIDE.md#using-onnx-models-recommended)
+> - [ONNX API Reference](API_REFERENCE.md#onnxmanager)
 > - [Multi-Output Model Support](ONNX_MULTI_OUTPUT.md)
 
 ## Overview

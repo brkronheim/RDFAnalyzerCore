@@ -108,7 +108,7 @@ end-to-end.
 ## 2. AnalysisMixin Parameters
 
 `AnalysisMixin` is a Python mixin class that injects a common set of Luigi
-parameters into `SkimTask` and `HistFillTask`.  Every parameter listed here is
+parameters into `SkimTask` and `HistFillTask`. Every parameter listed here is
 available on both tasks.
 
 ### `--submit-config` *(str, required)*
@@ -120,14 +120,18 @@ files (`.txt`, `.yaml`) into the per-job directory, and writes a finalised
 
 Keys overridden automatically per dataset:
 
+The paths below show the local run-directory layout. Delegated HTCondor
+submissions can rewrite output paths to the configured final destination.
+
 | Key | Value |
 |-----|-------|
 | `fileList` | Comma-separated list of input ROOT files (or DAS path) |
-| `saveFile` | `<outputs_dir>/<dataset>/skim.root` |
-| `metaFile` | `<outputs_dir>/<dataset>/meta.root` |
-| `saveDirectory` | `<outputs_dir>/<dataset>/` |
+| `saveFile` | Skim output in the job's output directory (standard manifest mode: `<outputs_dir>/<dataset>/skim.root`; file-source mode: `<outputs_dir>/<dataset>/job_<i>/skim.root`) |
+| `metaFile` | Metadata output in the job's output directory (standard manifest mode: `<outputs_dir>/<dataset>/meta.root`; file-source mode: `<outputs_dir>/<dataset>/job_<i>/meta.root`) |
+| `saveDirectory` | Job output directory (standard manifest mode: `<outputs_dir>/<dataset>/`; file-source mode: `<outputs_dir>/<dataset>/job_<i>/`) |
 | `sample` | Dataset name from the manifest |
-| `type` | Dataset `dtype` field from the manifest (if set) |
+| `dtype` | Framework dataset classification (`mc` or `data`) |
+| `type` | Legacy sample code, derived from `sample_type`, `stitch_id`, or `dtype` |
 
 All other keys in the template are forwarded verbatim.
 
@@ -151,17 +155,9 @@ Run name used to namespace output directories.
 
 ### `--dataset-manifest` *(str, required)*
 
-Path to the YAML dataset manifest file.  One workflow branch is created per
-`DatasetEntry` in the manifest.
-
-### `--num-workers` *(str, default: `"auto"`)*
-
-Thread pool size for parallel branch execution under `--workflow local`.  The
-special value `"auto"` lets LAW choose based on the number of CPU cores.
-
-### `--log-level` *(str, default: `"info"`)*
-
-Logging verbosity.  Valid values: `"debug"`, `"info"`, `"warning"`, `"error"`.
+Path to the YAML dataset manifest file. `HistFillTask` creates one branch per
+manifest entry. `SkimTask` does the same in standard manifest mode; in
+file-source mode it creates one branch per planned file partition.
 
 ---
 
@@ -173,8 +169,14 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
 
 ### Purpose
 
-Runs the analysis executable once per dataset to produce skimmed ROOT output
-files.  Each branch corresponds to one `DatasetEntry` from the dataset manifest.
+Runs the analysis executable to produce skimmed ROOT output files. In standard
+manifest mode each branch processes one `DatasetEntry`; in file-source mode
+each branch processes one planned file partition, so a dataset can span several
+branches.
+The analysis config must set `enableSkim=true` for the executable to write the
+event tree. LAW passes the config through; it does not turn skim writing on.
+With `enableSkim=false`, the task can run successfully without producing the
+skim its output layout describes.
 
 Before dispatching the full multi-dataset workflow a **pre-flight test job**
 (`RunSkimTestJob`) is run automatically on a single input file.  This catches
@@ -183,8 +185,29 @@ submitted.  Pass ``--no-make-test-job`` to skip the test.
 
 ### Parameters
 
-Inherits all [AnalysisMixin parameters](#2-analysismixin-parameters) and
-[SkimMixin parameters](#skimmixin-parameters).  Key additions:
+Inherits all [AnalysisMixin parameters](#2-analysismixin-parameters) and the
+file-discovery/execution options provided by `SkimMixin`.
+
+#### File discovery and partitioning
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `--file-source` | `""` | Use manifest `files`/`das` directly, or select `xrdfs`, `rucio`, or `opendata` discovery. |
+| `--file-source-name` | `""` | Name of the file-list task run to consume. If omitted, it defaults to `--name`. |
+| `--files-per-job` | `50` | Maximum files per job for file-count grouping; also the group limit for Rucio queries. |
+| `--partition` | `file_group` | File-source partition mode: `file_group`, `file` (one file per job), or `entry_range` (split by TTree entries; requires `uproot`). |
+| `--entries-per-job` | `100000` | Maximum TTree entries per job in `entry_range` mode; ignored by other modes. |
+
+Partition settings apply when the file-list payload contains a flat file list.
+If it includes precomputed groups, such as the groups produced by Rucio
+discovery, `PrepareSkimJobs` preserves those groups as job partitions.
+
+#### `--output-directory` *(str, optional)*
+
+SkimMixin parameter inherited by `PrepareSkimJobs` and `SkimTask`. The
+delegated HTCondor submission chain uses it as the final output destination,
+overriding `saveDirectory` in the generated submit configs; it may be a local
+EOS path or an explicit `root://` URL. It does not apply to `HistFillTask`.
 
 #### `--make-test-job` *(bool, default: `True`)*
 
@@ -196,27 +219,32 @@ dispatched if the executable crashes.
 Pass ``--no-make-test-job`` to disable the pre-flight test and submit
 immediately.
 
-#### `--file-source` *(str, default: `""`)*
+#### File-list source chaining
 
-File-list source controlling where input files are discovered.  Valid values:
+The file-list source controls where input files are discovered. Valid values:
 
 | Value | Source | Required prerequisite |
 |-------|--------|-----------------------|
 | `""` (default) | Dataset manifest `files` / `das` fields | None |
-| `xrdfs` | `GetXRDFSFileList` output (auto-chained) | `--file-source-name` |
-| `rucio` | `GetRucioFileList` output (run manually) | `--file-source-name` |
-| `opendata` | `GetOpenDataFileList` output (run manually) | `--file-source-name` |
+| `xrdfs` | `GetXRDFSFileList` output (auto-chained) | None; `--file-source-name` defaults to `--name` |
+| `rucio` | `GetRucioFileList` output (auto-chained) | None; `--file-source-name` defaults to `--name` |
+| `opendata` | `GetOpenDataFileList` output (auto-chained) | None; `--file-source-name` defaults to `--name` |
 
-When `--file-source xrdfs` is set, `PrepareSkimJobs.requires()` automatically
-declares `GetXRDFSFileList` as a dependency, so the full chain
-`GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask` runs
-automatically with a single `law run SkimTask` command.
+When any non-empty `--file-source` is set, `PrepareSkimJobs.requires()`
+automatically declares the corresponding file-list task as a dependency.
+Rucio and OpenData discovery use the `sampleConfig` payload in
+`--submit-config`. The full chain (for example,
+`GetRucioFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask`) runs with a
+single `law run SkimTask` command. Set `--file-source-name` only when the
+file-list task was run under a name different from `--name`.
 
 ### Branch Map
 
-One branch per dataset entry (index 0 … N-1, sorted by dataset name).  The
-`branch_data` object is a `DatasetEntry` with fields `name`, `files`, `das`,
-and `dtype`.
+In standard manifest mode, one branch is created per dataset entry in manifest
+order. In file-source mode, `PrepareSkimJobs` first partitions each dataset's
+discovered files; `SkimTask` then creates one branch per planned partition. A
+dataset can therefore have multiple branches. The `--partition`,
+`--files-per-job`, and `--entries-per-job` parameters control that partitioning.
 
 For multi-dimensional branching (regions, systematics) use
 [BranchMapPolicy](#6-branchmappolicy).
@@ -242,10 +270,25 @@ skimRun_<name>/
     └── <dataset_name>.perf.json ← performance metrics
 ```
 
+This tree shows standard manifest mode. In file-source mode, jobs and outputs
+are partitioned beneath each dataset:
+
+```text
+skimRun_<name>/
+├── jobs/<dataset_name>/job_<i>/submit_config.txt
+├── outputs/<dataset_name>/job_<i>/{skim.root,meta.root}
+└── job_outputs/
+    ├── <dataset_name>_b<branch>.done
+    └── <dataset_name>_b<branch>.perf.json
+```
+
+File-source mode therefore has no canonical
+`outputs/<dataset_name>/skim.root` file for a whole dataset.
+
 ### Caching and `complete()`
 
-`SkimTask` overrides `complete()` to perform a provenance-based cache
-validity check:
+In standard manifest mode, `SkimTask` overrides `complete()` to perform a
+provenance-based cache validity check:
 
 1. If `<dataset_name>.done` does not exist → **not complete**.
 2. Reads `.cache.yaml` sidecar co-located with `skim.root`.
@@ -255,7 +298,8 @@ validity check:
 5. If the cache is stale or absent, the `.done` marker is **deleted** and the
    task is rescheduled, guaranteeing that stale artifacts are regenerated.
 
-This check only applies at branch level; at the workflow level the standard
+In file-source mode, completion is tracked per partition by its branch marker;
+the single-file cache check does not apply. At the workflow level the standard
 LAW behaviour is preserved.
 
 ### Example Commands
@@ -276,27 +320,21 @@ law run SkimTask \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
     --no-make-test-job
 
-# Automatic chain: GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask
+# Automatic chain: GetRucioFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask
 law run SkimTask \
     --submit-config analyses/myAnalysis/cfg/skim_config.txt \
     --exe build/analyses/myAnalysis/myanalysis \
     --name mySkimRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-    --file-source xrdfs \
-    --file-source-name myFiles
+    --file-source rucio
 
-# Manual Rucio discovery followed by SkimTask
-law run GetRucioFileList \
-    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
-    --name myRun --x509 /tmp/x509 \
-    --exe build/analyses/myAnalysis/myanalysis
-
+# Override the file-list task name when it differs from --name
 law run SkimTask \
     --submit-config analyses/myAnalysis/cfg/skim_config.txt \
     --exe build/analyses/myAnalysis/myanalysis \
     --name mySkimRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-    --file-source rucio --file-source-name myRun
+    --file-source opendata --file-source-name priorDiscoveryRun
 
 # Same task, different executor: delegate to concrete per-dataset HTCondor submission
 law run SkimTask \
@@ -328,12 +366,15 @@ Log locations in delegated `htcondor` mode:
 
 When a job is held before payload execution, only the `.log` file may exist because the job never reached the execution wrapper.
 
-Final staged skim outputs in delegated `htcondor` mode are flattened per dataset directory rather than nested per job directory:
+At the configured HTCondor output destination, staged outputs are flattened
+into each dataset directory rather than nested under a job directory. Each
+submitted job or partition produces its own output pair:
 
 - `.../<dataset>/output_<job>.root`
 - `.../<dataset>/meta_<job>.root`
 
-This layout keeps all outputs for one dataset under a single XRootD directory, which matches monitor verification via directory-level `xrdfs ls` calls.
+For XRootD destinations, this keeps all outputs for one dataset under a single
+directory, matching monitor verification via directory-level `xrdfs ls` calls.
 
 ---
 
@@ -372,8 +413,8 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow)
 ### Purpose
 
 Runs the analysis executable once per dataset to fill analysis histograms.
-Optionally chains after a completed `SkimTask` by automatically wiring the
-skim output as the input file list.
+Optionally chains after a standard manifest-mode `SkimTask` run by wiring its
+per-dataset skim output as the input file list.
 
 ### Parameters
 
@@ -381,8 +422,11 @@ Inherits all [AnalysisMixin parameters](#2-analysismixin-parameters), plus:
 
 #### `--skim-name` *(str, default: `""`)*
 
-Name of a completed `SkimTask` run whose outputs should be used as input
-for this histogram fill pass.
+Name of a `SkimTask` run whose outputs should be used as input
+for this histogram fill pass. This currently expects standard manifest-mode
+skims, which write one `skim.root` per dataset. File-source skims write one
+skim per partition under `outputs/<dataset>/job_<i>/` and do not provide the
+single `outputs/<dataset>/skim.root` path consumed here.
 
 - **When set**: `HistFillTask` declares `SkimTask --name <skim-name>` as a
   dependency.  Before running each branch the task checks the skim cache
@@ -393,8 +437,8 @@ for this histogram fill pass.
 
 ### Chain Mode
 
-When `--skim-name` is set, `HistFillTask` validates the skim cache before
-consuming it:
+When `--skim-name` is set for a standard manifest-mode skim,
+`HistFillTask` validates the skim cache before consuming it:
 
 | Cache status | Behaviour |
 |---|---|

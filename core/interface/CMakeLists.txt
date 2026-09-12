@@ -5,5 +5,6 @@ set(HEADERS
     RootOutputSink.h
     TextConfigAdapter.h
     CounterService.h
+    CartesianBinning.h
     TaggerEfficiencyService.h
 ) 

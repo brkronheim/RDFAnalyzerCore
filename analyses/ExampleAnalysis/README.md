@@ -1,294 +1,41 @@
-# ATLAS Dimuon Analysis Example
+# ExampleAnalysis: a dimuon workflow
 
-This example demonstrates a complete Z→μμ analysis using the RDFAnalyzerCore framework with ATLAS Open Data. It showcases the most recent framework functionality.
+`ExampleAnalysis` is a compact RDFAnalyzerCore analysis over ATLAS PHYSLITE input. It demonstrates how an analysis connects an `Analyzer`, an RDataFrame selection graph, a histogram manager, and config-driven histogram booking. See the repository's [analysis walkthrough](../../docs/ANALYSIS_WALKTHROUGH.md) for the reusable method to trace an analysis and for framework context.
 
-## Overview
+## What the current code does
 
-This analysis selects events with exactly two good muons and reconstructs the Z boson mass from the dimuon system. It demonstrates several key features of the RDFAnalyzerCore framework:
+`analysis.cc`:
 
-## Features Demonstrated
+1. Constructs `Analyzer` from the config path passed on the command line and creates the `NDHistogramManager` plugin.
+2. Selects muons passing `DFCommonMuonPassIDCuts == 1`, `DFCommonMuonPassPreselection == 1`, `DFCommonJetDr > 0.4`, and `pt >= 20000` MeV.
+3. Requires exactly two selected muons, combines their massless four-vectors, and accepts dimuon mass up to 150000 MeV. There is no lower mass cut.
+4. Defines dimuon mass and leading/subleading muon pT in GeV and books the three histograms listed in `histograms.yaml`.
+5. Calls `an.run()` to execute the configured workflow.
 
-### 1. **Config-Driven Histogram Booking (NDHistogramManager)**
-- Histograms are defined in `histograms.yaml` configuration file
-- No manual histogram booking code required
-- Automatically supports systematic variations
-- Histograms defined:
-  - Z boson mass (70-110 GeV)
-  - Leading muon pT (20-150 GeV)
-  - Subleading muon pT (20-150 GeV)
+The histogram axis ranges (70–110 GeV for mass and 20–150 GeV for each muon pT) determine underflow and overflow; they are not additional event selections. Each histogram uses the `normScale` constant as its weight.
 
-### 2. **Systematic Variation Infrastructure**
-- Demonstrates the systematic variation registration API
-- Shows how to declare systematics that affect specific variables
-- Framework infrastructure for propagating systematics through the analysis
-- Example systematics registered (infrastructure only):
-  - `muonScale_up`: Would represent +1% momentum scale variation
-  - `muonScale_down`: Would represent -1% momentum scale variation
-- To fully implement: modify variable definitions to apply actual variations
-- See main README for complete systematic variation examples
+The analysis source does not explicitly define or register systematic variations. `NDHistogramManager` can auto-detect Up/Down input-column pairs by default; this example sets `histogramSystematics: false` so its configured output is nominal-only regardless of which variation branches are present in the input. The configured integer `type` and float `sampleNorm` constants are not referenced by this analysis source. No trigger manager or trigger selection is set up here.
 
-### 3. **Modern Analyzer API**
-- Single `Analyzer` object manages the entire workflow
-- Plugin system for modular functionality (NDHistogramManager)
-- Clean separation of configuration and code
-- Method chaining for readable analysis flow
+## Configuration and outputs
 
-### 4. **Physics Analysis Flow**
-1. Select muons passing ID cuts and preselection
-2. Require isolation from jets (ΔR > 0.4)
-3. Apply pT threshold (≥ 20 GeV)
-4. Select events with exactly two good muons
-5. Reconstruct Z boson from leading and subleading muons
-6. Apply Z mass window selection (≤ 150 GeV)
-7. Fill histograms for output variables
+- `cfg.yaml` specifies remote EOS input files, tree names, thread count, constant and histogram configuration files, and output settings.
+- `floats.yaml` defines `normScale` and the currently unused `sampleNorm` constant; `ints.yaml` defines an unused `type` constant.
+- `histograms.yaml` defines `ZBosonMass`, `LeadingMuonPt`, and `SubleadingMuonPt`, all weighted by `normScale`.
+- `output.txt` lists the `ZBosonMass` branch for a skim, but the current config sets `enableSkim: false`, so `an.run()` does not write an event tree. Set `enableSkim: true` only when a skim is intended.
 
-## Configuration Files
+The histogram manager writes ROOT histograms to the metadata output channel. Because `cfg.yaml` has no explicit `metaFile`, the output sink derives the path by adding `_meta` before the `saveFile` extension. The configured `saveFile` is `Output/ZMuMuL.root`, so histogram output is `Output/ZMuMuL_meta.root`.
 
-### `cfg.yaml` - Main Configuration
-- Input data files from ATLAS Open Data (PHYSLITE format)
-- Output file path
-- Thread count (-1 = auto-detect)
-- References to additional config files:
-  - `histogramConfig`: Histogram definitions (`histograms.yaml`)
-  - `floatConfig`: Float parameters (`floats.yaml`)
-  - `intConfig`: Integer parameters (`ints.yaml`)
-  - `saveConfig`: Output branch selection (`output.txt`)
+The main config and the `floatConfig`/`intConfig` paths are opened relative to the process working directory in this setup. `DataManager` checks those constant-file paths from the working directory before registering them, so run from the analysis directory or configure absolute paths. Other referenced config files are resolved from the working directory first and then relative to the main config file. Run from the analysis directory for this example:
 
-### `histograms.yaml` - Histogram Definitions
-Defines histograms using YAML mappings, e.g.:
-```yaml
-- name: ZBosonMass
-  variable: ZBosonMass
-  weight: normScale
-  bins: 60
-  lowerBound: 70.0
-  upperBound: 110.0
-```
-
-Each histogram specification includes:
-- `name`: Histogram identifier
-- `variable`: Branch/variable to histogram
-- `weight`: Event weight variable
-- `bins`, `lowerBound`, `upperBound`: Binning specification
-- `label`: (optional) Axis label
-
-### `floats.yaml` - Float Parameters
-- `normScale`: Overall normalization factor for MC
-- `sampleNorm`: Sample cross-section × luminosity
-
-### `ints.yaml` - Integer Parameters
-- `type`: Sample type identifier
-
-### `output.txt` - Output Branches
-Lists branches to save in output ROOT file:
-- `ZBosonMass`: Reconstructed Z boson mass in GeV
-
-## Building and Running
-
-### Build
 ```bash
-# From RDFAnalyzerCore root directory
+# From the repository root
 source build.sh
-
-# Or with CMake directly
-cmake -S . -B build
-cmake --build build -j$(nproc)
+cd analyses/ExampleAnalysis
+../../build/analyses/ExampleAnalysis/analysis cfg.yaml
 ```
 
-### Run locally (single file)
-```bash
-cd build/analyses/ExampleAnalysis
-./analysis ../../analyses/ExampleAnalysis/cfg.yaml
-```
+The configured input URLs are remote EOS files. A local run requires access to them through XRootD or edits to `fileList` pointing at accessible ROOT files. The framework can build the executable independently of whether those inputs are reachable.
 
-**Note**: This analysis uses ATLAS Open Data files hosted on EOS via XRootD. Access requires either:
-- Running on lxplus at CERN
-- Having XRootD access to eospublic.cern.ch
-- Modifying `cfg.yaml` to use local ROOT files
+## Reading or adapting the example
 
-### Run with LAW (file discovery + local multi-dataset skim)
-
-The recommended way to run over multiple datasets uses the LAW task system.
-
-```bash
-# Set up environment
-source law/env.sh
-law index
-
-# Discover files on XRootD storage (parallelized across datasets)
-law run GetXRDFSFileList \
-  --name exampleFiles \
-  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
-  --xrdfs-server root://eospublic.cern.ch/ \
-  --workers 4
-
-# Skim all datasets with pre-submission test job (default: enabled)
-law run SkimTask \
-  --name exampleRun \
-  --exe build/analyses/ExampleAnalysis/analysis \
-  --submit-config analyses/ExampleAnalysis/cfg.yaml \
-  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
-  --workers 4
-
-# Skip the pre-flight test job if you want to submit immediately
-law run SkimTask \
-  --name exampleRun \
-  --exe build/analyses/ExampleAnalysis/analysis \
-  --submit-config analyses/ExampleAnalysis/cfg.yaml \
-  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
-  --no-make-test-job \
-  --workers 4
-
-# Run with xrdfs file-source (automatically chains GetXRDFSFileList → PrepareSkimJobs → SkimTask)
-law run SkimTask \
-  --name exampleRun \
-  --exe build/analyses/ExampleAnalysis/analysis \
-  --submit-config analyses/ExampleAnalysis/cfg.yaml \
-  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
-  --file-source xrdfs \
-  --file-source-name exampleFiles \
-  --workers 4
-```
-
-#### Complete end-to-end pipeline with FullAnalysisDAG
-
-```bash
-law run FullAnalysisDAG \
-  --name exampleRun \
-  --exe build/analyses/ExampleAnalysis/analysis \
-  --submit-config analyses/ExampleAnalysis/cfg.yaml \
-  --dataset-manifest analyses/ExampleAnalysis/dataset_manifest.yaml \
-  --hist-config analyses/ExampleAnalysis/histograms.yaml \
-  --datacard-config analyses/ExampleAnalysis/datacard_config.yaml
-```
-
-`FullAnalysisDAG` automatically runs:
-1. `SkimTask` (with pre-flight test job)  
-2. `HistFillTask`  
-3. `MergeAll`  
-4. `ManifestDatacardTask` + `ManifestFitTask`
-
-## Output
-
-### Skimmed ROOT File
-Location specified by `saveFile` in `cfg.yaml`
-- Contains selected events with branches listed in `output.txt`
-- Includes `ZBosonMass` variable in GeV
-
-### Histograms
-Saved in the same ROOT file in `histograms/` directory:
-- `ZBosonMass`: Z boson invariant mass
-- `LeadingMuonPt`: Leading muon transverse momentum
-- `SubleadingMuonPt`: Subleading muon transverse momentum
-
-For each histogram, if systematic variations are implemented, they would be stored as separate histograms:
-- `<name>_nominal`: Central value
-- `<name>_muonScale_up`: +1% muon momentum scale (when implemented)
-- `<name>_muonScale_down`: -1% muon momentum scale (when implemented)
-
-## Analysis Code Structure
-
-### Helper Functions
-
-#### `getGoodMuons()`
-Selects muons passing:
-- ID cuts (`DFCommonMuonPassIDCuts`)
-- Preselection (`DFCommonMuonPassPreselection`)
-- Jet separation (ΔR > 0.4)
-- pT threshold (≥ 20 GeV)
-
-Returns indices sorted by pT (highest first).
-
-#### `getMuon<N>()`
-Template function extracting the Nth muon's 4-momentum.
-
-#### `twoMuons()`
-Filter requiring exactly 2 good muons.
-
-#### `massFilter()`
-Selects Z candidates with mass ≤ 150 GeV.
-
-#### `getLeadingMuonPt()` / `getSubleadingMuonPt()`
-Extract individual muon pT values in GeV for histogramming.
-
-### Analysis Flow in `main()`
-
-1. **Setup**: Create `Analyzer` from config file
-2. **Add Plugins**: Register `NDHistogramManager` for histogram booking
-3. **Register Systematics**: Define muon momentum scale variations
-4. **Define Variables**: Chain Define/Filter calls to build analysis pipeline
-5. **Book Histograms**: Call `bookConfigHistograms()` to load histogram config
-6. **Execute**: Call `save()` to run the dataframe and write output
-
-## Key Framework Features Used
-
-- **Analyzer Class**: High-level API for building analyses
-- **NDHistogramManager Plugin**: Config-driven histogram booking
-- **Systematic Propagation**: Automatic handling of uncertainty variations
-- **Method Chaining**: Fluent API for readable code
-- **Lazy Evaluation**: RDataFrame optimizes execution automatically
-- **Config-Driven Design**: Separate physics logic from configuration
-
-## Extending This Example
-
-### Adding More Histograms
-Edit `histograms.yaml` to add new histogram definitions:
-```
-name=muon_eta variable=LeadingMuonEta weight=normScale bins=50 lowerBound=-2.5 upperBound=2.5
-```
-
-### Adding More Systematics
-Register additional systematic variations in the code:
-```cpp
-an.getSystematicManager().registerSystematic("muonResolution_up", {"AnalysisMuonsAuxDyn.pt"});
-```
-
-### Adding ML Models
-Add ONNX or BDT plugins for machine learning inference:
-```cpp
-auto onnxMgr = std::make_unique<OnnxManager>(an.getConfigurationProvider());
-an.addPlugin("onnx", std::move(onnxMgr));
-```
-
-### Adding Corrections
-Add CorrectionManager plugin for scale factors:
-```cpp
-auto corrMgr = std::make_unique<CorrectionManager>(an.getConfigurationProvider());
-an.addPlugin("correction", std::move(corrMgr));
-```
-
-### Statistical Analysis Workflow
-
-After running the analysis and producing histograms, you can perform statistical analysis using CMS Combine:
-
-1. **Generate Datacards**: Use the Python datacard generator script:
-```bash
-python core/python/create_datacards.py example_datacard_config.yaml
-```
-
-2. **Build with Combine Support** (optional):
-```bash
-cmake -S . -B build -DBUILD_COMBINE=ON
-cmake --build build -j$(nproc)
-```
-
-3. **Run Statistical Analysis**:
-```bash
-# Set limits
-combine -M AsymptoticLimits datacard.txt
-
-# Fit signal strength
-combine -M FitDiagnostics datacard.txt
-```
-
-See the complete workflow in:
-- [Complete Analysis Workflow Script](../../examples/complete_analysis_workflow.sh)
-- [Datacard Generator Guide](../../docs/DATACARD_GENERATOR.md)
-- [Combine Integration Guide](../../docs/COMBINE_INTEGRATION.md)
-
-## References
-
-- [RDFAnalyzerCore Documentation](https://brkronheim.github.io/RDFAnalyzerCore/)
-- [Config-Driven Histograms Guide](../../docs/CONFIG_HISTOGRAMS.md)
-- [Analysis Guide](../../docs/ANALYSIS_GUIDE.md)
-- [ATLAS Open Data](http://opendata.cern.ch/docs/about-atlas)
+Start in `analysis.cc` and match each input branch to its `Define` and `Filter` uses. Follow the histogram variable and weight names into `histograms.yaml` and `floats.yaml`. For a similar analysis, preserve this tracing method but verify its own manager setup, configuration-path behavior, normalization, event selections, and output actions. Production manifests and batch task graphs are optional analysis-level features; this example does not define them.

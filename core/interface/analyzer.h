@@ -382,7 +382,7 @@ public:
    * (job ID, dataset query hash, submission timestamp, etc.) to the provenance
    * record without bypassing the provenance interface.
    *
-   * May be called at any time before save() / run().
+   * May be called at any time before run().
    *
    * @param key   Metadata key (will be stored as "task.<key>").
    * @param value Metadata value.

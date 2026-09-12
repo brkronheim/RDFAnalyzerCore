@@ -264,6 +264,53 @@ TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsWithConfig) {
   EXPECT_EQ(histos.size(), 4u);
 }
 
+TEST_F(NDHistogramManagerConfigTest, HistogramSystematicsCanBeDisabled) {
+  dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
+  dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var2", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("w2", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var3", []() { return 7.5f; }, {}, *systematicManager);
+  dataManager->Define("w3", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("var4", []() { return 12.5f; }, {}, *systematicManager);
+  dataManager->Define("w4", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("channel", []() { return 1.0f; }, {}, *systematicManager);
+  dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
+  dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
+  dataManager->Define("w1_weightUp", []() { return 2.0f; }, {},
+                      *systematicManager);
+  dataManager->Define("w1_weightDown", []() { return 0.5f; }, {},
+                      *systematicManager);
+  systematicManager->registerVariationColumn("w1", "weightUp", "w1_weightUp");
+  systematicManager->registerVariationColumn("w1", "weightDown", "w1_weightDown");
+  const auto allSystematics =
+      systematicManager->makeSystList("SystematicCounter", *dataManager);
+  ASSERT_EQ(allSystematics.size(), 3u);
+  dataManager->DefineVector(
+      "SystematicCounter_systVector",
+      {"SystematicCounter", "SystematicCounter_weightUp",
+       "SystematicCounter_weightDown"},
+      "Float_t", *systematicManager);
+
+  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramSystematics", "false");
+  histogramManager->setupFromConfigFile();
+  histogramManager->bookConfigHistograms();
+
+  ASSERT_EQ(histogramManager->GetHistos().size(), 4u);
+  auto histogram = histogramManager->GetHistos().front().GetPtr();
+  ASSERT_NE(histogram, nullptr);
+  ASSERT_EQ(histogram->GetNdimensions(), 5);
+  EXPECT_EQ(histogram->GetAxis(3)->GetNbins(), 1)
+      << "The systematic axis should contain only the nominal bin";
+  const auto nominalCounter = dataManager->getDataFrame()
+      .Take<ROOT::VecOps::RVec<Float_t>>(
+          "SystematicCounter_nominal_systVector")
+      .GetValue();
+  ASSERT_EQ(nominalCounter.size(), 1u);
+  ASSERT_EQ(nominalCounter.front().size(), 1u);
+  EXPECT_FLOAT_EQ(nominalCounter.front().front(), 0.0f);
+}
+
 TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsWithDefaults) {
   // Set up variables
   dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
@@ -741,6 +788,29 @@ TEST_F(NDHistogramManagerConfigTest, YamlHistogramConfigParsedFromTextMainConfig
 
   // Setup should parse the YAML config file without errors
   EXPECT_NO_THROW(histogramManager->setupFromConfigFile());
+}
+
+TEST_F(NDHistogramManagerConfigTest, VhHistogramsHaveSevenBTagRegions) {
+  configManager->set("histogramConfig", "../../../analyses/VH/histograms.yaml");
+  ASSERT_NO_THROW(histogramManager->setupFromConfigFile());
+
+  const auto &histograms = histogramManager->getConfigHistograms();
+  ASSERT_EQ(histograms.size(), 36u);
+  const std::vector<std::string> expectedRegions = {
+      "AtLeast1TightB_SubleadBelowLoose",
+      "AtLeast1TightB_SubleadLooseToMedium",
+      "AtLeast1TightB_SubleadMediumToTight",
+      "AtLeast1TightB_SubleadTightToXTight",
+      "AtLeast1TightB_SubleadXTightToXXTight",
+      "AtLeast1TightB_SubleadAtLeastXXTight",
+      "ZeroTightB_AnySubleadWP"};
+  for (const auto &histogram : histograms) {
+    EXPECT_EQ(histogram.channelVariable, "JetBTagRegion") << histogram.name;
+    EXPECT_EQ(histogram.channelBins, 7) << histogram.name;
+    EXPECT_FLOAT_EQ(histogram.channelLowerBound, -0.5f) << histogram.name;
+    EXPECT_FLOAT_EQ(histogram.channelUpperBound, 6.5f) << histogram.name;
+    EXPECT_EQ(histogram.channelRegions, expectedRegions) << histogram.name;
+  }
 }
 
 TEST_F(NDHistogramManagerConfigTest, YamlHistogramConfigProducesSameResultAsText) {

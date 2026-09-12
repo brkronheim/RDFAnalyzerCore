@@ -5,6 +5,5 @@
 # the RDataFrame.
 # =============================================================================
 
-# Sample type code (used by TriggerManager to select the trigger group).
-# 10 = Z→μμ MC sample (ATLAS type code convention).
+# Sample type code retained in the example config; analysis.cc does not use it.
 type: 10

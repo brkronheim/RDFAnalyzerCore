@@ -6,6 +6,7 @@
 //==============================================================================
 
 #include "CmsCorrections.h"
+#include "CmsWeights.h"
 
 // Plugin headers (needed for ::create calls and programmatic API).
 #include "CorrectedObjectCollectionManagers.h"
@@ -63,6 +64,24 @@ void setWorkflowConfigValue(IConfigurationProvider &config,
   }
 }
 
+std::string deriveJetVetoMapPath(const CmsYearSettings &ys) {
+  if (ys.jmeFile.empty()) return "";
+  std::string mapPath = ys.jmeFile;
+  const auto lastSlash = mapPath.rfind('/');
+  if (lastSlash == std::string::npos) return "";
+  return mapPath.substr(0, lastSlash + 1) + "jetvetomaps.json.gz";
+}
+
+void ensureCmsJetVetoMapConfig(Analyzer &an,
+                               const CmsCorrectionConfig &cfg) {
+  if (!cfg.yearSettings) return;
+  auto &config = an.getConfigurationProvider();
+  if (!config.get("jetVetoMapConfig").empty()) return;
+
+  const std::string mapPath = deriveJetVetoMapPath(*cfg.yearSettings);
+  if (!mapPath.empty()) config.set("jetVetoMapConfig", mapPath);
+}
+
 /// Derive the per-source JES correction name from the total correction name.
 std::string jesCorrectionNameForSource(const std::string &totalCorrectionName,
                                        const std::string &source) {
@@ -78,6 +97,141 @@ std::string jesCorrectionNameForSource(const std::string &totalCorrectionName,
 }
 
 } // namespace
+
+void CmsCorrectionAudit::add(const std::string &category,
+                              const std::string &reason,
+                              const std::string &detail,
+                              const std::string &remediation) {
+  entries.push_back({category, reason, detail, remediation});
+}
+
+void CmsCorrectionAudit::print(std::ostream &os) const {
+  if (entries.empty()) {
+    os << "CmsCorrectionAudit: No issues recorded.\n";
+    return;
+  }
+  os << "CmsCorrectionAudit: " << entries.size() << " issue(s).\n";
+  for (const auto &entry : entries) {
+    os << "  [" << entry.category << "] " << entry.reason << ": "
+       << entry.detail;
+    if (!entry.remediation.empty()) os << " Remediation: " << entry.remediation;
+    os << "\n";
+  }
+}
+
+void CmsCorrectionAudit::printSummary(std::ostream &os) const {
+  if (entries.empty()) {
+    os << "CmsCorrectionAudit: All corrections available.\n";
+    return;
+  }
+  os << "CmsCorrectionAudit: " << entries.size() << " issue(s):";
+  for (const auto &entry : entries) os << " " << entry.category;
+  os << "\n";
+}
+
+bool CmsCorrectionAudit::hasCategory(const std::string &category) const {
+  return std::any_of(entries.begin(), entries.end(),
+                     [&category](const CmsCorrectionAuditEntry &entry) {
+                       return entry.category == category;
+                     });
+}
+
+bool CmsCorrectionAudit::hasReason(const std::string &reason) const {
+  return std::any_of(entries.begin(), entries.end(),
+                     [&reason](const CmsCorrectionAuditEntry &entry) {
+                       return entry.reason == reason;
+                     });
+}
+
+CmsCorrectionAudit validateCmsCorrectionStack(
+    const CmsCorrectionConfig &corrCfg,
+    const CmsWeightConfig *weightCfg) {
+  CmsCorrectionAudit audit;
+  if (!corrCfg.yearSettings) {
+    audit.add("config", "missing_year_settings",
+              "No CmsYearSettings were supplied.",
+              "Load a year through CmsYearRegistry before configuring corrections.");
+    return audit;
+  }
+
+  const auto &ys = *corrCfg.yearSettings;
+  const auto check = [&audit](const std::string &category,
+                              const std::string &file,
+                              const std::string &detail,
+                              const std::string &remediation) {
+    if (file.empty() || !std::filesystem::exists(file)) {
+      audit.add(category, "payload_not_found", detail + " Path: " + file,
+                remediation);
+    }
+  };
+
+  if (corrCfg.applyJetCorrections) {
+    check("jec", ys.jmeFile, "AK4 JME payload is unavailable.",
+          "Set the 2024 JME payload path or disable jet corrections.");
+  }
+  if (corrCfg.applyFatJetCorrections) {
+    check("fatjet_jec", ys.fatJetJmeFile,
+          "AK8 JME payload is unavailable.",
+          "Set the fat-jet JME payload path or disable fat-jet corrections.");
+  }
+  if (corrCfg.applyMuonCorrections) {
+    check("muon_scale", ys.muonScaleResolutionFile,
+          "Muon scale and resolution payload is unavailable.",
+          "Set the 2024 muon scale/resolution payload or disable muon corrections.");
+  }
+  if (corrCfg.applyBtagCorrections) {
+    check("btag", ys.btvBTagFile, "BTV b-tag payload is unavailable.",
+          "Set the 2024 BTV payload or disable b-tag corrections.");
+  }
+
+  if (weightCfg && weightCfg->isMC) {
+    if (weightCfg->applyPileupWeights) {
+      check("pileup", ys.pileupFile, "Pileup payload is unavailable.",
+            "Set the 2024 pileup payload or disable pileup weights.");
+    }
+    if (weightCfg->applyMuonScaleFactors) {
+      check("muon_sf", ys.muonFile, "Muon ID/isolation payload is unavailable.",
+            "Set the 2024 muon SF payload or disable muon scale factors.");
+    }
+    if (weightCfg->applyBTagWeights || weightCfg->applyBTagScaleFactors) {
+      check("btag", ys.btvBTagFile, "BTV b-tag SF payload is unavailable.",
+            "Set the 2024 BTV payload or disable b-tag weights.");
+      if (weightCfg->btagMethod == BTagMethod::Shape) {
+        const std::string shapeFile = weightCfg->btagShapeFile.empty()
+                                          ? ys.btvBTagFile
+                                          : weightCfg->btagShapeFile;
+        check("btag_shape", shapeFile,
+          "Continuous b-tag shape payload is unavailable.",
+          "Set btagShapeFile to a payload containing the continuous correction.");
+        if (weightCfg->btagShapeCorrection.empty()) {
+          audit.add("btag_shape", "correction_name_missing",
+            "No continuous b-tag correction name is configured.",
+            "Set btagShapeCorrection, for example UParTAK4_shape.");
+        }
+      } else {
+        check("btag_efficiency", weightCfg->btagEfficiencyFile,
+          "MC b-tag efficiency payload is unavailable.",
+          "Set btagEfficiencyFile and btagEfficiencyCorrection.");
+        if (weightCfg->btagEfficiencyCorrection.empty()) {
+          audit.add("btag_efficiency", "correction_name_missing",
+            "No MC b-tag efficiency correction name is configured.",
+            "Set btagEfficiencyCorrection.");
+        }
+      }
+    }
+    if (weightCfg->applyTriggerScaleFactors) {
+      check("trigger", weightCfg->triggerSfFile,
+        "Path-specific dimuon trigger SF payload is unavailable.",
+        "Set triggerSfFile and triggerSfCorrection for the requested HLT.");
+      if (weightCfg->triggerSfCorrection.empty()) {
+        audit.add("trigger", "correction_name_missing",
+          "No path-specific trigger SF correction name is configured.",
+          "Set triggerSfCorrection for the requested HLT.");
+      }
+    }
+  }
+  return audit;
+}
 
 // ===========================================================================
 // Tagger working-point configuration helpers
@@ -96,11 +250,24 @@ void configureBtagWorkingPoints(Analyzer &an, const BTagWorkingPoints &btWp) {
     std::cerr << "WARNING: configureBtagWorkingPoints — btagManager not found.\n";
     return;
   }
-  if (btWp.loose != 0.0f)   btagMgr->addWorkingPoint("L", btWp.loose);
-  if (btWp.medium != 0.0f)  btagMgr->addWorkingPoint("M", btWp.medium);
-  if (btWp.tight != 0.0f)   btagMgr->addWorkingPoint("T", btWp.tight);
-  if (btWp.xtight != 0.0f)  btagMgr->addWorkingPoint("XT", btWp.xtight);
-  if (btWp.xxtight != 0.0f) btagMgr->addWorkingPoint("XXT", btWp.xxtight);
+  const auto &workingPoints = btagMgr->getWorkingPoints();
+  const auto addIfMissing = [&btagMgr, &workingPoints](const std::string &name,
+                                                        float threshold) {
+    if (threshold == 0.0f) return;
+    const auto existing = std::find_if(
+        workingPoints.begin(), workingPoints.end(),
+        [&name](const WorkingPointEntry &workingPoint) {
+          return workingPoint.name == name;
+        });
+    if (existing == workingPoints.end()) {
+      btagMgr->addWorkingPoint(name, threshold);
+    }
+  };
+  addIfMissing("L", btWp.loose);
+  addIfMissing("M", btWp.medium);
+  addIfMissing("T", btWp.tight);
+  addIfMissing("XT", btWp.xtight);
+  addIfMissing("XXT", btWp.xxtight);
 }
 
 /// Register c-tag working points from a CTagWorkingPoints struct.
@@ -116,12 +283,23 @@ void configureCtagWorkingPoints(Analyzer &an, const CTagWorkingPoints &ctWp) {
     std::cerr << "WARNING: configureCtagWorkingPoints — ctagManager not found.\n";
     return;
   }
-  if (ctWp.cvlLoose != 0.0f || ctWp.cvbLoose != 0.0f)
-    ctagMgr->addWorkingPoint("L", {ctWp.cvlLoose, ctWp.cvbLoose});
-  if (ctWp.cvlMedium != 0.0f || ctWp.cvbMedium != 0.0f)
-    ctagMgr->addWorkingPoint("M", {ctWp.cvlMedium, ctWp.cvbMedium});
-  if (ctWp.cvlTight != 0.0f || ctWp.cvbTight != 0.0f)
-    ctagMgr->addWorkingPoint("T", {ctWp.cvlTight, ctWp.cvbTight});
+  const auto &workingPoints = ctagMgr->getWorkingPoints();
+  const auto addIfMissing = [&ctagMgr, &workingPoints](
+                                const std::string &name,
+                                const std::vector<float> &thresholds) {
+    if (thresholds[0] == 0.0f && thresholds[1] == 0.0f) return;
+    const auto existing = std::find_if(
+        workingPoints.begin(), workingPoints.end(),
+        [&name](const WorkingPointEntry &workingPoint) {
+          return workingPoint.name == name;
+        });
+    if (existing == workingPoints.end()) {
+      ctagMgr->addWorkingPoint(name, thresholds);
+    }
+  };
+  addIfMissing("L", {ctWp.cvlLoose, ctWp.cvbLoose});
+  addIfMissing("M", {ctWp.cvlMedium, ctWp.cvbMedium});
+  addIfMissing("T", {ctWp.cvlTight, ctWp.cvbTight});
 }
 
 /// Configure the b-tag TaggerWorkingPointManager with object columns,
@@ -168,6 +346,7 @@ void setupCtagTaggerManager(Analyzer &an, const CmsYearSettings &ys,
 
 void setupCmsFrameworkPlugins(Analyzer &an,
                                const CmsCorrectionConfig &cfg) {
+  ensureCmsJetVetoMapConfig(an, cfg);
   CorrectionManager::create(an, "correctionManager");
   WeightManager::create(an, "weightManager");
   GenWeightManager::create(an, "genWeightManager");
@@ -209,33 +388,41 @@ void setupCmsFrameworkPlugins(Analyzer &an,
 // Correction input columns
 // ===========================================================================
 
-void defineCmsCorrectionInputs(Analyzer &an) {
-  // Electron_scEta: supercluster eta from electron eta + deltaEtaSC
-  an.Define("Electron_scEta",
-            [](const ROOT::VecOps::RVec<float> &eta,
-               const ROOT::VecOps::RVec<float> &deltaEtaSC) {
-              ROOT::VecOps::RVec<float> scEta(eta.size(), 0.0f);
-              for (size_t i = 0; i < eta.size(); ++i) {
-                scEta[i] = eta[i] + deltaEtaSC[i];
-              }
-              return scEta;
-            },
-            {"Electron_eta", "Electron_deltaEtaSC"});
+void defineCmsCorrectionInputs(Analyzer &an,
+                                const CmsCorrectionConfig &cfg) {
+  const bool isData = toLowerCopy(an.getConfigurationProvider().get("dtype")) ==
+                      "data";
 
-  // Jet_genMatchedPt: matched GenJet pT for JER smearing
-  an.Define("Jet_genMatchedPt",
-            [](const ROOT::VecOps::RVec<int> &genJetIdx,
-               const ROOT::VecOps::RVec<float> &genJetPt) {
-              ROOT::VecOps::RVec<float> matched(genJetIdx.size(), -1.0f);
-              for (size_t i = 0; i < genJetIdx.size(); ++i) {
-                const int idx = genJetIdx[i];
-                if (idx >= 0 && static_cast<size_t>(idx) < genJetPt.size()) {
-                  matched[i] = genJetPt[idx];
+  if (cfg.applyElectronCorrections) {
+    // Electron_scEta: supercluster eta from electron eta + deltaEtaSC
+    an.Define("Electron_scEta",
+              [](const ROOT::VecOps::RVec<float> &eta,
+                 const ROOT::VecOps::RVec<float> &deltaEtaSC) {
+                ROOT::VecOps::RVec<float> scEta(eta.size(), 0.0f);
+                for (size_t i = 0; i < eta.size(); ++i) {
+                  scEta[i] = eta[i] + deltaEtaSC[i];
                 }
-              }
-              return matched;
-            },
-            {"Jet_genJetIdx_int", "GenJet_pt"});
+                return scEta;
+              },
+              {"Electron_eta", "Electron_deltaEtaSC"});
+  }
+
+  if (cfg.applyJetCorrections && !isData) {
+    // Jet_genMatchedPt: matched GenJet pT for JER smearing
+    an.Define("Jet_genMatchedPt",
+            [](const std::vector<int> &genJetIdx,
+                 const ROOT::VecOps::RVec<float> &genJetPt) {
+                ROOT::VecOps::RVec<float> matched(genJetIdx.size(), -1.0f);
+                for (size_t i = 0; i < genJetIdx.size(); ++i) {
+                  const int idx = genJetIdx[i];
+                  if (idx >= 0 && static_cast<size_t>(idx) < genJetPt.size()) {
+                    matched[i] = genJetPt[idx];
+                  }
+                }
+                return matched;
+              },
+              {"Jet_genJetIdx_int", "GenJet_pt"});
+  }
 }
 
 // ===========================================================================
@@ -256,6 +443,7 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
   auto &config = an.getConfigurationProvider();
   const auto &ys = *cfg.yearSettings;
   const auto prefix = cfg.configKeyPrefix;
+  const bool isData = toLowerCopy(config.get("dtype")) == "data";
 
   // -- Basic enable/disable flags --
   setWorkflowConfigValue(config, prefix + "ApplyJetCorrections",
@@ -294,6 +482,22 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
   setWorkflowConfigValue(config, prefix + "MuonScaleResolutionFile",
                          ys.muonScaleResolutionFile);
 
+  if (cfg.applyMuonCorrections && !ys.muonScaleResolutionFile.empty()) {
+    auto muonMgr = an.getPlugin<MuonRochesterManager>("muonRochesterManager");
+    if (!muonMgr) {
+      throw std::runtime_error(
+          "CmsCorrections: muonRochesterManager is required for muon corrections.");
+    }
+    muonMgr->setObjectColumns("Muon_pt", "Muon_eta", "Muon_phi", "Muon_mass");
+    muonMgr->setRochesterInputColumns(
+        "Muon_charge", "", "Muon_nTrackerLayers", "", "");
+    muonMgr->setScaleResolutionEventColumns("luminosityBlock", "event");
+    const bool isData = config.get("dtype") == "data";
+    muonMgr->applyScaleAndResolution(
+        ys.muonScaleResolutionFile, isData, "Muon_pt",
+        "Muon_pt_corr_nominal");
+  }
+
   // -- JES systematic mode (used by fallback logic) --
   const char *jesModeStr = "reduced";
   switch (cfg.jesMode) {
@@ -313,11 +517,64 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
   auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
   if (!corrMgr) return;
 
-  // Register the JES uncertainty correction
-  const std::string jesCorrectionName = prefix + "_jes_unc";
-  corrMgr->registerCorrection(
-      jesCorrectionName, ys.jmeFile, ys.jesTotalCorrection,
-      {"Jet_pt", "Jet_eta", "Jet_phi"});
+  jesMgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  std::string rawPtColumn = "Jet_pt_raw";
+  std::string rawMassColumn = "Jet_mass_raw";
+  if (cfg.jetRawPtColumnOverride.empty()) {
+    jesMgr->removeExistingCorrections("Jet_rawFactor");
+  } else {
+    jesMgr->setRawPtColumn(cfg.jetRawPtColumnOverride);
+    rawPtColumn = cfg.jetRawPtColumnOverride;
+    if (!cfg.jetRawMassColumnOverride.empty()) {
+      rawMassColumn = cfg.jetRawMassColumnOverride;
+    }
+  }
+
+  const std::vector<std::string> jecInputs{
+    "Jet_area", "Jet_eta", rawPtColumn, ys.rhoBranch, "Jet_phi"};
+  const std::string jecCorrectionName = prefix + "_jec_nominal";
+  corrMgr->registerCorrection(jecCorrectionName, ys.jmeFile, jecCompound,
+                              jecInputs);
+  jesMgr->applyCorrectionlib(*corrMgr, jecCorrectionName, {}, rawPtColumn,
+                              "Jet_pt_corr_jec", true, rawMassColumn,
+                              "Jet_mass_corr_jec", jecInputs);
+
+  if (!isData) {
+    const std::string jerResolutionName = prefix + "_jer_resolution";
+    const std::string jerScaleFactorName = prefix + "_jer_scale_factor";
+    const std::vector<std::string> jerResolutionInputs{
+      "Jet_eta", "Jet_pt_corr_jec", ys.rhoBranch};
+    corrMgr->registerCorrection(jerResolutionName, ys.jmeFile,
+                                ys.jerPtResolutionCorrection,
+                                jerResolutionInputs);
+    corrMgr->registerCorrection(jerScaleFactorName, ys.jmeFile,
+                                ys.jerScaleFactorCorrection,
+                                ys.jerScaleFactorInputs);
+    jesMgr->setJERSmearingColumns("Jet_genMatchedPt", ys.rhoBranch, "event");
+    jesMgr->applyJERSmearing(*corrMgr, jerResolutionName, jerScaleFactorName,
+                             "Jet_pt_corr_jec", "Jet_pt_corr_nominal", "nom",
+                             true, "Jet_mass_corr_jec",
+                             "Jet_mass_corr_nominal", jerResolutionInputs,
+                             ys.jerScaleFactorInputs);
+  }
+
+  jesMgr->execute();
+
+  if (isData) {
+    an.Define("Jet_pt_corr_nominal",
+              [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+              {"Jet_pt_corr_jec"});
+    an.Define("Jet_mass_corr_nominal",
+              [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
+              {"Jet_mass_corr_jec"});
+  }
+
+  if (cfg.applyMetType1) {
+    jesMgr->setMETColumns("PuppiMET_pt", "PuppiMET_phi");
+    jesMgr->propagateMET(
+        "PuppiMET_pt", "PuppiMET_phi", "Jet_pt", "Jet_pt_corr_nominal",
+        "PuppiMET_pt_corr_nominal", "PuppiMET_phi_corr_nominal");
+  }
 
   // Select and register the systematic source set based on mode
   std::vector<std::string> jesSources;
@@ -333,20 +590,67 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
       break;
   }
 
+  const std::string jesTotalCorrection =
+      cfg.jesTotalCorrectionOverride.empty()
+          ? ys.jesTotalCorrection
+          : cfg.jesTotalCorrectionOverride;
   if (!jesSources.empty()) {
     jesMgr->registerSystematicSources(jesModeStr, jesSources);
-    jesMgr->applySystematicSet(*corrMgr, jesCorrectionName,
-                                jesModeStr, "Jet_pt_corr_jec",
-                                prefix + "_Jet_pt_jes");
+    const std::vector<std::string> jesInputs{"Jet_eta", "Jet_pt_corr_nominal"};
+    for (const auto &source : jesSources) {
+      const std::string correctionlibName =
+          source == "Total" ? jesTotalCorrection
+                             : jesCorrectionNameForSource(jesTotalCorrection,
+                                                          source);
+      const std::string correctionName = prefix + "_jes_" + source;
+      corrMgr->registerCorrection(correctionName, ys.jmeFile,
+                                  correctionlibName, jesInputs);
+      const std::string label = source == "Total" ? "total" : source;
+      const std::string upPtColumn = "Jet_pt_jes_" + label + "_up";
+      const std::string downPtColumn = "Jet_pt_jes_" + label + "_down";
+      const std::string upMassColumn = "Jet_mass_jes_" + label + "_up";
+      const std::string downMassColumn = "Jet_mass_jes_" + label + "_down";
+      jesMgr->applyCorrectionlib(
+          *corrMgr, correctionName, {}, "Jet_pt_corr_nominal", upPtColumn,
+          true, "Jet_mass_corr_nominal", upMassColumn, jesInputs, true, 1.0f);
+      jesMgr->applyCorrectionlib(
+          *corrMgr, correctionName, {}, "Jet_pt_corr_nominal", downPtColumn,
+          true, "Jet_mass_corr_nominal", downMassColumn, jesInputs, true,
+          -1.0f);
+      jesMgr->addVariation(label, upPtColumn, downPtColumn, upMassColumn,
+                           downMassColumn);
+      an.getSystematicManager().registerVariationColumns(
+          "Jet_pt_corr_nominal", label, upPtColumn, downPtColumn);
+      an.getSystematicManager().registerVariationColumns(
+          "Jet_mass_corr_nominal", label, upMassColumn, downMassColumn);
+      if (cfg.applyMetType1) {
+        const std::string upMetPtColumn =
+            "PuppiMET_pt_jes_" + label + "_up";
+        const std::string downMetPtColumn =
+            "PuppiMET_pt_jes_" + label + "_down";
+        const std::string upMetPhiColumn =
+            "PuppiMET_phi_jes_" + label + "_up";
+        const std::string downMetPhiColumn =
+            "PuppiMET_phi_jes_" + label + "_down";
+        jesMgr->propagateMET(
+            "PuppiMET_pt_corr_nominal", "PuppiMET_phi_corr_nominal",
+            "Jet_pt_corr_nominal", upPtColumn, upMetPtColumn,
+            upMetPhiColumn);
+        jesMgr->propagateMET(
+            "PuppiMET_pt_corr_nominal", "PuppiMET_phi_corr_nominal",
+            "Jet_pt_corr_nominal", downPtColumn, downMetPtColumn,
+            downMetPhiColumn);
+        an.getSystematicManager().registerVariationColumns(
+            "PuppiMET_pt_corr_nominal", label, upMetPtColumn,
+            downMetPtColumn);
+        an.getSystematicManager().registerVariationColumns(
+            "PuppiMET_phi_corr_nominal", label, upMetPhiColumn,
+            downMetPhiColumn);
+      }
+    }
   }
 
-  // -- JER per-bin uncertainties --
-  // Additionally register JER total variation
-  jesMgr->setJERSmearingColumns("Jet_genMatchedPt",
-                                 ys.rhoBranch, "event");
-  // JER uncertainties are handled within the JER smearing step itself.
-  // The JetEnergyScaleManager will create JER up/down columns automatically
-  // when the correction payloads contain systematic variations.
+  jesMgr->execute();
 }
 
 // ===========================================================================
@@ -569,36 +873,58 @@ void applyCmsHemIssueFilter(Analyzer &an, const CmsCorrectionConfig &cfg) {
 }
 
 // ===========================================================================
+// MET event-cleaning filters
+// ===========================================================================
+
+void applyCmsMetFilters(Analyzer &an) {
+  const std::vector<std::string> names{
+      "Flag_HBHENoiseFilter",
+      "Flag_HBHENoiseIsoFilter",
+      "Flag_CSCTightHaloFilter",
+      "Flag_goodVertices",
+      "Flag_eeBadScFilter",
+      "Flag_EcalDeadCellTriggerPrimitiveFilter",
+      "Flag_BadPFMuonFilter",
+      "Flag_BadChargedCandidateFilter",
+      "Flag_ecalBadCalibFilter"};
+
+  const auto columns = an.GetColumnNames();
+  std::vector<std::string> filterColumns;
+  filterColumns.reserve(names.size());
+  for (const auto &name : names) {
+    const std::string output = "cms_met_filter_" + name.substr(5);
+    filterColumns.push_back(output);
+    if (std::find(columns.begin(), columns.end(), name) == columns.end()) {
+      an.Define(output, []() { return true; }, {});
+    } else {
+      an.Define(output, [](bool value) { return value; }, {name});
+    }
+  }
+
+  an.Filter(
+      "cms_met_filters",
+      [](bool hbhe, bool hbheIso, bool halo, bool vertices, bool eeBadSc,
+         bool deadCell, bool badMuon, bool badCharged, bool badCalib) {
+        return hbhe && hbheIso && halo && vertices && eeBadSc && deadCell &&
+               badMuon && badCharged && badCalib;
+      },
+      filterColumns);
+}
+
+// ===========================================================================
 // JetVetoMap integration
 // ===========================================================================
 
 void applyCmsJetVetoMap(Analyzer &an, const CmsCorrectionConfig &cfg) {
   if (!cfg.yearSettings) return;
 
+  ensureCmsJetVetoMapConfig(an, cfg);
+
   auto jvm = an.getPlugin<JetVetoMapManager>("jetVetoMapManager");
   if (!jvm) {
     std::cerr << "WARNING: applyCmsJetVetoMap — JetVetoMapManager not found. "
               << "Call setupCmsFrameworkPlugins() first.\n";
     return;
-  }
-
-  // Auto-configure the JetVetoMap config if not already set
-  // The jetvetomaps.json.gz lives alongside the JME JSON file
-  const auto &ys = *cfg.yearSettings;
-  if (!ys.jmeFile.empty()) {
-    // Derive jetvetomap path from JME file path
-    // e.g. .../JME/Run3-...-NanoAODv12/latest/jet_jerc.json.gz
-    //  -> .../JME/Run3-...-NanoAODv12/latest/jetvetomaps.json.gz
-    std::string mapPath = ys.jmeFile;
-    const auto lastSlash = mapPath.rfind('/');
-    if (lastSlash != std::string::npos) {
-      mapPath = mapPath.substr(0, lastSlash + 1) + "jetvetomaps.json.gz";
-    }
-    auto &config = an.getConfigurationProvider();
-    const std::string existing = config.get("jetVetoMapConfig");
-    if (existing.empty()) {
-      config.set("jetVetoMapConfig", mapPath);
-    }
   }
 
   // Apply the JetVetoMap

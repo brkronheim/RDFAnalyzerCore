@@ -512,7 +512,14 @@ static std::string buildSystematicVector(
     }
   }
 
-  const std::string systVectorName = baseName + "_systVector";
+  // A nominal-only booking must not reuse a previously materialised full
+  // systematic vector: its longer size would be inconsistent with the
+  // one-bin systematic axis.  Keep a dedicated vector for the nominal case.
+  const bool nominalOnly =
+      systList.size() == 1 && systList.front() == "Nominal";
+  const std::string systVectorName =
+      nominalOnly ? baseName + "_nominal_systVector"
+                  : baseName + "_systVector";
   if (!cache.Has(systVectorName)) {
     dataManager_m->DefineVector(systVectorName, systBranches, "Float_t", *systematicManager_m);
     df = dataManager_m->getDataFrame();
@@ -607,9 +614,12 @@ void NDHistogramManager::BookSingleHistogram(
     throw std::runtime_error("NDHistogramManager::BookSingleHistogram: DataManager not set");
   }
 
-  ensureSystematicsAutoRegistered();
-  const std::vector<std::string> systList =
-      systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  std::vector<std::string> systList{"Nominal"};
+  if (histogramSystematics_m) {
+    ensureSystematicsAutoRegistered();
+    systList =
+        systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  }
   BookSingleHistogramWithSystList(info,
                                   std::move(sampleCategoryInfo),
                                   std::move(controlRegionInfo),
@@ -843,10 +853,13 @@ void NDHistogramManager::bookND(std::vector<histInfo> &infos,
 
   // Auto-detect systematic variations from dataframe columns before building
   // the syst list for the first time.
-  ensureSystematicsAutoRegistered();
-
-  // Append systematic axis info if not already appended
-  const std::vector<std::string> systList = systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  // Append systematic axis info if not already appended.
+  std::vector<std::string> systList{"Nominal"};
+  if (histogramSystematics_m) {
+    ensureSystematicsAutoRegistered();
+    systList =
+        systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  }
   if (allRegionNames.size() > 3) {
     for (size_t i = 3; i < allRegionNames.size(); ++i) {
       normalizedRegionNames.emplace_back(allRegionNames[i]);
@@ -1092,6 +1105,30 @@ void NDHistogramManager::Clear() {
 void NDHistogramManager::setupFromConfigFile() {
   if (!configManager_m) {
     throw std::runtime_error("NDHistogramManager: ConfigManager not set");
+  }
+
+  // Histogram systematic variations are enabled by default for backwards
+  // compatibility.  Analyses that only want nominal plots can explicitly set
+  // histogramSystematics: false without changing their central event weights.
+  const std::string histogramSystematics =
+      configManager_m->get("histogramSystematics");
+  histogramSystematics_m = true;
+  if (!histogramSystematics.empty()) {
+    std::string normalized = histogramSystematics;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (normalized == "true" || normalized == "1" || normalized == "yes") {
+      histogramSystematics_m = true;
+    } else if (normalized == "false" || normalized == "0" ||
+               normalized == "no") {
+      histogramSystematics_m = false;
+    } else {
+      throw std::runtime_error(
+          "NDHistogramManager: invalid histogramSystematics value '" +
+          histogramSystematics + "'. Valid values are true or false.");
+    }
   }
 
   // Read optional histogram backend selection (default: "root", option: "boost")
@@ -1378,10 +1415,12 @@ void NDHistogramManager::bookConfigHistograms() {
 
   // Auto-detect systematic variations from dataframe columns before the syst
   // list is built for the first time.
-  ensureSystematicsAutoRegistered();
-
-  const std::vector<std::string> systList =
-      systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  std::vector<std::string> systList{"Nominal"};
+  if (histogramSystematics_m) {
+    ensureSystematicsAutoRegistered();
+    systList =
+        systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  }
 
   for (const auto &config : configHistograms_m) {
     histInfo info(config.name.c_str(), config.variable.c_str(),

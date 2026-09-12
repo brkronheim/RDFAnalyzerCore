@@ -54,6 +54,15 @@ void JetVetoMapManager::setContext(ManagerContext &ctx) {
 // ---------------------------------------------------------------------------
 
 void JetVetoMapManager::loadConfigFile(const std::string &path) {
+  const auto isJsonPayload = [&path](const std::string &suffix) {
+    return path.size() >= suffix.size() &&
+           path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0;
+  };
+  if (isJsonPayload(".json") || isJsonPayload(".json.gz")) {
+    vetoMapFiles_m.push_back(path);
+    return;
+  }
+
   std::ifstream input(path);
   if (!input) {
     throw std::runtime_error(
@@ -185,6 +194,11 @@ void JetVetoMapManager::applyJetVetoMap() {
   auto corrSet = correction::CorrectionSet::from_file(mapFile);
   // Capture in shared_ptr to keep the correction set alive across invocations
   auto sharedSet = std::shared_ptr<const correction::CorrectionSet>(std::move(corrSet));
+  if (sharedSet->size() == 0) {
+    throw std::runtime_error(
+        "JetVetoMapManager: payload contains no corrections: " + mapFile);
+  }
+  const auto mapCorrection = sharedSet->begin()->second;
 
   auto df = dataManager_m->getDataFrame();
   const auto cols = df.GetColumnNames();
@@ -211,20 +225,19 @@ void JetVetoMapManager::applyJetVetoMap() {
 
   if (std::find(cols.begin(), cols.end(), "jet_veto_pass") == cols.end()) {
     df = df.Define("jet_veto_pass",
-                   [sharedSet, vetoType](const ROOT::VecOps::RVec<float> &jetPt,
+                   [mapCorrection, vetoType](const ROOT::VecOps::RVec<float> &jetPt,
                                          const ROOT::VecOps::RVec<float> &jetEta,
                                          const ROOT::VecOps::RVec<float> &jetPhi,
                                          const ROOT::VecOps::RVec<int> &jetId,
                                          const ROOT::VecOps::RVec<float> &chEmEF,
                                          const ROOT::VecOps::RVec<float> &neEmEF) {
-                     const auto &corrRef = sharedSet->at(vetoType);
                      for (size_t i = 0; i < jetPt.size(); ++i) {
                        // Minimal selection (CMS recommendations)
                        if (jetPt[i] < 15.0f) continue;
                        if (!(jetId[i] & 4)) continue;  // tightLepVeto
                        if ((chEmEF[i] + neEmEF[i]) >= 0.9f) continue;
 
-                       const double veto = corrRef->evaluate(
+                       const double veto = mapCorrection->evaluate(
                            {vetoType, static_cast<double>(jetEta[i]),
                             static_cast<double>(jetPhi[i])});
                        if (std::fabs(veto) > 1.0e-6) {

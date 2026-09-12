@@ -98,6 +98,12 @@ struct CmsCorrectionConfig {
   std::string correctedElectronCollectionName = "CorrectedElectrons";
   std::string correctedMuonCollectionName = "CorrectedMuons";
 
+  // -- Optional alternate raw jet inputs --
+  // When set, the JEC/JER workflow uses these columns instead of deriving
+  // Jet_pt_raw and Jet_mass_raw from the NanoAOD jet collection.
+  std::string jetRawPtColumnOverride;
+  std::string jetRawMassColumnOverride;
+
   // -- Prefix for config keys pushed to the Analyzer --
   std::string configKeyPrefix = "cms";
 
@@ -113,9 +119,10 @@ struct CmsCorrectionConfig {
   double hemIssueLumiFraction = 0.0;
 
   // -- MET Type-1 corrections --
-  /// Apply Type-1 MET corrections using JEC-corrected jet energies.
-  /// When true and applyJetCorrections is true, propagates JEC changes to
-  /// PuppiMET via JetEnergyScaleManager::propagateMET().
+  /// Apply Type-1 MET corrections using fully calibrated jet energies.
+  /// When true and applyJetCorrections is true, propagates the change from
+  /// NanoAOD jets to the final nominal JEC/JER-corrected jets via
+  /// JetEnergyScaleManager::propagateMET().
   /// Produces PuppiMET_pt_corr_nominal / PuppiMET_phi_corr_nominal.
   bool applyMetType1 = false;
 

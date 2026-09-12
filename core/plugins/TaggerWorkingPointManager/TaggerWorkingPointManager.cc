@@ -966,6 +966,7 @@ void TaggerWorkingPointManager::execute() {
   if (!dataManager_m)
     throw std::runtime_error(
         "TaggerWorkingPointManager::execute: context not set");
+  if (executed_m) return;
 
   // -------------------------------------------------------------------------
   // 1. Define per-object WP category column.
@@ -1389,6 +1390,8 @@ void TaggerWorkingPointManager::execute() {
       }
     }
   }
+
+  executed_m = true;
 }
 
 // ---------------------------------------------------------------------------

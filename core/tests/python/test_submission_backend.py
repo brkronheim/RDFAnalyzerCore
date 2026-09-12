@@ -219,6 +219,14 @@ def test_stage_in_caps_retries_at_3():
     assert int(m.group(1)) == 3
 
 
+def test_stage_in_site_redirector_url_uses_single_boundary_separator():
+    from core.python.submission_backend import stage_inputs_block
+
+    block = stage_inputs_block()
+    assert "if SITE_REDIRECTOR_MARKER in redirector:" in block
+    assert "return base + path" in block
+
+
 def test_stage_in_uses_only_site_specific_redirectors():
     """Stage-in must rank and retry only site-specific redirectors."""
     from core.python.submission_backend import stage_inputs_block
@@ -280,6 +288,13 @@ def test_xrootd_optimize_block_uses_short_timeout():
     assert float(m.group(1)) <= 10.0, f"PROBE_TIMEOUT too large: {m.group(1)}"
 
 
+def test_xrootd_optimize_block_limits_probe_concurrency_to_one_cpu():
+    from core.python.submission_backend import xrootd_optimize_block
+    block = xrootd_optimize_block()
+    assert 'XRD_PROBE_WORKERS = max(1, int(os.environ.get("XRD_PROBE_WORKERS", "1")))' in block
+    assert "min(len(active), XRD_PROBE_WORKERS)" in block
+
+
 def test_xrootd_optimize_block_reads_runtime_blacklist():
     """The generated script must read the xrdBlacklist key from the config."""
     from core.python.submission_backend import xrootd_optimize_block
@@ -337,5 +352,7 @@ def test_xrootd_optimize_block_fails_job_when_any_redirector_selection_fails():
     from core.python.submission_backend import xrootd_optimize_block
     block = xrootd_optimize_block()
     assert 'redirector_failures = []' in block
-    assert 'sys.exit(42)' in block
+    assert 'optimized.append(f)' in block
+    assert 'using original URLs' in block
+    assert 'sys.exit(42)' not in block
     assert 'raise RuntimeError(f"all probes failed for {lfn}")' in block
