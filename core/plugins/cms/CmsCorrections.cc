@@ -98,6 +98,14 @@ std::string jesCorrectionNameForSource(const std::string &totalCorrectionName,
 
 } // namespace
 
+std::vector<std::string> detail::jecCompoundInputColumns(
+    bool isData, const std::string &rawPtColumn, const std::string &rhoBranch) {
+  std::vector<std::string> inputs{
+      "Jet_area", "Jet_eta", rawPtColumn, rhoBranch};
+  if (isData) inputs.emplace_back("run");
+  return inputs;
+}
+
 void CmsCorrectionAudit::add(const std::string &category,
                               const std::string &reason,
                               const std::string &detail,
@@ -530,8 +538,8 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
     }
   }
 
-  const std::vector<std::string> jecInputs{
-    "Jet_area", "Jet_eta", rawPtColumn, ys.rhoBranch, "Jet_phi"};
+  const auto jecInputs =
+      detail::jecCompoundInputColumns(isData, rawPtColumn, ys.rhoBranch);
   const std::string jecCorrectionName = prefix + "_jec_nominal";
   corrMgr->registerCorrection(jecCorrectionName, ys.jmeFile, jecCompound,
                               jecInputs);

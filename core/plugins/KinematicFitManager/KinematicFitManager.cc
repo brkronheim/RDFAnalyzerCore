@@ -43,6 +43,18 @@ int parseInt(const std::string &s, const std::string &key) {
   }
 }
 
+/// Parse a boolean configuration value, accepting true/false and 1/0.
+bool parseBool(const std::string &s, const std::string &key) {
+  std::string value = s;
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (value == "true" || value == "1") return true;
+  if (value == "false" || value == "0") return false;
+  throw std::runtime_error(
+      "KinematicFitManager: cannot parse '" + s +
+      "' as boolean for key '" + key + "' (expected true/false or 1/0)");
+}
+
 /// Split @p s by a single-character delimiter, skipping empty tokens.
 std::vector<std::string> splitBy(const std::string &s, char delim) {
   std::vector<std::string> parts;
@@ -104,26 +116,64 @@ KinFitParticleConfig parseParticleSpec(const std::string &spec) {
  *  - "idx1+idx2+idx3:targetMass"         — three-body hard mass constraint
  *                                          (e.g. top: m(b, l, ν) = 173.3 GeV)
  *  - "idx1+idx2+idx3:targetMass:massSigma" — three-body soft mass constraint
- *  - "pt:idx:targetPt"                   — pT constraint on a single particle
- *                                          (set targetPt=0 for no-MET events)
+ *  - "pt:idx:targetPt[:ptSigma]"          — pT constraint on a single particle
+ *                                          (ptSigma > 0 gives a Gaussian width)
+ *  - "px:idx1+...:targetPx[:sigma]"       — px constraint on a particle sum
+ *  - "py:idx1+...:targetPy[:sigma]"       — py constraint on a particle sum
+ *                                          (sigma > 0 gives a Gaussian width)
  *
  * For soft mass constraints massSigma is the resonance width in GeV;
  * typical values: Z = 2.495, W = 2.085, top = 1.4, Higgs ≈ 0.004.
  * Indices are zero-based into the fit's particle list.
  */
 KinFitConstraintConfig parseConstraintSpec(const std::string &spec) {
-  // ── pT constraint: "pt:idx:targetPt" ──────────────────────────────────
+  // ── Cartesian constraint: "px|py:idx1+...:target[:sigma]" ─────────────
+  if (spec.size() >= 3 && (spec[0] == 'p') &&
+      (spec[1] == 'x' || spec[1] == 'y') && spec[2] == ':') {
+    const auto parts = splitBy(spec.substr(3), ':');
+    if (parts.size() != 2 && parts.size() != 3) {
+      throw std::runtime_error(
+          "KinematicFitManager: invalid Cartesian constraint spec '" + spec +
+          "' – expected px:idx1+...:target[:sigma] or "
+          "py:idx1+...:target[:sigma]");
+    }
+    const auto idxParts = splitBy(parts[0], '+');
+    if (idxParts.empty()) {
+      throw std::runtime_error(
+          "KinematicFitManager: Cartesian constraint '" + spec +
+          "' must contain at least one particle index");
+    }
+    KinFitConstraintConfig con;
+    con.type = (spec[1] == 'x') ? KinFitConstraintConfig::Type::PX
+                                : KinFitConstraintConfig::Type::PY;
+    con.indices.reserve(idxParts.size());
+    for (std::size_t i = 0; i < idxParts.size(); ++i) {
+      con.indices.push_back(parseInt(
+          idxParts[i], "CartesianConstraintIdx" + std::to_string(i)));
+    }
+    con.idx1 = con.indices.front();
+    con.targetValue = parseDouble(parts[1], "CartesianConstraintTarget");
+    con.transverseSigma = (parts.size() == 3)
+                              ? parseDouble(parts[2], "CartesianConstraintSigma")
+                              : 0.0;
+    return con;
+  }
+
+  // ── pT constraint: "pt:idx:targetPt[:ptSigma]" ────────────────────────
   if (spec.size() >= 3 && spec[0] == 'p' && spec[1] == 't' && spec[2] == ':') {
     const auto parts = splitBy(spec.substr(3), ':');
-    if (parts.size() != 2) {
+    if (parts.size() != 2 && parts.size() != 3) {
       throw std::runtime_error(
           "KinematicFitManager: invalid pT constraint spec '" + spec +
-          "' – expected pt:idx:targetPt");
+          "' – expected pt:idx:targetPt[:ptSigma]");
     }
     KinFitConstraintConfig con;
     con.type        = KinFitConstraintConfig::Type::PT;
     con.idx1        = parseInt(parts[0], "ptConstraintIdx");
     con.targetValue = parseDouble(parts[1], "ptConstraintTarget");
+    con.ptSigma     = (parts.size() == 3)
+                        ? parseDouble(parts[2], "ptConstraintSigma")
+                        : 0.0;
     return con;
   }
 
@@ -132,8 +182,11 @@ KinFitConstraintConfig parseConstraintSpec(const std::string &spec) {
   if (colonParts.size() != 2 && colonParts.size() != 3) {
     throw std::runtime_error(
         "KinematicFitManager: invalid constraint spec '" + spec +
-        "' – expected idx1+idx2:mass[:massSigma], "
-        "idx1+idx2+idx3:mass[:massSigma], or pt:idx:targetPt");
+          "' – expected idx1+idx2:mass[:massSigma], "
+          "idx1+idx2+idx3:mass[:massSigma], "
+          "pt:idx:targetPt[:ptSigma], "
+          "px:idx1+...:targetPx[:sigma], or "
+          "py:idx1+...:targetPy[:sigma]");
   }
   const auto idxParts = splitBy(colonParts[0], '+');
   if (idxParts.size() != 2 && idxParts.size() != 3) {
@@ -452,7 +505,14 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
   // ── build per-particle sigma arrays (same for every event) ────────────────
   // Pre-computed once here and captured by both the CPU and GPU lambdas,
   // eliminating the per-event particle-type dispatch.
+  // A MET particle with its measurement disabled still needs a finite
+  // covariance for the matrix solve. This value makes its measurement pull
+  // negligible compared with the configured soft priors while avoiding
+  // infinities in the CPU and GPU implementations.
+  static constexpr float kEffectivelyUnmeasuredMetResolution = 1.0e6f;
+
   std::vector<float> sigmas(static_cast<size_t>(nParticles) * 3);
+  std::vector<float> cartesianResolutions(static_cast<size_t>(nParticles), 0.0f);
   for (int i = 0; i < nParticles; ++i) {
     const auto &p = cfg.particles[i];
     float sigPt, sigEta, sigPhi;
@@ -476,6 +536,15 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
     sigmas[static_cast<size_t>(i) * 3 + 0] = sigPt;
     sigmas[static_cast<size_t>(i) * 3 + 1] = sigEta;
     sigmas[static_cast<size_t>(i) * 3 + 2] = sigPhi;
+    if (p.type == "met") {
+      if (!cfg.metUseMeasurement) {
+        cartesianResolutions[static_cast<size_t>(i)] =
+            kEffectivelyUnmeasuredMetResolution;
+      } else if (cfg.metCartesianResolution > 0.0) {
+        cartesianResolutions[static_cast<size_t>(i)] =
+            static_cast<float>(cfg.metCartesianResolution);
+      }
+    }
   }
 
   // ── build flat constraint arrays — only needed for the GPU path ─────────────
@@ -485,6 +554,7 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
   std::vector<int>   conIdx1;
   std::vector<int>   conIdx2;
   std::vector<int>   conIdx3;
+  std::vector<unsigned int> conMasks;
   std::vector<float> conTarget;
   std::vector<float> conSigma;
   if (cfg.useGPU) {
@@ -492,18 +562,38 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
     conIdx1  .resize(static_cast<size_t>(nConstraints));
     conIdx2  .resize(static_cast<size_t>(nConstraints));
     conIdx3  .resize(static_cast<size_t>(nConstraints));
+    conMasks .resize(static_cast<size_t>(nConstraints));
     conTarget.resize(static_cast<size_t>(nConstraints));
     conSigma .resize(static_cast<size_t>(nConstraints));
     for (int c = 0; c < nConstraints; ++c) {
       const auto &con = cfg.constraints[static_cast<size_t>(c)];
-      conTypes [static_cast<size_t>(c)] = (con.type == KinFitConstraintConfig::Type::PT)
-                                              ? 2
-                                              : (con.idx3 >= 0 ? 1 : 0);
+      conTypes [static_cast<size_t>(c)] =
+          (con.type == KinFitConstraintConfig::Type::PT)
+              ? 2
+              : (con.type == KinFitConstraintConfig::Type::PX)
+                    ? 3
+                    : (con.type == KinFitConstraintConfig::Type::PY)
+                          ? 4
+                          : (con.idx3 >= 0 ? 1 : 0);
       conIdx1  [static_cast<size_t>(c)] = con.idx1;
       conIdx2  [static_cast<size_t>(c)] = con.idx2;
       conIdx3  [static_cast<size_t>(c)] = con.idx3;
+      unsigned int mask = 0u;
+      if (con.type == KinFitConstraintConfig::Type::PX ||
+          con.type == KinFitConstraintConfig::Type::PY) {
+        for (const int idx : con.indices) {
+          mask |= (1u << static_cast<unsigned int>(idx));
+        }
+      }
+      conMasks[static_cast<size_t>(c)] = mask;
       conTarget[static_cast<size_t>(c)] = static_cast<float>(con.targetValue);
-      conSigma [static_cast<size_t>(c)] = static_cast<float>(con.massSigma);
+      conSigma [static_cast<size_t>(c)] = static_cast<float>(
+          con.type == KinFitConstraintConfig::Type::PT
+              ? con.ptSigma
+              : (con.type == KinFitConstraintConfig::Type::PX ||
+                 con.type == KinFitConstraintConfig::Type::PY)
+                    ? con.transverseSigma
+                    : con.massSigma);
     }
   }
 #else
@@ -539,9 +629,9 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
     // using thread-local storage that grows on demand and is never freed
     // until thread exit — no per-event cudaMalloc/cudaFree overhead.
     auto ctx = std::make_shared<CudaKinFitContext>(
-        sigmas.data(), nParticles,
+        sigmas.data(), cartesianResolutions.data(), nParticles,
         conTypes.data(), conIdx1.data(), conIdx2.data(), conIdx3.data(),
-        conTarget.data(), conSigma.data(), nConstraints);
+        conMasks.data(), conTarget.data(), conSigma.data(), nConstraints);
 
     auto fitLambdaGPU =
         [ctx, nParticles, maxIter = cfg.maxIterations,
@@ -574,7 +664,7 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
     // When runVar is false the fit is skipped and all outputs are -1.
     // The precomputed sigmas vector is captured to avoid re-reading cfg per event.
     auto fitLambda =
-        [cfg, nParticles, sigmas](ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
+        [cfg, nParticles, sigmas, cartesianResolutions](ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
         -> ROOT::VecOps::RVec<Float_t> {
       if (!runVar) {
         // Sentinel: chi2 = -1, converged = -1 (→ false), fitted momenta = -1
@@ -590,12 +680,19 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
         const double sigPt  = static_cast<double>(sigmas[static_cast<size_t>(i) * 3 + 0]);
         const double sigEta = static_cast<double>(sigmas[static_cast<size_t>(i) * 3 + 1]);
         const double sigPhi = static_cast<double>(sigmas[static_cast<size_t>(i) * 3 + 2]);
-        fitter.addParticle({pt, eta, phi, mass, sigPt, sigEta, sigPhi});
+        fitter.addParticle({pt, eta, phi, mass, sigPt, sigEta, sigPhi,
+                            static_cast<double>(cartesianResolutions[static_cast<size_t>(i)])});
       }
 
       for (const auto &con : cfg.constraints) {
         if (con.type == KinFitConstraintConfig::Type::PT) {
-          fitter.addPtConstraint(con.idx1, con.targetValue);
+          fitter.addPtConstraint(con.idx1, con.targetValue, con.ptSigma);
+        } else if (con.type == KinFitConstraintConfig::Type::PX) {
+          fitter.addPxConstraint(con.indices, con.targetValue,
+                                 con.transverseSigma);
+        } else if (con.type == KinFitConstraintConfig::Type::PY) {
+          fitter.addPyConstraint(con.indices, con.targetValue,
+                                 con.transverseSigma);
         } else if (con.idx3 >= 0) {
           fitter.addThreeBodyMassConstraint(con.idx1, con.idx2, con.idx3,
                                             con.targetValue, con.massSigma);
@@ -716,6 +813,8 @@ void KinematicFitManager::setupFromConfigFile() {
  *   leptonPtResolution, leptonEtaResolution, leptonPhiResolution,
  *   jetPtResolution,    jetEtaResolution,    jetPhiResolution,
  *   metPtResolution,    metEtaResolution,    metPhiResolution,
+ *   metCartesianResolution,
+ *   metUseMeasurement,
  *   recoilPtResolution, recoilEtaResolution, recoilPhiResolution
  */
 void KinematicFitManager::registerFits(
@@ -751,7 +850,17 @@ void KinematicFitManager::registerFits(
               "' for fit '" + entry.at("name") + "'");
         }
       };
-      checkIdx(con.idx1, "constraint");
+      if (con.type == KinFitConstraintConfig::Type::PX ||
+          con.type == KinFitConstraintConfig::Type::PY) {
+        if (con.indices.empty()) {
+          throw std::runtime_error(
+              "KinematicFitManager: Cartesian constraint in '" + spec +
+              "' has no particle indices");
+        }
+        for (const int idx : con.indices) checkIdx(idx, "Cartesian constraint");
+      } else {
+        checkIdx(con.idx1, "constraint");
+      }
       if (con.type == KinFitConstraintConfig::Type::MASS) {
         checkIdx(con.idx2, "constraint");
         if (con.idx3 >= 0) checkIdx(con.idx3, "constraint");
@@ -780,6 +889,13 @@ void KinematicFitManager::registerFits(
     cfg.jetEtaResolution    = getOpt("jetEtaResolution",    cfg.jetEtaResolution);
     cfg.jetPhiResolution    = getOpt("jetPhiResolution",    cfg.jetPhiResolution);
     cfg.metPtResolution     = getOpt("metPtResolution",     cfg.metPtResolution);
+    cfg.metCartesianResolution =
+        getOpt("metCartesianResolution", cfg.metCartesianResolution);
+    auto metUseMeasurementIt = entry.find("metUseMeasurement");
+    if (metUseMeasurementIt != entry.end()) {
+      cfg.metUseMeasurement =
+          parseBool(metUseMeasurementIt->second, "metUseMeasurement");
+    }
     cfg.metEtaResolution    = getOpt("metEtaResolution",    cfg.metEtaResolution);
     cfg.metPhiResolution    = getOpt("metPhiResolution",    cfg.metPhiResolution);
     cfg.recoilPtResolution  = getOpt("recoilPtResolution",  cfg.recoilPtResolution);

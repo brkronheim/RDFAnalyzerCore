@@ -131,6 +131,14 @@ Analyzer* Filter(std::string name,
 ```
 
 Apply an event filter.
+When systematic variations are registered, the predicate is evaluated for
+each variation and combined with the prior cumulative decision for that same
+variation. The dataframe retains an event if at least one variation passes all
+filters. NDHistogramManager receives the cumulative per-variation mask and skips
+histogram fills for variations that fail. Register variations before filters
+that should use them; variations added later cannot recover rows already
+removed by earlier filters. The current mask column for a label can be
+inspected with `analyzer.getSystematicManager().getSelectionMaskColumn(label)`.
 
 **Parameters**:
 - `name`: Filter label (stored internally as `pass_<name>`)
@@ -214,7 +222,7 @@ This method:
 3. Saves ND histograms when the `histogramManager` role is registered
 4. Finalizes services, then plugins, reports plugin metadata, and writes provenance
 
-The skim snapshot is written only when `enableSkim` is set to `1`, `true`, or `True`. `saveFile` is the skim path; the metadata/histogram output uses `metaFile` when configured and otherwise derives a sibling `<stem>_meta.root` path from `saveFile`.
+The skim snapshot is written only when `enableSkim` is set to `1`, `true`, or `True`. `saveFile` is the skim path; the metadata/histogram output uses `metaFile` when configured and otherwise derives a sibling `<stem>_meta.root` path from `saveFile`. Configured skim branches are nominal-only by default; set `skimSystematics=true` to include their registered paired Up/Down columns. Set `enableSystematics=false` to keep the complete Analyzer graph nominal-only.
 
 **Example**:
 ```cpp
@@ -350,6 +358,18 @@ void DefineVector(std::string name,
 ```
 
 Create a vector column from scalar or RVec inputs.
+For each registered paired systematic affecting an input, the provider also
+creates `<name>_<systematic>Up` and `<name>_<systematic>Down`. Each varied
+vector uses shifted inputs for that family and nominal inputs for unaffected
+columns, and the output is registered so later `Define` calls can propagate
+the same variation. If a custom output mapping was registered for `name`, its
+mapped output branch names are used. Explicit unpaired labels are not expanded
+by this API.
+
+Framework-generated packed variation vectors use the separate
+`DefineVectorNominal(...)` helper so a vector that already contains one entry
+per variation is not expanded a second time. Analysis code should normally use
+`Analyzer::DefineVector` or `DefineVector` above.
 
 **Example**:
 ```cpp
@@ -370,6 +390,10 @@ void Filter(F function, const std::vector<std::string>& columns);
 ```
 
 Apply event filters.
+For `Analyzer::Filter`, predicate columns are created for affected paired
+systematics and explicitly registered labels. The row filter keeps events
+passing at least one full variation path. Cumulative per-variation masks are
+passed to NDHistogramManager, which suppresses fills for failed variations.
 
 ### DataManager
 
@@ -888,7 +912,7 @@ Use `applyScaleAndResolution(...)` for the newer Run 3 split-schema payloads tha
 
 Concrete manager for kinematic fitting of reconstructed decay topologies.
 
-Performs kinematic fitting using mass, momentum, and recoil constraints to improve four-momentum resolution of reconstructed particles. Supports flexible constraint configuration, collection-indexed particle selection, and optional resonance width (soft mass constraints).
+Performs kinematic fitting using mass, scalar-pT, Cartesian balance, and recoil constraints to improve four-momentum resolution of reconstructed particles. Supports flexible constraint configuration, collection-indexed particle selection, and optional Gaussian widths for mass and transverse constraints.
 
 #### Configuration
 
@@ -909,11 +933,26 @@ name=dileptonFit particles=mu1:mu1_pt:mu1_eta:mu1_phi:mu1_mass:lepton,mu2:mu2_pt
 - `name`: Fit name (identifier)
 - `particles`: Comma-separated particle specs in the format shown above
 - `constraints`: Comma-separated mass constraints (`0+1:mass[:sigma]`,
-  `0+1+2:mass[:sigma]`) or pT constraints (`pt:idx:targetPt`)
+  `0+1+2:mass[:sigma]`), pT constraints (`pt:idx:targetPt[:ptSigma]`), or
+  Cartesian component constraints (`px:idx1+idx2+...:target[:sigma]` and
+  `py:idx1+idx2+...:target[:sigma]`). A zero width is a hard constraint;
+  positive widths are Gaussian widths in GeV. Cartesian constraints can express
+  global transverse-momentum balance or soft zero-component priors.
+- `metCartesianResolution`: Optional absolute isotropic MET px/py resolution
+  in GeV. When positive, it replaces the fractional MET pT resolution for the
+  MET particle and avoids the nonphysical high-pT turnover of a scalar MET
+  constraint with a fractional uncertainty.
+- `metUseMeasurement`: Optional boolean, default `true`. Set to `false` to
+  treat the MET measurement as effectively unmeasured while retaining hard
+  balance and configured soft MET-prior constraints.
 - `runVar`: Optional boolean column that enables the fit per event
 - `maxIterations`, `convergenceTolerance`, and resolution fields: optional
   fit controls with defaults defined by `KinFitConfig`
 - `useGPU`: Optional GPU execution flag; requires a CUDA-enabled build
+
+The `{fit}_chi2` output includes the measurement pulls and Gaussian penalties
+from all soft mass, pT, px, and py constraints. Hard constraints contribute no
+separate penalty because they are enforced directly.
 
 #### Methods
 
@@ -1933,6 +1972,9 @@ class ISystematicManager {
 public:
     virtual ~ISystematicManager() = default;
     static constexpr const char* CANONICAL_SYST_BRANCH_NAME = "SystematicCounter";
+
+    virtual void setEnabled(bool enabled) { (void)enabled; }
+    virtual bool isEnabled() const { return true; }
 
     virtual void registerSystematic(const std::string& syst,
                                     const std::set<std::string>& affectedVariables) = 0;

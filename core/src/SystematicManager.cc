@@ -32,6 +32,9 @@ std::string normalizeSystematicName(const std::string &syst) {
  */
 void SystematicManager::registerSystematic(
     const std::string &syst, const std::set<std::string> &affectedVariables) {
+  if (!enabled_m) {
+    return;
+  }
   const std::string normalizedSyst = normalizeSystematicName(syst);
   for (const auto &var : affectedVariables) {
     systematicToVariableMap_m[normalizedSyst].insert(var);
@@ -40,9 +43,36 @@ void SystematicManager::registerSystematic(
   systematics_m.insert(normalizedSyst);
 }
 
+void SystematicManager::setEnabled(bool enabled) {
+  if (enabled_m == enabled) {
+    return;
+  }
+
+  enabled_m = enabled;
+  if (!enabled_m) {
+    // Do not leave a partially systematic graph visible after disabling the
+    // manager.  The config-driven toggle is applied before analysis setup,
+    // while clearing here also makes the public API safe to use directly.
+    systematics_m.clear();
+    systematicToVariableMap_m.clear();
+    variableToSystematicMap_m.clear();
+    variationColumnMap_m.clear();
+    explicitVariationLabels_m.clear();
+    explicitVariationToVariableMap_m.clear();
+    variableToExplicitVariationMap_m.clear();
+    materializedSystLists_m.clear();
+    selectionMaskColumns_m.clear();
+  }
+}
+
+bool SystematicManager::isEnabled() const { return enabled_m; }
+
 void SystematicManager::registerVariationColumns(
     const std::string &variable, const std::string &systematicName,
     const std::string &upColumn, const std::string &downColumn) {
+  if (!enabled_m) {
+    return;
+  }
   if (variable.empty() || systematicName.empty() || upColumn.empty() ||
       downColumn.empty()) {
     return;
@@ -57,6 +87,9 @@ void SystematicManager::registerVariationColumns(
 void SystematicManager::registerVariationColumn(
     const std::string &variable, const std::string &variationLabel,
     const std::string &column) {
+  if (!enabled_m) {
+    return;
+  }
   if (variable.empty() || variationLabel.empty() || column.empty()) {
     return;
   }
@@ -73,6 +106,56 @@ void SystematicManager::registerVariationColumn(
  */
 const std::set<std::string> &SystematicManager::getSystematics() const {
   return systematics_m;
+}
+
+std::vector<std::string> SystematicManager::getExplicitVariationLabels() const {
+  if (!enabled_m) {
+    return {};
+  }
+  return {explicitVariationLabels_m.begin(), explicitVariationLabels_m.end()};
+}
+
+std::vector<std::string> SystematicManager::getVariationLabels() const {
+  std::vector<std::string> labels{"Nominal"};
+  if (!enabled_m) {
+    return labels;
+  }
+  labels.reserve(1 + systematics_m.size() * 2 + explicitVariationLabels_m.size());
+  for (const auto &systematic : systematics_m) {
+    labels.push_back(systematic + "Up");
+    labels.push_back(systematic + "Down");
+  }
+  labels.insert(labels.end(), explicitVariationLabels_m.begin(),
+                explicitVariationLabels_m.end());
+  return labels;
+}
+
+void SystematicManager::registerSelectionMaskColumn(
+    const std::string &variationLabel, const std::string &column) {
+  // The nominal mask is part of ordinary filtering, not a systematic
+  // variation, so it remains available in nominal-only mode.
+  if (!enabled_m && variationLabel != "Nominal") {
+    return;
+  }
+  if (variationLabel.empty() || column.empty()) {
+    return;
+  }
+  selectionMaskColumns_m[variationLabel] = column;
+}
+
+std::string SystematicManager::getSelectionMaskColumn(
+    const std::string &variationLabel) const {
+  const auto exact = selectionMaskColumns_m.find(variationLabel);
+  if (exact != selectionMaskColumns_m.end()) {
+    return exact->second;
+  }
+  const auto nominal = selectionMaskColumns_m.find("Nominal");
+  return nominal == selectionMaskColumns_m.end() ? std::string()
+                                                  : nominal->second;
+}
+
+bool SystematicManager::hasSelectionMasks() const {
+  return selectionMaskColumns_m.find("Nominal") != selectionMaskColumns_m.end();
 }
 
 /**
@@ -171,6 +254,10 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
   const std::unordered_set<std::string> colSet(columnNames.begin(), columnNames.end());
   SystematicValidationResult result;
 
+  if (!enabled_m) {
+    return result;
+  }
+
   // Track (baseVar, systName) keys we have already processed to avoid
   // reporting or registering the same pair twice.
   std::unordered_set<std::string> processedPairs;
@@ -268,14 +355,7 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
    }
 
    // Build the variation list from the currently registered systematics.
-   std::vector<std::string> systList = {"Nominal"};
-   for (const auto &syst : getSystematics()) {
-     systList.push_back(syst + "Up");
-     systList.push_back(syst + "Down");
-   }
-   for (const auto &label : explicitVariationLabels_m) {
-     systList.push_back(label);
-   }
+   std::vector<std::string> systList = getVariationLabels();
 
    // Define integer counter columns for this branchName namespace.
    // Columns that already exist in the dataframe are silently skipped.

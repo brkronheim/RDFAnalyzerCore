@@ -429,6 +429,39 @@ class TestDatasetManifestYAML:
         with pytest.raises(ValueError, match="invalid dtype"):
             DatasetManifest.load_yaml(str(p))
 
+    def test_load_yaml_rejects_duplicate_dataset_names(self, tmp_path):
+        p = tmp_path / "duplicate_names.yaml"
+        p.write_text(textwrap.dedent("""\
+            datasets:
+              - name: sample
+              - name: sample
+        """))
+        with pytest.raises(ValueError, match="Duplicate dataset name"):
+            DatasetManifest.load_yaml(str(p))
+
+    def test_load_yaml_rejects_missing_parent(self, tmp_path):
+        p = tmp_path / "missing_parent.yaml"
+        p.write_text(textwrap.dedent("""\
+            datasets:
+              - name: child
+                parent: missing
+        """))
+        with pytest.raises(ValueError, match="parent 'missing' not found"):
+            DatasetManifest.load_yaml(str(p))
+
+    def test_load_yaml_warns_for_unused_luminosity_year(self, tmp_path):
+        p = tmp_path / "unused_lumi_year.yaml"
+        p.write_text(textwrap.dedent("""\
+            lumi_by_year:
+              2099: 1.0
+            datasets:
+              - name: sample
+                year: 2022
+        """))
+        with pytest.warns(UserWarning, match="lumi_by_year contains year 2099"):
+            manifest = DatasetManifest.load_yaml(str(p))
+        assert manifest.by_name("sample") is not None
+
 
 # ---------------------------------------------------------------------------
 # DatasetManifest legacy text format removal tests
@@ -572,7 +605,8 @@ class TestDatasetManifestLumiByYear:
         )
         path = str(tmp_path / "manifest.yaml")
         original.save_yaml(path)
-        loaded = DatasetManifest.load_yaml(path)
+        with pytest.warns(UserWarning, match="lumi_by_year contains year 2023"):
+            loaded = DatasetManifest.load_yaml(path)
         assert loaded.lumi == 100.0
         assert loaded.lumi_by_year == {2022: 38.01, 2023: 27.01}
         assert loaded.lumi_for(year=2022) == 38.01

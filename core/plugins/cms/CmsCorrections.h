@@ -44,6 +44,16 @@ class Analyzer;
 
 namespace cms {
 
+namespace detail {
+
+/// Return correctionlib JEC compound inputs in schema order. DATA compounds
+/// include a fifth run-number input; MC compounds end after rho.
+std::vector<std::string> jecCompoundInputColumns(bool isData,
+                                                 const std::string &rawPtColumn,
+                                                 const std::string &rhoBranch);
+
+} // namespace detail
+
 // ---------------------------------------------------------------------------
 // CmsCorrectionConfig — controls which corrections to apply
 // ---------------------------------------------------------------------------

@@ -102,7 +102,8 @@ defineScalarBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMgr,
   spec.hasSystematics = hasSystematics;
   spec.layout = SystematicBundleLayout::VariationMajor;
   spec.resolvedColumnNames = resolveVariationColumns(sysMgr, baseVariable, variationLabels);
-  dataMgr.DefineVector(bundleColumnName, spec.resolvedColumnNames, "Float_t", sysMgr);
+  dataMgr.DefineVectorNominal(bundleColumnName, spec.resolvedColumnNames,
+                              "Float_t", sysMgr);
   return spec;
 }
 
@@ -132,7 +133,7 @@ definePackedInputBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMgr,
   const std::size_t nFeatures = inputFeatures.size();
   const std::size_t nVariations = variationLabels.size();
   if (nFeatures == 0 || nVariations == 0) {
-    dataMgr.DefineVector(bundleColumnName, {}, "Float_t", sysMgr);
+    dataMgr.DefineVectorNominal(bundleColumnName, {}, "Float_t", sysMgr);
     return spec;
   }
   const auto existingCols = [&]() {
@@ -232,7 +233,8 @@ defineSelectionMaskBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMg
   spec.selectionMaskColumnName = bundleColumnName;
   if (!hasSystematics) {
     const std::vector<std::string> broadcastCols(variationLabels.size(), selectionColumn);
-    dataMgr.DefineVector(bundleColumnName, broadcastCols, "Bool_t", sysMgr);
+    dataMgr.DefineVectorNominal(bundleColumnName, broadcastCols, "Bool_t",
+                                sysMgr);
     spec.resolvedColumnNames = broadcastCols;
     return spec;
   }
@@ -254,7 +256,7 @@ defineSelectionMaskBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMg
                                "' has systematic variation '" + label + "' but column '" + colName + "' not found.");
     }
   }
-  dataMgr.DefineVector(bundleColumnName, resolvedCols, "Bool_t", sysMgr);
+  dataMgr.DefineVectorNominal(bundleColumnName, resolvedCols, "Bool_t", sysMgr);
   return spec;
 }
 

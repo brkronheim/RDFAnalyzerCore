@@ -33,6 +33,8 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 - Returns -1.0 when runVar is false (to skip unnecessary computation)
 - Thread-safe for use with ROOT's ImplicitMT
 - Follows the same patterns as BDTManager for consistency
+- Packs scalar feature columns as one input element and appends vector-valued
+  feature columns in order
 - **Supports multiple outputs** (e.g., ParticleTransformer with bootstrapped models)
 - **Deferred execution**: Models loaded but NOT applied until explicitly invoked
 
@@ -251,9 +253,9 @@ Potential improvements for future work:
 ## Limitations
 
 1. **Float Input**: Input features are converted to float32
-2. **Fixed Shape Input**: Dynamic ONNX dimensions require either `paddingSize` or explicit `inputShapes` to resolve; otherwise model loading can fail
+2. **Fixed Shape Input**: Dynamic or omitted ONNX input dimensions require either `paddingSize` or explicit `inputShapes` to resolve; otherwise model loading can fail
 3. **CPU by Default**: ONNX Runtime uses CPU inference unless built with `ONNXRUNTIME_USE_CUDA=ON` and the model is configured with `useCuda=true`
-4. **Single Scalar Output Per Tensor**: Each output tensor must produce a single scalar value
+4. **Single Scalar Output Per Tensor**: Each output tensor must produce a single scalar value; omitted output shape metadata is treated as `[batch, 1]` and validated by ONNX Runtime at execution
 
 ## References
 

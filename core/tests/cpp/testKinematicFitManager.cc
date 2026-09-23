@@ -290,6 +290,65 @@ TEST_F(KinematicFitTest, PtConstraint_ForcesParticlePt) {
   EXPECT_LT(result.fittedParticles[0].pt, 30.0);
 }
 
+TEST_F(KinematicFitTest, SoftPtConstraintAllowsResidual) {
+  // A 20 GeV Gaussian width should leave a non-zero fitted pT instead of
+  // enforcing the target exactly. With a 20 GeV measurement resolution and a
+  // 20 GeV soft-constraint width, a 100 GeV input is pulled to 50 GeV.
+  KinematicFit fitter;
+  fitter.addParticle({100.0, 0.0, 0.0, 0.0, 0.20, 100.0, 0.05});
+  fitter.addPtConstraint(0, 0.0, 20.0);
+  const auto result = fitter.fit();
+
+  EXPECT_TRUE(result.converged);
+  EXPECT_NEAR(result.fittedParticles[0].pt, 50.0, 1e-6);
+}
+
+TEST_F(KinematicFitTest, CartesianZeroMETPriorUsesAbsoluteResolution) {
+  // With an absolute 20 GeV Cartesian measurement resolution and a 20 GeV
+  // zero-component prior, a 200 GeV MET vector should fit to 100 GeV, not to
+  // the 50 GeV endpoint produced by the old fractional-pT parameterization.
+  KinematicFit fitter;
+  fitter.addParticle({200.0, 0.0, 0.0, 0.0, 0.20, 100.0, 0.05, 20.0});
+  fitter.addPxConstraint({0}, 0.0, 20.0);
+  fitter.addPyConstraint({0}, 0.0, 20.0);
+  const auto result = fitter.fit();
+
+  EXPECT_TRUE(result.converged);
+  EXPECT_NEAR(result.fittedParticles[0].pt, 100.0, 1e-5);
+  EXPECT_NEAR(result.chi2, 50.0, 1e-5);
+}
+
+TEST_F(KinematicFitTest, CartesianBalanceAndZeroMETPrior) {
+  // The visible particles and MET are initially balanced. The soft zero-MET
+  // prior may redistribute their momenta, but the hard px/py balance must
+  // remain satisfied by the fitted topology.
+  const double metPhi = std::atan2(-40.0, -80.0);
+  KinematicFit fitter;
+  fitter.addParticle({80.0, 0.2, 0.0, 0.0, 0.10, 0.05, 0.05});
+  fitter.addParticle({40.0, -0.3, M_PI / 2.0, 0.0, 0.10, 0.05, 0.05});
+  fitter.addParticle({std::sqrt(80.0 * 80.0 + 40.0 * 40.0), 0.0, metPhi,
+                      0.0, 0.20, 100.0, 0.05, 20.0});
+  fitter.addPxConstraint({0, 1, 2}, 0.0);
+  fitter.addPyConstraint({0, 1, 2}, 0.0);
+  fitter.addPxConstraint({2}, 0.0, 20.0);
+  fitter.addPyConstraint({2}, 0.0, 20.0);
+  const auto result = fitter.fit();
+
+  ASSERT_TRUE(result.converged);
+  const auto &p0 = result.fittedParticles[0];
+  const auto &p1 = result.fittedParticles[1];
+  const auto &p2 = result.fittedParticles[2];
+  const double sumPx = p0.pt * std::cos(p0.phi) +
+                       p1.pt * std::cos(p1.phi) +
+                       p2.pt * std::cos(p2.phi);
+  const double sumPy = p0.pt * std::sin(p0.phi) +
+                       p1.pt * std::sin(p1.phi) +
+                       p2.pt * std::sin(p2.phi);
+  EXPECT_NEAR(sumPx, 0.0, 1e-4);
+  EXPECT_NEAR(sumPy, 0.0, 1e-4);
+  EXPECT_LT(p2.pt, 100.0);
+}
+
 TEST_F(KinematicFitTest, PtConstraintZeroMET_WithMassConstraint) {
   // Combine a dijet mass constraint with MET pT = 0 (hadronic Z → jj selection).
   const double mZ = 91.2;
@@ -404,13 +463,14 @@ TEST_F(KinematicFitManagerTest, ConstructorCreatesValidManager) {
 
 TEST_F(KinematicFitManagerTest, GetAllFitNames_ReturnsConfiguredFits) {
   const auto names = fitManager->getAllFitNames();
-  EXPECT_EQ(names.size(), 6u);
+  EXPECT_EQ(names.size(), 7u);
   EXPECT_TRUE(std::find(names.begin(), names.end(), "zhFit")      != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "wjFit")      != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "ttbarFit")   != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "zhCollFit")  != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "topFullFit") != names.end());
   EXPECT_TRUE(std::find(names.begin(), names.end(), "hadZFit")    != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "cartesianFit") != names.end());
 }
 
 TEST_F(KinematicFitManagerTest, GetFitConfig_Valid) {
@@ -544,6 +604,21 @@ TEST_F(KinematicFitManagerTest, ApplyAllFits_DefinesColumnsForAllFits) {
   EXPECT_TRUE(hasCol("zhCollFit_chi2"));
   EXPECT_TRUE(hasCol("topFullFit_chi2"));
   EXPECT_TRUE(hasCol("hadZFit_chi2"));
+  EXPECT_TRUE(hasCol("cartesianFit_chi2"));
+}
+
+TEST_F(KinematicFitManagerTest, CartesianFitCanIgnoreOriginalMETMeasurement) {
+  defineParticleColumns();
+  fitManager->applyFit("cartesianFit");
+
+  auto df = dataManager->getDataFrame();
+  auto fittedMetPt = df.Take<Float_t>("cartesianFit_met_pt_fitted");
+  for (const float pt : *fittedMetPt) {
+    // The two test leptons are exactly transverse-balanced. With the MET
+    // measurement disabled, balance plus the zero-MET prior should therefore
+    // drive fitted MET to the numerical pT floor rather than retain 38 GeV.
+    EXPECT_LT(pt, 1.0f);
+  }
 }
 
 // ─── Recoil particle type tests ───────────────────────────────────────────────
@@ -778,9 +853,34 @@ TEST_F(KinematicFitManagerTest, ParseConstraintSpec_PtConstraint_ParsedCorrectly
       EXPECT_EQ(con.idx2, -1);  // unused for pT constraint
       EXPECT_EQ(con.idx3, -1);  // unused for pT constraint
       EXPECT_NEAR(con.targetValue, 0.0, 1e-9);
+      EXPECT_NEAR(con.ptSigma, 20.0, 1e-9);
     }
   }
   EXPECT_TRUE(foundPt);
+}
+
+TEST_F(KinematicFitManagerTest, ParseConstraintSpec_CartesianConstraintsParsedCorrectly) {
+  const auto &cfg = fitManager->getFitConfig("cartesianFit");
+  ASSERT_EQ(cfg.constraints.size(), 4u);
+  EXPECT_EQ(cfg.particles[2].type, "met");
+  EXPECT_NEAR(cfg.metCartesianResolution, 20.0, 1e-9);
+  EXPECT_FALSE(cfg.metUseMeasurement);
+
+  ASSERT_EQ(cfg.constraints[0].type, KinFitConstraintConfig::Type::PX);
+  EXPECT_EQ(cfg.constraints[0].indices, (std::vector<int>{0, 1, 2}));
+  EXPECT_NEAR(cfg.constraints[0].targetValue, 0.0, 1e-9);
+  EXPECT_NEAR(cfg.constraints[0].transverseSigma, 0.0, 1e-9);
+
+  ASSERT_EQ(cfg.constraints[1].type, KinFitConstraintConfig::Type::PY);
+  EXPECT_EQ(cfg.constraints[1].indices, (std::vector<int>{0, 1, 2}));
+  EXPECT_NEAR(cfg.constraints[1].targetValue, 0.0, 1e-9);
+
+  EXPECT_EQ(cfg.constraints[2].type, KinFitConstraintConfig::Type::PX);
+  EXPECT_EQ(cfg.constraints[2].indices, (std::vector<int>{2}));
+  EXPECT_NEAR(cfg.constraints[2].transverseSigma, 20.0, 1e-9);
+  EXPECT_EQ(cfg.constraints[3].type, KinFitConstraintConfig::Type::PY);
+  EXPECT_EQ(cfg.constraints[3].indices, (std::vector<int>{2}));
+  EXPECT_NEAR(cfg.constraints[3].transverseSigma, 20.0, 1e-9);
 }
 
 // ─── Soft mass constraint (massSigma) tests ───────────────────────────────────

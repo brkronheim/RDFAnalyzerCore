@@ -106,7 +106,7 @@ def get_copy_file_list(config_dict):
     for key in config_dict:
         value = config_dict[key]
         if (".txt" in value or ".yaml" in value or ".yml" in value
-                or ".json" in value):
+                or ".json" in value or ".onnx" in value):
             transfer_list.append(value)
     return transfer_list
 
@@ -840,7 +840,8 @@ def xrootd_optimize_block(config_file="submit_config.txt", blacklisted_sites=Non
     **not** used.  It reads the ``fileList`` from the job config, probes all
     well-known CMS XRootD redirectors from the worker node using a ROOT macro,
     and rewrites the config with the site-specific URLs that delivered the
-    best throughput.
+    best throughput.  An explicit ``xrootdRedirector`` or ``redirector``
+    config value opts out of site probing and preserves the configured URLs.
 
     The local CMS site is detected from common grid environment variables
     (``GLIDEIN_CMSSite``, ``CMS_LOCAL_SITE``, etc.) and preferred when its
@@ -1136,6 +1137,16 @@ if not os.path.exists(cfg_path):
     sys.exit(0)
 
 cfg = read_config(cfg_path)
+configured_redirector = str(
+    cfg.get("xrootdRedirector", "") or cfg.get("redirector", "")
+).strip()
+if configured_redirector:
+    print(
+        f"[xrd-opt] Explicit redirector {{configured_redirector}}; "
+        "skipping site optimisation"
+    )
+    sys.exit(0)
+
 file_list_raw = cfg.get("fileList", "")
 if not file_list_raw:
     print("[xrd-opt] No fileList in config; skipping")

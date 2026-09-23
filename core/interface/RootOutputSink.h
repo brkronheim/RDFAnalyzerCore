@@ -26,7 +26,8 @@ private:
   std::string cachedSkimFile_;
   std::string cachedMetaFile_;
 
-  // Cache for column names resolved from saveConfig + systematics.
+  // Cache for column names resolved from saveConfig and, when
+  // skimSystematics=true, their registered systematic variations.
   // Invalidated each time writeDataFrame(config, ...) is called with a
   // different dataframe — but in practice it's called at most once.
   std::vector<std::string> cachedColumns_;

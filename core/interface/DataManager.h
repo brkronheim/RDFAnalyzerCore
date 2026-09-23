@@ -62,6 +62,11 @@ public:
    * scalar/RVec input is rejected. Common framework types use compiled
    * RDataFrame callables; unsupported type combinations fall back to the legacy
    * JIT expression path for compatibility.
+   * For each registered paired systematic affecting an input, also defines
+   * ``name_<systematic>Up`` and ``name_<systematic>Down`` with only the
+   * affected inputs shifted, then registers ``name`` as affected by that
+   * systematic so later derived definitions can propagate it. Explicit output
+   * column mappings already registered for ``name`` are honored.
    * @param name Name of the variable
    * @param columns Input columns (scalars or vectors)
    * @param type Data type (default: Float_t)
@@ -71,6 +76,18 @@ public:
                     const std::vector<std::string> &columns,
                     std::string type,
                     ISystematicManager &systematicManager) override;
+
+  /**
+   * @brief Define a vector from already-resolved nominal or packed inputs.
+   *
+   * Unlike DefineVector(), this does not create additional Up/Down outputs.
+   * It is intended for framework helper bundles whose input ordering already
+   * encodes the variations.
+   */
+  void DefineVectorNominal(std::string name,
+                           const std::vector<std::string> &columns,
+                           std::string type,
+                           ISystematicManager &systematicManager) override;
 
   /**
    * @brief Filter the dataframe
@@ -190,6 +207,12 @@ public:
   virtual ~DataManager();
 
 private:
+  void defineVectorImpl(std::string name,
+                        const std::vector<std::string> &columns,
+                        std::string type,
+                        ISystematicManager &systematicManager,
+                        bool propagateSystematics);
+
   /// Owns TChain objects attached as ROOT friend trees.
   /// Must be declared before chain_vec_m so that friend chains are destroyed
   /// AFTER the main TChain (C++ destroys members in reverse declaration order).

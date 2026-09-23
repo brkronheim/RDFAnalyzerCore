@@ -4,6 +4,7 @@
 #include <api/ISystematicManager.h>
 #include <filesystem>
 #include <fnmatch.h>
+#include <cctype>
 #include <iostream>
 #include <unordered_set>
 #include <ROOT/RSnapshotOptions.hxx>
@@ -21,6 +22,31 @@ static std::string makeMetaFileName(const std::string& saveFile) {
 
 static bool isGlobPattern(const std::string& val) {
   return val.find('*') != std::string::npos || val.find('?') != std::string::npos;
+}
+
+static bool parseBooleanConfig(const std::string& key, const std::string& value,
+                               bool defaultValue) {
+  if (value.empty()) {
+    return defaultValue;
+  }
+
+  std::string normalized;
+  normalized.reserve(value.size());
+  for (const unsigned char character : value) {
+    normalized.push_back(static_cast<char>(std::tolower(character)));
+  }
+
+  if (normalized == "1" || normalized == "true" || normalized == "yes" ||
+      normalized == "on") {
+    return true;
+  }
+  if (normalized == "0" || normalized == "false" || normalized == "no" ||
+      normalized == "off") {
+    return false;
+  }
+
+  throw std::invalid_argument("RootOutputSink: invalid boolean value '" + value +
+                              "' for configuration key '" + key + "'.");
 }
 
 static std::vector<std::string> parseSaveColumns(const IConfigurationProvider& configProvider,
@@ -140,7 +166,14 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df,
   // the cache is cold, which in practice means exactly once per sink lifetime.
   if (!columnsCached_) {
     cachedColumns_ = parseSaveColumns(configProvider, df.GetColumnNames());
-    expandSystematicColumns(cachedColumns_, systematicManager);
+    const auto skimSystematicsIt = configMap.find("skimSystematics");
+    const bool includeSystematics =
+        channel == OutputChannel::Skim &&
+        skimSystematicsIt != configMap.end() &&
+        parseBooleanConfig("skimSystematics", skimSystematicsIt->second, false);
+    if (includeSystematics) {
+      expandSystematicColumns(cachedColumns_, systematicManager);
+    }
     columnsCached_ = true;
   }
 

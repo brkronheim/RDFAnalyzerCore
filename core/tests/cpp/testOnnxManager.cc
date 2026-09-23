@@ -18,15 +18,9 @@
 /**
  * @file testOnnxManager.cc
  *
- * @note KNOWN LIMITATION: The test ONNX model ("test_model") expects
- * batched/vector-shaped inputs, but the test cases (ApplyModel_Valid,
- * ApplyModel_RunVarFalse) define features as scalar float columns via
- * DataManager::Define().  This type mismatch (vector expected vs scalar
- * provided) can cause the ONNX runtime session to behave unexpectedly or
- * return incorrect results under certain input configurations.  This is a
- * pre-existing test limitation, not a VHbb STXS regression.  To reproduce
- * production-like ONNX inference, the test fixtures would need to define
- * proper vector-typed columns matching the model's expected input shape.
+ * Scalar and vector-valued feature columns are both supported. Scalar
+ * columns contribute one element to the packed ONNX input, while vector
+ * columns are appended in order.
  */
 
 class OnnxManagerTest : public ::testing::Test {

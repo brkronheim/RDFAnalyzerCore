@@ -865,6 +865,22 @@ sysMgr.registerVariationColumns(
     "jet_pt", "jes", "jet_pt_jes_up", "jet_pt_jes_down");
 ```
 
+#### Filters with Systematics
+
+When a systematic affects a filter input, `Analyzer::Filter` evaluates the
+predicate for nominal and shifted inputs. For a filter named `jet_pt`, this
+produces `pass_jet_pt`, `pass_jet_pt_jesUp`, and `pass_jet_pt_jesDown`. Each
+variation has a cumulative boolean mask across all filters. The dataframe keeps
+an event when at least one variation passes every filter; events that fail all
+variations are removed. NDHistogramManager uses the same masks to skip fills
+for variations that fail, so a retained migration event contributes only to
+the systematic bins whose full selection it passes. This also applies to
+explicitly registered variation labels.
+
+Register systematic variations before the filters that should use them. A
+variation introduced after earlier filters cannot restore events those filters
+already removed.
+
 #### Histograms with Systematics
 
 When booking histograms with NDHistogramManager, an automatic systematic axis is added:

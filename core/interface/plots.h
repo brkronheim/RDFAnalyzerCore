@@ -11,6 +11,7 @@
 
 #include <ROOT/RDF/HistoModels.hxx>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -119,8 +120,10 @@ public:
   // Define a function pointer type for fill functions
   using FillFuncType = void (THnMulti::*)(unsigned int,
     const ROOT::VecOps::RVec<Float_t>&, const ROOT::VecOps::RVec<Float_t>&,
+    const ROOT::VecOps::RVec<Float_t>&,
+    const ROOT::VecOps::RVec<Bool_t>&,
     const ROOT::VecOps::RVec<Float_t>&, const ROOT::VecOps::RVec<Float_t>&,
-    const ROOT::VecOps::RVec<Float_t>&, const ROOT::VecOps::RVec<Float_t>&,
+    const ROOT::VecOps::RVec<Float_t>&,
     const ROOT::VecOps::RVec<Int_t>&);
 
   /**
@@ -207,12 +210,20 @@ public:
    * @brief Fill the per-thread histogram for one entry (hot loop).
    *
    * This function dispatches to the appropriate fast path fill function based on configuration.
+   * selectionMask uses the same systematic-slot ordering as systematicVariation.
    */
   void Exec(unsigned int slot,
             const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
-            const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation, const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
-            const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
+            const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+            const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
+            const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory,
+            const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion,
+            const ROOT::VecOps::RVec<Float_t> &__restrict__ channel,
             const ROOT::VecOps::RVec<Int_t> &__restrict__ nFills) {
+    if (selectionMask.size() != systematicVariation.size()) {
+      throw std::invalid_argument(
+          "THnMulti: selection mask length must match systematic variation length");
+    }
     if (baseHistogramValues.empty() || baseHistogramWeights.empty() || systematicVariation.empty() ||
         sampleCategory.empty() || controlRegion.empty() || channel.empty() || nFills.empty()) {
       LogSizes("empty input vector", slot, baseHistogramValues, baseHistogramWeights,
@@ -221,17 +232,19 @@ public:
     }
     // Dispatch to the selected fill function for optimal performance
     (this->*fillFunc_)(slot, baseHistogramValues, baseHistogramWeights,
-                      systematicVariation, sampleCategory, controlRegion, channel, nFills);
+                      systematicVariation, selectionMask, sampleCategory,
+                      controlRegion, channel, nFills);
   }
 
   void SingleNoSystematicFill(unsigned int slot,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation, // unused
+    const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
     const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
     const ROOT::VecOps::RVec<Int_t>   &__restrict__ nFills) {
 
-      if (baseHistogramWeights.size() < 1 || channel.size() < 1 || controlRegion.size() < 1 ||
+      if (baseHistogramWeights.size() < 1 || selectionMask.empty() || channel.size() < 1 || controlRegion.size() < 1 ||
           sampleCategory.size() < 1 || systematicVariation.size() < 1) {
         LogSizes("single fill size mismatch", slot, baseHistogramValues, baseHistogramWeights,
                  systematicVariation, sampleCategory, controlRegion, channel, nFills);
@@ -241,7 +254,7 @@ public:
       const Double_t weight = baseHistogramWeights[0];
 
       // Skip zero-weight entries for efficiency
-      if (weight != 0.0) { // Skip zero-weight contributions.
+      if (weight != 0.0 && selectionMask[0]) { // Skip zero-weight or rejected contributions.
         (this->*fillHistFunc_)(slot, channel[0], controlRegion[0], sampleCategory[0], systematicVariation[0], baseHistogramValues[0], weight);
       }
     
@@ -251,6 +264,7 @@ public:
   void SingleSystematicFill(unsigned int slot,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+    const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
     const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
     const ROOT::VecOps::RVec<Int_t> &__restrict__ nFills) {
@@ -267,7 +281,8 @@ public:
             controlRegionCounter >= static_cast<int>(controlRegion.size()) ||
             channelCounter >= static_cast<int>(channel.size()) ||
             sampleCategoryCounter >= static_cast<int>(sampleCategory.size()) ||
-            baseFillCounter >= static_cast<int>(systematicVariation.size())) {
+            baseFillCounter >= static_cast<int>(systematicVariation.size()) ||
+            baseFillCounter >= static_cast<int>(selectionMask.size())) {
           LogSizes("single systematic size mismatch", slot, baseHistogramValues, baseHistogramWeights,
                    systematicVariation, sampleCategory, controlRegion, channel, nFills);
           break;
@@ -275,7 +290,7 @@ public:
         const Double_t weight = baseHistogramWeights[weightCounter];
   
         // Skip zero-weight entries for efficiency
-        if (weight != 0.0) { // Skip zero-weight contributions.
+        if (weight != 0.0 && selectionMask[baseFillCounter]) {
           (this->*fillHistFunc_)(slot, channel[channelCounter], controlRegion[controlRegionCounter], sampleCategory[sampleCategoryCounter], systematicVariation[baseFillCounter], baseHistogramValues[baseFillCounter], weight);
         }
         
@@ -292,6 +307,7 @@ public:
   void MultiNoSystematicFill(unsigned int slot,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation, // unused
+    const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
     const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
     const ROOT::VecOps::RVec<Int_t> &__restrict__ nFills) {
@@ -310,7 +326,8 @@ public:
             controlRegionCounter >= static_cast<int>(controlRegion.size()) ||
             channelCounter >= static_cast<int>(channel.size()) ||
             sampleCategoryCounter >= static_cast<int>(sampleCategory.size()) ||
-            systematicCounter >= static_cast<int>(systematicVariation.size())) {
+            systematicCounter >= static_cast<int>(systematicVariation.size()) ||
+            systematicCounter >= static_cast<int>(selectionMask.size())) {
           LogSizes("multi fill size mismatch", slot, baseHistogramValues, baseHistogramWeights,
                    systematicVariation, sampleCategory, controlRegion, channel, nFills);
           break;
@@ -318,7 +335,7 @@ public:
         const Double_t weight = baseHistogramWeights[weightCounter];
   
         // Skip zero-weight entries for efficiency
-        if (weight != 0.0) { // Skip zero-weight contributions.
+        if (weight != 0.0 && selectionMask[systematicCounter]) {
           (this->*fillHistFunc_)(slot, channel[channelCounter], controlRegion[controlRegionCounter], sampleCategory[sampleCategoryCounter], systematicVariation[systematicCounter], baseHistogramValues[baseFillCounter], weight);
         }
         
@@ -338,6 +355,7 @@ public:
   void GeneralFill(unsigned int slot,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues, const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+    const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory, 
     const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion, const ROOT::VecOps::RVec<Float_t> &__restrict__ channel, 
     const ROOT::VecOps::RVec<Int_t> &__restrict__ nFills) {
@@ -356,6 +374,7 @@ public:
           channelCounter >= static_cast<int>(channel.size()) ||
           sampleCategoryCounter >= static_cast<int>(sampleCategory.size()) ||
           systematicCounter >= static_cast<int>(systematicVariation.size()) ||
+          systematicCounter >= static_cast<int>(selectionMask.size()) ||
           systematicCounter >= static_cast<int>(nFills.size())) {
         LogSizes("general fill size mismatch", slot, baseHistogramValues, baseHistogramWeights,
                  systematicVariation, sampleCategory, controlRegion, channel, nFills);
@@ -364,7 +383,7 @@ public:
       const Double_t weight = baseHistogramWeights[weightCounter];
 
       // Skip zero-weight entries for efficiency
-      if (weight != 0.0) { // Skip zero-weight contributions.
+      if (weight != 0.0 && selectionMask[systematicCounter]) {
         (this->*fillHistFunc_)(slot, channel[channelCounter], controlRegion[controlRegionCounter], sampleCategory[sampleCategoryCounter], systematicVariation[systematicCounter], baseHistogramValues[baseFillCounter], weight);
       }
 
@@ -613,8 +632,10 @@ public:
   // Define a function pointer type for fill functions (same signature as THnMulti)
   using FillFuncType = void (BHnMulti::*)(unsigned int,
     const ROOT::VecOps::RVec<Float_t>&, const ROOT::VecOps::RVec<Float_t>&,
+    const ROOT::VecOps::RVec<Float_t>&,
+    const ROOT::VecOps::RVec<Bool_t>&,
     const ROOT::VecOps::RVec<Float_t>&, const ROOT::VecOps::RVec<Float_t>&,
-    const ROOT::VecOps::RVec<Float_t>&, const ROOT::VecOps::RVec<Float_t>&,
+    const ROOT::VecOps::RVec<Float_t>&,
     const ROOT::VecOps::RVec<Int_t>&);
 
   /**
@@ -704,38 +725,47 @@ public:
 
   /**
    * @brief Fill the per-thread Boost histogram for one entry.
+   *
+   * selectionMask uses the same systematic-slot ordering as systematicVariation.
    */
   void Exec(unsigned int slot,
             const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues,
             const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
             const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+            const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
             const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory,
             const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion,
             const ROOT::VecOps::RVec<Float_t> &__restrict__ channel,
             const ROOT::VecOps::RVec<Int_t>   &__restrict__ nFills) {
+    if (selectionMask.size() != systematicVariation.size()) {
+      throw std::invalid_argument(
+          "BHnMulti: selection mask length must match systematic variation length");
+    }
     if (baseHistogramValues.empty() || baseHistogramWeights.empty() || systematicVariation.empty() ||
         sampleCategory.empty() || controlRegion.empty() || channel.empty() || nFills.empty()) {
       return;
     }
     (this->*fillFunc_)(slot, baseHistogramValues, baseHistogramWeights,
-                       systematicVariation, sampleCategory, controlRegion, channel, nFills);
+                       systematicVariation, selectionMask, sampleCategory,
+                       controlRegion, channel, nFills);
   }
 
   void SingleNoSystematicFill(unsigned int slot,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+    const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ channel,
     const ROOT::VecOps::RVec<Int_t>   &__restrict__ nFills) {
 
-    if (baseHistogramWeights.size() < 1 || channel.size() < 1 || controlRegion.size() < 1 ||
+    if (baseHistogramWeights.size() < 1 || selectionMask.empty() || channel.size() < 1 || controlRegion.size() < 1 ||
         sampleCategory.size() < 1 || systematicVariation.size() < 1) {
       return;
     }
     const double weight = static_cast<double>(baseHistogramWeights[0]);
-    if (weight != 0.0) {
+    if (weight != 0.0 && selectionMask[0]) {
       fillHist_(slot, weight,
           static_cast<double>(channel[0]),
           static_cast<double>(controlRegion[0]),
@@ -749,6 +779,7 @@ public:
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+    const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ channel,
@@ -762,12 +793,13 @@ public:
           controlRegionCounter >= static_cast<int>(controlRegion.size()) ||
           channelCounter >= static_cast<int>(channel.size()) ||
           sampleCategoryCounter >= static_cast<int>(sampleCategory.size()) ||
-          baseFillCounter >= static_cast<int>(systematicVariation.size())) {
+          baseFillCounter >= static_cast<int>(systematicVariation.size()) ||
+          baseFillCounter >= static_cast<int>(selectionMask.size())) {
         break;
       }
 
       const double weight = static_cast<double>(baseHistogramWeights[weightCounter]);
-      if (weight != 0.0) {
+      if (weight != 0.0 && selectionMask[baseFillCounter]) {
         fillHist_(slot, weight,
             static_cast<double>(channel[channelCounter]),
             static_cast<double>(controlRegion[controlRegionCounter]),
@@ -787,6 +819,7 @@ public:
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+    const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ channel,
@@ -800,11 +833,12 @@ public:
           controlRegionCounter >= static_cast<int>(controlRegion.size()) ||
           channelCounter >= static_cast<int>(channel.size()) ||
           sampleCategoryCounter >= static_cast<int>(sampleCategory.size()) ||
-          systematicCounter >= static_cast<int>(systematicVariation.size())) {
+          systematicCounter >= static_cast<int>(systematicVariation.size()) ||
+          systematicCounter >= static_cast<int>(selectionMask.size())) {
         break;
       }
       const double weight = static_cast<double>(baseHistogramWeights[weightCounter]);
-      if (weight != 0.0) {
+      if (weight != 0.0 && selectionMask[systematicCounter]) {
         fillHist_(slot, weight,
             static_cast<double>(channel[channelCounter]),
             static_cast<double>(controlRegion[controlRegionCounter]),
@@ -825,6 +859,7 @@ public:
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramValues,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ baseHistogramWeights,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ systematicVariation,
+    const ROOT::VecOps::RVec<Bool_t> &__restrict__ selectionMask,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ sampleCategory,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ controlRegion,
     const ROOT::VecOps::RVec<Float_t> &__restrict__ channel,
@@ -840,11 +875,12 @@ public:
           channelCounter >= static_cast<int>(channel.size()) ||
           sampleCategoryCounter >= static_cast<int>(sampleCategory.size()) ||
           systematicCounter >= static_cast<int>(systematicVariation.size()) ||
+          systematicCounter >= static_cast<int>(selectionMask.size()) ||
           systematicCounter >= static_cast<int>(nFills.size())) {
         break;
       }
       const double weight = static_cast<double>(baseHistogramWeights[weightCounter]);
-      if (weight != 0.0) {
+      if (weight != 0.0 && selectionMask[systematicCounter]) {
         fillHist_(slot, weight,
             static_cast<double>(channel[channelCounter]),
             static_cast<double>(controlRegion[controlRegionCounter]),

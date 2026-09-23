@@ -4,6 +4,7 @@
 #include <ROOT/RDataFrame.hxx>
 #include <algorithm>
 #include <string>
+#include <utility>
 #include <vector>
 
 
@@ -89,6 +90,10 @@ public:
     
     /**
      * @brief Define a vector variable in the dataframe
+     *
+     * DataFrame providers should also define paired Up/Down outputs for each
+     * registered systematic affecting one or more inputs, leave unaffected
+     * inputs nominal, and register the output as affected by that systematic.
      * @param name Name of the variable
      * @param columns Input columns
      * @param type Data type (default: Float_t)
@@ -98,9 +103,22 @@ public:
                              const std::vector<std::string> &columns,
                              std::string type,
                              ISystematicManager &systematicManager) = 0;
+
+    /**
+     * @brief Define an already-resolved vector without expanding systematics.
+     *
+     * Use for helper vectors whose elements already represent variations or
+     * whose inputs intentionally repeat nominal values. Providers that do not
+     * distinguish this mode may fall back to their ordinary vector definition.
+     */
+    virtual void DefineVectorNominal(
+        std::string name, const std::vector<std::string> &columns,
+        std::string type, ISystematicManager &systematicManager) {
+        DefineVector(std::move(name), columns, std::move(type), systematicManager);
+    }
     
     /**
-     * @brief Filter the dataframe
+     * @brief Filter the dataframe using the supplied nominal predicate
      * @param f Filter function
      * @param columns Input columns
      */
@@ -141,4 +159,4 @@ public:
     }
 };
 
-#endif // IDATAFRAMEPROVIDER_H_INCLUDED 
+#endif // IDATAFRAMEPROVIDER_H_INCLUDED

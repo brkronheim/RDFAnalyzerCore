@@ -15,9 +15,13 @@
 #include <RtypesCore.h>
 #include <correction.h>
 #include <fastforest.h>
+#include <algorithm>
+#include <cstddef>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <ROOT/RDFHelpers.hxx>
@@ -120,7 +124,13 @@ public:
   }
 
   /**
-   * @brief Define a filter (selection) in the dataframe. Systematics are handled automatically.
+   * @brief Define a filter (selection) in the dataframe.
+   *
+   * The predicate is evaluated for nominal and every registered variation.
+   * A cumulative boolean mask is retained for each variation, and an event is
+   * removed only when every variation fails its cumulative selection. The
+   * masks are also made available to histogram actions so failed variations
+   * do not receive histogram contributions from retained events.
    * @tparam F Callable type for the filter
    * @param name Name of the filter
    * @param f Callable to compute the filter
@@ -137,9 +147,132 @@ public:
       }
       preFilterNotified_m = true;
     }
+
+    const std::string filterLabel = name;
+
+    auto &systematics = getSystematicManager();
+    // File-backed analyses often register branch systematics lazily when
+    // histogramming starts. Discover conventional input pairs here as well,
+    // before defining the filter predicate, so migrated events are not lost.
+    auto inputDataFrame = dataFrameProvider_m->getDataFrame();
+    const auto inputColumnNames = inputDataFrame.GetColumnNames();
+    systematics.autoRegisterSystematics(
+        std::vector<std::string>(inputColumnNames.begin(), inputColumnNames.end()));
+
     name = "pass_" + name;
     Define(name, f, columns);
-    dataFrameProvider_m->Filter(passCut, {name});
+
+    // IDataFrameProvider::Define propagates paired systematics. Explicit
+    // labels (for example PDF replicas) use separate column registrations,
+    // so define those predicate columns here too.
+    auto df = dataFrameProvider_m->getDataFrame();
+    bool definedExplicitVariation = false;
+    for (const auto &label : systematics.getExplicitVariationLabels()) {
+      std::vector<std::string> variedColumns;
+      variedColumns.reserve(columns.size());
+      bool affected = false;
+      for (const auto &column : columns) {
+        const auto varied = systematics.getVariationColumnName(column, label);
+        affected = affected || varied != column;
+        variedColumns.push_back(varied);
+      }
+      if (!affected) {
+        continue;
+      }
+
+      auto availableColumns = df.GetColumnNames();
+      const auto mappedName = systematics.getVariationColumnName(name, label);
+      const std::string variedName = mappedName == name
+                                         ? name + "_" + label
+                                         : mappedName;
+      if (std::find(availableColumns.begin(), availableColumns.end(),
+                    variedName) == availableColumns.end()) {
+        df = df.Define(variedName, f, variedColumns);
+      }
+      systematics.registerVariationColumn(name, label, variedName);
+      definedExplicitVariation = true;
+    }
+    if (definedExplicitVariation) {
+      dataFrameProvider_m->setDataFrame(df);
+    }
+
+    auto variationLabels = systematics.getVariationLabels();
+    if (variationLabels.empty()) {
+      variationLabels.push_back("Nominal");
+    }
+    std::vector<std::string> previousMasks;
+    previousMasks.reserve(variationLabels.size());
+    for (const auto &label : variationLabels) {
+      // Resolve all prior masks before registering this filter's masks. A new
+      // label falls back to the previous nominal mask.
+      previousMasks.push_back(systematics.getSelectionMaskColumn(label));
+    }
+
+    df = dataFrameProvider_m->getDataFrame();
+    const auto availableColumns = df.GetColumnNames();
+    std::vector<std::string> cumulativeMasks;
+    cumulativeMasks.reserve(variationLabels.size());
+    std::unordered_map<std::string, std::string> maskByInputs;
+    for (std::size_t index = 0; index < variationLabels.size(); ++index) {
+      const auto &label = variationLabels[index];
+      std::string passColumn = label == "Nominal"
+                                   ? name
+                                   : systematics.getVariationColumnName(name, label);
+      if (std::find(availableColumns.begin(), availableColumns.end(), passColumn) ==
+          availableColumns.end()) {
+        passColumn = name;
+      }
+
+      const auto &previous = previousMasks[index];
+      const std::string key = std::to_string(previous.size()) + ":" +
+                              previous + passColumn;
+      auto cachedMask = maskByInputs.find(key);
+      std::string cumulative;
+      if (cachedMask != maskByInputs.end()) {
+        cumulative = cachedMask->second;
+      } else {
+        cumulative = "__rdf_filter_mask_" + std::to_string(filterCount_m) +
+                     "_" + std::to_string(maskByInputs.size());
+        if (previous.empty()) {
+          df = df.Define(cumulative, [](bool passed) { return passed; },
+                         {passColumn});
+        } else {
+          df = df.Define(
+              cumulative,
+              [](bool passedBefore, bool passedNow) {
+                return passedBefore && passedNow;
+              },
+              {previous, passColumn});
+        }
+        maskByInputs.emplace(key, cumulative);
+      }
+      cumulativeMasks.push_back(cumulative);
+      systematics.registerSelectionMaskColumn(label, cumulative);
+      if (systematics.getSelectionMaskColumn(label) != cumulative) {
+        throw std::logic_error(
+            "Analyzer::Filter requires the systematic manager to store "
+            "per-variation selection mask columns");
+      }
+    }
+
+    // Generate one short-circuiting expression over unique mask columns. All
+    // columns use framework-owned identifiers, avoiding per-event allocation
+    // of an RVec solely for the row filter (the histogram action packs its own
+    // per-variation mask once for all booked histograms).
+    std::string anyVariationPasses;
+    std::unordered_set<std::string> includedMasks;
+    for (const auto &mask : cumulativeMasks) {
+      if (!includedMasks.insert(mask).second) {
+        continue;
+      }
+      if (!anyVariationPasses.empty()) {
+        anyVariationPasses += " || ";
+      }
+      anyVariationPasses += "(" + mask + ")";
+    }
+    df = df.Filter(anyVariationPasses, filterLabel);
+    dataFrameProvider_m->setDataFrame(df);
+    ++filterCount_m;
     return this;
   }
 
@@ -172,7 +305,7 @@ public:
   }
 
   /**
-   * @brief Define a vector variable in the dataframe. Systematics are handled automatically.
+   * @brief Define a vector variable in the dataframe, including registered paired variations.
    * @param name Name of the variable
    * @param columns Input columns
    * @param type Data type (default: Float_t)
@@ -257,6 +390,12 @@ public:
    *
    * Triggers the event loop exactly once. This method:
    *  - Writes a skim only when @c enableSkim=1 (or @c true/@c True) is present in the config.
+   *    If @c skimFilter is present, it is applied as an RDataFrame filter to
+   *    the skim output only; histogram actions remain inclusive.
+   *    Skim systematic columns are omitted by default and are included only
+   *    when @c skimSystematics is enabled.
+   *  - Systematic propagation is enabled by default and can be disabled for
+   *    the entire framework with @c enableSystematics=false.
    *  - Saves all histograms booked on the NDHistogramManager (if one is registered).
    *  - Finalizes all analysis services (e.g. CounterService).
    *
@@ -455,6 +594,7 @@ private:
   std::unordered_map<std::string, std::string> taskMetadata_m;
   bool preFilterNotified_m = false;
   bool eventLoopTriggered_m = false;
+  std::size_t filterCount_m = 0;
   ///**
   // * @brief Initialize the analyzer with the provided dependencies
   // */

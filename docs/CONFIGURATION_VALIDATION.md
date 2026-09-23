@@ -94,6 +94,8 @@ Paths are resolved relative to the parent directory of the submit config file.
 
 When `threads` is present its value must be an integer, the string `auto`, or the string `max`; anything else is an error.
 
+The C++ runtime applies the same validation when it reads the analysis config, so skipping this preflight does not silently turn a malformed value into an all-cores job.
+
 ### Sample config validation
 
 The sample config (pointed to by `sampleConfig`) is validated according to its format.

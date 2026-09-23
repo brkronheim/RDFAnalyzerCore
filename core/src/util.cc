@@ -8,9 +8,12 @@
  * TChain and RDataFrame.
  */
 #include <cstdlib>
+#include <algorithm>
+#include <cctype>
 #include <dlfcn.h>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -169,16 +172,33 @@ static void setupROOTThreads(const IConfigurationProvider &configProvider) {
   int threads = -1;
   const auto &configMap = configProvider.getConfigMap();
   auto it = configMap.find("threads");
-  if (it != configMap.end()) {
+  if (it != configMap.end() && !it->second.empty()) {
     const std::string value = it->second;
-    if (value == "auto" || value == "max") {
+    const auto first = value.find_first_not_of(" \t\n\r\f\v");
+    const auto last = value.find_last_not_of(" \t\n\r\f\v");
+    const std::string trimmed = first == std::string::npos
+                                    ? std::string{}
+                                    : value.substr(first, last - first + 1);
+
+    std::string normalized = trimmed;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char character) {
+                     return static_cast<char>(std::tolower(character));
+                   });
+
+    if (normalized == "auto" || normalized == "max") {
       threads = 0;
-    } else {
+    } else if (!trimmed.empty()) {
       try {
-        threads = std::stoi(value);
+        size_t consumed = 0;
+        threads = std::stoi(trimmed, &consumed);
+        if (consumed != trimmed.size()) {
+          throw std::invalid_argument("trailing characters");
+        }
       } catch (const std::exception &) {
-        std::cout << "Invalid threads value '" << value << "', defaulting to auto" << std::endl;
-        threads = 0;
+        throw std::runtime_error(
+            "Invalid 'threads' value '" + trimmed +
+            "' (expected an integer, 'auto', or 'max').");
       }
     }
   }
@@ -379,4 +399,3 @@ parseFriendTreeConfig(const std::string &configFile) {
 
   return specs;
 }
-

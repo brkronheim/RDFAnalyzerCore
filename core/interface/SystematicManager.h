@@ -18,6 +18,15 @@
 class SystematicManager : public ISystematicManager {
 public:
   /**
+   * @brief Enable or disable all systematic registration and propagation.
+   *
+   * Disabling also clears registrations made before the toggle so the manager
+   * cannot expose a partially systematic graph.
+   */
+  void setEnabled(bool enabled) override;
+  bool isEnabled() const override;
+
+  /**
    * @brief Register a systematic and its affected variables
    * @param syst Name of the systematic
    * @param affectedVariables Set of affected variable names
@@ -39,6 +48,14 @@ public:
    * @return Reference to the set of systematic names
    */
   const std::set<std::string> &getSystematics() const override;
+
+  std::vector<std::string> getExplicitVariationLabels() const override;
+  std::vector<std::string> getVariationLabels() const override;
+  void registerSelectionMaskColumn(const std::string &variationLabel,
+                                   const std::string &column) override;
+  std::string getSelectionMaskColumn(
+      const std::string &variationLabel) const override;
+  bool hasSelectionMasks() const override;
 
   /**
    * @brief Get the set of variables affected by a given systematic
@@ -91,6 +108,7 @@ public:
                                      const std::string &syst) const override;
 
 private:
+  bool enabled_m = true;
   std::set<std::string> systematics_m;
   std::unordered_map<std::string, std::set<std::string>>
       systematicToVariableMap_m;
@@ -107,6 +125,8 @@ private:
   /// Enables multiple callers to safely share or isolate counter namespaces.
   std::unordered_map<std::string, std::vector<std::string>>
       materializedSystLists_m;
+  /// Cumulative Analyzer::Filter decision columns keyed by exact axis label.
+  std::unordered_map<std::string, std::string> selectionMaskColumns_m;
 };
 
 #endif // SYSTEMATICMANAGER_H_INCLUDED

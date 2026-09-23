@@ -13,10 +13,12 @@
 #include <iostream>
 #include <util.h>
 #include <algorithm>
+#include <cctype>
 #include <memory>
-#include <queue>
+#include <set>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 #include <SystematicManager.h>
 #include <api/ManagerContext.h> // for wiring plugins and services
 
@@ -24,6 +26,94 @@
 static void registerPluginProvenance(
     ProvenanceService* svc,
     const std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>& plugins);
+
+static std::vector<std::string> orderedPluginBatch(
+    const std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>& registered,
+    const std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>& incoming) {
+    std::set<std::string> pending;
+    std::unordered_set<std::string> available;
+    std::vector<std::string> order;
+
+    for (const auto& [role, plugin] : registered) {
+        (void)plugin;
+        available.insert(role);
+    }
+
+    for (const auto& [role, plugin] : incoming) {
+        if (registered.find(role) != registered.end()) {
+            throw std::runtime_error(
+                "Plugin role '" + role + "' is already registered.");
+        }
+        if (plugin) pending.insert(role);
+    }
+
+    while (!pending.empty()) {
+        std::vector<std::string> ready;
+        for (const auto& role : pending) {
+            const auto& plugin = incoming.at(role);
+            bool dependenciesAvailable = true;
+            for (const auto& dependency : plugin->getDependencies()) {
+                if (available.find(dependency) != available.end()) continue;
+                if (pending.find(dependency) == pending.end()) {
+                    throw std::runtime_error(
+                        "Plugin '" + role + "' declares dependency '" +
+                        dependency + "' which is not registered in the "
+                        "Analyzer or the plugin batch.");
+                }
+                dependenciesAvailable = false;
+            }
+            if (dependenciesAvailable) ready.push_back(role);
+        }
+
+        if (ready.empty()) {
+            throw std::runtime_error(
+                "Analyzer: circular dependency detected in plugin batch.");
+        }
+
+        for (const auto& role : ready) {
+            pending.erase(role);
+            available.insert(role);
+            order.push_back(role);
+        }
+    }
+
+    return order;
+}
+
+static bool parseBooleanConfig(const std::string &key, const std::string &value,
+                               bool defaultValue) {
+    if (value.empty()) {
+        return defaultValue;
+    }
+
+    std::string normalized;
+    normalized.reserve(value.size());
+    for (const unsigned char character : value) {
+        normalized.push_back(static_cast<char>(std::tolower(character)));
+    }
+
+    if (normalized == "1" || normalized == "true" || normalized == "yes" ||
+        normalized == "on") {
+        return true;
+    }
+    if (normalized == "0" || normalized == "false" || normalized == "no" ||
+        normalized == "off") {
+        return false;
+    }
+
+    throw std::invalid_argument("Analyzer: invalid boolean value '" + value +
+                                "' for configuration key '" + key + "'.");
+}
+
+static void configureSystematics(const IConfigurationProvider &config,
+                                 ISystematicManager &systematics) {
+    const auto &configMap = config.getConfigMap();
+    const auto it = configMap.find("enableSystematics");
+    const bool enabled = it == configMap.end()
+                             ? true
+                             : parseBooleanConfig("enableSystematics", it->second, true);
+    systematics.setEnabled(enabled);
+}
 
 // Dependency-injected constructor (shared_ptr plugin map)
 Analyzer::Analyzer(
@@ -47,6 +137,7 @@ Analyzer::Analyzer(
         throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
     }
     verbosityLevel_m = 1;
+    configureSystematics(*configProvider_m, *systematicManager_m);
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
         dataManager->finalizeSetup(*configProvider_m);
     }
@@ -77,6 +168,7 @@ Analyzer::Analyzer(
     }
     for (auto& kv : uniquePlugins) { plugins.emplace(kv.first, std::move(kv.second)); }
     verbosityLevel_m = 1;
+    configureSystematics(*configProvider_m, *systematicManager_m);
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
         dataManager->finalizeSetup(*configProvider_m);
     }
@@ -98,6 +190,7 @@ Analyzer::Analyzer(std::string configFile,
         throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
     }
     verbosityLevel_m = 1;
+    configureSystematics(*configProvider_m, *systematicManager_m);
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
         dataManager->finalizeSetup(*configProvider_m);
     }
@@ -121,6 +214,7 @@ Analyzer::Analyzer(std::string configFile,
     }
     for (auto& kv : uniquePlugins) { plugins.emplace(kv.first, std::move(kv.second)); }
     verbosityLevel_m = 1;
+    configureSystematics(*configProvider_m, *systematicManager_m);
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
         dataManager->finalizeSetup(*configProvider_m);
     }
@@ -163,18 +257,18 @@ void Analyzer::wirePluginManagers() {
         }
     }
 
-    std::queue<std::string> ready;
+    std::set<std::string> ready;
     for (auto& [role, deg] : inDegree) {
-        if (deg == 0) ready.push(role);
+        if (deg == 0) ready.insert(role);
     }
 
     std::vector<std::string> order;
     while (!ready.empty()) {
-        std::string cur = ready.front();
-        ready.pop();
+        const std::string cur = *ready.begin();
+        ready.erase(ready.begin());
         order.push_back(cur);
         for (const auto& dep : dependents[cur]) {
-            if (--inDegree[dep] == 0) ready.push(dep);
+            if (--inDegree[dep] == 0) ready.insert(dep);
         }
     }
 
@@ -218,18 +312,18 @@ void Analyzer::reorderPlugins() {
         }
     }
 
-    std::queue<std::string> ready;
+    std::set<std::string> ready;
     for (auto& [role, deg] : inDegree) {
-        if (deg == 0) ready.push(role);
+        if (deg == 0) ready.insert(role);
     }
 
     std::vector<std::string> order;
     while (!ready.empty()) {
-        std::string cur = ready.front();
-        ready.pop();
+        const std::string cur = *ready.begin();
+        ready.erase(ready.begin());
         order.push_back(cur);
         for (const auto& dep : dependents[cur]) {
-            if (--inDegree[dep] == 0) ready.push(dep);
+            if (--inDegree[dep] == 0) ready.insert(dep);
         }
     }
 
@@ -241,6 +335,9 @@ void Analyzer::reorderPlugins() {
 }
 
 Analyzer *Analyzer::addPlugin(const std::string &role, std::shared_ptr<IPluggableManager> plugin) {
+    if (plugins.find(role) != plugins.end()) {
+        throw std::runtime_error("Plugin role '" + role + "' is already registered.");
+    }
     if (!plugin) return this;
     // Validate that the new plugin's dependencies exist.
     for (const auto& dep : plugin->getDependencies()) {
@@ -272,13 +369,21 @@ Analyzer *Analyzer::addPlugin(const std::string &role, std::shared_ptr<IPluggabl
 }
 
 Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& newPlugins) {
-    for (auto &kv : newPlugins) { addPlugin(kv.first, std::move(kv.second)); }
+    const auto order = orderedPluginBatch(plugins, newPlugins);
+    for (const auto& role : order) {
+        addPlugin(role, std::move(newPlugins.at(role)));
+    }
     return this;
 }
 
 Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& newPlugins) {
-    for (auto &kv : newPlugins) { addPlugin(kv.first, std::move(kv.second)); }
-    return this;
+    std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> sharedPlugins;
+    sharedPlugins.reserve(newPlugins.size());
+    for (auto& [role, plugin] : newPlugins) {
+        sharedPlugins.emplace(
+            role, std::shared_ptr<IPluggableManager>(std::move(plugin)));
+    }
+    return addPlugins(std::move(sharedPlugins));
 }
 
 void Analyzer::initializeServices(ManagerContext& ctx) {
@@ -417,8 +522,6 @@ Analyzer *Analyzer::run() {
     }
     eventLoopTriggered_m = true;
 
-    auto df = dataFrameProvider_m->getDataFrame();
-
     // Pre-execution hook
     for (const auto& role : pluginOrder_m) {
         auto it = plugins.find(role);
@@ -427,12 +530,25 @@ Analyzer *Analyzer::run() {
         }
     }
 
+    // execute() hooks may extend the dataframe through IDataFrameProvider.
+    // Capture the current node only after all hooks have run so the skim and
+    // service finalizers see the complete graph.
+    auto df = dataFrameProvider_m->getDataFrame();
+
     // Conditionally write a skim when enableSkim=1/true/True is set in config
     const auto& cfgMap = configProvider_m->getConfigMap();
     const auto skimIt = cfgMap.find("enableSkim");
     if (skimIt != cfgMap.end()) {
         const auto& val = skimIt->second;
         if (val == "1" || val == "true" || val == "True") {
+            // Keep the skim selection on the output branch only. Histogram
+            // actions continue to use the full analysis dataframe, while a
+            // configured RDataFrame expression can restrict the events that
+            // are written to the skim.
+            const auto skimFilterIt = cfgMap.find("skimFilter");
+            if (skimFilterIt != cfgMap.end() && !skimFilterIt->second.empty()) {
+                df = df.Filter(skimFilterIt->second, "ConfiguredSkimFilter");
+            }
             skimSink_m->writeDataFrame(df,
                                        *configProvider_m,
                                        systematicManager_m.get(),
@@ -513,5 +629,3 @@ ROOT::RDF::RNode Analyzer::getDF() {
 std::string Analyzer::configMap(std::string key) {
     return configProvider_m->get(key);
 }
-
- 

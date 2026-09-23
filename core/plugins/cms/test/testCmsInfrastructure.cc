@@ -667,6 +667,15 @@ TEST(CmsCorrectionValidationTest, MissingJecFileReported) {
   EXPECT_TRUE(audit.hasCategory("jec"));
 }
 
+TEST(CmsCorrectionsTest, JecCompoundInputsMatchMcAndDataSchemas) {
+  EXPECT_EQ(detail::jecCompoundInputColumns(false, "Jet_pt_raw", "Rho"),
+            (std::vector<std::string>{"Jet_area", "Jet_eta", "Jet_pt_raw",
+                                      "Rho"}));
+  EXPECT_EQ(detail::jecCompoundInputColumns(true, "Jet_pt_raw", "Rho"),
+            (std::vector<std::string>{"Jet_area", "Jet_eta", "Jet_pt_raw",
+                                      "Rho", "run"}));
+}
+
 TEST(CmsCorrectionValidationTest, EmptyJecWithCorrectionsOffIsOk) {
   CmsYearSettings ys;
   ys.canonicalYear = "2022_preEE";

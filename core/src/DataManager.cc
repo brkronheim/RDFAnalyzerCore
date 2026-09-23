@@ -5,8 +5,10 @@
 #include <TChain.h>
 #include <cctype>
 #include <iostream>
+#include <stdexcept>
 #include <util.h>
 #include <filesystem>
+#include <utility>
 
 #include <ROOT/RDFHelpers.hxx>
 #include <functions.h>
@@ -392,7 +394,42 @@ bool hasUnsupportedInputTypes(const std::vector<DefineVectorTypeToken> &inputTyp
  * @param configProvider Reference to the configuration provider
  */
 DataManager::DataManager(const IConfigurationProvider &configProvider)
-    : chain_vec_m(makeTChain(configProvider)), df_m(ROOT::RDataFrame(1)) {
+    : chain_vec_m(makeTChain(configProvider)), df_m(ROOT::RDataFrame(0)) {
+
+    // The config-backed constructor is for real input data. Do not silently
+    // substitute an in-memory event when the configured files are missing,
+    // unreadable, or do not contain the requested tree: that can make a bad
+    // production config appear to have completed successfully.
+    if (chain_vec_m.empty() || !chain_vec_m[0] ||
+        chain_vec_m[0]->GetEntries() <= 0) {
+      std::string inputDescription = "no fileList or directory configured";
+      const auto &configMap = configProvider.getConfigMap();
+      const auto fileList = configMap.find("fileList");
+      if (fileList != configMap.end() && !fileList->second.empty()) {
+        inputDescription = "fileList='" + fileList->second + "'";
+      } else {
+        const auto directory = configMap.find("directory");
+        if (directory != configMap.end() && !directory->second.empty()) {
+          inputDescription = "directory='" + directory->second + "'";
+        }
+      }
+
+      const auto treeNames = configProvider.getList("treeList", {"Events"});
+      std::string treeDescription;
+      for (const auto &treeName : treeNames) {
+        if (!treeDescription.empty()) {
+          treeDescription += ", ";
+        }
+        treeDescription += treeName;
+      }
+
+      throw std::runtime_error(
+          "DataManager: no input entries found for tree(s) [" +
+          treeDescription + "] from " + inputDescription +
+          ". Check that the configured files are readable and contain the "
+          "requested tree. For intentional in-memory data in tests, use "
+          "DataManager(nEntries).");
+    }
 
     // Attach friend trees (from friendConfig) BEFORE wrapping in RDataFrame
     // so that all friend branches are visible to the RDataFrame at creation.
@@ -401,36 +438,29 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
       registerFriendTrees(configProvider);
     }
 
-    // Fall back to a small in-memory dataframe (1 entry) if no input files were found
-    // This allows unit tests to define variables and perform simple operations
-    // that expect at least one row.
-    if (!(chain_vec_m.empty()) && chain_vec_m[0]->GetEntries() > 0) {
-      df_m = ROOT::RDataFrame(*chain_vec_m[0]);
+    df_m = ROOT::RDataFrame(*chain_vec_m[0]);
 
-      // Apply optional entry-range restriction.
-      // Written by law tasks when partition='entry_range' is selected.
-      // Both keys must be present; if only one is set the range is ignored.
-      // Note: Range() disables implicit multi-threading (ImplicitMT) when
-      // used with ROOT < 6.28.  In entry_range partition mode each condor
-      // job is a separate process, so per-job parallelism is unaffected;
-      // only the in-process thread count is restricted to 1 on older ROOT.
-      const std::string firstEntryStr = configProvider.get("firstEntry");
-      const std::string lastEntryStr  = configProvider.get("lastEntry");
-      if (!firstEntryStr.empty() && !lastEntryStr.empty()) {
-        const ULong64_t firstEntry = std::stoull(firstEntryStr);
-        const ULong64_t lastEntry  = std::stoull(lastEntryStr);
-        if (lastEntry > firstEntry) {
-          df_m = df_m.Range(firstEntry, lastEntry);
-          std::cout << "Entry range applied: [" << firstEntry << ", "
-                    << lastEntry << ")" << std::endl;
-        } else {
-          std::cerr << "Warning: firstEntry (" << firstEntry
-                    << ") >= lastEntry (" << lastEntry
-                    << "); entry range ignored." << std::endl;
-        }
+    // Apply optional entry-range restriction.
+    // Written by law tasks when partition='entry_range' is selected.
+    // Both keys must be present; if only one is set the range is ignored.
+    // Note: Range() disables implicit multi-threading (ImplicitMT) when
+    // used with ROOT < 6.28.  In entry_range partition mode each condor
+    // job is a separate process, so per-job parallelism is unaffected;
+    // only the in-process thread count is restricted to 1 on older ROOT.
+    const std::string firstEntryStr = configProvider.get("firstEntry");
+    const std::string lastEntryStr  = configProvider.get("lastEntry");
+    if (!firstEntryStr.empty() && !lastEntryStr.empty()) {
+      const ULong64_t firstEntry = std::stoull(firstEntryStr);
+      const ULong64_t lastEntry  = std::stoull(lastEntryStr);
+      if (lastEntry > firstEntry) {
+        df_m = df_m.Range(firstEntry, lastEntry);
+        std::cout << "Entry range applied: [" << firstEntry << ", "
+                  << lastEntry << ")" << std::endl;
+      } else {
+        std::cerr << "Warning: firstEntry (" << firstEntry
+                  << ") >= lastEntry (" << lastEntry
+                  << "); entry range ignored." << std::endl;
       }
-    } else {
-      std::cout << "No input files found; using single-entry in-memory RDataFrame for testing." << std::endl;
     }
 
     // Display a progress bar depending on batch status and ROOT version
@@ -452,7 +482,7 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
   #endif
 
 
-      }
+}
 
 /**
  * @brief Construct a new DataManager object for testing with an in-memory RDataFrame
@@ -496,103 +526,176 @@ void DataManager::DefineVector(std::string name,
                                const std::vector<std::string> &columns,
                                std::string type,
                                ISystematicManager &systematicManager) {
-  (void)systematicManager;
-  //std::cout << "[DataManager] Defining vector column " << name << std::endl;
+  defineVectorImpl(std::move(name), columns, std::move(type), systematicManager,
+                   true);
+}
 
-  const auto existingColumns = df_m.GetColumnNames();
-  if (std::find(existingColumns.begin(), existingColumns.end(), name) != existingColumns.end()) {
-    std::cout << "[DataManager] Vector column " << name << " already exists, skipping." << std::endl;
+void DataManager::DefineVectorNominal(
+    std::string name, const std::vector<std::string> &columns, std::string type,
+    ISystematicManager &systematicManager) {
+  defineVectorImpl(std::move(name), columns, std::move(type), systematicManager,
+                   false);
+}
+
+void DataManager::defineVectorImpl(std::string name,
+                                   const std::vector<std::string> &columns,
+                                   std::string type,
+                                   ISystematicManager &systematicManager,
+                                   bool propagateSystematics) {
+  // Define nominal and each paired variation through the same compiled/JIT
+  // path.  Keeping this in one helper ensures systematic columns preserve all
+  // existing type checks and scalar/RVec conversion behavior.
+  auto defineVectorColumn = [&](const std::string &outputName,
+                                const std::vector<std::string> &inputColumns) {
+    const auto existingColumns = df_m.GetColumnNames();
+    if (std::find(existingColumns.begin(), existingColumns.end(), outputName) !=
+        existingColumns.end()) {
+      return;
+    }
+
+    std::vector<std::string> missing;
+    for (const auto &column : inputColumns) {
+      if (std::find(existingColumns.begin(), existingColumns.end(), column) ==
+          existingColumns.end()) {
+        missing.push_back(column);
+      }
+    }
+    if (!missing.empty()) {
+      std::string msg = "DefineVector: missing columns for '" + outputName + "': ";
+      for (const auto &column : missing) {
+        msg += column + " ";
+      }
+      throw std::runtime_error(msg);
+    }
+
+    std::vector<bool> isRVec;
+    std::vector<DefineVectorTypeToken> inputTypes;
+    inputTypes.reserve(inputColumns.size());
+    for (const auto &column : inputColumns) {
+      const std::string colType = df_m.GetColumnType(column);
+      const bool columnIsRVec = isRVecColumnType(colType);
+      isRVec.push_back(columnIsRVec);
+      inputTypes.push_back(
+          tokenizeDefineVectorType(columnIsRVec ? extractRVecElementType(colType)
+                                                : colType));
+    }
+
+    const bool allRVec =
+        std::all_of(isRVec.begin(), isRVec.end(), [](bool value) { return value; });
+    const bool allScalar =
+        std::none_of(isRVec.begin(), isRVec.end(), [](bool value) { return value; });
+    if (!(allRVec || allScalar)) {
+      throw std::runtime_error(
+          "DefineVector: Mixed scalar and RVec types are not supported.");
+    }
+
+    const auto targetType = tokenizeDefineVectorType(type);
+    const bool useFallback =
+        targetType == DefineVectorTypeToken::Unsupported ||
+        hasUnsupportedInputTypes(inputTypes);
+    if (useFallback) {
+      const std::string expr = allScalar
+                                   ? buildScalarDefineVectorExpression(inputColumns, type)
+                                   : buildRVecDefineVectorExpression(inputColumns, type);
+      df_m = df_m.Define(outputName, expr);
+      std::cout << "[DataManager] Vector column " << outputName
+                << " defined via JIT fallback." << std::endl;
+      std::cout << "Expression: \n" << expr << std::endl;
+      return;
+    }
+
+    switch (targetType) {
+    case DefineVectorTypeToken::Bool:
+      df_m = defineCompiledVectorColumn<Bool_t>(df_m, outputName, inputColumns,
+                                                inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::Float:
+      df_m = defineCompiledVectorColumn<Float_t>(df_m, outputName, inputColumns,
+                                                 inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::Double:
+      df_m = defineCompiledVectorColumn<Double_t>(df_m, outputName, inputColumns,
+                                                  inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::Int:
+      df_m = defineCompiledVectorColumn<Int_t>(df_m, outputName, inputColumns,
+                                               inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::UInt:
+      df_m = defineCompiledVectorColumn<UInt_t>(df_m, outputName, inputColumns,
+                                                inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::Short:
+      df_m = defineCompiledVectorColumn<Short_t>(df_m, outputName, inputColumns,
+                                                 inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::UShort:
+      df_m = defineCompiledVectorColumn<UShort_t>(df_m, outputName, inputColumns,
+                                                  inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::Char:
+      df_m = defineCompiledVectorColumn<Char_t>(df_m, outputName, inputColumns,
+                                                inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::UChar:
+      df_m = defineCompiledVectorColumn<UChar_t>(df_m, outputName, inputColumns,
+                                                 inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::Long64:
+      df_m = defineCompiledVectorColumn<Long64_t>(df_m, outputName, inputColumns,
+                                                  inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::ULong64:
+      df_m = defineCompiledVectorColumn<ULong64_t>(df_m, outputName, inputColumns,
+                                                   inputTypes, allScalar);
+      break;
+    case DefineVectorTypeToken::Unsupported:
+      throw std::runtime_error(
+          "DefineVector: unsupported target type in compiled path.");
+    }
+  };
+
+  defineVectorColumn(name, columns);
+  if (!propagateSystematics) {
     return;
   }
 
-  // Sanity-check that all requested columns exist in the dataframe.
-  std::vector<std::string> missing;
-  for (const auto &c : columns) {
-    if (std::find(existingColumns.begin(), existingColumns.end(), c) == existingColumns.end()) {
-      missing.push_back(c);
+  const std::vector<std::string> systematics(systematicManager.getSystematics().begin(),
+                                              systematicManager.getSystematics().end());
+  for (const auto &systematic : systematics) {
+    std::vector<std::string> upColumns;
+    std::vector<std::string> downColumns;
+    upColumns.reserve(columns.size());
+    downColumns.reserve(columns.size());
+    bool affected = false;
+    for (const auto &column : columns) {
+      const auto upColumn =
+          systematicManager.getVariationColumnName(column, systematic + "Up");
+      const auto downColumn =
+          systematicManager.getVariationColumnName(column, systematic + "Down");
+      affected = affected || upColumn != column || downColumn != column;
+      upColumns.push_back(upColumn);
+      downColumns.push_back(downColumn);
     }
-  }
-  if (!missing.empty()) {
-    std::string msg = "DefineVector: missing columns: ";
-    for (const auto &m : missing) {
-      msg += m + " ";
+    if (!affected) {
+      continue;
     }
-    throw std::runtime_error(msg);
-  }
 
-  // Determine the type of each column (scalar or RVec) and normalize the
-  // element/scalar types for the compiled fast path.
-  std::vector<bool> isRVec;
-  std::vector<DefineVectorTypeToken> inputTypes;
-  inputTypes.reserve(columns.size());
-  for (const auto& col : columns) {
-    const std::string colType = df_m.GetColumnType(col);
-    const bool columnIsRVec = isRVecColumnType(colType);
-    isRVec.push_back(columnIsRVec);
-    inputTypes.push_back(
-        tokenizeDefineVectorType(columnIsRVec ? extractRVecElementType(colType)
-                                              : colType));
-  }
+    const auto mappedUpName =
+        systematicManager.getVariationColumnName(name, systematic + "Up");
+    const auto mappedDownName =
+        systematicManager.getVariationColumnName(name, systematic + "Down");
+    const std::string upName = mappedUpName == name
+                                   ? name + "_" + systematic + "Up"
+                                   : mappedUpName;
+    const std::string downName = mappedDownName == name
+                                     ? name + "_" + systematic + "Down"
+                                     : mappedDownName;
 
-  bool allRVec = std::all_of(isRVec.begin(), isRVec.end(), [](bool v){ return v; });
-  bool allScalar = std::none_of(isRVec.begin(), isRVec.end(), [](bool v){ return v; });
-
-  if (!(allRVec || allScalar)) {
-    throw std::runtime_error("DefineVector: Mixed scalar and RVec types are not supported.");
-  }
-
-  const auto targetType = tokenizeDefineVectorType(type);
-  const bool useFallback =
-      targetType == DefineVectorTypeToken::Unsupported ||
-      hasUnsupportedInputTypes(inputTypes);
-
-  if (useFallback) {
-    const std::string expr = allScalar
-                                 ? buildScalarDefineVectorExpression(columns, type)
-                                 : buildRVecDefineVectorExpression(columns, type);
-    df_m = df_m.Define(name, expr);
-    std::cout << "[DataManager] Vector column " << name
-              << " defined via JIT fallback." << std::endl;
-    std::cout << "Expression: \n" << expr << std::endl;
-    return;
-  }
-
-  switch (targetType) {
-  case DefineVectorTypeToken::Bool:
-    df_m = defineCompiledVectorColumn<Bool_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::Float:
-    df_m = defineCompiledVectorColumn<Float_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::Double:
-    df_m = defineCompiledVectorColumn<Double_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::Int:
-    df_m = defineCompiledVectorColumn<Int_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::UInt:
-    df_m = defineCompiledVectorColumn<UInt_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::Short:
-    df_m = defineCompiledVectorColumn<Short_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::UShort:
-    df_m = defineCompiledVectorColumn<UShort_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::Char:
-    df_m = defineCompiledVectorColumn<Char_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::UChar:
-    df_m = defineCompiledVectorColumn<UChar_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::Long64:
-    df_m = defineCompiledVectorColumn<Long64_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::ULong64:
-    df_m = defineCompiledVectorColumn<ULong64_t>(df_m, name, columns, inputTypes, allScalar);
-    break;
-  case DefineVectorTypeToken::Unsupported:
-    throw std::runtime_error("DefineVector: unsupported target type in compiled path.");
+    defineVectorColumn(upName, upColumns);
+    defineVectorColumn(downName, downColumns);
+    systematicManager.registerVariationColumns(name, systematic, upName,
+                                               downName);
   }
 
   /*
@@ -1001,4 +1104,3 @@ DataManager::~DataManager() = default;
 
 // Add out-of-line definition for IDataFrameProvider virtual destructor
 IDataFrameProvider::~IDataFrameProvider() = default;
-

@@ -1,5 +1,11 @@
 import os
-from core.python.submission_backend import ensure_xrootd_redirector, generate_condor_submit, generate_condor_runscript, stage_outputs_blocks
+from core.python.submission_backend import ensure_xrootd_redirector, generate_condor_submit, generate_condor_runscript, get_copy_file_list, stage_outputs_blocks
+
+
+def test_get_copy_file_list_includes_onnx_payloads():
+    assert get_copy_file_list({"model": "cfg/model_even_train.onnx"}) == [
+        "cfg/model_even_train.onnx"
+    ]
 
 
 def test_ensure_xrootd_redirector_preserves_absolute_local_paths():
@@ -181,6 +187,16 @@ def test_runscript_excludes_xrootd_optimize_when_stage_in():
     assert "Optimizing XRootD redirectors" not in script
     # Stage-in block must be present instead
     assert "Staging input files" in script
+
+
+def test_xrootd_optimize_block_honors_explicit_redirector():
+    """An explicit config redirector disables worker-side site probing."""
+    from core.python.submission_backend import xrootd_optimize_block
+
+    block = xrootd_optimize_block()
+    assert 'cfg.get("xrootdRedirector", "")' in block
+    assert 'cfg.get("redirector", "")' in block
+    assert "skipping site optimisation" in block
 
 
 def test_stage_in_uses_site_selection():

@@ -18,6 +18,11 @@ struct KinFitParticle {
   double sigPt;  ///< Fractional pT resolution  (sigma_pT / pT)
   double sigEta; ///< Absolute eta resolution
   double sigPhi; ///< Absolute phi resolution
+  /// @brief Optional absolute isotropic resolution in px and py [GeV].
+  /// When positive, this replaces the fractional pT resolution for the
+  /// particle and uses sigma_pt = sigma_xy and sigma_phi = sigma_xy / pT.
+  /// This is intended for MET component fits.
+  double sigCartesian = 0.0;
 };
 
 /**
@@ -75,19 +80,37 @@ struct MassConstraint {
 /**
  * @brief Transverse-momentum (size) constraint on a single particle.
  *
- * Constrains the fitted pT of particle @p idx to equal @p targetPt.
- * Setting @p targetPt = 0 effectively removes the particle's contribution
- * to hadronic MET in events where no genuine MET is expected (e.g. fully
- * hadronic decays).
+ * Constrains the fitted pT of particle @p idx to @p targetPt. With
+ * @p ptSigma = 0 the constraint is exact; a positive @p ptSigma applies a
+ * Gaussian width in GeV and allows residual pT.
  *
  * Example: constrain MET to 0 in a Z → jj selection:
  * @code
- *   fitter.addPtConstraint(metIdx, 0.0);
+ *   fitter.addPtConstraint(metIdx, 0.0, 20.0);
  * @endcode
  */
 struct PtConstraint {
   int    idx;       ///< Index of the particle whose pT is constrained
   double targetPt;  ///< Target transverse momentum [GeV]
+  /// @brief Gaussian width of the pT constraint [GeV].
+  /// Set to 0 for a hard constraint; positive values allow residual pT.
+  double ptSigma = 0.0;
+};
+
+/**
+ * @brief Constraint on the px or py sum of one or more particles.
+ *
+ * The residual is the sum of the selected particles' Cartesian component
+ * minus @p target.  With @p sigma = 0 the constraint is exact; a positive
+ * width adds a Gaussian penalty in GeV.
+ */
+struct CartesianConstraint {
+  enum class Component { PX, PY };
+
+  Component component;
+  std::vector<int> indices;
+  double target = 0.0;
+  double sigma = 0.0;
 };
 
 /// @cond INTERNAL
@@ -107,18 +130,20 @@ constexpr double kMinPt          = 1e-4;
  * @class KinematicFit
  * @brief Kinematic fitter using iterative linearization with Lagrange multipliers.
  *
- * Minimises
+ * Minimises the measurement-pull chi2 plus Gaussian penalty terms for soft
+ * constraints, subject to hard constraints.  The returned chi2 includes both
+ * pieces:
  *   chi2 = sum_i [ (delta_pT_i / sigma_pT_i)^2
  *                + (delta_eta_i / sigma_eta_i)^2
  *                + (delta_phi_i / sigma_phi_i)^2 ]
- * subject to two-body invariant mass constraints f_c(particles) = 0.
+ *          + sum_soft (constraint residual / constraint sigma)^2.
  *
  * The method follows the standard HEP approach (Lagrange multipliers with
  * linearisation) applicable to any number of constraints; a direct 2x2
  * inversion is used for 1–2 constraints while Gaussian elimination handles
  * more than 2.  For each iteration:
  *   delta_eta = V * D^T * lambda
- *   lambda    = -(D * V * D^T)^{-1} * f
+ *   lambda    = -(D * V * D^T + S)^{-1} * f
  * where D_{ci} = df_c/deta_i evaluated at the current point.
  *
  * Usage example (dilepton+dijet):
@@ -180,14 +205,40 @@ public:
   /**
    * @brief Add a transverse-momentum constraint on a single particle.
    *
-   * Constrains the fitted pT of particle @p idx to equal @p targetPt.
-   * Use @p targetPt = 0.0 to suppress MET in events where no genuine
-   * missing energy is expected (e.g. fully hadronic decays).
+   * Constrains the fitted pT of particle @p idx to @p targetPt. With the
+   * default @p ptSigma = 0 the constraint is exact. A positive @p ptSigma
+   * turns it into a Gaussian constraint, allowing the fitted pT to deviate
+   * from the target with width @p ptSigma in GeV.
    * @param idx      Index of the particle.
    * @param targetPt Target pT [GeV].
+   * @param ptSigma  Gaussian pT width [GeV] (default 0 = hard constraint).
    */
-  void addPtConstraint(int idx, double targetPt) {
-    ptConstraints_.push_back({idx, targetPt});
+  void addPtConstraint(int idx, double targetPt, double ptSigma = 0.0) {
+    ptConstraints_.push_back({idx, targetPt, ptSigma});
+  }
+
+  /**
+   * @brief Add a px constraint on a sum of particles.
+   * @param indices Particle indices included in the sum.
+   * @param targetPx Target px sum [GeV].
+   * @param pxSigma Gaussian width [GeV] (default 0 = hard constraint).
+   */
+  void addPxConstraint(const std::vector<int> &indices, double targetPx,
+                       double pxSigma = 0.0) {
+    transverseConstraints_.push_back(
+        {CartesianConstraint::Component::PX, indices, targetPx, pxSigma});
+  }
+
+  /**
+   * @brief Add a py constraint on a sum of particles.
+   * @param indices Particle indices included in the sum.
+   * @param targetPy Target py sum [GeV].
+   * @param pySigma Gaussian width [GeV] (default 0 = hard constraint).
+   */
+  void addPyConstraint(const std::vector<int> &indices, double targetPy,
+                       double pySigma = 0.0) {
+    transverseConstraints_.push_back(
+        {CartesianConstraint::Component::PY, indices, targetPy, pySigma});
   }
 
   /**
@@ -202,6 +253,7 @@ private:
   std::vector<KinFitParticle> particles_;
   std::vector<MassConstraint> constraints_;
   std::vector<PtConstraint>   ptConstraints_;
+  std::vector<CartesianConstraint> transverseConstraints_;
 
   // ── helpers ────────────────────────────────────────────────────────────────────────────
 
@@ -293,7 +345,8 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
   const int nParticles    = static_cast<int>(particles_.size());
   const int nMassConstr   = static_cast<int>(constraints_.size());
   const int nPtConstr     = static_cast<int>(ptConstraints_.size());
-  const int nConstraints  = nMassConstr + nPtConstr;
+  const int nTransConstr  = static_cast<int>(transverseConstraints_.size());
+  const int nConstraints  = nMassConstr + nPtConstr + nTransConstr;
   const int nParams       = nParticles * 3; // (pT, eta, phi) per particle
 
   if (nParticles == 0 || nConstraints == 0) {
@@ -303,13 +356,93 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
   // ── build diagonal variance vector ──────────────────────────────────────
   std::vector<double> var(nParams);
   for (int i = 0; i < nParticles; ++i) {
-    // pT variance: use (sigma_pT * pT)^2 (fractional resolution)
-    const double sp = particles_[i].sigPt * particles_[i].pt;
-    var[3 * i + 0] = std::max(sp * sp, detail::kMinVariance);
+    // For an isotropic Cartesian resolution σ_xy, the local (pT, phi)
+    // covariance is diagonal with σ_pT = σ_xy and σ_phi = σ_xy / pT.
+    // This avoids making the MET measurement uncertainty grow with its
+    // measured magnitude when Cartesian constraints are used.
+    if (particles_[i].sigCartesian > 0.0) {
+      const double sigma = particles_[i].sigCartesian;
+      const double pt2 = std::max(particles_[i].pt * particles_[i].pt,
+                                  detail::kMinVariance);
+      var[3 * i + 0] = std::max(sigma * sigma, detail::kMinVariance);
+      var[3 * i + 2] = std::max(sigma * sigma / pt2,
+                                detail::kMinVariance);
+    } else {
+      // pT variance: use (sigma_pT * pT)^2 (fractional resolution)
+      const double sp = particles_[i].sigPt * particles_[i].pt;
+      var[3 * i + 0] = std::max(sp * sp, detail::kMinVariance);
+      var[3 * i + 2] = std::max(particles_[i].sigPhi * particles_[i].sigPhi,
+                                detail::kMinVariance);
+    }
     // eta/phi variances: absolute
     var[3 * i + 1] = std::max(particles_[i].sigEta * particles_[i].sigEta, detail::kMinVariance);
-    var[3 * i + 2] = std::max(particles_[i].sigPhi * particles_[i].sigPhi, detail::kMinVariance);
   }
+
+  bool hasSoftConstraint = false;
+  for (const auto &constraint : constraints_) {
+    hasSoftConstraint = hasSoftConstraint || constraint.massSigma > 0.0;
+  }
+  for (const auto &constraint : ptConstraints_) {
+    hasSoftConstraint = hasSoftConstraint || constraint.ptSigma > 0.0;
+  }
+  for (const auto &constraint : transverseConstraints_) {
+    hasSoftConstraint = hasSoftConstraint || constraint.sigma > 0.0;
+  }
+
+  // Report the complete fit objective: measurement pulls plus the Gaussian
+  // penalties from soft constraints. The latter are also represented in the
+  // W-matrix during the fit, so using the same residual definitions here
+  // makes KinFitResult::chi2 an accurate final-fit quality value.
+  auto computeChi2 = [&](const std::vector<KinFitParticle> &state) {
+    double chi2 = 0.0;
+    for (int i = 0; i < nParticles; ++i) {
+      const double dpt  = state[i].pt  - particles_[i].pt;
+      const double deta = state[i].eta - particles_[i].eta;
+      const double dphi = state[i].phi - particles_[i].phi;
+      chi2 += dpt  * dpt  / var[3 * i + 0];
+      chi2 += deta * deta / var[3 * i + 1];
+      chi2 += dphi * dphi / var[3 * i + 2];
+    }
+
+    for (const auto &constraint : constraints_) {
+      if (constraint.massSigma <= 0.0) continue;
+      const double residual = constraint.idx3 < 0
+                                  ? invMass2(state[constraint.idx1],
+                                             state[constraint.idx2]) -
+                                        constraint.targetMass * constraint.targetMass
+                                  : invMass3(state[constraint.idx1],
+                                             state[constraint.idx2],
+                                             state[constraint.idx3]) -
+                                        constraint.targetMass * constraint.targetMass;
+      const double residualSigma =
+          2.0 * constraint.targetMass * constraint.massSigma;
+      chi2 += residual * residual /
+              std::max(residualSigma * residualSigma, detail::kMinVariance);
+    }
+
+    for (const auto &constraint : ptConstraints_) {
+      if (constraint.ptSigma <= 0.0) continue;
+      const double residual = state[constraint.idx].pt - constraint.targetPt;
+      chi2 += residual * residual /
+              std::max(constraint.ptSigma * constraint.ptSigma,
+                       detail::kMinVariance);
+    }
+
+    for (const auto &constraint : transverseConstraints_) {
+      if (constraint.sigma <= 0.0) continue;
+      double componentSum = 0.0;
+      const bool isPx = constraint.component == CartesianConstraint::Component::PX;
+      for (const int idx : constraint.indices) {
+        componentSum += isPx ? state[idx].pt * std::cos(state[idx].phi)
+                             : state[idx].pt * std::sin(state[idx].phi);
+      }
+      const double residual = componentSum - constraint.target;
+      chi2 += residual * residual /
+              std::max(constraint.sigma * constraint.sigma,
+                       detail::kMinVariance);
+    }
+    return chi2;
+  };
 
   // Working copy of particle parameters
   std::vector<KinFitParticle> current = particles_;
@@ -371,6 +504,26 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
       // D[c * nParams + pc.idx * 3 + 2] = 0 (d f / d phi = 0, already zero)
     }
 
+    // Cartesian px/py constraints.  Each constraint may contain any number
+    // of particles, allowing the configuration to express total transverse
+    // momentum balance over the complete fitted topology.
+    for (int k = 0; k < nTransConstr; ++k) {
+      const int c = nMassConstr + nPtConstr + k;
+      const auto &tc = transverseConstraints_[k];
+      double componentSum = 0.0;
+      for (const int idx : tc.indices) {
+        const auto &p = current[idx];
+        const bool isPx = tc.component == CartesianConstraint::Component::PX;
+        componentSum += isPx ? p.pt * std::cos(p.phi)
+                             : p.pt * std::sin(p.phi);
+        D[c * nParams + idx * 3 + 0] +=
+            isPx ? std::cos(p.phi) : std::sin(p.phi);
+        D[c * nParams + idx * 3 + 2] +=
+            isPx ? -p.pt * std::sin(p.phi) : p.pt * std::cos(p.phi);
+      }
+      f[c] = componentSum - tc.target;
+    }
+
     // ── compute W = D * V * D^T  (nConstraints × nConstraints) ──────────
     std::vector<double> W(nConstraints * nConstraints, 0.0);
     for (int ci = 0; ci < nConstraints; ++ci) {
@@ -383,7 +536,7 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
       }
     }
 
-    // ── soften mass constraints with a Gaussian width (massSigma > 0) ────
+    // ── soften constraints with Gaussian widths ───────────────────────────
     // For a soft constraint with resonance width σ_m the constraint
     // residual g_c = m² − m_target² has uncertainty
     //   σ_{g_c} ≈ 2 · m_target · σ_m  (first-order error propagation),
@@ -397,26 +550,58 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
         W[c * nConstraints + c] += residualSigma * residualSigma;
       }
     }
+    for (int k = 0; k < nPtConstr; ++k) {
+      const auto &pc = ptConstraints_[k];
+      if (pc.ptSigma > 0.0) {
+        const int c = nMassConstr + k;
+        W[c * nConstraints + c] += pc.ptSigma * pc.ptSigma;
+      }
+    }
+    for (int k = 0; k < nTransConstr; ++k) {
+      const auto &tc = transverseConstraints_[k];
+      if (tc.sigma > 0.0) {
+        const int c = nMassConstr + nPtConstr + k;
+        W[c * nConstraints + c] += tc.sigma * tc.sigma;
+      }
+    }
 
-    // ── solve  W * lambda = -f  ──────────────────────────────────────────
+    // The right-hand side for the linearized constraints includes the shift
+    // back to the original measured point, D * (x_original - x_current).
+    // Without this term, repeated iterations would eventually drive even a
+    // soft constraint to its target exactly.
+    std::vector<double> linearizedResidual = f;
+    if (hasSoftConstraint) {
+      for (int c = 0; c < nConstraints; ++c) {
+        for (int i = 0; i < nParticles; ++i) {
+          linearizedResidual[c] +=
+              D[c * nParams + 3 * i + 0] * (particles_[i].pt - current[i].pt) +
+              D[c * nParams + 3 * i + 1] * (particles_[i].eta - current[i].eta) +
+              D[c * nParams + 3 * i + 2] * (particles_[i].phi - current[i].phi);
+        }
+      }
+    }
+
+    // ── solve  W * lambda = -linearizedResidual  ─────────────────────────
     std::vector<double> lambda(nConstraints, 0.0);
     if (nConstraints == 1) {
       if (std::abs(W[0]) < detail::kSingularityEps) break;
-      lambda[0] = -f[0] / W[0];
+      lambda[0] = -linearizedResidual[0] / W[0];
     } else if (nConstraints == 2) {
       const double det = W[0] * W[3] - W[1] * W[2];
       if (std::abs(det) < detail::kSingularityEps) break;
-      lambda[0] = (-f[0] * W[3] + f[1] * W[1]) / det;
-      lambda[1] = (-f[1] * W[0] + f[0] * W[2]) / det;
+      lambda[0] = (-linearizedResidual[0] * W[3] +
+                   linearizedResidual[1] * W[1]) / det;
+      lambda[1] = (-linearizedResidual[1] * W[0] +
+                   linearizedResidual[0] * W[2]) / det;
     } else {
       // General Gauss elimination for nConstraints > 2
-      // Augmented matrix [W | -f], in-place
+      // Augmented matrix [W | -linearizedResidual], in-place
       std::vector<double> aug(nConstraints * (nConstraints + 1));
       for (int r = 0; r < nConstraints; ++r) {
         for (int col = 0; col < nConstraints; ++col) {
           aug[r * (nConstraints + 1) + col] = W[r * nConstraints + col];
         }
-        aug[r * (nConstraints + 1) + nConstraints] = -f[r];
+        aug[r * (nConstraints + 1) + nConstraints] = -linearizedResidual[r];
       }
       for (int col = 0; col < nConstraints; ++col) {
         // Find pivot
@@ -455,9 +640,15 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
       }
     }
 
-    // ── update particles: delta_eta = V * D^T * lambda ───────────────────
+    // ── update particles: solve the linearized soft/hard fit objective ────
+    // Keep the original measured parameters as the data term's reference.
+    // This is essential for soft constraints: relinearizing a constraint
+    // around the updated point must not repeatedly apply the same pull until
+    // the residual reaches zero.
     for (int i = 0; i < nParticles; ++i) {
-      double dpt = 0.0, deta = 0.0, dphi = 0.0;
+      double dpt = hasSoftConstraint ? particles_[i].pt - current[i].pt : 0.0;
+      double deta = hasSoftConstraint ? particles_[i].eta - current[i].eta : 0.0;
+      double dphi = hasSoftConstraint ? particles_[i].phi - current[i].phi : 0.0;
       for (int c = 0; c < nConstraints; ++c) {
         dpt  += var[3 * i + 0] * D[c * nParams + 3 * i + 0] * lambda[c];
         deta += var[3 * i + 1] * D[c * nParams + 3 * i + 1] * lambda[c];
@@ -469,16 +660,8 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
       if (current[i].pt < detail::kMinPt) current[i].pt = detail::kMinPt; // keep pT physical
     }
 
-    // ── compute chi2 ─────────────────────────────────────────────────────
-    double chi2 = 0.0;
-    for (int i = 0; i < nParticles; ++i) {
-      const double dpt  = current[i].pt  - particles_[i].pt;
-      const double deta = current[i].eta - particles_[i].eta;
-      const double dphi = current[i].phi - particles_[i].phi;
-      chi2 += dpt  * dpt  / var[3 * i + 0];
-      chi2 += deta * deta / var[3 * i + 1];
-      chi2 += dphi * dphi / var[3 * i + 2];
-    }
+    // ── compute complete fit objective ───────────────────────────────────
+    const double chi2 = computeChi2(current);
 
     if (std::abs(chi2 - prevChi2) < tolerance) {
       return {current, chi2, iter + 1, true};
@@ -487,15 +670,7 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
   }
 
   // Return non-converged result with last chi2
-  double chi2 = 0.0;
-  for (int i = 0; i < nParticles; ++i) {
-    const double dpt  = current[i].pt  - particles_[i].pt;
-    const double deta = current[i].eta - particles_[i].eta;
-    const double dphi = current[i].phi - particles_[i].phi;
-    chi2 += dpt  * dpt  / var[3 * i + 0];
-    chi2 += deta * deta / var[3 * i + 1];
-    chi2 += dphi * dphi / var[3 * i + 2];
-  }
+  const double chi2 = computeChi2(current);
   return {current, chi2, maxIter, false};
 }
 

@@ -16,6 +16,7 @@
 #include <ROOT/RDataFrame.hxx>
 #include <TChain.h>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -53,6 +54,68 @@ TEST_F(DataManagerTest, ConstructorCreatesValidManager) {
     auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
     auto manager = ManagerFactory::createDataManager(*config);
   });
+}
+
+TEST_F(DataManagerTest, ConfiguredInputWithoutEntriesFailsClearly) {
+  const auto configPath = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-no-input-" + std::to_string(getpid()) + ".txt");
+  const auto missingDirectory = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-missing-input-" + std::to_string(getpid()));
+  {
+    std::ofstream configFile(configPath);
+    ASSERT_TRUE(configFile.good());
+    configFile << "directory=" << missingDirectory.string() << "\n"
+               << "threads=1\n"
+               << "treeList=Events\n";
+  }
+
+  ConfigurationManager config(configPath.string());
+  std::string errorMessage;
+  try {
+    DataManager manager(config);
+  } catch (const std::runtime_error &error) {
+    errorMessage = error.what();
+  }
+  std::filesystem::remove(configPath);
+
+  EXPECT_NE(errorMessage.find("no input entries found"), std::string::npos);
+  EXPECT_NE(errorMessage.find(missingDirectory.string()), std::string::npos);
+  EXPECT_NE(errorMessage.find("Events"), std::string::npos);
+}
+
+TEST(DataManagerInputTest, ExplicitInMemoryConstructorCreatesRequestedEntries) {
+  DataManager dataManager(3);
+  EXPECT_EQ(dataManager.getDataFrame().Count().GetValue(), 3u);
+}
+
+TEST(DataManagerInputTest, InvalidThreadSettingFailsWithValueContext) {
+  const auto configPath = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-invalid-threads-" + std::to_string(getpid()) + ".txt");
+  const auto missingDirectory = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-missing-input-" + std::to_string(getpid()));
+
+  for (const std::string &invalidValue : {"4oops", "nope"}) {
+    {
+      std::ofstream configFile(configPath);
+      ASSERT_TRUE(configFile.good());
+      configFile << "threads=" << invalidValue << "\n"
+                 << "directory=" << missingDirectory.string() << "\n"
+                 << "treeList=Events\n";
+    }
+
+    ConfigurationManager config(configPath.string());
+    std::string errorMessage;
+    try {
+      DataManager manager(config);
+    } catch (const std::runtime_error &error) {
+      errorMessage = error.what();
+    }
+    std::filesystem::remove(configPath);
+
+    EXPECT_NE(errorMessage.find("Invalid 'threads' value '" + invalidValue + "'"),
+              std::string::npos)
+        << "Malformed thread setting should fail before input discovery";
+  }
 }
 
 /**
@@ -178,6 +241,67 @@ TEST_F(DataManagerTest, DefineVectorCreatesVectorColumn) {
       EXPECT_EQ((*result)[0][1], 2.0f);
     }
   });
+}
+
+TEST_F(DataManagerTest, DefineVectorPropagatesPairedSystematicVariations) {
+  DataManager localDataManager(5);
+  localDataManager.Define("pt", []() { return 100.0f; }, {}, *systematicManager);
+  localDataManager.Define("eta", []() { return 1.0f; }, {}, *systematicManager);
+  localDataManager.Define("pt_shift_up", []() { return 120.0f; }, {},
+                          *systematicManager);
+  localDataManager.Define("pt_shift_down", []() { return 80.0f; }, {},
+                          *systematicManager);
+  localDataManager.Define("eta_scale_up", []() { return 2.0f; }, {},
+                          *systematicManager);
+  localDataManager.Define("eta_scale_down", []() { return 0.5f; }, {},
+                          *systematicManager);
+
+  systematicManager->registerVariationColumns("pt", "jes", "pt_shift_up",
+                                               "pt_shift_down");
+  systematicManager->registerVariationColumns(
+      "leptons", "jes", "leptons_jes_custom_up",
+      "leptons_jes_custom_down");
+  systematicManager->registerVariationColumns("eta", "etaScale", "eta_scale_up",
+                                               "eta_scale_down");
+
+  localDataManager.DefineVector("leptons", {"pt", "eta"}, "Float_t",
+                                *systematicManager);
+  localDataManager.Define(
+      "lepton_pt_sum",
+      [](const ROOT::VecOps::RVec<float> &values) { return values[0] + values[1]; },
+      {"leptons"}, *systematicManager);
+
+  auto df = localDataManager.getDataFrame();
+  auto nominal = df.Take<ROOT::VecOps::RVec<float>>("leptons");
+  auto jesUp = df.Take<ROOT::VecOps::RVec<float>>("leptons_jes_custom_up");
+  auto jesDown = df.Take<ROOT::VecOps::RVec<float>>("leptons_jes_custom_down");
+  auto etaUp = df.Take<ROOT::VecOps::RVec<float>>("leptons_etaScaleUp");
+  auto etaDown = df.Take<ROOT::VecOps::RVec<float>>("leptons_etaScaleDown");
+
+  ASSERT_EQ(nominal->size(), 5u);
+  ASSERT_EQ(jesUp->size(), 5u);
+  ASSERT_EQ(jesDown->size(), 5u);
+  ASSERT_EQ(etaUp->size(), 5u);
+  ASSERT_EQ(etaDown->size(), 5u);
+  ASSERT_EQ(nominal->front().size(), 2u);
+  EXPECT_FLOAT_EQ(nominal->front()[0], 100.0f);
+  EXPECT_FLOAT_EQ(nominal->front()[1], 1.0f);
+  EXPECT_FLOAT_EQ(jesUp->front()[0], 120.0f);
+  EXPECT_FLOAT_EQ(jesUp->front()[1], 1.0f);
+  EXPECT_FLOAT_EQ(jesDown->front()[0], 80.0f);
+  EXPECT_FLOAT_EQ(jesDown->front()[1], 1.0f);
+  EXPECT_FLOAT_EQ(etaUp->front()[0], 100.0f);
+  EXPECT_FLOAT_EQ(etaUp->front()[1], 2.0f);
+  EXPECT_FLOAT_EQ(etaDown->front()[0], 100.0f);
+  EXPECT_FLOAT_EQ(etaDown->front()[1], 0.5f);
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("leptons", "jes"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("leptons", "etaScale"));
+  EXPECT_EQ(systematicManager->getVariationColumnName("leptons", "jesUp"),
+            "leptons_jes_custom_up");
+  auto jesUpSum =
+      localDataManager.getDataFrame().Take<float>("lepton_pt_sum_jesUp");
+  ASSERT_EQ(jesUpSum->size(), 5u);
+  EXPECT_FLOAT_EQ(jesUpSum->front(), 121.0f);
 }
 
 TEST_F(DataManagerTest, DefineVectorConcatenatesRVecColumnsAndCasts) {

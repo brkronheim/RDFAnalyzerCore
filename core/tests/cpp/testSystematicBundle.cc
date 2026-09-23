@@ -93,6 +93,8 @@ TEST_F(SystematicBundleTest, ScalarBundleLayout) {
   auto spec = defineScalarBundle(*dataManager, *systematicManager, "x", labels, "__syst_scalar", true);
   EXPECT_EQ(spec.layout, SystematicBundleLayout::VariationMajor);
   EXPECT_EQ(spec.variationLabels.size(), 3);
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic(
+      "__syst_scalar", "JES"));
 }
 
 TEST_F(SystematicBundleTest, FanOutScalarMatchesVariationOrder) {
@@ -200,6 +202,35 @@ TEST_F(SystematicBundleTest, SelectionMaskSystematicAware) {
   auto df = dataManager->getDataFrame();
   auto result = df.Take<ROOT::VecOps::RVec<bool>>("__syst_mask_ua");
   ASSERT_EQ(result->size(), 4);
+}
+
+TEST_F(SystematicBundleTest,
+       SelectionMaskFallsBackToNominalWhenRegisteredVariationsAreMissing) {
+  registerSystematic("JES", {"sel"});
+  defineBool("sel", [](ULong64_t i) { return i % 2 == 0; });
+  auto labels = resolveVariationLabels(
+      *systematicManager, *dataManager,
+      ISystematicManager::CANONICAL_SYST_BRANCH_NAME);
+  const bool hasSyst = hasUsableSystematicColumns(
+      *dataManager, *systematicManager, "sel", labels);
+  ASSERT_FALSE(hasSyst);
+
+  auto spec = defineSelectionMaskBundle(
+      *dataManager, *systematicManager, "sel", labels, "__syst_mask_fallback",
+      hasSyst);
+  EXPECT_EQ(spec.resolvedColumnNames,
+            (std::vector<std::string>{"sel", "sel", "sel"}));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic(
+      "__syst_mask_fallback", "JES"));
+  auto result = dataManager->getDataFrame().Take<ROOT::VecOps::RVec<bool>>(
+      "__syst_mask_fallback");
+  ASSERT_EQ(result->size(), 4u);
+  EXPECT_TRUE((*result)[0][0]);
+  EXPECT_TRUE((*result)[0][1]);
+  EXPECT_TRUE((*result)[0][2]);
+  EXPECT_FALSE((*result)[1][0]);
+  EXPECT_FALSE((*result)[1][1]);
+  EXPECT_FALSE((*result)[1][2]);
 }
 
 TEST_F(SystematicBundleTest, FanOutMultiOutput) {

@@ -35,6 +35,13 @@ public:
 
   virtual void writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec) = 0;
 
+  /**
+   * @brief Write a configured output channel.
+   *
+   * The built-in ROOT sink keeps skim columns nominal-only unless the
+   * configuration sets `skimSystematics=true`; this is independent of the
+   * framework-wide `enableSystematics` setting.
+   */
   virtual void writeDataFrame(ROOT::RDF::RNode& df,
                               const IConfigurationProvider& configProvider,
                               const ISystematicManager* systematicManager,

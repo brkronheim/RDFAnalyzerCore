@@ -2,6 +2,7 @@
 
 ## Quick Links
 
+- **[Audit and improvement plan](./AUDIT_PLAN.md)** - Parallel workstreams, dependencies, acceptance criteria, and agent handoffs
 - **[Architecture](./ARCHITECTURE.md)** - Core C++ architecture and manager lifecycle
 - **[API Reference](./API_REFERENCE.md)** - Canonical C++ API surface
 - **[Getting Started](./GETTING_STARTED.md)** - Installation and first steps

@@ -245,6 +245,54 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertEqual(cfg["stitchWeights"], "stitch_weights.json")
             self.assertTrue(os.path.exists(os.path.join(job_dir, "stitch_weights.json")))
 
+    def test_compressed_json_payload_is_staged_and_rewritten_for_shared_inputs(self):
+        """Compressed correction payloads point to their staged cfg/ copy."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_name = "regJet_jerc.json.gz"
+            Path(os.path.join(tmpdir, payload_name)).write_bytes(b"payload")
+            template = _write_submit_config_template(
+                tmpdir,
+                extra={"vhRegressedJetJercFile": payload_name},
+            )
+            dataset = DatasetEntry(name="sample", files=["f.root"], dtype="mc")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(
+                job_dir,
+                template,
+                dataset,
+                out_dir,
+                stage_shared_inputs_locally=False,
+            )
+
+            cfg = {}
+            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
+                for line in fh:
+                    if "=" in line:
+                        key, value = line.strip().split("=", 1)
+                        cfg[key] = value
+
+            self.assertEqual(
+                cfg["vhRegressedJetJercFile"], os.path.join("cfg", payload_name)
+            )
+            self.assertTrue(os.path.isfile(os.path.join(job_dir, "cfg", payload_name)))
+
+            import tarfile
+
+            bundle_path = mod._bundle_analysis_config_files(
+                template,
+                {"vhRegressedJetJercFile": payload_name},
+                job_dir,
+            )
+            self.assertIsNotNone(bundle_path)
+            with tarfile.open(bundle_path, "r:gz") as bundle:
+                self.assertIn(os.path.join("cfg", payload_name), bundle.getnames())
+
     def test_auxiliary_files_resolve_from_analysis_root(self):
         """cfg/... references are resolved relative to the analysis root."""
         mod = self._import()
@@ -429,6 +477,33 @@ class TestWriteJobConfig(unittest.TestCase):
 
         self.assertEqual(
             generic_result,
+            "root://cms-xrd-global.cern.ch//store/data/file.root",
+        )
+
+    def test_explicit_redirector_skips_test_job_site_selection(self):
+        """A configured redirector is used directly by the preflight job."""
+        mod = self._import()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(os.path.join(tmpdir, "submit_config.txt")).write_text(
+                "xrootdRedirector=root://cms-xrd-global.cern.ch/\n"
+            )
+            with patch.dict(
+                sys.modules,
+                {
+                    "xrootd_site_selector": types.SimpleNamespace(
+                        select_best_url=lambda *_args, **_kwargs: self.fail(
+                            "site selection should be skipped"
+                        )
+                    )
+                },
+            ):
+                result = mod._select_test_input_url(
+                    "root://old.example//store/data/file.root",
+                    tmpdir,
+                )
+
+        self.assertEqual(
+            result,
             "root://cms-xrd-global.cern.ch//store/data/file.root",
         )
 
@@ -1879,6 +1954,10 @@ class TestPrepareSkimJobs(unittest.TestCase):
             job1 = os.path.join(jobs_dir, "job_1")
             Path(job0).mkdir()
             Path(job1).mkdir()
+            Path(os.path.join(job0, "cfg")).mkdir()
+            Path(os.path.join(job1, "cfg")).mkdir()
+            Path(os.path.join(job0, "cfg", "shared.yaml")).write_text("shared: true\n")
+            Path(os.path.join(job1, "cfg", "shared.yaml")).write_text("shared: true\n")
             Path(os.path.join(job0, "submit_config.txt")).write_text("saveFile=out0.root\nmetaFile=meta0.root\n")
             Path(os.path.join(job1, "submit_config.txt")).write_text("saveFile=out1.root\nmetaFile=meta1.root\n")
 
@@ -1927,15 +2006,21 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertTrue(os.path.isfile(runscript_path))
             self.assertTrue(os.path.isdir(os.path.join(submit_dir, "job_0")))
             self.assertTrue(os.path.isdir(os.path.join(submit_dir, "job_1")))
-            self.assertTrue(os.path.isfile(os.path.join(submit_dir, "job_0", "stitch_weights.json")))
+            self.assertFalse(os.path.exists(os.path.join(submit_dir, "job_0", "cfg")))
+            self.assertFalse(os.path.exists(os.path.join(submit_dir, "job_1", "cfg")))
+            self.assertFalse(
+                os.path.exists(os.path.join(submit_dir, "job_0", "shared.yaml"))
+            )
+            with tarfile.open(os.path.join(run_dir, "shared_inputs.tar.gz"), "r:gz") as archive:
+                self.assertIn("stitch_weights.json", archive.getnames())
+            self.assertFalse(
+                os.path.exists(os.path.join(submit_dir, "job_0", "stitch_weights.json"))
+            )
             self.assertIn(
                 "stitchWeights=stitch_weights.json",
                 Path(os.path.join(submit_dir, "job_0", "submit_config.txt")).read_text(),
             )
-            self.assertIn(
-                "job_$(Process)/stitch_weights.json",
-                Path(submit_path).read_text(),
-            )
+            self.assertNotIn("job_$(Process)/stitch_weights.json", Path(submit_path).read_text())
 
             job0_cfg = Path(os.path.join(submit_dir, "job_0", "submit_config.txt")).read_text()
             self.assertIn("saveDirectory=/tmp/out/sample", job0_cfg)

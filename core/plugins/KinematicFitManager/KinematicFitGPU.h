@@ -21,7 +21,7 @@
  * The CUDA kernel uses fixed-size device arrays to avoid dynamic GPU memory
  * allocation inside the kernel.  The compile-time limits are:
  *   - kGPUMaxParticles   = 10  (particles per fit)
- *   - kGPUMaxConstraints =  8  (constraints per fit, mass + pT combined)
+ *   - kGPUMaxConstraints =  8  (constraints per fit, mass + transverse combined)
  *
  * Fits that exceed these limits must use the CPU implementation.
  *
@@ -44,21 +44,29 @@
  *   sigmas[i * 3 + 2] = absolute phi resolution [rad]
  * @endcode
  *
+ * @p cartesianResolutions is a flat array of size @p nParticles. A positive
+ * entry uses that absolute isotropic px/py resolution [GeV] for the particle;
+ * zero retains the fractional-pT parameterization from @p sigmas.
+ *
  * Constraint arrays (@p conTypes, @p conIdx1, @p conIdx2, @p conIdx3,
- * @p conTarget, @p conSigma) each have length @p nConstraints:
+ * @p conMasks, @p conTarget, @p conSigma) each have length @p nConstraints:
  * @code
  *   conTypes[c] = 0  ─ two-body invariant-mass constraint
  *   conTypes[c] = 1  ─ three-body invariant-mass constraint
  *   conTypes[c] = 2  ─ pT constraint on a single particle
+ *   conTypes[c] = 3  ─ px constraint on particles in conMasks[c]
+ *   conTypes[c] = 4  ─ py constraint on particles in conMasks[c]
  *   conIdx3[c]  = -1 for conTypes 0 and 2
- *   conSigma[c] > 0  converts a mass constraint to a soft (Gaussian) constraint
- *                    with resonance width conSigma [GeV]
+ *   conMasks[c] has one bit set per particle included in a px/py sum
+ *   conSigma[c] > 0  gives a Gaussian width in GeV: resonance width for mass
+ *                    constraints and transverse width for pT/px/py constraints
  * @endcode
  *
  * @p outputs (host) is a flat array of size @p nEvents × (2 + @p nParticles × 3).
  * For event @e e:
  * @code
- *   outputs[e * outStride + 0]           = chi2
+ *   outputs[e * outStride + 0]           = complete chi2, including soft
+ *                                         constraint penalties
  *   outputs[e * outStride + 1]           = 1.0 if converged, else 0.0
  *   outputs[e * outStride + 2 + i*3 + 0] = fitted pT_i   [GeV]
  *   outputs[e * outStride + 2 + i*3 + 1] = fitted eta_i
@@ -94,19 +102,23 @@ static constexpr int kGPUMaxConstraints =  8;
 class CudaKinFitContext {
 public:
   float *d_sigmas    = nullptr; ///< Device: [nParticles * 3] (sigPt, sigEta, sigPhi)
+  float *d_cartesianResolutions = nullptr; ///< Device: [nParticles] absolute px/py resolutions
   int   *d_conTypes  = nullptr; ///< Device: [nConstraints] constraint types
   int   *d_conIdx1   = nullptr; ///< Device: [nConstraints] first particle index
   int   *d_conIdx2   = nullptr; ///< Device: [nConstraints] second particle index
   int   *d_conIdx3   = nullptr; ///< Device: [nConstraints] third particle index (-1 if N/A)
+  unsigned int *d_conMasks = nullptr; ///< Device: [nConstraints] px/py particle masks
   float *d_conTarget = nullptr; ///< Device: [nConstraints] target mass/pT [GeV]
-  float *d_conSigma  = nullptr; ///< Device: [nConstraints] resonance widths
+  float *d_conSigma  = nullptr; ///< Device: [nConstraints] soft-constraint widths
   int   nParticles   = 0;
   int   nConstraints = 0;
 
-  CudaKinFitContext(const float *sigmas, int nPart,
+  CudaKinFitContext(const float *sigmas, const float *cartesianResolutions,
+                    int nPart,
                     const int   *conTypes, const int   *conIdx1,
                     const int   *conIdx2,  const int   *conIdx3,
-                    const float *conTarget, const float *conSigma, int nCon);
+                    const unsigned int *conMasks, const float *conTarget,
+                    const float *conSigma, int nCon);
   ~CudaKinFitContext();
 
   CudaKinFitContext(const CudaKinFitContext &) = delete;
@@ -147,22 +159,28 @@ void kinFitRunGPU(const CudaKinFitContext &ctx, const float *inputs,
  *
  * @param inputs     Host array [nEvents * nParticles * 4] — see layout above.
  * @param sigmas     Host array [nParticles * 3] — per-particle resolutions.
+ * @param cartesianResolutions Host array [nParticles] — absolute isotropic
+ *                    px/py resolutions; zero uses sigmas.
  * @param nParticles Number of particles per fit (≤ kGPUMaxParticles).
- * @param conTypes   Host array [nConstraints] — constraint types (0/1/2).
+ * @param conTypes   Host array [nConstraints] — constraint types (0/1/2/3/4).
  * @param conIdx1    Host array [nConstraints] — first particle index.
  * @param conIdx2    Host array [nConstraints] — second particle index.
  * @param conIdx3    Host array [nConstraints] — third particle index (-1 if N/A).
- * @param conTarget  Host array [nConstraints] — target mass or pT [GeV].
- * @param conSigma   Host array [nConstraints] — resonance width for soft constraints.
+ * @param conMasks   Host array [nConstraints] — particle bitmasks for px/py.
+ * @param conTarget  Host array [nConstraints] — target mass, pT, px, or py [GeV].
+ * @param conSigma   Host array [nConstraints] — mass resonance width or pT
+ *                    Gaussian width for soft constraints.
  * @param nConstraints Number of constraints (≤ kGPUMaxConstraints).
  * @param nEvents    Number of events to process in this batch.
  * @param maxIter    Maximum number of linearisation iterations per fit.
  * @param tolerance  Convergence criterion on |Δχ²|.
  * @param outputs    Host array [nEvents * (2 + nParticles*3)] — fit results.
  */
-void kinFitBatchGPU(const float *inputs, const float *sigmas, int nParticles,
+void kinFitBatchGPU(const float *inputs, const float *sigmas,
+                    const float *cartesianResolutions, int nParticles,
                     const int *conTypes, const int *conIdx1, const int *conIdx2,
-                    const int *conIdx3, const float *conTarget,
+                    const int *conIdx3, const unsigned int *conMasks,
+                    const float *conTarget,
                     const float *conSigma, int nConstraints, int nEvents,
                     int maxIter, float tolerance, float *outputs);
 

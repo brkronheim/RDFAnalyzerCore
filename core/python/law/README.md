@@ -141,7 +141,10 @@ directory itself from the first dataset's first file.
 
 Creates per-job configuration directories and the shared ``shared_inputs/``
 directory (executable, libraries, x509 proxy) for use by ``SkimTask`` in
-file-source mode.
+file-source mode.  ``BuildSkimSubmission`` also creates one
+``shared_inputs.tar.gz`` archive per run containing the common executable,
+libraries, and configuration payloads; concrete Condor job directories keep
+only job-specific metadata and configuration.
 
 When ``--file-source xrdfs`` is set, ``PrepareSkimJobs`` automatically
 declares a LAW dependency on :class:`GetXRDFSFileList` so that the full chain
@@ -385,10 +388,10 @@ Each workflow is split into four law tasks that run in sequence:
 
 1. **Prepare\*Sample** *(LocalWorkflow)* – one branch per sample; discovers input
    files and creates per-job configuration directories.
-2. **Build\*Submission** *(Task)* – assembles the condor submission: copies the
-   executable, `aux/` directory, x509 proxy, and local shared libraries into
-   `shared_inputs/`; creates symlinks `job_0…job_{N-1}`; writes
-   `condor_submit.sub` and `condor_runscript.sh`.
+2. **Build\*Submission** *(Task)* – assembles the condor submission: packages
+   the executable, `aux/` directory, x509 proxy, local shared libraries, and
+   common configuration payloads into one `shared_inputs.tar.gz`; writes
+   per-job metadata, `condor_submit.sub`, and `condor_runscript.sh`.
 3. **Submit\*Jobs** *(Task)* – runs `condor_submit` and records the cluster ID.
 4. **Monitor\*Jobs** *(Task)* – blocking polling loop that verifies EOS outputs,
    resubmits held/failed jobs (up to `--max-retries` times), and writes

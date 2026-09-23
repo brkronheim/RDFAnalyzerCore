@@ -210,6 +210,46 @@ TEST_F(NDHistogramManagerTest, SaveHistsBasic) {
   EXPECT_TRUE(true);
 }
 
+TEST_F(NDHistogramManagerTest, SavesEmptyFineHistogramsAndCancelledBinErrors) {
+  dataManager->Define("pt", []() { return 250.0f; }, {}, *systematicManager);
+  dataManager->Define("weight", []() { return 1.0f; }, {}, *systematicManager);
+  std::vector<histInfo> infos = {
+      histInfo("LHE_Vpt", "pt", "pt", "weight", 200, 0, 2000),
+      histInfo("LHE_Vpt_fine", "pt", "pt", "weight", 130, -5, 60),
+      histInfo("LHE_Vpt_fine_stitched", "pt", "pt", "weight", 130, -5, 60)};
+  std::vector<selectionInfo> selections;
+  std::vector<std::vector<std::string>> regions = {{"fine_regression"}};
+  histogramManager->bookND(infos, selections, "", regions);
+
+  // The high-pT event is outside the fine range. Also model a bin whose
+  // signed weights cancel; serialization must retain its variance.
+  auto &histos = histogramManager->GetHistos();
+  histos[2]->Reset();
+  const Double_t coordinates[] = {0.5, 0.5, 0.5, 0.5, 10.25};
+  const auto bin = histos[2]->GetBin(coordinates, true);
+  histos[2]->SetBinContent(bin, 0.0);
+  histos[2]->SetBinError2(bin, 2.0);
+  histogramManager->saveHists();
+
+  const auto path = metaSink->resolveOutputFile(*configManager, OutputChannel::Meta);
+  TFile output(path.c_str(), "READ");
+  for (const auto &info : infos) {
+    auto *hist = output.Get<TH1F>(("fine_regression_Default/Default/" + info.name()).c_str());
+    ASSERT_NE(hist, nullptr) << info.name();
+    EXPECT_EQ(hist->GetNbinsX(), info.bins());
+    EXPECT_DOUBLE_EQ(hist->GetXaxis()->GetXmin(), info.lowerBound());
+    EXPECT_DOUBLE_EQ(hist->GetXaxis()->GetXmax(), info.upperBound());
+    if (info.name() == "LHE_Vpt") {
+      EXPECT_DOUBLE_EQ(hist->Integral(), 1.0);
+    } else {
+      EXPECT_DOUBLE_EQ(hist->Integral(), 0.0);
+      EXPECT_NEAR(hist->GetBinError(hist->FindBin(10.25)),
+                  info.name() == "LHE_Vpt_fine_stitched" ? std::sqrt(2.0) : 0.0,
+                  1e-6);
+    }
+  }
+}
+
 TEST_F(NDHistogramManagerTest, SaveHistsWithEmptyHistList) {
   std::vector<std::vector<histInfo>> emptyHistList = {};
   std::vector<std::vector<std::string>> regionNames = {{"region1"}};

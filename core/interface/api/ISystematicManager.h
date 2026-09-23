@@ -39,6 +39,22 @@ public:
     virtual ~ISystematicManager() = default;
 
     /**
+     * @brief Enable or disable systematic propagation.
+     *
+     * The framework-wide configuration key `enableSystematics` controls this
+     * for the built-in manager.  Disabled managers remain nominal-only: new
+     * registrations are ignored and no variation columns or selection masks
+     * are materialized.
+     *
+     * The default implementation is a no-op so existing third-party
+     * ISystematicManager implementations remain source compatible.
+     */
+    virtual void setEnabled(bool enabled) { (void)enabled; }
+
+    /** @brief Return whether systematic propagation is enabled. */
+    virtual bool isEnabled() const { return true; }
+
+    /**
      * @brief Canonical branch name used for systematic counter columns.
      *
      * All callers that need a systematic counter branch should pass this
@@ -94,6 +110,16 @@ public:
      * @return Reference to the set of systematic names
      */
     virtual const std::set<std::string> &getSystematics() const = 0;
+
+    /**
+     * @brief Get explicitly registered, non-paired variation labels.
+     *
+     * These labels are used for variations such as PDF replicas.  The default
+     * keeps existing third-party implementations source compatible.
+     */
+    virtual std::vector<std::string> getExplicitVariationLabels() const {
+        return {};
+    }
 
     /**
      * @brief Get the set of variables affected by a given systematic
@@ -203,6 +229,48 @@ public:
         }
         return variable;
     }
+
+    /**
+     * @brief Return the ordered labels represented by the systematic axis.
+     *
+     * Nominal is first, followed by paired Up/Down labels and explicit labels.
+     * This default supports managers that only implement paired systematics.
+     */
+    virtual std::vector<std::string> getVariationLabels() const {
+        std::vector<std::string> labels{"Nominal"};
+        for (const auto &systematic : getSystematics()) {
+            labels.push_back(systematic + "Up");
+            labels.push_back(systematic + "Down");
+        }
+        const auto explicitLabels = getExplicitVariationLabels();
+        labels.insert(labels.end(), explicitLabels.begin(), explicitLabels.end());
+        return labels;
+    }
+
+    /**
+     * @brief Register the cumulative event-selection mask for a variation.
+     *
+     * The default methods are no-ops for source compatibility. Custom
+     * systematic managers used with Analyzer::Filter must override this
+     * storage API; Analyzer checks that each mask registration succeeded.
+     */
+    virtual void registerSelectionMaskColumn(const std::string &variationLabel,
+                                             const std::string &column) {
+        (void)variationLabel;
+        (void)column;
+    }
+
+    /**
+     * @brief Get the mask column for a variation, falling back to nominal.
+     */
+    virtual std::string getSelectionMaskColumn(
+        const std::string &variationLabel) const {
+        (void)variationLabel;
+        return {};
+    }
+
+    /** @brief Whether any cumulative selection mask has been registered. */
+    virtual bool hasSelectionMasks() const { return false; }
 };
 
-#endif // ISYSTEMATICMANAGER_H_INCLUDED 
+#endif // ISYSTEMATICMANAGER_H_INCLUDED

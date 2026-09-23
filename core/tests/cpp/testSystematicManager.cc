@@ -22,6 +22,25 @@ TEST_F(SystematicManagerTest, ConstructorCreatesEmptyManager) {
   EXPECT_TRUE(manager.getSystematics().empty());
 }
 
+TEST_F(SystematicManagerTest, DisabledManagerRemainsNominalOnly) {
+  systematicManager->setEnabled(false);
+
+  EXPECT_FALSE(systematicManager->isEnabled());
+  systematicManager->registerSystematic("jes", {"pt"});
+  systematicManager->registerVariationColumn("weight", "pdf1", "weight_pdf1");
+  systematicManager->registerVariationColumns(
+      "mass", "jer", "mass_jerUp", "mass_jerDown");
+
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+  EXPECT_TRUE(systematicManager->getExplicitVariationLabels().empty());
+  const std::vector<std::string> nominalOnly{"Nominal"};
+  EXPECT_EQ(systematicManager->getVariationLabels(), nominalOnly);
+  EXPECT_TRUE(systematicManager->getSystematicsForVariable("pt").empty());
+  EXPECT_TRUE(systematicManager->autoRegisterSystematics(
+                            {"pt_jesUp", "pt_jesDown"})
+                  .registered.empty());
+}
+
 TEST_F(SystematicManagerTest, RegisterSystematicBasic) {
   std::set<std::string> affectedVars = {"var1", "var2", "var3"};
   systematicManager->registerSystematic("test_syst", affectedVars);

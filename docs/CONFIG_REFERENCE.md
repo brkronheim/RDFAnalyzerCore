@@ -38,7 +38,11 @@ The main configuration file controls the overall behavior of the framework. It's
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `threads` | Integer | `-1` | Number of ROOT ImplicitMT threads. `-1` = auto (all cores) |
+| `threads` | Integer, `auto`, or `max` | `-1` | Number of ROOT ImplicitMT threads. `1` disables implicit multithreading; values greater than `1` set the thread count; values less than or equal to `0`, `auto`, and `max` use all available cores. |
+
+The runtime rejects malformed values instead of silently switching to all
+available cores. When running on HTCondor, set `threads` no higher than the
+CPUs requested by the job.
 
 ### Batch Processing
 
@@ -51,6 +55,8 @@ The main configuration file controls the overall behavior of the framework. It's
 | Option | Type | Description |
 |--------|------|-------------|
 | `saveConfig` | Path | Configuration file listing branches to save in output tree |
+| `skimFilter` | RDataFrame expression | Optional event filter applied only when writing the skim; histogram actions use the unfiltered analysis graph |
+| `skimSystematics` | Boolean | `false` | When `true`, expand configured skim branches with their registered paired Up/Down systematic columns. This affects only skim output and does not enable framework systematics. |
 
 The `saveConfig` file contains one branch name per line. It also supports **glob patterns** for flexible column selection:
 
@@ -541,6 +547,12 @@ friend_trees:
 The YAML config is validated at startup against a JSON Schema. See **[CONFIGURATION_VALIDATION.md](CONFIGURATION_VALIDATION.md)** for the full schema reference and validation error messages.
 
 ## Advanced Configuration
+
+### Systematics
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enableSystematics` | Boolean | `true` | Enable systematic registration and propagation throughout the framework. Set to `false` for a nominal-only graph; registrations, varied definitions, varied selection masks, and systematic histogram axes are disabled. |
 
 ### Histogram Backend
 

@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
+#include <functional>
 #include <util.h>
 #include <plots.h>
 #include <string>
@@ -437,6 +438,12 @@ static void HandleAxisVarVector(
         std::vector<std::string> systematicVariations;
         for (const auto& syst : allSystematics) {
         std::string columnName = systematicManager_m->getVariationColumnName(variable, syst);
+        // A registered family can lack one or more columns in a particular
+        // input. When filters force systematic packing for otherwise nominal
+        // histogram axes, repeat the available nominal value for that slot.
+        if (!cache.Has(columnName)) {
+          columnName = variable;
+        }
         if (!isWeight && !refVector.empty()) {
           columnName = ensureExpandedVector(columnName);
         }
@@ -444,7 +451,8 @@ static void HandleAxisVarVector(
         }
         const std::string systVectorName = variable + "_systVector" + tagSuffix;
         if (!cache.Has(systVectorName)) {
-            dataManager_m->DefineVector(systVectorName, systematicVariations, "Float_t", *systematicManager_m);
+            dataManager_m->DefineVectorNominal(systVectorName, systematicVariations,
+                                               "Float_t", *systematicManager_m);
           df = dataManager_m->getDataFrame();
           cache.Refresh();
         }
@@ -465,7 +473,8 @@ static void HandleAxisVarVector(
         } else {
           const std::string rvecName = variable + "_RVec" + tagSuffix;
           if (!cache.Has(rvecName)) {
-            dataManager_m->DefineVector(rvecName, {variable}, "Float_t", *systematicManager_m);
+            dataManager_m->DefineVectorNominal(rvecName, {variable}, "Float_t",
+                                               *systematicManager_m);
             df = dataManager_m->getDataFrame();
             cache.Refresh();
           }
@@ -521,11 +530,51 @@ static std::string buildSystematicVector(
       nominalOnly ? baseName + "_nominal_systVector"
                   : baseName + "_systVector";
   if (!cache.Has(systVectorName)) {
-    dataManager_m->DefineVector(systVectorName, systBranches, "Float_t", *systematicManager_m);
+    dataManager_m->DefineVectorNominal(systVectorName, systBranches, "Float_t",
+                                       *systematicManager_m);
     df = dataManager_m->getDataFrame();
     cache.Refresh();
   }
   return systVectorName;
+}
+
+static std::string buildSelectionMaskVector(
+    ROOT::RDF::RNode& df,
+    IDataFrameProvider* dataManager_m,
+    ISystematicManager* systematicManager_m,
+    const std::vector<std::string>& systList,
+    ColumnCache& cache) {
+  const std::string defaultMaskName = "__rdf_filter_mask_default_true";
+  if (!cache.Has(defaultMaskName)) {
+    df = df.Define(defaultMaskName, []() -> Bool_t { return true; });
+    dataManager_m->setDataFrame(df);
+    cache.Refresh();
+  }
+
+  std::vector<std::string> maskColumns;
+  maskColumns.reserve(systList.size());
+  for (const auto& label : systList) {
+    const auto registeredMask =
+        systematicManager_m->getSelectionMaskColumn(label);
+    maskColumns.push_back(!registeredMask.empty() && cache.Has(registeredMask)
+                              ? registeredMask
+                              : defaultMaskName);
+  }
+
+  std::string signature;
+  for (const auto& label : systList) {
+    signature += std::to_string(label.size()) + ":" + label;
+  }
+  const std::string vectorName =
+      "__rdf_filter_mask_systVector_" +
+      std::to_string(std::hash<std::string>{}(signature));
+  if (!cache.Has(vectorName)) {
+    dataManager_m->DefineVectorNominal(vectorName, maskColumns, "Bool_t",
+                                       *systematicManager_m);
+    df = dataManager_m->getDataFrame();
+    cache.Refresh();
+  }
+  return vectorName;
 }
 
 static bool HasSystematicColumns(
@@ -715,6 +764,19 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
     fillInfo.hasSystematic = true;
   }
 
+  // Selection migrations require every histogram axis to be represented once
+  // per systematic, even when that axis itself is unaffected. Its nominal
+  // value is then repeated into the varied bins, while the selection mask
+  // decides whether each bin receives this event.
+  const bool hasSelectionMasks = systematicManager_m->hasSelectionMasks();
+  if (hasSelectionMasks) {
+    fillInfo.channel_hasSystematic = true;
+    fillInfo.controlRegion_hasSystematic = true;
+    fillInfo.sampleCategory_hasSystematic = true;
+    fillInfo.weight_hasSystematic = true;
+    fillInfo.hasSystematic = true;
+  }
+
   // For now, we don't support multi-fill for systematic variations
   fillInfo.systematic_hasMultiFill = false;
   
@@ -729,8 +791,9 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   // But we will set the weights to 0 for the non-systematic variations
   std::vector<std::string> usedSystematics(systList.begin(), systList.end());
 
-  // Build column vectors in the order expected by THnMulti::Exec:
-  // baseValues, baseWeights, systematic, sampleCategory, controlRegion, channel, nFills
+  // Build columns in the order expected by THnMulti::Exec and BHnMulti::Exec:
+  // base values, weights, systematic indices, selection mask, sample category,
+  // control region, channel, and per-systematic fill counts.
   //
   // When baseRefVector is non-empty (region-aware booking), scalar base
   // variables and their systematic variations are expanded to match the size
@@ -747,6 +810,9 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.weight(), fillInfo.weight_hasSystematic, fillInfo.weight_hasMultiFill, usedSystematics, baseWeightsVec, true, {baseValsVec.front()}, uniqueTag);
 
   const std::string systVectorName = buildSystematicVector(df, dataManager_m, systematicManager_m, systList, cache);
+  const std::string selectionMaskVectorName =
+      buildSelectionMaskVector(df, dataManager_m, systematicManager_m, systList,
+                              cache);
 
   std::vector<std::string> sampleCategoryVec;
   HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, sampleCategoryInfo.variable(), fillInfo.sampleCategory_hasSystematic, fillInfo.sampleCategory_hasMultiFill, usedSystematics, sampleCategoryVec, false, {baseValsVec.front()}, uniqueTag);
@@ -782,6 +848,7 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
     baseValsVec.front(),
     baseWeightsVec.front(),
     systVectorName,
+    selectionMaskVectorName,
     sampleCategoryVec.front(),
     controlRegionVec.front(),
     channelVec.front(),
@@ -803,6 +870,7 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Bool_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
@@ -814,6 +882,7 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Bool_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
@@ -946,6 +1015,36 @@ void NDHistogramManager::SaveHists(
     commonAxisSize.push_back(regionNameList.size());
   }
 
+  // Find sample categories represented by this input across all booked
+  // histograms.  A category can be empty for an individual observable (for
+  // example, because its value is outside that histogram's range), so use the
+  // union across histograms before creating the complete output schema.
+  std::unordered_set<std::size_t> populatedSampleCategories;
+  if (allRegionNames.size() >= 3) {
+    for (auto &histogramResult : histos_m) {
+      auto hist = histogramResult.GetPtr();
+      if (hist->GetNdimensions() <= 2) {
+        continue;
+      }
+
+      std::vector<Int_t> indices(hist->GetNdimensions());
+      for (Int_t i = 0; i < hist->GetNbins(); ++i) {
+        const Float_t content = hist->GetBinContent(i, indices.data());
+        const Float_t error = hist->GetBinError2(i);
+        if (content == 0 && error == 0) {
+          continue;
+        }
+
+        const Int_t categoryBin = indices[2];
+        if (categoryBin > 0 &&
+            categoryBin <= static_cast<Int_t>(allRegionNames[2].size())) {
+          populatedSampleCategories.insert(
+              static_cast<std::size_t>(categoryBin - 1));
+        }
+      }
+    }
+  }
+
   // Pre-build directory names matching the extraction code's dirName format.
   // dirName = channel/control/category  (from indices[0], indices[1], indices[2]).
   std::unordered_set<std::string> dirSet;
@@ -953,6 +1052,9 @@ void NDHistogramManager::SaveHists(
     for (size_t ci = 0; ci < allRegionNames[0].size(); ++ci) {
       for (size_t si = 0; si < allRegionNames[1].size(); ++si) {
         for (size_t mi = 0; mi < allRegionNames[2].size(); ++mi) {
+          if (populatedSampleCategories.count(mi) == 0) {
+            continue;
+          }
           dirSet.insert(allRegionNames[0][ci] + "/" +
                         allRegionNames[1][si] + "/" +
                         allRegionNames[2][mi]);
@@ -989,14 +1091,39 @@ void NDHistogramManager::SaveHists(
     const Int_t currentHistogramSize = hist->GetNbins();
     const Int_t dim = hist->GetNdimensions();
     std::vector<Int_t> indices(dim);
+
+    // Persist the booked schema even when this sample has no entries in the
+    // observable range (e.g. a high-pT sample in a low-pT validation plot).
+    // Limit systematic names to the axes actually booked for this histogram.
+    if (allRegionNames.size() >= 4 && dim == 5) {
+      for (const auto &dirName : dirSet) {
+        const auto nSystematics = std::min(
+            allRegionNames[3].size(),
+            static_cast<std::size_t>(hist->GetAxis(3)->GetNbins()));
+        for (std::size_t s = 0; s < nSystematics; ++s) {
+          std::string name = allNames[histIndex];
+          if (allRegionNames[3][s] != "Nominal") {
+            name += "_" + allRegionNames[3][s];
+          }
+          auto &output = histMap[dirName + "/" + name];
+          output.SetNameTitle(name.c_str(),
+                             (allNames[histIndex] + ";" + allNames[histIndex] +
+                              ";Counts").c_str());
+          output.SetBins(allBins[histIndex], allLowerBounds[histIndex],
+                         allUpperBounds[histIndex]);
+          output.Sumw2();
+          output.SetDirectory(nullptr);
+        }
+      }
+    }
       
     std::string histName = allNames[histIndex];
     for (int i = 0; i < currentHistogramSize; i++) {
       Float_t content = hist->GetBinContent(i, indices.data());
-      if (content == 0) {
+      Float_t error = hist->GetBinError2(i);
+      if (content == 0 && error == 0) {
         continue;
       }
-      Float_t error = hist->GetBinError2(i);
 
       // Reset histName for each bin — it may be extended below with a
       // systematic suffix and must not accumulate suffixes across bins.
@@ -1371,8 +1498,8 @@ std::string NDHistogramManager::ensureRegionMembershipColumn() {
   // Step 3: Use DefineVector to pack the per-region float indices into a
   //         single RVec<Float_t>.  DataManager::DefineVector builds a compact
   //         brace-initializer expression for scalar inputs – no JIT overhead.
-  dataManager_m->DefineVector(kMembershipCol, idxColNames, "Float_t",
-                               *systematicManager_m);
+  dataManager_m->DefineVectorNominal(kMembershipCol, idxColNames, "Float_t",
+                                     *systematicManager_m);
   return kMembershipCol;
 }
 

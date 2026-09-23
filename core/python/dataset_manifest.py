@@ -511,7 +511,27 @@ class DatasetManifest:
                 )
             entries.append(DatasetEntry.from_dict(item))
 
-        return cls(datasets=entries, lumi=lumi, whitelist=whitelist, blacklist=blacklist, lumi_by_year=lumi_by_year)
+        manifest = cls(
+            datasets=entries,
+            lumi=lumi,
+            whitelist=whitelist,
+            blacklist=blacklist,
+            lumi_by_year=lumi_by_year,
+        )
+
+        # Structural YAML checks above catch malformed fields; this second pass
+        # catches relationships that can only be checked after all entries are
+        # constructed (for example duplicate names and missing parents).
+        validation_messages = manifest.validate()
+        errors = [message for message in validation_messages if not message.startswith("Warning:")]
+        if errors:
+            details = "\n  - ".join(errors)
+            raise ValueError(f"Dataset manifest '{path}' is invalid:\n  - {details}")
+        for message in validation_messages:
+            if message.startswith("Warning:"):
+                warnings.warn(message, UserWarning, stacklevel=2)
+
+        return manifest
 
     def save_yaml(self, path: str) -> None:
         """Serialise the manifest to a YAML file.

@@ -148,6 +148,68 @@ TEST_F(RootOutputSinkTest, MixedExactAndGlobPatterns) {
   f.Close();
 }
 
+TEST_F(RootOutputSinkTest, SystematicColumnsAreOptInForSkims) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+
+  ConfigurationManager config(cfgPath);
+  config.set("skimSystematics", "true");
+
+  auto dm = std::make_unique<DataManager>(5);
+  SystematicManager sm;
+  sm.registerSystematic("jes", {"Electron_pt"});
+
+  auto df = dm->getDataFrame();
+  df = df.Define("Electron_pt", []() { return 30.0f; });
+  df = df.Define("Electron_pt_jesUp", []() { return 31.0f; });
+  df = df.Define("Electron_pt_jesDown", []() { return 29.0f; });
+  dm->setDataFrame(df);
+
+  RootOutputSink sink;
+  auto outputDf = dm->getDataFrame();
+  ASSERT_NO_THROW(
+      sink.writeDataFrame(outputDf, config, &sm, OutputChannel::Skim));
+
+  TFile f(outputPath.c_str(), "READ");
+  ASSERT_FALSE(f.IsZombie());
+  auto *tree = dynamic_cast<TTree *>(f.Get("Events"));
+  ASSERT_NE(tree, nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt"), nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt_jesUp"), nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt_jesDown"), nullptr);
+  f.Close();
+}
+
+TEST_F(RootOutputSinkTest, SystematicColumnsAreExcludedByDefault) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+
+  ConfigurationManager config(cfgPath);
+  auto dm = std::make_unique<DataManager>(5);
+  SystematicManager sm;
+  sm.registerSystematic("jes", {"Electron_pt"});
+
+  auto df = dm->getDataFrame();
+  df = df.Define("Electron_pt", []() { return 30.0f; });
+  df = df.Define("Electron_pt_jesUp", []() { return 31.0f; });
+  df = df.Define("Electron_pt_jesDown", []() { return 29.0f; });
+  dm->setDataFrame(df);
+
+  RootOutputSink sink;
+  auto outputDf = dm->getDataFrame();
+  ASSERT_NO_THROW(
+      sink.writeDataFrame(outputDf, config, &sm, OutputChannel::Skim));
+
+  TFile f(outputPath.c_str(), "READ");
+  ASSERT_FALSE(f.IsZombie());
+  auto *tree = dynamic_cast<TTree *>(f.Get("Events"));
+  ASSERT_NE(tree, nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt_jesUp"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt_jesDown"), nullptr);
+  f.Close();
+}
+
 /// A glob pattern that matches nothing does not throw
 TEST_F(RootOutputSinkTest, GlobPatternWithNoMatchDoesNotThrow) {
   writeSaveConfigFile(saveConfigPath, {"Jet_*"});

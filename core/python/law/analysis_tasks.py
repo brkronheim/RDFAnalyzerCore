@@ -22,8 +22,8 @@ Provides workflow helpers that extend the typical analysis workflow:
 
     StitchingApplyTask  (SkimTask)
             → Runs a counter pass, derives correctionlib stitching weights, and
-                runs a second application pass with the derived JSON staged into every
-                job.
+                runs a second application pass with the derived JSON staged once in
+                the shared worker archive.
 
     StitchingValidationTask  (Task)
             → Validates every application metadata file, including file-source
@@ -489,6 +489,8 @@ def _normalize_shared_config_references(
             or val.endswith(".yaml")
             or val.endswith(".yml")
             or val.endswith(".json")
+            or val.endswith(".json.gz")
+            or val.endswith(".onnx")
         ):
             basename = os.path.basename(val)
             if basename in staged_payloads:
@@ -568,24 +570,6 @@ def _materialize_runtime_staged_inputs(runtime_cfg_path: str, sandbox_dir: str) 
         write_config(config_dict, runtime_cfg_path)
 
 
-def _flatten_job_cfg_overlay_files(job_dir: str) -> list[str]:
-    """Flatten per-job cfg overlay payloads into *job_dir* for file-based transfer."""
-    overlay_dir = os.path.join(job_dir, "cfg")
-    flattened: list[str] = []
-    if not os.path.isdir(overlay_dir):
-        return flattened
-
-    for entry in sorted(Path(overlay_dir).iterdir()):
-        if not entry.is_file():
-            continue
-        flat_path = os.path.join(job_dir, entry.name)
-        if not os.path.exists(flat_path):
-            shutil.copy2(str(entry), flat_path)
-        flattened.append(flat_path)
-
-    return flattened
-
-
 def _skim_shared_loose_input_files(shared_dir: str) -> list[str]:
     """Return shared input files that should be transferred individually."""
     excluded = {
@@ -598,6 +582,49 @@ def _skim_shared_loose_input_files(shared_dir: str) -> list[str]:
         for entry in os.listdir(shared_dir)
         if os.path.isfile(os.path.join(shared_dir, entry)) and entry not in excluded
     )
+
+
+def _shared_archive_file_basenames(archive_path: str) -> set[str]:
+    """Return file basenames already contained in a shared-input archive."""
+    if not os.path.isfile(archive_path):
+        return set()
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        return {
+            os.path.basename(member.name)
+            for member in archive.getmembers()
+            if member.isfile() and os.path.basename(member.name)
+        }
+
+
+def _copy_job_submission_files(
+    source_dir: str,
+    destination_dir: str,
+    shared_archive_file_names: Optional[set[str]] = None,
+) -> None:
+    """Copy per-job payloads without expanding shared configuration overlays.
+
+    ``PrepareSkimJobs`` keeps a local ``cfg/`` overlay so local execution can
+    use the same prepared job directory.  Remote skim jobs receive the
+    equivalent payload through ``shared_inputs.tar.gz`` instead, so copying
+    that overlay into every concrete Condor job would duplicate potentially
+    large correction/configuration files.  Keep job-specific files (the
+    submit config, redirector map, and any future per-job payloads) while
+    omitting directories and files represented by the shared archive.
+    """
+    shared_names = set(shared_archive_file_names or set())
+    per_job_names = {"submit_config.txt", "site_redirectors.json"}
+    for entry in sorted(Path(source_dir).iterdir()):
+        if entry.name in {"cfg", "aux"}:
+            continue
+        if entry.name in shared_names and entry.name not in per_job_names:
+            continue
+
+        destination = os.path.join(destination_dir, entry.name)
+        if entry.is_dir():
+            shutil.copytree(str(entry), destination, dirs_exist_ok=True)
+        elif entry.is_file():
+            shutil.copy2(str(entry), destination)
 
 
 def _copy_tree_contents(src_dir: str, dst_dir: str) -> None:
@@ -2036,6 +2063,8 @@ def _write_job_config(
                 or val.endswith(".yaml")
                 or val.endswith(".yml")
                 or val.endswith(".json")
+                or val.endswith(".json.gz")
+                or val.endswith(".onnx")
             ):
                 basename = os.path.basename(val)
                 if basename in copied_payloads:
@@ -2084,6 +2113,17 @@ def _extract_lfn_for_redirect(url: str) -> str:
 
 def _select_test_input_url(input_url: str, job_dir: str) -> str:
     """Select a readable Rucio replica URL for the local preflight job."""
+    config_path = os.path.join(job_dir, "submit_config.txt")
+    if os.path.isfile(config_path):
+        config = read_config(config_path)
+        redirector = str(
+            config.get("xrootdRedirector", "") or config.get("redirector", "")
+        ).strip()
+        if redirector:
+            return ensure_xrootd_redirector(
+                _extract_lfn_for_redirect(input_url), redirector
+            )
+
     redirectors_path = os.path.join(job_dir, "site_redirectors.json")
     if not os.path.isfile(redirectors_path):
         return input_url
@@ -2398,8 +2438,8 @@ class SkimMixin:
         default="",
         significant=False,
         description=(
-            "Optional correctionlib stitching JSON copied into each job "
-            "and exposed as the 'stitchWeights' config value."
+            "Optional correctionlib stitching JSON staged in the shared worker "
+            "archive and exposed as the 'stitchWeights' config value."
         ),
     )
 
@@ -2835,6 +2875,15 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         if os.path.isfile(self.submit_config):
             template_config = read_config(self.submit_config)
             _copy_analysis_config_files(self.submit_config, template_config, test_dir)
+            # Keep a cfg/ copy as well as the loose files above. Prepared
+            # file-source jobs already refer to staged payloads as cfg/foo;
+            # this makes the local preflight layout match the worker archive.
+            _ensure_local_analysis_runtime_layout(
+                self.submit_config,
+                template_config,
+                test_dir,
+                include_aux=False,
+            )
             _copy_analysis_aux_dir(self.submit_config, test_dir)
 
         # Reuse floats.txt / ints.txt from the first job dir if available
@@ -2879,6 +2928,8 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 or val.endswith(".yaml")
                 or val.endswith(".yml")
                 or val.endswith(".json")
+                or val.endswith(".json.gz")
+                or val.endswith(".onnx")
             ):
                 basename = os.path.basename(val)
                 cfg_path = os.path.join(test_dir, "cfg", basename)
@@ -3118,7 +3169,10 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
             if key.startswith("__"):
                 continue
             if isinstance(val, str) and (
-                val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
+                val.endswith(".txt")
+                or val.endswith(".yaml")
+                or val.endswith(".yml")
+                or val.endswith(".onnx")
             ):
                 basename = os.path.basename(val)
                 cfg_path = os.path.join(test_dir, "cfg", basename)
@@ -3140,7 +3194,12 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
 
 
 class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
-    """Write concrete Condor submission files for prepared skim jobs."""
+    """Write concrete Condor submission files for prepared skim jobs.
+
+    Shared executable, library, configuration, auxiliary, and optional
+    stitching payloads are transferred as one run-level archive.  Concrete
+    per-job directories contain only job-specific metadata and configuration.
+    """
 
     task_namespace = ""
 
@@ -3200,12 +3259,24 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
             if os.path.isfile(candidate):
                 python_env_staged = candidate
 
-        shared_transfer_files = _skim_shared_input_files(shared_dir)
         stitch_weights_path = str(getattr(self, "stitch_weights", "") or "").strip()
         if stitch_weights_path and not os.path.isfile(stitch_weights_path):
             raise RuntimeError(
                 f"Stitching weights file not found: {stitch_weights_path!r}"
             )
+        if stitch_weights_path:
+            # Stitch weights are identical for every job.  Add them to the
+            # run-level archive instead of copying one JSON into each job.
+            shutil.copy2(
+                stitch_weights_path,
+                os.path.join(shared_dir, "stitch_weights.json"),
+            )
+            _build_shared_inputs_archive(shared_dir, self._shared_archive_path)
+
+        shared_transfer_files = _skim_shared_input_files(shared_dir)
+        shared_archive_file_names = _shared_archive_file_basenames(
+            self._shared_archive_path
+        )
 
         submission_records: list[dict[str, object]] = []
         for dataset_name, dataset_jobs in grouped_jobs.items():
@@ -3215,17 +3286,16 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
             Path(submission_dir).mkdir(parents=True, exist_ok=True)
 
             jobs_payload: list[dict[str, object]] = []
-            has_stitch_weights = False
             for local_index, (global_index, entry) in enumerate(dataset_jobs):
                 job_dir_abs = str(entry["job_dir"])
                 staged_job_dir = os.path.join(submission_dir, f"job_{local_index}")
                 Path(staged_job_dir).mkdir(parents=True, exist_ok=True)
-                _copy_tree_contents(job_dir_abs, staged_job_dir)
+                _copy_job_submission_files(
+                    job_dir_abs,
+                    staged_job_dir,
+                    shared_archive_file_names,
+                )
                 if stitch_weights_path:
-                    shutil.copy2(
-                        stitch_weights_path,
-                        os.path.join(staged_job_dir, "stitch_weights.json"),
-                    )
                     staged_config_path = os.path.join(staged_job_dir, "submit_config.txt")
                     staged_config = read_config(staged_config_path)
                     staged_config["stitchWeights"] = "stitch_weights.json"
@@ -3233,11 +3303,6 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                         for key, value in staged_config.items():
                             if not key.startswith("__"):
                                 staged_config_fh.write(f"{key}={value}\n")
-                _flatten_job_cfg_overlay_files(staged_job_dir)
-                has_stitch_weights = has_stitch_weights or os.path.isfile(
-                    os.path.join(staged_job_dir, "stitch_weights.json")
-                )
-
                 if final_output_base and entry.get("out_dir"):
                     final_output_dir = os.path.join(final_output_base, dataset_name)
                     _rewrite_job_output_destinations(
@@ -3254,14 +3319,6 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 })
 
             submission_transfer_files = list(shared_transfer_files)
-            if has_stitch_weights:
-                submission_transfer_files.append(
-                    os.path.join(
-                        submission_dir,
-                        "job_$(Process)",
-                        "stitch_weights.json",
-                    )
-                )
 
             submit_path = write_submit_files(
                 submission_dir,
@@ -5258,6 +5315,7 @@ class StitchingApplyTask(SkimTask):
     normal SkimTask executors for the application pass.  The generated
     correctionlib JSON is staged into every application job as
     ``stitchWeights`` and the executable receives ``stitchMode=correctionlib``.
+    The weights are included once in the shared worker archive.
 
     The stitch configuration accepts either explicit ``meta_files`` or
     declarative groups using ``samples`` / ``select``; in the latter case the

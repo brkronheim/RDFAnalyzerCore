@@ -165,9 +165,10 @@ std::vector<int64_t> resolveOutputShape(std::vector<int64_t> shape,
                                         const std::string &modelName,
                                         size_t outputIndex) {
   if (shape.empty()) {
-    throw std::runtime_error("OnnxManager: ONNX output shape is empty for model '" +
-                             modelName + "' output index " +
-                             std::to_string(outputIndex));
+    // Some exporters omit output shape metadata for scalar outputs. The
+    // manager's scalar-output contract is sufficient to resolve that case;
+    // ORT still validates the concrete runtime tensor shape during inference.
+    return {1, 1};
   }
 
   // Preserve a dynamic (≤ 0) leading batch dimension so the runtime can
@@ -710,15 +711,26 @@ void OnnxManager::applyModel(const std::string &modelName, const std::string &ou
     const std::string packedColName = "input_" + modelName;
     if (std::find(existingColumns.begin(), existingColumns.end(),
                   packedColName) == existingColumns.end()) {
+      const auto isVectorColumn = [&df](const std::string &column) {
+        const auto type = df.GetColumnType(column);
+        return type.find("RVec") != std::string::npos ||
+               type.find("vector<") != std::string::npos ||
+               type.find("std::vector") != std::string::npos;
+      };
       std::string expr = "ROOT::VecOps::RVec<Float_t> __v; __v.reserve(";
       for (size_t j = 0; j < inputFeatures.size(); ++j) {
         if (j > 0) expr += " + ";
-        expr += inputFeatures[j] + ".size()";
+        expr += isVectorColumn(inputFeatures[j]) ? inputFeatures[j] + ".size()"
+                                                 : "1";
       }
       expr += ");\n";
       for (const auto &f : inputFeatures) {
-        expr += "for (auto &__x : " + f +
-                ") __v.push_back(static_cast<Float_t>(__x));\n";
+        if (isVectorColumn(f)) {
+          expr += "for (auto &__x : " + f +
+                  ") __v.push_back(static_cast<Float_t>(__x));\n";
+        } else {
+          expr += "__v.push_back(static_cast<Float_t>(" + f + "));\n";
+        }
       }
       expr += "return __v;";
       df = df.Define(packedColName, expr);

@@ -73,9 +73,15 @@ struct KinFitParticleConfig {
  *     m(b, l, ν) = 173.3 GeV.
  *
  * **PT** – Transverse-momentum constraint on a single particle (idx1 only).
- *   Constrains pT(p_idx1) == targetValue.  Set targetValue = 0 to remove the
- *   MET contribution in events where no genuine missing energy is expected
- *   (e.g. fully hadronic W → jj decays).
+ *   Constrains pT(p_idx1) to targetValue. With the default ptSigma = 0 the
+ *   constraint is hard; a positive ptSigma applies a Gaussian penalty with
+ *   width ptSigma in GeV.
+ *
+ * **PX/PY** – Cartesian transverse-momentum constraint on the sum of one or
+ *   more particles. The particle indices are stored in @p indices. With the
+ *   default transverseSigma = 0 the constraint is hard; a positive width
+ *   applies a Gaussian penalty in GeV. These constraints are used for global
+ *   transverse-momentum balance and for a Cartesian zero-MET prior.
  *
  * **Soft mass constraints via massSigma**
  *
@@ -92,7 +98,8 @@ struct KinFitParticleConfig {
  *   - top quark: massSigma = 1.4    GeV
  *   - Higgs:     massSigma = 0.004  GeV (~4 MeV)
  *
- * massSigma has no effect on PT constraints.
+ * massSigma has no effect on PT/PX/PY constraints; use ptSigma or
+ * transverseSigma for a soft transverse-momentum constraint.
  *
  * Config syntax:
  *   @code
@@ -102,12 +109,18 @@ struct KinFitParticleConfig {
  *   constraints=0+1:91.2:2.495
  *   # Three-body mass constraint with top width (soft)
  *   constraints=0+1+2:173.3:1.4
- *   # pT constraint (particle 3 must have pT = 0 GeV)
+ *   # Hard pT constraint (particle 3 must have pT = 0 GeV)
  *   constraints=pt:3:0.0
+ *   # Soft pT constraint with a 20 GeV width
+ *   constraints=pt:3:0.0:20.0
+ *   # Hard px balance over particles 0, 1, and 2
+ *   constraints=px:0+1+2:0.0
+ *   # Soft Cartesian zero-MET prior on particle 3
+ *   constraints=px:3:0.0:20.0,py:3:0.0:20.0
  *   @endcode
  */
 struct KinFitConstraintConfig {
-  enum class Type { MASS, PT };
+  enum class Type { MASS, PT, PX, PY };
 
   Type   type       = Type::MASS; ///< Constraint type
   int    idx1       = -1;  ///< First  particle (mass 2/3-body or pT-only)
@@ -118,6 +131,13 @@ struct KinFitConstraintConfig {
   /// Set > 0 to soften the constraint (see struct documentation).
   /// Has no effect on PT constraints.
   double massSigma  = 0.0;
+  /// @brief Gaussian width [GeV] for soft PT constraints.
+  /// Set > 0 to allow the fitted pT to deviate from targetValue.
+  double ptSigma = 0.0;
+  /// @brief Particle indices included in PX/PY sum constraints.
+  std::vector<int> indices;
+  /// @brief Gaussian width [GeV] for soft PX/PY constraints.
+  double transverseSigma = 0.0;
 };
 
 /**
@@ -137,6 +157,14 @@ struct KinFitConfig {
   double jetPhiResolution    = 0.05;   ///< Absolute jet phi resolution [rad]
 
   double metPtResolution     = 0.20;   ///< Fractional MET pT resolution
+  /// @brief Absolute isotropic MET px/py resolution [GeV].
+  /// When positive, this is used instead of metPtResolution for the MET
+  /// particle, which prevents a fractional-pT endpoint in Cartesian fits.
+  double metCartesianResolution = 0.0;
+  /// @brief Whether the measured MET value contributes a fit pull.
+  /// When false, the MET measurement is treated as effectively unmeasured;
+  /// hard balance and configured soft MET priors still constrain it.
+  bool metUseMeasurement = true;
   /// @brief MET eta resolution. Very large so η is effectively free.
   double metEtaResolution    = 100.0;
   double metPhiResolution    = 0.05;   ///< Absolute MET phi resolution [rad]
@@ -191,9 +219,14 @@ struct KinFitConfig {
  *                       # Three-body invariant mass: idx1+idx2+idx3:targetMass[:massSigma]
  *                       # Used for top decay: t → b l ν  (idx 0=b, 1=l, 2=ν)
  *                       0+1+2:173.3:1.4    # top with PDG width
- *                       # pT (size) constraint on one particle: pt:idx:targetPt
- *                       # Set targetPt=0 to suppress MET in hadronic events
+ *                       # Hard pT constraint on one particle
  *                       pt:2:0.0
+ *                       # Soft pT constraint: target and Gaussian width in GeV
+ *                       pt:2:0.0:20.0
+ *                       # Hard global transverse balance
+ *                       px:0+1+2+3:0.0,py:0+1+2+3:0.0
+ *                       # Soft Cartesian zero-MET prior on particle 3
+ *                       px:3:0.0:20.0,py:3:0.0:20.0
  *                       @endcode
  *                       where indices are zero-based into the particles list.
  *   Optional (fall back to built-in defaults if absent):
@@ -208,6 +241,8 @@ struct KinFitConfig {
  *     leptonPtResolution, leptonEtaResolution, leptonPhiResolution
  *     jetPtResolution,    jetEtaResolution,    jetPhiResolution
  *     metPtResolution,    metEtaResolution,    metPhiResolution
+ *     metCartesianResolution (absolute isotropic px/py resolution)
+ *     metUseMeasurement (whether the measured MET contributes a fit pull)
  *     recoilPtResolution, recoilEtaResolution, recoilPhiResolution
  *
  * **Particle spec format**

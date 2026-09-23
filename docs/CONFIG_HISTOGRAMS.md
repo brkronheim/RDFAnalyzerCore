@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
 
 ### Systematic Variations
 
-Histogram systematic handling is enabled by default. Before the first booking, `NDHistogramManager` scans available dataframe column names for complete `baseVariable_nameUp` / `baseVariable_nameDown` pairs and registers the matching systematic against the base variable. You can disable this behavior with `histogramSystematics: false` in the main config to book nominal-only histograms. A registered name alone does not calculate a shifted value: the analysis or an input source must provide the varied columns, or the analysis must define and map the variations itself.
+Histogram systematic handling is enabled by default. Before the first booking, `NDHistogramManager` scans available dataframe column names for complete `baseVariable_nameUp` / `baseVariable_nameDown` pairs and registers the matching systematic against the base variable. You can disable this behavior with `histogramSystematics: false` in the main config to book nominal-only histograms. For a complete nominal-only framework graph, use `enableSystematics: false`; this also prevents systematic registration and propagation outside histogram booking. A registered name alone does not calculate a shifted value: the analysis or an input source must provide the varied columns, or the analysis must define and map the variations itself.
 
 ```cpp
 // Define a complete Up/Down pair using the expected baseVar_nameUp/Down form.

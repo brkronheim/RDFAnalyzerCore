@@ -806,11 +806,11 @@ void defineCmsTriggerScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
     corrMgr->registerCorrection(
         "cms_dimuon_trigger_mu17", cfg.dimuonTriggerMu17File,
         cfg.dimuonTriggerMu17Correction,
-        {"SelectedMuonLead_absEta", "Muon1_pt"});
+        {"SelectedMuonLead_absEta_triggerSF", "Muon1_pt_triggerSF"});
     corrMgr->registerCorrection(
         "cms_dimuon_trigger_mu8", cfg.dimuonTriggerMu8File,
         cfg.dimuonTriggerMu8Correction,
-        {"SelectedMuonSublead_absEta", "Muon2_pt"});
+        {"SelectedMuonSublead_absEta_triggerSF", "Muon2_pt_triggerSF"});
 
     const auto applyLegVariations = [&](const std::string &correction,
                                         const std::string &prefix) {
