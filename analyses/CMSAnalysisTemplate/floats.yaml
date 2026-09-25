@@ -1,0 +1,37 @@
+# =============================================================================
+# floats.yaml — Scalar float constants loaded as constant RDataFrame columns
+#
+# Format: YAML map (key: value).  Each entry becomes a constant column in the
+# RDataFrame with the specified name and value.  Useful for documenting
+# selection thresholds and analysis parameters in a single location.
+#
+# For MC normalisation, define the per-sample weight as:
+#   weight = xsec × lumi / sumWeights
+# and register it via WeightManager::addNormalization() in analysis.cc.
+# =============================================================================
+
+# ---- Luminosity [fb^-1] -----------------------------------------------------
+# Run 2016G single-muon certified luminosity (adapt to your run era)
+lumi_fb: 7.65
+
+# ---- Muon selection thresholds (documentation; actual cuts in analysis.cc) --
+muon_loose_pt_min: 10.0
+muon_loose_iso_max: 0.25
+muon_tight_pt_min: 26.0
+muon_tight_iso_max: 0.15
+muon_eta_max: 2.4
+
+# ---- Electron selection thresholds (documentation) -------------------------
+electron_loose_pt_min: 10.0
+electron_tight_pt_min: 30.0
+electron_eta_max: 2.5
+
+# ---- Jet selection thresholds (documentation) ------------------------------
+jet_pt_min: 30.0
+jet_eta_max: 4.7
+jet_dR_lepton: 0.4
+
+# ---- Event-level cuts (documentation) --------------------------------------
+met_cut_gev: 30.0
+mt_presel_gev: 40.0
+mt_signal_gev: 60.0

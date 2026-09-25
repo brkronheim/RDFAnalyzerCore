@@ -1,0 +1,127 @@
+# =============================================================================
+# collections.yaml — Object collection definitions for CMSAnalysisTemplate
+#
+# Each entry under "collections:" defines a named physics-object collection
+# that is built automatically by CMSAnalysisBase (Python) or can serve as the
+# specification for collection-builder functions in analysis.cc (C++).
+#
+# For every collection the Python base class produces these RDataFrame columns:
+#
+#   {name}_mask   — RVec<bool>  — per-object selection mask (after OR removal)
+#   {name}_pt     — RVec<float> — pT  of objects passing the mask
+#   {name}_eta    — RVec<float> — η
+#   {name}_phi    — RVec<float> — φ
+#   {name}_mass   — RVec<float> — mass
+#   {name}_n      — int         — number of objects passing the mask
+#
+# Fields
+# ------
+#   name              (required) — output column-name prefix
+#   pt / eta / phi / mass        — NanoAOD branch names (defaults: {name}_pt etc.)
+#   cuts              (list)     — C++ boolean expressions joined with &&
+#   overlap_removal   (list)     — ΔR overlap-removal passes (applied in order)
+#     - collection               — name of an already-defined collection
+#     - dr                       — ΔR threshold (default: 0.4)
+#
+# Cuts can be any valid C++ expression using the branch names listed under
+# pt/eta/phi/mass plus any other NanoAOD column available on the dataframe.
+# Numeric literals should use the float suffix (e.g., 0.15f) for performance.
+#
+# Correction integration
+# ----------------------
+# To use CMS corrections (Rochester for muons, energy-scale for electrons,
+# JEC for jets), replace the branch names with the corrected column names
+# produced by the respective correction manager.  For example, to use the
+# Rochester-corrected muon pT, change:
+#
+#     pt: Muon_pt
+#
+# to:
+#
+#     pt: Muon_pt_roc        # from MuonRochesterManager
+#
+# Enable the correction manager in cfg.yaml and follow the documentation in
+# docs/CMS_CORRECTIONS.md.
+# =============================================================================
+
+collections:
+
+  # ---------------------------------------------------------------------------
+  # Muons
+  # ---------------------------------------------------------------------------
+
+  - name: looseMuons
+    # Loose WP — used for additional-lepton vetoes.
+    pt:   Muon_pt
+    eta:  Muon_eta
+    phi:  Muon_phi
+    mass: Muon_mass
+    cuts:
+      - "Muon_looseId"                       # loose cut-based ID
+      - "Muon_pfRelIso04_all < 0.25f"        # loose PF isolation
+      - "Muon_pt > 10.0f"                    # minimum pT threshold [GeV]
+      - "abs(Muon_eta) < 2.4f"              # tracker acceptance
+
+  - name: tightMuons
+    # Tight WP — primary signal lepton for W→μν and Z→μμ channels.
+    pt:   Muon_pt
+    eta:  Muon_eta
+    phi:  Muon_phi
+    mass: Muon_mass
+    cuts:
+      - "Muon_tightId"                       # tight cut-based ID
+      - "Muon_pfRelIso04_all < 0.15f"        # tight PF isolation
+      - "Muon_pt > 26.0f"                    # above single-muon HLT threshold
+      - "abs(Muon_eta) < 2.4f"
+
+  # ---------------------------------------------------------------------------
+  # Electrons
+  # ---------------------------------------------------------------------------
+
+  - name: looseElectrons
+    # Loose WP — used for electron vetoes in muon channels.
+    pt:   Electron_pt
+    eta:  Electron_eta
+    phi:  Electron_phi
+    mass: Electron_mass
+    cuts:
+      - "Electron_cutBased >= 1"             # loose cut-based ID (≥ veto)
+      - "Electron_pt > 10.0f"
+      - "abs(Electron_eta) < 2.5f"          # ECAL acceptance
+      # Exclude ECAL barrel-endcap transition gap
+      - "!(abs(Electron_eta) > 1.444f && abs(Electron_eta) < 1.566f)"
+
+  - name: tightElectrons
+    # Tight WP — primary signal lepton for W→eν and Z→ee channels.
+    pt:   Electron_pt
+    eta:  Electron_eta
+    phi:  Electron_phi
+    mass: Electron_mass
+    cuts:
+      - "Electron_cutBased >= 4"             # tight cut-based ID
+      - "Electron_pt > 30.0f"               # above single-electron HLT threshold
+      - "abs(Electron_eta) < 2.5f"
+      - "!(abs(Electron_eta) > 1.444f && abs(Electron_eta) < 1.566f)"
+
+  # ---------------------------------------------------------------------------
+  # Jets
+  # ---------------------------------------------------------------------------
+
+  - name: goodJets
+    # AK4 CHS jets with jetID and ΔR cleaning against both lepton flavours.
+    # The overlap removal is applied sequentially: first against tightMuons,
+    # then against tightElectrons.  Both collections must be defined before
+    # goodJets in this file (ordering is preserved during processing).
+    pt:   Jet_pt
+    eta:  Jet_eta
+    phi:  Jet_phi
+    mass: Jet_mass
+    cuts:
+      - "Jet_jetId >= 2"                     # tight jetID (bit 1 = PF-loose, bit 2 = PF-tight)
+      - "Jet_pt > 30.0f"                     # minimum jet pT [GeV]
+      - "abs(Jet_eta) < 4.7f"              # jet η acceptance
+    overlap_removal:
+      - collection: tightMuons
+        dr: 0.4
+      - collection: tightElectrons
+        dr: 0.4
