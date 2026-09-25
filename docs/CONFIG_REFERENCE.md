@@ -79,6 +79,10 @@ Jet_eta          # Specific column
 - Exact column names continue to work unchanged
 - Overlapping patterns are automatically deduplicated
 - Non-matching patterns are silently skipped (no error)
+- If all entries are skipped and no columns remain selected, the current sink
+  snapshots all DataFrame columns for backwards compatibility; an empty list
+  cannot be used to request a zero-branch skim. Check patterns carefully to
+  avoid broadening the output unintentionally.
 - Mix exact names and glob patterns in the same file
 
 ### Data Loading Helpers
@@ -613,6 +617,24 @@ enableCounters=true
 counterWeightBranch=genWeight
 counterIntWeightBranch=stitchWeight
 ```
+
+### CMS generator-weight basis
+
+For MC datasets, the manifest field `generator_weight_mode` selects the raw
+generator-weight factor and normalization denominator. It defaults to `sign`:
+the event factor is `sign(genWeight)` and the denominator is
+`sum(sign(genWeight))`. Set it to `full` to use `genWeight` and
+`sum(genWeight)` instead. The LAW skim workflow writes the selected mode to
+`genWeightMode` in each MC job config and uses the same mode in its
+`normalization.json` result. A selected denominator that is zero, negative, or
+nonfinite marks the dataset normalization as an error; it never falls back to
+the other mode. Keep `counterWeightBranch=genWeight` when collecting these
+normalization counters so the selected totals use the generator-weight branch.
+
+`setupCmsGenWeights()` applies this basis to the nominal generator-weight
+column and its LHE, PDF, and parton-shower variations. Weight Up/Down columns
+use the same nominal sample normalization, so their yield changes are retained.
+Data jobs do not use this MC-only setting.
 
 ### Custom ROOT Dictionaries
 

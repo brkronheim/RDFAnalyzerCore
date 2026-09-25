@@ -14,8 +14,13 @@
 #include <CmsWeights.h>
 
 #include <string>
+#include <sstream>
 #include <vector>
 #include <unordered_map>
+#include <atomic>
+#include <filesystem>
+#include <thread>
+#include <unistd.h>
 
 using namespace cms;
 
@@ -334,13 +339,37 @@ TEST(CmsCorrectionsTest, DefaultJesModeIsReduced) {
   EXPECT_EQ(cfg.jesMode, CmsCorrectionConfig::Reduced);
 }
 
-TEST(CmsCorrectionsTest, CorrectionEnableFlagsDefaultToTrue) {
+TEST(CmsCorrectionsTest, CorrectionEnableFlagsDefaultToFalse) {
   CmsCorrectionConfig cfg;
-  EXPECT_TRUE(cfg.applyJetCorrections);
-  EXPECT_TRUE(cfg.applyElectronCorrections);
-  EXPECT_TRUE(cfg.applyMuonCorrections);
-  EXPECT_TRUE(cfg.applyBtagCorrections);
-  EXPECT_TRUE(cfg.applyCtagCorrections);
+  EXPECT_FALSE(cfg.applyJetCorrections);
+  EXPECT_FALSE(cfg.applyElectronCorrections);
+  EXPECT_FALSE(cfg.applyMuonCorrections);
+  EXPECT_FALSE(cfg.applyBtagCorrections);
+  EXPECT_FALSE(cfg.applyCtagCorrections);
+}
+
+TEST(CmsCorrectionsTest, PrintIncludesConfiguredSummaryFields) {
+  CmsCorrectionConfig cfg;
+  cfg.jetTagger = "DeepFlav";
+  cfg.applyTauCorrections = true;
+  std::ostringstream output;
+
+  cfg.print(output);
+
+  EXPECT_NE(output.str().find("jetTagger: DeepFlav"), std::string::npos);
+  EXPECT_NE(output.str().find("applyTauCorrections: yes"), std::string::npos);
+}
+
+TEST(CmsWeightsTest, PrintIncludesConfiguredSummaryFields) {
+  CmsWeightConfig cfg;
+  cfg.isMC = false;
+  cfg.applyPileupWeights = true;
+  std::ostringstream output;
+
+  cfg.print(output);
+
+  EXPECT_NE(output.str().find("isMC: no"), std::string::npos);
+  EXPECT_NE(output.str().find("applyPileupWeights: yes"), std::string::npos);
 }
 
 // ===========================================================================
@@ -422,6 +451,46 @@ TEST(CmsWeightsTest, JetTaggerBaseResolvesCorrectly) {
   // The jetTaggerBase is an internal helper in CmsWeights.cc
   // We test it indirectly through the correction name resolution
   // which uses similar logic.
+}
+
+TEST(CmsWeightsTest, ColdCorrectionCacheSupportsConcurrentEvaluation) {
+  const auto source = std::filesystem::path(TEST_SOURCE_DIR) /
+                      "aux" / "correction.json";
+  const auto copied = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-cold-correction-" + std::to_string(getpid()) + ".json");
+  std::filesystem::copy_file(
+      source, copied, std::filesystem::copy_options::overwrite_existing);
+
+  constexpr std::size_t workers = 16;
+  std::atomic<bool> start{false};
+  std::vector<float> results(workers, 0.0f);
+  std::vector<std::string> errors(workers);
+  std::vector<std::thread> threads;
+  threads.reserve(workers);
+  for (std::size_t i = 0; i < workers; ++i) {
+    threads.emplace_back([&, i]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      try {
+        results[i] = evalCorr3(copied.string(), "test_correction_real_pt",
+                               0.5f, 1.0f, "A");
+      } catch (const std::exception& error) {
+        errors[i] = error.what();
+      } catch (...) {
+        errors[i] = "unknown exception";
+      }
+    });
+  }
+  start.store(true, std::memory_order_release);
+  for (auto& thread : threads) thread.join();
+
+  for (std::size_t i = 0; i < workers; ++i) {
+    EXPECT_TRUE(errors[i].empty()) << errors[i];
+    const auto result = results[i];
+    EXPECT_FLOAT_EQ(result, 0.1f);
+  }
+  std::filesystem::remove(copied);
 }
 
 int main(int argc, char **argv) {

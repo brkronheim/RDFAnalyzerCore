@@ -5,6 +5,7 @@
 #include <RtypesCore.h>
 #include <TFile.h>
 #include <TH1D.h>
+#include <TH1F.h>
 #include <TROOT.h>
 #include <TCanvas.h>
 #include <TLegend.h>
@@ -66,7 +67,7 @@ void writeTestMetaFile(const std::string& metaPath) {
   normB.Write();
 
   dirA->cd();
-  TH1D histA("pt", "pt", 2, 0.0, 2.0);
+  TH1F histA("pt", "pt", 2, 0.0, 2.0);
   histA.SetBinContent(1, 10.0);
   histA.SetBinContent(2, 10.0);
   histA.Write();
@@ -78,7 +79,7 @@ void writeTestMetaFile(const std::string& metaPath) {
   histB.Write();
 
   dirData->cd();
-  TH1D data("pt", "pt", 2, 0.0, 2.0);
+  TH1F data("pt", "pt", 2, 0.0, 2.0);
   data.SetBinContent(1, 4.0);
   data.SetBinContent(2, 4.0);
   data.Write();

@@ -54,10 +54,17 @@ def read_config_text(config_file):
     config_dict = {}
     with open(config_file) as file:
         for line in file:
-            line = line.split("#")[0]
-            line = line.strip().split("=")
-            if len(line) == 2:
-                config_dict[line[0]] = line[1]
+            line = line.split("#", 1)[0]
+            if "=" not in line:
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            if not key:
+                continue
+            if key in config_dict:
+                raise ValueError(
+                    f"Duplicate key '{key}' in text config '{config_file}'."
+                )
+            config_dict[key] = value
     return config_dict
 
 
@@ -66,7 +73,27 @@ def read_config_yaml(config_file):
     with open(config_file) as file:
         config_dict = yaml.safe_load(file)
     # Ensure all values are strings for consistency
-    return {k: str(v) for k, v in config_dict.items()}
+    return {k: _yaml_value_to_config_string(v) for k, v in config_dict.items()}
+
+
+def _yaml_value_to_config_string(value):
+    """Serialize YAML values like the C++ YAML config adapter does."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        items = []
+        for item in value:
+            if isinstance(item, (dict, list)):
+                return yaml.safe_dump(
+                    value, default_flow_style=True, sort_keys=False
+                ).strip()
+            items.append(_yaml_value_to_config_string(item))
+        return "[" + ", ".join(items) + "]"
+    if isinstance(value, dict):
+        return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+    return str(value)
 
 
 def write_config(config_dict, output_file):
@@ -213,7 +240,19 @@ def read_config(cfg_path):
         import yaml
         with open(cfg_path) as f:
             cfg = yaml.safe_load(f)
-        return {{k: str(v) for k, v in cfg.items()}}
+        def yaml_value_to_config_string(value):
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            if value is None:
+                return ""
+            if isinstance(value, list):
+                if any(isinstance(item, (dict, list)) for item in value):
+                    return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+                return "[" + ", ".join(yaml_value_to_config_string(item) for item in value) + "]"
+            if isinstance(value, dict):
+                return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+            return str(value)
+        return {{k: yaml_value_to_config_string(v) for k, v in cfg.items()}}
     cfg = {{}}
     with open(cfg_path) as f:
         for line in f:
@@ -536,7 +575,19 @@ def read_config(config_file):
         import yaml
         with open(config_file) as f:
             cfg = yaml.safe_load(f)
-        return {{k: str(v) for k, v in cfg.items()}}
+        def yaml_value_to_config_string(value):
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            if value is None:
+                return ""
+            if isinstance(value, list):
+                if any(isinstance(item, (dict, list)) for item in value):
+                    return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+                return "[" + ", ".join(yaml_value_to_config_string(item) for item in value) + "]"
+            if isinstance(value, dict):
+                return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+            return str(value)
+        return {{k: yaml_value_to_config_string(v) for k, v in cfg.items()}}
     else:
         cfg = {{}}
         with open(config_file) as f:
@@ -676,7 +727,19 @@ def read_config(config_file):
         import yaml
         with open(config_file) as f:
             cfg = yaml.safe_load(f)
-        return {{k: str(v) for k, v in cfg.items()}}
+        def yaml_value_to_config_string(value):
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            if value is None:
+                return ""
+            if isinstance(value, list):
+                if any(isinstance(item, (dict, list)) for item in value):
+                    return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+                return "[" + ", ".join(yaml_value_to_config_string(item) for item in value) + "]"
+            if isinstance(value, dict):
+                return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+            return str(value)
+        return {{k: yaml_value_to_config_string(v) for k, v in cfg.items()}}
     else:
         cfg = {{}}
         with open(config_file) as f:
@@ -907,7 +970,19 @@ def read_config(cfg_path):
         import yaml
         with open(cfg_path) as f:
             cfg = yaml.safe_load(f)
-        return {{k: str(v) for k, v in cfg.items()}}
+        def yaml_value_to_config_string(value):
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            if value is None:
+                return ""
+            if isinstance(value, list):
+                if any(isinstance(item, (dict, list)) for item in value):
+                    return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+                return "[" + ", ".join(yaml_value_to_config_string(item) for item in value) + "]"
+            if isinstance(value, dict):
+                return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
+            return str(value)
+        return {{k: yaml_value_to_config_string(v) for k, v in cfg.items()}}
     cfg = {{}}
     with open(cfg_path) as f:
         for line in f:

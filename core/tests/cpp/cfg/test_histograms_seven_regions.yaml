@@ -1,0 +1,11 @@
+- name: test_btag_region
+  variable: var1
+  weight: w1
+  bins: "10"
+  lowerBound: "0.0"
+  upperBound: "10.0"
+  channelVariable: JetBTagRegion
+  channelBins: "7"
+  channelLowerBound: "-0.5"
+  channelUpperBound: "6.5"
+  channelRegions: "AtLeast1TightB_SubleadBelowLoose,AtLeast1TightB_SubleadLooseToMedium,AtLeast1TightB_SubleadMediumToTight,AtLeast1TightB_SubleadTightToXTight,AtLeast1TightB_SubleadXTightToXXTight,AtLeast1TightB_SubleadAtLeastXXTight,ZeroTightB_AnySubleadWP"

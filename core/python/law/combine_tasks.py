@@ -618,6 +618,14 @@ def _prepare_manifest_datacard_config(
             f"Datacard configuration must contain a YAML mapping at the top level: {config_file!r}"
         )
 
+    # The analysis manifest records which nuisance groups and process/region
+    # scopes were produced. Carry those into the generator unless the user
+    # supplied an explicit datacard-side override.
+    if manifest.nuisance_groups and "nuisance_groups" not in config:
+        config["nuisance_groups"] = [
+            group.to_dict() for group in manifest.nuisance_groups
+        ]
+
     hist_file = _resolve_manifest_histogram_file(manifest, manifest_path)
 
     if not config.get("input_files"):

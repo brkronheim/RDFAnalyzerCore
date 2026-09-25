@@ -53,9 +53,8 @@ class CmsYearRegistry;
 // ---------------------------------------------------------------------------
 // BTagWorkingPoints — b-tag discriminator thresholds for fixed-WP SFs
 // ---------------------------------------------------------------------------
-/// Holds the five standard working-point thresholds (L/M/T/XT/XXT) for
-/// b-tagging.  Values are tagger-dependent and year-dependent; see
-/// CmsYearRegistry::defaultBTagWorkingPoints() for defaults.
+/// Holds caller-supplied b-tag thresholds (L/M/T/XT/XXT). Built-in
+/// year/tagger defaults are not currently available.
 struct BTagWorkingPoints {
   float loose = 0.0f;
   float medium = 0.0f;
@@ -67,9 +66,8 @@ struct BTagWorkingPoints {
 // ---------------------------------------------------------------------------
 // CTagWorkingPoints — c-tag (CvL × CvB) discriminator thresholds
 // ---------------------------------------------------------------------------
-/// Holds the three standard working-point thresholds for each of the two
-/// c-tag discriminators (CvsL and CvsB).  Values are tagger-dependent and
-/// year-dependent; see CmsYearRegistry::defaultCTagWorkingPoints().
+/// Holds caller-supplied c-tag thresholds for the CvsL and CvsB
+/// discriminators. Built-in year/tagger defaults are not currently available.
 struct CTagWorkingPoints {
   float cvlLoose = 0.0f, cvlMedium = 0.0f, cvlTight = 0.0f;
   float cvbLoose = 0.0f, cvbMedium = 0.0f, cvbTight = 0.0f;
@@ -241,14 +239,14 @@ public:
   static std::string defaultCvBBranch(const std::string &jetTagger,
                                        const std::string &canonicalYear = "");
 
-  /// Get BTV POG-recommended b-tag working-point thresholds for a given
-  /// year and tagger.  Returns zeroed struct for unknown combinations.
+  /// Reserved for a future BTV POG working-point table. No implementation is
+  /// currently linked; callers must provide thresholds explicitly.
   static BTagWorkingPoints defaultBTagWorkingPoints(
       const std::string &canonicalYear,
       const std::string &jetTagger);
 
-  /// Get BTV POG-recommended c-tag working-point thresholds for a given
-  /// year and tagger.  Returns zeroed struct for unknown combinations.
+  /// Reserved for a future BTV POG working-point table. No implementation is
+  /// currently linked; callers must provide thresholds explicitly.
   static CTagWorkingPoints defaultCTagWorkingPoints(
       const std::string &canonicalYear,
       const std::string &jetTagger);

@@ -685,6 +685,7 @@ TEST_F(BaseConfigSetup, SetAndGetWithSpecialCharacters) {
 TEST_F(BaseConfigSetup, SetAndGetWithEmptyValue) {
   config->set("emptyValue", "");
   EXPECT_EQ(config->get("emptyValue"), "");
+  EXPECT_THROW(config->set("emptyValue", "replacement"), std::runtime_error);
 }
 
 /**

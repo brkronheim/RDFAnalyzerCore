@@ -93,6 +93,12 @@ void GenWeightManager::setupFromConfigFile() {
   pdfCount_m = configInt("genWeightPdfCount", 103);
   pdfAsUpOffset_m = configInt("genWeightPdfAsUpOffset", -1);
   pdfAsDownOffset_m = configInt("genWeightPdfAsDownOffset", -1);
+  weightMode_m = toLowerCopy(configString("genWeightMode", "sign"));
+  if (weightMode_m != "sign" && weightMode_m != "full") {
+    throw std::invalid_argument(
+        "GenWeightManager: genWeightMode must be 'sign' or 'full', got '" +
+        weightMode_m + "'");
+  }
 }
 
 void GenWeightManager::execute() {
@@ -110,7 +116,7 @@ void GenWeightManager::defineVariationWeights() {
     throw std::runtime_error("GenWeightManager: manager context is not set");
   }
 
-  const std::string &baseWeightCol = baseWeightColumn_m;
+  std::string baseWeightCol = baseWeightColumn_m;
 
   if (!hasColumn(baseWeightCol)) {
     throw std::runtime_error("GenWeightManager: base weight column '" +
@@ -122,8 +128,39 @@ void GenWeightManager::defineVariationWeights() {
   const bool useDoubleBase =
       baseWeightType == "double" || baseWeightType == "Double_t";
 
+  if (weightMode_m == "sign") {
+    const std::string signColumn = "__rdfanalyzer_genWeightSign";
+    if (hasColumn(signColumn)) {
+      throw std::runtime_error(
+          "GenWeightManager: helper column '" + signColumn +
+          "' already exists; rename the input column or configure a different "
+          "generator-weight setup");
+    }
+    if (useDoubleBase) {
+      dataManager_m->Define(
+          signColumn,
+          [](double weight) {
+            return static_cast<float>((weight > 0.0) - (weight < 0.0));
+          },
+          {baseWeightCol}, *systematicManager_m);
+    } else {
+      dataManager_m->Define(
+          signColumn,
+          [](float weight) {
+            return static_cast<float>((weight > 0.0f) - (weight < 0.0f));
+          },
+          {baseWeightCol}, *systematicManager_m);
+    }
+    baseWeightCol = signColumn;
+  }
+
+  const std::string eventWeightType =
+      dataManager_m->getDataFrame().GetColumnType(baseWeightCol);
+  const bool useDoubleEventWeight =
+      eventWeightType == "double" || eventWeightType == "Double_t";
+
   // Define the nominal column: copy of the base event weight.
-  if (useDoubleBase) {
+  if (useDoubleEventWeight) {
     dataManager_m->Define(nominalColumn_m,
                           [](double base) {
                             return static_cast<float>(base);
@@ -137,10 +174,12 @@ void GenWeightManager::defineVariationWeights() {
                           {baseWeightCol}, *systematicManager_m);
   }
 
-  if (enableLheScale_m) defineLheScaleWeights(baseWeightCol, useDoubleBase);
-  if (enablePs_m) definePsWeights(baseWeightCol, useDoubleBase);
-  if (enablePdf_m) definePdfWeights(baseWeightCol, useDoubleBase);
-  if (enablePdfAs_m) definePdfAsWeights(baseWeightCol, useDoubleBase);
+  if (enableLheScale_m)
+    defineLheScaleWeights(baseWeightCol, useDoubleEventWeight);
+  if (enablePs_m) definePsWeights(baseWeightCol, useDoubleEventWeight);
+  if (enablePdf_m) definePdfWeights(baseWeightCol, useDoubleEventWeight);
+  if (enablePdfAs_m)
+    definePdfAsWeights(baseWeightCol, useDoubleEventWeight);
 
   materialized_m = true;
 }
@@ -149,6 +188,7 @@ std::unordered_map<std::string, std::string>
 GenWeightManager::collectProvenanceEntries() const {
   return {{"nominal_column", nominalColumn_m},
       {"base_weight_column", baseWeightColumn_m},
+          {"weight_mode", weightMode_m},
           {"lhe_scale_branch", lheScaleBranch_m},
           {"ps_branch", psBranch_m},
           {"pdf_branch", pdfBranch_m},

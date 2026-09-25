@@ -186,8 +186,7 @@ void setupAnalysis(Analyzer &an, const std::string &year, bool isMC) {
 - ✅ **Muon genPt derivation** — `CmsNanoAodCompat` derives `Muon_genPt` from `Muon_genPartIdx` + `GenPart_pt` for Rochester corrections.
 - ✅ **Photon CSEV SFs in weight** — `defineCmsPhotonScaleFactors()` now produces `photon_csev_weight_nominal/up/down` and includes them in `defineCmsNominalWeight()` under the `applyPhotonSFs` flag.
 - ✅ **Year-specific trigger SF names** — Muon trigger SF uses correct correction names per era (`IsoMu24`/`IsoMu27`/etc.) instead of the ID SF name.
-- ✅ **Standalone build** — `core/plugins/cms/` can be built independently with `cmake -S . -B build -DRDFANALYZER_CORE_DIR=...`.
-- ✅ **Unit tests** — `testCmsInfrastructure` covering year normalization, path resolution, helpers, config (73 tests)
+- ✅ **Unit tests** — `CmsInfrastructureTest` is registered with the framework CTest suite and covers the implemented year registry, NanoAOD compatibility, corrections, and weights APIs.
 - ✅ **Tau energy scale** — TauEnergyScaleManager and CorrectedTauCollectionManager gated by `applyTauCorrections` flag. Configured in `configureCmsCorrectionWorkflow()` with correction name from `yearSettings->tauEnergyScaleCorrection` (default `"tau_energy_scale"`). Fallback identity columns produced when disabled.
 - ✅ **Correction stack validation** — `validateCmsCorrectionStack()` checks each enabled flag against payload availability for the configured year. `CmsCorrectionAudit` struct records category/reason/detail/remediation for every unavailable component. Can be called before the event loop to catch misconfigurations early.
 
@@ -379,8 +378,8 @@ the plugin instances for enabled corrections.
 |-------|-----------|---------|---------|
 | `correctionNamePrefix` | Both configs | `"cms"` | Prefix for `CorrectionManager::registerCorrection()` names. Change to isolate correction sets (e.g., `"vhbb"`). |
 | `configKeyPrefix` | `CmsCorrectionConfig` | `"cms"` | Prefix for config keys pushed to the Analyzer's `IConfigurationProvider`. |
-| `btagWorkingPoints` | `CmsWeightConfig` | Auto-defaulted | b-tag discriminator thresholds for fixed-WP SFs. Auto-populated from `CmsYearRegistry::defaultBTagWorkingPoints()` when all zero. |
-| `ctagWorkingPoints` | `CmsWeightConfig` | Auto-defaulted | c-tag (CvL × CvB) thresholds for fixed-WP SFs. Auto-populated from `CmsYearRegistry::defaultCTagWorkingPoints()` when all zero. |
+| `btagWorkingPoints` | `CmsWeightConfig` | Zeroed / disabled | Set discriminator thresholds explicitly before using fixed-WP b-tag SFs. Built-in year/tagger defaults are not currently available. |
+| `ctagWorkingPoints` | `CmsWeightConfig` | Zeroed / disabled | Set CvL × CvB thresholds explicitly before using fixed-WP c-tag SFs. Built-in year/tagger defaults are not currently available. |
 
 ### ChannelMask Flags (Per-Channel)
 
@@ -422,7 +421,7 @@ infrastructure.
 |---|----------------|------------|
 | 1 | **Call-order fragility** | Enforced invariant: create managers → define columns → configure workflows → define fallbacks.  Documented in [Manager Lifecycle](#manager-lifecycle). |
 | 2 | **Missing WP configuration** | `btagWorkingPoints` / `ctagWorkingPoints` structs added to `CmsWeightConfig`. Configured by `setupCmsStandardWeights()`. |
-| 5 | **No default working points** | `CmsYearRegistry::defaultBTagWorkingPoints()` and `defaultCTagWorkingPoints()` auto-populate when thresholds are zero. |
+| 5 | **No default working points** | Still unresolved. Fixed-WP users must provide thresholds or register them on the manager. The declared year/tagger helper methods have no definitions; defaults require an approved BTV table. |
 | 6 | **Hardcoded correction names** | `correctionNamePrefix` field added to both config structs (default `"cms"`). All registration names use this prefix. |
 
 ### 🔶 By Design / Deferred
@@ -452,19 +451,23 @@ across analyses.
 for all new code.  See the [Column Naming Convention](#column-naming-convention)
 section for the canonical reference.
 
-#### 5. Tagger working points default (✅ Fixed)
+#### 5. Tagger working point defaults (🔶 Unresolved)
 
-**Status**: `CmsYearRegistry` now provides year- and tagger-dependent default
-working points via `defaultBTagWorkingPoints()` and `defaultCTagWorkingPoints()`.
-When `setupCmsStandardWeights()` runs and all working-point thresholds are zero
-(i.e., the user hasn't set them), it auto-populates from BTV POG
-recommendations for the configured year and tagger.  Users can still override
-any or all thresholds:
+**Status**: The default-working-point functions are declared but have no
+definitions, and `setupCmsStandardWeights()` passes configured values through
+unchanged. Zero thresholds therefore do not select any working points. For
+fixed-WP weights, supply thresholds explicitly or configure the manager
+directly:
 
 ```cpp
-cfg.btagWorkingPoints.medium = 0.35f;  // override just medium
-// Others auto-default from CmsYearRegistry::defaultBTagWorkingPoints()
+cfg.btagWorkingPoints.medium = 0.35f;
+cfg.ctagWorkingPoints.cvlMedium = 0.10f;
 ```
+
+Adding built-in defaults needs an approved year/tagger table, including which
+working points each payload supports. The historical plugin-local test source
+contains guessed values and expectations for unsupported years, so those
+values are not used as defaults.
 
 ### 7. `configureNominalAnalysisWeights` duplicates CMS logic (🔶 Planned)
 
@@ -600,12 +603,10 @@ wm->addWeightVariation("my_component", "my_weight_up", "my_weight_down");
 - `ObjectEnergyManagerBase::applyCorrectionlib()` delegates to CorrectionManager then
   multiplies pT × SF — use `applyCorrectionVec()` for pure SF evaluation
 
-### Transparency
-Both `CmsCorrectionConfig::print()` and `CmsWeightConfig::print()` methods
-log the full configuration to `std::cout`.  These are called automatically at
-the start of `setupCmsFrameworkPlugins()` and `setupCmsStandardWeights()`
-respectively, so every analysis run prints exactly which corrections and
-weights are configured:
+### Configuration summaries
+`CmsCorrectionConfig::print()` and `CmsWeightConfig::print()` write a readable
+summary to the stream passed by the caller. The setup functions do not print
+automatically, so analyses can choose whether and where to log these summaries:
 
 ```
 === CmsCorrectionConfig ===
@@ -624,14 +625,14 @@ weights are configured:
 
 ### Manager Lifecycle
 ```
-setupCmsFrameworkPlugins()          → create all managers (logs config)
+setupCmsFrameworkPlugins()          → create all managers
 defineCmsCorrectionInputs()         → define helper columns
 configureCmsCorrectionWorkflow()    → register corrections, apply JEC/JER/scale
 defineCmsCorrectionFallbacks()      → identity columns for disabled corrections
 applyCmsHemIssueFilter()            → event filter (2018 only)
 applyCmsJetVetoMap()                → jet veto map filter
 setupCmsGenWeights()                → LHE/PDF/PS variation weights
-setupCmsStandardWeights()           → all event weight components (logs config)
+setupCmsStandardWeights()           → all event weight components
 ```
 
 ## Building
@@ -689,41 +690,25 @@ The base path for all of these files is `/cvmfs/cms-griddata.cern.ch/cat/metadat
 | **LUM (Pileup)** | `LUM/<era>/latest/puWeights.json.gz` | Pileup per-event weights |
 | **TAU** | `TAU/<era>/latest/tau_*.json.gz` | Tau ID, anti-lepton discriminant, energy scale |
 
-## Standalone Build
+## Build and Test
 
-The CMS infrastructure can be built **standalone** (outside RDFAnalyzerCore) for
-analyses that need it behind CMS credentials without pulling the full framework
-as a git dependency.
+`CmsInfrastructure` is built as part of RDFAnalyzerCore's `corePlugins` target.
+The former plugin-local standalone preset did not define a CMake project or
+load the framework's ROOT and GoogleTest targets, so it did not build or run
+the advertised test suite. The CMS test now uses the canonical framework test
+source and is registered whenever the framework is configured with
+`BUILD_TESTS=ON`.
 
-### Quick Start
-
-```bash
-# Clone or copy the cms directory
-git clone <cms-infra-repo> CmsInfrastructure
-cd CmsInfrastructure
-
-# Build with framework headers
-cmake -S . -B build -DRDFANALYZER_CORE_DIR=/path/to/RDFAnalyzerCore
-cmake --build build -j$(nproc)
-
-# Install (optional)
-cmake --install build --prefix /your/install/path
-```
-
-### CMake Presets
+From the RDFAnalyzerCore repository root, use the same build directory as the
+framework:
 
 ```bash
-cmake --preset standalone -DRDFANALYZER_CORE_DIR=/path/to/RDFAnalyzerCore
-cmake --build build
-ctest --test-dir build
+cmake --build <build-directory> --target testCmsInfrastructure
+ctest --test-dir <build-directory> -R '^CmsInfrastructureTest$' --output-on-failure
 ```
 
-### Using in an Analysis
-
-```cmake
-find_package(CmsInfrastructure REQUIRED)
-target_link_libraries(my_analysis PRIVATE CmsInfrastructure)
-```
+This target tests the APIs currently implemented by the framework. It does not
+provide a separately installable `CmsInfrastructure` package.
 
 ## Corrections Reference
 

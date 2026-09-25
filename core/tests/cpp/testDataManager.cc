@@ -667,6 +667,115 @@ TEST_F(DataManagerTest, AttachFriendTreeNoSourceSkipsGracefully) {
   });
 }
 
+TEST(DataManagerConfigTest, RelativeAuxiliaryPathsResolveFromMainConfigDirectory) {
+  const auto tempRoot = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-relative-config-" + std::to_string(getpid()));
+  const auto configDir = tempRoot / "cfg";
+  const auto workingDir = tempRoot / "work";
+  std::filesystem::create_directories(configDir);
+  std::filesystem::create_directories(workingDir);
+
+  {
+    std::ofstream(configDir / "floats.txt") << "mass=125.0\n";
+    std::ofstream(configDir / "ints.txt") << "count=7\n";
+    std::ofstream(configDir / "aliases.txt")
+        << "existingName=source newName=source_alias\n";
+    std::ofstream(configDir / "optional.txt")
+        << "name=optional_branch type=1 default=42\n";
+    std::ofstream(tempRoot / "submit.txt")
+        << "floatConfig=cfg/floats.txt\n"
+        << "intConfig=cfg/ints.txt\n"
+        << "aliasConfig=cfg/aliases.txt\n"
+        << "optionalBranchesConfig=cfg/optional.txt\n";
+  }
+
+  const auto oldWorkingDir = std::filesystem::current_path();
+  std::filesystem::current_path(workingDir);
+  {
+    ConfigurationManager config((tempRoot / "submit.txt").string());
+    DataManager data(2);
+    SystematicManager systematics;
+    data.Define("source", []() { return 3.0; }, {}, systematics);
+    data.finalizeSetup(config);
+
+    const auto names = data.getDataFrame().GetColumnNames();
+    EXPECT_NE(std::find(names.begin(), names.end(), "mass"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "count"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "source_alias"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "optional_branch"), names.end());
+  }
+  std::filesystem::current_path(oldWorkingDir);
+  std::filesystem::remove_all(tempRoot);
+}
+
+TEST(DataManagerConfigTest, ConstantValuesRequireFullTokensAndCppRanges) {
+  const auto tempRoot = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-invalid-constant-" + std::to_string(getpid()));
+  const auto valueDirName = "invalid-values-" + std::to_string(getpid());
+  std::filesystem::create_directories(tempRoot / valueDirName);
+
+  const auto expectInvalid = [&](const std::string& key,
+                                 const std::string& value,
+                                 const std::string& expectedMessage) {
+    const bool isFloat = key == "floatConfig";
+    const auto valuePath = tempRoot / valueDirName /
+        (isFloat ? "floats.txt" : "ints.txt");
+    {
+      std::ofstream values(valuePath);
+      values << "bad=" << value << "\n";
+    }
+    const auto configPath = tempRoot / ("main-" + key + ".txt");
+    {
+      std::ofstream configFile(configPath);
+      configFile << key << "=" << valueDirName << "/"
+                 << valuePath.filename().string() << "\n";
+    }
+    ConfigurationManager config(configPath.string());
+    DataManager data(1);
+    std::string observed;
+    try {
+      data.registerConstants(config);
+    } catch (const std::runtime_error& error) {
+      observed = error.what();
+    }
+    EXPECT_NE(observed.find(expectedMessage), std::string::npos)
+        << "input value was " << value << "; observed " << observed;
+  };
+
+  for (const auto& value : {"12junk", "3.5", "2147483648"}) {
+    expectInvalid("intConfig", value, "invalid integer constant 'bad=");
+  }
+  for (const auto& value : {"12junk", "1e39", "nan", "inf"}) {
+    expectInvalid("floatConfig", value, "invalid float constant 'bad=");
+  }
+
+  std::filesystem::remove_all(tempRoot);
+}
+
+TEST(DataManagerConfigTest, ThreadCountOneDisablesGlobalImplicitMTAfterPriorEnable) {
+  const auto tempRoot = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-thread-config-" + std::to_string(getpid()));
+  std::filesystem::create_directories(tempRoot);
+
+  const auto constructWithThreads = [&](const std::string& value) {
+    const auto configPath = tempRoot / ("threads-" + value + ".txt");
+    {
+      std::ofstream configFile(configPath);
+      configFile << "threads=" << value << "\n"
+                 << "directory=" << (tempRoot / "missing").string() << "\n";
+    }
+    ConfigurationManager config(configPath.string());
+    EXPECT_THROW(DataManager data(config), std::runtime_error);
+  };
+
+  ROOT::DisableImplicitMT();
+  constructWithThreads("2");
+  EXPECT_TRUE(ROOT::IsImplicitMTEnabled());
+  constructWithThreads("1");
+  EXPECT_FALSE(ROOT::IsImplicitMTEnabled());
+  std::filesystem::remove_all(tempRoot);
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

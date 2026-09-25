@@ -180,6 +180,57 @@ TEST_F(RootOutputSinkTest, SystematicColumnsAreOptInForSkims) {
   f.Close();
 }
 
+TEST_F(RootOutputSinkTest, SkimSystematicsUseRegisteredColumnMappings) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt", "Muon_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+
+  ConfigurationManager config(cfgPath);
+  config.set("skimSystematics", "true");
+
+  auto dm = std::make_unique<DataManager>(5);
+  SystematicManager sm;
+  sm.registerVariationColumns("Electron_pt", "jes", "custom_jes_up",
+                              "custom_jes_down");
+  sm.registerVariationColumn("Electron_pt", "pdfReplica0", "pdf_replica_zero");
+  // An explicit label can share a name with a paired family affecting a
+  // different variable. Skims must keep that registration scoped per variable.
+  sm.registerVariationColumn("Electron_pt", "scale", "electron_scale_only");
+  sm.registerVariationColumns("Muon_pt", "scale", "muon_scale_up",
+                              "muon_scale_down");
+
+  auto df = dm->getDataFrame();
+  df = df.Define("Electron_pt", []() { return 30.0f; });
+  df = df.Define("custom_jes_up", []() { return 31.0f; });
+  df = df.Define("custom_jes_down", []() { return 29.0f; });
+  df = df.Define("pdf_replica_zero", []() { return 32.0f; });
+  df = df.Define("electron_scale_only", []() { return 33.0f; });
+  df = df.Define("Muon_pt", []() { return 20.0f; });
+  df = df.Define("muon_scale_up", []() { return 21.0f; });
+  df = df.Define("muon_scale_down", []() { return 19.0f; });
+  dm->setDataFrame(df);
+
+  RootOutputSink sink;
+  auto outputDf = dm->getDataFrame();
+  ASSERT_NO_THROW(
+      sink.writeDataFrame(outputDf, config, &sm, OutputChannel::Skim));
+
+  TFile f(outputPath.c_str(), "READ");
+  ASSERT_FALSE(f.IsZombie());
+  auto* tree = dynamic_cast<TTree*>(f.Get("Events"));
+  ASSERT_NE(tree, nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt"), nullptr);
+  EXPECT_NE(tree->GetBranch("custom_jes_up"), nullptr);
+  EXPECT_NE(tree->GetBranch("custom_jes_down"), nullptr);
+  EXPECT_NE(tree->GetBranch("pdf_replica_zero"), nullptr);
+  EXPECT_NE(tree->GetBranch("electron_scale_only"), nullptr);
+  EXPECT_NE(tree->GetBranch("muon_scale_up"), nullptr);
+  EXPECT_NE(tree->GetBranch("muon_scale_down"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Muon_pt_scale"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt_jesUp"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt_pdfReplica0Up"), nullptr);
+  f.Close();
+}
+
 TEST_F(RootOutputSinkTest, SystematicColumnsAreExcludedByDefault) {
   writeSaveConfigFile(saveConfigPath, {"Electron_pt"});
   writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);

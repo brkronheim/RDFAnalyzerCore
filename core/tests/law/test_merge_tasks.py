@@ -395,6 +395,17 @@ class TestMergeMixinFindManifests(unittest.TestCase):
             paths = task._find_manifest_paths()
             self.assertEqual(len(paths), 2)
 
+    def test_excludes_previous_merge_output_nested_in_input_tree(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_dir = os.path.join(tmpdir, "jobs", "job_0")
+            merge_dir = os.path.join(tmpdir, "merged")
+            job_manifest = _make_full_manifest(job_dir)
+            merge_manifest = _make_full_manifest(os.path.join(merge_dir, "histograms"))
+            task = self._make_task(input_dir=tmpdir, output_dir=merge_dir)
+
+            self.assertEqual(task._find_manifest_paths(), [job_manifest])
+            self.assertNotIn(merge_manifest, task._find_manifest_paths())
+
     def test_custom_manifest_glob(self):
         """Custom glob pattern restricts which manifests are found."""
         import merge_tasks
@@ -471,6 +482,41 @@ class TestMergeSkimsTask(unittest.TestCase):
         self.assertEqual(
             task.output().path, "/custom/out/skims/output_manifest.yaml"
         )
+
+    def test_complete_rejects_missing_corrupt_and_unlisted_group_outputs(self):
+        import numpy as np
+        import uproot
+        mod = self._import()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task = mod.MergeSkims(name="r", output_dir=tmpdir)
+            output_dir = os.path.dirname(task.output().path)
+            os.makedirs(output_dir, exist_ok=True)
+            skim_path = os.path.join(output_dir, "skim.root")
+            with uproot.recreate(skim_path) as root_file:
+                root_file.mktree("Events", {"x": "float64"})
+                root_file["Events"].extend({"x": np.array([1.0])})
+            _make_skim_manifest(output_dir, output_file=skim_path)
+            groups_path = os.path.join(output_dir, "merged_skim_groups.json")
+            with open(groups_path, "w") as stream:
+                json.dump({"skim.root": skim_path}, stream)
+
+            self.assertTrue(task.complete())
+            os.remove(skim_path)
+            self.assertFalse(task.complete())
+
+            Path(skim_path).write_bytes(b"not a ROOT file")
+            self.assertFalse(task.complete())
+
+            with uproot.recreate(skim_path) as root_file:
+                root_file.mktree("Events", {"x": "float64"})
+                root_file["Events"].extend({"x": np.array([1.0])})
+            with open(groups_path, "w") as stream:
+                json.dump(
+                    {"skim.root": skim_path,
+                     "second.root": os.path.join(output_dir, "missing.root")},
+                    stream,
+                )
+            self.assertFalse(task.complete())
 
     def test_raises_when_no_skim_manifests(self):
         """MergeSkims raises RuntimeError in run() when no manifests have a skim schema."""

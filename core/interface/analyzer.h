@@ -93,6 +93,14 @@ public:
   Analyzer(std::string configFile,
            std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins);
 
+  // ManagerContext and injected plugin/service contexts are bound to this
+  // object's address, so moving an initialized Analyzer would leave dangling
+  // context pointers. Keep ownership stable for its full lifetime.
+  Analyzer(const Analyzer&) = delete;
+  Analyzer& operator=(const Analyzer&) = delete;
+  Analyzer(Analyzer&&) = delete;
+  Analyzer& operator=(Analyzer&&) = delete;
+
   /**
    * @brief Define a new variable in the dataframe. Systematics are handled automatically.
    * @tparam F Callable type for the variable definition
@@ -388,7 +396,11 @@ public:
   /**
    * @brief Unified run/save entry point.
    *
-   * Triggers the event loop exactly once. This method:
+   * Runs each booked lazy action through the configured dataframe graph.
+   * If no action has been booked, the call is a successful no-op and does not
+   * trigger ROOT's event loop. In either case, a successful call consumes the
+   * Analyzer's one-shot run lifecycle. A failed run is terminal for that
+   * Analyzer; cleanup and retry are not supported. This method:
    *  - Writes a skim only when @c enableSkim=1 (or @c true/@c True) is present in the config.
    *    If @c skimFilter is present, it is applied as an RDataFrame filter to
    *    the skim output only; histogram actions remain inclusive.

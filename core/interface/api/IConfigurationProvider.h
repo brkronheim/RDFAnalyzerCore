@@ -22,6 +22,18 @@ public:
      * @return Configuration value
      */
     virtual std::string get(const std::string &key) const = 0;
+
+    /**
+     * @brief Resolve a referenced config path using this provider's policy.
+     *
+     * Providers that do not track a main config file default to returning the
+     * supplied path unchanged. ConfigurationManager prefers an existing path
+     * from the process working directory, then resolves relative paths from
+     * the main config directory.
+     */
+    virtual std::string resolveConfigPath(const std::string &path) const {
+        return path;
+    }
     
     /**
      * @brief Set a configuration value by key
@@ -84,4 +96,4 @@ public:
                                                  std::string_view delimiter) const = 0;
 };
 
-#endif // ICONFIGURATIONPROVIDER_H_INCLUDED 
+#endif // ICONFIGURATIONPROVIDER_H_INCLUDED

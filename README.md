@@ -381,6 +381,7 @@ Here's a minimal analysis using the framework:
 
 ```cpp
 #include <analyzer.h>
+#include <OnnxManager.h>
 
 int main(int argc, char **argv) {
     // Create analyzer from config file
@@ -405,11 +406,9 @@ int main(int argc, char **argv) {
         {"n_good_jets"}
     );
     
-    // Apply ML model (from config)
-    auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
-    if (onnxMgr) {
-        onnxMgr->applyAllModels();
-    }
+    // Register the optional ONNX manager, then apply configured models.
+    auto onnxMgr = OnnxManager::create(analyzer);
+    onnxMgr->applyAllModels();
     
     // Save outputs
     analyzer.run();
@@ -501,19 +500,18 @@ All managers support:
 
 Built-in support for systematic variations:
 ```cpp
-sysMgr->registerSystematic("jes_up");
-sysMgr->registerSystematic("jes_down");
+auto& sysMgr = analyzer.getSystematicManager();
+sysMgr.registerSystematic("jes", {"jet_pt"});
 
 analyzer.Define("corrected_pt",
-    [](float pt, const std::string& sys) {
-        if (sys == "jes_up") return pt * 1.02;
-        if (sys == "jes_down") return pt * 0.98;
-        return pt;
-    },
-    {"jet_pt"},
-    sysMgr
+    [](float pt) { return pt * 1.02f; },
+    {"jet_pt"}
 );
 ```
+
+The manager maps conventional `jet_pt_jesUp` and `jet_pt_jesDown` input
+columns into varied definitions. The callable takes the input columns; it does
+not receive a systematic-name argument.
 
 Histograms automatically include systematic axes.
 

@@ -181,8 +181,10 @@ int main(int argc, char **argv) {
 ### Step 6: Build and Run
 
 ```bash
-# The steps above leave the shell in analyses/MyAnalysis.
-../../build.sh
+# The steps above leave the shell in analyses/MyAnalysis. Build from the repo root.
+cd ../..
+source build.sh
+cd analyses/MyAnalysis
 ../../build/analyses/MyAnalysis/myanalysis cfg/main_config.txt
 ```
 

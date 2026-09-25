@@ -1,0 +1,3 @@
+interface:
+  display_name: "RDFAnalyzer Analysis"
+  short_description: "Understand analyses built on RDFAnalyzerCore"

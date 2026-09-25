@@ -82,6 +82,198 @@ static bool isValidSignature(const std::string& signature) {
     return true;
 }
 
+static std::string replaceColumnIdentifiers(
+    const std::string& expression,
+    const std::unordered_map<std::string, std::string>& replacements) {
+    std::string result;
+    result.reserve(expression.size());
+
+    enum class LexicalState { Code, String, Character, LineComment, BlockComment };
+    LexicalState state = LexicalState::Code;
+    bool escaped = false;
+
+    for (std::size_t i = 0; i < expression.size();) {
+        const char current = expression[i];
+        const char next = i + 1 < expression.size() ? expression[i + 1] : '\0';
+
+        if (state == LexicalState::String || state == LexicalState::Character) {
+            result.push_back(current);
+            ++i;
+            if (escaped) {
+                escaped = false;
+            } else if (current == '\\') {
+                escaped = true;
+            } else if ((state == LexicalState::String && current == '"') ||
+                       (state == LexicalState::Character && current == '\'')) {
+                state = LexicalState::Code;
+            }
+            continue;
+        }
+
+        if (state == LexicalState::LineComment) {
+            result.push_back(current);
+            ++i;
+            if (current == '\n') state = LexicalState::Code;
+            continue;
+        }
+
+        if (state == LexicalState::BlockComment) {
+            result.push_back(current);
+            ++i;
+            if (current == '*' && next == '/') {
+                result.push_back(next);
+                ++i;
+                state = LexicalState::Code;
+            }
+            continue;
+        }
+
+        if (current == '"') {
+            result.push_back(current);
+            ++i;
+            state = LexicalState::String;
+            continue;
+        }
+        if (current == '\'') {
+            result.push_back(current);
+            ++i;
+            state = LexicalState::Character;
+            continue;
+        }
+        if (current == '/' && next == '/') {
+            result.append("//");
+            i += 2;
+            state = LexicalState::LineComment;
+            continue;
+        }
+        if (current == '/' && next == '*') {
+            result.append("/*");
+            i += 2;
+            state = LexicalState::BlockComment;
+            continue;
+        }
+
+        // Raw string contents are opaque to identifier replacement. Handle
+        // standard raw-string prefixes before tokenizing the prefix itself.
+        std::size_t rawPrefixLength = 0;
+        if (expression.compare(i, 4, "u8R\"") == 0) rawPrefixLength = 4;
+        else if (expression.compare(i, 3, "uR\"") == 0 ||
+                 expression.compare(i, 3, "UR\"") == 0 ||
+                 expression.compare(i, 3, "LR\"") == 0) rawPrefixLength = 3;
+        else if (expression.compare(i, 2, "R\"") == 0) rawPrefixLength = 2;
+        if (rawPrefixLength > 0) {
+            const auto delimiterStart = i + rawPrefixLength;
+            const auto openParen = expression.find('(', delimiterStart);
+            if (openParen != std::string::npos && openParen - delimiterStart <= 16) {
+                const auto delimiter = expression.substr(
+                    delimiterStart, openParen - delimiterStart);
+                if (delimiter.find_first_of(" ()\\\t\r\n") == std::string::npos) {
+                    const auto terminator = ")" + delimiter + "\"";
+                    const auto close = expression.find(terminator, openParen + 1);
+                    if (close != std::string::npos) {
+                        const auto end = close + terminator.size();
+                        result.append(expression, i, end - i);
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        const auto byte = static_cast<unsigned char>(current);
+        if (std::isalpha(byte) || current == '_') {
+            const auto start = i++;
+            while (i < expression.size()) {
+                const auto tokenByte = static_cast<unsigned char>(expression[i]);
+                if (!std::isalnum(tokenByte) && expression[i] != '_') break;
+                ++i;
+            }
+            const auto token = expression.substr(start, i - start);
+            const auto replacement = replacements.find(token);
+            auto previous = start;
+            while (previous > 0 &&
+                   std::isspace(static_cast<unsigned char>(expression[previous - 1]))) {
+                --previous;
+            }
+            const bool isMemberName =
+                (previous > 0 && expression[previous - 1] == '.') ||
+                (previous >= 2 && expression.compare(previous - 2, 2, "->") == 0);
+            result += (replacement == replacements.end() || isMemberName)
+                          ? token
+                          : replacement->second;
+            continue;
+        }
+
+        result.push_back(current);
+        ++i;
+    }
+
+    return result;
+}
+
+static std::string declareJitExpressionFunction(
+    const std::string& expression,
+    const std::vector<std::string>& columns,
+    ROOT::RDF::RNode& dataframe) {
+    static std::atomic<unsigned int> expressionCounter{0};
+    const auto functionName = "__rdf_jit_expression_" +
+        std::to_string(expressionCounter.fetch_add(1));
+
+    std::unordered_map<std::string, std::string> replacements;
+    std::ostringstream declaration;
+    declaration << "auto " << functionName << "(";
+    const auto availableColumns = dataframe.GetColumnNames();
+    for (std::size_t index = 0; index < columns.size(); ++index) {
+        const auto& column = columns[index];
+        if (std::find(availableColumns.begin(), availableColumns.end(), column) ==
+            availableColumns.end()) {
+            throw std::invalid_argument(
+                "DefineJIT: input column '" + column + "' is not available");
+        }
+        if (column.empty() ||
+            !(std::isalpha(static_cast<unsigned char>(column.front())) ||
+              column.front() == '_') ||
+            !std::all_of(column.begin() + 1, column.end(), [](unsigned char ch) {
+                return std::isalnum(ch) || ch == '_';
+            })) {
+            throw std::invalid_argument(
+                "DefineJIT: input column '" + column +
+                "' is not a C++ identifier and cannot be used in a JIT expression");
+        }
+        if (index != 0) declaration << ", ";
+        const auto argument = "__rdf_jit_arg_" + std::to_string(index);
+        const auto type = dataframe.GetColumnType(column);
+        if (type.empty() || type.find_first_of(";{}") != std::string::npos) {
+            throw std::invalid_argument(
+                "DefineJIT: unsupported dataframe type '" + type +
+                "' for input column '" + column + "'");
+        }
+        declaration << "const " << type << "& " << argument;
+        replacements.emplace(column, argument);
+    }
+
+    const auto rewritten = replaceColumnIdentifiers(expression, replacements);
+    declaration << "){ return (" << rewritten << "); }";
+    if (!gInterpreter->Declare(declaration.str().c_str())) {
+        throw std::runtime_error(
+            "DefineJIT: Cling could not compile expression '" + expression + "'");
+    }
+    return functionName;
+}
+
+static std::string jitExpressionCall(
+    const std::string& functionName,
+    const std::vector<std::string>& columns) {
+    std::ostringstream call;
+    call << functionName << "(";
+    for (std::size_t index = 0; index < columns.size(); ++index) {
+        if (index != 0) call << ", ";
+        call << columns[index];
+    }
+    call << ")";
+    return call.str();
+}
+
 /**
  * @brief Wrapper to handle string-based Define calls (ROOT JIT compilation)
  * 
@@ -118,26 +310,42 @@ public:
             std::cerr << "Warning: Column '" << name << "' already exists, skipping Define" << std::endl;
             return *this;
         }
+
+        // An empty dependency list retains ROOT's automatic column discovery
+        // semantics for backwards compatibility. Explicit dependencies use a
+        // wrapper below to keep member names out of RDF's token scan.
+        if (columns.empty()) {
+            df = df.Define(name, expression);
+            analyzer_.getDataFrameProvider().setDataFrame(df);
+            return *this;
+        }
+
+        // Compile the requested C++ once into a wrapper with explicit inputs.
+        // The dataframe then sees only a function call and its arguments, so
+        // tokens such as `.first` are not mistaken for column dependencies by
+        // ROOT's automatic expression parser.
+        const auto expressionFunction =
+            declareJitExpressionFunction(expression, columns, df);
         
         // Handle systematics
-        // Note on naming: Input columns use "_up"/"_down" suffixes (e.g., "pt_up", "pt_down")
-        // while output columns include the systematic name (e.g., "newvar_jesUp", "newvar_jesDown")
+        // Resolve varied input names through the manager because producers may
+        // register explicit names that do not follow a suffix convention.
         std::vector<std::string> systList(sysMgr.getSystematics().begin(), 
                                          sysMgr.getSystematics().end());
         if (!systList.empty()) {
             for (const auto& syst : systList) {
                 int nAffected = 0;
-                std::vector<std::string> newColumnsUp;
-                std::vector<std::string> newColumnsDown;
+                std::vector<std::string> upColumns;
+                std::vector<std::string> downColumns;
                 for (const auto& col : columns) {
-                    if (sysMgr.getSystematicsForVariable(col).find(syst) != 
-                        sysMgr.getSystematicsForVariable(col).end()) {
-                        newColumnsUp.push_back(col + "_up");
-                        newColumnsDown.push_back(col + "_down");
+                    const auto upColumn =
+                        sysMgr.getVariationColumnName(col, syst + "Up");
+                    const auto downColumn =
+                        sysMgr.getVariationColumnName(col, syst + "Down");
+                    upColumns.push_back(upColumn);
+                    downColumns.push_back(downColumn);
+                    if (upColumn != col || downColumn != col) {
                         nAffected++;
-                    } else {
-                        newColumnsUp.push_back(col);
-                        newColumnsDown.push_back(col);
                     }
                 }
                 if (nAffected > 0) {
@@ -145,25 +353,25 @@ public:
                     const auto downName = name + "_" + syst + "Down";
                     if (std::find(existingColumns.begin(), existingColumns.end(), upName) == 
                         existingColumns.end()) {
-                        // Use the string-expression overload (only name + expression). Columns are
-                        // used for systematic bookkeeping above, ROOT's string-based Define does
-                        // not accept an explicit columns argument.
-                        df = df.Define(upName, expression);
+                        df = df.Define(upName,
+                                       jitExpressionCall(expressionFunction,
+                                                         upColumns));
                     }
                     if (std::find(existingColumns.begin(), existingColumns.end(), downName) == 
                         existingColumns.end()) {
-                        df = df.Define(downName, expression);
+                        df = df.Define(downName,
+                                       jitExpressionCall(expressionFunction,
+                                                         downColumns));
                     }
                     sysMgr.registerSystematic(syst, {name});
                 }
             }
         }
         
-        // ROOT's string-based Define overload does not accept an explicit
-        // column list (it only supports a name + expression). Therefore, we
-        // rely on ROOT's expression parsing (and the earlier systematic handling
-        // above) and ignore the provided column list here.
-        df = df.Define(name, expression);
+        // For systematic definitions, the input identifiers above are replaced
+        // with their mapped Up/Down columns. The nominal definition keeps the
+        // original expression.
+        df = df.Define(name, jitExpressionCall(expressionFunction, columns));
         analyzer_.getDataFrameProvider().setDataFrame(df);
         return *this;
     }
@@ -178,13 +386,13 @@ public:
     AnalyzerPythonWrapper& FilterJIT(const std::string& name,
                                      const std::string& expression,
                                      const std::vector<std::string>& columns = {}) {
-        std::string filterName = "pass_" + name;
-        DefineJIT(filterName, expression, columns);
-        
-        auto df = analyzer_.getDF();
-        // Filter by the boolean column created above: keep rows where the column is true.
-        df = df.Filter([](bool v){ return v; }, {filterName});
-        analyzer_.getDataFrameProvider().setDataFrame(df);
+        // Define the expression under a private name, then delegate selection
+        // masks and the row filter to Analyzer::Filter. This keeps the Python
+        // JIT path aligned with the C++ variation-aware filter behavior.
+        const std::string predicateName = "__python_filter_predicate_" + name;
+        DefineJIT(predicateName, expression, columns);
+        analyzer_.Filter(name, [](bool passed) { return passed; },
+                         {predicateName});
         return *this;
     }
 
@@ -215,6 +423,54 @@ public:
             throw std::invalid_argument(
                 "Invalid function signature format: '" + signature + "'. "
                 "Expected format: 'return_type(arg_type1, arg_type2, ...)'"
+            );
+        }
+        if (func_ptr == 0) {
+            throw std::invalid_argument(
+                "DefineFromPointer: func_ptr must be a non-null function address"
+            );
+        }
+
+        const size_t signatureClose = signature.rfind(')');
+        const size_t signatureLast = signature.find_last_not_of(" \t\n\r");
+        if (signatureClose != signatureLast ||
+            signature.find('(', signature.find('(') + 1) != std::string::npos ||
+            signature.find(')', signatureClose + 1) != std::string::npos) {
+            throw std::invalid_argument(
+                "Invalid function signature format: '" + signature + "'. "
+                "Expected one complete return_type(arg_type, ...) signature."
+            );
+        }
+        const size_t signatureOpen = signature.find('(');
+        const std::string signatureArgs =
+            signature.substr(signatureOpen + 1, signatureClose - signatureOpen - 1);
+        const auto firstArgument = signatureArgs.find_first_not_of(" \t\n\r");
+        const auto lastArgument = signatureArgs.find_last_not_of(" \t\n\r");
+        if (signatureArgs.find_first_of("()") != std::string::npos ||
+            (firstArgument != std::string::npos &&
+             (signatureArgs[firstArgument] == ',' || signatureArgs[lastArgument] == ','))) {
+            throw std::invalid_argument(
+                "Invalid function signature format: malformed argument list"
+            );
+        }
+        size_t argumentCount = 0;
+        if (signatureArgs.find_first_not_of(" \t\n\r") != std::string::npos) {
+            std::istringstream countArgs(signatureArgs);
+            std::string argumentType;
+            while (std::getline(countArgs, argumentType, ',')) {
+                if (argumentType.find_first_not_of(" \t\n\r") == std::string::npos) {
+                    throw std::invalid_argument(
+                        "Invalid function signature format: empty argument type"
+                    );
+                }
+                ++argumentCount;
+            }
+        }
+        if (argumentCount != columns.size()) {
+            throw std::invalid_argument(
+                "DefineFromPointer: signature declares " +
+                std::to_string(argumentCount) + " argument(s), but " +
+                std::to_string(columns.size()) + " input column(s) were provided"
             );
         }
         
@@ -317,6 +573,11 @@ public:
                                             uintptr_t data_ptr,
                                             size_t size,
                                             const std::string& element_type = "float") {
+        if (size > 0 && data_ptr == 0) {
+            throw std::invalid_argument(
+                "DefineFromVector: data_ptr must be non-null when size is positive"
+            );
+        }
         // Validate element type against whitelist to prevent code injection
         if (ALLOWED_ELEMENT_TYPES.find(element_type) == ALLOWED_ELEMENT_TYPES.end()) {
             throw std::invalid_argument(

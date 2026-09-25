@@ -62,6 +62,7 @@ private:
   int pdfCount_m = 103;
   int pdfAsUpOffset_m = -1;    ///< αₛ up offset within PDF weights (-1 = auto)
   int pdfAsDownOffset_m = -1;  ///< αₛ down offset within PDF weights (-1 = auto)
+  std::string weightMode_m = "sign";
 
   bool materialized_m = false;
   std::vector<GenWeightVariationSpec> variations_m;

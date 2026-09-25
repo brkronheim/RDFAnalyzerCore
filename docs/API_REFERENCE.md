@@ -1986,6 +1986,9 @@ public:
                                          const std::string& variationLabel,
                                          const std::string& column) = 0;
     virtual const std::set<std::string>& getSystematics() const = 0;
+    virtual std::vector<std::string> getExplicitVariationLabels() const { return {}; }
+    virtual std::vector<std::string> getExplicitVariationLabelsForVariable(
+        const std::string& variable) const;
     virtual std::set<std::string> getVariablesForSystematic(const std::string& syst) const = 0;
     virtual std::set<std::string> getSystematicsForVariable(const std::string& var) const = 0;
     virtual void registerExistingSystematics(
@@ -2031,7 +2034,19 @@ const auto& systematics = sysMgr.getSystematics();
 
 sysMgr.getVariationColumnName("Jet_pt_corr_nominal", "jes_totalUp");
 // Returns: "Jet_pt_jes_total_up"
+
+sysMgr.registerVariationColumn("event_weight", "pdfReplica0", "weight_pdf_0");
+sysMgr.getExplicitVariationLabelsForVariable("event_weight");
+// Contains: "pdfReplica0", whose exact column is "weight_pdf_0"
 ```
+
+Skim writers should resolve paired variations with
+`getVariationColumnName(variable, family + "Up")` and the corresponding
+`family + "Down"` call, and exact-label variations with
+`getExplicitVariationLabelsForVariable(variable)`. A custom
+manager that permits a paired family and explicit label with the same name on
+different variables should override the per-variable method to preserve their
+separate registrations.
 
 ### IOutputSink
 

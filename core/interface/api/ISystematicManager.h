@@ -122,6 +122,27 @@ public:
     }
 
     /**
+     * @brief Return explicit, non-paired labels registered for one variable.
+     *
+     * The default implementation filters the global labels through
+     * getSystematicsForVariable(). Managers that allow a paired family and an
+     * explicit label with the same name on different variables should
+     * override this method to preserve that distinction.
+     */
+    virtual std::vector<std::string> getExplicitVariationLabelsForVariable(
+        const std::string &variable) const {
+        const auto labels = getExplicitVariationLabels();
+        const auto registered = getSystematicsForVariable(variable);
+        std::vector<std::string> result;
+        for (const auto &label : labels) {
+            if (registered.count(label) != 0) {
+                result.push_back(label);
+            }
+        }
+        return result;
+    }
+
+    /**
      * @brief Get the set of variables affected by a given systematic
      * @param syst Name of the systematic
      * @return Reference to the set of variable names

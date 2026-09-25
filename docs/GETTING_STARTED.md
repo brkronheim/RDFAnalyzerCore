@@ -40,18 +40,18 @@ source build.sh
 ```
 
 This will:
-- Configure CMake with the appropriate presets
+- Configure a Release build in `build/` with the defaults used by `build.sh`
 - Download ONNX Runtime automatically
 - Build the core framework
 - Discover and build any analyses in the `analyses/` directory
+- Run the registered CTest suite
 
 The build artifacts will be placed in the `build/` directory.
 
-To verify your build, run:
+To rerun the test suite later from the repository root:
 
 ```bash
-cd build
-ctest --output-on-failure
+source test.sh
 ```
 
 ### 4. Run the Example Analysis
@@ -77,6 +77,13 @@ Output locations and skim behavior are specified in the main configuration file.
 ## Your First Analysis — Complete Walkthrough
 
 This section walks you through creating a complete working analysis from scratch. It uses a text-format `cfg.txt` and `histograms.txt`; the actual `analyses/ExampleAnalysis/` uses YAML config files, as shown in the run command above.
+
+Start this walkthrough from the repository root. If you just ran the example
+analysis in Quick Start, return from `analyses/ExampleAnalysis` first:
+
+```bash
+cd ../..
+```
 
 ### Step 1: Create Your Analysis Directory
 
@@ -294,9 +301,12 @@ int main(int argc, char **argv) {
 
 ### Step 6: Build the Analysis
 
-From the repository root, run a full build. CMake will automatically discover your new analysis directory:
+The previous steps leave the shell in `analyses/MyFirstAnalysis`. Return to
+the repository root before running `build.sh`; CMake discovers your analysis
+directory during configuration:
 
 ```bash
+cd ../..
 source build.sh
 ```
 
@@ -314,6 +324,7 @@ resolved from the working directory when present, then from the main config's
 directory:
 
 ```bash
+# Return to the analysis directory so relative paths in cfg.txt resolve there.
 cd analyses/MyFirstAnalysis
 ../../build/analyses/MyFirstAnalysis/myAnalysis cfg.txt
 ```
@@ -423,16 +434,23 @@ datasets:
 ### Incremental Development Tips
 
 - Rebuild incrementally with `(cd build && make -j$(nproc))` (faster than re-running `build.sh`).
-- Use `source cleanBuild.sh` when you add new files or change `CMakeLists.txt`.
+- From the repository root, use `source cleanBuild.sh` to remove `build/` and configure a clean build after major CMake changes.
 - Run from the analysis directory when your input/output paths are relative; referenced config files also fall back to the main config's directory.
 - Set `threads=1` in `cfg.txt` while debugging to get deterministic output and cleaner stack traces.
-- Use `source buildTest.sh` to build and run the unit test suite.
+- From the repository root, use `source test.sh` to rerun the registered test suite.
 
 ---
 
 ## Running with Batch Processing
 
 Once your analysis works locally, scale it up to many datasets using the LAW workflow manager included in `core/python/law/`.
+
+The tutorial run leaves the shell in `analyses/MyFirstAnalysis`; return to the
+repository root before using these repository-relative paths:
+
+```bash
+cd ../..
+```
 
 ### Quick Batch Submission with `SkimTask`
 
@@ -496,6 +514,10 @@ RDFAnalyzerCore/
 
 ## Common Issues
 
+For detailed diagnostics, see [Errors and Tracing](ERRORS_AND_TRACING.md),
+[Configuration Validation](CONFIGURATION_VALIDATION.md),
+[Output Schema](OUTPUT_SCHEMA.md), and [Batch Submission](BATCH_SUBMISSION.md).
+
 ### Build Fails with ROOT Not Found
 
 Ensure ROOT is properly sourced before building:
@@ -507,18 +529,21 @@ source <root-install>/bin/thisroot.sh  # Standalone ROOT installation
 
 ### ONNX Runtime Download Fails
 
-The build automatically downloads ONNX Runtime from GitHub Releases. If this fails:
-- Check your internet connection and proxy settings
-- On restricted clusters, download manually and place in `core/extern/`
+The build downloads ONNX Runtime from GitHub Releases. If the build host cannot
+reach that service, download and extract the runtime separately, then configure
+CMake with `-DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime`. That directory must
+contain `include/` and `lib/` subdirectories.
 
 ### Analysis Not Found During Build
 
 Analyses are auto-discovered by CMake. Your analysis directory must:
 - Be located directly under `analyses/`
 - Contain a valid `CMakeLists.txt`
-- Be tracked by Git (committed, or registered via `.gitmodules` for submodules)
 
-Run `source cleanBuild.sh` to fully reconfigure and rebuild.
+Analysis directories are discovered when they are directly under `analyses/`
+and contain a `CMakeLists.txt`; Git tracking is not required. If you add or
+change CMake files, run `source cleanBuild.sh` from the repository root to
+remove the existing build tree and configure/build again.
 
 ### Segfault / Crash During Execution
 

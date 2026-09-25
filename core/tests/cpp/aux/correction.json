@@ -77,6 +77,25 @@
         }
       },
       {
+        "name": "test_correction_real_pt",
+        "description": "Three real/string arguments for concurrent cache evaluation.",
+        "version": 1,
+        "inputs": [
+          {"name": "eta", "type": "real"},
+          {"name": "pt", "type": "real"},
+          {"name": "variation", "type": "string"}
+        ],
+        "output": {"name": "output", "type": "real"},
+        "data": {
+          "nodetype": "category",
+          "input": "variation",
+          "content": [
+            {"key": "A", "value": 0.1},
+            {"key": "B", "value": 0.2}
+          ]
+        }
+      },
+      {
         "name": "test_correction2",
         "description": "A second test correction with different arguments.",
         "version": 1,

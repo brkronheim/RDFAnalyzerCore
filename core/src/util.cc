@@ -164,8 +164,8 @@ static int scanDirectory(TChain &chain, const std::string &directory,
  * @brief Setup ROOT thread configuration based on config map
  * @param configProvider Configuration provider containing thread settings
  *
- * If threads > 1, enables that many threads.
- * If threads = 1, runs single-threaded.
+ * ROOT's implicit-MT setting is process-global. If threads > 1, enables that
+ * many threads. If threads = 1, disables the process-wide pool.
  * If threads < 1 or not specified, enables maximum number of threads.
  */
 static void setupROOTThreads(const IConfigurationProvider &configProvider) {
@@ -207,6 +207,7 @@ static void setupROOTThreads(const IConfigurationProvider &configProvider) {
     ROOT::EnableImplicitMT(threads);
     std::cout << "Running with " << threads << " threads" << std::endl;
   } else if (threads == 1) {
+    ROOT::DisableImplicitMT();
     std::cout << "Running with 1 thread" << std::endl;
   } else {
     ROOT::EnableImplicitMT();

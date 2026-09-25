@@ -9,15 +9,18 @@ This test validates that:
 4. The output file contains the expected filtered entries and values.
 
 The test uses **uproot** to read/write ROOT files so there is no PyROOT
-requirement.  numba is still required for the DefineFromPointer portion.
+requirement.  It uses numba for compiled callbacks when available and falls
+back to `ctypes` callbacks so the function-pointer binding is still exercised
+without numba.
 
 Exit codes:
   0: success
   1: failure
- 77: skipped due to missing runtime prerequisites (uproot/numba/module)
+ 77: skipped due to missing runtime prerequisites (uproot/module)
 """
 import ctypes
-import math
+import gc
+import os
 import sys
 import tempfile
 from array import array
@@ -29,7 +32,9 @@ SKIP_EXIT_CODE = 77
 
 def _add_module_path() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    module_path = repo_root / "build" / "python"
+    module_path = Path(
+        os.environ.get("RDFANALYZER_PYTHON_MODULE_DIR", repo_root / "build" / "python")
+    )
     sys.path.insert(0, str(module_path))
 
 
@@ -50,25 +55,37 @@ def _require_imports():
 
     try:
         import numba  # type: ignore
-    except Exception as exc:
-        print(f"SKIP: unable to import numba: {exc}")
-        sys.exit(SKIP_EXIT_CODE)
+    except Exception:
+        numba = None
 
     # return modules in the order they are used later; ROOT module is no longer needed
     return rdfanalyzer, uproot, numba
 
 
 def _write_input_root(uproot_module, input_file: Path) -> None:
-    # using uproot to create a simple TTree with a single branch
+    # Write nominal and shifted inputs so the Python DefineFromPointer test can
+    # verify that systematic expressions read the matching Up/Down columns.
     import numpy as np
-    # three values for pt (use native little-endian dtype for uproot compatibility)
     arr = np.array([10.0, 30.0, 50.0], dtype="float64")
     with uproot_module.recreate(str(input_file)) as f:
-        f["Events"] = {"pt": arr}
+        f["Events"] = {
+            "pt": arr,
+            "pt_jesUp": np.array([12.0, 36.0, 60.0], dtype="float64"),
+            "pt_jesDown": np.array([8.0, 24.0, 40.0], dtype="float64"),
+            "first": np.array([1.0, 2.0, 3.0], dtype="float64"),
+            "first_jesUp": np.array([11.0, 22.0, 33.0], dtype="float64"),
+            "first_jesDown": np.array([7.0, 8.0, 9.0], dtype="float64"),
+        }
 
 
 def _write_save_config(save_config: Path) -> None:
-    save_config.write_text("pt\npt_scaled\npass_high_pt\n")
+    save_config.write_text(
+        "pt\npt_scaled\npt_scaled_jesUp\npt_scaled_jesDown\n"
+        "pass_high_pt\npass_high_pt_jesUp\n"
+        "pass_selected_high_pt\npass_selected_high_pt_jesUp\n"
+        "raw_literal_probe\nraw_literal_probe_jesUp\n"
+        "member_access_probe\nmember_access_probe_jesUp\n"
+    )
 
 
 def _write_minimal_plugin_configs(workdir: Path) -> dict[str, Path]:
@@ -99,6 +116,8 @@ def _write_analysis_config(config_path: Path, input_file: Path, output_file: Pat
             f"fileList={input_file}",
             f"saveFile={output_file}",
             "saveTree=Events",
+            "enableSkim=true",
+            "skimSystematics=true",
             "threads=1",
             f"saveConfig={save_config}",
         ]
@@ -107,35 +126,31 @@ def _write_analysis_config(config_path: Path, input_file: Path, output_file: Pat
 
 
 def _assert_output(uproot_module, output_file: Path) -> None:
-    # read output with uproot and validate contents
+    # Validate the filter result, schema, and lexer probes with Uproot's
+    # synchronous executors. This keeps the integration check independent of
+    # PyROOT and of the site's asynchronous basket-read behavior.
     with uproot_module.open(str(output_file)) as f:
         tree = f["Events"]
         entries = tree.num_entries
-        arr = tree.arrays(["pt_scaled", "pass_high_pt"], library="np")
-        scaled_values = arr["pt_scaled"].tolist()
-        pass_flags = arr["pass_high_pt"].tolist()
+        expected_columns = {
+            "pt_scaled", "pt_scaled_jesUp", "pt_scaled_jesDown",
+            "pass_high_pt", "pass_high_pt_jesUp",
+            "pass_selected_high_pt", "pass_selected_high_pt_jesUp",
+            "raw_literal_probe", "raw_literal_probe_jesUp",
+            "member_access_probe", "member_access_probe_jesUp",
+        }
+        missing = expected_columns - set(tree.keys())
 
-    # When the input ROOT file is loaded successfully (GetEntries() > 0), there
-    # are 3 input entries (pt = 10, 30, 50) and 2 pass the high-pT filter
-    # (pt_scaled = 60, 100 > 50).  When the file-based RDF cannot be initialised
-    # (e.g. GetEntries() <= 0 for uproot-written files on some ROOT versions), the
-    # in-memory fallback is used.  In that case pt is defined as a constant 30.0,
-    # giving 1 input entry with pt_scaled = 60.0 that passes the filter.
-    if entries == 2:
-        expected_scaled = [60.0, 100.0]
-    elif entries == 1:
-        expected_scaled = [60.0]
-    else:
-        raise AssertionError(f"Expected 1 or 2 entries after filtering, got {entries}")
-
-    for actual, expected in zip(scaled_values, expected_scaled):
-        if not math.isclose(actual, expected, rel_tol=1e-12, abs_tol=1e-12):
-            raise AssertionError(
-                f"Unexpected pt_scaled value. Expected {expected}, got {actual}"
-            )
-
-    if pass_flags != [True] * entries:
-        raise AssertionError(f"Expected pass_high_pt flags all True, got {pass_flags}")
+    # With input pt_jesUp = [12, 36, 60], the pointer-backed definitions yield
+    # pass_high_pt_jesUp = [False, False, True] for the >110 threshold. The
+    # selection also requires the raw-string-derived value to remain 63 on the
+    # JES-up row. If the lexer rewrites the literal contents, that row is
+    # rejected. Saving the member-access probe checks that `.first` compiles as
+    # a C++ member token.
+    if entries != 1:
+        raise AssertionError(f"Expected one JES-up-selected entry, got {entries}")
+    if missing:
+        raise AssertionError(f"Snapshot is missing expected columns: {sorted(missing)}")
 
 
 def run_test() -> int:
@@ -172,16 +187,26 @@ def run_test() -> int:
         _write_analysis_config(config_file, input_file, output_file, save_config)
         plugin_cfgs = _write_minimal_plugin_configs(workdir)
 
-        @numba.cfunc("float64(float64)")
-        def scale_pt(value):
-            return value * 2.0
+        if numba is not None:
+            @numba.cfunc("float64(float64)")
+            def scale_pt(value):
+                return value * 2.0
 
-        @numba.cfunc("bool(float64)")
-        def is_high_pt(value):
-            return value > 50.0
+            @numba.cfunc("bool(float64)")
+            def is_high_pt(value):
+                return value > 110.0
 
-        scale_ptr = ctypes.cast(scale_pt.address, ctypes.c_void_p).value
-        high_pt_ptr = ctypes.cast(is_high_pt.address, ctypes.c_void_p).value
+            scale_ptr = ctypes.cast(scale_pt.address, ctypes.c_void_p).value
+            high_pt_ptr = ctypes.cast(is_high_pt.address, ctypes.c_void_p).value
+        else:
+            scale_callback = ctypes.CFUNCTYPE(ctypes.c_double, ctypes.c_double)(
+                lambda value: value * 2.0
+            )
+            high_pt_callback = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_double)(
+                lambda value: value > 110.0
+            )
+            scale_ptr = ctypes.cast(scale_callback, ctypes.c_void_p).value
+            high_pt_ptr = ctypes.cast(high_pt_callback, ctypes.c_void_p).value
 
         analyzer = rdfanalyzer.Analyzer(str(config_file))
 
@@ -260,11 +285,61 @@ def run_test() -> int:
         # tools like uproot that are incompatible with this ROOT version).
         # Analyzer.Define silently skips the define when pt already exists in the RDF
         # (file-based mode), so this is a no-op in that case.
-        # With pt = 30.0: pt_scaled = 60.0 > 50.0, so the high-pT filter passes.
+        # With pt = 30.0, the nominal value does not pass the >110 threshold.
         analyzer.Define("pt", "30.0", [])  # [] = no column dependencies for constant
+        analyzer.registerSystematic("jes", ["pt", "first"])
+        # These constants provide shifted-input values only if the input file
+        # did not expose the same named branches.
+        analyzer.Define("pt_jesUp", "33.0", [])
+        analyzer.Define("pt_jesDown", "27.0", [])
+        analyzer.Define(
+            "raw_literal_probe",
+            'static_cast<double>(sizeof(R"tag(pt)tag")) + pt',
+            ["pt"],
+        )
+        analyzer.Define(
+            "member_access_probe",
+            "std::make_pair(pt, first).first + pt",
+            ["pt", "first"],
+        )
+
+        for invalid_call, message in (
+            (
+                lambda: analyzer.DefineFromPointer(
+                    "bad_null_function", 0, "double(double)", ["pt"]
+                ),
+                "func_ptr must be a non-null",
+            ),
+            (
+                lambda: analyzer.DefineFromPointer(
+                    "bad_arity", scale_ptr, "double(double, double)", ["pt"]
+                ),
+                "signature declares 2 argument(s), but 1 input column(s)",
+            ),
+            (
+                lambda: analyzer.DefineFromVector("bad_null_vector", 0, 1, "double"),
+                "data_ptr must be non-null",
+            ),
+        ):
+            try:
+                invalid_call()
+            except ValueError as exc:
+                if message not in str(exc):
+                    raise AssertionError(f"Unexpected pointer validation error: {exc}")
+            else:
+                raise AssertionError(f"Expected pointer validation for: {message}")
 
         analyzer.DefineFromPointer("pt_scaled", scale_ptr, "double(double)", ["pt"])
+        required_variations = {"pt_scaled_jesUp", "pt_scaled_jesDown"}
+        available_columns = set(analyzer.GetColumnNames())
+        if not required_variations <= available_columns:
+            raise AssertionError(
+                "DefineFromPointer did not create shifted output columns: "
+                f"{sorted(required_variations - available_columns)}"
+            )
         analyzer.DefineFromPointer("pass_high_pt", high_pt_ptr, "bool(double)", ["pt_scaled"])
+        if "pass_high_pt_jesUp" not in set(analyzer.GetColumnNames()):
+            raise AssertionError("Second DefineFromPointer omitted JES-up output")
         analyzer.Define("pass_high_pt_copy", "pass_high_pt", ["pass_high_pt"])
 
         hist_info = rdfanalyzer.HistInfo(
@@ -293,9 +368,16 @@ def run_test() -> int:
 
         analyzer.clearNDHistograms("hist")
 
-        analyzer.Filter("selected_high_pt", "pass_high_pt_copy", ["pass_high_pt_copy"])
+        analyzer.Filter(
+            "selected_high_pt",
+            "pt_scaled > 110.0 && raw_literal_probe == 63.0 && "
+            "member_access_probe > 100.0",
+            ["pt_scaled", "raw_literal_probe", "member_access_probe"],
+        )
         _ = analyzer.makeSystList("pt_scaled")
         analyzer.save()
+        del analyzer
+        gc.collect()
 
         _assert_output(uproot, output_file)
 

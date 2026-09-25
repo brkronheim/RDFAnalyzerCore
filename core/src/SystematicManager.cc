@@ -115,6 +115,18 @@ std::vector<std::string> SystematicManager::getExplicitVariationLabels() const {
   return {explicitVariationLabels_m.begin(), explicitVariationLabels_m.end()};
 }
 
+std::vector<std::string> SystematicManager::getExplicitVariationLabelsForVariable(
+    const std::string &variable) const {
+  if (!enabled_m) {
+    return {};
+  }
+  const auto it = variableToExplicitVariationMap_m.find(variable);
+  if (it == variableToExplicitVariationMap_m.end()) {
+    return {};
+  }
+  return {it->second.begin(), it->second.end()};
+}
+
 std::vector<std::string> SystematicManager::getVariationLabels() const {
   std::vector<std::string> labels{"Nominal"};
   if (!enabled_m) {

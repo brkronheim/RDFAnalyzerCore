@@ -72,7 +72,7 @@ std::string ConfigurationManager::get(const std::string &key) const {
  */
 void ConfigurationManager::set(const std::string &key,
                                const std::string &value) {
-  if (get(key) != "") {
+  if (configMap_m.find(key) != configMap_m.end()) {
     throw std::runtime_error(
         "Error: Key " + key +
         " already exists. Do not use set to overwrite existing keys.");
@@ -104,6 +104,9 @@ std::string_view ConfigurationManager::trim(std::string_view s) const {
 std::vector<std::string>
 ConfigurationManager::splitString(std::string_view input,
                                   std::string_view delimiter) const {
+  if (delimiter.empty()) {
+    throw std::invalid_argument("ConfigurationManager::splitString: delimiter must not be empty");
+  }
   std::vector<std::string> splitStringVector;
   size_t pos = 0, prev = 0;
   while ((pos = input.find(delimiter, prev)) != std::string_view::npos) {

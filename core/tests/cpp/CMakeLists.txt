@@ -78,11 +78,6 @@ add_executable(testWorkingPointRecipe testWorkingPointRecipe.cc)
 target_link_libraries(testWorkingPointRecipe coreAll gtest gtest_main)
 add_test(NAME WorkingPointRecipeTest COMMAND testWorkingPointRecipe)
 
-# CMS infrastructure tests moved to core/plugins/cms/test/
-# They are registered automatically via add_subdirectory(test) in cms/CMakeLists.txt
-
-
-
 # Plugin tests
 
 add_executable(testPluginLifecycle testPluginLifecycle.cc)
@@ -203,13 +198,13 @@ add_test(NAME OnnxManagerGpuIntegrationTest COMMAND testOnnxManagerGpu)
 endif()
 
 if(TARGET rdfanalyzer AND Python_EXECUTABLE)
-add_test(NAME PythonBindingsNumbaIntegration
+add_test(NAME PythonBindingsIntegrationTest
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_bindings.py)
 # Prepend our build/python to PYTHONPATH but preserve the user's PYTHONPATH
 # so imports provided by the user's environment (e.g. ROOT from an LCG view)
 # remain available when running under CTest.
-set_tests_properties(PythonBindingsNumbaIntegration PROPERTIES
-                    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+set_tests_properties(PythonBindingsIntegrationTest PROPERTIES
+                    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
                     SKIP_RETURN_CODE 77)
 endif()
 
@@ -245,4 +240,3 @@ add_test(
         -DCOMBINEHARVESTER_LIBRARY_DIR=${COMBINEHARVESTER_LIBRARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyCombineHarvesterConfig.cmake)
 endif()
-

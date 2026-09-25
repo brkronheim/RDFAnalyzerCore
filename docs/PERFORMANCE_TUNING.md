@@ -136,29 +136,19 @@ for i in range(0, len(data), chunk_size):
 
 **Efficient Systematic Application:**
 ```cpp
-// Register systematics once
-sysMgr->registerSystematic("jes_up");
+// Register each systematic family once, before defining affected columns.
+auto& sysMgr = analyzer.getSystematicManager();
+sysMgr.registerSystematic("jes", {"jet_pt"});
 
-// Use vector operations
-analyzer.Define("corrected_pt", [](RVec<float> pt, const std::string& sys) {
-    if (sys == "jes_up") return pt * 1.02;
-    return pt;
-}, {"jet_pt"}, sysMgr);
+// The dataframe must provide jet_pt and its jet_pt_jesUp/Down inputs.
+// Analyzer::Define applies this common correction to each input column.
+analyzer.Define("corrected_pt",
+    [](float pt) { return pt * 1.02f; },
+    {"jet_pt"});
 ```
 
-**Avoid in loops:**
-```cpp
-// BAD: Register inside loop
-for (auto& sys : systems) {
-    sysMgr->registerSystematic(sys);
-}
-
-// GOOD: Register once
-for (auto& sys : systems) {
-    sysMgr->registerSystematic(sys);
-}
-// Then use in Define
-```
+Register systematic families during graph setup, outside event-processing
+loops. Variation labels are generated as `<family>Up` and `<family>Down`.
 
 ### Histogram Booking
 

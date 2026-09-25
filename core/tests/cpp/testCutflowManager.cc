@@ -340,6 +340,12 @@ TEST_F(CutflowManagerTest, RegionCutflowSingleRegionSingleCut) {
 
   dm->Define("pass_signal", [](ULong64_t i) { return i >= 2; },
              {"rdfentry_"}, *systematicManager);
+  dm->Define("pass_signal_jesUp", [](ULong64_t) { return true; },
+             {"rdfentry_"}, *systematicManager);
+  dm->Define("pass_signal_jesDown", [](ULong64_t i) { return i >= 5; },
+             {"rdfentry_"}, *systematicManager);
+  systematicManager->registerVariationColumns(
+      "pass_signal", "jes", "pass_signal_jesUp", "pass_signal_jesDown");
   dm->Define("pass_pt",     [](ULong64_t i) { return i < 4; },
              {"rdfentry_"}, *systematicManager);
 
@@ -355,7 +361,9 @@ TEST_F(CutflowManagerTest, RegionCutflowSingleRegionSingleCut) {
   ASSERT_EQ(cfm->getCutflowCounts().size(), 1u);
   EXPECT_EQ(cfm->getCutflowCounts()[0].second, 4ULL);
 
-  // Region "signal" has 4 events total; 2 pass ptCut inside the region.
+  // Region "signal" uses the nominal assignment (4 events), although the
+  // JES-up/down versions would select 6 and 1 event respectively. Two of the
+  // nominal region events pass ptCut.
   EXPECT_EQ(cfm->getRegionTotalCount("signal"), 4ULL);
   ASSERT_EQ(cfm->getRegionCutflowCounts("signal").size(), 1u);
   EXPECT_EQ(cfm->getRegionCutflowCounts("signal")[0].second, 2ULL);

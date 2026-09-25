@@ -104,6 +104,8 @@ public:
    *
    * The column must already be defined on the dataframe when
    * defineNominalWeight() is called.
+   * Component names are unique: registering the same name/column pair again
+   * is idempotent, while reusing a name for another column throws.
    *
    * @param name   Human-readable label used in audit output.
    * @param column Dataframe column name (float or double).

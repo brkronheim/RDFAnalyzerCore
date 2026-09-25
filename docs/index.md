@@ -185,15 +185,15 @@ Efficient processing with automatic optimization.
 
 ### For New Users
 
-1. [Installation](GETTING_STARTED.md#installation-and-building)
-2. [First Analysis](GETTING_STARTED.md#run-the-example-analysis)
+1. [Installation](GETTING_STARTED.md#quick-start)
+2. [Create Your First Analysis](GETTING_STARTED.md#step-1-create-your-analysis-directory)
 3. [Configuration Basics](CONFIG_REFERENCE.md#main-configuration-file)
 4. [Analysis Tutorial](ANALYSIS_GUIDE.md#step-by-step-tutorial)
 
 ### For Advanced Users
 
-1. [Architecture Overview](ARCHITECTURE.md#architecture-overview)
-2. [Creating Plugins](PLUGIN_DEVELOPMENT.md#step-by-step-creating-a-plugin)
+1. [Architecture Overview](ARCHITECTURE.md#design-philosophy)
+2. [Creating Plugins](PLUGIN_DEVELOPMENT.md#plugin-shapes)
 3. [Systematic Uncertainties](ANALYSIS_GUIDE.md#systematics)
 4. [HTCondor Submission](ANALYSIS_GUIDE.md#advanced-topics)
 
@@ -272,7 +272,8 @@ ONNX Runtime is downloaded automatically during build.
 
 Contributions welcome! See [Plugin Development Guide](PLUGIN_DEVELOPMENT.md) to get started.
 
-For implementation details and design notes for major features, see the [DEVELOPMENT](DEVELOPMENT/) directory.
+For framework design details, see the [Architecture Guide](ARCHITECTURE.md) and
+[Plugin Development Guide](PLUGIN_DEVELOPMENT.md).
 
 ## License
 

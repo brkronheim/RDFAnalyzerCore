@@ -88,14 +88,13 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
                 url.startswith("root://"),
                 f"Expected root:// prefix but got: {url!r}",
             )
-        # Without Rucio state information, site_redirectors should contain
-        # only the generic CMS fallback redirectors.
+        # Without Rucio replica states there are no site-specific candidates.
+        # The group URL itself still carries the configured global redirector;
+        # worker probing intentionally does not use generic redirectors.
         site_redirs = self._site_redirectors(result)
         self.assertIn(lfn, site_redirs, "LFN should appear in site_redirectors")
-        for fb in ["root://cmsxrootd.fnal.gov/", "root://xrootd-cms.infn.it/",
-                   "root://cms-xrd-global.cern.ch/"]:
-            self.assertIn(fb, site_redirs[lfn],
-                          f"Generic fallback redirector {fb!r} should be in list")
+        self.assertEqual(site_redirs[lfn], [])
+        self.assertTrue(all("cms-xrd-global.cern.ch" in url for url in all_urls))
 
     def test_full_xrootd_lfn_not_double_prefixed(self):
         """If Rucio returns a name already starting with root://, it is not double-prefixed."""
@@ -181,10 +180,9 @@ class TestQueryRucioRedirectorEnforcement(unittest.TestCase):
             any("T1_US_FNAL" in r for r in redir_list),
             f"Tape site T1_US_FNAL should NOT be in site_redirectors, got: {redir_list}",
         )
-        # Generic CMS fallback redirectors must also be present.
-        for fb in ["root://cmsxrootd.fnal.gov/", "root://cms-xrd-global.cern.ch/"]:
-            self.assertIn(fb, redir_list,
-                          f"Generic fallback {fb!r} should be in site_redirectors")
+        # The worker probes the reported replicas only; the global redirector
+        # remains on the grouped input URL as the ordinary file-list fallback.
+        self.assertFalse(any("cms-xrd-global.cern.ch" in r for r in redir_list))
 
     def test_blacklisted_site_excluded_from_redirectors(self):
         """Sites on the blacklist must not appear in site_redirectors."""

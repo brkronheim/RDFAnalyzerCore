@@ -1,0 +1,3 @@
+interface:
+  display_name: "RDFAnalyzer Development"
+  short_description: "Change the core framework and its plugins"

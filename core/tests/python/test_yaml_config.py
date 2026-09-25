@@ -29,6 +29,34 @@ def test_read_text_format():
         os.unlink(fname)
 
 
+def test_read_text_matches_cpp_pair_parser():
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        fname = f.name
+        f.write("  sampleConfig = samples.txt  # inline comment\n")
+        f.write("endpoint=root://host/path?token=a=b\n")
+        f.write("empty=\n")
+        f.write("not a config line\n")
+    try:
+        assert read_config_text(fname) == {
+            'sampleConfig': 'samples.txt',
+            'endpoint': 'root://host/path?token=a=b',
+            'empty': '',
+        }
+    finally:
+        os.unlink(fname)
+
+
+def test_read_text_rejects_duplicate_keys():
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        fname = f.name
+        f.write("repeat=first\nrepeat=second\n")
+    try:
+        with pytest.raises(ValueError, match="Duplicate key 'repeat'"):
+            read_config_text(fname)
+    finally:
+        os.unlink(fname)
+
+
 def test_read_yaml_format():
     with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
         fname = f.name
@@ -42,6 +70,17 @@ def test_read_yaml_format():
         assert result['key3'] == 'value with spaces'
     finally:
         os.unlink(fname)
+
+
+def test_yaml_collections_match_cpp_config_string_representation():
+    fixture = os.path.join(
+        os.path.dirname(__file__), "..", "cpp", "cfg", "yaml_conversion.yaml"
+    )
+    result = read_config_yaml(os.path.abspath(fixture))
+    assert result["scalar"] == "quoted scalar"
+    assert result["enabled"] == "true"
+    assert result["labels"] == "[alpha, beta]"
+    assert result["mapping"] == "{mode: fast, flags: [x, y]}"
 
 
 def test_write_text_format_roundtrip():

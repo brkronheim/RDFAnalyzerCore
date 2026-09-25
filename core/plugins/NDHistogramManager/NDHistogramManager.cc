@@ -177,6 +177,73 @@ ROOT::RDF::RNode defineBroadcastFloatVector(ROOT::RDF::RNode df,
       {referenceColumn, scalarColumn});
 }
 
+template <typename ScalarT>
+ROOT::RDF::RNode defineSystematicBroadcastFloatVector(
+    ROOT::RDF::RNode df, const std::string &name,
+    const std::string &referenceColumn, const std::string &scalarColumn,
+    std::size_t systematicSlots) {
+  return df.Define(
+      name,
+      [systematicSlots](const ROOT::VecOps::RVec<Float_t> &reference,
+                        ScalarT value) -> ROOT::VecOps::RVec<Float_t> {
+        if (systematicSlots == 0 || reference.size() % systematicSlots != 0) {
+          throw std::runtime_error(
+              "NDHistogramManager: base fill vector is not divisible by its "
+              "systematic slot count");
+        }
+        return ROOT::VecOps::RVec<Float_t>(
+            reference.size() / systematicSlots, static_cast<Float_t>(value));
+      },
+      {referenceColumn, scalarColumn});
+}
+
+ROOT::RDF::RNode dispatchSystematicBroadcastFloatVector(
+    ROOT::RDF::RNode df, const std::string &name,
+    const std::string &referenceColumn, const std::string &scalarColumn,
+    NDHistogramTypeToken scalarType, std::size_t systematicSlots) {
+  switch (scalarType) {
+  case NDHistogramTypeToken::Bool:
+    return defineSystematicBroadcastFloatVector<Bool_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Float:
+    return defineSystematicBroadcastFloatVector<Float_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Double:
+    return defineSystematicBroadcastFloatVector<Double_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Int:
+    return defineSystematicBroadcastFloatVector<Int_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::UInt:
+    return defineSystematicBroadcastFloatVector<UInt_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Short:
+    return defineSystematicBroadcastFloatVector<Short_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::UShort:
+    return defineSystematicBroadcastFloatVector<UShort_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Char:
+    return defineSystematicBroadcastFloatVector<Char_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::UChar:
+    return defineSystematicBroadcastFloatVector<UChar_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Long64:
+    return defineSystematicBroadcastFloatVector<Long64_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::ULong64:
+    return defineSystematicBroadcastFloatVector<ULong64_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Unsupported:
+    throw std::runtime_error(
+        "NDHistogramManager: unsupported scalar type in systematic broadcast path");
+  }
+
+  throw std::runtime_error(
+      "NDHistogramManager: unreachable systematic broadcast dispatch");
+}
+
 template <typename ReferenceT>
 ROOT::RDF::RNode dispatchBroadcastFloatVectorByScalar(
     ROOT::RDF::RNode df, const std::string &name,
@@ -445,7 +512,29 @@ static void HandleAxisVarVector(
           columnName = variable;
         }
         if (!isWeight && !refVector.empty()) {
-          columnName = ensureExpandedVector(columnName);
+          const std::string columnType = cache.GetType(columnName);
+          if (columnType.find("RVec") == std::string::npos) {
+            const std::string expandedName =
+                columnName + "_FillRVecPerSyst_" + refVector + "_" +
+                std::to_string(allSystematics.size()) + tagSuffix;
+            if (!cache.Has(expandedName)) {
+              const auto scalarToken = tokenizeNDHistogramType(columnType);
+              if (scalarToken == NDHistogramTypeToken::Unsupported) {
+                df = df.Define(
+                    expandedName,
+                    "ROOT::VecOps::RVec<Float_t>(" + refVector + ".size() / " +
+                        std::to_string(allSystematics.size()) +
+                        ", static_cast<Float_t>(" + columnName + "))");
+              } else {
+                df = dispatchSystematicBroadcastFloatVector(
+                    df, expandedName, refVector, columnName, scalarToken,
+                    allSystematics.size());
+              }
+              dataManager_m->setDataFrame(df);
+              cache.Refresh();
+            }
+            columnName = expandedName;
+          }
         }
         systematicVariations.push_back(columnName);
         }
@@ -739,6 +828,28 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
     fillInfo.hasMultiFill = true;
   }
 
+  // The histogram variable is the fill axis too. Mark vector-valued input so
+  // the action selects a multi-fill path when another axis introduces
+  // systematics (or when this is a nominal-only multi-fill histogram).
+  const std::string histogramVariableType = cache.GetType(info.variable());
+  bool baseAxisHasMultiFill =
+      histogramVariableType.find("RVec") != std::string::npos;
+  if (fillInfo.hasSystematic) {
+    for (const auto &systematic : systList) {
+      const auto variationColumn =
+          systematicManager_m->getVariationColumnName(info.variable(),
+                                                       systematic);
+      if (cache.Has(variationColumn) &&
+          cache.GetType(variationColumn).find("RVec") != std::string::npos) {
+        baseAxisHasMultiFill = true;
+        break;
+      }
+    }
+  }
+  if (baseAxisHasMultiFill) {
+    fillInfo.hasMultiFill = true;
+  }
+
   // determine if the variables have systematic variations
   if(systematicManager_m->getSystematicsForVariable(channelInfo.variable()).size() > 0 &&
      HasSystematicColumns(cache, systematicManager_m, channelInfo.variable(), systList)) {
@@ -764,17 +875,27 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
     fillInfo.hasSystematic = true;
   }
 
-  // Selection migrations require every histogram axis to be represented once
-  // per systematic, even when that axis itself is unaffected. Its nominal
-  // value is then repeated into the varied bins, while the selection mask
-  // decides whether each bin receives this event.
+  // Any systematic histogram fill requires every axis to be represented once
+  // per systematic, even when that axis itself is unaffected. Unaffected
+  // values repeat into the varied slots so multi-fill vectors stay aligned
+  // with the systematic axis. Selection masks additionally decide whether a
+  // particular slot receives the event.
   const bool hasSelectionMasks = systematicManager_m->hasSelectionMasks();
-  if (hasSelectionMasks) {
+  if (fillInfo.hasSystematic || hasSelectionMasks) {
     fillInfo.channel_hasSystematic = true;
     fillInfo.controlRegion_hasSystematic = true;
     fillInfo.sampleCategory_hasSystematic = true;
     fillInfo.weight_hasSystematic = true;
     fillInfo.hasSystematic = true;
+  }
+
+  // When the observable has multiple fills, the systematic packing above
+  // expands each category axis to one value per fill in each systematic slot.
+  // Advance those axis vectors with the base value vector inside a slot.
+  if (fillInfo.hasSystematic && baseAxisHasMultiFill) {
+    fillInfo.channel_hasMultiFill = true;
+    fillInfo.controlRegion_hasMultiFill = true;
+    fillInfo.sampleCategory_hasMultiFill = true;
   }
 
   // For now, we don't support multi-fill for systematic variations

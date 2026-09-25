@@ -165,11 +165,11 @@ public:
     // Set the fill function pointer based on configuration
     // (This logic can be expanded for more fast paths as needed)
     if (!channel_hasSystematic_m && !controlRegion_hasSystematic_m && !sampleCategory_hasSystematic_m && !weight_hasSystematic_m &&
-        !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
+        !hasMultiFill_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
       fillFunc_ = &THnMulti::SingleNoSystematicFill;
-    } else if (hasSystematic_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
+    } else if (hasSystematic_m && !hasMultiFill_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
       fillFunc_ = &THnMulti::SingleSystematicFill;
-    } else if (!hasSystematic_m && (channel_hasMultiFill_m || controlRegion_hasMultiFill_m || sampleCategory_hasMultiFill_m || weight_hasMultiFill_m || systematic_hasMultiFill_m)) {
+    } else if (!hasSystematic_m && (hasMultiFill_m || channel_hasMultiFill_m || controlRegion_hasMultiFill_m || sampleCategory_hasMultiFill_m || weight_hasMultiFill_m || systematic_hasMultiFill_m)) {
       fillFunc_ = &THnMulti::MultiNoSystematicFill;
     } else {
       fillFunc_ = &THnMulti::GeneralFill;
@@ -702,11 +702,11 @@ public:
         nbins_m.data(), xmin_m.data(), xmax_m.data());
     fFinalResult->Sumw2();
     if (!channel_hasSystematic_m && !controlRegion_hasSystematic_m && !sampleCategory_hasSystematic_m && !weight_hasSystematic_m &&
-        !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
+        !hasMultiFill_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
       fillFunc_ = &BHnMulti::SingleNoSystematicFill;
-    } else if (hasSystematic_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
+    } else if (hasSystematic_m && !hasMultiFill_m && !channel_hasMultiFill_m && !controlRegion_hasMultiFill_m && !sampleCategory_hasMultiFill_m && !weight_hasMultiFill_m && !systematic_hasMultiFill_m) {
       fillFunc_ = &BHnMulti::SingleSystematicFill;
-    } else if (!hasSystematic_m && (channel_hasMultiFill_m || controlRegion_hasMultiFill_m || sampleCategory_hasMultiFill_m || weight_hasMultiFill_m || systematic_hasMultiFill_m)) {
+    } else if (!hasSystematic_m && (hasMultiFill_m || channel_hasMultiFill_m || controlRegion_hasMultiFill_m || sampleCategory_hasMultiFill_m || weight_hasMultiFill_m || systematic_hasMultiFill_m)) {
       fillFunc_ = &BHnMulti::MultiNoSystematicFill;
     } else {
       fillFunc_ = &BHnMulti::GeneralFill;

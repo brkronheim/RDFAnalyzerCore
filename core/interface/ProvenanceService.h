@@ -127,6 +127,9 @@ public:
     static std::string hashString(const std::string& data);
 
 private:
+    friend class Analyzer;
+    void removeEntry(const std::string& key);
+
     ManagerContext* ctx_m = nullptr;
     std::unordered_map<std::string, std::string> provenance_m;
 

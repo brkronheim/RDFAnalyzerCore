@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -36,9 +37,11 @@ namespace {
 
 using CorrectionRef = correction::Correction::Ref;
 
-const CorrectionRef &loadCorrectionByName(const std::string &filePath,
-                                          const std::string &name) {
+CorrectionRef loadCorrectionByName(const std::string &filePath,
+                                   const std::string &name) {
   static std::unordered_map<std::string, CorrectionRef> cache;
+  static std::mutex cacheMutex;
+  const std::lock_guard<std::mutex> lock(cacheMutex);
   const std::string key = filePath + "::" + name;
   const auto cached = cache.find(key);
   if (cached != cache.end()) return cached->second;
@@ -143,13 +146,39 @@ void fillDefaultSourceNames(CmsWeightConfig &cfg) {
 
 } // namespace
 
+void CmsWeightConfig::print(std::ostream &os) const {
+  const auto yesNo = [](bool value) { return value ? "yes" : "no"; };
+  os << "=== CmsWeightConfig ===\n"
+     << "  year: "
+     << (yearSettings ? yearSettings->canonicalYear : "<unset>") << '\n'
+     << "  isMC: " << yesNo(isMC) << '\n'
+     << "  jetTagger: " << jetTagger << '\n'
+     << "  applyPileupWeights: " << yesNo(applyPileupWeights) << '\n'
+     << "  applyL1PrefireWeights: " << yesNo(applyL1PrefireWeights) << '\n'
+     << "  applyMuonScaleFactors: " << yesNo(applyMuonScaleFactors) << '\n'
+     << "  applyElectronScaleFactors: " << yesNo(applyElectronScaleFactors)
+     << '\n'
+     << "  applyBTagScaleFactors: " << yesNo(applyBTagScaleFactors) << '\n'
+     << "  applyCTagScaleFactors: " << yesNo(applyCTagScaleFactors) << '\n'
+     << "  applyTriggerScaleFactors: " << yesNo(applyTriggerScaleFactors)
+     << '\n'
+     << "  applyTauScaleFactors: " << yesNo(applyTauScaleFactors) << '\n'
+     << "  applyPhotonScaleFactors: " << yesNo(applyPhotonScaleFactors)
+     << '\n'
+     << "  applyJetPuIdScaleFactors: " << yesNo(applyJetPuIdScaleFactors)
+     << '\n'
+     << "  applyPileupMinbiasXsec: " << yesNo(applyPileupMinbiasXsec) << '\n'
+     << "  correctionNamePrefix: " << correctionNamePrefix << '\n'
+     << "  channelMasks: " << channels.size() << '\n';
+}
+
 // ===========================================================================
 // Correction evaluation helpers
 // ===========================================================================
 
 float evalCorr3(const std::string &filePath, const std::string &name,
                 float absEta, float pt, const std::string &variation) {
-  const auto &corr = loadCorrectionByName(filePath, name);
+  const auto corr = loadCorrectionByName(filePath, name);
   return static_cast<float>(
       corr->evaluate({static_cast<double>(absEta), static_cast<double>(pt),
                       variation}));
@@ -228,18 +257,39 @@ ROOT::VecOps::RVec<float> mergeCTagScaleFactors(
   return result;
 }
 
-std::vector<float> selectElectronRecoScaleFactors(
-    const std::vector<float> &pt,
-    const std::vector<float> &below20,
-    const std::vector<float> &between20And75,
-    const std::vector<float> &above75) {
-  std::vector<float> result(pt.size(), 1.0f);
+namespace {
+
+template <typename Vector>
+Vector selectElectronRecoScaleFactorsImpl(
+    const Vector &pt, const Vector &below20, const Vector &between20And75,
+    const Vector &above75) {
+  Vector result(pt.size(), 1.0f);
   for (size_t i = 0; i < pt.size(); ++i) {
     if (pt[i] < 20.0f) result[i] = i < below20.size() ? below20[i] : 1.0f;
     else if (pt[i] <= 75.0f) result[i] = i < between20And75.size() ? between20And75[i] : 1.0f;
     else result[i] = i < above75.size() ? above75[i] : 1.0f;
   }
   return result;
+}
+
+} // namespace
+
+std::vector<float> selectElectronRecoScaleFactors(
+    const std::vector<float> &pt,
+    const std::vector<float> &below20,
+    const std::vector<float> &between20And75,
+    const std::vector<float> &above75) {
+  return selectElectronRecoScaleFactorsImpl(pt, below20, between20And75,
+                                            above75);
+}
+
+ROOT::VecOps::RVec<float> selectElectronRecoScaleFactors(
+    const ROOT::VecOps::RVec<float> &pt,
+    const ROOT::VecOps::RVec<float> &below20,
+    const ROOT::VecOps::RVec<float> &between20And75,
+    const ROOT::VecOps::RVec<float> &above75) {
+  return selectElectronRecoScaleFactorsImpl(pt, below20, between20And75,
+                                            above75);
 }
 
 // ===========================================================================
@@ -322,9 +372,10 @@ void defineCmsMuonScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
 
     constexpr float kPtMin = 15.0f;
     an.Define("muon_iso_sf_nominal_vec",
-              [isoFile, isoCorrection](const std::vector<float> &abseta,
-                        const std::vector<float> &pt) {
-                std::vector<float> r(pt.size(), 1.0f);
+              [isoFile, isoCorrection](
+                  const ROOT::VecOps::RVec<float> &abseta,
+                  const ROOT::VecOps::RVec<float> &pt) {
+                ROOT::VecOps::RVec<float> r(pt.size(), 1.0f);
                 for (size_t i = 0; i < pt.size(); ++i)
                   if (pt[i] >= kPtMin)
                     r[i] = evalCorr3(isoFile, isoCorrection,
@@ -332,9 +383,10 @@ void defineCmsMuonScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
                 return r;
               }, {"SelectedMuon_absEta_sf", "SelectedMuon_pt"})
         ->Define("muon_iso_sf_systup_vec",
-              [isoFile, isoCorrection](const std::vector<float> &abseta,
-                        const std::vector<float> &pt) {
-                std::vector<float> r(pt.size(), 1.0f);
+              [isoFile, isoCorrection](
+                  const ROOT::VecOps::RVec<float> &abseta,
+                  const ROOT::VecOps::RVec<float> &pt) {
+                ROOT::VecOps::RVec<float> r(pt.size(), 1.0f);
                 for (size_t i = 0; i < pt.size(); ++i)
                   if (pt[i] >= kPtMin)
                     r[i] = evalCorr3(isoFile, isoCorrection,
@@ -342,9 +394,10 @@ void defineCmsMuonScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
                 return r;
               }, {"SelectedMuon_absEta_sf", "SelectedMuon_pt"})
         ->Define("muon_iso_sf_systdown_vec",
-              [isoFile, isoCorrection](const std::vector<float> &abseta,
-                        const std::vector<float> &pt) {
-                std::vector<float> r(pt.size(), 1.0f);
+              [isoFile, isoCorrection](
+                  const ROOT::VecOps::RVec<float> &abseta,
+                  const ROOT::VecOps::RVec<float> &pt) {
+                ROOT::VecOps::RVec<float> r(pt.size(), 1.0f);
                 for (size_t i = 0; i < pt.size(); ++i)
                   if (pt[i] >= kPtMin)
                     r[i] = evalCorr3(isoFile, isoCorrection,
@@ -389,6 +442,14 @@ void defineCmsElectronScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
   }
   const auto &ys = *cfg.yearSettings;
   auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
+  const auto selectElectronRecoScaleFactorsRVec =
+      [](const ROOT::VecOps::RVec<float> &pt,
+         const ROOT::VecOps::RVec<float> &below20,
+         const ROOT::VecOps::RVec<float> &between20And75,
+         const ROOT::VecOps::RVec<float> &above75) {
+        return selectElectronRecoScaleFactors(pt, below20, between20And75,
+                                              above75);
+      };
 
   // Electron ID
   corrMgr->registerCorrection(
@@ -434,15 +495,15 @@ void defineCmsElectronScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
       "electron_reco_sf_above75_down_vec");
 
   // Merge per-pT bin reco SFs
-  an.Define("electron_reco_sf_nominal_vec", selectElectronRecoScaleFactors,
+  an.Define("electron_reco_sf_nominal_vec", selectElectronRecoScaleFactorsRVec,
             {"SelectedElectron_pt", "electron_reco_sf_below20_nominal_vec",
              "electron_reco_sf_20to75_nominal_vec",
              "electron_reco_sf_above75_nominal_vec"})
-      ->Define("electron_reco_sf_up_vec", selectElectronRecoScaleFactors,
+      ->Define("electron_reco_sf_up_vec", selectElectronRecoScaleFactorsRVec,
                {"SelectedElectron_pt", "electron_reco_sf_below20_up_vec",
                 "electron_reco_sf_20to75_up_vec",
                 "electron_reco_sf_above75_up_vec"})
-      ->Define("electron_reco_sf_down_vec", selectElectronRecoScaleFactors,
+      ->Define("electron_reco_sf_down_vec", selectElectronRecoScaleFactorsRVec,
                {"SelectedElectron_pt", "electron_reco_sf_below20_down_vec",
                 "electron_reco_sf_20to75_down_vec",
                 "electron_reco_sf_above75_down_vec"});

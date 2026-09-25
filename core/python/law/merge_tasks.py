@@ -230,6 +230,8 @@ def _group_files_by_basename(
 class MergeMixin:
     """Parameters and helpers shared by all merge tasks."""
 
+    output_manifest_role: Optional[str] = None
+
     name = luigi.Parameter(
         description=(
             "Run name.  Merged outputs are written to "
@@ -312,6 +314,20 @@ class MergeMixin:
             )
         pattern = os.path.join(input_dir, self.manifest_glob)
         paths = sorted(_glob.glob(pattern, recursive=True))
+        # A caller may put merged output beneath the input tree. Exclude the
+        # task's own output directory so a later run cannot recursively merge
+        # its previous result together with original job products.
+        input_real = os.path.realpath(input_dir)
+        output_real = os.path.realpath(self._merge_dir)
+        try:
+            output_is_nested = os.path.commonpath([input_real, output_real]) == input_real
+        except ValueError:
+            output_is_nested = False
+        if output_is_nested:
+            paths = [
+                path for path in paths
+                if os.path.commonpath([output_real, os.path.realpath(path)]) != output_real
+            ]
         if not paths:
             raise RuntimeError(
                 f"No manifests found matching {pattern!r}.  "
@@ -384,6 +400,69 @@ class MergeMixin:
             required_roles=required_roles,
         )
 
+    def complete(self) -> bool:
+        """Require the manifest and every merged artifact it describes.
+
+        A manifest is written last, but it can outlive a ROOT/JSON artifact if
+        an operator removes or truncates one after a completed run. Treat such
+        a cache as stale so Luigi can rebuild it.
+        """
+        if not super().complete():
+            return False
+        role = self.output_manifest_role
+        if role is None:
+            return True
+
+        manifest_path = self.output().path
+        try:
+            manifest = OutputManifest.load_yaml(manifest_path)
+            schema = getattr(manifest, role)
+            if schema is None or not schema.output_file:
+                return False
+            primary = schema.output_file
+            if not os.path.isabs(primary):
+                primary = os.path.join(os.path.dirname(manifest_path), primary)
+
+            if role == "metadata":
+                with open(primary, "r", encoding="utf-8") as stream:
+                    summary = json.load(stream)
+                return isinstance(summary, dict)
+
+            groups_name = {
+                "skim": "merged_skim_groups.json",
+                "histograms": "merged_histogram_groups.json",
+                "cutflow": "merged_cutflow_groups.json",
+            }[role]
+            with open(os.path.join(os.path.dirname(manifest_path), groups_name),
+                      "r", encoding="utf-8") as stream:
+                groups = json.load(stream)
+            paths = list(groups.values()) if isinstance(groups, dict) else []
+            if not paths or primary not in paths:
+                paths.append(primary)
+
+            import uproot  # type: ignore
+
+            for path in paths:
+                resolved = path if os.path.isabs(path) else os.path.join(
+                    os.path.dirname(manifest_path), path
+                )
+                if not os.path.isfile(resolved) or os.path.getsize(resolved) <= 0:
+                    return False
+                with uproot.open(resolved) as root_file:
+                    if role == "skim":
+                        tree_name = getattr(schema, "tree_name", "Events")
+                        obj = root_file[tree_name]
+                        classname = getattr(obj, "classname", None)
+                        if classname is not None and classname not in (
+                            "TTree", "ROOT::RNTuple"
+                        ):
+                            return False
+                    elif not root_file.keys():
+                        return False
+            return True
+        except Exception:  # malformed manifests or artifacts are stale targets
+            return False
+
 
 # ---------------------------------------------------------------------------
 # Task 1 – MergeSkims
@@ -403,6 +482,7 @@ class MergeSkims(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+    output_manifest_role = "skim"
 
     def output(self):
         return law.LocalFileTarget(
@@ -495,6 +575,7 @@ class MergeHistograms(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+    output_manifest_role = "histograms"
 
     def output(self):
         return law.LocalFileTarget(
@@ -659,6 +740,7 @@ class MergeCutflows(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+    output_manifest_role = "cutflow"
 
     def output(self):
         return law.LocalFileTarget(
@@ -747,6 +829,7 @@ class MergeMetadata(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+    output_manifest_role = "metadata"
 
     def output(self):
         return law.LocalFileTarget(
@@ -838,6 +921,14 @@ class MergeAll(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+
+    def complete(self) -> bool:
+        if not super().complete():
+            return False
+        try:
+            return all(task.complete() for task in self.requires())
+        except Exception:
+            return False
 
     skip_skims = luigi.BoolParameter(
         default=False,

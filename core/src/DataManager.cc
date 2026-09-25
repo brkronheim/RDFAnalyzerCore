@@ -1,5 +1,6 @@
 #include <api/IConfigurationProvider.h>
 #include <algorithm>
+#include <cmath>
 #include <ROOT/RVec.hxx>
 #include <DataManager.h>
 #include <TChain.h>
@@ -35,6 +36,39 @@ std::string removeWhitespace(std::string value) {
                              [](unsigned char c) { return std::isspace(c) != 0; }),
               value.end());
   return value;
+}
+
+float parseFloatConstant(const std::string& name, const std::string& value) {
+  try {
+    std::size_t consumed = 0;
+    const float parsed = std::stof(value, &consumed);
+    if (consumed != value.size()) {
+      throw std::invalid_argument("trailing characters");
+    }
+    if (!std::isfinite(parsed)) {
+      throw std::invalid_argument("non-finite value");
+    }
+    return parsed;
+  } catch (const std::exception&) {
+    throw std::runtime_error("DataManager: invalid float constant '" + name +
+                             "=" + value +
+                             "' (expected one complete finite float value).");
+  }
+}
+
+int parseIntConstant(const std::string& name, const std::string& value) {
+  try {
+    std::size_t consumed = 0;
+    const int parsed = std::stoi(value, &consumed);
+    if (consumed != value.size()) {
+      throw std::invalid_argument("trailing characters");
+    }
+    return parsed;
+  } catch (const std::exception&) {
+    throw std::runtime_error("DataManager: invalid integer constant '" + name +
+                             "=" + value +
+                             "' (expected one complete value in the C++ int range).");
+  }
 }
 
 bool isRVecColumnType(const std::string &columnType) {
@@ -434,7 +468,8 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
     // Attach friend trees (from friendConfig) BEFORE wrapping in RDataFrame
     // so that all friend branches are visible to the RDataFrame at creation.
     const std::string friendConfigFile = configProvider.get("friendConfig");
-    if (!friendConfigFile.empty() && std::filesystem::exists(friendConfigFile)) {
+    if (!friendConfigFile.empty() &&
+        std::filesystem::exists(configProvider.resolveConfigPath(friendConfigFile))) {
       registerFriendTrees(configProvider);
     }
 
@@ -716,17 +751,23 @@ void DataManager::defineVectorImpl(std::string name,
 void DataManager::registerConstants(const IConfigurationProvider &configProvider, const std::string& floatConfigKey, const std::string& intConfigKey) {
   std::string floatFile = configProvider.get(floatConfigKey);
   if (!floatFile.empty()) {
+    floatFile = configProvider.resolveConfigPath(floatFile);
+  }
+  if (!floatFile.empty()) {
     auto floatConfig = configProvider.parsePairBasedConfig(floatFile);
     for (auto &pair : floatConfig) {
-      float val = std::stof(pair.second);
+      float val = parseFloatConstant(pair.first, pair.second);
       defineConstant(pair.first, val);
     }
   }
   std::string intFile = configProvider.get(intConfigKey);
   if (!intFile.empty()) {
+    intFile = configProvider.resolveConfigPath(intFile);
+  }
+  if (!intFile.empty()) {
     auto intConfig = configProvider.parsePairBasedConfig(intFile);
     for (auto &pair : intConfig) {
-      int val = std::stoi(pair.second);
+      int val = parseIntConstant(pair.first, pair.second);
       defineConstant(pair.first, val);
     }
   }
@@ -982,20 +1023,25 @@ void DataManager::finalizeSetup(const IConfigurationProvider &configProvider,
   std::cout << "Finalizing setup" << std::endl;
   const auto floatConfig = configProvider.get(floatConfigKey);
   const auto intConfig = configProvider.get(intConfigKey);
-  if ((!floatConfig.empty() && std::filesystem::exists(floatConfig)) ||
-      (!intConfig.empty() && std::filesystem::exists(intConfig))) {
+  if ((!floatConfig.empty() &&
+       std::filesystem::exists(configProvider.resolveConfigPath(floatConfig))) ||
+      (!intConfig.empty() &&
+       std::filesystem::exists(configProvider.resolveConfigPath(intConfig)))) {
     std::cout << "Registering constants" << std::endl;
     registerConstants(configProvider, floatConfigKey, intConfigKey);
   }
 
   const auto aliasConfig = configProvider.get(aliasConfigKey);
-  if (!aliasConfig.empty() && std::filesystem::exists(aliasConfig)) {
+  if (!aliasConfig.empty() &&
+      std::filesystem::exists(configProvider.resolveConfigPath(aliasConfig))) {
     std::cout << "Registering aliases" << std::endl;
     registerAliases(configProvider, aliasConfigKey);
   }
 
   const auto optionalBranchesConfig = configProvider.get(optionalBranchesConfigKey);
-  if (!optionalBranchesConfig.empty() && std::filesystem::exists(optionalBranchesConfig)) {
+  if (!optionalBranchesConfig.empty() &&
+      std::filesystem::exists(
+          configProvider.resolveConfigPath(optionalBranchesConfig))) {
     std::cout << "Registering optional branches" << std::endl;
     registerOptionalBranches(configProvider, optionalBranchesConfigKey);
   }
@@ -1064,10 +1110,12 @@ void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
 void DataManager::registerFriendTrees(
     const IConfigurationProvider &configProvider,
     const std::string &friendConfigKey) {
-  const std::string friendConfigFile = configProvider.get(friendConfigKey);
-  if (friendConfigFile.empty()) {
+  const std::string configuredFriendPath = configProvider.get(friendConfigKey);
+  if (configuredFriendPath.empty()) {
     return;
   }
+  const std::string friendConfigFile =
+      configProvider.resolveConfigPath(configuredFriendPath);
   if (!std::filesystem::exists(friendConfigFile)) {
     std::cerr << "[DataManager] Warning: friendConfig file '" << friendConfigFile
               << "' not found; skipping friend tree registration." << std::endl;

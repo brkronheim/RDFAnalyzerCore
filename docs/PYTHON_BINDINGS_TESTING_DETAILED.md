@@ -116,6 +116,9 @@ print('DefineFromPointer works')
 
 ### 5. Systematic Variations
 
+The configured input tree must contain `pt_jesUp` and `pt_jesDown` alongside
+`pt`; the wrapper applies the same function to those shifted inputs.
+
 ```python
 import rdfanalyzer
 import numba
@@ -124,7 +127,7 @@ import ctypes
 analyzer = rdfanalyzer.Analyzer('config.txt')
 
 # Register systematic and affected variables
-analyzer.registerSystematic('jes_up', ['pt'])
+analyzer.registerSystematic('jes', ['pt'])
 
 @numba.cfunc('double(double)')
 def apply_jes(pt):
@@ -133,7 +136,8 @@ def apply_jes(pt):
 func_ptr = ctypes.cast(apply_jes.address, ctypes.c_void_p).value
 
 analyzer.DefineFromPointer('corrected_pt', func_ptr, 'double(double)', ['pt'])
-print('Systematic variations work')
+columns = set(analyzer.GetColumnNames())
+assert {'corrected_pt_jesUp', 'corrected_pt_jesDown'} <= columns
 ```
 
 ### 6. Histogram Booking

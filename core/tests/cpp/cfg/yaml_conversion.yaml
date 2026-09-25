@@ -1,0 +1,4 @@
+scalar: quoted scalar
+enabled: true
+labels: [alpha, beta]
+mapping: {mode: fast, flags: [x, y]}

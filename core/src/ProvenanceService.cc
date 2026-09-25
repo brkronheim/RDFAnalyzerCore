@@ -193,6 +193,10 @@ void ProvenanceService::addEntry(const std::string& key, const std::string& valu
     provenance_m[key] = value;
 }
 
+void ProvenanceService::removeEntry(const std::string& key) {
+    provenance_m.erase(key);
+}
+
 void ProvenanceService::recordDatasetManifestProvenance(
     const std::string& manifestFileHash,
     const std::string& queryParamsJson,

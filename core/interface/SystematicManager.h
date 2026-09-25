@@ -50,6 +50,8 @@ public:
   const std::set<std::string> &getSystematics() const override;
 
   std::vector<std::string> getExplicitVariationLabels() const override;
+  std::vector<std::string> getExplicitVariationLabelsForVariable(
+      const std::string &variable) const override;
   std::vector<std::string> getVariationLabels() const override;
   void registerSelectionMaskColumn(const std::string &variationLabel,
                                    const std::string &column) override;

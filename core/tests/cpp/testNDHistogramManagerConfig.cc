@@ -9,6 +9,7 @@
 #include <TH1D.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -51,6 +52,70 @@ protected:
     skimSink.reset();
     metaSink.reset();
     configManager.reset();
+  }
+
+  void expectShapeVariationCanMigrateHistogramRegion(
+      const std::string &backend = "") {
+    dataManager->Define(
+        "obs",
+        []() { return ROOT::VecOps::RVec<Float_t>{1.0f, 2.0f}; }, {},
+        *systematicManager);
+    dataManager->Define("weight", []() { return 1.0f; }, {}, *systematicManager);
+    dataManager->Define("channel", []() { return 0.5f; }, {}, *systematicManager);
+    dataManager->Define("sampleCategory", []() { return 0.5f; }, {},
+                        *systematicManager);
+    dataManager->Define("controlRegion", []() { return 0.5f; }, {},
+                        *systematicManager);
+    dataManager->Define("controlRegion_jesUp", []() { return 1.5f; }, {},
+                        *systematicManager);
+    dataManager->Define("controlRegion_jesDown", []() { return 2.5f; }, {},
+                        *systematicManager);
+    systematicManager->registerVariationColumns(
+        "controlRegion", "jes", "controlRegion_jesUp", "controlRegion_jesDown");
+
+    if (!backend.empty()) {
+      configManager->set("histogramBackend", backend);
+    }
+    histogramManager->setupFromConfigFile();
+    histInfo info("region_migration", "obs", "obs", "weight", 5, 0.0f, 5.0f);
+    EXPECT_NO_THROW(histogramManager->BookSingleHistogram(
+        info, selectionInfo(),
+        selectionInfo("controlRegion", 3, 0.0, 3.0, {"SR", "CR", "Top"}),
+        selectionInfo("channel", 1, 0.0, 1.0, {"channel"})));
+
+    ASSERT_EQ(histogramManager->GetHistos().size(), 1u);
+    auto histogram = histogramManager->GetHistos().front().GetPtr();
+    ASSERT_NE(histogram, nullptr);
+    ASSERT_EQ(histogram->GetNdimensions(), 5);
+    const auto variedRegions = dataManager->getDataFrame()
+        .Take<ROOT::VecOps::RVec<Float_t>>(
+            "controlRegion_systVector_region_migration_")
+        .GetValue();
+    ASSERT_EQ(variedRegions.size(), 1u);
+    ASSERT_EQ(variedRegions.front().size(), 6u);
+    EXPECT_FLOAT_EQ(variedRegions.front()[0], 0.5f);
+    EXPECT_FLOAT_EQ(variedRegions.front()[1], 0.5f);
+    EXPECT_FLOAT_EQ(variedRegions.front()[2], 1.5f);
+    EXPECT_FLOAT_EQ(variedRegions.front()[3], 1.5f);
+    EXPECT_FLOAT_EQ(variedRegions.front()[4], 2.5f);
+    EXPECT_FLOAT_EQ(variedRegions.front()[5], 2.5f);
+
+    // Axis 1 stores the control-region category and axis 3 the systematic.
+    // ROOT's regular-bin coordinates start at one: Nominal, Up, and Down are
+    // coordinates 1, 2, and 3 on the systematic axis.
+    // The two synthetic fills each stay in SR nominally and move to CR / Top
+    // under the Up / Down shape variations, respectively.
+    std::map<std::pair<int, int>, float> regionYields;
+    std::vector<Int_t> indices(histogram->GetNdimensions());
+    for (Long64_t bin = 0; bin < histogram->GetNbins(); ++bin) {
+      const float content = histogram->GetBinContent(bin, indices.data());
+      if (content != 0.0f) {
+        regionYields[{indices[1], indices[3]}] += content;
+      }
+    }
+    EXPECT_FLOAT_EQ(regionYields.at(std::make_pair(1, 1)), 2.0f);
+    EXPECT_FLOAT_EQ(regionYields.at(std::make_pair(2, 2)), 2.0f);
+    EXPECT_FLOAT_EQ(regionYields.at(std::make_pair(3, 3)), 2.0f);
   }
 
   std::unique_ptr<IConfigurationProvider> configManager;
@@ -742,6 +807,15 @@ TEST_F(NDHistogramManagerConfigTest, AutoDetectDoesNotDuplicateManualRegistratio
   EXPECT_NE(systs.find("jes"), systs.end());
 }
 
+TEST_F(NDHistogramManagerConfigTest, ShapeVariationCanMigrateHistogramRegion) {
+  expectShapeVariationCanMigrateHistogramRegion();
+}
+
+TEST_F(NDHistogramManagerConfigTest,
+       ShapeVariationCanMigrateHistogramRegionWithBoostBackend) {
+  expectShapeVariationCanMigrateHistogramRegion("boost");
+}
+
 TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsWithBoundRegionManager) {
   dataManager->Define("var1", []() { return 5.0f; }, {}, *systematicManager);
   dataManager->Define("w1", []() { return 1.0f; }, {}, *systematicManager);
@@ -790,12 +864,12 @@ TEST_F(NDHistogramManagerConfigTest, YamlHistogramConfigParsedFromTextMainConfig
   EXPECT_NO_THROW(histogramManager->setupFromConfigFile());
 }
 
-TEST_F(NDHistogramManagerConfigTest, VhHistogramsHaveSevenBTagRegions) {
-  configManager->set("histogramConfig", "../../../analyses/VH/histograms.yaml");
+TEST_F(NDHistogramManagerConfigTest, HistogramYamlParsesSevenChannelRegions) {
+  configManager->set("histogramConfig", "cfg/test_histograms_seven_regions.yaml");
   ASSERT_NO_THROW(histogramManager->setupFromConfigFile());
 
   const auto &histograms = histogramManager->getConfigHistograms();
-  ASSERT_EQ(histograms.size(), 36u);
+  ASSERT_EQ(histograms.size(), 1u);
   const std::vector<std::string> expectedRegions = {
       "AtLeast1TightB_SubleadBelowLoose",
       "AtLeast1TightB_SubleadLooseToMedium",

@@ -162,6 +162,33 @@ TEST_F(WeightManagerTest, AddScaleFactorWithEmptyColumnThrows) {
   EXPECT_THROW(mgr.addScaleFactor("sf", ""), std::invalid_argument);
 }
 
+TEST_F(WeightManagerTest, RepeatedScaleFactorRegistrationDoesNotSquareWeight) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+  dm->Define("genWeight_nominal", [](ULong64_t) { return 2.0; },
+             {"rdfentry_"}, *systematicManager);
+
+  // setupCmsStandardWeights() and setupCmsGenWeights() both register this
+  // same nominal component in the documented CMS stack.
+  mgr->addScaleFactor("genWeight", "genWeight_nominal");
+  mgr->addScaleFactor("genWeight", "genWeight_nominal");
+  mgr->defineNominalWeight("weight_nominal");
+  mgr->execute();
+  mgr->finalize();
+
+  ASSERT_EQ(mgr->getAuditEntries().size(), 1u);
+  EXPECT_DOUBLE_EQ(mgr->getAuditEntries()[0].sumWeights, 6.0);
+  EXPECT_DOUBLE_EQ(mgr->getAuditEntries()[0].meanWeight, 2.0);
+}
+
+TEST_F(WeightManagerTest, ScaleFactorNameCannotUseTwoColumns) {
+  WeightManager mgr;
+  mgr.addScaleFactor("genWeight", "genWeight_nominal");
+  EXPECT_THROW(
+      mgr.addScaleFactor("genWeight", "other_genWeight"),
+      std::invalid_argument);
+}
+
 // ---------------------------------------------------------------------------
 // Weight variation registration
 // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 #include <PlottingUtility.h>
 
+#include <TAxis.h>
 #include <TCanvas.h>
 #include <TDirectory.h>
 #include <TFile.h>
@@ -54,6 +55,39 @@ double getNormalizationScale(TFile& file, const PlotProcessConfig& process) {
     return process.scale;
   }
   return process.scale / norm;
+}
+
+std::unique_ptr<TH1D> cloneAsDoubleHistogram(const TH1& source,
+                                            const std::string& name) {
+  if (source.GetDimension() != 1) {
+    return nullptr;
+  }
+
+  const auto* xBins = source.GetXaxis()->GetXbins();
+  std::unique_ptr<TH1D> result;
+  if (xBins && xBins->GetSize() == source.GetNbinsX() + 1) {
+    result = std::make_unique<TH1D>(name.c_str(), source.GetTitle(),
+                                    source.GetNbinsX(), xBins->GetArray());
+  } else {
+    result = std::make_unique<TH1D>(name.c_str(), source.GetTitle(),
+                                    source.GetNbinsX(),
+                                    source.GetXaxis()->GetXmin(),
+                                    source.GetXaxis()->GetXmax());
+  }
+
+  result->SetDirectory(nullptr);
+  result->Sumw2();
+  for (int bin = 0; bin <= source.GetNbinsX() + 1; ++bin) {
+    result->SetBinContent(bin, source.GetBinContent(bin));
+    result->SetBinError(bin, source.GetBinError(bin));
+  }
+  result->SetEntries(source.GetEntries());
+  result->GetXaxis()->SetTitle(source.GetXaxis()->GetTitle());
+  result->GetYaxis()->SetTitle(source.GetYaxis()->GetTitle());
+  for (int bin = 1; bin <= source.GetNbinsX(); ++bin) {
+    result->GetXaxis()->SetBinLabel(bin, source.GetXaxis()->GetBinLabel(bin));
+  }
+  return result;
 }
 
 // Mutex to protect ROOT GUI/IO (TCanvas/TPad/SaveAs) which is not safe to run concurrently
@@ -256,12 +290,12 @@ PlotResult PlottingUtility::makeStackPlot(const PlotRequest& request) const {
     }
 
     const std::string cloneName = "plot_hist_" + std::to_string(processIndex);
-    auto hist = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(source->Clone(cloneName.c_str())));
+    auto hist = cloneAsDoubleHistogram(*source, cloneName);
     if (!hist) {
-      result.message = "Histogram is not TH1D: '" + process.histogramName + "'";
+      result.message = "Histogram is not one-dimensional: '" +
+                       process.histogramName + "'";
       return result;
     }
-    hist->SetDirectory(nullptr);
     hist->Scale(getNormalizationScale(file, process));
     hist->SetLineColor(process.color);
     hist->SetMarkerColor(process.color);

@@ -15,3 +15,9 @@ Use the user's request to set task scope. Treat READMEs, analysis configs, datas
 - `analyses/` contains separately maintained analysis projects. Their presence and build targets vary by checkout; inspect each analysis's `CMakeLists.txt` and entry point rather than assuming a particular directory or runner.
 
 Check `git status --short` before editing and preserve existing work, including generated run directories and external analysis checkouts. Keep analysis-specific selections and regions in the analysis project unless the requested change is to framework behavior.
+
+The root `.gitignore` ignores `analyses/*`, so the root status does not show
+changes inside nested analysis repositories. Before working near an analysis,
+also record `git -C analyses/<name> rev-parse HEAD` and check
+`git -C analyses/<name> status --short`; preserve those changes independently
+of the framework worktree.

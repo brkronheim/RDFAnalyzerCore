@@ -215,6 +215,18 @@ void WeightManager::addScaleFactor(const std::string &name,
     throw std::invalid_argument("WeightManager::addScaleFactor: name must not be empty");
   if (column.empty())
     throw std::invalid_argument("WeightManager::addScaleFactor: column must not be empty");
+  const auto existing = std::find_if(
+      scaleFactors_m.begin(), scaleFactors_m.end(),
+      [&](const auto &entry) { return entry.first == name; });
+  if (existing != scaleFactors_m.end()) {
+    if (existing->second == column) {
+      return;
+    }
+    throw std::invalid_argument(
+        "WeightManager::addScaleFactor: component '" + name +
+        "' is already registered for column '" + existing->second +
+        "' and cannot also use column '" + column + "'");
+  }
   scaleFactors_m.push_back({name, column});
 }
 

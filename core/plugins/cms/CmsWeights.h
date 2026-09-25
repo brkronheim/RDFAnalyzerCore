@@ -178,13 +178,15 @@ struct CmsWeightConfig {
   /// These are set on the TaggerWorkingPointManager("btagManager") when
   /// setupCmsStandardWeights() runs.  All zero (default) means the caller
   /// has configured them externally.
-  /// When all fields are zero, setupCmsStandardWeights() auto-populates
-  /// from CmsYearRegistry::defaultBTagWorkingPoints().
+  /// Zero fields do not select any working points. Supply thresholds here or
+  /// register working points on the manager explicitly; built-in year/tagger
+  /// defaults are not currently available.
   BTagWorkingPoints btagWorkingPoints;
 
   /// C-tag (CvL × CvB) working-point thresholds.
-  /// When all fields are zero, setupCmsStandardWeights() auto-populates
-  /// from CmsYearRegistry::defaultCTagWorkingPoints().
+  /// Zero fields do not select any working points. Supply thresholds here or
+  /// register working points on the manager explicitly; built-in year/tagger
+  /// defaults are not currently available.
   CTagWorkingPoints ctagWorkingPoints;
 
   /// Prefix for correction-manager registration names.
@@ -338,6 +340,11 @@ std::vector<float> selectElectronRecoScaleFactors(
     const std::vector<float> &below20,
     const std::vector<float> &between20And75,
     const std::vector<float> &above75);
+ROOT::VecOps::RVec<float> selectElectronRecoScaleFactors(
+    const ROOT::VecOps::RVec<float> &pt,
+    const ROOT::VecOps::RVec<float> &below20,
+    const ROOT::VecOps::RVec<float> &between20And75,
+    const ROOT::VecOps::RVec<float> &above75);
 
 /// Compute the product of a vector of weights with safeguards.
 float productOrOne(const std::vector<float> &weights);

@@ -606,11 +606,13 @@ Complete examples are available in the `examples/` directory:
 
 2. **Plugin access**: Plugin managers ARE exposed to Python with full lifecycle and action APIs. See "Plugin Management" section for details on using `AddPlugin()`, `applyAllOnnxModels()`, `applyAllBDTs()`, `applyCorrection()`, and other plugin methods.
 
-3. **Memory management**: When using DefineFromVector, ensure arrays remain in memory during analysis. The analyzer stores pointers, not copies.
+3. **Memory management**: `DefineFromVector` captures a borrowed address in the lazy RDataFrame graph; it does not copy or retain the NumPy owner. Keep the array alive, unchanged, correctly typed, contiguous, and aligned until `save()` returns. `DefineFromPointer` has the same lifetime rule for the native function and any code library that owns it. Null addresses and signature/column arity mismatches are rejected before graph construction, but arbitrary pointer validity and dataframe type compatibility cannot be checked safely by this API.
 
 4. **ROOT environment**: Requires proper ROOT environment setup. Source `env.sh` or `thisroot.sh` before running Python scripts.
 
 5. **Systematic variations**: Currently handled automatically for DefineJIT. Not yet implemented for DefineFromPointer or DefineFromVector.
+
+6. **Python threads**: `save()` runs synchronously while holding the Python GIL. The current graph API invokes native C++/Numba functions and does not support Python callbacks from dataframe workers; other Python threads therefore cannot make progress until `save()` returns.
 
 ## Troubleshooting
 

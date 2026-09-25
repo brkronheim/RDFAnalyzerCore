@@ -508,6 +508,63 @@ class TestPrepareManifestDatacardConfig(unittest.TestCase):
             finally:
                 os.unlink(prepared)
 
+    def test_manifest_nuisance_groups_scope_datacard_systematics(self):
+        mod = self._import()
+        from output_schema import (
+            HistogramSchema, NuisanceGroupDefinition, OutputManifest,
+        )
+        from create_datacards import DatacardGenerator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "datacard.yaml")
+            with open(config_path, "w") as fh:
+                yaml.safe_dump(
+                    {
+                        "output_dir": os.path.join(tmpdir, "out"),
+                        "input_files": {
+                            "signal_sample": {"path": "unused.root"},
+                            "background_sample": {"path": "unused.root"},
+                        },
+                        "processes": {
+                            "signal": {"samples": ["signal_sample"]},
+                            "background": {"samples": ["background_sample"]},
+                        },
+                        "systematics": {"JES": {"type": "shape"}},
+                        "control_regions": {
+                            "SR": {"observable": "mass", "processes": ["signal", "background"]}
+                        },
+                    },
+                    fh,
+                )
+            manifest = OutputManifest(
+                histograms=HistogramSchema(output_file="merged.root"),
+                nuisance_groups=[
+                    NuisanceGroupDefinition(
+                        name="signal_jes", systematics=["JES"],
+                        processes=["signal"], regions=["SR"],
+                        output_usage=["datacard"],
+                    )
+                ],
+            )
+            manifest_path = os.path.join(tmpdir, "output_manifest.yaml")
+            manifest.save_yaml(manifest_path)
+
+            prepared = mod._prepare_manifest_datacard_config(
+                config_path, manifest, manifest_path, target_region="SR"
+            )
+            try:
+                generator = DatacardGenerator(prepared)
+                self.assertEqual(
+                    list(generator._get_systematics_for_process("signal", "SR")),
+                    ["JES"],
+                )
+                self.assertEqual(
+                    generator._get_systematics_for_process("background", "SR"),
+                    {},
+                )
+            finally:
+                os.unlink(prepared)
+
     def test_synthesizes_regions_from_manifest_defaults(self):
         mod = self._import()
         from output_schema import OutputManifest, HistogramSchema, RegionDefinition

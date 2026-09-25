@@ -22,7 +22,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from dataset_manifest import DatasetEntry, DatasetManifest, FriendTreeConfig
+from dataset_manifest import (
+    DatasetEntry,
+    DatasetManifest,
+    FriendTreeConfig,
+    select_generator_weight_denominator,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +47,27 @@ class TestDatasetEntry:
         assert e.xsec is None
         assert e.year is None
         assert e.parent is None
+        assert e.generator_weight_mode == "sign"
+
+    def test_generator_weight_mode_round_trips_and_defaults_to_sign(self):
+        default_entry = DatasetEntry.from_dict({"name": "default"})
+        full_entry = DatasetEntry.from_dict(
+            {"name": "full", "generator_weight_mode": "FULL"}
+        )
+        full_legacy = DatasetEntry.from_legacy_dict(
+            {"name": "full", "genWeightMode": "full"}
+        )
+
+        assert default_entry.generator_weight_mode == "sign"
+        assert full_entry.generator_weight_mode == "full"
+        assert DatasetEntry.from_dict(full_entry.to_dict()).generator_weight_mode == "full"
+        assert full_entry.to_legacy_dict()["genWeightMode"] == "full"
+        assert full_legacy.generator_weight_mode == "full"
+
+    @pytest.mark.parametrize("mode", ["typo", "", None, 1])
+    def test_generator_weight_mode_rejects_invalid_values(self, mode):
+        with pytest.raises(ValueError, match="generator_weight_mode must be 'sign' or 'full'"):
+            DatasetEntry(name="bad", generator_weight_mode=mode)
 
     def test_full_construction(self):
         e = DatasetEntry(
@@ -223,6 +249,183 @@ class TestDatasetManifestQuery:
             DatasetEntry("ttbar_skim",     year=2022, dtype="mc",   process="ttbar",  parent="ttbar_2022"),
         ])
 
+
+    def test_selects_denominator_for_each_mode_with_negative_events(self):
+        # The synthetic generator weights are [-2, 1, 4], so the raw sum is 3
+        # while the sum of signs is 1.
+        assert select_generator_weight_denominator("sign", 3.0, 1.0) == 1.0
+        assert select_generator_weight_denominator("full", 3.0, 1.0) == 3.0
+
+    @pytest.mark.parametrize(
+        ("mode", "sum_weights", "sum_sign_weights", "selected"),
+        [
+            ("sign", 5.0, 0.0, "sum_sign_weights"),
+            ("sign", 5.0, -2.0, "sum_sign_weights"),
+            ("sign", 5.0, float("nan"), "sum_sign_weights"),
+            ("sign", 5.0, float("inf"), "sum_sign_weights"),
+            ("full", 0.0, 5.0, "sum_weights"),
+            ("full", -2.0, 5.0, "sum_weights"),
+            ("full", float("nan"), 5.0, "sum_weights"),
+            ("full", float("inf"), 5.0, "sum_weights"),
+        ],
+    )
+    def test_rejects_invalid_selected_denominator_without_fallback(
+        self, mode, sum_weights, sum_sign_weights, selected
+    ):
+        with pytest.raises(ValueError, match=selected) as exc:
+            select_generator_weight_denominator(
+                mode,
+                sum_weights,
+                sum_sign_weights,
+                dataset_name="mc_negative_weights",
+            )
+        assert "must be finite and strictly positive" in str(exc.value)
+        assert "No fallback" in str(exc.value)
+
+    def test_skim_collector_uses_the_manifest_selected_denominator(self, tmp_path, monkeypatch):
+        analysis_tasks = pytest.importorskip("analysis_tasks")
+        manifest_path = tmp_path / "datasets.yaml"
+        manifest_path.write_text(
+            yaml.safe_dump(
+                {
+                    "lumi": 1.0,
+                    "datasets": [
+                        {
+                            "name": "negative_sign",
+                            "dtype": "mc",
+                            "xsec": 0.003,
+                            "files": ["sign.root"],
+                        },
+                        {
+                            "name": "negative_full",
+                            "dtype": "mc",
+                            "xsec": 0.003,
+                            "generator_weight_mode": "full",
+                            "files": ["full.root"],
+                        },
+                    ],
+                }
+            )
+        )
+        job_info = {
+            "negative_sign": {0: {"meta": "sign_meta.root"}},
+            "negative_full": {0: {"meta": "full_meta.root"}},
+        }
+        state = {
+            "datasets": {
+                dataset: {"jobs": {"0": {"status": "done"}}}
+                for dataset in job_info
+            }
+        }
+        raw_sums = {"sign_meta.root": 3.0, "full_meta.root": 3.0}
+        sign_sums = {"sign_meta.root": 1.0, "full_meta.root": 1.0}
+        monkeypatch.setattr(
+            analysis_tasks,
+            "_shared_read_weight_sum",
+            lambda path, sample: raw_sums[path],
+        )
+        monkeypatch.setattr(
+            analysis_tasks,
+            "_shared_read_weight_sign_sum",
+            lambda path, sample: sign_sums[path],
+        )
+
+        result = analysis_tasks._collect_skim_normalization(
+            str(manifest_path), job_info, state
+        )
+
+        sign_result = result["datasets"]["negative_sign"]
+        full_result = result["datasets"]["negative_full"]
+        assert sign_result["normalization_mode"] == "sign"
+        assert sign_result["normalization_denominator_name"] == "sum_sign_weights"
+        assert sign_result["normalization_denominator"] == 1.0
+        assert sign_result["normalization"] == 3.0
+        assert full_result["normalization_mode"] == "full"
+        assert full_result["normalization_denominator_name"] == "sum_weights"
+        assert full_result["normalization_denominator"] == 3.0
+        assert full_result["normalization"] == 1.0
+
+    @pytest.mark.parametrize(
+        ("mode", "raw_total", "sign_total", "selected"),
+        [
+            ("sign", 3.0, 0.0, "sum_sign_weights"),
+            ("full", 0.0, 1.0, "sum_weights"),
+        ],
+    )
+    def test_skim_collector_rejects_invalid_selected_sum_without_fallback(
+        self, tmp_path, monkeypatch, mode, raw_total, sign_total, selected
+    ):
+        analysis_tasks = pytest.importorskip("analysis_tasks")
+        manifest_path = tmp_path / "datasets.yaml"
+        manifest_path.write_text(
+            yaml.safe_dump(
+                {
+                    "datasets": [
+                        {
+                            "name": "invalid_denominator",
+                            "dtype": "mc",
+                            "xsec": 1.0,
+                            "generator_weight_mode": mode,
+                            "files": ["input.root"],
+                        }
+                    ]
+                }
+            )
+        )
+        job_info = {"invalid_denominator": {0: {"meta": "meta.root"}}}
+        state = {
+            "datasets": {
+                "invalid_denominator": {"jobs": {"0": {"status": "done"}}}
+            }
+        }
+        monkeypatch.setattr(
+            analysis_tasks,
+            "_shared_read_weight_sum",
+            lambda path, sample: raw_total,
+        )
+        monkeypatch.setattr(
+            analysis_tasks,
+            "_shared_read_weight_sign_sum",
+            lambda path, sample: sign_total,
+        )
+
+        result = analysis_tasks._collect_skim_normalization(
+            str(manifest_path), job_info, state
+        )["datasets"]["invalid_denominator"]
+
+        assert result["status"] == "error"
+        assert result["normalization"] is None
+        assert selected in result["errors"][0]
+        assert "No fallback" in result["errors"][0]
+
+    def test_job_config_receives_explicit_full_generator_weight_mode(self, tmp_path):
+        analysis_tasks = pytest.importorskip("analysis_tasks")
+        dataset = DatasetEntry(name="full_sample", generator_weight_mode="full")
+        metadata = analysis_tasks._dataset_job_metadata(dataset)
+        assert metadata["genWeightMode"] == "full"
+
+        template = tmp_path / "submit_config.txt"
+        template.write_text("enableCounters=true\n")
+        job_dir = tmp_path / "job"
+        output_dir = tmp_path / "output"
+        analysis_tasks._write_job_config(
+            str(job_dir), str(template), dataset, str(output_dir)
+        )
+        written_config = analysis_tasks.read_config(
+            str(job_dir / "submit_config.txt")
+        )
+        assert written_config["genWeightMode"] == "full"
+
+        data_dataset = DatasetEntry(name="data_sample", dtype="data")
+        data_job_dir = tmp_path / "data_job"
+        analysis_tasks._write_job_config(
+            str(data_job_dir), str(template), data_dataset, str(output_dir)
+        )
+        data_config = analysis_tasks.read_config(
+            str(data_job_dir / "submit_config.txt")
+        )
+        assert "genWeightMode" not in data_config
+
     def test_query_by_year(self):
         m = self._make_manifest()
         result = m.query(year=2022)
@@ -328,6 +531,7 @@ class TestDatasetManifestYAML:
                 process: ttbar
                 group: ttbar
                 dtype: mc
+                generator_weight_mode: full
                 das: /TTto2L2Nu/Run3/NANO
                 xsec: 98.34
                 filter_efficiency: 1.0
@@ -354,6 +558,7 @@ class TestDatasetManifestYAML:
         assert ttbar.year == 2022
         assert ttbar.xsec == 98.34
         assert ttbar.das == "/TTto2L2Nu/Run3/NANO"
+        assert ttbar.generator_weight_mode == "full"
 
     def test_save_and_reload_yaml(self, tmp_path):
         original = DatasetManifest(
@@ -365,6 +570,7 @@ class TestDatasetManifestYAML:
                     xsec=1000.0,
                     stitch_id=0,
                     dtype="mc",
+                    generator_weight_mode="full",
                     das="/WtoLNu/Run3/NANO",
                 )
             ],
@@ -383,6 +589,7 @@ class TestDatasetManifestYAML:
         assert e.name == "wjets_0"
         assert e.stitch_id == 0
         assert e.xsec == 1000.0
+        assert e.generator_weight_mode == "full"
 
     def test_load_auto_detect_yaml(self, tmp_path):
         path = self._make_yaml(tmp_path)
@@ -405,6 +612,17 @@ class TestDatasetManifestYAML:
                 dtype: mc
         """))
         with pytest.raises(ValueError, match="unknown top-level keys"):
+            DatasetManifest.load_yaml(str(p))
+
+    def test_load_yaml_rejects_invalid_generator_weight_mode(self, tmp_path):
+        p = tmp_path / "bad_weight_mode.yaml"
+        p.write_text(textwrap.dedent("""\
+            datasets:
+              - name: ttbar
+                dtype: mc
+                generator_weight_mode: magnitude
+        """))
+        with pytest.raises(ValueError, match="ttbar.*generator_weight_mode"):
             DatasetManifest.load_yaml(str(p))
 
     def test_load_yaml_promotes_unknown_dataset_keys_to_extra(self, tmp_path):

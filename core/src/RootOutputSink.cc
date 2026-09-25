@@ -99,7 +99,10 @@ static void expandSystematicColumns(std::vector<std::string>& columns,
   if (!systematicManager) {
     return;
   }
+
   const unsigned int baseSize = columns.size();
+  std::unordered_set<std::string> seen(columns.begin(), columns.end());
+
   // Pre-allocate to avoid repeated reallocation during the expansion loop.
   size_t extra = 0;
   for (unsigned int i = 0; i < baseSize; ++i) {
@@ -108,10 +111,27 @@ static void expandSystematicColumns(std::vector<std::string>& columns,
   columns.reserve(baseSize + extra);
 
   for (unsigned int i = 0; i < baseSize; ++i) {
-    const auto& systs = systematicManager->getSystematicsForVariable(columns[i]);
-    for (const auto& syst : systs) {
-      columns.push_back(columns[i] + "_" + syst + "Up");
-      columns.push_back(columns[i] + "_" + syst + "Down");
+    const auto appendVariation = [&](const std::string& label) {
+      const auto column =
+          systematicManager->getVariationColumnName(columns[i], label);
+      if (seen.insert(column).second) {
+        columns.push_back(column);
+      }
+    };
+
+    for (const auto& syst : systematicManager->getSystematics()) {
+      if (systematicManager->getVariablesForSystematic(syst).count(
+              columns[i]) == 0) {
+        continue;
+      }
+      for (const auto* direction : {"Up", "Down"}) {
+        appendVariation(syst + direction);
+      }
+    }
+
+    for (const auto& label :
+         systematicManager->getExplicitVariationLabelsForVariable(columns[i])) {
+      appendVariation(label);
     }
   }
 }

@@ -243,6 +243,8 @@ class ProvenanceRecord:
     * **user_repo_hash** - git commit hash of the user analysis repository.
     * **config_mtime** - UTC modification time (ISO 8601) of the job
       configuration file that triggered the job.
+    * **task_config_hash** - content digest of the effective task config and
+      explicitly supplied task input files, when captured.
 
     Any field may be ``None`` when the information is unavailable.  Two
     records are considered *matching* when every field that is non-``None`` in
@@ -257,6 +259,9 @@ class ProvenanceRecord:
     config_mtime:
         UTC modification time of the configuration file in ISO 8601 format,
         or ``None``.
+    task_config_hash:
+        SHA-256 digest of the effective task config and explicitly supplied
+        task inputs, or ``None``.
 
     Examples
     --------
@@ -274,11 +279,13 @@ class ProvenanceRecord:
         user_repo_hash: Optional[str] = None,
         config_mtime: Optional[str] = None,
         dataset_manifest_hash: Optional[str] = None,
+        task_config_hash: Optional[str] = None,
     ) -> None:
         self.framework_hash: Optional[str] = framework_hash
         self.user_repo_hash: Optional[str] = user_repo_hash
         self.config_mtime: Optional[str] = config_mtime
         self.dataset_manifest_hash: Optional[str] = dataset_manifest_hash
+        self.task_config_hash: Optional[str] = task_config_hash
 
     def matches(self, other: "ProvenanceRecord") -> bool:
         """Return ``True`` when all comparable fields agree.
@@ -297,9 +304,16 @@ class ProvenanceRecord:
         bool
             ``True`` if no comparable field differs between *self* and *other*.
         """
-        for attr in ("framework_hash", "user_repo_hash", "config_mtime", "dataset_manifest_hash"):
+        for attr in (
+            "framework_hash", "user_repo_hash", "config_mtime",
+            "dataset_manifest_hash", "task_config_hash",
+        ):
             self_val = getattr(self, attr)
             other_val = getattr(other, attr)
+            if attr == "task_config_hash" and (self_val is None) != (other_val is None):
+                # Older cache sidecars did not carry this field, so they
+                # cannot establish task-input identity and must be rebuilt.
+                return False
             if self_val is not None and other_val is not None:
                 if self_val != other_val:
                     return False
@@ -312,6 +326,7 @@ class ProvenanceRecord:
             "user_repo_hash": self.user_repo_hash,
             "config_mtime": self.config_mtime,
             "dataset_manifest_hash": self.dataset_manifest_hash,
+            "task_config_hash": self.task_config_hash,
         }
 
     @classmethod
@@ -322,6 +337,7 @@ class ProvenanceRecord:
             user_repo_hash=d.get("user_repo_hash"),
             config_mtime=d.get("config_mtime"),
             dataset_manifest_hash=d.get("dataset_manifest_hash"),
+            task_config_hash=d.get("task_config_hash"),
         )
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -329,7 +345,8 @@ class ProvenanceRecord:
             f"ProvenanceRecord("
             f"framework_hash={self.framework_hash!r}, "
             f"user_repo_hash={self.user_repo_hash!r}, "
-            f"config_mtime={self.config_mtime!r})"
+            f"config_mtime={self.config_mtime!r}, "
+            f"task_config_hash={self.task_config_hash!r})"
         )
 
 
@@ -1463,6 +1480,9 @@ class OutputManifest:
         time.
     config_mtime : str or None
         UTC modification time (ISO 8601) of the job configuration file.
+    task_config_hash : str or None
+        Content digest of the effective task configuration and explicit task
+        input files. Optional and ignored when loading older manifests.
     dataset_manifest_provenance : DatasetManifestProvenance or None
         Identity and selection record for the dataset manifest used in this
         job.  Records the manifest file hash, the query parameters applied
@@ -1494,6 +1514,7 @@ class OutputManifest:
         framework_hash: Optional[str] = None,
         user_repo_hash: Optional[str] = None,
         config_mtime: Optional[str] = None,
+        task_config_hash: Optional[str] = None,
         dataset_manifest_provenance: Optional["DatasetManifestProvenance"] = None,
         column_inventory: Optional["SystematicColumnInventory"] = None,
         coverage_report: Optional[Dict[str, int]] = None,
@@ -1510,6 +1531,7 @@ class OutputManifest:
         self.framework_hash: Optional[str] = framework_hash
         self.user_repo_hash: Optional[str] = user_repo_hash
         self.config_mtime: Optional[str] = config_mtime
+        self.task_config_hash: Optional[str] = task_config_hash
         self.dataset_manifest_provenance: Optional[DatasetManifestProvenance] = (
             dataset_manifest_provenance
         )
@@ -1541,6 +1563,7 @@ class OutputManifest:
             "framework_hash": self.framework_hash,
             "user_repo_hash": self.user_repo_hash,
             "config_mtime": self.config_mtime,
+            "task_config_hash": self.task_config_hash,
             "dataset_manifest_provenance": (
                 self.dataset_manifest_provenance.to_dict()
                 if self.dataset_manifest_provenance is not None
@@ -1618,6 +1641,7 @@ class OutputManifest:
             framework_hash=data.get("framework_hash"),
             user_repo_hash=data.get("user_repo_hash"),
             config_mtime=data.get("config_mtime"),
+            task_config_hash=data.get("task_config_hash"),
             dataset_manifest_provenance=dataset_manifest_provenance,
             column_inventory=column_inventory,
             coverage_report=data.get("coverage_report"),
@@ -1703,6 +1727,10 @@ class OutputManifest:
         for i, artifact in enumerate(self.intermediate_artifacts):
             for e in artifact.validate():
                 errors.append(f"intermediate_artifacts[{i}]: {e}")
+
+        if self.column_inventory is not None:
+            for e in self.column_inventory.validate():
+                errors.append(f"column_inventory: {e}")
 
         # Validate individual region definitions.
         for i, region in enumerate(self.regions):
@@ -1791,6 +1819,17 @@ class OutputManifest:
                     f"current={NUISANCE_GROUP_DEFINITION_VERSION}"
                 )
 
+        if (
+            manifest.column_inventory is not None
+            and manifest.column_inventory.schema_version
+            != SYSTEMATIC_COLUMN_INVENTORY_VERSION
+        ):
+            mismatches.append(
+                "column_inventory: stored="
+                f"{manifest.column_inventory.schema_version}, "
+                f"current={SYSTEMATIC_COLUMN_INVENTORY_VERSION}"
+            )
+
         if mismatches:
             raise SchemaVersionError(
                 "Output schema version mismatch(es) detected:\n"
@@ -1817,7 +1856,7 @@ class OutputManifest:
         Constructs a :class:`ProvenanceRecord` from the
         ``framework_hash``, ``user_repo_hash``, ``config_mtime``, and
         (when available) the ``manifest_hash`` stored in
-        ``dataset_manifest_provenance``.
+        ``dataset_manifest_provenance``, plus ``task_config_hash`` when set.
 
         Returns
         -------
@@ -1835,6 +1874,7 @@ class OutputManifest:
             user_repo_hash=self.user_repo_hash,
             config_mtime=self.config_mtime,
             dataset_manifest_hash=dmp_hash,
+            task_config_hash=self.task_config_hash,
         )
 
     def resolve(
@@ -2164,6 +2204,45 @@ def validate_merge_inputs(
                         f"manifest[{i}]={m_a.schema_version}."
                     )
 
+    # Region and nuisance definitions are analysis-level contracts. Merging
+    # incompatible definitions would leave downstream branch/datacard tasks
+    # with whichever arbitrary input happened to be first.
+    for attr in ("regions", "nuisance_groups"):
+        ref_items = [item.to_dict() for item in getattr(ref, attr)]
+        for i, manifest in enumerate(manifests[1:], start=1):
+            items = [item.to_dict() for item in getattr(manifest, attr)]
+            if items != ref_items:
+                errors.append(
+                    f"Inconsistent {attr} definitions: manifest[0] and "
+                    f"manifest[{i}] differ."
+                )
+
+    # Dataset provenance can describe different selected entries from the
+    # same source manifest. The merger can union those names, but cannot
+    # truthfully collapse distinct source manifests or query selections into
+    # the single-source schema.
+    ref_dataset_prov = ref.dataset_manifest_provenance
+    for i, manifest in enumerate(manifests[1:], start=1):
+        candidate = manifest.dataset_manifest_provenance
+        if (ref_dataset_prov is None) != (candidate is None):
+            errors.append(
+                "Inconsistent dataset_manifest_provenance presence: "
+                f"manifest[0] and manifest[{i}] differ."
+            )
+        elif ref_dataset_prov is not None and candidate is not None:
+            identity = ("manifest_path", "manifest_hash", "query_params")
+            differing = [
+                key for key in identity
+                if getattr(ref_dataset_prov, key) != getattr(candidate, key)
+            ]
+            if differing:
+                errors.append(
+                    "Incompatible dataset_manifest_provenance in "
+                    f"manifest[{i}]: source identity differs in "
+                    + ", ".join(differing)
+                    + "."
+                )
+
     # ------------------------------------------------------------------
     # Rule 8: required roles
     # ------------------------------------------------------------------
@@ -2273,17 +2352,94 @@ def merge_manifests(
         )
 
     # Use the first manifest as the structural template — all inputs have
-    # agreed on schema versions and roles after validation above.
+    # agreed on schema versions, roles, and analysis-level definitions above.
     source = manifests[0]
+
+    def _clone(schema):
+        return type(schema).from_dict(schema.to_dict()) if schema is not None else None
+
+    dataset_provenance = _clone(source.dataset_manifest_provenance)
+    if dataset_provenance is not None:
+        selected_names = [
+            manifest.dataset_manifest_provenance.resolved_entry_names
+            for manifest in manifests
+        ]
+        if any(names is not None for names in selected_names):
+            resolved_names: List[str] = []
+            for names in selected_names:
+                for name in names or []:
+                    if name not in resolved_names:
+                        resolved_names.append(name)
+            dataset_provenance.resolved_entry_names = resolved_names
+
+    inventory = None
+    if any(manifest.column_inventory is not None for manifest in manifests):
+        entries_by_base: Dict[str, SystematicColumnEntry] = {}
+        for manifest in manifests:
+            if manifest.column_inventory is None:
+                continue
+            for entry in manifest.column_inventory.entries:
+                current = entries_by_base.get(entry.base_name)
+                if current is None:
+                    entries_by_base[entry.base_name] = SystematicColumnEntry.from_dict(
+                        entry.to_dict()
+                    )
+                    continue
+                for field_name in (
+                    "family", "nominal_column", "producer", "affected_observable"
+                ):
+                    old_value = getattr(current, field_name)
+                    new_value = getattr(entry, field_name)
+                    if old_value and new_value and old_value != new_value:
+                        raise MergeInputValidationError(
+                            "Cannot merge column inventory entry "
+                            f"{entry.base_name!r}: conflicting {field_name} "
+                            f"values {old_value!r} and {new_value!r}."
+                        )
+                    if not old_value:
+                        setattr(current, field_name, new_value)
+                for field_name in ("up_column", "down_column"):
+                    old_value = getattr(current, field_name)
+                    new_value = getattr(entry, field_name)
+                    if old_value and new_value and old_value != new_value:
+                        raise MergeInputValidationError(
+                            "Cannot merge column inventory entry "
+                            f"{entry.base_name!r}: conflicting {field_name} "
+                            f"values {old_value!r} and {new_value!r}."
+                        )
+                    if not old_value:
+                        setattr(current, field_name, new_value)
+        inventory = SystematicColumnInventory(
+            entries=list(entries_by_base.values())
+        )
+
+    coverage_reports = [m.coverage_report for m in manifests]
+    coverage_report = None
+    if coverage_reports and all(report is not None for report in coverage_reports):
+        coverage_report = {}
+        all_keys = set().union(*(report.keys() for report in coverage_reports))
+        for key in all_keys:
+            values = [report.get(key, 0) for report in coverage_reports]
+            if any(not isinstance(value, (int, float)) for value in values):
+                raise MergeInputValidationError(
+                    f"Cannot aggregate non-numeric coverage_report field {key!r}."
+                )
+            coverage_report[key] = sum(values)
+
     return OutputManifest(
-        skim=source.skim,
-        histograms=source.histograms,
-        metadata=source.metadata,
-        cutflow=source.cutflow,
-        law_artifacts=list(source.law_artifacts),
-        intermediate_artifacts=list(source.intermediate_artifacts),
+        skim=_clone(source.skim),
+        histograms=_clone(source.histograms),
+        metadata=_clone(source.metadata),
+        cutflow=_clone(source.cutflow),
+        law_artifacts=[_clone(item) for item in source.law_artifacts],
+        intermediate_artifacts=[_clone(item) for item in source.intermediate_artifacts],
+        regions=[_clone(item) for item in source.regions],
+        nuisance_groups=[_clone(item) for item in source.nuisance_groups],
         framework_hash=framework_hash,
         user_repo_hash=user_repo_hash,
+        dataset_manifest_provenance=dataset_provenance,
+        column_inventory=inventory,
+        coverage_report=coverage_report,
     )
 
 

@@ -4,6 +4,7 @@
 #include <GenWeightManager.h>
 #include <ManagerFactory.h>
 #include <NullOutputSink.h>
+#include <WeightManager.h>
 #include <SystematicManager.h>
 #include <api/ManagerContext.h>
 #include <gtest/gtest.h>
@@ -12,6 +13,7 @@
 #include <ROOT/RVec.hxx>
 
 #include <algorithm>
+#include <numeric>
 #include <memory>
 #include <string>
 #include <vector>
@@ -150,6 +152,7 @@ TEST_F(GenWeightManagerTest, MapsConfiguredPdfIds) {
 TEST_F(GenWeightManagerTest, UsesConfiguredBaseWeightColumn) {
   config->set("genWeightEnableLheScale", "false");
   config->set("genWeightEnablePs", "false");
+  config->set("genWeightMode", "full");
   config->set("genWeightPdfFirstLhaId", "325300");
   config->set("genWeightPdfCount", "1");
   config->set("genWeightBaseWeightColumn", "weight_nominal");
@@ -166,6 +169,101 @@ TEST_F(GenWeightManagerTest, UsesConfiguredBaseWeightColumn) {
   auto varied = dm.getDataFrame().Take<Float_t>("genWeight_nominal_pdf_325300");
   EXPECT_FLOAT_EQ(nominal.GetValue().at(0), 10.0f);
   EXPECT_FLOAT_EQ(varied.GetValue().at(0), 9.1f);
+}
+
+TEST_F(GenWeightManagerTest,
+       SignAndFullModesUseNegativeWeightsAndKeepVariationRateChanges) {
+  for (const std::string mode : {"sign", "full"}) {
+    auto modeConfig = ManagerFactory::createConfigurationManager(
+        "cfg/test_data_config_minimal.txt");
+    modeConfig->set("genWeightMode", mode);
+    modeConfig->set("genWeightEnableLheScale", "false");
+    modeConfig->set("genWeightEnablePdf", "false");
+    modeConfig->set("genWeightEnablePdfAs", "false");
+    modeConfig->set("genWeightEnablePs", "true");
+
+    DataManager dm(3);
+    auto modeSystematics = std::make_unique<SystematicManager>();
+    auto modeLogger = std::make_unique<DefaultLogger>();
+    auto modeSkimSink = std::make_unique<NullOutputSink>();
+    auto modeMetaSink = std::make_unique<NullOutputSink>();
+    dm.Define(
+        "genWeight",
+        [](ULong64_t entry) {
+          const Float_t weights[] = {-2.0f, 1.0f, 4.0f};
+          return weights[entry];
+        },
+        {"rdfentry_"}, *modeSystematics);
+    dm.Define(
+        "PSWeight",
+        [](ULong64_t entry) {
+          if (entry == 0) return FloatVec{2.0f, 0.5f, 1.0f, 1.0f};
+          if (entry == 1) return FloatVec{1.0f, 1.5f, 1.0f, 1.0f};
+          return FloatVec{1.0f, 1.0f, 1.0f, 1.0f};
+        },
+        {"rdfentry_"}, *modeSystematics);
+
+    auto ctx = makeContext(*modeConfig, dm, *modeSystematics, *modeLogger,
+                           *modeSkimSink, *modeMetaSink);
+    auto genWeights = std::make_unique<GenWeightManager>();
+    genWeights->setContext(ctx);
+    genWeights->setupFromConfigFile();
+    genWeights->defineVariationWeights();
+
+    auto weightManager = std::make_unique<WeightManager>();
+    weightManager->setContext(ctx);
+    weightManager->addScaleFactor("genWeight", "genWeight_nominal");
+    // The numerator is 6 for each mode.  The raw and sign denominators for
+    // [-2, 1, 4] are 3 and 1 respectively.
+    weightManager->addNormalization("sample", mode == "sign" ? 6.0 : 2.0);
+    weightManager->addWeightVariation(
+        "generator_ps", "genWeight", "genWeight_nominal_ps_isr2_fsr1",
+        "genWeight_nominal_ps_isr1_fsr2");
+    weightManager->defineNominalWeight("weight_nominal");
+    weightManager->defineVariedWeight("generator_ps", "up", "weight_up");
+    weightManager->defineVariedWeight("generator_ps", "down", "weight_down");
+
+    auto nominalGenerator =
+        dm.getDataFrame().Take<Float_t>("genWeight_nominal");
+    auto variedGeneratorUp = dm.getDataFrame().Take<Float_t>(
+        "genWeight_nominal_ps_isr2_fsr1");
+    auto variedGeneratorDown = dm.getDataFrame().Take<Float_t>(
+        "genWeight_nominal_ps_isr1_fsr2");
+    auto nominalWeight = dm.getDataFrame().Take<double>("weight_nominal");
+    auto upWeight = dm.getDataFrame().Take<double>("weight_up");
+    auto downWeight = dm.getDataFrame().Take<double>("weight_down");
+
+    const std::vector<Float_t> expectedGenerator =
+        mode == "sign" ? std::vector<Float_t>{-1.0f, 1.0f, 1.0f}
+                        : std::vector<Float_t>{-2.0f, 1.0f, 4.0f};
+    const std::vector<Float_t> expectedGeneratorUp =
+        mode == "sign" ? std::vector<Float_t>{-2.0f, 1.0f, 1.0f}
+                        : std::vector<Float_t>{-4.0f, 1.0f, 4.0f};
+    const std::vector<Float_t> expectedGeneratorDown =
+        mode == "sign" ? std::vector<Float_t>{-0.5f, 1.5f, 1.0f}
+                        : std::vector<Float_t>{-1.0f, 1.5f, 4.0f};
+    EXPECT_EQ(nominalGenerator.GetValue(), expectedGenerator);
+    EXPECT_EQ(variedGeneratorUp.GetValue(), expectedGeneratorUp);
+    EXPECT_EQ(variedGeneratorDown.GetValue(), expectedGeneratorDown);
+
+    const double nominalSum =
+        std::accumulate(nominalWeight.GetValue().begin(),
+                        nominalWeight.GetValue().end(), 0.0);
+    const double upSum = std::accumulate(upWeight.GetValue().begin(),
+                                         upWeight.GetValue().end(), 0.0);
+    const double downSum = std::accumulate(downWeight.GetValue().begin(),
+                                           downWeight.GetValue().end(), 0.0);
+    EXPECT_DOUBLE_EQ(nominalSum, 6.0);
+    EXPECT_DOUBLE_EQ(upSum, mode == "sign" ? 0.0 : 2.0);
+    EXPECT_DOUBLE_EQ(downSum, mode == "sign" ? 12.0 : 9.0);
+  }
+}
+
+TEST_F(GenWeightManagerTest, RejectsUnknownGeneratorWeightMode) {
+  config->set("genWeightMode", "magnitude");
+  DataManager dm(1);
+  defineBaseGenWeight(dm, *systematicManager);
+  EXPECT_THROW(makeMgr(dm), std::invalid_argument);
 }
 
 TEST_F(GenWeightManagerTest, ShortVectorsFallBackToUnity) {

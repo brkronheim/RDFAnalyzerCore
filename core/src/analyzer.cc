@@ -22,6 +22,16 @@
 #include <SystematicManager.h>
 #include <api/ManagerContext.h> // for wiring plugins and services
 
+template <typename T>
+static T& requireCoreDependency(const std::unique_ptr<T>& dependency,
+                                const char* name) {
+    if (!dependency) {
+        throw std::invalid_argument(std::string("Analyzer: Core dependency '") +
+                                    name + "' must be non-null");
+    }
+    return *dependency;
+}
+
 // Forward declaration of helper defined at file scope below.
 static void registerPluginProvenance(
     ProvenanceService* svc,
@@ -130,12 +140,14 @@ Analyzer::Analyzer(
       logger_m(std::move(logger)),
       skimSink_m(std::move(skimSink)),
       metaSink_m(std::move(metaSink)),
-      managerContext_m{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m},
+      managerContext_m{requireCoreDependency(configProvider_m, "configuration provider"),
+                       requireCoreDependency(dataFrameProvider_m, "dataframe provider"),
+                       requireCoreDependency(systematicManager_m, "systematic manager"),
+                       requireCoreDependency(logger_m, "logger"),
+                       requireCoreDependency(skimSink_m, "skim output sink"),
+                       requireCoreDependency(metaSink_m, "metadata output sink")},
       plugins(std::move(plugins))
 {
-    if (!configProvider_m || !dataFrameProvider_m || !systematicManager_m || !logger_m || !skimSink_m || !metaSink_m) {
-        throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
-    }
     verbosityLevel_m = 1;
     configureSystematics(*configProvider_m, *systematicManager_m);
     if (auto* dataManager = dynamic_cast<DataManager*>(dataFrameProvider_m.get())) {
@@ -161,11 +173,13 @@ Analyzer::Analyzer(
       logger_m(std::move(logger)),
       skimSink_m(std::move(skimSink)),
       metaSink_m(std::move(metaSink)),
-      managerContext_m{*configProvider_m, *dataFrameProvider_m, *systematicManager_m, *logger_m, *skimSink_m, *metaSink_m}
+      managerContext_m{requireCoreDependency(configProvider_m, "configuration provider"),
+                       requireCoreDependency(dataFrameProvider_m, "dataframe provider"),
+                       requireCoreDependency(systematicManager_m, "systematic manager"),
+                       requireCoreDependency(logger_m, "logger"),
+                       requireCoreDependency(skimSink_m, "skim output sink"),
+                       requireCoreDependency(metaSink_m, "metadata output sink")}
 {
-    if (!configProvider_m || !dataFrameProvider_m || !systematicManager_m || !logger_m || !skimSink_m || !metaSink_m) {
-        throw std::invalid_argument("Analyzer: Core dependencies must be non-null");
-    }
     for (auto& kv : uniquePlugins) { plugins.emplace(kv.first, std::move(kv.second)); }
     verbosityLevel_m = 1;
     configureSystematics(*configProvider_m, *systematicManager_m);
@@ -348,30 +362,54 @@ Analyzer *Analyzer::addPlugin(const std::string &role, std::shared_ptr<IPluggabl
         }
     }
 
-    // Insert the new plugin.
+    const auto previousOrder = pluginOrder_m;
     plugins.emplace(role, std::move(plugin));
-    pluginOrder_m.push_back(role);
+    try {
+        pluginOrder_m.push_back(role);
 
-    // Re-run topological sort over the full set to ensure order is valid.
-    // (Existing plugins that depend on the new role will now be ordered correctly.)
-    reorderPlugins();
+        // Re-run topological sort over the full set to ensure order is valid.
+        // (Existing plugins that depend on the new role will now be ordered correctly.)
+        reorderPlugins();
 
-    // Lifecycle hooks for the new plugin only.
-    auto& inserted = plugins.at(role);
-    inserted->setContext(managerContext_m);
-    inserted->setupFromConfigFile();
-    inserted->initialize();
+        // Lifecycle hooks for the new plugin only.
+        auto& inserted = plugins.at(role);
+        inserted->setContext(managerContext_m);
+        inserted->setupFromConfigFile();
+        inserted->initialize();
 
-    if (provenanceService_m) {
-        provenanceService_m->addEntry("plugin." + role, inserted->type());
+        if (provenanceService_m) {
+            provenanceService_m->addEntry("plugin." + role, inserted->type());
+        }
+    } catch (...) {
+        plugins.erase(role);
+        pluginOrder_m = previousOrder;
+        if (provenanceService_m) {
+            provenanceService_m->removeEntry("plugin." + role);
+        }
+        throw;
     }
     return this;
 }
 
 Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::shared_ptr<IPluggableManager>>&& newPlugins) {
     const auto order = orderedPluginBatch(plugins, newPlugins);
-    for (const auto& role : order) {
-        addPlugin(role, std::move(newPlugins.at(role)));
+    const auto previousOrder = pluginOrder_m;
+    try {
+        for (const auto& role : order) {
+            addPlugin(role, std::move(newPlugins.at(role)));
+        }
+    } catch (...) {
+        for (const auto& role : order) {
+            if (std::find(previousOrder.begin(), previousOrder.end(), role) ==
+                previousOrder.end()) {
+                plugins.erase(role);
+                if (provenanceService_m) {
+                    provenanceService_m->removeEntry("plugin." + role);
+                }
+            }
+        }
+        pluginOrder_m = previousOrder;
+        throw;
     }
     return this;
 }

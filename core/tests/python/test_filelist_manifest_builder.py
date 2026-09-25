@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+from pathlib import Path
 
 from core.python.dataset_manifest import DatasetEntry, DatasetManifest
 
@@ -32,10 +34,11 @@ def test_build_manifest_from_filelist_dir(tmp_path):
         )
 
     output_manifest = tmp_path / "out.yaml"
+    repo_root = Path(__file__).resolve().parents[3]
     subprocess.run(
         [
-            "python3",
-            "core/python/law/build_manifest_from_filelist_dir.py",
+            sys.executable,
+            str(repo_root / "core/python/law/build_manifest_from_filelist_dir.py"),
             "--base-manifest",
             str(base_manifest),
             "--filelist-dir",

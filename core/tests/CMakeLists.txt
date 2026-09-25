@@ -3,6 +3,14 @@
 
 add_subdirectory(cpp)
 
+# Keep the CMS infrastructure suite with its plugin while configuring it in
+# the framework test context, where coreAll and the in-tree GoogleTest targets
+# are available.
+add_subdirectory(
+    "${CMAKE_SOURCE_DIR}/core/plugins/cms/test"
+    "${CMAKE_BINARY_DIR}/core/plugins/cms/test"
+)
+
 set(_PYTHON_EXECUTABLE "")
 
 if(DEFINED ENV{VIRTUAL_ENV})
@@ -14,19 +22,34 @@ if(DEFINED ENV{VIRTUAL_ENV})
     endif()
 endif()
 
-if(NOT DEFINED _PYTHON_EXECUTABLE AND DEFINED Python3_EXECUTABLE)
+if("${_PYTHON_EXECUTABLE}" STREQUAL "" AND DEFINED Python3_EXECUTABLE)
     set(_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
 endif()
 
-if(NOT DEFINED _PYTHON_EXECUTABLE)
+if("${_PYTHON_EXECUTABLE}" STREQUAL "" AND DEFINED Python_EXECUTABLE)
+    # pybind11's FindPython module may already have selected the interpreter
+    # even when CMake's separate FindPython3 module has not.
+    set(_PYTHON_EXECUTABLE "${Python_EXECUTABLE}")
+endif()
+
+if("${_PYTHON_EXECUTABLE}" STREQUAL "")
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_FOUND)
         set(_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
     endif()
 endif()
 
-if(NOT DEFINED _PYTHON_EXECUTABLE OR _PYTHON_EXECUTABLE STREQUAL "")
+if("${_PYTHON_EXECUTABLE}" STREQUAL "")
     message(STATUS "Python3 not found; skipping Python test registration.")
+    return()
+endif()
+
+# A user-supplied Python3_EXECUTABLE can be relative (for example
+# .venv/bin/python). CTest runs from the build directory, so make it absolute.
+get_filename_component(_PYTHON_EXECUTABLE "${_PYTHON_EXECUTABLE}" ABSOLUTE
+    BASE_DIR "${CMAKE_SOURCE_DIR}")
+if(NOT EXISTS "${_PYTHON_EXECUTABLE}")
+    message(STATUS "Python interpreter '${_PYTHON_EXECUTABLE}' does not exist; skipping Python test registration.")
     return()
 endif()
 
@@ -59,7 +82,7 @@ set(_EXEC_TESTS
 macro(add_law_unittest _test_name _file_stem)
     add_test(
         NAME    ${_test_name}
-        COMMAND ${_PYTHON_EXECUTABLE} ${_TEST_DIR}/law/${_file_stem}.py
+        COMMAND ${_PYTHON_EXECUTABLE} -m pytest -q -p no:cacheprovider ${_TEST_DIR}/law/${_file_stem}.py
     )
     # Check if this test needs the TMPDIR override
     list(FIND _EXEC_TESTS "${_test_name}" _idx)
@@ -81,6 +104,7 @@ add_law_unittest(LawCombineTasksTest        test_combine_tasks)
 add_law_unittest(LawDagTasksTest            test_dag_tasks)
 add_law_unittest(LawExecutorParityTest      test_executor_parity)
 add_law_unittest(LawFailureHandlerTest      test_failure_handler)
+add_law_unittest(LawIngestionUtilsTest      test_ingestion_utils)
 add_law_unittest(LawMergeTasksTest          test_merge_tasks)
 add_law_unittest(LawManifestPlotTasksTest   test_manifest_plot_tasks)
 add_law_unittest(LawRucioTasksTest          test_rucio_tasks)
@@ -88,15 +112,16 @@ add_law_unittest(LawOpenDataTasksTest       test_opendata_tasks)
 add_law_unittest(LawPlotTasksTest             test_plot_tasks)
 add_law_unittest(LawPerformanceRecorderTest test_performance_recorder)
 add_law_unittest(LawPartitionUtilsTest      test_partition_utils)
+add_law_unittest(LawRedirectorPrecedenceTest test_redirector_precedence)
 add_law_unittest(LawXRootDTasksTest         test_xrdfs_tasks)
 add_law_unittest(LawWorkflowExecutorsTest   test_workflow_executors)
 
-# Python framework tests (from core/python, now in core/tests/python)
-# These are registered as generic Python tests without special TMPDIR handling
+# Python framework tests (from core/python, now in core/tests/python).
+# Run through pytest so assertion-style tests are actually collected.
 macro(add_python_unittest _test_name _file_stem)
     add_test(
         NAME    ${_test_name}
-        COMMAND ${_PYTHON_EXECUTABLE} ${_TEST_DIR}/python/${_file_stem}.py
+        COMMAND ${_PYTHON_EXECUTABLE} -m pytest -q -p no:cacheprovider ${_TEST_DIR}/python/${_file_stem}.py
     )
     set_tests_properties(${_test_name} PROPERTIES
         ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}"
@@ -107,6 +132,7 @@ add_python_unittest(PythonAnalysisConfigValidationTest test_analysis_config_vali
 add_python_unittest(PythonCppWrapperTest               test_cpp_wrapper)
 add_python_unittest(PythonDatacardGeneratorTest        test_datacard_generator)
 add_python_unittest(PythonDatasetManifestTest          test_dataset_manifest)
+add_python_unittest(PythonFilelistManifestBuilderTest  test_filelist_manifest_builder)
 add_python_unittest(PythonNuisanceGroupsTest           test_nuisance_groups)
 add_python_unittest(PythonOutputSchemaTest             test_output_schema)
 add_python_unittest(PythonProductionManagerTest        test_production_manager)
@@ -125,4 +151,6 @@ add_python_unittest(PythonOpenDataDiscoveryTest        test_opendata_discovery)
 add_python_unittest(PythonConvertConfigTest            test_convert_config)
 add_python_unittest(PythonResubmitJobsTest             test_resubmit_jobs)
 add_python_unittest(PythonValidateDatacardGeneratorTest test_validate_datacard_generator)
+add_python_unittest(PythonVhbbManifestConversionTest   test_vhbb_manifest_conversion)
+add_python_unittest(PythonVhbbStxsPreflightTest        test_vhbb_stxs_preflight)
 add_python_unittest(PythonYamlConfigTest               test_yaml_config)

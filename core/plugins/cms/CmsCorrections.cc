@@ -58,10 +58,188 @@ std::string joinCsv(const std::vector<std::string> &values) {
 void setWorkflowConfigValue(IConfigurationProvider &config,
                             const std::string &key,
                             const std::string &value) {
-  const auto existing = config.get(key);
-  if (existing.empty()) {
+  const auto &values = config.getConfigMap();
+  const auto it = values.find(key);
+  if (it == values.end() || it->second.empty()) {
     config.set(key, value);
   }
+}
+
+void defineElectronIdentityCorrections(Analyzer &an) {
+  an.Define("Electron_pt_corr_nominal",
+            [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+            {"Electron_pt"})
+      ->Define("Electron_mass_corr_nominal",
+               [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
+               {"Electron_mass"})
+      ->Define("Electron_pt_scale_up",
+               [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+               {"Electron_pt"})
+      ->Define("Electron_pt_scale_down",
+               [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+               {"Electron_pt"})
+      ->Define("Electron_pt_smear_up",
+               [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+               {"Electron_pt"})
+      ->Define("Electron_pt_smear_down",
+               [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+               {"Electron_pt"});
+}
+
+void configureElectronScaleSmearing(Analyzer &an,
+                                    const CmsCorrectionConfig &cfg,
+                                    const CmsYearSettings &ys,
+                                    bool isData) {
+  if (!cfg.applyElectronCorrections) return;
+
+  if (ys.electronScaleSmearingFile.empty()) {
+    // Run 2 NanoAOD already includes the EGM scale and smearing corrections.
+    defineElectronIdentityCorrections(an);
+    return;
+  }
+  if (ys.electronScaleCorrection.empty() ||
+      ys.electronSmearingCorrection.empty()) {
+    throw std::runtime_error(
+        "CmsCorrections: electron scale/smearing file is configured, but its "
+        "correction names are empty.");
+  }
+
+  auto electronMgr =
+      an.getPlugin<ElectronEnergyScaleManager>("electronEnergyScaleManager");
+  auto corrMgr = an.getPlugin<CorrectionManager>("correctionManager");
+  if (!electronMgr || !corrMgr) {
+    throw std::runtime_error(
+        "CmsCorrections: electron corrections require both "
+        "electronEnergyScaleManager and correctionManager.");
+  }
+
+  electronMgr->setObjectColumns("Electron_pt", "Electron_eta", "Electron_phi",
+                                "Electron_mass");
+
+  const std::string prefix =
+      cfg.configKeyPrefix.empty() ? "cms" : cfg.configKeyPrefix;
+  const std::string scaleName = prefix + "_electron_scale";
+  const std::string smearName = prefix + "_electron_smearing";
+  const std::vector<std::string> smearInputs{
+      "Electron_pt", "Electron_r9", "Electron_scEta"};
+
+  if (isData) {
+    // Correctionlib's EGM scale compound takes a per-electron run number.
+    // Materialize it as an RVec to keep all correction inputs object-aligned.
+    an.Define("Electron_run",
+              [](UInt_t run, const ROOT::VecOps::RVec<float> &pt) {
+                return ROOT::VecOps::RVec<UInt_t>(pt.size(), run);
+              },
+              {"run", "Electron_pt"});
+    const std::vector<std::string> scaleInputs{
+        "Electron_run", "Electron_scEta", "Electron_r9", "Electron_pt",
+        "Electron_seedGain"};
+    corrMgr->registerCorrection(scaleName, ys.electronScaleSmearingFile,
+                                ys.electronScaleCorrection, scaleInputs);
+    electronMgr->applyCorrectionlib(
+        *corrMgr, scaleName, {"scale"}, "Electron_pt",
+        "Electron_pt_corr_nominal", true, "Electron_mass",
+        "Electron_mass_corr_nominal", scaleInputs);
+    electronMgr->execute();
+    return;
+  }
+
+  corrMgr->registerCorrection(smearName, ys.electronScaleSmearingFile,
+                              ys.electronSmearingCorrection, smearInputs);
+  const std::string randomColumn = "Electron_smearing_random";
+  electronMgr->defineReproducibleGaussian(
+      randomColumn, "Electron_pt", "run", "luminosityBlock", "event",
+      "cms_egm_electron_smearing");
+  // Define the deterministic Gaussian input before scheduling the columns
+  // that consume it.
+  electronMgr->execute();
+
+  corrMgr->applyCorrectionVec(smearName, {"smear"}, smearInputs,
+                              "Electron_smearing_sigma");
+  corrMgr->applyCorrectionVec(smearName, {"smear_up"}, smearInputs,
+                              "Electron_smearing_sigma_up");
+  corrMgr->applyCorrectionVec(smearName, {"smear_down"}, smearInputs,
+                              "Electron_smearing_sigma_down");
+  corrMgr->applyCorrectionVec(smearName, {"escale"}, smearInputs,
+                              "Electron_scale_uncertainty");
+
+  an.Define("Electron_smearing_factor",
+            [](const ROOT::VecOps::RVec<float> &sigma,
+               const ROOT::VecOps::RVec<float> &random) {
+              ROOT::VecOps::RVec<float> factor(sigma.size());
+              for (std::size_t i = 0; i < sigma.size(); ++i) {
+                factor[i] = 1.0f + sigma[i] * random[i];
+              }
+              return factor;
+            },
+            {"Electron_smearing_sigma", randomColumn});
+  an.Define("Electron_smearing_factor_up",
+            [](const ROOT::VecOps::RVec<float> &sigma,
+               const ROOT::VecOps::RVec<float> &random) {
+              ROOT::VecOps::RVec<float> factor(sigma.size());
+              for (std::size_t i = 0; i < sigma.size(); ++i) {
+                factor[i] = 1.0f + sigma[i] * random[i];
+              }
+              return factor;
+            },
+            {"Electron_smearing_sigma_up", randomColumn});
+  an.Define("Electron_smearing_factor_down",
+            [](const ROOT::VecOps::RVec<float> &sigma,
+               const ROOT::VecOps::RVec<float> &random) {
+              ROOT::VecOps::RVec<float> factor(sigma.size());
+              for (std::size_t i = 0; i < sigma.size(); ++i) {
+                factor[i] = 1.0f + sigma[i] * random[i];
+              }
+              return factor;
+            },
+            {"Electron_smearing_sigma_down", randomColumn});
+  an.Define("Electron_scale_factor_up",
+            [](const ROOT::VecOps::RVec<float> &uncertainty) {
+              ROOT::VecOps::RVec<float> factor(uncertainty.size());
+              for (std::size_t i = 0; i < uncertainty.size(); ++i) {
+                factor[i] = 1.0f + uncertainty[i];
+              }
+              return factor;
+            },
+            {"Electron_scale_uncertainty"});
+  an.Define("Electron_scale_factor_down",
+            [](const ROOT::VecOps::RVec<float> &uncertainty) {
+              ROOT::VecOps::RVec<float> factor(uncertainty.size());
+              for (std::size_t i = 0; i < uncertainty.size(); ++i) {
+                factor[i] = 1.0f - uncertainty[i];
+              }
+              return factor;
+            },
+            {"Electron_scale_uncertainty"});
+
+  electronMgr->applyCorrection(
+      "Electron_pt", "Electron_smearing_factor",
+      "Electron_pt_corr_nominal", true, "Electron_mass",
+      "Electron_mass_corr_nominal");
+  electronMgr->applyCorrection(
+      "Electron_pt", "Electron_smearing_factor_up", "Electron_pt_smear_up",
+      true, "Electron_mass", "Electron_mass_smear_up");
+  electronMgr->applyCorrection(
+      "Electron_pt", "Electron_smearing_factor_down",
+      "Electron_pt_smear_down", true, "Electron_mass",
+      "Electron_mass_smear_down");
+  electronMgr->addVariation("ElectronSmear", "Electron_pt_smear_up",
+                            "Electron_pt_smear_down",
+                            "Electron_mass_smear_up",
+                            "Electron_mass_smear_down");
+  electronMgr->applyCorrection(
+      "Electron_pt_corr_nominal", "Electron_scale_factor_up",
+      "Electron_pt_scale_up", true, "Electron_mass_corr_nominal",
+      "Electron_mass_scale_up");
+  electronMgr->applyCorrection(
+      "Electron_pt_corr_nominal", "Electron_scale_factor_down",
+      "Electron_pt_scale_down", true, "Electron_mass_corr_nominal",
+      "Electron_mass_scale_down");
+  electronMgr->addVariation("ElectronScale", "Electron_pt_scale_up",
+                            "Electron_pt_scale_down",
+                            "Electron_mass_scale_up",
+                            "Electron_mass_scale_down");
+  electronMgr->execute();
 }
 
 std::string deriveJetVetoMapPath(const CmsYearSettings &ys) {
@@ -97,6 +275,39 @@ std::string jesCorrectionNameForSource(const std::string &totalCorrectionName,
 }
 
 } // namespace
+
+void CmsCorrectionConfig::print(std::ostream &os) const {
+  const auto yesNo = [](bool value) { return value ? "yes" : "no"; };
+  const char *jesModeName = "Reduced";
+  switch (jesMode) {
+  case Total:
+    jesModeName = "Total";
+    break;
+  case Reduced:
+    jesModeName = "Reduced";
+    break;
+  case Full:
+    jesModeName = "Full";
+    break;
+  }
+
+  os << "=== CmsCorrectionConfig ===\n"
+     << "  year: "
+     << (yearSettings ? yearSettings->canonicalYear : "<unset>") << '\n'
+     << "  jetTagger: " << jetTagger << '\n'
+     << "  jesMode: " << jesModeName << '\n'
+     << "  applyJetCorrections: " << yesNo(applyJetCorrections) << '\n'
+     << "  applyFatJetCorrections: " << yesNo(applyFatJetCorrections) << '\n'
+     << "  applyElectronCorrections: " << yesNo(applyElectronCorrections)
+     << '\n'
+     << "  applyMuonCorrections: " << yesNo(applyMuonCorrections) << '\n'
+     << "  applyBtagCorrections: " << yesNo(applyBtagCorrections) << '\n'
+     << "  applyCtagCorrections: " << yesNo(applyCtagCorrections) << '\n'
+     << "  applyTauCorrections: " << yesNo(applyTauCorrections) << '\n'
+     << "  applyMetType1: " << yesNo(applyMetType1) << '\n'
+     << "  maxJesSlots: " << maxJesSlots << '\n'
+     << "  correctionNamePrefix: " << correctionNamePrefix << '\n';
+}
 
 std::vector<std::string> detail::jecCompoundInputColumns(
     bool isData, const std::string &rawPtColumn, const std::string &rhoBranch) {
@@ -228,13 +439,35 @@ CmsCorrectionAudit validateCmsCorrectionStack(
       }
     }
     if (weightCfg->applyTriggerScaleFactors) {
-      check("trigger", weightCfg->triggerSfFile,
-        "Path-specific dimuon trigger SF payload is unavailable.",
-        "Set triggerSfFile and triggerSfCorrection for the requested HLT.");
-      if (weightCfg->triggerSfCorrection.empty()) {
-        audit.add("trigger", "correction_name_missing",
-          "No path-specific trigger SF correction name is configured.",
-          "Set triggerSfCorrection for the requested HLT.");
+      const bool hasDimuonLegPayload =
+          !weightCfg->dimuonTriggerMu17File.empty() ||
+          !weightCfg->dimuonTriggerMu8File.empty();
+      if (hasDimuonLegPayload) {
+        check("trigger", weightCfg->dimuonTriggerMu17File,
+              "Mu17 dimuon trigger SF payload is unavailable.",
+              "Set dimuonTriggerMu17File and its correction name.");
+        check("trigger", weightCfg->dimuonTriggerMu8File,
+              "Mu8 dimuon trigger SF payload is unavailable.",
+              "Set dimuonTriggerMu8File and its correction name.");
+        if (weightCfg->dimuonTriggerMu17Correction.empty()) {
+          audit.add("trigger", "correction_name_missing",
+                    "No Mu17 trigger SF correction name is configured.",
+                    "Set dimuonTriggerMu17Correction.");
+        }
+        if (weightCfg->dimuonTriggerMu8Correction.empty()) {
+          audit.add("trigger", "correction_name_missing",
+                    "No Mu8 trigger SF correction name is configured.",
+                    "Set dimuonTriggerMu8Correction.");
+        }
+      } else {
+        check("trigger", weightCfg->triggerSfFile,
+              "Path-specific dimuon trigger SF payload is unavailable.",
+              "Set triggerSfFile and triggerSfCorrection for the requested HLT.");
+        if (weightCfg->triggerSfCorrection.empty()) {
+          audit.add("trigger", "correction_name_missing",
+                    "No path-specific trigger SF correction name is configured.",
+                    "Set triggerSfCorrection for the requested HLT.");
+        }
       }
     }
   }
@@ -486,6 +719,8 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
   setWorkflowConfigValue(config, prefix + "ElectronSmearingCorrection",
                          ys.electronSmearingCorrection);
 
+  configureElectronScaleSmearing(an, cfg, ys, isData);
+
   // -- Muon scale/resolution --
   setWorkflowConfigValue(config, prefix + "MuonScaleResolutionFile",
                          ys.muonScaleResolutionFile);
@@ -733,6 +968,9 @@ void defineCmsCorrectionFallbacks(Analyzer &an,
     an.Define("Electron_pt_corr_nominal",
               [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
               {"Electron_pt"})
+        ->Define("Electron_mass_corr_nominal",
+                 [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
+                 {"Electron_mass"})
         ->Define("Electron_pt_scale_up",
                  [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
                  {"Electron_pt"})

@@ -35,6 +35,10 @@ analyzer.DefineFromPointer(
 )
 ```
 
+For the Python wrapper's automatic Up/Down propagation, the input dataframe
+must contain columns named `jet_pt_jesUp` and `jet_pt_jesDown` in addition to
+`jet_pt`. The same compiled function is applied to each matching input.
+
 ### Type Safety
 
 Numba restricts supported types. Use whitelisted types:
@@ -120,7 +124,7 @@ Systematic variations are registered through the Analyzer Python wrapper using t
 import numba
 import ctypes
 
-analyzer.registerSystematic("jes_up", ["jet_pt"])
+analyzer.registerSystematic("jes", ["jet_pt"])
 
 @numba.cfunc("double(double)")
 def apply_jes(pt):
