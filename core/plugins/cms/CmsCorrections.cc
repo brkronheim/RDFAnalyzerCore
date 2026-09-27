@@ -820,6 +820,16 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
   }
 
   // Select and register the systematic source set based on mode
+  // Nominal JEC/JER corrections have already been registered above.  Avoid
+  // loading any JES uncertainty corrections when the global systematic
+  // manager is disabled; those columns cannot be consumed in that mode.
+  if (!an.getSystematicManager().isEnabled()) {
+    // The nominal MET propagation was queued after the first execute() call
+    // above, so flush it even when no JES variations will be registered.
+    jesMgr->execute();
+    return;
+  }
+
   std::vector<std::string> jesSources;
   switch (cfg.jesMode) {
     case CmsCorrectionConfig::Total:

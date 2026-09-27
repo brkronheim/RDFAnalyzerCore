@@ -119,6 +119,44 @@ class TestWriteJobConfig(unittest.TestCase):
         import analysis_tasks
         return analysis_tasks
 
+    def test_root_io_settings_reach_prepared_and_runtime_configs(self):
+        """ROOT I/O options survive LAW job preparation and sandbox copying."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        settings = {
+            "treeCacheSizeMB": "64",
+            "treeCacheLearnEntries": "7",
+            "treeCachePrefill": "0",
+            "treeCacheAsyncPrefetch": "1",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir, settings)
+            job_dir = os.path.join(tmpdir, "job")
+            shared_dir = os.path.join(tmpdir, "shared")
+            os.mkdir(shared_dir)
+            Path(shared_dir, "analysis_exe").write_text("dummy executable")
+            mod._write_job_config(
+                job_dir, template,
+                DatasetEntry(name="sample", files=["input.root"], dtype="data"),
+                os.path.join(tmpdir, "out"),
+                stage_shared_inputs_locally=False,
+            )
+            prepared = mod.read_config(os.path.join(job_dir, "submit_config.txt"))
+            self.assertEqual({key: prepared[key] for key in settings}, settings)
+
+            runtime_dir, _ = mod._materialize_file_source_runtime_job(
+                shared_dir=shared_dir, source_job_dir=job_dir,
+                exe_relpath="analysis_exe",
+            )
+            try:
+                runtime = mod.read_config(
+                    os.path.join(runtime_dir, "cfg", "submit_config.txt")
+                )
+                self.assertEqual({key: runtime[key] for key in settings}, settings)
+            finally:
+                shutil.rmtree(runtime_dir)
+
     def test_basic_overrides(self):
         """fileList, saveFile, metaFile, sample and type are injected."""
         mod = self._import()
@@ -1049,6 +1087,9 @@ class TestSkimNormalization(unittest.TestCase):
                         raise KeyError(name)
                     return FakeTree()
 
+                def keys(self):
+                    return ["metadata"]
+
             fake_uproot = types.SimpleNamespace(open=lambda _path: FakeRootFile())
             with patch.dict(sys.modules, {"uproot": fake_uproot, "ROOT": None}):
                 # One readable skim with no metadata is still a partial result.
@@ -1071,6 +1112,23 @@ class TestSkimNormalization(unittest.TestCase):
                 )
                 self.assertEqual(len(errors), 2)
                 self.assertTrue(all("truncated ROOT" in error for error in errors))
+
+    def test_output_validator_allows_disabled_skim(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_path = os.path.join(tmpdir, "meta.root")
+            Path(meta_path).write_bytes(b"metadata")
+            with patch("analysis_tasks._root_file_tree_error", return_value=None) as check:
+                errors = analysis_tasks._skim_job_output_errors(
+                    dataset_name="sample",
+                    dtype="data",
+                    save_path=os.path.join(tmpdir, "skim.root"),
+                    meta_path=meta_path,
+                    require_skim=False,
+                )
+            self.assertEqual(errors, [])
+            check.assert_called_once_with(meta_path, None)
 
     def test_mc_output_validation_requires_both_normalization_counters(self):
         import analysis_tasks

@@ -8,8 +8,12 @@
 #include <TInterpreter.h>
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <variant>
 
 namespace {
@@ -149,11 +153,11 @@ void populateCorrectionValues(std::vector<CorrectionValue> &values,
 
 /// Evaluate a correction with safe fallback for out-of-range inputs.
 ///
-/// Attempts `correction->evaluate(values)` and returns the result. If the
-/// evaluation throws `std::out_of_range` (common when a correction's binning
-/// has `flow: "error"` and an input falls outside the defined edges), the
-/// fallback value is returned instead. No exception ever propagates to the
-/// caller in this case — the error is contained at the lowest level.
+/// Attempts `correction->evaluate(values)` and returns the result. Out-of-range
+/// bin lookups return the fallback value. Depending on the Correctionlib
+/// version, these are reported as either std::out_of_range or a runtime_error
+/// whose message begins with "Index below/above bounds in". No range exception
+/// propagates to the caller.
 ///
 /// For any other exception type the evaluation is still re-thrown as a
 /// `std::runtime_error` with a descriptive message, since those indicate
@@ -171,6 +175,21 @@ Float_t safeEvaluate(const CorrectionRef &correction,
     // reconstruction SFs binned by pT, muon isolation SFs with a
     // minimum-pt edge).  No exception escapes to RDataFrame.
     return fallback;
+  } catch (const std::runtime_error &e) {
+    // The bundled Correctionlib throws runtime_error (rather than
+    // out_of_range) for Binning/MultiBinning nodes configured with
+    // flow: "error". Keep only those known range failures neutral; other
+    // runtime errors still indicate a broken payload or schema mismatch.
+    const std::string_view message(e.what());
+    if (message.rfind("Index below bounds in ", 0) == 0 ||
+        message.rfind("Index above bounds in ", 0) == 0) {
+      return fallback;
+    }
+    throw std::runtime_error(
+        std::string("Error evaluating correction '") + correction->name() +
+        "': " + e.what() +
+        ". This indicates a genuine problem (corrupt file, schema "
+        "mismatch, or missing correction) and should be investigated.");
   } catch (const std::exception &e) {
     throw std::runtime_error(
         std::string("Error evaluating correction '") + correction->name() +
@@ -283,6 +302,28 @@ CorrectionManager::CorrectionManager(IConfigurationProvider const& configProvide
   initialized_m = true;
 }
 
+std::shared_ptr<const correction::CorrectionSet>
+CorrectionManager::loadCorrectionSet(const std::string &file) {
+  std::error_code error;
+  const auto canonicalPath = std::filesystem::weakly_canonical(file, error);
+  const std::string cacheKey = error
+                                   ? std::filesystem::path(file)
+                                         .lexically_normal()
+                                         .string()
+                                   : canonicalPath.string();
+
+  const auto cached = correctionSets_m.find(cacheKey);
+  if (cached != correctionSets_m.end()) {
+    return cached->second;
+  }
+
+  auto loaded = correction::CorrectionSet::from_file(file);
+  auto correctionSet =
+      std::shared_ptr<const correction::CorrectionSet>(std::move(loaded));
+  return correctionSets_m.emplace(cacheKey, std::move(correctionSet))
+      .first->second;
+}
+
 /**
  * @brief Validate that a string is safe to use as part of an RDF branch name.
  *
@@ -343,7 +384,7 @@ void CorrectionManager::registerCorrection(
         "' is already registered. Use a unique name for each correction.");
   }
   try {
-    auto correctionSet = correction::CorrectionSet::from_file(file);
+    auto correctionSet = loadCorrectionSet(file);
     const auto [corr, compoundCorr] =
         lookupCorrectionOrCompound(correctionSet, correctionlibName);
     if (corr) {
@@ -615,8 +656,7 @@ void CorrectionManager::registerCorrectionlib(
         configProvider.splitString(entryKeys.at("inputVariables"), ",");
 
     // load correction object from json
-    auto correctionF =
-        correction::CorrectionSet::from_file(entryKeys.at("file"));
+    auto correctionF = loadCorrectionSet(entryKeys.at("file"));
     const auto [correction, compoundCorrection] =
         lookupCorrectionOrCompound(correctionF, entryKeys.at("correctionName"));
 
@@ -660,8 +700,7 @@ void CorrectionManager::setupFromConfigFile() {
         configManager_m->splitString(entryKeys.at("inputVariables"), ",");
 
     // load correction object from json
-    auto correctionF =
-      correction::CorrectionSet::from_file(entryKeys.at("file"));
+    auto correctionF = loadCorrectionSet(entryKeys.at("file"));
     const auto [correction, compoundCorrection] =
       lookupCorrectionOrCompound(correctionF, entryKeys.at("correctionName"));
 

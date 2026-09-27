@@ -44,6 +44,7 @@ public:
    */
   ROOT::RDF::RNode getDataFrame() override;
   void setDataFrame(const ROOT::RDF::RNode &node) override;
+  void markInputDependenciesIncomplete(const std::string &reason) override;
 
   /**
    * @brief Get the main TChain reference

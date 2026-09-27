@@ -214,6 +214,13 @@ from output_schema import (  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 
+
+def _stream_analysis_output() -> bool:
+    """Return whether local analysis subprocess logs should be shown live."""
+    return os.environ.get("RDF_VH_VERBOSE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
 _MC_GENERATOR_CONFIG_KEYS = (
     "counterWeightBranch",
     "genWeightMode",
@@ -803,6 +810,7 @@ def _run_prepared_skim_job(
     source_config_path: Optional[str] = None,
     shared_archive_path: Optional[str] = None,
     stream_output: bool = False,
+    worker_number: Optional[int] = None,
 ) -> str:
     """Run a prepared skim job after materializing a worker-local sandbox."""
     runtime_job_dir = None
@@ -821,6 +829,7 @@ def _run_prepared_skim_job(
             container_setup=container_setup,
             config_relpath=os.path.join("cfg", "submit_config.txt"),
             stream_output=stream_output,
+            worker_number=worker_number,
         )
     finally:
         if runtime_job_dir and os.path.isdir(runtime_job_dir):
@@ -892,13 +901,8 @@ def _output_files_exist_batch(output_paths: list[str]) -> dict[str, bool]:
     return result
 
 
-def _root_file_tree_error(path: str, tree_name: str) -> Optional[str]:
-    """Return an explanation when *path* is not a readable ROOT file with a tree.
-
-    Skim and metadata snapshots both use ``saveTree``.  Checking the named
-    object catches truncated or unrelated ROOT files while still accepting a
-    valid tree with zero entries.
-    """
+def _root_file_tree_error(path: str, tree_name: Optional[str]) -> Optional[str]:
+    """Check a ROOT file, optionally requiring a named tree inside it."""
     if not path:
         return "output path is not configured"
 
@@ -926,6 +930,9 @@ def _root_file_tree_error(path: str, tree_name: str) -> Optional[str]:
         for open_path in dict.fromkeys(open_paths):
             try:
                 with uproot.open(open_path) as root_file:
+                    if tree_name is None:
+                        root_file.keys()
+                        return None
                     obj = root_file[tree_name]
                     classname = getattr(obj, "classname", None)
                     if classname is not None and classname not in ("TTree", "ROOT::RNTuple"):
@@ -947,6 +954,8 @@ def _root_file_tree_error(path: str, tree_name: str) -> Optional[str]:
                 root_file = ROOT.TFile.Open(open_path, "READ")
                 if not root_file or root_file.IsZombie():
                     raise OSError("ROOT reported a zombie or unopened file")
+                if tree_name is None:
+                    return None
                 obj = root_file.Get(tree_name)
                 if not obj or not obj.InheritsFrom("TTree"):
                     return f"object '{tree_name}' is missing or is not a TTree"
@@ -958,7 +967,19 @@ def _root_file_tree_error(path: str, tree_name: str) -> Optional[str]:
                     root_file.Close()
 
     detail = "; ".join(errors) if errors else "neither uproot nor PyROOT is available"
+    if tree_name is None:
+        return f"cannot validate ROOT file {path!r}: {detail}"
     return f"cannot validate ROOT tree '{tree_name}' in {path!r}: {detail}"
+
+
+def _config_enables_skim(config_path: str) -> bool:
+    """Read the Analyzer skim switch from a staged or template config."""
+    if not config_path or not os.path.isfile(config_path):
+        return False
+    value = read_config(config_path).get("enableSkim", False)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _skim_job_output_errors(
@@ -968,16 +989,24 @@ def _skim_job_output_errors(
     save_path: str,
     meta_path: str,
     tree_name: str = "Events",
+    require_skim: bool = True,
 ) -> list[str]:
-    """Validate the complete artifact set consumed by skim workflows."""
+    """Validate a skim when enabled and always validate the metadata output."""
     errors: list[str] = []
-    for role, path in (("skim", save_path), ("metadata", meta_path)):
-        if not path:
-            errors.append(f"{role} output path is not configured")
-            continue
-        reason = _root_file_tree_error(path, tree_name)
+    if require_skim:
+        if not save_path:
+            errors.append("skim output path is not configured")
+        else:
+            reason = _root_file_tree_error(save_path, tree_name)
+            if reason:
+                errors.append(f"skim output {save_path!r}: {reason}")
+
+    if not meta_path:
+        errors.append("metadata output path is not configured")
+    else:
+        reason = _root_file_tree_error(meta_path, None)
         if reason:
-            errors.append(f"{role} output {path!r}: {reason}")
+            errors.append(f"metadata output {meta_path!r}: {reason}")
 
     if dtype.lower() == "mc" and meta_path and not any(
         error.startswith("metadata output") for error in errors
@@ -1017,12 +1046,14 @@ def _run_skim_job_with_output_contract(
             f"{dataset_manifest_path!r}."
         )
 
+    require_skim = _config_enables_skim(submit_config_path)
     errors = _skim_job_output_errors(
         dataset_name=dataset_name,
         dtype=dataset.dtype,
         save_path=save_path,
         meta_path=meta_path,
         tree_name=tree_name,
+        require_skim=require_skim,
     )
     if errors:
         raise RuntimeError(
@@ -1030,7 +1061,7 @@ def _run_skim_job_with_output_contract(
             + "; ".join(errors)
         )
 
-    if write_cache:
+    if write_cache and require_skim:
         manifest = _build_skim_manifest(
             dataset=dataset,
             submit_config_path=submit_config_path,
@@ -2640,6 +2671,12 @@ class SkimMixin:
             "the Rucio query in GetRucioFileList."
         ),
     )
+    rucio_group_size_gb = luigi.FloatParameter(
+        default=10.0,
+        description=(
+            "Rucio file-group size threshold in GB (default: 10)."
+        ),
+    )
     partition = luigi.Parameter(
         default="file_group",
         description=(
@@ -2884,6 +2921,17 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
     def _run_dir(self) -> str:
         return os.path.join(WORKSPACE, f"skimRun_{self.name}")
 
+    @property
+    def _prepared_config_hash_path(self) -> str:
+        return os.path.join(self._run_dir, "prep_submission.config.sha256")
+
+    def _submit_config_hash(self) -> str:
+        digest = hashlib.sha256()
+        with open(self.submit_config, "rb") as config_fh:
+            for chunk in iter(lambda: config_fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     def requires(self):
         """Declare LAW dependency on the file-list task when ``--file-source`` is set.
 
@@ -2891,10 +2939,9 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         :class:`~xrdfs_tasks.GetXRDFSFileList` is declared automatically because
         both tasks share the same ``dataset_manifest`` parameter.
 
-        For ``--file-source rucio`` and ``--file-source opendata`` the skim
-        submit config is reused directly when it contains the corresponding
-        ``sampleConfig`` payload, allowing the file-list step to be chained
-        automatically from :class:`SkimTask`.
+        For ``--file-source rucio``, the dataset manifest is passed directly
+        to file discovery. For ``--file-source opendata``, the submit config
+        supplies its ``sampleConfig`` payload.
         """
         if self.file_source == "xrdfs":
             from xrdfs_tasks import GetXRDFSFileList  # noqa: PLC0415
@@ -2907,6 +2954,9 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             return GetRucioFileList.req(
                 self,
                 name=self._effective_file_source_name,
+                dataset_manifest=self.dataset_manifest,
+                size=self.rucio_group_size_gb,
+                files_per_job=self.files_per_job,
             )
         if self.file_source == "opendata":
             from opendata_tasks import GetOpenDataFileList  # noqa: PLC0415
@@ -2922,8 +2972,17 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         )
 
     def complete(self):
-        """Invalidate prepared inputs when the staged executable is outdated."""
+        """Invalidate prepared inputs when their config or executable is outdated."""
         if not super().complete():
+            return False
+
+        try:
+            with open(self._prepared_config_hash_path) as hash_fh:
+                if hash_fh.read().strip() != self._submit_config_hash():
+                    return False
+        except OSError:
+            # Older preparation outputs did not record their source config.
+            # Rebuild once so staged job configs cannot silently omit settings.
             return False
 
         exe_path = os.path.abspath(self.exe)
@@ -3140,6 +3199,9 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         # ---- create local test job (one file) for pre-flight validation -----
         if self.make_test_job and job_entries:
             self._create_test_job(exe_path, job_entries)
+
+        with open(self._prepared_config_hash_path, "w") as hash_fh:
+            hash_fh.write(self._submit_config_hash() + "\n")
 
     def _create_test_job(self, exe_path: str, job_entries: list) -> None:
         """Create a minimal single-file ``test_job/`` directory for pre-flight testing.
@@ -3431,7 +3493,8 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
                 job_dir=test_dir,
                 root_setup=self._root_setup_content,
                 container_setup="",
-                stream_output=True,
+                stream_output=_stream_analysis_output(),
+                worker_number=0,
             )
         rec.save(os.path.join(test_dir, "test_job.perf.json"))
 
@@ -3929,12 +3992,21 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 for job_state in jobs.values():
                     if not isinstance(job_state, dict) or job_state.get("status") != "done":
                         return False
+                    job_config = os.path.join(
+                        str(job_state.get("job_dir", "")), "submit_config.txt"
+                    )
+                    require_skim = (
+                        _config_enables_skim(job_config)
+                        if job_state.get("job_dir")
+                        else _config_enables_skim(self.submit_config)
+                    )
                     errors = _skim_job_output_errors(
                         dataset_name=dataset_name,
                         dtype=dataset.dtype,
                         save_path=str(job_state.get("save", "")),
                         meta_path=str(job_state.get("meta", "")),
                         tree_name=str(job_state.get("tree_name", "Events")),
+                        require_skim=require_skim,
                     )
                     if errors:
                         return False
@@ -4129,7 +4201,15 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     cluster_id = str(job_state["cluster"])
                     proc = job_state["proc"]
                     if live_status.get((cluster_id, proc)) is None:
-                        if job_info[idx]["save"]:
+                        job_config = os.path.join(
+                            str(job_info[idx].get("dir", "")), "submit_config.txt"
+                        )
+                        require_skim = (
+                            _config_enables_skim(job_config)
+                            if os.path.isfile(job_config)
+                            else _config_enables_skim(self.submit_config)
+                        )
+                        if require_skim and job_info[idx]["save"]:
                             output_paths_to_check.append(job_info[idx]["save"])
                         if job_info[idx]["meta"]:
                             output_paths_to_check.append(job_info[idx]["meta"])
@@ -4147,7 +4227,15 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         continue
 
                     errors: list[str] = []
-                    for role in ("save", "meta"):
+                    job_config = os.path.join(
+                        str(info.get("dir", "")), "submit_config.txt"
+                    )
+                    require_skim = (
+                        _config_enables_skim(job_config)
+                        if os.path.isfile(job_config)
+                        else _config_enables_skim(self.submit_config)
+                    )
+                    for role in (("save", "meta") if require_skim else ("meta",)):
                         path = str(info.get(role, ""))
                         if not path:
                             errors.append(f"{role} output path is not configured")
@@ -4165,6 +4253,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                                 save_path=str(info.get("save", "")),
                                 meta_path=str(info.get("meta", "")),
                                 tree_name=str(info.get("tree_name", "Events")),
+                                require_skim=require_skim,
                             )
                         )
                     output_errors[(dataset_name, idx)] = errors
@@ -4696,6 +4785,8 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
             save_path=skim_file,
             meta_path=meta_file,
             tree_name=tree_name,
+            require_skim=str(config.get("enableSkim", "")).strip().lower()
+            in {"1", "true", "yes", "on"},
         )
         if output_errors:
             done_path = str(self.output().path)
@@ -4776,7 +4867,8 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
                 result = _run_analysis_job(
                     exe_path=exe_path,
                     job_dir=job_dir,
-                    stream_output=True,
+                    stream_output=_stream_analysis_output(),
+                    worker_number=self.branch,
                 )
 
             Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
@@ -4837,7 +4929,8 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
                     container_setup=self.container_setup or "",
                     source_config_path=config_path,
                     shared_archive_path=self._shared_archive_path,
-                    stream_output=True,
+                    stream_output=_stream_analysis_output(),
+                    worker_number=self.branch,
                 )
 
             Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
@@ -5008,7 +5101,7 @@ eval "${cmd}"
                     _run_analysis_job,
                     [exe_path, job_dir, self._root_setup_content,
                      self.container_setup or ""],
-                    {},
+                    {"worker_number": branch_num},
                     self.dataset_manifest,
                     config_path,
                     branch_data.name,
@@ -5042,7 +5135,7 @@ eval "${cmd}"
                     config_path,
                     self._shared_archive_path,
                 ],
-                {},
+                {"worker_number": branch_num},
                 self.dataset_manifest,
                 config_path,
                 str(branch_entry["dataset_name"]),
@@ -5242,7 +5335,8 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
             result = _run_analysis_job(
                 exe_path=exe_path,
                 job_dir=job_dir,
-                stream_output=True,
+                stream_output=_stream_analysis_output(),
+                worker_number=self.branch,
             )
 
         Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)

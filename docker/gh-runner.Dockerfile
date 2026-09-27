@@ -41,7 +41,7 @@ RUN curl -L https://github.com/actions/runner/releases/download/v2.331.0/actions
     | tar xz
 
 # ROOT binary distribution
-RUN curl -L https://root.cern/download/root_v6.36.08.Linux-ubuntu22.04-x86_64-gcc11.4.tar.gz \
+RUN curl -L https://root.cern/download/root_v6.40.04.Linux-ubuntu22.04-x86_64-gcc11.4.tar.gz \
     | tar xz
 
 # Persist ROOT environment

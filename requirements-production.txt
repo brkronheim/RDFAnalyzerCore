@@ -10,12 +10,14 @@ matplotlib>=3.5
 uproot>=5.0.0
 fsspec-xrootd>=0.2.0
 correctionlib>=2.0.0
+requests>=2.28.0
+rucio>=41.3.0
 
 # For DASK backend (optional – required only for --workflow dask)
 # Install with: pip install dask[distributed]
 # dask[distributed]>=2021.0.0
 
 # Note: Other dependencies are either:
-# - Provided by ROOT/CMSSW environment (e.g., numpy, requests)
+# - Provided by ROOT/CMSSW environment (e.g., numpy)
 # - Part of Python standard library (e.g., json, pathlib, subprocess)
 # - Optional and detected at runtime (e.g., curses, rucio)

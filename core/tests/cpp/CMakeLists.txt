@@ -66,6 +66,13 @@ add_executable(testDataManager testDataManager.cc)
 target_link_libraries(testDataManager coreAll gtest gtest_main)
 add_test(NAME DataManagerTest COMMAND testDataManager)
 
+add_executable(testInputCache testInputCache.cc)
+target_link_libraries(testInputCache coreAll gtest gtest_main)
+add_test(NAME InputCacheTest COMMAND testInputCache)
+
+add_executable(benchmarkInputCache EXCLUDE_FROM_ALL benchmarkInputCache.cc)
+target_link_libraries(benchmarkInputCache coreAll)
+
 add_executable(testSystematicBundle testSystematicBundle.cc)
 target_link_libraries(testSystematicBundle coreAll gtest gtest_main)
 add_test(NAME SystematicBundleTest COMMAND testSystematicBundle)

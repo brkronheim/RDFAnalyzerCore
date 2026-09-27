@@ -31,6 +31,11 @@ public:
      * @param node The RNode to set
      */
     virtual void setDataFrame(const ROOT::RDF::RNode &node) = 0;
+
+    /// Custom operations reading branches outside declared RDF inputs must
+    /// request learning before running. Normal RDF expressions/actions need
+    /// no notification: ROOT resolves their physical reader dependencies.
+    virtual void markInputDependenciesIncomplete(const std::string &) {}
     
     // TODO: Why are these defined here? Shouldn't they be defined in the final classes?
 

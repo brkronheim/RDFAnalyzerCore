@@ -95,6 +95,23 @@ endif()
 set(ONNXRUNTIME_INCLUDE_DIRS "${ONNXRUNTIME_ROOT_DIR}/include")
 set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT_DIR}/lib")
 
+# find_library caches its result across CMake reconfigurations. When switching
+# between the CPU and CUDA ONNX Runtime packages, discard a cached library that
+# came from the previously selected runtime directory.
+if(ONNXRUNTIME_LIBRARY)
+    get_filename_component(_ONNXRUNTIME_CACHED_LIB_DIR
+        "${ONNXRUNTIME_LIBRARY}" DIRECTORY)
+    get_filename_component(_ONNXRUNTIME_CACHED_LIB_DIR
+        "${_ONNXRUNTIME_CACHED_LIB_DIR}" REALPATH)
+    get_filename_component(_ONNXRUNTIME_SELECTED_LIB_DIR
+        "${ONNXRUNTIME_LIB_DIR}" REALPATH)
+    if(NOT "${_ONNXRUNTIME_CACHED_LIB_DIR}" STREQUAL
+           "${_ONNXRUNTIME_SELECTED_LIB_DIR}")
+        unset(ONNXRUNTIME_LIBRARY CACHE)
+        unset(ONNXRUNTIME_LIBRARY)
+    endif()
+endif()
+
 # Find the ONNX Runtime library
 find_library(ONNXRUNTIME_LIBRARY
     NAMES onnxruntime
@@ -104,6 +121,14 @@ find_library(ONNXRUNTIME_LIBRARY
 
 if(NOT ONNXRUNTIME_LIBRARY)
     message(FATAL_ERROR "Could not find ONNX Runtime library in ${ONNXRUNTIME_LIB_DIR}")
+endif()
+
+if(ONNXRUNTIME_USE_CUDA AND
+   NOT EXISTS "${ONNXRUNTIME_LIB_DIR}/libonnxruntime_providers_cuda.so")
+    message(FATAL_ERROR
+        "ONNXRUNTIME_USE_CUDA=ON, but the selected ONNX Runtime package has no "
+        "CUDA provider at ${ONNXRUNTIME_LIB_DIR}/libonnxruntime_providers_cuda.so. "
+        "Select the GPU-enabled ONNX Runtime package with ONNXRUNTIME_ROOT_DIR.")
 endif()
 
 message(STATUS "ONNX Runtime library: ${ONNXRUNTIME_LIBRARY}")

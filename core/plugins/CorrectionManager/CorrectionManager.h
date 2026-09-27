@@ -200,11 +200,17 @@ private:
    */
   void registerCorrectionlib(const IConfigurationProvider &configProvider);
 
+  std::shared_ptr<const correction::CorrectionSet>
+  loadCorrectionSet(const std::string &file);
+
   std::unordered_map<std::string, correction::CompoundCorrection::Ref> compoundObjects_m;
+  std::unordered_map<std::string,
+                     std::shared_ptr<const correction::CorrectionSet>>
+      correctionSets_m;
 
   bool initialized_m = false;
 };
 
 
 
-#endif // CORRECTIONMANAGER_H_INCLUDED 
+#endif // CORRECTIONMANAGER_H_INCLUDED

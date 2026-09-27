@@ -15,6 +15,9 @@
 #include <ManagerFactory.h>
 #include <ROOT/RDataFrame.hxx>
 #include <TChain.h>
+#include <TEnv.h>
+#include <TTreeCache.h>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -116,6 +119,54 @@ TEST(DataManagerInputTest, InvalidThreadSettingFailsWithValueContext) {
               std::string::npos)
         << "Malformed thread setting should fail before input discovery";
   }
+}
+
+TEST(DataManagerInputTest, RootInputCacheSettingsApplyBeforeOpeningFiles) {
+  const auto configPath = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-cache-" + std::to_string(getpid()) + ".txt");
+  const char *previousFactor = std::getenv("ROOT_TTREECACHE_SIZE");
+  const char *previousPrefill = std::getenv("ROOT_TTREECACHE_PREFILL");
+  const std::string oldFactor = previousFactor ? previousFactor : "";
+  const std::string oldPrefill = previousPrefill ? previousPrefill : "";
+  const int oldLearnEntries = TTreeCache::GetLearnEntries();
+  const int oldAsync = gEnv->GetValue("TFile.AsyncReading", 0);
+
+  auto writeConfig = [&](const std::string &settings) {
+    std::ofstream file(configPath);
+    file << "threads=1\n"
+         << "treeList=Events\n"
+         << "directory=" << configPath.parent_path().string()
+         << "/rdfanalyzer-nonexistent-input\n" << settings;
+  };
+
+  writeConfig("treeCacheSizeMB=64\n"
+              "treeCacheLearnEntries=7\n"
+              "treeCachePrefill=0\n"
+              "treeCacheAsyncPrefetch=1\n");
+  ConfigurationManager fixedConfig(configPath.string());
+  auto chains = makeTChain(fixedConfig);
+  ASSERT_EQ(chains.size(), 1u);
+  EXPECT_EQ(chains[0]->GetCacheSize(), 64LL * 1024 * 1024);
+  EXPECT_EQ(TTreeCache::GetLearnEntries(), 7);
+  EXPECT_STREQ(std::getenv("ROOT_TTREECACHE_PREFILL"), "0");
+  EXPECT_EQ(gEnv->GetValue("TFile.AsyncReading", 0), 1);
+
+  writeConfig("ROOT_TTREECACHE_SIZE=2.5\n");
+  ConfigurationManager factorConfig(configPath.string());
+  EXPECT_NO_THROW(makeTChain(factorConfig));
+  EXPECT_STREQ(std::getenv("ROOT_TTREECACHE_SIZE"), "2.5");
+
+  writeConfig("rootTTreeCacheSize=67108864\n");
+  ConfigurationManager invalidConfig(configPath.string());
+  EXPECT_THROW(makeTChain(invalidConfig), std::runtime_error);
+
+  if (previousFactor) setenv("ROOT_TTREECACHE_SIZE", oldFactor.c_str(), 1);
+  else unsetenv("ROOT_TTREECACHE_SIZE");
+  if (previousPrefill) setenv("ROOT_TTREECACHE_PREFILL", oldPrefill.c_str(), 1);
+  else unsetenv("ROOT_TTREECACHE_PREFILL");
+  TTreeCache::SetLearnEntries(oldLearnEntries);
+  gEnv->SetValue("TFile.AsyncReading", oldAsync);
+  std::filesystem::remove(configPath);
 }
 
 /**

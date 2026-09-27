@@ -109,6 +109,12 @@ histogramConfig=cfg/histograms.txt
 # ============== Performance ==============
 threads=-1
 batch=false
+# Optional ROOT input settings for remote TTree files:
+# treeCacheSizeMB=64
+# treeCacheLearnEntries=10
+# treeCachePrefill=0
+# treeCacheAsyncPrefetch=1
+# treeCacheAsyncOpenNext=1
 
 # ============== Plugin configuration paths ==============
 # Referencing a plugin config does not construct the plugin. Create and
@@ -117,6 +123,31 @@ batch=false
 # correctionConfig=cfg/corrections.txt
 # triggerConfig=cfg/triggers.txt
 ```
+
+For remote reads, `treeCacheSizeMB` sets a fixed cache size in MiB per ROOT
+tree cache (0 disables the cache; maximum 512). Multithreaded reads may use
+multiple caches, and ROOT may clamp the actual size.
+Alternatively, `rootTTreeCacheSize` sets the `ROOT_TTREECACHE_SIZE` environment
+variable to a multiplier of ROOT's estimated cache size, such as `2.0`.
+The config key `ROOT_TTREECACHE_SIZE` is accepted as an alias.
+It is **not a byte count**. Set only one of these two size options.
+
+`treeCacheLearnEntries` sets how many initial entries ROOT uses to discover
+branches for the cache (at least 1). `treeCachePrefill` accepts `0` or `1` and
+controls whether ROOT preloads baskets from all branches during learning.
+`treeCacheAsyncPrefetch` accepts `0` or `1` and controls ROOT's
+`TFile.AsyncReading` option. These controls are optional; absent keys leave
+ROOT's defaults or the existing process environment in effect. The cache and
+prefetch settings can increase memory use or unnecessary reads, so compare
+them with an otherwise identical job.
+`treeCacheAsyncOpenNext=1` overlaps opening the next XRootD file with processing
+the current one. It is single-threaded and opt-in; it does not preload the next
+file's event data.
+
+LAW's `PrepareSkimJobs` copies these keys from the submit config template into
+each job's `submit_config.txt`, including its test job. Its worker setup copies
+that per-job config into the runtime sandbox, where the executable applies the
+settings before opening input files.
 
 ### Step 4: Create Output Branch Configuration
 

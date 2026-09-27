@@ -8,6 +8,7 @@
 #include <RegionManager.h>
 #include <CounterService.h>
 #include <TFile.h>
+#include <TList.h>
 #include <TH1F.h>
 #include <THnSparse.h>
 #include <cctype>
@@ -1130,6 +1131,21 @@ void NDHistogramManager::SaveHists(
   // Open the meta file for update so we don't clobber histograms (e.g. counters)
   // written by Analyzer/CounterService earlier.
   TFile saveFile(fileName.c_str(), "UPDATE");
+  if (saveFile.IsZombie() || !saveFile.IsOpen() || !saveFile.IsWritable()) {
+    throw std::runtime_error("Cannot open histogram output for update: " + fileName);
+  }
+  // An interrupted first write can leave a header-only file. ROOT accepts
+  // this in UPDATE mode without marking it zombie, but mkdir/TKey then
+  // dereferences the missing first free segment (also in ROOT 6.36).
+  // Refuse the update before triggering RDF, and avoid rewriting the damaged
+  // file during stack unwinding so it remains available for inspection.
+  if (!saveFile.GetListOfFree() || saveFile.GetListOfFree()->IsEmpty()) {
+    saveFile.SetWritable(false);
+    throw std::runtime_error(
+        "Histogram output has no free-segment table (possibly an interrupted "
+        "previous write): " + fileName +
+        ". Preserve or move this file before rerunning with a fresh output path.");
+  }
 
   std::vector<Int_t> commonAxisSize = {};
   for (const auto &regionNameList : allRegionNames) {

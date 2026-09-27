@@ -96,6 +96,42 @@
         }
       },
       {
+        "name": "test_correction_range_error",
+        "description": "Returns a neutral fallback when a binned input is outside its domain.",
+        "version": 1,
+        "inputs": [
+          {"name": "float_arg", "type": "real"},
+          {"name": "int_arg", "type": "int"},
+          {"name": "str_arg", "type": "string"}
+        ],
+        "output": {"name": "output", "type": "real"},
+        "data": {
+          "nodetype": "category",
+          "input": "str_arg",
+          "content": [
+            {
+              "key": "A",
+              "value": {
+                "nodetype": "category",
+                "input": "int_arg",
+                "content": [
+                  {
+                    "key": 1,
+                    "value": {
+                      "nodetype": "binning",
+                      "input": "float_arg",
+                      "edges": [0.0, 1.0, 2.0],
+                      "content": [0.1, 0.2],
+                      "flow": "error"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
         "name": "test_correction2",
         "description": "A second test correction with different arguments.",
         "version": 1,

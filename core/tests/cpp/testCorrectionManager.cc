@@ -202,6 +202,30 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionWithBoundaryValues) {
   setContextFor(*dataManager);
 }
 
+TEST_F(CorrectionManagerTest, ApplyCorrectionRangeErrorsUseNeutralFallback) {
+  auto testDataManager = std::make_unique<DataManager>(3);
+  setContextFor(*testDataManager);
+
+  testDataManager->Define(
+      "float_arg",
+      [](ULong64_t i) -> double {
+        return i == 0 ? -0.5 : (i == 1 ? 0.5 : 2.0);
+      },
+      {"rdfentry_"}, *systematicManager);
+  testDataManager->Define("int_arg", [](ULong64_t) -> double { return 1.0; },
+                          {"rdfentry_"}, *systematicManager);
+
+  correctionManager->applyCorrection("test_correction_range_error", {"A"});
+  auto df = testDataManager->getDataFrame();
+  auto result = df.Take<float>("test_correction_range_error_A");
+  ASSERT_EQ(result->size(), 3u);
+  EXPECT_FLOAT_EQ(result->at(0), 1.0f);
+  EXPECT_NEAR(result->at(1), 0.1f, 1e-6f);
+  EXPECT_FLOAT_EQ(result->at(2), 1.0f);
+
+  setContextFor(*dataManager);
+}
+
 /**
  * @brief Test correction application with empty dataframe
  *
@@ -549,6 +573,32 @@ TEST_F(CorrectionManagerTest, ApplyVectorCorrectionEmptyVector) {
   auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("test_correction_A");
   ASSERT_EQ(result->size(), 1u);
   EXPECT_EQ((*result)[0].size(), 0u);
+
+  setContextFor(*dataManager);
+}
+
+TEST_F(CorrectionManagerTest, ApplyVectorCorrectionRangeErrorsUseNeutralFallback) {
+  auto testDataManager = std::make_unique<DataManager>(1);
+  setContextFor(*testDataManager);
+
+  testDataManager->Define(
+      "float_arg",
+      []() -> ROOT::VecOps::RVec<double> { return {-0.5, 0.5, 2.0}; }, {},
+      *systematicManager);
+  testDataManager->Define(
+      "int_arg",
+      []() -> ROOT::VecOps::RVec<double> { return {1.0, 1.0, 1.0}; }, {},
+      *systematicManager);
+
+  correctionManager->applyCorrectionVec("test_correction_range_error", {"A"});
+  auto df = testDataManager->getDataFrame();
+  auto result = df.Take<ROOT::VecOps::RVec<Float_t>>(
+      "test_correction_range_error_A");
+  ASSERT_EQ(result->size(), 1u);
+  ASSERT_EQ(result->at(0).size(), 3u);
+  EXPECT_FLOAT_EQ(result->at(0)[0], 1.0f);
+  EXPECT_NEAR(result->at(0)[1], 0.1f, 1e-6f);
+  EXPECT_FLOAT_EQ(result->at(0)[2], 1.0f);
 
   setContextFor(*dataManager);
 }

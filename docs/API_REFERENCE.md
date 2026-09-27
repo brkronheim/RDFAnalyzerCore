@@ -1,5 +1,8 @@
 # API Reference
 
+For single-threaded ROOT cache configuration, dependency resolution, diagnostics,
+and benchmark commands, see [ROOT input caching](INPUT_CACHE.md).
+
 Complete API documentation for RDFAnalyzerCore interfaces and key classes.
 
 ## Table of Contents

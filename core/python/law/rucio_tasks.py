@@ -94,15 +94,22 @@ class RucioMixin:
     """Parameters required for Rucio-based file-list discovery tasks.
 
     This is a stripped-down replacement for the old ``NANOMixin``.  It contains
-    only the parameters needed to locate the sample config and query Rucio;
+    only the parameters needed to locate a dataset manifest and query Rucio;
     all submission-management parameters have been removed and now live
     exclusively in :class:`~analysis_tasks.SkimMixin`.
     """
 
     submit_config = luigi.Parameter(
         description=(
-            "Path to the submit-config file (key=value or YAML) used to "
-            "locate the sample config via the ``sampleConfig`` key."
+            "Path to the submit-config file (key=value or YAML), used to "
+            "locate the sample config when no dataset manifest is given."
+        ),
+    )
+    dataset_manifest = luigi.Parameter(
+        default="",
+        description=(
+            "Optional dataset-manifest path. When provided, use it directly "
+            "instead of looking up ``sampleConfig`` in the submit config."
         ),
     )
     name = luigi.Parameter(
@@ -151,7 +158,16 @@ class RucioMixin:
 
     @property
     def _sample_config(self) -> str:
-        return self._resolve(self._config_dict["sampleConfig"])
+        if self.dataset_manifest:
+            return self._resolve(self.dataset_manifest)
+        sample_config = self._config_dict.get("sampleConfig", "")
+        if not sample_config:
+            raise ValueError(
+                "Rucio file discovery needs a dataset manifest. Pass "
+                "--dataset-manifest or set sampleConfig in the submit config "
+                f"{self.submit_config!r}."
+            )
+        return self._resolve(sample_config)
 
     @property
     def _file_list_dir(self) -> str:
@@ -167,7 +183,7 @@ class RucioMixin:
 class GetRucioFileList(RucioMixin, law.LocalWorkflow):
     """Produce a per-dataset XRootD file-list JSON by querying Rucio.
 
-    One branch is created per dataset entry in the sample config.  Each branch
+    One branch is created per dataset entry in the selected manifest. Each branch
     queries the Rucio replica catalogue (or uses an explicit ``files`` field
     from the manifest) and writes a compact JSON file::
 
@@ -324,5 +340,3 @@ class GetRucioFileList(RucioMixin, law.LocalWorkflow):
             f"GetRucioFileList: {name} → {len(fixed_urls)} file(s), "
             f"{len(rucio_groups)} Rucio group(s)"
         )
-
-

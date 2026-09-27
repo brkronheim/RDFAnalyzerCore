@@ -3,6 +3,7 @@
 #include <cmath>
 #include <ROOT/RVec.hxx>
 #include <DataManager.h>
+#include <InputCache.h>
 #include <TChain.h>
 #include <cctype>
 #include <iostream>
@@ -538,6 +539,12 @@ ROOT::RDF::RNode DataManager::getDataFrame() { return df_m; }
  */
 void DataManager::setDataFrame(const ROOT::RDF::RNode &node) { df_m = node; }
 
+void DataManager::markInputDependenciesIncomplete(const std::string &reason) {
+  for (auto &chain : chain_vec_m)
+    if (auto *input = dynamic_cast<InputCacheChain *>(chain.get()))
+      input->markDependenciesIncomplete(reason);
+}
+
 /**
  * @brief Get the main TChain pointer
  * @return Pointer to the main TChain
@@ -1055,7 +1062,13 @@ void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
   // residual objects in NanoAOD files) during friend file discovery.
   ROOTWarningGuard warningGuard;
 
-  auto friendChain = std::make_unique<TChain>(spec.treeName.c_str());
+  std::unique_ptr<TChain> friendChain;
+  const auto *primary = chain_vec_m.empty() ? nullptr :
+      dynamic_cast<InputCacheChain *>(chain_vec_m.front().get());
+  if (primary && primary->statisticsEnabled())
+    friendChain = std::make_unique<InputCacheChain>(spec.treeName);
+  else
+    friendChain = std::make_unique<TChain>(spec.treeName.c_str());
 
   if (!spec.files.empty()) {
     for (const auto &f : spec.files) {

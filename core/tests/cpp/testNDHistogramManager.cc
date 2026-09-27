@@ -9,6 +9,9 @@
 #include <TH2D.h>
 #include <TH3D.h>
 #include <gtest/gtest.h>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -208,6 +211,48 @@ TEST_F(NDHistogramManagerTest, SaveHistsBasic) {
   std::vector<std::vector<std::string>> allRegionNames = {{"region1", "region2"}};
   EXPECT_NO_THROW(histogramManager->saveHists(fullHistList, allRegionNames));
   EXPECT_TRUE(true);
+}
+
+TEST_F(NDHistogramManagerTest, RejectsInterruptedOutputBeforeRunningGraph) {
+  const auto prefix = std::filesystem::temp_directory_path() /
+      ("rdf-incomplete-output-" + std::to_string(getpid()));
+  const auto source = prefix.string() + "-source.root";
+  const auto damaged = prefix.string() + "-damaged.root";
+  {
+    // Keep the header above ROOT's initial 300-byte probe, reproducing the
+    // non-zombie/no-free-segments case rather than a rejected short file.
+    const std::string title(128, 'x');
+    TFile unfinished(source.c_str(), "RECREATE", title.c_str());
+    unfinished.Flush();
+    // Copy the on-disk state before Close writes the free-segment table.
+    std::filesystem::copy_file(source, damaged,
+                              std::filesystem::copy_options::overwrite_existing);
+  }
+  configManager->set("metaFile", damaged);
+  const auto readBytes = [](const std::string &path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input),
+                       std::istreambuf_iterator<char>());
+  };
+  const auto originalBytes = readBytes(damaged);
+  int processed = 0;
+  dataManager->Define("x", [&processed]() { ++processed; return 1.f; }, {}, *systematicManager);
+  dataManager->Define("w", []() { return 1.f; }, {}, *systematicManager);
+  std::vector<histInfo> infos = {histInfo("x", "x", "x", "w", 10, 0, 10)};
+  std::vector<selectionInfo> selections;
+  std::vector<std::vector<std::string>> regions = {{"interrupted"}};
+  histogramManager->bookND(infos, selections, "", regions);
+  try {
+    histogramManager->saveHists();
+    FAIL() << "Expected an actionable error for incomplete output";
+  } catch (const std::runtime_error &error) {
+    EXPECT_NE(std::string(error.what()).find("no free-segment table"), std::string::npos);
+    EXPECT_NE(std::string(error.what()).find(damaged), std::string::npos);
+  }
+  EXPECT_EQ(processed, 0);
+  EXPECT_EQ(readBytes(damaged), originalBytes);
+  std::filesystem::remove(source);
+  std::filesystem::remove(damaged);
 }
 
 TEST_F(NDHistogramManagerTest, SavesEmptyFineHistogramsAndCancelledBinErrors) {

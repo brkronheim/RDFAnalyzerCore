@@ -7,7 +7,7 @@
 # Vc.pcm at /build/jenkins/...). This causes cling to fail to load modules at
 # runtime with "module file not found" errors even though the .pcm files exist.
 #
-# The lcg/app/releases ROOT 6.36.08 build:
+# The lcg/app/releases ROOT 6.40.04 build:
 #   - Has no hardcoded build-server paths in its PCM files.
 #   - Was compiled with the system GCC 11.5 present in the cmssw-el9 container.
 #   - Sets ROOTSYS = its own prefix, so the CMakeLists.txt ROOTSYS check passes.
@@ -24,10 +24,10 @@ export CXX=/usr/bin/g++
 export FC=/usr/bin/gfortran
 
 # ---------------------------------------------------------------------------
-# 1. ROOT 6.36.08  (lcg/app/releases standalone build — no build-server paths
+# 1. ROOT 6.40.04  (lcg/app/releases standalone build — no build-server paths
 #                   in PCM files; ROOTSYS set to cvmfs prefix so CMake check passes)
 # ---------------------------------------------------------------------------
-source /cvmfs/sft.cern.ch/lcg/app/releases/ROOT/6.36.08/x86_64-almalinux9.7-gcc115-opt/bin/thisroot.sh
+source /cvmfs/sft.cern.ch/lcg/app/releases/ROOT/6.40.04/x86_64-almalinux9.8-gcc115-opt/bin/thisroot.sh || return 1
 
 # ---------------------------------------------------------------------------
 # 2. vdt 0.4.4  (ROOT's cmake FindVdt.cmake calls find_dependency(Vdt); the
