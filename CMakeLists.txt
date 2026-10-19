@@ -82,7 +82,7 @@ option(BUILD_TESTS "Build analysis tests" ON)
 option(BUILD_COMBINE "Build CMS Combine package for statistical analysis" OFF)
 option(BUILD_COMBINE_HARVESTER "Build CombineHarvester tools (requires BUILD_COMBINE)" OFF)
 option(USE_CUDA "Enable CUDA GPU support for kinematic fits" OFF)
-option(RDF_ENABLE_XRD_ADAPTOR "Build the optional standalone XrdCl input backend" OFF)
+option(RDF_ENABLE_XRD_ADAPTOR "Build the optional standalone XrdCl input backend" ON)
 
 if(USE_CUDA)
     enable_language(CUDA)
