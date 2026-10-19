@@ -46,12 +46,13 @@ def _condor_machine_requirements() -> str:
 
 
 def collect_local_shared_libs(exe_path: str, repo_root: str) -> dict[str, str]:
-    """Return ``{staged_name: real_path}`` for shared-library deps of *exe_path*.
+    """Return local shared-library deps and ROOT dictionary sidecars.
 
     Only libraries whose resolved real path starts with *repo_root* are
     returned, so system libraries (glibc, libstdc++, …) are silently ignored.
     Both the resolved basename and the declared soname are added as keys so
-    that the loader can find the library under either name.
+    that the loader can find the library under either name. ROOT PCM/rootmap
+    files and referenced headers beside a library are staged with it.
     """
     staged: dict[str, str] = {}
     try:
@@ -94,6 +95,28 @@ def collect_local_shared_libs(exe_path: str, repo_root: str) -> dict[str, str]:
         staged[real_name] = real_path
         if soname and ".so" in soname:
             staged[soname] = real_path
+
+        library_stem = real_name.split(".so", 1)[0]
+        library_dir = os.path.dirname(real_path)
+        rootmap_path = os.path.join(library_dir, f"{library_stem}.rootmap")
+        for sidecar_name in (
+            f"{library_stem}_rdict.pcm",
+            f"{library_stem}.rootmap",
+        ):
+            sidecar_path = os.path.join(library_dir, sidecar_name)
+            if os.path.isfile(sidecar_path):
+                staged[sidecar_name] = sidecar_path
+
+        if os.path.isfile(rootmap_path):
+            try:
+                with open(rootmap_path, encoding="utf-8") as rootmap_fh:
+                    for rootmap_line in rootmap_fh:
+                        key, _, header_name = rootmap_line.strip().partition(" ")
+                        if key != "header" or not header_name:
+                            continue
+                        header_path = os.path.join(library_dir, header_name)
+                        if os.path.isfile(header_path):
+                            staged[os.path.basename(header_path)] = header_path
 
     return staged
 

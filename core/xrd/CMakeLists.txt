@@ -71,7 +71,7 @@ list(REMOVE_DUPLICATES CMAKE_BUILD_RPATH)
 list(REMOVE_DUPLICATES CMAKE_INSTALL_RPATH)
 
 ROOT_GENERATE_DICTIONARY(G__RDFXrdAdaptor
-    "${CMAKE_CURRENT_SOURCE_DIR}/XrdTFile.h"
+    XrdTFile.h
     LINKDEF "${CMAKE_CURRENT_SOURCE_DIR}/LinkDef.h"
     OPTIONS -I"${CMAKE_CURRENT_SOURCE_DIR}" -I"${XRDCL_INCLUDE_DIR}")
 
@@ -89,3 +89,12 @@ target_link_libraries(RDFXrdAdaptor PUBLIC
     ROOT::Tree
     "${XRDCL_LIBRARY}")
 set_target_properties(RDFXrdAdaptor PROPERTIES OUTPUT_NAME RDFXrdAdaptor)
+
+# ROOT's runtime dictionary uses this header when it loads the PCM. Keep a
+# copy next to the library so the submission workflow can stage the complete,
+# relocatable dictionary payload with the shared library.
+add_custom_command(TARGET RDFXrdAdaptor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/XrdTFile.h"
+        "$<TARGET_FILE_DIR:RDFXrdAdaptor>/XrdTFile.h"
+    VERBATIM)

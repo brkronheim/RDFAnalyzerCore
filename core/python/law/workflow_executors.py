@@ -418,6 +418,7 @@ def _run_analysis_job(
 
     cmd_parts.extend([
         f"cd {shlex.quote(job_dir)}",
+        'export ROOT_INCLUDE_PATH="$PWD${ROOT_INCLUDE_PATH:+:$ROOT_INCLUDE_PATH}"',
         "if [ -f x509 ]; then export X509_USER_PROXY=$PWD/x509; fi",
         f"chmod +x {shlex.quote(exe_path)}",
         f"{shlex.quote(exe_path)} {shlex.quote(config_relpath)}",

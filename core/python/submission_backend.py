@@ -1333,6 +1333,10 @@ def generate_condor_runscript(
             f"fi\n"
         )
 
+    root_include_path_block = (
+        'export ROOT_INCLUDE_PATH="$PWD${ROOT_INCLUDE_PATH:+:$ROOT_INCLUDE_PATH}"\n'
+    )
+
     run_script = f"""#!/bin/bash
 # fail fast on any command error, undefined var, or pipeline failure
 set -euo pipefail
@@ -1350,7 +1354,7 @@ run_helper_python() {{
     fi
     env -u PYTHONHOME LD_LIBRARY_PATH="${{RDF_ORIG_LD_LIBRARY_PATH:-}}" "$helper" "$@"
 }}
-{root_block}{pre_block}{shared_block}{x509_block}{python_env_block}ls
+{root_block}{pre_block}{shared_block}{x509_block}{python_env_block}{root_include_path_block}ls
 stage_in_start=$(date +%s)
 {stage_out_pre}{stage_block}
 stage_in_end=$(date +%s)
