@@ -340,7 +340,10 @@ def probe_via_root_macro(url, read_bytes, timeout):
             macro_path = tmp.name
         result = subprocess.run(
             ["root", "-b", "-q", "-l", macro_path],
-            capture_output=True, timeout=timeout, text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            universal_newlines=True,
         )
         for line in result.stdout.splitlines():
             if line.startswith("PROBE_RESULT:"):
@@ -563,12 +566,6 @@ def stage_outputs_blocks(eos_sched=False, config_file="submit_config.txt"):
     pre_block = f"""
 run_helper_python - << 'PY'
 import os
-import subprocess
-import time
-
-XRDFS_TIMEOUT = int(os.environ.get("XRDFS_TIMEOUT", "30"))
-XRDFS_VERIFY_RETRIES = int(os.environ.get("XRDFS_VERIFY_RETRIES", "4"))
-XRDFS_VERIFY_DELAY = float(os.environ.get("XRDFS_VERIFY_DELAY", "5"))
 
 def read_config(config_file):
     if config_file.endswith('.yaml') or config_file.endswith('.yml'):
@@ -609,72 +606,6 @@ def write_config(cfg, config_file):
             for k, v in cfg.items():
                 f.write(f"{{k}}={{v}}\\n")
 
-def normalize_dest(dest):
-    if not dest:
-        return dest
-    if dest.startswith("root://"):
-        return dest
-    return "root://eosuser.cern.ch/" + dest
-
-def split_xrootd_dest(dest):
-    normalized = normalize_dest(dest)
-    if not normalized.startswith("root://"):
-        raise RuntimeError(f"Unsupported stage-out destination: {{dest}}")
-    without_scheme = normalized[len("root://"):]
-    host, _, remainder = without_scheme.partition("/")
-    if not host:
-        raise RuntimeError(f"Could not parse XRootD host from destination: {{normalized}}")
-    path = "/" + remainder.lstrip("/")
-    return normalized, f"root://{{host}}/", path
-
-def eos_dir_from_dest(dest):
-    if dest.startswith("root://"):
-        _, _, path_part = split_xrootd_dest(dest)
-    else:
-        path_part = dest
-    return os.path.dirname("/" + path_part.lstrip("/"))
-
-def xrdfs_ok(host_url, *args, timeout=XRDFS_TIMEOUT):
-    try:
-        result = subprocess.run(
-            ["xrdfs", host_url, *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return result.returncode == 0, result.stdout.strip() or result.stderr.strip()
-    except Exception as exc:
-        return False, str(exc)
-
-def ensure_output_endpoint_ready(dest, retries=XRDFS_VERIFY_RETRIES, delay=XRDFS_VERIFY_DELAY):
-    normalized_dest, host_url, _ = split_xrootd_dest(dest)
-    eos_dir = eos_dir_from_dest(normalized_dest)
-    if not eos_dir or eos_dir == "/":
-        return
-
-    mkdir_ok, mkdir_msg = xrdfs_ok(host_url, "mkdir", "-p", eos_dir)
-    if not mkdir_ok:
-        print(f"Warning: xrdfs mkdir -p {{eos_dir}} failed (may already exist): {{mkdir_msg}}")
-
-    last_err = ""
-    for attempt in range(1, retries + 1):
-        stat_ok, stat_msg = xrdfs_ok(host_url, "stat", eos_dir)
-        if stat_ok:
-            ls_ok, ls_msg = xrdfs_ok(host_url, "ls", eos_dir)
-            if ls_ok:
-                return
-            last_err = ls_msg or f"xrdfs ls failed for {{eos_dir}}"
-        else:
-            last_err = stat_msg or f"xrdfs stat failed for {{eos_dir}}"
-        print(f"xrdfs endpoint check attempt {{attempt}} failed for {{eos_dir}}: {{last_err}}")
-        time.sleep(delay * attempt)
-
-    raise RuntimeError(f"Output endpoint check failed for {{normalized_dest}}: {{last_err}}")
-
-def check_output_endpoint(dest):
-    if dest:
-        ensure_output_endpoint_ready(dest)
-
 cfg = read_config("{config_file}")
 
 save_file = cfg.get("saveFile", "")
@@ -691,9 +622,6 @@ if "__orig_metaFile" in cfg and cfg.get("__orig_metaFile"):
 elif meta_file:
     cfg["__orig_metaFile"] = meta_file
     cfg["metaFile"] = os.path.basename(meta_file)
-
-check_output_endpoint(cfg.get("__orig_saveFile", ""))
-check_output_endpoint(cfg.get("__orig_metaFile", ""))
 
 proc_id = os.environ.get("CONDOR_PROC", "")
 if proc_id and cfg.get("saveFile"):
@@ -782,42 +710,34 @@ def xrdfs_ok(host_url, *args, timeout=XRDFS_TIMEOUT):
     try:
         result = subprocess.run(
             ["xrdfs", host_url, *args],
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
             timeout=timeout,
         )
         return result.returncode == 0, result.stdout.strip() or result.stderr.strip()
     except Exception as exc:
         return False, str(exc)
 
-def ensure_output_endpoint_ready(dest, retries=XRDFS_VERIFY_RETRIES, delay=XRDFS_VERIFY_DELAY):
+_attempted_output_dirs = set()
+
+def ensure_output_endpoint_ready(dest):
     normalized_dest, host_url, _ = split_xrootd_dest(dest)
     eos_dir = eos_dir_from_dest(normalized_dest)
     if not eos_dir or eos_dir == "/":
         return
 
+    output_dir_key = (host_url, eos_dir)
+    if output_dir_key in _attempted_output_dirs:
+        return
+    _attempted_output_dirs.add(output_dir_key)
+
     mkdir_ok, mkdir_msg = xrdfs_ok(host_url, "mkdir", "-p", eos_dir)
     if not mkdir_ok:
-        print(f"Warning: xrdfs mkdir -p {{eos_dir}} failed (may already exist): {{mkdir_msg}}")
-
-    last_err = ""
-    for attempt in range(1, retries + 1):
-        stat_ok, stat_msg = xrdfs_ok(host_url, "stat", eos_dir)
-        if stat_ok:
-            ls_ok, ls_msg = xrdfs_ok(host_url, "ls", eos_dir)
-            if ls_ok:
-                return
-            last_err = ls_msg or f"xrdfs ls failed for {{eos_dir}}"
-        else:
-            last_err = stat_msg or f"xrdfs stat failed for {{eos_dir}}"
-        print(f"xrdfs endpoint check attempt {{attempt}} failed for {{eos_dir}}: {{last_err}}")
-        time.sleep(delay * attempt)
-
-    raise RuntimeError(f"Output endpoint check failed for {{normalized_dest}}: {{last_err}}")
-
-def check_output_endpoint(dest):
-    normalized_dest = normalize_dest(dest)
-    ensure_output_endpoint_ready(normalized_dest)
+        print(
+            f"Warning: xrdfs mkdir -p {{eos_dir}} failed; "
+            f"trying xrdcp stage-out anyway: {{mkdir_msg}}"
+        )
 
 def verify_remote_file(dest, retries=XRDFS_VERIFY_RETRIES, delay=XRDFS_VERIFY_DELAY):
     normalized_dest, host_url, remote_path = split_xrootd_dest(dest)
@@ -1094,7 +1014,10 @@ def probe_via_root_macro(url, read_bytes, timeout):
             macro_path = tmp.name
         result = subprocess.run(
             ["root", "-b", "-q", "-l", macro_path],
-            capture_output=True, timeout=timeout, text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            universal_newlines=True,
         )
         for line in result.stdout.splitlines():
             if line.startswith("PROBE_RESULT:"):
@@ -1417,6 +1340,8 @@ trap 'rc=$?; echo "ERROR: wrapper exited with code $rc"; exit $rc' ERR
 # log and re-raise SIGTERM so Condor records ExitBySignal (do not swallow the signal)
 trap 'echo "Received SIGTERM - likely timed out by scheduler"; trap - SIGTERM; kill -s SIGTERM $$' SIGTERM
 RDF_ORIG_LD_LIBRARY_PATH="${{LD_LIBRARY_PATH:-}}"
+# The helper interpreter is selected before setup scripts adjust PATH. Keep
+# embedded Python compatible with the older subprocess API on worker nodes.
 RDF_HELPER_PYTHON="$(command -v python3 || command -v python || true)"
 run_helper_python() {{
     local helper="${{RDF_HELPER_PYTHON:-python3}}"
@@ -1490,6 +1415,71 @@ chmod +x ./{inner_script_name}
 {launch_cmd}
 """
     return wrapper
+
+
+_CONDOR_RESERVED_MACHINES = ("hepcms-henrietta.privnet",)
+_CONDOR_EXTRA_BLOCKED_HOSTS_ENV = "RDF_CONDOR_EXTRA_BLOCKED_HOSTS"
+_DEFAULT_CONDOR_EXTRA_BLOCKED_MACHINES = ("hepcms-namenode.privnet",)
+
+
+def _condor_blocked_machines():
+    """Return reserved hosts plus configurable additional blocked hosts.
+
+    ``RDF_CONDOR_EXTRA_BLOCKED_HOSTS`` is a comma-separated override for the
+    additional blocked hosts. When unset, the known EOS-unreachable worker is
+    blocked by default; setting it to an empty string allows that worker to
+    match again. Reserved machines remain excluded regardless of this setting.
+    """
+    configured_hosts = os.environ.get(_CONDOR_EXTRA_BLOCKED_HOSTS_ENV)
+    if configured_hosts is None:
+        extra_hosts = _DEFAULT_CONDOR_EXTRA_BLOCKED_MACHINES
+    else:
+        extra_hosts = configured_hosts.split(",")
+
+    hosts = [*_CONDOR_RESERVED_MACHINES]
+    hosts.extend(host.strip() for host in extra_hosts if host.strip())
+    return tuple(dict.fromkeys(hosts))
+
+
+def ensure_condor_machine_exclusion(submit_text):
+    """Add known unavailable execution hosts to a submit description."""
+    lines = submit_text.splitlines()
+    trailing_newline = submit_text.endswith("\n")
+    blocked_machines = _condor_blocked_machines()
+
+    for index, line in enumerate(lines):
+        attribute, separator, expression = line.partition("=")
+        if not separator or attribute.strip().lower() != "requirements":
+            continue
+        requirement, comment_marker, comment = expression.partition("#")
+        missing_hosts = [
+            host for host in blocked_machines if host not in requirement
+        ]
+        if not missing_hosts:
+            return submit_text
+        comment_suffix = f" #{comment}" if comment_marker else ""
+        exclusion_expr = " && ".join(
+            f'(TARGET.Machine != "{host}")' for host in missing_hosts
+        )
+        lines[index] = (
+            f"{attribute}= ({requirement.strip()}) && "
+            f"{exclusion_expr}{comment_suffix}"
+        )
+        return "\n".join(lines) + ("\n" if trailing_newline else "")
+
+    queue_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.lstrip().lower().startswith("queue")
+        ),
+        len(lines),
+    )
+    exclusion_expr = " && ".join(
+        f'(TARGET.Machine != "{host}")' for host in blocked_machines
+    )
+    lines.insert(queue_index, f"Requirements = {exclusion_expr}")
+    return "\n".join(lines) + ("\n" if trailing_newline else "")
 
 
 def generate_condor_submit(
@@ -1576,7 +1566,7 @@ Error      = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stderr
 Log        = {main_dir}/condor_logs/{log_name}
 queue {jobs}
 """
-    return submit_file
+    return ensure_condor_machine_exclusion(submit_file)
 
 
 def write_submit_files(

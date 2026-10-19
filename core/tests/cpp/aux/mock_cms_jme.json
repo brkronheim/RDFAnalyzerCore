@@ -1,0 +1,51 @@
+{
+  "schema_version": 2,
+  "corrections": [
+    {
+      "name": "mc_jec", "version": 1,
+      "inputs": [{"name": "JetA", "type": "real"}, {"name": "JetEta", "type": "real"}, {"name": "JetPt", "type": "real"}, {"name": "Rho", "type": "real"}],
+      "output": {"name": "factor", "type": "real"}, "data": 1.1
+    },
+    {
+      "name": "data_jec", "version": 1,
+      "inputs": [{"name": "JetA", "type": "real"}, {"name": "JetEta", "type": "real"}, {"name": "JetPt", "type": "real"}, {"name": "Rho", "type": "real"}, {"name": "run", "type": "real"}],
+      "output": {"name": "factor", "type": "real"},
+      "data": {"nodetype": "formula", "expression": "1.2+(x-350000)*0.000001", "parser": "TFormula", "variables": ["run"]}
+    },
+    {
+      "name": "resolution", "version": 1,
+      "inputs": [{"name": "JetEta", "type": "real"}, {"name": "JetPt", "type": "real"}, {"name": "Rho", "type": "real"}],
+      "output": {"name": "resolution", "type": "real"}, "data": 0.1
+    },
+    {
+      "name": "Mock_MC_ScaleFactor_AK4PFPuppi", "version": 1,
+      "inputs": [{"name": "JetEta", "type": "real"}, {"name": "JetPt", "type": "real"}],
+      "output": {"name": "factor", "type": "real"}, "data": 1.2
+    },
+    {
+      "name": "Mock_MC_SFUncertainty_AK4PFPuppi", "version": 1,
+      "inputs": [{"name": "JetEta", "type": "real"}, {"name": "JetPt", "type": "real"}],
+      "output": {"name": "uncertainty", "type": "real"}, "data": 0.1
+    },
+    {
+      "name": "legacy_sf", "version": 1,
+      "inputs": [{"name": "JetEta", "type": "real"}, {"name": "systematic", "type": "string"}],
+      "output": {"name": "factor", "type": "real"},
+      "data": {"nodetype": "category", "input": "systematic", "content": [{"key": "nom", "value": 1.2}, {"key": "up", "value": 1.3}, {"key": "down", "value": 1.1}]}
+    }
+  ],
+  "compound_corrections": [
+    {
+      "name": "Mock_MC_L1L2L3Res_AK4PFPuppi",
+      "inputs": [{"name": "JetA", "type": "real"}, {"name": "JetEta", "type": "real"}, {"name": "JetPt", "type": "real"}, {"name": "Rho", "type": "real"}],
+      "output": {"name": "factor", "type": "real"},
+      "inputs_update": ["JetPt"], "input_op": "*", "output_op": "*", "stack": ["mc_jec"]
+    },
+    {
+      "name": "Mock_DATA_L1L2L3Res_AK4PFPuppi",
+      "inputs": [{"name": "JetA", "type": "real"}, {"name": "JetEta", "type": "real"}, {"name": "JetPt", "type": "real"}, {"name": "Rho", "type": "real"}, {"name": "run", "type": "real"}],
+      "output": {"name": "factor", "type": "real"},
+      "inputs_update": ["JetPt"], "input_op": "*", "output_op": "*", "stack": ["data_jec"]
+    }
+  ]
+}

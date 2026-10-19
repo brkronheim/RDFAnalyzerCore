@@ -40,18 +40,29 @@ public:
     // TODO: Why are these defined here? Shouldn't they be defined in the final classes?
 
     /**
-     * @brief Define a new variable in the dataframe
+     * @brief Define exactly one column without systematic expansion.
      * @tparam F Callable type for the variable definition
      * @param name Name of the variable
      * @param f Callable to compute the variable
      * @param columns Input columns
-     * @param systematicManager Reference to systematic manager
+     */
+    template <typename F>
+    void DefineNominal(std::string name, F f,
+                       const std::vector<std::string> &columns = {}) {
+        auto df = getDataFrame();
+        if (df.HasColumn(name)) return;
+        setDataFrame(df.Define(name, std::move(f), columns));
+    }
+
+    /**
+     * @brief Define a column and propagate each registered input variation.
+     * Use DefineNominal for already-resolved, terminal variation columns to
+     * avoid constructing unused combinations of independent nuisances.
      */
     template <typename F>
     void Define(std::string name, F f, const std::vector<std::string> &columns, ISystematicManager &systematicManager) {
         auto df = getDataFrame();
-        const auto existingColumns = df.GetColumnNames();
-        if (std::find(existingColumns.begin(), existingColumns.end(), name) != existingColumns.end()) {
+        if (df.HasColumn(name)) {
             return;
         }
 
@@ -78,10 +89,10 @@ public:
                 if (nAffected > 0) {
                     const auto upName = name + "_" + syst + "Up";
                     const auto downName = name + "_" + syst + "Down";
-                    if (std::find(existingColumns.begin(), existingColumns.end(), upName) == existingColumns.end()) {
+                    if (!df.HasColumn(upName)) {
                         df = df.Define(upName, f, newColumnsUp);
                     }
-                    if (std::find(existingColumns.begin(), existingColumns.end(), downName) == existingColumns.end()) {
+                    if (!df.HasColumn(downName)) {
                         df = df.Define(downName, f, newColumnsDown);
                     }
                     systematicManager.registerSystematic(syst, {name});
@@ -142,8 +153,7 @@ public:
     template <typename F> 
     void DefinePerSample(std::string name, F f) {
         auto df = getDataFrame();
-        const auto existingColumns = df.GetColumnNames();
-        if (std::find(existingColumns.begin(), existingColumns.end(), name) != existingColumns.end()) {
+        if (df.HasColumn(name)) {
             return;
         }
         df = df.DefinePerSample(name, f);

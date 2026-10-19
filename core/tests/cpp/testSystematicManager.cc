@@ -453,6 +453,40 @@ TEST_F(SystematicManagerTest, AutoRegisterSystematics_CompoundVariableName) {
   EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("my_var_name", "jes"));
 }
 
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_RegisteredUnderscoreNuisance) {
+  systematicManager->registerSystematic("Absolute_2024", {"Jet_pt"});
+  // A similarly named nominal column must not override the registered suffix.
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"eventWeight", "eventWeight_Absolute",
+       "eventWeight_Absolute_2024Up", "eventWeight_Absolute_2024Down"});
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first, "eventWeight");
+  EXPECT_EQ(result.registered[0].second, "Absolute_2024");
+  EXPECT_EQ(systematicManager->getSystematics().count("2024"), 0u);
+  EXPECT_EQ(systematicManager->getVariationColumnName("eventWeight", "Absolute_2024Up"),
+            "eventWeight_Absolute_2024Up");
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_RequiresExistingBase) {
+  // NanoAOD's ptUnclustered is not a variation of a column named PuppiMET.
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"PuppiMET_pt", "PuppiMET_ptUnclusteredUp", "PuppiMET_ptUnclusteredDown"});
+  EXPECT_TRUE(result.registered.empty());
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_UnderscoreNuisanceFromBase) {
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"jet_pt", "jet_pt_Absolute_2024Up", "jet_pt_Absolute_2024Down",
+       "weight", "weight_BBEC1_2024Down"});
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first, "jet_pt");
+  EXPECT_EQ(result.registered[0].second, "Absolute_2024");
+  ASSERT_EQ(result.missingUp.size(), 1u);
+  EXPECT_EQ(result.missingUp[0], "weight_BBEC1_2024Down");
+  EXPECT_EQ(systematicManager->getSystematics().count("2024"), 0u);
+}
+
 TEST_F(SystematicManagerTest, AutoRegisterSystematics_Idempotent) {
   // Calling auto-register twice should not create duplicate registrations.
   const std::vector<std::string> cols = {"pt", "pt_jesUp", "pt_jesDown"};

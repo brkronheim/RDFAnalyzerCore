@@ -117,6 +117,18 @@ public:
   }
 
   /**
+   * @brief Define exactly one column using the supplied input columns.
+   * No systematic expansion or registration occurs. Use for terminal,
+   * explicitly varied weights; ordinary Define retains automatic propagation.
+   */
+  template <typename F>
+  Analyzer *DefineNominal(std::string name, F f,
+                         const std::vector<std::string> &columns = {}) {
+    dataFrameProvider_m->DefineNominal(std::move(name), std::move(f), columns);
+    return this;
+  }
+
+  /**
    * @brief Redefine an existing variable in the dataframe.
    * @tparam F Callable type for the variable redefinition
    * @param name Name of the variable to redefine

@@ -120,11 +120,11 @@ struct KinFitParticleConfig {
  *   @endcode
  */
 struct KinFitConstraintConfig {
-  enum class Type { MASS, PT, PX, PY };
+  enum class Type { MASS, PT, PX, PY, DELTAR };
 
   Type   type       = Type::MASS; ///< Constraint type
   int    idx1       = -1;  ///< First  particle (mass 2/3-body or pT-only)
-  int    idx2       = -1;  ///< Second particle (mass constraints only)
+  int    idx2       = -1;  ///< Second particle (two-body mass or ΔR constraint)
   int    idx3       = -1;  ///< Third  particle (three-body mass only; -1 = two-body)
   double targetValue = 0.0; ///< Target invariant mass [GeV] or target pT [GeV]
   /// @brief Resonance width / mass uncertainty [GeV] for soft mass constraints.
@@ -138,6 +138,10 @@ struct KinFitConstraintConfig {
   std::vector<int> indices;
   /// @brief Gaussian width [GeV] for soft PX/PY constraints.
   double transverseSigma = 0.0;
+  /// @brief Event columns for a soft ΔR target and its Gaussian width.
+  /// Used only when type == DELTAR.
+  std::string targetColumn;
+  std::string sigmaColumn;
 };
 
 /**
@@ -145,7 +149,8 @@ struct KinFitConstraintConfig {
  */
 struct KinFitConfig {
   std::vector<KinFitParticleConfig>   particles;   ///< Ordered list of particles
-  std::vector<KinFitConstraintConfig> constraints; ///< Mass and pT constraints
+  /// @brief Mass, pT, Cartesian, or event-dependent ΔR constraints.
+  std::vector<KinFitConstraintConfig> constraints;
 
   // ── per-type resolution parameters (with physics-motivated defaults) ──────
   double leptonPtResolution  = 0.02;   ///< Fractional lepton pT resolution
@@ -208,7 +213,7 @@ struct KinFitConfig {
  *   Required:
  *     name            – unique identifier for the fit
  *     particles       – comma-separated list of particle specs (see below)
- *     constraints     – comma-separated constraints; three formats supported:
+ *     constraints     – comma-separated mass, pT, Cartesian, or ΔR constraints:
  *                       @code
  *                       # Two-body invariant mass (hard): idx1+idx2:targetMass
  *                       0+1:91.2
@@ -227,8 +232,13 @@ struct KinFitConfig {
  *                       px:0+1+2+3:0.0,py:0+1+2+3:0.0
  *                       # Soft Cartesian zero-MET prior on particle 3
  *                       px:3:0.0:20.0,py:3:0.0:20.0
+ *                       # Soft ΔR constraint with event-dependent target
+ *                       # and width columns
+ *                       dr:0+1:targetDeltaRColumn:deltaRSigmaColumn
  *                       @endcode
  *                       where indices are zero-based into the particles list.
+ *                       The @c dr form reads one target and one positive width
+ *                       per event from the named scalar dataframe columns.
  *   Optional (fall back to built-in defaults if absent):
  *     maxIterations        – maximum number of linearisation iterations
  *     convergenceTolerance – convergence criterion on |Δχ²|

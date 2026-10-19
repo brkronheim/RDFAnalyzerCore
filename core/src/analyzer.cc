@@ -633,8 +633,7 @@ std::vector<std::string> Analyzer::GetColumnNames() {
 }
 
 bool Analyzer::HasColumn(const std::string& name) {
-    const auto names = GetColumnNames();
-    return std::find(names.begin(), names.end(), name) != names.end();
+    return dataFrameProvider_m->getDataFrame().HasColumn(name);
 }
 
 std::string Analyzer::GetColumnType(const std::string& name) {

@@ -225,8 +225,10 @@ The script reads ROOT files produced by RDFAnalyzerCore analyses using `uproot`.
 
 - **TH1 histograms**: Standard 1D histograms (TH1F, TH1D, etc.)
 
-**Note**: Only 1D histograms are supported. THnSparse and multi-dimensional histograms are not supported.
-Ensure your analysis outputs 1D histograms for the observables specified in your datacard configuration.
+**Note**: Only 1D histograms are supported. RDFAnalyzerCore's merge task adds
+these 1D histograms after hadding the per-job `THnSparseF` arrays. For a manual
+merge, run `python core/python/extract_nd_histograms.py merged.root` before
+pointing the datacard configuration at the merged file.
 
 ### Histogram Naming
 

@@ -50,6 +50,17 @@ std::string joinPath(const std::string &base, const std::string &suffix) {
   return base + "/" + suffix;
 }
 
+std::string replaceAlgorithmSuffix(std::string correctionName,
+                                   const std::string &ak4Suffix,
+                                   const std::string &ak8Suffix) {
+  const auto position = correctionName.rfind(ak4Suffix);
+  if (position != std::string::npos &&
+      position + ak4Suffix.size() == correctionName.size()) {
+    correctionName.replace(position, ak4Suffix.size(), ak8Suffix);
+  }
+  return correctionName;
+}
+
 std::vector<std::string> withHltPrefix(const std::vector<std::string> &triggers) {
   std::vector<std::string> out;
   out.reserve(triggers.size());
@@ -244,7 +255,7 @@ const BuiltInYearEntry kBuiltInDefaults[] = {
   // ==========================================================================
   {
     "2022_preEE",
-    "2022_preEE",
+    "2022Re-recoBCD",
     "Rho_fixedGridRhoFastjetAll",
     "NUM_MediumID_DEN_TrackerMuons",
     "Electron-ID-SF",
@@ -256,8 +267,8 @@ const BuiltInYearEntry kBuiltInDefaults[] = {
     "BTV/Run3-22CDSep23-Summer22-NanoAODv12/latest/btagging.json.gz",
     "BTV/Run3-22CDSep23-Summer22-NanoAODv12/latest/ctagging.json.gz",
     "JME/Run3-22CDSep23-Summer22-NanoAODv12/latest/jet_jerc.json.gz",
-    "Summer22_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
-    "Summer22_22Sep2023_V3_MC_Regrouped_Total_AK4PFPuppi",
+    "Summer22_22Sep2023_V4_MC_L1L2L3Res_AK4PFPuppi",
+    "Summer22_22Sep2023_V4_MC_Regrouped_Total_AK4PFPuppi",
     "Summer22_22Sep2023_JRV2_MC_PtResolution_AK4PFPuppi",
     "Summer22_22Sep2023_JRV2_MC_ScaleFactor_AK4PFPuppi",
     {"Jet_eta", "Jet_pt_corr_jec"},
@@ -278,7 +289,7 @@ const BuiltInYearEntry kBuiltInDefaults[] = {
   // ==========================================================================
   {
     "2022_postEE",
-    "2022_postEE",
+    "2022Re-recoE+PromptFG",
     "Rho_fixedGridRhoFastjetAll",
     "NUM_MediumID_DEN_TrackerMuons",
     "Electron-ID-SF",
@@ -290,8 +301,8 @@ const BuiltInYearEntry kBuiltInDefaults[] = {
     "BTV/Run3-22EFGSep23-Summer22EE-NanoAODv12/latest/btagging.json.gz",
     "BTV/Run3-22EFGSep23-Summer22EE-NanoAODv12/latest/ctagging.json.gz",
     "JME/Run3-22EFGSep23-Summer22EE-NanoAODv12/latest/jet_jerc.json.gz",
-    "Summer22EE_22Sep2023_V3_MC_L1L2L3Res_AK4PFPuppi",
-    "Summer22EE_22Sep2023_V3_MC_Regrouped_Total_AK4PFPuppi",
+    "Summer22EE_22Sep2023_V4_MC_L1L2L3Res_AK4PFPuppi",
+    "Summer22EE_22Sep2023_V4_MC_Regrouped_Total_AK4PFPuppi",
     "Summer22EE_22Sep2023_JRV2_MC_PtResolution_AK4PFPuppi",
     "Summer22EE_22Sep2023_JRV2_MC_ScaleFactor_AK4PFPuppi",
     {"Jet_eta", "Jet_pt_corr_jec"},
@@ -312,7 +323,7 @@ const BuiltInYearEntry kBuiltInDefaults[] = {
   // ==========================================================================
   {
     "2023_preBPix",
-    "2023_preBPix",
+    "2023PromptC",
     "Rho_fixedGridRhoFastjetAll",
     "NUM_MediumID_DEN_TrackerMuons",
     "Electron-ID-SF",
@@ -324,10 +335,10 @@ const BuiltInYearEntry kBuiltInDefaults[] = {
     "BTV/Run3-23CSep23-Summer23-NanoAODv12/latest/btagging.json.gz",
     "BTV/Run3-23CSep23-Summer23-NanoAODv12/latest/ctagging.json.gz",
     "JME/Run3-23CSep23-Summer23-NanoAODv12/latest/jet_jerc.json.gz",
-    "Summer23Prompt23_V2_MC_L1L2L3Res_AK4PFPuppi",
-    "Summer23Prompt23_V2_MC_Regrouped_Total_AK4PFPuppi",
-    "Summer23Prompt23_RunCv1234_JRV2_MC_PtResolution_AK4PFPuppi",
-    "Summer23Prompt23_RunCv1234_JRV2_MC_ScaleFactor_AK4PFPuppi",
+    "Summer23Prompt23_V4_MC_L1L2L3Res_AK4PFPuppi",
+    "Summer23Prompt23_V4_MC_Regrouped_Total_AK4PFPuppi",
+    "Summer23Prompt23_RunCv1234_JRV3_MC_PtResolution_AK4PFPuppi",
+    "Summer23Prompt23_RunCv1234_JRV3_MC_ScaleFactor_AK4PFPuppi",
     {"Jet_eta", "Jet_pt_corr_jec"},
     "EGM/Run3-23CSep23-Summer23-NanoAODv12/latest/electronSS_EtDependent.json.gz",
     "Scale",
@@ -346,7 +357,7 @@ const BuiltInYearEntry kBuiltInDefaults[] = {
   // ==========================================================================
   {
     "2023_postBPix",
-    "2023_postBPix",
+    "2023PromptD",
     "Rho_fixedGridRhoFastjetAll",
     "NUM_MediumID_DEN_TrackerMuons",
     "Electron-ID-SF",
@@ -358,10 +369,10 @@ const BuiltInYearEntry kBuiltInDefaults[] = {
     "BTV/Run3-23DSep23-Summer23BPix-NanoAODv12/latest/btagging.json.gz",
     "BTV/Run3-23DSep23-Summer23BPix-NanoAODv12/latest/ctagging.json.gz",
     "JME/Run3-23DSep23-Summer23BPix-NanoAODv12/latest/jet_jerc.json.gz",
-    "Summer23BPixPrompt23_V3_MC_L1L2L3Res_AK4PFPuppi",
-    "Summer23BPixPrompt23_V3_MC_Regrouped_Total_AK4PFPuppi",
-    "Summer23BPixPrompt23_RunD_JRV2_MC_PtResolution_AK4PFPuppi",
-    "Summer23BPixPrompt23_RunD_JRV2_MC_ScaleFactor_AK4PFPuppi",
+    "Summer23BPixPrompt23_V4_MC_L1L2L3Res_AK4PFPuppi",
+    "Summer23BPixPrompt23_V4_MC_Regrouped_Total_AK4PFPuppi",
+    "Summer23BPixPrompt23_RunD_JRV3_MC_PtResolution_AK4PFPuppi",
+    "Summer23BPixPrompt23_RunD_JRV3_MC_ScaleFactor_AK4PFPuppi",
     {"Jet_eta", "Jet_pt_corr_jec"},
     "EGM/Run3-23DSep23-Summer23BPix-NanoAODv12/latest/electronSS_EtDependent.json.gz",
     "Scale",
@@ -502,7 +513,8 @@ std::vector<std::string> CmsYearRegistry::defaultJesReducedSources(
     if (canonicalYear == "2016_PreVFP" || canonicalYear == "2016_PostVFP") return "2016";
     if (canonicalYear == "2017") return "2017";
     if (canonicalYear == "2018") return "2018";
-    if (canonicalYear == "2022_preEE" || canonicalYear == "2022_postEE") return "2022";
+    if (canonicalYear == "2022_preEE") return "2022";
+    if (canonicalYear == "2022_postEE") return "2022EE";
     if (canonicalYear == "2023_preBPix") return "2023";
     if (canonicalYear == "2023_postBPix") return "2023BPix";
     if (canonicalYear == "2024") return "2024";
@@ -893,12 +905,22 @@ CmsYearSettings CmsYearRegistry::load() const {
       if (yearNode["btvBTagFile"]) s.btvBTagFile = resolveYamlPath("btvBTagFile");
       if (yearNode["btvCTagFile"]) s.btvCTagFile = resolveYamlPath("btvCTagFile");
       if (yearNode["jmeFile"]) s.jmeFile = resolveYamlPath("jmeFile");
+      if (yearNode["fatJetJmeFile"]) s.fatJetJmeFile = resolveYamlPath("fatJetJmeFile");
       if (yearNode["jecCompoundCorrection"]) s.jecCompoundCorrection = resolveYamlString("jecCompoundCorrection");
       if (yearNode["jesTotalCorrection"]) s.jesTotalCorrection = resolveYamlString("jesTotalCorrection");
       if (yearNode["jesSources"]) s.jesSources = resolveYamlStringVector("jesSources");
       if (yearNode["jerPtResolutionCorrection"]) s.jerPtResolutionCorrection = resolveYamlString("jerPtResolutionCorrection");
       if (yearNode["jerScaleFactorCorrection"]) s.jerScaleFactorCorrection = resolveYamlString("jerScaleFactorCorrection");
       if (yearNode["jerScaleFactorInputs"]) s.jerScaleFactorInputs = resolveYamlStringVector("jerScaleFactorInputs");
+      if (yearNode["jerScaleFactorUncertaintyCorrection"]) s.jerScaleFactorUncertaintyCorrection = resolveYamlString("jerScaleFactorUncertaintyCorrection");
+      if (yearNode["jerScaleFactorUncertaintyInputs"]) s.jerScaleFactorUncertaintyInputs = resolveYamlStringVector("jerScaleFactorUncertaintyInputs");
+      if (yearNode["fatJetJecCompoundCorrection"]) s.fatJetJecCompoundCorrection = resolveYamlString("fatJetJecCompoundCorrection");
+      if (yearNode["fatJetJesTotalCorrection"]) s.fatJetJesTotalCorrection = resolveYamlString("fatJetJesTotalCorrection");
+      if (yearNode["fatJetJerPtResolutionCorrection"]) s.fatJetJerPtResolutionCorrection = resolveYamlString("fatJetJerPtResolutionCorrection");
+      if (yearNode["fatJetJerScaleFactorCorrection"]) s.fatJetJerScaleFactorCorrection = resolveYamlString("fatJetJerScaleFactorCorrection");
+      if (yearNode["fatJetJerScaleFactorInputs"]) s.fatJetJerScaleFactorInputs = resolveYamlStringVector("fatJetJerScaleFactorInputs");
+      if (yearNode["fatJetJerScaleFactorUncertaintyCorrection"]) s.fatJetJerScaleFactorUncertaintyCorrection = resolveYamlString("fatJetJerScaleFactorUncertaintyCorrection");
+      if (yearNode["fatJetJerScaleFactorUncertaintyInputs"]) s.fatJetJerScaleFactorUncertaintyInputs = resolveYamlStringVector("fatJetJerScaleFactorUncertaintyInputs");
       if (yearNode["electronScaleSmearingFile"]) s.electronScaleSmearingFile = resolveYamlPath("electronScaleSmearingFile");
       if (yearNode["electronScaleCorrection"]) s.electronScaleCorrection = resolveYamlString("electronScaleCorrection");
       if (yearNode["electronSmearingCorrection"]) s.electronSmearingCorrection = resolveYamlString("electronSmearingCorrection");
@@ -938,10 +960,17 @@ CmsYearSettings CmsYearRegistry::load() const {
     else if (key == "btvBTagFile") s.btvBTagFile = resolvePathInternal(value, correctionsBase_m, "");
     else if (key == "btvCTagFile") s.btvCTagFile = resolvePathInternal(value, correctionsBase_m, "");
     else if (key == "jmeFile") s.jmeFile = resolvePathInternal(value, correctionsBase_m, "");
+    else if (key == "fatJetJmeFile") s.fatJetJmeFile = resolvePathInternal(value, correctionsBase_m, "");
     else if (key == "jecCompoundCorrection") s.jecCompoundCorrection = value;
     else if (key == "jesTotalCorrection") s.jesTotalCorrection = value;
     else if (key == "jerPtResolutionCorrection") s.jerPtResolutionCorrection = value;
     else if (key == "jerScaleFactorCorrection") s.jerScaleFactorCorrection = value;
+    else if (key == "jerScaleFactorUncertaintyCorrection") s.jerScaleFactorUncertaintyCorrection = value;
+    else if (key == "fatJetJecCompoundCorrection") s.fatJetJecCompoundCorrection = value;
+    else if (key == "fatJetJesTotalCorrection") s.fatJetJesTotalCorrection = value;
+    else if (key == "fatJetJerPtResolutionCorrection") s.fatJetJerPtResolutionCorrection = value;
+    else if (key == "fatJetJerScaleFactorCorrection") s.fatJetJerScaleFactorCorrection = value;
+    else if (key == "fatJetJerScaleFactorUncertaintyCorrection") s.fatJetJerScaleFactorUncertaintyCorrection = value;
     else if (key == "electronScaleSmearingFile") s.electronScaleSmearingFile = resolvePathInternal(value, correctionsBase_m, "");
     else if (key == "electronScaleCorrection") s.electronScaleCorrection = value;
     else if (key == "electronSmearingCorrection") s.electronSmearingCorrection = value;
@@ -954,11 +983,70 @@ CmsYearSettings CmsYearRegistry::load() const {
   for (const auto &[key, values] : listOverrides_m) {
     if (key == "jesSources") s.jesSources = values;
     else if (key == "jerScaleFactorInputs") s.jerScaleFactorInputs = values;
+    else if (key == "jerScaleFactorUncertaintyInputs") s.jerScaleFactorUncertaintyInputs = values;
+    else if (key == "fatJetJerScaleFactorInputs") s.fatJetJerScaleFactorInputs = values;
+    else if (key == "fatJetJerScaleFactorUncertaintyInputs") s.fatJetJerScaleFactorUncertaintyInputs = values;
     else if (key == "doubleMuonTriggers") s.doubleMuonTriggers = withHltPrefix(values);
     else if (key == "doubleElectronTriggers") s.doubleElectronTriggers = withHltPrefix(values);
     else if (key == "singleMuonTriggers") s.singleMuonTriggers = withHltPrefix(values);
     else if (key == "singleElectronTriggers") s.singleElectronTriggers = withHltPrefix(values);
     else if (key == "metTriggers") s.metTriggers = withHltPrefix(values);
+  }
+
+  // Modern Run 3 AK4 payloads separate central JER SF and absolute uncertainty.
+  // Derive from the final SF name so explicit campaign/name overrides agree.
+  if (s.canonicalYear.rfind("202", 0) == 0) {
+    const std::string sfToken = "_ScaleFactor_";
+    const auto token = s.jerScaleFactorCorrection.find(sfToken);
+    if (s.jerScaleFactorUncertaintyCorrection.empty() && token != std::string::npos) {
+      s.jerScaleFactorUncertaintyCorrection = s.jerScaleFactorCorrection;
+      s.jerScaleFactorUncertaintyCorrection.replace(token, sfToken.size(), "_SFUncertainty_");
+    }
+    if (s.jerScaleFactorUncertaintyInputs.empty()) {
+      s.jerScaleFactorUncertaintyInputs = s.jerScaleFactorInputs;
+    }
+  }
+
+  // Run 3 NanoAODv15 publishes the AK8 PUPPI corrections in a sibling
+  // fatJet_jerc.json.gz file. The correction names follow the AK4 names with
+  // the algorithm suffix changed. Keep the defaults derived from the final
+  // AK4 settings so a site or analysis can override the source payload once.
+  const std::string ak4Suffix = "_AK4PFPuppi";
+  const std::string ak8Suffix = "_AK8PFPuppi";
+  if (s.canonicalYear == "2024" &&
+      s.jecCompoundCorrection.find(ak4Suffix) != std::string::npos) {
+    if (s.fatJetJmeFile.empty() && !s.jmeFile.empty()) {
+      s.fatJetJmeFile =
+          (std::filesystem::path(s.jmeFile).parent_path() /
+           "fatJet_jerc.json.gz").string();
+    }
+    if (s.fatJetJecCompoundCorrection.empty()) {
+      s.fatJetJecCompoundCorrection = replaceAlgorithmSuffix(
+          s.jecCompoundCorrection, ak4Suffix, ak8Suffix);
+    }
+    if (s.fatJetJesTotalCorrection.empty()) {
+      s.fatJetJesTotalCorrection = replaceAlgorithmSuffix(
+          s.jesTotalCorrection, ak4Suffix, ak8Suffix);
+    }
+    if (s.fatJetJerPtResolutionCorrection.empty()) {
+      s.fatJetJerPtResolutionCorrection = replaceAlgorithmSuffix(
+          s.jerPtResolutionCorrection, ak4Suffix, ak8Suffix);
+    }
+    if (s.fatJetJerScaleFactorCorrection.empty()) {
+      s.fatJetJerScaleFactorCorrection = replaceAlgorithmSuffix(
+          s.jerScaleFactorCorrection, ak4Suffix, ak8Suffix);
+    }
+    if (s.fatJetJerScaleFactorUncertaintyCorrection.empty()) {
+      s.fatJetJerScaleFactorUncertaintyCorrection = replaceAlgorithmSuffix(
+          s.fatJetJerScaleFactorCorrection,
+          "_ScaleFactor" + ak8Suffix, "_SFUncertainty" + ak8Suffix);
+    }
+    if (s.fatJetJerScaleFactorInputs.empty()) {
+      s.fatJetJerScaleFactorInputs = {"FatJet_eta", "FatJet_pt_corr_jec"};
+    }
+    if (s.fatJetJerScaleFactorUncertaintyInputs.empty()) {
+      s.fatJetJerScaleFactorUncertaintyInputs = s.fatJetJerScaleFactorInputs;
+    }
   }
 
   return s;
@@ -997,10 +1085,17 @@ CmsYearSettings CmsYearRegistry::loadWithOverrides(
     else if (strippedKey == "btvBTagFile") settings.btvBTagFile = resolvePathInternal(value, correctionsBase_m, "");
     else if (strippedKey == "btvCTagFile") settings.btvCTagFile = resolvePathInternal(value, correctionsBase_m, "");
     else if (strippedKey == "jmeFile") settings.jmeFile = resolvePathInternal(value, correctionsBase_m, "");
+    else if (strippedKey == "fatJetJmeFile") settings.fatJetJmeFile = resolvePathInternal(value, correctionsBase_m, "");
     else if (strippedKey == "jecCompoundCorrection") settings.jecCompoundCorrection = value;
     else if (strippedKey == "jesTotalCorrection") settings.jesTotalCorrection = value;
     else if (strippedKey == "jerPtResolutionCorrection") settings.jerPtResolutionCorrection = value;
     else if (strippedKey == "jerScaleFactorCorrection") settings.jerScaleFactorCorrection = value;
+    else if (strippedKey == "jerScaleFactorUncertaintyCorrection") settings.jerScaleFactorUncertaintyCorrection = value;
+    else if (strippedKey == "fatJetJecCompoundCorrection") settings.fatJetJecCompoundCorrection = value;
+    else if (strippedKey == "fatJetJesTotalCorrection") settings.fatJetJesTotalCorrection = value;
+    else if (strippedKey == "fatJetJerPtResolutionCorrection") settings.fatJetJerPtResolutionCorrection = value;
+    else if (strippedKey == "fatJetJerScaleFactorCorrection") settings.fatJetJerScaleFactorCorrection = value;
+    else if (strippedKey == "fatJetJerScaleFactorUncertaintyCorrection") settings.fatJetJerScaleFactorUncertaintyCorrection = value;
     else if (strippedKey == "electronScaleSmearingFile") settings.electronScaleSmearingFile = resolvePathInternal(value, correctionsBase_m, "");
     else if (strippedKey == "electronScaleCorrection") settings.electronScaleCorrection = value;
     else if (strippedKey == "electronSmearingCorrection") settings.electronSmearingCorrection = value;

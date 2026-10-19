@@ -578,9 +578,10 @@ class HistogramSchema:
     """Schema definition for ROOT histogram output files.
 
     ``NDHistogramManager`` saves N-dimensional ``THnSparseF`` objects into the
-    *meta* output ROOT file.  This schema records the expected file name, the
-    histogram names, and the axis specifications that downstream tools can
-    rely on.
+    *meta* output ROOT file under ``nd_histograms_v1/``. Per-job files carry
+    the merge-safe axis labels and bin edges in an embedded schema object. The
+    merge workflow hadds these arrays, then adds reconstructed ``TH1F``
+    objects to the merged ROOT file for existing downstream tools.
 
     Attributes
     ----------
@@ -590,15 +591,16 @@ class HistogramSchema:
         Path (or pattern) of the meta-output ROOT file that contains the
         histograms.
     histogram_names : list[str]
-        Names of the ``THnSparseF`` objects expected in the file.
+        ROOT paths of the ``THnSparseF`` objects expected in the file. Legacy
+        1D-only files may still list their histogram paths directly.
     axes : list[HistogramAxisSpec]
         Axis specifications shared across all histograms in this schema.
         Individual histograms may add extra axes; these represent the common
         (required) axes.
     axis_labels : dict[str, list[str]]
-        Optional axis-role to category-label mapping extracted from the
-        histogram booking configuration. Typical keys are ``channel``,
-        ``control``, ``sample``, and ``systematic``.
+        Axis-role to category-label mapping extracted from the embedded ROOT
+        schema when available. Typical keys are ``channel``, ``control``,
+        ``sample``, and ``systematic``.
     sample_metadata : dict[str, dict]
         Optional metadata keyed by analysis sample alias. This is intended for
         downstream automation such as manifest-aware process synthesis,

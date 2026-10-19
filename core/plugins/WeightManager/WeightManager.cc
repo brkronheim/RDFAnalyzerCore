@@ -1,4 +1,5 @@
 #include <WeightManager.h>
+#include <RDFColumnPacker.h>
 #include <analyzer.h>
 #include <NullOutputSink.h>
 #include <TFile.h>
@@ -88,96 +89,6 @@ std::string buildLegacyWeightInitExpression(const std::string &column) {
 std::string buildLegacyWeightMultiplyExpression(const std::string &accumulator,
                                                 const std::string &column) {
   return accumulator + " * static_cast<double>(" + column + ")";
-}
-
-template <typename InputT>
-ROOT::RDF::RNode defineWeightAccumulatorInit(ROOT::RDF::RNode df,
-                                             const std::string &name,
-                                             const std::string &column) {
-  return df.Define(
-      name,
-      [](InputT value) { return static_cast<double>(value); },
-      {column});
-}
-
-template <typename InputT>
-ROOT::RDF::RNode defineWeightAccumulatorMultiply(ROOT::RDF::RNode df,
-                                                 const std::string &name,
-                                                 const std::string &accumulator,
-                                                 const std::string &column) {
-  return df.Define(
-      name,
-      [](double acc, InputT value) { return acc * static_cast<double>(value); },
-      {accumulator, column});
-}
-
-ROOT::RDF::RNode dispatchWeightAccumulatorInit(ROOT::RDF::RNode df,
-                                               const std::string &name,
-                                               const std::string &column,
-                                               WeightScalarTypeToken inputType) {
-  switch (inputType) {
-  case WeightScalarTypeToken::Bool:
-    return defineWeightAccumulatorInit<Bool_t>(df, name, column);
-  case WeightScalarTypeToken::Float:
-    return defineWeightAccumulatorInit<Float_t>(df, name, column);
-  case WeightScalarTypeToken::Double:
-    return defineWeightAccumulatorInit<Double_t>(df, name, column);
-  case WeightScalarTypeToken::Int:
-    return defineWeightAccumulatorInit<Int_t>(df, name, column);
-  case WeightScalarTypeToken::UInt:
-    return defineWeightAccumulatorInit<UInt_t>(df, name, column);
-  case WeightScalarTypeToken::Short:
-    return defineWeightAccumulatorInit<Short_t>(df, name, column);
-  case WeightScalarTypeToken::UShort:
-    return defineWeightAccumulatorInit<UShort_t>(df, name, column);
-  case WeightScalarTypeToken::Char:
-    return defineWeightAccumulatorInit<Char_t>(df, name, column);
-  case WeightScalarTypeToken::UChar:
-    return defineWeightAccumulatorInit<UChar_t>(df, name, column);
-  case WeightScalarTypeToken::Long64:
-    return defineWeightAccumulatorInit<Long64_t>(df, name, column);
-  case WeightScalarTypeToken::ULong64:
-    return defineWeightAccumulatorInit<ULong64_t>(df, name, column);
-  case WeightScalarTypeToken::Unsupported:
-    throw std::runtime_error("WeightManager::defineWeightColumn: unsupported scalar input type in compiled path");
-  }
-
-  throw std::runtime_error("WeightManager::defineWeightColumn: unreachable init dispatch");
-}
-
-ROOT::RDF::RNode dispatchWeightAccumulatorMultiply(ROOT::RDF::RNode df,
-                                                   const std::string &name,
-                                                   const std::string &accumulator,
-                                                   const std::string &column,
-                                                   WeightScalarTypeToken inputType) {
-  switch (inputType) {
-  case WeightScalarTypeToken::Bool:
-    return defineWeightAccumulatorMultiply<Bool_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::Float:
-    return defineWeightAccumulatorMultiply<Float_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::Double:
-    return defineWeightAccumulatorMultiply<Double_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::Int:
-    return defineWeightAccumulatorMultiply<Int_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::UInt:
-    return defineWeightAccumulatorMultiply<UInt_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::Short:
-    return defineWeightAccumulatorMultiply<Short_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::UShort:
-    return defineWeightAccumulatorMultiply<UShort_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::Char:
-    return defineWeightAccumulatorMultiply<Char_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::UChar:
-    return defineWeightAccumulatorMultiply<UChar_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::Long64:
-    return defineWeightAccumulatorMultiply<Long64_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::ULong64:
-    return defineWeightAccumulatorMultiply<ULong64_t>(df, name, accumulator, column);
-  case WeightScalarTypeToken::Unsupported:
-    throw std::runtime_error("WeightManager::defineWeightColumn: unsupported scalar input type in compiled path");
-  }
-
-  throw std::runtime_error("WeightManager::defineWeightColumn: unreachable multiply dispatch");
 }
 
 bool shouldUseLegacyWeightDefines(const std::vector<std::string> &columnTypes,
@@ -329,16 +240,6 @@ void WeightManager::defineWeightColumn(const std::string &outputColumn,
 
   const double normProduct = computeNormProduct();
 
-  // Build a lambda that multiplies all SF columns together, then scales by norm.
-  // We use RDataFrame's variadic Define mechanism with a captured copy of the
-  // norm product.  The lambda signature must match the number of input columns,
-  // which varies at runtime.  We therefore handle the common cases explicitly
-  // and fall back to a generic loop approach via a helper lambda defined below.
-  //
-  // Strategy: define a helper column "_tmp_wm_product_<outputColumn>" that
-  // holds the product of all SF columns (as double), then multiply by normProduct.
-  // If there are no SF columns the weight is just the normProduct scalar.
-
   ROOT::RDF::RNode df = dataManager_m->getDataFrame();
 
   if (sfColumns.empty()) {
@@ -364,30 +265,24 @@ void WeightManager::defineWeightColumn(const std::string &outputColumn,
 
   const bool useLegacyDefines = shouldUseLegacyWeightDefines(columnTypes, typeTokens);
 
-  // Accumulate the product of scale factors step by step since the number of
-  // inputs is only known at runtime. Common scalar types use compiled lambdas;
-  // unsupported types keep the legacy string-Define fallback.
+  if (!useLegacyDefines) {
+    dataManager_m->setDataFrame(rdfcolumnpacker::defineScalarProduct(
+        df, outputColumn, sfColumns, normProduct));
+    return;
+  }
+
+  // Preserve the legacy expression fallback for nonstandard input types.
 
   // Define the first accumulator column
   std::string prevCol = outputColumn + "_wm_acc_0_";
-  if (useLegacyDefines) {
-    const std::string sfCol0 = sfColumns[0];
-    df = df.Define(prevCol, buildLegacyWeightInitExpression(sfCol0));
-  } else {
-    df = dispatchWeightAccumulatorInit(df, prevCol, sfColumns[0], typeTokens[0]);
-  }
+  df = df.Define(prevCol, buildLegacyWeightInitExpression(sfColumns[0]));
 
   // Multiply in subsequent SF columns
   for (std::size_t i = 1; i < sfColumns.size(); ++i) {
     std::string nextCol = outputColumn + "_wm_acc_" + std::to_string(i) + "_";
     const std::string sfColI = sfColumns[i];
     const std::string pCol = prevCol;
-    if (useLegacyDefines) {
-      df = df.Define(nextCol, buildLegacyWeightMultiplyExpression(pCol, sfColI));
-    } else {
-      df = dispatchWeightAccumulatorMultiply(df, nextCol, pCol, sfColI,
-                                             typeTokens[i]);
-    }
+    df = df.Define(nextCol, buildLegacyWeightMultiplyExpression(pCol, sfColI));
     prevCol = nextCol;
   }
 

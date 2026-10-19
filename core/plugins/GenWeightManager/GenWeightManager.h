@@ -51,6 +51,8 @@ private:
 
   bool enableLheScale_m = true;
   bool enablePs_m = true;
+  bool enableIsr_m = true;
+  bool enableFsr_m = true;
   bool enablePdf_m = true;
   bool enablePdfAs_m = true;
   std::string lheScaleBranch_m = "LHEScaleWeight";

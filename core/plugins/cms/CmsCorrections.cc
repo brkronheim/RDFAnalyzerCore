@@ -31,6 +31,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cms {
@@ -42,6 +43,11 @@ std::string toLowerCopy(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return value;
+}
+
+bool hasColumn(Analyzer &analyzer, const std::string &name) {
+  const auto columns = analyzer.GetColumnNames();
+  return std::find(columns.begin(), columns.end(), name) != columns.end();
 }
 
 /// Join a vector of strings with comma separators.
@@ -71,19 +77,52 @@ void defineElectronIdentityCorrections(Analyzer &an) {
             {"Electron_pt"})
       ->Define("Electron_mass_corr_nominal",
                [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
-               {"Electron_mass"})
-      ->Define("Electron_pt_scale_up",
-               [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
-               {"Electron_pt"})
+               {"Electron_mass"});
+}
+
+void defineElectronIdentityVariations(Analyzer &an,
+                                      const std::string &nominalPtColumn,
+                                      const std::string &nominalMassColumn) {
+  an.Define("Electron_pt_scale_up",
+            [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+            {nominalPtColumn})
       ->Define("Electron_pt_scale_down",
                [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
-               {"Electron_pt"})
+               {nominalPtColumn})
       ->Define("Electron_pt_smear_up",
                [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
-               {"Electron_pt"})
+               {nominalPtColumn})
       ->Define("Electron_pt_smear_down",
                [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
-               {"Electron_pt"});
+               {nominalPtColumn})
+      ->Define("Electron_mass_scale_up",
+               [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
+               {nominalMassColumn})
+      ->Define("Electron_mass_scale_down",
+               [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
+               {nominalMassColumn})
+      ->Define("Electron_mass_smear_up",
+               [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
+               {nominalMassColumn})
+      ->Define("Electron_mass_smear_down",
+               [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
+               {nominalMassColumn});
+}
+
+void registerElectronVariationMappings(Analyzer &an) {
+  auto &systematics = an.getSystematicManager();
+  systematics.registerVariationColumns(
+      "Electron_pt_corr_nominal", "ElectronScale", "Electron_pt_scale_up",
+      "Electron_pt_scale_down");
+  systematics.registerVariationColumns(
+      "Electron_mass_corr_nominal", "ElectronScale",
+      "Electron_mass_scale_up", "Electron_mass_scale_down");
+  systematics.registerVariationColumns(
+      "Electron_pt_corr_nominal", "ElectronSmear", "Electron_pt_smear_up",
+      "Electron_pt_smear_down");
+  systematics.registerVariationColumns(
+      "Electron_mass_corr_nominal", "ElectronSmear",
+      "Electron_mass_smear_up", "Electron_mass_smear_down");
 }
 
 void configureElectronScaleSmearing(Analyzer &an,
@@ -95,6 +134,12 @@ void configureElectronScaleSmearing(Analyzer &an,
   if (ys.electronScaleSmearingFile.empty()) {
     // Run 2 NanoAOD already includes the EGM scale and smearing corrections.
     defineElectronIdentityCorrections(an);
+    if (cfg.applyLeptonScaleSmearSystematics &&
+        an.getSystematicManager().isEnabled()) {
+      defineElectronIdentityVariations(an, "Electron_pt_corr_nominal",
+                                       "Electron_mass_corr_nominal");
+      registerElectronVariationMappings(an);
+    }
     return;
   }
   if (ys.electronScaleCorrection.empty() ||
@@ -120,10 +165,19 @@ void configureElectronScaleSmearing(Analyzer &an,
       cfg.configKeyPrefix.empty() ? "cms" : cfg.configKeyPrefix;
   const std::string scaleName = prefix + "_electron_scale";
   const std::string smearName = prefix + "_electron_smearing";
-  const std::vector<std::string> smearInputs{
-      "Electron_pt", "Electron_r9", "Electron_scEta"};
+  const bool etDependent = ys.electronScaleSmearingEtDependent;
+  const bool includeVariations = cfg.applyLeptonScaleSmearSystematics &&
+                                 an.getSystematicManager().isEnabled();
+  const std::vector<std::string> smearInputs = etDependent
+      ? std::vector<std::string>{"Electron_pt", "Electron_r9", "Electron_scEta"}
+      : std::vector<std::string>{"Electron_scEta", "Electron_r9"};
+  const std::vector<std::string> scaleInputs = etDependent
+      ? std::vector<std::string>{"Electron_run", "Electron_scEta", "Electron_r9",
+                                 "Electron_pt", "Electron_seedGain"}
+      : std::vector<std::string>{"Electron_seedGain", "Electron_run",
+                                 "Electron_scEta", "Electron_r9", "Electron_pt"};
 
-  if (isData) {
+  if (isData || (!etDependent && includeVariations)) {
     // Correctionlib's EGM scale compound takes a per-electron run number.
     // Materialize it as an RVec to keep all correction inputs object-aligned.
     an.Define("Electron_run",
@@ -131,16 +185,21 @@ void configureElectronScaleSmearing(Analyzer &an,
                 return ROOT::VecOps::RVec<UInt_t>(pt.size(), run);
               },
               {"run", "Electron_pt"});
-    const std::vector<std::string> scaleInputs{
-        "Electron_run", "Electron_scEta", "Electron_r9", "Electron_pt",
-        "Electron_seedGain"};
+  }
+  if (isData) {
     corrMgr->registerCorrection(scaleName, ys.electronScaleSmearingFile,
                                 ys.electronScaleCorrection, scaleInputs);
     electronMgr->applyCorrectionlib(
-        *corrMgr, scaleName, {"scale"}, "Electron_pt",
+        *corrMgr, scaleName, {etDependent ? "scale" : "total_correction"}, "Electron_pt",
         "Electron_pt_corr_nominal", true, "Electron_mass",
         "Electron_mass_corr_nominal", scaleInputs);
     electronMgr->execute();
+    if (cfg.applyLeptonScaleSmearSystematics &&
+        an.getSystematicManager().isEnabled()) {
+      defineElectronIdentityVariations(an, "Electron_pt_corr_nominal",
+                                       "Electron_mass_corr_nominal");
+      registerElectronVariationMappings(an);
+    }
     return;
   }
 
@@ -154,14 +213,35 @@ void configureElectronScaleSmearing(Analyzer &an,
   // that consume it.
   electronMgr->execute();
 
-  corrMgr->applyCorrectionVec(smearName, {"smear"}, smearInputs,
-                              "Electron_smearing_sigma");
-  corrMgr->applyCorrectionVec(smearName, {"smear_up"}, smearInputs,
-                              "Electron_smearing_sigma_up");
-  corrMgr->applyCorrectionVec(smearName, {"smear_down"}, smearInputs,
-                              "Electron_smearing_sigma_down");
-  corrMgr->applyCorrectionVec(smearName, {"escale"}, smearInputs,
-                              "Electron_scale_uncertainty");
+  corrMgr->applyCorrectionVec(smearName, {etDependent ? "smear" : "rho"},
+                              smearInputs, "Electron_smearing_sigma");
+  if (includeVariations && etDependent) {
+    corrMgr->applyCorrectionVec(smearName, {"smear_up"}, smearInputs,
+                                "Electron_smearing_sigma_up");
+    corrMgr->applyCorrectionVec(smearName, {"smear_down"}, smearInputs,
+                                "Electron_smearing_sigma_down");
+    corrMgr->applyCorrectionVec(smearName, {"escale"}, smearInputs,
+                                "Electron_scale_uncertainty");
+  } else if (includeVariations) {
+    corrMgr->applyCorrectionVec(smearName, {"err_rho"}, smearInputs,
+                                "Electron_smearing_sigma_error");
+    for (const auto &direction : {std::pair<const char *, float>{"up", 1.0f},
+                                 {"down", -1.0f}}) {
+      an.Define(std::string("Electron_smearing_sigma_") + direction.first,
+          [sign = direction.second](const ROOT::VecOps::RVec<float> &sigma,
+                                    const ROOT::VecOps::RVec<float> &error) {
+            ROOT::VecOps::RVec<float> result(sigma.size());
+            for (std::size_t i = 0; i < sigma.size(); ++i) {
+              result[i] = std::max(0.0f, sigma[i] + sign * error.at(i));
+            }
+            return result;
+          }, {"Electron_smearing_sigma", "Electron_smearing_sigma_error"});
+    }
+    corrMgr->registerCorrection(scaleName, ys.electronScaleSmearingFile,
+                                ys.electronScaleCorrection, scaleInputs);
+    corrMgr->applyCorrectionVec(scaleName, {"total_uncertainty"}, scaleInputs,
+                                "Electron_scale_uncertainty");
+  }
 
   an.Define("Electron_smearing_factor",
             [](const ROOT::VecOps::RVec<float> &sigma,
@@ -173,7 +253,7 @@ void configureElectronScaleSmearing(Analyzer &an,
               return factor;
             },
             {"Electron_smearing_sigma", randomColumn});
-  an.Define("Electron_smearing_factor_up",
+  if (includeVariations) an.Define("Electron_smearing_factor_up",
             [](const ROOT::VecOps::RVec<float> &sigma,
                const ROOT::VecOps::RVec<float> &random) {
               ROOT::VecOps::RVec<float> factor(sigma.size());
@@ -183,7 +263,7 @@ void configureElectronScaleSmearing(Analyzer &an,
               return factor;
             },
             {"Electron_smearing_sigma_up", randomColumn});
-  an.Define("Electron_smearing_factor_down",
+  if (includeVariations) an.Define("Electron_smearing_factor_down",
             [](const ROOT::VecOps::RVec<float> &sigma,
                const ROOT::VecOps::RVec<float> &random) {
               ROOT::VecOps::RVec<float> factor(sigma.size());
@@ -193,7 +273,7 @@ void configureElectronScaleSmearing(Analyzer &an,
               return factor;
             },
             {"Electron_smearing_sigma_down", randomColumn});
-  an.Define("Electron_scale_factor_up",
+  if (includeVariations) an.Define("Electron_scale_factor_up",
             [](const ROOT::VecOps::RVec<float> &uncertainty) {
               ROOT::VecOps::RVec<float> factor(uncertainty.size());
               for (std::size_t i = 0; i < uncertainty.size(); ++i) {
@@ -202,7 +282,7 @@ void configureElectronScaleSmearing(Analyzer &an,
               return factor;
             },
             {"Electron_scale_uncertainty"});
-  an.Define("Electron_scale_factor_down",
+  if (includeVariations) an.Define("Electron_scale_factor_down",
             [](const ROOT::VecOps::RVec<float> &uncertainty) {
               ROOT::VecOps::RVec<float> factor(uncertainty.size());
               for (std::size_t i = 0; i < uncertainty.size(); ++i) {
@@ -216,30 +296,33 @@ void configureElectronScaleSmearing(Analyzer &an,
       "Electron_pt", "Electron_smearing_factor",
       "Electron_pt_corr_nominal", true, "Electron_mass",
       "Electron_mass_corr_nominal");
-  electronMgr->applyCorrection(
-      "Electron_pt", "Electron_smearing_factor_up", "Electron_pt_smear_up",
-      true, "Electron_mass", "Electron_mass_smear_up");
-  electronMgr->applyCorrection(
-      "Electron_pt", "Electron_smearing_factor_down",
-      "Electron_pt_smear_down", true, "Electron_mass",
-      "Electron_mass_smear_down");
-  electronMgr->addVariation("ElectronSmear", "Electron_pt_smear_up",
-                            "Electron_pt_smear_down",
-                            "Electron_mass_smear_up",
-                            "Electron_mass_smear_down");
-  electronMgr->applyCorrection(
-      "Electron_pt_corr_nominal", "Electron_scale_factor_up",
-      "Electron_pt_scale_up", true, "Electron_mass_corr_nominal",
-      "Electron_mass_scale_up");
-  electronMgr->applyCorrection(
-      "Electron_pt_corr_nominal", "Electron_scale_factor_down",
-      "Electron_pt_scale_down", true, "Electron_mass_corr_nominal",
-      "Electron_mass_scale_down");
-  electronMgr->addVariation("ElectronScale", "Electron_pt_scale_up",
-                            "Electron_pt_scale_down",
-                            "Electron_mass_scale_up",
-                            "Electron_mass_scale_down");
+  if (includeVariations) {
+    electronMgr->applyCorrection(
+        "Electron_pt", "Electron_smearing_factor_up", "Electron_pt_smear_up",
+        true, "Electron_mass", "Electron_mass_smear_up");
+    electronMgr->applyCorrection(
+        "Electron_pt", "Electron_smearing_factor_down",
+        "Electron_pt_smear_down", true, "Electron_mass",
+        "Electron_mass_smear_down");
+    electronMgr->addVariation("ElectronSmear", "Electron_pt_smear_up",
+                              "Electron_pt_smear_down",
+                              "Electron_mass_smear_up",
+                              "Electron_mass_smear_down");
+    electronMgr->applyCorrection(
+        "Electron_pt_corr_nominal", "Electron_scale_factor_up",
+        "Electron_pt_scale_up", true, "Electron_mass_corr_nominal",
+        "Electron_mass_scale_up");
+    electronMgr->applyCorrection(
+        "Electron_pt_corr_nominal", "Electron_scale_factor_down",
+        "Electron_pt_scale_down", true, "Electron_mass_corr_nominal",
+        "Electron_mass_scale_down");
+    electronMgr->addVariation("ElectronScale", "Electron_pt_scale_up",
+                              "Electron_pt_scale_down",
+                              "Electron_mass_scale_up",
+                              "Electron_mass_scale_down");
+  }
   electronMgr->execute();
+  if (includeVariations) registerElectronVariationMappings(an);
 }
 
 std::string deriveJetVetoMapPath(const CmsYearSettings &ys) {
@@ -262,15 +345,30 @@ void ensureCmsJetVetoMapConfig(Analyzer &an,
 
 /// Derive the per-source JES correction name from the total correction name.
 std::string jesCorrectionNameForSource(const std::string &totalCorrectionName,
-                                       const std::string &source) {
-  const auto totalPos = totalCorrectionName.find("Total");
+                                       const std::string &source,
+                                       bool fullSplit = false) {
+  std::string out = totalCorrectionName;
+  std::string payloadSource = source;
+  if (fullSplit) {
+    // Full maps are unregrouped and have no year suffix in the payload.
+    // Keep the suffix on the variation label to preserve its correlations.
+    const auto regrouped = out.find("_Regrouped_");
+    if (regrouped != std::string::npos) {
+      out.replace(regrouped, std::string("_Regrouped_").size(), "_");
+    }
+    const auto suffix = payloadSource.rfind('_');
+    if (suffix != std::string::npos &&
+        payloadSource.compare(suffix + 1, 2, "20") == 0) {
+      payloadSource.erase(suffix);
+    }
+  }
+  const auto totalPos = out.find("Total");
   if (totalPos == std::string::npos) {
     throw std::runtime_error(
         "CmsCorrections: cannot derive JES source correction name from '" +
         totalCorrectionName + "': no 'Total' token found.");
   }
-  std::string out = totalCorrectionName;
-  out.replace(totalPos, std::string("Total").size(), source);
+  out.replace(totalPos, std::string("Total").size(), payloadSource);
   return out;
 }
 
@@ -300,6 +398,10 @@ void CmsCorrectionConfig::print(std::ostream &os) const {
      << "  applyFatJetCorrections: " << yesNo(applyFatJetCorrections) << '\n'
      << "  applyElectronCorrections: " << yesNo(applyElectronCorrections)
      << '\n'
+     << "  applyJesSystematics: " << yesNo(applyJesSystematics) << '\n'
+     << "  applyJerSystematics: " << yesNo(applyJerSystematics) << '\n'
+     << "  applyLeptonScaleSmearSystematics: "
+     << yesNo(applyLeptonScaleSmearSystematics) << '\n'
      << "  applyMuonCorrections: " << yesNo(applyMuonCorrections) << '\n'
      << "  applyBtagCorrections: " << yesNo(applyBtagCorrections) << '\n'
      << "  applyCtagCorrections: " << yesNo(applyCtagCorrections) << '\n'
@@ -309,12 +411,42 @@ void CmsCorrectionConfig::print(std::ostream &os) const {
      << "  correctionNamePrefix: " << correctionNamePrefix << '\n';
 }
 
+std::string detail::jecCompoundForSample(const std::string &defaultCompound,
+                                        bool isData) {
+  std::string selected = defaultCompound;
+  const auto token = selected.find("_MC_");
+  if (isData && token != std::string::npos) {
+    selected.replace(token, 4, "_DATA_");
+  }
+  return selected;
+}
+
 std::vector<std::string> detail::jecCompoundInputColumns(
-    bool isData, const std::string &rawPtColumn, const std::string &rhoBranch) {
+    bool isData, const std::string &rawPtColumn, const std::string &rhoBranch,
+    const std::string &collectionPrefix, bool includePhi) {
   std::vector<std::string> inputs{
-      "Jet_area", "Jet_eta", rawPtColumn, rhoBranch};
+      collectionPrefix + "_area", collectionPrefix + "_eta", rawPtColumn,
+      rhoBranch};
+  if (includePhi) inputs.push_back(collectionPrefix + "_phi");
   if (isData) inputs.emplace_back("run");
   return inputs;
+}
+
+std::vector<std::string> detail::jecCompoundInputColumns(
+    const std::vector<std::string> &schemaInputs, const std::string &rawPtColumn,
+    const std::string &rhoBranch, const std::string &collectionPrefix) {
+  std::vector<std::string> columns;
+  columns.reserve(schemaInputs.size());
+  for (const auto &name : schemaInputs) {
+    if (name == "JetA" || name == "JetArea") columns.push_back(collectionPrefix + "_area");
+    else if (name == "JetEta") columns.push_back(collectionPrefix + "_eta");
+    else if (name == "JetPt") columns.push_back(rawPtColumn);
+    else if (name == "Rho") columns.push_back(rhoBranch);
+    else if (name == "JetPhi") columns.push_back(collectionPrefix + "_phi");
+    else if (name == "run") columns.push_back("run");
+    else throw std::runtime_error("CmsCorrections: unsupported JEC compound input '" + name + "'");
+  }
+  return columns;
 }
 
 void CmsCorrectionAudit::add(const std::string &category,
@@ -594,6 +726,11 @@ void setupCmsFrameworkPlugins(Analyzer &an,
   TaggerWorkingPointManager::create(an, "btagManager");
   TaggerWorkingPointManager::create(an, "ctagManager");
   JetEnergyScaleManager::create(an, "jetEnergyScaleManager");
+  if (cfg.applyFatJetCorrections) {
+    JetEnergyScaleManager::create(an, "fatJetEnergyScaleManager");
+    CorrectedFatJetCollectionManager::create(
+        an, "correctedFatJetCollectionManager", "fatJetEnergyScaleManager");
+  }
   ElectronEnergyScaleManager::create(an, "electronEnergyScaleManager");
   MuonRochesterManager::create(an, "muonRochesterManager");
   CorrectedJetCollectionManager::create(an, "correctedJetCollectionManager");
@@ -664,6 +801,28 @@ void defineCmsCorrectionInputs(Analyzer &an,
               },
               {"Jet_genJetIdx_int", "GenJet_pt"});
   }
+
+  if (cfg.applyFatJetCorrections && !isData) {
+    if (!hasColumn(an, "FatJet_genJetAK8Idx_int") ||
+        !hasColumn(an, "GenJetAK8_pt")) {
+      throw std::runtime_error(
+          "CmsCorrections: AK8 JER requires FatJet_genJetAK8Idx and "
+          "GenJetAK8_pt branches.");
+    }
+    an.Define("FatJet_genMatchedPt",
+              [](const ROOT::VecOps::RVec<Int_t> &genJetIdx,
+                 const ROOT::VecOps::RVec<float> &genJetPt) {
+                ROOT::VecOps::RVec<float> matched(genJetIdx.size(), -1.0f);
+                for (size_t i = 0; i < genJetIdx.size(); ++i) {
+                  const Int_t idx = genJetIdx[i];
+                  if (idx >= 0 && static_cast<size_t>(idx) < genJetPt.size()) {
+                    matched[i] = genJetPt[static_cast<size_t>(idx)];
+                  }
+                }
+                return matched;
+              },
+              {"FatJet_genJetAK8Idx_int", "GenJetAK8_pt"});
+  }
 }
 
 // ===========================================================================
@@ -689,6 +848,8 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
   // -- Basic enable/disable flags --
   setWorkflowConfigValue(config, prefix + "ApplyJetCorrections",
                          cfg.applyJetCorrections ? "true" : "false");
+  setWorkflowConfigValue(config, prefix + "ApplyFatJetCorrections",
+                         cfg.applyFatJetCorrections ? "true" : "false");
   setWorkflowConfigValue(config, prefix + "ApplyElectronCorrections",
                          cfg.applyElectronCorrections ? "true" : "false");
   setWorkflowConfigValue(config, prefix + "ApplyMuonCorrections",
@@ -699,7 +860,8 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
   setWorkflowConfigValue(config, prefix + "RhoBranch", ys.rhoBranch);
 
   const std::string jecCompound = cfg.jesCompoundCorrectionOverride.empty()
-                                      ? ys.jecCompoundCorrection
+                                      ? detail::jecCompoundForSample(
+                                            ys.jecCompoundCorrection, isData)
                                       : cfg.jesCompoundCorrectionOverride;
   setWorkflowConfigValue(config, prefix + "JecCompoundCorrection", jecCompound);
 
@@ -710,6 +872,29 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
                          ys.jerScaleFactorCorrection);
   setWorkflowConfigValue(config, prefix + "JerScaleFactorInputs",
                          joinCsv(ys.jerScaleFactorInputs));
+  setWorkflowConfigValue(config, prefix + "JerScaleFactorUncertaintyCorrection",
+                         ys.jerScaleFactorUncertaintyCorrection);
+  setWorkflowConfigValue(config, prefix + "JerScaleFactorUncertaintyInputs",
+                         joinCsv(ys.jerScaleFactorUncertaintyInputs));
+  const std::string fatJecCompound = detail::jecCompoundForSample(
+      ys.fatJetJecCompoundCorrection, isData);
+  setWorkflowConfigValue(config, prefix + "FatJetJmeFile", ys.fatJetJmeFile);
+  setWorkflowConfigValue(config, prefix + "FatJetJecCompoundCorrection",
+                         fatJecCompound);
+  setWorkflowConfigValue(config, prefix + "FatJetJesTotalCorrection",
+                         ys.fatJetJesTotalCorrection);
+  setWorkflowConfigValue(config, prefix + "FatJetJerPtResolutionCorrection",
+                         ys.fatJetJerPtResolutionCorrection);
+  setWorkflowConfigValue(config, prefix + "FatJetJerScaleFactorCorrection",
+                         ys.fatJetJerScaleFactorCorrection);
+  setWorkflowConfigValue(config, prefix + "FatJetJerScaleFactorInputs",
+                         joinCsv(ys.fatJetJerScaleFactorInputs));
+  setWorkflowConfigValue(
+      config, prefix + "FatJetJerScaleFactorUncertaintyCorrection",
+      ys.fatJetJerScaleFactorUncertaintyCorrection);
+  setWorkflowConfigValue(
+      config, prefix + "FatJetJerScaleFactorUncertaintyInputs",
+      joinCsv(ys.fatJetJerScaleFactorUncertaintyInputs));
 
   // -- Electron scale/smearing --
   setWorkflowConfigValue(config, prefix + "ElectronScaleSmearingFile",
@@ -739,6 +924,47 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
     muonMgr->applyScaleAndResolution(
         ys.muonScaleResolutionFile, isData, "Muon_pt",
         "Muon_pt_corr_nominal");
+    if (cfg.applyLeptonScaleSmearSystematics &&
+        an.getSystematicManager().isEnabled()) {
+      if (!isData) {
+        muonMgr->applyScaleAndResolution(
+            ys.muonScaleResolutionFile, false, "Muon_pt", "Muon_pt_scale_up",
+            "up", "nom");
+        muonMgr->applyScaleAndResolution(
+            ys.muonScaleResolutionFile, false, "Muon_pt", "Muon_pt_scale_down",
+            "down", "nom");
+        muonMgr->applyScaleAndResolution(
+            ys.muonScaleResolutionFile, false, "Muon_pt", "Muon_pt_smear_up",
+            "nom", "up");
+        muonMgr->applyScaleAndResolution(
+            ys.muonScaleResolutionFile, false, "Muon_pt", "Muon_pt_smear_down",
+            "nom", "down");
+        muonMgr->addVariation("MuonScale", "Muon_pt_scale_up",
+                              "Muon_pt_scale_down");
+        muonMgr->addVariation("MuonSmear", "Muon_pt_smear_up",
+                              "Muon_pt_smear_down");
+        muonMgr->execute();
+      } else {
+        an.Define("Muon_pt_scale_up",
+                  [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+                  {"Muon_pt_corr_nominal"})
+            ->Define("Muon_pt_scale_down",
+                     [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+                     {"Muon_pt_corr_nominal"})
+            ->Define("Muon_pt_smear_up",
+                     [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+                     {"Muon_pt_corr_nominal"})
+            ->Define("Muon_pt_smear_down",
+                     [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+                     {"Muon_pt_corr_nominal"});
+      }
+      an.getSystematicManager().registerVariationColumns(
+          "Muon_pt_corr_nominal", "MuonScale", "Muon_pt_scale_up",
+          "Muon_pt_scale_down");
+      an.getSystematicManager().registerVariationColumns(
+          "Muon_pt_corr_nominal", "MuonSmear", "Muon_pt_smear_up",
+          "Muon_pt_smear_down");
+    }
   }
 
   // -- JES systematic mode (used by fallback logic) --
@@ -773,11 +999,16 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
     }
   }
 
-  const auto jecInputs =
-      detail::jecCompoundInputColumns(isData, rawPtColumn, ys.rhoBranch);
   const std::string jecCorrectionName = prefix + "_jec_nominal";
-  corrMgr->registerCorrection(jecCorrectionName, ys.jmeFile, jecCompound,
-                              jecInputs);
+  // Register without default columns: the explicit inputs below follow the
+  // payload schema, which differs between campaigns (notably JetPhi in 2024).
+  corrMgr->registerCorrection(jecCorrectionName, ys.jmeFile, jecCompound, {});
+  std::vector<std::string> jecSchema;
+  for (const auto &input : corrMgr->getCompoundCorrection(jecCorrectionName)->inputs()) {
+    jecSchema.push_back(input.name());
+  }
+  const auto jecInputs = detail::jecCompoundInputColumns(
+      jecSchema, rawPtColumn, ys.rhoBranch);
   jesMgr->applyCorrectionlib(*corrMgr, jecCorrectionName, {}, rawPtColumn,
                               "Jet_pt_corr_jec", true, rawMassColumn,
                               "Jet_mass_corr_jec", jecInputs);
@@ -799,6 +1030,45 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
                              true, "Jet_mass_corr_jec",
                              "Jet_mass_corr_nominal", jerResolutionInputs,
                              ys.jerScaleFactorInputs);
+    const bool includeJerSystematics = cfg.applyJerSystematics &&
+                                       an.getSystematicManager().isEnabled();
+    if (includeJerSystematics) {
+      // Older payloads select nom/up/down via a string. Modern Run 3
+      // payloads store the central SF and its absolute uncertainty separately.
+      const auto sfCorrection = corrMgr->getCorrection(jerScaleFactorName);
+      const bool hasVariationInput = std::any_of(
+          sfCorrection->inputs().begin(), sfCorrection->inputs().end(),
+          [](const auto &input) { return input.typeStr() == "string"; });
+      std::string uncertaintyName;
+      if (!hasVariationInput) {
+        if (ys.jerScaleFactorUncertaintyCorrection.empty()) {
+          throw std::runtime_error(
+              "CmsCorrections: JER SF has no variation input; configure "
+              "jerScaleFactorUncertaintyCorrection to avoid identical JER variations.");
+        }
+        uncertaintyName = prefix + "_jer_scale_factor_uncertainty";
+        corrMgr->registerCorrection(
+            uncertaintyName, ys.jmeFile,
+            ys.jerScaleFactorUncertaintyCorrection,
+            ys.jerScaleFactorUncertaintyInputs);
+      }
+      for (const auto &direction : {std::string("up"), std::string("down")}) {
+        jesMgr->applyJERSmearing(
+            *corrMgr, jerResolutionName, jerScaleFactorName,
+            "Jet_pt_corr_jec", "Jet_pt_jer_" + direction,
+            hasVariationInput ? direction : "nom", true,
+            "Jet_mass_corr_jec", "Jet_mass_jer_" + direction,
+            jerResolutionInputs, ys.jerScaleFactorInputs, uncertaintyName,
+            ys.jerScaleFactorUncertaintyInputs, direction == "up" ? 1.0f : -1.0f);
+      }
+      jesMgr->addVariation("jer", "Jet_pt_jer_up", "Jet_pt_jer_down",
+                           "Jet_mass_jer_up", "Jet_mass_jer_down");
+      an.getSystematicManager().registerVariationColumns(
+          "Jet_pt_corr_nominal", "jer", "Jet_pt_jer_up", "Jet_pt_jer_down");
+      an.getSystematicManager().registerVariationColumns(
+          "Jet_mass_corr_nominal", "jer", "Jet_mass_jer_up",
+          "Jet_mass_jer_down");
+    }
   }
 
   jesMgr->execute();
@@ -818,6 +1088,129 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
         "PuppiMET_pt", "PuppiMET_phi", "Jet_pt", "Jet_pt_corr_nominal",
         "PuppiMET_pt_corr_nominal", "PuppiMET_phi_corr_nominal");
   }
+  if (!isData && cfg.applyMetType1 && cfg.applyJerSystematics &&
+      an.getSystematicManager().isEnabled()) {
+    for (const auto &direction : {std::string("up"), std::string("down")}) {
+      const auto metPt = "PuppiMET_pt_jer_" + direction;
+      const auto metPhi = "PuppiMET_phi_jer_" + direction;
+      jesMgr->propagateMET(
+          "PuppiMET_pt_corr_nominal", "PuppiMET_phi_corr_nominal",
+          "Jet_pt_corr_nominal", "Jet_pt_jer_" + direction, metPt, metPhi);
+    }
+    an.getSystematicManager().registerVariationColumns(
+        "PuppiMET_pt_corr_nominal", "jer", "PuppiMET_pt_jer_up",
+        "PuppiMET_pt_jer_down");
+    an.getSystematicManager().registerVariationColumns(
+        "PuppiMET_phi_corr_nominal", "jer", "PuppiMET_phi_jer_up",
+        "PuppiMET_phi_jer_down");
+  }
+
+  JetEnergyScaleManager *fatJesMgr = nullptr;
+  if (cfg.applyFatJetCorrections) {
+    if (ys.fatJetJmeFile.empty() || ys.fatJetJecCompoundCorrection.empty()) {
+      throw std::runtime_error(
+          "CmsCorrections: AK8 corrections are enabled, but the fat-jet JME "
+          "payload or compound JEC correction is not configured.");
+    }
+    auto fatJesPlugin = an.getPlugin<JetEnergyScaleManager>(
+        "fatJetEnergyScaleManager");
+    if (!fatJesPlugin) {
+      throw std::runtime_error(
+          "CmsCorrections: fatJetEnergyScaleManager is required when AK8 "
+          "corrections are enabled.");
+    }
+    fatJesMgr = fatJesPlugin.get();
+    fatJesMgr->setJetColumns("FatJet_pt", "FatJet_eta", "FatJet_phi",
+                             "FatJet_mass");
+    fatJesMgr->removeExistingCorrections("FatJet_rawFactor");
+    if (!isData) {
+      fatJesMgr->setJERSmearingColumns("FatJet_genMatchedPt", ys.rhoBranch,
+                                       "event");
+    }
+
+    const std::string fatJecName = prefix + "_fatjet_jec_nominal";
+    corrMgr->registerCorrection(fatJecName, ys.fatJetJmeFile,
+                                fatJecCompound, {});
+    std::vector<std::string> fatJecSchema;
+    for (const auto &input : corrMgr->getCompoundCorrection(fatJecName)->inputs()) {
+      fatJecSchema.push_back(input.name());
+    }
+    const auto fatJecInputs = detail::jecCompoundInputColumns(
+        fatJecSchema, "FatJet_pt_raw", ys.rhoBranch, "FatJet");
+    fatJesMgr->applyCorrectionlib(
+        *corrMgr, fatJecName, {}, "FatJet_pt_raw", "FatJet_pt_corr_jec", true,
+        "FatJet_mass_raw", "FatJet_mass_corr_jec", fatJecInputs);
+
+    // Make the JEC columns available before registering JER inputs that use
+    // FatJet_pt_corr_jec. This also ensures the data nominal aliases below
+    // reference a column already present in the dataframe.
+    fatJesMgr->execute();
+
+    if (!isData) {
+      if (ys.fatJetJerPtResolutionCorrection.empty() ||
+          ys.fatJetJerScaleFactorCorrection.empty() ||
+          ys.fatJetJerScaleFactorInputs.empty()) {
+        throw std::runtime_error(
+            "CmsCorrections: AK8 MC corrections require both JER payload "
+            "correction names and their scale-factor inputs.");
+      }
+      const std::string resolutionName = prefix + "_fatjet_jer_resolution";
+      const std::string scaleFactorName = prefix + "_fatjet_jer_scale_factor";
+      const std::vector<std::string> resolutionInputs{
+          "FatJet_eta", "FatJet_pt_corr_jec", ys.rhoBranch};
+      corrMgr->registerCorrection(resolutionName, ys.fatJetJmeFile,
+                                  ys.fatJetJerPtResolutionCorrection,
+                                  resolutionInputs);
+      corrMgr->registerCorrection(scaleFactorName, ys.fatJetJmeFile,
+                                  ys.fatJetJerScaleFactorCorrection,
+                                  ys.fatJetJerScaleFactorInputs);
+      fatJesMgr->applyJERSmearing(
+          *corrMgr, resolutionName, scaleFactorName, "FatJet_pt_corr_jec",
+          "FatJet_pt_corr_nominal", "nom", true, "FatJet_mass_corr_jec",
+          "FatJet_mass_corr_nominal", resolutionInputs,
+          ys.fatJetJerScaleFactorInputs);
+      if (cfg.applyJerSystematics && an.getSystematicManager().isEnabled() &&
+          !ys.fatJetJerScaleFactorUncertaintyCorrection.empty()) {
+        const std::string uncertaintyName =
+            prefix + "_fatjet_jer_scale_factor_uncertainty";
+        corrMgr->registerCorrection(
+            uncertaintyName, ys.fatJetJmeFile,
+            ys.fatJetJerScaleFactorUncertaintyCorrection,
+            ys.fatJetJerScaleFactorUncertaintyInputs);
+        for (const auto &direction : {std::string("up"), std::string("down")}) {
+          const float uncertaintyDirection = direction == "up" ? 1.0f : -1.0f;
+          const std::string variedPt = "FatJet_pt_jer_" + direction;
+          const std::string variedMass = "FatJet_mass_jer_" + direction;
+          fatJesMgr->applyJERSmearing(
+              *corrMgr, resolutionName, scaleFactorName,
+              "FatJet_pt_corr_jec", variedPt, "nom", true,
+              "FatJet_mass_corr_jec", variedMass, resolutionInputs,
+              ys.fatJetJerScaleFactorInputs, uncertaintyName,
+              ys.fatJetJerScaleFactorUncertaintyInputs, uncertaintyDirection);
+        }
+        fatJesMgr->addVariation("jer", "FatJet_pt_jer_up",
+                                "FatJet_pt_jer_down", "FatJet_mass_jer_up",
+                                "FatJet_mass_jer_down");
+        an.getSystematicManager().registerVariationColumns(
+            "FatJet_pt_corr_nominal", "jer", "FatJet_pt_jer_up",
+            "FatJet_pt_jer_down");
+        an.getSystematicManager().registerVariationColumns(
+            "FatJet_mass_corr_nominal", "jer", "FatJet_mass_jer_up",
+            "FatJet_mass_jer_down");
+      }
+    } else {
+      an.Define("FatJet_pt_corr_nominal",
+                [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+                {"FatJet_pt_corr_jec"});
+      an.Define("FatJet_mass_corr_nominal",
+                [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
+                {"FatJet_mass_corr_jec"});
+    }
+  }
+
+  // Materialize the nominal AK8 JER result before JES variations are added
+  // below, since those variations use FatJet_pt_corr_nominal as an input.
+  if (fatJesMgr) fatJesMgr->execute();
 
   // Select and register the systematic source set based on mode
   // Nominal JEC/JER corrections have already been registered above.  Avoid
@@ -827,20 +1220,23 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
     // The nominal MET propagation was queued after the first execute() call
     // above, so flush it even when no JES variations will be registered.
     jesMgr->execute();
+    if (fatJesMgr) fatJesMgr->execute();
     return;
   }
 
   std::vector<std::string> jesSources;
-  switch (cfg.jesMode) {
-    case CmsCorrectionConfig::Total:
-      jesSources = {"Total"};
-      break;
-    case CmsCorrectionConfig::Reduced:
-      jesSources = CmsYearRegistry::defaultJesReducedSources(ys.canonicalYear);
-      break;
-    case CmsCorrectionConfig::Full:
-      jesSources = CmsYearRegistry::defaultJesFullSources(ys.canonicalYear);
-      break;
+  if (cfg.applyJesSystematics) {
+    switch (cfg.jesMode) {
+      case CmsCorrectionConfig::Total:
+        jesSources = {"Total"};
+        break;
+      case CmsCorrectionConfig::Reduced:
+        jesSources = CmsYearRegistry::defaultJesReducedSources(ys.canonicalYear);
+        break;
+      case CmsCorrectionConfig::Full:
+        jesSources = CmsYearRegistry::defaultJesFullSources(ys.canonicalYear);
+        break;
+    }
   }
 
   const std::string jesTotalCorrection =
@@ -854,7 +1250,8 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
       const std::string correctionlibName =
           source == "Total" ? jesTotalCorrection
                              : jesCorrectionNameForSource(jesTotalCorrection,
-                                                          source);
+                                                          source,
+                                                          cfg.jesMode == CmsCorrectionConfig::Full);
       const std::string correctionName = prefix + "_jes_" + source;
       corrMgr->registerCorrection(correctionName, ys.jmeFile,
                                   correctionlibName, jesInputs);
@@ -876,6 +1273,44 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
           "Jet_pt_corr_nominal", label, upPtColumn, downPtColumn);
       an.getSystematicManager().registerVariationColumns(
           "Jet_mass_corr_nominal", label, upMassColumn, downMassColumn);
+
+      if (fatJesMgr) {
+        const std::string fatJesCorrectionName = prefix + "_fatjet_jes_" + source;
+        const std::string fatJesCorrectionlibName =
+            source == "Total"
+                ? ys.fatJetJesTotalCorrection
+                : jesCorrectionNameForSource(ys.fatJetJesTotalCorrection,
+                                             source,
+                                             cfg.jesMode == CmsCorrectionConfig::Full);
+        if (fatJesCorrectionlibName.empty()) {
+          throw std::runtime_error(
+              "CmsCorrections: AK8 JES uncertainty correction is not "
+              "configured for source '" + source + "'.");
+        }
+        const std::vector<std::string> fatJesInputs{
+            "FatJet_eta", "FatJet_pt_corr_nominal"};
+        corrMgr->registerCorrection(fatJesCorrectionName,
+                                    ys.fatJetJmeFile,
+                                    fatJesCorrectionlibName, fatJesInputs);
+        const std::string fatUpPt = "FatJet_pt_jes_" + label + "_up";
+        const std::string fatDownPt = "FatJet_pt_jes_" + label + "_down";
+        const std::string fatUpMass = "FatJet_mass_jes_" + label + "_up";
+        const std::string fatDownMass = "FatJet_mass_jes_" + label + "_down";
+        fatJesMgr->applyCorrectionlib(
+            *corrMgr, fatJesCorrectionName, {}, "FatJet_pt_corr_nominal",
+            fatUpPt, true, "FatJet_mass_corr_nominal", fatUpMass,
+            fatJesInputs, true, 1.0f);
+        fatJesMgr->applyCorrectionlib(
+            *corrMgr, fatJesCorrectionName, {}, "FatJet_pt_corr_nominal",
+            fatDownPt, true, "FatJet_mass_corr_nominal", fatDownMass,
+            fatJesInputs, true, -1.0f);
+        fatJesMgr->addVariation(label, fatUpPt, fatDownPt, fatUpMass,
+                                fatDownMass);
+        an.getSystematicManager().registerVariationColumns(
+            "FatJet_pt_corr_nominal", label, fatUpPt, fatDownPt);
+        an.getSystematicManager().registerVariationColumns(
+            "FatJet_mass_corr_nominal", label, fatUpMass, fatDownMass);
+      }
       if (cfg.applyMetType1) {
         const std::string upMetPtColumn =
             "PuppiMET_pt_jes_" + label + "_up";
@@ -904,6 +1339,7 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
   }
 
   jesMgr->execute();
+  if (fatJesMgr) fatJesMgr->execute();
 }
 
 // ===========================================================================
@@ -912,6 +1348,16 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
 
 void defineCmsCorrectionFallbacks(Analyzer &an,
                                    const CmsCorrectionConfig &cfg) {
+  if (!cfg.applyFatJetCorrections && hasColumn(an, "FatJet_pt")) {
+    an.Define("FatJet_pt_corr_nominal",
+              [](const ROOT::VecOps::RVec<float> &pt) { return pt; },
+              {"FatJet_pt"});
+    if (hasColumn(an, "FatJet_mass")) {
+      an.Define("FatJet_mass_corr_nominal",
+                [](const ROOT::VecOps::RVec<float> &mass) { return mass; },
+                {"FatJet_mass"});
+    }
+  }
   // -- Jet correction fallbacks --
   if (!cfg.applyJetCorrections) {
     an.Define("Jet_pt_corr_nominal",

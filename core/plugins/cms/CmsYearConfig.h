@@ -79,7 +79,7 @@ struct CTagWorkingPoints {
 struct CmsYearSettings {
   // -- Identification --
   std::string canonicalYear;       ///< Normalized year label, e.g. "2022_preEE"
-  std::string electronYearToken;   ///< Token for electron SF lookups (e.g. "2022preVFP")
+  std::string electronYearToken;   ///< Payload SF key (e.g. "2022Re-recoBCD")
 
   // -- Branch names --
   std::string rhoBranch = "fixedGridRhoFastjetAll"; ///< Rho branch for JEC
@@ -113,12 +113,23 @@ struct CmsYearSettings {
   std::string jerPtResolutionCorrection;  ///< JER PtResolution correction name
   std::string jerScaleFactorCorrection;   ///< JER ScaleFactor correction name
   std::vector<std::string> jerScaleFactorInputs; ///< Inputs for JER SF (e.g. Jet_eta)
+  std::string jerScaleFactorUncertaintyCorrection; ///< Separate absolute AK4 JER SF uncertainty (Run 3)
+  std::vector<std::string> jerScaleFactorUncertaintyInputs; ///< Inputs for the separate AK4 JER uncertainty
+  std::string fatJetJecCompoundCorrection; ///< AK8 compound JEC correction name
+  std::string fatJetJesTotalCorrection;    ///< AK8 total JES correction name
+  std::string fatJetJerPtResolutionCorrection; ///< AK8 JER PtResolution name
+  std::string fatJetJerScaleFactorCorrection;  ///< AK8 JER ScaleFactor name
+  std::vector<std::string> fatJetJerScaleFactorInputs; ///< AK8 JER SF inputs
+  std::string fatJetJerScaleFactorUncertaintyCorrection; ///< AK8 JER SF uncertainty
+  std::vector<std::string> fatJetJerScaleFactorUncertaintyInputs; ///< AK8 JER SF uncertainty inputs
 
   // -- Electron scale/smearing --
   std::string electronScaleSmearingFile;        ///< Path to electron scale+smear JSON
   std::string electronScaleCorrection;          ///< Scale correction name
   std::string electronSmearingCorrection;       ///< Smearing correction name
-  bool electronScaleSmearingEtDependent = false; ///< Whether scale/smear uses Et
+  /// Select Et-dependent Scale/SmearAndSyst or standard Scale/Smearing inputs
+  /// and variation categories. File and correction names must match the recipe.
+  bool electronScaleSmearingEtDependent = false;
 
   // -- Muon scale/resolution --
   std::string muonScaleResolutionFile; ///< Path to muon scale+resolution JSON (Run 3)

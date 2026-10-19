@@ -1,6 +1,5 @@
 #include <JetEnergyScaleManager.h>
 #include <RDFColumnPacker.h>
-#include <TInterpreter.h>
 #include <analyzer.h>
 #include <ROOT/RVec.hxx>
 #include <api/ILogger.h>
@@ -12,86 +11,11 @@
 
 namespace {
 
-void ensureFlattenHelperDeclared() {
-  static const bool declared = []() {
-    return gInterpreter->Declare(R"cpp(
-#include <ROOT/RVec.hxx>
-#include <algorithm>
-#include <type_traits>
-
-namespace jet_energy_scale_detail {
-
-template <typename... Args>
-ROOT::VecOps::RVec<double> FlattenInputs(const Args &...args) {
-  using ROOT::VecOps::RVec;
-  std::size_t nFills = 0U;
-  bool sawVectorInput = false;
-  auto updateSize = [&](auto const &arg) {
-    if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
-      if (!sawVectorInput) {
-        nFills = 1U;
-      }
-    } else {
-      sawVectorInput = true;
-      nFills = std::max<std::size_t>(nFills, arg.size());
-    }
-  };
-  (updateSize(args), ...);
-
-  if (sawVectorInput && nFills == 0U) {
-    return RVec<double>{};
-  }
-
-  const std::size_t stride = sizeof...(Args);
-  RVec<double> out;
-  out.reserve(nFills * stride);
-  for (std::size_t i = 0; i < nFills; ++i) {
-    auto pushVal = [&](auto const &arg) {
-      if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
-        out.emplace_back(static_cast<double>(arg));
-      } else {
-        const auto idx = (i < arg.size()) ? i : arg.size() - 1;
-        out.emplace_back(static_cast<double>(arg[idx]));
-      }
-    };
-    (pushVal(args), ...);
-  }
-  return out;
-}
-
-} // namespace jet_energy_scale_detail
-    )cpp");
-  }();
-
-  if (!declared) {
-    throw std::runtime_error(
-        "JetEnergyScaleManager: failed to declare flatten helper in Cling");
-  }
-}
-
-std::string buildFlattenInputExpression(
-    const std::vector<std::string> &inputColumns) {
-  std::string expr = "jet_energy_scale_detail::FlattenInputs(";
-  for (size_t index = 0; index < inputColumns.size(); ++index) {
-    if (index != 0) {
-      expr += ", ";
-    }
-    expr += inputColumns[index];
-  }
-  expr += ")";
-  return expr;
-}
-
 ROOT::RDF::RNode defineFlattenedJERInputs(
     ROOT::RDF::RNode df, const std::string &outputColumn,
     const std::vector<std::string> &inputColumns) {
   return rdfcolumnpacker::defineFlattenedNumericInputs(
-      df, outputColumn, inputColumns, "JetEnergyScaleManager",
-      [](ROOT::RDF::RNode df, const std::string &columnName,
-         const std::vector<std::string> &columns) {
-        ensureFlattenHelperDeclared();
-        return df.Define(columnName, buildFlattenInputExpression(columns));
-      });
+      df, outputColumn, inputColumns, "JetEnergyScaleManager");
 }
 
 uint64_t splitmix64(uint64_t value) {
@@ -295,7 +219,10 @@ void JetEnergyScaleManager::applyJERSmearing(
     bool applyToMass, const std::string &inputMassColumn,
     const std::string &outputMassColumn,
     const std::vector<std::string> &ptResolutionInputs,
-    const std::vector<std::string> &scaleFactorInputs) {
+    const std::vector<std::string> &scaleFactorInputs,
+    const std::string &scaleFactorUncertaintyCorrection,
+    const std::vector<std::string> &scaleFactorUncertaintyInputs,
+    float scaleFactorUncertaintyDirection) {
   if (ptResolutionCorrection.empty())
     throw std::invalid_argument(
         "JetEnergyScaleManager::applyJERSmearing: ptResolutionCorrection must not be empty");
@@ -318,12 +245,21 @@ void JetEnergyScaleManager::applyJERSmearing(
   JERSmearingStep step;
   step.ptResolutionCorrection = cm.getCorrection(ptResolutionCorrection);
   step.scaleFactorCorrection = cm.getCorrection(scaleFactorCorrection);
+  if (!scaleFactorUncertaintyCorrection.empty()) {
+    step.scaleFactorUncertaintyCorrection =
+        cm.getCorrection(scaleFactorUncertaintyCorrection);
+    step.scaleFactorUncertaintyInputs =
+        scaleFactorUncertaintyInputs.empty()
+            ? cm.getCorrectionFeatures(scaleFactorUncertaintyCorrection)
+            : scaleFactorUncertaintyInputs;
+  }
   step.ptResolutionInputs = ptResolutionInputs.empty()
                                 ? cm.getCorrectionFeatures(ptResolutionCorrection)
                                 : ptResolutionInputs;
   step.scaleFactorInputs = scaleFactorInputs.empty()
-                               ? cm.getCorrectionFeatures(scaleFactorCorrection)
-                               : scaleFactorInputs;
+                                ? cm.getCorrectionFeatures(scaleFactorCorrection)
+                                : scaleFactorInputs;
+  step.scaleFactorUncertaintyDirection = scaleFactorUncertaintyDirection;
   step.systematic = systematic;
   step.inputPtColumn = inputPtColumn;
   step.outputPtColumn = outputPtColumn;
@@ -684,8 +620,12 @@ void JetEnergyScaleManager::execute() {
   for (const auto &step : jerSmearingSteps_m) {
     const std::string resInputCol = "_jer_inputs_res_" + step.outputPtColumn;
     const std::string sfInputCol = "_jer_inputs_sf_" + step.outputPtColumn;
+    const std::string sfUncertaintyInputCol =
+        "_jer_inputs_sf_uncertainty_" + step.outputPtColumn;
     const std::string jerResCol = "_jer_resolution_" + step.outputPtColumn;
     const std::string jerSfCol = "_jer_scale_factor_" + step.outputPtColumn;
+    const std::string jerSfUncertaintyCol =
+        "_jer_scale_factor_uncertainty_" + step.outputPtColumn;
     const std::string smearCol = "_jer_smear_" + step.outputPtColumn;
 
     {
@@ -699,6 +639,13 @@ void JetEnergyScaleManager::execute() {
       ROOT::RDF::RNode df = dataManager_m->getDataFrame();
       auto newDf = defineFlattenedJERInputs(df, sfInputCol,
                                             step.scaleFactorInputs);
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    if (step.scaleFactorUncertaintyCorrection) {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      auto newDf = defineFlattenedJERInputs(
+          df, sfUncertaintyInputCol, step.scaleFactorUncertaintyInputs);
       dataManager_m->setDataFrame(newDf);
     }
 
@@ -739,6 +686,63 @@ void JetEnergyScaleManager::execute() {
             return result;
           },
           {resInputCol});
+      dataManager_m->setDataFrame(newDf);
+    }
+
+    if (step.scaleFactorUncertaintyCorrection) {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const auto uncertainty = step.scaleFactorUncertaintyCorrection;
+      const auto featureCount = step.scaleFactorUncertaintyInputs.size();
+      auto newDf = df.Define(
+          jerSfUncertaintyCol,
+          [uncertainty, featureCount](
+              const ROOT::VecOps::RVec<double> &flatInputVector)
+              -> ROOT::VecOps::RVec<Float_t> {
+            if (featureCount == 0) {
+              throw std::runtime_error(
+                  "JetEnergyScaleManager: empty JER scale-factor uncertainty "
+                  "feature list");
+            }
+            if (flatInputVector.size() % featureCount != 0) {
+              throw std::runtime_error(
+                  "JetEnergyScaleManager: invalid flattened JER scale-factor "
+                  "uncertainty input size");
+            }
+            const std::size_t objectCount =
+                flatInputVector.size() / featureCount;
+            ROOT::VecOps::RVec<Float_t> result(objectCount);
+            for (std::size_t i = 0; i < objectCount; ++i) {
+              std::vector<correction::Variable::Type> values;
+              values.reserve(featureCount);
+              std::size_t numericIndex = 0U;
+              const auto begin = flatInputVector.begin() +
+                                 static_cast<std::ptrdiff_t>(i * featureCount);
+              for (const auto &input : uncertainty->inputs()) {
+                if (input.type() == correction::Variable::VarType::integer) {
+                  values.emplace_back(static_cast<int>(
+                      *(begin + static_cast<std::ptrdiff_t>(numericIndex))));
+                } else {
+                  values.emplace_back(
+                      *(begin + static_cast<std::ptrdiff_t>(numericIndex)));
+                }
+                ++numericIndex;
+              }
+              result[i] = static_cast<Float_t>(uncertainty->evaluate(values));
+            }
+            return result;
+          },
+          {sfUncertaintyInputCol});
+      dataManager_m->setDataFrame(newDf);
+    } else {
+      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
+      const std::string inputPt = step.inputPtColumn;
+      auto newDf = df.Define(
+          jerSfUncertaintyCol,
+          [](const ROOT::VecOps::RVec<Float_t> &pt)
+              -> ROOT::VecOps::RVec<Float_t> {
+            return ROOT::VecOps::RVec<Float_t>(pt.size(), 0.0f);
+          },
+          {inputPt});
       dataManager_m->setDataFrame(newDf);
     }
 
@@ -792,12 +796,14 @@ void JetEnergyScaleManager::execute() {
       const std::string eventCol = eventColumn_m;
       auto newDf = df.Define(
           smearCol,
-          [](const ROOT::VecOps::RVec<Float_t> &pt,
+          [uncertaintyDirection = step.scaleFactorUncertaintyDirection](
+             const ROOT::VecOps::RVec<Float_t> &pt,
              const ROOT::VecOps::RVec<Float_t> &eta,
              const ROOT::VecOps::RVec<Float_t> &genJetPt,
              ULong64_t eventId,
              const ROOT::VecOps::RVec<Float_t> &resolution,
-             const ROOT::VecOps::RVec<Float_t> &scaleFactor)
+             const ROOT::VecOps::RVec<Float_t> &scaleFactor,
+             const ROOT::VecOps::RVec<Float_t> &scaleFactorUncertainty)
               -> ROOT::VecOps::RVec<Float_t> {
             ROOT::VecOps::RVec<Float_t> smear(pt.size(), 1.0f);
             for (std::size_t i = 0; i < pt.size(); ++i) {
@@ -806,7 +812,13 @@ void JetEnergyScaleManager::execute() {
                 smear[i] = 1.0f;
                 continue;
               }
-              const float sf = i < scaleFactor.size() ? scaleFactor[i] : 1.0f;
+              const float centralSf =
+                  i < scaleFactor.size() ? scaleFactor[i] : 1.0f;
+              const float uncertainty =
+                  i < scaleFactorUncertainty.size()
+                      ? scaleFactorUncertainty[i]
+                      : 0.0f;
+              const float sf = centralSf + uncertaintyDirection * uncertainty;
               const float res = i < resolution.size() ? resolution[i] : 0.0f;
               const float genPt = i < genJetPt.size() ? genJetPt[i] : -1.0f;
               const bool matched =
@@ -828,7 +840,8 @@ void JetEnergyScaleManager::execute() {
             }
             return smear;
           },
-          {inputPt, etaCol, genJetPtCol, eventCol, jerResCol, jerSfCol});
+          {inputPt, etaCol, genJetPtCol, eventCol, jerResCol, jerSfCol,
+           jerSfUncertaintyCol});
       dataManager_m->setDataFrame(newDf);
     }
 

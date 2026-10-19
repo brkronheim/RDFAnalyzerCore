@@ -102,6 +102,27 @@ analyzer.Define("pt_gev_systematic", [](float pt) { return pt / 1000.0; }, {"pt"
 // input columns; the callable receives only the listed input values.
 ```
 
+#### DefineNominal
+
+```cpp
+template<typename F>
+Analyzer* DefineNominal(std::string name, F function,
+                        const std::vector<std::string>& columns = {});
+```
+
+Define exactly one column from the specified inputs, without propagating or
+registering input systematics. `IDataFrameProvider::DefineNominal` provides the
+same operation and returns `void`. Use this for terminal, explicitly varied
+weights in a one-nuisance-at-a-time workflow. Keep ordinary `Define` for the
+nominal event weight so JES/JER and lepton momentum changes still reach it.
+Explicitly register the resulting varied weight with the systematic manager.
+
+```cpp
+analyzer.DefineNominal("weight_pileup_up", composeWeight,
+    {"genWeight", "pileup_up", "trigger_nominal", "lepton_nominal"});
+systematics.registerVariationColumn("eventWeight", "pileupUp", "weight_pileup_up");
+```
+
 #### DefinePerSample
 
 ```cpp
@@ -361,6 +382,22 @@ void DefineVector(std::string name,
 ```
 
 Create a vector column from scalar or RVec inputs.
+Scalar inputs are cast directly to the requested element type; RVec inputs are
+concatenated in the requested order, including repeated inputs and empty
+vectors. Mixing scalar and RVec inputs in one call remains unsupported.
+
+Multi-input packing queries `GetColumnType()` and JIT-compiles a typed factory
+that adds one RDF `Define`, rather than a chain of intermediate packing columns.
+The factory binds distinct input columns explicitly and restores the requested
+order inside its callable. A process-wide, synchronized cache reuses factories
+by input types, output type, scalar/vector mode, and repeated-input layout;
+column and output names do not enter the compiled signature. Generated code
+uses synthetic argument names, so column names are passed directly to RDF.
+The callable constructs the final RVec once (reserving the total size for
+concatenation) and has no mutable event or slot state. Common zero-/one-input
+cases keep their native compiled path. See [Memory use](MEMORY_USAGE.md) for
+systematic graph and histogram memory guidance.
+
 For each registered paired systematic affecting an input, the provider also
 creates `<name>_<systematic>Up` and `<name>_<systematic>Down`. Each varied
 vector uses shifted inputs for that family and nominal inputs for unaffected
@@ -658,6 +695,10 @@ files.
 > **See also**: [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md)
 
 The manager now supports both correctionlib `corrections` and `compound_corrections` through the same registration and application APIs.
+Both application APIs validate the numeric-column and string-argument counts
+against the payload schema before defining the graph. Numeric columns follow
+the order of numeric inputs in the schema; compound integer inputs retain
+their declared type. A mismatch raises a descriptive error during setup.
 
 #### `applyCorrection`
 
@@ -691,6 +732,31 @@ correctionManager.applyCorrection("muon_sf", {"nominal"});
 correctionManager.applyCorrection(
     "pileup_weight", {"up"}, {}, "pileup_weight_up");
 ```
+
+#### `applyCorrections` and `applyCorrectionsVec`
+
+Batch variants of the scalar and vector APIs share one numeric input pack
+across different string arguments. The arguments are `(correctionName,
+argumentSets, inputColumns = {}, outputBranches = {}, propagateSystematics =
+{})`. The last two vectors, when supplied, must have one entry per argument
+set. Empty output names are derived as in the single-output API. All argument
+counts are validated before adding definitions. Sharing is scoped to one call;
+subsequent batches use fresh readers even after an input is redefined.
+
+```cpp
+correctionManager.applyCorrections("trigger_sf",
+    {{"nominal"}, {"up"}, {"down"}}, {"eta", "pt"},
+    {"trigger_nominal", "trigger_up", "trigger_down"},
+    {true, false, false});
+```
+
+By default all scalar outputs propagate input shape variations. The optional
+boolean per output can disable this for terminal SF variations, avoiding unused
+products of independent nuisances. The example keeps shape propagation on the
+nominal SF. The vector API retains the input propagation semantics of
+`applyCorrectionVec`. Its row-major feature packing now uses one typed Define:
+scalars broadcast to the largest collection, shorter nonempty collections
+repeat their last value, and an empty collection produces no objects.
 
 #### `applyCorrectionVec`
 
@@ -915,7 +981,7 @@ Use `applyScaleAndResolution(...)` for the newer Run 3 split-schema payloads tha
 
 Concrete manager for kinematic fitting of reconstructed decay topologies.
 
-Performs kinematic fitting using mass, scalar-pT, Cartesian balance, and recoil constraints to improve four-momentum resolution of reconstructed particles. Supports flexible constraint configuration, collection-indexed particle selection, and optional Gaussian widths for mass and transverse constraints.
+Performs kinematic fitting using mass, scalar-pT, angular-separation, Cartesian balance, and recoil constraints to improve four-momentum resolution of reconstructed particles. Supports flexible constraint configuration, collection-indexed particle selection, and optional Gaussian widths for soft constraints.
 
 #### Configuration
 
@@ -938,9 +1004,14 @@ name=dileptonFit particles=mu1:mu1_pt:mu1_eta:mu1_phi:mu1_mass:lepton,mu2:mu2_pt
 - `constraints`: Comma-separated mass constraints (`0+1:mass[:sigma]`,
   `0+1+2:mass[:sigma]`), pT constraints (`pt:idx:targetPt[:ptSigma]`), or
   Cartesian component constraints (`px:idx1+idx2+...:target[:sigma]` and
-  `py:idx1+idx2+...:target[:sigma]`). A zero width is a hard constraint;
-  positive widths are Gaussian widths in GeV. Cartesian constraints can express
-  global transverse-momentum balance or soft zero-component priors.
+  `py:idx1+idx2+...:target[:sigma]`), plus event-dependent angular
+  constraints (`dr:idx1+idx2:targetColumn:sigmaColumn`). The `dr` form reads
+  one target and one positive Gaussian width per event from scalar dataframe
+  columns; it is currently supported for CPU fits. Mass and pT widths are in
+  GeV, Cartesian widths are in GeV, and ΔR widths are in radians. A zero width
+  is a hard constraint for mass, pT, and Cartesian constraints. Cartesian
+  constraints can express global transverse-momentum balance or soft
+  zero-component priors.
 - `metCartesianResolution`: Optional absolute isotropic MET px/py resolution
   in GeV. When positive, it replaces the fractional MET pT resolution for the
   MET particle and avoids the nonphysical high-pT turnover of a scalar MET
@@ -954,8 +1025,9 @@ name=dileptonFit particles=mu1:mu1_pt:mu1_eta:mu1_phi:mu1_mass:lepton,mu2:mu2_pt
 - `useGPU`: Optional GPU execution flag; requires a CUDA-enabled build
 
 The `{fit}_chi2` output includes the measurement pulls and Gaussian penalties
-from all soft mass, pT, px, and py constraints. Hard constraints contribute no
-separate penalty because they are enforced directly.
+from all configured soft constraints, including event-dependent ΔR constraints.
+Hard constraints contribute no separate penalty because they are enforced
+directly.
 
 #### Methods
 
@@ -1074,6 +1146,11 @@ triggerMgr->applyAllTriggers();
 
 Concrete `IPluggableManager` plugin for N-dimensional histogram management. `Analyzer::run()` automatically saves its booked histograms when it is registered under the `histogramManager` role.
 
+`saveHists()` writes the mergeable `THnSparseF` objects and their axis schema
+to the meta ROOT file. After merging job outputs, the LAW merge task or
+`core/python/extract_nd_histograms.py` reconstructs the standard `TH1F`
+objects used by plotting and datacard tools.
+
 ```cpp
 class NDHistogramManager : public IPluggableManager {
 public:
@@ -1081,10 +1158,16 @@ public:
                 std::vector<selectionInfo>& selections,
                 const std::string& suffix,
                 std::vector<std::vector<std::string>>& regionNames);
-    void bookConfigHistograms();
+    void bookConfigHistograms(const std::vector<std::string>& excludedNames = {});
     void saveHists();
 };
 ```
+
+`NDHistogramManager::bookConfigHistograms(excludedNames)` optionally excludes
+logical histogram names before booking. Excluded entries are removed from the
+output schema and do not require their observable/weight columns. Supply
+exclusions before any histogram has been booked. The default empty list keeps
+all configured histograms.
 
 #### Histogram Description Classes
 
@@ -1092,7 +1175,8 @@ public:
 class histInfo {
 public:
     histInfo(const char name[], const char variable[], const char label[],
-             const char weight[], int bins, float lowerBound, float upperBound);
+             const char weight[], int bins, float lowerBound, float upperBound,
+             std::vector<Double_t> binEdges = {}, bool forceSparse = false);
     const std::string& name() const;
     const std::string& variable() const;
     const std::string& label() const;
@@ -1100,6 +1184,7 @@ public:
     const int& bins() const;
     const float& lowerBound() const;
     const float& upperBound() const;
+    bool forceSparse() const;
 };
 
 class selectionInfo {
@@ -1116,6 +1201,14 @@ public:
     const std::vector<std::string>& regions() const;
 };
 ```
+
+Pass `forceSparse=true` for a programmatically booked ROOT histogram with low
+expected occupancy to bypass the automatic dense-accumulator threshold.
+Sparse storage retains signed contents and double-precision `sumw2`. The ROOT
+histogram action releases per-slot accumulators after merging into its final
+sparse result; dense conversion also retains zero-content bins with nonzero
+variance. Boost backends honor `forceSparse` when Boost >=1.76 supports sparse
+storage.
 
 These classes store immutable histogram and selection descriptions. Read their
 values through the getters; `histInfo` uses `label()` for the axis label.
@@ -1148,6 +1241,11 @@ analyzer.run();
 ### WeightManager
 
 **Header**: `core/plugins/WeightManager/WeightManager.h`
+
+Scalar weight products use one cached typed RDF definition, with sequential
+double arithmetic and the normalization applied last. Common numeric inputs
+no longer create one `_wm_acc_*` column per component. Nonstandard input types
+retain the legacy expression fallback.
 
 Plugin that computes nominal and varied event weights from registered scale
 factors and scalar normalizations. Supports systematic weight variations and
@@ -2021,6 +2119,12 @@ public:
 same public API headers. See
 [`ISystematicManager.h`](../core/interface/api/ISystematicManager.h) for the
 complete documented contract and method semantics.
+
+Automatic systematic discovery requires the nominal base column to exist.
+It resolves names containing underscores using the longest registered nuisance
+suffix first, then the longest existing base-column prefix. For example,
+`eventWeight_Absolute_2024Up/Down` belongs to `Absolute_2024`, while NanoAOD's
+`PuppiMET_ptUnclusteredUp/Down` does not imply a base column named `PuppiMET`.
 
 **Example**:
 ```cpp

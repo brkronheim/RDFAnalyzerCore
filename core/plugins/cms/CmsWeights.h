@@ -239,6 +239,10 @@ void defineCmsMuonScaleFactors(Analyzer &an, const CmsWeightConfig &cfg);
 
 /// Define electron ID and reconstruction scale factors (nominal + up/down,
 /// per-pT bin for reco).
+/// Requires index-aligned SelectedElectron_scEta and SelectedElectron_pt;
+/// payloads declaring phi (including 2023) also require SelectedElectron_phi.
+/// Uses Run 2/Run 3 reconstruction working points and validates the configured
+/// year, working points, and variation categories before event processing.
 void defineCmsElectronScaleFactors(Analyzer &an, const CmsWeightConfig &cfg);
 
 /// Define b-tag fixed-WP scale factors (nominal + per-source variations).
@@ -334,7 +338,7 @@ ROOT::VecOps::RVec<float> mergeCTagScaleFactors(
   const ROOT::VecOps::RVec<float> &wc,
   const ROOT::VecOps::RVec<float> &tnp);
 
-/// Select electron reconstruction SF per pT bin (<20, 20-75, >75 GeV).
+/// Select electron reconstruction SF per pT bin (<20, [20,75), >=75 GeV).
 std::vector<float> selectElectronRecoScaleFactors(
     const std::vector<float> &pt,
     const std::vector<float> &below20,

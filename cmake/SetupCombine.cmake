@@ -7,7 +7,7 @@
 include(ExternalProject)
 
 # Users can override the git tags/branches if desired.
-set(COMBINE_GIT_TAG "v10.5.1" CACHE STRING "Git tag or branch to checkout for Combine")
+set(COMBINE_GIT_TAG "v11.1.0" CACHE STRING "Git tag or branch to checkout for Combine")
 set(COMBINEHARV_GIT_TAG "v3.0.0" CACHE STRING "Git tag or branch to checkout for CombineHarvester")
 
 # Validate options
@@ -74,7 +74,7 @@ endif()
 
 set(_gsl_linker_flags "")
 if(_gsl_lib_dir)
-    set(_gsl_linker_flags "-L${_gsl_lib_dir} -Wl,-rpath,${_gsl_lib_dir}")
+    set(_gsl_linker_flags "-L${_gsl_lib_dir} -Wl,-rpath,${_gsl_lib_dir} -Wl,-rpath-link,${_gsl_lib_dir}")
     message(STATUS "Passing GSL library directory to Combine ExternalProject: ${_gsl_lib_dir}")
 endif()
 
@@ -87,8 +87,8 @@ set(_common_args
     -DEigen3_DIR=${Eigen3_DIR}
     -DBUILD_TESTS=OFF
     -DBUILD_TESTING=OFF
-    -DCMAKE_EXE_LINKER_FLAGS="${_gsl_linker_flags}"
-    -DCMAKE_SHARED_LINKER_FLAGS="${_gsl_linker_flags}"
+    "-DCMAKE_EXE_LINKER_FLAGS=${_gsl_linker_flags}"
+    "-DCMAKE_SHARED_LINKER_FLAGS=${_gsl_linker_flags}"
 )
 
 ExternalProject_Add(CombineTool
@@ -96,6 +96,12 @@ ExternalProject_Add(CombineTool
     GIT_TAG ${COMBINE_GIT_TAG}
     PREFIX "${_combine_prefix}"
     CMAKE_ARGS ${_common_args}
+    PATCH_COMMAND ${CMAKE_COMMAND}
+        -DCOMBINE_SOURCE_DIR=<SOURCE_DIR>
+        -P ${CMAKE_SOURCE_DIR}/cmake/PatchCombinePyROOT.cmake
+        COMMAND ${CMAKE_COMMAND}
+        -DCOMBINE_SOURCE_DIR=<SOURCE_DIR>
+        -P ${CMAKE_SOURCE_DIR}/cmake/PatchCombineRobustHesse.cmake
     UPDATE_COMMAND ""
     TEST_COMMAND ""
 )

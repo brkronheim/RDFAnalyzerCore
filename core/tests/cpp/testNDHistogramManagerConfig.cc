@@ -6,8 +6,14 @@
 #include <RegionManager.h>
 #include <api/IPluggableManager.h>
 #include <ROOT/RDataFrame.hxx>
+#include <TFile.h>
 #include <TH1D.h>
+#include <THnSparse.h>
+#include <TNamed.h>
+#include <TObjString.h>
 #include <gtest/gtest.h>
+#include <chrono>
+#include <filesystem>
 #include <memory>
 #include <map>
 #include <string>
@@ -941,7 +947,75 @@ TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsTrackedForSaveHists) {
       << "trackedHistInfos_m should be populated by bookConfigHistograms()";
 }
 
+TEST_F(NDHistogramManagerConfigTest, SaveHistsWritesSparseArrayAndSchema) {
+  dataManager->Define("obs", []() { return 5.0f; }, {}, *systematicManager);
+  dataManager->Define("weight", []() { return 2.0f; }, {}, *systematicManager);
+  dataManager->Define("channel", []() { return 0.5f; }, {}, *systematicManager);
+  dataManager->Define("control", []() { return 0.5f; }, {}, *systematicManager);
+  dataManager->Define("sample", []() { return 0.5f; }, {}, *systematicManager);
+
+  histInfo info("export_hist", "obs", "Observable", "weight", 2, 0.0f, 20.0f);
+  histogramManager->BookSingleHistogram(
+      info,
+      selectionInfo("sample", 1, 0.0f, 1.0f, {"inclusive"}),
+      selectionInfo("control", 1, 0.0f, 1.0f, {"default"}),
+      selectionInfo("channel", 1, 0.0f, 1.0f, {"signal"}));
+
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto outputPath = std::filesystem::temp_directory_path() /
+                          ("rdfanalyzer_sparse_export_" +
+                           std::to_string(stamp) + ".root");
+  {
+    TFile seed(outputPath.string().c_str(), "RECREATE");
+    TNamed marker("seed", "seed");
+    marker.Write();
+  }
+  configManager->set("metaFile", outputPath.string());
+
+  std::vector<std::vector<histInfo>> histogramInfo = {{info}};
+  std::vector<std::vector<std::string>> axisLabels = {
+      {"signal"}, {"default"}, {"inclusive"}, {"Nominal"}};
+  ASSERT_NO_THROW(histogramManager->saveHists(histogramInfo, axisLabels));
+
+  TFile result(outputPath.string().c_str(), "READ");
+  ASSERT_TRUE(result.IsOpen());
+  auto *sparse = dynamic_cast<THnSparseF *>(
+      result.Get("nd_histograms_v1/export_hist_"));
+  ASSERT_NE(sparse, nullptr);
+  EXPECT_EQ(std::string(sparse->GetAxis(0)->GetTitle()), "channel");
+  EXPECT_EQ(std::string(sparse->GetAxis(0)->GetBinLabel(1)), "signal");
+  EXPECT_EQ(std::string(sparse->GetAxis(3)->GetBinLabel(1)), "Nominal");
+  Int_t coordinates[5] = {};
+  ASSERT_EQ(sparse->GetNbins(), 1);
+  EXPECT_FLOAT_EQ(sparse->GetBinContent(0, coordinates), 2.0f);
+
+  auto *schema = dynamic_cast<TObjString *>(
+      result.Get("__rdf_histogram_schema_v1"));
+  ASSERT_NE(schema, nullptr);
+  const std::string schemaText = schema->GetString().Data();
+  EXPECT_NE(schemaText.find("\"name\":\"export_hist\""), std::string::npos);
+  EXPECT_NE(schemaText.find("\"role\":\"observable\""), std::string::npos);
+  result.Close();
+  std::filesystem::remove(outputPath);
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+TEST_F(NDHistogramManagerConfigTest, ExcludedDiagnosticsDoNotRequireTheirColumns) {
+  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  histogramManager->setupFromConfigFile();
+  dataManager->Define("var1", []() { return 5.f; }, {}, *systematicManager);
+  dataManager->Define("w1", []() { return 1.f; }, {}, *systematicManager);
+  // The excluded entries reference deliberately absent columns. Only the
+  // selected entry may be booked, tracked, or evaluated.
+  histogramManager->bookConfigHistograms({"test_hist2", "test_hist3", "test_hist4"});
+  ASSERT_EQ(histogramManager->getConfigHistograms().size(), 1u);
+  EXPECT_EQ(histogramManager->getConfigHistograms()[0].name, "test_hist1");
+  ASSERT_EQ(histogramManager->GetHistos().size(), 1u);
+  EXPECT_EQ(histogramManager->GetHistos()[0]->GetEntries(), 1);
+  EXPECT_THROW(histogramManager->bookConfigHistograms({"test_hist1"}),
+               std::runtime_error);
 }

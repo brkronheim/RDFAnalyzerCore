@@ -535,3 +535,75 @@ TEST_F(NDHistogramManagerTest, ExecuteAndFinalizeAreNoOps) {
 TEST_F(NDHistogramManagerTest, GetDependenciesReturnsEmpty) {
   EXPECT_TRUE(histogramManager->getDependencies().empty());
 }
+
+TEST(HistogramStorage, DenseAndForcedSparseRetainCancellationVarianceAcrossSlots) {
+  for (const bool sparse : {false, true}) {
+    histFillInfo info;
+    info.name = "cancelled";
+    info.nSlots = 2;
+    info.nbins = {1, 1, 1, 1, 2};
+    info.xmin = {0, 0, 0, 0, 0};
+    info.xmax = {1, 1, 1, 1, 2};
+    info.forceSparse = sparse;
+    THnMulti action(info);
+    action.Exec(0, {.5f}, {2.f}, {.5f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+    action.Exec(1, {.5f}, {-2.f}, {.5f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+    action.Exec(1, {1.5f}, {3.f}, {.5f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+    action.Finalize();
+    const auto result = action.GetResultPtr();
+    const Double_t cancelled[] = {.5, .5, .5, .5, .5};
+    const auto bin = result->GetBin(cancelled, false);
+    ASSERT_GE(bin, 0);
+    EXPECT_DOUBLE_EQ(result->GetBinContent(bin), 0);
+    EXPECT_NEAR(result->GetBinError2(bin), 8, 1e-10);
+    const Double_t populated[] = {.5, .5, .5, .5, 1.5};
+    EXPECT_DOUBLE_EQ(result->GetBinContent(result->GetBin(populated, false)), 3);
+  }
+}
+
+TEST_F(NDHistogramManagerTest, SharedAxisPacksDoNotCrossRedefineBetweenBookingCalls) {
+  dataManager->DefineNominal("obs", []() { return 1.5f; });
+  dataManager->DefineNominal("weight", []() { return 2.f; });
+  dataManager->DefineNominal("weight_shiftUp", []() { return 3.f; });
+  dataManager->DefineNominal("weight_shiftDown", []() { return 1.f; });
+  systematicManager->registerVariationColumns("weight", "shift", "weight_shiftUp", "weight_shiftDown");
+  histogramManager->setupFromConfigFile();
+  std::vector<histInfo> first{
+      histInfo("first", "obs", "", "weight", 2, 0, 2),
+      histInfo("second", "obs", "", "weight", 2, 0, 2)};
+  std::vector<selectionInfo> selections;
+  std::vector<std::vector<std::string>> regions{{"ch"}, {"cr"}, {"sample"}};
+  histogramManager->bookND(first, selections, "", regions);
+  auto df = dataManager->getDataFrame();
+  std::size_t weightPacks = 0;
+  for (const auto &column : df.GetColumnNames())
+    if (column.find("weight_systVector_") == 0) ++weightPacks;
+  EXPECT_EQ(weightPacks, 1u);
+  dataManager->Redefine("weight", []() { return 4.f; });
+  histInfo third("third", "obs", "", "weight", 2, 0, 2);
+  histogramManager->BookSingleHistogram(third);
+  Double_t point[] = {.5, .5, .5, .5, 1.5};
+  auto &histograms = histogramManager->GetHistos();
+  ASSERT_EQ(histograms.size(), 3u);
+  EXPECT_FLOAT_EQ(histograms[0]->GetBinContent(histograms[0]->GetBin(point, false)), 2.f);
+  EXPECT_FLOAT_EQ(histograms[1]->GetBinContent(histograms[1]->GetBin(point, false)), 2.f);
+  EXPECT_FLOAT_EQ(histograms[2]->GetBinContent(histograms[2]->GetBin(point, false)), 4.f);
+}
+
+TEST_F(NDHistogramManagerTest, ChangedSelectionMasksDoNotReuseEarlierHistogramMaskPack) {
+  dataManager->DefineNominal("obs", []() { return 1.5f; });
+  dataManager->DefineNominal("weight", []() { return 1.f; });
+  dataManager->DefineNominal("mask_first", []() { return true; });
+  dataManager->DefineNominal("mask_second", []() { return false; });
+  histogramManager->setupFromConfigFile();
+  systematicManager->registerSelectionMaskColumn("Nominal", "mask_first");
+  histInfo before("before_mask", "obs", "", "weight", 2, 0, 2);
+  histogramManager->BookSingleHistogram(before);
+  systematicManager->registerSelectionMaskColumn("Nominal", "mask_second");
+  histInfo after("after_mask", "obs", "", "weight", 2, 0, 2);
+  histogramManager->BookSingleHistogram(after);
+  Double_t point[] = {.5, .5, .5, .5, 1.5};
+  auto &histograms = histogramManager->GetHistos();
+  EXPECT_FLOAT_EQ(histograms[0]->GetBinContent(histograms[0]->GetBin(point, false)), 1.f);
+  EXPECT_EQ(histograms[1]->GetNbins(), 0);
+}

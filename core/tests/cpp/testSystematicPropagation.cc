@@ -375,3 +375,19 @@ int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+TEST_F(SystematicPropagationTest, TerminalVariationDoesNotExpandIndependentShapes) {
+  analyzer->DefineNominal("shape_input", []() { return 2.0f; });
+  analyzer->DefineNominal("shape_input_shiftUp", []() { return 3.0f; });
+  analyzer->DefineNominal("shape_input_shiftDown", []() { return 1.0f; });
+  auto &sys = analyzer->getSystematicManager();
+  sys.registerVariationColumns("shape_input", "shift", "shape_input_shiftUp", "shape_input_shiftDown");
+  analyzer->Define("nominal_weight", [](float x) { return x * 10; }, {"shape_input"});
+  analyzer->DefineNominal("weight_pileup_up", [](float x) { return x * 11; }, {"shape_input"});
+  sys.registerVariationColumn("nominal_weight", "pileupUp", "weight_pileup_up");
+  auto df = analyzer->getDataFrameProvider().getDataFrame();
+  EXPECT_FLOAT_EQ(*df.Take<float>("nominal_weight_shiftUp")->begin(), 30.f);
+  EXPECT_FLOAT_EQ(*df.Take<float>(sys.getVariationColumnName("nominal_weight", "pileupUp"))->begin(), 22.f);
+  EXPECT_FALSE(df.HasColumn("weight_pileup_up_shiftUp"));
+  EXPECT_FALSE(sys.isVariableAffectedBySystematic("weight_pileup_up", "shiftUp"));
+}

@@ -301,6 +301,9 @@ public:
    * @param outputMassColumn       Explicit output mass column; auto-derived if empty.
    * @param ptResolutionInputs     Optional override for pt-resolution numeric inputs.
    * @param scaleFactorInputs      Optional override for scale-factor numeric inputs.
+   * @param scaleFactorUncertaintyCorrection Optional absolute SF uncertainty correction.
+   * @param scaleFactorUncertaintyInputs Optional uncertainty inputs.
+   * @param scaleFactorUncertaintyDirection Multiplier for uncertainty (usually +1 or -1).
    */
   void applyJERSmearing(CorrectionManager &cm,
                         const std::string &ptResolutionCorrection,
@@ -312,7 +315,10 @@ public:
                         const std::string &inputMassColumn = "",
                         const std::string &outputMassColumn = "",
                         const std::vector<std::string> &ptResolutionInputs = {},
-                        const std::vector<std::string> &scaleFactorInputs = {});
+                        const std::vector<std::string> &scaleFactorInputs = {},
+                        const std::string &scaleFactorUncertaintyCorrection = "",
+                        const std::vector<std::string> &scaleFactorUncertaintyInputs = {},
+                        float scaleFactorUncertaintyDirection = 0.0f);
 
   // -------------------------------------------------------------------------
   // CMS systematic source sets
@@ -661,8 +667,11 @@ private:
   struct JERSmearingStep {
     correction::Correction::Ref ptResolutionCorrection;
     correction::Correction::Ref scaleFactorCorrection;
+    correction::Correction::Ref scaleFactorUncertaintyCorrection;
     std::vector<std::string> ptResolutionInputs;
     std::vector<std::string> scaleFactorInputs;
+    std::vector<std::string> scaleFactorUncertaintyInputs;
+    float scaleFactorUncertaintyDirection = 0.0f;
     std::string systematic;
     std::string inputPtColumn;
     std::string outputPtColumn;

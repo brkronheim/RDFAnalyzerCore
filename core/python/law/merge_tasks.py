@@ -85,6 +85,11 @@ from output_schema import (  # noqa: E402
     validate_merge_inputs,
 )
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
+from extract_nd_histograms import (  # noqa: E402
+    extract_nd_histograms,
+    read_embedded_histogram_schema,
+    validate_compatible_histogram_schemas,
+)
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 
@@ -164,7 +169,7 @@ def _find_hadd() -> str:
 
 
 def _run_hadd(output_path: str, input_paths: List[str]) -> None:
-    """Run ``hadd`` to merge *input_paths* into *output_path*.
+    """Run ``hadd`` to merge local or XRootD inputs into a local output.
 
     Parameters
     ----------
@@ -193,6 +198,34 @@ def _run_hadd(output_path: str, input_paths: List[str]) -> None:
             f"hadd failed (exit {result.returncode}) merging "
             f"{len(input_paths)} file(s) into {output_path!r}.\n"
             f"stderr: {result.stderr.strip()}"
+            + (
+                "\nFor root:// inputs, confirm this ROOT installation has "
+                "XRootD support and the current credentials can read the files."
+                if any(_is_xrootd_url(path) for path in input_paths)
+                else ""
+            )
+        )
+
+
+def _is_xrootd_url(path: str) -> bool:
+    """Return whether *path* is a ROOT XRootD URL."""
+    return path.startswith("root://")
+
+
+def _resolve_manifest_root_path(manifest_path: str, root_path: str) -> str:
+    """Resolve a manifest ROOT path while preserving remote ``root://`` URLs."""
+    if _is_xrootd_url(root_path) or os.path.isabs(root_path):
+        return root_path
+    return os.path.join(os.path.dirname(manifest_path), root_path)
+
+
+def _require_local_root_input(path: str, role: str, manifest_path: str) -> None:
+    """Check local inputs early; remote inputs are validated by ROOT/hadd."""
+    if _is_xrootd_url(path):
+        return
+    if not os.path.isfile(path):
+        raise RuntimeError(
+            f"{role} file not found: {path!r} (referenced in {manifest_path!r})"
         )
 
 
@@ -515,14 +548,9 @@ class MergeSkims(MergeMixin, law.Task):
         # Collect skim output file paths from manifests
         skim_files: List[str] = []
         for p, m in skim_manifests:
-            job_dir = os.path.dirname(p)
             skim_path = m.skim.output_file  # type: ignore[union-attr]
-            if not os.path.isabs(skim_path):
-                skim_path = os.path.join(job_dir, skim_path)
-            if not os.path.isfile(skim_path):
-                raise RuntimeError(
-                    f"Skim file not found: {skim_path!r}  (referenced in {p!r})"
-                )
+            skim_path = _resolve_manifest_root_path(p, skim_path)
+            _require_local_root_input(skim_path, "Skim", p)
             skim_files.append(skim_path)
 
         groups = _group_files_by_basename(skim_files)
@@ -604,14 +632,9 @@ class MergeHistograms(MergeMixin, law.Task):
 
         hist_files: List[str] = []
         for p, m in hist_manifests:
-            job_dir = os.path.dirname(p)
             hist_path = m.histograms.output_file  # type: ignore[union-attr]
-            if not os.path.isabs(hist_path):
-                hist_path = os.path.join(job_dir, hist_path)
-            if not os.path.isfile(hist_path):
-                raise RuntimeError(
-                    f"Histogram file not found: {hist_path!r}  (referenced in {p!r})"
-                )
+            hist_path = _resolve_manifest_root_path(p, hist_path)
+            _require_local_root_input(hist_path, "Histogram", p)
             hist_files.append(hist_path)
 
         groups = _group_files_by_basename(hist_files)
@@ -620,13 +643,31 @@ class MergeHistograms(MergeMixin, law.Task):
             f"{len(groups)} group(s): {sorted(groups.keys())}"
         )
 
+        # A THnSparse can only be added directly when every file uses the same
+        # category-to-bin mapping and exact binning. Validate every group
+        # before writing any merged output.
+        group_schemas: Dict[str, Optional[dict]] = {}
+        for basename, paths in groups.items():
+            schemas = [(path, read_embedded_histogram_schema(path)) for path in paths]
+            present = [(path, schema) for path, schema in schemas if schema is not None]
+            if present and len(present) != len(schemas):
+                missing = [path for path, schema in schemas if schema is None]
+                raise RuntimeError(
+                    f"Cannot merge mixed legacy and sparse-first histogram files for "
+                    f"{basename!r}; files without the embedded schema: {missing}"
+                )
+            group_schemas[basename] = validate_compatible_histogram_schemas(present)
+
         # ---- Pre-merge coverage prediction ----
         # Collect all histogram names across input manifests to predict
         # which systematic variations will be available post-merge.
         coverage_prediction: Dict[str, List[str]] = {}
         for _, m in hist_manifests:
-            if m.histograms and m.histograms.histogram_names:
-                for name in m.histograms.histogram_names:
+            if m.histograms:
+                names = (m.histograms.axis_labels or {}).get("systematic", [])
+                if not names:
+                    names = m.histograms.histogram_names or []
+                for name in names:
                     lower = name.lower()
                     for suffix in ("up", "down"):
                         if lower.endswith(suffix):
@@ -649,6 +690,11 @@ class MergeHistograms(MergeMixin, law.Task):
                 out_path = os.path.join(out_dir, basename)
                 self.publish_message(f"hadd: {len(paths)} → {out_path}")
                 _run_hadd(out_path, paths)
+                if group_schemas[basename] is not None:
+                    self.publish_message(
+                        f"Reconstructing single histograms in {out_path}"
+                    )
+                    extract_nd_histograms(out_path, out_path)
                 merged_output_files[basename] = out_path
 
         rec.save(os.path.join(out_dir, "merge_histograms.perf.json"))
@@ -666,8 +712,16 @@ class MergeHistograms(MergeMixin, law.Task):
         # ---- Build systematic column inventory from histogram names ----
         all_hist_names: List[str] = []
         for _, m in hist_manifests:
-            if m.histograms and m.histograms.histogram_names:
-                all_hist_names.extend(m.histograms.histogram_names)
+            if m.histograms:
+                systematic_labels = (m.histograms.axis_labels or {}).get(
+                    "systematic", []
+                )
+                if systematic_labels:
+                    all_hist_names.extend(
+                        label for label in systematic_labels if label != "Nominal"
+                    )
+                elif m.histograms.histogram_names:
+                    all_hist_names.extend(m.histograms.histogram_names)
 
         if all_hist_names:
             # Deduplicate while preserving order
@@ -769,14 +823,9 @@ class MergeCutflows(MergeMixin, law.Task):
 
         cf_files: List[str] = []
         for p, m in cf_manifests:
-            job_dir = os.path.dirname(p)
             cf_path = m.cutflow.output_file  # type: ignore[union-attr]
-            if not os.path.isabs(cf_path):
-                cf_path = os.path.join(job_dir, cf_path)
-            if not os.path.isfile(cf_path):
-                raise RuntimeError(
-                    f"Cutflow file not found: {cf_path!r}  (referenced in {p!r})"
-                )
+            cf_path = _resolve_manifest_root_path(p, cf_path)
+            _require_local_root_input(cf_path, "Cutflow", p)
             cf_files.append(cf_path)
 
         groups = _group_files_by_basename(cf_files)

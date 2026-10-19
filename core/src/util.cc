@@ -27,6 +27,9 @@
 #include <TROOT.h>
 #include <TTreeCache.h>
 #include <InputCache.h>
+#ifdef RDF_HAS_XRD_ADAPTOR
+#include <XrdSourceManager.h>
+#endif
 
 #include <dirent.h>
 
@@ -304,6 +307,71 @@ setupROOTInputCache(const IConfigurationProvider &configProvider) {
   return fixedBytes;
 }
 
+static void setupROOTInputBackend(const IConfigurationProvider &configProvider) {
+  const auto &config = configProvider.getConfigMap();
+  auto setting = [&config](const char *key) -> std::string {
+    const auto it = config.find(key);
+    if (it == config.end()) return {};
+    const auto first = it->second.find_first_not_of(" \t\n\r");
+    if (first == std::string::npos) return {};
+    const auto last = it->second.find_last_not_of(" \t\n\r");
+    return it->second.substr(first, last - first + 1);
+  };
+  const auto backend = setting("rootInputBackend");
+  const auto nextFilePrefetch = setting("treeCachePrefetchNextFile");
+  const bool wantsNextFilePrefetch =
+      nextFilePrefetch == "1" || nextFilePrefetch == "true" ||
+      nextFilePrefetch == "True";
+  if (backend.empty() || backend == "root") {
+    if (wantsNextFilePrefetch)
+      throw std::runtime_error(
+          "treeCachePrefetchNextFile requires rootInputBackend=xrd-adaptor.");
+    return;
+  }
+  if (backend != "xrd-adaptor")
+    throw std::runtime_error("Unknown rootInputBackend '" + backend +
+                             "' (expected 'root' or 'xrd-adaptor').");
+#ifndef RDF_HAS_XRD_ADAPTOR
+  throw std::runtime_error(
+      "rootInputBackend=xrd-adaptor requires a build configured with "
+      "-DRDF_ENABLE_XRD_ADAPTOR=ON and the XrdCl development package.");
+#else
+  auto integer = [&setting](const char *key, unsigned fallback,
+                            unsigned maximum) {
+    const auto value = setting(key);
+    if (value.empty()) return fallback;
+    try {
+      std::size_t end = 0;
+      const auto parsed = std::stoul(value, &end);
+      if (end == value.size() && parsed <= maximum)
+        return static_cast<unsigned>(parsed);
+    } catch (const std::exception &) {
+    }
+    throw std::runtime_error("Invalid '" + std::string(key) + "' value '" +
+                             value + "'.");
+  };
+  const auto probeSeconds = integer("xrdSourceProbeIntervalSeconds", 5, 300);
+  const auto cacheMB = integer("xrdPrefetchCacheMB", 256, 131072);
+  const auto preferredSiteBand = integer("xrdPreferredSiteBandPercent", 20, 100);
+  const auto explorationShare = integer("xrdExplorationSharePercent", 10, 50);
+  const auto maxReadSources = integer("xrdMaxReadSources", 2, 2);
+  if (maxReadSources == 0)
+    throw std::runtime_error(
+        "Invalid 'xrdMaxReadSources' value '0' (expected 1 or 2).");
+  rdf::xrd::configureXrdAdaptor(
+      probeSeconds, static_cast<std::size_t>(cacheMB) * 1024 * 1024,
+      preferredSiteBand, explorationShare, maxReadSources);
+  rdf::xrd::registerXrdAdaptor();
+  std::cout << "ROOT input backend: XrdAdaptor (source probe interval="
+            << probeSeconds << " s, handoff cache=" << cacheMB
+            << " MiB, preferred-site band=" << preferredSiteBand
+            << "% with 10% hysteresis, exploration sample budget="
+            << explorationShare << "% max 2 MiB/read, max full-read sites="
+            << maxReadSources << ", exploration site enabled="
+            << (explorationShare > 0 ? "yes" : "no") << ")\n";
+#endif
+}
+
 /**
  * @brief Scan a directory for ROOT files matching globs and add them to a
  * TChain
@@ -348,6 +416,9 @@ makeTChain(const IConfigurationProvider &configProvider) {
 
   // setup ROOT threads now before any dataframes are created
   setupROOTThreads(configProvider);
+
+  // Register an optional TFile backend before TChain::Add opens URLs.
+  setupROOTInputBackend(configProvider);
 
   // Apply I/O controls before TChain::Add opens remote files. An explicit
   // cache size is stored by TChain and carried to each file it opens.

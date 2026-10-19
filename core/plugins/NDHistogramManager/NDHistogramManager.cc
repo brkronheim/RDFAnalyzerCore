@@ -5,12 +5,14 @@
 #include <api/IPluggableManager.h>
 #include <DataManager.h>
 #include <NDHistogramManager.h>
+#include <RDFColumnPacker.h>
 #include <RegionManager.h>
 #include <CounterService.h>
 #include <TFile.h>
 #include <TList.h>
 #include <TH1F.h>
 #include <THnSparse.h>
+#include <TObjString.h>
 #include <cctype>
 #include <cmath>
 #include <unordered_map>
@@ -22,6 +24,7 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <iomanip>
 
 /**
  * @brief Construct a new NDHistogramManager object
@@ -34,18 +37,23 @@ void NDHistogramManager::bindToRegionManager(RegionManager *rm) {
 
 struct ColumnCache {
   ROOT::RDF::RNode& df;
-  std::vector<std::string> names;
+  std::unordered_set<std::string> names;
   std::unordered_map<std::string, std::string> types;
 
   explicit ColumnCache(ROOT::RDF::RNode& node)
-      : df(node), names(node.GetColumnNames()) {}
+      : df(node) {
+    Refresh();
+  }
 
   bool Has(const std::string& name) const {
-    return std::find(names.begin(), names.end(), name) != names.end();
+    return names.find(name) != names.end();
   }
 
   void Refresh() {
-    names = df.GetColumnNames();
+    const auto columnNames = df.GetColumnNames();
+    names.clear();
+    names.reserve(columnNames.size());
+    names.insert(columnNames.begin(), columnNames.end());
     types.clear();
   }
 
@@ -61,6 +69,57 @@ struct ColumnCache {
 };
 
 namespace {
+
+std::string jsonEscape(const std::string &value) {
+  std::ostringstream escaped;
+  for (const unsigned char c : value) {
+    switch (c) {
+    case '"': escaped << "\\\""; break;
+    case '\\': escaped << "\\\\"; break;
+    case '\b': escaped << "\\b"; break;
+    case '\f': escaped << "\\f"; break;
+    case '\n': escaped << "\\n"; break;
+    case '\r': escaped << "\\r"; break;
+    case '\t': escaped << "\\t"; break;
+    default:
+      if (c < 0x20) {
+        escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                << static_cast<int>(c) << std::dec;
+      } else {
+        escaped << static_cast<char>(c);
+      }
+    }
+  }
+  return escaped.str();
+}
+
+std::vector<Double_t> getAxisEdges(const TAxis &axis) {
+  std::vector<Double_t> edges(static_cast<std::size_t>(axis.GetNbins()) + 1);
+  for (Int_t bin = 1; bin <= axis.GetNbins() + 1; ++bin) {
+    edges[static_cast<std::size_t>(bin - 1)] = axis.GetBinLowEdge(bin);
+  }
+  return edges;
+}
+
+void appendJsonStringArray(std::ostringstream &json,
+                           const std::vector<std::string> &values) {
+  json << '[';
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i != 0) json << ',';
+    json << '"' << jsonEscape(values[i]) << '"';
+  }
+  json << ']';
+}
+
+void appendJsonDoubleArray(std::ostringstream &json,
+                           const std::vector<Double_t> &values) {
+  json << '[';
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i != 0) json << ',';
+    json << std::setprecision(17) << values[i];
+  }
+  json << ']';
+}
 
 enum class NDHistogramTypeToken {
   Bool,
@@ -339,120 +398,6 @@ ROOT::RDF::RNode dispatchBroadcastFloatVector(
   throw std::runtime_error("NDHistogramManager: unreachable reference broadcast dispatch");
 }
 
-template <typename InputT>
-ROOT::RDF::RNode defineRegionChainInit(ROOT::RDF::RNode df,
-                                       const std::string &name,
-                                       const std::string &column) {
-  return df.Define(
-      name,
-      [](InputT value) { return static_cast<bool>(value); },
-      {column});
-}
-
-template <typename InputT>
-ROOT::RDF::RNode defineRegionChainAppend(ROOT::RDF::RNode df,
-                                         const std::string &name,
-                                         const std::string &currentColumn,
-                                         const std::string &nextColumn) {
-  return df.Define(
-      name,
-      [](bool current, InputT value) {
-        return current && static_cast<bool>(value);
-      },
-      {currentColumn, nextColumn});
-}
-
-ROOT::RDF::RNode dispatchRegionChainInit(ROOT::RDF::RNode df,
-                                         const std::string &name,
-                                         const std::string &column,
-                                         NDHistogramTypeToken inputType) {
-  switch (inputType) {
-  case NDHistogramTypeToken::Bool:
-    return defineRegionChainInit<Bool_t>(df, name, column);
-  case NDHistogramTypeToken::Float:
-    return defineRegionChainInit<Float_t>(df, name, column);
-  case NDHistogramTypeToken::Double:
-    return defineRegionChainInit<Double_t>(df, name, column);
-  case NDHistogramTypeToken::Int:
-    return defineRegionChainInit<Int_t>(df, name, column);
-  case NDHistogramTypeToken::UInt:
-    return defineRegionChainInit<UInt_t>(df, name, column);
-  case NDHistogramTypeToken::Short:
-    return defineRegionChainInit<Short_t>(df, name, column);
-  case NDHistogramTypeToken::UShort:
-    return defineRegionChainInit<UShort_t>(df, name, column);
-  case NDHistogramTypeToken::Char:
-    return defineRegionChainInit<Char_t>(df, name, column);
-  case NDHistogramTypeToken::UChar:
-    return defineRegionChainInit<UChar_t>(df, name, column);
-  case NDHistogramTypeToken::Long64:
-    return defineRegionChainInit<Long64_t>(df, name, column);
-  case NDHistogramTypeToken::ULong64:
-    return defineRegionChainInit<ULong64_t>(df, name, column);
-  case NDHistogramTypeToken::Unsupported:
-    throw std::runtime_error("NDHistogramManager: unsupported region filter type in compiled path");
-  }
-
-  throw std::runtime_error("NDHistogramManager: unreachable region chain init dispatch");
-}
-
-ROOT::RDF::RNode dispatchRegionChainAppend(ROOT::RDF::RNode df,
-                                           const std::string &name,
-                                           const std::string &currentColumn,
-                                           const std::string &nextColumn,
-                                           NDHistogramTypeToken inputType) {
-  switch (inputType) {
-  case NDHistogramTypeToken::Bool:
-    return defineRegionChainAppend<Bool_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::Float:
-    return defineRegionChainAppend<Float_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::Double:
-    return defineRegionChainAppend<Double_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::Int:
-    return defineRegionChainAppend<Int_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::UInt:
-    return defineRegionChainAppend<UInt_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::Short:
-    return defineRegionChainAppend<Short_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::UShort:
-    return defineRegionChainAppend<UShort_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::Char:
-    return defineRegionChainAppend<Char_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::UChar:
-    return defineRegionChainAppend<UChar_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::Long64:
-    return defineRegionChainAppend<Long64_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::ULong64:
-    return defineRegionChainAppend<ULong64_t>(df, name, currentColumn, nextColumn);
-  case NDHistogramTypeToken::Unsupported:
-    throw std::runtime_error("NDHistogramManager: unsupported region filter type in compiled path");
-  }
-
-  throw std::runtime_error("NDHistogramManager: unreachable region chain append dispatch");
-}
-
-ROOT::RDF::RNode defineCompiledRegionMembershipChain(
-    ROOT::RDF::RNode df, const std::string &outputColumn,
-    const std::vector<std::string> &filterChain,
-    const std::vector<NDHistogramTypeToken> &filterTypes) {
-  if (filterChain.empty()) {
-    throw std::runtime_error("NDHistogramManager: empty region filter chain");
-  }
-
-  std::string currentName =
-      (filterChain.size() == 1) ? outputColumn : outputColumn + "__chain_0";
-  df = dispatchRegionChainInit(df, currentName, filterChain[0], filterTypes[0]);
-  for (std::size_t index = 1; index < filterChain.size(); ++index) {
-    const std::string nextName =
-        (index + 1 == filterChain.size())
-            ? outputColumn
-            : outputColumn + "__chain_" + std::to_string(index);
-    df = dispatchRegionChainAppend(df, nextName, currentName, filterChain[index],
-                                   filterTypes[index]);
-    currentName = nextName;
-  }
-  return df;
-}
 
 } // namespace
 
@@ -462,6 +407,7 @@ static void HandleAxisVarVector(
     IDataFrameProvider* dataManager_m,
     ISystematicManager* systematicManager_m,
     ColumnCache& cache,
+    std::unordered_map<std::string, std::string>& packedColumns,
     const std::string& variable,
     bool hasSystematic,
     bool hasMultiFill,
@@ -539,14 +485,23 @@ static void HandleAxisVarVector(
         }
         systematicVariations.push_back(columnName);
         }
-        const std::string systVectorName = variable + "_systVector" + tagSuffix;
-        if (!cache.Has(systVectorName)) {
+        std::string signature;
+        for (const auto &column : systematicVariations)
+          signature += std::to_string(column.size()) + ":" + column;
+        const auto packed = packedColumns.find(signature);
+        if (packed != packedColumns.end()) {
+          varVector.push_back(packed->second);
+        } else {
+          const std::string systVectorName = variable + "_systVector" + tagSuffix;
+          if (!cache.Has(systVectorName)) {
             dataManager_m->DefineVectorNominal(systVectorName, systematicVariations,
-                                               "Float_t", *systematicManager_m);
-          df = dataManager_m->getDataFrame();
-          cache.Refresh();
+                                              "Float_t", *systematicManager_m);
+            df = dataManager_m->getDataFrame();
+            cache.Refresh();
+          }
+          packedColumns.emplace(std::move(signature), systVectorName);
+          varVector.push_back(systVectorName);
         }
-        varVector.push_back(systVectorName);
     } else {
         if (hasMultiFill) {
             const std::string colType = cache.GetType(variable);
@@ -581,9 +536,6 @@ static std::string buildSystematicVector(
     const std::vector<std::string>& systList,
     ColumnCache& cache) {
   const std::string baseName = "SystematicCounter";
-  std::vector<std::string> systBranches;
-  systBranches.reserve(systList.size());
-
   bool definedAny = false;
   for (size_t i = 0; i < systList.size(); ++i) {
     const auto &syst = systList[i];
@@ -603,14 +555,6 @@ static std::string buildSystematicVector(
     cache.Refresh();
   }
 
-  for (const auto& syst : systList) {
-    if (syst == "Nominal") {
-      systBranches.push_back(baseName);
-    } else {
-      systBranches.push_back(baseName + "_" + syst);
-    }
-  }
-
   // A nominal-only booking must not reuse a previously materialised full
   // systematic vector: its longer size would be inconsistent with the
   // one-bin systematic axis.  Keep a dedicated vector for the nominal case.
@@ -620,9 +564,12 @@ static std::string buildSystematicVector(
       nominalOnly ? baseName + "_nominal_systVector"
                   : baseName + "_systVector";
   if (!cache.Has(systVectorName)) {
-    dataManager_m->DefineVectorNominal(systVectorName, systBranches, "Float_t",
-                                       *systematicManager_m);
-    df = dataManager_m->getDataFrame();
+    // These values are slot indices, independent of the event. Avoid a
+    // chain of vector appends and column readers for a constant bundle.
+    ROOT::VecOps::RVec<Float_t> indices(systList.size());
+    for (std::size_t i = 0; i < indices.size(); ++i) indices[i] = i;
+    df = df.Define(systVectorName, [indices]() { return indices; });
+    dataManager_m->setDataFrame(df);
     cache.Refresh();
   }
   return systVectorName;
@@ -655,6 +602,9 @@ static std::string buildSelectionMaskVector(
   for (const auto& label : systList) {
     signature += std::to_string(label.size()) + ":" + label;
   }
+  // Equal label lists can refer to new cumulative masks after another filter.
+  for (const auto &column : maskColumns)
+    signature += std::to_string(column.size()) + ":" + column;
   const std::string vectorName =
       "__rdf_filter_mask_systVector_" +
       std::to_string(std::hash<std::string>{}(signature));
@@ -749,6 +699,7 @@ void NDHistogramManager::BookSingleHistogram(
     selectionInfo &&channelInfo, // selection info (variable, bins, lowerBound, upperBound)
     std::string suffix){ // suffix to append to histogram names
 
+  axisPackCache_m.clear();
   if (dataManager_m == nullptr) {
     throw std::runtime_error("NDHistogramManager::BookSingleHistogram: DataManager not set");
   }
@@ -786,6 +737,7 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
 
   // set the basic information
   histFillInfo fillInfo = histFillInfo();
+  fillInfo.forceSparse = info.forceSparse();
 
   fillInfo.name = info.name() + "_" + suffix;
   fillInfo.title = info.name() + " " + suffix;
@@ -794,6 +746,14 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   fillInfo.nbins = {channelInfo.bins(), controlRegionInfo.bins(), sampleCategoryInfo.bins(), 1, info.bins()};
   fillInfo.xmin = {channelInfo.lowerBound(), controlRegionInfo.lowerBound(), sampleCategoryInfo.lowerBound(), 0.0, info.lowerBound()};
   fillInfo.xmax = {channelInfo.upperBound(), controlRegionInfo.upperBound(), sampleCategoryInfo.upperBound(), 1.0, info.upperBound()};
+  fillInfo.binEdges.resize(fillInfo.dim);
+  if (!info.binEdges().empty()) {
+    if (histogramBackend_m == "boost") {
+      throw std::runtime_error(
+          "NDHistogramManager: variable-width bins require histogramBackend: root");
+    }
+    fillInfo.binEdges[4] = info.binEdges();
+  }
 
   // define zero vector if needed
   if(!cache.Has("zero__")) {
@@ -922,14 +882,18 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   // of the reference (the region membership RVec) so that multi-fill works
   // correctly without an extra event-loop pass.
   std::vector<std::string> baseValsVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.variable(),
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, info.variable(),
                       fillInfo.hasSystematic, fillInfo.hasMultiFill, usedSystematics,
                       baseValsVec, false,
                       baseRefVector.empty() ? std::vector<std::string>{}
                                             : std::vector<std::string>{baseRefVector},
                       uniqueTag);
+  const std::vector<std::string> fillReference =
+      baseAxisHasMultiFill || !baseRefVector.empty()
+          ? std::vector<std::string>{baseValsVec.front()}
+          : std::vector<std::string>{};
   std::vector<std::string> baseWeightsVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.weight(), fillInfo.weight_hasSystematic, fillInfo.weight_hasMultiFill, usedSystematics, baseWeightsVec, true, {baseValsVec.front()}, uniqueTag);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, info.weight(), fillInfo.weight_hasSystematic, fillInfo.weight_hasMultiFill, usedSystematics, baseWeightsVec, true, fillReference, uniqueTag);
 
   const std::string systVectorName = buildSystematicVector(df, dataManager_m, systematicManager_m, systList, cache);
   const std::string selectionMaskVectorName =
@@ -937,11 +901,11 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
                               cache);
 
   std::vector<std::string> sampleCategoryVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, sampleCategoryInfo.variable(), fillInfo.sampleCategory_hasSystematic, fillInfo.sampleCategory_hasMultiFill, usedSystematics, sampleCategoryVec, false, {baseValsVec.front()}, uniqueTag);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, sampleCategoryInfo.variable(), fillInfo.sampleCategory_hasSystematic, fillInfo.sampleCategory_hasMultiFill, usedSystematics, sampleCategoryVec, false, fillReference, uniqueTag);
   std::vector<std::string> controlRegionVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, controlRegionInfo.variable(), fillInfo.controlRegion_hasSystematic, fillInfo.controlRegion_hasMultiFill, usedSystematics, controlRegionVec, false, {baseValsVec.front()}, uniqueTag);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, controlRegionInfo.variable(), fillInfo.controlRegion_hasSystematic, fillInfo.controlRegion_hasMultiFill, usedSystematics, controlRegionVec, false, fillReference, uniqueTag);
   std::vector<std::string> channelVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, channelInfo.variable(), fillInfo.channel_hasSystematic, fillInfo.channel_hasMultiFill, usedSystematics, channelVec, false, {baseValsVec.front()}, uniqueTag);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, channelInfo.variable(), fillInfo.channel_hasSystematic, fillInfo.channel_hasMultiFill, usedSystematics, channelVec, false, fillReference, uniqueTag);
 
   const std::string nFillsName = "SystematicCounter_nFills_" + baseValsVec.front() + "_" + uniqueTag;
   if (!cache.Has(nFillsName)) {
@@ -1011,6 +975,8 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
       ROOT::VecOps::RVec<Int_t>>(
       std::move(tempModel), varVector));
   }
+  histRegionNames_m.push_back({channelInfo.regions(), controlRegionInfo.regions(),
+                               sampleCategoryInfo.regions(), systList});
   histNodes_m.push_back(df);
 }
 
@@ -1018,6 +984,7 @@ void NDHistogramManager::bookND(std::vector<histInfo> &infos,
                                 std::vector<selectionInfo> &selection,
                                 const std::string &suffix,
                                 std::vector<std::vector<std::string>> &allRegionNames) {
+  axisPackCache_m.clear();
   if (!dataManager_m || !systematicManager_m) {
     throw std::runtime_error("NDHistogramManager: DataManager or SystematicManager not set");
   }
@@ -1074,6 +1041,7 @@ void NDHistogramManager::bookND(std::vector<histInfo> &infos,
                                     selectionInfo(channelInfo),
                                     suffix,
                                     systList);
+    histRegionNames_m.back() = normalizedRegionNames;
   }
 }
 
@@ -1084,7 +1052,7 @@ void NDHistogramManager::saveHists() {
   if (trackedHistInfos_m.empty()) {
     return;
   }
-  SaveHists(trackedHistInfos_m, trackedRegionNames_m, *configManager_m);
+  SaveHistsImpl(trackedHistInfos_m, trackedRegionNames_m, *configManager_m, true);
 }
 
 void NDHistogramManager::saveHists(std::vector<std::vector<histInfo>> &fullHistList,
@@ -1099,6 +1067,14 @@ void NDHistogramManager::SaveHists(
     std::vector<std::vector<histInfo>> &fullHistList,
     std::vector<std::vector<std::string>> &allRegionNames,
     const IConfigurationProvider &configProvider) {
+  SaveHistsImpl(fullHistList, allRegionNames, configProvider, false);
+}
+
+void NDHistogramManager::SaveHistsImpl(
+    std::vector<std::vector<histInfo>> &fullHistList,
+    std::vector<std::vector<std::string>> &allRegionNames,
+    const IConfigurationProvider &configProvider,
+    bool useBookedAxisLabels) {
   std::string fileName;
   if (metaSink_m) {
     fileName = metaSink_m->resolveOutputFile(configProvider, OutputChannel::Meta);
@@ -1113,18 +1089,12 @@ void NDHistogramManager::SaveHists(
   std::vector<std::string> allNames;
   std::vector<std::string> allVariables;
   std::vector<std::string> allLabels;
-  std::vector<int> allBins;
-  std::vector<float> allLowerBounds;
-  std::vector<float> allUpperBounds;
   for (auto const &histList : fullHistList) {
     for (auto const &info : histList) {
       //std::cout << "Storing histogram: " << info.name() << std::endl;
       allNames.push_back(info.name());
       allVariables.push_back(info.variable());
       allLabels.push_back(info.label());
-      allBins.push_back(info.bins());
-      allLowerBounds.push_back(info.lowerBound());
-      allUpperBounds.push_back(info.upperBound());
     }
   }
 
@@ -1147,201 +1117,100 @@ void NDHistogramManager::SaveHists(
         ". Preserve or move this file before rerunning with a fresh output path.");
   }
 
-  std::vector<Int_t> commonAxisSize = {};
-  for (const auto &regionNameList : allRegionNames) {
-    commonAxisSize.push_back(regionNameList.size());
+  constexpr const char *kHistogramSchemaKey = "__rdf_histogram_schema_v1";
+  constexpr const char *kHistogramDirectory = "nd_histograms_v1";
+  static const std::vector<std::string> axisRoles = {
+      "channel", "control", "sample", "systematic", "observable"};
+
+  TDirectory *ndDirectory = saveFile.GetDirectory(kHistogramDirectory);
+  if (!ndDirectory) {
+    ndDirectory = saveFile.mkdir(kHistogramDirectory);
+  }
+  if (!ndDirectory) {
+    throw std::runtime_error("Cannot create N-dimensional histogram directory in " +
+                             fileName);
   }
 
-  // Find sample categories represented by this input across all booked
-  // histograms.  A category can be empty for an individual observable (for
-  // example, because its value is outside that histogram's range), so use the
-  // union across histograms before creating the complete output schema.
-  std::unordered_set<std::size_t> populatedSampleCategories;
-  if (allRegionNames.size() >= 3) {
-    for (auto &histogramResult : histos_m) {
-      auto hist = histogramResult.GetPtr();
-      if (hist->GetNdimensions() <= 2) {
-        continue;
-      }
+  std::ostringstream schema;
+  schema << "{\"schema_version\":1,\"directory\":\""
+         << kHistogramDirectory << "\",\"histograms\":[";
 
-      std::vector<Int_t> indices(hist->GetNdimensions());
-      for (Int_t i = 0; i < hist->GetNbins(); ++i) {
-        const Float_t content = hist->GetBinContent(i, indices.data());
-        const Float_t error = hist->GetBinError2(i);
-        if (content == 0 && error == 0) {
-          continue;
-        }
-
-        const Int_t categoryBin = indices[2];
-        if (categoryBin > 0 &&
-            categoryBin <= static_cast<Int_t>(allRegionNames[2].size())) {
-          populatedSampleCategories.insert(
-              static_cast<std::size_t>(categoryBin - 1));
-        }
-      }
+  std::cout << "Writing " << histos_m.size()
+            << " N-dimensional histograms for merging..." << std::endl;
+  for (std::size_t histIndex = 0; histIndex < histos_m.size(); ++histIndex) {
+    if (histIndex >= allNames.size() || histIndex >= allVariables.size() ||
+        histIndex >= allLabels.size()) {
+      throw std::runtime_error(
+          "NDHistogramManager: booked histogram list does not match save metadata");
     }
-  }
 
-  // Pre-build directory names matching the extraction code's dirName format.
-  // dirName = channel/control/category  (from indices[0], indices[1], indices[2]).
-  std::unordered_set<std::string> dirSet;
-  if (allRegionNames.size() >= 3) {
-    for (size_t ci = 0; ci < allRegionNames[0].size(); ++ci) {
-      for (size_t si = 0; si < allRegionNames[1].size(); ++si) {
-        for (size_t mi = 0; mi < allRegionNames[2].size(); ++mi) {
-          if (populatedSampleCategories.count(mi) == 0) {
-            continue;
-          }
-          dirSet.insert(allRegionNames[0][ci] + "/" +
-                        allRegionNames[1][si] + "/" +
-                        allRegionNames[2][mi]);
-        }
-      }
+    auto hist = histos_m[histIndex].GetPtr();
+    if (!hist) {
+      throw std::runtime_error("NDHistogramManager: booked histogram result is null");
     }
-  }
 
-  // Create all directories once, before extracting any histogram data.
-  // ROOT's mkdir handles nested paths: the first '/' is replaced with '_' to
-  // produce a flat top-level name, while remaining slashes create subdirs.
-  for (const auto &dirName : dirSet) {
-    std::string newDir(dirName);
-    {
-      const size_t firstSlash = newDir.find('/');
-      if (firstSlash != std::string::npos) {
-        newDir[firstSlash] = '_';
-      }
-    }
-    saveFile.cd();
-    if (!newDir.empty()) {
-      saveFile.mkdir(newDir.c_str());
-    }
-  }
-
-  std::cout << "Processing " << histos_m.size() << " histograms for saving..." << std::endl;
-  int histIndex = 0;
-  for (auto &histo_m : histos_m) {
-    // Local map — only holds TH1Fs for the current config histogram.
-    // Written and discarded before processing the next histogram.
-    std::unordered_map<std::string, TH1F> histMap;
-
-    auto hist = histo_m.GetPtr();
-    const Int_t currentHistogramSize = hist->GetNbins();
     const Int_t dim = hist->GetNdimensions();
-    std::vector<Int_t> indices(dim);
-
-    // Persist the booked schema even when this sample has no entries in the
-    // observable range (e.g. a high-pT sample in a low-pT validation plot).
-    // Limit systematic names to the axes actually booked for this histogram.
-    if (allRegionNames.size() >= 4 && dim == 5) {
-      for (const auto &dirName : dirSet) {
-        const auto nSystematics = std::min(
-            allRegionNames[3].size(),
-            static_cast<std::size_t>(hist->GetAxis(3)->GetNbins()));
-        for (std::size_t s = 0; s < nSystematics; ++s) {
-          std::string name = allNames[histIndex];
-          if (allRegionNames[3][s] != "Nominal") {
-            name += "_" + allRegionNames[3][s];
-          }
-          auto &output = histMap[dirName + "/" + name];
-          output.SetNameTitle(name.c_str(),
-                             (allNames[histIndex] + ";" + allNames[histIndex] +
-                              ";Counts").c_str());
-          output.SetBins(allBins[histIndex], allLowerBounds[histIndex],
-                         allUpperBounds[histIndex]);
-          output.Sumw2();
-          output.SetDirectory(nullptr);
-        }
-      }
+    if (dim < 2) {
+      throw std::runtime_error(
+          "NDHistogramManager: expected an observable axis and at least one category axis");
     }
-      
-    std::string histName = allNames[histIndex];
-    for (int i = 0; i < currentHistogramSize; i++) {
-      Float_t content = hist->GetBinContent(i, indices.data());
-      Float_t error = hist->GetBinError2(i);
-      if (content == 0 && error == 0) {
-        continue;
-      }
+    const std::string objectKey = hist->GetName();
+    const std::string logicalName = allNames[histIndex];
+    const auto &histogramRegionNames =
+        useBookedAxisLabels && histIndex < histRegionNames_m.size() &&
+                !histRegionNames_m[histIndex].empty()
+            ? histRegionNames_m[histIndex]
+            : allRegionNames;
 
-      // Reset histName for each bin — it may be extended below with a
-      // systematic suffix and must not accumulate suffixes across bins.
-      histName = allNames[histIndex];
+    if (histIndex != 0) schema << ',';
+    schema << "{\"key\":\"" << jsonEscape(objectKey)
+           << "\",\"name\":\"" << jsonEscape(logicalName)
+           << "\",\"variable\":\"" << jsonEscape(allVariables[histIndex])
+           << "\",\"label\":\"" << jsonEscape(allLabels[histIndex])
+           << "\",\"axes\":[";
 
-      std::string dirName = "";
-      const Int_t regionAxes = std::min(static_cast<Int_t>(allRegionNames.size()), dim - 1);
-      const Int_t size = regionAxes - 2;
-      for (int j = 0; j < size; j++) {
-        if (indices[j] > 0 && j < static_cast<Int_t>(allRegionNames.size()) &&
-            indices[j] - 1 < static_cast<Int_t>(allRegionNames[j].size())) {
-          dirName += allRegionNames[j][indices[j] - 1] + "/";
-        }
-      }
+    for (Int_t axisIndex = 0; axisIndex < dim; ++axisIndex) {
+      if (axisIndex != 0) schema << ',';
+      TAxis *axis = hist->GetAxis(axisIndex);
+      const std::string role =
+          axisIndex < static_cast<Int_t>(axisRoles.size())
+              ? axisRoles[static_cast<std::size_t>(axisIndex)]
+              : "axis_" + std::to_string(axisIndex);
+      axis->SetTitle(role.c_str());
 
-      if (regionAxes - 2 >= 0 &&
-          regionAxes - 2 < static_cast<Int_t>(allRegionNames.size()) &&
-          indices[regionAxes - 2] > 0 &&
-          indices[regionAxes - 2] - 1 < static_cast<Int_t>(allRegionNames[regionAxes - 2].size())) {
-        dirName += allRegionNames[regionAxes - 2][indices[regionAxes - 2] - 1];
+      std::vector<std::string> labels;
+      if (axisIndex < dim - 1 &&
+          axisIndex < static_cast<Int_t>(histogramRegionNames.size())) {
+        labels = histogramRegionNames[static_cast<std::size_t>(axisIndex)];
       }
+      const auto nLabels = std::min(
+          labels.size(), static_cast<std::size_t>(axis->GetNbins()));
+      for (std::size_t labelIndex = 0; labelIndex < nLabels; ++labelIndex) {
+        axis->SetBinLabel(static_cast<Int_t>(labelIndex + 1),
+                          labels[labelIndex].c_str());
+      }
+      labels.resize(nLabels);
 
-      
-      
-      if (regionAxes - 1 >= 0 &&
-          regionAxes - 1 < static_cast<Int_t>(allRegionNames.size()) &&
-          indices[regionAxes - 1] > 0 &&
-          indices[regionAxes - 1] - 1 < static_cast<Int_t>(allRegionNames[regionAxes - 1].size())) {
-        if (allRegionNames[regionAxes - 1][indices[regionAxes - 1] - 1] != "Nominal") {
-          histName += "_" + allRegionNames[regionAxes - 1][indices[regionAxes - 1] - 1];
-        }
-      }
-
-      const std::string key = dirName + "/" + histName;
-      if (histMap.count(key) == 0) {
-        histMap[key] =
-            TH1F(histName.c_str(),
-                 (allNames[histIndex] + ";" + allNames[histIndex] +
-                  ";Counts").c_str(),
-                 allBins[histIndex], allLowerBounds[histIndex],
-                 allUpperBounds[histIndex]);
-      }
-
-      const Int_t valueAxisIndex = regionAxes;
-      if (valueAxisIndex < dim) {
-        histMap[key].SetBinContent(indices[valueAxisIndex], content);
-        histMap[key].SetBinError(indices[valueAxisIndex], std::sqrt(error));
-      }
+      schema << "{\"role\":\"" << jsonEscape(role)
+             << "\",\"bins\":" << axis->GetNbins()
+             << ",\"labels\":";
+      appendJsonStringArray(schema, labels);
+      schema << ",\"edges\":";
+      appendJsonDoubleArray(schema, getAxisEdges(*axis));
+      schema << '}';
     }
+    schema << "]}";
 
-    // Write TH1Fs for this config histogram immediately, then discard the map.
-    for (auto &pair : histMap) {
-      const std::string &fullKey = pair.first;
-      // Key format: "channel/control/category/histname" — dirName has two
-      // slashes (channel/control/category).  Extract the directory part by
-      // finding the LAST slash (before the histname).
-      const size_t lastSlash = fullKey.rfind('/');
-      std::string dirPart;
-      if (lastSlash != std::string::npos) {
-        dirPart = fullKey.substr(0, lastSlash);
-      }
-      std::string newDir(dirPart);
-      {
-        const size_t midSlash = newDir.find('/');
-        if (midSlash != std::string::npos) {
-          newDir[midSlash] = '_';
-        }
-      }
-      saveFile.cd();
-      if (!newDir.empty()) {
-        saveFile.cd(newDir.c_str());
-      }
-      pair.second.Write();
-      // Prevent the TH1F from remaining associated with the ROOT directory.
-      // Without this, the TH1F destructor (when histMap is cleared) may
-      // trigger a double-free with the TFile's directory cleanup.
-      pair.second.SetDirectory(nullptr);
-    }
-
-    histIndex++;
+    ndDirectory->cd();
+    hist->SetTitle(logicalName.c_str());
+    hist->Write(objectKey.c_str(), TObject::kOverwrite);
   }
+
+  schema << "]}";
+  saveFile.cd();
+  TObjString schemaObject(schema.str().c_str());
+  schemaObject.Write(kHistogramSchemaKey, TObject::kOverwrite);
+  saveFile.Flush();
 }
 
 
@@ -1361,6 +1230,9 @@ NDHistogramManager::GetHistos() {
 void NDHistogramManager::Clear() {
   histos_m.clear();
   histNodes_m.clear();
+  histRegionNames_m.clear();
+  trackedHistInfos_m.clear();
+  trackedRegionNames_m.clear();
 }
 
 /**
@@ -1419,7 +1291,7 @@ void NDHistogramManager::setupFromConfigFile() {
   try {
     // Parse the histogram configuration file
     // Required keys: name, variable, weight, bins, lowerBound, upperBound
-    // Optional keys: label, suffix, channelVariable, channelBins, channelLowerBound, channelUpperBound, 
+    // Optional keys: label, suffix, binningRanges, channelVariable, channelBins, channelLowerBound, channelUpperBound,
     //                channelRegions, controlRegionVariable, controlRegionBins, controlRegionLowerBound,
     //                controlRegionUpperBound, controlRegionRegions, sampleCategoryVariable, 
     //                sampleCategoryBins, sampleCategoryLowerBound, sampleCategoryUpperBound, sampleCategoryRegions
@@ -1439,6 +1311,50 @@ void NDHistogramManager::setupFromConfigFile() {
       config.upperBound = std::stof(entry.at("upperBound"));
 
       // Optional fields
+      auto binningRangesIt = entry.find("binningRanges");
+      if (binningRangesIt != entry.end()) {
+        const auto ranges =
+            configManager_m->splitString(binningRangesIt->second, ";");
+        for (const auto &range : ranges) {
+          const auto parts = configManager_m->splitString(range, ":");
+          if (parts.size() != 3) {
+            throw std::runtime_error(
+                "NDHistogramManager: binningRanges for histogram '" +
+                config.name +
+                "' must contain semicolon-separated min:max:nbins ranges");
+          }
+          const Double_t lower = std::stod(parts[0]);
+          const Double_t upper = std::stod(parts[1]);
+          const Int_t nBins = std::stoi(parts[2]);
+          if (!std::isfinite(lower) || !std::isfinite(upper) ||
+              lower >= upper || nBins <= 0) {
+            throw std::runtime_error(
+                "NDHistogramManager: invalid binning range for histogram '" +
+                config.name + "'");
+          }
+          if (config.binEdges.empty()) {
+            config.binEdges.push_back(lower);
+          } else if (std::abs(config.binEdges.back() - lower) > 1.0e-9) {
+            throw std::runtime_error(
+                "NDHistogramManager: binningRanges for histogram '" +
+                config.name + "' must be contiguous and ordered");
+          }
+          for (Int_t bin = 1; bin <= nBins; ++bin) {
+            config.binEdges.push_back(
+                lower + (upper - lower) * static_cast<Double_t>(bin) / nBins);
+          }
+        }
+        if (config.binEdges.size() !=
+                static_cast<std::size_t>(config.bins + 1) ||
+            std::abs(config.binEdges.front() - config.lowerBound) > 1.0e-6 ||
+            std::abs(config.binEdges.back() - config.upperBound) > 1.0e-6) {
+          throw std::runtime_error(
+              "NDHistogramManager: binningRanges for histogram '" +
+              config.name +
+              "' must match bins, lowerBound, and upperBound");
+        }
+      }
+
       auto labelIt = entry.find("label");
       config.label = (labelIt != entry.end()) ? labelIt->second : config.variable;
 
@@ -1583,8 +1499,8 @@ std::string NDHistogramManager::ensureRegionMembershipColumn() {
     }
 
     const auto chain = regionManager_m->getFilterChain(name);
-    std::vector<NDHistogramTypeToken> filterTypes;
-    filterTypes.reserve(chain.size());
+    if (chain.empty())
+      throw std::runtime_error("NDHistogramManager: empty region filter chain");
     bool useFallback = false;
     for (const auto &filterColumn : chain) {
       const std::string filterType = dataManager_m->getDataFrame().GetColumnType(filterColumn);
@@ -1597,13 +1513,12 @@ std::string NDHistogramManager::ensureRegionMembershipColumn() {
         useFallback = true;
         break;
       }
-      filterTypes.push_back(token);
     }
 
     if (useFallback) {
       df = df.Define(boolCol, buildRegionMembershipBoolExpression(chain));
     } else {
-      df = defineCompiledRegionMembershipChain(df, boolCol, chain, filterTypes);
+      df = rdfcolumnpacker::defineScalarAll(df, boolCol, chain);
     }
     dataManager_m->setDataFrame(df);
   }
@@ -1647,7 +1562,21 @@ std::string NDHistogramManager::ensureRegionMembershipColumn() {
  * single large THnSparse with an additional region axis.  All bookings are
  * lazy, so the event loop runs exactly once.
  */
-void NDHistogramManager::bookConfigHistograms() {
+void NDHistogramManager::bookConfigHistograms(
+    const std::vector<std::string> &excludedNames) {
+  axisPackCache_m.clear();
+  if (!excludedNames.empty()) {
+    if (!histos_m.empty()) {
+      throw std::runtime_error("NDHistogramManager: exclude config histograms before booking");
+    }
+    configHistograms_m.erase(
+        std::remove_if(configHistograms_m.begin(), configHistograms_m.end(),
+                       [&](const HistogramConfig &entry) {
+                         return std::find(excludedNames.begin(), excludedNames.end(),
+                                          entry.name) != excludedNames.end();
+                       }),
+        configHistograms_m.end());
+  }
   if (configHistograms_m.empty()) {
     return;
   }
@@ -1689,7 +1618,8 @@ void NDHistogramManager::bookConfigHistograms() {
   for (const auto &config : configHistograms_m) {
     histInfo info(config.name.c_str(), config.variable.c_str(),
                   config.label.c_str(), config.weight.c_str(),
-                  config.bins, config.lowerBound, config.upperBound);
+                  config.bins, config.lowerBound, config.upperBound,
+                  config.binEdges);
 
     if (nRegions > 0) {
       // Region-aware path: override the channel axis with the region
@@ -1755,7 +1685,8 @@ void NDHistogramManager::bookConfigHistograms() {
   for (const auto& config : configHistograms_m) {
     configBatch.emplace_back(config.name.c_str(), config.variable.c_str(),
                               config.label.c_str(), config.weight.c_str(),
-                              config.bins, config.lowerBound, config.upperBound);
+                              config.bins, config.lowerBound, config.upperBound,
+                              config.binEdges);
   }
   if (!configBatch.empty()) {
     trackedHistInfos_m.push_back(std::move(configBatch));

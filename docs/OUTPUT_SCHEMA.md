@@ -161,15 +161,19 @@ Describes a single axis dimension of a `THnSparseF` histogram.
 
 ### HistogramSchema
 
-Describes `THnSparseF` histogram objects saved by `NDHistogramManager` into the meta-output ROOT file.
+Describes histogram objects saved by `NDHistogramManager` into the meta-output
+ROOT file. Per-job outputs contain mergeable `THnSparseF` objects under
+`nd_histograms_v1/` plus an embedded `__rdf_histogram_schema_v1` metadata
+object. After `hadd`, the merge workflow adds the reconstructed `TH1F`
+objects used by existing analysis tools while retaining the sparse arrays.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `schema_version` | `int` | `1` | Schema format version. |
 | `output_file` | `str` | `""` | Path or pattern of the meta-output ROOT file. Must not be empty. |
-| `histogram_names` | `list[str]` | `[]` | Names of the `THnSparseF` objects expected in the file. |
+| `histogram_names` | `list[str]` | `[]` | ROOT paths of the `THnSparseF` objects expected in the file. |
 | `axes` | `list[HistogramAxisSpec]` | `[]` | Axis specifications shared across all histograms in this schema. |
-| `axis_labels` | `dict[str, list[str]]` | `{}` | Optional label payloads inferred from histogram config axes such as channel, control-region, or sample-category labels. |
+| `axis_labels` | `dict[str, list[str]]` | `{}` | Category labels for the channel, control, sample, and systematic axes, read from the embedded ROOT schema when available. |
 | `sample_metadata` | `dict[str, dict]` | `{}` | Optional per-sample or per-alias metadata used by downstream tools to resolve fit groupings. |
 | `sample_combinations` | `dict[str, dict]` | `{}` | Optional pre-resolved sample-combination definitions, compatible with the datacard generator `sample_combinations` block. |
 | `processes` | `dict[str, dict]` | `{}` | Optional pre-resolved process definitions, compatible with the datacard generator `processes` block. |

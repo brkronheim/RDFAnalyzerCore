@@ -82,6 +82,8 @@ void GenWeightManager::setContext(ManagerContext &ctx) {
 void GenWeightManager::setupFromConfigFile() {
   enableLheScale_m = configBool("genWeightEnableLheScale", true);
   enablePs_m = configBool("genWeightEnablePs", true);
+  enableIsr_m = configBool("genWeightEnableIsr", true);
+  enableFsr_m = configBool("genWeightEnableFsr", true);
   enablePdf_m = configBool("genWeightEnablePdf", true);
   enablePdfAs_m = configBool("genWeightEnablePdfAs", true);
   lheScaleBranch_m = configString("genWeightLheScaleBranch", "LHEScaleWeight");
@@ -301,6 +303,10 @@ void GenWeightManager::definePsWeights(const std::string &baseWeightCol,
                               {"ps_isr1_fsr0p5", 3}};
 
   for (const auto &point : psPoints) {
+    const bool isrVariation = point.index == 0 || point.index == 2;
+    if ((isrVariation && !enableIsr_m) || (!isrVariation && !enableFsr_m)) {
+      continue;
+    }
     const std::string label(point.label);
     const std::string column = nominalColumn_m + "_" + label;
     const int index = point.index;

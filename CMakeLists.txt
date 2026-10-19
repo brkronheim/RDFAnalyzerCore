@@ -1,6 +1,15 @@
 include(CMakePrintHelpers)
 
 cmake_minimum_required(VERSION 3.19.0)
+
+# Use optimized code for normal builds unless the caller selected a build type.
+# This applies to both the framework and analysis targets, while still allowing
+# explicit Debug/RelWithDebInfo builds and multi-configuration generators.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+endif()
+
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 17)
 # Ensure static libraries are built position-independent so they can be linked
@@ -73,6 +82,7 @@ option(BUILD_TESTS "Build analysis tests" ON)
 option(BUILD_COMBINE "Build CMS Combine package for statistical analysis" OFF)
 option(BUILD_COMBINE_HARVESTER "Build CombineHarvester tools (requires BUILD_COMBINE)" OFF)
 option(USE_CUDA "Enable CUDA GPU support for kinematic fits" OFF)
+option(RDF_ENABLE_XRD_ADAPTOR "Build the optional standalone XrdCl input backend" OFF)
 
 if(USE_CUDA)
     enable_language(CUDA)

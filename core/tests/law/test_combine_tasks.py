@@ -385,6 +385,19 @@ class TestDeriveAvailableVariations(unittest.TestCase):
         self.assertIn("h_jesUp", result["h_jes"])
         self.assertIn("h_jesDown", result["h_jes"])
 
+    def test_sparse_histogram_schema_uses_systematic_axis_labels(self):
+        mod = self._import()
+        from output_schema import OutputManifest, HistogramSchema
+        manifest = OutputManifest()
+        manifest.histograms = HistogramSchema(
+            output_file="merged.root",
+            histogram_names=["nd_histograms_v1/pt__nominal"],
+            axis_labels={"systematic": ["Nominal", "jesUp", "jesDown"]},
+        )
+
+        result = mod._derive_available_variations(manifest)
+        self.assertEqual(result, {"jes": ["jesUp", "jesDown"]})
+
     def test_case_insensitive_suffix_detection(self):
         mod = self._import()
         from output_schema import OutputManifest, HistogramSchema

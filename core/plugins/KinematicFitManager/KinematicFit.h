@@ -75,6 +75,10 @@ struct MassConstraint {
   /// @brief Resonance width / mass uncertainty [GeV].
   /// Set > 0 to use a soft (Gaussian-penalty) constraint.  See struct docs.
   double massSigma = 0.0;
+  /// When true, apply the soft mass penalty only outside [minimumMass, maximumMass].
+  bool massWindow = false;
+  double minimumMass = 0.0;
+  double maximumMass = 0.0;
 };
 
 /**
@@ -95,6 +99,19 @@ struct PtConstraint {
   /// @brief Gaussian width of the pT constraint [GeV].
   /// Set to 0 for a hard constraint; positive values allow residual pT.
   double ptSigma = 0.0;
+};
+
+/**
+ * @brief Gaussian constraint on the angular distance between two particles.
+ *
+ * The residual is ΔR(idx1, idx2) - targetDeltaR. A positive sigma makes the
+ * constraint soft, with sigma measured directly in ΔR units.
+ */
+struct DeltaRConstraint {
+  int idx1;
+  int idx2;
+  double targetDeltaR;
+  double sigma = 0.0;
 };
 
 /**
@@ -184,6 +201,26 @@ public:
   }
 
   /**
+   * @brief Add a soft invariant-mass window with a flat central region.
+   *
+   * The constraint contributes no penalty while the fitted mass lies in the
+   * inclusive [minimumMass, maximumMass] interval. Outside it, the nearest
+   * boundary is used as the Gaussian target with width @p massSigma.
+   */
+  void addMassWindowConstraint(int idx1, int idx2, double minimumMass,
+                               double maximumMass, double massSigma) {
+    if (!(minimumMass >= 0.0) || !(maximumMass > minimumMass) ||
+        !(massSigma > 0.0)) {
+      throw std::invalid_argument(
+          "Mass window requires 0 <= minimumMass < maximumMass and a "
+          "positive massSigma");
+    }
+    constraints_.push_back({idx1, idx2, -1,
+                            0.5 * (minimumMass + maximumMass), massSigma,
+                            true, minimumMass, maximumMass});
+  }
+
+  /**
    * @brief Add a three-body invariant mass constraint.
    *
    * Constrains m(p_idx1, p_idx2, p_idx3) = targetMass.  Typical use case is
@@ -215,6 +252,18 @@ public:
    */
   void addPtConstraint(int idx, double targetPt, double ptSigma = 0.0) {
     ptConstraints_.push_back({idx, targetPt, ptSigma});
+  }
+
+  /**
+   * @brief Add a ΔR constraint between two particles.
+   * @param idx1 First particle index.
+   * @param idx2 Second particle index.
+   * @param targetDeltaR Target distance in (η, φ).
+   * @param sigma Gaussian width in ΔR units (0 means hard constraint).
+   */
+  void addDeltaRConstraint(int idx1, int idx2, double targetDeltaR,
+                           double sigma = 0.0) {
+    deltaRConstraints_.push_back({idx1, idx2, targetDeltaR, sigma});
   }
 
   /**
@@ -253,6 +302,7 @@ private:
   std::vector<KinFitParticle> particles_;
   std::vector<MassConstraint> constraints_;
   std::vector<PtConstraint>   ptConstraints_;
+  std::vector<DeltaRConstraint> deltaRConstraints_;
   std::vector<CartesianConstraint> transverseConstraints_;
 
   // ── helpers ────────────────────────────────────────────────────────────────────────────
@@ -345,8 +395,10 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
   const int nParticles    = static_cast<int>(particles_.size());
   const int nMassConstr   = static_cast<int>(constraints_.size());
   const int nPtConstr     = static_cast<int>(ptConstraints_.size());
+  const int nDeltaRConstr = static_cast<int>(deltaRConstraints_.size());
   const int nTransConstr  = static_cast<int>(transverseConstraints_.size());
-  const int nConstraints  = nMassConstr + nPtConstr + nTransConstr;
+  const int nConstraints  =
+      nMassConstr + nPtConstr + nDeltaRConstr + nTransConstr;
   const int nParams       = nParticles * 3; // (pT, eta, phi) per particle
 
   if (nParticles == 0 || nConstraints == 0) {
@@ -385,6 +437,9 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
   for (const auto &constraint : ptConstraints_) {
     hasSoftConstraint = hasSoftConstraint || constraint.ptSigma > 0.0;
   }
+  for (const auto &constraint : deltaRConstraints_) {
+    hasSoftConstraint = hasSoftConstraint || constraint.sigma > 0.0;
+  }
   for (const auto &constraint : transverseConstraints_) {
     hasSoftConstraint = hasSoftConstraint || constraint.sigma > 0.0;
   }
@@ -398,7 +453,9 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
     for (int i = 0; i < nParticles; ++i) {
       const double dpt  = state[i].pt  - particles_[i].pt;
       const double deta = state[i].eta - particles_[i].eta;
-      const double dphi = state[i].phi - particles_[i].phi;
+      const double dphi = std::remainder(
+          state[i].phi - particles_[i].phi,
+          2.0 * 3.14159265358979323846);
       chi2 += dpt  * dpt  / var[3 * i + 0];
       chi2 += deta * deta / var[3 * i + 1];
       chi2 += dphi * dphi / var[3 * i + 2];
@@ -406,16 +463,29 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
 
     for (const auto &constraint : constraints_) {
       if (constraint.massSigma <= 0.0) continue;
-      const double residual = constraint.idx3 < 0
-                                  ? invMass2(state[constraint.idx1],
-                                             state[constraint.idx2]) -
-                                        constraint.targetMass * constraint.targetMass
-                                  : invMass3(state[constraint.idx1],
-                                             state[constraint.idx2],
-                                             state[constraint.idx3]) -
-                                        constraint.targetMass * constraint.targetMass;
-      const double residualSigma =
-          2.0 * constraint.targetMass * constraint.massSigma;
+      const double massSquared =
+          constraint.idx3 < 0
+              ? invMass2(state[constraint.idx1], state[constraint.idx2])
+              : invMass3(state[constraint.idx1], state[constraint.idx2],
+                         state[constraint.idx3]);
+      double targetMass = constraint.targetMass;
+      if (constraint.massWindow) {
+        const double mass = std::sqrt(std::max(0.0, massSquared));
+        if (mass < constraint.minimumMass) {
+          targetMass = constraint.minimumMass;
+        } else if (mass > constraint.maximumMass) {
+          targetMass = constraint.maximumMass;
+        } else {
+          continue;
+        }
+      }
+      const double mass = std::sqrt(std::max(0.0, massSquared));
+      const double residual = constraint.massWindow
+                                  ? mass - targetMass
+                                  : massSquared - targetMass * targetMass;
+      const double residualSigma = constraint.massWindow
+                                       ? constraint.massSigma
+                                       : 2.0 * targetMass * constraint.massSigma;
       chi2 += residual * residual /
               std::max(residualSigma * residualSigma, detail::kMinVariance);
     }
@@ -425,6 +495,20 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
       const double residual = state[constraint.idx].pt - constraint.targetPt;
       chi2 += residual * residual /
               std::max(constraint.ptSigma * constraint.ptSigma,
+                       detail::kMinVariance);
+    }
+
+    for (const auto &constraint : deltaRConstraints_) {
+      if (constraint.sigma <= 0.0) continue;
+      const auto &p1 = state[constraint.idx1];
+      const auto &p2 = state[constraint.idx2];
+      const double deltaEta = p1.eta - p2.eta;
+      const double deltaPhi = std::remainder(
+          p1.phi - p2.phi, 2.0 * 3.14159265358979323846);
+      const double residual = std::hypot(deltaEta, deltaPhi) -
+                              constraint.targetDeltaR;
+      chi2 += residual * residual /
+              std::max(constraint.sigma * constraint.sigma,
                        detail::kMinVariance);
     }
 
@@ -455,20 +539,46 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
     std::vector<double> D(nConstraints * nParams, 0.0);
 
     // Mass constraints (two-body and three-body)
+    std::vector<bool> activeMassWindows(nMassConstr, true);
     for (int c = 0; c < nMassConstr; ++c) {
       const auto &con = constraints_[c];
       const auto &p1  = current[con.idx1];
       const auto &p2  = current[con.idx2];
 
+      double targetMass = con.targetMass;
+      const double massSquared =
+          con.idx3 < 0 ? invMass2(p1, p2)
+                       : invMass3(p1, p2, current[con.idx3]);
+      const double mass = std::sqrt(std::max(0.0, massSquared));
+      if (con.massWindow) {
+        if (mass < con.minimumMass) {
+          targetMass = con.minimumMass;
+        } else if (mass > con.maximumMass) {
+          targetMass = con.maximumMass;
+        } else {
+          // A zero Jacobian and a unit diagonal below leave this inactive row
+          // decoupled from the other fit constraints.
+          activeMassWindows[c] = false;
+          f[c] = 0.0;
+          continue;
+        }
+      }
+
       if (con.idx3 < 0) {
         // ── Two-body mass constraint ──────────────────────────────────────
-        f[c] = invMass2(p1, p2) - con.targetMass * con.targetMass;
+        f[c] = con.massWindow ? mass - targetMass
+                              : massSquared - targetMass * targetMass;
 
         auto [E1,px1,py1,pz1] = fourMomentum(p1.pt,p1.eta,p1.phi,p1.mass);
         auto [E2,px2,py2,pz2] = fourMomentum(p2.pt,p2.eta,p2.phi,p2.mass);
         const double sE  = E1+E2, sPx = px1+px2, sPy = py1+py2, sPz = pz1+pz2;
         auto g1 = gradMassN(p1, sE, sPx, sPy, sPz);
         auto g2 = gradMassN(p2, sE, sPx, sPy, sPz);
+        if (con.massWindow) {
+          const double derivativeScale = 1.0 / std::max(2.0 * mass, 1e-12);
+          for (auto &value : g1) value *= derivativeScale;
+          for (auto &value : g2) value *= derivativeScale;
+        }
 
         const int i1 = con.idx1 * 3, i2 = con.idx2 * 3;
         D[c * nParams + i1 + 0] = g1[0]; D[c * nParams + i1 + 1] = g1[1]; D[c * nParams + i1 + 2] = g1[2];
@@ -476,7 +586,8 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
       } else {
         // ── Three-body mass constraint (e.g. top → b l ν) ────────────────
         const auto &p3 = current[con.idx3];
-        f[c] = invMass3(p1, p2, p3) - con.targetMass * con.targetMass;
+        f[c] = con.massWindow ? mass - targetMass
+                              : massSquared - targetMass * targetMass;
 
         auto [E1,px1,py1,pz1] = fourMomentum(p1.pt,p1.eta,p1.phi,p1.mass);
         auto [E2,px2,py2,pz2] = fourMomentum(p2.pt,p2.eta,p2.phi,p2.mass);
@@ -486,6 +597,12 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
         auto g1 = gradMassN(p1, sE, sPx, sPy, sPz);
         auto g2 = gradMassN(p2, sE, sPx, sPy, sPz);
         auto g3 = gradMassN(p3, sE, sPx, sPy, sPz);
+        if (con.massWindow) {
+          const double derivativeScale = 1.0 / std::max(2.0 * mass, 1e-12);
+          for (auto &value : g1) value *= derivativeScale;
+          for (auto &value : g2) value *= derivativeScale;
+          for (auto &value : g3) value *= derivativeScale;
+        }
 
         const int i1 = con.idx1*3, i2 = con.idx2*3, i3 = con.idx3*3;
         D[c*nParams+i1+0]=g1[0]; D[c*nParams+i1+1]=g1[1]; D[c*nParams+i1+2]=g1[2];
@@ -504,11 +621,37 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
       // D[c * nParams + pc.idx * 3 + 2] = 0 (d f / d phi = 0, already zero)
     }
 
+    // Soft or hard ΔR constraints. The phi difference is wrapped so the
+    // distance remains continuous at the -π/π boundary.
+    for (int k = 0; k < nDeltaRConstr; ++k) {
+      const int c = nMassConstr + nPtConstr + k;
+      const auto &constraint = deltaRConstraints_[k];
+      const auto &p1 = current[constraint.idx1];
+      const auto &p2 = current[constraint.idx2];
+      const double deltaEta = p1.eta - p2.eta;
+      const double deltaPhi = std::remainder(
+          p1.phi - p2.phi, 2.0 * 3.14159265358979323846);
+      const double deltaR = std::hypot(deltaEta, deltaPhi);
+      f[c] = deltaR - constraint.targetDeltaR;
+
+      // At exactly zero separation the norm is not differentiable. Select
+      // the η direction as a finite subgradient to keep the linear system
+      // well-defined and let the soft width regularize the step.
+      const double gradEta = deltaR > 1e-12 ? deltaEta / deltaR : 1.0;
+      const double gradPhi = deltaR > 1e-12 ? deltaPhi / deltaR : 0.0;
+      const int i1 = constraint.idx1 * 3;
+      const int i2 = constraint.idx2 * 3;
+      D[c * nParams + i1 + 1] = gradEta;
+      D[c * nParams + i1 + 2] = gradPhi;
+      D[c * nParams + i2 + 1] = -gradEta;
+      D[c * nParams + i2 + 2] = -gradPhi;
+    }
+
     // Cartesian px/py constraints.  Each constraint may contain any number
     // of particles, allowing the configuration to express total transverse
     // momentum balance over the complete fitted topology.
     for (int k = 0; k < nTransConstr; ++k) {
-      const int c = nMassConstr + nPtConstr + k;
+      const int c = nMassConstr + nPtConstr + nDeltaRConstr + k;
       const auto &tc = transverseConstraints_[k];
       double componentSum = 0.0;
       for (const int idx : tc.indices) {
@@ -544,9 +687,27 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
     // Gaussian penalty of width ~σ_m GeV.  When σ_m = 0 the term is zero and
     // the original hard constraint is recovered.
     for (int c = 0; c < nMassConstr; ++c) {
+      if (constraints_[c].massWindow && !activeMassWindows[c]) {
+        W[c * nConstraints + c] = 1.0;
+        continue;
+      }
       if (constraints_[c].massSigma > 0.0) {
         // residualSigma = σ_{g_c} = 2 · m_target · σ_m
-        const double residualSigma = 2.0 * constraints_[c].targetMass * constraints_[c].massSigma;
+        double targetMass = constraints_[c].targetMass;
+        if (constraints_[c].massWindow) {
+          const auto &con = constraints_[c];
+          const double massSquared =
+              con.idx3 < 0
+                  ? invMass2(current[con.idx1], current[con.idx2])
+                  : invMass3(current[con.idx1], current[con.idx2],
+                             current[con.idx3]);
+          const double mass = std::sqrt(std::max(0.0, massSquared));
+          targetMass = mass < con.minimumMass ? con.minimumMass
+                                              : con.maximumMass;
+        }
+        const double residualSigma = constraints_[c].massWindow
+                                         ? constraints_[c].massSigma
+                                         : 2.0 * targetMass * constraints_[c].massSigma;
         W[c * nConstraints + c] += residualSigma * residualSigma;
       }
     }
@@ -560,8 +721,16 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
     for (int k = 0; k < nTransConstr; ++k) {
       const auto &tc = transverseConstraints_[k];
       if (tc.sigma > 0.0) {
-        const int c = nMassConstr + nPtConstr + k;
+        const int c = nMassConstr + nPtConstr + nDeltaRConstr + k;
         W[c * nConstraints + c] += tc.sigma * tc.sigma;
+      }
+    }
+
+    for (int k = 0; k < nDeltaRConstr; ++k) {
+      const auto &constraint = deltaRConstraints_[k];
+      if (constraint.sigma > 0.0) {
+        const int c = nMassConstr + nPtConstr + k;
+        W[c * nConstraints + c] += constraint.sigma * constraint.sigma;
       }
     }
 
@@ -576,7 +745,9 @@ inline KinFitResult KinematicFit::fit(int maxIter, double tolerance) const {
           linearizedResidual[c] +=
               D[c * nParams + 3 * i + 0] * (particles_[i].pt - current[i].pt) +
               D[c * nParams + 3 * i + 1] * (particles_[i].eta - current[i].eta) +
-              D[c * nParams + 3 * i + 2] * (particles_[i].phi - current[i].phi);
+              D[c * nParams + 3 * i + 2] *
+                  std::remainder(particles_[i].phi - current[i].phi,
+                                 2.0 * 3.14159265358979323846);
         }
       }
     }

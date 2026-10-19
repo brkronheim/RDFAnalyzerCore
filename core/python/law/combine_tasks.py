@@ -482,16 +482,14 @@ def _load_manifest(manifest_path: str) -> "OutputManifest":
 def _derive_available_variations(manifest: "OutputManifest") -> Dict[str, List[str]]:
     """Derive a ``{systematic_base → [variant_names]}`` map from the manifest.
 
-    The available variations are inferred from the histogram names stored in
-    :attr:`OutputManifest.histograms`.  A histogram named ``h_jesUp`` is
-    assumed to be an Up variation of ``jes``; ``h_jesDown`` is the Down
-    variation.  The base name is extracted by stripping the ``Up`` / ``Down``
-    suffix (case-insensitive).
+    Sparse-first manifests use the systematic axis labels. Legacy manifests
+    fall back to histogram names. A label or histogram named ``jesUp`` is
+    treated as the Up variation of ``jes``; ``jesDown`` is the Down variation.
 
     Parameters
     ----------
     manifest:
-        The merged :class:`OutputManifest` whose histogram names are inspected.
+        The merged :class:`OutputManifest` whose systematic labels are inspected.
 
     Returns
     -------
@@ -499,11 +497,18 @@ def _derive_available_variations(manifest: "OutputManifest") -> Dict[str, List[s
         Mapping of base systematic name → list of observed variant histogram names.
         For example ``{"jes": ["h_jesUp", "h_jesDown"]}``.
     """
-    if manifest.histograms is None or not manifest.histograms.histogram_names:
+    if manifest.histograms is None:
         return {}
 
+    axis_labels = manifest.histograms.axis_labels or {}
+    systematic_labels = axis_labels.get("systematic", [])
+    names = (
+        [name for name in systematic_labels if name != "Nominal"]
+        if systematic_labels
+        else manifest.histograms.histogram_names or []
+    )
     variations: Dict[str, List[str]] = {}
-    for name in manifest.histograms.histogram_names:
+    for name in names:
         lower = name.lower()
         for suffix in ("up", "down"):
             if lower.endswith(suffix):
@@ -948,6 +953,28 @@ class ManifestDatacardTask(CombineMixin, law.Task):
         if not hist_names:
             self.publish_message("No histogram names in manifest; skipping shape preflight.")
             return
+        if all(name.startswith("nd_histograms_v1/") for name in hist_names):
+            # The manifest lists the merge inputs, while the merge task adds
+            # reconstructed TH1 objects under channel/control/sample paths.
+            # Inspect those 1D outputs after extraction.
+            projected_names = []
+            for key in rf.keys(recursive=True, cycle=False):
+                name = str(key).split(";", 1)[0]
+                if name.count("/") < 2:
+                    continue
+                try:
+                    hist = rf[name]
+                    axes = getattr(hist, "axes", None)
+                    if hasattr(hist, "values") and axes is not None and len(axes) == 1:
+                        projected_names.append(name)
+                except Exception:
+                    continue
+            hist_names = sorted(projected_names)
+            if not hist_names:
+                self.publish_message(
+                    "No reconstructed 1D histograms found; skipping shape preflight."
+                )
+                return
 
         # Check each histogram
         low_stat_warnings = 0

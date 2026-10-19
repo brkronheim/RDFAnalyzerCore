@@ -567,9 +567,17 @@ The YAML config is validated at startup against a JSON Schema. See **[CONFIGURAT
 | `histogramBackend` | String | `"root"` | Histogram backend: `"root"` (THnSparseF) or `"boost"` (Boost.Histogram) |
 | `histogramSystematics` | Boolean | `true` | Enable histogram systematic variations and auto-detect complete `baseVariable_nameUp` / `baseVariable_nameDown` column pairs. Set to `false` for nominal-only histograms. |
 
-**ROOT backend** (`"root"`, default): stores histograms as `THnSparseF` objects in the meta ROOT output file.  This is compatible with all downstream tools and is the correct choice for most analyses.
+**ROOT backend** (`"root"`, default): stores mergeable `THnSparseF` objects in
+the meta ROOT output file, including axis labels and exact bin edges. The
+manifest-driven merge task combines these objects with `hadd`, then writes the
+reconstructed `TH1F` objects alongside them for downstream plotting and
+datacard tools. For manual merges, run
+`python core/python/extract_nd_histograms.py merged.root` after `hadd`.
 
-**Boost.Histogram backend** (`"boost"`): stores histograms in-memory using Boost.Histogram during the event loop, then converts to ROOT format for output.  This can improve memory performance for analyses with very large numbers of histogram bins.
+**Boost.Histogram backend** (`"boost"`): stores histograms in-memory using
+Boost.Histogram during the event loop, then converts to the same mergeable
+`THnSparseF` format for output. This can improve memory performance for
+analyses with very large numbers of histogram bins.
 
 ```
 # Use ROOT backend (default — compatible with all downstream tools including Combine)
@@ -635,6 +643,12 @@ normalization counters so the selected totals use the generator-weight branch.
 column and its LHE, PDF, and parton-shower variations. Weight Up/Down columns
 use the same nominal sample normalization, so their yield changes are retained.
 Data jobs do not use this MC-only setting.
+
+`genWeightEnableIsr` and `genWeightEnableFsr` independently select the ISR and
+FSR pairs from `PSWeight`; both default to `true` and take effect when
+`genWeightEnablePs` is enabled. The ISR pair is `ps_isr2_fsr1` /
+`ps_isr0p5_fsr1`, and the FSR pair is `ps_isr1_fsr2` /
+`ps_isr1_fsr0p5`.
 
 ### Custom ROOT Dictionaries
 

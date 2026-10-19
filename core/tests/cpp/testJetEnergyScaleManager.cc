@@ -431,6 +431,9 @@ TEST_F(JetEnergyScaleManagerTest, ChainedCorrectionStepsApplySequentially) {
     correctionManager->registerCorrection(
       "jer_scale_factor", "aux/correction.json", "test_correction",
       {"jer_sf_feature", "jer_sf_bin"});
+    correctionManager->registerCorrection(
+      "jer_scale_factor_uncertainty", "aux/correction.json",
+      "test_correction2", {"jer_unc_feature", "jer_unc_bin"});
 
     dm->Define(
       "Jet_pt_raw",
@@ -460,6 +463,12 @@ TEST_F(JetEnergyScaleManagerTest, ChainedCorrectionStepsApplySequentially) {
       *systematicManager);
     dm->Define("jer_sf_bin", []() -> Int_t { return 2; }, {},
          *systematicManager);
+    dm->Define(
+      "jer_unc_feature",
+      []() -> ROOT::VecOps::RVec<Float_t> { return {0.5f, 2.5f}; }, {},
+      *systematicManager);
+    dm->Define("jer_unc_bin", []() -> Int_t { return 1; }, {},
+         *systematicManager);
 
     mgr->setJetColumns("Jet_pt", "Jet_eta", "Jet_phi", "");
     mgr->setJERSmearingColumns("GenJet_pt", "rho_fixedGridRhoFastjetAll",
@@ -467,7 +476,9 @@ TEST_F(JetEnergyScaleManagerTest, ChainedCorrectionStepsApplySequentially) {
     mgr->applyJERSmearing(*correctionManager, "jer_resolution",
               "jer_scale_factor", "Jet_pt_raw", "Jet_pt_jer",
               "B", false, "", "", {"jer_res_feature", "jer_res_bin"},
-              {"jer_sf_feature", "jer_sf_bin"});
+              {"jer_sf_feature", "jer_sf_bin"},
+              "jer_scale_factor_uncertainty",
+              {"jer_unc_feature", "jer_unc_bin"}, 1.0f);
 
     EXPECT_NO_THROW(mgr->execute());
 
@@ -475,14 +486,25 @@ TEST_F(JetEnergyScaleManagerTest, ChainedCorrectionStepsApplySequentially) {
       "_jer_resolution_Jet_pt_jer");
     auto jerScaleFactor = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>(
       "_jer_scale_factor_Jet_pt_jer");
+    auto jerScaleFactorUncertainty =
+      dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>(
+        "_jer_scale_factor_uncertainty_Jet_pt_jer");
+    auto jerSmear = dm->getDataFrame().Take<ROOT::VecOps::RVec<Float_t>>(
+      "_jer_smear_Jet_pt_jer");
 
     ASSERT_EQ(jerResolution->size(), 1u);
     ASSERT_EQ(jerScaleFactor->size(), 1u);
+    ASSERT_EQ(jerScaleFactorUncertainty->size(), 1u);
+    ASSERT_EQ(jerSmear->size(), 1u);
     ASSERT_EQ((*jerResolution)[0].size(), 2u);
     ASSERT_EQ((*jerScaleFactor)[0].size(), 2u);
+    ASSERT_EQ((*jerScaleFactorUncertainty)[0].size(), 2u);
+    ASSERT_EQ((*jerSmear)[0].size(), 2u);
 
     const auto resolution = correctionManager->getCorrection("jer_resolution");
     const auto scaleFactor = correctionManager->getCorrection("jer_scale_factor");
+    const auto scaleFactorUncertainty =
+      correctionManager->getCorrection("jer_scale_factor_uncertainty");
     const auto expectedRes0 =
       static_cast<float>(resolution->evaluate({0.5, 1}));
     const auto expectedRes1 =
@@ -491,11 +513,27 @@ TEST_F(JetEnergyScaleManagerTest, ChainedCorrectionStepsApplySequentially) {
       static_cast<float>(scaleFactor->evaluate({0.5, 2, std::string("B")}));
     const auto expectedSf1 =
       static_cast<float>(scaleFactor->evaluate({1.5, 2, std::string("B")}));
+    const auto expectedSfUncertainty0 =
+      static_cast<float>(scaleFactorUncertainty->evaluate({0.5, 1}));
+    const auto expectedSfUncertainty1 =
+      static_cast<float>(scaleFactorUncertainty->evaluate({2.5, 1}));
 
     EXPECT_NEAR((*jerResolution)[0][0], expectedRes0, 1e-6f);
     EXPECT_NEAR((*jerResolution)[0][1], expectedRes1, 1e-6f);
     EXPECT_NEAR((*jerScaleFactor)[0][0], expectedSf0, 1e-6f);
     EXPECT_NEAR((*jerScaleFactor)[0][1], expectedSf1, 1e-6f);
+    EXPECT_NEAR((*jerScaleFactorUncertainty)[0][0], expectedSfUncertainty0,
+                1e-6f);
+    EXPECT_NEAR((*jerScaleFactorUncertainty)[0][1], expectedSfUncertainty1,
+                1e-6f);
+    const float variedSf0 = expectedSf0 + expectedSfUncertainty0;
+    const float variedSf1 = expectedSf1 + expectedSfUncertainty1;
+    EXPECT_NEAR((*jerSmear)[0][0],
+                1.0f + (variedSf0 - 1.0f) * (55.0f - 50.0f) / 55.0f,
+                1e-6f);
+    EXPECT_NEAR((*jerSmear)[0][1],
+                1.0f + (variedSf1 - 1.0f) * (110.0f - 100.0f) / 110.0f,
+                1e-6f);
   }
 
   TEST_F(JetEnergyScaleManagerTest,

@@ -89,18 +89,42 @@ void defineNanoAodCompatibilityColumns(Analyzer &an) {
   }
 
   // -----------------------------------------------------------------------
-  // FatJet_genJetIdx_int — same conversion for AK8 fat jets.
+  // NanoAODv15 names this index FatJet_genJetAK8Idx. Normalize the newer
+  // name (and the older FatJet_genJetIdx spelling) for AK8 JER matching.
   // -----------------------------------------------------------------------
-  if (!hasColumn(an, "FatJet_genJetIdx_int") && hasColumn(an, "FatJet_genJetIdx")) {
+  if (!hasColumn(an, "FatJet_genJetAK8Idx_int")) {
+    const std::string source = hasColumn(an, "FatJet_genJetAK8Idx")
+                                   ? "FatJet_genJetAK8Idx"
+                                   : (hasColumn(an, "FatJet_genJetIdx")
+                                          ? "FatJet_genJetIdx"
+                                          : "");
+    if (!source.empty()) {
+      const auto sourceType = columnType(an, source);
+      if (sourceType.find("Short") != std::string::npos ||
+          sourceType.find("short") != std::string::npos) {
+        an.Define("FatJet_genJetAK8Idx_int",
+                  [](const ROOT::VecOps::RVec<Short_t> &indices) {
+                    ROOT::VecOps::RVec<int> converted(indices.size(), -1);
+                    for (size_t i = 0; i < indices.size(); ++i) {
+                      converted[i] = static_cast<int>(indices[i]);
+                    }
+                    return converted;
+                  },
+                  {source});
+      } else {
+        an.Define("FatJet_genJetAK8Idx_int",
+                  [](const ROOT::VecOps::RVec<Int_t> &indices) {
+                    return ROOT::VecOps::RVec<int>(indices.begin(), indices.end());
+                  },
+                  {source});
+      }
+    }
+  }
+  if (!hasColumn(an, "FatJet_genJetIdx_int") &&
+      hasColumn(an, "FatJet_genJetAK8Idx_int")) {
     an.Define("FatJet_genJetIdx_int",
-              [](const ROOT::VecOps::RVec<Short_t> &indices) {
-                std::vector<int> converted(indices.size(), -1);
-                for (size_t i = 0; i < indices.size(); ++i) {
-                  converted[i] = static_cast<int>(indices[i]);
-                }
-                return converted;
-              },
-              {"FatJet_genJetIdx"});
+              [](const ROOT::VecOps::RVec<int> &indices) { return indices; },
+              {"FatJet_genJetAK8Idx_int"});
   }
 
   // -----------------------------------------------------------------------

@@ -121,12 +121,43 @@ KinFitParticleConfig parseParticleSpec(const std::string &spec) {
  *  - "px:idx1+...:targetPx[:sigma]"       — px constraint on a particle sum
  *  - "py:idx1+...:targetPy[:sigma]"       — py constraint on a particle sum
  *                                          (sigma > 0 gives a Gaussian width)
+ *  - "dr:idx1+idx2:targetColumn:sigmaColumn" — soft ΔR constraint whose
+ *                                          target and width vary per event
  *
  * For soft mass constraints massSigma is the resonance width in GeV;
  * typical values: Z = 2.495, W = 2.085, top = 1.4, Higgs ≈ 0.004.
  * Indices are zero-based into the fit's particle list.
  */
 KinFitConstraintConfig parseConstraintSpec(const std::string &spec) {
+  // ── event-dependent ΔR constraint: "dr:idx1+idx2:targetCol:sigmaCol" ──
+  if (spec.size() >= 3 && spec[0] == 'd' && spec[1] == 'r' &&
+      spec[2] == ':') {
+    const auto parts = splitBy(spec.substr(3), ':');
+    if (parts.size() != 3) {
+      throw std::runtime_error(
+          "KinematicFitManager: invalid ΔR constraint spec '" + spec +
+          "' – expected dr:idx1+idx2:targetColumn:sigmaColumn");
+    }
+    const auto idxParts = splitBy(parts[0], '+');
+    if (idxParts.size() != 2) {
+      throw std::runtime_error(
+          "KinematicFitManager: invalid ΔR constraint indices in '" + spec +
+          "' – expected two indices separated by '+'");
+    }
+    KinFitConstraintConfig con;
+    con.type = KinFitConstraintConfig::Type::DELTAR;
+    con.idx1 = parseInt(idxParts[0], "deltaRConstraintIdx1");
+    con.idx2 = parseInt(idxParts[1], "deltaRConstraintIdx2");
+    con.targetColumn = parts[1];
+    con.sigmaColumn = parts[2];
+    if (con.targetColumn.empty() || con.sigmaColumn.empty()) {
+      throw std::runtime_error(
+          "KinematicFitManager: ΔR constraint '" + spec +
+          "' requires target and sigma columns");
+    }
+    return con;
+  }
+
   // ── Cartesian constraint: "px|py:idx1+...:target[:sigma]" ─────────────
   if (spec.size() >= 3 && (spec[0] == 'p') &&
       (spec[1] == 'x' || spec[1] == 'y') && spec[2] == ':') {
@@ -476,12 +507,22 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
 
   // ── pack all scalar inputs into one RVec<Float_t> ─────────────────────────
   std::vector<std::string> inputCols;
-  inputCols.reserve(4 * nParticles);
+  inputCols.reserve(4 * nParticles + 2 * cfg.constraints.size());
   for (int i = 0; i < nParticles; ++i) {
     inputCols.push_back(ptCols[i]);
     inputCols.push_back(etaCols[i]);
     inputCols.push_back(phiCols[i]);
     inputCols.push_back(massCols[i]);
+  }
+  std::vector<std::pair<std::size_t, std::size_t>> deltaRInputOffsets;
+  deltaRInputOffsets.reserve(cfg.constraints.size());
+  for (const auto &constraint : cfg.constraints) {
+    if (constraint.type != KinFitConstraintConfig::Type::DELTAR) continue;
+    const auto targetOffset = inputCols.size();
+    inputCols.push_back(constraint.targetColumn);
+    const auto sigmaOffset = inputCols.size();
+    inputCols.push_back(constraint.sigmaColumn);
+    deltaRInputOffsets.emplace_back(targetOffset, sigmaOffset);
   }
 
   const std::string inputsCol = fitName + "_inputs";
@@ -664,7 +705,8 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
     // When runVar is false the fit is skipped and all outputs are -1.
     // The precomputed sigmas vector is captured to avoid re-reading cfg per event.
     auto fitLambda =
-        [cfg, nParticles, sigmas, cartesianResolutions](ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
+        [cfg, nParticles, sigmas, cartesianResolutions,
+         deltaRInputOffsets](ROOT::VecOps::RVec<Float_t> &inputs, bool runVar)
         -> ROOT::VecOps::RVec<Float_t> {
       if (!runVar) {
         // Sentinel: chi2 = -1, converged = -1 (→ false), fitted momenta = -1
@@ -684,6 +726,7 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
                             static_cast<double>(cartesianResolutions[static_cast<size_t>(i)])});
       }
 
+      std::size_t deltaRConstraintIndex = 0;
       for (const auto &con : cfg.constraints) {
         if (con.type == KinFitConstraintConfig::Type::PT) {
           fitter.addPtConstraint(con.idx1, con.targetValue, con.ptSigma);
@@ -693,6 +736,11 @@ void KinematicFitManager::applyFit(const std::string &fitName) {
         } else if (con.type == KinFitConstraintConfig::Type::PY) {
           fitter.addPyConstraint(con.indices, con.targetValue,
                                  con.transverseSigma);
+        } else if (con.type == KinFitConstraintConfig::Type::DELTAR) {
+          const auto [targetOffset, sigmaOffset] =
+              deltaRInputOffsets.at(deltaRConstraintIndex++);
+          fitter.addDeltaRConstraint(
+              con.idx1, con.idx2, inputs[targetOffset], inputs[sigmaOffset]);
         } else if (con.idx3 >= 0) {
           fitter.addThreeBodyMassConstraint(con.idx1, con.idx2, con.idx3,
                                             con.targetValue, con.massSigma);
@@ -861,9 +909,12 @@ void KinematicFitManager::registerFits(
       } else {
         checkIdx(con.idx1, "constraint");
       }
-      if (con.type == KinFitConstraintConfig::Type::MASS) {
+      if (con.type == KinFitConstraintConfig::Type::MASS ||
+          con.type == KinFitConstraintConfig::Type::DELTAR) {
         checkIdx(con.idx2, "constraint");
-        if (con.idx3 >= 0) checkIdx(con.idx3, "constraint");
+        if (con.type == KinFitConstraintConfig::Type::MASS && con.idx3 >= 0) {
+          checkIdx(con.idx3, "constraint");
+        }
       }
       cfg.constraints.push_back(con);
     }
@@ -923,6 +974,18 @@ void KinematicFitManager::registerFits(
               "' – expected 'true', 'false', '1', or '0'");
         }
       }
+    }
+
+    if (cfg.useGPU && std::any_of(
+            cfg.constraints.begin(), cfg.constraints.end(),
+            [](const KinFitConstraintConfig &constraint) {
+              return constraint.type ==
+                     KinFitConstraintConfig::Type::DELTAR;
+            })) {
+      throw std::runtime_error(
+          "KinematicFitManager: fit '" + entry.at("name") +
+          "' uses an event-dependent ΔR constraint, which is currently "
+          "available only for CPU fits");
     }
 
     objects_m.emplace(entry.at("name"), std::move(cfg));

@@ -32,19 +32,34 @@ def _normalize_sample_names(sample_spec: object, field_name: str) -> list[str]:
 
 
 def _meta_file_exists(meta_file: str) -> bool:
-    if meta_file.startswith(("root://", "xroot://")):
+    if meta_file.startswith(("root://", "xroot://", "/eos/", "/store/")):
         return True
     return os.path.isfile(meta_file)
+
+
+def _meta_file_open_path(meta_file: str) -> str:
+    """Use XRootD for EOS paths that are not mounted on the current host."""
+    if meta_file.startswith("root://"):
+        parts = meta_file.split("/", 3)
+        if len(parts) >= 4 and not parts[3].startswith("/"):
+            return f"{parts[0]}//{parts[2]}//{parts[3]}"
+        return meta_file
+    if meta_file.startswith(("/eos/", "/store/")):
+        if os.path.isfile(meta_file):
+            return meta_file
+        return f"root://eosuser.cern.ch//{meta_file.lstrip('/')}"
+    return meta_file
 
 
 def _read_intweight_sign_hist(meta_file: str, sample_name: str) -> list[float]:
     """Read the signed-count histogram for one stitched sample."""
     hist_name = f"counter_intWeightSignSum_{sample_name}"
+    open_path = _meta_file_open_path(meta_file)
 
     try:
         import uproot  # type: ignore
 
-        with uproot.open(meta_file) as f:
+        with uproot.open(open_path) as f:
             keys = [k.split(";")[0] for k in f.keys()]
             if hist_name not in keys:
                 raise RuntimeError(
@@ -59,7 +74,7 @@ def _read_intweight_sign_hist(meta_file: str, sample_name: str) -> list[float]:
     try:
         import ROOT  # type: ignore
 
-        tfile = ROOT.TFile.Open(meta_file, "READ")
+        tfile = ROOT.TFile.Open(open_path, "READ")
         if not tfile or tfile.IsZombie():
             raise RuntimeError(f"Cannot open ROOT file: '{meta_file}'")
         hist = tfile.Get(hist_name)
@@ -83,11 +98,12 @@ def _read_intweight_sign_hist(meta_file: str, sample_name: str) -> list[float]:
 def _read_weight_sign_sum(meta_file: str, sample_name: str) -> float:
     """Read the signed event total for one sample."""
     hist_name = f"counter_weightSignSum_{sample_name}"
+    open_path = _meta_file_open_path(meta_file)
 
     try:
         import uproot  # type: ignore
 
-        with uproot.open(meta_file) as f:
+        with uproot.open(open_path) as f:
             keys = [k.split(";", 1)[0] for k in f.keys(recursive=True)]
             if hist_name not in keys:
                 raise RuntimeError(
@@ -106,7 +122,7 @@ def _read_weight_sign_sum(meta_file: str, sample_name: str) -> float:
     try:
         import ROOT  # type: ignore
 
-        tfile = ROOT.TFile.Open(meta_file, "READ")
+        tfile = ROOT.TFile.Open(open_path, "READ")
         if not tfile or tfile.IsZombie():
             raise RuntimeError(f"Cannot open ROOT file: '{meta_file}'")
         hist = tfile.Get(hist_name)
@@ -135,11 +151,12 @@ def _read_weight_sign_sum(meta_file: str, sample_name: str) -> float:
 def _read_weight_sum(meta_file: str, sample_name: str) -> float:
     """Read the raw generator-weight total for one sample."""
     hist_name = f"counter_weightSum_{sample_name}"
+    open_path = _meta_file_open_path(meta_file)
 
     try:
         import uproot  # type: ignore
 
-        with uproot.open(meta_file) as f:
+        with uproot.open(open_path) as f:
             keys = [k.split(";", 1)[0] for k in f.keys(recursive=True)]
             if hist_name not in keys:
                 raise RuntimeError(
@@ -158,7 +175,7 @@ def _read_weight_sum(meta_file: str, sample_name: str) -> float:
     try:
         import ROOT  # type: ignore
 
-        tfile = ROOT.TFile.Open(meta_file, "READ")
+        tfile = ROOT.TFile.Open(open_path, "READ")
         if not tfile or tfile.IsZombie():
             raise RuntimeError(f"Cannot open ROOT file: '{meta_file}'")
         hist = tfile.Get(hist_name)

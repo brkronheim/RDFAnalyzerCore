@@ -19,6 +19,27 @@ from collections import defaultdict
 from pathlib import Path
 
 
+_CONDOR_RESERVED_MACHINES = ("hepcms-henrietta.privnet",)
+_CONDOR_EXTRA_BLOCKED_HOSTS_ENV = "RDF_CONDOR_EXTRA_BLOCKED_HOSTS"
+_DEFAULT_CONDOR_EXTRA_BLOCKED_MACHINES = ("hepcms-namenode.privnet",)
+
+
+def _condor_machine_requirements() -> str:
+    """Build machine exclusions shared by legacy Condor resubmissions."""
+    configured_hosts = os.environ.get(_CONDOR_EXTRA_BLOCKED_HOSTS_ENV)
+    if configured_hosts is None:
+        extra_hosts = _DEFAULT_CONDOR_EXTRA_BLOCKED_MACHINES
+    else:
+        extra_hosts = configured_hosts.split(",")
+
+    hosts = [*_CONDOR_RESERVED_MACHINES]
+    hosts.extend(host.strip() for host in extra_hosts if host.strip())
+    unique_hosts = dict.fromkeys(hosts)
+    return " && ".join(
+        f'TARGET.Machine != "{host}"' for host in unique_hosts
+    )
+
+
 # ---------------------------------------------------------------------------
 # File utilities
 # ---------------------------------------------------------------------------
@@ -410,6 +431,7 @@ def submit_single_job(
         f"Notification = never\n"
         f"transfer_input_files = {transfer_str}\n"
         f"environment = CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)\n"
+        f"Requirements = {_condor_machine_requirements()}\n"
         f"+RequestMemory={request_memory}\n"
         f"+RequestCpus=1\n"
         f"+RequestDisk=20000\n"

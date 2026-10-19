@@ -24,6 +24,8 @@ class Analyzer;
  *
  * Corrections can be registered either from a config file (via the constructor
  * or setupFromConfigFile()) or directly from C++ using registerCorrection().
+ * During evaluation, each std::out_of_range fallback writes a warning to
+ * stderr with the correction name, exception, inputs, and fallback value.
  */
 class CorrectionManager
     : public NamedObjectManager<correction::Correction::Ref> {
@@ -153,6 +155,24 @@ public:
                           const std::vector<std::string> &inputColumns = {},
                           const std::string &outputBranch = "");
 
+  /// Apply several string-argument variants with one shared numeric input
+  /// pack. Output branches must match argumentSets in length, or be empty to
+  /// derive the names. Sharing is scoped to this call, so subsequent Redefine
+  /// operations cannot reuse stale inputs. Scalar input systematics propagate
+  /// exactly as in applyCorrection; the vector path retains applyCorrectionVec
+  /// semantics. An optional boolean per output disables shape propagation for
+  /// explicitly varied terminal outputs; the default propagates all outputs.
+  void applyCorrections(const std::string &correctionName,
+                        const std::vector<std::vector<std::string>> &argumentSets,
+                        const std::vector<std::string> &inputColumns = {},
+                        const std::vector<std::string> &outputBranches = {},
+                        const std::vector<bool> &propagateSystematics = {});
+  void applyCorrectionsVec(const std::string &correctionName,
+                           const std::vector<std::vector<std::string>> &argumentSets,
+                           const std::vector<std::string> &inputColumns = {},
+                           const std::vector<std::string> &outputBranches = {},
+                           const std::vector<bool> &propagateSystematics = {});
+
   /**
    * @brief Get a correction object by key
    * @param key Correction key
@@ -194,6 +214,24 @@ public:
   void reportMetadata() override;
 
 private:
+  void applyCorrectionImpl(const std::string &correctionName,
+                           const std::vector<std::string> &stringArguments,
+                           const std::vector<std::string> &inputColumns,
+                           const std::string &outputBranch,
+                           const std::string &packedInput,
+                           bool propagateSystematics = true);
+  void applyCorrectionVecImpl(const std::string &correctionName,
+                              const std::vector<std::string> &stringArguments,
+                              const std::vector<std::string> &inputColumns,
+                              const std::string &outputBranch,
+                              const std::string &packedInput,
+                           bool propagateSystematics = true);
+  void applyCorrectionBatch(bool vector,
+                            const std::string &correctionName,
+                            const std::vector<std::vector<std::string>> &argumentSets,
+                            const std::vector<std::string> &inputColumns,
+                            const std::vector<std::string> &outputBranches,
+                            const std::vector<bool> &propagateSystematics);
   /**
    * @brief Register corrections from correctionlib using the configuration
    * @param configProvider Reference to the configuration provider
@@ -208,6 +246,7 @@ private:
                      std::shared_ptr<const correction::CorrectionSet>>
       correctionSets_m;
 
+  std::size_t batchInputIndex_m = 0;
   bool initialized_m = false;
 };
 

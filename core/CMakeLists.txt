@@ -9,6 +9,9 @@ if(ROOT_VERSION VERSION_GREATER_EQUAL "6.34.00")
 endif()
 
 add_subdirectory(extern)
+if(RDF_ENABLE_XRD_ADAPTOR)
+    add_subdirectory(xrd)
+endif()
 add_subdirectory(src)
 add_subdirectory(python/bindings)
 
@@ -63,7 +66,6 @@ target_link_libraries(coreAll INTERFACE
 if(BUILD_TESTS)
     add_subdirectory(tests)
 endif()
-
 
 
 

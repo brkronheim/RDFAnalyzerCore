@@ -2,11 +2,20 @@
 #include <ROOT/RDataFrame.hxx>
 #include <TChainElement.h>
 #include <TFile.h>
+#include <TDirectory.h>
+#include <TFileCacheRead.h>
+#include <TBranch.h>
+#include <TObjArray.h>
+#include <TTree.h>
+#include <TROOT.h>
 #include <TTreeCache.h>
+#include <TFilePrefetch.h>
 #include <algorithm>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <sstream>
+#include <future>
 
 namespace {
 std::string setting(const IConfigurationProvider &config, const char *key) {
@@ -44,6 +53,16 @@ auto prefetch(Cache &cache, bool enabled, int)
   return cache.IsEnablePrefetching() == enabled;
 }
 template <class Cache> bool prefetch(Cache &, bool enabled, long) { return !enabled; }
+
+const char *asyncOpenStatusName(TFile::EAsyncOpenStatus status) {
+  switch (status) {
+  case TFile::kAOSNotAsync: return "not-async";
+  case TFile::kAOSFailure: return "failure";
+  case TFile::kAOSInProgress: return "in-progress";
+  case TFile::kAOSSuccess: return "success";
+  }
+  return "unknown";
+}
 }
 
 std::unique_ptr<TChain> makeInputCacheChain(
@@ -53,22 +72,28 @@ std::unique_ptr<TChain> makeInputCacheChain(
   bool optimize = allowOptimization && flag(config, "treeCacheEnabled", false);
   bool asyncOpenNextFile =
       allowOptimization && flag(config, "treeCacheAsyncOpenNext", false);
+  bool prefetchNextFile =
+      allowOptimization && flag(config, "treeCachePrefetchNextFile", false);
   if (ROOT::IsImplicitMTEnabled()) {
     if (optimize)
       std::cerr << "[InputCache] fallback: IMT is active; retaining ROOT cache policy\n";
     if (asyncOpenNextFile)
       std::cerr << "[InputCache] fallback: IMT is active; disabling next-file asynchronous open\n";
+    if (prefetchNextFile)
+      std::cerr << "[InputCache] fallback: IMT is active; disabling next-file data prefetch\n";
     optimize = false;
     asyncOpenNextFile = false;
+    prefetchNextFile = false;
     if (stats)
       std::cout << "[InputCache] IMT: per-worker cache statistics are unavailable on "
                    "the supplied chain; reports cover the master chain only. "
                    "Process-wide ROOT read counters include worker I/O.\n";
   }
-  if (!stats && !optimize && !asyncOpenNextFile)
+  if (!stats && !optimize && !asyncOpenNextFile && !prefetchNextFile)
     return std::make_unique<TChain>(name.c_str());
-  return std::make_unique<InputCacheChain>(name, config, optimize,
-                                            asyncOpenNextFile);
+  auto chain = std::make_unique<InputCacheChain>(name, config, optimize,
+                                                asyncOpenNextFile);
+  return chain;
 }
 
 InputCacheChain::InputCacheChain(const std::string &name)
@@ -86,10 +111,16 @@ InputCacheChain::InputCacheChain(const std::string &name,
     : TChain(name.c_str()),
       asyncPrefetch_(flag(config, "treeCacheAsyncPrefetch", true)),
       asyncOpenNextFile_(asyncOpenNextFile),
+      prefetchNextFile_(!ROOT::IsImplicitMTEnabled() &&
+                        flag(config, "treeCachePrefetchNextFile", false)),
       explicitBranches_(flag(config, "treeCacheExplicitBranches", true)),
       statistics_(flag(config, "treeCacheStats", true)),
       optimize_(optimize),
       verbosity_(number(config, "treeCacheVerbosity", 0, 2)) {
+  warmCacheLimitBytes_ = number(config, "xrdPrefetchCacheMB", 256, 131072) *
+                         1024 * 1024;
+  if (prefetchNextFile_) ROOT::EnableThreadSafety();
+  if (prefetchNextFile_) asyncOpenNextFile_ = false;
   if (!setting(config, "firstEntry").empty() && !setting(config, "lastEntry").empty()) {
     first_ = number(config, "firstEntry", 0, TTree::kMaxEntries);
     last_ = number(config, "lastEntry", 0, TTree::kMaxEntries);
@@ -125,28 +156,138 @@ InputCacheChain::~InputCacheChain() {
 }
 
 Long64_t InputCacheChain::LoadTree(Long64_t entry) {
+  const auto callbackStarted = std::chrono::steady_clock::now();
+  const int previousTree = GetTreeNumber();
+  auto *previousTreeObject = GetTree();
+  bool crossingBoundary = false;
+  if (previousTreeObject && previousTree >= 0) {
+    const auto offset = GetTreeOffset()[previousTree];
+    crossingBoundary = entry < offset ||
+                       entry >= offset + previousTreeObject->GetEntries();
+  }
+
+  int expectedTree = -1;
+  std::string expectedUrl;
+  if (crossingBoundary && previousTree >= 0) {
+    expectedTree = previousTree + 1;
+    auto *files = GetListOfFiles();
+    if (files && expectedTree < files->GetEntriesFast()) {
+      auto *element = dynamic_cast<TChainElement *>(files->At(expectedTree));
+      if (element && element->GetTitle()) expectedUrl = element->GetTitle();
+    }
+  }
+
+  struct WarmState {
+    bool found = false;
+    bool ready = false;
+    double ageSeconds = -1.;
+  };
+  const auto warmStateFor = [this](const std::string &url) {
+    WarmState state;
+    if (url.empty()) return state;
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto &task : warmTasks_) {
+      if (task.url != url) continue;
+      state.found = true;
+      state.ready = task.file.wait_for(std::chrono::seconds(0)) ==
+                    std::future_status::ready;
+      state.ageSeconds = std::chrono::duration<double>(now - task.scheduledAt).count();
+      break;
+    }
+    return state;
+  };
+  const auto warmBefore = warmStateFor(expectedUrl);
+  const auto openStatusBefore = expectedUrl.empty()
+                                    ? TFile::kAOSNotAsync
+                                    : TFile::GetAsyncOpenStatus(expectedUrl.c_str());
+
+  double reportMs = 0.;
   // Report before ROOT closes the old file. Do not replace the notify chain:
   // TTreeReader uses it to refresh proxies and friends on file transitions.
-  if (statistics_ && GetTree() && GetTreeNumber() >= 0) {
-    const auto offset = GetTreeOffset()[GetTreeNumber()];
-    if (entry < offset || entry >= offset + GetTree()->GetEntries())
+  if (statistics_ && previousTreeObject && previousTree >= 0) {
+    if (crossingBoundary) {
+      const auto reportStarted = std::chrono::steady_clock::now();
       reportCache("file-boundary-or-end");
+      reportMs = std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - reportStarted)
+                     .count();
+    }
   }
+  const auto loadStarted = std::chrono::steady_clock::now();
   const auto result = TChain::LoadTree(entry);
+  const double rootLoadMs = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - loadStarted)
+                                .count();
+  const auto warmAfterLoad = warmStateFor(expectedUrl);
+  const auto openStatusAfterLoad = expectedUrl.empty()
+                                       ? TFile::kAOSNotAsync
+                                       : TFile::GetAsyncOpenStatus(expectedUrl.c_str());
+  double configureMs = 0.;
+  double warmReleaseMs = 0.;
+  double scheduleMs = 0.;
   if (result >= 0 && GetTreeNumber() != configuredTree_) {
     configuredTree_ = GetTreeNumber();
     fileStarted_ = std::chrono::steady_clock::now();
     lastReport_.clear();
+    const auto configureStarted = std::chrono::steady_clock::now();
     if (optimize_) configureCurrentTree();
+    configureMs = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - configureStarted)
+                      .count();
     if (pendingAsyncOpenTree_ == configuredTree_)
       pendingAsyncOpenTree_ = -1;
+    auto *currentFile = GetCurrentFile();
+    const auto releaseStarted = std::chrono::steady_clock::now();
+    releaseWarmFileFor(currentFile ? currentFile->GetName() : std::string{});
+    warmReleaseMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - releaseStarted)
+                        .count();
+    const auto scheduleStarted = std::chrono::steady_clock::now();
     scheduleNextFileOpen();
+    // The first lookahead is queued when ROOT finishes learning the proxy
+    // branches. Repeat it after each file switch so every current file warms
+    // the next one, once that branch set is known to be complete.
+    if (prefetchNextFile_ && dependenciesResolved_)
+      scheduleNextFilePrefetch();
+    scheduleMs = std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - scheduleStarted)
+                     .count();
+  }
+
+  if (crossingBoundary &&
+      (statistics_ || asyncOpenNextFile_ || prefetchNextFile_)) {
+    const auto *currentFile = GetCurrentFile();
+    const auto callbackMs = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - callbackStarted)
+                                .count();
+    std::ostringstream transitionLog;
+    transitionLog << std::fixed << std::setprecision(3)
+                  << "[InputCache] file-transition from_index=" << previousTree
+                  << " expected_to_index=" << expectedTree
+                  << " actual_to_index=" << GetTreeNumber()
+                  << " requested_entry=" << entry
+                  << " result=" << result
+                  << " target=" << (expectedUrl.empty() ? "<unknown>" : expectedUrl)
+                  << " opened=" << (currentFile ? currentFile->GetName() : "<none>")
+                  << " warm_task_found=" << warmBefore.found
+                  << " warm_task_ready_before=" << warmBefore.ready
+                  << " warm_task_ready_after_load=" << warmAfterLoad.ready
+                  << " warm_task_age_s=" << warmBefore.ageSeconds
+                  << " root_async_open_before=" << asyncOpenStatusName(openStatusBefore)
+                  << " root_async_open_after_load=" << asyncOpenStatusName(openStatusAfterLoad)
+                  << " cache_report_ms=" << reportMs
+                  << " root_loadtree_ms=" << rootLoadMs
+                  << " configure_tree_ms=" << configureMs
+                  << " warm_release_ms=" << warmReleaseMs
+                  << " schedule_next_ms=" << scheduleMs
+                  << " callback_total_ms=" << callbackMs;
+    std::cout << transitionLog.str() << '\n';
   }
   return result;
 }
 
 void InputCacheChain::scheduleNextFileOpen() {
-  if (!asyncOpenNextFile_ || GetTreeNumber() < 0) return;
+  if (!asyncOpenNextFile_ || prefetchNextFile_ || GetTreeNumber() < 0) return;
 
   const int nextTree = GetTreeNumber() + 1;
   auto *files = GetListOfFiles();
@@ -251,8 +392,202 @@ Int_t InputCacheChain::StopCacheLearningPhase() {
   }
   const auto result = TChain::StopCacheLearningPhase();
   dependenciesResolved_ = result == 0;
+  if (dependenciesResolved_ && prefetchNextFile_)
+    scheduleNextFilePrefetch();
   if (verbosity_) reportCache();
   return result;
+}
+
+void InputCacheChain::releaseWarmFileFor(const std::string &url) {
+  if (!prefetchNextFile_ || url.empty()) return;
+  for (auto task = warmTasks_.begin(); task != warmTasks_.end();) {
+    if (task->url == url) task->consumed = true;
+    if (!task->consumed ||
+        task->file.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+      ++task;
+      continue;
+    }
+    try {
+      task->file.get().reset();
+    } catch (const std::exception &error) {
+      std::cerr << "[InputCache] next-file prefetch failed for " << url
+                << ": " << error.what() << '\n';
+    }
+    task = warmTasks_.erase(task);
+  }
+}
+
+void InputCacheChain::scheduleNextFilePrefetch() {
+  if (!prefetchNextFile_ || GetTreeNumber() < 0 || !GetTree() ||
+      !GetCurrentFile() || warmCacheLimitBytes_ <= 0)
+    return;
+
+  for (auto task = warmTasks_.begin(); task != warmTasks_.end();) {
+    if (!task->consumed ||
+        task->file.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+      ++task;
+      continue;
+    }
+    try {
+      task->file.get().reset();
+    } catch (const std::exception &error) {
+      std::cerr << "[InputCache] next-file prefetch failed for " << task->url
+                << ": " << error.what() << '\n';
+    }
+    task = warmTasks_.erase(task);
+  }
+
+  auto *currentCache = GetTree()->GetReadCache(GetCurrentFile(), false);
+  if (!currentCache || !currentCache->GetCachedBranches()) return;
+  std::vector<std::string> branches;
+  auto *cachedBranches = currentCache->GetCachedBranches();
+  for (Int_t i = 0; i < cachedBranches->GetEntriesFast(); ++i) {
+    auto *branch = dynamic_cast<TBranch *>(cachedBranches->At(i));
+    if (branch && branch->GetName() && *branch->GetName())
+      branches.emplace_back(branch->GetName());
+  }
+  if (branches.empty()) return;
+
+  const int nextTree = GetTreeNumber() + 1;
+  auto *files = GetListOfFiles();
+  if (!files || nextTree >= files->GetEntriesFast()) return;
+  auto *element = dynamic_cast<TChainElement *>(files->At(nextTree));
+  if (!element || !element->GetTitle() || !*element->GetTitle()) return;
+  const std::string url = element->GetTitle();
+  if (std::any_of(warmTasks_.begin(), warmTasks_.end(), [&](const auto &task) {
+        return task.url == url;
+      }))
+    return;
+  if (warmTasks_.size() >= 2) {
+    if (verbosity_)
+      std::cout << "[InputCache] next-file warmup skipped: two lookahead files "
+                   "are still pending\n";
+    return;
+  }
+
+  const std::string treeName = GetTree()->GetName();
+  const Long64_t cacheBytes = std::min(GetCacheSize(), warmCacheLimitBytes_);
+  std::cout << "[InputCache] warming next file's first cached cluster: " << url
+            << " (" << branches.size() << " branches)\n";
+  WarmTask task;
+  task.url = url;
+  task.scheduledAt = std::chrono::steady_clock::now();
+  task.file = std::async(
+      std::launch::async,
+      [url, treeName, branches = std::move(branches), cacheBytes,
+       scheduledAt = task.scheduledAt]()
+          -> std::shared_ptr<TFile> {
+        const auto elapsedMs = [](std::chrono::steady_clock::time_point start,
+                                  std::chrono::steady_clock::time_point end) {
+          return std::chrono::duration<double, std::milli>(end - start).count();
+        };
+        const auto openStarted = std::chrono::steady_clock::now();
+        TDirectory::TContext directoryContext;
+        std::unique_ptr<TFile> opened(TFile::Open(url.c_str(), "READ"));
+        const auto openedAt = std::chrono::steady_clock::now();
+        if (!opened) {
+          std::cerr << "[InputCache] next-file warmup could not open " << url
+                    << " reason=TFile::Open returned null open_ms="
+                    << elapsedMs(openStarted, openedAt)
+                    << " total_ms=" << elapsedMs(scheduledAt, openedAt) << '\n';
+          return {};
+        }
+        if (opened->IsZombie()) {
+          std::cerr << "[InputCache] next-file warmup could not open " << url
+                    << " reason=zombie backend=" << opened->ClassName()
+                    << " errno=" << opened->GetErrno()
+                    << " open_ms=" << elapsedMs(openStarted, openedAt)
+                    << " total_ms=" << elapsedMs(scheduledAt, openedAt) << '\n';
+          return {};
+        }
+        // Keep the warmed TFile independent so this thread can read its first
+        // cached cluster. Queue ROOT's matching file open after that first
+        // handle is acquired; TChain can adopt it at the next file boundary
+        // while it consumes the bytes held in the URL-scoped Xrd handoff cache.
+        const auto asyncQueueStarted = std::chrono::steady_clock::now();
+        auto *asyncHandle = TFile::AsyncOpen(url.c_str(), "READ");
+        const auto asyncStatus = asyncHandle
+                                     ? TFile::GetAsyncOpenStatus(asyncHandle)
+                                     : TFile::kAOSFailure;
+        const auto asyncQueuedAt = std::chrono::steady_clock::now();
+        if (!asyncHandle)
+          std::cerr << "[InputCache] next-file warmup could not queue ROOT open for "
+                    << url << '\n';
+        const auto treeSetupStarted = std::chrono::steady_clock::now();
+        auto *tree = dynamic_cast<TTree *>(opened->Get(treeName.c_str()));
+        if (!tree || tree->GetEntries() <= 0) {
+          std::cerr << "[InputCache] next-file warmup failed file=" << url
+                    << " reason=missing-or-empty-tree tree=" << treeName
+                    << " open_ms=" << elapsedMs(openStarted, openedAt)
+                    << " async_open_queue_ms="
+                    << elapsedMs(asyncQueueStarted, asyncQueuedAt)
+                    << " async_open_status=" << asyncOpenStatusName(asyncStatus)
+                    << " total_ms=" << elapsedMs(scheduledAt,
+                                                 std::chrono::steady_clock::now())
+                    << '\n';
+          return {};
+        }
+        tree->SetBranchStatus("*", false);
+        for (const auto &name : branches) {
+          if (tree->GetBranch(name.c_str())) {
+            tree->SetBranchStatus(name.c_str(), true);
+            tree->AddBranchToCache(name.c_str(), true);
+          }
+        }
+        if (cacheBytes > 0 && tree->SetCacheSize(cacheBytes) != 0)
+          std::cerr << "[InputCache] next-file warmup could not set ROOT cache "
+                       "size for " << url << '\n';
+        auto *cache = tree->GetReadCache(opened.get(), true);
+        if (!cache) {
+          std::cerr << "[InputCache] next-file warmup failed file=" << url
+                    << " reason=no-read-cache total_ms="
+                    << elapsedMs(scheduledAt, std::chrono::steady_clock::now())
+                    << '\n';
+          return {};
+        }
+        cache->SetEnablePrefetching(true);
+        tree->StopCacheLearningPhase();
+        tree->SetCacheEntryRange(0, tree->GetEntries());
+        const auto treeSetupAt = std::chrono::steady_clock::now();
+        const auto entryReadStarted = std::chrono::steady_clock::now();
+        if (tree->GetEntry(0) < 0) {
+          std::cerr << "[InputCache] next-file warmup could not read entry 0 "
+                    << "from " << url
+                    << " open_ms=" << elapsedMs(openStarted, openedAt)
+                    << " async_open_queue_ms="
+                    << elapsedMs(asyncQueueStarted, asyncQueuedAt)
+                    << " tree_setup_ms=" << elapsedMs(treeSetupStarted, treeSetupAt)
+                    << " get_entry0_ms="
+                    << elapsedMs(entryReadStarted, std::chrono::steady_clock::now())
+                    << " total_ms=" << elapsedMs(scheduledAt,
+                                                 std::chrono::steady_clock::now())
+                    << '\n';
+          return {};
+        }
+        const auto entryReadAt = std::chrono::steady_clock::now();
+        const auto prefetchDrainStarted = std::chrono::steady_clock::now();
+        cache->WaitFinishPrefetch();
+        const auto completedAt = std::chrono::steady_clock::now();
+        std::ostringstream warmupLog;
+        warmupLog << "[InputCache] next-file warmup complete file=" << url
+                  << " status=ready"
+                  << " open_ms=" << elapsedMs(openStarted, openedAt)
+                  << " async_open_queue_ms="
+                  << elapsedMs(asyncQueueStarted, asyncQueuedAt)
+                  << " async_open_status=" << asyncOpenStatusName(asyncStatus)
+                  << " tree_setup_ms=" << elapsedMs(treeSetupStarted, treeSetupAt)
+                  << " get_entry0_ms=" << elapsedMs(entryReadStarted, entryReadAt)
+                  << " prefetch_drain_ms="
+                  << elapsedMs(prefetchDrainStarted, completedAt)
+                  << " total_ms=" << elapsedMs(scheduledAt, completedAt)
+                  << " warm_file_bytes=" << opened->GetBytesRead()
+                  << " warm_file_read_calls=" << opened->GetReadCalls()
+                  << " warm_cache_bytes=" << cache->GetNtot()
+                  << " prefetched_blocks=" << cache->GetPrefetchedBlocks();
+        std::cout << warmupLog.str() << '\n';
+        return std::shared_ptr<TFile>(opened.release());
+      });
+  warmTasks_.push_back(std::move(task));
 }
 
 void InputCacheChain::reportCache(const char *reason) const {
@@ -262,14 +597,25 @@ void InputCacheChain::reportCache(const char *reason) const {
   auto *cache = tree->GetReadCache(file, false);
   // Do not create a cache just to report it. File counters remain useful
   // when caching is disabled or the graph consumes no physical columns.
+  auto *prefetcher = cache ? cache->GetPrefetchObj() : nullptr;
+  const double prefetchWaitSeconds =
+      prefetcher ? prefetcher->GetWaitTime() / 1.e+6 : 0.;
   std::ostringstream signature;
   signature << file->GetName() << ':' << GetTreeNumber() << ':'
             << file->GetBytesRead() << ':' << file->GetReadCalls() << ':'
             << (cache ? cache->GetBytesRead() : 0) << ':'
             << (cache ? cache->GetNoCacheReadCalls() : 0) << ':'
-            << (cache ? cache->GetPrefetchedBlocks() : 0);
+            << (cache ? cache->GetPrefetchedBlocks() : 0) << ':'
+            << prefetchWaitSeconds;
   if (lastReport_ == signature.str()) return;
   lastReport_ = signature.str();
+  const double prefetchWaitDeltaSeconds =
+      prefetcher == lastPrefetcher_ &&
+              prefetchWaitSeconds >= lastPrefetchWaitSeconds_
+          ? prefetchWaitSeconds - lastPrefetchWaitSeconds_
+          : prefetchWaitSeconds;
+  lastPrefetcher_ = prefetcher;
+  lastPrefetchWaitSeconds_ = prefetchWaitSeconds;
   const double seconds = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - fileStarted_).count();
   std::cout << "[InputCache] reading statistics reason=" << reason
@@ -329,6 +675,8 @@ void InputCacheChain::reportCache(const char *reason) const {
               << " relative_efficiency=" << cache->GetEfficiencyRel()
               << " miss_cache_efficiency=" << cache->GetMissEfficiency()
               << " relative_miss_cache_efficiency=" << cache->GetMissEfficiencyRel()
+              << " prefetch_wait_lifetime_s=" << prefetchWaitSeconds
+              << " prefetch_wait_since_report_s=" << prefetchWaitDeltaSeconds
               << " optimize_misses=" << cache->GetOptimizeMisses()
               << " cache_enabled=" << cache->IsEnabled()
               << " learn_entries=" << cache->GetLearnEntries()

@@ -5,7 +5,12 @@
 #include <api/IConfigurationProvider.h>
 #include <memory>
 #include <chrono>
+#include <future>
 #include <string>
+#include <vector>
+
+class TFile;
+class TFilePrefetch;
 
 /** Single-threaded RDF input policy. ROOT's TTreeReader supplies the physical
  * branch dependencies, after JIT and before the first event is evaluated.
@@ -34,8 +39,11 @@ public:
 private:
   void configureCurrentTree();
   void scheduleNextFileOpen();
+  void scheduleNextFilePrefetch();
+  void releaseWarmFileFor(const std::string &url);
   bool asyncPrefetch_ = true;
   bool asyncOpenNextFile_ = false;
+  bool prefetchNextFile_ = false;
   bool explicitBranches_ = true;
   bool statistics_ = true;
   bool optimize_ = true;
@@ -43,11 +51,21 @@ private:
   int verbosity_ = 0;
   Long64_t first_ = 0;
   Long64_t last_ = -1;
+  Long64_t warmCacheLimitBytes_ = 256LL * 1024 * 1024;
   int configuredTree_ = -1;
   int pendingAsyncOpenTree_ = -1;
   std::string fallbackReason_;
+  struct WarmTask {
+    std::string url;
+    std::future<std::shared_ptr<TFile>> file;
+    std::chrono::steady_clock::time_point scheduledAt;
+    bool consumed = false;
+  };
+  std::vector<WarmTask> warmTasks_;
   std::chrono::steady_clock::time_point fileStarted_ = std::chrono::steady_clock::now();
   mutable std::string lastReport_;
+  mutable const TFilePrefetch *lastPrefetcher_ = nullptr;
+  mutable double lastPrefetchWaitSeconds_ = 0.;
 };
 
 /// Statistics are enabled by default independently of optimization. Returns

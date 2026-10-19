@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -133,6 +134,14 @@ void JetVetoMapManager::setupFromConfigFile() {
     const std::string typeOverride = configManager_m->get("jetVetoMapType");
     if (!typeOverride.empty()) vetoMapType_m = typeOverride;
   } catch (...) {}
+
+  // Optional jet-ID column override, used when NanoAOD does not store the
+  // Jet_jetId branch and the analysis constructs the recommended ID itself.
+  try {
+    const std::string jetIdColumn =
+        configManager_m->get("jetVetoMapJetIdColumn");
+    if (!jetIdColumn.empty()) jetIdColumn_m = jetIdColumn;
+  } catch (...) {}
 }
 
 void JetVetoMapManager::initialize() {
@@ -204,7 +213,8 @@ void JetVetoMapManager::applyJetVetoMap() {
   const auto cols = df.GetColumnNames();
 
   // Check if required columns exist; if not, define pass-through
-  bool hasJetId = std::find(cols.begin(), cols.end(), "Jet_jetId_i") != cols.end();
+  const bool hasJetId =
+      std::find(cols.begin(), cols.end(), jetIdColumn_m) != cols.end();
   bool hasChEm = std::find(cols.begin(), cols.end(), "Jet_chEmEF") != cols.end();
   bool hasNeEm = std::find(cols.begin(), cols.end(), "Jet_neEmEF") != cols.end();
 
@@ -217,13 +227,16 @@ void JetVetoMapManager::applyJetVetoMap() {
     if (logger_m) {
       logger_m->log(ILogger::Level::Warn,
                     "JetVetoMapManager: required columns missing "
-                    "(Jet_jetId_i, Jet_chEmEF, Jet_neEmEF). "
+                    "(" + jetIdColumn_m + ", Jet_chEmEF, Jet_neEmEF). "
                     "Skipping JetVetoMap filter.");
     }
     return;
   }
 
   if (std::find(cols.begin(), cols.end(), "jet_veto_pass") == cols.end()) {
+    const std::vector<std::string> mapColumns{
+        "Jet_pt", "Jet_eta", "Jet_phi", jetIdColumn_m,
+        "Jet_chEmEF", "Jet_neEmEF"};
     df = df.Define("jet_veto_pass",
                    [mapCorrection, vetoType](const ROOT::VecOps::RVec<float> &jetPt,
                                          const ROOT::VecOps::RVec<float> &jetEta,
@@ -233,7 +246,7 @@ void JetVetoMapManager::applyJetVetoMap() {
                                          const ROOT::VecOps::RVec<float> &neEmEF) {
                      for (size_t i = 0; i < jetPt.size(); ++i) {
                        // Minimal selection (CMS recommendations)
-                       if (jetPt[i] < 15.0f) continue;
+                       if (jetPt[i] <= 15.0f) continue;
                        if (!(jetId[i] & 4)) continue;  // tightLepVeto
                        if ((chEmEF[i] + neEmEF[i]) >= 0.9f) continue;
 
@@ -246,8 +259,7 @@ void JetVetoMapManager::applyJetVetoMap() {
                      }
                      return true;  // pass
                    },
-                   {"Jet_pt", "Jet_eta", "Jet_phi", "Jet_jetId_i",
-                    "Jet_chEmEF", "Jet_neEmEF"});
+                   mapColumns);
   }
 
   dataManager_m->setDataFrame(df.Filter("jet_veto_pass"));

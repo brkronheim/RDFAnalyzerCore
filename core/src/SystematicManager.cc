@@ -270,6 +270,33 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
     return result;
   }
 
+  // A nuisance may itself contain underscores (e.g. Absolute_2024).
+  // Prefer the longest explicitly registered suffix, then the longest
+  // existing base column. Only use the legacy last-underscore split when
+  // neither source can disambiguate the name.
+  const auto splitVariation = [&](const std::string &prefix) {
+    std::size_t split = std::string::npos;
+    std::size_t longestSuffix = 0;
+    for (const auto &syst : systematics_m) {
+      const std::string suffix = "_" + syst;
+      if (suffix.size() < prefix.size() && endsWith(prefix, suffix) &&
+          suffix.size() > longestSuffix) {
+        split = prefix.size() - suffix.size();
+        longestSuffix = suffix.size();
+      }
+    }
+    if (split == std::string::npos) {
+      for (auto pos = prefix.rfind('_'); pos != std::string::npos;
+           pos = pos == 0 ? std::string::npos : prefix.rfind('_', pos - 1)) {
+        if (colSet.count(prefix.substr(0, pos))) {
+          split = pos;
+          break;
+        }
+      }
+    }
+    return split == std::string::npos ? prefix.rfind('_') : split;
+  };
+
   // Track (baseVar, systName) keys we have already processed to avoid
   // reporting or registering the same pair twice.
   std::unordered_set<std::string> processedPairs;
@@ -286,14 +313,14 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
 
     // prefix = "baseVar_systName"
     const std::string prefix = col.substr(0, col.size() - kUpLen);
-    const std::size_t lastUnderscore = prefix.rfind('_');
+    const std::size_t lastUnderscore = splitVariation(prefix);
     if (lastUnderscore == std::string::npos || lastUnderscore == 0) {
       continue;
     }
 
     const std::string baseVar  = prefix.substr(0, lastUnderscore);
     const std::string systName = prefix.substr(lastUnderscore + 1);
-    if (baseVar.empty() || systName.empty()) {
+    if (baseVar.empty() || systName.empty() || !colSet.count(baseVar)) {
       continue;
     }
 
@@ -323,14 +350,14 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
     }
 
     const std::string prefix = col.substr(0, col.size() - kDownLen);
-    const std::size_t lastUnderscore = prefix.rfind('_');
+    const std::size_t lastUnderscore = splitVariation(prefix);
     if (lastUnderscore == std::string::npos || lastUnderscore == 0) {
       continue;
     }
 
     const std::string baseVar  = prefix.substr(0, lastUnderscore);
     const std::string systName = prefix.substr(lastUnderscore + 1);
-    if (baseVar.empty() || systName.empty()) {
+    if (baseVar.empty() || systName.empty() || !colSet.count(baseVar)) {
       continue;
     }
 

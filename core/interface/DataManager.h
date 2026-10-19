@@ -60,9 +60,9 @@ public:
    *
    * If all input columns are scalars, creates a vector from them. If all input
    * columns are RVecs, concatenates and casts them to the target type. Mixed
-   * scalar/RVec input is rejected. Common framework types use compiled
-   * RDataFrame callables; unsupported type combinations fall back to the legacy
-   * JIT expression path for compatibility.
+   * scalar/RVec input is rejected. Multi-input packing queries RDF input types
+   * and uses a cached typed JIT callable with one output Define and no packing
+   * helper columns. Common zero-/one-input cases use native compiled callables.
    * For each registered paired systematic affecting an input, also defines
    * ``name_<systematic>Up`` and ``name_<systematic>Down`` with only the
    * affected inputs shifted, then registers ``name`` as affected by that

@@ -53,7 +53,8 @@ def test_generate_condor_submit_sets_want_os(tmp_path):
     assert 'MY.WantOS = "el8"' in sub
 
 
-def test_generate_condor_submit_sets_x86_v2_requirements(tmp_path):
+def test_generate_condor_submit_sets_x86_v2_requirements(tmp_path, monkeypatch):
+    monkeypatch.delenv("RDF_CONDOR_EXTRA_BLOCKED_HOSTS", raising=False)
     sub = generate_condor_submit(
         main_dir=str(tmp_path),
         jobs=1,
@@ -63,6 +64,18 @@ def test_generate_condor_submit_sets_x86_v2_requirements(tmp_path):
     assert 'requirements = (TARGET.Arch =?= "X86_64")' in sub
     assert 'TARGET.Microarch =!= UNDEFINED' in sub
     assert 'TARGET.Has_sse4_1 =?= True' in sub
+    assert 'TARGET.Machine != "hepcms-henrietta.privnet"' in sub
+    assert 'TARGET.Machine != "hepcms-namenode.privnet"' in sub
+
+    monkeypatch.setenv("RDF_CONDOR_EXTRA_BLOCKED_HOSTS", "")
+    sub = generate_condor_submit(
+        main_dir=str(tmp_path),
+        jobs=1,
+        exe_relpath="bin/fakeexe",
+        config_file="submit_config.txt",
+    )
+    assert 'TARGET.Machine != "hepcms-henrietta.privnet"' in sub
+    assert 'TARGET.Machine != "hepcms-namenode.privnet"' not in sub
 
 
 def test_stage_outputs_preblock_contains_condor_proc_handling():
@@ -70,11 +83,14 @@ def test_stage_outputs_preblock_contains_condor_proc_handling():
     # ensure pre-block reads CONDOR_PROC and will append process id to filenames
     assert "CONDOR_PROC" in pre
     assert "_proc" not in pre  # we don't hardcode a literal suffix, but proc-aware logic exists
-    assert "check_output_endpoint(cfg.get(\"__orig_saveFile\", \"\"))" in pre
-    assert "check_output_endpoint(cfg.get(\"__orig_metaFile\", \"\"))" in pre
+    # Remote EOS checks are deferred until stage-out so a slow endpoint does
+    # not prevent the analysis executable from running.
+    assert "check_output_endpoint" not in pre
+    assert "xrdfs" not in pre
     assert "ensure_output_endpoint_ready" in post
     assert "verify_remote_file" in post
-    assert 'xrdfs_ok(host_url, "stat", eos_dir)' in post
+    assert 'xrdfs_ok(host_url, "mkdir", "-p", eos_dir)' in post
+    assert 'xrdfs_ok(host_url, "stat", eos_dir)' not in post
     assert 'xrdfs_ok(host_url, "stat", remote_path)' in post
     assert 'XRDCP_TIMEOUT_FLOOR' in post
 

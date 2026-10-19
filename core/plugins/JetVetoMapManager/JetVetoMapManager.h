@@ -25,6 +25,9 @@
 //   /path/to/jetvetomaps.json.gz
 // or a text file containing one payload path per line:
 //   /path/to/jet_veto_map_files.txt
+// Optional configuration key jetVetoMapJetIdColumn selects the RVec<int>
+// jet-ID bitmask column used by the map (bit 2 / value 4 is tightLepVeto).
+// The default remains Jet_jetId_i for NanoAOD versions that store Jet_jetId.
 //
 // Uses CorrectionManager to evaluate the correctionlib payload, then defines
 // a filter column vetoing events where any selected jet falls in a veto region.
@@ -69,6 +72,7 @@ private:
 
   std::vector<std::string> vetoMapFiles_m;
   std::string vetoMapType_m = "jetvetomap";
+  std::string jetIdColumn_m = "Jet_jetId_i";
   bool active_m = false;
 
   void loadConfigFile(const std::string &path);

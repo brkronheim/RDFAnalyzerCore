@@ -5,11 +5,11 @@
 #include <api/IDataFrameProvider.h>
 #include <api/ILogger.h>
 #include <api/ISystematicManager.h>
-#include <TInterpreter.h>
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -25,76 +25,6 @@ enum class CorrectionInputKind {
   Int,
   Double,
 };
-
-void ensureFlattenHelperDeclared() {
-  static const bool declared = []() {
-    return gInterpreter->Declare(R"cpp(
-#include <ROOT/RVec.hxx>
-#include <algorithm>
-#include <type_traits>
-
-namespace correction_manager_detail {
-
-template <typename... Args>
-ROOT::VecOps::RVec<double> FlattenInputs(const Args &...args) {
-  using ROOT::VecOps::RVec;
-  std::size_t nFills = 0U;
-  bool sawVectorInput = false;
-  auto updateSize = [&](auto const &arg) {
-    if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
-      if (!sawVectorInput) {
-        nFills = 1U;
-      }
-    } else {
-      sawVectorInput = true;
-      nFills = std::max<std::size_t>(nFills, arg.size());
-    }
-  };
-  (updateSize(args), ...);
-
-  if (sawVectorInput && nFills == 0U) {
-    return RVec<double>{};
-  }
-
-  const std::size_t stride = sizeof...(Args);
-  RVec<double> out;
-  out.reserve(nFills * stride);
-  for (std::size_t i = 0; i < nFills; ++i) {
-    auto pushVal = [&](auto const &arg) {
-      if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
-        out.emplace_back(static_cast<double>(arg));
-      } else {
-        const auto idx = (i < arg.size()) ? i : arg.size() - 1;
-        out.emplace_back(static_cast<double>(arg[idx]));
-      }
-    };
-    (pushVal(args), ...);
-  }
-  return out;
-}
-
-} // namespace correction_manager_detail
-    )cpp");
-  }();
-
-  if (!declared) {
-    throw std::runtime_error(
-        "CorrectionManager: failed to declare flatten helper in Cling");
-  }
-}
-
-std::string buildFlattenRVecExpression(
-    const std::vector<std::string> &inputColumns) {
-  std::string expression = "correction_manager_detail::FlattenInputs(";
-  for (size_t index = 0; index < inputColumns.size(); ++index) {
-    if (index != 0) {
-      expression += ", ";
-    }
-    expression += inputColumns[index];
-  }
-  expression += ")";
-  return expression;
-}
 
 std::vector<CorrectionInputKind>
 buildCorrectionInputKinds(const correction::Correction::Ref &correction) {
@@ -119,11 +49,29 @@ buildCorrectionInputKinds(const correction::CompoundCorrection::Ref &correction)
   for (const auto &varType : correction->inputs()) {
     if (varType.typeStr() == "string") {
       inputKinds.push_back(CorrectionInputKind::String);
+    } else if (varType.typeStr() == "int") {
+      inputKinds.push_back(CorrectionInputKind::Int);
     } else {
       inputKinds.push_back(CorrectionInputKind::Double);
     }
   }
   return inputKinds;
+}
+
+void validateCorrectionInputs(const std::string &name,
+                              const std::vector<CorrectionInputKind> &kinds,
+                              size_t numericCount, size_t stringCount) {
+  const size_t expectedStrings = std::count(kinds.begin(), kinds.end(),
+                                            CorrectionInputKind::String);
+  const size_t expectedNumeric = kinds.size() - expectedStrings;
+  if (numericCount != expectedNumeric || stringCount != expectedStrings) {
+    throw std::runtime_error(
+        "CorrectionManager: correction '" + name + "' expects " +
+        std::to_string(expectedNumeric) + " numeric and " +
+        std::to_string(expectedStrings) + " string inputs; received " +
+        std::to_string(numericCount) + " numeric and " +
+        std::to_string(stringCount) + " string inputs");
+  }
 }
 
 template <typename DoubleIterator>
@@ -157,7 +105,8 @@ void populateCorrectionValues(std::vector<CorrectionValue> &values,
 /// bin lookups return the fallback value. Depending on the Correctionlib
 /// version, these are reported as either std::out_of_range or a runtime_error
 /// whose message begins with "Index below/above bounds in". No range exception
-/// propagates to the caller.
+/// propagates to the caller. Every std::out_of_range fallback is reported to
+/// stderr, including missing category keys.
 ///
 /// For any other exception type the evaluation is still re-thrown as a
 /// `std::runtime_error` with a descriptive message, since those indicate
@@ -168,12 +117,20 @@ Float_t safeEvaluate(const CorrectionRef &correction,
                      Float_t fallback = 1.0f) {
   try {
     return correction->evaluate(values);
-  } catch (const std::out_of_range &) {
-    // Input outside defined binning range — return the fallback value.
-    // This is the common case for per-object corrections that are
-    // applied to all objects but only valid for a subset (e.g. electron
-    // reconstruction SFs binned by pT, muon isolation SFs with a
-    // minimum-pt edge).  No exception escapes to RDataFrame.
+  } catch (const std::out_of_range &e) {
+    // Preserve the neutral fallback, but report every failure: correctionlib
+    // also uses this exception for missing string/category keys, which can
+    // indicate a configuration error rather than an expected numeric range.
+    std::ostringstream warning;
+    warning << "Warning: CorrectionManager: std::out_of_range evaluating "
+            << "correction '" << correction->name() << "': " << e.what()
+            << "; using fallback " << fallback << " for inputs [";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (i != 0) warning << ", ";
+      std::visit([&warning](const auto &value) { warning << value; }, values[i]);
+    }
+    warning << "]\n";
+    std::cerr << warning.str();
     return fallback;
   } catch (const std::runtime_error &e) {
     // The bundled Correctionlib throws runtime_error (rather than
@@ -403,6 +360,68 @@ void CorrectionManager::registerCorrection(
   features_m.emplace(name, inputVariables);
 }
 
+void CorrectionManager::applyCorrections(
+    const std::string &name,
+    const std::vector<std::vector<std::string>> &arguments,
+    const std::vector<std::string> &inputs,
+    const std::vector<std::string> &outputs,
+    const std::vector<bool> &propagateSystematics) {
+  applyCorrectionBatch(false, name, arguments, inputs, outputs, propagateSystematics);
+}
+
+void CorrectionManager::applyCorrectionsVec(
+    const std::string &name,
+    const std::vector<std::vector<std::string>> &arguments,
+    const std::vector<std::string> &inputs,
+    const std::vector<std::string> &outputs,
+    const std::vector<bool> &propagateSystematics) {
+  applyCorrectionBatch(true, name, arguments, inputs, outputs, propagateSystematics);
+}
+
+void CorrectionManager::applyCorrectionBatch(
+    bool vector, const std::string &name,
+    const std::vector<std::vector<std::string>> &arguments,
+    const std::vector<std::string> &inputs,
+    const std::vector<std::string> &outputs,
+    const std::vector<bool> &propagateSystematics) {
+  if (!propagateSystematics.empty() && propagateSystematics.size() != arguments.size()) {
+    throw std::invalid_argument("CorrectionManager: batch propagation/argument count mismatch");
+  }
+  if (!outputs.empty() && outputs.size() != arguments.size()) {
+    throw std::invalid_argument("CorrectionManager: batch output/argument count mismatch");
+  }
+  std::vector<std::string> branches;
+  branches.reserve(arguments.size());
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    branches.push_back(outputs.empty() || outputs[i].empty()
+                           ? makeBranchName(name, arguments[i]) : outputs[i]);
+  }
+  if (branches.empty()) return;
+  if (!dataManager_m || !systematicManager_m)
+    throw std::runtime_error("CorrectionManager: DataManager or SystematicManager not set");
+  const auto &resolved = inputs.empty() ? getCorrectionFeatures(name) : inputs;
+  std::vector<CorrectionInputKind> kinds;
+  if (objects_m.count(name)) kinds = buildCorrectionInputKinds(objects_m.at(name));
+  else if (compoundObjects_m.count(name)) kinds = buildCorrectionInputKinds(compoundObjects_m.at(name));
+  else throw std::runtime_error("CorrectionManager: unknown correction '" + name + "'");
+  for (const auto &args : arguments)
+    validateCorrectionInputs(name, kinds, resolved.size(), args.size());
+  auto df = dataManager_m->getDataFrame();
+  if (std::all_of(branches.begin(), branches.end(),
+                  [&df](const std::string &branch) { return df.HasColumn(branch); })) return;
+  // Never cache readers between calls: Redefine can change an input without
+  // changing its name. A partial repeat also needs fresh inputs for new outputs.
+  std::string packed;
+  do {
+    packed = "__rdf_correction_input_" + std::to_string(batchInputIndex_m++);
+  } while (df.HasColumn(packed));
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const bool expand = propagateSystematics.empty() || propagateSystematics[i];
+    if (vector) applyCorrectionVecImpl(name, arguments[i], inputs, branches[i], packed, expand);
+    else applyCorrectionImpl(name, arguments[i], inputs, branches[i], packed, expand);
+  }
+}
+
 /**
  * @brief Apply a scalar correction to the dataframe.
  *
@@ -418,6 +437,15 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
                                         const std::vector<std::string> &stringArguments,
                                         const std::vector<std::string> &inputColumns,
                                         const std::string &outputBranch) {
+  applyCorrectionImpl(correctionName, stringArguments, inputColumns, outputBranch, "");
+}
+
+void CorrectionManager::applyCorrectionImpl(
+    const std::string &correctionName,
+    const std::vector<std::string> &stringArguments,
+    const std::vector<std::string> &inputColumns,
+    const std::string &outputBranch, const std::string &packedInput,
+    bool propagateSystematics) {
   std::cout << "Applying correction " << correctionName << std::endl;
 
   if (!dataManager_m || !systematicManager_m) {
@@ -427,13 +455,29 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
   const std::string branchName = outputBranch.empty()
                                      ? makeBranchName(correctionName, stringArguments)
                                      : outputBranch;
-  const std::string inputColName = "input_" + branchName;
+  const std::string inputColName = packedInput.empty() ? "input_" + branchName : packedInput;
 
   const std::vector<std::string> &resolvedInputs =
       inputColumns.empty() ? getCorrectionFeatures(correctionName) : inputColumns;
 
+  if (const auto it = objects_m.find(correctionName); it != objects_m.end()) {
+    validateCorrectionInputs(correctionName, buildCorrectionInputKinds(it->second),
+                             resolvedInputs.size(), stringArguments.size());
+  } else if (const auto it = compoundObjects_m.find(correctionName);
+             it != compoundObjects_m.end()) {
+    validateCorrectionInputs(correctionName, buildCorrectionInputKinds(it->second),
+                             resolvedInputs.size(), stringArguments.size());
+  } else {
+    throw std::runtime_error("CorrectionManager: unknown correction '" + correctionName + "'");
+  }
+
   std::cout << "Defining input features for correction " << correctionName << std::endl;
-  dataManager_m->DefineVector(inputColName, resolvedInputs, "double", *systematicManager_m);
+  if (propagateSystematics) {
+    // A later output in the batch may be the first to request input variations.
+    dataManager_m->DefineVector(inputColName, resolvedInputs, "double", *systematicManager_m);
+  } else {
+    dataManager_m->DefineVectorNominal(inputColName, resolvedInputs, "double", *systematicManager_m);
+  }
   if (const auto corrIt = this->objects_m.find(correctionName);
       corrIt != this->objects_m.end()) {
     auto correction = corrIt->second;
@@ -443,7 +487,9 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
         [correction, stringArgs, inputKinds](const ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
       return evaluateScalarCorrection(correction, stringArgs, inputKinds, inputVector);
     };
-    dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+    if (propagateSystematics)
+      dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+    else dataManager_m->DefineNominal(branchName, correctionLambda, {inputColName});
     return;
   }
 
@@ -456,7 +502,9 @@ void CorrectionManager::applyCorrection(const std::string &correctionName,
         [correction, stringArgs, inputKinds](const ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
       return evaluateScalarCorrection(correction, stringArgs, inputKinds, inputVector);
     };
-    dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+    if (propagateSystematics)
+      dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
+    else dataManager_m->DefineNominal(branchName, correctionLambda, {inputColName});
     return;
   }
 
@@ -508,6 +556,15 @@ void CorrectionManager::applyCorrectionVec(
     const std::vector<std::string> &stringArguments,
     const std::vector<std::string> &inputColumns,
     const std::string &outputBranch) {
+  applyCorrectionVecImpl(correctionName, stringArguments, inputColumns, outputBranch, "");
+}
+
+void CorrectionManager::applyCorrectionVecImpl(
+    const std::string &correctionName,
+    const std::vector<std::string> &stringArguments,
+    const std::vector<std::string> &inputColumns,
+    const std::string &outputBranch, const std::string &packedInput,
+    bool propagateSystematics) {
   std::cout << "Applying vector correction " << correctionName << std::endl;
   if (!dataManager_m || !systematicManager_m) {
     throw std::runtime_error(
@@ -521,13 +578,23 @@ void CorrectionManager::applyCorrectionVec(
   const std::vector<std::string> &resolvedInputs =
       inputColumns.empty() ? getCorrectionFeatures(correctionName) : inputColumns;
 
+  if (const auto it = objects_m.find(correctionName); it != objects_m.end()) {
+    validateCorrectionInputs(correctionName, buildCorrectionInputKinds(it->second),
+                             resolvedInputs.size(), stringArguments.size());
+  } else if (const auto it = compoundObjects_m.find(correctionName);
+             it != compoundObjects_m.end()) {
+    validateCorrectionInputs(correctionName, buildCorrectionInputKinds(it->second),
+                             resolvedInputs.size(), stringArguments.size());
+  } else {
+    throw std::runtime_error("CorrectionManager: unknown correction '" + correctionName + "'");
+  }
+
   // Validate that all required input columns exist in the dataframe.
   {
-    const auto existingColumns = dataManager_m->getDataFrame().GetColumnNames();
+    auto df = dataManager_m->getDataFrame();
     std::vector<std::string> missing;
     for (const auto &f : resolvedInputs) {
-      if (std::find(existingColumns.begin(), existingColumns.end(), f) ==
-          existingColumns.end()) {
+      if (!df.HasColumn(f)) {
         missing.push_back(f);
       }
     }
@@ -549,15 +616,12 @@ void CorrectionManager::applyCorrectionVec(
         "applyCorrectionVec: correction '" + correctionName +
         "' has no registered input variables");
   }
-  // The intermediate packed column name includes the branch suffix so that the
-  // same correction can be applied with different string arguments without
-  // column name collisions.
-  const std::string inputVecName = "input_vec_" + branchName;
+  // Single calls retain the branch-derived name; batches supply one shared
+  // numeric pack for their different string arguments.
+  const std::string inputVecName = packedInput.empty() ? "input_vec_" + branchName : packedInput;
   {
     auto dfNode = dataManager_m->getDataFrame();
-    const auto existingColumns = dfNode.GetColumnNames();
-    if (std::find(existingColumns.begin(), existingColumns.end(),
-                  inputVecName) == existingColumns.end()) {
+    if (!dfNode.HasColumn(inputVecName)) {
       bool hasVectorInput = false;
       for (const auto &f : resolvedInputs) {
         const std::string columnType = dfNode.GetColumnType(f);
@@ -574,13 +638,7 @@ void CorrectionManager::applyCorrectionVec(
       }
 
       dfNode = rdfcolumnpacker::defineFlattenedNumericInputs(
-          dfNode, inputVecName, resolvedInputs, "CorrectionManager",
-          [](ROOT::RDF::RNode df, const std::string &outputColumn,
-             const std::vector<std::string> &inputColumns) {
-            ensureFlattenHelperDeclared();
-            return df.Define(outputColumn,
-                             buildFlattenRVecExpression(inputColumns));
-          });
+          dfNode, inputVecName, resolvedInputs, "CorrectionManager");
 
       dataManager_m->setDataFrame(dfNode);
     }
@@ -599,8 +657,9 @@ void CorrectionManager::applyCorrectionVec(
       return evaluateVectorCorrection(correction, stringArgs, inputKinds, flatInputVector,
                                       featureCount);
     };
-    dataManager_m->Define(branchName, correctionLambda, {inputVecName},
-                          *systematicManager_m);
+    if (propagateSystematics)
+      dataManager_m->Define(branchName, correctionLambda, {inputVecName}, *systematicManager_m);
+    else dataManager_m->DefineNominal(branchName, correctionLambda, {inputVecName});
     return;
   }
 
@@ -616,8 +675,9 @@ void CorrectionManager::applyCorrectionVec(
       return evaluateVectorCorrection(correction, stringArgs, inputKinds, flatInputVector,
                                       featureCount);
     };
-    dataManager_m->Define(branchName, correctionLambda, {inputVecName},
-                          *systematicManager_m);
+    if (propagateSystematics)
+      dataManager_m->Define(branchName, correctionLambda, {inputVecName}, *systematicManager_m);
+    else dataManager_m->DefineNominal(branchName, correctionLambda, {inputVecName});
     return;
   }
 

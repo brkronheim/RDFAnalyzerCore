@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 
 class Analyzer;
 
@@ -21,7 +22,7 @@ class RegionManager;
  * @brief Manages booking, storage, and saving of N-dimensional histograms.
  *
  * This manager encapsulates the logic for creating, storing, and writing
- * N-dimensional histograms (THnSparseD) using ROOT's RDataFrame. It is designed
+ * N-dimensional histograms (THnSparseF) using ROOT's RDataFrame. It is designed
  * to be used by the Analyzer class and centralizes all histogram-related
  * operations. It is registered through the pluggable-manager API used by Analyzer.
  *
@@ -79,7 +80,7 @@ public:
       std::string suffix=""); 
     
   /**
-   * @brief Save histograms to file
+   * @brief Save mergeable N-dimensional histograms and their extraction schema.
    * @param fullHistList Vector of vectors of histogram info objects
    * @param allRegionNames Vector of vectors of region name vectors
    */
@@ -100,7 +101,7 @@ public:
               std::vector<std::vector<std::string>> &allRegionNames);
 
   /**
-   * @brief Save histograms to file (wrapper for analyzer compatibility)
+   * @brief Save mergeable N-dimensional histograms (wrapper for analyzer compatibility)
    * @param fullHistList Vector of vectors of histogram info objects
    * @param allRegionNames Vector of vectors of region name vectors
    */
@@ -108,7 +109,7 @@ public:
                  std::vector<std::vector<std::string>> &allRegionNames);
 
   /**
-   * @brief Save all histograms booked via bookND without supplying lists again.
+   * @brief Save all booked histograms and their extraction schema.
    *
    * Histogram metadata and region names are accumulated internally each time
    * bookND() is called. This overload replays that stored information so the
@@ -165,7 +166,8 @@ public:
    * covers all declared regions, keeping the output compact and the event
    * loop to a single execution.
    */
-  void bookConfigHistograms();
+  // Exclusions are logical config names and are applied before any booking.
+  void bookConfigHistograms(const std::vector<std::string> &excludedNames = {});
 
   /**
    * @brief Bind this manager to a RegionManager for automatic region-aware
@@ -198,6 +200,7 @@ public:
     int bins;
     float lowerBound;
     float upperBound;
+    std::vector<Double_t> binEdges;
     std::string suffix;
     std::string channelVariable;
     int channelBins;
@@ -233,6 +236,14 @@ public:
   }
 
 private:
+  // Reuse identical packs within one booking call. Reset between calls so
+  // intervening Redefine operations cannot bind a new histogram to old values.
+  std::unordered_map<std::string, std::string> axisPackCache_m;
+  void SaveHistsImpl(std::vector<std::vector<histInfo>> &fullHistList,
+                     std::vector<std::vector<std::string>> &allRegionNames,
+                     const IConfigurationProvider &configProvider,
+                     bool useBookedAxisLabels);
+
   void BookSingleHistogramWithSystList(histInfo &info,
                                        selectionInfo &&sampleCategoryInfo,
                                        selectionInfo &&controlRegionInfo,
@@ -272,6 +283,8 @@ private:
    */
   std::vector<ROOT::RDF::RNode> histNodes_m;
   std::vector<ROOT::RDF::RResultPtr<THnSparseF>> histos_m;
+  // Axis labels captured per booked sparse histogram for merge-safe export.
+  std::vector<std::vector<std::vector<std::string>>> histRegionNames_m;
   std::vector<HistogramConfig> configHistograms_m;
   // Accumulated metadata from each bookND() call — used by the no-args saveHists()
   std::vector<std::vector<histInfo>> trackedHistInfos_m;

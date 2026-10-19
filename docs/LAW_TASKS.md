@@ -61,6 +61,23 @@ source core/python/law/env.sh
 law run <TaskName> [parameters]
 ```
 
+The merge tasks can read per-job ROOT inputs whose manifest paths are XRootD
+URLs (for example, `root://host//store/user/analysis/job/meta.root`). The
+`output_manifest.yaml` files must still be available under the local
+`--input-dir`; relative ROOT paths are resolved from each manifest's directory,
+while `root://` URLs are passed directly to ROOT `hadd`. Merged products are
+written to the local `--output-dir`. Use a ROOT installation with XRootD
+support and valid credentials for the remote storage. `MergeHistograms` also
+uses Uproot or PyROOT to inspect each remote file's embedded histogram schema
+before merging.
+
+```bash
+law run MergeHistograms \
+  --name myRun \
+  --input-dir /scratch/job_manifests \
+  --output-dir /scratch/merged/myRun
+```
+
 ### Typical task dependency chain
 
 ```
@@ -178,10 +195,11 @@ event tree. LAW passes the config through; it does not turn skim writing on.
 With `enableSkim=false`, the task can run successfully without producing the
 skim its output layout describes.
 
-Before dispatching the full multi-dataset workflow a **pre-flight test job**
-(`RunSkimTestJob`) is run automatically on a single input file.  This catches
-analysis runtime errors early, before potentially hundreds of jobs are
-submitted.  Pass ``--no-make-test-job`` to skip the test.
+Before dispatching the full multi-dataset workflow a **pre-flight test**
+(`RunSkimTestJob`) is run automatically on one input file for each available
+data and MC sample type. This catches sample-specific runtime errors before
+potentially hundreds of jobs are submitted. Pass ``--no-make-test-job`` to
+skip the test.
 
 ### Parameters
 
@@ -197,6 +215,7 @@ file-discovery/execution options provided by `SkimMixin`.
 | `--files-per-job` | `50` | Maximum files per job for file-count grouping; also the group limit for Rucio queries. |
 | `--partition` | `file_group` | File-source partition mode: `file_group`, `file` (one file per job), or `entry_range` (split by TTree entries; requires `uproot`). |
 | `--entries-per-job` | `100000` | Maximum TTree entries per job in `entry_range` mode; ignored by other modes. |
+| `--prepare-workers` | `4` | Maximum number of threads used to write independent per-job configs and redirector maps. Set to `1` for serial preparation. |
 
 Partition settings apply when the file-list payload contains a flat file list.
 If it includes precomputed groups, such as the groups produced by Rucio
@@ -207,14 +226,16 @@ discovery, `PrepareSkimJobs` preserves those groups as job partitions.
 SkimMixin parameter inherited by `PrepareSkimJobs` and `SkimTask`. The
 delegated HTCondor submission chain uses it as the final output destination,
 overriding `saveDirectory` in the generated submit configs; it may be a local
-EOS path or an explicit `root://` URL. It does not apply to `HistFillTask`.
+EOS path or an explicit `root://` URL. Relative paths and ordinary local
+filesystem paths are rejected because workers stage outputs through XRootD.
+It does not apply to `HistFillTask`.
 
 #### `--make-test-job` *(bool, default: `True`)*
 
 When ``True`` (the default), `SkimTask` declares `RunSkimTestJob` as a
-workflow prerequisite.  `RunSkimTestJob` will run the analysis executable on
-a single input file and fail with a clear error message before any branch is
-dispatched if the executable crashes.
+workflow prerequisite. `RunSkimTestJob` runs the analysis executable on one
+input file for each available data and MC sample type. It fails before any
+branch is dispatched if either preflight crashes.
 
 Pass ``--no-make-test-job`` to disable the pre-flight test and submit
 immediately.
@@ -254,8 +275,11 @@ For multi-dimensional branching (regions, systematics) use
 ```
 skimRun_<name>/
 ├── test_job/
-│   ├── submit_config.txt      ← minimal single-file config
-│   ├── test_output.root        ← test skim output
+│   ├── submit_config_data.txt  ← minimal data config, when data is present
+│   ├── submit_config_mc.txt    ← minimal MC config, when MC is present
+│   ├── test_jobs.json          ← selected sample types and input files
+│   ├── test_output_data.root   ← data test output, when data is present
+│   ├── test_output_mc.root     ← MC test output, when MC is present
 │   └── test_passed.txt         ← RunSkimTestJob success marker
 ├── jobs/
 │   └── <dataset_name>/
@@ -386,15 +410,16 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task)
 
 ### Purpose
 
-Runs the analysis executable on a **single input file** as a pre-flight
-validation step before ``SkimTask`` dispatches the full multi-dataset workflow.
+Runs the analysis executable on one input file for each available data and MC
+sample type as a pre-flight validation step before ``SkimTask`` dispatches the
+full multi-dataset workflow.
 
 In **file-source mode** (``--file-source`` set) ``RunSkimTestJob`` requires
 ``PrepareSkimJobs``, which creates a ``test_job/`` directory with a minimal
-single-file config.
+config for each available sample type.
 
 In **standard manifest mode** (``--file-source`` empty) the task builds the
-test job directory itself from the first dataset's first file.
+test job directory itself from the first dataset file available for each type.
 
 ### Output
 

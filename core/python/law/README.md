@@ -58,10 +58,11 @@ Runs the analysis executable once per dataset entry defined in a dataset
 manifest YAML.  Each branch executes one dataset job and writes a `.done`
 marker file when finished.
 
-A **pre-flight local test job** (``RunSkimTestJob``) is run automatically
-before the full workflow is dispatched.  It executes the analysis on a single
-input file, catching runtime errors before potentially hundreds of jobs are
-submitted.  The test can be skipped with ``--no-make-test-job``.
+A **pre-flight local test** (``RunSkimTestJob``) is run automatically before
+the full workflow is dispatched. It executes one input file for each available
+data and MC sample type, catching sample-specific runtime errors before
+potentially hundreds of jobs are submitted. The test can be skipped with
+``--no-make-test-job``.
 
 **Parameters**
 
@@ -71,7 +72,7 @@ submitted.  The test can be skipped with ``--no-make-test-job``.
 | `--exe` | *(required)* | Path to the compiled analysis executable |
 | `--name` | *(required)* | Run name; outputs go to `skimRun_<name>/` |
 | `--dataset-manifest` | *(required)* | Path to the YAML dataset manifest |
-| `--make-test-job` | `True` | Run a single-file test before full dispatch |
+| `--make-test-job` | `True` | Run one-file data and MC preflights for types present before full dispatch |
 | `--file-source` | `""` | File-list source: `""`, `rucio`, `opendata`, or `xrdfs` |
 | `--file-source-name` | `""` | Name matching a completed file-list task run |
 | `--num-workers` | auto | Thread-pool size for the local runner |
@@ -124,9 +125,9 @@ law run SkimTask \
 
 ### RunSkimTestJob
 
-Runs the analysis executable with a **single input file** to validate that the
-analysis compiles and runs without runtime errors before submitting the full
-workflow.  This task is required automatically by ``SkimTask`` when
+Runs the analysis executable with one input file for each available data and
+MC sample type to validate that both configurations work before submitting the
+full workflow. This task is required automatically by ``SkimTask`` when
 ``--make-test-job`` is set (the default).
 
 In **file-source mode** it uses the ``PrepareSkimJobs`` output directory. The
@@ -150,6 +151,10 @@ When ``--file-source xrdfs`` is set, ``PrepareSkimJobs`` automatically
 declares a LAW dependency on :class:`GetXRDFSFileList` so that the full chain
 ``GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask``
 runs automatically.
+
+Per-job configs and redirector maps are prepared concurrently, with a bounded
+pool of four threads by default. Set ``--prepare-workers 1`` for serial
+preparation or pass another positive value to tune filesystem concurrency.
 
 ### HistFillTask
 
@@ -398,8 +403,10 @@ Each workflow is split into four law tasks that run in sequence:
    `all_outputs_verified.txt` when every job is confirmed complete.
 
 Outputs are always staged to EOS after each job completes (stage-out is always
-active).  Stage-in (copying inputs to the worker node before running) is
-optional and controlled by `--stage-in`.
+active). The worker prepares the destination directory when staging begins,
+then relies on `xrdcp` and a remote file check; it does not probe EOS before
+starting the analysis. Stage-in (copying inputs to the worker node before
+running) is optional and controlled by `--stage-in`.
 
 ---
 
@@ -729,7 +736,7 @@ GetOpenDataFileList (parallel, one branch per sample)
 PrepareSkimJobs    ─── depends on GetXRDFSFileList (automatic)
   │                   or on GetRucio/OpenDataFileList (run manually first)
    ▼
-RunSkimTestJob     ─── pre-flight: runs analysis on 1 file; blocks full dispatch
+RunSkimTestJob     ─── pre-flight: tests one data and one MC file when present
    │
    ▼
 
@@ -811,14 +818,15 @@ The `NDHistogramManager` supports two backends (configured via `histogramBackend
 in the analysis config):
 
 - **`root`** (default) — produces `THnSparseF` objects stored in ROOT files.
-  This format is required for `CreateDatacard` and all standard ROOT-based
-  downstream tools.
+  Per-job files retain these arrays for direct `hadd` merging. The merge task
+  then adds reconstructed `TH1F` objects to the merged file, preserving
+  compatibility with `CreateDatacard` and standard ROOT-based downstream
+  tools.
 - **`boost`** — uses Boost.Histogram during the event loop for reduced memory
-  usage; output is converted to ROOT format before writing, so it is fully
-  compatible with downstream tools including Combine.
+  usage; output is converted to the same sparse ROOT format before writing.
 
-Both backends write identical output files; `histogramBackend` is purely an
-internal performance knob.  See [CONFIG_REFERENCE.md — Histogram Backend](../../../docs/CONFIG_REFERENCE.md#histogram-backend)
+For a manual merge, run `python core/python/extract_nd_histograms.py merged.root`
+after `hadd`.  See [CONFIG_REFERENCE.md — Histogram Backend](../../../docs/CONFIG_REFERENCE.md#histogram-backend)
 for configuration details.
 
 ---
@@ -988,6 +996,11 @@ export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
 - **`container_setup`** is passed to the outer wrapper script and used to
   launch the inner runscript (e.g. `cmssw-el9 -- bash condor_runscript_inner.sh`).
 - **No OS-pinning** by default (`MY.WantOS` is not set).
+- **Blocked worker hosts**: `hepcms-henrietta.privnet` remains reserved. The
+  additional blocked hosts default to `hepcms-namenode.privnet`. Set
+  `RDF_CONDOR_EXTRA_BLOCKED_HOSTS` to a comma-separated list to replace that
+  list, or to an empty string to allow name-node to match again. To block
+  name-node plus another host, include both names in the value.
 - **Local shared libraries** required by the executable (resolved via `ldd` and
   located under the repository root) are automatically staged into `shared_inputs/`.
 

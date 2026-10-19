@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cms {
@@ -266,7 +267,7 @@ Vector selectElectronRecoScaleFactorsImpl(
   Vector result(pt.size(), 1.0f);
   for (size_t i = 0; i < pt.size(); ++i) {
     if (pt[i] < 20.0f) result[i] = i < below20.size() ? below20[i] : 1.0f;
-    else if (pt[i] <= 75.0f) result[i] = i < between20And75.size() ? between20And75[i] : 1.0f;
+    else if (pt[i] < 75.0f) result[i] = i < between20And75.size() ? between20And75[i] : 1.0f;
     else result[i] = i < above75.size() ? above75[i] : 1.0f;
   }
   return result;
@@ -310,9 +311,8 @@ void defineCmsPileupWeights(Analyzer &an, const CmsWeightConfig &cfg) {
   corrMgr->registerCorrection(
       "cms_pileup_weight", ys.pileupFile, ys.pileupCorrection,
       {"Pileup_nTrueInt"});
-  corrMgr->applyCorrection("cms_pileup_weight", {"nominal"}, {}, "pileup_weight_nominal");
-  corrMgr->applyCorrection("cms_pileup_weight", {"up"}, {}, "pileup_weight_up");
-  corrMgr->applyCorrection("cms_pileup_weight", {"down"}, {}, "pileup_weight_down");
+  corrMgr->applyCorrections("cms_pileup_weight", {{"nominal"}, {"up"}, {"down"}}, {},
+      {"pileup_weight_nominal", "pileup_weight_up", "pileup_weight_down"});
 }
 
 // ===========================================================================
@@ -345,9 +345,9 @@ void defineCmsMuonScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
   corrMgr->registerCorrection(
       "cms_muon_id_sf", ys.muonFile, ys.muonCorrection,
       {"SelectedMuon_eta_sf", "SelectedMuon_pt"});
-  corrMgr->applyCorrectionVec("cms_muon_id_sf", {"nominal"}, {}, "muon_id_sf_nominal_vec");
-  corrMgr->applyCorrectionVec("cms_muon_id_sf", {"systup"}, {}, "muon_id_sf_systup_vec");
-  corrMgr->applyCorrectionVec("cms_muon_id_sf", {"systdown"}, {}, "muon_id_sf_systdown_vec");
+  corrMgr->applyCorrectionsVec("cms_muon_id_sf",
+      {{"nominal"}, {"systup"}, {"systdown"}}, {},
+      {"muon_id_sf_nominal_vec", "muon_id_sf_systup_vec", "muon_id_sf_systdown_vec"});
 
   // Muon isolation — POG TightPFIso by default, with an optional POG
   // correction-name override or custom correctionlib payload.
@@ -414,9 +414,9 @@ void defineCmsMuonScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
   corrMgr->registerCorrection(
       "cms_muon_iso_sf", ys.muonFile, isoCorrection,
       {"SelectedMuon_eta_sf", "SelectedMuon_pt"});
-  corrMgr->applyCorrectionVec("cms_muon_iso_sf", {"nominal"}, {}, "muon_iso_sf_nominal_vec");
-  corrMgr->applyCorrectionVec("cms_muon_iso_sf", {"systup"}, {}, "muon_iso_sf_systup_vec");
-  corrMgr->applyCorrectionVec("cms_muon_iso_sf", {"systdown"}, {}, "muon_iso_sf_systdown_vec");
+  corrMgr->applyCorrectionsVec("cms_muon_iso_sf",
+      {{"nominal"}, {"systup"}, {"systdown"}}, {},
+      {"muon_iso_sf_nominal_vec", "muon_iso_sf_systup_vec", "muon_iso_sf_systdown_vec"});
 }
 
 // ===========================================================================
@@ -451,48 +451,81 @@ void defineCmsElectronScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
                                               above75);
       };
 
-  // Electron ID
-  corrMgr->registerCorrection(
-      "cms_electron_id_sf", ys.electronFile, ys.electronCorrection,
-      {"SelectedElectron_scEta", "SelectedElectron_pt"});
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sf", ys.electronWorkingPoint}, {},
-      "electron_id_sf_nominal_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sfup", ys.electronWorkingPoint}, {},
-      "electron_id_sf_up_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sfdown", ys.electronWorkingPoint}, {},
-      "electron_id_sf_down_vec");
+  // Follow the payload's numeric input order, including phi for 2023.
+  corrMgr->registerCorrection("cms_electron_id_sf", ys.electronFile,
+                              ys.electronCorrection, {});
+  const auto correction = corrMgr->getCorrection("cms_electron_id_sf");
+  std::vector<std::string> inputs;
+  std::vector<std::string> stringInputs;
+  for (const auto &input : correction->inputs()) {
+    if (input.typeStr() == "string") {
+      stringInputs.push_back(input.name());
+    } else if (input.name() == "eta") {
+      inputs.push_back("SelectedElectron_scEta");
+    } else if (input.name() == "pt") {
+      inputs.push_back("SelectedElectron_pt");
+    } else if (input.name() == "phi") {
+      inputs.push_back("SelectedElectron_phi");
+    } else {
+      throw std::runtime_error("CmsWeights: unsupported electron SF input '" +
+                               input.name() + "'");
+    }
+  }
+  if (stringInputs != std::vector<std::string>{"year", "ValType", "WorkingPoint"}) {
+    throw std::runtime_error("CmsWeights: unsupported electron SF string inputs");
+  }
 
-  // Electron reconstruction (per-pT bin)
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sf", "RecoBelow20"}, {},
-      "electron_reco_sf_below20_nominal_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sf", "Reco20to75"}, {},
-      "electron_reco_sf_20to75_nominal_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sf", "RecoAbove75"}, {},
-      "electron_reco_sf_above75_nominal_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sfup", "RecoBelow20"}, {},
-      "electron_reco_sf_below20_up_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sfup", "Reco20to75"}, {},
-      "electron_reco_sf_20to75_up_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sfup", "RecoAbove75"}, {},
-      "electron_reco_sf_above75_up_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sfdown", "RecoBelow20"}, {},
-      "electron_reco_sf_below20_down_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sfdown", "Reco20to75"}, {},
-      "electron_reco_sf_20to75_down_vec");
-  corrMgr->applyCorrectionVec("cms_electron_id_sf",
-      {ys.electronYearToken, "sfdown", "RecoAbove75"}, {},
-      "electron_reco_sf_above75_down_vec");
+  const bool isRun2 = ys.canonicalYear == "2016_PreVFP" ||
+                     ys.canonicalYear == "2016_PostVFP" ||
+                     ys.canonicalYear == "2017" || ys.canonicalYear == "2018";
+  const std::string middleReco = isRun2 ? "RecoAbove20" : "Reco20to75";
+  const std::string highReco = isRun2 ? "RecoAbove20" : "RecoAbove75";
+
+  // Validate string keys on in-domain points before booking lazy evaluations.
+  // Missing years/WPs must not turn the whole SF family into neutral fallbacks.
+  const auto validate = [&](const std::string &variation,
+                            const std::string &workingPoint, double pt) {
+    std::vector<correction::Variable::Type> args;
+    for (const auto &input : correction->inputs()) {
+      const auto name = input.name();
+      if (name == "year") args.emplace_back(ys.electronYearToken);
+      else if (name == "ValType") args.emplace_back(variation);
+      else if (name == "WorkingPoint") args.emplace_back(workingPoint);
+      else if (name == "pt") args.emplace_back(pt);
+      else if (name == "eta") args.emplace_back(0.5);
+      else args.emplace_back(0.0); // phi
+    }
+    try {
+      correction->evaluate(args);
+    } catch (const std::exception &error) {
+      throw std::runtime_error(
+          "CmsWeights: invalid electron SF configuration (year='" +
+          ys.electronYearToken + "', variation='" + variation + "', WP='" +
+          workingPoint + "', file='" + ys.electronFile + "'): " + error.what());
+    }
+  };
+  for (const auto &variation : {"sf", "sfup", "sfdown"}) {
+    validate(variation, ys.electronWorkingPoint, 45.0);
+    validate(variation, "RecoBelow20", 15.0);
+    validate(variation, middleReco, 45.0);
+    validate(variation, highReco, 100.0);
+  }
+
+  const std::vector<std::pair<std::string, std::string>> variations{
+      {"sf", "nominal"}, {"sfup", "up"}, {"sfdown", "down"}};
+  std::vector<std::vector<std::string>> electronArguments;
+  std::vector<std::string> electronOutputs;
+  for (const auto &variation : variations) {
+    const auto append = [&](const std::string &workingPoint, const std::string &column) {
+      electronArguments.push_back({ys.electronYearToken, variation.first, workingPoint});
+      electronOutputs.push_back(column);
+    };
+    append(ys.electronWorkingPoint, "electron_id_sf_" + variation.second + "_vec");
+    append("RecoBelow20", "electron_reco_sf_below20_" + variation.second + "_vec");
+    append(middleReco, "electron_reco_sf_20to75_" + variation.second + "_vec");
+    append(highReco, "electron_reco_sf_above75_" + variation.second + "_vec");
+  }
+  corrMgr->applyCorrectionsVec("cms_electron_id_sf", electronArguments, inputs, electronOutputs);
 
   // Merge per-pT bin reco SFs
   an.Define("electron_reco_sf_nominal_vec", selectElectronRecoScaleFactorsRVec,
@@ -875,10 +908,8 @@ void defineCmsTriggerScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
 
     const auto applyLegVariations = [&](const std::string &correction,
                                         const std::string &prefix) {
-      corrMgr->applyCorrection(correction, {"nominal"}, {},
-                               prefix + "_nominal");
-      corrMgr->applyCorrection(correction, {"systup"}, {}, prefix + "_up");
-      corrMgr->applyCorrection(correction, {"systdown"}, {}, prefix + "_down");
+      corrMgr->applyCorrections(correction, {{"nominal"}, {"systup"}, {"systdown"}}, {},
+          {prefix + "_nominal", prefix + "_up", prefix + "_down"});
     };
     applyLegVariations("cms_dimuon_trigger_mu17", "dimuon_trigger_mu17");
     applyLegVariations("cms_dimuon_trigger_mu8", "dimuon_trigger_mu8");
@@ -919,12 +950,8 @@ void defineCmsTriggerScaleFactors(Analyzer &an, const CmsWeightConfig &cfg) {
   corrMgr->registerCorrection("cms_trigger_sf", cfg.triggerSfFile,
                               cfg.triggerSfCorrection,
                               {"SelectedMuon_absEta", "SelectedMuon_pt"});
-  corrMgr->applyCorrectionVec("cms_trigger_sf", {"nominal"}, {},
-                              "trigger_sf_nominal_vec");
-  corrMgr->applyCorrectionVec("cms_trigger_sf", {"systup"}, {},
-                              "trigger_sf_up_vec");
-  corrMgr->applyCorrectionVec("cms_trigger_sf", {"systdown"}, {},
-                              "trigger_sf_down_vec");
+  corrMgr->applyCorrectionsVec("cms_trigger_sf", {{"nominal"}, {"systup"}, {"systdown"}}, {},
+      {"trigger_sf_nominal_vec", "trigger_sf_up_vec", "trigger_sf_down_vec"});
     an.Define("trig_sf_nominal", productOrOneRVec, {"trigger_sf_nominal_vec"})
       ->Define("trig_sf_up", productOrOneRVec, {"trigger_sf_up_vec"})
       ->Define("trig_sf_down", productOrOneRVec, {"trigger_sf_down_vec"});

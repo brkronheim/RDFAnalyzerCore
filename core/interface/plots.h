@@ -10,6 +10,7 @@
 #define PLOTS_H_INCLUDED
 
 #include <ROOT/RDF/HistoModels.hxx>
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -81,6 +82,7 @@ static constexpr std::size_t kDenseMemoryThresholdBytes = 64ULL * 1024 * 1024; /
 
 
 struct histFillInfo {
+  Bool_t forceSparse = false;
   std::string name = "";
   std::string title = "";
   Int_t dim = 5;
@@ -88,6 +90,7 @@ struct histFillInfo {
   std::vector<Int_t> nbins = {};
   std::vector<Double_t> xmin = {};
   std::vector<Double_t> xmax = {};
+  std::vector<std::vector<Double_t>> binEdges = {};
   Bool_t channel_hasSystematic = false;
   Bool_t controlRegion_hasSystematic = false;
   Bool_t sampleCategory_hasSystematic = false;
@@ -136,28 +139,54 @@ public:
       controlRegion_hasMultiFill_m(fillInfo.controlRegion_hasMultiFill), sampleCategory_hasMultiFill_m(fillInfo.sampleCategory_hasMultiFill), systematic_hasMultiFill_m(fillInfo.systematic_hasMultiFill), weight_hasMultiFill_m(fillInfo.weight_hasMultiFill), 
       hasMultiFill_m(fillInfo.hasMultiFill), name_m(fillInfo.name), title_m(fillInfo.title) {
 
+    binEdges_m = fillInfo.binEdges;
+
     // Auto-select dense (THnF) vs sparse (THnSparseF) per-thread accumulators.
     // THnF uses direct array indexing (O(1)) which is faster than THnSparseF's
     // hash-based lookup, but consumes memory proportional to all bins.
     // Float_t content (4 B) + Double_t sumw2 (8 B) = 12 bytes per bin (with Sumw2).
-    useDense_m = estimateDenseMemoryBytes(nbins_m, nSlots_m, 12) <= kDenseMemoryThresholdBytes;
+    useDense_m = !fillInfo.forceSparse &&
+        estimateDenseMemoryBytes(nbins_m, nSlots_m, 12) <= kDenseMemoryThresholdBytes;
+
+    const auto setConfiguredBinEdges = [this](auto &histogram) {
+      const auto nAxes = std::min(binEdges_m.size(),
+                                  static_cast<std::size_t>(dim_m));
+      for (std::size_t axis = 0; axis < nAxes; ++axis) {
+        if (!binEdges_m[axis].empty()) {
+          histogram->SetBinEdges(static_cast<Int_t>(axis),
+                                 binEdges_m[axis].data());
+        }
+      }
+    };
 
     for (unsigned int i = 0; i < nSlots_m; i++) {
       if (useDense_m) {
         fPerThreadDense_m.push_back(std::make_shared<THnF>(
             (name_m + "_" + std::to_string(i)).c_str(), title_m.c_str(), dim_m,
             nbins_m.data(), xmin_m.data(), xmax_m.data()));
+        setConfiguredBinEdges(fPerThreadDense_m[i]);
         fPerThreadDense_m[i]->Sumw2();
       } else {
         fPerThreadResults.push_back(std::make_shared<THnSparseF>(
             (name_m + "_" + std::to_string(i)).c_str(), title_m.c_str(), dim_m,
             nbins_m.data(), xmin_m.data(), xmax_m.data()));
+        setConfiguredBinEdges(fPerThreadResults[i]);
         fPerThreadResults[i]->Sumw2();
       }
     }
-    fFinalResult =
-        std::make_shared<Result_t>((name_m).c_str(), title_m.c_str(), dim_m,
-                                   nbins_m.data(), xmin_m.data(), xmax_m.data());
+    if (!useDense_m && !fPerThreadResults.empty()) {
+      // Publish slot zero as the result from the start. Its address stays
+      // stable for RResultPtr, and finalization can merge into it without
+      // copying an entire occupied sparse histogram (especially costly with
+      // one slot, where no merge is needed at all).
+      fFinalResult = fPerThreadResults.front();
+      fFinalResult->SetName(name_m.c_str());
+    } else {
+      fFinalResult = std::make_shared<Result_t>(
+          name_m.c_str(), title_m.c_str(), dim_m,
+          nbins_m.data(), xmin_m.data(), xmax_m.data());
+      setConfiguredBinEdges(fFinalResult);
+    }
 
     // Select the per-bin fill helper: dense uses THnF (direct array), sparse uses THnSparseF (hash).
     fillHistFunc_ = useDense_m ? &THnMulti::fillHistDense_ : &THnMulti::fillHistSparse_;
@@ -460,6 +489,7 @@ public:
       // Sum all per-thread dense histograms into the first one
       for (size_t slot = 1; slot < fPerThreadDense_m.size(); slot++) {
         fPerThreadDense_m[0]->Add(fPerThreadDense_m[slot].get());
+        fPerThreadDense_m[slot].reset();
       }
       // Convert dense result to sparse: iterate all inner bins and copy non-zero ones
       const Long64_t totalBins = fPerThreadDense_m[0]->GetNbins();
@@ -467,7 +497,8 @@ public:
       std::vector<Double_t> coordBuf(dim_m);
       for (Long64_t bin = 0; bin < totalBins; ++bin) {
         const Double_t content = fPerThreadDense_m[0]->GetBinContent(bin, idxBuf.data());
-        if (content == 0.0) continue;
+        const Double_t error = fPerThreadDense_m[0]->GetBinError(bin);
+        if (content == 0.0 && error == 0.0) continue;
         // Skip overflow/underflow bins
         bool isOverflow = false;
         for (int d = 0; d < dim_m; ++d) {
@@ -482,12 +513,15 @@ public:
         }
         Long64_t sparseBin = fFinalResult->GetBin(coordBuf.data(), true);
         fFinalResult->SetBinContent(sparseBin, content);
-        fFinalResult->SetBinError(sparseBin, fPerThreadDense_m[0]->GetBinError(bin));
+        fFinalResult->SetBinError(sparseBin, error);
       }
+      fPerThreadDense_m.clear();
     } else {
-      for (auto hist : fPerThreadResults) {
-        fFinalResult->Add(hist.get());
+      for (std::size_t slot = 1; slot < fPerThreadResults.size(); ++slot) {
+        fFinalResult->Add(fPerThreadResults[slot].get());
+        fPerThreadResults[slot].reset();
       }
+      fPerThreadResults.clear();
     }
   }
 
@@ -553,6 +587,7 @@ private:
   const std::vector<Double_t> xmin_m;
   /** @brief Maximum value per dimension. */
   const std::vector<Double_t> xmax_m;
+  std::vector<std::vector<Double_t>> binEdges_m;
 
   const std::string name_m;
   const std::string title_m;
@@ -657,7 +692,8 @@ public:
     // On Boost 1.76+, choose storage based on estimated dense memory usage:
     // weight_storage (dense) when it fits within the threshold; sparse_storage<weighted_sum<>>
     // otherwise.  Dense gives O(1) fills; sparse uses memory proportional to filled bins only.
-    const bool useSparse = estimateDenseMemoryBytes(nbins_m, nSlots_m, 16) > kDenseMemoryThresholdBytes;
+    const bool useSparse = fillInfo.forceSparse ||
+        estimateDenseMemoryBytes(nbins_m, nSlots_m, 16) > kDenseMemoryThresholdBytes;
     if (!useSparse) {
       auto& denseVec = fPerThreadHists.emplace<std::vector<BH5DDense>>();
       denseVec.reserve(nSlots_m);
@@ -950,6 +986,7 @@ public:
         fFinalResult->SetBinContent(globalBin, content);
         fFinalResult->SetBinError2(globalBin, variance);
       }
+      hists.clear();
     };
 
 #if BOOST_VERSION >= 107600
@@ -1033,9 +1070,11 @@ public:
    * @param upperBound Upper bound of the histogram.
    */
   histInfo(const char name[], const char variable[], const char label[],
-           const char weight[], int bins, float lowerBound, float upperBound)
+           const char weight[], int bins, float lowerBound, float upperBound,
+           std::vector<Double_t> binEdges = {}, bool forceSparse = false)
       : name_m(name), variable_m(variable), label_m(label), weight_m(weight),
-        bins_m(bins), lowerBound_m(lowerBound), upperBound_m(upperBound) {}
+        bins_m(bins), lowerBound_m(lowerBound), upperBound_m(upperBound),
+        binEdges_m(std::move(binEdges)), forceSparse_m(forceSparse) {}
 
   /**
    * @brief Get the name of the histogram.
@@ -1079,6 +1118,14 @@ public:
    */
   constexpr const float &upperBound() const { return (upperBound_m); }
 
+  /** @brief Get optional explicit edges for a variable-width axis. */
+  constexpr const std::vector<Double_t> &binEdges() const {
+    return (binEdges_m);
+  }
+
+  /// Force sparse ROOT accumulation for a histogram with low expected occupancy.
+  constexpr bool forceSparse() const { return forceSparse_m; }
+
 private:
   /** @brief Name of the histogram. */
   const std::string name_m;
@@ -1094,6 +1141,9 @@ private:
   const float lowerBound_m;
   /** @brief Upper bound of the histogram. */
   const float upperBound_m;
+  /** @brief Optional variable-width edges for the histogram axis. */
+  const std::vector<Double_t> binEdges_m;
+  const bool forceSparse_m;
 };
 
 /**

@@ -46,11 +46,22 @@ namespace cms {
 
 namespace detail {
 
-/// Return correctionlib JEC compound inputs in schema order. DATA compounds
-/// include a fifth run-number input; MC compounds end after rho.
+/// Convert the default MC compound to its DATA counterpart for data samples.
+/// Explicit CmsCorrectionConfig compound overrides are used verbatim instead.
+std::string jecCompoundForSample(const std::string &defaultCompound, bool isData);
+
+/// Legacy JEC input layout, optionally including phi and a data run number.
 std::vector<std::string> jecCompoundInputColumns(bool isData,
                                                  const std::string &rawPtColumn,
-                                                 const std::string &rhoBranch);
+                                                 const std::string &rhoBranch,
+                                                 const std::string &collectionPrefix = "Jet",
+                                                 bool includePhi = false);
+
+/// Map the payload's ordered input names to dataframe columns. Phi and run
+/// are included only when requested by the actual compound schema.
+std::vector<std::string> jecCompoundInputColumns(
+    const std::vector<std::string> &schemaInputs, const std::string &rawPtColumn,
+    const std::string &rhoBranch, const std::string &collectionPrefix = "Jet");
 
 } // namespace detail
 
@@ -95,6 +106,14 @@ struct CmsCorrectionConfig {
   bool applyBtagCorrections = false;
   bool applyCtagCorrections = false;
   bool applyTauCorrections = false;      ///< Tau energy scale corrections
+
+  // -- Systematic variation flags (used when SystematicManager is enabled) --
+  /// Register JES source variations in addition to nominal jet corrections.
+  bool applyJesSystematics = true;
+  /// Register AK4/AK8 JER up/down variations; nominal smearing is unaffected.
+  bool applyJerSystematics = true;
+  /// Register electron and muon scale/resolution variations; nominal corrections are unaffected.
+  bool applyLeptonScaleSmearSystematics = true;
 
   // -- Max JES workflow slots (for the JetEnergyScaleManager) --
   size_t maxJesSlots = 12;

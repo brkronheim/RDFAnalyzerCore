@@ -558,11 +558,15 @@ configuration and executor setup.
 
 ### Parallel file discovery
 
-The Prepare tasks run as law LocalWorkflows with one branch per sample.
-Set `--workers N` to discover files for up to N samples in parallel:
+File-discovery tasks run as law LocalWorkflows with one branch per sample.
+Set `--workers N` to discover files for up to N samples in parallel. The
+subsequent `PrepareSkimJobs` task writes independent job configs and redirector
+maps with a bounded four-thread pool by default; tune it with
+`--prepare-workers N` (or use `1` for serial preparation):
 
 ```bash
-law run PrepareSkimJobs --workers 8 --file-source rucio [other params]
+law run PrepareSkimJobs \
+  --workers 8 --prepare-workers 4 --file-source rucio [other params]
 ```
 
 ---

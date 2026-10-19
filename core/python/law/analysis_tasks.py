@@ -149,6 +149,7 @@ import sys
 import tarfile
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
@@ -172,6 +173,7 @@ for _p in (_HERE, _CORE_PYTHON):
         sys.path.insert(0, _p)
 
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
+from extract_nd_histograms import extract_nd_histograms  # noqa: E402
 from dataset_manifest import (  # noqa: E402
     DatasetManifest,
     DatasetEntry,
@@ -188,6 +190,7 @@ from derivation_correctionlib import (  # noqa: E402
 )
 from stitching_plotting import plot_ratio_comparison as _plot_ratio_comparison  # noqa: E402
 from submission_backend import (  # noqa: E402
+    ensure_condor_machine_exclusion,
     ensure_xrootd_redirector,
     get_copy_file_list,
     read_config,
@@ -231,6 +234,8 @@ _MC_GENERATOR_CONFIG_KEYS = (
     "genWeightPdfBranch",
     "genWeightEnableLheScale",
     "genWeightEnablePs",
+    "genWeightEnableIsr",
+    "genWeightEnableFsr",
     "genWeightEnablePdf",
     "genWeightEnablePdfAs",
 )
@@ -480,16 +485,20 @@ def _ensure_local_analysis_runtime_layout(
     config_dict: dict[str, str],
     destination_dir: str,
     include_aux: bool = True,
+    payload_sources: Optional[list[str]] = None,
 ) -> None:
     """Populate local job directories with referenced cfg/ and aux payloads."""
     cfg_dir = os.path.join(destination_dir, "cfg")
     Path(cfg_dir).mkdir(parents=True, exist_ok=True)
 
-    for src in _analysis_config_payload_sources(
-        template_config_path,
-        config_dict,
-        staged_config_dir=destination_dir,
-    ):
+    sources = payload_sources
+    if sources is None:
+        sources = _analysis_config_payload_sources(
+            template_config_path,
+            config_dict,
+            staged_config_dir=destination_dir,
+        )
+    for src in sources:
         dst = os.path.join(cfg_dir, os.path.basename(src))
         _symlink_or_copy_path(src, dst)
 
@@ -540,15 +549,17 @@ def _build_shared_inputs_archive(shared_dir: str, archive_path: str) -> str:
 def _normalize_shared_config_references(
     template_config_path: str,
     job_config: dict[str, str],
+    staged_payload_names: Optional[set[str]] = None,
 ) -> None:
     """Rewrite referenced payload files to the runtime cfg/ layout."""
-    staged_payloads = set()
-    for path_value in get_copy_file_list(job_config):
-        if not path_value:
-            continue
-        source_path = _resolve_analysis_config_path(template_config_path, path_value)
-        if os.path.isfile(source_path):
-            staged_payloads.add(os.path.basename(source_path))
+    staged_payloads = set(staged_payload_names or set())
+    if staged_payload_names is None:
+        for path_value in get_copy_file_list(job_config):
+            if not path_value:
+                continue
+            source_path = _resolve_analysis_config_path(template_config_path, path_value)
+            if os.path.isfile(source_path):
+                staged_payloads.add(os.path.basename(source_path))
     for key, val in list(job_config.items()):
         if key.startswith("__"):
             continue
@@ -907,7 +918,8 @@ def _root_file_tree_error(path: str, tree_name: Optional[str]) -> Optional[str]:
         return "output path is not configured"
 
     is_url = path.startswith("root://")
-    if not is_url:
+    is_remote_storage_path = path.startswith(("/eos/", "/store/"))
+    if not is_url and not is_remote_storage_path:
         try:
             if not os.path.isfile(path):
                 return "file is absent or is not a regular file"
@@ -916,9 +928,13 @@ def _root_file_tree_error(path: str, tree_name: Optional[str]) -> Optional[str]:
         except OSError as exc:
             return f"file is unreadable: {exc}"
 
-    open_paths = [path]
-    if path.startswith("/store/") or path.startswith("/eos/"):
-        open_paths.append(ensure_xrootd_redirector(path, "root://eosuser.cern.ch/"))
+    open_paths = [
+        ensure_xrootd_redirector(path, "root://eosuser.cern.ch/")
+        if is_url or is_remote_storage_path
+        else path
+    ]
+    if is_remote_storage_path:
+        open_paths.insert(0, path)
 
     errors: list[str] = []
     try:
@@ -1299,6 +1315,7 @@ Log    = {log_base}/{resub_label}.log
 queue 1
 """
 
+    sub_content = ensure_condor_machine_exclusion(sub_content)
     submit_filename = (
         f"resub_job{job_index}.sub"
         if log_label is None
@@ -1606,15 +1623,22 @@ def _read_histogram_config_entries(config_path: str) -> list[dict[str, str]]:
     return entries
 
 
-def _read_root_histogram_names(meta_file: str) -> list[str]:
-    """Return deduplicated histogram names found recursively in *meta_file*."""
-    if not meta_file or not os.path.isfile(meta_file):
-        return []
+def _read_root_histogram_metadata(
+    meta_file: str,
+) -> tuple[list[str], Optional[dict[str, Any]]]:
+    """Read histogram keys and any embedded sparse-first schema."""
+    if not meta_file:
+        return [], None
+    is_remote_path = meta_file.startswith(
+        ("root://", "xroot://", "/eos/", "/store/")
+    )
+    if not is_remote_path and not os.path.isfile(meta_file):
+        return [], None
 
     try:
         import uproot  # type: ignore
     except ImportError:
-        return []
+        return [], None
 
     names: list[str] = []
     seen: set[str] = set()
@@ -1641,40 +1665,85 @@ def _read_root_histogram_names(meta_file: str) -> list[str]:
                 names.append(full_name)
                 seen.add(full_name)
 
-    with uproot.open(meta_file) as root_file:
+    open_path = meta_file
+    if meta_file.startswith(("root://", "/eos/", "/store/")):
+        remote_open_path = ensure_xrootd_redirector(
+            meta_file, "root://eosuser.cern.ch/"
+        )
+        if meta_file.startswith("root://") or not os.path.isfile(meta_file):
+            open_path = remote_open_path
+    with uproot.open(open_path) as root_file:
+        try:
+            embedded = json.loads(str(root_file["__rdf_histogram_schema_v1"]))
+        except KeyError:
+            embedded = None
+        if isinstance(embedded, dict) and isinstance(
+            embedded.get("histograms"), list
+        ):
+            directory = embedded.get("directory", "nd_histograms_v1")
+            names = [
+                f"{directory}/{entry['key']}"
+                for entry in embedded["histograms"]
+                if isinstance(entry, dict) and isinstance(entry.get("key"), str)
+            ]
+            return names, embedded
         _visit(root_file)
-    return names
+    return names, None
+
+
+def _read_root_histogram_names(meta_file: str) -> list[str]:
+    """Return deduplicated histogram names found recursively in *meta_file*."""
+    return _read_root_histogram_metadata(meta_file)[0]
 
 
 def _histogram_axis_labels_from_entries(
     entries: list[dict[str, str]],
     histogram_names: list[str],
+    embedded_schema: Optional[dict[str, Any]] = None,
 ) -> dict[str, list[str]]:
     """Build axis-label metadata from parsed histogram config entries."""
     axis_labels: dict[str, list[str]] = {}
-    if not entries:
-        return axis_labels
+    if embedded_schema and isinstance(embedded_schema.get("histograms"), list):
+        for histogram in embedded_schema["histograms"]:
+            if not isinstance(histogram, dict):
+                continue
+            for axis in histogram.get("axes", []):
+                if not isinstance(axis, dict):
+                    continue
+                role = axis.get("role")
+                labels = axis.get("labels")
+                if (
+                    isinstance(role, str)
+                    and isinstance(labels, list)
+                    and labels
+                    and role not in axis_labels
+                ):
+                    axis_labels[role] = labels
 
-    first = entries[0]
-    for role, key in (
-        ("channel", "channelRegions"),
-        ("control", "controlRegionRegions"),
-        ("sample", "sampleCategoryRegions"),
-    ):
-        raw = first.get(key, "")
-        labels = [label.strip() for label in raw.split(",") if label.strip()]
-        if labels:
-            axis_labels[role] = labels
+    if entries:
+        first = entries[0]
+        for role, key in (
+            ("channel", "channelRegions"),
+            ("control", "controlRegionRegions"),
+            ("sample", "sampleCategoryRegions"),
+        ):
+            if role in axis_labels:
+                continue
+            raw = first.get(key, "")
+            labels = [label.strip() for label in raw.split(",") if label.strip()]
+            if labels:
+                axis_labels[role] = labels
 
-    systematic_labels = sorted(
-        {
-            match.group(1)
-            for name in histogram_names
-            for match in [re.search(r"_(.+(?:Up|Down))$", name)]
-            if match
-        }
-    )
-    axis_labels["systematic"] = ["Nominal"] + systematic_labels
+    if "systematic" not in axis_labels:
+        systematic_labels = sorted(
+            {
+                match.group(1)
+                for name in histogram_names
+                for match in [re.search(r"_(.+(?:Up|Down))$", name)]
+                if match
+            }
+        )
+        axis_labels["systematic"] = ["Nominal"] + systematic_labels
     return axis_labels
 
 
@@ -1936,8 +2005,12 @@ def _build_histfill_manifest(
         job_config.get("histogramConfig", ""),
     )
     histogram_entries = _read_histogram_config_entries(histogram_config_path)
-    histogram_names = _read_root_histogram_names(meta_file)
-    axis_labels = _histogram_axis_labels_from_entries(histogram_entries, histogram_names)
+    histogram_names, embedded_histogram_schema = _read_root_histogram_metadata(
+        meta_file
+    )
+    axis_labels = _histogram_axis_labels_from_entries(
+        histogram_entries, histogram_names, embedded_histogram_schema
+    )
 
     sample_metadata = _initial_sample_metadata(dataset)
     _augment_sample_metadata_with_axis_labels(sample_metadata, axis_labels)
@@ -2233,16 +2306,27 @@ def _resolve_output_destination_base(
     config_dict: dict[str, str],
     output_directory: str = "",
 ) -> str:
-    """Resolve the configured final saveDirectory for staged skim outputs."""
+    """Resolve an EOS/XRootD destination for staged HTCondor skim outputs."""
     save_dir = str(
         output_directory or config_dict.get("saveDirectory", "") or ""
     ).strip()
     if not save_dir:
         return ""
-    if save_dir.startswith("root://") or os.path.isabs(save_dir):
+    if (
+        save_dir.startswith("root://")
+        or save_dir.startswith("/eos/")
+    ):
         return save_dir
-    template_dir = os.path.dirname(os.path.abspath(template_config_path))
-    return os.path.abspath(os.path.join(template_dir, save_dir))
+    if os.path.isabs(save_dir):
+        resolved_save_dir = save_dir
+    else:
+        template_dir = os.path.dirname(os.path.abspath(template_config_path))
+        resolved_save_dir = os.path.abspath(os.path.join(template_dir, save_dir))
+    raise RuntimeError(
+        "HTCondor stage-out requires an EOS destination (/eos/...) or an explicit "
+        f"root:// URL; saveDirectory {save_dir!r} resolves to local path "
+        f"{resolved_save_dir!r}. Pass --output-directory with a remote destination."
+    )
 
 
 def _rewrite_job_output_destinations(config_path: str, final_output_dir: str) -> None:
@@ -2284,6 +2368,8 @@ def _write_job_config(
     manifest_lumi: Optional[float] = None,
     extra_overrides: Optional[dict[str, str]] = None,
     stage_shared_inputs_locally: bool = True,
+    template_config: Optional[dict[str, str]] = None,
+    runtime_payload_sources: Optional[list[str]] = None,
 ) -> None:
     """Create a ``submit_config.txt`` inside *job_dir* for *dataset*.
 
@@ -2311,7 +2397,8 @@ def _write_job_config(
     extra_overrides:
         Additional key-value overrides applied after the standard ones.
     """
-    template_config = read_config(template_config_path)
+    if template_config is None:
+        template_config = read_config(template_config_path)
     template_dir = os.path.dirname(os.path.abspath(template_config_path))
 
     job_config = dict(template_config)
@@ -2399,8 +2486,17 @@ def _write_job_config(
             job_config,
             job_dir,
             include_aux=False,
+            payload_sources=runtime_payload_sources,
         )
-        _normalize_shared_config_references(template_config_path, job_config)
+        _normalize_shared_config_references(
+            template_config_path,
+            job_config,
+            staged_payload_names=(
+                {os.path.basename(src) for src in runtime_payload_sources}
+                if runtime_payload_sources is not None
+                else None
+            ),
+        )
 
     # ---- write the final config file ----------------------------------------
     config_path = os.path.join(job_dir, "submit_config.txt")
@@ -2496,11 +2592,13 @@ def _plan_file_source_jobs(
     entries_per_job: int,
     jobs_dir: str,
     outputs_dir: str,
+    manifest: Optional[DatasetManifest] = None,
 ) -> list[dict[str, object]]:
     """Build deterministic per-job metadata from file-list JSON outputs."""
     job_plans: list[dict[str, object]] = []
     missing_datasets: list[str] = []
-    manifest = DatasetManifest.load(dataset_manifest_path)
+    if manifest is None:
+        manifest = DatasetManifest.load(dataset_manifest_path)
 
     for json_path in sorted(Path(file_list_dir).glob("*.json")):
         if json_path.name.endswith(".perf.json"):
@@ -2693,6 +2791,14 @@ class SkimMixin:
             "Requires uproot.  Ignored for 'file_group' and 'file' modes."
         ),
     )
+    prepare_workers = luigi.IntParameter(
+        default=4,
+        significant=False,
+        description=(
+            "Maximum number of threads used to prepare independent per-job "
+            "directories and configs (default: 4)."
+        ),
+    )
 
     # ---- worker environment -----------------------------------------------
 
@@ -2750,10 +2856,10 @@ class SkimMixin:
     make_test_job = luigi.BoolParameter(
         default=True,
         description=(
-            "If True (default), run a single-file local test job before dispatching "
-            "the full SkimTask workflow.  This catches analysis runtime errors early "
-            "before submitting potentially hundreds of jobs.  Set --no-make-test-job "
-            "to skip the test and submit immediately."
+            "If True (default), run one-file local preflight jobs for each available "
+            "data and MC sample type before dispatching the full SkimTask workflow. "
+            "This catches sample-specific runtime errors before batch submission. "
+            "Set --no-make-test-job to skip the preflight and submit immediately."
         ),
     )
     stitch_mode = luigi.Parameter(
@@ -2794,6 +2900,11 @@ class SkimMixin:
         default=3600,
         significant=False,
         description="Maximum HTCondor job runtime in seconds (default: 3600).",
+    )
+    request_memory = luigi.IntParameter(
+        default=2000,
+        significant=False,
+        description="HTCondor memory request per job in MB (default: 2000).",
     )
 
     # ---- derived helpers --------------------------------------------------
@@ -2865,9 +2976,15 @@ class SkimMixin:
         """Directory for the local pre-submission test job."""
         return os.path.join(self._run_dir, "test_job")
 
+    @property
+    def _test_jobs_manifest_path(self) -> str:
+        """Manifest of per-dtype configurations used by the local preflight."""
+        return os.path.join(self._test_job_dir, "test_jobs.json")
+
     def _prepare_skim_jobs_requirement(self):
         return PrepareSkimJobs.req(
             self,
+            prepare_workers=self.prepare_workers,
             stitch_mode=self.stitch_mode,
             stitch_weights=self.stitch_weights,
         )
@@ -3001,6 +3118,8 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             return False
 
         test_config_path = os.path.join(self._test_job_dir, "submit_config.txt")
+        if self.make_test_job and not os.path.isfile(self._test_jobs_manifest_path):
+            return False
         if self.make_test_job and os.path.isfile(test_config_path):
             staged_exe_paths.append(
                 os.path.join(self._test_job_dir, self._exe_relpath)
@@ -3023,8 +3142,88 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 f"Analysis executable not found: {exe_path!r}. "
                 "Build the analysis before running PrepareSkimJobs."
             )
+        if self.prepare_workers < 1:
+            raise ValueError("--prepare-workers must be at least 1")
+
+        manifest = DatasetManifest.load(self.dataset_manifest)
+        template_config = read_config(self.submit_config)
+        base_extra_overrides = _stitch_job_overrides(self)
+
+        # These references depend on the template, optional stitching override,
+        # and whether generator-only settings are removed for data. Resolve them
+        # once per dtype instead of rescanning the config paths for every job.
+        runtime_payload_sources_by_dtype: dict[str, list[str]] = {}
+        dataset_dtypes = {
+            str(entry.dtype or "mc").lower() for entry in manifest.datasets
+        } | {"mc"}
+        for dtype in dataset_dtypes:
+            config_for_dtype = dict(template_config)
+            config_for_dtype["dtype"] = dtype
+            _remove_mc_generator_config_for_data(config_for_dtype)
+            config_for_dtype.update(base_extra_overrides)
+            runtime_payload_sources_by_dtype[dtype] = _analysis_config_payload_sources(
+                self.submit_config, config_for_dtype
+            )
+
+        def write_job_entry(
+            *,
+            dataset: DatasetEntry,
+            job_dir: str,
+            out_dir: str,
+            manifest_lumi: Optional[float],
+            extra_overrides: dict[str, str],
+            site_redirectors: dict,
+        ) -> dict[str, str]:
+            dtype = str(dataset.dtype or "mc").lower()
+            runtime_payload_sources = runtime_payload_sources_by_dtype.get(
+                dtype, runtime_payload_sources_by_dtype["mc"]
+            )
+            _write_job_config(
+                job_dir=job_dir,
+                template_config_path=self.submit_config,
+                dataset=dataset,
+                output_dir=out_dir,
+                manifest_lumi=manifest_lumi,
+                extra_overrides=extra_overrides,
+                stage_shared_inputs_locally=False,
+                template_config=template_config,
+                runtime_payload_sources=runtime_payload_sources,
+            )
+
+            # Write the per-job site redirector list so Condor workers can
+            # probe replicas from all available sites.
+            with open(os.path.join(job_dir, "site_redirectors.json"), "w") as sr_fh:
+                json.dump(site_redirectors, sr_fh)
+
+            return {
+                "dataset_name": dataset.name,
+                "job_dir": job_dir,
+                "config_path": os.path.join(job_dir, "submit_config.txt"),
+                "out_dir": out_dir,
+            }
+
+        def prepare_in_parallel(items, prepare_one) -> list[dict[str, str]]:
+            if not items:
+                return []
+
+            worker_count = min(self.prepare_workers, len(items))
+            prepared: list[dict[str, str]] = []
+            start_time = time.monotonic()
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                for count, job_entry in enumerate(
+                    executor.map(prepare_one, items), start=1
+                ):
+                    prepared.append(job_entry)
+                    if count % 500 == 0 or count == len(items):
+                        elapsed = time.monotonic() - start_time
+                        self.publish_message(
+                            f"PrepareSkimJobs: prepared {count}/{len(items)} job "
+                            f"configs in {elapsed:.1f}s ({worker_count} thread(s))."
+                        )
+            return prepared
 
         # ---- set up shared_inputs/ ----------------------------------------
+        shared_inputs_start = time.monotonic()
         shared_dir = self._shared_dir
         Path(shared_dir).mkdir(parents=True, exist_ok=True)
 
@@ -3060,11 +3259,13 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             shutil.copy2(python_env_src, os.path.join(shared_dir, tarball_name))
 
         # Bundle shared configs and aux once for remote worker materialization.
-        if os.path.isfile(self.submit_config):
-            template_config = read_config(self.submit_config)
-            _bundle_analysis_config_files(self.submit_config, template_config, shared_dir)
-            _bundle_analysis_aux_dir(self.submit_config, shared_dir)
+        _bundle_analysis_config_files(self.submit_config, template_config, shared_dir)
+        _bundle_analysis_aux_dir(self.submit_config, shared_dir)
         _build_shared_inputs_archive(shared_dir, self._shared_archive_path)
+        self.publish_message(
+            "PrepareSkimJobs: shared inputs and archive ready in "
+            f"{time.monotonic() - shared_inputs_start:.1f}s."
+        )
 
         # ---- determine datasets and file groups ---------------------------
         job_entries: list = []
@@ -3079,6 +3280,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     f"--name {self.file_source_name!r} ..."
                 )
 
+            planning_start = time.monotonic()
             planned_jobs = _plan_file_source_jobs(
                 dataset_manifest_path=self.dataset_manifest,
                 file_list_dir=fl_dir,
@@ -3087,15 +3289,21 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 entries_per_job=self.entries_per_job,
                 jobs_dir=self._jobs_dir,
                 outputs_dir=self._outputs_dir,
+                manifest=manifest,
+            )
+            self.publish_message(
+                f"PrepareSkimJobs: planned {len(planned_jobs)} job(s) in "
+                f"{time.monotonic() - planning_start:.1f}s."
             )
 
-            for plan in planned_jobs:
+            manifest_entries = {entry.name: entry for entry in manifest.datasets}
+
+            def prepare_file_source_plan(plan: dict[str, object]) -> dict[str, str]:
                 job_dir = str(plan["job_dir"])
                 out_dir = str(plan["out_dir"])
                 dataset_name = str(plan["dataset_name"])
-                Path(job_dir).mkdir(parents=True, exist_ok=True)
 
-                manifest_entry = _find_dataset_entry(self.dataset_manifest, dataset_name)
+                manifest_entry = manifest_entries.get(dataset_name)
                 if manifest_entry is not None:
                     transient = DatasetEntry.from_dict(manifest_entry.to_dict())
                     transient.files = [
@@ -3115,76 +3323,44 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         dtype=str(plan["dtype"]),
                     )
 
-                extra_overrides = _stitch_job_overrides(self)
+                extra_overrides = dict(base_extra_overrides)
                 if int(plan.get("last_entry", 0)) > 0:
                     extra_overrides["firstEntry"] = str(plan["first_entry"])
                     extra_overrides["lastEntry"] = str(plan["last_entry"])
 
-
-                _write_job_config(
-                    job_dir=job_dir,
-                    template_config_path=self.submit_config,
+                manifest_lumi = (
+                    float(plan["lumi"])
+                    if plan.get("lumi") is not None
+                    else manifest.lumi_for(transient.year, transient.era)
+                )
+                return write_job_entry(
                     dataset=transient,
-                    output_dir=out_dir,
-                    manifest_lumi=(
-                        float(plan["lumi"])
-                        if plan.get("lumi") is not None
-                        else _manifest_lumi_for_dataset(self.dataset_manifest, transient)
-                    ),
+                    job_dir=job_dir,
+                    out_dir=out_dir,
+                    manifest_lumi=manifest_lumi,
                     extra_overrides=extra_overrides,
-                    stage_shared_inputs_locally=False,
-                )
-                _ensure_local_analysis_runtime_layout(
-                    self.submit_config,
-                    read_config(os.path.join(job_dir, "submit_config.txt")),
-                    job_dir,
+                    site_redirectors=plan.get("site_redirectors", {}),
                 )
 
-                # Write the per-job site redirector list so Condor workers
-                # can probe all available sites instead of only the generic
-                # CMS_REDIRECTORS.
-                job_site_redirectors = plan.get("site_redirectors", {})
-                with open(os.path.join(job_dir, "site_redirectors.json"), "w") as sr_fh:
-                    json.dump(job_site_redirectors, sr_fh)
-
-                job_entries.append({
-                    "dataset_name": dataset_name,
-                    "job_dir": job_dir,
-                    "config_path": os.path.join(job_dir, "submit_config.txt"),
-                    "out_dir": out_dir,
-                })
+            job_entries = prepare_in_parallel(planned_jobs, prepare_file_source_plan)
 
         else:
             # Standard manifest mode: one job dir per dataset entry
-            manifest = DatasetManifest.load(self.dataset_manifest)
-            for entry in manifest.datasets:
+            def prepare_manifest_entry(entry: DatasetEntry) -> dict[str, str]:
                 job_dir = os.path.join(self._jobs_dir, entry.name)
-                Path(job_dir).mkdir(parents=True, exist_ok=True)
                 out_dir = os.path.join(self._outputs_dir, entry.name)
-                _write_job_config(
-                    job_dir=job_dir,
-                    template_config_path=self.submit_config,
+                return write_job_entry(
                     dataset=entry,
-                    output_dir=out_dir,
+                    job_dir=job_dir,
+                    out_dir=out_dir,
                     manifest_lumi=manifest.lumi_for(entry.year, entry.era),
-                    extra_overrides=_stitch_job_overrides(self),
-                    stage_shared_inputs_locally=False,
+                    extra_overrides=dict(base_extra_overrides),
+                    site_redirectors={},
                 )
-                _ensure_local_analysis_runtime_layout(
-                    self.submit_config,
-                    read_config(os.path.join(job_dir, "submit_config.txt")),
-                    job_dir,
-                )
-                # Write empty site_redirectors.json so Condor transfer works
-                # consistently; workers fall back to CMS_REDIRECTORS when empty.
-                with open(os.path.join(job_dir, "site_redirectors.json"), "w") as sr_fh:
-                    json.dump({}, sr_fh)
-                job_entries.append({
-                    "dataset_name": entry.name,
-                    "job_dir": job_dir,
-                    "config_path": os.path.join(job_dir, "submit_config.txt"),
-                    "out_dir": out_dir,
-                })
+
+            job_entries = prepare_in_parallel(
+                manifest.datasets, prepare_manifest_entry
+            )
 
         # ---- write the branch-map manifest --------------------------------
         Path(self._run_dir).mkdir(parents=True, exist_ok=True)
@@ -3196,19 +3372,18 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             f"  shared_inputs/ ready at {shared_dir}"
         )
 
-        # ---- create local test job (one file) for pre-flight validation -----
-        if self.make_test_job and job_entries:
+        # ---- create local sample-type preflight configs --------------------
+        if self.make_test_job:
             self._create_test_job(exe_path, job_entries)
 
         with open(self._prepared_config_hash_path, "w") as hash_fh:
             hash_fh.write(self._submit_config_hash() + "\n")
 
     def _create_test_job(self, exe_path: str, job_entries: list) -> None:
-        """Create a minimal single-file ``test_job/`` directory for pre-flight testing.
+        """Create one local test configuration for each available data/MC type.
 
-        The first available input file from the first job entry is used.  The test
-        job writes outputs to ``test_job/`` itself (not EOS/shared storage) so that
-        it runs entirely locally without staging.
+        Each test uses the first available file from one representative prepared
+        job. Outputs are written under ``test_job/`` rather than to remote storage.
 
         Parameters
         ----------
@@ -3223,24 +3398,38 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
 
         exe_relpath = self._exe_relpath
 
-        # Find the first input file from the first job entry
-        first_file = ""
-        first_job_dir = ""
+        # Keep one representative input job for every sample type that has a
+        # prepared file. This checks both the data and MC configuration paths
+        # when both are present in the manifest.
+        candidates: dict[str, dict[str, Any]] = {}
         for entry in job_entries:
             jcfg_path = os.path.join(entry["job_dir"], "submit_config.txt")
             if os.path.exists(jcfg_path):
                 jcfg = read_config(jcfg_path)
                 file_list = jcfg.get("__orig_fileList", jcfg.get("fileList", ""))
-                if file_list:
-                    first_file = file_list.split(",")[0].strip()
-                    first_job_dir = entry["job_dir"]
-                    break
+                if not file_list:
+                    continue
+                dtype = str(jcfg.get("dtype", "")).strip().lower()
+                if dtype not in {"data", "mc"}:
+                    dtype = "other"
+                candidates.setdefault(
+                    dtype,
+                    {
+                        "entry": entry,
+                        "config": jcfg,
+                        "input": file_list.split(",")[0].strip(),
+                    },
+                )
 
-        if not first_file:
-            self.publish_message(
-                "Warning: no input files found in job entries; test job not created."
+        if not candidates:
+            raise RuntimeError(
+                "Cannot create the requested preflight: no prepared job has an input file."
             )
-            return
+
+        test_types = [dtype for dtype in ("data", "mc") if dtype in candidates]
+        if not test_types:
+            test_types = [next(iter(candidates))]
+        test_jobs = []
 
         # Copy the analysis executable into the test job dir
         dst_exe = os.path.join(test_dir, exe_relpath)
@@ -3270,7 +3459,8 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             )
             _copy_analysis_aux_dir(self.submit_config, test_dir)
 
-        # Reuse floats.txt / ints.txt from the first job dir if available
+        # Reuse floats.txt / ints.txt from the first selected job if available.
+        first_job_dir = candidates[test_types[0]]["entry"]["job_dir"]
         for aux_name in ("floats.txt", "ints.txt"):
             src = os.path.join(first_job_dir, aux_name)
             if os.path.exists(src):
@@ -3278,79 +3468,88 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 if not os.path.exists(dst):
                     shutil.copy2(src, dst)
 
-        # Build a minimal submit config: single file, local outputs, single thread
-        #if os.path.isfile(self.submit_config):
-        #    test_config = dict(read_config(self.submit_config))
-        #else:
-        #    test_config = {}
-        import copy
-        test_config = copy.deepcopy(template_config)
-        test_config.update(jcfg)
-        _remove_mc_generator_config_for_data(test_config)
-        test_config["fileList"] = _select_test_input_url(first_file, first_job_dir)
-        test_config["saveFile"] = "test_output.root"
-        test_config["metaFile"] = "test_output_meta.root"
-        test_config["saveDirectory"] = test_dir
-        test_config.setdefault("threads", "1")
-        # Remove any stage-out sentinel keys
-        for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
-            test_config.pop(key, None)
+        for dtype in test_types:
+            candidate = candidates[dtype]
+            job_dir = candidate["entry"]["job_dir"]
+            test_config = dict(template_config)
+            test_config.update(candidate["config"])
+            _remove_mc_generator_config_for_data(test_config)
+            test_config["fileList"] = _select_test_input_url(
+                candidate["input"], job_dir
+            )
+            test_config["saveFile"] = f"test_output_{dtype}.root"
+            test_config["metaFile"] = f"test_output_{dtype}_meta.root"
+            test_config["saveDirectory"] = test_dir
+            test_config["threads"] = "1"
+            for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
+                test_config.pop(key, None)
 
-        if os.path.isfile(self.submit_config):
-            _ensure_local_analysis_runtime_layout(
-                self.submit_config,
-                test_config,
-                test_dir,
+            if os.path.isfile(self.submit_config):
+                _ensure_local_analysis_runtime_layout(
+                    self.submit_config,
+                    test_config,
+                    test_dir,
+                )
+
+            for key, value in list(test_config.items()):
+                if key.startswith("__") or not isinstance(value, str):
+                    continue
+                if value.endswith((".txt", ".yaml", ".yml", ".json", ".json.gz", ".onnx")):
+                    basename = os.path.basename(value)
+                    cfg_path = os.path.join(test_dir, "cfg", basename)
+                    if os.path.exists(cfg_path):
+                        test_config[key] = os.path.join("cfg", basename)
+                    elif os.path.exists(os.path.join(test_dir, basename)):
+                        test_config[key] = basename
+
+            config_name = f"submit_config_{dtype}.txt"
+            config_path = os.path.join(test_dir, config_name)
+            _write_config_file(config_path, test_config)
+            test_jobs.append(
+                {
+                    "dtype": dtype,
+                    "dataset": str(candidate["entry"].get("dataset_name", "")),
+                    "config": config_name,
+                    "input": test_config["fileList"],
+                    "config_sha256": hashlib.sha256(
+                        Path(config_path).read_bytes()
+                    ).hexdigest(),
+                }
             )
 
-        # Resolve config-file references to their basenames (files are already copied)
-        for key, val in list(test_config.items()):
-            if key.startswith("__"):
-                continue
-            if isinstance(val, str) and (
-                val.endswith(".txt")
-                or val.endswith(".yaml")
-                or val.endswith(".yml")
-                or val.endswith(".json")
-                or val.endswith(".json.gz")
-                or val.endswith(".onnx")
-            ):
-                basename = os.path.basename(val)
-                cfg_path = os.path.join(test_dir, "cfg", basename)
-                if os.path.exists(cfg_path):
-                    test_config[key] = os.path.join("cfg", basename)
-                    continue
-                if os.path.exists(os.path.join(test_dir, basename)):
-                    test_config[key] = basename
-
-        _write_config_file(os.path.join(test_dir, "submit_config.txt"), test_config)
+        # Keep the historic config filename for manual inspection and older
+        # tooling; RunSkimTestJob uses the explicit per-type manifest above.
+        primary_config = os.path.join(test_dir, test_jobs[0]["config"])
+        shutil.copy2(primary_config, os.path.join(test_dir, "submit_config.txt"))
+        with open(self._test_jobs_manifest_path, "w", encoding="utf-8") as manifest_fh:
+            json.dump({"schema_version": 1, "jobs": test_jobs}, manifest_fh, indent=2)
 
         self.publish_message(
-            f"[PrepareSkimJobs] Test job created in {test_dir}/\n"
-            f"  Input file: {test_config['fileList']}\n"
-            f"  Run manually with:  cd {test_dir} && ./{exe_relpath} submit_config.txt"
+            f"[PrepareSkimJobs] Test jobs created in {test_dir}/ for "
+            f"{', '.join(test_types)}.\n"
+            f"  Inputs: "
+            + "; ".join(f"{job['dataset']} ({job['dtype']}): {job['input']}" for job in test_jobs)
         )
 
 
 # ===========================================================================
-# RunSkimTestJob – pre-flight single-file local test
+# RunSkimTestJob – pre-flight data/MC local tests
 # ===========================================================================
 
 class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
-    """Run a single-file local test before dispatching the full :class:`SkimTask`.
+    """Run one-file data and MC preflights before dispatching :class:`SkimTask`.
 
-    This task mirrors the test job functionality in earlier workflow versions.  It
-    runs the analysis executable with a single input file and validates the exit
-    code, catching analysis runtime errors **before** expensive batch or
-    multi-dataset dispatch.
+    This task runs the analysis executable once per available sample type,
+    using one input file each for data and MC when both are present. It validates
+    each exit code before expensive batch or multi-dataset dispatch.
 
     In **file-source mode** (``--file-source`` set) the test job directory is
     prepared by :class:`PrepareSkimJobs`, which is declared as a formal LAW
     prerequisite.
 
     In **standard manifest mode** (``--file-source`` empty) the task creates the
-    test job directory itself using the first file from the first dataset entry in
-    the manifest.
+    test job directory itself using the first file from one data and one MC entry
+    when both types are present in the manifest.
 
     Output
     ------
@@ -3375,7 +3574,7 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
         )
 
     def complete(self):
-        """Require a passing marker for the currently staged executable."""
+        """Require passing preflight markers for every configured sample type."""
         if not super().complete():
             return False
 
@@ -3384,6 +3583,26 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
         if not _staged_copy_is_current(exe_path, staged_exe):
             return False
         try:
+            with open(self._test_jobs_manifest_path, encoding="utf-8") as jobs_fh:
+                jobs_manifest = json.load(jobs_fh)
+            if (
+                not isinstance(jobs_manifest, dict)
+                or jobs_manifest.get("schema_version") != 1
+                or not isinstance(jobs_manifest.get("jobs"), list)
+            ):
+                return False
+            manifest_hash = hashlib.sha256(
+                Path(self._test_jobs_manifest_path).read_bytes()
+            ).hexdigest()
+            expected_types = sorted(
+                {
+                    str(job.get("dtype", "")).lower()
+                    for job in jobs_manifest.get("jobs", [])
+                    if isinstance(job, dict) and job.get("dtype")
+                }
+            )
+            if not expected_types:
+                return False
             exe_stat = os.stat(exe_path)
             with open(self.output().path) as marker_fh:
                 marker = {}
@@ -3391,11 +3610,14 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
                     key, sep, value = line.strip().partition("=")
                     if sep:
                         marker[key] = value
-        except OSError:
+        except (OSError, json.JSONDecodeError):
             return False
         try:
             return (
                 marker.get("status") == "passed"
+                and marker.get("test_schema_version") == "2"
+                and sorted(marker.get("test_types", "").split(",")) == expected_types
+                and marker.get("test_jobs_sha256") == manifest_hash
                 and int(marker.get("exe_size", "-1")) == exe_stat.st_size
                 and int(marker.get("exe_mtime_ns", "-1")) == exe_stat.st_mtime_ns
             )
@@ -3447,24 +3669,36 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
 
     def run(self):
         test_dir = self._test_job_dir
-
-        if not os.path.isdir(test_dir):
-            # Standard manifest mode: PrepareSkimJobs did not create the test_job/
-            # dir because no file-source mode was used.  Build it from scratch.
+        if not os.path.isfile(self._test_jobs_manifest_path):
+            if self.file_source:
+                raise RuntimeError(
+                    f"Preflight job manifest is missing: {self._test_jobs_manifest_path}. "
+                    "PrepareSkimJobs must create one test per available data/MC type."
+                )
+            # Standard manifest mode has no PrepareSkimJobs dependency, so
+            # create the local preflight configs directly from its manifest.
             self._prepare_standard_test_job(test_dir)
 
-        config_path = os.path.join(test_dir, "submit_config.txt")
-        if not os.path.isfile(config_path):
+        try:
+            with open(self._test_jobs_manifest_path, encoding="utf-8") as jobs_fh:
+                jobs_manifest = json.load(jobs_fh)
+        except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(
-                f"Test job config not found: {config_path!r}. "
-                "Ensure PrepareSkimJobs has completed (file-source mode) or "
-                "that the dataset manifest contains at least one dataset with files."
+                f"Could not read preflight job manifest: {self._test_jobs_manifest_path}"
+            ) from exc
+        if (
+            not isinstance(jobs_manifest, dict)
+            or jobs_manifest.get("schema_version") != 1
+        ):
+            raise RuntimeError(
+                f"Invalid preflight job manifest: {self._test_jobs_manifest_path}"
             )
-
-        test_config = read_config(config_path)
-        _remove_mc_generator_config_for_data(test_config)
-        _write_config_file(config_path, test_config)
-        self._refresh_test_input_url(config_path)
+        test_jobs = jobs_manifest.get("jobs")
+        if not isinstance(test_jobs, list) or not test_jobs:
+            raise RuntimeError(
+                f"No preflight inputs were recorded in {self._test_jobs_manifest_path}. "
+                "Ensure the manifest has at least one available data or MC sample."
+            )
 
         exe_relpath = self._exe_relpath
         exe_in_test = os.path.join(test_dir, exe_relpath)
@@ -3484,38 +3718,67 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
             )
 
         self.publish_message(
-            f"[RunSkimTestJob] Running single-file test in {test_dir} …"
+            f"[RunSkimTestJob] Running {len(test_jobs)} sample-type preflight job(s) "
+            f"in {test_dir} …"
         )
 
         with PerformanceRecorder("RunSkimTestJob") as rec:
-            result = _run_analysis_job(
-                exe_path=exe_in_test,
-                job_dir=test_dir,
-                root_setup=self._root_setup_content,
-                container_setup="",
-                stream_output=_stream_analysis_output(),
-                worker_number=0,
-            )
+            results = []
+            tested_types = []
+            tested_samples = []
+            for test_job in test_jobs:
+                if not isinstance(test_job, dict):
+                    raise RuntimeError("Invalid preflight job record")
+                config_name = str(test_job.get("config", ""))
+                config_path = os.path.join(test_dir, config_name)
+                if not config_name or not os.path.isfile(config_path):
+                    raise RuntimeError(f"Preflight config not found: {config_path!r}")
+                test_config = read_config(config_path)
+                _remove_mc_generator_config_for_data(test_config)
+                _write_config_file(config_path, test_config)
+                self._refresh_test_input_url(config_path)
+                dtype = str(test_job.get("dtype", "unknown")).lower()
+                sample = str(test_job.get("dataset", "unknown"))
+                self.publish_message(
+                    f"[RunSkimTestJob] Testing {dtype} sample {sample} …"
+                )
+                result = _run_analysis_job(
+                    exe_path=exe_in_test,
+                    job_dir=test_dir,
+                    root_setup=self._root_setup_content,
+                    container_setup="",
+                    config_relpath=config_name,
+                    stream_output=_stream_analysis_output(),
+                    worker_number=0,
+                )
+                results.append(result)
+                tested_types.append(dtype)
+                tested_samples.append(sample)
         rec.save(os.path.join(test_dir, "test_job.perf.json"))
 
         self.publish_message(
-            f"[RunSkimTestJob] Test passed: {result}"
+            f"[RunSkimTestJob] Preflight passed for {', '.join(tested_types)}: "
+            f"{'; '.join(results)}"
         )
 
         exe_stat = os.stat(current_exe)
         with self.output().open("w") as fh:
             fh.write(
                 f"status=passed\n"
+                f"test_schema_version=2\n"
+                f"test_types={','.join(sorted(tested_types))}\n"
+                f"test_samples={','.join(tested_samples)}\n"
+                f"test_jobs_sha256={hashlib.sha256(Path(self._test_jobs_manifest_path).read_bytes()).hexdigest()}\n"
                 f"exe_size={exe_stat.st_size}\n"
                 f"exe_mtime_ns={exe_stat.st_mtime_ns}\n"
-                f"{result}\n"
+                f"{';'.join(results)}\n"
             )
 
     def _prepare_standard_test_job(self, test_dir: str) -> None:
         """Create a minimal test job directory in standard (non-file-source) mode.
 
-        Reads the first dataset from the manifest, takes the first file, copies
-        the executable and config files, and writes a minimal ``submit_config.txt``.
+        Selects one dataset with files for each available data/MC type, then
+        writes a minimal config for every selected one.
         """
         exe_path = os.path.abspath(self.exe)
         if not os.path.isfile(exe_path):
@@ -3525,23 +3788,29 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
             )
 
         manifest = DatasetManifest.load(self.dataset_manifest)
-        first_dataset = next(iter(manifest.datasets), None)
-        if first_dataset is None:
+        if not manifest.datasets:
             raise RuntimeError(
                 f"Dataset manifest '{self.dataset_manifest}' contains no datasets."
             )
 
-        first_file = ""
-        if first_dataset.files:
-            first_file = first_dataset.files[0]
-        elif first_dataset.das:
-            first_file = first_dataset.das
+        candidates: dict[str, tuple[Any, str]] = {}
+        for dataset in manifest.datasets:
+            first_file = dataset.files[0] if dataset.files else dataset.das
+            if not first_file:
+                continue
+            dtype = str(dataset.dtype or "").strip().lower()
+            if dtype not in {"data", "mc"}:
+                dtype = "other"
+            candidates.setdefault(dtype, (dataset, str(first_file)))
 
-        if not first_file:
+        if not candidates:
             raise RuntimeError(
-                f"Dataset '{first_dataset.name}' has no files or DAS path; "
-                "cannot create a test job."
+                f"Dataset manifest '{self.dataset_manifest}' has no dataset with "
+                "a file or DAS identifier for preflight."
             )
+        test_types = [dtype for dtype in ("data", "mc") if dtype in candidates]
+        if not test_types:
+            test_types = [next(iter(candidates))]
 
         Path(test_dir).mkdir(parents=True, exist_ok=True)
 
@@ -3563,57 +3832,72 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
             template_config = read_config(self.submit_config)
             _copy_analysis_config_files(self.submit_config, template_config, test_dir)
             _copy_analysis_aux_dir(self.submit_config, test_dir)
-            test_config = dict(template_config)
         else:
-            test_config = {}
+            template_config = {}
 
-        # Override dataset-specific keys
-        test_config["fileList"] = first_file
-        test_config["saveFile"] = "test_output.root"
-        test_config["metaFile"] = "test_output_meta.root"
-        test_config["saveDirectory"] = test_dir
-        test_config.update(_dataset_job_metadata(first_dataset))
-        test_config["lumi"] = str(
-            manifest.lumi_for(first_dataset.year, first_dataset.era)
-        )
-        _remove_mc_generator_config_for_data(test_config)
-        test_config.setdefault("threads", "1")
-        for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
-            test_config.pop(key, None)
+        test_jobs = []
+        for dtype in test_types:
+            dataset, first_file = candidates[dtype]
+            test_config = dict(template_config)
+            test_config.update(_dataset_job_metadata(dataset))
+            test_config["fileList"] = first_file
+            test_config["saveFile"] = f"test_output_{dtype}.root"
+            test_config["metaFile"] = f"test_output_{dtype}_meta.root"
+            test_config["saveDirectory"] = test_dir
+            test_config["lumi"] = str(
+                manifest.lumi_for(dataset.year, dataset.era)
+            )
+            test_config["threads"] = "1"
+            _remove_mc_generator_config_for_data(test_config)
+            for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
+                test_config.pop(key, None)
 
-        if os.path.isfile(self.submit_config):
-            _ensure_local_analysis_runtime_layout(
-                self.submit_config,
-                test_config,
-                test_dir,
+            if os.path.isfile(self.submit_config):
+                _ensure_local_analysis_runtime_layout(
+                    self.submit_config,
+                    test_config,
+                    test_dir,
+                )
+
+            for key, value in list(test_config.items()):
+                if key.startswith("__") or not isinstance(value, str):
+                    continue
+                if value.endswith((".txt", ".yaml", ".yml", ".json", ".json.gz", ".onnx")):
+                    basename = os.path.basename(value)
+                    cfg_path = os.path.join(test_dir, "cfg", basename)
+                    if os.path.exists(cfg_path):
+                        test_config[key] = os.path.join("cfg", basename)
+                    elif os.path.exists(os.path.join(test_dir, basename)):
+                        test_config[key] = basename
+
+            config_name = f"submit_config_{dtype}.txt"
+            config_path = os.path.join(test_dir, config_name)
+            _write_config_file(config_path, test_config)
+            test_jobs.append(
+                {
+                    "dtype": dtype,
+                    "dataset": dataset.name,
+                    "config": config_name,
+                    "input": first_file,
+                    "config_sha256": hashlib.sha256(
+                        Path(config_path).read_bytes()
+                    ).hexdigest(),
+                }
             )
 
-        # Resolve referenced config files to basenames
-        for key, val in list(test_config.items()):
-            if key.startswith("__"):
-                continue
-            if isinstance(val, str) and (
-                val.endswith(".txt")
-                or val.endswith(".yaml")
-                or val.endswith(".yml")
-                or val.endswith(".onnx")
-            ):
-                basename = os.path.basename(val)
-                cfg_path = os.path.join(test_dir, "cfg", basename)
-                if os.path.exists(cfg_path):
-                    test_config[key] = os.path.join("cfg", basename)
-                    continue
-                if os.path.exists(os.path.join(test_dir, basename)):
-                    test_config[key] = basename
-
-        with open(os.path.join(test_dir, "submit_config.txt"), "w") as fh:
-            for k, v in test_config.items():
-                if not k.startswith("__"):
-                    fh.write(f"{k}={v}\n")
+        primary_config = os.path.join(test_dir, test_jobs[0]["config"])
+        shutil.copy2(primary_config, os.path.join(test_dir, "submit_config.txt"))
+        with open(self._test_jobs_manifest_path, "w", encoding="utf-8") as manifest_fh:
+            json.dump({"schema_version": 1, "jobs": test_jobs}, manifest_fh, indent=2)
 
         self.publish_message(
-            f"[RunSkimTestJob] Test job prepared in {test_dir}/\n"
-            f"  First dataset: {first_dataset.name}, input: {first_file}"
+            f"[RunSkimTestJob] Test jobs prepared in {test_dir}/ for "
+            f"{', '.join(test_types)}.\n"
+            f"  Inputs: "
+            + "; ".join(
+                f"{job['dataset']} ({job['dtype']}): {job['input']}"
+                for job in test_jobs
+            )
         )
 
 
@@ -3753,7 +4037,7 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 root_setup=self._root_setup_content,
                 x509loc=None,
                 max_runtime=str(self.max_runtime),
-                request_memory=2000,
+                request_memory=self.request_memory,
                 request_cpus=1,
                 request_disk=20000,
                 extra_transfer_files=submission_transfer_files,
@@ -3904,7 +4188,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         return law.LocalFileTarget(self._normalization_path)
 
     def complete(self):
-        """Require every persisted job artifact and normalization record to validate."""
+        """Require completed jobs, listed output paths, and normalization records."""
         if not super().complete() or not os.path.isfile(self._normalization_path):
             return False
 
@@ -3943,6 +4227,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
 
             manifest = DatasetManifest.load(self.dataset_manifest)
             checked_jobs = 0
+            expected_output_paths: list[str] = []
             for dataset_name, dataset_state in dataset_states.items():
                 dataset = manifest.by_name(dataset_name)
                 norm_record = normalization_datasets[dataset_name]
@@ -4000,18 +4285,18 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         if job_state.get("job_dir")
                         else _config_enables_skim(self.submit_config)
                     )
-                    errors = _skim_job_output_errors(
-                        dataset_name=dataset_name,
-                        dtype=dataset.dtype,
-                        save_path=str(job_state.get("save", "")),
-                        meta_path=str(job_state.get("meta", "")),
-                        tree_name=str(job_state.get("tree_name", "Events")),
-                        require_skim=require_skim,
-                    )
-                    if errors:
+                    output_roles = ("save", "meta") if require_skim else ("meta",)
+                    job_output_paths = [
+                        str(job_state.get(role, "")) for role in output_roles
+                    ]
+                    if any(not path for path in job_output_paths):
                         return False
+                    expected_output_paths.extend(job_output_paths)
                     checked_jobs += 1
 
+            outputs_exist = _output_files_exist_batch(expected_output_paths)
+            if not all(outputs_exist.get(path, False) for path in expected_output_paths):
+                return False
             return checked_jobs == total
         except Exception:  # completion checks fail closed on corrupt persisted records
             return False
@@ -4191,6 +4476,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 for proc, exit_code in _condor_history_exit(cluster_id).items():
                     history_exit[(cluster_id, proc)] = exit_code
 
+            successful_jobs: dict[tuple[str, int], tuple[dict, tuple[str, ...]]] = {}
             output_paths_to_check: list[str] = []
             for dataset_name, job_info in dataset_job_info.items():
                 dataset_state = state["datasets"][dataset_name]
@@ -4198,35 +4484,32 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     job_state = dataset_state["jobs"][str(idx)]
                     if job_state["status"] == "perm_fail":
                         continue
-                    cluster_id = str(job_state["cluster"])
-                    proc = job_state["proc"]
-                    if live_status.get((cluster_id, proc)) is None:
+                    if job_state["status"] == "done":
+                        info = job_info[idx]
                         job_config = os.path.join(
-                            str(job_info[idx].get("dir", "")), "submit_config.txt"
+                            str(info.get("dir", "")), "submit_config.txt"
                         )
                         require_skim = (
                             _config_enables_skim(job_config)
                             if os.path.isfile(job_config)
                             else _config_enables_skim(self.submit_config)
                         )
-                        if require_skim and job_info[idx]["save"]:
-                            output_paths_to_check.append(job_info[idx]["save"])
-                        if job_info[idx]["meta"]:
-                            output_paths_to_check.append(job_info[idx]["meta"])
-            output_exists = _output_files_exist_batch(output_paths_to_check)
-            output_errors: dict[tuple[str, int], list[str]] = {}
-            for dataset_name, job_info in dataset_job_info.items():
-                dataset = manifest.by_name(dataset_name)
-                for idx, info in job_info.items():
-                    job_state = state["datasets"][dataset_name]["jobs"][str(idx)]
-                    if job_state["status"] == "perm_fail":
+                        output_roles = ("save", "meta") if require_skim else ("meta",)
+                        successful_jobs[(dataset_name, idx)] = (info, output_roles)
+                        output_paths_to_check.extend(
+                            str(info.get(role, ""))
+                            for role in output_roles
+                            if info.get(role)
+                        )
                         continue
                     cluster_id = str(job_state["cluster"])
                     proc = job_state["proc"]
                     if live_status.get((cluster_id, proc)) is not None:
                         continue
+                    if history_exit.get((cluster_id, proc)) != 0:
+                        continue
 
-                    errors: list[str] = []
+                    info = job_info[idx]
                     job_config = os.path.join(
                         str(info.get("dir", "")), "submit_config.txt"
                     )
@@ -4235,28 +4518,29 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         if os.path.isfile(job_config)
                         else _config_enables_skim(self.submit_config)
                     )
-                    for role in (("save", "meta") if require_skim else ("meta",)):
-                        path = str(info.get(role, ""))
-                        if not path:
-                            errors.append(f"{role} output path is not configured")
-                        elif not output_exists.get(path, False):
-                            errors.append(f"{role} output {path!r} is absent or unreadable")
-                    if dataset is None:
-                        errors.append(
-                            f"dataset {dataset_name!r} is missing from the dataset manifest"
-                        )
-                    elif not errors:
-                        errors.extend(
-                            _skim_job_output_errors(
-                                dataset_name=dataset_name,
-                                dtype=dataset.dtype,
-                                save_path=str(info.get("save", "")),
-                                meta_path=str(info.get("meta", "")),
-                                tree_name=str(info.get("tree_name", "Events")),
-                                require_skim=require_skim,
-                            )
-                        )
-                    output_errors[(dataset_name, idx)] = errors
+                    output_roles = ("save", "meta") if require_skim else ("meta",)
+                    successful_jobs[(dataset_name, idx)] = (info, output_roles)
+                    output_paths_to_check.extend(
+                        str(info.get(role, ""))
+                        for role in output_roles
+                        if info.get(role)
+                    )
+            output_exists = _output_files_exist_batch(output_paths_to_check)
+            output_errors: dict[tuple[str, int], list[str]] = {}
+            for (dataset_name, idx), (info, output_roles) in successful_jobs.items():
+                dataset = manifest.by_name(dataset_name)
+                errors: list[str] = []
+                for role in output_roles:
+                    path = str(info.get(role, ""))
+                    if not path:
+                        errors.append(f"{role} output path is not configured")
+                    elif not output_exists.get(path, False):
+                        errors.append(f"{role} output {path!r} is absent or unreadable")
+                if dataset is None:
+                    errors.append(
+                        f"dataset {dataset_name!r} is missing from the dataset manifest"
+                    )
+                output_errors[(dataset_name, idx)] = errors
 
             for dataset_name, job_info in dataset_job_info.items():
                 dataset_state = state["datasets"][dataset_name]
@@ -4272,6 +4556,20 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
 
                     condor_status = live_status.get((cluster_id, proc))
                     exit_code = history_exit.get((cluster_id, proc))
+
+                    if status == "done":
+                        errors = output_errors.get((dataset_name, idx), [])
+                        if errors:
+                            self._try_resubmit(
+                                dataset_name,
+                                idx,
+                                dataset_state,
+                                job_state,
+                                reason="; ".join(errors),
+                                job_info=job_info,
+                                monitor_state=state,
+                            )
+                        continue
 
                     if condor_status == 2:
                         condor_ad = live_ads.get((cluster_id, proc), {})
@@ -4341,20 +4639,15 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         )
                         continue
 
-                    if condor_status is None:
+                    if condor_status is None and exit_code == 0:
                         errors = output_errors.get((dataset_name, idx), [])
                         if not errors:
                             job_state["status"] = "done"
                             self.publish_message(
-                                f"[{dataset_name}] Job {idx}: skim, metadata, and "
-                                "normalization artifacts verified."
+                                f"[{dataset_name}] Job {idx}: successful exit and "
+                                "expected output paths verified."
                             )
                         else:
-                            if status == "done":
-                                self.publish_message(
-                                    f"[{dataset_name}] Job {idx}: previously verified "
-                                    "outputs are now invalid."
-                                )
                             self._try_resubmit(
                                 dataset_name,
                                 idx,
@@ -4477,7 +4770,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 idx,
                 submission_dir,
                 self.max_runtime,
-                2000,
+                self.request_memory,
                 extra_transfer_files=list(dataset_state.get("shared_transfer_files", [])),
                 config_file="submit_config.txt",
                 source_job_dir=part_info.get("dir") or source_job_dir,
@@ -4601,7 +4894,14 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
         getattr(law.LocalWorkflow, "exclude_params_branch", set())
         | getattr(SkimHTCondorWorkflow, "exclude_params_branch", set())
         | getattr(DaskWorkflow, "exclude_params_branch", set())
-        | {"dask_scheduler", "dask_workers", "max_runtime", "make_test_job"}
+        | {
+            "dask_scheduler",
+            "dask_workers",
+            "max_runtime",
+            "request_memory",
+            "make_test_job",
+            "prepare_workers",
+        }
     )
     cache_branch_map_default = False
     reset_branch_map_before_run = True
@@ -7496,6 +7796,12 @@ class CollectHistogramsTask(law.Task):
                 f"hadd failed (exit {result.returncode}):\n"
                 f"stdout: {result.stdout}\nstderr: {result.stderr}"
             )
+
+        # Older workflows may collect histogram-bearing skim files directly.
+        # Sparse-first files need the same post-hadd reconstruction as the
+        # manifest-driven MergeHistograms task; ordinary skim files are left
+        # unchanged.
+        extract_nd_histograms(merged_path, merged_path, required=False)
 
         self.publish_message(
             f"CollectHistogramsTask: merged histogram written to {merged_path}"

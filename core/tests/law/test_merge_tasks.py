@@ -627,6 +627,7 @@ class TestMergeHistogramsTask(unittest.TestCase):
 
             task = mod.MergeHistograms(name="r", input_dir=tmpdir, output_dir=out_dir)
             with patch.object(mod, "_run_hadd") as mock_hadd, \
+                 patch.object(mod, "read_embedded_histogram_schema", return_value=None), \
                  patch.object(task, "publish_message", return_value=None):
                 def fake_hadd(out_path, in_paths):
                     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -636,6 +637,54 @@ class TestMergeHistogramsTask(unittest.TestCase):
 
             self.assertTrue(os.path.isfile(task.output().path))
             mock_hadd.assert_called_once()
+
+    def test_sparse_histograms_are_extracted_after_hadd(self):
+        mod = self._import()
+        uproot = __import__("uproot")
+        schema = {
+            "schema_version": 1,
+            "directory": "nd_histograms_v1",
+            "histograms": [
+                {
+                    "key": "pt__nominal",
+                    "name": "h_pt",
+                    "variable": "pt",
+                    "label": "Jet pT",
+                    "axes": [
+                        {"role": "channel", "bins": 1, "labels": ["signal"], "edges": [0, 1]},
+                        {"role": "control", "bins": 1, "labels": ["default"], "edges": [0, 1]},
+                        {"role": "sample", "bins": 1, "labels": ["inclusive"], "edges": [0, 1]},
+                        {"role": "systematic", "bins": 1, "labels": ["Nominal"], "edges": [0, 1]},
+                        {"role": "observable", "bins": 1, "labels": [], "edges": [0, 1]},
+                    ],
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = os.path.join(tmpdir, "output")
+            for i in range(2):
+                job_dir = os.path.join(tmpdir, f"job_{i}")
+                _make_histogram_manifest(job_dir)
+                with uproot.recreate(os.path.join(job_dir, "histograms.root")) as root_file:
+                    root_file["__rdf_histogram_schema_v1"] = json.dumps(schema)
+
+            task = mod.MergeHistograms(name="r", input_dir=tmpdir, output_dir=out_dir)
+            with patch.object(mod, "_run_hadd") as mock_hadd, \
+                 patch.object(mod, "extract_nd_histograms") as mock_extract, \
+                 patch.object(task, "publish_message", return_value=None):
+                def fake_hadd(out_path, in_paths):
+                    with uproot.recreate(out_path) as root_file:
+                        root_file["__rdf_histogram_schema_v1"] = json.dumps(schema)
+
+                mock_hadd.side_effect = fake_hadd
+                task.run()
+
+            mock_hadd.assert_called_once()
+            mock_extract.assert_called_once_with(
+                os.path.join(out_dir, "histograms.root"),
+                os.path.join(out_dir, "histograms.root"),
+            )
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)

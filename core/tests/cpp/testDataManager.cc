@@ -294,6 +294,149 @@ TEST_F(DataManagerTest, DefineVectorCreatesVectorColumn) {
   });
 }
 
+TEST_F(DataManagerTest, DefineVectorRepeatedScalarsPreserveOrderAndEventValues) {
+  DataManager local(3);
+  local.Define("x", [](ULong64_t entry) { return double(entry) + 0.5; },
+               {"rdfentry_"}, *systematicManager);
+  local.Define("y", [](ULong64_t entry) { return int(entry) + 10; },
+               {"rdfentry_"}, *systematicManager);
+  local.DefineVectorNominal("repeated", {"x", "y", "x", "x", "y"},
+                            "Float_t", *systematicManager);
+  const auto values = local.getDataFrame()
+                          .Take<ROOT::VecOps::RVec<Float_t>>("repeated").GetValue();
+  ASSERT_EQ(values.size(), 3u);
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    const ROOT::VecOps::RVec<Float_t> expected{
+        float(i) + 0.5f, float(i) + 10.f, float(i) + 0.5f,
+        float(i) + 0.5f, float(i) + 10.f};
+    EXPECT_EQ(std::vector<Float_t>(values[i].begin(), values[i].end()),
+              std::vector<Float_t>(expected.begin(), expected.end()));
+  }
+}
+
+TEST_F(DataManagerTest, WidePackingCreatesOneColumnAndPreservesInputOrder) {
+  DataManager local(3);
+  std::vector<std::string> inputs;
+  for (int i = 0; i < 96; ++i) {
+    const auto name = "input_" + std::to_string(i);
+    local.Define(name, [i](ULong64_t entry) { return i + .25f * entry; },
+                 {"rdfentry_"}, *systematicManager);
+    inputs.push_back(name);
+  }
+  // Exercise repeated dependencies and nontrivial requested ordering too.
+  inputs.push_back(inputs[3]);
+  std::reverse(inputs.begin(), inputs.end());
+  const auto before = local.getDataFrame().GetColumnNames().size();
+  local.DefineVectorNominal("wide", inputs, "float", *systematicManager);
+  EXPECT_EQ(local.getDataFrame().GetColumnNames().size(), before + 1);
+  const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<float>>("wide").GetValue();
+  ASSERT_EQ(values.size(), 3u);
+  for (std::size_t entry = 0; entry < values.size(); ++entry) {
+    ASSERT_EQ(values[entry].size(), inputs.size());
+    for (std::size_t i = 0; i < inputs.size(); ++i)
+      EXPECT_FLOAT_EQ(values[entry][i], std::stoi(inputs[i].substr(6)) + .25f * entry);
+  }
+}
+
+TEST_F(DataManagerTest, CachedPackingBindsNewColumnNamesAndPreservesNumericTypes) {
+  for (const std::string prefix : {"first_", "second_"}) {
+    DataManager local(2);
+    local.Define(prefix + "x", [](ULong64_t entry) { return double(entry) + .125; },
+                 {"rdfentry_"}, *systematicManager);
+    local.Define(prefix + "i", []() { return 7; }, {}, *systematicManager);
+    local.Define(prefix + "b", []() { return true; }, {}, *systematicManager);
+    local.Define(prefix + "wide", []() { return ULong64_t{9007199254740993ULL}; }, {}, *systematicManager);
+    local.DefineVectorNominal(prefix + "packed", {prefix + "x", prefix + "i", prefix + "b", prefix + "x"},
+                              "double", *systematicManager);
+    local.DefineVectorNominal(prefix + "integers", {prefix + "wide", prefix + "i"},
+                              "ULong64_t", *systematicManager);
+    const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<double>>(prefix + "packed").GetValue();
+    ASSERT_EQ(values.size(), 2u);
+    for (std::size_t entry = 0; entry < values.size(); ++entry) {
+      const ROOT::VecOps::RVec<double> expected{entry + .125, 7, 1, entry + .125};
+      EXPECT_EQ(std::vector<double>(values[entry].begin(), values[entry].end()),
+                std::vector<double>(expected.begin(), expected.end()));
+    }
+    const auto integers = local.getDataFrame().Take<ROOT::VecOps::RVec<ULong64_t>>(prefix + "integers").GetValue();
+    EXPECT_EQ(integers.front()[0], 9007199254740993ULL);
+    EXPECT_EQ(integers.front()[1], 7u);
+  }
+}
+
+TEST_F(DataManagerTest, VectorPackingConcatenatesRepeatedAndEmptyVectorsPerEvent) {
+  DataManager local(3);
+  local.Define("a", [](ULong64_t entry) { return ROOT::VecOps::RVec<int>(entry, int(entry)); },
+               {"rdfentry_"}, *systematicManager);
+  local.Define("b", []() { return ROOT::VecOps::RVec<double>{.5}; }, {}, *systematicManager);
+  local.Define("empty", []() { return ROOT::VecOps::RVec<bool>{}; }, {}, *systematicManager);
+  const auto before = local.getDataFrame().GetColumnNames().size();
+  local.DefineVectorNominal("packed", {"a", "empty", "b", "a"}, "double", *systematicManager);
+  EXPECT_EQ(local.getDataFrame().GetColumnNames().size(), before + 1);
+  const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<double>>("packed").GetValue();
+  for (std::size_t entry = 0; entry < values.size(); ++entry) {
+    std::vector<double> expected(entry, double(entry));
+    expected.push_back(.5);
+    expected.insert(expected.end(), entry, double(entry));
+    EXPECT_EQ(std::vector<double>(values[entry].begin(), values[entry].end()), expected);
+  }
+}
+
+TEST_F(DataManagerTest, PackedBooleansAndRuntimeNumericTypesUseDirectCasts) {
+  DataManager local(1);
+  local.Define("extended", []() { return long{123456789}; }, {}, *systematicManager);
+  local.Define("zero", []() { return 0; }, {}, *systematicManager);
+  local.Define("negative", []() { return -2; }, {}, *systematicManager);
+  local.DefineVectorNominal("numeric", {"extended", "negative"}, "double", *systematicManager);
+  local.DefineVectorNominal("bits", {"zero", "negative", "zero"}, "Bool_t", *systematicManager);
+  const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<double>>("numeric").GetValue();
+  EXPECT_DOUBLE_EQ(values.front()[0], 123456789);
+  EXPECT_DOUBLE_EQ(values.front()[1], -2);
+  const auto bits = local.getDataFrame().Take<ROOT::VecOps::RVec<bool>>("bits").GetValue();
+  EXPECT_FALSE(bits.front()[0]);
+  EXPECT_TRUE(bits.front()[1]);
+  EXPECT_FALSE(bits.front()[2]);
+}
+
+TEST_F(DataManagerTest, PackedVectorsEvaluateIndependentlyAcrossRdfSlots) {
+  struct DisablePoolOnExit {
+    ~DisablePoolOnExit() { ROOT::DisableImplicitMT(); }
+  } resetPool;
+  ROOT::EnableImplicitMT(2);
+  {
+    DataManager local(1000);
+    local.Define("entry", [](ULong64_t entry) { return double(entry); },
+                 {"rdfentry_"}, *systematicManager);
+    local.Define("twice", [](double entry) { return entry * 2; },
+                 {"entry"}, *systematicManager);
+    local.DefineVectorNominal("packed", {"entry", "twice", "entry"}, "double", *systematicManager);
+    const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<double>>("packed").GetValue();
+    ASSERT_EQ(values.size(), 1000u);
+    for (const auto &value : values) {
+      ASSERT_EQ(value.size(), 3u);
+      EXPECT_DOUBLE_EQ(value[1], 2 * value[0]);
+      EXPECT_DOUBLE_EQ(value[2], value[0]);
+    }
+  }
+}
+
+TEST_F(DataManagerTest, UnknownInterpreterInputFailsWithoutBreakingLaterPacking) {
+  DataManager local(1);
+  struct UnregisteredNumber {
+    operator double() const { return 3.125; }
+  };
+  local.Define("unknown", []() { return UnregisteredNumber{}; }, {}, *systematicManager);
+  local.Define("known", []() { return 2; }, {}, *systematicManager);
+  // This local C++ type has no interpreter declaration or ROOT dictionary.
+  ASSERT_NE(local.getDataFrame().GetColumnType("unknown").find("CLING_UNKNOWN_TYPE_"), std::string::npos);
+  EXPECT_THROW(local.DefineVectorNominal("bad", {"unknown", "known"}, "double", *systematicManager),
+               std::runtime_error);
+  local.DefineVectorNominal("good", {"known", "known"}, "int", *systematicManager);
+  const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<int>>("good").GetValue();
+  EXPECT_EQ(values.front().size(), 2u);
+  EXPECT_EQ(values.front()[0], 2);
+  EXPECT_EQ(values.front()[1], 2);
+}
+
 TEST_F(DataManagerTest, DefineVectorPropagatesPairedSystematicVariations) {
   DataManager localDataManager(5);
   localDataManager.Define("pt", []() { return 100.0f; }, {}, *systematicManager);
@@ -315,8 +458,11 @@ TEST_F(DataManagerTest, DefineVectorPropagatesPairedSystematicVariations) {
   systematicManager->registerVariationColumns("eta", "etaScale", "eta_scale_up",
                                                "eta_scale_down");
 
+  const auto beforePacking = localDataManager.getDataFrame().GetColumnNames().size();
   localDataManager.DefineVector("leptons", {"pt", "eta"}, "Float_t",
                                 *systematicManager);
+  // Nominal plus the two paired sources, each as one direct Define.
+  EXPECT_EQ(localDataManager.getDataFrame().GetColumnNames().size(), beforePacking + 5);
   localDataManager.Define(
       "lepton_pt_sum",
       [](const ROOT::VecOps::RVec<float> &values) { return values[0] + values[1]; },

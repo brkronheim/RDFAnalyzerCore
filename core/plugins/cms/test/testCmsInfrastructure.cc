@@ -116,7 +116,7 @@ TEST(CmsYearConfigTest, LoadReturnsCorrectDefaultsFor2023PostBPix) {
   auto s = registry.load();
 
   EXPECT_EQ(s.canonicalYear, "2023_postBPix");
-  EXPECT_EQ(s.electronYearToken, "2023_postBPix");
+  EXPECT_EQ(s.electronYearToken, "2023PromptD");
   EXPECT_EQ(s.electronCorrection, "Electron-ID-SF");
   EXPECT_TRUE(s.electronScaleSmearingEtDependent);
 

@@ -88,6 +88,34 @@ int main(int argc, char **argv) {
 }
 ```
 
+## Electron payload contracts
+
+Electron SF helpers require index-aligned `SelectedElectron_scEta` and
+`SelectedElectron_pt` vectors. They inspect the payload schema and additionally
+consume `SelectedElectron_phi` when it declares phi, as the 2023 payloads do.
+Year, variation, and working-point categories are checked during setup so an
+invalid configuration fails before processing events.
+
+| Correction era | Electron SF year token |
+| --- | --- |
+| 2022 pre-EE | `2022Re-recoBCD` |
+| 2022 post-EE | `2022Re-recoE+PromptFG` |
+| 2023 pre-BPix | `2023PromptC` |
+| 2023 post-BPix | `2023PromptD` |
+| 2024 | `2024Prompt` |
+
+Run 2 reconstruction uses `RecoBelow20` and `RecoAbove20`. Run 3 uses
+`RecoBelow20`, `Reco20to75`, and `RecoAbove75`; exactly 75 GeV selects
+`RecoAbove75`. Existing per-bin output column names remain available in Run 2,
+with both columns above 20 GeV evaluated using `RecoAbove20`.
+
+`electronScaleSmearingEtDependent` selects the Et-dependent scale/smear inputs
+and categories when true, or the standard `total_correction`, `rho`, and
+`err_rho` recipe when false. Override the payload file and correction names
+together to match the selected recipe. Standard smearing uncertainty shifts the
+width by `err_rho`, with the down width bounded at zero; both recipes reuse the
+same Gaussian draw for nominal and varied momenta.
+
 ## Quick Start
 
 For a standard CMS analysis, explicitly enable each correction and weight
@@ -154,7 +182,7 @@ void setupAnalysis(Analyzer &an, const std::string &year, bool isMC) {
 - ✅ **Pileup weights** — via `defineCmsPileupWeights()` with up/down systematics
 - ✅ **L1 prefiring weights** — reads NanoAOD `L1PreFiringWeight_*` branches for 2016/2017, unity for later years
 - ✅ **Muon ID + isolation SF** — custom TightMiniIso or POG TightPFIso fallback, systup/systdown
-- ✅ **Electron ID + reco SF** — per-pT bin (<20, 20–75, >75 GeV), up/down
+- ✅ **Electron ID + reco SF** — Run 2 bins (<20, ≥20 GeV), Run 3 bins (<20, [20,75), ≥75 GeV), up/down
 - ✅ **Tau ID SFs** — `defineCmsTauScaleFactors()`: DeepTau2018v2p5 VSjet/VSe/VSmu at Medium WP, nom/up/down. Run 2 UL and Run 3 2022–2024
 - ✅ **Photon ID SFs** — `defineCmsPhotonScaleFactors()`: Photon-ID-SF, CSEV, PixVeto at Medium WP. Run 3 2022–2025
 - ✅ **b-tag fixed-WP weight computation** — via `WorkingPointRecipe::defineFixedWorkingPointVariation()`, multiple WPs (L/M/T/XT/XXT), full systematic coverage (9 sources + JES)
@@ -366,11 +394,39 @@ that should include the component.
 | `applyFatJetCorrections` | `false` | AK8 JEC/JER, `fatJetEnergyScaleManager`, `CorrectedFatJetCollectionManager` |
 | `applyElectronCorrections` | `false` | Electron scale/smear, `ElectronEnergyScaleManager`, `CorrectedElectronCollectionManager` |
 | `applyMuonCorrections` | `false` | Muon scale/resolution (RoccoR), `MuonRochesterManager`, `CorrectedMuonCollectionManager` |
+| `applyJesSystematics` | `true` | Register the JES uncertainty sources selected by `jesMode`; nominal JEC remains applied |
+| `applyJerSystematics` | `true` | Register AK4/AK8 JER up/down variations; nominal JER remains applied |
+| `applyLeptonScaleSmearSystematics` | `true` | Register electron scale/smear and muon scale/resolution variations; nominal lepton corrections remain applied |
 | `applyBtagCorrections` | `false` | `TaggerWorkingPointManager` (btag) |
 | `applyCtagCorrections` | `false` | `TaggerWorkingPointManager` (ctag) |
 
 Pass a `CmsCorrectionConfig` to `setupCmsFrameworkPlugins()` to create only
-the plugin instances for enabled corrections.
+the plugin instances for enabled corrections. Systematic switches only register
+variations when the `SystematicManager` is enabled.
+
+Nominal AK4 and AK8 JEC use the era's DATA compound for data: the default
+`_MC_` token is replaced with `_DATA_`. This includes the DATA residual
+calibration. Compound inputs follow the payload schema, including `run` and
+`JetPhi` where required. An explicit AK4 `jesCompoundCorrectionOverride` is
+used verbatim. The chosen names are recorded as `cmsJecCompoundCorrection`
+and `cmsFatJetJecCompoundCorrection` (with the configured key prefix).
+
+AK4 JER supports both payload formats. A central SF with a string variation
+input uses its nominal/up/down categories. A central SF without that input
+requires the separate absolute uncertainty map for JER variations, giving
+`SF_up/down = SF_nominal +/- uncertainty`. Run 3 year defaults derive the map
+name by replacing `_ScaleFactor_` with `_SFUncertainty_` after registry
+overrides. `CmsYearSettings::jerScaleFactorUncertaintyCorrection` and
+`jerScaleFactorUncertaintyInputs` can be set through year YAML or registry
+overrides; the inputs default to `jerScaleFactorInputs`. A missing map fails
+setup when JER variations are enabled instead of silently producing identical
+shifts. Nominal smearing remains available when variations are disabled.
+Jet pT and mass variations propagate into Type-1 MET when enabled.
+
+Full JES mode loads the unregrouped per-source maps, removing `Regrouped_`
+from the default total correction name. Year suffixes remain on variation
+labels for correlations, but are omitted from full-source payload names.
+Reduced JES continues to use the regrouped maps and their payload year suffixes.
 
 ### Additional Configuration Fields
 

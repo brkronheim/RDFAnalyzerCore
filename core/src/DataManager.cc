@@ -5,7 +5,9 @@
 #include <DataManager.h>
 #include <InputCache.h>
 #include <TChain.h>
+#include <RDFColumnPacker.h>
 #include <cctype>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <util.h>
@@ -37,6 +39,19 @@ std::string removeWhitespace(std::string value) {
                              [](unsigned char c) { return std::isspace(c) != 0; }),
               value.end());
   return value;
+}
+
+bool isRemoteCondorJob() {
+  return std::getenv("CONDOR_PROC") != nullptr ||
+         std::getenv("CONDOR_CLUSTER") != nullptr ||
+         std::getenv("_CONDOR_SCRATCH_DIR") != nullptr;
+}
+
+bool isEnabledFlag(std::string value) {
+  value = removeWhitespace(std::move(value));
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return value == "true" || value == "1" || value == "yes" || value == "on";
 }
 
 float parseFloatConstant(const std::string& name, const std::string& value) {
@@ -130,34 +145,6 @@ DefineVectorTypeToken tokenizeDefineVectorType(const std::string &typeName) {
   return DefineVectorTypeToken::Unsupported;
 }
 
-std::string buildScalarDefineVectorExpression(
-    const std::vector<std::string> &columns, const std::string &type) {
-  std::string expr = "ROOT::VecOps::RVec<" + type + ">{";
-  for (size_t i = 0; i < columns.size(); ++i) {
-    expr += "static_cast<" + type + ">(" + columns[i] + ")";
-    if (i + 1 < columns.size()) {
-      expr += ", ";
-    }
-  }
-  expr += "}";
-  return expr;
-}
-
-std::string buildRVecDefineVectorExpression(
-    const std::vector<std::string> &columns, const std::string &type) {
-  std::string expr = "size_t total = 0;\n";
-  for (const auto &col : columns) {
-    expr += "total += " + col + ".size();\n";
-  }
-  expr += "ROOT::VecOps::RVec<" + type + "> out;\n";
-  expr += "out.reserve(total);\n";
-  for (const auto &col : columns) {
-    expr += "for (auto& x : " + col + ") out.push_back(static_cast<" + type + ">(x));\n";
-  }
-  expr += "return out;";
-  return expr;
-}
-
 template <typename TargetT, typename InputT>
 ROOT::RDF::RNode defineScalarVectorInit(ROOT::RDF::RNode df,
                                         const std::string &name,
@@ -171,20 +158,6 @@ ROOT::RDF::RNode defineScalarVectorInit(ROOT::RDF::RNode df,
 }
 
 template <typename TargetT, typename InputT>
-ROOT::RDF::RNode defineScalarVectorAppend(ROOT::RDF::RNode df,
-                                          const std::string &name,
-                                          const std::string &currentColumn,
-                                          const std::string &nextColumn) {
-  return df.Define(
-      name,
-      [](const ROOT::VecOps::RVec<TargetT> &existing,
-         InputT value) -> ROOT::VecOps::RVec<TargetT> {
-        return appendScalarCastToVector<TargetT>(existing, value);
-      },
-      {currentColumn, nextColumn});
-}
-
-template <typename TargetT, typename InputT>
 ROOT::RDF::RNode defineRVecVectorInit(ROOT::RDF::RNode df,
                                       const std::string &name,
                                       const std::string &column) {
@@ -194,20 +167,6 @@ ROOT::RDF::RNode defineRVecVectorInit(ROOT::RDF::RNode df,
         return castRVec<TargetT>(values);
       },
       {column});
-}
-
-template <typename TargetT, typename InputT>
-ROOT::RDF::RNode defineRVecVectorAppend(ROOT::RDF::RNode df,
-                                        const std::string &name,
-                                        const std::string &currentColumn,
-                                        const std::string &nextColumn) {
-  return df.Define(
-      name,
-      [](const ROOT::VecOps::RVec<TargetT> &existing,
-         const ROOT::VecOps::RVec<InputT> &values) -> ROOT::VecOps::RVec<TargetT> {
-        return concatenateCastRVec<TargetT>(existing, values);
-      },
-      {currentColumn, nextColumn});
 }
 
 template <typename TargetT>
@@ -255,42 +214,6 @@ ROOT::RDF::RNode dispatchScalarInit(ROOT::RDF::RNode df,
 }
 
 template <typename TargetT>
-ROOT::RDF::RNode dispatchScalarAppend(ROOT::RDF::RNode df,
-                                      const std::string &name,
-                                      const std::string &currentColumn,
-                                      const std::string &nextColumn,
-                                      DefineVectorTypeToken inputType) {
-  switch (inputType) {
-  case DefineVectorTypeToken::Bool:
-    return defineScalarVectorAppend<TargetT, Bool_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Float:
-    return defineScalarVectorAppend<TargetT, Float_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Double:
-    return defineScalarVectorAppend<TargetT, Double_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Int:
-    return defineScalarVectorAppend<TargetT, Int_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::UInt:
-    return defineScalarVectorAppend<TargetT, UInt_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Short:
-    return defineScalarVectorAppend<TargetT, Short_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::UShort:
-    return defineScalarVectorAppend<TargetT, UShort_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Char:
-    return defineScalarVectorAppend<TargetT, Char_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::UChar:
-    return defineScalarVectorAppend<TargetT, UChar_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Long64:
-    return defineScalarVectorAppend<TargetT, Long64_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::ULong64:
-    return defineScalarVectorAppend<TargetT, ULong64_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Unsupported:
-    throw std::runtime_error("DefineVector: unsupported scalar input type in compiled path.");
-  }
-
-  throw std::runtime_error("DefineVector: unreachable scalar append dispatch.");
-}
-
-template <typename TargetT>
 ROOT::RDF::RNode dispatchRVecInit(ROOT::RDF::RNode df,
                                   const std::string &name,
                                   const std::string &column,
@@ -326,100 +249,15 @@ ROOT::RDF::RNode dispatchRVecInit(ROOT::RDF::RNode df,
 }
 
 template <typename TargetT>
-ROOT::RDF::RNode dispatchRVecAppend(ROOT::RDF::RNode df,
-                                    const std::string &name,
-                                    const std::string &currentColumn,
-                                    const std::string &nextColumn,
-                                    DefineVectorTypeToken inputType) {
-  switch (inputType) {
-  case DefineVectorTypeToken::Bool:
-    return defineRVecVectorAppend<TargetT, Bool_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Float:
-    return defineRVecVectorAppend<TargetT, Float_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Double:
-    return defineRVecVectorAppend<TargetT, Double_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Int:
-    return defineRVecVectorAppend<TargetT, Int_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::UInt:
-    return defineRVecVectorAppend<TargetT, UInt_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Short:
-    return defineRVecVectorAppend<TargetT, Short_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::UShort:
-    return defineRVecVectorAppend<TargetT, UShort_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Char:
-    return defineRVecVectorAppend<TargetT, Char_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::UChar:
-    return defineRVecVectorAppend<TargetT, UChar_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Long64:
-    return defineRVecVectorAppend<TargetT, Long64_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::ULong64:
-    return defineRVecVectorAppend<TargetT, ULong64_t>(df, name, currentColumn, nextColumn);
-  case DefineVectorTypeToken::Unsupported:
-    throw std::runtime_error("DefineVector: unsupported RVec input type in compiled path.");
-  }
-
-  throw std::runtime_error("DefineVector: unreachable RVec append dispatch.");
-}
-
-template <typename TargetT>
-ROOT::RDF::RNode defineScalarVectorChain(
-    ROOT::RDF::RNode df, const std::string &name,
-    const std::vector<std::string> &columns,
-    const std::vector<DefineVectorTypeToken> &inputTypes) {
-  if (columns.empty()) {
-    return defineEmptyVectorColumn<TargetT>(df, name);
-  }
-
-  std::string currentName = (columns.size() == 1) ? name : name + "__defineVector_scalar_0";
-  df = dispatchScalarInit<TargetT>(df, currentName, columns[0], inputTypes[0]);
-  for (size_t i = 1; i < columns.size(); ++i) {
-    const std::string nextName = (i + 1 == columns.size())
-                                     ? name
-                                     : name + "__defineVector_scalar_" + std::to_string(i);
-    df = dispatchScalarAppend<TargetT>(df, nextName, currentName, columns[i], inputTypes[i]);
-    currentName = nextName;
-  }
-  return df;
-}
-
-template <typename TargetT>
-ROOT::RDF::RNode defineRVecVectorChain(
-    ROOT::RDF::RNode df, const std::string &name,
-    const std::vector<std::string> &columns,
-    const std::vector<DefineVectorTypeToken> &inputTypes) {
-  if (columns.empty()) {
-    return defineEmptyVectorColumn<TargetT>(df, name);
-  }
-
-  std::string currentName = (columns.size() == 1) ? name : name + "__defineVector_rvec_0";
-  df = dispatchRVecInit<TargetT>(df, currentName, columns[0], inputTypes[0]);
-  for (size_t i = 1; i < columns.size(); ++i) {
-    const std::string nextName = (i + 1 == columns.size())
-                                     ? name
-                                     : name + "__defineVector_rvec_" + std::to_string(i);
-    df = dispatchRVecAppend<TargetT>(df, nextName, currentName, columns[i], inputTypes[i]);
-    currentName = nextName;
-  }
-  return df;
-}
-
-template <typename TargetT>
-ROOT::RDF::RNode defineCompiledVectorColumn(
+ROOT::RDF::RNode defineSmallVectorColumn(
     ROOT::RDF::RNode df, const std::string &name,
     const std::vector<std::string> &columns,
     const std::vector<DefineVectorTypeToken> &inputTypes, bool allScalar) {
-  if (allScalar) {
-    return defineScalarVectorChain<TargetT>(df, name, columns, inputTypes);
-  }
-  return defineRVecVectorChain<TargetT>(df, name, columns, inputTypes);
+  if (columns.empty()) return defineEmptyVectorColumn<TargetT>(df, name);
+  return allScalar ? dispatchScalarInit<TargetT>(df, name, columns.front(), inputTypes.front())
+                   : dispatchRVecInit<TargetT>(df, name, columns.front(), inputTypes.front());
 }
 
-bool hasUnsupportedInputTypes(const std::vector<DefineVectorTypeToken> &inputTypes) {
-  return std::any_of(inputTypes.begin(), inputTypes.end(),
-                     [](DefineVectorTypeToken token) {
-                       return token == DefineVectorTypeToken::Unsupported;
-                     });
-}
 
 } // namespace
 
@@ -501,12 +339,13 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
 
     // Display a progress bar depending on batch status and ROOT version
   #if defined(HAS_ROOT_PROGRESS_BAR)
-    auto batch = configProvider.get("batch");
-    if (batch != "True" && batch != "") {
+    const auto batch = configProvider.get("batch");
+    const bool remoteJob = isRemoteCondorJob();
+    if (!remoteJob && !isEnabledFlag(batch) && !batch.empty()) {
       ROOT::RDF::Experimental::AddProgressBar(df_m);
     } else {
       //if (verbosityLevel_m >= 1) {
-      std::cout << "Batch mode, no progress bar" << std::endl;
+      std::cout << "Batch/remote mode, no progress bar" << std::endl;
       //}
     }
   #else
@@ -589,16 +428,13 @@ void DataManager::defineVectorImpl(std::string name,
   // existing type checks and scalar/RVec conversion behavior.
   auto defineVectorColumn = [&](const std::string &outputName,
                                 const std::vector<std::string> &inputColumns) {
-    const auto existingColumns = df_m.GetColumnNames();
-    if (std::find(existingColumns.begin(), existingColumns.end(), outputName) !=
-        existingColumns.end()) {
+    if (df_m.HasColumn(outputName)) {
       return;
     }
 
     std::vector<std::string> missing;
     for (const auto &column : inputColumns) {
-      if (std::find(existingColumns.begin(), existingColumns.end(), column) ==
-          existingColumns.end()) {
+      if (!df_m.HasColumn(column)) {
         missing.push_back(column);
       }
     }
@@ -611,10 +447,12 @@ void DataManager::defineVectorImpl(std::string name,
     }
 
     std::vector<bool> isRVec;
+    std::vector<std::string> columnTypes;
     std::vector<DefineVectorTypeToken> inputTypes;
     inputTypes.reserve(inputColumns.size());
     for (const auto &column : inputColumns) {
       const std::string colType = df_m.GetColumnType(column);
+      columnTypes.push_back(colType);
       const bool columnIsRVec = isRVecColumnType(colType);
       isRVec.push_back(columnIsRVec);
       inputTypes.push_back(
@@ -632,63 +470,59 @@ void DataManager::defineVectorImpl(std::string name,
     }
 
     const auto targetType = tokenizeDefineVectorType(type);
-    const bool useFallback =
+    const bool useJit = inputColumns.size() > 1 ||
         targetType == DefineVectorTypeToken::Unsupported ||
-        hasUnsupportedInputTypes(inputTypes);
-    if (useFallback) {
-      const std::string expr = allScalar
-                                   ? buildScalarDefineVectorExpression(inputColumns, type)
-                                   : buildRVecDefineVectorExpression(inputColumns, type);
-      df_m = df_m.Define(outputName, expr);
-      std::cout << "[DataManager] Vector column " << outputName
-                << " defined via JIT fallback." << std::endl;
-      std::cout << "Expression: \n" << expr << std::endl;
+        (!inputTypes.empty() && inputTypes.front() == DefineVectorTypeToken::Unsupported);
+    if (useJit) {
+      df_m = rdfcolumnpacker::definePackedVector(df_m, outputName, inputColumns,
+          type, allScalar ? rdfcolumnpacker::PackingLayout::Scalars
+                          : rdfcolumnpacker::PackingLayout::Concatenate);
       return;
     }
 
     switch (targetType) {
     case DefineVectorTypeToken::Bool:
-      df_m = defineCompiledVectorColumn<Bool_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<Bool_t>(df_m, outputName, inputColumns,
                                                 inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::Float:
-      df_m = defineCompiledVectorColumn<Float_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<Float_t>(df_m, outputName, inputColumns,
                                                  inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::Double:
-      df_m = defineCompiledVectorColumn<Double_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<Double_t>(df_m, outputName, inputColumns,
                                                   inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::Int:
-      df_m = defineCompiledVectorColumn<Int_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<Int_t>(df_m, outputName, inputColumns,
                                                inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::UInt:
-      df_m = defineCompiledVectorColumn<UInt_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<UInt_t>(df_m, outputName, inputColumns,
                                                 inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::Short:
-      df_m = defineCompiledVectorColumn<Short_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<Short_t>(df_m, outputName, inputColumns,
                                                  inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::UShort:
-      df_m = defineCompiledVectorColumn<UShort_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<UShort_t>(df_m, outputName, inputColumns,
                                                   inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::Char:
-      df_m = defineCompiledVectorColumn<Char_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<Char_t>(df_m, outputName, inputColumns,
                                                 inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::UChar:
-      df_m = defineCompiledVectorColumn<UChar_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<UChar_t>(df_m, outputName, inputColumns,
                                                  inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::Long64:
-      df_m = defineCompiledVectorColumn<Long64_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<Long64_t>(df_m, outputName, inputColumns,
                                                   inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::ULong64:
-      df_m = defineCompiledVectorColumn<ULong64_t>(df_m, outputName, inputColumns,
+      df_m = defineSmallVectorColumn<ULong64_t>(df_m, outputName, inputColumns,
                                                    inputTypes, allScalar);
       break;
     case DefineVectorTypeToken::Unsupported:

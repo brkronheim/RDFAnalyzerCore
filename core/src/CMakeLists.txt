@@ -35,6 +35,11 @@ target_link_libraries(core PUBLIC
     yaml-cpp
 )
 
+if(RDF_ENABLE_XRD_ADAPTOR)
+    target_link_libraries(core PUBLIC RDFXrdAdaptor)
+    target_compile_definitions(core PRIVATE RDF_HAS_XRD_ADAPTOR)
+endif()
+
 set(SOURCES
     # ... existing sources ...
 )
