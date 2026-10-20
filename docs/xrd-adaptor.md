@@ -38,6 +38,7 @@ xrdPrefetchCacheMB: 256
 xrdPreferredSiteBandPercent: 20
 xrdExplorationSharePercent: 10
 xrdMaxReadSources: 2
+xrdReadTimeoutSeconds: 45
 treeCacheEnabled: true
 treeCacheAsyncPrefetch: true
 treeCachePrefetchNextFile: true
@@ -61,6 +62,14 @@ Xrd handoff cache. The active file and lookahead file can be live at the same
 time, so their separate caches can use memory concurrently. The source probe
 interval can be set to zero to disable alternate-source discovery while
 keeping XrdCl as the read backend.
+
+`xrdReadTimeoutSeconds` sets the per-request XrdCl timeout for file open/stat,
+replica discovery opens, and vectored reads. The default is 45 seconds; valid
+values are 1 through 300. When a vectored read times out, that replica is
+treated as failed for the current file and the manager advances to another
+discovered site. At most `xrdMaxReadSources` full reads are in flight at once;
+the timeout is applied to each site request, not to the complete `LoadTree`
+call.
 Under ROOT implicit multithreading, the next-file warmup is disabled because
 this lookahead currently assumes one sequential chain reader.
 

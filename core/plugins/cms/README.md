@@ -386,6 +386,39 @@ Set any flag to `true` to enable the corresponding weight computation. The
 corresponding `ChannelMask` flags must also be set to `true` for each channel
 that should include the component.
 
+### Raw Puppi MET rebuild for 2024 NanoAODv15
+
+`applyMetType1 = true` with `rebuildPuppiMetFromRaw = true` rebuilds Puppi
+Type-1 MET from `RawPuppiMET`, rather than adding a jet difference to the
+stored Type-1 MET. It currently requires standard 2024 AK4 PUPPI JEC/JER and
+rejects regressed raw-jet inputs. The default remains `false` for existing
+analysis callers.
+
+The rebuild includes both `Jet` and `CorrT1METJet`, including low-pT jets that
+cross the corrected 15 GeV threshold. It uses muon-subtracted directions and
+momenta, excludes EM fractions above 0.9, and applies nominal JER on MC.
+Missing raw-MET, muon-subtraction, low-jet, or MC gen-matching inputs throw
+instead of silently returning the stored MET. The main and low-jet JES/JER
+variations share their source names. MC matching checks delta-R below 0.2
+for AK4 and below 0.4 for AK8, with the resolution window applied in smearing.
+
+Optional `metMuonMaskColumn` and `metElectronMaskColumn` specify fixed boolean
+vectors in original NanoAOD order. Their objects' corrected-minus-original
+transverse momenta are subtracted after the jet update. Keep these masks fixed
+across variations so a changing object set does not introduce spurious shifts.
+With systematics enabled, lepton variations and the stored NanoAOD unclustered
+up/down vector differences reach `PuppiMET_pt_corr_nominal` and
+`PuppiMET_phi_corr_nominal` through the normal variation mappings. Unclustered
+branches are required in that mode. PF MET and MET covariance are unchanged.
+
+The jet sum follows the PUPPI no-L1-offset path in the
+[CMSSW MET producer](https://github.com/cms-sw/cmssw/blob/CMSSW_15_0_X/JetMETCorrections/Type1MET/interface/PFJetMETcorrInputProducerT.h)
+and the full-jet correction factor applied to the muon-subtracted p4 in
+[PATJetCorrExtractor](https://github.com/cms-sw/cmssw/blob/CMSSW_15_0_X/PhysicsTools/PatUtils/interface/PATJetCorrExtractor.h).
+Synthetic data/MC regression tests check arithmetic and variation propagation;
+a representative production-sample closure check remains necessary before
+regenerating final physics results.
+
 ### Correction Enable Flags (`CmsCorrectionConfig`)
 
 | Flag | Default | Controls |

@@ -358,16 +358,22 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
   if (maxReadSources == 0)
     throw std::runtime_error(
         "Invalid 'xrdMaxReadSources' value '0' (expected 1 or 2).");
+  const auto readTimeoutSeconds = integer("xrdReadTimeoutSeconds", 45, 300);
+  if (readTimeoutSeconds == 0)
+    throw std::runtime_error(
+        "Invalid 'xrdReadTimeoutSeconds' value '0' (expected 1 to 300).");
   rdf::xrd::configureXrdAdaptor(
       probeSeconds, static_cast<std::size_t>(cacheMB) * 1024 * 1024,
-      preferredSiteBand, explorationShare, maxReadSources);
+      preferredSiteBand, explorationShare, maxReadSources,
+      readTimeoutSeconds);
   rdf::xrd::registerXrdAdaptor();
   std::cout << "ROOT input backend: XrdAdaptor (source probe interval="
             << probeSeconds << " s, handoff cache=" << cacheMB
             << " MiB, preferred-site band=" << preferredSiteBand
             << "% with 10% hysteresis, exploration sample budget="
             << explorationShare << "% max 2 MiB/read, max full-read sites="
-            << maxReadSources << ", exploration site enabled="
+            << maxReadSources << ", read/request timeout="
+            << readTimeoutSeconds << " s, exploration site enabled="
             << (explorationShare > 0 ? "yes" : "no") << ")\n";
 #endif
 }

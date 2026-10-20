@@ -41,6 +41,19 @@ protected:
   std::unique_ptr<ConfigurationManager> config;
 };
 
+TEST_F(BaseConfigSetup, YamlMainConfigCanReadTextSubconfigs) {
+  const auto path = std::filesystem::temp_directory_path() / "rdf_yaml_text_subconfigs.yaml";
+  { std::ofstream out(path); out << "threads: 1\n"; }
+  ConfigurationManager yaml(path.string());
+  EXPECT_EQ(yaml.parsePairBasedConfig("cfg/config.txt"),
+            config->parsePairBasedConfig("cfg/config.txt"));
+  EXPECT_EQ(yaml.parseMultiKeyConfig("cfg/correction.txt", {"file", "correctionName", "name", "inputVariables"}),
+            config->parseMultiKeyConfig("cfg/correction.txt", {"file", "correctionName", "name", "inputVariables"}));
+  EXPECT_EQ(yaml.parseVectorConfig("cfg/config.txt"),
+            config->parseVectorConfig("cfg/config.txt"));
+  std::filesystem::remove(path);
+}
+
 // ============================================================================
 // Basic Functionality Tests
 // ============================================================================
@@ -269,10 +282,11 @@ TEST_F(BaseConfigSetup, ParseMultiKeyConfigWorks) {
       correctionConfigFile,
       {"file", "correctionName", "name", "inputVariables"});
 
-  ASSERT_EQ(mapVector.size(), 2);
+  ASSERT_EQ(mapVector.size(), 3);
 
   auto map1 = mapVector.at(0);
-  auto map2 = mapVector.at(1);
+  EXPECT_EQ(mapVector.at(1).at("name"), "test_correction_range_error");
+  auto map2 = mapVector.at(2);
 
   EXPECT_EQ(map1.at("file"), "aux/correction.json");
   EXPECT_EQ(map1.at("correctionName"), "test_correction");

@@ -90,11 +90,14 @@ target_link_libraries(RDFXrdAdaptor PUBLIC
     "${XRDCL_LIBRARY}")
 set_target_properties(RDFXrdAdaptor PROPERTIES OUTPUT_NAME RDFXrdAdaptor)
 
-# ROOT's runtime dictionary uses this header when it loads the PCM. Keep a
-# copy next to the library so the submission workflow can stage the complete,
-# relocatable dictionary payload with the shared library.
+# ROOT's runtime dictionary uses the rootmap header when it loads the PCM.
+# Keep the Xrd adaptor headers beside the library so the submission workflow
+# can stage the complete, relocatable dictionary payload with the shared
+# library, including headers included by the rootmap header.
+file(GLOB _xrd_runtime_headers CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 add_custom_command(TARGET RDFXrdAdaptor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/XrdTFile.h"
-        "$<TARGET_FILE_DIR:RDFXrdAdaptor>/XrdTFile.h"
+        ${_xrd_runtime_headers}
+        "$<TARGET_FILE_DIR:RDFXrdAdaptor>"
     VERBATIM)

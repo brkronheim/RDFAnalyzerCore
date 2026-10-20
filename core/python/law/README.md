@@ -996,11 +996,17 @@ export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
 - **`container_setup`** is passed to the outer wrapper script and used to
   launch the inner runscript (e.g. `cmssw-el9 -- bash condor_runscript_inner.sh`).
 - **No OS-pinning** by default (`MY.WantOS` is not set).
-- **Blocked worker hosts**: `hepcms-henrietta.privnet` remains reserved. The
-  additional blocked hosts default to `hepcms-namenode.privnet`. Set
-  `RDF_CONDOR_EXTRA_BLOCKED_HOSTS` to a comma-separated list to replace that
-  list, or to an empty string to allow name-node to match again. To block
-  name-node plus another host, include both names in the value.
+- **Blocked worker hosts and sites**: `hepcms-henrietta.privnet` remains
+  reserved, and `hepcms-namenode.privnet` is blocked by default. The default
+  machine veto patterns also exclude IFCA workers (`*.ifca.es`) and the
+  repeatedly failing hosts `node38-1`, `node38-3`, and `node38-5` at IIHE plus
+  `lwnac008.ihep.ac.cn` at IHEP. Other IIHE and IHEP workers remain eligible.
+  Set `RDF_CONDOR_EXTRA_BLOCKED_HOSTS` to a comma-separated list to replace
+  the extra exact-host list, or to an empty string to allow name-node to match
+  again. Set `RDF_CONDOR_BLOCKED_MACHINE_PATTERNS` to a comma-separated list
+  of case-insensitive regular expressions matched against `TARGET.Machine` to
+  replace the site/worker defaults; an empty value disables those patterns.
+  Reserved hosts remain excluded in all cases.
 - **Local shared libraries** required by the executable (resolved via `ldd` and
   located under the repository root) are automatically staged into `shared_inputs/`.
 

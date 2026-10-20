@@ -157,6 +157,10 @@ add_executable(testCmsElectronCorrections testCmsElectronCorrections.cc)
 target_link_libraries(testCmsElectronCorrections coreAll gtest gtest_main)
 add_test(NAME CmsElectronCorrectionsTest COMMAND testCmsElectronCorrections)
 
+add_executable(testCmsMetCorrections testCmsMetCorrections.cc)
+target_link_libraries(testCmsMetCorrections coreAll gtest gtest_main)
+add_test(NAME CmsMetCorrectionsTest COMMAND testCmsMetCorrections)
+
 add_executable(testCorrectedObjectCollectionManagers testCorrectedObjectCollectionManagers.cc)
 target_link_libraries(testCorrectedObjectCollectionManagers coreAll gtest gtest_main)
 add_test(NAME CorrectedObjectCollectionManagersTest COMMAND testCorrectedObjectCollectionManagers)

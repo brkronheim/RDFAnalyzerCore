@@ -1424,6 +1424,16 @@ chmod +x ./{inner_script_name}
 _CONDOR_RESERVED_MACHINES = ("hepcms-henrietta.privnet",)
 _CONDOR_EXTRA_BLOCKED_HOSTS_ENV = "RDF_CONDOR_EXTRA_BLOCKED_HOSTS"
 _DEFAULT_CONDOR_EXTRA_BLOCKED_MACHINES = ("hepcms-namenode.privnet",)
+_CONDOR_BLOCKED_MACHINE_PATTERNS_ENV = "RDF_CONDOR_BLOCKED_MACHINE_PATTERNS"
+_DEFAULT_CONDOR_BLOCKED_MACHINE_PATTERNS = (
+    # IFCA worker nodes consistently lacked the configured CVMFS ROOT release.
+    r"(^|[.])ifca[.]es$",
+    # Failures were concentrated on these IIHE worker nodes; other IIHE nodes
+    # completed successfully and remain eligible.
+    r"^node38-(1|3|5)[.]wn[.]iihe[.]ac[.]be$",
+    # All observed jobs on this IHEP worker failed; other IHEP nodes succeeded.
+    r"^lwnac008[.]ihep[.]ac[.]cn$",
+)
 
 
 def _condor_blocked_machines():
@@ -1445,26 +1455,60 @@ def _condor_blocked_machines():
     return tuple(dict.fromkeys(hosts))
 
 
+def _condor_blocked_machine_patterns():
+    """Return default site/worker regexes or an environment override."""
+    configured_patterns = os.environ.get(_CONDOR_BLOCKED_MACHINE_PATTERNS_ENV)
+    if configured_patterns is None:
+        patterns = _DEFAULT_CONDOR_BLOCKED_MACHINE_PATTERNS
+    else:
+        patterns = configured_patterns.split(",")
+
+    return tuple(
+        dict.fromkeys(pattern.strip() for pattern in patterns if pattern.strip())
+    )
+
+
+def _classad_string(value):
+    """Quote a Python string as an HTCondor ClassAd string literal."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _condor_machine_exclusion_expressions():
+    """Build exact-host and regex machine veto expressions."""
+    expressions = [
+        f"(TARGET.Machine != {_classad_string(host)})"
+        for host in _condor_blocked_machines()
+    ]
+    expressions.extend(
+        f"!(regexp({_classad_string(pattern)}, TARGET.Machine, \"i\"))"
+        for pattern in _condor_blocked_machine_patterns()
+    )
+    return expressions
+
+
+def condor_machine_requirements():
+    """Return the framework's default Condor machine veto expression."""
+    return " && ".join(_condor_machine_exclusion_expressions())
+
+
 def ensure_condor_machine_exclusion(submit_text):
-    """Add known unavailable execution hosts to a submit description."""
+    """Add default blocked hosts and sites to a Condor submit description."""
     lines = submit_text.splitlines()
     trailing_newline = submit_text.endswith("\n")
-    blocked_machines = _condor_blocked_machines()
+    exclusions = _condor_machine_exclusion_expressions()
 
     for index, line in enumerate(lines):
         attribute, separator, expression = line.partition("=")
         if not separator or attribute.strip().lower() != "requirements":
             continue
         requirement, comment_marker, comment = expression.partition("#")
-        missing_hosts = [
-            host for host in blocked_machines if host not in requirement
+        missing_exclusions = [
+            exclusion for exclusion in exclusions if exclusion not in requirement
         ]
-        if not missing_hosts:
+        if not missing_exclusions:
             return submit_text
         comment_suffix = f" #{comment}" if comment_marker else ""
-        exclusion_expr = " && ".join(
-            f'(TARGET.Machine != "{host}")' for host in missing_hosts
-        )
+        exclusion_expr = " && ".join(missing_exclusions)
         lines[index] = (
             f"{attribute}= ({requirement.strip()}) && "
             f"{exclusion_expr}{comment_suffix}"
@@ -1479,9 +1523,7 @@ def ensure_condor_machine_exclusion(submit_text):
         ),
         len(lines),
     )
-    exclusion_expr = " && ".join(
-        f'(TARGET.Machine != "{host}")' for host in blocked_machines
-    )
+    exclusion_expr = " && ".join(exclusions)
     lines.insert(queue_index, f"Requirements = {exclusion_expr}")
     return "\n".join(lines) + ("\n" if trailing_newline else "")
 

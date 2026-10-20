@@ -6,6 +6,7 @@
 //==============================================================================
 
 #include "CmsCorrections.h"
+#include "CmsMetCorrections.h"
 #include "CmsWeights.h"
 
 // Plugin headers (needed for ::create calls and programmatic API).
@@ -771,7 +772,9 @@ void defineCmsCorrectionInputs(Analyzer &an,
   const bool isData = toLowerCopy(an.getConfigurationProvider().get("dtype")) ==
                       "data";
 
-  if (cfg.applyElectronCorrections) {
+  if (!hasColumn(an, "Electron_scEta") &&
+      (cfg.applyElectronCorrections ||
+       (hasColumn(an, "Electron_eta") && hasColumn(an, "Electron_deltaEtaSC")))) {
     // Electron_scEta: supercluster eta from electron eta + deltaEtaSC
     an.Define("Electron_scEta",
               [](const ROOT::VecOps::RVec<float> &eta,
@@ -786,42 +789,48 @@ void defineCmsCorrectionInputs(Analyzer &an,
   }
 
   if (cfg.applyJetCorrections && !isData) {
-    // Jet_genMatchedPt: matched GenJet pT for JER smearing
+    for (const auto &name : {"GenJet_eta", "GenJet_phi"})
+      if (!hasColumn(an, name)) throw std::runtime_error(
+          std::string("CmsCorrections: AK4 JER requires ") + name);
     an.Define("Jet_genMatchedPt",
-            [](const std::vector<int> &genJetIdx,
-                 const ROOT::VecOps::RVec<float> &genJetPt) {
-                ROOT::VecOps::RVec<float> matched(genJetIdx.size(), -1.0f);
-                for (size_t i = 0; i < genJetIdx.size(); ++i) {
-                  const int idx = genJetIdx[i];
-                  if (idx >= 0 && static_cast<size_t>(idx) < genJetPt.size()) {
-                    matched[i] = genJetPt[idx];
-                  }
+              [](const std::vector<int> &indices,
+                 const ROOT::VecOps::RVec<float> &pt,
+                 const ROOT::VecOps::RVec<float> &eta,
+                 const ROOT::VecOps::RVec<float> &phi,
+                 const ROOT::VecOps::RVec<float> &recoEta,
+                 const ROOT::VecOps::RVec<float> &recoPhi) {
+                ROOT::VecOps::RVec<float> matched(indices.size(), -1.f);
+                for (std::size_t i = 0; i < indices.size(); ++i) {
+                  const int j = indices[i];
+                  if (j < 0 || std::size_t(j) >= pt.size()) continue;
+                  const double de = double(recoEta.at(i)) - eta.at(j);
+                  const double dp = std::remainder(double(recoPhi.at(i)) - phi.at(j), 2. * M_PI);
+                  if (de * de + dp * dp < .2 * .2) matched[i] = pt[j];
                 }
                 return matched;
-              },
-              {"Jet_genJetIdx_int", "GenJet_pt"});
+              }, {"Jet_genJetIdx_int", "GenJet_pt", "GenJet_eta", "GenJet_phi", "Jet_eta", "Jet_phi"});
   }
-
   if (cfg.applyFatJetCorrections && !isData) {
-    if (!hasColumn(an, "FatJet_genJetAK8Idx_int") ||
-        !hasColumn(an, "GenJetAK8_pt")) {
-      throw std::runtime_error(
-          "CmsCorrections: AK8 JER requires FatJet_genJetAK8Idx and "
-          "GenJetAK8_pt branches.");
-    }
+    for (const auto &name : {"FatJet_genJetAK8Idx_int", "GenJetAK8_pt", "GenJetAK8_eta", "GenJetAK8_phi"})
+      if (!hasColumn(an, name)) throw std::runtime_error(
+          std::string("CmsCorrections: AK8 JER requires ") + name);
     an.Define("FatJet_genMatchedPt",
-              [](const ROOT::VecOps::RVec<Int_t> &genJetIdx,
-                 const ROOT::VecOps::RVec<float> &genJetPt) {
-                ROOT::VecOps::RVec<float> matched(genJetIdx.size(), -1.0f);
-                for (size_t i = 0; i < genJetIdx.size(); ++i) {
-                  const Int_t idx = genJetIdx[i];
-                  if (idx >= 0 && static_cast<size_t>(idx) < genJetPt.size()) {
-                    matched[i] = genJetPt[static_cast<size_t>(idx)];
-                  }
+              [](const ROOT::VecOps::RVec<int> &indices,
+                 const ROOT::VecOps::RVec<float> &pt,
+                 const ROOT::VecOps::RVec<float> &eta,
+                 const ROOT::VecOps::RVec<float> &phi,
+                 const ROOT::VecOps::RVec<float> &recoEta,
+                 const ROOT::VecOps::RVec<float> &recoPhi) {
+                ROOT::VecOps::RVec<float> matched(indices.size(), -1.f);
+                for (std::size_t i = 0; i < indices.size(); ++i) {
+                  const int j = indices[i];
+                  if (j < 0 || std::size_t(j) >= pt.size()) continue;
+                  const double de = double(recoEta.at(i)) - eta.at(j);
+                  const double dp = std::remainder(double(recoPhi.at(i)) - phi.at(j), 2. * M_PI);
+                  if (de * de + dp * dp < .4 * .4) matched[i] = pt[j];
                 }
                 return matched;
-              },
-              {"FatJet_genJetAK8Idx_int", "GenJetAK8_pt"});
+              }, {"FatJet_genJetAK8Idx_int", "GenJetAK8_pt", "GenJetAK8_eta", "GenJetAK8_phi", "FatJet_eta", "FatJet_phi"});
   }
 }
 
@@ -1082,13 +1091,13 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
               {"Jet_mass_corr_jec"});
   }
 
-  if (cfg.applyMetType1) {
+  if (cfg.applyMetType1 && !cfg.rebuildPuppiMetFromRaw) {
     jesMgr->setMETColumns("PuppiMET_pt", "PuppiMET_phi");
     jesMgr->propagateMET(
         "PuppiMET_pt", "PuppiMET_phi", "Jet_pt", "Jet_pt_corr_nominal",
         "PuppiMET_pt_corr_nominal", "PuppiMET_phi_corr_nominal");
   }
-  if (!isData && cfg.applyMetType1 && cfg.applyJerSystematics &&
+  if (!isData && cfg.applyMetType1 && !cfg.rebuildPuppiMetFromRaw && cfg.applyJerSystematics &&
       an.getSystematicManager().isEnabled()) {
     for (const auto &direction : {std::string("up"), std::string("down")}) {
       const auto metPt = "PuppiMET_pt_jer_" + direction;
@@ -1221,6 +1230,7 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
     // above, so flush it even when no JES variations will be registered.
     jesMgr->execute();
     if (fatJesMgr) fatJesMgr->execute();
+    if (cfg.applyMetType1 && cfg.rebuildPuppiMetFromRaw) defineCmsRebuiltPuppiMet(an, cfg);
     return;
   }
 
@@ -1311,7 +1321,7 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
         an.getSystematicManager().registerVariationColumns(
             "FatJet_mass_corr_nominal", label, fatUpMass, fatDownMass);
       }
-      if (cfg.applyMetType1) {
+      if (cfg.applyMetType1 && !cfg.rebuildPuppiMetFromRaw) {
         const std::string upMetPtColumn =
             "PuppiMET_pt_jes_" + label + "_up";
         const std::string downMetPtColumn =
@@ -1340,6 +1350,7 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
 
   jesMgr->execute();
   if (fatJesMgr) fatJesMgr->execute();
+  if (cfg.applyMetType1 && cfg.rebuildPuppiMetFromRaw) defineCmsRebuiltPuppiMet(an, cfg);
 }
 
 // ===========================================================================

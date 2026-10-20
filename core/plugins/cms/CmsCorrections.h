@@ -151,9 +151,19 @@ struct CmsCorrectionConfig {
   /// Apply Type-1 MET corrections using fully calibrated jet energies.
   /// When true and applyJetCorrections is true, propagates the change from
   /// NanoAOD jets to the final nominal JEC/JER-corrected jets via
-  /// JetEnergyScaleManager::propagateMET().
+  /// JetEnergyScaleManager::propagateMET(), unless rebuildPuppiMetFromRaw is set.
   /// Produces PuppiMET_pt_corr_nominal / PuppiMET_phi_corr_nominal.
   bool applyMetType1 = false;
+
+  /// Rebuild Puppi Type-1 MET from RawPuppiMET and both v15 AK4 collections.
+  /// Requires 2024 standard AK4 PUPPI JEC (no regressed inputs), muon-subtraction
+  /// factors/directions and CorrT1METJet inputs. Missing inputs are errors.
+  /// Other analyses retain the legacy difference propagation unless opted in.
+  bool rebuildPuppiMetFromRaw = false;
+  /// Optional, fixed masks in the original object order. Propagate the energy
+  /// changes of these leptons into Puppi MET after the hadronic Type-1 update.
+  std::string metMuonMaskColumn;
+  std::string metElectronMaskColumn;
 
   // -- Tagger working-point thresholds --
   /// B-tag discriminator thresholds for each working point.

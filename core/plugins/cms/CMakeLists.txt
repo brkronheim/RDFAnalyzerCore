@@ -11,6 +11,7 @@ add_library(CmsInfrastructure OBJECT
     CmsYearConfig.cc
     CmsNanoAodCompat.cc
     CmsCorrections.cc
+    CmsMetCorrections.cc
     CmsWeights.cc
     GoldenJsonManager/GoldenJsonManager.cc
 )

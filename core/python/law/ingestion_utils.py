@@ -18,26 +18,9 @@ import subprocess
 from collections import defaultdict
 from pathlib import Path
 
-
-_CONDOR_RESERVED_MACHINES = ("hepcms-henrietta.privnet",)
-_CONDOR_EXTRA_BLOCKED_HOSTS_ENV = "RDF_CONDOR_EXTRA_BLOCKED_HOSTS"
-_DEFAULT_CONDOR_EXTRA_BLOCKED_MACHINES = ("hepcms-namenode.privnet",)
-
-
-def _condor_machine_requirements() -> str:
-    """Build machine exclusions shared by legacy Condor resubmissions."""
-    configured_hosts = os.environ.get(_CONDOR_EXTRA_BLOCKED_HOSTS_ENV)
-    if configured_hosts is None:
-        extra_hosts = _DEFAULT_CONDOR_EXTRA_BLOCKED_MACHINES
-    else:
-        extra_hosts = configured_hosts.split(",")
-
-    hosts = [*_CONDOR_RESERVED_MACHINES]
-    hosts.extend(host.strip() for host in extra_hosts if host.strip())
-    unique_hosts = dict.fromkeys(hosts)
-    return " && ".join(
-        f'TARGET.Machine != "{host}"' for host in unique_hosts
-    )
+from submission_backend import (
+    condor_machine_requirements as _condor_machine_requirements,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -109,14 +92,43 @@ def collect_local_shared_libs(exe_path: str, repo_root: str) -> dict[str, str]:
 
         if os.path.isfile(rootmap_path):
             try:
+                pending_headers: list[str] = []
                 with open(rootmap_path, encoding="utf-8") as rootmap_fh:
                     for rootmap_line in rootmap_fh:
                         key, _, header_name = rootmap_line.strip().partition(" ")
                         if key != "header" or not header_name:
                             continue
-                        header_path = os.path.join(library_dir, header_name)
-                        if os.path.isfile(header_path):
-                            staged[os.path.basename(header_path)] = header_path
+                        pending_headers.append(header_name)
+
+                # ROOT's rootmap names only the dictionary header. Stage its
+                # adjacent quoted-include dependencies too, since Cling parses
+                # that header on the worker when it loads the PCM.
+                seen_headers: set[str] = set()
+                local_library_dir = os.path.realpath(library_dir)
+                while pending_headers:
+                    header_name = pending_headers.pop()
+                    if os.path.dirname(header_name) not in ("", "."):
+                        continue
+                    header_path = os.path.join(library_dir, header_name)
+                    if not os.path.isfile(header_path):
+                        continue
+                    header_path = os.path.realpath(header_path)
+                    if (header_path in seen_headers
+                            or os.path.dirname(header_path) != local_library_dir):
+                        continue
+                    seen_headers.add(header_path)
+                    staged[os.path.basename(header_path)] = header_path
+
+                    with open(header_path, encoding="utf-8") as header_fh:
+                        for header_line in header_fh:
+                            include_match = re.match(
+                                r'^\s*#\s*include\s*"([^"/][^"]*)"',
+                                header_line,
+                            )
+                            if include_match:
+                                pending_headers.append(include_match.group(1))
+            except OSError as err:
+                print(f"Warning: failed to read rootmap '{rootmap_path}': {err}")
 
     return staged
 

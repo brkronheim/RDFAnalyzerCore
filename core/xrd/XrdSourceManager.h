@@ -31,7 +31,8 @@ public:
   class ExplorationReadHandler;
 
   XrdSourceManager(std::string url, unsigned probeIntervalSeconds,
-                   std::size_t prefetchCacheBytes);
+                   std::size_t prefetchCacheBytes,
+                   unsigned readTimeoutSeconds = 45);
   ~XrdSourceManager();
 
   XrdSourceManager(const XrdSourceManager &) = delete;
@@ -70,6 +71,7 @@ private:
   std::string fileKey_;
   std::uint64_t fileSize_ = 0;
   unsigned probeIntervalSeconds_ = 5;
+  unsigned readTimeoutSeconds_ = 45;
   std::chrono::steady_clock::time_point nextProbeAt_;
   std::shared_ptr<PrefetchCache> cache_;
   mutable std::mutex mutex_;
@@ -88,7 +90,8 @@ void configureXrdAdaptor(unsigned probeIntervalSeconds,
                          std::size_t prefetchCacheBytes,
                          unsigned preferredSiteBandPercent = 20,
                          unsigned explorationSharePercent = 10,
-                         unsigned maxReadSources = 2);
+                         unsigned maxReadSources = 2,
+                         unsigned readTimeoutSeconds = 45);
 std::shared_ptr<XrdSourceManager> makeXrdSourceManager(const std::string &url);
 void registerXrdAdaptor();
 

@@ -215,6 +215,10 @@ ConfigurationManager::parsePairBasedConfig(
     YamlConfigAdapter yamlAdapter;
     return yamlAdapter.parsePairBasedConfig(resolvedPath);
   }
+  if (dynamic_cast<YamlConfigAdapter *>(adapter_m.get())) {
+    TextConfigAdapter textAdapter;
+    return textAdapter.parsePairBasedConfig(resolvedPath);
+  }
   return adapter_m->parsePairBasedConfig(resolvedPath);
 }
 
@@ -238,6 +242,10 @@ ConfigurationManager::parseMultiKeyConfig(
     YamlConfigAdapter yamlAdapter;
     return yamlAdapter.parseMultiKeyConfig(resolvedPath, requiredEntryKeys);
   }
+  if (dynamic_cast<YamlConfigAdapter *>(adapter_m.get())) {
+    TextConfigAdapter textAdapter;
+    return textAdapter.parseMultiKeyConfig(resolvedPath, requiredEntryKeys);
+  }
   return adapter_m->parseMultiKeyConfig(resolvedPath, requiredEntryKeys);
 }
 
@@ -256,6 +264,10 @@ ConfigurationManager::parseVectorConfig(const std::string &configFile) const {
   if (isYamlFile(resolvedPath)) {
     YamlConfigAdapter yamlAdapter;
     return yamlAdapter.parseVectorConfig(resolvedPath);
+  }
+  if (dynamic_cast<YamlConfigAdapter *>(adapter_m.get())) {
+    TextConfigAdapter textAdapter;
+    return textAdapter.parseVectorConfig(resolvedPath);
   }
   return adapter_m->parseVectorConfig(resolvedPath);
 }

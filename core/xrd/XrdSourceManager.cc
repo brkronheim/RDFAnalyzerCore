@@ -59,6 +59,7 @@ void logLine(const std::string &line, LogLevel level = LogLevel::Info) {
 struct GlobalSettings {
   std::mutex mutex;
   unsigned probeIntervalSeconds = 5;
+  unsigned readTimeoutSeconds = 45;
   std::size_t prefetchCacheBytes = 256ULL * 1024 * 1024;
   unsigned preferredSiteBandPercent = 20;
   unsigned explorationSharePercent = 10;
@@ -1024,9 +1025,11 @@ std::shared_ptr<XrdSourceManager::PrefetchCache> acquireCache(
 
 XrdSourceManager::XrdSourceManager(std::string url,
                                    unsigned probeIntervalSeconds,
-                                   std::size_t prefetchCacheBytes)
+                                   std::size_t prefetchCacheBytes,
+                                   unsigned readTimeoutSeconds)
     : url_(std::move(url)), fileKey_(fileIdentity(url_)),
       probeIntervalSeconds_(probeIntervalSeconds),
+      readTimeoutSeconds_(std::clamp(readTimeoutSeconds, 1U, 300U)),
       nextProbeAt_(std::chrono::steady_clock::now()),
       cache_(acquireCache(url_, prefetchCacheBytes)) {
   SiteQualityMonitor::instance().configurePreferredBand(
@@ -1034,12 +1037,14 @@ XrdSourceManager::XrdSourceManager(std::string url,
   instanceId_ = nextManagerId.fetch_add(1);
   auto primary = std::make_shared<Source>();
   primary->file = std::make_shared<XrdCl::File>();
-  const auto status = primary->file->Open(url_, XrdCl::OpenFlags::Read);
+  const auto timeout = static_cast<std::uint16_t>(readTimeoutSeconds_);
+  const auto status = primary->file->Open(url_, XrdCl::OpenFlags::Read,
+                                          XrdCl::Access::None, timeout);
   if (!status.IsOK())
     throw std::runtime_error("XrdCl could not open '" + url_ + "': " + status.ToStr());
 
   XrdCl::StatInfo *statInfo = nullptr;
-  const auto statStatus = primary->file->Stat(false, statInfo);
+  const auto statStatus = primary->file->Stat(false, statInfo, timeout);
   std::unique_ptr<XrdCl::StatInfo> ownedStat(statInfo);
   if (!statStatus.IsOK() || !ownedStat)
     throw std::runtime_error("XrdCl could not stat '" + url_ + "': " + statStatus.ToStr());
@@ -1119,7 +1124,8 @@ void XrdSourceManager::startDiscovery() {
   auto *handler = new ProbeHandler(weak_from_this(), file);
   const auto candidateUrl = appendOpaque(url_, opaque);
   const auto status = file->Open(candidateUrl, XrdCl::OpenFlags::Read,
-                                 XrdCl::Access::None, handler);
+                                 XrdCl::Access::None, handler,
+                                 static_cast<std::uint16_t>(readTimeoutSeconds_));
   if (!status.IsOK()) {
     logLine("[XrdAdaptor] replica probe request failed handle=" +
             std::to_string(instanceId_) + " file=" + url_ +
@@ -1403,7 +1409,9 @@ std::unique_ptr<XrdSourceManager::PendingRead> XrdSourceManager::submit(
       expected += ranges[i].length;
     }
     auto waiter = std::make_unique<VectorReadWaiter>(expected);
-    const auto status = source->file->VectorRead(chunks, nullptr, waiter.get());
+    const auto status = source->file->VectorRead(
+        chunks, nullptr, waiter.get(),
+        static_cast<std::uint16_t>(readTimeoutSeconds_));
     if (!status.IsOK()) {
       source->failed = true;
       pending->allQueued = false;
@@ -1466,7 +1474,8 @@ void XrdSourceManager::scheduleExplorationProbe(
   auto *handler = new ExplorationReadHandler(
       source, fileKey_, url_, peerSite, instanceId_, expectedBytes, started,
       std::move(buffers));
-  const auto status = source->file->VectorRead(chunks, nullptr, handler);
+  const auto status = source->file->VectorRead(
+      chunks, nullptr, handler, static_cast<std::uint16_t>(readTimeoutSeconds_));
   if (!status.IsOK()) {
     monitor.endExplorationProbe(source->site);
     logLine("[XrdAdaptor] exploration sample could not be queued handle=" +
@@ -1545,6 +1554,7 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
               << " handoff_hit_bytes=" << handoffBytes
               << " handoff_stored_bytes=" << handoffStoredBytes
               << " bytes_not_from_handoff=" << (requestedBytes - handoffBytes)
+              << " request_timeout_s=" << readTimeoutSeconds_
               << " elapsed_ms=" << elapsedMs
               << " sources=[";
     for (std::size_t i = 0; i < active.size(); ++i) {
@@ -1689,7 +1699,9 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
           batchBytes, [attempt](bool success, std::uint64_t bytes) {
             attempt->completeBatch(success, bytes);
           });
-      const auto status = source->file->VectorRead(chunks, nullptr, handler);
+      const auto status = source->file->VectorRead(
+          chunks, nullptr, handler,
+          static_cast<std::uint16_t>(readTimeoutSeconds_));
       if (!status.IsOK()) {
         delete handler;
         attempt->completeBatch(false, 0);
@@ -1890,11 +1902,13 @@ void configureXrdAdaptor(unsigned probeIntervalSeconds,
                          std::size_t prefetchCacheBytes,
                          unsigned preferredBandPercent,
                          unsigned explorationShare,
-                         unsigned maxReadSourceCount) {
+                         unsigned maxReadSourceCount,
+                         unsigned readTimeoutSeconds) {
   auto &global = settings();
   {
     std::lock_guard<std::mutex> lock(global.mutex);
     global.probeIntervalSeconds = probeIntervalSeconds;
+    global.readTimeoutSeconds = std::clamp(readTimeoutSeconds, 1U, 300U);
     global.prefetchCacheBytes = prefetchCacheBytes;
     global.preferredSiteBandPercent = std::min(preferredBandPercent, 100U);
     global.explorationSharePercent = std::min(explorationShare, 50U);
@@ -1906,14 +1920,17 @@ void configureXrdAdaptor(unsigned probeIntervalSeconds,
 
 std::shared_ptr<XrdSourceManager> makeXrdSourceManager(const std::string &url) {
   unsigned interval = 5;
+  unsigned readTimeout = 45;
   std::size_t cacheBytes = 256ULL * 1024 * 1024;
   {
     auto &global = settings();
     std::lock_guard<std::mutex> lock(global.mutex);
     interval = global.probeIntervalSeconds;
+    readTimeout = global.readTimeoutSeconds;
     cacheBytes = global.prefetchCacheBytes;
   }
-  auto manager = std::make_shared<XrdSourceManager>(url, interval, cacheBytes);
+  auto manager = std::make_shared<XrdSourceManager>(url, interval, cacheBytes,
+                                                    readTimeout);
   manager->startDiscovery();
   return manager;
 }
