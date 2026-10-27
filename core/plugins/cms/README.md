@@ -386,21 +386,29 @@ Set any flag to `true` to enable the corresponding weight computation. The
 corresponding `ChannelMask` flags must also be set to `true` for each channel
 that should include the component.
 
-### Raw Puppi MET rebuild for 2024 NanoAODv15
+### Raw Puppi MET rebuild for Run 3 NanoAOD
 
 `applyMetType1 = true` with `rebuildPuppiMetFromRaw = true` rebuilds Puppi
 Type-1 MET from `RawPuppiMET`, rather than adding a jet difference to the
-stored Type-1 MET. It currently requires standard 2024 AK4 PUPPI JEC/JER and
+stored Type-1 MET. It supports the five 2022–2024 correction eras with standard AK4 PUPPI JEC/JER and
 rejects regressed raw-jet inputs. The default remains `false` for existing
 analysis callers.
 
 The rebuild includes both `Jet` and `CorrT1METJet`, including low-pT jets that
 cross the corrected 15 GeV threshold. It uses muon-subtracted directions and
-momenta, excludes EM fractions above 0.9, and applies nominal JER on MC.
+momenta, excludes EM fractions at or above 0.9, and applies nominal JER on MC.
 Missing raw-MET, muon-subtraction, low-jet, or MC gen-matching inputs throw
 instead of silently returning the stored MET. The main and low-jet JES/JER
 variations share their source names. MC matching checks delta-R below 0.2
 for AK4 and below 0.4 for AK8, with the resolution window applied in smearing.
+
+For NanoAODv12, set `metAllowLegacyInputs=true` explicitly: missing
+muon-subtracted direction offsets are zero and a missing low-jet EM fraction
+is zero, following the [NanoAOD-tools compatibility convention](https://github.com/cms-nanoAOD/nanoAOD-tools/blob/master/python/postprocessing/modules/jme/jetmetUncertainties.py).
+Muon-subtraction factors and both jet collections remain required. The default
+is strict, so missing v15 branches fail. `applyUnclusteredMetSystematics=true`
+(default) propagates stored PUPPI unclustered vector deltas; disable this flag
+to omit that family without changing nominal MET.
 
 Optional `metMuonMaskColumn` and `metElectronMaskColumn` specify fixed boolean
 vectors in original NanoAOD order. Their objects' corrected-minus-original

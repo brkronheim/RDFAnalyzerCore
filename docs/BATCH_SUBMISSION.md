@@ -526,6 +526,10 @@ law run MonitorSkimJobs --workers 1 \
 
 ### Input staging
 
+Worker-side redirector selection collects every queued probe result. Each
+probe subprocess retains its own timeout; no additional deadline discards
+later sites when probes run with one worker.
+
 Copy input files to the worker node before running the analysis:
 
 ```bash
@@ -536,6 +540,31 @@ When enabled, input XRootD URLs are xrdcp'd to local disk on the worker.
 The `submit_config.txt` for each job stores the original URLs in
 `__orig_fileList` and uses local filenames (`input_0.root`, …) for the
 analysis.
+
+### Refresh XRootD fixes for an existing skim production
+
+Stop the production's LAW monitors before refreshing prepared retry inputs.
+Rebuilding the adaptor or restarting the monitor alone does not replace the
+scripts and runtime library already staged in the run directory. Preview and
+then apply a focused refresh from the repository root:
+
+```bash
+python3 core/python/refresh_xrootd_runtime.py \
+  --library build/core/xrd/libRDFXrdAdaptor.so skimRun_myRun
+python3 core/python/refresh_xrootd_runtime.py --apply \
+  --library build/core/xrd/libRDFXrdAdaptor.so skimRun_myRun
+```
+
+The refresh patches only the embedded probe collectors and the adaptor library
+in `shared_inputs/` and `shared_inputs.tar.gz`. It verifies that every other
+regular archive member has identical contents, including the analysis binary
+and physics configuration. Original scripts, library, archive, and a rollback
+manifest are saved under `runtime_patches/xrootd_<timestamp>/`. Files are
+replaced atomically after validation. Resume the same monitor tasks with the
+same run names and parameters; their existing state and completed outputs are
+preserved. Jobs that already received their inputs keep those copies; future
+resubmissions transfer the refreshed files. The refresh itself does not submit,
+cancel, or restart any jobs.
 
 ### Output staging
 

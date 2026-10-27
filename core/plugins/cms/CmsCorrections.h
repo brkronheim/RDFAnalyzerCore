@@ -155,11 +155,17 @@ struct CmsCorrectionConfig {
   /// Produces PuppiMET_pt_corr_nominal / PuppiMET_phi_corr_nominal.
   bool applyMetType1 = false;
 
-  /// Rebuild Puppi Type-1 MET from RawPuppiMET and both v15 AK4 collections.
-  /// Requires 2024 standard AK4 PUPPI JEC (no regressed inputs), muon-subtraction
-  /// factors/directions and CorrT1METJet inputs. Missing inputs are errors.
+  /// Rebuild Run 3 Puppi Type-1 MET from RawPuppiMET and both AK4 collections.
+  /// Requires standard AK4 PUPPI JEC (no regressed inputs), muon-subtraction
+  /// factors and CorrT1METJet inputs. Missing inputs are errors.
   /// Other analyses retain the legacy difference propagation unless opted in.
   bool rebuildPuppiMetFromRaw = false;
+  /// Explicit NanoAODv12 compatibility: unavailable muon-subtracted directions
+  /// use the jet axis; unavailable CorrT1METJet_EmEF uses zero, as in NanoAOD-tools.
+  /// Muon-subtracted pT factors and the low-pT collection remain mandatory.
+  bool metAllowLegacyInputs = false;
+  /// Add stored PuppiMET unclustered vector deltas to the rebuilt MET.
+  bool applyUnclusteredMetSystematics = true;
   /// Optional, fixed masks in the original object order. Propagate the energy
   /// changes of these leptons into Puppi MET after the hadronic Type-1 update.
   std::string metMuonMaskColumn;

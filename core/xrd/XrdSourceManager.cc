@@ -1,4 +1,5 @@
 #include "XrdSourceManager.h"
+#include "XrdOpenRetry.h"
 
 #include <XrdCl/XrdClBuffer.hh>
 #include <XrdCl/XrdClFile.hh>
@@ -22,6 +23,7 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -59,7 +61,7 @@ void logLine(const std::string &line, LogLevel level = LogLevel::Info) {
 struct GlobalSettings {
   std::mutex mutex;
   unsigned probeIntervalSeconds = 5;
-  unsigned readTimeoutSeconds = 45;
+  unsigned readTimeoutSeconds = 120;
   std::size_t prefetchCacheBytes = 256ULL * 1024 * 1024;
   unsigned preferredSiteBandPercent = 20;
   unsigned explorationSharePercent = 10;
@@ -1036,19 +1038,36 @@ XrdSourceManager::XrdSourceManager(std::string url,
       preferredSiteBandPercent());
   instanceId_ = nextManagerId.fetch_add(1);
   auto primary = std::make_shared<Source>();
-  primary->file = std::make_shared<XrdCl::File>();
   const auto timeout = static_cast<std::uint16_t>(readTimeoutSeconds_);
-  const auto status = primary->file->Open(url_, XrdCl::OpenFlags::Read,
-                                          XrdCl::Access::None, timeout);
-  if (!status.IsOK())
-    throw std::runtime_error("XrdCl could not open '" + url_ + "': " + status.ToStr());
-
-  XrdCl::StatInfo *statInfo = nullptr;
-  const auto statStatus = primary->file->Stat(false, statInfo, timeout);
-  std::unique_ptr<XrdCl::StatInfo> ownedStat(statInfo);
-  if (!statStatus.IsOK() || !ownedStat)
-    throw std::runtime_error("XrdCl could not stat '" + url_ + "': " + statStatus.ToStr());
-  fileSize_ = ownedStat->GetSize();
+  std::string lastError;
+  const bool opened = detail::openWithRetry(
+      url_,
+      [&](const std::string &candidateUrl, std::size_t attempt) {
+        // A failed XrdCl handle must not be reused on the next attempt.
+        auto file = std::make_shared<XrdCl::File>();
+        const auto status = file->Open(candidateUrl, XrdCl::OpenFlags::Read,
+                                       XrdCl::Access::None, timeout);
+        if (!status.IsOK()) {
+          lastError = "XrdCl could not open '" + candidateUrl + "': " + status.ToStr();
+        } else {
+          XrdCl::StatInfo *statInfo = nullptr;
+          const auto statStatus = file->Stat(false, statInfo, timeout);
+          std::unique_ptr<XrdCl::StatInfo> ownedStat(statInfo);
+          if (statStatus.IsOK() && ownedStat) {
+            fileSize_ = ownedStat->GetSize();
+            primary->file = std::move(file);
+            // Continue replica discovery through the endpoint that worked.
+            url_ = candidateUrl;
+            return true;
+          }
+          lastError = "XrdCl could not stat '" + candidateUrl + "': " + statStatus.ToStr();
+        }
+        logLine("[XrdAdaptor] initial open attempt " + std::to_string(attempt) +
+                    "/3 failed: " + lastError, LogLevel::Error);
+        return false;
+      },
+      [](std::chrono::seconds delay) { std::this_thread::sleep_for(delay); });
+  if (!opened) throw std::runtime_error(lastError + " (after 3 attempts)");
 
   primary->file->GetProperty("DataServer", primary->server);
   if (primary->server.empty()) {
@@ -1920,7 +1939,7 @@ void configureXrdAdaptor(unsigned probeIntervalSeconds,
 
 std::shared_ptr<XrdSourceManager> makeXrdSourceManager(const std::string &url) {
   unsigned interval = 5;
-  unsigned readTimeout = 45;
+  unsigned readTimeout = 120;
   std::size_t cacheBytes = 256ULL * 1024 * 1024;
   {
     auto &global = settings();

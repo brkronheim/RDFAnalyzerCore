@@ -39,6 +39,15 @@ std::string columnType(Analyzer &an, const std::string &name) {
 } // namespace
 
 void defineNanoAodCompatibilityColumns(Analyzer &an) {
+  // v12 stores PF MET as MET; v15 names it PFMET. Keep the stored PF
+  // observable distinct from PuppiMET and from every recalibrated MET column.
+  for (const std::string component : {"pt", "phi"}) {
+    const auto output = "PFMET_" + component;
+    const auto input = "MET_" + component;
+    if (!hasColumn(an, output) && hasColumn(an, input)) {
+      an.DefineNominal(output, [](Float_t value) { return value; }, {input});
+    }
+  }
   // -----------------------------------------------------------------------
   // PV_npvsGood_u32 — PV_npvsGood is UChar_t in some NanoAOD versions (v9);
   // convert to UInt_t for uniform downstream handling.

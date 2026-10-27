@@ -38,7 +38,7 @@ xrdPrefetchCacheMB: 256
 xrdPreferredSiteBandPercent: 20
 xrdExplorationSharePercent: 10
 xrdMaxReadSources: 2
-xrdReadTimeoutSeconds: 45
+xrdReadTimeoutSeconds: 120
 treeCacheEnabled: true
 treeCacheAsyncPrefetch: true
 treeCachePrefetchNextFile: true
@@ -64,7 +64,7 @@ interval can be set to zero to disable alternate-source discovery while
 keeping XrdCl as the read backend.
 
 `xrdReadTimeoutSeconds` sets the per-request XrdCl timeout for file open/stat,
-replica discovery opens, and vectored reads. The default is 45 seconds; valid
+replica discovery opens, and vectored reads. The default is 120 seconds; valid
 values are 1 through 300. When a vectored read times out, that replica is
 treated as failed for the current file and the manager advances to another
 discovered site. At most `xrdMaxReadSources` full reads are in flight at once;
@@ -134,6 +134,17 @@ keeps a third distinct site available for samples. Set `xrdMaxReadSources: 1`
 to use a single full read; an untested second site can still receive samples.
 Set `xrdExplorationSharePercent: 0` to disable the third-site sample. These
 settings do not affect the initial ROOT file-open redirect.
+
+Initial file open and stat now use up to three attempts, each with a fresh
+XrdCl handle and the configured `xrdReadTimeoutSeconds` request timeout. Retries
+wait one and then two seconds. Public CMS dataset paths (`/store/mc/`,
+`/store/data/`, `/store/relval/`, `/store/himc/`) can fall back through other
+CMS global/regional redirectors. Site-routing prefixes are removed for those
+fallbacks so they can select another replica. Other namespaces, including
+private `/store/user/` and `/store/group/` paths, retry their original URL.
+Open/stat failures and attempt numbers are logged even in Condor jobs. If all
+attempts fail, the job still fails; no input file is skipped. Replica discovery
+continues from the URL that successfully opened the file.
 
 At normal process exit, the backend prints a site ranking from lowest to
 highest rolling quality, with preferred and blacklisted flags, failed read

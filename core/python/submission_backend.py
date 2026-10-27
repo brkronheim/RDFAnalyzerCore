@@ -205,7 +205,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ---------------------------------------------------------------------------
 # Inline helpers shared with the XRootD optimiser (no external Python packages)
@@ -219,9 +219,6 @@ GENERIC_REDIRECTOR_HOSTS = {
 }
 LOCAL_SITE_BONUS = 1.25
 PROBE_TIMEOUT = 15.0
-# Extra seconds added to the per-probe timeout when waiting for the thread
-# pool to finish — gives in-flight probes time to complete gracefully.
-PROBE_POOL_TIMEOUT_BUFFER = 2.0
 PROBE_BYTES = 1 * 1024 * 1024  # 1 MiB – realistic but still small
 STAGE_COPY_TIMEOUT = 60        # per-xrdcp timeout in seconds
 # Total attempts per file: try up to MAX_ATTEMPTS site-specific redirectors
@@ -400,37 +397,22 @@ def rank_redirectors_parallel(lfn, redirectors, local_site=""):
         return site in redir
 
     results = []
-    processed = set()
+    # Each subprocess probe has its own timeout.  A timeout for the whole
+    # queue would discard later sites when only one probe worker is used.
     with ThreadPoolExecutor(max_workers=max(1, min(len(redirectors), XRD_PROBE_WORKERS))) as pool:
         futures = {{pool.submit(probe_one_redirector, lfn, r): r for r in redirectors}}
-        try:
-            for future in as_completed(futures, timeout=PROBE_TIMEOUT + PROBE_POOL_TIMEOUT_BUFFER):
-                processed.add(future)
-                try:
-                    tput = future.result()
-                except Exception:
-                    continue
-                if tput is None:
-                    continue
-                redir = futures[future]
-                if local_site and site_matches(local_site, redir):
-                    tput *= LOCAL_SITE_BONUS
-                results.append((redir, tput))
-        except TimeoutError:
-            pass
-
-        for future, redir in futures.items():
-            if future in processed or not future.done():
-                continue
+        for future in as_completed(futures):
             try:
                 tput = future.result()
             except Exception:
                 continue
             if tput is None:
                 continue
+            redir = futures[future]
             if local_site and site_matches(local_site, redir):
                 tput *= LOCAL_SITE_BONUS
             results.append((redir, tput))
+
     results.sort(key=lambda x: x[1], reverse=True)
     return results
 
@@ -856,7 +838,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ---------------------------------------------------------------------------
 # Inline helpers (stdlib + ROOT via subprocess; no external Python packages)
@@ -870,8 +852,6 @@ GENERIC_REDIRECTOR_HOSTS = {
 }
 LOCAL_SITE_BONUS = 1.25
 PROBE_TIMEOUT = 10.0
-# Extra seconds added to PROBE_TIMEOUT when waiting for the thread pool.
-PROBE_POOL_TIMEOUT_BUFFER = 2.0
 PROBE_BYTES = 1 * 1024 * 1024
 # Keep redirector probing within the one-CPU Condor request by default.
 XRD_PROBE_WORKERS = max(1, int(os.environ.get("XRD_PROBE_WORKERS", "1")))
@@ -1083,34 +1063,18 @@ def select_best_url(url, redirectors, local_site="", blacklist=None):
         return site in redir
 
     results = []
-    processed = set()
+    # Each subprocess probe has its own timeout.  A timeout for the whole
+    # queue would discard later sites when only one probe worker is used.
     with ThreadPoolExecutor(max_workers=max(1, min(len(active), XRD_PROBE_WORKERS))) as pool:
         futures = {{pool.submit(probe_redirector, lfn, r): r for r in active}}
-        try:
-            for future in as_completed(futures, timeout=PROBE_TIMEOUT + PROBE_POOL_TIMEOUT_BUFFER):
-                processed.add(future)
-                try:
-                    tput = future.result()
-                except Exception:
-                    continue
-                if tput is None:
-                    continue
-                redir = futures[future]
-                if local_site and site_matches_redir(local_site, redir):
-                    tput *= LOCAL_SITE_BONUS
-                results.append((redir, tput))
-        except TimeoutError:
-            pass
-
-        for future, redir in futures.items():
-            if future in processed or not future.done():
-                continue
+        for future in as_completed(futures):
             try:
                 tput = future.result()
             except Exception:
                 continue
             if tput is None:
                 continue
+            redir = futures[future]
             if local_site and site_matches_redir(local_site, redir):
                 tput *= LOCAL_SITE_BONUS
             results.append((redir, tput))

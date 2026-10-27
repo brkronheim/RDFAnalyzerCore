@@ -1,5 +1,49 @@
 import os
+import ast
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import pytest
 from core.python.submission_backend import ensure_xrootd_redirector, generate_condor_submit, generate_condor_runscript, get_copy_file_list, stage_outputs_blocks
+
+
+@pytest.mark.parametrize("stage_in", [False, True])
+def test_site_selection_collects_success_after_queue_timeout(stage_in):
+    """A slow first site must not hide a later, healthy site with one worker."""
+    from core.python.submission_backend import stage_inputs_block, xrootd_optimize_block
+
+    block = stage_inputs_block() if stage_in else xrootd_optimize_block()
+    delimiter = "PY" if stage_in else "XRDPY"
+    code = block.split("<< '" + delimiter + "'\n", 1)[1].rsplit("\n" + delimiter, 1)[0]
+    functions = [node for node in ast.parse(code).body if isinstance(node, ast.FunctionDef)]
+
+    # Scale the former queue-wide deadline down to keep the regression fast.
+    def complete(futures, timeout=None):
+        return as_completed(futures, timeout=0.001 if timeout is not None else None)
+
+    scope = dict(ThreadPoolExecutor=ThreadPoolExecutor, as_completed=complete,
+                 PROBE_TIMEOUT=0.001, PROBE_POOL_TIMEOUT_BUFFER=0,
+                 PROBE_BYTES=1024, XRD_PROBE_WORKERS=1,
+                 SITE_REDIRECTOR_MARKER="/store/test/xrootd/",
+                 GENERIC_REDIRECTOR_HOSTS=set(), re=__import__("re"))
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "<worker-probes>", "exec"), scope)
+
+    def probe(lfn, redirector):
+        time.sleep(0.01)
+        if "broken" in redirector:
+            raise RuntimeError("unavailable endpoint")
+        return 25.0
+
+    redirectors = ["root://broken//store/test/xrootd/T2_Bad/",
+                   "root://healthy//store/test/xrootd/T2_Good/"]
+    if stage_in:
+        scope["probe_one_redirector"] = probe
+        ranked = scope["rank_redirectors_parallel"]("/store/mc/test.root", redirectors)
+        assert ranked == [(redirectors[1], 25.0)]
+    else:
+        scope["probe_redirector"] = probe
+        selected = scope["select_best_url"]("root://original//store/mc/test.root", redirectors)
+        assert selected == "root://healthy//store/test/xrootd/T2_Good/store/mc/test.root"
 
 
 def test_get_copy_file_list_includes_onnx_payloads():

@@ -121,6 +121,9 @@ for version-dependent type differences.
 | `applyCtagCorrections` | false | Create c-tag TaggerWorkingPointManager (required for c-tag SFs) |
 | `applyHemIssueFilter` | false | 2018 HEM issue jet veto |
 | `applyMetType1` | false | Propagate the final calibrated jet shift to PuppiMET |
+| `rebuildPuppiMetFromRaw` | false | Rebuild Run 3 standard AK4 PUPPI Type-1 MET from raw MET and both jet collections; requires `applyMetType1` |
+| `metAllowLegacyInputs` | false | Explicit v12 compatibility for unavailable muon-subtracted directions and low-jet EM fraction; see the CMS plugin README |
+| `applyUnclusteredMetSystematics` | true | Propagate PUPPI unclustered vector deltas when rebuilding MET with systematics enabled |
 | `jesMode` | Reduced | JES systematic granularity (Total/Reduced/Full) |
 
 ### `CmsWeightConfig` flags

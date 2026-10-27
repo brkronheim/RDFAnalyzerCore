@@ -2,6 +2,7 @@
 #include <CmsMetCorrections.h>
 #include <CmsCorrections.h>
 #include <CmsYearConfig.h>
+#include <CmsNanoAodCompat.h>
 #include <ConfigurationManager.h>
 #include <CorrectionManager.h>
 #include <DataManager.h>
@@ -33,7 +34,7 @@ std::unique_ptr<Analyzer> makeAnalyzer(bool systematics = true, bool isMC = fals
 void v(Analyzer &an, const std::string &name, Vec value) {
   an.Define(name, [value]() { return value; }, {});
 }
-void inputs(Analyzer &an) {
+void inputs(Analyzer &an, bool legacy = false) {
   an.Define("RawPuppiMET_pt", []() { return 100.f; }, {})
       ->Define("RawPuppiMET_phi", []() { return 0.f; }, {})
       ->Define("PuppiMET_pt", []() { return 999.f; }, {}) // must be ignored
@@ -49,15 +50,19 @@ void inputs(Analyzer &an) {
   v(an, "Jet_rawFactor", {.2f, .2f}); v(an, "Jet_eta", {.5f, .5f});
   v(an, "Jet_phi", {0.f, 0.f}); v(an, "Jet_area", {.5f, .5f});
   v(an, "Jet_muonSubtrFactor", {.2f, 0.f});
-  v(an, "Jet_muonSubtrDeltaEta", {0.f, 0.f});
-  v(an, "Jet_muonSubtrDeltaPhi", {0.f, 0.f});
+  if (!legacy) {
+    v(an, "Jet_muonSubtrDeltaEta", {0.f, 0.f});
+    v(an, "Jet_muonSubtrDeltaPhi", {0.f, 0.f});
+  }
   v(an, "Jet_chEmEF", {.1f, .6f}); v(an, "Jet_neEmEF", {.1f, .4f});
   v(an, "CorrT1METJet_rawPt", {14.f}); v(an, "CorrT1METJet_area", {.5f});
   v(an, "CorrT1METJet_eta", {.5f}); v(an, "CorrT1METJet_phi", {float(M_PI/2.)});
   v(an, "CorrT1METJet_muonSubtrFactor", {0.f});
-  v(an, "CorrT1METJet_muonSubtrDeltaEta", {0.f});
-  v(an, "CorrT1METJet_muonSubtrDeltaPhi", {0.f});
-  v(an, "CorrT1METJet_EmEF", {.2f});
+  if (!legacy) {
+    v(an, "CorrT1METJet_muonSubtrDeltaEta", {0.f});
+    v(an, "CorrT1METJet_muonSubtrDeltaPhi", {0.f});
+    v(an, "CorrT1METJet_EmEF", {.2f});
+  }
   v(an, "Muon_pt", {30.f, 30.f}); v(an, "Muon_pt_corr_nominal", {33.f, 60.f});
   v(an, "Muon_phi", {0.f, 0.f});
   an.Define("metMuons", []() { return Mask{true, false}; }, {});
@@ -150,9 +155,75 @@ TEST(CmsMetCorrections, JerMatchingRejectsDistantStoredAssociationsAndWrapsPhi) 
   EXPECT_TRUE(ROOT::VecOps::All(df.Take<Vec>("FatJet_genMatchedPt").GetValue().at(0) == Vec{-1.f,200.f}));
 }
 
+TEST(CmsMetCorrections, V12AllCorrectionErasUseBothCollectionsAndUnclusteredVectorDeltas) {
+  for (const std::string era : {"2022_preEE", "2022_postEE", "2023_preBPix", "2023_postBPix"}) {
+    for (const bool isMC : {false, true}) {
+      SCOPED_TRACE(era + (isMC ? " MC" : " data"));
+      cms::CmsYearRegistry registry; registry.setYear(era); const auto ys = registry.load();
+      if (!std::filesystem::exists(ys.jmeFile)) GTEST_SKIP() << "CVMFS unavailable";
+      auto an = makeAnalyzer(isMC, isMC); inputs(*an, true);
+      if (isMC) {
+        an->Define("event", []() { return ULong64_t(1234); }, {});
+        v(*an, "GenJet_pt", {45.f}); v(*an, "GenJet_eta", {.5f}); v(*an, "GenJet_phi", {0.f});
+        v(*an, "Jet_genMatchedPt", {45.f,45.f});
+      }
+      // The DATA compound includes a run-dependent residual.
+      an->getDataFrameProvider().setDataFrame(an->getDataFrameProvider().getDataFrame()
+          .Redefine("run", [era]() { return UInt_t(era.rfind("2022",0)==0 ?
+              (era=="2022_preEE" ? 355800 : 360000) : (era=="2023_preBPix" ? 367000 : 370000)); }, {}));
+      cms::CmsCorrectionConfig cfg; cfg.yearSettings=&ys;
+      cfg.applyJetCorrections=true; cfg.applyMetType1=true; cfg.rebuildPuppiMetFromRaw=true;
+      cfg.metAllowLegacyInputs=true; cfg.jesMode=cms::CmsCorrectionConfig::Total;
+      cms::configureCmsCorrectionWorkflow(*an,cfg);
+      auto df=an->getDataFrameProvider().getDataFrame();
+      const auto jets=df.Take<Vec>("Jet_pt_corr_nominal").GetValue()[0];
+      const auto low=df.Take<Vec>("CorrT1METJet_pt_corr_nominal").GetValue()[0];
+      const float x=100.f - .8f*(jets[0]-40.f);
+      const float y=low[0]>15.f ? -(low[0]-14.f) : 0.f;
+      EXPECT_NEAR(df.Take<float>("PuppiMET_pt_corr_nominal").GetValue()[0],std::hypot(x,y),3e-5);
+      if (isMC) {
+        const auto up=an->getSystematicManager().getVariationColumnName("PuppiMET_pt_corr_nominal","UnclusteredMETUp");
+        EXPECT_NEAR(df.Take<float>(up).GetValue()[0],std::hypot(x+5.f,y),3e-5);
+        const auto jer=an->getSystematicManager().getVariationColumnName("PuppiMET_pt_corr_nominal","jerUp");
+        EXPECT_NE(jer,"PuppiMET_pt_corr_nominal");
+        EXPECT_TRUE(std::isfinite(df.Take<float>(jer).GetValue()[0]));
+      }
+      EXPECT_FLOAT_EQ(df.Take<float>("PFMET_pt").GetValue()[0],73.f);
+    }
+  }
+}
+
+TEST(CmsMetCorrections, Type1ThresholdCrossingsRecomputeEligibilityInEachDirection) {
+  const auto sum = [](float corrected) {
+    return cms::detail::puppiType1JetSum({14.f},{corrected},{0.f},{0.f},
+                                       {0.f},{0.f},{0.f},{.2f})[0];
+  };
+  EXPECT_FLOAT_EQ(sum(14.5f),0.f);
+  EXPECT_FLOAT_EQ(sum(16.f),2.f);
+  EXPECT_FLOAT_EQ(sum(15.f),0.f);
+  EXPECT_FLOAT_EQ(cms::detail::puppiType1JetSum({20.f},{30.f},{0.f},{0.f},
+      {0.f},{0.f},{0.f},{.9f})[0],0.f);
+}
+
 TEST(CmsMetCorrections, MissingRebuildInputsFailInsteadOfReturningNominalMet) {
   auto an = makeAnalyzer();
   cms::CmsYearRegistry registry; registry.setYear("2024"); const auto ys = registry.load();
   cms::CmsCorrectionConfig cfg; cfg.yearSettings = &ys; cfg.applyJetCorrections = true;
   EXPECT_THROW(cms::defineCmsRebuiltPuppiMet(*an, cfg), std::runtime_error);
+}
+
+TEST(CmsMetCorrections, PfMetAliasUsesStoredPfMetAndPreservesNativeNames) {
+  for (const bool native : {false,true}) {
+    auto an = makeAnalyzer(false);
+    v(*an,"Jet_pt",{});
+    an->Define("MET_pt",[]() {return 83.f;},{})
+        ->Define("MET_phi",[]() {return .5f;},{})
+        ->Define("PuppiMET_pt",[]() {return 200.f;},{});
+    if (native) an->Define("PFMET_pt",[]() {return 73.f;},{});
+    cms::defineNanoAodCompatibilityColumns(*an);
+    cms::defineNanoAodCompatibilityColumns(*an);
+    auto df=an->getDataFrameProvider().getDataFrame();
+    EXPECT_FLOAT_EQ(df.Take<float>("PFMET_pt").GetValue()[0],native ? 73.f : 83.f);
+    EXPECT_FLOAT_EQ(df.Take<float>("PFMET_phi").GetValue()[0],.5f);
+  }
 }

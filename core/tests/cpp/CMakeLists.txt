@@ -14,6 +14,15 @@ add_test(NAME ProvenanceServiceTest COMMAND testProvenanceService)
 
 # Basic functionality tests
 
+if(TARGET RDFXrdAdaptor)
+    add_executable(testXrdOpenRetry testXrdOpenRetry.cc)
+    target_include_directories(testXrdOpenRetry PRIVATE
+        "${CMAKE_SOURCE_DIR}/core/xrd" "${XRDCL_INCLUDE_DIR}")
+    target_link_libraries(testXrdOpenRetry PRIVATE "${XRDCL_LIBRARY}" gtest gtest_main)
+    target_compile_features(testXrdOpenRetry PRIVATE cxx_std_17)
+    add_test(NAME XrdOpenRetryTest COMMAND testXrdOpenRetry)
+endif()
+
 add_executable(testConfigurationManager testConfigurationManager.cc)
 target_link_libraries(testConfigurationManager core gtest gtest_main)
 add_test(NAME ConfigurationManagerTest COMMAND testConfigurationManager)

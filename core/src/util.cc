@@ -358,7 +358,7 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
   if (maxReadSources == 0)
     throw std::runtime_error(
         "Invalid 'xrdMaxReadSources' value '0' (expected 1 or 2).");
-  const auto readTimeoutSeconds = integer("xrdReadTimeoutSeconds", 45, 300);
+  const auto readTimeoutSeconds = integer("xrdReadTimeoutSeconds", 120, 300);
   if (readTimeoutSeconds == 0)
     throw std::runtime_error(
         "Invalid 'xrdReadTimeoutSeconds' value '0' (expected 1 to 300).");

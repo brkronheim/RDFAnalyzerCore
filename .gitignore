@@ -39,6 +39,9 @@ aux/Run2/*
 docs/doxygen/*
 analyses/*
 core/python/law/index
+skimRun*/
+mergeRun*/
+rucioFileList*/
 
 AGENTS/
 analyticFit_ci_run/

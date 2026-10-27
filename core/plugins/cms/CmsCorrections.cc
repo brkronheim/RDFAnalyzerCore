@@ -408,6 +408,9 @@ void CmsCorrectionConfig::print(std::ostream &os) const {
      << "  applyCtagCorrections: " << yesNo(applyCtagCorrections) << '\n'
      << "  applyTauCorrections: " << yesNo(applyTauCorrections) << '\n'
      << "  applyMetType1: " << yesNo(applyMetType1) << '\n'
+     << "  rebuildPuppiMetFromRaw: " << yesNo(rebuildPuppiMetFromRaw) << '\n'
+     << "  metAllowLegacyInputs: " << yesNo(metAllowLegacyInputs) << '\n'
+     << "  applyUnclusteredMetSystematics: " << yesNo(applyUnclusteredMetSystematics) << '\n'
      << "  maxJesSlots: " << maxJesSlots << '\n'
      << "  correctionNamePrefix: " << correctionNamePrefix << '\n';
 }
@@ -863,6 +866,12 @@ void configureCmsCorrectionWorkflow(Analyzer &an,
                          cfg.applyElectronCorrections ? "true" : "false");
   setWorkflowConfigValue(config, prefix + "ApplyMuonCorrections",
                          cfg.applyMuonCorrections ? "true" : "false");
+  setWorkflowConfigValue(config, prefix + "RebuildPuppiMetFromRaw",
+                         cfg.rebuildPuppiMetFromRaw ? "true" : "false");
+  setWorkflowConfigValue(config, prefix + "MetAllowLegacyInputs",
+                         cfg.metAllowLegacyInputs ? "true" : "false");
+  setWorkflowConfigValue(config, prefix + "ApplyUnclusteredMetSystematics",
+                         cfg.applyUnclusteredMetSystematics ? "true" : "false");
 
   // -- JME file and correction names --
   setWorkflowConfigValue(config, prefix + "JmeFile", ys.jmeFile);

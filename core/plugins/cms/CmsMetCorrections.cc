@@ -5,6 +5,7 @@
 #include "analyzer.h"
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <stdexcept>
 
 namespace cms {
@@ -37,7 +38,7 @@ Vec detail::puppiType1JetSum(
         !std::isfinite(muonSubtrDeltaEta[i]) ||
         !std::isfinite(muonSubtrDeltaPhi[i]) || !std::isfinite(emFraction[i]))
       throw std::runtime_error("CmsMetCorrections: non-finite jet input");
-    if (rawPt[i] <= 0.f || emFraction[i] > maxEmFraction ||
+    if (rawPt[i] <= 0.f || emFraction[i] >= maxEmFraction ||
         std::abs(eta[i] + muonSubtrDeltaEta[i]) >= maxAbsEta) continue;
     const float hadronicFraction = 1.f - muonSubtrFactor[i];
     const float correctedHadronicPt = correctedPt[i] * hadronicFraction;
@@ -73,13 +74,31 @@ void defineCmsRebuiltPuppiMet(Analyzer &an, const CmsCorrectionConfig &cfg) {
       !cfg.jetRawPtColumnOverride.empty())
     throw std::runtime_error("CmsMetCorrections: raw Puppi MET rebuild requires standard AK4 PUPPI corrections");
   const auto &ys = *cfg.yearSettings;
-  if (ys.canonicalYear != "2024" ||
+  const bool run3 = ys.canonicalYear == "2022_preEE" || ys.canonicalYear == "2022_postEE" ||
+                   ys.canonicalYear == "2023_preBPix" || ys.canonicalYear == "2023_postBPix" ||
+                   ys.canonicalYear == "2024";
+  if (!run3 ||
       ys.jecCompoundCorrection.find("AK4PFPuppi") == std::string::npos ||
       ys.jecCompoundCorrection.find("Regression") != std::string::npos)
-    throw std::runtime_error("CmsMetCorrections: raw rebuild currently supports 2024 standard AK4 PUPPI only");
+    throw std::runtime_error("CmsMetCorrections: raw rebuild requires Run 3 standard AK4 PUPPI corrections");
   const bool isData = an.getConfigurationProvider().get("dtype") == "data";
   auto corrections = an.getPlugin<CorrectionManager>("correctionManager");
   auto low = JetEnergyScaleManager::create(an, "metLowJetEnergyScaleManager");
+  if (cfg.metAllowLegacyInputs) {
+    // v12 did not retain these quantities. This is an explicit schema policy,
+    // never a fallback for accidentally missing v15 branches.
+    for (const auto &collection : {std::string("Jet"), std::string("CorrT1METJet")}) {
+      const auto sizeColumn = collection == "Jet" ? "Jet_pt" : "CorrT1METJet_rawPt";
+      requireColumns(an, {sizeColumn});
+      for (const auto &quantity : {std::string("muonSubtrDeltaEta"), std::string("muonSubtrDeltaPhi"), std::string("EmEF")}) {
+        if (quantity == "EmEF" && collection == "Jet") continue;
+        const auto column = collection + "_" + quantity;
+        if (an.HasColumn(column)) continue;
+        std::cerr << "CmsMetCorrections: NanoAODv12 compatibility uses zero for unavailable " << column << '\n';
+        an.Define(column, [](const Vec &pt) { return Vec(pt.size(), 0.f); }, {sizeColumn});
+      }
+    }
+  }
   requireColumns(an, {"RawPuppiMET_pt", "RawPuppiMET_phi", "Jet_pt_raw",
       "Jet_muonSubtrFactor", "Jet_muonSubtrDeltaEta", "Jet_muonSubtrDeltaPhi",
       "Jet_chEmEF", "Jet_neEmEF", "CorrT1METJet_rawPt", "CorrT1METJet_eta",
@@ -190,7 +209,7 @@ void defineCmsRebuiltPuppiMet(Analyzer &an, const CmsCorrectionConfig &cfg) {
         {family.first + "_pt", family.first + "_pt_corr_nominal", family.first + "_phi", family.second});
   }
   an.Define("cms_met_unclustered_shift", []() { return Vec{0.f, 0.f}; }, {});
-  if (an.getSystematicManager().isEnabled()) {
+  if (cfg.applyUnclusteredMetSystematics && an.getSystematicManager().isEnabled()) {
     requireColumns(an, {"PuppiMET_pt", "PuppiMET_phi", "PuppiMET_ptUnclusteredUp",
         "PuppiMET_phiUnclusteredUp", "PuppiMET_ptUnclusteredDown", "PuppiMET_phiUnclusteredDown"});
     for (const auto &direction : {std::string("Up"), std::string("Down")})

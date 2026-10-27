@@ -11,6 +11,7 @@
 //   safe for any CMS analysis to call at the top of their pipeline.
 //
 //   The following columns are defined (if not already present):
+//     PFMET_pt/phi        — stored MET_pt/phi for schemas using the older PF name
 //     PV_npvsGood_u32      — UInt_t copy of PV_npvsGood (UChar_t in v9)
 //     Jet_genJetIdx_int    — Int_t copy of Jet_genJetIdx (Short_t in v9)
 //     Jet_hadronFlavour_int — Int_t copy of Jet_hadronFlavour (UChar_t in v15)
