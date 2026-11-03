@@ -1,0 +1,38 @@
+# =============================================================================
+# triggers.yaml — TriggerManager configuration
+#
+# Format: YAML sequence.  Each entry must have:
+#   name     : trigger group label (arbitrary)
+#   sample   : sample-type string that matches the 'type' key in cfg.yaml
+#   triggers : comma-separated list of HLT branch names (Bool_t in NanoAOD)
+#   vetoes   : (optional) comma-separated HLT veto branches
+#
+# TriggerManager applies the logical OR of all 'triggers' branches and
+# filters the event if none fired.  When 'vetoes' are present it additionally
+# requires that none of the veto branches fired.
+#
+# Convention used in this template:
+#   sample "0" — data (Run 2016G single-muon dataset)
+#   sample "1" — MC (no trigger filter; trigger efficiency applied as weight)
+#
+# Adapt the trigger paths to your run era and dataset.
+# Run 3 (2022–) typical single-muon paths:
+#   HLT_IsoMu24
+#   HLT_IsoMu27
+#   HLT_Mu50
+# =============================================================================
+
+# ---- Data: single-muon HLT paths (Run 2016, adapt per era) ------------------
+- name: single_muon_data
+  sample: "0"
+  triggers: >-
+    HLT_IsoMu24,
+    HLT_IsoTkMu24
+
+# ---- MC: no HLT filter (apply trigger efficiency scale factor as weight) ----
+# Remove or replace this entry if you want to apply trigger emulation on MC.
+- name: single_muon_mc
+  sample: "1"
+  triggers: >-
+    HLT_IsoMu24,
+    HLT_IsoTkMu24

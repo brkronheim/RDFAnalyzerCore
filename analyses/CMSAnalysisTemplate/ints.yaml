@@ -1,0 +1,17 @@
+# =============================================================================
+# ints.yaml — Scalar integer constants loaded as constant RDataFrame columns
+#
+# Format: YAML map (key: value).  Each entry becomes a constant integer
+# column in the RDataFrame.
+# =============================================================================
+
+# ---- Analysis year / run era (used by correction payloads) -----------------
+run_year: 2016
+
+# ---- Jet working-point thresholds (documentation) --------------------------
+jet_id_min: 2
+
+# ---- Electron cut-based ID working points ----------------------------------
+# 0=fail, 1=veto, 2=loose, 3=medium, 4=tight (CMS NanoAOD convention)
+electron_loose_wp: 1
+electron_tight_wp: 4
