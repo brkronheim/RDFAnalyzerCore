@@ -136,7 +136,41 @@ static void expandSystematicColumns(std::vector<std::string>& columns,
   }
 }
 
-void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec) {
+static ROOT::RDF::RSnapshotOptions snapshotOptions(
+    const IConfigurationProvider* configProvider = nullptr) {
+  ROOT::RDF::RSnapshotOptions options;
+  options.fCompressionAlgorithm = ROOT::RCompressionSetting::EAlgorithm::kZSTD;
+  options.fCompressionLevel = 5;
+  if (!configProvider) return options;
+  const auto& config = configProvider->getConfigMap();
+  const auto algorithm = config.find("skimCompressionAlgorithm");
+  if (algorithm != config.end()) {
+    std::string name = algorithm->second;
+    for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    using Algorithm = ROOT::RCompressionSetting::EAlgorithm;
+    if (name == "zstd") options.fCompressionAlgorithm = Algorithm::kZSTD;
+    else if (name == "lzma") options.fCompressionAlgorithm = Algorithm::kLZMA;
+    else if (name == "zlib") options.fCompressionAlgorithm = Algorithm::kZLIB;
+    else if (name == "lz4") options.fCompressionAlgorithm = Algorithm::kLZ4;
+    else throw std::invalid_argument("RootOutputSink: skimCompressionAlgorithm must be zstd, lzma, zlib or lz4");
+  }
+  const auto level = config.find("skimCompressionLevel");
+  if (level != config.end()) {
+    try {
+      size_t parsed = 0;
+      const int value = std::stoi(level->second, &parsed);
+      if (parsed != level->second.size() || value < 0 || value > 9)
+        throw std::invalid_argument("invalid level");
+      options.fCompressionLevel = value;
+    } catch (const std::exception&) {
+      throw std::invalid_argument("RootOutputSink: skimCompressionLevel must be an integer from 0 to 9");
+    }
+  }
+  return options;
+}
+
+static void writeSnapshot(ROOT::RDF::RNode& df, const OutputSpec& spec,
+                          const ROOT::RDF::RSnapshotOptions& options) {
   if (spec.outputFile.empty()) {
     throw std::runtime_error("RootOutputSink: outputFile is empty");
   }
@@ -153,10 +187,6 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec
     std::filesystem::create_directories(outputPath.parent_path());
   }
 
-  ROOT::RDF::RSnapshotOptions options;
-  options.fCompressionAlgorithm = ROOT::RCompressionSetting::EAlgorithm::kZSTD;
-  options.fCompressionLevel = 5;  // 505 ZSTD compression level, good balance between speed and size
-
   if (spec.columns.empty()) {
     df.Snapshot(spec.treeName, spec.outputFile, ".*", options);
   } else {
@@ -164,6 +194,10 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec
   }
 
   std::cout << "Done Saving" << std::endl;
+}
+
+void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec) {
+  writeSnapshot(df, spec, snapshotOptions());
 }
 
 void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df,
@@ -202,7 +236,7 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df,
   }
 
   OutputSpec spec{outputFile, saveTree, cachedColumns_};
-  writeDataFrame(df, spec);
+  writeSnapshot(df, spec, snapshotOptions(channel == OutputChannel::Skim ? &configProvider : nullptr));
 }
 
 std::string RootOutputSink::resolveOutputFile(const IConfigurationProvider& configProvider,

@@ -1,0 +1,49 @@
+{
+  "upstream_revision": "a0e8323a1f6489abc5d25b6c1c90933ccee55deb",
+  "devices": "4 x NVIDIA L40, 46068 MiB each, NVIDIA driver 615.71.10",
+  "native_test_command": "PYTHONPATH=core/python RDF_TEST_RABBIT=1 RDF_TEST_RABBIT_GPUS=1,4 .venv-rabbit/bin/python -m pytest core/tests/python/test_rabbit_runtime.py",
+  "native_tests": "3 passed; CPU/1-GPU/4-GPU analytic Poisson fit, normalized polynomial/ttbar covariance, weighted MC-stat and asymmetric nuisances",
+  "polynomial_comparison": {
+    "parameters": [
+      "mu_DYJets",
+      "c1",
+      "ttbar_c_0_0"
+    ],
+    "combine": {
+      "mu_DYJets": {
+        "value": 1.0,
+        "error": 0.10313684461210332
+      },
+      "c1": {
+        "value": 1.0,
+        "error": 0.12755013727101272
+      },
+      "ttbar_c_0_0": {
+        "value": 1.0,
+        "error": 0.08417472003058601
+      }
+    },
+    "rabbit": {
+      "mu_DYJets": {
+        "value": 1.0,
+        "error": 0.10301759101045575
+      },
+      "c1": {
+        "value": 1.0,
+        "error": 0.1273348955092004
+      },
+      "ttbar_c_0_0": {
+        "value": 1.0,
+        "error": 0.08407909848926637
+      }
+    },
+    "maximum_absolute_covariance_difference_over_largest_combine_entry": 0.0033721654206512333
+  },
+  "saved_card_conversion": {
+    "channels": 22,
+    "parameters": 38,
+    "channel_process_nuisance_effects": 63905,
+    "seconds": 321.2426473000087
+  },
+  "full_production_fit_run": false
+}

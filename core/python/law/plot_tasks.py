@@ -210,6 +210,9 @@ class MakePlot(PlotTask):
             rdfanalyzer=rdfanalyzer,
         )
 
+        from plot_config import apply_plot_options
+        req = apply_plot_options(req, {"processes": processes_cfg}, rdfanalyzer)
+
         with PerformanceRecorder("MakePlot") as rec:
             pu = rdfanalyzer.PlottingUtility()
             result = pu.makeStackPlot(req)
@@ -261,6 +264,11 @@ class MakePlots(PlotTask, law.LocalWorkflow):
         description="Path to a JSON file describing the list of plots to create.",
     )
 
+    plots_per_branch = luigi.IntParameter(
+        default=1,
+        description="Number of plots sharing one persistent session per branch.",
+    )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -279,10 +287,20 @@ class MakePlots(PlotTask, law.LocalWorkflow):
     # ------------------------------------------------------------------
 
     def create_branch_map(self):
-        return {i: cfg for i, cfg in enumerate(self._load_plot_configs())}
+        configs = self._load_plot_configs()
+        if self.plots_per_branch < 1:
+            raise ValueError("plots_per_branch must be positive")
+        if self.plots_per_branch == 1:
+            return dict(enumerate(configs))
+        return dict(enumerate(
+            configs[i:i + self.plots_per_branch]
+            for i in range(0, len(configs), self.plots_per_branch)
+        ))
 
     def output(self):
         cfg = self.branch_data
+        if isinstance(cfg, list):
+            return [law.LocalFileTarget(item["outputFile"]) for item in cfg]
         return law.LocalFileTarget(cfg["outputFile"])
 
     @law.decorator.log
@@ -291,34 +309,31 @@ class MakePlots(PlotTask, law.LocalWorkflow):
     def run(self):
         import rdfanalyzer  # type: ignore
 
-        cfg: dict = self.branch_data
+        from plot_config import apply_plot_options
 
-        req = _build_plot_request(
-            meta_file=self.meta_file,
-            output_file=self.output().path,
-            title=cfg.get("title", ""),
-            x_axis_title=cfg.get("xAxisTitle", ""),
-            y_axis_title=cfg.get("yAxisTitle", "Counts"),
-            log_y=bool(cfg.get("logY", False)),
-            draw_ratio=bool(cfg.get("drawRatio", True)),
-            processes_cfg=cfg.get("processes", []),
-            rdfanalyzer=rdfanalyzer,
-        )
+        configs = self.branch_data if isinstance(self.branch_data, list) else [self.branch_data]
+        requests = []
+        for cfg in configs:
+            req = _build_plot_request(
+                meta_file=self.meta_file,
+                output_file=cfg["outputFile"],
+                title=cfg.get("title", ""),
+                x_axis_title=cfg.get("xAxisTitle", ""),
+                y_axis_title=cfg.get("yAxisTitle", "Counts"),
+                log_y=bool(cfg.get("logY", False)),
+                draw_ratio=bool(cfg.get("drawRatio", True)),
+                processes_cfg=cfg.get("processes", []),
+                rdfanalyzer=rdfanalyzer,
+            )
+            requests.append(apply_plot_options(req, cfg, rdfanalyzer))
 
         with PerformanceRecorder(f"MakePlots[branch={self.branch}]") as rec:
-            pu = rdfanalyzer.PlottingUtility()
-            result = pu.makeStackPlot(req)
-
-        rec.save(perf_path_for(self.output().path))
-
-        if not result.success:
-            raise RuntimeError(f"PlottingUtility failed: {result.message}")
-
-        self.publish_message(
-            f"branch {self.branch}: saved {self.output().path}  "
-            f"(MC integral={result.mcIntegral:.3g}, "
-            f"data integral={result.dataIntegral:.3g})"
-        )
+            results = rdfanalyzer.PlottingUtility().makeStackPlots(requests)
+        rec.save(perf_path_for(requests[0].outputFile))
+        errors = [result.message for result in results if not result.success]
+        if errors:
+            raise RuntimeError("PlottingUtility failed: " + "; ".join(errors))
+        self.publish_message(f"branch {self.branch}: saved {len(results)} plot(s)")
 
 
 

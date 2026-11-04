@@ -51,7 +51,7 @@ private:
   int verbosity_ = 0;
   Long64_t first_ = 0;
   Long64_t last_ = -1;
-  Long64_t warmCacheLimitBytes_ = 256LL * 1024 * 1024;
+  Long64_t warmCacheLimitBytes_ = 32LL * 1024 * 1024;
   int configuredTree_ = -1;
   int pendingAsyncOpenTree_ = -1;
   std::string fallbackReason_;

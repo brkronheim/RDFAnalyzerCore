@@ -4,6 +4,9 @@
 file(GLOB CORE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/*.cc")
 
 add_library(core STATIC ${CORE_SRC})
+if(RDF_ROOT_REGISTRY_AVAILABLE)
+    rdf_attach_root_registry(core)
+endif()
 
 target_compile_features(core PUBLIC cxx_std_17)
 
@@ -21,6 +24,7 @@ target_include_directories(core PUBLIC
 )
 
 target_link_libraries(core PUBLIC
+    ${CMAKE_DL_LIBS}
     fastforest
     correctionlib
     Boost::headers
@@ -30,6 +34,7 @@ target_link_libraries(core PUBLIC
     ROOT::Gpad
     ROOT::Graf
     ROOT::Hist
+    ROOT::HistPainter
     ROOT::MathCore
     ${RDF_ROOT_TRANSITIVE_LIBS}
     yaml-cpp

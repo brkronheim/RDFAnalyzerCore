@@ -1,3 +1,4 @@
 interface:
   display_name: "RDFAnalyzer Development"
   short_description: "Change the core framework and its plugins"
+  default_prompt: "Use $rdfanalyzer-development to locate the framework contract for this change and select the relevant implementation and verification workflow."

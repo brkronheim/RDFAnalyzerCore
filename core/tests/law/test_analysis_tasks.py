@@ -532,7 +532,9 @@ class TestWriteJobConfig(unittest.TestCase):
                     fh,
                 )
 
-            with patch.dict(sys.modules, {"xrootd_site_selector": fake_selector}):
+            with patch.dict(sys.modules, {"xrootd_site_selector": fake_selector}), patch.object(
+                mod._io_policy, "SITE_REDIRECTOR_MARKER", "/store/test/xrootd/"
+            ):
                 result = mod._select_test_input_url(
                     "root://cms-xrd-global.cern.ch//store/data/file.root",
                     tmpdir,
@@ -550,7 +552,9 @@ class TestWriteJobConfig(unittest.TestCase):
                     {"/store/data/file.root": ["root://cms-xrd-global.cern.ch/"]},
                     fh,
                 )
-            with patch.dict(sys.modules, {"xrootd_site_selector": fake_selector}):
+            with patch.dict(sys.modules, {"xrootd_site_selector": fake_selector}), patch.object(
+                mod._io_policy, "SITE_REDIRECTOR_MARKER", "/store/test/xrootd/"
+            ):
                 generic_result = mod._select_test_input_url(
                     "root://old.example//store/data/file.root",
                     tmpdir,
@@ -859,7 +863,7 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertEqual(cfg["fileList"], "/my/skim.root")
 
     def test_shared_config_layout_without_local_staging(self):
-        """File-source job configs keep cfg/ references and avoid local payload copies."""
+        """Shared configs use cfg/ references and lightweight local aux links."""
         mod = self._import()
         from dataset_manifest import DatasetEntry
 
@@ -893,7 +897,11 @@ class TestWriteJobConfig(unittest.TestCase):
             )
 
             self.assertFalse(os.path.exists(os.path.join(job_dir, "corrections.yaml")))
-            self.assertFalse(os.path.exists(os.path.join(job_dir, "aux")))
+            self.assertTrue(os.path.islink(os.path.join(job_dir, "aux")))
+            self.assertEqual(
+                Path(job_dir, "aux", "muon_scalesmearing.json.gz").read_text(),
+                "payload\n",
+            )
 
             cfg = {}
             with open(os.path.join(job_dir, "submit_config.txt")) as fh:
@@ -956,6 +964,79 @@ class TestWriteJobConfig(unittest.TestCase):
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
 class TestSkimNormalization(unittest.TestCase):
     """Tests for deferred per-job generator-weight accounting."""
+
+    def test_monitor_exists_mode_skips_root_reads_for_new_and_done_jobs(self):
+        import analysis_tasks
+        import law as law_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir, "skimRun_exists")
+            submission_dir = run_dir / "condor_submissions/sample"
+            outputs = {}
+            for idx in range(3):
+                job_dir = submission_dir / f"job_{idx}"
+                job_dir.mkdir(parents=True)
+                meta = f"/eos/user/t/test/sample/meta_{idx}.root"
+                (job_dir / "submit_config.txt").write_text(
+                    f"enableSkim=false\nmetaFile={meta}\n"
+                )
+                outputs[meta] = idx != 2
+            manifest = _write_manifest(tmpdir, [{
+                "name": "sample", "files": ["input.root"], "dtype": "mc", "xsec": 1.0,
+            }])
+            submitted = Path(tmpdir, "submitted.json")
+            submitted.write_text(json.dumps({"datasets": [{
+                "dataset_name": "sample", "submission_dir": str(submission_dir),
+                "cluster_id": "123", "shared_transfer_files": [],
+            }]}))
+            for mode in ("exists", "integrity"):
+                with self.subTest(mode=mode), patch.object(
+                    analysis_tasks.MonitorSkimJobs, "_run_dir",
+                    new_callable=lambda: property(lambda self: str(run_dir)),
+                ):
+                    task = analysis_tasks.MonitorSkimJobs(
+                        exe="/fake/exe", submit_config="submit_config.txt",
+                        dataset_manifest=manifest, name=f"verification_{mode}",
+                        output_validation=mode, max_retries=0, poll_interval=0,
+                    )
+                    # A previously completed output must use the same policy.
+                    Path(task._state_file).write_text(json.dumps({"datasets": {
+                        "sample": {"jobs": {"0": {
+                            "status": "done", "cluster": "123", "proc": 0, "retries": 0,
+                        }}},
+                    }}))
+                    with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
+                            patch.object(task, "publish_message"), \
+                            patch("analysis_tasks._condor_q_ads", return_value={}), \
+                            patch("analysis_tasks._condor_history_exit", return_value={1: 0, 2: 0}), \
+                            patch("analysis_tasks._output_files_exist_batch", return_value=outputs) as stat, \
+                            patch("analysis_tasks._skim_job_output_errors", return_value=["bad ROOT"]) as integrity, \
+                            patch("analysis_tasks._shared_read_weight_sum") as raw_counter, \
+                            patch("analysis_tasks._shared_read_weight_sign_sum") as sign_counter, \
+                            patch("analysis_tasks._collect_skim_normalization", return_value={}):
+                        task.run()
+                    jobs = task._load_state()["datasets"]["sample"]["jobs"]
+                    self.assertEqual(jobs["2"]["status"], "perm_fail")
+                    for idx in ("0", "1"):
+                        self.assertEqual(jobs[idx]["status"], "done" if mode == "exists" else "perm_fail")
+                    stat.assert_called_once()
+                    self.assertEqual(integrity.call_count, 0 if mode == "exists" else 2)
+                    raw_counter.assert_not_called()
+                    sign_counter.assert_not_called()
+
+    def test_output_validation_policy_reaches_delegated_monitor(self):
+        import analysis_tasks
+
+        identities = []
+        for mode in ("exists", "integrity"):
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe", submit_config="submit_config.txt",
+                dataset_manifest="datasets.yaml", name="policy",
+                workflow="htcondor", output_validation=mode,
+            )
+            identities.append(task.task_id)
+            self.assertEqual(task.htcondor_delegate_task().output_validation, mode)
+        self.assertEqual(identities[0], identities[1])
 
     def test_monitor_state_is_atomically_replaced(self):
         import analysis_tasks
@@ -1274,9 +1355,101 @@ class TestSkimNormalization(unittest.TestCase):
                         return_value=["corrupt ROOT"],
                     ):
                         self.assertFalse(task.complete())
+                    exists_task = task.clone(output_validation="exists")
+                    with patch("analysis_tasks._skim_job_output_errors") as integrity:
+                        self.assertTrue(exists_task.complete())
+                        integrity.assert_not_called()
+                        Path(meta_path).unlink()
+                        self.assertFalse(exists_task.complete())
             finally:
                 analysis_tasks.MonitorSkimJobs._run_dir = property(original_run_dir)
 
+
+    def test_monitor_rejects_corruption_after_successful_completion(self):
+        import analysis_tasks
+        try:
+            import numpy as np
+            import uproot
+        except ImportError:
+            self.skipTest("uproot and numpy required for ROOT artifact validation")
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir):
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
+            template = _write_submit_config_template(tmpdir)
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe", submit_config=template,
+                dataset_manifest=manifest, name="validated",
+            )
+            Path(task._run_dir).mkdir()
+            skim, meta = Path(tmpdir, "skim.root"), Path(tmpdir, "meta.root")
+
+            def write_skim(tree="Events"):
+                with uproot.recreate(skim) as handle:
+                    handle.mktree(tree, {"value": "float64"})
+                    handle[tree].extend({"value": np.array([1.])})
+
+            write_skim()
+            with uproot.recreate(meta) as handle:
+                handle["counter"] = (np.array([1.]), np.array([0., 1.]))
+            Path(task.output().path).write_text("done=1\nperm_fail=0\ntotal=1\n")
+            Path(task._normalization_path).write_text(json.dumps({
+                "schema_version": 1, "manifest": manifest,
+                "datasets": {"sample": {"status": "complete", "job_count": 1,
+                    "completed_jobs": 1, "jobs": {"0": {"status": "done"}}}},
+            }))
+            Path(task._state_file).write_text(json.dumps({
+                "datasets": {"sample": {"jobs": {"0": {"status": "done",
+                    "save": str(skim), "meta": str(meta), "tree_name": "Events"}}}},
+            }))
+            self.assertTrue(task.complete())
+            skim.unlink()
+            self.assertFalse(task.complete())
+            write_skim("WrongTree")
+            self.assertFalse(task.complete())
+            write_skim()
+            self.assertTrue(task.complete())
+            meta.write_bytes(b"corrupted after successful monitoring")
+            self.assertFalse(task.complete())
+
+    def test_monitor_rejects_corrupt_output_despite_successful_worker_exit(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir):
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
+            template = _write_submit_config_template(tmpdir, {"enableSkim": "false"})
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe", submit_config=template, dataset_manifest=manifest,
+                name="corrupt_worker", max_retries=0,
+            )
+            submission = Path(task._run_dir, "condor_submissions", "sample")
+            job = submission / "job_0"
+            job.mkdir(parents=True)
+            meta = Path(tmpdir, "meta.root")
+            meta.write_bytes(b"truncated ROOT output")
+            (job / "submit_config.txt").write_text(
+                f"metaFile={meta}\nenableSkim=false\n"
+            )
+            submitted = Path(tmpdir, "submitted.json")
+            submitted.write_text(json.dumps({"datasets": [{
+                "dataset_name": "sample", "cluster_id": "123",
+                "submission_dir": str(submission),
+            }]}))
+            with patch.object(task, "input", return_value=law.LocalFileTarget(str(submitted))), \
+                    patch.object(analysis_tasks, "_condor_q_ads", return_value={}), \
+                    patch.object(analysis_tasks, "_condor_history_exit", return_value={0: 0}), \
+                    patch.object(analysis_tasks, "_submit_single_skim_job") as submit:
+                task.run()
+            submit.assert_not_called()
+            state = json.loads(Path(task._state_file).read_text())
+            self.assertEqual(state["datasets"]["sample"]["jobs"]["0"]["status"], "perm_fail")
+            self.assertIn("done=0", Path(task.output().path).read_text())
+            self.assertFalse(task.complete())
 
     def test_file_source_planning_does_not_read_weight_counters(self):
         import analysis_tasks
@@ -1398,49 +1571,71 @@ class TestSkimNormalization(unittest.TestCase):
 class TestRunSkimTestJob(unittest.TestCase):
     """Tests for the local pre-flight skim test job."""
 
+    def test_setup_changes_invalidate_passing_preflight(self):
+        import analysis_tasks
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir), \
+                patch.object(analysis_tasks, "_collect_skim_shared_libs", return_value={}), \
+                patch.object(analysis_tasks, "_run_analysis_job", return_value="done:test"):
+            executable = Path(tmpdir, "analysis")
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            setup = Path(tmpdir, "env.sh")
+            setup.write_text("export PRESET=first\n")
+            template = _write_submit_config_template(tmpdir)
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
+            task = analysis_tasks.RunSkimTestJob(exe=str(executable),
+                submit_config=template, dataset_manifest=manifest,
+                root_setup=str(setup), name="changedSetup")
+            task.run()
+            self.assertTrue(task.complete())
+            setup.write_text("export PRESET=second\n")
+            self.assertFalse(task.complete())
+            task.run()
+            self.assertTrue(task.complete())
+
+    def test_stream_output_obeys_generic_precedence_and_legacy_alias(self):
+        import analysis_tasks
+
+        for environment, expected in (
+            ({}, False),
+            ({"RDF_VERBOSE": "true"}, True),
+            ({"RDF_VH_VERBOSE": "1"}, True),
+            ({"RDF_VERBOSE": "0", "RDF_VH_VERBOSE": "1"}, False),
+        ):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(analysis_tasks._stream_analysis_output(), expected)
+
     def test_complete_invalidates_marker_for_a_different_executable(self):
         import analysis_tasks
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            exe_path = os.path.join(tmpdir, "analysis")
-            Path(exe_path).write_text("current executable\n")
-            os.chmod(exe_path, 0o755)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir), \
+                patch.object(analysis_tasks, "_collect_skim_shared_libs", return_value={}), \
+                patch.object(analysis_tasks, "_run_analysis_job", return_value="done:test"):
+            executable = Path(tmpdir, "analysis")
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            template = _write_submit_config_template(tmpdir)
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
             task = analysis_tasks.RunSkimTestJob(
-                exe=exe_path,
-                submit_config="/fake/submit.yaml",
-                dataset_manifest="/fake/manifest.yaml",
-                name="changedExe",
+                exe=str(executable), submit_config=template,
+                dataset_manifest=manifest, name="changedExe",
             )
-
-            run_dir = os.path.join(tmpdir, "skimRun_changedExe")
-            original_run_dir = analysis_tasks.RunSkimTestJob._run_dir.fget
-            analysis_tasks.RunSkimTestJob._run_dir = property(lambda self: run_dir)
-            try:
-                test_dir = Path(task._test_job_dir)
-                test_dir.mkdir(parents=True)
-                staged_exe = test_dir / task._exe_relpath
-                staged_exe.write_text("old executable\n")
-                old_stat = staged_exe.stat()
-                marker_path = Path(task.output().path)
-                marker_path.write_text(
-                    "status=passed\n"
-                    f"exe_size={old_stat.st_size}\n"
-                    f"exe_mtime_ns={old_stat.st_mtime_ns}\n"
-                )
-
-                self.assertFalse(task.complete())
-
-                shutil.copy2(exe_path, staged_exe)
-                self.assertFalse(task.complete())
-                current_stat = os.stat(exe_path)
-                marker_path.write_text(
-                    "status=passed\n"
-                    f"exe_size={current_stat.st_size}\n"
-                    f"exe_mtime_ns={current_stat.st_mtime_ns}\n"
-                )
-                self.assertTrue(task.complete())
-            finally:
-                analysis_tasks.RunSkimTestJob._run_dir = property(original_run_dir)
+            task.run()
+            self.assertTrue(task.complete())
+            marker = Path(task.output().path).read_bytes()
+            executable.write_text("#!/bin/sh\nexit 123\n")
+            self.assertFalse(task.complete())
+            shutil.copy2(executable, Path(task._test_job_dir, task._exe_relpath))
+            self.assertFalse(task.complete())
+            self.assertEqual(Path(task.output().path).read_bytes(), marker)
+            task.run()
+            self.assertTrue(task.complete())
 
     def test_run_ignores_container_setup(self):
         import analysis_tasks
@@ -1691,7 +1886,7 @@ class TestSkimTask(unittest.TestCase):
             Path(job_dir).mkdir(parents=True)
             Path(out_dir).mkdir(parents=True)
             config_path = os.path.join(job_dir, "submit_config.txt")
-            Path(config_path).write_text("saveTree=Events\n")
+            Path(config_path).write_text("saveTree=Events\nenableSkim=true\n")
             branch_data = {
                 "dataset_name": "sample",
                 "job_dir": job_dir,
@@ -1805,7 +2000,7 @@ class TestSkimTask(unittest.TestCase):
             config_path = os.path.join(tmpdir, "job", "submit_config.txt")
             Path(out_dir).mkdir(parents=True)
             Path(os.path.dirname(config_path)).mkdir(parents=True)
-            Path(config_path).write_text("saveTree=Events\n")
+            Path(config_path).write_text("saveTree=Events\nenableSkim=true\n")
             Path(os.path.join(out_dir, "skim.root")).write_bytes(b"partial")
             branch_data = {
                 "dataset_name": "sample",
@@ -1841,7 +2036,6 @@ class TestPrepareSkimJobs(unittest.TestCase):
 
     def test_requires_get_rucio_file_list_automatically(self):
         import analysis_tasks
-        import rucio_tasks
 
         task = analysis_tasks.PrepareSkimJobs(
             exe="/fake/exe",
@@ -1853,6 +2047,12 @@ class TestPrepareSkimJobs(unittest.TestCase):
             x509="/fake/x509",
         )
 
+        from optional_extensions import extension_source
+        if extension_source("cms") is None:
+            with self.assertRaisesRegex(ImportError, "disabled|unavailable"):
+                task.requires()
+            return
+        import rucio_tasks
         req = task.requires()
         self.assertIsInstance(req, rucio_tasks.GetRucioFileList)
         self.assertEqual(req.name, "skimDY2Jet")
@@ -1968,42 +2168,28 @@ class TestPrepareSkimJobs(unittest.TestCase):
     def test_complete_invalidates_stale_staged_executable(self):
         import analysis_tasks
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            exe_path = os.path.join(tmpdir, "analysis")
-            Path(exe_path).write_text("new executable\n")
-            os.chmod(exe_path, 0o755)
-
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir), \
+                patch.object(analysis_tasks, "_collect_skim_shared_libs", return_value={}):
+            executable = Path(tmpdir, "analysis")
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            template = _write_submit_config_template(tmpdir)
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
             task = analysis_tasks.PrepareSkimJobs(
-                exe=exe_path,
-                submit_config="/fake/submit.yaml",
-                dataset_manifest="/fake/manifest.yaml",
-                name="staleExe",
+                exe=str(executable), submit_config=template,
+                dataset_manifest=manifest, name="staleExe",
             )
-            run_dir = os.path.join(tmpdir, "skimRun_staleExe")
-            original_run_dir = analysis_tasks.PrepareSkimJobs._run_dir.fget
-            analysis_tasks.PrepareSkimJobs._run_dir = property(lambda self: run_dir)
-            try:
-                Path(task.output().path).parent.mkdir(parents=True)
-                Path(task.output().path).write_text("[]\n")
-
-                shared_exe = Path(task._shared_dir, task._exe_relpath)
-                test_exe = Path(task._test_job_dir, task._exe_relpath)
-                shared_exe.parent.mkdir(parents=True)
-                test_exe.parent.mkdir(parents=True)
-                Path(task._test_job_dir, "submit_config.txt").write_text(
-                    "saveTree=Events\n"
-                )
-                shared_exe.write_text("old executable\n")
-                test_exe.write_text("old executable\n")
-                Path(task._shared_archive_path).write_text("archive\n")
-
-                self.assertFalse(task.complete())
-
-                shutil.copy2(exe_path, shared_exe)
-                shutil.copy2(exe_path, test_exe)
-                self.assertTrue(task.complete())
-            finally:
-                analysis_tasks.PrepareSkimJobs._run_dir = property(original_run_dir)
+            task._run_impl()
+            self.assertTrue(task.complete())
+            executable.write_text("#!/bin/sh\nexit 123\n")
+            self.assertFalse(task.complete())
+            task._run_impl()
+            self.assertTrue(task.complete())
+            Path(task._test_job_dir, task._exe_relpath).write_text("stale test executable")
+            self.assertFalse(task.complete())
 
     def test_create_test_job_copies_aux_directory(self):
         import analysis_tasks
@@ -2622,6 +2808,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
 
             exe_name = "myanalysis"
             Path(os.path.join(shared_dir, exe_name)).write_text("#!/bin/sh\nexit 0\n")
+            Path(os.path.join(tmpdir, exe_name)).write_text("#!/bin/sh\nexit 0\n")
             Path(os.path.join(shared_dir, "libexample.so")).write_text("fake-so")
             Path(os.path.join(shared_dir, "x509")).write_text("proxy")
             weights_path = os.path.join(tmpdir, "derived_stitch_weights.json")
@@ -2666,7 +2853,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 tmpdir,
                 [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
             )
-            submit_config = _write_submit_config_template(tmpdir, extra={"saveDirectory": "/tmp/out"})
+            submit_config = _write_submit_config_template(tmpdir, extra={"saveDirectory": "/eos/user/t/test/myRun"})
             task = analysis_tasks.BuildSkimSubmission(
                 exe=os.path.join(tmpdir, exe_name),
                 submit_config=submit_config,
@@ -2680,7 +2867,9 @@ class TestPrepareSkimJobs(unittest.TestCase):
             orig_run_dir = analysis_tasks.BuildSkimSubmission._run_dir.fget
             analysis_tasks.BuildSkimSubmission._run_dir = property(lambda self: run_dir)
             try:
-                task._run_impl()
+                with patch("analysis_tasks.subprocess.run", return_value=
+                           analysis_tasks.subprocess.CompletedProcess([], 0, stdout="604800\n")):
+                    task._run_impl()
             finally:
                 analysis_tasks.BuildSkimSubmission._run_dir = property(orig_run_dir)
 
@@ -2715,11 +2904,14 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertNotIn("job_$(Process)/stitch_weights.json", Path(submit_path).read_text())
 
             job0_cfg = Path(os.path.join(submit_dir, "job_0", "submit_config.txt")).read_text()
-            self.assertIn("saveDirectory=/tmp/out/sample", job0_cfg)
-            self.assertIn("saveFile=/tmp/out/sample/output_0.root", job0_cfg)
-            self.assertIn("metaFile=/tmp/out/sample/meta_0.root", job0_cfg)
+            self.assertIn("saveDirectory=/eos/user/t/test/myRun/sample", job0_cfg)
+            self.assertIn("saveFile=/eos/user/t/test/myRun/sample/output_0.root", job0_cfg)
+            self.assertIn("metaFile=/eos/user/t/test/myRun/sample/meta_0.root", job0_cfg)
 
             submit_text = Path(submit_path).read_text()
+            self.assertIn('+JobBatchName = "sample [myRun]"', submit_text)
+            self.assertIn('+RDFSample = "sample"', submit_text)
+            self.assertIn('+RDFRun = "myRun"', submit_text)
             self.assertIn("job_$(Process)/submit_config.txt", submit_text)
             self.assertIn(os.path.join(run_dir, "shared_inputs.tar.gz"), submit_text)
             self.assertNotIn("job_$(Process)/myanalysis", submit_text)
@@ -2765,6 +2957,65 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     jobs_dir=os.path.join(tmpdir, "jobs"),
                     outputs_dir=os.path.join(tmpdir, "outputs"),
                 )
+
+    def test_file_source_planning_ignores_foreign_data_and_empty_foreign_payloads(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = _write_manifest(tmpdir, [{
+                "name": "DATA_current", "dtype": "data", "year": 2024,
+                "files": ["a.root", "b.root"],
+            }])
+            cache = Path(tmpdir, "cache")
+            cache.mkdir()
+            for name, payload in {
+                "DATA_current": {"files": ["a.root", "b.root"], "groups": ["a.root,b.root"]},
+                "DATA_other_era": {"files": ["foreign.root"], "groups": ["foreign.root"]},
+                "empty_other_era": {"files": []},
+            }.items():
+                (cache / f"{name}.json").write_text(json.dumps({"sample": name, **payload}))
+            plans = analysis_tasks._plan_file_source_jobs(
+                dataset_manifest_path=manifest, file_list_dir=str(cache),
+                partition="file_group", files_per_job=1, entries_per_job=0,
+                jobs_dir=str(Path(tmpdir, "jobs")), outputs_dir=str(Path(tmpdir, "outputs")))
+            self.assertEqual(len(plans), 1)
+            self.assertEqual(plans[0]["dataset_name"], "DATA_current")
+            self.assertEqual(plans[0]["dtype"], "data")
+            self.assertEqual(plans[0]["files"], "a.root,b.root")
+            self.assertEqual(plans[0]["lumi"], 1.)
+            self.assertFalse(Path(tmpdir, "jobs").exists())
+
+    def test_file_source_planning_requires_every_manifest_dataset(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = _write_manifest(tmpdir, [
+                {"name": "present", "dtype": "mc", "files": ["a.root"]},
+                {"name": "missing", "dtype": "data", "files": ["b.root"]},
+            ])
+            cache = Path(tmpdir, "cache")
+            cache.mkdir()
+            (cache / "present.json").write_text(json.dumps({"sample": "present", "files": ["a.root"]}))
+            with self.assertRaisesRegex(RuntimeError, "missing payloads.*missing"):
+                analysis_tasks._plan_file_source_jobs(
+                    dataset_manifest_path=manifest, file_list_dir=str(cache),
+                    partition="file_group", files_per_job=20, entries_per_job=0,
+                    jobs_dir=str(Path(tmpdir, "jobs")), outputs_dir=str(Path(tmpdir, "outputs")))
+
+    def test_file_source_planning_rejects_duplicate_requested_payloads(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = _write_manifest(tmpdir, [{"name": "sample", "dtype": "mc", "files": ["a.root"]}])
+            cache = Path(tmpdir, "cache")
+            cache.mkdir()
+            for name in ("first", "second"):
+                (cache / f"{name}.json").write_text(json.dumps({"sample": "sample", "files": ["a.root"]}))
+            with self.assertRaisesRegex(RuntimeError, "Duplicate.*sample"):
+                analysis_tasks._plan_file_source_jobs(
+                    dataset_manifest_path=manifest, file_list_dir=str(cache),
+                    partition="file_group", files_per_job=20, entries_per_job=0,
+                    jobs_dir=str(Path(tmpdir, "jobs")), outputs_dir=str(Path(tmpdir, "outputs")))
 
     def test_monitor_skim_jobs_discovers_save_and_meta_outputs(self):
         import analysis_tasks
@@ -2820,6 +3071,9 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 "\n".join(
                     [
                         "universe = vanilla",
+                        '+JobBatchName = "sample [myRun]"',
+                        '+RDFSample = "sample"',
+                        '+RDFRun = "myRun"',
                         f"Executable = {submit_dir}/condor_runscript.sh",
                         "transfer_input_files = "
                         f"{submit_dir}/job_$(Process)/submit_config.txt,"
@@ -2862,6 +3116,9 @@ class TestPrepareSkimJobs(unittest.TestCase):
             ).read_text()
             self.assertIn('MY.SingularityImage = "/cvmfs/unpacked.cern.ch/example/image:latest"', resub_text)
             self.assertIn('MY.WantOS = "el9"', resub_text)
+            self.assertIn('+JobBatchName = "sample [myRun]"', resub_text)
+            self.assertIn('+RDFSample = "sample"', resub_text)
+            self.assertIn('+RDFRun = "myRun"', resub_text)
             self.assertIn(f"{submit_dir}/job_7/submit_config.txt", resub_text)
             self.assertIn(f"{submit_dir}/job_7/site_redirectors.json", resub_text)
             self.assertIn('environment = "CONDOR_PROC=7 CONDOR_CLUSTER=$(Cluster)"', resub_text)
@@ -2884,6 +3141,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
         job_state = {"status": "submitted", "retries": 0, "cluster": "123", "proc": 7}
 
         with patch.object(analysis_tasks, "_submit_single_skim_job", return_value=None), \
+                patch.object(analysis_tasks, "_validate_staged_skim_executable"), \
                 patch.object(task, "publish_message"):
             task._try_resubmit(
                 "sample",
@@ -2957,6 +3215,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 return str(100 + len(submissions))
 
             with patch.object(analysis_tasks, "_submit_single_skim_job", side_effect=fake_submit), \
+                    patch.object(analysis_tasks, "_validate_staged_skim_executable"), \
                     patch.object(task, "publish_message"):
                 task._try_resubmit(
                     "sample",
@@ -3001,6 +3260,127 @@ class TestPrepareSkimJobs(unittest.TestCase):
 # ===========================================================================
 # HistFillTask
 # ===========================================================================
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestCondorRuntimeMonitor(unittest.TestCase):
+    def test_current_attempt_runtime_and_fallbacks(self):
+        import analysis_tasks
+
+        cases = [
+            # A stale or absent wall-clock counter must not hide an overrun.
+            ({"JobCurrentStartDate": 1000, "ServerTime": 1151,
+              "RemoteWallClockTime": 0}, True),
+            ({"JobCurrentStartDate": 1000, "ServerTime": 1150}, False),
+            # Previous attempts and time queued must not penalize a fresh run.
+            ({"JobCurrentStartDate": 1140, "ServerTime": 1151,
+              "JobStartDate": 1, "QDate": 1, "RemoteWallClockTime": 10000}, False),
+            ({"EnteredCurrentStatus": 1000, "ServerTime": 1151}, True),
+            ({"JobCurrentStartDate": 1000}, True),  # local clock fallback
+            ({"JobCurrentStartDate": 1200, "ServerTime": 1151}, False),
+            ({"RemoteWallClockTime": 151}, True),
+            ({}, False),
+            ({"RemoteWallClockTime": "undefined"}, False),
+            ({"RemoteWallClockTime": float("inf")}, False),
+        ]
+        with patch.object(analysis_tasks.time, "time", return_value=1151):
+            for fields, expected in cases:
+                with self.subTest(fields=fields):
+                    self.assertEqual(
+                        analysis_tasks._condor_job_exceeded_runtime(
+                            {"MaxRuntime": 100, **fields}
+                        ),
+                        expected,
+                    )
+            for limit in (None, 0, -1):
+                with self.subTest(fallback_limit=limit):
+                    self.assertTrue(analysis_tasks._condor_job_exceeded_runtime(
+                        {"MaxRuntime": limit, "JobCurrentStartDate": 1000},
+                        fallback_max_runtime=100,
+                    ))
+            for limit in ("undefined", float("nan"), float("inf")):
+                with self.subTest(invalid_limit=limit):
+                    self.assertFalse(analysis_tasks._condor_job_exceeded_runtime(
+                        {"MaxRuntime": limit, "JobCurrentStartDate": 1000},
+                    ))
+
+    def test_monitor_removes_overlong_job_before_retrying(self):
+        import analysis_tasks
+        import law as law_mod
+
+        cases = [
+            (2, 151, True, True),
+            (2, 150, True, False),
+            (2, 151, False, False),
+            (1, 151, True, False),  # idle jobs are never evicted for runtime
+        ]
+        for status, elapsed, removal_succeeds, expect_retry in cases:
+            with self.subTest(status=status, elapsed=elapsed, removed=removal_succeeds), \
+                    tempfile.TemporaryDirectory() as tmpdir:
+                run_dir = Path(tmpdir, "skimRun_runtime")
+                submission_dir = run_dir / "condor_submissions/sample"
+                job_dir = submission_dir / "job_0"
+                job_dir.mkdir(parents=True)
+                meta = str(run_dir / "meta.root")
+                (job_dir / "submit_config.txt").write_text(
+                    f"enableSkim=false\nfileList=input.root\nmetaFile={meta}\n"
+                )
+                manifest = _write_manifest(tmpdir, [{
+                    "name": "sample", "files": ["input.root"], "dtype": "data",
+                }])
+                submitted = Path(tmpdir, "submitted.json")
+                submitted.write_text(json.dumps({"datasets": [{
+                    "dataset_name": "sample", "submission_dir": str(submission_dir),
+                    "cluster_id": "123", "shared_transfer_files": [],
+                }]}))
+                events = []
+
+                def remove(cluster, proc):
+                    events.append(("remove", cluster, proc))
+                    return removal_succeeds
+
+                def submit(*args, **kwargs):
+                    events.append(("submit",))
+                    return "456"
+
+                with patch.object(
+                    analysis_tasks.MonitorSkimJobs, "_run_dir",
+                    new_callable=lambda: property(lambda self: str(run_dir)),
+                ):
+                    task = analysis_tasks.MonitorSkimJobs(
+                        exe="/fake/exe", submit_config="submit_config.txt",
+                        dataset_manifest=manifest, name="runtime",
+                        output_validation="exists", max_retries=1, poll_interval=0,
+                    )
+                    # Default task max-runtime is 3600; the job's ad must win.
+                    live_ad = {"JobStatus": status, "MaxRuntime": 100,
+                               "JobCurrentStartDate": 1000,
+                               "ServerTime": 1000 + elapsed,
+                               "RemoteWallClockTime": 0}
+                    with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
+                            patch.object(task, "publish_message") as messages, \
+                            patch.object(analysis_tasks, "_condor_q_ads", side_effect=[{0: live_ad}, {}]), \
+                            patch.object(analysis_tasks, "_condor_history_exit", side_effect=[{}, {0: 0}]), \
+                            patch.object(analysis_tasks, "_condor_rm_job", side_effect=remove) as rm, \
+                            patch.object(analysis_tasks, "_submit_single_skim_job", side_effect=submit) as retry, \
+                            patch.object(analysis_tasks, "_validate_staged_skim_executable"), \
+                            patch.object(analysis_tasks, "_output_files_exist_batch", return_value={meta: True}), \
+                            patch.object(analysis_tasks, "_collect_skim_normalization", return_value={}), \
+                            patch.object(analysis_tasks.time, "sleep"):
+                        task.run()
+
+                    job = task._load_state()["datasets"]["sample"]["jobs"]["0"]
+                    self.assertEqual(job["status"], "done")
+                    self.assertEqual(job["retries"], int(expect_retry))
+                    self.assertEqual(job["cluster"], "456" if expect_retry else "123")
+                    self.assertEqual(rm.call_count, int(status == 2 and elapsed > 150))
+                    self.assertEqual(retry.call_count, int(expect_retry))
+                    if expect_retry:
+                        self.assertEqual(events, [("remove", "123", 0), ("submit",)])
+                        self.assertTrue(any(
+                            "151.0s > 1.5 * 100.0s" in str(call)
+                            for call in messages.call_args_list
+                        ))
+
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
 class TestHistFillTask(unittest.TestCase):
@@ -3122,7 +3502,8 @@ class TestHistFillTask(unittest.TestCase):
                         task.run()
 
                 self.assertTrue(run_job.called)
-                self.assertTrue(run_job.call_args.kwargs.get("stream_output"))
+                self.assertEqual(run_job.call_args.kwargs.get("stream_output"),
+                                 analysis_tasks._stream_analysis_output())
 
                 # Verify that the job submit_config.txt uses skim.root
                 job_cfg = {}
@@ -3157,7 +3538,7 @@ class TestHistFillTask(unittest.TestCase):
 
             histogram_cfg = os.path.join(tmpdir, "histograms.txt")
             Path(histogram_cfg).write_text(
-                "name=vhbb_dnn variable=score weight=weight bins=20 lowerBound=0 upperBound=1 "
+                "name=analysis_score variable=score weight=weight bins=20 lowerBound=0 upperBound=1 "
                 "channelVariable=channel channelBins=2 channelLowerBound=0 channelUpperBound=2 "
                 "channelRegions=Zll,Wln controlRegionVariable=region controlRegionBins=2 "
                 "controlRegionLowerBound=0 controlRegionUpperBound=2 "
@@ -4239,6 +4620,22 @@ class TestStitchingDerivationTask(unittest.TestCase):
 class TestStitchingValidationTask(unittest.TestCase):
     """Tests for all-file stitching application validation."""
 
+    def test_optional_adapter_import_and_generic_defaults(self):
+        import analysis_tasks
+
+        adapter = types.ModuleType("test_stitching_adapter")
+        adapter.process_label = lambda group: "label_" + group
+        with patch.dict(sys.modules, {adapter.__name__: adapter}):
+            loaded = analysis_tasks._load_stitch_validation_adapter(adapter.__name__)
+            self.assertIs(loaded, adapter)
+            self.assertEqual(analysis_tasks._stitch_validation_process_label("group", loaded), "label_group")
+        self.assertIsNone(analysis_tasks._load_stitch_validation_adapter(""))
+        with self.assertRaisesRegex(RuntimeError, "Could not import stitching validation adapter"):
+            analysis_tasks._load_stitch_validation_adapter("missing_stitching_adapter_for_test")
+        self.assertEqual(analysis_tasks._stitch_validation_process_label("group A"), "group_A")
+        self.assertEqual(analysis_tasks._stitch_validation_year_set(None, "run2"), "run2")
+        self.assertEqual(analysis_tasks._stitch_validation_excluded_bins("sample", "group", {}, "", 21), set())
+
     def test_validation_histogram_specs_are_configurable(self):
         import analysis_tasks
 
@@ -4330,13 +4727,12 @@ class TestStitchingValidationTask(unittest.TestCase):
         self.assertEqual(signed_sum, 100.0)
         self.assertEqual(scale, 0.1)
 
-    def test_dy_ptz_zero_to50_excludes_reserved_zero_pt_bins(self):
+    def test_adapter_exclusions_are_used_for_sample_normalization(self):
         import analysis_tasks
-        import importlib
         import numpy as np
 
-        validation_adapter = importlib.import_module(
-            "analyses.rdfAnalyzerStitch.stitching_validation"
+        validation_adapter = types.SimpleNamespace(
+            excluded_bins=MagicMock(return_value={0, 7, 14}),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4351,6 +4747,10 @@ class TestStitchingValidationTask(unittest.TestCase):
                 validation_adapter,
             )
             self.assertEqual(excluded_bins, {0, 7, 14})
+            validation_adapter.excluded_bins.assert_called_once_with(
+                "DYJetsToLL_LHEFilterPtZ-0To50_FxFx", "DYto2L",
+                {"era": "run2"}, submit_config, 21,
+            )
 
             meta_file = os.path.join(tmpdir, "sample.root")
             Path(meta_file).write_text("")
@@ -4395,10 +4795,9 @@ class TestStitchingValidationTask(unittest.TestCase):
 
     def test_process_and_year_labels_are_separate(self):
         import analysis_tasks
-        import importlib
-
-        validation_adapter = importlib.import_module(
-            "analyses.rdfAnalyzerStitch.stitching_validation"
+        validation_adapter = types.SimpleNamespace(
+            process_label=lambda group: {"DYto2L": "DY", "WtoLNu": "W", "Zto2Nu": "Z"}[group],
+            year_set=lambda entry, era: {"run2": "UL", "run3_22_23": "22-23", "run3_24": "24"}[era],
         )
 
         self.assertEqual(
@@ -4440,12 +4839,13 @@ class TestStitchingValidationTask(unittest.TestCase):
 
     def test_plot_boundaries_and_ratio_use_variable_axes(self):
         import analysis_tasks
-        import importlib
         import numpy as np
         from stitching_plotting import ratio_with_uncertainty
 
-        validation_adapter = importlib.import_module(
-            "analyses.rdfAnalyzerStitch.stitching_validation"
+        validation_adapter = types.SimpleNamespace(
+            variable_boundaries=lambda variable, family, boundaries, by_process:
+                by_process.get(family, boundaries.get(variable, []))
+                if variable == "LHE_Vpt" else boundaries.get(variable, []),
         )
 
         boundaries = {
@@ -4711,10 +5111,10 @@ class TestStitchingValidationTask(unittest.TestCase):
                 yaml.safe_dump(
                     {
                         "validation": {
-                            "adapter": (
-                                "analyses.rdfAnalyzerStitch."
-                                "stitching_validation"
-                            ),
+                            "boundaries": {
+                                "LHE_Vpt": [100, 130, 220, 250, 280],
+                                "LHE_NpNLO": [1, 2, 3],
+                            },
                             "histograms": [
                                 {
                                     "name": "LHE_Vpt",
@@ -4813,7 +5213,7 @@ class TestStitchingValidationTask(unittest.TestCase):
 
             plot_image = mpimg.imread(report["plots"][0])
             self.assertEqual(plot_image.shape[:2], (1650, 1500))
-            normalization = report["plot_normalization"]["group_a_UL"]["samples"]
+            normalization = report["plot_normalization"]["group_a_run2"]["samples"]
             self.assertEqual(normalization["sample_a"]["cross_section_pb"], 30.0)
             self.assertEqual(normalization["sample_a"]["signed_event_sum"], 6.0)
             self.assertEqual(normalization["sample_a"]["scale"], 0.5)
@@ -5070,7 +5470,8 @@ class TestSkimTaskCacheProducer(unittest.TestCase):
                         task.run()
 
                 self.assertTrue(run_job.called)
-                self.assertTrue(run_job.call_args.kwargs.get("stream_output"))
+                self.assertEqual(run_job.call_args.kwargs.get("stream_output"),
+                                 analysis_tasks._stream_analysis_output())
 
                 sidecar_path = skim_file + CACHE_SIDECAR_SUFFIX
                 self.assertTrue(

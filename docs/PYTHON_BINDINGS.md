@@ -371,70 +371,45 @@ region_names = analyzer.bookNDHistograms("hist", [h], [s], "nominal")
 
 ### PlottingUtility
 
-The `PlottingUtility` class provides Python bindings for creating ROOT stack plots directly from Python with the full C++ plotting functionality.
+`PlottingUtility` renders stacks, overlays, response heatmaps, and configurable
+ratio/pull/signal panels in C++. Use a persistent session for repeated plots:
 
 ```python
-import rdfanalyzer
+import rdfanalyzer as rdf
 
-# Configure a process (sample)
-proc = rdfanalyzer.PlotProcessConfig()
-proc.directory = "signal"
-proc.histogramName = "pt"
-proc.legendLabel = "Signal MC"
-proc.color = 2
-proc.normalizationHistogram = "counter_weightSum_signal"
-
-# Create plot request
-req = rdfanalyzer.PlotRequest()
-req.metaFile = "meta.root"
-req.outputFile = "pt.pdf"
-req.xAxisTitle = "p_{T} [GeV]"
-req.yAxisTitle = "Events"
-req.logY = False
-req.drawRatio = True
-req.processes = [proc]
-
-# Generate plot
-result = rdfanalyzer.PlottingUtility().makeStackPlot(req)
-assert result.success, result.message
-```
-
-**Features**:
-- Stack plots with data/MC ratio panels
-- Log-y scale support via `logY` parameter
-- Automatic normalization using `normalizationHistogram`
-- PCA-based systematic envelopes
-- Parallel batch plotting support
-
-**Configuration Classes**:
-
-- `PlotProcessConfig`: Configures a single process (sample) in the plot
-  - `directory`: Directory in ROOT file containing histograms
-  - `histogramName`: Name of histogram to plot
-  - `legendLabel`: Label for legend entry
-  - `color`: ROOT color code
-  - `normalizationHistogram`: Histogram name for normalization (optional)
-
-- `PlotRequest`: Complete plot configuration
-  - `metaFile`: Input ROOT file with histograms
-  - `outputFile`: Output plot file (PDF, PNG, etc.)
-  - `xAxisTitle`, `yAxisTitle`: Axis labels
-  - `logY`: Logarithmic y-axis (default: False)
-  - `drawRatio`: Draw data/MC ratio panel (default: False)
-  - `processes`: List of `PlotProcessConfig` objects
-
-**Batch Plotting**:
-
-```python
-# Generate multiple plots in parallel
-requests = [req1, req2, req3, ...]
-for req in requests:
-    result = rdfanalyzer.PlottingUtility().makeStackPlot(req)
+requests = rdf.PlottingUtility.readRequests("plots.yaml")
+options = rdf.PlotBatchOptions()
+options.workers = 4
+session = rdf.PlotSession(options)
+results = session.renderBatch(requests)
+for result in results:
     if not result.success:
-        print(f"Failed: {result.message}")
+        raise RuntimeError(result.message)
+print(session.stats().drawableObjects)
 ```
 
-See [Production Manager Guide](PRODUCTION_MANAGER.md) for integration with Law workflow tasks.
+CMS headers and inside legends are the defaults. Select `PlotExperiment.ATLAS`,
+`LHCb`, `ALICE`, or `Custom` and set `experimentExtra` for other header styles.
+`style.legendInside = False` selects an outside legend. Fonts, labels, panel
+bounds, and input-array/file options use the same API as C++ and the compiled CLI.
+
+`makeStackPlot(request)` and `makeStackPlots(requests, parallel=False)` remain
+available. The batch wrapper reuses one session; `parallel=True` enables bounded
+input preparation while graphics remain serialized. Python's GIL is released
+around rendering. Sessions must be called on their constructing thread.
+
+### Sparse histogram I/O
+
+`rdf.read_sparse_bins(file, key)` reads allocated `THnSparse` entries into
+NumPy coordinate, content, and sumw2 arrays. `rdf.project_sparse_bins(...)`
+instead applies per-axis bin maps and accumulates directly into a dense output
+array; map entries of `-1` exclude bins. The projection runs in C++ with the
+GIL released and can omit sumw2 reads when only contents are needed. These
+helpers are intended for bulk histogram adapters that need to avoid a Python
+call and tuple allocation for every sparse bin.
+
+See [Physics Plotting](PLOTTING.md) for configuration examples, systematic and
+normalization policies, allocation/resource limits, and LAW integration.
 
 ## API Reference
 

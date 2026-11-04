@@ -84,12 +84,12 @@ ROOT::RDF::RNode defineKernel(
       const auto function = "RDFAnalyzerVectorPackingJit::" + factoryName;
       std::ostringstream code;
       code << "#include <ROOT/RDataFrame.hxx>\n#include <ROOT/RVec.hxx>\n"
-              "#include <string>\n#include <vector>\n#include <algorithm>\n"
+              "#include <string>\n#include <vector>\n#include <algorithm>\n#include <stdexcept>\n"
               "namespace RDFAnalyzerVectorPackingJit {\n"
               "ROOT::RDF::RNode " << factoryName
            << "(ROOT::RDF::RNode node, const std::string& name, "
               "const std::vector<std::string>& columns, double normalization) {\n"
-              "return node.Define(name, [normalization](";
+              "return node.Define(name, [normalization, columns, name](";
       for (std::size_t i = 0; i < uniqueTypes.size(); ++i) {
         if (i) code << ',';
         code << "const " << uniqueTypes[i] << "& arg" << i;
@@ -115,33 +115,50 @@ ROOT::RDF::RNode defineKernel(
           code << "static_cast<" << targetType << ">(arg" << indices[i] << ')';
         }
         code << "};\n";
-      } else if (layout == PackingLayout::Rows) {
+      } else if (layout == PackingLayout::Rows || layout == PackingLayout::AlignedRows) {
+        const bool aligned = layout == PackingLayout::AlignedRows;
         const bool hasVector = std::any_of(uniqueTypes.begin(), uniqueTypes.end(),
             [](const std::string &type) { return isRowCollectionType(type); });
         code << "std::size_t rows = " << (hasVector ? 0 : 1) << ";\n";
+        if (aligned) code << "bool haveRows = false;\n";
         for (std::size_t i = 0; i < uniqueTypes.size(); ++i) {
           if (!isRowCollectionType(uniqueTypes[i])) continue;
-          code << "if (arg" << i << ".empty()) return {};\n"
-               << "rows = std::max(rows, arg" << i << ".size());\n";
+          if (aligned) {
+            code << "if (haveRows && rows != arg" << i << ".size()) "
+                 << "throw std::runtime_error(\"Correction input packing '\" + name + "
+                    "\"': misaligned array '\" + columns[" << i << "] + "
+                    "\"' has size \" + std::to_string(arg" << i << ".size()) + "
+                    "\", expected \" + std::to_string(rows));\n"
+                 << "rows = arg" << i << ".size(); haveRows = true;\n";
+          } else {
+            code << "if (arg" << i << ".empty()) return {};\n"
+                 << "rows = std::max(rows, arg" << i << ".size());\n";
+          }
         }
-        code << "ROOT::VecOps::RVec<" << targetType << "> out;\n"
-             << "out.reserve(rows * " << indices.size() << ");\n"
+        // Size once: push_back retains a growth check and size update for
+        // every element, even after reserve. Direct stores expose the
+        // contiguous output writes to the JIT optimizer.
+        code << "ROOT::VecOps::RVec<" << targetType << "> out(rows * "
+             << indices.size() << ");\n"
+             << "auto* dst = out.data();\n"
              << "for (std::size_t row = 0; row < rows; ++row) {\n";
         for (const auto index : indices) {
-          code << "out.push_back(static_cast<" << targetType << ">(arg" << index;
-          if (isRowCollectionType(uniqueTypes[index]))
-            code << "[std::min(row, arg" << index << ".size() - 1)]";
-          code << "));\n";
+          code << "*dst++ = static_cast<" << targetType << ">(arg" << index;
+          if (isRowCollectionType(uniqueTypes[index])) {
+            if (aligned) code << "[row]";
+            else code << "[std::min(row, arg" << index << ".size() - 1)]";
+          }
+          code << ");\n";
         }
         code << "}\nreturn out;\n";
       } else {
-        code << "ROOT::VecOps::RVec<" << targetType << "> out;\n"
-                "std::size_t total = 0;\n";
+        code << "std::size_t total = 0;\n";
         for (const auto index : indices) code << "total += arg" << index << ".size();\n";
-        code << "out.reserve(total);\n";
+        code << "ROOT::VecOps::RVec<" << targetType << "> out(total);\n"
+                "auto* dst = out.data();\n";
         for (const auto index : indices)
-          code << "for (const auto& value : arg" << index << ") out.push_back(static_cast<"
-               << targetType << ">(value));\n";
+          code << "for (const auto& value : arg" << index << ") *dst++ = static_cast<"
+               << targetType << ">(value);\n";
         code << "return out;\n";
       }
       code << "}, columns);\n}\n}\n";
@@ -217,7 +234,7 @@ ROOT::RDF::RNode defineFlattenedNumericInputs(
     ROOT::RDF::RNode df, const std::string &name,
     const std::vector<std::string> &columns, const std::string &context) {
   try {
-    return definePackedVector(std::move(df), name, columns, "double", PackingLayout::Rows);
+    return definePackedVector(std::move(df), name, columns, "double", PackingLayout::AlignedRows);
   } catch (const std::exception &error) {
     throw std::runtime_error(context + ": " + error.what());
   }

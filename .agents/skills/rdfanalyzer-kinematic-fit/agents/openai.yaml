@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kinematic fits"
+  short_description: "Trace kinematic fits workflows"
+  default_prompt: "Use $rdfanalyzer-kinematic-fit to trace the fit particles, constraints, resolutions, execution path, and convergence outputs."

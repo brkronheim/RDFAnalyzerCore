@@ -117,7 +117,7 @@ InputCacheChain::InputCacheChain(const std::string &name,
       statistics_(flag(config, "treeCacheStats", true)),
       optimize_(optimize),
       verbosity_(number(config, "treeCacheVerbosity", 0, 2)) {
-  warmCacheLimitBytes_ = number(config, "xrdPrefetchCacheMB", 256, 131072) *
+  warmCacheLimitBytes_ = number(config, "xrdPrefetchCacheMB", 32, 131072) *
                          1024 * 1024;
   if (prefetchNextFile_) ROOT::EnableThreadSafety();
   if (prefetchNextFile_) asyncOpenNextFile_ = false;
@@ -138,7 +138,7 @@ InputCacheChain::InputCacheChain(const std::string &name,
   // ROOT_TTREECACHE_SIZE as bytes or silently override a configured factor.
   if (setting(config, "rootTTreeCacheSize").empty() &&
       setting(config, "ROOT_TTREECACHE_SIZE").empty()) {
-    const auto size = number(config, "treeCacheSizeMB", 128, 512);
+    const auto size = number(config, "treeCacheSizeMB", 32, 512);
     if (SetCacheSize(size * 1024 * 1024) != 0)
       std::cerr << "[InputCache] fallback: could not set cache size\n";
   }
@@ -500,17 +500,18 @@ void InputCacheChain::scheduleNextFilePrefetch() {
                     << " total_ms=" << elapsedMs(scheduledAt, openedAt) << '\n';
           return {};
         }
-        // Keep the warmed TFile independent so this thread can read its first
-        // cached cluster. Queue ROOT's matching file open after that first
-        // handle is acquired; TChain can adopt it at the next file boundary
-        // while it consumes the bytes held in the URL-scoped Xrd handoff cache.
+        // RDFXrdFile shares the live transport with the next TChain file. Its
+        // ROOT objects and cursors stay independent; ROOT's AsyncOpen does not
+        // provide asynchronous open adoption for this custom TFile backend.
+        // Retain native async-open queuing for other ROOT backends.
         const auto asyncQueueStarted = std::chrono::steady_clock::now();
-        auto *asyncHandle = TFile::AsyncOpen(url.c_str(), "READ");
+        const bool sharedTransport = std::string(opened->ClassName()) == "RDFXrdFile";
+        auto *asyncHandle = sharedTransport ? nullptr : TFile::AsyncOpen(url.c_str(), "READ");
         const auto asyncStatus = asyncHandle
                                      ? TFile::GetAsyncOpenStatus(asyncHandle)
-                                     : TFile::kAOSFailure;
+                                     : sharedTransport ? TFile::kAOSNotAsync : TFile::kAOSFailure;
         const auto asyncQueuedAt = std::chrono::steady_clock::now();
-        if (!asyncHandle)
+        if (!sharedTransport && !asyncHandle)
           std::cerr << "[InputCache] next-file warmup could not queue ROOT open for "
                     << url << '\n';
         const auto treeSetupStarted = std::chrono::steady_clock::now();
@@ -570,6 +571,7 @@ void InputCacheChain::scheduleNextFilePrefetch() {
         const auto completedAt = std::chrono::steady_clock::now();
         std::ostringstream warmupLog;
         warmupLog << "[InputCache] next-file warmup complete file=" << url
+                  << " open_strategy=" << (sharedTransport ? "shared-transport" : "root-async")
                   << " status=ready"
                   << " open_ms=" << elapsedMs(openStarted, openedAt)
                   << " async_open_queue_ms="

@@ -1,4 +1,7 @@
 #include "TaggerWorkingPointManager.h"
+#include <ArrayValidation.h>
+#include <RDFColumnPacker.h>
+#include <map>
 #include <NullOutputSink.h>
 #include <WeightManager.h>
 #include <analyzer.h>
@@ -8,6 +11,8 @@
 #include <api/ILogger.h>
 #include <cmath>
 #include <memory>
+#include <iostream>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -629,14 +634,12 @@ void TaggerWorkingPointManager::defineWeightColumn(
     const std::string collectionCol = inputObjectCollectionColumn_m;
     auto newDf = df.Define(
         outputWeightColumn,
-        [](const PhysicsObjectCollection &jets,
+        [outputWeightColumn](const PhysicsObjectCollection &jets,
            const ROOT::VecOps::RVec<Float_t> &sf) -> Float_t {
           Float_t weight = 1.0f;
           for (std::size_t i = 0; i < jets.size(); ++i) {
             const Int_t idx = jets.index(i);
-            if (idx >= 0 && static_cast<std::size_t>(idx) < sf.size()) {
-              weight *= sf[static_cast<std::size_t>(idx)];
-            }
+            weight *= sf[rdf::checkedIndex(outputWeightColumn, idx, sf.size())];
           }
           return weight;
         },
@@ -652,19 +655,17 @@ void TaggerWorkingPointManager::defineWeightColumn(
     const std::string fracCol = fractionCorrectionName_m;
     auto newDf = df.Define(
         outputWeightColumn,
-        [](const PhysicsObjectCollection &jets,
+        [outputWeightColumn, fractionContext = outputWeightColumn + " fraction"](const PhysicsObjectCollection &jets,
            const ROOT::VecOps::RVec<Float_t> &sf,
            const ROOT::VecOps::RVec<Float_t> &fraction) -> Float_t {
           Float_t weight = 1.0f;
           for (std::size_t i = 0; i < jets.size(); ++i) {
             const Int_t idx = jets.index(i);
-            if (idx >= 0 && static_cast<std::size_t>(idx) < sf.size()) {
-              const std::size_t j = static_cast<std::size_t>(idx);
-              const Float_t frac = (j < fraction.size() && fraction[j] > 0.0f)
-                                       ? fraction[j]
-                                       : 1.0f;
-              weight *= sf[j] / frac;
-            }
+            const auto j = rdf::checkedIndex(outputWeightColumn, idx, sf.size());
+            rdf::checkedIndex(fractionContext, idx, fraction.size());
+            if (!std::isfinite(fraction[j]) || fraction[j] <= 0.f)
+              throw std::runtime_error(outputWeightColumn + ": invalid MC fraction at index " + std::to_string(idx));
+            weight *= sf[j] / fraction[j];
           }
           return weight;
         },
@@ -678,86 +679,9 @@ void TaggerWorkingPointManager::defineWeightColumn(
 // ---------------------------------------------------------------------------
 
 void TaggerWorkingPointManager::defineFixedWorkingPointWeightColumn(
-    const std::vector<std::string> &perWorkingPointSFColumns,
-    const std::vector<std::string> &perWorkingPointEfficiencyColumns,
+    const std::string &packedSFCol,
+    const std::string &packedEffCol,
     const std::string &outputWeightColumn) {
-  const std::string packedSFCol = "_twm_fixedwp_sf_" + outputWeightColumn;
-  const std::string packedEffCol = "_twm_fixedwp_eff_" + outputWeightColumn;
-
-  {
-    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-    const std::string firstCol = perWorkingPointSFColumns.front();
-    auto newDf = df.Define(
-        packedSFCol,
-        [](const ROOT::VecOps::RVec<Float_t> &values)
-            -> ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> {
-          ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> packed(values.size());
-          for (std::size_t index = 0; index < values.size(); ++index)
-            packed[index] = ROOT::VecOps::RVec<Float_t>{values[index]};
-          return packed;
-        },
-        {firstCol});
-    dataManager_m->setDataFrame(newDf);
-  }
-
-  for (std::size_t wpIndex = 1; wpIndex < perWorkingPointSFColumns.size();
-       ++wpIndex) {
-    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-    const std::string sfColumn = perWorkingPointSFColumns[wpIndex];
-    auto newDf = df.Redefine(
-        packedSFCol,
-        [](ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> packed,
-           const ROOT::VecOps::RVec<Float_t> &values)
-            -> ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> {
-          if (packed.size() != values.size())
-            throw std::runtime_error(
-                "TaggerWorkingPointManager: fixed-WP SF columns have "
-                "different lengths per event");
-          for (std::size_t index = 0; index < packed.size(); ++index)
-            packed[index].push_back(values[index]);
-          return packed;
-        },
-        {packedSFCol, sfColumn});
-    dataManager_m->setDataFrame(newDf);
-  }
-
-  {
-    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-    const std::string firstCol = perWorkingPointEfficiencyColumns.front();
-    auto newDf = df.Define(
-        packedEffCol,
-        [](const ROOT::VecOps::RVec<Float_t> &values)
-            -> ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> {
-          ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> packed(values.size());
-          for (std::size_t index = 0; index < values.size(); ++index)
-            packed[index] = ROOT::VecOps::RVec<Float_t>{values[index]};
-          return packed;
-        },
-        {firstCol});
-    dataManager_m->setDataFrame(newDf);
-  }
-
-  for (std::size_t wpIndex = 1;
-       wpIndex < perWorkingPointEfficiencyColumns.size(); ++wpIndex) {
-    ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-    const std::string effColumn = perWorkingPointEfficiencyColumns[wpIndex];
-    auto newDf = df.Redefine(
-        packedEffCol,
-        [](ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> packed,
-           const ROOT::VecOps::RVec<Float_t> &values)
-            -> ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> {
-          if (packed.size() != values.size())
-            throw std::runtime_error(
-                "TaggerWorkingPointManager: fixed-WP efficiency columns "
-                "have different lengths per event");
-          for (std::size_t index = 0; index < packed.size(); ++index)
-            packed[index].push_back(values[index]);
-          return packed;
-        },
-        {packedEffCol, effColumn});
-    dataManager_m->setDataFrame(newDf);
-  }
-
   ROOT::RDF::RNode df = dataManager_m->getDataFrame();
   const std::string collectionCol = inputObjectCollectionColumn_m;
   const std::string categoryCol = wpCategoryColumn();
@@ -765,21 +689,34 @@ void TaggerWorkingPointManager::defineFixedWorkingPointWeightColumn(
 
   auto newDf = df.Define(
       outputWeightColumn,
-      [nWorkingPoints](
+      [nWorkingPoints, outputWeightColumn,
+       categoryContext = outputWeightColumn + " category",
+       sfContext = outputWeightColumn + " SF",
+       efficiencyContext = outputWeightColumn + " efficiency"](
           const PhysicsObjectCollection &objects,
           const ROOT::VecOps::RVec<Int_t> &category,
-          const ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> &sfPacked,
-          const ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> &effPacked)
+          const ROOT::VecOps::RVec<Float_t> &sfPacked,
+          const ROOT::VecOps::RVec<Float_t> &effPacked)
           -> Float_t {
-        auto unityIfInvalid = [](Float_t numerator,
+        const auto warn = [&](const std::string &detail) {
+          static std::mutex warningMutex;
+          const std::lock_guard<std::mutex> lock(warningMutex);
+          std::cerr << "Warning: TaggerWorkingPointManager: '" << outputWeightColumn
+                    << "': " << detail << "; using fallback 1\n";
+        };
+        auto unityIfInvalid = [&](Float_t numerator,
                                  Float_t denominator) -> Float_t {
           if (!std::isfinite(numerator) || !std::isfinite(denominator) ||
               denominator <= 0.0f || numerator < 0.0f) {
+            warn("invalid fixed-WP ratio numerator=" + std::to_string(numerator) +
+                 " denominator=" + std::to_string(denominator));
             return 1.0f;
           }
           const Float_t value = numerator / denominator;
-          if (!std::isfinite(value) || value < 0.0f)
+          if (!std::isfinite(value) || value < 0.0f) {
+            warn("invalid fixed-WP ratio result");
             return 1.0f;
+          }
           return value;
         };
 
@@ -787,34 +724,29 @@ void TaggerWorkingPointManager::defineFixedWorkingPointWeightColumn(
         for (std::size_t objectIndex = 0; objectIndex < objects.size();
              ++objectIndex) {
           const Int_t idx = objects.index(objectIndex);
-          if (idx < 0)
-            continue;
+          const auto flatIndex = rdf::checkedIndex(categoryContext, idx, category.size());
+          rdf::checkedIndex(sfContext, idx, sfPacked.size() / nWorkingPoints);
+          rdf::checkedIndex(efficiencyContext, idx, effPacked.size() / nWorkingPoints);
 
-          const std::size_t flatIndex = static_cast<std::size_t>(idx);
-          if (flatIndex >= category.size() || flatIndex >= sfPacked.size() ||
-              flatIndex >= effPacked.size()) {
-            continue;
-          }
-
-          const auto &sfValues = sfPacked[flatIndex];
-          const auto &effValues = effPacked[flatIndex];
-          if (sfValues.size() < nWorkingPoints ||
-              effValues.size() < nWorkingPoints) {
-            continue;
-          }
+          const auto *sfValues = sfPacked.data() + flatIndex * nWorkingPoints;
+          const auto *effValues = effPacked.data() + flatIndex * nWorkingPoints;
 
           const Int_t cat = category[flatIndex];
           Float_t factor = 1.0f;
 
-          if (cat <= 0) {
+          if (cat < 0 || static_cast<std::size_t>(cat) > nWorkingPoints)
+            throw std::runtime_error(outputWeightColumn + ": invalid working-point category " + std::to_string(cat));
+          if (cat == 0) {
             const Float_t effLoose = effValues[0];
             const Float_t sfLoose = sfValues[0];
             factor = unityIfInvalid(1.0f - sfLoose * effLoose,
                                     1.0f - effLoose);
           } else if (static_cast<std::size_t>(cat) >= nWorkingPoints) {
             factor = sfValues[nWorkingPoints - 1];
-            if (!std::isfinite(factor) || factor < 0.0f)
+            if (!std::isfinite(factor) || factor < 0.0f) {
+              warn("invalid passing-jet SF at index " + std::to_string(idx));
               factor = 1.0f;
+            }
           } else {
             const std::size_t lower = static_cast<std::size_t>(cat) - 1;
             const std::size_t upper = static_cast<std::size_t>(cat);
@@ -870,75 +802,30 @@ void TaggerWorkingPointManager::defineWPCategoryColumn() {
     dataManager_m->setDataFrame(newDf);
 
   } else {
-    // -----------------------------------------------------------------------
-    // Multi-score path: pack all discriminant scores per object into a
-    // RVec<RVec<Float_t>> intermediate column, then compute category.
-    //
-    // The packed column is named "_twm_packed_<catCol>" so multiple instances
-    // of the plugin don't collide.
-    // -----------------------------------------------------------------------
+    // One aligned, object-major flat pack replaces nested vectors and the
+    // per-score Redefine/copy chain. Array mismatches remain fatal.
     const std::string packedCol = "_twm_packed_" + catCol;
     const std::size_t numScores = taggerColumns_m.size();
+    dataManager_m->setDataFrame(rdfcolumnpacker::definePackedVector(
+        dataManager_m->getDataFrame(), packedCol, taggerColumns_m, "Float_t",
+        rdfcolumnpacker::PackingLayout::AlignedRows));
 
-    // Step A: initialise packed column from first tagger score.
-    {
-      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-      const std::string firstCol = taggerColumns_m[0];
-      auto newDf = df.Define(
-          packedCol,
-          [](const ROOT::VecOps::RVec<Float_t> &s)
-              -> ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> {
-            ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> result(s.size());
-            for (std::size_t i = 0; i < s.size(); ++i)
-              result[i] = ROOT::VecOps::RVec<Float_t>{s[i]};
-            return result;
-          },
-          {firstCol});
-      dataManager_m->setDataFrame(newDf);
-    }
-
-    // Step B: append each additional tagger score column.
-    for (std::size_t k = 1; k < taggerColumns_m.size(); ++k) {
-      ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-      const std::string scoreCol = taggerColumns_m[k];
-      auto newDf = df.Redefine(
-          packedCol,
-          [](ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> packed,
-             const ROOT::VecOps::RVec<Float_t> &s)
-              -> ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> {
-            // Both columns must have the same number of objects per event.
-            // Size mismatches indicate a configuration error (mismatched
-            // tagger columns or incorrectly sized branches).
-            if (packed.size() != s.size())
-              throw std::runtime_error(
-                  "TaggerWorkingPointManager: tagger score columns have "
-                  "different lengths per event — ensure all setTaggerColumns() "
-                  "columns have one entry per object");
-            for (std::size_t i = 0; i < packed.size(); ++i)
-              packed[i].push_back(s[i]);
-            return packed;
-          },
-          {packedCol, scoreCol});
-      dataManager_m->setDataFrame(newDf);
-    }
-
-    // Step C: compute category from packed scores.
+    // Compute the category without allocating one score vector per object.
     {
       ROOT::RDF::RNode df = dataManager_m->getDataFrame();
       auto newDf = df.Define(
           catCol,
           [wps, numScores](
-              const ROOT::VecOps::RVec<ROOT::VecOps::RVec<Float_t>> &packed)
+              const ROOT::VecOps::RVec<Float_t> &packed)
               -> ROOT::VecOps::RVec<Int_t> {
-            ROOT::VecOps::RVec<Int_t> cat(packed.size(), 0);
-            for (std::size_t i = 0; i < packed.size(); ++i) {
-              const auto &scores = packed[i];
+            ROOT::VecOps::RVec<Int_t> cat(packed.size() / numScores, 0);
+            for (std::size_t i = 0; i < cat.size(); ++i) {
+              const auto *scores = packed.data() + i * numScores;
               Int_t c = 0;
               for (const auto &wp : wps) {
                 bool passes = true;
                 for (std::size_t k = 0; k < numScores; ++k) {
-                  if (k >= scores.size() ||
-                      scores[k] < wp.thresholds[k]) {
+                  if (scores[k] < wp.thresholds[k]) {
                     passes = false;
                     break;
                   }
@@ -982,11 +869,30 @@ void TaggerWorkingPointManager::execute() {
     defineWeightColumn(step.perObjectSFColumn, step.outputWeightColumn);
   }
 
+  // These readers are shared only within this execute call: no cache survives
+  // a graph change. Identical efficiencies across SF nuisances are packed once.
+  std::map<std::vector<std::string>, std::string> fixedWPPacks;
+  const auto packFixedWP = [&](const std::vector<std::string> &columns,
+                               const std::string &name) {
+    if (columns.size() == 1) return columns.front(); // No copy for a single WP.
+    const auto found = fixedWPPacks.find(columns);
+    if (found != fixedWPPacks.end()) return found->second;
+    dataManager_m->setDataFrame(rdfcolumnpacker::definePackedVector(
+        dataManager_m->getDataFrame(), name, columns, "Float_t",
+        rdfcolumnpacker::PackingLayout::AlignedRows));
+    fixedWPPacks.emplace(columns, name);
+    return name;
+  };
   for (const auto &step : fixedWPWeightSteps_m) {
-    defineFixedWorkingPointWeightColumn(
-        step.perWorkingPointSFColumns,
-        step.perWorkingPointEfficiencyColumns,
-        step.outputWeightColumn);
+    if (step.perWorkingPointSFColumns.size() != workingPoints_m.size() ||
+        step.perWorkingPointEfficiencyColumns.size() != workingPoints_m.size())
+      throw std::runtime_error("TaggerWorkingPointManager: working points changed after scheduling '" +
+                               step.outputWeightColumn + "'");
+    const auto sf = packFixedWP(step.perWorkingPointSFColumns,
+                                "_twm_fixedwp_sf_" + step.outputWeightColumn);
+    const auto eff = packFixedWP(step.perWorkingPointEfficiencyColumns,
+                                 "_twm_fixedwp_eff_" + step.outputWeightColumn);
+    defineFixedWorkingPointWeightColumn(sf, eff, step.outputWeightColumn);
   }
 
   // -------------------------------------------------------------------------

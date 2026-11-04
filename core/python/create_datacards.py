@@ -512,6 +512,19 @@ class DatacardGenerator:
         if not process_hists:
             print(f"Warning: No histograms found for region {region}")
             return
+
+        data_process = region_config.get('data_process', 'data_obs')
+        data_hist = self.combine_samples(region, data_process)
+        if data_hist is None:
+            if data_process in self.input_files or data_process in self.processes:
+                raise ValueError(f"Missing observed histogram for {data_process} in {region}")
+            print(f"  No data sample configured for {region}; writing nominal pseudo-data")
+            for hist in process_hists.values():
+                if data_hist is None:
+                    data_hist = hist.clone('data_obs')
+                else:
+                    data_hist.add(hist)
+        process_hists[data_process] = data_hist
         
         # Stage the matching ROOT shapes and card beside their final paths,
         # then publish the shapes first and the card last as the completion
@@ -551,8 +564,12 @@ class DatacardGenerator:
         
         for process, hist in process_hists.items():
             # Write nominal histogram
-            hist_dict = self._histogram_to_uproot_dict(hist, process)
-            histograms_to_write[process] = hist_dict
+            is_data = process == self.control_regions[region].get('data_process', 'data_obs')
+            output_name = 'data_obs' if is_data else process
+            hist_dict = self._histogram_to_uproot_dict(hist, output_name)
+            histograms_to_write[output_name] = hist_dict
+            if is_data:
+                continue
             
             # Write systematic variations
             syst_hists = self._get_systematic_histograms(process, hist, region)
@@ -820,7 +837,7 @@ class DatacardGenerator:
             f.write(f"# Observable: {region_config.get('observable')}\n")
             f.write("#" + "="*80 + "\n")
             f.write(f"imax 1  number of channels\n")
-            f.write(f"jmax {len(process_hists) - 1}  number of backgrounds\n")
+            f.write("jmax *  number of backgrounds\n")
             f.write(f"kmax *  number of nuisance parameters\n")
             f.write("#" + "-"*80 + "\n")
             
@@ -831,18 +848,13 @@ class DatacardGenerator:
             # Observations
             # Get data process
             data_process = region_config.get('data_process', 'data_obs')
-            if data_process in process_hists:
-                n_obs = int(process_hists[data_process].integral())
-            else:
-                # Sum all backgrounds as pseudo-data
-                n_obs = int(sum(h.integral() for h in process_hists.values()))
             
             f.write(f"bin          {region}\n")
-            f.write(f"observation  {n_obs}\n")
+            f.write("observation  -1\n")
             f.write("#" + "-"*80 + "\n")
             
             # Expected rates
-            processes = list(process_hists.keys())
+            processes = [name for name in process_hists if name != data_process]
             n_proc = len(processes)
             
             # Determine signal and background process IDs
@@ -884,7 +896,7 @@ class DatacardGenerator:
                 # Build systematic line
                 syst_values = []
                 for proc in processes:
-                    applies = syst_config.get('applies_to', {}).get(proc, True)
+                    applies = syst_name in self._get_systematics_for_process(proc, region)
                     if applies:
                         if syst_type == 'shape':
                             syst_values.append("1")

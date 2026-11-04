@@ -1,9 +1,9 @@
 //==============================================================================
 // StxsColumns — Generic STXS column definitions for RDataFrame
 //
-// Ported from VHqqSTXS.cc. Made fully generic: branch names, signal process
+// Branch names, signal process
 // IDs, and weight computations are driven by the StxsConfig struct rather
-// than hardcoded VH-specific values.
+// than analysis-specific values.
 //==============================================================================
 
 #include "StxsColumns.h"

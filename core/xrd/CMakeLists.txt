@@ -9,51 +9,10 @@ if(DEFINED ENV{XRD_ROOT})
     list(APPEND _xrootd_library_hints "$ENV{XRD_ROOT}/lib" "$ENV{XRD_ROOT}/lib64")
 endif()
 
-# CMS runtime containers expose the XrdCl development package through CVMFS,
-# without adding its headers to the default compiler search path.
-file(GLOB _cms_xrootd_dirs LIST_DIRECTORIES TRUE
-    "/cvmfs/cms.cern.ch/el9_amd64_gcc11/external/xrootd/*")
-list(SORT _cms_xrootd_dirs)
-list(REVERSE _cms_xrootd_dirs)
-set(_cms_xrootd_package "")
-foreach(_dir IN LISTS _cms_xrootd_dirs)
-    list(APPEND _xrootd_hints "${_dir}/include/xrootd")
-    list(APPEND _xrootd_library_hints "${_dir}/lib64" "${_dir}/lib")
-    if(NOT _cms_xrootd_package
-       AND EXISTS "${_dir}/include/xrootd/XrdCl/XrdClFile.hh"
-       AND EXISTS "${_dir}/lib64/libXrdCl.so")
-        set(_cms_xrootd_package "${_dir}")
-    endif()
-endforeach()
-
-if(DEFINED ENV{XROOTD_ROOT} OR DEFINED ENV{XRD_ROOT})
-    find_path(XRDCL_INCLUDE_DIR
-        NAMES XrdCl/XrdClFile.hh
-        HINTS ${_xrootd_hints}
-        DOC "Directory containing XrdCl development headers")
-    find_library(XRDCL_LIBRARY
-        NAMES XrdCl
-        HINTS ${_xrootd_library_hints}
-        DOC "XrdCl client library")
-elseif(_cms_xrootd_package)
-    # Keep the headers and client library from the same CMS XRootD release.
-    # On some EL9 hosts, the system XrdCl 5.9 runtime crashes during its own
-    # static initialization; the matched CMS CVMFS 5.7 package is usable by
-    # both the standalone build and its worker container.
-    set(XRDCL_INCLUDE_DIR "${_cms_xrootd_package}/include/xrootd"
-        CACHE PATH "Directory containing XrdCl development headers" FORCE)
-    set(XRDCL_LIBRARY "${_cms_xrootd_package}/lib64/libXrdCl.so"
-        CACHE FILEPATH "XrdCl client library" FORCE)
-else()
-    find_path(XRDCL_INCLUDE_DIR
-        NAMES XrdCl/XrdClFile.hh
-        HINTS ${_xrootd_hints}
-        DOC "Directory containing XrdCl development headers")
-    find_library(XRDCL_LIBRARY
-        NAMES XrdCl
-        HINTS ${_xrootd_library_hints}
-        DOC "XrdCl client library")
-endif()
+find_path(XRDCL_INCLUDE_DIR NAMES XrdCl/XrdClFile.hh
+    HINTS ${_xrootd_hints} DOC "Directory containing XrdCl development headers")
+find_library(XRDCL_LIBRARY NAMES XrdCl HINTS ${_xrootd_library_hints}
+    DOC "XrdCl client library")
 
 if(NOT XRDCL_INCLUDE_DIR OR NOT XRDCL_LIBRARY)
     message(FATAL_ERROR
@@ -89,6 +48,14 @@ target_link_libraries(RDFXrdAdaptor PUBLIC
     ROOT::Tree
     "${XRDCL_LIBRARY}")
 set_target_properties(RDFXrdAdaptor PROPERTIES OUTPUT_NAME RDFXrdAdaptor)
+if(RDF_XRD_OPEN_POLICY_HEADER)
+    # Copy the extension policy alongside the dictionary for relocatable workers.
+    configure_file("${RDF_XRD_OPEN_POLICY_HEADER}"
+        "${CMAKE_CURRENT_BINARY_DIR}/RDFXrdOpenPolicy.h" COPYONLY)
+    target_include_directories(RDFXrdAdaptor PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")
+    target_compile_definitions(RDFXrdAdaptor PUBLIC
+        RDF_XRD_OPEN_POLICY_HEADER="RDFXrdOpenPolicy.h")
+endif()
 
 # ROOT's runtime dictionary uses the rootmap header when it loads the PCM.
 # Keep the Xrd adaptor headers beside the library so the submission workflow

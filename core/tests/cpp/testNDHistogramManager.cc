@@ -561,6 +561,190 @@ TEST(HistogramStorage, DenseAndForcedSparseRetainCancellationVarianceAcrossSlots
   }
 }
 
+template <class Action>
+void checkStorageFlowsAndCancellation(bool sparse, bool floatContents = false,
+                                     const std::string &backend = "map") {
+  histFillInfo info;
+  info.name = "storage_contract";
+  info.nSlots = 2;
+  info.nbins = {2, 1, 1, 2, 3};
+  info.xmin = {-.5, -.5, -.5, 0, 0};
+  info.xmax = {1.5, .5, .5, 2, 3};
+  info.denseMemoryLimitBytes = sparse ? 0 : kDenseMemoryThresholdBytes;
+  info.boostFloatContents = floatContents;
+  info.boostSparseBackend = backend;
+  Action action(info);
+  // Interior cancellation retains variance; flows in both observable and
+  // category axes must survive every storage/backend and the slot merge.
+  action.Exec(0, {.5f}, {2.f}, {0.f}, {true}, {0.f}, {0.f}, {0.f}, {1});
+  action.Exec(1, {.5f}, {-2.f}, {0.f}, {true}, {0.f}, {0.f}, {0.f}, {1});
+  action.Exec(0, {-1.f}, {3.f}, {0.f}, {true}, {0.f}, {0.f}, {0.f}, {1});
+  action.Exec(1, {3.f}, {-4.f}, {0.f}, {true}, {0.f}, {0.f}, {0.f}, {1});
+  action.Exec(1, {1.f}, {5.f}, {0.f}, {true}, {0.f}, {0.f}, {2.f}, {1});
+  action.Exec(0, {2.f}, {9.f}, {0.f}, {false}, {0.f}, {0.f}, {0.f}, {1});
+  action.Finalize();
+  const auto result = action.GetResultPtr();
+  const std::array<std::array<int, 5>, 4> coordinates{{
+      {{1, 1, 1, 1, 1}}, {{1, 1, 1, 1, 0}},
+      {{1, 1, 1, 1, 4}}, {{3, 1, 1, 1, 2}}}};
+  const double contents[] = {0, 3, -4, 5};
+  const double variances[] = {8, 9, 16, 25};
+  ASSERT_EQ(result->GetNbins(), 4);
+  for (std::size_t i = 0; i < coordinates.size(); ++i) {
+    const auto bin = result->GetBin(coordinates[i].data(), false);
+    ASSERT_GE(bin, 0);
+    EXPECT_DOUBLE_EQ(result->GetBinContent(bin), contents[i]);
+    EXPECT_DOUBLE_EQ(result->GetBinError2(bin), variances[i]);
+  }
+}
+
+TEST(HistogramStorage, RootDenseAndSparsePreserveFlowsAndSelection) {
+  checkStorageFlowsAndCancellation<THnMulti>(false);
+  checkStorageFlowsAndCancellation<THnMulti>(true);
+}
+
+TEST(HistogramStorage, BoostDenseAndSparsePreserveFlowsAndSelection) {
+  checkStorageFlowsAndCancellation<BHnMulti>(false);
+  checkStorageFlowsAndCancellation<BHnMulti>(true);
+}
+
+TEST(HistogramStorage, BoostFloatDenseAndSparsePreserveFlowsAndSelection) {
+  checkStorageFlowsAndCancellation<BHnMulti>(false, true);
+  checkStorageFlowsAndCancellation<BHnMulti>(true, true);
+#ifdef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+  checkStorageFlowsAndCancellation<BHnMulti>(true, true, "flat");
+  checkStorageFlowsAndCancellation<BHnMulti>(true, false, "flat");
+#endif
+}
+
+TEST(HistogramStorage, BoostFloatMatchesRootForRepresentativeObservableEdges) {
+  for (const auto &range : std::vector<std::array<double, 3>>{
+      {40, 0, 400}, {60, -3, 3}, {40, -3.2, 3.2}, {35, 0, 700}, {69, 0, 69}}) {
+    histFillInfo info;
+    info.name = "float_edges"; info.nSlots = 1;
+    info.nbins = {1, 1, 1, 1, static_cast<int>(range[0])};
+    info.xmin = {0, 0, 0, 0, range[1]};
+    info.xmax = {1, 1, 1, 1, range[2]};
+    info.boostFloatContents = true;
+    THnMulti root(info);
+    BHnMulti boost(info);
+    for (int bin = 0; bin <= info.nbins[4]; ++bin) {
+      const float boundary = range[1] + (range[2]-range[1])*bin/info.nbins[4];
+      for (const float value : {std::nextafter(boundary, -INFINITY), boundary,
+                                std::nextafter(boundary, INFINITY)}) {
+        root.Exec(0, {value}, {1.f}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+        boost.Exec(0, {value}, {1.f}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+      }
+    }
+    root.Finalize(); boost.Finalize();
+    auto first = root.GetResultPtr(), second = boost.GetResultPtr();
+    for (int bin = 0; bin <= info.nbins[4]+1; ++bin) {
+      const int coord[] = {1, 1, 1, 1, bin};
+      const auto a = first->GetBin(coord, false), b = second->GetBin(coord, false);
+      ASSERT_EQ(a < 0, b < 0) << bin;
+      if (a >= 0) {
+        EXPECT_EQ(first->GetBinContent(a), second->GetBinContent(b)) << bin;
+        EXPECT_EQ(first->GetBinError2(a), second->GetBinError2(b)) << bin;
+      }
+    }
+  }
+}
+
+TEST(HistogramStorage, SparseAllocationCountersAreSlotLocalAndSurviveFinalization) {
+  for (const auto *storage : {"map", "flat"}) {
+#ifndef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+    if (std::string(storage) == "flat") continue;
+#endif
+    histFillInfo info;
+    info.name = "memory_slots";
+    info.nSlots = 2;
+    info.nbins = {8, 8, 8, 8, 8};
+    info.xmin = {0, 0, 0, 0, 0};
+    info.xmax = {8, 8, 8, 8, 8};
+    info.boostFloatContents = true;
+    info.boostSparseBackend = storage;
+    info.denseMemoryLimitBytes = 0;
+    BHnMulti action(info);
+    auto memory = action.GetStorageMemoryUsage();
+    EXPECT_EQ(memory->sparseBytes, 0u);
+    for (int cell = 0; cell < 32768; ++cell) {
+      auto linear = cell;
+      float coordinate[5];
+      for (auto &value : coordinate) { value = (linear % 8) + .5f; linear /= 8; }
+      for (unsigned slot = 0; slot < 2; ++slot)
+        action.Exec(slot, {coordinate[4]}, {1.f}, {coordinate[3]}, {true},
+                    {coordinate[2]}, {coordinate[1]}, {coordinate[0]}, {1});
+    }
+    action.Finalize();
+    EXPECT_EQ(memory->slots, 2u);
+    EXPECT_EQ(memory->denseBytes, estimateDenseMemoryBytes(info.nbins, 2, 12));
+    EXPECT_TRUE(memory->sparse);
+    EXPECT_GT(memory->sparseBytes, memory->denseBytes);
+    EXPECT_EQ(action.GetResultPtr()->GetNbins(), 32768);
+    EXPECT_EQ(action.GetResultPtr()->GetBinContent(Long64_t{0}), 2);
+    EXPECT_EQ(action.GetResultPtr()->GetBinError2(0), 2);
+  }
+  BHnMulti::FloatSparseMap first, second;
+  first[0] += boost::histogram::weight(1.);
+  EXPECT_GT(first.get_allocator().bytes->current, 0u);
+  EXPECT_EQ(second.get_allocator().bytes->current, 0u);
+  auto counter = first.get_allocator().bytes;
+  { auto moved = std::move(first); EXPECT_GT(counter->current, 0u); }
+  EXPECT_EQ(counter->current, 0u);
+}
+
+TEST(HistogramStorage, BoostHugeLogicalGridUsesOnlyAllocatedCells) {
+  histFillInfo info;
+  info.name = "huge_sparse";
+  info.nSlots = 2;
+  info.nbins = {1000, 1000, 1000, 10, 1000};
+  info.xmin = {0, 0, 0, 0, 0};
+  info.xmax = {1000, 1000, 1000, 10, 1000};
+  BHnMulti action(info);
+  action.Exec(0, {.5f}, {2.f}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+  action.Exec(1, {.5f}, {-2.f}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+  action.Finalize();
+  ASSERT_EQ(action.GetResultPtr()->GetNbins(), 1);
+  EXPECT_DOUBLE_EQ(action.GetResultPtr()->GetBinContent(Long64_t{0}), 0);
+  EXPECT_DOUBLE_EQ(action.GetResultPtr()->GetBinError2(0), 8);
+}
+
+TEST(HistogramStorage, RootFloatAndBoostDoubleHaveDifferentCancellationPrecision) {
+  histFillInfo info;
+  info.name = "precision";
+  info.nSlots = 1;
+  info.nbins = {1, 1, 1, 1, 1};
+  info.xmin = {0, 0, 0, 0, 0};
+  info.xmax = {1, 1, 1, 1, 1};
+  THnMulti root(info);
+  BHnMulti boost(info);
+  for (float weight : {16777216.f, 1.f, -16777216.f}) {
+    root.Exec(0, {.5f}, {weight}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+    boost.Exec(0, {.5f}, {weight}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+  }
+  root.Finalize();
+  boost.Finalize();
+  EXPECT_EQ(root.GetResultPtr()->GetBinContent(Long64_t{0}), 0);
+  EXPECT_EQ(boost.GetResultPtr()->GetBinContent(Long64_t{0}), 1);
+  EXPECT_EQ(root.GetResultPtr()->GetBinError2(0), boost.GetResultPtr()->GetBinError2(0));
+  for (const auto *storage : {"map", "flat"}) {
+#ifndef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+    if (std::string(storage) == "flat") continue;
+#endif
+    for (const auto limit : {std::size_t{0}, kDenseMemoryThresholdBytes}) {
+      info.boostFloatContents = true;
+      info.boostSparseBackend = storage;
+      info.denseMemoryLimitBytes = limit;
+      BHnMulti compatible(info);
+      for (float weight : {16777216.f, 1.f, -16777216.f})
+        compatible.Exec(0, {.5f}, {weight}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+      compatible.Finalize();
+      EXPECT_EQ(compatible.GetResultPtr()->GetBinContent(Long64_t{0}), 0);
+      EXPECT_EQ(compatible.GetResultPtr()->GetBinError2(0), root.GetResultPtr()->GetBinError2(0));
+    }
+  }
+}
+
 TEST_F(NDHistogramManagerTest, SharedAxisPacksDoNotCrossRedefineBetweenBookingCalls) {
   dataManager->DefineNominal("obs", []() { return 1.5f; });
   dataManager->DefineNominal("weight", []() { return 2.f; });
@@ -606,4 +790,84 @@ TEST_F(NDHistogramManagerTest, ChangedSelectionMasksDoNotReuseEarlierHistogramMa
   auto &histograms = histogramManager->GetHistos();
   EXPECT_FLOAT_EQ(histograms[0]->GetBinContent(histograms[0]->GetBin(point, false)), 1.f);
   EXPECT_EQ(histograms[1]->GetNbins(), 0);
+}
+
+TEST(HistogramStorage, IndexedCategoriesMatchRootForEdgesMasksAndVariableObservable) {
+  for (bool variableCategories : {false, true}) {
+    histFillInfo info;
+    info.name = "category_edges";
+    info.nSlots = 2;
+    info.nbins = {3, 3, 2, 2, 3};
+    info.xmin = {-.5, .5, 0., 0., 0.};
+    info.xmax = {2.5, 3.5, 2., 2., 5.};
+    info.binEdges.resize(5);
+    info.binEdges[4] = {0., .5, 2., 5.};
+    if (variableCategories) info.binEdges[0] = {-.5, .25, 1.5, 2.5};
+    THnMulti action(info);
+    THnF reference("category_reference", "", 5, info.nbins.data(),
+                   info.xmin.data(), info.xmax.data());
+    reference.Sumw2();
+    reference.SetBinEdges(4, info.binEdges[4].data());
+    if (variableCategories) reference.SetBinEdges(0, info.binEdges[0].data());
+    const ROOT::VecOps::RVec<Int_t> fills{1};
+    const std::vector<float> values{-1.f, -.5f, 0.f, .25f, .5f, 1.f, 1.5f,
+        2.f, 2.5f, 3.f, 3.5f, 5.f,
+        std::nextafter(2.f, 0.f), std::nextafter(2.f, 3.f),
+        std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::quiet_NaN()};
+    for (int variedAxis = 0; variedAxis < 5; ++variedAxis) {
+      for (std::size_t i = 0; i < values.size(); ++i) {
+        Double_t point[5] = {1., 2., 1., 0., 1.};
+        point[variedAxis] = values[i];
+        for (float weight : {1.5f, -1.5f, .25f}) {
+          const bool pass = i % 4 != 0;
+          action.Exec(i % 2, {float(point[4])}, {weight}, {float(point[3])},
+                      {pass}, {float(point[2])}, {float(point[1])},
+                      {float(point[0])}, fills);
+          if (pass) reference.Fill(point, weight);
+        }
+      }
+    }
+    action.Finalize();
+    const auto result = action.GetResultPtr();
+    Long64_t occupied = 0;
+    Int_t coordinates[5];
+    for (Long64_t i = 0; i < reference.GetNbins(); ++i) {
+      const auto content = reference.GetBinContent(i, coordinates);
+      const auto error2 = reference.GetBinError2(i);
+      if (content == 0 && error2 == 0) continue;
+      ++occupied;
+      const auto bin = result->GetBin(coordinates, false);
+      ASSERT_GE(bin, 0);
+      EXPECT_EQ(result->GetBinContent(bin), content);
+      EXPECT_EQ(result->GetBinError2(bin), error2);
+    }
+    EXPECT_EQ(result->GetNbins(), occupied);
+  }
+}
+
+TEST_F(NDHistogramManagerTest, ScalarBroadcastKeepsVariationOnlyAcceptance) {
+  configManager->set("histogramSystematics", "true");
+  dataManager->DefineNominal("obs", []() { return .5f; });
+  dataManager->DefineNominal("obs_shiftUp", []() { return 1.5f; });
+  dataManager->DefineNominal("obs_shiftDown", []() { return .25f; });
+  dataManager->DefineNominal("weight", []() { return 1.f; });
+  dataManager->DefineNominal("reject", []() { return false; });
+  dataManager->DefineNominal("accept", []() { return true; });
+  systematicManager->registerVariationColumns("obs", "shift", "obs_shiftUp", "obs_shiftDown");
+  systematicManager->registerSelectionMaskColumn("Nominal", "reject");
+  systematicManager->registerSelectionMaskColumn("shiftUp", "accept");
+  systematicManager->registerSelectionMaskColumn("shiftDown", "reject");
+  histogramManager->setupFromConfigFile();
+  std::vector<histInfo> histograms{histInfo("migration", "obs", "", "weight", 2, 0, 2)};
+  std::vector<selectionInfo> selections;
+  std::vector<std::vector<std::string>> regions{{"ch"}, {"cr"}, {"sample"}};
+  histogramManager->bookND(histograms, selections, "", regions);
+  const auto result = histogramManager->GetHistos().front().GetPtr();
+  EXPECT_EQ(result->GetAxis(3)->GetNbins(), 3);
+  ASSERT_EQ(result->GetNbins(), 1);
+  Int_t coordinates[5];
+  EXPECT_EQ(result->GetBinContent(0, coordinates), 1.f);
+  EXPECT_EQ(coordinates[4], 2);
 }

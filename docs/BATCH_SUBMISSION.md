@@ -40,6 +40,11 @@ For HTCondor skim production, the primary sequence is:
 1. **PrepareSkimJobs** – plans the run and creates per-dataset/per-job
    configuration directories in one task. When `--file-source` is set, it
    requires the corresponding file-discovery task.
+   The dataset manifest is authoritative: preparation ignores cached discovery
+   entries for other samples/eras and fails if a requested dataset has no
+   payload, an empty payload, or duplicate payloads. Reusing a larger cache
+   cannot introduce jobs with fallback sample identity. Separate cache names
+   per concurrent era are still recommended to avoid concurrent cache writes.
 2. **BuildSkimSubmission** – assembles `condor_submit.sub`, run scripts, and
    stages the executable, `aux/`, x509 proxy, and local shared libraries into
    `shared_inputs/`.
@@ -47,6 +52,10 @@ For HTCondor skim production, the primary sequence is:
 4. **MonitorSkimJobs** – blocking polling loop that verifies EOS outputs,
   resubmits held/failed jobs, collects per-job generator-weight counters into
   `normalization.json`, and writes `all_outputs_verified.txt`.
+
+Monitor completion rechecks the required ROOT files, skim trees when enabled,
+MC weight counters, and normalization records. An existing completion marker
+does not make a missing or corrupt output complete.
 
 Law tracks task outputs so you can run the final task directly and earlier
 steps execute automatically if not yet complete.
@@ -492,22 +501,62 @@ tree only when this option is enabled; LAW does not override it. Use
 
 ## Monitoring and Resubmission
 
+LAW skim submissions automatically set Condor's `JobBatchName` to
+`<sample> [<run name>]`, using the dataset name and `--name`. This applies
+to all analyses using `BuildSkimSubmission`, including the vjet-njetpt
+submission wrapper. Normal `condor_q` batch summaries show this label in
+`BATCH_NAME`; retries and split retries inherit it from the submission template.
+The sample comes first so it is visible even when the column is truncated.
+
+Each job also carries the string ClassAd attributes `RDFSample` and `RDFRun`:
+
+```bash
+# Show full batch names in the usual summary
+condor_q -wide
+
+# Show full labels for individual jobs (including retries)
+condor_q -af ClusterId ProcId JobStatus RDFSample RDFRun
+
+# Restrict the query to one sample
+condor_q -constraint 'RDFSample == "DYJets"'
+```
+
+These labels apply to newly generated submission files. Existing queued jobs
+and previously prepared submission templates retain their original attributes.
+Python callers of `write_submit_files` or `generate_condor_submit` can opt in
+with `sample_name=...` and `run_name=...`.
+
 The `Monitor*Jobs` tasks run a blocking poll loop:
 
 1. Every `--poll-interval` seconds, query `condor_q` and `condor_history`.
 2. **Held jobs**: remove from queue and resubmit automatically.
 3. **Failed jobs** (non-zero exit code): resubmit if `--max-retries` not reached.
 4. **Overlong jobs**: remove and resubmit a running job when its
-  `RemoteWallClockTime` exceeds 150% of its Condor `MaxRuntime`.
+   current execution exceeds 150% of its Condor `MaxRuntime` (for example,
+   over 90 minutes for a 60-minute limit). This check is always enabled in
+   `MonitorSkimJobs` and runs on each poll. Elapsed time uses
+   `ServerTime - JobCurrentStartDate`, with the local clock used if
+   `ServerTime` is unavailable. If the start date is absent, the monitor uses
+   `EnteredCurrentStatus`, then `RemoteWallClockTime` as a final fallback.
+   The job's positive `MaxRuntime` takes precedence over `--max-runtime`,
+   which is used if the ad omits the limit. Resubmission requires successful
+   removal and respects `--max-retries`.
 5. **Multi-file retries**: split a retry with more than one input file into two
   balanced file groups, with separate output and metadata files for each part.
-6. **Completed jobs**: verify the expected EOS output exists via `xrdfs stat`.
+6. **Completed jobs**: check expected output paths using batched `xrdfs ls`
+   (falling back to `stat`). `--output-validation integrity` (the framework
+   default) additionally opens ROOT files to check their contents and MC
+   counters. `--output-validation exists` skips these per-poll ROOT reads.
 7. Write `skimRun_{name}/all_outputs_verified.txt` when all outputs confirmed.
 
 For MC, generator-weight sums are never scanned over the full dataset during
 preparation. Each partition writes its own counter to its metadata ROOT file;
 only after every job has finished does `MonitorSkimJobs` sum those counters and
 write the process normalization to `skimRun_{name}/normalization.json`.
+This final counter read is required in both validation modes. The vjet submit
+wrapper selects `exists` by default; its `--output-validation integrity` option
+restores the stronger checks. The policy does not change worker payloads,
+partitions, saved monitoring state, or the run identity.
 
 **State persistence**: monitoring state is saved to
 `skimRun_{name}/monitor_state.json` after each poll cycle.  If you interrupt
@@ -526,9 +575,11 @@ law run MonitorSkimJobs --workers 1 \
 
 ### Input staging
 
-Worker-side redirector selection collects every queued probe result. Each
-probe subprocess retains its own timeout; no additional deadline discards
-later sites when probes run with one worker.
+Workers route public CMS dataset inputs through `cms-xrd-global.cern.ch`.
+Streaming and stage-in workers perform no per-site redirector probing and
+launch no ROOT probe subprocesses. The XrdAdaptor handles replica discovery
+and read races during streaming. Stage-in uses `xrdcp` directly with bounded
+retries. Local inputs and private/non-CMS endpoints retain their URLs.
 
 Copy input files to the worker node before running the analysis:
 
@@ -555,7 +606,8 @@ python3 core/python/refresh_xrootd_runtime.py --apply \
   --library build/core/xrd/libRDFXrdAdaptor.so skimRun_myRun
 ```
 
-The refresh patches only the embedded probe collectors and the adaptor library
+The refresh replaces legacy embedded worker probes with global URL routing
+and updates the adaptor library
 in `shared_inputs/` and `shared_inputs.tar.gz`. It verifies that every other
 regular archive member has identical contents, including the analysis binary
 and physics configuration. Original scripts, library, archive, and a rollback
@@ -564,7 +616,9 @@ replaced atomically after validation. Resume the same monitor tasks with the
 same run names and parameters; their existing state and completed outputs are
 preserved. Jobs that already received their inputs keep those copies; future
 resubmissions transfer the refreshed files. The refresh itself does not submit,
-cancel, or restart any jobs.
+cancel, or restart any jobs. Executable changes, including lazy initial chain
+validation, require a freshly staged executable; this refresh preserves the
+saved analysis binary.
 
 ### Output staging
 

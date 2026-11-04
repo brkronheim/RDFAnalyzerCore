@@ -173,6 +173,7 @@ for _p in (_HERE, _CORE_PYTHON):
         sys.path.insert(0, _p)
 
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
+from optional_extensions import render_environment_setup  # noqa: E402
 from extract_nd_histograms import extract_nd_histograms  # noqa: E402
 from dataset_manifest import (  # noqa: E402
     DatasetManifest,
@@ -197,6 +198,9 @@ from submission_backend import (  # noqa: E402
     write_config,
     write_submit_files,
 )
+import io_policy as _io_policy
+from run_bundle import (find_bundle, verify_config_bundle, rewrite_references,
+                        file_digest, execution_identity, record_execution)
 from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
 from partition_utils import _make_partitions  # noqa: E402
 from output_schema import (  # noqa: E402
@@ -220,7 +224,7 @@ WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 
 def _stream_analysis_output() -> bool:
     """Return whether local analysis subprocess logs should be shown live."""
-    return os.environ.get("RDF_VH_VERBOSE", "").strip().lower() in {
+    return os.environ.get("RDF_VERBOSE", os.environ.get("RDF_VH_VERBOSE", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
 
@@ -300,6 +304,20 @@ def _resolve_analysis_config_path(
     """
     if not path_value:
         return path_value
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        record = json.loads((bundle / "bundle_manifest.json").read_text())
+        if path_value in record["files"]:
+            return str(bundle / path_value)
+        if path_value in record["assets"]:
+            return str(bundle / record["assets"][path_value])
+        if path_value.startswith("cfg/"):
+            members = [name for name in record["files"] if Path(name).name == Path(path_value).name]
+            if len(members) == 1:
+                return str(bundle / members[0])
+        if os.path.isabs(path_value):
+            return path_value
+        raise FileNotFoundError(f"undeclared bundle dependency {path_value!r} in {bundle}")
     if os.path.isabs(path_value):
         return path_value
 
@@ -343,7 +361,12 @@ def _analysis_config_payload_sources(
     """Resolve payload references, including paths already staged under cfg/."""
     sources: list[str] = []
     basename_sources: dict[str, str] = {}
-    for path_value in get_copy_file_list(config_dict):
+    paths = list(get_copy_file_list(config_dict))
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        declared = json.loads((bundle / "bundle_manifest.json").read_text())
+        paths.extend(str(bundle / value) for value in declared["assets"].values())
+    for path_value in paths:
         if staged_config_dir and path_value.startswith("cfg/"):
             staged_path = os.path.join(staged_config_dir, path_value)
             if os.path.isfile(staged_path):
@@ -397,6 +420,9 @@ def _copy_analysis_config_files(
 
 def _analysis_aux_dir(template_config_path: str) -> str:
     """Return the analysis-local aux directory for a submit-config template."""
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        return str(bundle / "aux")
     return _resolve_analysis_config_path(template_config_path, "aux")
 
 
@@ -428,8 +454,9 @@ def _bundle_analysis_config_files(
     template_config_path: str,
     config_dict: dict[str, str],
     destination_dir: str,
+    prepared_payloads: Optional[dict[str, bytes]] = None,
 ) -> Optional[str]:
-    """Create a tar.gz archive containing shared cfg/ payload files."""
+    """Archive cfg/ payloads, optionally retaining rewritten text for local jobs."""
     payload_paths = _analysis_config_payload_sources(template_config_path, config_dict)
     if not payload_paths:
         return None
@@ -446,6 +473,8 @@ def _bundle_analysis_config_files(
                 source_config_path=src,
                 staged_config_path=staged_path,
             )
+            if prepared_payloads is not None and Path(src).suffix in {".yaml", ".yml", ".txt"}:
+                prepared_payloads[src] = Path(staged_path).read_bytes()
         with tarfile.open(archive_path, "w:gz") as archive:
             archive.add(cfg_stage_dir, arcname="cfg")
     return archive_path
@@ -468,16 +497,27 @@ def _symlink_or_copy_path(src_path: str, dst_path: str) -> None:
 
 
 def _staged_copy_is_current(source_path: str, staged_path: str) -> bool:
-    """Return whether a staged file matches its source's size and mtime."""
+    """Return whether a staged file matches source contents, including same-stat edits."""
     try:
         source_stat = os.stat(source_path)
         staged_stat = os.stat(staged_path)
     except OSError:
         return False
-    return (
-        source_stat.st_size == staged_stat.st_size
-        and source_stat.st_mtime_ns == staged_stat.st_mtime_ns
-    )
+    return source_stat.st_size == staged_stat.st_size and file_digest(source_path) == file_digest(staged_path)
+
+
+def _local_shared_libs_with_signature(exe_path: str) -> tuple[dict[str, str], str]:
+    """Collect local runtime libraries and fingerprint their source metadata."""
+    local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+    digest = hashlib.sha256()
+    for name, source_path in sorted(local_libs.items()):
+        try:
+            source_stat = os.stat(source_path)
+        except OSError:
+            return local_libs, ""
+        record = f"{name}\0{file_digest(source_path)}\n"
+        digest.update(record.encode())
+    return local_libs, digest.hexdigest()
 
 
 def _ensure_local_analysis_runtime_layout(
@@ -486,6 +526,7 @@ def _ensure_local_analysis_runtime_layout(
     destination_dir: str,
     include_aux: bool = True,
     payload_sources: Optional[list[str]] = None,
+    prepared_payloads: Optional[dict[str, bytes]] = None,
 ) -> None:
     """Populate local job directories with referenced cfg/ and aux payloads."""
     cfg_dir = os.path.join(destination_dir, "cfg")
@@ -498,9 +539,21 @@ def _ensure_local_analysis_runtime_layout(
             config_dict,
             staged_config_dir=destination_dir,
         )
+    sealed = find_bundle(template_config_path) is not None
     for src in sources:
         dst = os.path.join(cfg_dir, os.path.basename(src))
-        _symlink_or_copy_path(src, dst)
+        if sealed and Path(src).suffix in {".yaml", ".yml", ".txt"}:
+            # Nested references differ in the worker layout. Never rewrite a
+            # symlink into the immutable source bundle.
+            if os.path.islink(dst):
+                os.unlink(dst)
+            if prepared_payloads is not None and src in prepared_payloads:
+                Path(dst).write_bytes(prepared_payloads[src])
+            else:
+                shutil.copy2(src, dst)
+                _rewrite_staged_analysis_config(template_config_path, src, dst)
+        else:
+            _symlink_or_copy_path(src, dst)
 
     if include_aux:
         aux_src = _analysis_aux_dir(template_config_path)
@@ -512,6 +565,115 @@ def _ensure_local_analysis_runtime_layout(
 def _shared_inputs_archive_name() -> str:
     """Return the canonical filename for the skim shared-input archive."""
     return "shared_inputs.tar.gz"
+
+
+def _validate_staged_skim_executable(shared_dir: str, exe_path: str) -> None:
+    """Require the worker executable to match the current configured binary."""
+    exe_path = os.path.abspath(exe_path)
+    exe_name = os.path.basename(exe_path)
+    archive_path = os.path.join(os.path.dirname(shared_dir), _shared_inputs_archive_name())
+    staged_path = os.path.join(shared_dir, exe_name)
+    remedy = (
+        "Rerun PrepareSkimJobs to restage the executable and rebuild "
+        "shared_inputs.tar.gz before submitting; use a new run name if the "
+        "sealed bundle's execution identity has changed."
+    )
+    try:
+        if not os.path.isfile(exe_path):
+            raise RuntimeError(f"Current analysis executable not found: {exe_path!r}. {remedy}")
+        expected_digest = file_digest(exe_path)
+        if os.path.isfile(archive_path):
+            staged_path = f"{archive_path}:{exe_name}"
+            with tarfile.open(archive_path, "r:gz") as archive:
+                member = next(
+                    (entry for entry in archive if entry.name in (exe_name, f"./{exe_name}")),
+                    None,
+                )
+                if member is None or not member.isfile():
+                    raise RuntimeError(
+                        f"Staged executable {staged_path!r} is missing or is not a regular file. {remedy}"
+                    )
+                digest = hashlib.sha256()
+                with archive.extractfile(member) as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                staged_digest = digest.hexdigest()
+        else:
+            if not os.path.isfile(staged_path):
+                raise RuntimeError(f"Staged executable not found: {staged_path!r}. {remedy}")
+            staged_digest = file_digest(staged_path)
+        if staged_digest != expected_digest:
+            raise RuntimeError(
+                f"Staged executable {staged_path!r} does not match the current "
+                f"--exe binary {exe_path!r} (SHA-256 differs). {remedy}"
+            )
+    except (OSError, tarfile.TarError) as exc:
+        raise RuntimeError(
+            f"Cannot verify staged executable {staged_path!r} against {exe_path!r}: {exc}. {remedy}"
+        ) from exc
+
+
+def _validate_x509_proxy(proxy_path: str, *, label: Optional[str] = None) -> None:
+    """Require at least two days of validity on a staged X509 proxy."""
+    description = label or proxy_path
+    remedy = (
+        "Renew the proxy (for CMS: voms-proxy-init -voms cms -rfc --valid 168:0) "
+        "and rerun PrepareSkimJobs to restage it and rebuild shared_inputs.tar.gz "
+        "before submitting."
+    )
+    try:
+        result = subprocess.run(
+            ["voms-proxy-info", "-file", proxy_path, "-timeleft"],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        seconds_left = int(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise RuntimeError(
+            f"Cannot verify staged X509 proxy {description!r}; "
+            f"at least 48 hours (172800 seconds) of validity are required. {remedy}"
+        ) from exc
+    if seconds_left < 172800:
+        raise RuntimeError(
+            f"Staged X509 proxy {description!r} has {seconds_left} seconds remaining; "
+            f"at least 48 hours (172800 seconds) are required. {remedy}"
+        )
+
+
+def _validate_staged_skim_proxy(shared_dir: str, *, required: bool = False) -> None:
+    """Check the credential workers receive, preferring the archived copy."""
+    proxy_path = os.path.join(shared_dir, "x509")
+    archive_path = os.path.join(os.path.dirname(shared_dir), _shared_inputs_archive_name())
+    if not os.path.isfile(archive_path):
+        if required or os.path.lexists(proxy_path):
+            _validate_x509_proxy(proxy_path)
+        return
+
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            member = next(
+                (entry for entry in archive if entry.name in ("x509", "./x509")),
+                None,
+            )
+            if member is None:
+                if required or os.path.lexists(proxy_path):
+                    raise RuntimeError(
+                        f"Staged X509 proxy is missing from {archive_path!r}. "
+                        "Rerun PrepareSkimJobs with --x509 to rebuild the archive "
+                        "with a proxy valid for at least 48 hours."
+                    )
+                return
+            if not member.isfile():
+                raise RuntimeError(f"Staged X509 proxy in {archive_path!r} is not a regular file.")
+            # Do not extract archive paths or retain a second credential copy.
+            with archive.extractfile(member) as source, tempfile.TemporaryDirectory(
+                prefix="skim_proxy_check_"
+            ) as tmpdir:
+                check_path = os.path.join(tmpdir, "x509")
+                with open(check_path, "xb", opener=lambda path, flags: os.open(path, flags, 0o600)) as target:
+                    shutil.copyfileobj(source, target)
+                _validate_x509_proxy(check_path, label=f"{archive_path}:x509")
+    except (OSError, tarfile.TarError) as exc:
+        raise RuntimeError(f"Cannot inspect staged proxy in {archive_path!r}: {exc}") from exc
 
 
 def _build_shared_inputs_archive(shared_dir: str, archive_path: str) -> str:
@@ -948,6 +1110,15 @@ def _root_file_tree_error(path: str, tree_name: Optional[str]) -> Optional[str]:
                 with uproot.open(open_path) as root_file:
                     if tree_name is None:
                         root_file.keys()
+                        # Compact metadata is part of the artifact contract.
+                        # Validate while the file is already open; legacy files
+                        # without the versioned keys retain their old contract.
+                        from metadata_io import JOB_KEY, REFERENCE_KEY, load_metadata_records
+                        if JOB_KEY in root_file or REFERENCE_KEY in root_file:
+                            try:
+                                load_metadata_records(open_path)
+                            except Exception as exc:
+                                return f"invalid compact metadata: {exc}"
                         return None
                     obj = root_file[tree_name]
                     classname = getattr(obj, "classname", None)
@@ -971,6 +1142,15 @@ def _root_file_tree_error(path: str, tree_name: Optional[str]) -> Optional[str]:
                 if not root_file or root_file.IsZombie():
                     raise OSError("ROOT reported a zombie or unopened file")
                 if tree_name is None:
+                    from metadata_io import JOB_KEY, REFERENCE_KEY, _normalize_record
+                    obj = root_file.Get(JOB_KEY)
+                    if obj:
+                        try:
+                            _normalize_record(json.loads(str(obj.GetString().Data())), open_path)
+                        except Exception as exc:
+                            return f"invalid compact metadata: {exc}"
+                    if root_file.Get(REFERENCE_KEY):
+                        return "merged metadata references require uproot for integrity validation"
                     return None
                 obj = root_file.Get(tree_name)
                 if not obj or not obj.InheritsFrom("TTree"):
@@ -1198,6 +1378,34 @@ def _prepare_split_skim_job(
     }
 
 
+def _condor_job_elapsed_runtime(ad: dict) -> float:
+    """Return wall time for the current run, using the schedd's clock when available."""
+    # RemoteWallClockTime is cumulative across executions and can lag while a
+    # job is running. Prefer the current start date so a stuck first execution
+    # is detected and an earlier eviction does not penalize a fresh execution.
+    for attribute in ("JobCurrentStartDate", "EnteredCurrentStatus"):
+        try:
+            started = float(ad.get(attribute, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(started) or started <= 0:
+            continue
+        try:
+            now = float(ad.get("ServerTime", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            now = 0
+        if not math.isfinite(now) or now <= 0:
+            now = time.time()
+        return max(0.0, now - started)
+
+    # Compatibility with ads that do not expose a current-run timestamp.
+    try:
+        elapsed = float(ad.get("RemoteWallClockTime", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return elapsed if math.isfinite(elapsed) and elapsed > 0 else 0.0
+
+
 def _condor_job_exceeded_runtime(
     ad: dict,
     fallback_max_runtime: Optional[int] = None,
@@ -1208,11 +1416,15 @@ def _condor_job_exceeded_runtime(
         assigned_runtime = float(ad.get("MaxRuntime", 0) or 0)
         if assigned_runtime <= 0 and fallback_max_runtime:
             assigned_runtime = float(fallback_max_runtime)
-        elapsed_runtime = float(ad.get("RemoteWallClockTime", 0) or 0)
-    except (TypeError, ValueError):
+        elapsed_runtime = _condor_job_elapsed_runtime(ad)
+    except (TypeError, ValueError, OverflowError):
         return False
 
-    return assigned_runtime > 0 and elapsed_runtime > assigned_runtime * grace_factor
+    return (
+        math.isfinite(assigned_runtime)
+        and assigned_runtime > 0
+        and elapsed_runtime > assigned_runtime * grace_factor
+    )
 
 
 def _submit_single_skim_job(
@@ -1352,28 +1564,72 @@ def _rewrite_staged_analysis_config(
     source_config_path: str,
     staged_config_path: str,
 ) -> None:
-    """Rewrite staged YAML config payloads so aux references stay valid locally."""
+    """Rewrite staged YAML payload references to the worker's ``aux/`` tree.
+
+    Payloads may be nested below ``aux/`` (for example
+    ``aux/payloads/run3_2022_preEE/...``). Preserve that relative layout when
+    rewriting paths; using only the basename can both miss nested files and
+    select the wrong era when basenames are repeated.
+    """
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        record = json.loads((bundle / "bundle_manifest.json").read_text())
+        replacements = {}
+        prefix = "cfg/" if Path(staged_config_path).parent.name == "cfg" else ""
+        for source, relative in record["assets"].items():
+            runtime = prefix + Path(relative).name
+            replacements.update({source: runtime, relative: runtime,
+                                 str(bundle / relative): runtime})
+        path = Path(staged_config_path)
+        if path.suffix in {".yaml", ".yml"}:
+            value = yaml.safe_load(path.read_text())
+            path.write_text(yaml.safe_dump(rewrite_references(value, replacements), sort_keys=False))
+        elif path.suffix == ".txt":
+            content = path.read_text()
+            for source, runtime in replacements.items():
+                content = content.replace("file=" + source, "file=" + runtime)
+            path.write_text(content)
+        return
     if not staged_config_path.lower().endswith((".yaml", ".yml")):
         return
 
     aux_src = _analysis_aux_dir(template_config_path)
-    aux_files: set[str] = set()
-    if aux_src and os.path.isdir(aux_src):
-        aux_files = {
-            aux_entry.name
-            for aux_entry in Path(aux_src).iterdir()
-            if aux_entry.is_file()
-        }
-    if not aux_files:
+    if not aux_src or not os.path.isdir(aux_src):
         return
-
-    try:
-        import yaml  # type: ignore
-    except ImportError:
-        return
+    aux_root = Path(aux_src).resolve()
+    aux_files_by_name: dict[str, list[Path]] = {}
+    for aux_entry in aux_root.rglob("*"):
+        if aux_entry.is_file():
+            aux_files_by_name.setdefault(aux_entry.name, []).append(aux_entry)
 
     with open(staged_config_path) as fh:
         payload = yaml.safe_load(fh)
+
+    def _worker_aux_path(value: str) -> Optional[str]:
+        value = value.strip()
+        if not value or value.startswith(("root://", "http://", "https://")):
+            return None
+
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            resolved_value = _resolve_analysis_config_path(source_config_path, value)
+            candidate = Path(resolved_value).expanduser()
+        try:
+            resolved_candidate = candidate.resolve()
+            relative = resolved_candidate.relative_to(aux_root)
+        except (OSError, RuntimeError, ValueError):
+            relative = None
+        if relative is not None and resolved_candidate.is_file():
+            return (Path("aux") / relative).as_posix()
+
+        # Keep support for configs that name a payload by basename. Only
+        # rewrite it when that basename uniquely identifies a file in aux.
+        if os.path.isabs(value) or os.path.sep in value:
+            return None
+        matches = aux_files_by_name.get(value, [])
+        if len(matches) == 1:
+            return (Path("aux") / matches[0].relative_to(aux_root)).as_posix()
+        return None
 
     def _rewrite(node):
         if isinstance(node, list):
@@ -1382,21 +1638,9 @@ def _rewrite_staged_analysis_config(
             rewritten: dict[object, object] = {}
             for key, value in node.items():
                 if isinstance(key, str) and key.lower().endswith("file") and isinstance(value, str):
-                    basename = os.path.basename(value.strip())
-                    if basename in aux_files:
-                        rewritten[key] = os.path.join("aux", basename)
-                        continue
-
-                    resolved_value = _resolve_analysis_config_path(source_config_path, value.strip())
-                    if (
-                        resolved_value
-                        and os.path.isfile(resolved_value)
-                        and os.path.basename(resolved_value) in aux_files
-                    ):
-                        rewritten[key] = os.path.join(
-                            "aux",
-                            os.path.basename(resolved_value),
-                        )
+                    worker_path = _worker_aux_path(value)
+                    if worker_path is not None:
+                        rewritten[key] = worker_path
                         continue
                 rewritten[key] = _rewrite(value)
             return rewritten
@@ -2370,6 +2614,7 @@ def _write_job_config(
     stage_shared_inputs_locally: bool = True,
     template_config: Optional[dict[str, str]] = None,
     runtime_payload_sources: Optional[list[str]] = None,
+    prepared_payloads: Optional[dict[str, bytes]] = None,
 ) -> None:
     """Create a ``submit_config.txt`` inside *job_dir* for *dataset*.
 
@@ -2402,6 +2647,9 @@ def _write_job_config(
     template_dir = os.path.dirname(os.path.abspath(template_config_path))
 
     job_config = dict(template_config)
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        job_config["runBundleId"] = json.loads((bundle / "bundle_manifest.json").read_text())["bundle_id"]
 
     # ---- file list ----------------------------------------------------------
     if dataset.files:
@@ -2485,8 +2733,8 @@ def _write_job_config(
             template_config_path,
             job_config,
             job_dir,
-            include_aux=False,
             payload_sources=runtime_payload_sources,
+            prepared_payloads=prepared_payloads,
         )
         _normalize_shared_config_references(
             template_config_path,
@@ -2525,7 +2773,7 @@ def _extract_lfn_for_redirect(url: str) -> str:
     path = "/" + m.group(1).lstrip("/")
     # For site-specific test redirectors the path is
     # /store/test/xrootd/<site>//store/... — extract the actual LFN.
-    test_m = _re.match(r"/store/test/xrootd/[^/]+/(.*)", path)
+    test_m = _re.match(_io_policy.SITE_PATH_PATTERN, path)
     if test_m:
         path = "/" + test_m.group(1).lstrip("/")
     return path
@@ -2571,7 +2819,7 @@ def _select_test_input_url(input_url: str, job_dir: str) -> str:
     # Rucio only supplies replicas that exist at the listed sites. Use the
     # first candidate when probing is unavailable or inconclusive.
     redirector = str(candidates[0]).rstrip("/")
-    separator = "/" if "/store/test/xrootd/" in redirector else "//"
+    separator = "/" if _io_policy.SITE_REDIRECTOR_MARKER in redirector else "//"
     return f"{redirector}{separator}{lfn.lstrip('/')}"
 
 
@@ -2594,11 +2842,13 @@ def _plan_file_source_jobs(
     outputs_dir: str,
     manifest: Optional[DatasetManifest] = None,
 ) -> list[dict[str, object]]:
-    """Build deterministic per-job metadata from file-list JSON outputs."""
+    """Plan only manifest datasets, allowing reuse of a larger discovery cache."""
     job_plans: list[dict[str, object]] = []
     missing_datasets: list[str] = []
     if manifest is None:
         manifest = DatasetManifest.load(dataset_manifest_path)
+    manifest_entries = {entry.name: entry for entry in manifest.datasets}
+    discovered_datasets: set[str] = set()
 
     for json_path in sorted(Path(file_list_dir).glob("*.json")):
         if json_path.name.endswith(".perf.json"):
@@ -2608,6 +2858,17 @@ def _plan_file_source_jobs(
             payload = json.load(fh)
 
         dataset_name = payload.get("sample", json_path.stem)
+        dataset_entry = manifest_entries.get(str(dataset_name))
+        if dataset_entry is None:
+            # A reused cache can contain other eras or analyses. Such entries
+            # must never become jobs with fallback MC identity/calibrations.
+            continue
+        if dataset_entry.name in discovered_datasets:
+            raise RuntimeError(
+                f"Duplicate file-list discovery payload for dataset {dataset_entry.name!r} "
+                f"in {file_list_dir!r}; remove the ambiguous cache entry before preparation."
+            )
+        discovered_datasets.add(dataset_entry.name)
         all_files = payload.get("files", [])
         groups = payload.get("groups", [])
         # Per-file redirector list from Rucio discovery (may be absent for
@@ -2633,13 +2894,8 @@ def _plan_file_source_jobs(
                 entries_per_job=entries_per_job,
             )
 
-        dataset_entry = manifest.by_name(str(dataset_name))
-        dtype = dataset_entry.dtype if dataset_entry else "mc"
-        lumi = (
-            manifest.lumi_for(dataset_entry.year, dataset_entry.era)
-            if dataset_entry is not None
-            else manifest.lumi
-        )
+        dtype = dataset_entry.dtype
+        lumi = manifest.lumi_for(dataset_entry.year, dataset_entry.era)
 
         for sub_idx, part in enumerate(partitions):
             # Build per-job site_redirectors: only include LFNs in this partition.
@@ -2665,6 +2921,12 @@ def _plan_file_source_jobs(
                 "site_redirectors": job_site_redirectors,
             })
 
+    undiscovered = sorted(set(manifest_entries) - discovered_datasets)
+    if undiscovered:
+        raise RuntimeError(
+            "File-list discovery is missing payloads for manifest dataset(s): "
+            f"{', '.join(undiscovered)}. Complete discovery before preparing skim jobs."
+        )
     if missing_datasets:
         missing_display = ", ".join(sorted(set(missing_datasets)))
         raise RuntimeError(
@@ -2799,6 +3061,16 @@ class SkimMixin:
             "directories and configs (default: 4)."
         ),
     )
+    output_validation = luigi.ChoiceParameter(
+        default="integrity",
+        choices=("exists", "integrity"),
+        significant=False,
+        description=(
+            "Delegated HTCondor output checks: 'exists' uses batched xrdfs listings "
+            "without opening ROOT files; 'integrity' also checks ROOT contents and "
+            "MC counters (default). Final normalization counters are read in either mode."
+        ),
+    )
 
     # ---- worker environment -----------------------------------------------
 
@@ -2806,7 +3078,8 @@ class SkimMixin:
         default="",
         description=(
             "Path to the VOMS x509 proxy file.  Copied into "
-            "``skimRun_{name}/shared_inputs/x509`` for use by HTCondor workers."
+            "``skimRun_{name}/shared_inputs/x509`` for use by HTCondor workers. "
+            "The staged proxy must have at least 48 hours of validity remaining."
         ),
     )
     stage_in = luigi.BoolParameter(
@@ -2930,7 +3203,7 @@ class SkimMixin:
 
     @property
     def _root_setup_content(self) -> str:
-        """Return the content of the root_setup script, or empty string."""
+        """Return portable setup text with enabled extension hooks embedded."""
         if not self.root_setup:
             return ""
         path = self._resolve_skim(self.root_setup)
@@ -2939,7 +3212,7 @@ class SkimMixin:
                 f"root_setup must point to an existing file, got: {self.root_setup!r}"
             )
         with open(path) as fh:
-            return fh.read().rstrip("\n")
+            return render_environment_setup(fh.read()).rstrip("\n")
 
     def _python_env_path(self) -> Optional[str]:
         """Return the resolved path to the Python environment tarball, or None."""
@@ -3088,9 +3361,36 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             os.path.join(self._run_dir, "prep_submission.json")
         )
 
+    def _bundle_execution_identity(self, bundle_record):
+        exe_path = os.path.abspath(self.exe)
+        discovery = {}
+        if self.file_source:
+            discovery = {str(p.relative_to(self._file_list_dir())): file_digest(p) for p in sorted(Path(self._file_list_dir()).rglob("*"))
+                         if p.is_file()}
+        return execution_identity(bundle_record["bundle_id"],
+            inputs={"manifest_sha256": file_digest(self.dataset_manifest), "discovery": discovery},
+            partitions={"files_per_job": self.files_per_job,
+                        "rucio_group_size_gb": self.rucio_group_size_gb,
+                        "partition": self.partition, "entries_per_job": self.entries_per_job},
+            runtime={"executable": file_digest(exe_path),
+                     "libraries": _local_shared_libs_with_signature(exe_path)[1]},
+            options={"output_directory": self.output_directory,
+                         "root_setup": hashlib.sha256(self._root_setup_content.encode()).hexdigest() if self.root_setup else "",
+                         "container_setup": self.container_setup})
+
     def complete(self):
-        """Invalidate prepared inputs when their config or executable is outdated."""
+        """Invalidate prepared inputs when their config, executable, or proxy changes."""
+        bundle_record = verify_config_bundle(self.submit_config)
+        identity_path = Path(self._run_dir) / "execution_identity.json"
+        if bundle_record and identity_path.is_file():
+            if json.loads(identity_path.read_text()) != self._bundle_execution_identity(bundle_record):
+                return False
         if not super().complete():
+            return False
+
+        if self.x509 and not _staged_copy_is_current(
+            os.path.abspath(self.x509), os.path.join(self._shared_dir, "x509")
+        ):
             return False
 
         try:
@@ -3106,9 +3406,8 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         if not os.path.isfile(exe_path):
             return False
 
-        staged_exe_paths = [
-            os.path.join(self._shared_dir, self._exe_relpath),
-        ]
+        staged_exe_paths = [os.path.join(self._shared_dir, self._exe_relpath)]
+        local_libs, _ = _local_shared_libs_with_signature(exe_path)
         try:
             exe_mtime_ns = os.stat(exe_path).st_mtime_ns
             archive_mtime_ns = os.stat(self._shared_archive_path).st_mtime_ns
@@ -3116,6 +3415,16 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             return False
         if archive_mtime_ns < exe_mtime_ns:
             return False
+        for lib_name, lib_src in local_libs.items():
+            try:
+                if os.stat(lib_src).st_mtime_ns > archive_mtime_ns:
+                    return False
+            except OSError:
+                return False
+            if not _staged_copy_is_current(
+                lib_src, os.path.join(self._shared_dir, lib_name)
+            ):
+                return False
 
         test_config_path = os.path.join(self._test_job_dir, "submit_config.txt")
         if self.make_test_job and not os.path.isfile(self._test_jobs_manifest_path):
@@ -3124,11 +3433,24 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             staged_exe_paths.append(
                 os.path.join(self._test_job_dir, self._exe_relpath)
             )
+            if any(
+                not _staged_copy_is_current(
+                    lib_src, os.path.join(self._test_job_dir, lib_name)
+                )
+                for lib_name, lib_src in local_libs.items()
+            ):
+                return False
 
-        return all(
+        if not all(
             _staged_copy_is_current(exe_path, staged_path)
             for staged_path in staged_exe_paths
-        )
+        ):
+            return False
+        try:
+            _validate_staged_skim_executable(self._shared_dir, exe_path)
+        except RuntimeError:
+            return False
+        return True
 
     def run(self):
         with PerformanceRecorder("PrepareSkimJobs") as rec:
@@ -3136,6 +3458,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         rec.save(os.path.join(self._run_dir, "prep_submission.perf.json"))
 
     def _run_impl(self):  # noqa: C901 - intentionally comprehensive
+        bundle_record = verify_config_bundle(self.submit_config)
         exe_path = os.path.abspath(self.exe)
         if not os.path.isfile(exe_path):
             raise RuntimeError(
@@ -3147,12 +3470,24 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
 
         manifest = DatasetManifest.load(self.dataset_manifest)
         template_config = read_config(self.submit_config)
+        if bundle_record:
+            # Lock source identity before modifying staged workers. Discovery
+            # and the partition plan are recorded once preparation is complete.
+            identity = self._bundle_execution_identity(bundle_record)
+            record_execution(Path(self._run_dir) / "execution_identity.json", identity)
         base_extra_overrides = _stitch_job_overrides(self)
+        base_extra_overrides["metadataExecutableSha256"] = file_digest(exe_path)
+        if bundle_record:
+            base_extra_overrides["metadataExecutionId"] = identity["execution_id"]
 
         # These references depend on the template, optional stitching override,
         # and whether generator-only settings are removed for data. Resolve them
         # once per dtype instead of rescanning the config paths for every job.
         runtime_payload_sources_by_dtype: dict[str, list[str]] = {}
+        # Filled while building the archive, before preparation threads start.
+        # Keep this cache local to this invocation so a later preparation cannot
+        # reuse stale payloads. Jobs receive independent files with identical bytes.
+        prepared_payloads: Optional[dict[str, bytes]] = {} if bundle_record else None
         dataset_dtypes = {
             str(entry.dtype or "mc").lower() for entry in manifest.datasets
         } | {"mc"}
@@ -3188,6 +3523,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 stage_shared_inputs_locally=False,
                 template_config=template_config,
                 runtime_payload_sources=runtime_payload_sources,
+                prepared_payloads=prepared_payloads,
             )
 
             # Write the per-job site redirector list so Condor workers can
@@ -3231,11 +3567,10 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         shutil.copy2(exe_path, os.path.join(shared_dir, self._exe_relpath))
 
         # Copy local shared libraries
-        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        local_libs, _ = _local_shared_libs_with_signature(exe_path)
         for lib_name, lib_src in sorted(local_libs.items()):
             lib_dst = os.path.join(shared_dir, lib_name)
-            if (not os.path.exists(lib_dst)
-                    or os.path.getsize(lib_dst) != os.path.getsize(lib_src)):
+            if not _staged_copy_is_current(lib_src, lib_dst):
                 shutil.copy2(lib_src, lib_dst)
         if local_libs:
             self.publish_message(
@@ -3245,12 +3580,11 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         # Copy x509 proxy
         if self.x509:
             x509_src = os.path.abspath(self.x509)
-            if os.path.isfile(x509_src):
-                shutil.copy2(x509_src, os.path.join(shared_dir, "x509"))
-            else:
-                self.publish_message(
-                    f"Warning: x509 file not found: {x509_src!r}; skipping."
-                )
+            if not os.path.isfile(x509_src):
+                raise RuntimeError(f"X509 proxy file not found: {x509_src!r}")
+            shutil.copy2(x509_src, os.path.join(shared_dir, "x509"))
+        if self.x509 or os.path.lexists(os.path.join(shared_dir, "x509")):
+            _validate_x509_proxy(os.path.join(shared_dir, "x509"))
 
         # Copy Python env tarball
         python_env_src = self._python_env_path()
@@ -3259,7 +3593,10 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             shutil.copy2(python_env_src, os.path.join(shared_dir, tarball_name))
 
         # Bundle shared configs and aux once for remote worker materialization.
-        _bundle_analysis_config_files(self.submit_config, template_config, shared_dir)
+        _bundle_analysis_config_files(
+            self.submit_config, template_config, shared_dir,
+            prepared_payloads=prepared_payloads,
+        )
         _bundle_analysis_aux_dir(self.submit_config, shared_dir)
         _build_shared_inputs_archive(shared_dir, self._shared_archive_path)
         self.publish_message(
@@ -3303,25 +3640,17 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 out_dir = str(plan["out_dir"])
                 dataset_name = str(plan["dataset_name"])
 
-                manifest_entry = manifest_entries.get(dataset_name)
-                if manifest_entry is not None:
-                    transient = DatasetEntry.from_dict(manifest_entry.to_dict())
-                    transient.files = [
-                        f.strip()
-                        for f in str(plan["files"]).split(",")
-                        if f.strip()
-                    ]
-                    transient.das = None
-                else:
-                    transient = DatasetEntry(
-                        name=dataset_name,
-                        files=[
-                            f.strip()
-                            for f in str(plan["files"]).split(",")
-                            if f.strip()
-                        ],
-                        dtype=str(plan["dtype"]),
-                    )
+                # Plans must retain manifest identity, even when a caller
+                # supplies or caches the plan separately from this invocation.
+                if dataset_name not in manifest_entries:
+                    raise RuntimeError(f"Planned dataset is absent from the manifest: {dataset_name!r}")
+                transient = DatasetEntry.from_dict(manifest_entries[dataset_name].to_dict())
+                transient.files = [
+                    f.strip()
+                    for f in str(plan["files"]).split(",")
+                    if f.strip()
+                ]
+                transient.das = None
 
                 extra_overrides = dict(base_extra_overrides)
                 if int(plan.get("last_entry", 0)) > 0:
@@ -3366,6 +3695,12 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         Path(self._run_dir).mkdir(parents=True, exist_ok=True)
         with open(self.output().path, "w") as fh:
             json.dump(job_entries, fh, indent=2)
+        if bundle_record:
+            record_execution(Path(self._run_dir) / "execution_plan.json", execution_identity(
+                bundle_record["bundle_id"], inputs=identity["inputs"],
+                partitions=[{"dataset": entry["dataset_name"],
+                             "config_sha256": file_digest(entry["config_path"])} for entry in job_entries],
+                runtime=identity["runtime"], options=identity["options"]))
 
         self.publish_message(
             f"PrepareSkimJobs: {len(job_entries)} job dir(s) prepared.\n"
@@ -3437,10 +3772,10 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             shutil.copy2(exe_path, dst_exe)
 
         # Copy local shared libraries
-        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        local_libs, _ = _local_shared_libs_with_signature(exe_path)
         for lib_name, lib_src in sorted(local_libs.items()):
             lib_dst = os.path.join(test_dir, lib_name)
-            if not os.path.exists(lib_dst):
+            if not _staged_copy_is_current(lib_src, lib_dst):
                 shutil.copy2(lib_src, lib_dst)
 
         # Copy auxiliary config files referenced in the template
@@ -3582,6 +3917,14 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
         staged_exe = os.path.join(self._test_job_dir, self._exe_relpath)
         if not _staged_copy_is_current(exe_path, staged_exe):
             return False
+        local_libs, library_signature = _local_shared_libs_with_signature(exe_path)
+        if not library_signature or any(
+            not _staged_copy_is_current(
+                lib_src, os.path.join(self._test_job_dir, lib_name)
+            )
+            for lib_name, lib_src in local_libs.items()
+        ):
+            return False
         try:
             with open(self._test_jobs_manifest_path, encoding="utf-8") as jobs_fh:
                 jobs_manifest = json.load(jobs_fh)
@@ -3615,9 +3958,11 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
         try:
             return (
                 marker.get("status") == "passed"
-                and marker.get("test_schema_version") == "2"
+                and marker.get("test_schema_version") == "3"
                 and sorted(marker.get("test_types", "").split(",")) == expected_types
                 and marker.get("test_jobs_sha256") == manifest_hash
+                and marker.get("runtime_libs_sha256") == library_signature
+                and marker.get("root_setup_sha256") == hashlib.sha256(self._root_setup_content.encode()).hexdigest()
                 and int(marker.get("exe_size", "-1")) == exe_stat.st_size
                 and int(marker.get("exe_mtime_ns", "-1")) == exe_stat.st_mtime_ns
             )
@@ -3717,6 +4062,14 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
                 "Build the analysis before running RunSkimTestJob."
             )
 
+        local_libs, library_signature = _local_shared_libs_with_signature(
+            current_exe
+        )
+        for lib_name, lib_src in sorted(local_libs.items()):
+            lib_dst = os.path.join(test_dir, lib_name)
+            if not _staged_copy_is_current(lib_src, lib_dst):
+                shutil.copy2(lib_src, lib_dst)
+
         self.publish_message(
             f"[RunSkimTestJob] Running {len(test_jobs)} sample-type preflight job(s) "
             f"in {test_dir} …"
@@ -3765,10 +4118,12 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
         with self.output().open("w") as fh:
             fh.write(
                 f"status=passed\n"
-                f"test_schema_version=2\n"
+                f"test_schema_version=3\n"
                 f"test_types={','.join(sorted(tested_types))}\n"
                 f"test_samples={','.join(tested_samples)}\n"
                 f"test_jobs_sha256={hashlib.sha256(Path(self._test_jobs_manifest_path).read_bytes()).hexdigest()}\n"
+                f"runtime_libs_sha256={library_signature}\n"
+                f"root_setup_sha256={hashlib.sha256(self._root_setup_content.encode()).hexdigest()}\n"
                 f"exe_size={exe_stat.st_size}\n"
                 f"exe_mtime_ns={exe_stat.st_mtime_ns}\n"
                 f"{';'.join(results)}\n"
@@ -3821,10 +4176,10 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
             shutil.copy2(exe_path, dst_exe)
 
         # Copy local shared libraries
-        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        local_libs, _ = _local_shared_libs_with_signature(exe_path)
         for lib_name, lib_src in sorted(local_libs.items()):
             lib_dst = os.path.join(test_dir, lib_name)
-            if not os.path.exists(lib_dst):
+            if not _staged_copy_is_current(lib_src, lib_dst):
                 shutil.copy2(lib_src, lib_dst)
 
         # Copy auxiliary config files referenced in template
@@ -3960,6 +4315,7 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 "Run PrepareSkimJobs first."
             )
 
+        _validate_staged_skim_executable(shared_dir, self.exe)
         python_env_staged = None
         python_env_src = self._python_env_path()
         if python_env_src:
@@ -3982,6 +4338,7 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
             _build_shared_inputs_archive(shared_dir, self._shared_archive_path)
 
         shared_transfer_files = _skim_shared_input_files(shared_dir)
+        _validate_staged_skim_proxy(shared_dir, required=bool(self.x509))
         shared_archive_file_names = _shared_archive_file_basenames(
             self._shared_archive_path
         )
@@ -4050,6 +4407,8 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 python_env_tarball=python_env_staged,
                 shared_archive_name=os.path.basename(self._shared_archive_path),
                 runtime_config_relpath=os.path.join("cfg", "submit_config.txt"),
+                sample_name=dataset_name,
+                run_name=self.name,
             )
             _rewrite_submit_transfer_files(
                 submit_path,
@@ -4108,6 +4467,8 @@ class SubmitSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             if not dataset_records:
                 raise RuntimeError("No dataset submissions found in submission manifest.")
 
+            _validate_staged_skim_proxy(self._shared_dir, required=bool(self.x509))
+            _validate_staged_skim_executable(self._shared_dir, self.exe)
             submitted_records: list[dict[str, object]] = []
             for record in dataset_records:
                 dataset_name = str(record["dataset_name"])
@@ -4188,7 +4549,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         return law.LocalFileTarget(self._normalization_path)
 
     def complete(self):
-        """Require completed jobs, listed output paths, and normalization records."""
+        """Require completed jobs, valid output artifacts, and normalization records."""
         if not super().complete() or not os.path.isfile(self._normalization_path):
             return False
 
@@ -4290,6 +4651,15 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         str(job_state.get(role, "")) for role in output_roles
                     ]
                     if any(not path for path in job_output_paths):
+                        return False
+                    if self.output_validation == "integrity" and _skim_job_output_errors(
+                        dataset_name=dataset_name,
+                        dtype=dataset.dtype,
+                        save_path=str(job_state.get("save", "")),
+                        meta_path=str(job_state.get("meta", "")),
+                        tree_name=str(job_state.get("tree_name", "Events")),
+                        require_skim=require_skim,
+                    ):
                         return False
                     expected_output_paths.extend(job_output_paths)
                     checked_jobs += 1
@@ -4454,6 +4824,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         self.publish_message(
             f"Monitoring {sum(len(job_info) for job_info in dataset_job_info.values())} skim job(s) across {len(dataset_job_info)} dataset cluster(s)."
         )
+        self.publish_message(f"Output validation: {self.output_validation}")
 
         while True:
             active_clusters = set()
@@ -4540,6 +4911,15 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     errors.append(
                         f"dataset {dataset_name!r} is missing from the dataset manifest"
                     )
+                elif not errors and self.output_validation == "integrity":
+                    errors.extend(_skim_job_output_errors(
+                        dataset_name=dataset_name,
+                        dtype=dataset.dtype,
+                        save_path=str(info.get("save", "")),
+                        meta_path=str(info.get("meta", "")),
+                        tree_name=str(info.get("tree_name", "Events")),
+                        require_skim="save" in output_roles,
+                    ))
                 output_errors[(dataset_name, idx)] = errors
 
             for dataset_name, job_info in dataset_job_info.items():
@@ -4572,10 +4952,13 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         continue
 
                     if condor_status == 2:
+                        job_state["status"] = "running"
                         condor_ad = live_ads.get((cluster_id, proc), {})
                         if _condor_job_exceeded_runtime(condor_ad, self.max_runtime):
-                            assigned_runtime = condor_ad.get("MaxRuntime", self.max_runtime)
-                            elapsed_runtime = condor_ad.get("RemoteWallClockTime", 0)
+                            assigned_runtime = float(condor_ad.get("MaxRuntime", 0) or 0)
+                            if assigned_runtime <= 0:
+                                assigned_runtime = self.max_runtime
+                            elapsed_runtime = _condor_job_elapsed_runtime(condor_ad)
                             removed = _condor_rm_job(cluster_id, proc)
                             if removed:
                                 self.publish_message(
@@ -4600,8 +4983,6 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                                     f"[{dataset_name}] Job {idx} exceeded Condor runtime "
                                     "but could not be removed; leaving it running."
                                 )
-                        else:
-                            job_state["status"] = "running"
                         continue
 
                     if condor_status == 5:
@@ -4729,6 +5110,8 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 self._save_state(monitor_state)
             return
 
+        _validate_staged_skim_proxy(self._shared_dir, required=bool(self.x509))
+        _validate_staged_skim_executable(self._shared_dir, self.exe)
         self.publish_message(
             f"[{dataset_name}] Job {idx} failed ({reason}) - resubmitting "
             f"(attempt {retries + 1}/{self.max_retries})."

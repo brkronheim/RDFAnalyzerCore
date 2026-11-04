@@ -4,6 +4,7 @@
 #include <ROOT/RDataFrame.hxx>
 #include <Math/Vector3D.h>
 #include <TFile.h>
+#include <TChainElement.h>
 #include <TTree.h>
 #include <TTreeCache.h>
 #include <gtest/gtest.h>
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <set>
 #include <string>
+#include <tuple>
 #include <unistd.h>
 
 namespace {
@@ -94,6 +96,72 @@ TEST_F(InputCacheTest, PhysicalDependenciesAndAsyncSurviveFileTransitions) {
     }, {"y"});
     EXPECT_EQ(files, (std::set<int>{0, 1}));
     EXPECT_EQ(hist->GetEntries(), 40);
+  }
+}
+
+TEST_F(InputCacheTest, StartupKeepsLaterFileMetadataLazy) {
+  auto cfg = config("treeCacheEnabled=1\ntreeCacheStats=0\n");
+  DataManager data(cfg);
+  auto &chain = data.getChain();
+  ASSERT_EQ(chain.GetTreeNumber(), 0);
+  auto *second = dynamic_cast<TChainElement *>(chain.GetListOfFiles()->At(1));
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(second->GetEntries(), TTree::kMaxEntries);
+  EXPECT_EQ(*data.getDataFrame().Count(), 40);
+  EXPECT_EQ(second->GetEntries(), 20);
+}
+
+TEST_F(InputCacheTest, EmptyFirstFileStillReachesNonemptyInput) {
+  {
+    TFile file((dir / "0.root").c_str(), "RECREATE");
+    TTree tree("Events", "Events");
+    float pt = 0;
+    tree.Branch("Jet_pt", &pt);
+    tree.Write();
+  }
+  auto cfg = config("treeCacheEnabled=1\ntreeCacheStats=0\n");
+  DataManager data(cfg);
+  EXPECT_EQ(*data.getDataFrame().Count(), 20);
+  std::filesystem::remove(dir / "1.root");
+  EXPECT_THROW(DataManager{cfg}, std::runtime_error);
+}
+
+TEST_F(InputCacheTest, MissingTreeAndUnreadableInputsStillFail) {
+  for (const auto &name : {"0.root", "1.root"}) {
+    TFile file((dir / name).c_str(), "RECREATE");
+    TTree tree("WrongTree", "WrongTree");
+    tree.Write();
+  }
+  auto cfg = config("treeCacheStats=0\n");
+  EXPECT_THROW(DataManager{cfg}, std::runtime_error);
+  std::filesystem::remove(dir / "0.root");
+  std::filesystem::remove(dir / "1.root");
+  EXPECT_THROW(DataManager{cfg}, std::runtime_error);
+}
+
+TEST_F(InputCacheTest, DefaultCacheBudgetsAndExplicitSizesSurviveFileTransitions) {
+  const std::vector<std::tuple<std::string, Long64_t, int>> settings{
+      {"", 32LL * 1024 * 1024, 32},
+      {"treeCacheSizeMB=8\nxrdPrefetchCacheMB=64\n", 8LL * 1024 * 1024, 64},
+  };
+  for (const auto &[extra, rootBytes, xrdMiB] : settings) {
+    auto cfg = config("treeCacheEnabled=1\ntreeCacheAsyncPrefetch=1\n" + extra);
+    testing::internal::CaptureStdout();
+    DataManager data(cfg);
+    const auto setup = testing::internal::GetCapturedStdout();
+    if (setup.find("ROOT input backend: XrdAdaptor") != std::string::npos)
+      EXPECT_NE(setup.find("handoff cache=" + std::to_string(xrdMiB) + " MiB"),
+                std::string::npos);
+    EXPECT_EQ(data.getChain().GetCacheSize(), rootBytes);
+    std::set<int> files;
+    data.getDataFrame().Foreach([&](float) {
+      const auto file = data.getChain().GetTreeNumber();
+      if (!files.insert(file).second) return;
+      ASSERT_NE(cache(data), nullptr);
+      EXPECT_EQ(cache(data)->GetBufferSize(), rootBytes);
+      EXPECT_TRUE(cache(data)->IsEnablePrefetching());
+    }, {"Jet_pt"});
+    EXPECT_EQ(files, (std::set<int>{0, 1}));
   }
 }
 

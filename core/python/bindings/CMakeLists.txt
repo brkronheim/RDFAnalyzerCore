@@ -35,7 +35,7 @@
 
 
 # Create the Python module
-pybind11_add_module(rdfanalyzer python_bindings.cpp)
+pybind11_add_module(rdfanalyzer python_bindings.cpp histogram_io_bindings.cpp)
 
 # Link against the core library
 target_link_libraries(rdfanalyzer PRIVATE
@@ -43,6 +43,8 @@ target_link_libraries(rdfanalyzer PRIVATE
     ROOT::ROOTDataFrame
     ROOT::ROOTVecOps
     ROOT::Core
+    ROOT::Hist
+    ROOT::RIO
 )
 
 # Include directories

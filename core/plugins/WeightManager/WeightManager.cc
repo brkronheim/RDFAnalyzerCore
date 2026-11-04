@@ -441,6 +441,7 @@ void WeightManager::finalize() {
     WeightAuditEntry entry;
     entry.name          = ap.name;
     entry.column        = ap.column;
+    entry.entryCount    = aggregate.entryCount;
     entry.sumWeights    = aggregate.sumWeights;
     entry.meanWeight    = aggregate.entryCount == 0U
                               ? 0.0
@@ -452,70 +453,20 @@ void WeightManager::finalize() {
     auditEntries_m.push_back(std::move(entry));
   }
 
-  // Write audit results to the meta ROOT file.
-  if (dynamic_cast<NullOutputSink *>(metaSink_m) != nullptr) return;
+  // Analyzer collects the typed metadata after all plugins finalize.
+}
 
-  const std::string fileName =
-      metaSink_m->resolveOutputFile(*configManager_m, OutputChannel::Meta);
-  if (fileName.empty()) return;
-
-  TFile outFile(fileName.c_str(), "UPDATE");
-  if (outFile.IsZombie()) {
-    if (logger_m) {
-      logger_m->log(ILogger::Level::Error,
-                    "WeightManager: failed to open meta output file: " + fileName);
-    }
-    return;
-  }
-
-  // Write per-component normalization factors as TNamed objects.
-  for (const auto &[name, value] : normalizations_m) {
-    std::string key   = "weight_norm_" + name;
-    std::string valStr = std::to_string(value);
-    TNamed obj(key.c_str(), valStr.c_str());
-    obj.Write(key.c_str(), TObject::kOverwrite);
-  }
-
-  // Write total normalization.
-  {
-    std::string valStr = std::to_string(computeNormProduct());
-    TNamed obj("weight_norm_total", valStr.c_str());
-    obj.Write("weight_norm_total", TObject::kOverwrite);
-  }
-
-  // Write audit statistics as TH1D histograms (one per audited column).
-  for (const auto &entry : auditEntries_m) {
-    // Summary histogram: bins = sumWeights, mean, min, max.
-    const std::string histName = "weight_audit_" + entry.column;
-    TH1D hist(histName.c_str(),
-              (std::string("Weight audit: ") + entry.name +
-               ";Statistic;Value").c_str(),
-              4, -0.5, 3.5);
-    hist.GetXaxis()->SetBinLabel(1, "sum");
-    hist.GetXaxis()->SetBinLabel(2, "mean");
-    hist.GetXaxis()->SetBinLabel(3, "min");
-    hist.GetXaxis()->SetBinLabel(4, "max");
-    hist.SetBinContent(1, entry.sumWeights);
-    hist.SetBinContent(2, entry.meanWeight);
-    hist.SetBinContent(3, entry.minWeight);
-    hist.SetBinContent(4, entry.maxWeight);
-    hist.SetDirectory(&outFile);
-    hist.Write(histName.c_str(), TObject::kOverwrite);
-
-    // Negative/zero weight count as TNamed.
-    {
-      const std::string key = histName + "_negCount";
-      TNamed obj(key.c_str(), std::to_string(entry.negativeCount).c_str());
-      obj.Write(key.c_str(), TObject::kOverwrite);
-    }
-    {
-      const std::string key = histName + "_zeroCount";
-      TNamed obj(key.c_str(), std::to_string(entry.zeroCount).c_str());
-      obj.Write(key.c_str(), TObject::kOverwrite);
-    }
-  }
-
-  outFile.Close();
+rdf::OutputMetadata WeightManager::collectOutputMetadata() const {
+  rdf::OutputMetadata result;
+  for (const auto& [name, value] : normalizations_m)
+    result.normalizations["weight_norm_" + name] = value;
+  result.normalizations["weight_norm_total"] = computeNormProduct();
+  for (const auto& entry : auditEntries_m)
+    result.weightAudits["weight_audit_" + entry.column] = {
+        entry.entryCount, static_cast<std::uint64_t>(entry.negativeCount),
+        static_cast<std::uint64_t>(entry.zeroCount), entry.sumWeights,
+        entry.minWeight, entry.maxWeight};
+  return result;
 }
 
 // ---------------------------------------------------------------------------

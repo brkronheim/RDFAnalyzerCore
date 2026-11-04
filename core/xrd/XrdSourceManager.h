@@ -33,6 +33,9 @@ public:
   XrdSourceManager(std::string url, unsigned probeIntervalSeconds,
                    std::size_t prefetchCacheBytes,
                    unsigned readTimeoutSeconds = 120);
+  XrdSourceManager(std::string url, unsigned probeIntervalSeconds,
+                   std::size_t prefetchCacheBytes, unsigned readTimeoutSeconds,
+                   unsigned openTimeoutSeconds);
   ~XrdSourceManager();
 
   XrdSourceManager(const XrdSourceManager &) = delete;
@@ -42,11 +45,14 @@ public:
   std::uint64_t size() const { return fileSize_; }
   void startDiscovery();
   void stop();
+  bool isStopped() const { return stopped_.load(); }
   const std::string &url() const { return url_; }
 
 private:
   struct Source;
   struct PendingRead;
+
+  bool readvWindow(const std::vector<ReadRange> &ranges, bool prefetch);
 
   bool completeProbe(const std::shared_ptr<XrdCl::File> &file,
                      const XrdCl::XRootDStatus *status);
@@ -72,6 +78,7 @@ private:
   std::uint64_t fileSize_ = 0;
   unsigned probeIntervalSeconds_ = 5;
   unsigned readTimeoutSeconds_ = 120;
+  unsigned openTimeoutSeconds_ = 30;
   std::chrono::steady_clock::time_point nextProbeAt_;
   std::shared_ptr<PrefetchCache> cache_;
   mutable std::mutex mutex_;
@@ -80,7 +87,7 @@ private:
   std::vector<std::string> triedHosts_;
   std::vector<std::string> reportedFullReadLimitSites_;
   bool probeInFlight_ = false;
-  bool stopped_ = false;
+  std::atomic<bool> stopped_{false};
   std::uint64_t instanceId_ = 0;
   std::atomic<std::uint64_t> readvSequence_{0};
   std::atomic<std::uint64_t> demandReadSequence_{0};
@@ -92,7 +99,17 @@ void configureXrdAdaptor(unsigned probeIntervalSeconds,
                          unsigned explorationSharePercent = 10,
                          unsigned maxReadSources = 2,
                          unsigned readTimeoutSeconds = 120);
+void configureXrdAdaptor(unsigned probeIntervalSeconds,
+                         std::size_t prefetchCacheBytes,
+                         unsigned preferredSiteBandPercent,
+                         unsigned explorationSharePercent,
+                         unsigned maxReadSources,
+                         unsigned readTimeoutSeconds,
+                         unsigned openTimeoutSeconds);
 std::shared_ptr<XrdSourceManager> makeXrdSourceManager(const std::string &url);
+// Share only live read-only transport state, never ROOT file cursors. Concurrent
+// opens of the same URL join one in-flight open; unused entries are weak.
+std::shared_ptr<XrdSourceManager> acquireXrdSourceManager(const std::string &url);
 void registerXrdAdaptor();
 
 } // namespace rdf::xrd

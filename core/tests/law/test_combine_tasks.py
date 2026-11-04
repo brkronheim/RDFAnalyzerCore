@@ -485,7 +485,7 @@ class TestPrepareManifestDatacardConfig(unittest.TestCase):
                         },
                         "control_regions": {
                             "Zll/Zee_BB": {
-                                "observable": "vhbb_dnn_stxs",
+                                "observable": "analysis_score_stxs",
                                 "processes": ["signal", "background"],
                             }
                         },
@@ -591,7 +591,7 @@ class TestPrepareManifestDatacardConfig(unittest.TestCase):
                     {
                         "processes": {"signal": {"samples": ["wh_301"]}},
                         "manifest_defaults": {
-                            "observable": "vhbb_dnn_stxs",
+                            "observable": "analysis_score_stxs",
                             "processes": ["signal"],
                             "rebin": 2,
                         },
@@ -614,7 +614,7 @@ class TestPrepareManifestDatacardConfig(unittest.TestCase):
                 with open(prepared, "r") as fh:
                     prepared_cfg = yaml.safe_load(fh)
                 region_cfg = prepared_cfg["control_regions"]["Zll/Zee_BB"]
-                self.assertEqual(region_cfg["observable"], "vhbb_dnn_stxs")
+                self.assertEqual(region_cfg["observable"], "analysis_score_stxs")
                 self.assertEqual(region_cfg["processes"], ["signal"])
                 self.assertEqual(region_cfg["rebin"], 2)
             finally:
@@ -1294,7 +1294,6 @@ class TestAnalyticWorkspaceFitTaskRun(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             ws_cfg_path   = self._make_workspace_config(tmpdir)
             hist_file     = self._make_histogram_file(tmpdir)
-            out_dir       = os.path.join(tmpdir, "fit_out")
 
             if hist_file is None:
                 self.skipTest("ROOT not available for histogram creation")
@@ -1306,7 +1305,8 @@ class TestAnalyticWorkspaceFitTaskRun(unittest.TestCase):
                     histogram_file=hist_file,
                     skip_fit=True,
                 )
-                # run() is a LAW method; call it directly
+                # LAW owns the run directory; use its declared output target.
+                out_dir = task.output().path
                 task.run()
 
             # Workspace must exist

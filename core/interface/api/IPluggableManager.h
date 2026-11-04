@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 #include <api/IContextAware.h>
+#include <OutputMetadata.h>
 
 /**
  * @brief Abstract base class for all pluggable manager types.
@@ -136,6 +137,9 @@ public:
      *
      * @return Map of provenance key-value pairs (without role prefix).
      */
+    /** Typed, reducible output metadata, collected after finalize(). */
+    virtual rdf::OutputMetadata collectOutputMetadata() const { return {}; }
+
     virtual std::unordered_map<std::string, std::string>
     collectProvenanceEntries() const { return {}; }
 };

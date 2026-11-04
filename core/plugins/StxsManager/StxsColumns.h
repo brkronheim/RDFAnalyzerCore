@@ -11,7 +11,7 @@
 //   identifiers, and branch names.
 //
 // Columns defined:
-//   stxs_decay_channel        : integer (from vhbb_channel or configured input)
+//   stxs_decay_channel        : integer (from analysis_channel or configured input)
 //   stxs_signal_process       : integer signal-process identifier
 //   stxs_production_mode      : integer production-mode identifier
 //   stxs_is_signal            : true if STXS signal
@@ -65,8 +65,8 @@ struct StxsConfig {
   /// Whether this sample is an STXS signal sample.
   bool isSTXSSignal = false;
 
-  /// Input branch for decay channel classification (e.g. "vhbb_channel").
-  std::string decayChannelBranch = "vhbb_channel";
+  /// Input branch for decay channel classification (e.g. "analysis_channel").
+  std::string decayChannelBranch = "analysis_channel";
 
   /// NanoAOD branch for stage-0 category.
   std::string stage0Branch = "HTXS_stage0_cat";

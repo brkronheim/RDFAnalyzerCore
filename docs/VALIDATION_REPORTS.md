@@ -562,8 +562,8 @@ structured, provenance-driven record of all information needed to reproduce or
 cross-check an analysis run.
 
 Provenance data is collected at C++ analysis time by the `ProvenanceService` and
-written as `TNamed` objects into a `provenance` TDirectory inside the meta ROOT
-output file.  The Python module reads this data via **uproot** and organises the
+written as one compact `__rdf_job_metadata_v1` document in the meta ROOT
+output file. Legacy directories remain readable; see [metadata contracts](METADATA.md).  The Python module reads this data via **uproot** and organises the
 flat `{key: value}` map into logical sections.
 
 **What is captured:**
@@ -733,11 +733,12 @@ class ReproducibilityReport:
 
 #### `load_provenance_from_root(meta_root_path: str) → Dict[str, str]`
 
-Reads the `provenance` TDirectory from a ROOT meta file using **uproot**.  Each
-`TNamed` object in the directory contributes one entry: the TNamed name is the key,
-the TNamed title is the value.  Raises `FileNotFoundError` if the file does not
-exist and `ImportError` if uproot is not installed.  Returns an empty dict if the
-`"provenance"` directory is absent.
+Reads legacy or compact ROOT metadata using **uproot**. Merged files yield
+only provenance values shared by every job; `load_provenance_records_from_root`
+returns the complete identified records. The report CLI retains a factored
+`metadata_bundle` in JSON/YAML output. Missing files/sidecars, bad digests and
+unsupported versions raise errors. A file with no provenance yields an empty
+map. See [metadata storage and reduction](METADATA.md).
 
 #### `build_report_from_provenance(provenance, timestamp=None) → ReproducibilityReport`
 
@@ -796,8 +797,9 @@ python reproducibility_report.py --load-yaml reports/repro.yaml
 ## 11. Integration with ProvenanceService
 
 The C++ `ProvenanceService` (in the framework core) collects provenance entries
-at analysis runtime and writes them into the meta ROOT output file as `TNamed`
-objects inside a `provenance` TDirectory.
+at analysis runtime and writes a compact versioned job document. Typed plugin
+definitions and audits are collected after finalization. The readers also
+accept legacy `TNamed` directories and merged sidecar references.
 
 Entries are written with the flat namespaced key convention:
 

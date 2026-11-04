@@ -255,6 +255,13 @@ recommendation and replaces that per-jet factor with unity.
 This method schedules exactly that fixed-WP event weight. The input vectors must
 be ordered exactly like the registered working points.
 
+With one working point, weights read the SF and efficiency arrays directly.
+Multiple working points use one aligned, object-major flat pack per distinct
+input list; identical efficiency inputs are shared across nuisance weights
+within `execute()`. Multi-score categories also use a flat aligned pack.
+Mismatched lengths within a pack and missing selected-object indices throw
+exceptions.
+
 ```cpp
 auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
 

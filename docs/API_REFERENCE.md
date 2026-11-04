@@ -847,7 +847,7 @@ Key capabilities:
 
 ### CorrectedObjectCollectionManagers
 
-**Header**: `core/plugins/CorrectedObjectCollectionManagers/CorrectedObjectCollectionManagers.h`
+**Header**: `extensions/cms/plugins/CorrectedObjectCollectionManagers/CorrectedObjectCollectionManagers.h`
 
 Thin wrapper plugins that expose corrected full-object collections directly to
 analysis code.
@@ -941,7 +941,7 @@ and usage pattern.
 
 ### ElectronEnergyScaleManager
 
-**Header**: `core/plugins/ElectronEnergyScaleManager/ElectronEnergyScaleManager.h`
+**Header**: `extensions/cms/plugins/ElectronEnergyScaleManager/ElectronEnergyScaleManager.h`
 
 Thin concrete wrapper over `ObjectEnergyManagerBase` for electron workflows.
 
@@ -955,7 +955,7 @@ See [CMS_CORRECTIONS.md](CMS_CORRECTIONS.md) for a full Run 3 pattern.
 
 ### MuonRochesterManager
 
-**Header**: `core/plugins/MuonRochesterManager/MuonRochesterManager.h`
+**Header**: `extensions/cms/plugins/MuonRochesterManager/MuonRochesterManager.h`
 
 Concrete object-energy manager for CMS muon momentum corrections.
 
@@ -1064,7 +1064,7 @@ For a fit named `{fit}`, the manager defines `{fit}_chi2`,
 
 ### GoldenJsonManager
 
-**Header**: `core/plugins/cms/GoldenJsonManager/GoldenJsonManager.h`
+**Header**: `extensions/cms/plugins/cms/GoldenJsonManager/GoldenJsonManager.h`
 
 Concrete manager for CMS golden JSON certification filtering.
 
@@ -1416,8 +1416,8 @@ region is associated with a boolean filter column and an optional parent
 region. Child regions are strict subsets of their parents; the main analysis
 DataFrame is not modified.
 
-> **Note**: In `finalize()`, RegionManager writes a region-summary `TNamed`
-> to the `regions` TDirectory in the meta ROOT file.
+> **Note**: After `finalize()`, `collectOutputMetadata()` contributes region
+> definitions to the single compact job document written by the Analyzer.
 
 **Access pattern**:
 ```cpp
@@ -1626,7 +1626,7 @@ for (const auto& [name, count] : cfm.getRegionCutflowCounts("signal")) {
 
 ### JetEnergyScaleManager
 
-**Header**: `core/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
+**Header**: `extensions/cms/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
 
 > **Full reference**: [JET_ENERGY_CORRECTIONS.md](JET_ENERGY_CORRECTIONS.md)
 
@@ -1969,10 +1969,11 @@ jetVars["JEC_up"]  = PhysicsObjectCollection(pt_up,  eta, phi, mass_up,  mask_up
 
 **Header**: `core/interface/ProvenanceService.h`
 
-Analysis service that automatically records complete provenance metadata into
-the `provenance` TDirectory of the meta ROOT file. All entries are stored as
-`TNamed` objects (name = key, title = value) and can be read back from Python
-with PyROOT or uproot.
+Analysis service that writes one compressed, versioned `__rdf_job_metadata_v1`
+JSON object, including plugin definitions and typed weight audits. The shared
+Python reader accepts both this format and legacy `provenance/` directories.
+See [metadata storage and reduction](METADATA.md) for the contribution API,
+bundle readers, compatibility rules and legacy limitations.
 
 > **Note**: For task-level provenance, use
 > `analyzer.setTaskMetadata(key, value)` rather than accessing
@@ -2342,3 +2343,10 @@ dataManager->Define("score",
 - [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md) - Analysis examples
 - [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md) - Creating plugins
 - [ARCHITECTURE.md](ARCHITECTURE.md) - Internal architecture
+
+## PlottingUtility
+
+See [Physics Plotting](PLOTTING.md) for the extended C++/Python/CLI API.
+`PlottingUtility::Session` owns persistent drawing objects and exposes `render`,
+`renderBatch`, and `stats`. The existing one-shot and batch methods delegate to
+that implementation. Public configurations are in `core/interface/PlottingUtility.h`.

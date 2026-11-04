@@ -6,7 +6,7 @@ YAML configuration (including a LAW submit-config template):
 ```yaml
 threads: 1
 treeCacheEnabled: 1
-treeCacheSizeMB: 128
+treeCacheSizeMB: 32
 treeCacheAsyncPrefetch: 1
 treeCacheAsyncOpenNext: 1
 treeCacheExplicitBranches: 1
@@ -16,7 +16,7 @@ treeCacheStats: 1
 
 The same names work with `key=value` text configuration. The policy is **opt-in**
 to preserve existing memory budgets and ROOT process settings. When enabled,
-the defaults are 128 MiB, asynchronous prefetch on, next-file asynchronous
+the defaults are 32 MiB, asynchronous prefetch on, next-file asynchronous
 open off, explicit branches on, verbosity zero, and statistics on. Statistics
 are independent of optimization;
 existing configurations also report reads without `treeCacheEnabled=1`. `treeCacheSizeMB` accepts 0–512 MiB (zero
@@ -24,6 +24,21 @@ removes the cache). Existing factor-based `rootTTreeCacheSize` /
 `ROOT_TTREECACHE_SIZE` settings remain alternatives to the fixed size.
 Actual memory can exceed the requested cache size because asynchronous reading
 uses additional buffers; measure resident memory as well as throughput.
+The XrdAdaptor's `xrdPrefetchCacheMB` default is also 32 MiB, including the
+next-file warmup cap. Explicit config values override these defaults; saved
+configs and already-staged workers retain their configured sizes.
+
+With `treeCachePrefetchNextFile=1`, the adaptor warmup and active reader share
+one live read-only XRootD transport for the same URL. Their ROOT file objects,
+trees, and cursors remain independent. Closing the warmup file releases its
+ownership without stopping the active reader; the last owner releases the
+transport and cache. Concurrent opens join the same in-flight open, and the
+registry retains only weak references after it completes. No idle-file pool
+is retained. New adaptor configurations use a separate registry generation.
+
+The adaptor warmup reports `open_strategy=shared-transport`. It does not queue
+ROOT's `TFile::AsyncOpen`, which does not provide async-open adoption for this
+custom backend. Native ROOT backends retain their existing async-open path.
 
 The policy applies to the primary input chain, regardless of local or remote
 protocol. It does not enable IMT or parallel decompression. If IMT is already
@@ -42,6 +57,14 @@ If processing stops before a queued file is reached, ROOT keeps that request in
 its pending-open list for a later matching open.
 
 ## Architecture and dependency resolution
+
+Config-backed startup validates a real entry with `LoadTree(0)` and leaves its
+file open for RDF. It does not call `GetEntries()` to count every file before
+processing. Later files retain lazy metadata discovery, avoiding a complete
+extra pass of remote opens. Missing, empty, or malformed initial inputs still
+fail instead of creating an in-memory fallback event.
+Friend-tree registration and index construction retain their existing
+entry-count passes.
 
 `makeTChain()` constructs one primary chain from `fileList` or directory discovery,
 with optional friend chains. `DataManager` constructs RDF over that primary chain

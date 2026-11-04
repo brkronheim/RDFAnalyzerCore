@@ -8,6 +8,14 @@
 #include <DefaultLogger.h>
 #include <NullOutputSink.h>
 #include <SystematicManager.h>
+#include <RootOutputSink.h>
+#include <WeightManager.h>
+#include <RegionManager.h>
+#include <TFile.h>
+#include <TObjString.h>
+#include <yaml-cpp/yaml.h>
+#include <filesystem>
+#include <fstream>
 
 #include <algorithm>
 #include <memory>
@@ -331,4 +339,47 @@ TEST(PluginLifecycle, SetTaskMetadataStoresEntries) {
     // Double-call should overwrite
     analyzer->setTaskMetadata("job_id", "99");
     // No assertion on the stored value here; integration tests cover writing
+}
+
+TEST(PluginLifecycle, AnalyzerWritesOneDocumentAfterPluginFinalizers) {
+    char pattern[] = "/tmp/rdf_metadata_analyzer_XXXXXX";
+    const auto* directory = mkdtemp(pattern);
+    ASSERT_NE(directory, nullptr);
+    const auto base = std::filesystem::path(directory);
+    const auto cfg = base / "config.txt";
+    const auto meta = base / "meta.root";
+    {
+        std::ofstream out(cfg);
+        out << "sample=synthetic\nmetaFile=" << meta.string()
+            << "\nenableCounters=true\n";
+    }
+    auto data = std::make_unique<DataManager>(5);
+    auto systematics = std::make_unique<SystematicManager>();
+    data->Define("sf", [](ULong64_t i) { return double(i)-2.; },
+                 {"rdfentry_"}, *systematics);
+    data->Define("pass", [](ULong64_t) { return true; },
+                 {"rdfentry_"}, *systematics);
+    auto weights = std::make_shared<WeightManager>();
+    auto regions = std::make_shared<RegionManager>();
+    std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins{
+        {"weights", weights}, {"regions", regions}};
+    Analyzer analyzer(std::make_unique<ConfigurationManager>(cfg.string()),
+                      std::move(data), std::move(plugins), std::move(systematics),
+                      std::make_unique<DefaultLogger>(),
+                      std::make_unique<NullOutputSink>(), std::make_unique<RootOutputSink>());
+    weights->addScaleFactor("sf", "sf");
+    weights->defineNominalWeight("weight");
+    regions->declareRegion("signal", "pass");
+    analyzer.run();
+    TFile file(meta.c_str(), "READ");
+    auto* object = dynamic_cast<TObjString*>(file.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["weight_audits"]["weight_audit_weight"]["n"].as<int>(), 5);
+    EXPECT_EQ(document["weight_audits"]["weight_audit_weight"]["n_negative"].as<int>(), 2);
+    EXPECT_EQ(document["regions"]["signal"].as<std::string>(), "pass");
+    EXPECT_EQ(file.Get("weight_audit_weight"), nullptr);
+    EXPECT_EQ(file.Get("regions"), nullptr);
+    file.Close();
+    std::filesystem::remove_all(base);
 }

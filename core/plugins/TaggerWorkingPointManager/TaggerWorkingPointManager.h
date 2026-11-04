@@ -454,7 +454,9 @@ public:
    *
    * When an intermediate-bin numerator becomes negative, the per-object factor
    * is set to unity to avoid unphysical negative event weights, following the
-   * BTV recommendation.
+   * BTV recommendation. Each fallback reports its output column and reason to
+   * stderr. Missing selected-object indices and incomplete per-WP arrays throw
+   * during event evaluation instead of omitting a jet from the weight.
    *
    * @param perWorkingPointSFColumns   Per-object SF columns in WP order.
    * @param perWorkingPointEfficiencyColumns  Per-object MC efficiency columns
@@ -936,8 +938,8 @@ private:
   /// Build a BTV-style fixed-WP event weight from per-WP SF and efficiency
   /// columns.
   void defineFixedWorkingPointWeightColumn(
-      const std::vector<std::string> &perWorkingPointSFColumns,
-      const std::vector<std::string> &perWorkingPointEfficiencyColumns,
+      const std::string &packedSFColumn,
+      const std::string &packedEfficiencyColumn,
       const std::string &outputWeightColumn);
 
   /// Define the per-object WP category column (handles single- and multi-score).

@@ -3,14 +3,6 @@
 
 add_subdirectory(cpp)
 
-# Keep the CMS infrastructure suite with its plugin while configuring it in
-# the framework test context, where coreAll and the in-tree GoogleTest targets
-# are available.
-add_subdirectory(
-    "${CMAKE_SOURCE_DIR}/core/plugins/cms/test"
-    "${CMAKE_BINARY_DIR}/core/plugins/cms/test"
-)
-
 set(_PYTHON_EXECUTABLE "")
 
 if(DEFINED ENV{VIRTUAL_ENV})
@@ -88,11 +80,11 @@ macro(add_law_unittest _test_name _file_stem)
     list(FIND _EXEC_TESTS "${_test_name}" _idx)
     if(_idx GREATER_EQUAL 0)
         set_tests_properties(${_test_name} PROPERTIES
-            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${_EXEC_TMPDIR}"
+            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${_EXEC_TMPDIR};${RDF_EXTENSION_TEST_ENVIRONMENT}"
         )
     else()
         set_tests_properties(${_test_name} PROPERTIES
-            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}"
+            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${RDF_EXTENSION_TEST_ENVIRONMENT}"
         )
     endif()
 endmacro()
@@ -107,7 +99,6 @@ add_law_unittest(LawFailureHandlerTest      test_failure_handler)
 add_law_unittest(LawIngestionUtilsTest      test_ingestion_utils)
 add_law_unittest(LawMergeTasksTest          test_merge_tasks)
 add_law_unittest(LawManifestPlotTasksTest   test_manifest_plot_tasks)
-add_law_unittest(LawRucioTasksTest          test_rucio_tasks)
 add_law_unittest(LawOpenDataTasksTest       test_opendata_tasks)
 add_law_unittest(LawPlotTasksTest             test_plot_tasks)
 add_law_unittest(LawPerformanceRecorderTest test_performance_recorder)
@@ -124,7 +115,7 @@ macro(add_python_unittest _test_name _file_stem)
         COMMAND ${_PYTHON_EXECUTABLE} -m pytest -q -p no:cacheprovider ${_TEST_DIR}/python/${_file_stem}.py
     )
     set_tests_properties(${_test_name} PROPERTIES
-        ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}"
+        ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${RDF_EXTENSION_TEST_ENVIRONMENT}"
     )
 endmacro()
 
@@ -135,6 +126,9 @@ add_python_unittest(PythonDatasetManifestTest          test_dataset_manifest)
 add_python_unittest(PythonFilelistManifestBuilderTest  test_filelist_manifest_builder)
 add_python_unittest(PythonNuisanceGroupsTest           test_nuisance_groups)
 add_python_unittest(PythonOutputSchemaTest             test_output_schema)
+add_python_unittest(PythonMetadataIOTest               test_metadata_io)
+set_tests_properties(PythonMetadataIOTest PROPERTIES SKIP_RETURN_CODE 5)
+add_python_unittest(PythonOptionalExtensionsTest       test_optional_extensions)
 add_python_unittest(PythonProductionManagerTest        test_production_manager)
 add_python_unittest(PythonRegionSchemaTest             test_region_schema)
 add_python_unittest(PythonReproducibilityReportTest    test_reproducibility_report)
@@ -147,11 +141,20 @@ add_python_unittest(PythonValidationReportTest         test_validation_report)
 add_python_unittest(PythonVariationOrchestratorTest    test_variation_orchestrator)
 add_python_unittest(PythonVersionInfoTest             test_version_info)
 add_python_unittest(PythonProductionMonitorTest       test_production_monitor)
-add_python_unittest(PythonRucioDiscoveryTest           test_rucio_discovery)
 add_python_unittest(PythonOpenDataDiscoveryTest        test_opendata_discovery)
 add_python_unittest(PythonConvertConfigTest            test_convert_config)
 add_python_unittest(PythonResubmitJobsTest             test_resubmit_jobs)
 add_python_unittest(PythonValidateDatacardGeneratorTest test_validate_datacard_generator)
-add_python_unittest(PythonVhbbManifestConversionTest   test_vhbb_manifest_conversion)
-add_python_unittest(PythonVhbbStxsPreflightTest        test_vhbb_stxs_preflight)
+add_python_unittest(PythonSampleManifestConversionTest test_sample_manifest_conversion)
+add_python_unittest(PythonAnalysisPreflightTest test_analysis_preflight)
 add_python_unittest(PythonYamlConfigTest               test_yaml_config)
+
+# These suites use unittest and do not need pytest or ROOT Python bindings.
+foreach(_suite IN ITEMS run_bundle analysis_inputs)
+    add_test(NAME Shared_${_suite} COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+        discover -s ${_TEST_DIR}/python -p test_${_suite}.py -q)
+    set_tests_properties(Shared_${_suite} PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+endforeach()
+add_test(NAME Shared_BundleStaging COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/law -p test_run_bundle_staging.py -q)
+set_tests_properties(Shared_BundleStaging PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")

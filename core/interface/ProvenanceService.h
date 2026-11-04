@@ -2,6 +2,7 @@
 #define PROVENANCESERVICE_H_INCLUDED
 
 #include "api/IAnalysisService.h"
+#include <OutputMetadata.h>
 #include <string>
 #include <unordered_map>
 
@@ -9,7 +10,7 @@
  * @brief Analysis service that collects and writes complete provenance metadata.
  *
  * ProvenanceService automatically records the following provenance information
- * into the meta-output ROOT file under a "provenance" TDirectory:
+ * in one compressed JSON TObjString named __rdf_job_metadata_v1:
  *
  *  - framework.git_hash      : Git commit SHA of the RDFAnalyzerCore framework
  *                              (captured at CMake configure time).
@@ -18,6 +19,10 @@
  *  - framework.build_timestamp : UTC timestamp when the framework was configured.
  *  - framework.compiler      : Compiler ID and version used to build the framework.
  *  - root.version            : ROOT version string (from ROOT_RELEASE macro).
+ *  - root.registry_optimization : Actual native ROOT registry implementation,
+ *                              or off when the compatibility object is absent.
+ *  - root.registry_definitions, root.registry_input_bindings_before/after :
+ *                              Cumulative construction counts, not live bytes.
  *  - analysis.git_hash       : Git commit SHA of the analysis repository (queried
  *                              at run time from the current working directory).
  *  - analysis.git_dirty      : Whether the analysis tree had uncommitted changes
@@ -56,17 +61,13 @@
  *
  * Additional entries can be injected at any time before finalize() via addEntry().
  *
- * All entries are stored as ROOT TNamed objects (name = key, title = value) in
- * a TDirectory named "provenance" inside the meta output file.  They can be read
- * back from Python with either PyROOT or uproot:
- *
- * @code{.py}
- * import ROOT
- * f = ROOT.TFile("output_meta.root")
- * d = f.Get("provenance")
- * for key in d.GetListOfKeys():
- *     print(key.GetName(), "=", key.ReadObj().GetTitle())
- * @endcode
+ * The document contains schema_version, format, provenance, regions,
+ * normalizations and typed weight_audits. Analyzer collects plugin metadata
+ * after finalize() and this service performs the single descriptive write.
+ * Read either legacy or compact outputs using metadata_io.load_metadata_records
+ * or reproducibility_report.load_provenance_from_root (shared values only for
+ * merged outputs). See docs/OUTPUT_SCHEMA.md for the portable merge bundle.
+
  */
 class ProvenanceService : public IAnalysisService {
 public:
@@ -79,6 +80,7 @@ public:
      * @param value Provenance value.
      */
     void addEntry(const std::string& key, const std::string& value);
+    void addOutputMetadata(const rdf::OutputMetadata& value) { outputMetadata_m.merge(value); }
 
     /**
      * @brief Record dataset manifest identity for framework provenance.
@@ -132,6 +134,7 @@ private:
 
     ManagerContext* ctx_m = nullptr;
     std::unordered_map<std::string, std::string> provenance_m;
+    rdf::OutputMetadata outputMetadata_m;
 
     void collectBuildInfo();
     void collectRuntimeInfo(const IConfigurationProvider& config);

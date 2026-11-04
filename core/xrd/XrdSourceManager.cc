@@ -1,5 +1,6 @@
 #include "XrdSourceManager.h"
 #include "XrdOpenRetry.h"
+#include "XrdReadMemory.h"
 
 #include <XrdCl/XrdClBuffer.hh>
 #include <XrdCl/XrdClFile.hh>
@@ -16,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -33,10 +35,17 @@ namespace {
 constexpr std::uint32_t kReadChunkBytes = 512 * 1024;
 constexpr std::size_t kMaxChunksPerRequest = 1000;
 constexpr std::size_t kMaxSourcesPerFile = 8;
+constexpr std::size_t kMaxPrefetchEntries = 4096;
 constexpr std::uint64_t kMaxExplorationBytesPerRead = 2ULL * 1024 * 1024;
 // Permit one active-file and one lookahead-file full read to share a site.
 constexpr unsigned kMaxFullReadsPerSite = 2;
 std::atomic<std::uint64_t> nextManagerId{1};
+
+detail::ReadMemoryBudget &readMemoryBudget() {
+  // XrdCl callbacks may still own reservations during static teardown.
+  static auto *budget = new detail::ReadMemoryBudget;
+  return *budget;
+}
 
 std::mutex &outputMutex() {
   static std::mutex value;
@@ -62,7 +71,9 @@ struct GlobalSettings {
   std::mutex mutex;
   unsigned probeIntervalSeconds = 5;
   unsigned readTimeoutSeconds = 120;
-  std::size_t prefetchCacheBytes = 256ULL * 1024 * 1024;
+  unsigned openTimeoutSeconds = 30;
+  std::uint64_t generation = 0;
+  std::size_t prefetchCacheBytes = 32ULL * 1024 * 1024;
   unsigned preferredSiteBandPercent = 20;
   unsigned explorationSharePercent = 10;
   unsigned maxReadSources = 2;
@@ -204,7 +215,9 @@ public:
     XrdCl::Buffer argument;
     argument.FromString("sitename");
     const auto status = handler->fileSystem_.Query(
-        XrdCl::QueryCode::Config, argument, handler.get());
+        // Match the caller's one-second wait; do not retain query handlers
+        // and FileSystems for the much longer default request timeout.
+        XrdCl::QueryCode::Config, argument, handler.get(), 1);
     if (!status.IsOK()) return {};
 
     // Wait on our own condition variable. XrdCl's synchronous Query would
@@ -316,6 +329,10 @@ public:
     if (site.empty()) site = fallbackSiteName(server);
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      // This is a lookup optimization, not quality/blacklist history.
+      // Re-query evicted hosts rather than retaining every checked server.
+      if (siteByServer_.size() >= 256 && !siteByServer_.count(serverKey))
+        siteByServer_.erase(siteByServer_.begin());
       const auto result = siteByServer_.emplace(serverKey, std::move(site));
       sites_[result.first->second];
       return result.first->second;
@@ -589,7 +606,10 @@ private:
   void markPoorLocked(SiteState &state, const std::string &file,
                       const std::string &reason, Decision &decision) {
     decision.reason = reason;
-    decision.newlyPoorFile = state.poorFiles.insert(file).second;
+    // Two distinct paths establish a process-wide blacklist. Further paths
+    // cannot affect selection and need not be retained for the process lifetime.
+    decision.newlyPoorFile =
+        !state.blacklisted && state.poorFiles.insert(file).second;
     if (!state.blacklisted && state.poorFiles.size() >= 2) {
       state.blacklisted = true;
       decision.newlyBlacklisted = true;
@@ -709,7 +729,12 @@ public:
 
   void waitForChange(std::chrono::milliseconds duration) {
     std::unique_lock<std::mutex> lock(mutex_);
-    condition_.wait_for(lock, duration);
+    const auto completed = results_.size();
+    // A callback can win between the caller's winner check and this wait.
+    // Preserve that notification instead of sleeping an extra 5--50 ms/window.
+    condition_.wait_for(lock, duration, [this, completed] {
+      return winner_ != kNoWinner || results_.size() != completed;
+    });
   }
 
 private:
@@ -771,6 +796,7 @@ struct XrdSourceManager::Source {
 struct XrdSourceManager::PendingRead {
   std::shared_ptr<Source> source;
   std::vector<std::unique_ptr<VectorReadWaiter>> waiters;
+  std::unique_ptr<detail::ReadMemoryBudget::Reservation> memory;
   std::vector<std::shared_ptr<std::vector<char>>> ownedBuffers;
   std::shared_ptr<ReadRaceState> race;
   std::chrono::steady_clock::time_point started;
@@ -816,6 +842,12 @@ struct XrdSourceManager::PendingRead {
     logSiteDecision(source->site, url, health);
     const bool won = race->complete(sourceIndex, finalSuccess, source->site,
                                     fileKey, url, health.qualityMs);
+    if (!won) {
+      // Every batch has completed, so XrdCl no longer writes these buffers.
+      // Keep the small timing/result record, not a full failed/losing copy.
+      ownedBuffers.clear();
+      memory.reset();
+    }
     std::ostringstream result;
     result << std::fixed << std::setprecision(3)
            << "[XrdAdaptor] full read result handle=" << managerId
@@ -843,11 +875,12 @@ public:
                          std::string url, std::string peerSite,
                          std::uint64_t managerId, std::uint64_t expectedBytes,
                          std::chrono::steady_clock::time_point started,
-                         std::vector<std::shared_ptr<std::vector<char>>> buffers)
+                         std::vector<std::shared_ptr<std::vector<char>>> buffers,
+                         std::unique_ptr<detail::ReadMemoryBudget::Reservation> memory)
       : source_(std::move(source)), file_(std::move(file)), url_(std::move(url)),
         peerSite_(std::move(peerSite)), managerId_(managerId),
         expectedBytes_(expectedBytes), started_(started),
-        buffers_(std::move(buffers)) {}
+        memory_(std::move(memory)), buffers_(std::move(buffers)) {}
 
   void HandleResponse(XrdCl::XRootDStatus *status,
                       XrdCl::AnyObject *response) override {
@@ -910,6 +943,7 @@ private:
   std::uint64_t managerId_ = 0;
   std::uint64_t expectedBytes_ = 0;
   std::chrono::steady_clock::time_point started_;
+  std::unique_ptr<detail::ReadMemoryBudget::Reservation> memory_;
   std::vector<std::shared_ptr<std::vector<char>>> buffers_;
 };
 
@@ -964,7 +998,7 @@ struct XrdSourceManager::PrefetchCache {
       if (cursor < start || cursor >= spanEnd) return false;
       spans.emplace_back(candidate, cursor - start);
       cursor = std::min(end, spanEnd);
-      it = entries.lower_bound(cursor);
+      it = entries.upper_bound(cursor);
     }
     cursor = offset;
     for (const auto &span : spans) {
@@ -988,7 +1022,10 @@ struct XrdSourceManager::PrefetchCache {
       usedBytes -= found->second.data->size();
       entries.erase(found);
     }
-    while (usedBytes + data->size() > limit && !entries.empty()) {
+    // Tiny metadata reads must not turn a payload-byte cap into millions of
+    // map nodes and separately allocated vector/control blocks.
+    while ((usedBytes + data->size() > limit ||
+            entries.size() >= kMaxPrefetchEntries) && !entries.empty()) {
       auto oldest = std::min_element(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
         return a.second.use < b.second.use;
       });
@@ -1025,20 +1062,28 @@ std::shared_ptr<XrdSourceManager::PrefetchCache> acquireCache(
 }
 } // namespace
 
+XrdSourceManager::XrdSourceManager(std::string url, unsigned probeIntervalSeconds,
+                                   std::size_t prefetchCacheBytes,
+                                   unsigned readTimeoutSeconds)
+    : XrdSourceManager(std::move(url), probeIntervalSeconds, prefetchCacheBytes,
+                       readTimeoutSeconds, 30) {}
+
 XrdSourceManager::XrdSourceManager(std::string url,
                                    unsigned probeIntervalSeconds,
                                    std::size_t prefetchCacheBytes,
-                                   unsigned readTimeoutSeconds)
+                                   unsigned readTimeoutSeconds,
+                                   unsigned openTimeoutSeconds)
     : url_(std::move(url)), fileKey_(fileIdentity(url_)),
       probeIntervalSeconds_(probeIntervalSeconds),
       readTimeoutSeconds_(std::clamp(readTimeoutSeconds, 1U, 300U)),
+      openTimeoutSeconds_(std::clamp(openTimeoutSeconds, 1U, 300U)),
       nextProbeAt_(std::chrono::steady_clock::now()),
       cache_(acquireCache(url_, prefetchCacheBytes)) {
   SiteQualityMonitor::instance().configurePreferredBand(
       preferredSiteBandPercent());
   instanceId_ = nextManagerId.fetch_add(1);
   auto primary = std::make_shared<Source>();
-  const auto timeout = static_cast<std::uint16_t>(readTimeoutSeconds_);
+  const auto timeout = static_cast<std::uint16_t>(openTimeoutSeconds_);
   std::string lastError;
   const bool opened = detail::openWithRetry(
       url_,
@@ -1144,7 +1189,7 @@ void XrdSourceManager::startDiscovery() {
   const auto candidateUrl = appendOpaque(url_, opaque);
   const auto status = file->Open(candidateUrl, XrdCl::OpenFlags::Read,
                                  XrdCl::Access::None, handler,
-                                 static_cast<std::uint16_t>(readTimeoutSeconds_));
+                                 static_cast<std::uint16_t>(openTimeoutSeconds_));
   if (!status.IsOK()) {
     logLine("[XrdAdaptor] replica probe request failed handle=" +
             std::to_string(instanceId_) + " file=" + url_ +
@@ -1167,6 +1212,9 @@ void XrdSourceManager::stop() {
     stopped_ = true;
     sources_.clear();
   }
+  // Closed ROOT file objects may remain alive. Release their cache ownership
+  // now; an active peer or in-progress window keeps its own shared reference.
+  std::atomic_store(&cache_, std::shared_ptr<PrefetchCache>{});
   condition_.notify_all();
 }
 
@@ -1403,12 +1451,14 @@ bool XrdSourceManager::completeProbe(
 bool XrdSourceManager::copyPrefetched(std::uint64_t offset,
                                       std::uint32_t length,
                                       char *destination) {
-  return cache_->copy(offset, length, destination);
+  const auto cache = std::atomic_load(&cache_);
+  return cache && cache->copy(offset, length, destination);
 }
 
 void XrdSourceManager::savePrefetched(
     std::uint64_t offset, std::shared_ptr<std::vector<char>> bytes) {
-  cache_->insert(offset, std::move(bytes));
+  if (const auto cache = std::atomic_load(&cache_))
+    cache->insert(offset, std::move(bytes));
 }
 
 std::unique_ptr<XrdSourceManager::PendingRead> XrdSourceManager::submit(
@@ -1478,6 +1528,13 @@ void XrdSourceManager::scheduleExplorationProbe(
     return;
   }
 
+  std::size_t sampleBytes = 0;
+  for (const auto &range : ranges) sampleBytes += range.length;
+  auto memory = readMemoryBudget().tryReserve(sampleBytes);
+  if (!memory) {
+    monitor.endExplorationProbe(source->site);
+    return;
+  }
   XrdCl::ChunkList chunks;
   std::vector<std::shared_ptr<std::vector<char>>> buffers;
   buffers.reserve(ranges.size());
@@ -1492,7 +1549,7 @@ void XrdSourceManager::scheduleExplorationProbe(
   const auto started = std::chrono::steady_clock::now();
   auto *handler = new ExplorationReadHandler(
       source, fileKey_, url_, peerSite, instanceId_, expectedBytes, started,
-      std::move(buffers));
+      std::move(buffers), std::move(memory));
   const auto status = source->file->VectorRead(
       chunks, nullptr, handler, static_cast<std::uint16_t>(readTimeoutSeconds_));
   if (!status.IsOK()) {
@@ -1509,8 +1566,48 @@ void XrdSourceManager::scheduleExplorationProbe(
   }
 }
 
-bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
-                             bool prefetch) {
+bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges, bool prefetch) {
+  if (stopped_) return false;
+  // Bound private copies even for very large ROOT cache/cluster requests.
+  // Visit windows backwards so the first ranges remain newest in the handoff
+  // LRU, including warmup reads arriving with a destination buffer.
+  for (const auto &range : ranges) {
+    if (range.length && ((!prefetch && !range.buffer) ||
+        range.offset > std::numeric_limits<std::uint64_t>::max() - range.length))
+      return false;
+  }
+  std::vector<ReadRange> window;
+  std::size_t bytes = 0;
+  const auto flush = [&] {
+    if (stopped_) return false;
+    if (window.empty()) return true;
+    std::reverse(window.begin(), window.end());
+    const bool ok = readvWindow(window, prefetch);
+    window.clear();
+    bytes = 0;
+    return ok;
+  };
+  for (auto range = ranges.rbegin(); range != ranges.rend(); ++range) {
+    std::uint32_t remaining = range->length;
+    while (remaining) {
+      const auto count = static_cast<std::uint32_t>(std::min<std::size_t>(
+          remaining, detail::ReadMemoryBudget::kWindow - bytes));
+      remaining -= count;
+      window.push_back({range->offset + remaining, count,
+                        prefetch ? nullptr : range->buffer + remaining});
+      bytes += count;
+      if ((bytes == detail::ReadMemoryBudget::kWindow ||
+           window.size() == kMaxChunksPerRequest) && !flush())
+        return false;
+    }
+  }
+  return flush();
+}
+
+bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
+                                   bool prefetch) {
+  const auto cache = std::atomic_load(&cache_);
+  if (!cache || stopped_) return false;
   const auto readStarted = std::chrono::steady_clock::now();
   const auto requestSequence = readvSequence_.fetch_add(1) + 1;
   const auto demandSequence =
@@ -1520,6 +1617,7 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
     std::shared_ptr<std::vector<char>> owned;
   };
 
+  std::unique_ptr<detail::ReadMemoryBudget::Reservation> retryMemory;
   std::vector<Piece> pieces;
   std::uint64_t requestedBytes = 0;
   std::uint64_t handoffBytes = 0;
@@ -1541,8 +1639,8 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
       piece.range.offset = range.offset + consumed;
       piece.range.length = part;
       if (prefetch) {
-        piece.owned = std::make_shared<std::vector<char>>(part);
-        piece.range.buffer = piece.owned->data();
+        // The winning attempt supplies storage directly to the handoff cache.
+        piece.range.buffer = nullptr;
       } else {
         piece.range.buffer = range.buffer + consumed;
       }
@@ -1651,6 +1749,7 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
   bool explorationScheduled = false;
 
   const auto launchFullRead = [&](const std::shared_ptr<Source> &source) {
+    if (race->winner() != ReadRaceState::kNoWinner) return false;
     if (!source || source->failed.load()) return false;
     const auto key = sourceKey(source);
     if (key.empty() || attemptedSites.count(key)) return false;
@@ -1672,7 +1771,13 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
       return false;
     }
 
+    auto memory = readMemoryBudget().tryReserve(networkBytes);
+    if (!memory) {
+      siteMonitor.endFullRead(key);
+      return false;
+    }
     auto attempt = std::make_shared<PendingRead>();
+    attempt->memory = std::move(memory);
     attempt->source = source;
     attempt->race = race;
     attempt->sourceIndex = fullAttempts.size();
@@ -1770,7 +1875,8 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
         if (sampleBytes + piece.range.length > explorationBudget) continue;
         sampleRanges.push_back(piece.range);
         sampleBytes += piece.range.length;
-        if (sampleBytes >= explorationBudget) break;
+        if (sampleBytes >= explorationBudget ||
+            sampleRanges.size() >= kMaxChunksPerRequest) break;
       }
       if (!sampleRanges.empty()) {
         explorationSources.push_back(candidate);
@@ -1818,18 +1924,17 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
       break;
 
     startDiscovery();
-    race->waitForChange(std::chrono::milliseconds(50));
+    // A different reader releasing a site/budget slot cannot signal this
+    // race. Avoid adding a 50 ms stall to every small window in that case.
+    const auto wait = fullReadCount() == 0 && !active.empty() ? 5 : 50;
+    race->waitForChange(std::chrono::milliseconds(wait));
   }
 
-  // If the first full copy wins just before discovery exposes its alternate,
-  // still give that newly available site a full copy for timing data. The
-  // already completed winner remains the only data copied back to ROOT.
+  // Once the read has won, do not launch another full copy solely for timing.
+  // Keep bounded exploration samples; already in-flight losing reads drain
+  // normally and continue to supply quality measurements.
   if (race->winner() != ReadRaceState::kNoWinner) {
     active = sources();
-    for (const auto &source : active) {
-      if (fullReadAssignedCount() >= fullReadSiteLimit) break;
-      launchFullRead(source);
-    }
     scheduleExploration(active);
   }
 
@@ -1843,9 +1948,21 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
                  !source->failed.load();
         });
     if (fallback != fallbacks.end()) {
+      if (prefetch) {
+        while (!(retryMemory = readMemoryBudget().tryReserve(networkBytes))) {
+          if (stopped_) return false;
+          race->waitForChange(std::chrono::milliseconds(50));
+        }
+      }
       std::vector<ReadRange> retryRanges;
       retryRanges.reserve(pieces.size());
-      for (const auto &piece : pieces) retryRanges.push_back(piece.range);
+      for (auto &piece : pieces) {
+        if (prefetch) {
+          piece.owned = std::make_shared<std::vector<char>>(piece.range.length);
+          piece.range.buffer = piece.owned->data();
+        }
+        retryRanges.push_back(piece.range);
+      }
       logLine("[XrdAdaptor] full read retry handle=" +
               std::to_string(instanceId_) + " site=" + (*fallback)->site +
               " server=" + (*fallback)->server + " bytes=" +
@@ -1886,9 +2003,12 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
       logReadTiming("race-winner-unavailable", readSources);
       return false;
     }
-    for (std::size_t i = 0; i < pieces.size(); ++i)
-      std::memcpy(pieces[i].range.buffer, (*winner)->ownedBuffers[i]->data(),
-                  pieces[i].range.length);
+    for (std::size_t i = 0; i < pieces.size(); ++i) {
+      pieces[i].owned = (*winner)->ownedBuffers[i];
+      if (!prefetch)
+        std::memcpy(pieces[i].range.buffer, pieces[i].owned->data(),
+                    pieces[i].range.length);
+    }
   }
 
   if (prefetch) {
@@ -1897,19 +2017,19 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges,
     // larger than the handoff budget preserves the first data it will read.
     for (auto piece = pieces.rbegin(); piece != pieces.rend(); ++piece) {
       savePrefetched(piece->range.offset, piece->owned);
-      if (piece->range.length <= cache_->limit)
+      if (piece->range.length <= cache->limit)
         handoffStoredBytes += piece->range.length;
     }
-  } else if (cache_->limit > 0) {
+  } else if (cache->limit > 0) {
     // ROOT's next-file warmup can fetch its TTreeCache cluster through normal
     // ReadBuffers calls (with a destination buffer), not ReadBufferAsync.
     // Retain those successful demand reads too, so the active TFile handle can
     // consume the bytes fetched by the warm handle at the file boundary.
     for (auto piece = pieces.rbegin(); piece != pieces.rend(); ++piece) {
-      if (piece->range.length > cache_->limit) continue;
-      auto bytes = std::make_shared<std::vector<char>>(piece->range.length);
-      std::memcpy(bytes->data(), piece->range.buffer, piece->range.length);
-      savePrefetched(piece->range.offset, std::move(bytes));
+      if (piece->range.length > cache->limit) continue;
+      // The winner is immutable once all its callbacks have completed.
+      // Share that allocation instead of copying ROOT's destination again.
+      savePrefetched(piece->range.offset, piece->owned);
       handoffStoredBytes += piece->range.length;
     }
   }
@@ -1923,11 +2043,24 @@ void configureXrdAdaptor(unsigned probeIntervalSeconds,
                          unsigned explorationShare,
                          unsigned maxReadSourceCount,
                          unsigned readTimeoutSeconds) {
+  configureXrdAdaptor(probeIntervalSeconds, prefetchCacheBytes, preferredBandPercent,
+                      explorationShare, maxReadSourceCount, readTimeoutSeconds, 30);
+}
+
+void configureXrdAdaptor(unsigned probeIntervalSeconds,
+                         std::size_t prefetchCacheBytes,
+                         unsigned preferredBandPercent,
+                         unsigned explorationShare,
+                         unsigned maxReadSourceCount,
+                         unsigned readTimeoutSeconds,
+                         unsigned openTimeoutSeconds) {
   auto &global = settings();
   {
     std::lock_guard<std::mutex> lock(global.mutex);
     global.probeIntervalSeconds = probeIntervalSeconds;
     global.readTimeoutSeconds = std::clamp(readTimeoutSeconds, 1U, 300U);
+    global.openTimeoutSeconds = std::clamp(openTimeoutSeconds, 1U, 300U);
+    ++global.generation;
     global.prefetchCacheBytes = prefetchCacheBytes;
     global.preferredSiteBandPercent = std::min(preferredBandPercent, 100U);
     global.explorationSharePercent = std::min(explorationShare, 50U);
@@ -1940,18 +2073,87 @@ void configureXrdAdaptor(unsigned probeIntervalSeconds,
 std::shared_ptr<XrdSourceManager> makeXrdSourceManager(const std::string &url) {
   unsigned interval = 5;
   unsigned readTimeout = 120;
-  std::size_t cacheBytes = 256ULL * 1024 * 1024;
+  unsigned openTimeout = 30;
+  std::size_t cacheBytes = 32ULL * 1024 * 1024;
   {
     auto &global = settings();
     std::lock_guard<std::mutex> lock(global.mutex);
     interval = global.probeIntervalSeconds;
     readTimeout = global.readTimeoutSeconds;
+    openTimeout = global.openTimeoutSeconds;
     cacheBytes = global.prefetchCacheBytes;
   }
   auto manager = std::make_shared<XrdSourceManager>(url, interval, cacheBytes,
-                                                    readTimeout);
+                                                    readTimeout, openTimeout);
   manager->startDiscovery();
   return manager;
+}
+
+std::shared_ptr<XrdSourceManager> acquireXrdSourceManager(const std::string &url) {
+  struct Entry {
+    std::weak_ptr<XrdSourceManager> active;
+    std::shared_future<std::shared_ptr<XrdSourceManager>> pending;
+  };
+  static std::mutex poolMutex;
+  static std::map<std::pair<std::string, std::uint64_t>, std::shared_ptr<Entry>> pool;
+  unsigned interval, readTimeout, openTimeout;
+  std::size_t cacheBytes;
+  std::uint64_t generation;
+  {
+    auto &global = settings();
+    std::lock_guard<std::mutex> lock(global.mutex);
+    interval = global.probeIntervalSeconds;
+    readTimeout = global.readTimeoutSeconds;
+    openTimeout = global.openTimeoutSeconds;
+    cacheBytes = global.prefetchCacheBytes;
+    generation = global.generation;
+  }
+  const auto key = std::make_pair(url, generation);
+  std::shared_ptr<Entry> entry;
+  std::shared_future<std::shared_ptr<XrdSourceManager>> pending;
+  std::unique_ptr<std::promise<std::shared_ptr<XrdSourceManager>>> creator;
+  {
+    std::lock_guard<std::mutex> lock(poolMutex);
+    for (auto it = pool.begin(); it != pool.end();) {
+      if (it->second->active.expired() && !it->second->pending.valid())
+        it = pool.erase(it);
+      else
+        ++it;
+    }
+    auto &slot = pool[key];
+    if (!slot) slot = std::make_shared<Entry>();
+    entry = slot;
+    if (auto active = entry->active.lock()) {
+      if (!active->isStopped()) return active;
+    }
+    if (!entry->pending.valid()) {
+      creator = std::make_unique<std::promise<std::shared_ptr<XrdSourceManager>>>();
+      entry->pending = creator->get_future().share();
+    }
+    pending = entry->pending;
+  }
+  // Never hold the registry mutex across network I/O or while joining another
+  // open. Different URLs must remain independent, including active/lookahead.
+  if (!creator) return pending.get();
+  try {
+    auto manager = std::make_shared<XrdSourceManager>(
+        url, interval, cacheBytes, readTimeout, openTimeout);
+    manager->startDiscovery();
+    {
+      std::lock_guard<std::mutex> lock(poolMutex);
+      entry->active = manager;
+      entry->pending = {};
+    }
+    creator->set_value(manager);
+    return manager;
+  } catch (...) {
+    {
+      std::lock_guard<std::mutex> lock(poolMutex);
+      pool.erase(key);
+    }
+    creator->set_exception(std::current_exception());
+    throw;
+  }
 }
 
 } // namespace rdf::xrd

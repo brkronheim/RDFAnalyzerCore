@@ -1,10 +1,8 @@
 //==============================================================================
 // stxs::Manager — Generic STXS Manager implementation
 //
-// Ported and generalized from VHbbSTXS.cc. All VH-specific logic has been
-// replaced with data-driven configuration. The bin-indexing scheme for
-// migration weights follows the CMS STXS convention (fine categories encode
-// pT bins in their last two digits), but is overridable per analysis.
+// Histogram-bin mappings and special-category policies are supplied by the
+// consuming analysis through Config::migrationBins.
 //==============================================================================
 
 #include "stxs/Manager.h"
@@ -88,42 +86,6 @@ TH1 *cloneHistogram(const std::string &filePath, const std::string &name) {
   }
   clone->SetDirectory(nullptr);
   return clone;
-}
-
-// ---------------------------------------------------------------------------
-// Bin-index helpers for migration weights
-//
-// These follow the CMS STXS convention where the fine category's last two
-// digits encode the pT bin index (for delta75–delta400) and the local
-// category within the stage-0 bin uses a remapped scheme (for delta1/delta2).
-//
-// Analyses with a different binning scheme can override these by providing
-// custom mapping functions via the config.
-// ---------------------------------------------------------------------------
-
-/// Map fine category to a bin index 1..N for the delta75–delta400 histograms.
-/// Default: uses (fineCategory % 100) modulo 5.
-int ptBinIndex(int fineCategory) {
-  const int localCategory = fineCategory % 100;
-  const int modulo = localCategory - (localCategory / 5) * 5;
-  return modulo == 0 ? 5 : modulo;
-}
-
-/// Map fine category to a bin index for the delta1/delta2 histograms.
-/// Default: uses a remapped table matching the CMS VH STXS convention.
-int jetPtBinIndex(int fineCategory) {
-  const int stage0 = (fineCategory / 100) * 100;
-  static const std::unordered_map<int, int> kRemappedBins{
-      {1, 1}, {2, 4}, {3, 7}, {4, 10}, {5, 13},
-      {6, 2}, {7, 5}, {8, 8}, {9, 11}, {10, 14},
-      {11, 3}, {12, 6}, {13, 9}, {14, 12}, {15, 15},
-  };
-  const auto localCategory = fineCategory - stage0;
-  const auto match = kRemappedBins.find(localCategory);
-  if (match == kRemappedBins.end()) {
-    return 0;
-  }
-  return match->second + 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +175,36 @@ Config loadConfig(const std::string &binConfigPath,
 // Config loading — YAML format (generic, preferred)
 // ===========================================================================
 
+void loadMigrationBinConfig(const std::string &path, Config &config) {
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("stxs::Manager: cannot open migration bin config '" + path + "'.");
+  }
+  std::unordered_map<int, MigrationBin> bins;
+  std::string line;
+  while (std::getline(input, line)) {
+    line = trimCopy(line.substr(0, line.find('#')));
+    if (line.empty()) continue;
+    std::istringstream row(line);
+    int category = 0, fallback = 0;
+    MigrationBin bin;
+    std::string extra;
+    if (!(row >> category >> bin.ptBin >> bin.jetPtBin >> bin.scaleBin >> fallback) ||
+        (row >> extra) || category <= 0 || bin.ptBin <= 0 || bin.jetPtBin <= 0 ||
+        bin.scaleBin <= 0 || (fallback != 0 && fallback != 1)) {
+      throw std::runtime_error("stxs::Manager: invalid migration bin row '" + line + "'.");
+    }
+    bin.useAcceptanceFallback = fallback != 0;
+    if (!bins.emplace(category, bin).second) {
+      throw std::runtime_error("stxs::Manager: duplicate migration category in '" + path + "'.");
+    }
+  }
+  if (bins.empty()) {
+    throw std::runtime_error("stxs::Manager: migration bin config is empty: '" + path + "'.");
+  }
+  config.migrationBins = std::move(bins);
+}
+
 Config loadConfigFromYaml(const std::string &yamlConfigPath) {
   // TODO: Implement YAML parsing using the framework's YAML config adapter.
   // For now, this returns a default Config and logs a warning.
@@ -279,6 +271,15 @@ std::string productionModeName(
 
 Manager::Manager(Config config) : config_m(std::move(config)) {
   if (config_m.enabled) {
+    if (!config_m.migrationSpecs.empty() && config_m.migrationBins.empty()) {
+      throw std::runtime_error("stxs::Manager: migration histograms require explicit migrationBins.");
+    }
+    for (const auto &entry : config_m.migrationBins) {
+      if (entry.first <= 0 || entry.second.ptBin <= 0 ||
+          entry.second.jetPtBin <= 0 || entry.second.scaleBin <= 0) {
+        throw std::runtime_error("stxs::Manager: migration bin indices must be positive.");
+      }
+    }
     loadAuxiliaryHistograms();
   }
 }
@@ -337,21 +338,18 @@ MigrationWeights Manager::migrationWeights(int productionModeId,
   if (!enabled() || fineCategory <= 0) {
     return {};
   }
-  if (fineCategory % 100 <= 0 || fineCategory / 100 <= 2 ||
-      fineCategory / 100 >= 6) {
-    return {};
-  }
-
   const auto match = migrationSets_m.find(productionModeId);
   if (match == migrationSets_m.end()) {
     return {};
   }
-
-  const int localPtBin = ptBinIndex(fineCategory);
-  const int localJetPtBin = jetPtBinIndex(fineCategory);
-  if (localPtBin <= 0 || localJetPtBin <= 0) {
+  // Unmapped categories are outside this analysis's migration prescription.
+  const auto mapped = config_m.migrationBins.find(fineCategory);
+  if (mapped == config_m.migrationBins.end()) {
     return {};
   }
+  const auto &bins = mapped->second;
+  const int localPtBin = bins.ptBin;
+  const int localJetPtBin = bins.jetPtBin;
 
   const auto &set = match->second;
   MigrationWeights weights;
@@ -391,9 +389,7 @@ MigrationWeights Manager::migrationWeights(int productionModeId,
   const float combined =
       std::sqrt(delta1 * delta1 + delta2 * delta2 + delta400 * delta400);
 
-  // Scale histograms use (fineCategory - stage0 + 1) as bin index
-  const int stage0 = (fineCategory / 100) * 100;
-  const int scaleBin = fineCategory - stage0 + 1;
+  const int scaleBin = bins.scaleBin;
   const float scaleUp = set.scaleUp
                             ? static_cast<float>(
                                   set.scaleUp->GetBinContent(scaleBin))
@@ -403,8 +399,8 @@ MigrationWeights Manager::migrationWeights(int productionModeId,
           ? static_cast<float>(set.scaleDown->GetBinContent(scaleBin))
           : 1.0f;
 
-  // Fine categories 403 and 503 use fallback weights (no own scale histograms)
-  if (fineCategory == 403 || fineCategory == 503) {
+  // The analysis marks categories without independent scale histograms.
+  if (bins.useAcceptanceFallback) {
     weights.fineAcceptanceUp = fallbackUp;
     weights.fineAcceptanceDown = fallbackDown;
     return weights;

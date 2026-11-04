@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import tarfile
 
 import pytest
@@ -10,10 +11,23 @@ from core.python.refresh_xrootd_runtime import (
 from core.python.submission_backend import generate_condor_runscript
 
 
+def legacy_worker(script, stage_in):
+    # A saved worker from before global routing. Its custom config path must
+    # survive replacement, along with unrelated output/config helpers.
+    pattern = r"run_helper_python - << 'RDFINPUT'\n(.*?)\nRDFINPUT$"
+    match = re.search(pattern, script, re.S | re.M)
+    config_line = next(line for line in match[1].splitlines() if line.startswith('cfg_path ='))
+    delimiter = 'PY' if stage_in else 'XRDPY'
+    function = 'rank_redirectors_parallel' if stage_in else 'select_best_url'
+    old = ("run_helper_python - << '" + delimiter + "'\n" + config_line +
+           "\ndef " + function + "():\n    return as_completed(futures, timeout=12)\n" + delimiter)
+    return script[:match.start()] + old + script[match.end():]
+
+
 @pytest.mark.parametrize("stage_in", [False, True])
 def test_refresh_patches_collector_after_other_heredocs(stage_in):
-    script = generate_condor_runscript("analysis", stage_in, True, "export KEEP_THIS=1")
-    old = script.replace("as_completed(futures):", "as_completed(futures, timeout=12):", 1)
+    script = generate_condor_runscript("analysis", stage_in, True, "export KEEP_THIS=1", runtime_config_relpath="cfg/custom_input.txt")
+    old = legacy_worker(script, stage_in)
     patched = patch_probe_functions(old)
     assert "as_completed(futures, timeout=12):" not in patched
     assert "export KEEP_THIS=1" in patched
@@ -39,8 +53,7 @@ def test_refresh_preserves_payloads_and_keeps_rollback_copy(tmp_path):
             output.addfile(info, io.BytesIO(contents))
     script = run / "condor_submissions/dataset/condor_runscript_inner.sh"
     script.parent.mkdir(parents=True)
-    script.write_text(generate_condor_runscript("analysis", False, False, "").replace(
-        "as_completed(futures):", "as_completed(futures, timeout=12):"))
+    script.write_text(legacy_worker(generate_condor_runscript("analysis", False, False, ""), False))
     script.chmod(0o755)
     state = run / "monitor_state.json"
     state.write_text('{"existing": "monitor state"}')

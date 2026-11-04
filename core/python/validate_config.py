@@ -116,11 +116,6 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "optional_keys": ["triggers"],
         "key_types": {"triggers": list},
     },
-    "GoldenJsonManager": {
-        "required_keys": [],
-        "optional_keys": ["json_files"],
-        "key_types": {"json_files": list},
-    },
     "KinematicFitManager": {
         "required_keys": [],
         "optional_keys": ["fits"],
@@ -130,25 +125,6 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "required_keys": [],
         "optional_keys": ["objects"],
         "key_types": {"objects": list},
-    },
-    "JetEnergyScaleManager": {
-        "required_keys": [],
-        "optional_keys": [
-            "jet_columns",
-            "met_columns",
-            "raw_factor_column",
-            "corrections",
-            "systematic_sets",
-            "variations",
-        ],
-        "key_types": {
-            "jet_columns": dict,
-            "met_columns": dict,
-            "raw_factor_column": str,
-            "corrections": list,
-            "systematic_sets": dict,
-            "variations": list,
-        },
     },
     "TaggerWorkingPointManager": {
         "required_keys": [],
@@ -176,6 +152,15 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         },
     },
 }
+
+# Optional providers extend validation without introducing mandatory imports.
+if __package__:
+    from .optional_extensions import load_extension_services as _load_extension_services
+else:
+    from optional_extensions import load_extension_services as _load_extension_services
+for _extension_schemas in _load_extension_services("config_schemas"):
+    _KNOWN_PLUGINS.update(_extension_schemas.PLUGIN_SCHEMAS)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1232,36 +1217,6 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
     return errors, warnings
 
 
-def run_vhbb_stxs_preflight(args: argparse.Namespace) -> None:
-    """Run the VHbb STXS preflight readiness gate."""
-    try:
-        from vhbb_stxs_preflight import VHbbStxsPreflight
-
-        preflight = VHbbStxsPreflight(
-            args.vhbb_analysis_dir or
-            os.path.join(os.getcwd(), "analyses", "VHbbSTXS", "VHqqRDF")
-        )
-        result = preflight.run(
-            pass_configs=args.vhbb_pass_configs,
-            dataset_manifest=args.vhbb_dataset_manifest,
-            year=args.vhbb_year,
-            year_settings=args.vhbb_year_settings or "cfg/year_settings.yaml",
-            stxs_bin_config=args.vhbb_stxs_bin_config or "cfg/stxs_bins.txt",
-            datacard_config=args.vhbb_datacard_config or "cfg/datacard_vhbb_stxs.yaml",
-            fit_metadata=args.vhbb_fit_metadata or "cfg/fit_metadata.yaml",
-            histogram_configs=args.vhbb_histogram_configs,
-        )
-    except ImportError as exc:
-        print(f"VHbb STXS preflight module not available: {exc}")
-        print("Install the core Python package or run from the repo root.")
-        raise SystemExit(1)
-
-    print(result.summary())
-
-    if not result.passed:
-        raise SystemExit(1)
-
-
 def main():
     parser = argparse.ArgumentParser(
         "Validate submission, sample, and analysis configs"
@@ -1273,11 +1228,6 @@ def main():
         help="Path to analysis configuration YAML file (regions, nuisances, "
              "histograms, friend trees, plugins)",
     )
-    group.add_argument(
-        "--vhbb-stxs-preflight",
-        action="store_true",
-        help="Run the VHbb STXS preflight readiness gate (requires --vhbb-* args)",
-    )
     parser.add_argument(
         "--mode",
         choices=["auto", "nano", "opendata"],
@@ -1285,65 +1235,7 @@ def main():
         help="Validation mode for submit config (auto detects from sample config)",
     )
 
-    # VHbb STXS preflight arguments
-    vhbb_group = parser.add_argument_group("VHbb STXS preflight options")
-    vhbb_group.add_argument(
-        "--vhbb-analysis-dir",
-        help="Path to VHqqRDF analysis directory (default: auto-detect)",
-    )
-    vhbb_group.add_argument(
-        "--vhbb-pass-config",
-        action="append",
-        dest="vhbb_pass_configs",
-        help="Pass config file to validate (can be repeated)",
-    )
-    vhbb_group.add_argument(
-        "--vhbb-dataset-manifest",
-        dest="vhbb_dataset_manifest",
-        help="Dataset manifest YAML to validate",
-    )
-    vhbb_group.add_argument(
-        "--vhbb-year",
-        dest="vhbb_year",
-        help="Year token for correction payload validation (e.g. 2022_preEE)",
-    )
-    vhbb_group.add_argument(
-        "--vhbb-year-settings",
-        dest="vhbb_year_settings",
-        default="cfg/year_settings.yaml",
-        help="Year settings file relative to cfg_dir",
-    )
-    vhbb_group.add_argument(
-        "--vhbb-stxs-bin-config",
-        dest="vhbb_stxs_bin_config",
-        default="cfg/stxs_bins.txt",
-        help="STXS bin config relative to cfg_dir",
-    )
-    vhbb_group.add_argument(
-        "--vhbb-datacard-config",
-        dest="vhbb_datacard_config",
-        default="cfg/datacard_vhbb_stxs.yaml",
-        help="Datacard config relative to cfg_dir",
-    )
-    vhbb_group.add_argument(
-        "--vhbb-fit-metadata",
-        dest="vhbb_fit_metadata",
-        default="cfg/fit_metadata.yaml",
-        help="Fit metadata config relative to cfg_dir",
-    )
-    vhbb_group.add_argument(
-        "--vhbb-histogram-config",
-        action="append",
-        dest="vhbb_histogram_configs",
-        help="Histogram config to validate (can be repeated)",
-    )
-
     args = parser.parse_args()
-
-    # VHbb STXS preflight mode
-    if args.vhbb_stxs_preflight:
-        run_vhbb_stxs_preflight(args)
-        return
 
     try:
         if args.analysis_config:

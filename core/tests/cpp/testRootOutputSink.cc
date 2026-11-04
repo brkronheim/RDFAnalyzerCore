@@ -92,6 +92,7 @@ TEST_F(RootOutputSinkTest, ExactColumnNamesAreWritten) {
 
   TFile f(outputPath.c_str(), "READ");
   ASSERT_FALSE(f.IsZombie());
+  EXPECT_EQ(f.GetCompressionSettings(), 505);
   auto* tree = dynamic_cast<TTree*>(f.Get("Events"));
   ASSERT_NE(tree, nullptr);
   EXPECT_NE(tree->GetBranch("Electron_pt"),  nullptr);
@@ -275,4 +276,51 @@ TEST_F(RootOutputSinkTest, GlobPatternWithNoMatchDoesNotThrow) {
   // When the glob matches nothing, columns is empty so all columns are snapshotted.
   ASSERT_NO_THROW(
       sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
+}
+
+TEST_F(RootOutputSinkTest, ConfiguredCompressionPreservesEntriesAndValues) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+  auto dm = makeDataManager();
+  SystematicManager sm;
+  auto df = dm->getDataFrame();
+  for (const auto& setting : std::vector<std::pair<std::string, int>>{
+           {"zstd", 509}, {"lzma", 209}, {"zlib", 109}, {"lz4", 409}}) {
+    ConfigurationManager config(cfgPath);
+    config.set("skimCompressionAlgorithm", setting.first);
+    config.set("skimCompressionLevel", "9");
+    RootOutputSink sink;
+    sink.writeDataFrame(df, config, &sm, OutputChannel::Skim);
+    TFile file(outputPath.c_str(), "READ");
+    ASSERT_FALSE(file.IsZombie());
+    EXPECT_EQ(file.GetCompressionSettings(), setting.second);
+    auto* tree = dynamic_cast<TTree*>(file.Get("Events"));
+    ASSERT_NE(tree, nullptr);
+    EXPECT_EQ(tree->GetEntries(), 5);
+    float value = 0;
+    tree->SetBranchAddress("Electron_pt", &value);
+    for (int entry = 0; entry < 5; ++entry) {
+      tree->GetEntry(entry);
+      EXPECT_FLOAT_EQ(value, 30.f);
+    }
+  }
+}
+
+TEST_F(RootOutputSinkTest, InvalidCompressionFailsBeforeCreatingOutput) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+  auto dm = makeDataManager();
+  SystematicManager sm;
+  auto df = dm->getDataFrame();
+  for (const auto& setting : std::vector<std::pair<std::string, std::string>>{
+           {"skimCompressionAlgorithm", "typo"}, {"skimCompressionLevel", "10"},
+           {"skimCompressionLevel", "-1"}, {"skimCompressionLevel", "9oops"},
+           {"skimCompressionLevel", ""}}) {
+    ConfigurationManager config(cfgPath);
+    config.set(setting.first, setting.second);
+    RootOutputSink sink;
+    EXPECT_THROW(sink.writeDataFrame(df, config, &sm, OutputChannel::Skim), std::invalid_argument);
+    std::ifstream output(outputPath);
+    EXPECT_FALSE(output.good());
+  }
 }

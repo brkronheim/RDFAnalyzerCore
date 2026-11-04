@@ -31,6 +31,9 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 message(STATUS "CMAKE_MODULE_PATH = ${CMAKE_MODULE_PATH}")
 
 project(RDFAnalyzer)
+include("${PROJECT_SOURCE_DIR}/cmake/SetupExtensions.cmake")
+rdf_discover_extensions()
+rdf_generate_extension_config()
 
 # ---------------------------------------------------------------------------
 # Capture git provenance information at configure time and write GitVersion.h
@@ -82,7 +85,7 @@ option(BUILD_TESTS "Build analysis tests" ON)
 option(BUILD_COMBINE "Build CMS Combine package for statistical analysis" OFF)
 option(BUILD_COMBINE_HARVESTER "Build CombineHarvester tools (requires BUILD_COMBINE)" OFF)
 option(USE_CUDA "Enable CUDA GPU support for kinematic fits" OFF)
-option(RDF_ENABLE_XRD_ADAPTOR "Build the optional standalone XrdCl input backend" ON)
+option(RDF_ENABLE_XRD_ADAPTOR "Build the default standalone XrdCl input backend" ON)
 
 if(USE_CUDA)
     enable_language(CUDA)
@@ -99,6 +102,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 find_package(ROOT REQUIRED)
 find_package(Boost REQUIRED CONFIG)
+include("${CMAKE_SOURCE_DIR}/cmake/SetupRootRegistry.cmake")
 
 # Setup yaml-cpp
 # include(SetupYamlCpp)

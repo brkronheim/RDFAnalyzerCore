@@ -203,8 +203,18 @@ class FullAnalysisDAG(law.Task):
     )
     fitting_backend = luigi.Parameter(
         default="analysis",
-        description="Fitting backend: 'combine' or 'analysis'.",
+        description="Fitting backend: 'combine', 'rabbit' (CPU/CUDA), or 'analysis'.",
     )
+    rabbit_python = luigi.Parameter(default="")
+    rabbit_device = luigi.ChoiceParameter(default="gpu", choices=("cpu", "gpu"))
+    rabbit_devices = luigi.Parameter(default="")
+    rabbit_n_devices = luigi.IntParameter(default=1)
+    rabbit_mc_stat = luigi.ChoiceParameter(default="card", choices=("card", "none", "lite", "full"))
+    rabbit_likelihood = luigi.ChoiceParameter(default="native", choices=("native", "combine"))
+    rabbit_covariance = luigi.ChoiceParameter(default="auto", choices=("auto", "analytic", "combine"))
+    rabbit_zero_shape_policy = luigi.ChoiceParameter(default="error", choices=("error", "native"))
+    rabbit_hvp_batch = luigi.IntParameter(default=0)
+    fit_dataset = luigi.ChoiceParameter(default="observed", choices=("asimov", "observed"))
     method = luigi.Parameter(
         default="AsymptoticLimits",
         description="Combine fit method (fitting_backend=combine only).",
@@ -309,6 +319,17 @@ class FullAnalysisDAG(law.Task):
                     fitting_backend=self.fitting_backend,
                     method=self.method,
                     combine_exe=self.combine_exe,
+                    rabbit_python=self.rabbit_python,
+                    rabbit_device=self.rabbit_device,
+                    rabbit_devices=self.rabbit_devices,
+                    rabbit_n_devices=self.rabbit_n_devices,
+                    rabbit_mc_stat=self.rabbit_mc_stat,
+                    rabbit_likelihood=self.rabbit_likelihood,
+                    rabbit_covariance=self.rabbit_covariance,
+                    rabbit_zero_shape_policy=self.rabbit_zero_shape_policy,
+                    rabbit_hvp_batch=self.rabbit_hvp_batch,
+                    fit_dataset=self.fit_dataset,
+                    strict_coverage=self.strict_coverage,
                 )
             )
 

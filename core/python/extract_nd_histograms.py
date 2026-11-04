@@ -19,6 +19,8 @@ import tempfile
 from array import array
 from typing import Any, Optional
 
+from histogram_io import iter_sparse_bins, _compiled_reader
+
 
 SCHEMA_KEY = "__rdf_histogram_schema_v1"
 SCHEMA_VERSION = 1
@@ -188,6 +190,73 @@ def _histogram_axis_edges(axis: Any, metadata: dict[str, Any]) -> list[float]:
     return [float(edge) for edge in metadata["edges"]]
 
 
+def _reconcile_systematic_axis(axis: Any, metadata: dict[str, Any]) -> bool:
+    """Recover appended systematic categories from the sparse axis labels.
+
+    ROOT can retain a larger categorical axis after ``hadd`` combines files
+    produced with different systematic lists, while the embedded schema comes
+    from only one input file.  The numeric systematic bins remain interpretable
+    only when every bin is labelled and the schema labels are an exact prefix
+    of the labels on the merged axis.
+    """
+    declared_bins = int(metadata["bins"])
+    actual_bins = int(axis.GetNbins())
+    if actual_bins == declared_bins:
+        return False
+    if actual_bins < declared_bins:
+        raise ValueError(
+            f"Sparse axis 'systematic' has {actual_bins} bins, "
+            f"metadata declares {declared_bins}"
+        )
+
+    declared_labels = metadata["labels"]
+    axis_labels = [str(axis.GetBinLabel(index)) for index in range(1, actual_bins + 1)]
+    if len(declared_labels) != declared_bins or any(not label for label in axis_labels):
+        raise ValueError(
+            "Sparse systematic axis has more bins than its metadata, but its "
+            "labels are incomplete; refusing to guess the systematic mapping"
+        )
+    if axis_labels[:declared_bins] != declared_labels:
+        raise ValueError(
+            "Sparse systematic axis has more bins than its metadata and the "
+            "declared labels do not match the axis prefix; refusing to merge "
+            "potentially mislabelled variations"
+        )
+
+    metadata["bins"] = actual_bins
+    metadata["labels"] = axis_labels
+    metadata["edges"] = [
+        float(axis.GetBinLowEdge(index)) for index in range(1, actual_bins + 1)
+    ] + [float(axis.GetBinUpEdge(actual_bins))]
+    return True
+
+
+def _nominal_systematic_metadata(axis: Any, metadata: dict[str, Any]) -> None:
+    """Expose only the nominal slice while preserving the sparse axis shape.
+
+    The merged THnSparse is left untouched. Keeping its physical bin count in
+    the schema lets sparse readers build correctly sized maps, while the
+    one-label systematic inventory filters every non-nominal bin out.
+    """
+    actual_bins = int(axis.GetNbins())
+    declared_labels = metadata.get("labels", [])
+    nominal_label = str(axis.GetBinLabel(1)) if actual_bins else ""
+    if actual_bins < 1 or (
+        (declared_labels and declared_labels[0] != "Nominal")
+        or (nominal_label and nominal_label != "Nominal")
+    ):
+        raise ValueError(
+            "Cannot create a nominal-only merge because systematic bin 1 is "
+            "not labelled Nominal"
+        )
+
+    metadata["bins"] = actual_bins
+    metadata["labels"] = ["Nominal"]
+    metadata["edges"] = [
+        float(axis.GetBinLowEdge(index)) for index in range(1, actual_bins + 1)
+    ] + [float(axis.GetBinUpEdge(actual_bins))]
+
+
 def _directory_for_path(root_file: Any, path: str) -> Any:
     current = root_file
     for component in path.split("/"):
@@ -202,12 +271,7 @@ def _directory_for_path(root_file: Any, path: str) -> Any:
 
 def _sparse_bins(histogram: Any):
     """Yield (coordinate bins, content, sumw2) from an allocated THnSparse bin."""
-    dimensions = int(histogram.GetNdimensions())
-    coordinates = array("i", [0] * dimensions)
-    for sparse_bin in range(int(histogram.GetNbins())):
-        content = float(histogram.GetBinContent(sparse_bin, coordinates))
-        sumw2 = float(histogram.GetBinError2(sparse_bin))
-        yield tuple(coordinates), content, sumw2
+    yield from iter_sparse_bins(histogram)
 
 
 def _open_root_file(ROOT: Any, path: str, mode: str) -> Any:
@@ -222,12 +286,15 @@ def extract_nd_histograms(
     output_path: Optional[str] = None,
     *,
     required: bool = True,
+    nominal_only: bool = False,
 ) -> int:
     """Add reconstructed TH1F objects to a copy of a sparse ROOT file.
 
     If *output_path* is omitted, the input file is replaced atomically after
     extraction. Existing THnSparse objects and unrelated ROOT objects are
-    retained. Returns the number of single histograms written. With
+    retained. With ``nominal_only=True``, only the Nominal systematic slice is
+    exposed in reconstructed histograms and schema metadata. Returns the number
+    of single histograms written. With
     ``required=False``, files without the sparse-first schema are left alone
     and the function returns zero.
     """
@@ -249,6 +316,10 @@ def extract_nd_histograms(
             "PyROOT is required to reconstruct TH1F histograms from THnSparse"
         ) from exc
 
+    reader = _compiled_reader()
+    native = (reader is not None and hasattr(reader, "extract_sparse_slices")
+              and all(len(record["axes"]) == 5 for record in schema["histograms"]))
+
     output_dir = os.path.dirname(output_path) or "."
     os.makedirs(output_dir, exist_ok=True)
     fd, working_path = tempfile.mkstemp(
@@ -262,6 +333,7 @@ def extract_nd_histograms(
         try:
             histogram_records: list[tuple[dict[str, Any], Any, dict[str, int]]] = []
             populated_sample_bins: set[int] = set()
+            repaired_schema = False
 
             for metadata in schema["histograms"]:
                 sparse = root_file.Get(f"{schema['directory']}/{metadata['key']}")
@@ -277,120 +349,165 @@ def extract_nd_histograms(
                     )
                 axis_indices = _axis_map(metadata)
                 sample_axis = axis_indices["sample"]
-                for axis_index, axis_metadata in enumerate(axes):
-                    _histogram_axis_edges(sparse.GetAxis(axis_index), axis_metadata)
-                for coordinates, content, sumw2 in _sparse_bins(sparse):
-                    sample_bin = coordinates[sample_axis]
-                    if (content != 0.0 or sumw2 != 0.0) and sample_bin > 0:
-                        populated_sample_bins.add(sample_bin)
-                histogram_records.append((metadata, sparse, axis_indices))
-
-            written = 0
-            for metadata, sparse, axis_indices in histogram_records:
-                axes = metadata["axes"]
-                channel_labels = axes[axis_indices["channel"]]["labels"]
-                control_labels = axes[axis_indices["control"]]["labels"]
-                sample_labels = axes[axis_indices["sample"]]["labels"]
-                systematic_labels = axes[axis_indices["systematic"]]["labels"]
-                observable_axis_index = axis_indices["observable"]
-                observable_metadata = axes[observable_axis_index]
-                observable_axis = sparse.GetAxis(observable_axis_index)
-                edges = _histogram_axis_edges(observable_axis, observable_metadata)
-                n_bins = int(observable_metadata["bins"])
-
-                output_hists: dict[tuple[int, int, int, int], Any] = {}
-                for channel_bin, channel in enumerate(channel_labels, start=1):
-                    for control_bin, control in enumerate(control_labels, start=1):
-                        for sample_bin in sorted(populated_sample_bins):
-                            if sample_bin > len(sample_labels):
-                                continue
-                            sample = sample_labels[sample_bin - 1]
-                            for systematic_bin, systematic in enumerate(
-                                systematic_labels, start=1
-                            ):
-                                if systematic_bin > int(
-                                    sparse.GetAxis(axis_indices["systematic"]).GetNbins()
-                                ):
-                                    continue
-                                histogram_name = metadata["name"]
-                                if systematic != "Nominal":
-                                    histogram_name += "_" + systematic
-                                output_key = (
-                                    channel_bin,
-                                    control_bin,
-                                    sample_bin,
-                                    systematic_bin,
-                                )
-                                title = (
-                                    f"{metadata['name']};{metadata['name']};Counts"
-                                )
-                                output_hist = ROOT.TH1F(
-                                    histogram_name,
-                                    title,
-                                    n_bins,
-                                    array("d", edges),
-                                )
-                                output_hist.Sumw2()
-                                output_hist.SetDirectory(0)
-                                output_hists[output_key] = output_hist
-                                written += 1
-
-                for coordinates, content, sumw2 in _sparse_bins(sparse):
-                    channel_bin = coordinates[axis_indices["channel"]]
-                    control_bin = coordinates[axis_indices["control"]]
-                    sample_bin = coordinates[axis_indices["sample"]]
-                    systematic_bin = coordinates[axis_indices["systematic"]]
-                    observable_bin = coordinates[observable_axis_index]
-                    if min(channel_bin, control_bin, sample_bin, systematic_bin) <= 0:
-                        continue
-                    if channel_bin > len(channel_labels) or control_bin > len(control_labels):
-                        continue
-                    if sample_bin > len(sample_labels) or systematic_bin > len(systematic_labels):
-                        continue
-                    if content == 0.0 and sumw2 == 0.0:
-                        continue
-                    output_hist = output_hists.get(
-                        (channel_bin, control_bin, sample_bin, systematic_bin)
+                systematic_axis = axis_indices["systematic"]
+                if nominal_only:
+                    systematic_metadata = axes[systematic_axis]
+                    _nominal_systematic_metadata(
+                        sparse.GetAxis(systematic_axis), systematic_metadata
                     )
-                    if output_hist is None:
-                        continue
-                    output_hist.SetBinContent(observable_bin, content)
-                    output_hist.SetBinError(observable_bin, math.sqrt(max(0.0, sumw2)))
+                    repaired_schema = True
+                for axis_index, axis_metadata in enumerate(axes):
+                    sparse_axis = sparse.GetAxis(axis_index)
+                    if axis_metadata["role"] == "systematic":
+                        if not nominal_only:
+                            repaired_schema = (
+                                _reconcile_systematic_axis(sparse_axis, axis_metadata)
+                                or repaired_schema
+                            )
+                    else:
+                        _histogram_axis_edges(sparse_axis, axis_metadata)
+                if native:
+                    histogram_records.append((metadata, None, axis_indices))
+                    directory = root_file.GetDirectory(schema["directory"])
+                    directory.GetList().Remove(sparse)
+                    ROOT.SetOwnership(sparse, True)
+                    del sparse
+                else:
+                    for coordinates, content, sumw2 in _sparse_bins(sparse):
+                        sample_bin = coordinates[sample_axis]
+                        if (content != 0.0 or sumw2 != 0.0) and sample_bin > 0:
+                            populated_sample_bins.add(sample_bin)
+                    histogram_records.append((metadata, sparse, axis_indices))
 
-                # Write after filling; pre-created objects preserve empty
-                # category and systematic combinations in the output.
-                for channel_bin, channel in enumerate(channel_labels, start=1):
-                    for control_bin, control in enumerate(control_labels, start=1):
-                        for sample_bin in sorted(populated_sample_bins):
-                            if sample_bin > len(sample_labels):
-                                continue
-                            sample = sample_labels[sample_bin - 1]
-                            directory_path = f"{channel}_{control}/{sample}"
-                            destination = _directory_for_path(root_file, directory_path)
-                            destination.cd()
-                            for systematic_bin, systematic in enumerate(
-                                systematic_labels, start=1
-                            ):
-                                key = (
-                                    channel_bin,
-                                    control_bin,
-                                    sample_bin,
-                                    systematic_bin,
-                                )
-                                output_hist = output_hists.get(key)
-                                if output_hist is None:
+            if repaired_schema:
+                _validate_schema(schema, input_path)
+                root_file.Delete(f"{SCHEMA_KEY};*")
+                root_file.WriteObject(
+                    ROOT.TObjString(json.dumps(schema, separators=(",", ":"))),
+                    SCHEMA_KEY,
+                )
+
+            if native:
+                specifications = []
+                roles = ["channel", "control", "sample", "systematic", "observable"]
+                for metadata, _, axis_indices in histogram_records:
+                    axes = metadata["axes"]
+                    specifications.append((
+                        f"{schema['directory']}/{metadata['key']}", metadata["name"],
+                        [axis_indices[role] for role in roles],
+                        [axes[axis_indices[role]]["labels"] for role in roles[:4]],
+                        axes[axis_indices["observable"]]["edges"],
+                    ))
+                root_file.Close()
+                root_file = None
+                written = int(reader.extract_sparse_slices(working_path, specifications))
+            else:
+                written = 0
+                for metadata, sparse, axis_indices in histogram_records:
+                    axes = metadata["axes"]
+                    channel_labels = axes[axis_indices["channel"]]["labels"]
+                    control_labels = axes[axis_indices["control"]]["labels"]
+                    sample_labels = axes[axis_indices["sample"]]["labels"]
+                    systematic_labels = axes[axis_indices["systematic"]]["labels"]
+                    observable_axis_index = axis_indices["observable"]
+                    observable_metadata = axes[observable_axis_index]
+                    observable_axis = sparse.GetAxis(observable_axis_index)
+                    edges = _histogram_axis_edges(observable_axis, observable_metadata)
+                    n_bins = int(observable_metadata["bins"])
+
+                    output_hists: dict[tuple[int, int, int, int], Any] = {}
+                    for channel_bin, channel in enumerate(channel_labels, start=1):
+                        for control_bin, control in enumerate(control_labels, start=1):
+                            for sample_bin in sorted(populated_sample_bins):
+                                if sample_bin > len(sample_labels):
                                     continue
-                                histogram_name = metadata["name"]
-                                if systematic != "Nominal":
-                                    histogram_name += "_" + systematic
-                                output_hist.Write(
-                                    histogram_name, ROOT.TObject.kOverwrite
-                                )
-                                output_hist.SetDirectory(0)
-                            root_file.cd()
+                                sample = sample_labels[sample_bin - 1]
+                                for systematic_bin, systematic in enumerate(
+                                    systematic_labels, start=1
+                                ):
+                                    if systematic_bin > int(
+                                        sparse.GetAxis(axis_indices["systematic"]).GetNbins()
+                                    ):
+                                        continue
+                                    histogram_name = metadata["name"]
+                                    if systematic != "Nominal":
+                                        histogram_name += "_" + systematic
+                                    output_key = (
+                                        channel_bin,
+                                        control_bin,
+                                        sample_bin,
+                                        systematic_bin,
+                                    )
+                                    title = (
+                                        f"{metadata['name']};{metadata['name']};Counts"
+                                    )
+                                    output_hist = ROOT.TH1F(
+                                        histogram_name,
+                                        title,
+                                        n_bins,
+                                        array("d", edges),
+                                    )
+                                    output_hist.Sumw2()
+                                    output_hist.SetDirectory(0)
+                                    output_hists[output_key] = output_hist
+                                    written += 1
 
+                    for coordinates, content, sumw2 in _sparse_bins(sparse):
+                        channel_bin = coordinates[axis_indices["channel"]]
+                        control_bin = coordinates[axis_indices["control"]]
+                        sample_bin = coordinates[axis_indices["sample"]]
+                        systematic_bin = coordinates[axis_indices["systematic"]]
+                        observable_bin = coordinates[observable_axis_index]
+                        if min(channel_bin, control_bin, sample_bin, systematic_bin) <= 0:
+                            continue
+                        if channel_bin > len(channel_labels) or control_bin > len(control_labels):
+                            continue
+                        if sample_bin > len(sample_labels) or systematic_bin > len(systematic_labels):
+                            continue
+                        if content == 0.0 and sumw2 == 0.0:
+                            continue
+                        output_hist = output_hists.get(
+                            (channel_bin, control_bin, sample_bin, systematic_bin)
+                        )
+                        if output_hist is None:
+                            continue
+                        output_hist.SetBinContent(observable_bin, content)
+                        output_hist.SetBinError(observable_bin, math.sqrt(max(0.0, sumw2)))
+
+                    # Write after filling; pre-created objects preserve empty
+                    # category and systematic combinations in the output.
+                    for channel_bin, channel in enumerate(channel_labels, start=1):
+                        for control_bin, control in enumerate(control_labels, start=1):
+                            for sample_bin in sorted(populated_sample_bins):
+                                if sample_bin > len(sample_labels):
+                                    continue
+                                sample = sample_labels[sample_bin - 1]
+                                directory_path = f"{channel}_{control}/{sample}"
+                                destination = _directory_for_path(root_file, directory_path)
+                                destination.cd()
+                                for systematic_bin, systematic in enumerate(
+                                    systematic_labels, start=1
+                                ):
+                                    key = (
+                                        channel_bin,
+                                        control_bin,
+                                        sample_bin,
+                                        systematic_bin,
+                                    )
+                                    output_hist = output_hists.get(key)
+                                    if output_hist is None:
+                                        continue
+                                    histogram_name = metadata["name"]
+                                    if systematic != "Nominal":
+                                        histogram_name += "_" + systematic
+                                    output_hist.Write(
+                                        histogram_name, ROOT.TObject.kOverwrite
+                                    )
+                                    output_hist.SetDirectory(0)
+                                root_file.cd()
         finally:
-            root_file.Close()
+            if root_file:
+                root_file.Close()
 
         os.replace(working_path, output_path)
         return written
@@ -409,8 +526,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--output",
         help="Output ROOT file (defaults to atomically updating the input file)",
     )
+    parser.add_argument(
+        "--nominal-only",
+        action="store_true",
+        help="expose only the Nominal systematic slice in schema and reconstructed histograms",
+    )
     args = parser.parse_args(argv)
-    count = extract_nd_histograms(args.input, args.output)
+    count = extract_nd_histograms(
+        args.input, args.output, nominal_only=args.nominal_only
+    )
     print(f"Wrote {count} reconstructed 1D histogram(s).")
     return 0
 

@@ -2,6 +2,13 @@
 
 A powerful, config-driven framework for building physics analyses with ROOT RDataFrame.
 
+CMS support is an [optional separate checkout](docs/CMS_EXTENSION.md). Existing
+analyses continue to link `coreAll`; use `-DRDF_BUILD_EXTENSIONS=OFF` for a generic
+build. Combine and CombineHarvester integration remain available in core.
+
+[Run bundles](docs/RUN_BUNDLES.md) provide verified configuration snapshots,
+independent run collections, and shared execution/reduction identities.
+
 [![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](https://brkronheim.github.io/RDFAnalyzerCore/)
 [![ROOT](https://img.shields.io/badge/ROOT-6.30%2B-blue.svg)](https://root.cern/)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)

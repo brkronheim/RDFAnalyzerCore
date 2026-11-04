@@ -1,5 +1,8 @@
 # CMS Combine Integration
 
+For shared Combine/Rabbit fit execution, CUDA setup, and the vjet polynomial
+adapter, see [Combine and Rabbit statistical backends](RABBIT_INTEGRATION.md).
+
 This guide explains how to use RDFAnalyzerCore with CMS Combine for statistical analysis, limit setting, and fits.
 
 ## Overview

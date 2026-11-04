@@ -31,7 +31,7 @@ SKIP_EXIT_CODE = 77
 
 
 def _add_module_path() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     module_path = Path(
         os.environ.get("RDFANALYZER_PYTHON_MODULE_DIR", repo_root / "build" / "python")
     )
@@ -46,6 +46,8 @@ def _require_imports():
     except Exception as exc:
         print(f"SKIP: unable to import rdfanalyzer: {exc}")
         sys.exit(SKIP_EXIT_CODE)
+
+    print(f"Using rdfanalyzer: {rdfanalyzer.__file__}")
 
     try:
         import uproot  # type: ignore
@@ -67,15 +69,19 @@ def _write_input_root(uproot_module, input_file: Path) -> None:
     # verify that systematic expressions read the matching Up/Down columns.
     import numpy as np
     arr = np.array([10.0, 30.0, 50.0], dtype="float64")
+    columns = {
+        "pt": arr,
+        "pt_jesUp": np.array([12.0, 36.0, 60.0], dtype="float64"),
+        "pt_jesDown": np.array([8.0, 24.0, 40.0], dtype="float64"),
+        "first": np.array([1.0, 2.0, 3.0], dtype="float64"),
+        "first_jesUp": np.array([11.0, 22.0, 33.0], dtype="float64"),
+        "first_jesDown": np.array([7.0, 8.0, 9.0], dtype="float64"),
+    }
+    # The input backend consumes TTrees. Assignment syntax can create an
+    # RNTuple in newer Uproot versions, so make the fixture format explicit.
     with uproot_module.recreate(str(input_file)) as f:
-        f["Events"] = {
-            "pt": arr,
-            "pt_jesUp": np.array([12.0, 36.0, 60.0], dtype="float64"),
-            "pt_jesDown": np.array([8.0, 24.0, 40.0], dtype="float64"),
-            "first": np.array([1.0, 2.0, 3.0], dtype="float64"),
-            "first_jesUp": np.array([11.0, 22.0, 33.0], dtype="float64"),
-            "first_jesDown": np.array([7.0, 8.0, 9.0], dtype="float64"),
-        }
+        f.mktree("Events", {name: values.dtype for name, values in columns.items()})
+        f["Events"].extend(columns)
 
 
 def _write_save_config(save_config: Path) -> None:
@@ -258,10 +264,18 @@ def run_test() -> int:
         if "myPt" not in analyzer.getVariablesForSystematic("btag"):
             raise AssertionError("autoRegisterSystematics: 'myPt' not affected by 'btag'")
 
-        # An incomplete pair (missing Down) should appear in 'missing_down'
-        orphan_result = analyzer.autoRegisterSystematics(["orphanVar_xUp"])
+        # Discovery requires each nominal base in the available-column list.
+        # Incomplete pairs are reported but must not be registered; unrelated
+        # suffix-like names without a nominal base must be ignored.
+        orphan_result = analyzer.autoRegisterSystematics(
+            ["orphanVar", "orphanVar_xUp", "downOnly", "downOnly_yDown", "stray_zUp"]
+        )
         if "orphanVar_xUp" not in orphan_result.get("missing_down", []):
             raise AssertionError("autoRegisterSystematics did not report missing_down for orphanVar_xUp")
+        if orphan_result.get("missing_up") != ["downOnly_yDown"]:
+            raise AssertionError("autoRegisterSystematics did not report the orphan Down column")
+        if orphan_result.get("registered") or "stray_zUp" in orphan_result.get("missing_down", []):
+            raise AssertionError("autoRegisterSystematics registered an incomplete pair or accepted an absent base")
 
         analyzer.AddPlugin("onnx", "OnnxManager")
         analyzer.AddPlugin("bdt", "BDTManager")

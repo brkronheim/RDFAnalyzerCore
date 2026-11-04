@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plotting and rendering"
+  short_description: "Work with plotting and rendering"
+  default_prompt: "Use $rdfanalyzer-plotting to trace plot inputs, normalization, uncertainties, and rendering behavior for the requested change."

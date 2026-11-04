@@ -1,8 +1,8 @@
 # JetEnergyScaleManager Reference
 
 > **Plugin class**: `JetEnergyScaleManager`
-> **Header**: `core/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
-> **Source**: `core/plugins/JetEnergyScaleManager/JetEnergyScaleManager.cc`
+> **Header**: `extensions/cms/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
+> **Source**: `extensions/cms/plugins/JetEnergyScaleManager/JetEnergyScaleManager.cc`
 
 ---
 
@@ -308,6 +308,11 @@ This method is intended for payloads where:
 - unmatched jets require stochastic smearing
 
 The output smearing is reproducible because the random seed is derived from the event id and jet index.
+Finite negative hybrid factors are truncated to zero, setting both corrected
+pT and mass to zero. Nonfinite factors raise an error. New output provenance
+records `jer_smearing_policy=hybrid-nonnegative-v2`; earlier outputs may retain
+the historical nonpositive-to-unity fallback and require reprocessing to change
+their jet momenta and MET.
 
 ---
 

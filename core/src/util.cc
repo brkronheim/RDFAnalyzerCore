@@ -317,12 +317,17 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
     const auto last = it->second.find_last_not_of(" \t\n\r");
     return it->second.substr(first, last - first + 1);
   };
-  const auto backend = setting("rootInputBackend");
+  auto backend = setting("rootInputBackend");
+#ifdef RDF_HAS_XRD_ADAPTOR
+  if (backend.empty()) backend = "xrd-adaptor";
+#else
+  if (backend.empty()) backend = "root";
+#endif
   const auto nextFilePrefetch = setting("treeCachePrefetchNextFile");
   const bool wantsNextFilePrefetch =
       nextFilePrefetch == "1" || nextFilePrefetch == "true" ||
       nextFilePrefetch == "True";
-  if (backend.empty() || backend == "root") {
+  if (backend == "root") {
     if (wantsNextFilePrefetch)
       throw std::runtime_error(
           "treeCachePrefetchNextFile requires rootInputBackend=xrd-adaptor.");
@@ -351,7 +356,7 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
                              value + "'.");
   };
   const auto probeSeconds = integer("xrdSourceProbeIntervalSeconds", 5, 300);
-  const auto cacheMB = integer("xrdPrefetchCacheMB", 256, 131072);
+  const auto cacheMB = integer("xrdPrefetchCacheMB", 32, 131072);
   const auto preferredSiteBand = integer("xrdPreferredSiteBandPercent", 20, 100);
   const auto explorationShare = integer("xrdExplorationSharePercent", 10, 50);
   const auto maxReadSources = integer("xrdMaxReadSources", 2, 2);
@@ -362,10 +367,14 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
   if (readTimeoutSeconds == 0)
     throw std::runtime_error(
         "Invalid 'xrdReadTimeoutSeconds' value '0' (expected 1 to 300).");
+  const auto openTimeoutSeconds = integer("xrdOpenTimeoutSeconds", 30, 300);
+  if (openTimeoutSeconds == 0)
+    throw std::runtime_error(
+        "Invalid 'xrdOpenTimeoutSeconds' value '0' (expected 1 to 300).");
   rdf::xrd::configureXrdAdaptor(
       probeSeconds, static_cast<std::size_t>(cacheMB) * 1024 * 1024,
       preferredSiteBand, explorationShare, maxReadSources,
-      readTimeoutSeconds);
+      readTimeoutSeconds, openTimeoutSeconds);
   rdf::xrd::registerXrdAdaptor();
   std::cout << "ROOT input backend: XrdAdaptor (source probe interval="
             << probeSeconds << " s, handoff cache=" << cacheMB
@@ -373,7 +382,8 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
             << "% with 10% hysteresis, exploration sample budget="
             << explorationShare << "% max 2 MiB/read, max full-read sites="
             << maxReadSources << ", read/request timeout="
-            << readTimeoutSeconds << " s, exploration site enabled="
+            << readTimeoutSeconds << " s, initial-open timeout="
+            << openTimeoutSeconds << " s, exploration site enabled="
             << (explorationShare > 0 ? "yes" : "no") << ")\n";
 #endif
 }

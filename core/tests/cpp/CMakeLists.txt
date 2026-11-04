@@ -13,14 +13,34 @@ target_link_libraries(testProvenanceService core gtest gtest_main)
 add_test(NAME ProvenanceServiceTest COMMAND testProvenanceService)
 
 # Basic functionality tests
+add_executable(testRootRegistryOptimization testRootRegistryOptimization.cc)
+target_link_libraries(testRootRegistryOptimization PRIVATE core gtest gtest_main)
+target_compile_definitions(testRootRegistryOptimization PRIVATE
+    RDF_EXPECT_ROOT_REGISTRY=$<BOOL:${RDF_ROOT_REGISTRY_AVAILABLE}>)
+add_test(NAME RootRegistryOptimizationTest COMMAND testRootRegistryOptimization)
+add_test(NAME RootRegistryOptimizationDisabledTest COMMAND testRootRegistryOptimization)
+set_tests_properties(RootRegistryOptimizationDisabledTest PROPERTIES
+    ENVIRONMENT "RDF_ROOT_REGISTRY_OPTIMIZATION=0")
 
 if(TARGET RDFXrdAdaptor)
     add_executable(testXrdOpenRetry testXrdOpenRetry.cc)
     target_include_directories(testXrdOpenRetry PRIVATE
         "${CMAKE_SOURCE_DIR}/core/xrd" "${XRDCL_INCLUDE_DIR}")
-    target_link_libraries(testXrdOpenRetry PRIVATE "${XRDCL_LIBRARY}" gtest gtest_main)
+    target_link_libraries(testXrdOpenRetry PRIVATE RDFXrdAdaptor gtest gtest_main)
     target_compile_features(testXrdOpenRetry PRIVATE cxx_std_17)
     add_test(NAME XrdOpenRetryTest COMMAND testXrdOpenRetry)
+
+    add_executable(testXrdReadMemory testXrdReadMemory.cc)
+    target_include_directories(testXrdReadMemory PRIVATE
+        "${CMAKE_SOURCE_DIR}/core/xrd" "${XRDCL_INCLUDE_DIR}")
+    target_link_libraries(testXrdReadMemory PRIVATE "${XRDCL_LIBRARY}" gtest gtest_main)
+    target_compile_features(testXrdReadMemory PRIVATE cxx_std_17)
+    add_test(NAME XrdReadMemoryTest COMMAND testXrdReadMemory)
+
+    add_executable(testXrdSharedFile testXrdSharedFile.cc)
+    target_link_libraries(testXrdSharedFile PRIVATE RDFXrdAdaptor gtest gtest_main)
+    target_compile_features(testXrdSharedFile PRIVATE cxx_std_17)
+    add_test(NAME XrdSharedFileTest COMMAND testXrdSharedFile)
 endif()
 
 add_executable(testConfigurationManager testConfigurationManager.cc)
@@ -150,29 +170,14 @@ add_executable(testCutflowManager testCutflowManager.cc)
 target_link_libraries(testCutflowManager coreAll gtest gtest_main)
 add_test(NAME CutflowManagerTest COMMAND testCutflowManager)
 
-add_executable(testJetEnergyScaleManager testJetEnergyScaleManager.cc)
-target_link_libraries(testJetEnergyScaleManager coreAll gtest gtest_main)
-add_test(NAME JetEnergyScaleManagerTest COMMAND testJetEnergyScaleManager)
 
 add_executable(testTaggerWorkingPointManager testTaggerWorkingPointManager.cc)
 target_link_libraries(testTaggerWorkingPointManager coreAll gtest gtest_main)
 add_test(NAME TaggerWorkingPointManagerTest COMMAND testTaggerWorkingPointManager)
 
-add_executable(testLeptonPhotonEnergyManagers testLeptonPhotonEnergyManagers.cc)
-target_link_libraries(testLeptonPhotonEnergyManagers coreAll gtest gtest_main)
-add_test(NAME LeptonPhotonEnergyManagersTest COMMAND testLeptonPhotonEnergyManagers)
 
-add_executable(testCmsElectronCorrections testCmsElectronCorrections.cc)
-target_link_libraries(testCmsElectronCorrections coreAll gtest gtest_main)
-add_test(NAME CmsElectronCorrectionsTest COMMAND testCmsElectronCorrections)
 
-add_executable(testCmsMetCorrections testCmsMetCorrections.cc)
-target_link_libraries(testCmsMetCorrections coreAll gtest gtest_main)
-add_test(NAME CmsMetCorrectionsTest COMMAND testCmsMetCorrections)
 
-add_executable(testCorrectedObjectCollectionManagers testCorrectedObjectCollectionManagers.cc)
-target_link_libraries(testCorrectedObjectCollectionManagers coreAll gtest gtest_main)
-add_test(NAME CorrectedObjectCollectionManagersTest COMMAND testCorrectedObjectCollectionManagers)
 
 add_executable(testRegionManager testRegionManager.cc)
 target_link_libraries(testRegionManager coreAll gtest gtest_main)
@@ -186,9 +191,6 @@ add_executable(testGenWeightManager testGenWeightManager.cc)
 target_link_libraries(testGenWeightManager coreAll gtest gtest_main)
 add_test(NAME GenWeightManagerTest COMMAND testGenWeightManager)
 
-add_executable(testGoldenJsonManager testGoldenJsonManager.cc)
-target_link_libraries(testGoldenJsonManager coreAll gtest gtest_main)
-add_test(NAME GoldenJsonManagerTest COMMAND testGoldenJsonManager)
 
 
 add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)
@@ -207,7 +209,7 @@ add_executable(testRootEnvironmentGuard testRootEnvironmentGuard.cc)
 target_link_libraries(testRootEnvironmentGuard core gtest gtest_main)
 add_test(NAME RootEnvironmentGuardTest COMMAND testRootEnvironmentGuard)
 
-add_executable(testPlottingUtility testPlottingUtility.cc)
+add_executable(testPlottingUtility testPlottingUtility.cc testPlottingSession.cc)
 target_link_libraries(testPlottingUtility core gtest gtest_main)
 add_test(NAME PlottingUtilityTest COMMAND testPlottingUtility)
 
@@ -222,6 +224,16 @@ add_test(NAME OnnxManagerGpuIntegrationTest COMMAND testOnnxManagerGpu)
 endif()
 
 if(TARGET rdfanalyzer AND Python_EXECUTABLE)
+add_test(NAME ExtensionBuildIntegrationTest COMMAND ${Python_EXECUTABLE}
+         ${CMAKE_CURRENT_SOURCE_DIR}/test_extension_build.py
+         ${CMAKE_BINARY_DIR}/python "${RDF_ENABLED_EXTENSIONS}")
+set_tests_properties(ExtensionBuildIntegrationTest PROPERTIES
+                     ENVIRONMENT "PYTHONPATH=$ENV{PYTHONPATH}"
+                     TIMEOUT 60)
+add_test(NAME PythonPlottingBindingsTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_plotting_bindings.py)
+set_tests_properties(PythonPlottingBindingsTest PROPERTIES
+                    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python;RDF_PLOT_EXECUTABLE=$<TARGET_FILE:rdf-plot>")
 add_test(NAME PythonBindingsIntegrationTest
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_bindings.py)
 # Prepend our build/python to PYTHONPATH but preserve the user's PYTHONPATH
@@ -264,3 +276,7 @@ add_test(
         -DCOMBINEHARVESTER_LIBRARY_DIR=${COMBINEHARVESTER_LIBRARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyCombineHarvesterConfig.cmake)
 endif()
+
+add_executable(testStxsManager testStxsManager.cc)
+target_link_libraries(testStxsManager PRIVATE core corePlugins gtest gtest_main)
+add_test(NAME StxsManagerTest COMMAND testStxsManager)

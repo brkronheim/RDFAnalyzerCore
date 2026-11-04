@@ -37,7 +37,7 @@ RDFXrdFile::RDFXrdFile(const char *path, Option_t *option, const char *title,
   }
 
   try {
-    sourceManager_ = rdf::xrd::makeXrdSourceManager(path);
+    sourceManager_ = rdf::xrd::acquireXrdSourceManager(path);
     fRealName = path;
     // Keep ROOT's internal suffix through Init(): it removes the suffix and
     // disables global TFile registration for this open.
@@ -140,9 +140,11 @@ Bool_t RDFXrdFile::IsOpen() const {
 
 void RDFXrdFile::Close(Option_t *option) {
   if (closed_) return;
-  if (sourceManager_) sourceManager_->stop();
   TFile::Close(option);
   closed_ = true;
+  // A warmed file and the active TChain reader can share this transport.
+  // Closing one file must not stop its peer; the last owner stops the manager.
+  sourceManager_.reset();
 }
 
 Int_t RDFXrdFile::SysOpen(const char *, Int_t, UInt_t) { return 0; }

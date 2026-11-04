@@ -7,6 +7,7 @@
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
 #include <correction.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -24,7 +25,7 @@ class Analyzer;
  *
  * Corrections can be registered either from a config file (via the constructor
  * or setupFromConfigFile()) or directly from C++ using registerCorrection().
- * During evaluation, each std::out_of_range fallback writes a warning to
+ * During evaluation, each range/category fallback writes a warning to
  * stderr with the correction name, exception, inputs, and fallback value.
  */
 class CorrectionManager
@@ -122,6 +123,11 @@ public:
    * underscores) so that the same correction can be applied with different
    * variations without column name collisions.
    *
+   * Only scalars broadcast. All vector inputs must have equal lengths;
+   * malformed arrays and non-finite numeric inputs/results throw. Every
+   * payload range/category fallback reports the correction, ordered input
+   * values/names and original error to stderr, while retaining unity.
+   *
    * @param correctionName  Name of the correction (must have been loaded via
    *        the configuration or registerCorrection()).
    * @param stringArguments Constant string arguments consumed by the
@@ -154,6 +160,66 @@ public:
                           const std::vector<std::string> &stringArguments,
                           const std::vector<std::string> &inputColumns = {},
                           const std::string &outputBranch = "");
+
+  struct VectorCorrectionCase {
+    std::string correctionName;
+    std::vector<std::string> stringArguments;
+  };
+
+  /** Evaluate exactly one case per object, selected before calling correctionlib.
+   * selectorColumn is an aligned RVec<int> of zero-based case indices. Numeric
+   * inputs share the same ordered columns across cases; scalars broadcast and
+   * arrays must align. Invalid selectors/inputs throw. Range/category failures
+   * retain the logged unity fallback. Input/selector systematics propagate.
+   */
+  void applySelectedCorrectionsVec(
+      const std::vector<VectorCorrectionCase> &cases,
+      const std::string &selectorColumn,
+      const std::vector<std::string> &inputColumns,
+      const std::string &outputBranch,
+      bool propagateSystematics = true);
+
+  /// Selected outputs sharing numeric inputs and a selector use one pack per
+  /// input variation. Sharing lasts only for this call, preserving Redefine.
+  void applySelectedCorrectionsVecBatch(
+      const std::vector<std::vector<VectorCorrectionCase>> &caseSets,
+      const std::string &selectorColumn,
+      const std::vector<std::string> &inputColumns,
+      const std::vector<std::string> &outputBranches,
+      const std::vector<bool> &propagateSystematics = {});
+
+  /// Scalar correction gated by a bool column. Inactive events return unity
+  /// without calling correctionlib; nominal-only outputs can opt out of shapes.
+  void applyConditionalCorrection(
+      const std::string &correctionName,
+      const std::vector<std::string> &stringArguments,
+      const std::vector<std::string> &inputColumns,
+      const std::string &conditionColumn,
+      const std::string &outputBranch,
+      bool propagateSystematics = true);
+
+  /// Gated scalar variants share a numeric pack and consume the bool condition
+  /// directly, without allocating selector or result vectors for each output.
+  void applyConditionalCorrections(
+      const std::string &correctionName,
+      const std::vector<std::vector<std::string>> &argumentSets,
+      const std::vector<std::string> &inputColumns,
+      const std::string &conditionColumn,
+      const std::vector<std::string> &outputBranches,
+      const std::vector<bool> &propagateSystematics = {});
+
+  /** Fuse numeric input preparation with gated scalar evaluation. The callback
+   * runs on a private copy of the ordered numeric inputs, only for active
+   * events. It must preserve input count/order and be safe for concurrent RDF
+   * slots. The shared raw pack and other outputs are never modified. */
+  void applyConditionalCorrections(
+      const std::string &correctionName,
+      const std::vector<std::vector<std::string>> &argumentSets,
+      const std::vector<std::string> &inputColumns,
+      const std::string &conditionColumn,
+      const std::vector<std::string> &outputBranches,
+      const std::vector<bool> &propagateSystematics,
+      std::function<void(ROOT::VecOps::RVec<double> &)> prepareInputs);
 
   /// Apply several string-argument variants with one shared numeric input
   /// pack. Output branches must match argumentSets in length, or be empty to

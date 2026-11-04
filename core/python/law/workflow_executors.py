@@ -386,7 +386,7 @@ def _run_analysis_job(
 
     gpu_devices = [
         device.strip()
-        for device in os.environ.get("RDF_VH_GPU_DEVICE_IDS", "").split(",")
+        for device in os.environ.get("RDF_GPU_DEVICE_IDS", os.environ.get("RDF_VH_GPU_DEVICE_IDS", "")).split(",")
         if device.strip()
     ]
     gpu_setup: list[str] = []
@@ -418,6 +418,7 @@ def _run_analysis_job(
 
     cmd_parts.extend([
         f"cd {shlex.quote(job_dir)}",
+        'export LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
         'export ROOT_INCLUDE_PATH="$PWD${ROOT_INCLUDE_PATH:+:$ROOT_INCLUDE_PATH}"',
         "if [ -f x509 ]; then export X509_USER_PROXY=$PWD/x509; fi",
         f"chmod +x {shlex.quote(exe_path)}",
@@ -562,7 +563,7 @@ def _run_analysis_job(
                 + (f"\nstderr:\n{stderr_tail}" if stderr_tail else "")
             )
 
-    if os.environ.get("RDF_VH_JOB_SUMMARY", "").strip().lower() in {
+    if os.environ.get("RDF_JOB_SUMMARY", os.environ.get("RDF_VH_JOB_SUMMARY", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }:
         output = "\n".join((stdout_data or "", stderr_data or ""))

@@ -21,12 +21,8 @@
 #include <OnnxManager.h>
 #include <BDTManager.h>
 #include <CorrectionManager.h>
-#include "../plugins/CorrectedObjectCollectionManagers/CorrectedObjectCollectionManagers.h"
-#include <ElectronEnergyScaleManager.h>
-#include <JetEnergyScaleManager.h>
-#include <MuonRochesterManager.h>
-#include <PhotonEnergyScaleManager.h>
-#include <TauEnergyScaleManager.h>
+#include <ExtensionConfig.h>
+#include <ExtensionPythonPlugins.h>
 #include <TriggerManager.h>
 #include <SofieManager.h>
 #include <NDHistogramManager.h>
@@ -45,6 +41,8 @@
 #include <unordered_map>
 
 namespace py = pybind11;
+
+void bindHistogramIO(py::module_ &module);
 
 // Whitelist of allowed element types for DefineFromVector
 static const std::set<std::string> ALLOWED_ELEMENT_TYPES = {
@@ -615,40 +613,18 @@ public:
             analyzer_.addPlugin(role, std::make_unique<BDTManager>(cfg));
         } else if (normalized == "correction") {
             analyzer_.addPlugin(role, std::make_unique<CorrectionManager>(cfg));
-        } else if (normalized == "correctedjetcollection") {
-            auto mgr = analyzer_.getPlugin<JetEnergyScaleManager>("jetEnergyScaleManager");
-            if (!mgr) throw std::runtime_error("CorrectedJetCollectionManager requires plugin role 'jetEnergyScaleManager'");
-            analyzer_.addPlugin(role, std::make_unique<CorrectedJetCollectionManager>(*mgr));
-        } else if (normalized == "correctedfatjetcollection") {
-            auto mgr = analyzer_.getPlugin<JetEnergyScaleManager>("fatJetEnergyScaleManager");
-            if (!mgr) throw std::runtime_error("CorrectedFatJetCollectionManager requires plugin role 'fatJetEnergyScaleManager'");
-            analyzer_.addPlugin(role, std::make_unique<CorrectedFatJetCollectionManager>(*mgr));
-        } else if (normalized == "correctedelectroncollection") {
-            auto mgr = analyzer_.getPlugin<ElectronEnergyScaleManager>("electronEnergyScaleManager");
-            if (!mgr) throw std::runtime_error("CorrectedElectronCollectionManager requires plugin role 'electronEnergyScaleManager'");
-            analyzer_.addPlugin(role, std::make_unique<CorrectedElectronCollectionManager>(*mgr));
-        } else if (normalized == "correctedmuoncollection") {
-            auto mgr = analyzer_.getPlugin<MuonRochesterManager>("muonRochesterManager");
-            if (!mgr) throw std::runtime_error("CorrectedMuonCollectionManager requires plugin role 'muonRochesterManager'");
-            analyzer_.addPlugin(role, std::make_unique<CorrectedMuonCollectionManager>(*mgr));
-        } else if (normalized == "correctedtaucollection") {
-            auto mgr = analyzer_.getPlugin<TauEnergyScaleManager>("tauEnergyScaleManager");
-            if (!mgr) throw std::runtime_error("CorrectedTauCollectionManager requires plugin role 'tauEnergyScaleManager'");
-            analyzer_.addPlugin(role, std::make_unique<CorrectedTauCollectionManager>(*mgr));
-        } else if (normalized == "correctedphotoncollection") {
-            auto mgr = analyzer_.getPlugin<PhotonEnergyScaleManager>("photonEnergyScaleManager");
-            if (!mgr) throw std::runtime_error("CorrectedPhotonCollectionManager requires plugin role 'photonEnergyScaleManager'");
-            analyzer_.addPlugin(role, std::make_unique<CorrectedPhotonCollectionManager>(*mgr));
         } else if (normalized == "trigger") {
             analyzer_.addPlugin(role, std::make_unique<TriggerManager>(cfg));
         } else if (normalized == "sofie") {
             analyzer_.addPlugin(role, std::make_unique<SofieManager>(cfg));
         } else if (normalized == "ndhistogram") {
             analyzer_.addPlugin(role, std::make_unique<NDHistogramManager>(cfg));
+        } else if (rdf::addExtensionPythonPlugin(analyzer_, role, normalized)) {
+            // The selected source extensions own their concrete managers.
         } else {
             throw std::invalid_argument(
-                "Unsupported plugin type: '" + pluginType + "'. Supported: "
-                "OnnxManager, BDTManager, CorrectionManager, CorrectedJetCollectionManager, CorrectedFatJetCollectionManager, CorrectedElectronCollectionManager, CorrectedMuonCollectionManager, CorrectedTauCollectionManager, CorrectedPhotonCollectionManager, TriggerManager, SofieManager, NDHistogramManager"
+                "Unavailable plugin type (check optional extensions): '" + pluginType + "'. Supported: "
+                "OnnxManager, BDTManager, CorrectionManager, TriggerManager, SofieManager, NDHistogramManager"
             );
         }
         return *this;
@@ -1000,7 +976,29 @@ private:
 };
 
 PYBIND11_MODULE(rdfanalyzer, m) {
+    py::list enabledExtensions;
+    for (const auto &extension : rdf::extensionBuildInfo) {
+        if (extension.enabled) enabledExtensions.append(extension.name);
+        if (extension.capability[0] != '\0')
+            m.attr(extension.capability) = extension.enabled;
+    }
+    m.attr("enabled_extensions") = enabledExtensions;
+    m.def("has_extension", [](const std::string &name) {
+        for (const auto &extension : rdf::extensionBuildInfo)
+            if (name == extension.name) return extension.enabled;
+        return false;
+    });
+    m.def("__getattr__", [](const std::string &attribute) -> py::object {
+        if (attribute.compare(0, 4, "has_") == 0) {
+            const auto name = attribute.substr(4);
+            for (const auto &extension : rdf::extensionBuildInfo)
+                if (name == extension.name) return py::bool_(extension.enabled);
+            return py::bool_(false);
+        }
+        throw py::attribute_error("module rdfanalyzer has no attribute " + attribute);
+    });
     m.doc() = "Python bindings for RDFAnalyzerCore framework";
+    bindHistogramIO(m);
 
     py::class_<histInfo>(m, "HistInfo",
         "Histogram booking descriptor equivalent to C++ histInfo")
@@ -1425,34 +1423,54 @@ PYBIND11_MODULE(rdfanalyzer, m) {
     // Version info
     m.attr("__version__") = "1.0.0";
 
-    // ---------------------------------------------------------------------------
-    // PlottingUtility bindings
-    // ---------------------------------------------------------------------------
+    // Plotting calculations and rendering run entirely in C++.
+    py::enum_<PlotKind>(m, "PlotKind")
+        .value("Stack", PlotKind::Stack)
+        .value("Overlay", PlotKind::Overlay)
+        .value("Heatmap", PlotKind::Heatmap);
+    py::enum_<PlotPanel>(m, "PlotPanel")
+        .value("Ratio", PlotPanel::Ratio)
+        .value("Pull", PlotPanel::Pull)
+        .value("SignalBackground", PlotPanel::SignalBackground)
+        .value("Significance", PlotPanel::Significance);
+    py::enum_<PlotExperiment>(m, "PlotExperiment")
+        .value("CMS", PlotExperiment::CMS)
+        .value("ATLAS", PlotExperiment::ATLAS)
+        .value("LHCb", PlotExperiment::LHCb)
+        .value("ALICE", PlotExperiment::ALICE)
+        .value("Custom", PlotExperiment::Custom);
+    py::enum_<PlotFlow>(m, "PlotFlow")
+        .value("Drop", PlotFlow::Drop)
+        .value("Fold", PlotFlow::Fold);
+    py::class_<PlotVariation>(m, "PlotVariation")
+        .def(py::init<>())
+        .def_readwrite("name", &PlotVariation::name)
+        .def_readwrite("up", &PlotVariation::up)
+        .def_readwrite("down", &PlotVariation::down);
 
-    py::class_<PlotProcessConfig>(m, "PlotProcessConfig",
-        R"pbdoc(
-        Configuration for a single process in a stack plot.
+    py::class_<PlotPanelConfig>(m, "PlotPanelConfig")
+        .def(py::init<>())
+        .def_readwrite("type", &PlotPanelConfig::type)
+        .def_readwrite("minimum", &PlotPanelConfig::minimum)
+        .def_readwrite("maximum", &PlotPanelConfig::maximum)
+        .def_readwrite("autoRange", &PlotPanelConfig::autoRange);
 
-        Parameters
-        ----------
-        directory : str
-            TDirectory name inside the meta file (empty string = file root).
-        histogramName : str
-            Name of the TH1D histogram to retrieve.
-        legendLabel : str
-            Label shown in the plot legend.
-        color : int
-            ROOT color index used for fill/line.
-        scale : float
-            Manual normalization scale factor (multiplied on top of the
-            normalization histogram scale when provided).
-        normalizationHistogram : str
-            Optional name of a TH1 whose bin-1 content is used to normalize
-            the histogram (e.g. ``counter_weightSum_<sample>``).
-        isData : bool
-            When *True* the histogram is drawn as data points instead of a
-            filled stack contribution.
-        )pbdoc")
+    py::class_<PlotStyle>(m, "PlotStyle")
+        .def(py::init<>())
+        .def_readwrite("width", &PlotStyle::width)
+        .def_readwrite("height", &PlotStyle::height)
+        .def_readwrite("labelSize", &PlotStyle::labelSize)
+        .def_readwrite("titleSize", &PlotStyle::titleSize)
+        .def_readwrite("legendSize", &PlotStyle::legendSize)
+        .def_readwrite("leftMargin", &PlotStyle::leftMargin)
+        .def_readwrite("rightMargin", &PlotStyle::rightMargin)
+        .def_readwrite("legendColumns", &PlotStyle::legendColumns)
+        .def_readwrite("grid", &PlotStyle::grid)
+        .def_readwrite("legendInside", &PlotStyle::legendInside)
+        .def_readwrite("legendWidth", &PlotStyle::legendWidth)
+        .def_readwrite("annotationBoxWidth", &PlotStyle::annotationBoxWidth);
+
+    py::class_<PlotProcessConfig>(m, "PlotProcessConfig")
         .def(py::init<>())
         .def_readwrite("directory", &PlotProcessConfig::directory)
         .def_readwrite("histogramName", &PlotProcessConfig::histogramName)
@@ -1460,31 +1478,23 @@ PYBIND11_MODULE(rdfanalyzer, m) {
         .def_readwrite("color", &PlotProcessConfig::color)
         .def_readwrite("scale", &PlotProcessConfig::scale)
         .def_readwrite("normalizationHistogram", &PlotProcessConfig::normalizationHistogram)
-        .def_readwrite("isData", &PlotProcessConfig::isData);
+        .def_readwrite("isData", &PlotProcessConfig::isData)
+        .def_readwrite("files", &PlotProcessConfig::files)
+        .def_readwrite("isSignal", &PlotProcessConfig::isSignal)
+        .def_readwrite("overlay", &PlotProcessConfig::overlay)
+        .def_readwrite("displayScale", &PlotProcessConfig::displayScale)
+        .def_readwrite("group", &PlotProcessConfig::group)
+        .def_readwrite("values", &PlotProcessConfig::values)
+        .def_readwrite("variances", &PlotProcessConfig::variances)
+        .def_readwrite("errorLow", &PlotProcessConfig::errorLow)
+        .def_readwrite("errorHigh", &PlotProcessConfig::errorHigh)
+        .def_readwrite("variations", &PlotProcessConfig::variations)
+        .def_readwrite("selections", &PlotProcessConfig::selections)
+        .def_readwrite("readSystematics", &PlotProcessConfig::readSystematics)
+        .def_readwrite("colorHex", &PlotProcessConfig::colorHex)
+        .def_readwrite("referenceCovariance", &PlotProcessConfig::referenceCovariance);
 
-    py::class_<PlotRequest>(m, "PlotRequest",
-        R"pbdoc(
-        Full specification for a single stack plot.
-
-        Parameters
-        ----------
-        metaFile : str
-            Path to the ROOT meta output file produced by the analysis.
-        outputFile : str
-            Destination path for the saved plot (PDF, PNG, …).
-        title : str
-            Histogram/canvas title.
-        xAxisTitle : str
-            Label for the x-axis.
-        yAxisTitle : str
-            Label for the y-axis (default: ``"Counts"``).
-        logY : bool
-            Draw y-axis in log scale.
-        drawRatio : bool
-            Add a data/MC ratio (and pull) panel below the stack.
-        processes : list[PlotProcessConfig]
-            Ordered list of processes (MC first, data last).
-        )pbdoc")
+    py::class_<PlotRequest>(m, "PlotRequest")
         .def(py::init<>())
         .def_readwrite("metaFile", &PlotRequest::metaFile)
         .def_readwrite("outputFile", &PlotRequest::outputFile)
@@ -1493,95 +1503,81 @@ PYBIND11_MODULE(rdfanalyzer, m) {
         .def_readwrite("yAxisTitle", &PlotRequest::yAxisTitle)
         .def_readwrite("logY", &PlotRequest::logY)
         .def_readwrite("drawRatio", &PlotRequest::drawRatio)
-        .def_readwrite("processes", &PlotRequest::processes);
+        .def_readwrite("processes", &PlotRequest::processes)
+        .def_readwrite("kind", &PlotRequest::kind)
+        .def_readwrite("binEdges", &PlotRequest::binEdges)
+        .def_readwrite("binLabels", &PlotRequest::binLabels)
+        .def_readwrite("panels", &PlotRequest::panels)
+        .def_readwrite("blindBins", &PlotRequest::blindBins)
+        .def_readwrite("systematicLow", &PlotRequest::systematicLow)
+        .def_readwrite("systematicHigh", &PlotRequest::systematicHigh)
+        .def_readwrite("experimentLabel", &PlotRequest::experimentLabel)
+        .def_readwrite("luminosityLabel", &PlotRequest::luminosityLabel)
+        .def_readwrite("annotations", &PlotRequest::annotations)
+        .def_readwrite("style", &PlotRequest::style)
+        .def_readwrite("density", &PlotRequest::density)
+        .def_readwrite("strictNormalization", &PlotRequest::strictNormalization)
+        .def_readwrite("signalOverlay", &PlotRequest::signalOverlay)
+        .def_readwrite("flow", &PlotRequest::flow)
+        .def_readwrite("additionalOutputs", &PlotRequest::additionalOutputs)
+        .def_readwrite("matrix", &PlotRequest::matrix)
+        .def_readwrite("yBinEdges", &PlotRequest::yBinEdges)
+        .def_readwrite("yBinLabels", &PlotRequest::yBinLabels)
+        .def_readwrite("heatmapYRole", &PlotRequest::heatmapYRole)
+        .def_readwrite("zAxisTitle", &PlotRequest::zAxisTitle)
+        .def_readwrite("horizontalSeparators", &PlotRequest::horizontalSeparators)
+        .def_readwrite("symmetricColorRange", &PlotRequest::symmetricColorRange)
+        .def_readwrite("logZ", &PlotRequest::logZ)
+        .def_readwrite("referenceProcess", &PlotRequest::referenceProcess)
+        .def_readwrite("experiment", &PlotRequest::experiment)
+        .def_readwrite("experimentExtra", &PlotRequest::experimentExtra)
+        .def_readwrite("rebin", &PlotRequest::rebin);
 
-    py::class_<PlotResult>(m, "PlotResult",
-        R"pbdoc(
-        Result returned by :py:meth:`PlottingUtility.makeStackPlot`.
-
-        Attributes
-        ----------
-        success : bool
-            *True* if the plot was created and saved successfully.
-        message : str
-            Error description when *success* is *False*.
-        mcIntegral : float
-            Integral of the total MC stack histogram.
-        dataIntegral : float
-            Integral of the data histogram (0 when no data process is given).
-        )pbdoc")
+    py::class_<PlotResult>(m, "PlotResult")
         .def(py::init<>())
         .def_readwrite("success", &PlotResult::success)
         .def_readwrite("message", &PlotResult::message)
         .def_readwrite("mcIntegral", &PlotResult::mcIntegral)
-        .def_readwrite("dataIntegral", &PlotResult::dataIntegral);
+        .def_readwrite("dataIntegral", &PlotResult::dataIntegral)
+        .def_readwrite("mcVariance", &PlotResult::mcVariance)
+        .def_readwrite("warnings", &PlotResult::warnings)
+        .def_readwrite("outputs", &PlotResult::outputs);
 
-    py::class_<PlottingUtility>(m, "PlottingUtility",
-        R"pbdoc(
-        Utility for creating and saving analysis-style ROOT stack plots.
-
-        Creates MC-stack + optional data-overlay plots with ratio and pull
-        panels directly from the meta output ROOT file produced by the
-        analysis framework.  Plots can be saved to any format supported by
-        ROOT's ``TCanvas::SaveAs`` (PDF, PNG, …).
-
-        Examples
-        --------
-        >>> import rdfanalyzer
-        >>> pu = rdfanalyzer.PlottingUtility()
-        >>>
-        >>> proc_mc = rdfanalyzer.PlotProcessConfig()
-        >>> proc_mc.directory = "signal"
-        >>> proc_mc.histogramName = "pt"
-        >>> proc_mc.legendLabel = "Signal MC"
-        >>> proc_mc.color = 2  # kRed
-        >>> proc_mc.normalizationHistogram = "counter_weightSum_signal"
-        >>>
-        >>> req = rdfanalyzer.PlotRequest()
-        >>> req.metaFile = "meta_output.root"
-        >>> req.outputFile = "pt_stack.pdf"
-        >>> req.title = "Transverse Momentum"
-        >>> req.xAxisTitle = "p_{T} [GeV]"
-        >>> req.logY = False
-        >>> req.drawRatio = False
-        >>> req.processes = [proc_mc]
-        >>>
-        >>> result = pu.makeStackPlot(req)
-        >>> assert result.success, result.message
-        )pbdoc")
+    py::class_<PlotBatchOptions>(m, "PlotBatchOptions")
         .def(py::init<>())
-        .def("makeStackPlot", &PlottingUtility::makeStackPlot,
-             py::arg("request"),
-             R"pbdoc(
-             Create and save a single stack plot.
+        .def_readwrite("workers", &PlotBatchOptions::workers)
+        .def_readwrite("maxPreparedBytes", &PlotBatchOptions::maxPreparedBytes)
+        .def_readwrite("maxOpenFiles", &PlotBatchOptions::maxOpenFiles);
 
-             Parameters
-             ----------
-             request : PlotRequest
-                 Full plot specification.
+    py::class_<PlotSessionStats>(m, "PlotSessionStats")
+        .def(py::init<>())
+        .def_readwrite("plots", &PlotSessionStats::plots)
+        .def_readwrite("workspaces", &PlotSessionStats::workspaces)
+        .def_readwrite("drawableObjects", &PlotSessionStats::drawableObjects)
+        .def_readwrite("bufferGrowths", &PlotSessionStats::bufferGrowths)
+        .def_readwrite("fileOpens", &PlotSessionStats::fileOpens)
+        .def_readwrite("preparationSeconds", &PlotSessionStats::preparationSeconds)
+        .def_readwrite("renderingSeconds", &PlotSessionStats::renderingSeconds)
+        .def_readwrite("exportSeconds", &PlotSessionStats::exportSeconds);
 
-             Returns
-             -------
-             PlotResult
-                 Success flag, optional error message, and histogram integrals.
-             )pbdoc")
+    auto plotting = py::class_<PlottingUtility>(m, "PlottingUtility",
+        "Physics plots with reusable sessions and bounded parallel preparation.");
+    plotting.def(py::init<>())
+        .def("makeStackPlot", &PlottingUtility::makeStackPlot, py::arg("request"),
+             py::call_guard<py::gil_scoped_release>())
         .def("makeStackPlots", &PlottingUtility::makeStackPlots,
-             py::arg("requests"),
-             py::arg("parallel") = false,
-             R"pbdoc(
-             Create and save multiple stack plots.
-
-             Parameters
-             ----------
-             requests : list[PlotRequest]
-                 List of plot specifications.
-             parallel : bool
-                 When *True*, plots are rendered concurrently using
-                 ``std::async``.  ROOT thread-safety is enabled automatically.
-
-             Returns
-             -------
-             list[PlotResult]
-                 One result per request, in the same order.
-             )pbdoc");
+             py::arg("requests"), py::arg("parallel") = false,
+             "Reuse one session. Parallel mode prepares inputs on up to four workers; graphics are serialized.",
+             py::call_guard<py::gil_scoped_release>())
+        .def_static("readRequests", &PlottingUtility::readRequests, py::arg("configFile"))
+        .def_static("parseRequests", &PlottingUtility::parseRequests, py::arg("yamlOrJson"));
+    py::class_<PlottingUtility::Session>(plotting, "Session",
+        "Thread-affine rendering session; reuse on its constructing/main thread.")
+        .def(py::init<const PlotBatchOptions&>(), py::arg("options") = PlotBatchOptions{})
+        .def("render", &PlottingUtility::Session::render, py::arg("request"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("renderBatch", &PlottingUtility::Session::renderBatch, py::arg("requests"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("stats", &PlottingUtility::Session::stats);
+    m.attr("PlotSession") = plotting.attr("Session");
 }

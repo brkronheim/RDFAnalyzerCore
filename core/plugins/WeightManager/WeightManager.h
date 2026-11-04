@@ -25,6 +25,7 @@ class Analyzer;
 struct WeightAuditEntry {
   std::string name;          ///< Human-readable label
   std::string column;        ///< Dataframe column that was audited
+  std::uint64_t entryCount = 0; ///< Number of audited events
   double sumWeights = 0.0;   ///< Sum of per-event weight values
   double meanWeight = 0.0;   ///< Arithmetic mean
   double minWeight = 0.0;    ///< Minimum value seen
@@ -254,11 +255,12 @@ public:
   void execute() override;
 
   /**
-   * @brief Retrieve audit results and write them to the meta output file.
+   * @brief Retrieve audit results for the typed metadata contribution.
    *
    * Called by the framework after the RDataFrame computation completes.
    */
   void finalize() override;
+  rdf::OutputMetadata collectOutputMetadata() const override;
 
   /**
    * @brief Log weight audit summary via the analysis logger.

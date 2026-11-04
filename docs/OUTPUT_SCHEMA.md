@@ -164,8 +164,10 @@ Describes a single axis dimension of a `THnSparseF` histogram.
 Describes histogram objects saved by `NDHistogramManager` into the meta-output
 ROOT file. Per-job outputs contain mergeable `THnSparseF` objects under
 `nd_histograms_v1/` plus an embedded `__rdf_histogram_schema_v1` metadata
-object. After `hadd`, the merge workflow adds the reconstructed `TH1F`
-objects used by existing analysis tools while retaining the sparse arrays.
+object. After `hadd`, compatibility merge workflows can add reconstructed
+`TH1F` objects while retaining the sparse arrays. Schema-aware readers do not
+require that expansion; the vjet merge wrapper defaults to sparse-only output
+and accepts `--extract-histograms` for legacy consumers.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -208,13 +210,18 @@ These extra histogram fields are intended for downstream automation rather than 
 
 ### MetadataSchema
 
-Describes the provenance metadata output written by `ProvenanceService` as `TNamed` objects inside a `TDirectory` in the meta-output ROOT file.
+Describes compact job metadata, legacy provenance directories and merged bundle
+references. The manifest envelope remains version 1; embedded formats have
+independent versions. See [metadata storage and merging](METADATA.md).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `schema_version` | `int` | `1` | Schema format version. |
 | `output_file` | `str` | `""` | Path or pattern of the meta-output ROOT file. Must not be empty. |
 | `provenance_dir` | `str` | `"provenance"` | Name of the `TDirectory` holding the provenance objects. Must not be empty. |
+| `storage_format` | `str` | `"auto"` | Auto-detect legacy/compact storage; also accepts `legacy` or `compact`. |
+| `document_key` | `str` | `"__rdf_job_metadata_v1"` | Compact job document key. |
+| `reference_key` | `str` | `"__rdf_metadata_reference_v1"` | Portable merged metadata reference key. |
 | `required_keys` | `list[str]` | `PROVENANCE_REQUIRED_KEYS` | Keys that must be present. Defaults to the framework-defined required set. |
 | `optional_keys` | `list[str]` | `PROVENANCE_OPTIONAL_KEYS` | Keys that may optionally be present. |
 

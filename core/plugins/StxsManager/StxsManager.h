@@ -21,24 +21,25 @@
 //
 // Configuration (read from global config map in setupFromConfigFile()):
 //   stxsEnabled: "true|false" (default: false)
+//   stxsMigrationBinConfig: "cfg/migration_bins.txt" (optional explicit histogram mapping)
 //   stxsBinConfig: "cfg/stxs_bins.txt"
 //   stxsAuxDirectory: "aux/stxs"
 //   stxsCoarseBranch: "HTXS_stage1_1_cat_pTjet30GeV"
 //   stxsFineBranch: "HTXS_stage1_1_fine_cat_pTjet30GeV"
 //   stxsAnalysisCoarseBranch: "" (optional)
 //   stxsAnalysisFineBranch: "" (optional)
-//   stxsDecayChannelBranch: "vhbb_channel" (optional)
-//   stxsSignalProcess: "zh" (used with stxsSampleName/stxsGroupName)
-//   stxsSampleName: "zh"
+//   stxsDecayChannelBranch: "analysis_channel" (optional)
+//   stxsSignalProcess: "signal" (used with stxsSampleName/stxsGroupName)
+//   stxsSampleName: "sample"
 //   stxsGroupName: "signal"
 //   stxsSignalProcessId: "4" (alternative: direct integer ID)
 //   stxsProductionModeId: "2" (alternative: direct integer ID, auto-derived if absent)
 //   stxsSignalProcessRules: "cfg/stxs_signal_process_rules.yaml" (optional)
 //   stxsAcceptanceSpecs: "cfg/stxs_acceptance.yaml" (optional YAML)
 //   stxsMigrationSpecs: "cfg/stxs_migration.yaml" (optional YAML)
-//   stxsNBins: "46" (number of analysis bins for auto-booked histograms)
+//   stxsNBins: "12" (number of analysis bins for auto-booked histograms)
 //   stxsHistogramLow: "0.0"
-//   stxsHistogramHigh: "46.0"
+//   stxsHistogramHigh: "12.0"
 //==============================================================================
 
 #include <api/IPluggableManager.h>
@@ -140,13 +141,14 @@ private:
   bool enabled_m = false;
 
   // Configuration values (raw)
+  std::string migrationBinConfigPath_m;
   std::string binConfigPath_m;
   std::string auxDirectoryPath_m;
   std::string coarseBranch_m;
   std::string fineBranch_m;
   std::string analysisCoarseBranch_m;
   std::string analysisFineBranch_m;
-  std::string decayChannelBranch_m = "vhbb_channel";
+  std::string decayChannelBranch_m = "analysis_channel";
   std::string signalProcessStr_m;
   std::string sampleNameStr_m;
   std::string groupNameStr_m;
@@ -157,9 +159,9 @@ private:
   std::string acceptanceSpecsPath_m;
   std::string migrationSpecsPath_m;
   std::string signalProcessRulesPath_m;
-  int nHistogramBins_m = 46;
+  int nHistogramBins_m = 0;
   double histogramLow_m = 0.0;
-  double histogramHigh_m = 46.0;
+  double histogramHigh_m = 0.0;
 
   // STXS Manager and config
   std::shared_ptr<stxs::Manager> stxsManager_m;

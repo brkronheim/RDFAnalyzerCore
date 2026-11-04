@@ -16,7 +16,8 @@
 
 #include <TDirectory.h>
 #include <TFile.h>
-#include <TNamed.h>
+#include <TObjString.h>
+#include <yaml-cpp/yaml.h>
 
 #include <cstdio>
 #include <fstream>
@@ -81,25 +82,29 @@ TEST_F(ProvenanceServiceTest, RequiredKeysWrittenToMetaFile) {
     TFile f(metaPath.c_str(), "READ");
     ASSERT_FALSE(f.IsZombie()) << "Meta output file was not created";
 
-    TDirectory* provDir = dynamic_cast<TDirectory*>(f.Get("provenance"));
-    ASSERT_NE(provDir, nullptr)
-        << "'provenance' directory missing from meta file";
-
+    auto* object = dynamic_cast<TObjString*>(f.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["schema_version"].as<int>(), 1);
+    EXPECT_EQ(f.Get("provenance"), nullptr);
+    const auto provenance = document["provenance"];
     // Check mandatory keys are present and non-empty
     const std::vector<std::string> requiredKeys = {
         "framework.git_hash",
         "framework.build_timestamp",
         "framework.compiler",
         "root.version",
+        "root.registry_optimization",
+        "root.registry_definitions",
+        "root.registry_input_bindings_before",
+        "root.registry_input_bindings_after",
         "config.hash",
         "executor.num_threads",
     };
 
     for (const auto& key : requiredKeys) {
-        auto* obj = dynamic_cast<TNamed*>(provDir->Get(key.c_str()));
-        ASSERT_NE(obj, nullptr) << "Missing provenance key: " << key;
-        EXPECT_FALSE(std::string(obj->GetTitle()).empty())
-            << "Provenance key has empty value: " << key;
+        ASSERT_TRUE(provenance[key]) << "Missing provenance key: " << key;
+        EXPECT_FALSE(provenance[key].as<std::string>().empty());
     }
 
     f.Close();
@@ -132,16 +137,11 @@ TEST_F(ProvenanceServiceTest, AddEntryStoresCustomValues) {
     TFile f(metaPath.c_str(), "READ");
     ASSERT_FALSE(f.IsZombie());
 
-    auto* provDir = dynamic_cast<TDirectory*>(f.Get("provenance"));
-    ASSERT_NE(provDir, nullptr);
-
-    auto* pluginEntry = dynamic_cast<TNamed*>(provDir->Get("plugin.myPlugin"));
-    ASSERT_NE(pluginEntry, nullptr);
-    EXPECT_EQ(std::string(pluginEntry->GetTitle()), "MyPluginType");
-
-    auto* customEntry = dynamic_cast<TNamed*>(provDir->Get("custom.key"));
-    ASSERT_NE(customEntry, nullptr);
-    EXPECT_EQ(std::string(customEntry->GetTitle()), "hello_world");
+    auto* object = dynamic_cast<TObjString*>(f.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["provenance"]["plugin.myPlugin"].as<std::string>(), "MyPluginType");
+    EXPECT_EQ(document["provenance"]["custom.key"].as<std::string>(), "hello_world");
 
     f.Close();
 }
@@ -262,4 +262,76 @@ TEST_F(ProvenanceServiceTest, RecordDatasetManifestProvenance) {
 
     auto df = dataManager.getDataFrame();
     svc.finalize(df);
+}
+
+TEST_F(ProvenanceServiceTest, TypedMetadataWrittenOnceWithEscaping) {
+    writeMinimalConfig(cfgPath, metaPath);
+    ConfigurationManager config(cfgPath);
+    DataManager dataManager(3);
+    SystematicManager systematicManager;
+    DefaultLogger logger;
+    NullOutputSink skimSink;
+    RootOutputSink metaSink;
+    ManagerContext ctx{config, dataManager, systematicManager, logger, skimSink, metaSink};
+    ProvenanceService svc;
+    svc.initialize(ctx);
+    svc.addEntry("quoted", "a\"b\\c\n");
+    rdf::OutputMetadata metadata;
+    metadata.regions["signal"] = "pass:preselection";
+    metadata.normalizations["weight_norm_total"] = 2.5;
+    metadata.weightAudits["weight_audit_w"] = {5, 1, 0, 14., -1., 5.};
+    svc.addOutputMetadata(metadata);
+    auto df = dataManager.getDataFrame();
+    svc.finalize(df);
+    svc.finalize(df);
+    TFile f(metaPath.c_str(), "READ");
+    auto* object = dynamic_cast<TObjString*>(f.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["provenance"]["quoted"].as<std::string>(), "a\"b\\c\n");
+    EXPECT_EQ(document["weight_audits"]["weight_audit_w"]["n"].as<int>(), 5);
+    EXPECT_EQ(document["normalizations"]["weight_norm_total"].as<double>(), 2.5);
+    EXPECT_EQ(f.GetListOfKeys()->GetSize(), 1);
+}
+
+TEST_F(ProvenanceServiceTest, SemanticConfigIgnoresOnlyJobRouting) {
+    writeMinimalConfig(cfgPath, metaPath);
+    ConfigurationManager firstConfig(cfgPath);
+    DataManager data(1);
+    SystematicManager systematic;
+    DefaultLogger logger;
+    NullOutputSink skim;
+    RootOutputSink meta;
+    ManagerContext firstContext{firstConfig, data, systematic, logger, skim, meta};
+    ProvenanceService first;
+    first.initialize(firstContext);
+    writeMinimalConfig(cfgPath, metaPath + ".other");
+    {
+        std::ofstream append(cfgPath, std::ios::app);
+        append << "metadataJobId=other-job\nmetadataAttemptId=retry\n";
+    }
+    ConfigurationManager secondConfig(cfgPath);
+    ManagerContext secondContext{secondConfig, data, systematic, logger, skim, meta};
+    ProvenanceService second;
+    second.initialize(secondContext);
+    EXPECT_EQ(first.getProvenance().at("config.semantic_hash"),
+              second.getProvenance().at("config.semantic_hash"));
+    EXPECT_NE(first.getProvenance().at("config.hash"),
+              second.getProvenance().at("config.hash"));
+}
+
+TEST_F(ProvenanceServiceTest, ConfiguredMetadataWriteFailureIsFatal) {
+    writeMinimalConfig(cfgPath, metaPath);
+    { std::ofstream corrupt(metaPath); corrupt << "not a ROOT file"; }
+    ConfigurationManager config(cfgPath);
+    DataManager data(1);
+    SystematicManager systematic;
+    DefaultLogger logger;
+    NullOutputSink skim;
+    RootOutputSink meta;
+    ManagerContext context{config, data, systematic, logger, skim, meta};
+    ProvenanceService service;
+    service.initialize(context);
+    auto df = data.getDataFrame();
+    EXPECT_THROW(service.finalize(df), std::runtime_error);
 }

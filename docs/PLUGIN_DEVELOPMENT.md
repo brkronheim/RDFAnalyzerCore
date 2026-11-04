@@ -85,7 +85,10 @@ Use each hook intentionally:
 - `execute()`: define RDF columns and book lazy actions
 - `finalize()`: consume booked results after the event loop
 - `reportMetadata()`: emit human-readable summaries
-- `collectProvenanceEntries()`: emit stable structured metadata
+- `collectProvenanceEntries()`: emit stable structured provenance
+- `collectOutputMetadata()`: contribute typed region definitions, normalization
+  constants and sufficient weight-audit statistics after finalize. The Analyzer
+  combines these in one job document; see [metadata contracts](METADATA.md).
 
 ## Minimal Interface
 
@@ -253,7 +256,7 @@ Recommended reference implementations by pattern:
 - `core/plugins/RegionManager/RegionManager.h`
 - `core/plugins/CutflowManager/CutflowManager.h`
 - `core/plugins/WeightManager/WeightManager.h`
-- `core/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
+- `extensions/cms/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
 - `core/plugins/ObjectEnergyManagerBase/ObjectEnergyManagerBase.h`
 - `core/plugins/TaggerWorkingPointManager/TaggerWorkingPointManager.h`
 

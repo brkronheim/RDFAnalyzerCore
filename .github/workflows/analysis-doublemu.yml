@@ -14,6 +14,9 @@ name: CMS DoubleMuon Analysis
 on:
   workflow_dispatch:
     inputs:
+      cms_repository:
+        description: "CMS extension Git URL (defaults to RDF_CMS_REPOSITORY repository variable)"
+        required: false
       threads:
         description: "Number of RDataFrame threads (default: -1 = all CPUs)"
         required: false
@@ -47,8 +50,13 @@ jobs:
       - name: Install Python dependencies
         run: pip3 install -r requirements-ci.txt
 
+      - name: Download pinned CMS extension
+        env:
+          CMS_REPOSITORY: ${{ inputs.cms_repository || vars.RDF_CMS_REPOSITORY }}
+        run: python3 scripts/fetch_cms.py --repository "$CMS_REPOSITORY"
+
       - name: Configure CMake
-        run: cmake -S . -B build
+        run: cmake -S . -B build -DRDF_ENABLE_CMS=ON -DRDF_REQUIRED_EXTENSIONS=cms
 
       - name: Build cms_doublemu_analysis
         run: |

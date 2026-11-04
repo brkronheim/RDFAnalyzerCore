@@ -21,6 +21,16 @@
 
 namespace {
 
+const std::string& plotTestDirectory() {
+  static const auto directory = [] {
+    auto path = std::filesystem::temp_directory_path() /
+                ("rdf_plotting_tests_" + std::to_string(getpid()));
+    std::filesystem::create_directories(path);
+    return path.string();
+  }();
+  return directory;
+}
+
 // Skip message for tests when image library is not available
 constexpr const char* kImageLibrarySkipMessage = 
     "Skipping PNG file check: ROOT image library (libASImage) not available. "
@@ -131,7 +141,7 @@ static void copyPlotIfRequested(const std::string& src) {
 TEST(PlottingUtilityTest, CreatesLinearAndLogStackPlotsWithRatio) {
   gROOT->SetBatch(true);
 
-  const std::string baseDir = std::string(TEST_SOURCE_DIR) + "/aux";
+  const std::string baseDir = plotTestDirectory();
   const std::string metaPath = baseDir + "/test_plotting_meta.root";
   const std::string linearPath = baseDir + "/test_plotting_linear.png";
   const std::string logPath = baseDir + "/test_plotting_log.png";
@@ -307,7 +317,7 @@ TEST(PlottingUtilityTest, ComputesDetailedRatioSummary) {
   EXPECT_DOUBLE_EQ(summary.error[1], 0.0);
 
   // save summary histograms for visual inspection
-  const std::string baseDir = std::string(TEST_SOURCE_DIR) + "/aux";
+  const std::string baseDir = plotTestDirectory();
   const std::string summaryCombinedPath = baseDir + "/test_ratio_summary.png"; // reused filename, now multi-panel
   std::remove(summaryCombinedPath.c_str());
 
@@ -406,7 +416,7 @@ TEST(PlottingUtilityTest, ComputesPCAEnvelope) {
   // save PCA envelope plot for visual inspection
   {
     gROOT->SetBatch(true);
-    const std::string baseDir = std::string(TEST_SOURCE_DIR) + "/aux";
+    const std::string baseDir = plotTestDirectory();
     const std::string pcaPath = baseDir + "/test_pca_envelope.png";
     std::remove(pcaPath.c_str());
 

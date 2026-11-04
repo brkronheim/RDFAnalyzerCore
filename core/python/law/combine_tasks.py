@@ -26,7 +26,7 @@ Workflow
   ManifestFitTask  (Task)
       → requires ManifestDatacardTask (or accepts an explicit datacard dir / path)
       → supports Combine-based fits and a lightweight analysis-defined fitting backend
-      → fitting_backend choices: "combine" (default) or "analysis" (histogram-based chi2)
+      → fitting_backend choices: "combine" (default), "rabbit" (CPU/CUDA), or "analysis" (histogram-based chi2)
       → output: <workspace>/manifestDatacard_<name>/fit_results/
 
   AnalyticWorkspaceFitTask  (Task)
@@ -1155,11 +1155,16 @@ class ManifestDatacardTask(CombineMixin, law.Task):
 class ManifestFitTask(CombineMixin, law.Task):
     """Fit task that consumes datacards produced by :class:`ManifestDatacardTask`.
 
-    Supports two fitting backends selectable via ``--fitting-backend``:
+    Supports three fitting backends selectable via ``--fitting-backend``:
 
     ``combine`` (default)
         Invokes the CMS Combine binary for the chosen statistical method
         (``--method``).  Requires Combine to be installed or built locally.
+
+    ``rabbit``
+        Native binned profile-likelihood fits in a dedicated Python runtime,
+        with explicit CPU/GPU selection and multi-GPU bin sharding. Consumes
+        unique-channel cards jointly. ``method`` is Combine-specific.
 
     ``analysis``
         A lightweight, analysis-defined histogram-based fitting backend that
@@ -1183,10 +1188,21 @@ class ManifestFitTask(CombineMixin, law.Task):
         default="combine",
         description=(
             "Fitting backend to use.  Choices: 'combine' (default, requires "
-            "the CMS Combine binary) or 'analysis' (lightweight histogram-based "
+            "the CMS Combine binary), 'rabbit' (native CPU/CUDA fits), or 'analysis' (lightweight histogram-based "
             "chi2 fit, no external dependencies)."
         ),
     )
+    rabbit_python = luigi.Parameter(default="", description="Dedicated Rabbit CPU/CUDA Python interpreter.")
+    rabbit_device = luigi.ChoiceParameter(default="gpu", choices=("cpu", "gpu"))
+    rabbit_devices = luigi.Parameter(default="", description="Comma-separated GPU indices.")
+    rabbit_n_devices = luigi.IntParameter(default=1)
+    rabbit_mc_stat = luigi.ChoiceParameter(default="card", choices=("card", "none", "lite", "full"))
+    rabbit_likelihood = luigi.ChoiceParameter(default="native", choices=("native", "combine"))
+    rabbit_covariance = luigi.ChoiceParameter(default="auto", choices=("auto", "analytic", "combine"))
+    rabbit_zero_shape_policy = luigi.ChoiceParameter(default="error", choices=("error", "native"))
+    rabbit_hvp_batch = luigi.IntParameter(default=0, description="Hessian-vector directions per batch; zero uses Rabbit's default.")
+    fit_dataset = luigi.ChoiceParameter(default="observed", choices=("asimov", "observed"))
+    strict_coverage = luigi.BoolParameter(default=False)
     method = luigi.Parameter(
         default="AsymptoticLimits",
         description=(
@@ -1238,12 +1254,29 @@ class ManifestFitTask(CombineMixin, law.Task):
                 self,
                 manifest_path=self.manifest_path,
                 merge_input_dir=self.merge_input_dir,
+                strict_coverage=self.strict_coverage,
             )
         return None
 
     def output(self):
         out_dir = self._manifest_fit_dir
+        if self.fitting_backend.lower() == "rabbit":
+            return law.LocalFileTarget(os.path.join(out_dir, "rabbit", "task_complete.json"))
         return law.LocalDirectoryTarget(out_dir)
+
+    def complete(self):
+        if self.fitting_backend.lower() != "rabbit":
+            return super().complete()
+        try:
+            from statistical_inference.model import cached_model, _file_digest
+            marker = json.loads(Path(self.output().path).read_text())
+            return (marker["task_id"] == self.task_id and
+                    marker["model_identity"] == cached_model(self._collect_datacards(),
+                        Path(self._manifest_fit_dir) / "rabbit" / "prepared_model.json")["identity"] and
+                    Path(marker["native_output"]).is_file() and
+                    _file_digest(marker["native_output"]) == marker["native_sha256"])
+        except (OSError, ValueError, KeyError, RuntimeError):
+            return False
 
     @property
     def _manifest_datacard_dir(self) -> str:
@@ -1269,28 +1302,20 @@ class ManifestFitTask(CombineMixin, law.Task):
 
     def _run_combine_fits(self, datacards: List[str], out_dir: str) -> bool:
         """Run Combine for each datacard.  Returns True if all succeeded."""
-        combine_bin = _find_combine(self.combine_exe)
-        self.publish_message(f"Using combine binary: {combine_bin}")
+        from statistical_inference.combine import run_standard_combine
         extra_opts = shlex.split(self.combine_options) if self.combine_options else []
 
         all_ok = True
         for datacard in datacards:
             tag = Path(datacard).stem.replace("datacard_", "")
-            cmd = [combine_bin, "-M", self.method, datacard, "-n", f"_{tag}"] + extra_opts
-            self.publish_message("Running: " + " ".join(cmd))
-            log_path = os.path.join(out_dir, f"combine_{tag}.log")
-            with open(log_path, "w") as log_fh:
-                result = subprocess.run(
-                    cmd, stdout=log_fh, stderr=subprocess.STDOUT, cwd=out_dir
-                )
-            if result.returncode != 0:
-                self.publish_message(
-                    f"ERROR: combine failed for {datacard!r} (exit {result.returncode}).  "
-                    f"See log: {log_path}"
-                )
+            try:
+                result = run_standard_combine(datacard, Path(out_dir) / "combine" / tag,
+                    executable=self.combine_exe or None, method=self.method, options=extra_opts,
+                    asimov=self.fit_dataset == "asimov")
+                (Path(out_dir) / "combine" / tag / "fit_result.json").write_text(json.dumps(result, indent=2) + "\n")
+            except RuntimeError as exc:
+                self.publish_message(f"ERROR: {exc}")
                 all_ok = False
-            else:
-                self.publish_message(f"Combine finished for {tag}.  Log: {log_path}")
         return all_ok
 
     # ------------------------------------------------------------------
@@ -1369,10 +1394,10 @@ class ManifestFitTask(CombineMixin, law.Task):
         )
 
         backend = self.fitting_backend.lower()
-        if backend not in ("combine", "analysis"):
+        if backend not in ("combine", "analysis", "rabbit"):
             raise RuntimeError(
                 f"Unknown fitting_backend {self.fitting_backend!r}.  "
-                "Choose 'combine' or 'analysis'."
+                "Choose 'combine', 'rabbit', or 'analysis'."
             )
 
         provenance = {
@@ -1387,6 +1412,22 @@ class ManifestFitTask(CombineMixin, law.Task):
         with PerformanceRecorder(f"ManifestFitTask[{backend}]") as rec:
             if backend == "combine":
                 all_ok = self._run_combine_fits(datacards, out_dir)
+            elif backend == "rabbit":
+                from statistical_inference.rabbit import run_rabbit
+                marker = Path(self.output().path)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.unlink(missing_ok=True)
+                fit = run_rabbit({"datacards": datacards}, out_dir,
+                                 self.fit_dataset == "asimov",
+                                 python=self.rabbit_python or None, device=self.rabbit_device,
+                                 devices=[int(v) for v in self.rabbit_devices.split(",") if v],
+                                 n_devices=self.rabbit_n_devices, mc_stat=self.rabbit_mc_stat,
+                                 likelihood=self.rabbit_likelihood,
+                                 covariance=self.rabbit_covariance,
+                                 zero_shape_policy=self.rabbit_zero_shape_policy,
+                                 hvp_batch=self.rabbit_hvp_batch or None)
+                provenance["rabbit"] = fit
+                all_ok = True
             else:
                 all_ok = self._run_analysis_fits(datacards, out_dir)
 
@@ -1400,6 +1441,12 @@ class ManifestFitTask(CombineMixin, law.Task):
             raise RuntimeError(
                 f"One or more fits failed.  Check logs in {out_dir!r}."
             )
+
+        if backend == "rabbit":
+            from statistical_inference.model import _file_digest
+            Path(self.output().path).write_text(json.dumps({"task_id": self.task_id,
+                "model_identity": fit["model_identity"], "native_output": fit["hdf5_output"],
+                "native_sha256": _file_digest(fit["hdf5_output"])}) + "\n")
 
         self.publish_message(
             f"ManifestFitTask complete.  Results in: {out_dir}"

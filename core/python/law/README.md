@@ -424,6 +424,25 @@ For NANO submissions, a valid VOMS proxy is also required:
 voms-proxy-init -voms cms -rfc --valid 168:0
 ```
 
+When `--x509` is supplied, `PrepareSkimJobs` requires the copied proxy to have
+at least **48 hours (172800 seconds)** of validity remaining. A missing or
+unreadable proxy, an unavailable `voms-proxy-info`, or insufficient validity
+stops preparation. `BuildSkimSubmission`, `SubmitSkimJobs`, and monitor retries
+check the staged credential again, reading `x509` from `shared_inputs.tar.gz`
+when that archive is used. Renewing the local source proxy alone does not
+refresh that archive: rerun `PrepareSkimJobs` to restage it before submitting.
+Changed source-proxy contents invalidate cached preparation automatically.
+
+The worker executable must match the current binary selected by `--exe`.
+Preparation completion, `BuildSkimSubmission`, `SubmitSkimJobs`, and monitor
+retries compare SHA-256 contents, checking the executable inside
+`shared_inputs.tar.gz` when present and the loose staged copy otherwise.
+A missing, unreadable, or mismatched executable blocks submission even when
+cached submission files exist or the archive has a newer timestamp. Restage
+with `PrepareSkimJobs`; sealed runs whose execution identity changes require
+a new run name. This compares built binaries; source changes require building
+the analysis first.
+
 For Open Data submissions, no proxy is needed (Open Data is public). The
 optional `cernopendata-client` speeds up metadata fetching:
 
@@ -817,13 +836,16 @@ law run FullAnalysisDAG \
 The `NDHistogramManager` supports two backends (configured via `histogramBackend`
 in the analysis config):
 
-- **`root`** (default) — produces `THnSparseF` objects stored in ROOT files.
+- **`root`** (explicit override) — produces `THnSparseF` objects stored in ROOT files.
   Per-job files retain these arrays for direct `hadd` merging. The merge task
   then adds reconstructed `TH1F` objects to the merged file, preserving
   compatibility with `CreateDatacard` and standard ROOT-based downstream
   tools.
-- **`boost`** — uses Boost.Histogram during the event loop for reduced memory
-  usage; output is converted to the same sparse ROOT format before writing.
+- **`boost`** (default) — uses float contents/double sumw2 in sparse standard
+  maps during the event loop; output is converted to the same sparse ROOT
+  format before writing. Metadata saving warns if tracked sparse allocations
+  exceed the equivalent dense-array estimate. A nonzero
+  `histogramDenseLimitMiB` enables dense accumulation within that budget.
 
 For a manual merge, run `python core/python/extract_nd_histograms.py merged.root`
 after `hadd`.  See [CONFIG_REFERENCE.md — Histogram Backend](../../../docs/CONFIG_REFERENCE.md#histogram-backend)
@@ -1021,6 +1043,16 @@ export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
 3. For failed jobs (non-zero exit code): resubmit if `--max-retries` not reached.
 4. For completed jobs: verify the expected EOS output file exists via `xrdfs stat`.
 5. On completion, write `all_outputs_verified.txt`.
+
+`MonitorSkimJobs` also removes running jobs once the current execution exceeds
+150% of the job's Condor `MaxRuntime`, then retries them within `--max-retries`.
+This is enabled by default and checked every poll. It uses
+`ServerTime - JobCurrentStartDate` so stale cumulative wall-time counters do not
+hide a stuck execution or penalize a fresh restart. Missing scheduler time falls
+back to the local clock; missing start dates fall back to `EnteredCurrentStatus`,
+then `RemoteWallClockTime`. A missing or nonpositive `MaxRuntime` falls back to
+`--max-runtime`. A failed removal leaves the job tracked for the next poll and
+does not submit a duplicate.
 
 State is saved to `condorSub_{name}/monitor_state.json` after each poll cycle,
 so the task can be safely interrupted and restarted — it resumes from where it

@@ -18,7 +18,7 @@
  * path "test_data_minimal/dummy.root" resolves correctly.  When CTest is
  * configured with a working directory that differs from TEST_SOURCE_DIR
  * (e.g. the build directory), the dummy ROOT file may not be found and the
- * test fails.  This is a pre-existing environmental issue, not a VHbb STXS
+ * test fails.  This is a pre-existing environmental issue, not a analysis-specific
  * regression.  The TEST_SOURCE_DIR is defined in
  * core/tests/cpp/CMakeLists.txt via:
  *   add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

@@ -2,7 +2,8 @@
 
 source "$(dirname "$0")/env.sh"
 
-git submodule update --init --recursive
+# CMS is a separate optional checkout. Only initialize core dependencies here.
+git submodule update --init --recursive -- core/extern
 
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
@@ -13,5 +14,5 @@ cmake -S . -B build \
     -DBUILD_COMBINE=OFF \
     -DBUILD_COMBINE_HARVESTER=OFF \
     -DONNXRUNTIME_USE_CUDA=OFF \
-    -DUSE_CUDA=OFF # `correction config --cmake`  # --trace
+    -DUSE_CUDA=OFF "$@"
 cmake --build build -j"$(nproc)"

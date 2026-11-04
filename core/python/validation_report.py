@@ -1326,6 +1326,12 @@ def _file_integrity(role: str, path: str, check_files: bool) -> "OutputIntegrity
             issues.append(f"Could not determine file size: {exc}")
         if size is not None and size == 0:
             issues.append("File is empty (0 bytes)")
+        if role in ("metadata", "histograms", "cutflow") and path.endswith(".root") and size:
+            try:
+                from metadata_io import validate_metadata_bundle
+                validate_metadata_bundle(path)
+            except Exception as exc:
+                issues.append(f"Metadata integrity: {exc}")
     return OutputIntegrityEntry(
         artifact_role=role, path=path, exists=exists, size_bytes=size, issues=issues
     )

@@ -7,6 +7,9 @@ Welcome to the RDFAnalyzerCore documentation! This framework provides a powerful
 New to RDFAnalyzerCore? Start here:
 
 - **[Getting Started Guide](GETTING_STARTED.md)** - Installation, setup, and your first analysis
+- **[Source Extensions](EXTENSIONS.md)** - Generic discovery and extension-owned build options
+- **[Optional CMS Extension](CMS_EXTENSION.md)** - Separate checkout, build modes, and analysis compatibility
+- **[Run Bundles](RUN_BUNDLES.md)** - Frozen inputs, execution identities, shared workflow and physics helpers
 - **[Quick Start](GETTING_STARTED.md#quick-start)** - Get running in 5 minutes
 
 ## Who should read what?
@@ -42,6 +45,7 @@ New to RDFAnalyzerCore? Start here:
 
 - **[Python Bindings](PYTHON_BINDINGS.md)** - Full Python API and usage patterns
 - **[Python Bindings Testing](PYTHON_BINDINGS_TESTING.md)** - Validation and troubleshooting guide
+- **[Combine and Rabbit fits](RABBIT_INTEGRATION.md)** - Shared statistical tools, native CUDA and multi-GPU fitting, and vjet adapters
 
 ### Framework Features
 
@@ -53,6 +57,8 @@ New to RDFAnalyzerCore? Start here:
 
 - **[Batch Submission](BATCH_SUBMISSION.md)** - HTCondor job submission guide
 - **[Production Manager](PRODUCTION_MANAGER.md)** - Production-scale job management and monitoring
+- **[XrdAdaptor input](xrd-adaptor.md)** - Default framework XRootD reader and worker runtime
+- **[ROOT input cache](INPUT_CACHE.md)** - TTree cache and next-file prefetch controls
 
 ### Data Management & Outputs
 

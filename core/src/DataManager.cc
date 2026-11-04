@@ -273,8 +273,12 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
     // substitute an in-memory event when the configured files are missing,
     // unreadable, or do not contain the requested tree: that can make a bad
     // production config appear to have completed successfully.
+    // Validate a real entry without GetEntries(): counting a lazy TChain
+    // opens every remote file, closes those temporary readers, then opens
+    // them all again for processing. LoadTree(0) validates the first usable
+    // tree and leaves its file open for RDF; later files remain lazy.
     if (chain_vec_m.empty() || !chain_vec_m[0] ||
-        chain_vec_m[0]->GetEntries() <= 0) {
+        chain_vec_m[0]->LoadTree(0) < 0) {
       std::string inputDescription = "no fileList or directory configured";
       const auto &configMap = configProvider.getConfigMap();
       const auto fileList = configMap.find("fileList");

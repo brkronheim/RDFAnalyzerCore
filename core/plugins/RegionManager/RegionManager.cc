@@ -208,42 +208,15 @@ void RegionManager::finalize() {
     }
   }
 
-  if (dynamic_cast<NullOutputSink *>(metaSink_m) != nullptr) return;
+}
 
-  std::string fileName =
-      metaSink_m->resolveOutputFile(*configManager_m, OutputChannel::Meta);
-  if (fileName.empty()) return;
-
-  TFile outFile(fileName.c_str(), "UPDATE");
-  if (outFile.IsZombie()) {
-    if (logger_m) {
-      logger_m->log(ILogger::Level::Error,
-                    "RegionManager: failed to open meta output file: " +
-                        fileName);
-    }
-    return;
+rdf::OutputMetadata RegionManager::collectOutputMetadata() const {
+  rdf::OutputMetadata result;
+  for (const auto& name : regionOrder_m) {
+    const auto& entry = regions_m.at(name);
+    result.regions[name] = entry.filterColumn + (entry.parent.empty() ? "" : ":" + entry.parent);
   }
-
-  // Write each region as a TNamed of the form
-  //   name → "<filter_column>[:<parent>]"
-  // stored in a "regions" TDirectory.
-  TDirectory *regDir = outFile.GetDirectory("regions");
-  if (!regDir) {
-    regDir = outFile.mkdir("regions");
-  }
-  regDir->cd();
-
-  for (const auto &name : regionOrder_m) {
-    const auto &entry = regions_m.at(name);
-    std::string value = entry.filterColumn;
-    if (!entry.parent.empty()) {
-      value += ":" + entry.parent;
-    }
-    TNamed obj(name.c_str(), value.c_str());
-    obj.Write(name.c_str(), TObject::kOverwrite);
-  }
-
-  outFile.Close();
+  return result;
 }
 
 void RegionManager::reportMetadata() {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Systematics and acceptance"
+  short_description: "Systematics and acceptance"
+  default_prompt: "Use $rdfanalyzer-systematics to follow a variation through derived columns, acceptance masks, weights, and histogram output."

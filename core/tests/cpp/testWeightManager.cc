@@ -620,3 +620,22 @@ TEST_F(WeightManagerTest, WideMixedProductPreservesOrderAndNormalizationWithoutA
   EXPECT_DOUBLE_EQ(result[0], expected * .3);
   EXPECT_DOUBLE_EQ(result[1], 0.);
 }
+
+TEST_F(WeightManagerTest, OutputMetadataContainsSufficientStatistics) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+  dm->Define("sf", [](ULong64_t i) { return double(i) - 1.; },
+             {"rdfentry_"}, *systematicManager);
+  mgr->addScaleFactor("sf", "sf");
+  mgr->defineNominalWeight("audit_weight");
+  mgr->execute();
+  mgr->finalize();
+  const auto metadata = mgr->collectOutputMetadata();
+  const auto& audit = metadata.weightAudits.at("weight_audit_audit_weight");
+  EXPECT_EQ(audit.count, 3U);
+  EXPECT_EQ(audit.negativeCount, 1U);
+  EXPECT_EQ(audit.zeroCount, 1U);
+  EXPECT_DOUBLE_EQ(audit.sum, 0.);
+  EXPECT_DOUBLE_EQ(audit.minimum, -1.);
+  EXPECT_DOUBLE_EQ(audit.maximum, 1.);
+}

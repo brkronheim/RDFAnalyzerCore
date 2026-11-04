@@ -16,6 +16,7 @@
 #include <TH1D.h>
 #include <TObject.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -97,13 +98,14 @@ void StxsManager::configureFromConfigMap() {
   }
 
   binConfigPath_m = get_str("stxsBinConfig");
+  migrationBinConfigPath_m = get_str("stxsMigrationBinConfig");
   auxDirectoryPath_m = get_str("stxsAuxDirectory");
   coarseBranch_m = get_str("stxsCoarseBranch", "HTXS_stage1_1_cat_pTjet30GeV");
   fineBranch_m = get_str("stxsFineBranch", "HTXS_stage1_1_fine_cat_pTjet30GeV");
   analysisCoarseBranch_m = get_str("stxsAnalysisCoarseBranch");
   analysisFineBranch_m = get_str("stxsAnalysisFineBranch");
   decayChannelBranch_m =
-      get_str("stxsDecayChannelBranch", "vhbb_channel");
+      get_str("stxsDecayChannelBranch", "analysis_channel");
   signalProcessStr_m = get_str("stxsSignalProcess");
   sampleNameStr_m = get_str("stxsSampleName");
   groupNameStr_m = get_str("stxsGroupName");
@@ -126,9 +128,9 @@ void StxsManager::configureFromConfigMap() {
   signalProcessRulesPath_m = get_str("stxsSignalProcessRules");
 
   // Histogram binning
-  nHistogramBins_m = get_int("stxsNBins", 46);
+  nHistogramBins_m = get_int("stxsNBins", 0);
   histogramLow_m = get_double("stxsHistogramLow", 0.0);
-  histogramHigh_m = get_double("stxsHistogramHigh", 46.0);
+  histogramHigh_m = get_double("stxsHistogramHigh", 0.0);
 
   // Sample name for output labeling
   sampleName_m = get_str("sample", "unknown");
@@ -194,9 +196,8 @@ void StxsManager::initialize() {
           signalProcessStr_m, sampleNameStr_m, groupNameStr_m,
           config.signalProcessRules);
     }
-    // If still unknown, and we have a signal process string, try built-in
+    // Report an unclassified configured process.
     if (signalProcessId_m == 0 && !signalProcessStr_m.empty()) {
-      // Fallback: use a simple hash or check if the VH naming is used
       // In production, the user should provide rules or explicit IDs.
       ctx_m->logger.log(
           ILogger::Level::Warn,
@@ -226,6 +227,18 @@ void StxsManager::initialize() {
   // the config here. For the initial implementation, we rely on the
   // loadConfigFromYaml path or direct config construction.
 
+  if (!migrationBinConfigPath_m.empty()) {
+    stxs::loadMigrationBinConfig(migrationBinConfigPath_m, config);
+  }
+  if (nHistogramBins_m <= 0) {
+    nHistogramBins_m = 1; // include the non-signal/default bin
+    for (const auto &bin : config.bins) {
+      nHistogramBins_m = std::max(nHistogramBins_m, bin.analysisBin + 1);
+    }
+  }
+  if (ctx_m->config.getConfigMap().count("stxsHistogramHigh") == 0) {
+    histogramHigh_m = histogramLow_m + nHistogramBins_m;
+  }
   stxsManager_m = std::make_shared<stxs::Manager>(std::move(config));
 
   // -----------------------------------------------------------------------

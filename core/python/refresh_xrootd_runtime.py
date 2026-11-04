@@ -2,7 +2,7 @@
 """Refresh prepared skim retry artifacts while their LAW monitors are stopped.
 
 Defaults to a preview. With --apply, backs up originals and atomically replaces
-the probe functions and adaptor library. No jobs are submitted or removed.
+the worker input helpers and adaptor library. No jobs are submitted or removed.
 """
 
 import argparse
@@ -27,34 +27,41 @@ except ImportError:
 
 
 def patch_probe_functions(script):
-    """Replace just the embedded probe collectors, preserving the run setup."""
-    for delimiter, generator, function in (
-        ("XRDPY", xrootd_optimize_block, "select_best_url"),
-        ("PY", stage_inputs_block, "rank_redirectors_parallel"),
-    ):
-        marker = "run_helper_python - << '" + delimiter + "'\n"
-        if marker not in script:
-            continue
-        generated = generator().split(marker, 1)[1].split("\n" + delimiter, 1)[0]
-        replacement = next(n for n in ast.parse(generated).body
-                           if isinstance(n, ast.FunctionDef) and n.name == function)
-        pattern = re.escape(marker) + r"(.*?)\n" + delimiter + r"$"
-        for match in reversed(list(re.finditer(pattern, script, re.S | re.M))):
-            code = match[1]
-            nodes = [n for n in ast.parse(code).body
-                     if isinstance(n, ast.FunctionDef) and n.name == function]
-            if not nodes:
-                continue
-            node = nodes[0]
-            lines = code.splitlines(keepends=True)
-            new_lines = generated.splitlines(keepends=True)
-            code = ("".join(lines[:node.lineno - 1]) +
-                    "".join(new_lines[replacement.lineno - 1:replacement.end_lineno]) +
-                    "".join(lines[node.end_lineno:]))
-            ast.parse(code)
-            script = script[:match.start(1)] + code + script[match.end(1):]
-    return script
+    """Replace legacy worker probes with global routing, preserving config paths.
 
+    The public name is retained for existing callers of the recovery utility.
+    Current workers are also refreshed idempotently. Unrelated output helpers
+    and container/environment setup are left intact.
+    """
+    pattern = r"run_helper_python - << '(XRDPY|PY|RDFINPUT)'\n(.*?)\n\1$"
+    for match in reversed(list(re.finditer(pattern, script, re.S | re.M))):
+        tree = ast.parse(match[2])
+        functions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+        assignments = {target.id: node.value for node in tree.body
+                       if isinstance(node, ast.Assign) for target in node.targets
+                       if isinstance(target, ast.Name)}
+        if 'select_best_url' in functions:
+            stage_in = False
+        elif 'rank_redirectors_parallel' in functions:
+            stage_in = True
+        elif 'global_url' in functions and 'STAGE_INPUTS' in assignments:
+            stage_in = ast.literal_eval(assignments['STAGE_INPUTS'])
+        else:
+            continue
+        config = 'submit_config.txt'
+        if 'cfg_path' in assignments:
+            config = ast.literal_eval(assignments['cfg_path'])
+        else:
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == 'read_config' and node.args
+                        and isinstance(node.args[0], ast.Constant)):
+                    config = node.args[0].value
+                    break
+        generator = stage_inputs_block if stage_in else xrootd_optimize_block
+        replacement = generator(config_file=config).strip('\n')
+        script = script[:match.start()] + replacement + script[match.end():]
+    return script.replace('echo "Optimizing XRootD redirectors for fastest site"\n', '')
 
 def archive_hashes(path):
     """Hash each regular member to verify unrelated payloads are unchanged."""

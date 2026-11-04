@@ -2,6 +2,7 @@
 #define RDF_ANALYZER_CARTESIAN_BINNING_H_INCLUDED
 
 #include <cmath>
+#include <array>
 #include <cstddef>
 #include <limits>
 #include <optional>
@@ -164,6 +165,34 @@ inline std::optional<std::size_t> NumericBinningAxis::findBin(
   return std::min(static_cast<std::size_t>(upperEdge - edges_m.begin() - 1),
                   edges_m.size() - 1);
 }
+
+// Fixed-size overloads avoid per-event coordinate allocations. Their
+// last-axis-fastest convention is identical to CartesianBinning.
+template <std::size_t N>
+std::size_t flattenCategories(const std::array<std::size_t,N> &sizes,
+                              const std::array<int,N> &indices, std::size_t base=0) {
+  std::size_t result=0;
+  for (std::size_t i=0; i<N; ++i) {
+    if (indices[i]<0 || static_cast<std::size_t>(indices[i])>=sizes[i])
+      throw std::out_of_range("category index outside declared layout");
+    result=result*sizes[i]+indices[i];
+  }
+  return result+base;
+}
+template <std::size_t N>
+std::array<int,N> unflattenCategories(const std::array<std::size_t,N> &sizes,
+                                     std::size_t index, std::size_t base=0) {
+  if (index<base) throw std::out_of_range("category index below base");
+  index-=base;
+  std::array<int,N> result{};
+  for (std::size_t i=N; i>0; --i) {
+    if (!sizes[i-1]) throw std::invalid_argument("empty category axis");
+    result[i-1]=index%sizes[i-1]; index/=sizes[i-1];
+  }
+  if (index) throw std::out_of_range("category index above layout");
+  return result;
+}
+
 
 }  // namespace RDFAnalyzer
 

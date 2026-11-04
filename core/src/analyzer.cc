@@ -515,6 +515,7 @@ void Analyzer::collectAndRegisterProvenance(ROOT::RDF::RNode& df) {
         // entries so that any configuration change is detectable.
         for (const auto& [role, plugin] : plugins) {
             if (!plugin) continue;
+            provenanceService_m->addOutputMetadata(plugin->collectOutputMetadata());
             const auto entries = plugin->collectProvenanceEntries();
             if (entries.empty()) continue;
 

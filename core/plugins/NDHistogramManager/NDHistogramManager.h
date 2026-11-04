@@ -16,6 +16,7 @@ class Analyzer;
 
 // Forward declaration to avoid circular includes.
 class RegionManager;
+struct NDHistogramColumnCacheState;
 
 /**
  * @class NDHistogramManager
@@ -93,12 +94,14 @@ public:
    * @param infos Vector of histogram info objects
    * @param selection Vector of selection info objects
    * @param suffix Suffix to append to histogram names
+   * @param nominalOnly Book only the nominal slice, preserving other bookings.
    * @param allRegionNames Vector of region name vectors
    */
   void bookND(std::vector<histInfo> &infos,
               std::vector<selectionInfo> &selection,
               const std::string &suffix,
-              std::vector<std::vector<std::string>> &allRegionNames);
+              std::vector<std::vector<std::string>> &allRegionNames,
+              bool nominalOnly = false);
 
   /**
    * @brief Save mergeable N-dimensional histograms (wrapper for analyzer compatibility)
@@ -202,6 +205,7 @@ public:
     float upperBound;
     std::vector<Double_t> binEdges;
     std::string suffix;
+    bool nominalOnly = false; // Keep one nominal slice for this config histogram.
     std::string channelVariable;
     int channelBins;
     float channelLowerBound;
@@ -250,7 +254,8 @@ private:
                                        selectionInfo &&channelInfo,
                                        std::string suffix,
                                        const std::vector<std::string> &systList,
-                                       const std::string &baseRefVector = "");
+                                      const std::string &baseRefVector = "",
+                                      NDHistogramColumnCacheState *columnCache = nullptr);
 
   /**
    * @brief Automatically detect and register systematic variations from the
@@ -283,6 +288,8 @@ private:
    */
   std::vector<ROOT::RDF::RNode> histNodes_m;
   std::vector<ROOT::RDF::RResultPtr<THnSparseF>> histos_m;
+  std::vector<std::shared_ptr<const rdfhistogram::StorageMemoryUsage>> histMemoryUsage_m;
+  std::vector<bool> histMemoryWarningReported_m;
   // Axis labels captured per booked sparse histogram for merge-safe export.
   std::vector<std::vector<std::vector<std::string>>> histRegionNames_m;
   std::vector<HistogramConfig> configHistograms_m;
@@ -295,7 +302,10 @@ private:
   ILogger* logger_m = nullptr;
   IOutputSink* skimSink_m = nullptr;
   IOutputSink* metaSink_m = nullptr;
-  std::string histogramBackend_m = "root";
+  std::string histogramBackend_m = "boost";
+  std::size_t histogramDenseLimitBytes_m = 0;
+  bool histogramBoostFloatContents_m = true;
+  std::string histogramBoostSparseBackend_m = "map";
   bool histogramSystematics_m = true;
   RegionManager* regionManager_m = nullptr;
 };

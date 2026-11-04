@@ -81,11 +81,19 @@ def test_sparse_schema_signature_ignores_histogram_order():
 
 
 @pytest.mark.skipif(importlib.util.find_spec("ROOT") is None, reason="PyROOT unavailable")
-def test_extraction_preserves_sparse_data_and_variable_binning(tmp_path):
+@pytest.mark.parametrize("compiled", [False, True])
+def test_extraction_preserves_sparse_data_and_variable_binning(tmp_path, monkeypatch, compiled):
     import ROOT  # type: ignore
     from array import array
 
     from extract_nd_histograms import extract_nd_histograms
+    import extract_nd_histograms as extractor
+    if compiled:
+        reader = extractor._compiled_reader()
+        if reader is None or not hasattr(reader, "extract_sparse_slices"):
+            pytest.skip("Compiled sparse extraction unavailable")
+    else:
+        monkeypatch.setattr(extractor, "_compiled_reader", lambda: None)
 
     input_path = tmp_path / "merged.root"
     output_path = tmp_path / "projected.root"
@@ -102,6 +110,13 @@ def test_extraction_preserves_sparse_data_and_variable_binning(tmp_path):
     sparse.SetBinEdges(4, array("d", [0.0, 10.0, 30.0]))
     sparse.Fill(coordinates, 2.0)
     sparse.Fill(coordinates, -1.0)
+    coordinates[4] = -5.0
+    sparse.Fill(coordinates, 3.0)
+    coordinates[4] = 30.0
+    sparse.Fill(coordinates, 5.0)
+    coordinates[3], coordinates[4] = 1.5, 15.0
+    sparse.Fill(coordinates, 2.0)
+    sparse.Fill(coordinates, -2.0)
     labels = ["signal", "default", "inclusive", "Nominal"]
     for index, label in enumerate(labels):
         sparse.GetAxis(index).SetBinLabel(1, label)
@@ -123,5 +138,22 @@ def test_extraction_preserves_sparse_data_and_variable_binning(tmp_path):
         assert projected.GetBinError(projected.FindBin(5.0)) == pytest.approx(5.0**0.5)
         assert projected.GetXaxis().GetBinUpEdge(1) == pytest.approx(10.0)
         assert projected.GetXaxis().GetBinUpEdge(2) == pytest.approx(30.0)
+        assert projected.GetBinContent(0) == 3.0
+        assert projected.GetBinContent(3) == 5.0
+        shifted = result_file.Get("signal_default/inclusive/h_pt_jesUp")
+        assert shifted.GetBinContent(2) == 0.0
+        assert shifted.GetBinError(2) ** 2 == pytest.approx(8.0)
     finally:
         result_file.Close()
+
+    nominal_path = tmp_path / "nominal.root"
+    assert extract_nd_histograms(str(input_path), str(nominal_path), nominal_only=True) == 1
+    nominal_schema = read_embedded_histogram_schema(str(nominal_path))
+    assert nominal_schema["histograms"][0]["axes"][3]["labels"] == ["Nominal"]
+    nominal_file = ROOT.TFile.Open(str(nominal_path), "READ")
+    try:
+        assert nominal_file.Get("signal_default/inclusive/h_pt")
+        assert not nominal_file.Get("signal_default/inclusive/h_pt_jesUp")
+        assert nominal_file.Get("nd_histograms_v1/pt__nominal").GetAxis(3).GetNbins() == 2
+    finally:
+        nominal_file.Close()

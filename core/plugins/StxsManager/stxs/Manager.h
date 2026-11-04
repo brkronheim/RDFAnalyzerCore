@@ -9,7 +9,7 @@
 //   migration uncertainty weights. Fully configurable: signal processes,
 //   production modes, decay channels, bin definitions, and auxiliary
 //   histograms are all loaded from configuration files — no hardcoded
-//   VH-specific logic.
+//   analysis-specific logic.
 //
 // Usage:
 //   1. Load config via stxs::loadConfig() or stxs::loadConfigFromYaml()
@@ -35,7 +35,7 @@ namespace stxs {
 // Generic STXS enums (integer-based, values from config)
 // ===========================================================================
 
-/// Signal process identifier (configurable integer, not VH-specific).
+/// Signal process identifier (configurable integer, not analysis-specific).
 enum class SignalProcess : int {
   kUnknown = 0,
   kUserDefinedStart = 100  ///< User-defined processes start here
@@ -129,6 +129,14 @@ struct SignalProcessRule {
   int processId = 0;       ///< SignalProcess integer to assign on match
 };
 
+/// Analysis-supplied histogram bins for one fine category.
+struct MigrationBin {
+  int ptBin = 0;
+  int jetPtBin = 0;
+  int scaleBin = 0;
+  bool useAcceptanceFallback = false;
+};
+
 /// Top-level STXS configuration.
 struct Config {
   bool enabled = false;
@@ -141,6 +149,7 @@ struct Config {
   std::vector<BinDefinition> bins;
   std::vector<AcceptanceSpec> acceptanceSpecs;
   std::vector<MigrationSpec> migrationSpecs;
+  std::unordered_map<int, MigrationBin> migrationBins;
   std::vector<SignalProcessRule> signalProcessRules;
   std::unordered_map<int, int> fineCategoryToAnalysisBin;
   std::unordered_map<int, std::string> analysisBinLabels;
@@ -159,6 +168,10 @@ Config loadConfig(const std::string &binConfigPath,
                   const std::string &coarseBranch,
                   const std::string &fineBranch,
                   bool enabled);
+
+/// Load rows: <fine_category> <pt_bin> <jet_pt_bin> <scale_bin> <acceptance_fallback_0_or_1>.
+/// Unmapped categories receive unity migration weights. Indices must be positive.
+void loadMigrationBinConfig(const std::string &path, Config &config);
 
 /// Load the full STXS configuration from a YAML file (preferred for genericity).
 /// The YAML file specifies:
@@ -215,8 +228,8 @@ public:
                                       int coarseCategory) const;
 
   /// Compute migration weights for a (productionMode, fineCategory) pair.
-  /// The fallback values are used when fineCategory is a boundary that lacks
-  /// its own fine-acceptance histogram (e.g. fine categories 403, 503).
+  /// The fallback values are used when the analysis mapping marks a category
+  /// with useAcceptanceFallback. Unmapped categories receive unity weights.
   MigrationWeights migrationWeights(int productionModeId,
                                     int fineCategory,
                                     float fallbackUp,

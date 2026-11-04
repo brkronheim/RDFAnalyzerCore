@@ -85,6 +85,8 @@ from output_schema import (  # noqa: E402
     validate_merge_inputs,
 )
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
+from metadata_io import (merge_root_files, load_metadata_records, build_bundle,
+                         validate_metadata_bundle)  # noqa: E402
 from extract_nd_histograms import (  # noqa: E402
     extract_nd_histograms,
     read_embedded_histogram_schema,
@@ -459,6 +461,9 @@ class MergeMixin:
             if role == "metadata":
                 with open(primary, "r", encoding="utf-8") as stream:
                     summary = json.load(stream)
+                if isinstance(summary, dict) and summary.get("metadata_bundle") is not None:
+                    from metadata_io import expand_bundle
+                    expand_bundle(summary["metadata_bundle"])
                 return isinstance(summary, dict)
 
             groups_name = {
@@ -481,6 +486,8 @@ class MergeMixin:
                 )
                 if not os.path.isfile(resolved) or os.path.getsize(resolved) <= 0:
                     return False
+                if role != "skim":
+                    validate_metadata_bundle(resolved)
                 with uproot.open(resolved) as root_file:
                     if role == "skim":
                         tree_name = getattr(schema, "tree_name", "Events")
@@ -689,12 +696,11 @@ class MergeHistograms(MergeMixin, law.Task):
             for basename, paths in groups.items():
                 out_path = os.path.join(out_dir, basename)
                 self.publish_message(f"hadd: {len(paths)} → {out_path}")
-                _run_hadd(out_path, paths)
-                if group_schemas[basename] is not None:
-                    self.publish_message(
-                        f"Reconstructing single histograms in {out_path}"
-                    )
-                    extract_nd_histograms(out_path, out_path)
+                merge_root_files(
+                    out_path, paths, role="histograms", hadd=_find_hadd(),
+                    postprocess=(lambda path: extract_nd_histograms(path, path))
+                    if group_schemas[basename] is not None else None,
+                )
                 merged_output_files[basename] = out_path
 
         rec.save(os.path.join(out_dir, "merge_histograms.perf.json"))
@@ -839,7 +845,7 @@ class MergeCutflows(MergeMixin, law.Task):
             for basename, paths in groups.items():
                 out_path = os.path.join(out_dir, basename)
                 self.publish_message(f"hadd: {len(paths)} → {out_path}")
-                _run_hadd(out_path, paths)
+                merge_root_files(out_path, paths, role="cutflow", hadd=_find_hadd())
                 merged_output_files[basename] = out_path
 
         rec.save(os.path.join(out_dir, "merge_cutflows.perf.json"))
@@ -915,12 +921,27 @@ class MergeMetadata(MergeMixin, law.Task):
                 }
                 provenance_records.append(record)
 
+            root_records = []
+            seen_metadata_paths = set()
+            for manifest_path, manifest in loaded:
+                if manifest.metadata is None or not manifest.metadata.output_file:
+                    continue
+                metadata_path = _resolve_manifest_root_path(
+                    manifest_path, manifest.metadata.output_file)
+                if metadata_path in seen_metadata_paths:
+                    raise ValueError(f"Duplicate metadata artifact: {metadata_path}")
+                seen_metadata_paths.add(metadata_path)
+                # Manifests may describe metadata-only tasks with no ROOT artifact.
+                if metadata_path.endswith((".root", ".json", ".json.gz")):
+                    root_records.extend(load_metadata_records(metadata_path))
+            metadata_bundle = build_bundle(root_records) if root_records else None
             summary_path = os.path.join(out_dir, "provenance_summary.json")
             with open(summary_path, "w") as fh:
                 json.dump(
                     {
                         "n_inputs": len(loaded),
                         "provenance_records": provenance_records,
+                        "metadata_bundle": metadata_bundle,
                     },
                     fh,
                     indent=2,

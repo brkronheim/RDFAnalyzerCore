@@ -1,0 +1,4 @@
+interface:
+  display_name: "Taggers, working points, and efficiencies"
+  short_description: "Taggers, working points, and efficiencies"
+  default_prompt: "Use $rdfanalyzer-tagging to resolve the discriminator, working points, efficiency inputs, and event-weight method."

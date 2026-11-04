@@ -739,10 +739,11 @@ class HistogramSchema:
 class MetadataSchema:
     """Schema definition for the provenance metadata output.
 
-    ``ProvenanceService`` writes ``TNamed`` objects into a ``TDirectory``
-    named ``"provenance"`` inside the meta-output ROOT file.  This schema
-    records the expected file name, directory name, and required/optional
-    provenance keys.
+    ``ProvenanceService`` writes one versioned JSON ``TObjString``; merged
+    files reference a compressed provenance bundle. Legacy ``provenance``
+    directories remain readable. The manifest envelope is unchanged; embedded
+    documents/references have independent format versions. ``storage_format``
+    defaults to auto-detection and records the document/reference key names.
 
     Attributes
     ----------
@@ -766,6 +767,11 @@ class MetadataSchema:
     schema_version: int = METADATA_SCHEMA_VERSION
     output_file: str = ""
     provenance_dir: str = "provenance"
+    # The manifest envelope stays backward compatible. Embedded documents and
+    # merge references carry their own independently validated format versions.
+    storage_format: str = "auto"
+    document_key: str = "__rdf_job_metadata_v1"
+    reference_key: str = "__rdf_metadata_reference_v1"
     required_keys: List[str] = field(
         default_factory=lambda: list(PROVENANCE_REQUIRED_KEYS)
     )
@@ -796,6 +802,8 @@ class MetadataSchema:
             errors.append("MetadataSchema.output_file must not be empty.")
         if not self.provenance_dir:
             errors.append("MetadataSchema.provenance_dir must not be empty.")
+        if self.storage_format not in ("auto", "legacy", "compact"):
+            errors.append("MetadataSchema.storage_format must be auto, legacy or compact.")
         return errors
 
 

@@ -6,7 +6,7 @@ exact call order, flags to enable, output columns produced, and extension
 patterns for analysis-specific corrections.
 
 For the full implementation status matrix, see
-[`core/plugins/cms/README.md`](../core/plugins/cms/README.md).
+[`extensions/cms/plugins/cms/README.md`](../extensions/cms/plugins/cms/README.md).
 
 ---
 
@@ -307,7 +307,7 @@ The STXS stage-1.2 binning is configured via `stxsConfig`.
 
 Not centrally available in CAT CVMFS as of 2026.  When payloads become
 available, use the reserved `ChannelMask::applyBoostedTagSFs` flag and
-follow the b-tag SF pattern.  See [`core/plugins/cms/README.md`](../core/plugins/cms/README.md)
+follow the b-tag SF pattern.  See [`extensions/cms/plugins/cms/README.md`](../extensions/cms/plugins/cms/README.md)
 for the current status.
 
 ### 7. Custom Correctionlib Payloads
@@ -353,7 +353,7 @@ cm->applyCorrectionVec("my_corr", {"nominal"}, {}, "my_corr_nominal_vec");
 
 ## See Also
 
-- [`core/plugins/cms/README.md`](../core/plugins/cms/README.md) — implementation status matrix
+- [`extensions/cms/plugins/cms/README.md`](../extensions/cms/plugins/cms/README.md) — implementation status matrix
 - [`docs/CMS_CORRECTIONS.md`](CMS_CORRECTIONS.md) — correction manager patterns
 - [`docs/JET_ENERGY_CORRECTIONS.md`](JET_ENERGY_CORRECTIONS.md) — JEC/JER reference
 - [`docs/API_REFERENCE.md`](API_REFERENCE.md) — API reference

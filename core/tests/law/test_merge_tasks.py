@@ -626,12 +626,14 @@ class TestMergeHistogramsTask(unittest.TestCase):
                 Path(os.path.join(job_dir, "histograms.root")).touch()
 
             task = mod.MergeHistograms(name="r", input_dir=tmpdir, output_dir=out_dir)
-            with patch.object(mod, "_run_hadd") as mock_hadd, \
+            with patch.object(mod, "merge_root_files") as mock_hadd, \
                  patch.object(mod, "read_embedded_histogram_schema", return_value=None), \
                  patch.object(task, "publish_message", return_value=None):
-                def fake_hadd(out_path, in_paths):
+                def fake_hadd(out_path, in_paths, **kwargs):
                     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
                     Path(out_path).touch()
+                    if kwargs.get("postprocess"):
+                        kwargs["postprocess"](out_path)
                 mock_hadd.side_effect = fake_hadd
                 task.run()
 
@@ -670,20 +672,21 @@ class TestMergeHistogramsTask(unittest.TestCase):
                     root_file["__rdf_histogram_schema_v1"] = json.dumps(schema)
 
             task = mod.MergeHistograms(name="r", input_dir=tmpdir, output_dir=out_dir)
-            with patch.object(mod, "_run_hadd") as mock_hadd, \
+            with patch.object(mod, "merge_root_files") as mock_hadd, \
                  patch.object(mod, "extract_nd_histograms") as mock_extract, \
                  patch.object(task, "publish_message", return_value=None):
-                def fake_hadd(out_path, in_paths):
+                def fake_hadd(out_path, in_paths, **kwargs):
                     with uproot.recreate(out_path) as root_file:
                         root_file["__rdf_histogram_schema_v1"] = json.dumps(schema)
+                    kwargs["postprocess"](out_path)
 
                 mock_hadd.side_effect = fake_hadd
                 task.run()
 
             mock_hadd.assert_called_once()
             mock_extract.assert_called_once_with(
-                os.path.join(out_dir, "histograms.root"),
-                os.path.join(out_dir, "histograms.root"),
+                os.path.join(out_dir, "histograms", "histograms.root"),
+                os.path.join(out_dir, "histograms", "histograms.root"),
             )
 
 
@@ -714,11 +717,13 @@ class TestMergeCutflowsTask(unittest.TestCase):
                 Path(os.path.join(job_dir, "cutflow.root")).touch()
 
             task = mod.MergeCutflows(name="r", input_dir=tmpdir, output_dir=out_dir)
-            with patch.object(mod, "_run_hadd") as mock_hadd, \
+            with patch.object(mod, "merge_root_files") as mock_hadd, \
                  patch.object(task, "publish_message", return_value=None):
-                def fake_hadd(out_path, in_paths):
+                def fake_hadd(out_path, in_paths, **kwargs):
                     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
                     Path(out_path).touch()
+                    if kwargs.get("postprocess"):
+                        kwargs["postprocess"](out_path)
                 mock_hadd.side_effect = fake_hadd
                 task.run()
 
@@ -729,6 +734,16 @@ class TestMergeCutflowsTask(unittest.TestCase):
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
 class TestMergeMetadataTask(unittest.TestCase):
     """Tests for MergeMetadata task construction and run logic."""
+
+    def setUp(self):
+        import merge_tasks
+        from metadata_io import _normalize_record
+        def fake_records(path):
+            return [_normalize_record({"format": "rdf-job-metadata", "schema_version": 1,
+                                       "provenance": {}}, path)]
+        patcher = patch.object(merge_tasks, "load_metadata_records", side_effect=fake_records)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _import(self):
         import merge_tasks

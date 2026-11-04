@@ -13,7 +13,9 @@ if(RDF_ENABLE_XRD_ADAPTOR)
     add_subdirectory(xrd)
 endif()
 add_subdirectory(src)
-add_subdirectory(python/bindings)
+add_executable(rdf-plot tools/plot.cc)
+target_link_libraries(rdf-plot PRIVATE core)
+install(TARGETS rdf-plot RUNTIME DESTINATION bin)
 
 # Optional custom ROOT dictionary (user-provided)
 if(RDF_CUSTOM_DICT_HEADERS AND RDF_CUSTOM_DICT_LINKDEF)
@@ -49,22 +51,38 @@ if(RDF_CUSTOM_DICT_HEADERS AND RDF_CUSTOM_DICT_LINKDEF)
     target_link_libraries(core PUBLIC ${RDF_CUSTOM_DICT_TARGET})
 endif()
 add_subdirectory(plugins)
+rdf_add_extensions()
+get_property(_rdf_extension_targets GLOBAL PROPERTY RDF_EXTENSION_TARGETS)
 
 # coreAll: interface target that links core + corePlugins inside a linker
 # rescan group so the circular dependency between the two static archives
 # (core→NDHistogramManager symbols, corePlugins→Analyzer::addPlugin) is
 # resolved regardless of link order on single-pass GNU ld.
 add_library(coreAll INTERFACE)
+# ROOT's imported targets can expose bare transitive names (notably tbb).
+# Propagate their resolved directories to every consumer, including tests.
+if(RDF_ROOT_TRANSITIVE_RPATH_DIRS)
+    target_link_directories(coreAll INTERFACE ${RDF_ROOT_TRANSITIVE_RPATH_DIRS})
+    # Keep -L even when CMake considers an environment path implicit: some
+    # resolved libraries are linker scripts with relative INPUT members.
+    foreach(_rdf_transitive_dir IN LISTS RDF_ROOT_TRANSITIVE_RPATH_DIRS)
+        target_link_options(coreAll INTERFACE "-L${_rdf_transitive_dir}")
+    endforeach()
+endif()
 target_link_libraries(coreAll INTERFACE
     -Wl,--start-group
     core
     corePlugins
+    ${_rdf_extension_targets}
     -Wl,--end-group
 )
+
+add_subdirectory(python/bindings)
 
 # Only build tests if requested
 if(BUILD_TESTS)
     add_subdirectory(tests)
+    rdf_add_extension_tests()
 endif()
 
 

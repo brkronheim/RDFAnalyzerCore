@@ -1,0 +1,4 @@
+interface:
+  display_name: "Object corrections and collections"
+  short_description: "Object corrections and collections"
+  default_prompt: "Use $rdfanalyzer-object-corrections to trace a correction from its payload inputs through corrected kinematics and collection indices."

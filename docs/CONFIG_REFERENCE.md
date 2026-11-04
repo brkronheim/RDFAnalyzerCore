@@ -52,11 +52,18 @@ CPUs requested by the job.
 
 ### Output Branch Configuration
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `saveConfig` | Path | Configuration file listing branches to save in output tree |
-| `skimFilter` | RDataFrame expression | Optional event filter applied only when writing the skim; histogram actions use the unfiltered analysis graph |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `saveConfig` | Path | All columns | Configuration file listing branches to save in output tree |
+| `skimFilter` | RDataFrame expression | None | Optional event filter applied only when writing the skim; histogram actions use the unfiltered analysis graph |
 | `skimSystematics` | Boolean | `false` | When `true`, expand configured skim branches with their registered paired Up/Down systematic columns. This affects only skim output and does not enable framework systematics. |
+| `skimCompressionAlgorithm` | String | `zstd` | ROOT skim compression: `zstd`, `lzma`, `zlib`, or `lz4`. |
+| `skimCompressionLevel` | Integer | 5 | ROOT skim compression level, 0 through 9. Level 0 disables compression. Higher levels trade write CPU time for file size. |
+
+For stronger lossless skim compression, set `skimCompressionAlgorithm=zstd`
+and `skimCompressionLevel=9`. These settings apply to the ROOT skim sink;
+metadata and histogram compression are unchanged. Existing frozen workers keep
+their staged executable and configuration.
 
 The `saveConfig` file contains one branch name per line. It also supports **glob patterns** for flexible column selection:
 
@@ -334,10 +341,10 @@ workflowConfig=cfg/corrected_jets_workflow.txt
 ```text
 type=setJetColumns ptColumn=Jet_pt etaColumn=Jet_eta phiColumn=Jet_phi massColumn=Jet_mass
 type=removeExistingCorrections rawFactorColumn=Jet_rawFactor sample=mc
-type=registerCorrection sample=mc name=vhqq_jec_nominal file=${jmeFile} correctionName=${jecCompoundCorrection} inputVariables=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
-type=applyCorrectionlib sample=mc correction=vhqq_jec_nominal inputPtColumn=Jet_pt_raw outputPtColumn=${correctedPtColumn} applyToMass=true inputMassColumn=Jet_mass_raw outputMassColumn=${correctedMassColumn} inputColumns=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
-type=applyResolutionSmearingSystematic sample=mc correction=vhqq_electron_smear systematicName=electron_smear
-type=applyRelativePtUncertaintySystematic sample=mc correction=vhqq_electron_smear systematicName=electron_scale stringArgs=escale
+type=registerCorrection sample=mc name=analysis_jec_nominal file=${jmeFile} correctionName=${jecCompoundCorrection} inputVariables=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+type=applyCorrectionlib sample=mc correction=analysis_jec_nominal inputPtColumn=Jet_pt_raw outputPtColumn=${correctedPtColumn} applyToMass=true inputMassColumn=Jet_mass_raw outputMassColumn=${correctedMassColumn} inputColumns=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+type=applyResolutionSmearingSystematic sample=mc correction=analysis_electron_smear systematicName=electron_smear
+type=applyRelativePtUncertaintySystematic sample=mc correction=analysis_electron_smear systematicName=electron_scale stringArgs=escale
 type=applyScaleResolutionSystematics jsonFile=${muonScaleResolutionFile}
 ```
 
@@ -564,30 +571,51 @@ The YAML config is validated at startup against a JSON Schema. See **[CONFIGURAT
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `histogramBackend` | String | `"root"` | Histogram backend: `"root"` (THnSparseF) or `"boost"` (Boost.Histogram) |
+| `histogramBackend` | String | `"boost"` | Histogram backend: `"root"` or `"boost"` (Boost.Histogram). Both persist THnSparseF. |
+| `histogramDenseLimitMiB` | Non-negative integer | `0` | Dense accumulator budget per histogram, summed over all RDF slots and including flow cells. Default `0` forces sparse accumulation. This is not a process-wide memory cap. |
+| `histogramBoostPrecision` | String | `"float"` | Boost contents: `"float"` for ROOT-compatible float contents with double sumw2 and ROOT bin lookup, or explicit `"double"` for double weighted sums. |
+| `histogramBoostSparseBackend` | String | `"map"` | Boost sparse container: `"map"` uses `std::unordered_map`; `"flat"` uses `boost::unordered_flat_map` when its header is available. |
 | `histogramSystematics` | Boolean | `true` | Enable histogram systematic variations and auto-detect complete `baseVariable_nameUp` / `baseVariable_nameDown` column pairs. Set to `false` for nominal-only histograms. |
 
-**ROOT backend** (`"root"`, default): stores mergeable `THnSparseF` objects in
+**ROOT backend** (`"root"`, explicit override): stores mergeable `THnSparseF` objects in
 the meta ROOT output file, including axis labels and exact bin edges. The
 manifest-driven merge task combines these objects with `hadd`, then writes the
 reconstructed `TH1F` objects alongside them for downstream plotting and
 datacard tools. For manual merges, run
 `python core/python/extract_nd_histograms.py merged.root` after `hadd`.
 
-**Boost.Histogram backend** (`"boost"`): stores histograms in-memory using
+**Boost.Histogram backend** (`"boost"`, default): stores histograms in-memory using
 Boost.Histogram during the event loop, then converts to the same mergeable
-`THnSparseF` format for output. This can improve memory performance for
-analyses with very large numbers of histogram bins.
+`THnSparseF` format for output. Regular-axis histograms use dense weighted
+arrays or sparse weighted maps. With explicit double precision,
+variable-width observables use the ROOT action. The default float precision
+uses a custom accumulator with float contents and double sumw2, plus ROOT's
+axis lookup for both regular and variable bins. Dense float storage uses
+separate arrays (12 bytes per cell), avoiding structure padding. The explicit
+double option accumulates contents in double and rounds to float at export;
+negative-weight cancellations can therefore differ from ROOT.
 
 ```
-# Use ROOT backend (default — compatible with all downstream tools including Combine)
-histogramBackend=root
-
-# Use Boost.Histogram backend (in-memory optimisation, same output format)
+# Default: ROOT-compatible float arithmetic, sparse standard map
 histogramBackend=boost
+histogramBoostPrecision=float
+histogramBoostSparseBackend=map
+histogramDenseLimitMiB=0
+
+# To restore ROOT accumulation with the former dense budget, instead use:
+# histogramBackend=root
+# histogramDenseLimitMiB=64
 ```
 
-Both backends produce the same output format and are fully interchangeable.
+Both backends produce the same output format. Both retain flow bins and
+double sumw2. Numerical agreement must be checked before changing a backend.
+Set `RDF_HISTOGRAM_PROFILE=1` to report each action's storage choice, estimated
+dense bytes, occupied output bins, and finalization CPU/wall time.
+At metadata save time, Boost sparse actions warn once per histogram when
+tracked container allocations observed during finalization exceed the dense
+array estimate across the same slots. The warning includes the file/histogram,
+both byte counts, and the dense-budget override. See
+[storage accounting and its limits](CONFIG_HISTOGRAMS.md#storage-selection-and-output).
 
 ### Counter Service
 

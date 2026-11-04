@@ -15,6 +15,10 @@
 # All supporting packages use x86_64-el9-gcc11-opt to match the ROOT ABI.
 # Platform: x86_64-almalinux9 / cmssw-el9 container, system GCC 11.5
 
+# Resolve paths relative to this file so the environment works when sourced
+# from outside the repository root as well.
+export REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
 ulimit -n 10000
 
 # Compiler: use the system GCC 11.5.0 that ships in the cmssw-el9 container.
@@ -80,25 +84,31 @@ if [ -n "${LCG_GSL_ROOT}" ] && [ -f "${LCG_GSL_ROOT}/lib/libgsl.so.25" ] && [ -f
 	export LIBRARY_PATH=${LCG_GSL_ROOT}/lib:${LIBRARY_PATH}
 fi
 
-# ---------------------------------------------------------------------------
-# 4b. XRootD 5.7.2 (matched client, headers, and helper tools)
-#     The system XRootD 5.9.6 client on some EL9 hosts crashes during library
-#     initialization. Use the CMS CVMFS release consistently at build and run
-#     time, including for xrdcp/xrdfs site probing.
-# ---------------------------------------------------------------------------
-LCG_XROOTD_ROOT=${XROOTD_ROOT:-${XRD_ROOT:-/cvmfs/cms.cern.ch/el9_amd64_gcc11/external/xrootd/5.7.2-bdeecf35946e4279bb4e035d424d9ff2}}
-LCG_XROOTD_LIBDIR=${LCG_XROOTD_ROOT}/lib64
-if [ ! -f "${LCG_XROOTD_LIBDIR}/libXrdCl.so" ]; then
-	LCG_XROOTD_LIBDIR=${LCG_XROOTD_ROOT}/lib
-fi
-if [ -d "${LCG_XROOTD_ROOT}/include/xrootd/XrdCl" ] && [ -f "${LCG_XROOTD_LIBDIR}/libXrdCl.so" ]; then
-	if [ -z "${XROOTD_ROOT:-${XRD_ROOT:-}}" ]; then
-		export XROOTD_ROOT=${LCG_XROOTD_ROOT}
-	fi
-	export PATH=${LCG_XROOTD_ROOT}/bin:${PATH}
-	export CMAKE_PREFIX_PATH=${LCG_XROOTD_ROOT}:${CMAKE_PREFIX_PATH}
-	export LD_LIBRARY_PATH=${LCG_XROOTD_LIBDIR}:${LD_LIBRARY_PATH}
-	export LIBRARY_PATH=${LCG_XROOTD_LIBDIR}:${LIBRARY_PATH}
+# Source the environment hooks declared by installed extensions. Each extension
+# owns its enable option and presets; the framework only discovers manifests.
+# RDF_EXTENSION_ENV_BEGIN
+rdf_extension_env_paths=$(python3 "${REPO_DIR}/scripts/extension_env.py") || return 1
+while IFS= read -r rdf_extension_environment; do
+    if [ -n "${rdf_extension_environment}" ]; then
+        source "${rdf_extension_environment}" || return 1
+    fi
+done <<< "${rdf_extension_env_paths}"
+# RDF_EXTENSION_ENV_END
+
+# Honor an explicitly selected XRootD package with or without an experiment
+# checkout. Optional presets may supply a default prefix.
+LCG_XROOTD_ROOT=${XROOTD_ROOT:-${XRD_ROOT:-}}
+if [ -n "${LCG_XROOTD_ROOT}" ]; then
+    LCG_XROOTD_LIBDIR=${LCG_XROOTD_ROOT}/lib64
+    if [ ! -f "${LCG_XROOTD_LIBDIR}/libXrdCl.so" ]; then
+        LCG_XROOTD_LIBDIR=${LCG_XROOTD_ROOT}/lib
+    fi
+    if [ -d "${LCG_XROOTD_ROOT}/include/xrootd/XrdCl" ] && [ -f "${LCG_XROOTD_LIBDIR}/libXrdCl.so" ]; then
+        export PATH=${LCG_XROOTD_ROOT}/bin:${PATH}
+        export CMAKE_PREFIX_PATH=${LCG_XROOTD_ROOT}:${CMAKE_PREFIX_PATH}
+        export LD_LIBRARY_PATH=${LCG_XROOTD_LIBDIR}:${LD_LIBRARY_PATH}
+        export LIBRARY_PATH=${LCG_XROOTD_LIBDIR}:${LIBRARY_PATH}
+    fi
 fi
 
 # ---------------------------------------------------------------------------

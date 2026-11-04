@@ -4,11 +4,13 @@
 #include <api/IOutputSink.h>
 
 #include <GitVersion.h>
+#include <ExtensionConfig.h>
+#include <RootRegistryOptimization.h>
 
 #include <TDirectory.h>
 #include <TFile.h>
 #include <TMD5.h>
-#include <TNamed.h>
+#include <TObjString.h>
 #include <TObject.h>
 #include <RVersion.h>
 
@@ -154,29 +156,48 @@ void ProvenanceService::finalize(ROOT::RDF::RNode& /*df*/) {
 
     TFile outFile(fileName.c_str(), "UPDATE");
     if (outFile.IsZombie()) {
-        ctx_m->logger.log(ILogger::Level::Error,
-            "ProvenanceService: failed to open meta output file: " + fileName);
-        return;
+        throw std::runtime_error("ProvenanceService: failed to open meta output file: " + fileName);
     }
 
-    // Create (or retrieve) the "provenance" sub-directory
-    TDirectory* provDir = dynamic_cast<TDirectory*>(outFile.Get("provenance"));
-    if (!provDir) {
-        provDir = outFile.mkdir("provenance", "Provenance metadata");
-    }
-    if (!provDir) {
-        ctx_m->logger.log(ILogger::Level::Error,
-            "ProvenanceService: could not create 'provenance' directory in "
-            + fileName);
-        outFile.Close();
-        return;
-    }
+    const auto registry = rdf::rootRegistryOptimizationStatus();
+    provenance_m["root.registry_optimization"] = registry.implementation;
+    provenance_m["root.registry_definitions"] = std::to_string(registry.definitions);
+    provenance_m["root.registry_input_bindings_before"] = std::to_string(registry.inputBindingsBefore);
+    provenance_m["root.registry_input_bindings_after"] = std::to_string(registry.inputBindingsAfter);
 
-    provDir->cd();
-    for (const auto& [key, value] : provenance_m) {
-        TNamed entry(key.c_str(), value.c_str());
-        entry.Write(key.c_str(), TObject::kOverwrite);
+    // One compressed, versioned object. Definitions and measured diagnostics
+    // are contributed by plugins, so no plugin needs to reopen this file.
+    std::map<std::string, std::string> sorted(provenance_m.begin(), provenance_m.end());
+    std::ostringstream document;
+    document << "{\"schema_version\":1,\"format\":\"rdf-job-metadata\",\"provenance\":"
+             << rdf::metadataJsonMap(sorted)
+             << ",\"regions\":" << rdf::metadataJsonMap(outputMetadata_m.regions)
+             << ",\"normalizations\":{";
+    bool first = true;
+    for (const auto& [key, value] : outputMetadata_m.normalizations) {
+        if (!first) document << ',';
+        first = false;
+        document << rdf::metadataJsonString(key) << ':' << rdf::metadataJsonNumber(value);
     }
+    document << "},\"weight_audits\":{";
+    first = true;
+    for (const auto& [key, value] : outputMetadata_m.weightAudits) {
+        if (!first) document << ',';
+        first = false;
+        document << rdf::metadataJsonString(key) << ":{\"n\":" << value.count
+                 << ",\"sum_w\":" << rdf::metadataJsonNumber(value.sum)
+                 << ",\"min_w\":" << (value.count ? rdf::metadataJsonNumber(value.minimum) : "null")
+                 << ",\"max_w\":" << (value.count ? rdf::metadataJsonNumber(value.maximum) : "null")
+                 << ",\"n_negative\":" << value.negativeCount
+                 << ",\"n_zero\":" << value.zeroCount << '}';
+    }
+    document << "}}";
+    outFile.cd();
+    // A reused file must not advertise both the old and new provenance formats.
+    outFile.Delete("provenance;*");
+    TObjString entry(document.str().c_str());
+    if (entry.Write(rdf::jobMetadataKey, TObject::kOverwrite) <= 0)
+        throw std::runtime_error("Failed to write job metadata to " + fileName);
 
     outFile.Close();
 
@@ -222,6 +243,18 @@ void ProvenanceService::collectBuildInfo() {
     provenance_m["framework.git_dirty"]       = RDFANALYZER_GIT_DIRTY ? "true" : "false";
     provenance_m["framework.build_timestamp"] = RDFANALYZER_BUILD_TIMESTAMP;
     provenance_m["framework.compiler"]        = RDFANALYZER_COMPILER;
+    std::string enabledExtensions;
+    for (const auto &extension : rdf::extensionBuildInfo) {
+        const auto prefix = std::string("extensions.") + extension.name;
+        provenance_m[prefix + ".enabled"] = extension.enabled ? "true" : "false";
+        if (extension.enabled) {
+            if (!enabledExtensions.empty()) enabledExtensions += ";";
+            enabledExtensions += extension.name;
+            provenance_m[prefix + ".git_hash"] = extension.revision;
+            provenance_m[prefix + ".git_dirty"] = extension.dirty ? "true" : "false";
+        }
+    }
+    provenance_m["extensions.enabled"] = enabledExtensions;
 
     // ROOT version is a compile-time macro
     provenance_m["root.version"] = ROOT_RELEASE;
@@ -237,7 +270,7 @@ void ProvenanceService::collectRuntimeInfo(const IConfigurationProvider& config)
 
     const std::string gitStatus =
         runCommand("git status --porcelain 2>/dev/null");
-    provenance_m["analysis.git_dirty"] = gitStatus.empty() ? "false" : "true";
+    provenance_m["analysis.git_dirty"] = analysisHash.empty() ? "unknown" : (gitStatus.empty() ? "false" : "true");
 
     // -----------------------------------------------------------------------
     // Runtime environment / container tag
@@ -264,7 +297,39 @@ void ProvenanceService::collectRuntimeInfo(const IConfigurationProvider& config)
     // Configuration hash (deterministic serialisation of the config map)
     // -----------------------------------------------------------------------
     const auto& configMap = config.getConfigMap();
+    auto setting = [&](const char* key) {
+        auto it = configMap.find(key);
+        return it == configMap.end() ? std::string() : it->second;
+    };
+    std::string logicalOutput = setting("__orig_metaFile");
+    if (logicalOutput.empty()) logicalOutput = setting("metaFile");
+    if (logicalOutput.empty()) logicalOutput = setting("saveFile");
+    if (!logicalOutput.empty() && logicalOutput.find("://") == std::string::npos)
+        logicalOutput = std::filesystem::absolute(logicalOutput).lexically_normal().string();
+    if (!setting("metadataJobId").empty())
+        provenance_m["job.logical_id"] = setting("metadataJobId");
+    else if (!logicalOutput.empty())
+        provenance_m["job.logical_id"] = hashString(logicalOutput);
+    if (!setting("metadataAttemptId").empty())
+        provenance_m["job.attempt_id"] = setting("metadataAttemptId");
+    if (!setting("runBundleId").empty())
+        provenance_m["run.bundle_id"] = setting("runBundleId");
+    if (!setting("metadataExecutionId").empty())
+        provenance_m["run.execution_id"] = setting("metadataExecutionId");
+    if (!setting("metadataExecutableSha256").empty())
+        provenance_m["run.expected_executable_sha256"] = setting("metadataExecutableSha256");
+    provenance_m["service.counter.sample"] = setting("sample");
+    if (provenance_m["service.counter.sample"].empty())
+        provenance_m["service.counter.sample"] = setting("name");
+    if (provenance_m["service.counter.sample"].empty())
+        provenance_m["service.counter.sample"] = "unknown";
     provenance_m["config.hash"] = hashString(serializeConfigMap(configMap));
+    auto semanticConfig = configMap;
+    for (const char* key : {"saveFile", "metaFile", "__orig_saveFile", "__orig_metaFile",
+                            "saveDirectory", "fileList", "firstEntry", "lastEntry",
+                            "metadataJobId", "metadataAttemptId"})
+        semanticConfig.erase(key);
+    provenance_m["config.semantic_hash"] = hashString(serializeConfigMap(semanticConfig));
 
     // -----------------------------------------------------------------------
     // File-list hash (the file referenced by "fileList")
@@ -287,7 +352,9 @@ void ProvenanceService::collectRuntimeInfo(const IConfigurationProvider& config)
             if (key == sk) { skip = true; break; }
         }
         if (!skip && looksLikeFilePath(value)) {
-            provenance_m["file.hash." + key] = hashFile(value);
+            const auto fingerprint = hashFile(value);
+            provenance_m["file.reference_fingerprint." + key] = fingerprint;
+            provenance_m["file.hash." + key] = fingerprint; // legacy alias
         }
     }
 }

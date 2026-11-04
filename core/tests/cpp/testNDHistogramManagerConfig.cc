@@ -60,6 +60,93 @@ protected:
     configManager.reset();
   }
 
+  void expectSparseMemoryWarning(const std::string &precision = "",
+                                 const std::string &storage = "",
+                                 const std::string &backend = "",
+                                 const std::string &budget = "") {
+    class RecordingLogger : public ILogger {
+    public:
+      std::vector<std::string> warnings;
+      void log(Level level, const std::string &message) override {
+        if (level == Level::Warn) warnings.push_back(message);
+      }
+    } recording;
+    if (!precision.empty()) configManager->set("histogramBoostPrecision", precision);
+    if (!storage.empty()) configManager->set("histogramBoostSparseBackend", storage);
+    if (!backend.empty()) configManager->set("histogramBackend", backend);
+    if (!budget.empty()) configManager->set("histogramDenseLimitMiB", budget);
+    const auto output = (std::filesystem::temp_directory_path() /
+        ("rdf-sparse-memory-" + std::to_string(getpid()) + ".root")).string();
+    std::filesystem::remove(output);
+    configManager->set("metaFile", output);
+    ManagerContext context{*configManager, *dataManager, *systematicManager,
+                           recording, *skimSink, *metaSink};
+    histogramManager->setContext(context);
+    // All 16^4 observable/category combinations, with nine weight variations,
+    // occupy enough of the 5D grid to make either sparse map exceed dense.
+    constexpr int bins = 16, cells = bins * bins * bins * bins;
+    for (int axis = 0; axis < 4; ++axis) {
+      dataManager->DefineNominal("coordinate" + std::to_string(axis), [axis, bins, cells]() {
+        ROOT::VecOps::RVec<float> values(cells);
+        int stride = 1;
+        for (int i = 0; i < axis; ++i) stride *= bins;
+        for (int i = 0; i < cells; ++i) values[i] = (i / stride) % bins + .5f;
+        return values;
+      });
+    }
+    dataManager->DefineNominal("memory_weight", [] { return 1.f; });
+    for (int variation = 0; variation < 4; ++variation) {
+      const auto name = "memory_scale" + std::to_string(variation);
+      const auto up = "memory_weight_" + name + "Up";
+      const auto down = "memory_weight_" + name + "Down";
+      dataManager->DefineNominal(up, [] { return 1.f; });
+      dataManager->DefineNominal(down, [] { return 1.f; });
+      systematicManager->registerVariationColumns("memory_weight", name, up, down);
+    }
+    histogramManager->setupFromConfigFile();
+    std::vector<histInfo> infos{
+        histInfo("occupied", "coordinate0", "", "memory_weight", bins, 0, bins),
+        histInfo("wide_sparse", "coordinate0", "", "memory_weight", 1000000, 0, 1000000)};
+    std::vector<selectionInfo> selections{
+        selectionInfo("coordinate1", bins, 0, bins), selectionInfo("coordinate2", bins, 0, bins),
+        selectionInfo("coordinate3", bins, 0, bins)};
+    std::vector<std::vector<std::string>> regions{{"channel"}, {"control"}, {"sample"}};
+    histogramManager->bookND(infos, selections, "", regions);
+    auto *histogram = histogramManager->GetHistos().front().GetPtr();
+    EXPECT_TRUE(recording.warnings.empty()) << "Warning belongs to metadata saving, not finalization";
+    ASSERT_NE(histogram, nullptr);
+    EXPECT_EQ(histogram->GetNbins(), cells * 9);
+    histogramManager->saveHists();
+    const bool warn = backend != "root" && budget != "64";
+    if (warn) {
+      ASSERT_EQ(recording.warnings.size(), 1u);
+      EXPECT_NE(recording.warnings[0].find("occupied_"), std::string::npos);
+      EXPECT_NE(recording.warnings[0].find(output), std::string::npos);
+      EXPECT_NE(recording.warnings[0].find("exceed the estimated dense arrays"), std::string::npos);
+      EXPECT_NE(recording.warnings[0].find("histogramDenseLimitMiB"), std::string::npos);
+    } else {
+      EXPECT_TRUE(recording.warnings.empty());
+    }
+    histogramManager->saveHists();
+    EXPECT_EQ(recording.warnings.size(), warn ? 1u : 0u) << "Repeated saves must not repeat warnings";
+    {
+      TFile saved(output.c_str(), "READ");
+      auto *stored = saved.Get<THnSparseF>("nd_histograms_v1/occupied_");
+      ASSERT_NE(stored, nullptr);
+      EXPECT_EQ(stored->GetNbins(), cells * 9);
+      const int point[] = {1, 1, 1, 1, 1};
+      const auto bin = stored->GetBin(point, false);
+      ASSERT_GE(bin, 0);
+      EXPECT_EQ(stored->GetBinContent(bin), 1);
+      EXPECT_EQ(stored->GetBinError2(bin), 1);
+    }
+    // Drop the context reference to the local logger before it is destroyed.
+    ManagerContext original{*configManager, *dataManager, *systematicManager,
+                            *logger, *skimSink, *metaSink};
+    histogramManager->setContext(original);
+    std::filesystem::remove(output);
+  }
+
   void expectShapeVariationCanMigrateHistogramRegion(
       const std::string &backend = "") {
     dataManager->Define(
@@ -585,7 +672,8 @@ TEST_F(NDHistogramManagerConfigTest, BoostBackendFunctionallyEquivalentToRoot) {
 
   configManager->set("histogramConfig", "cfg/test_histograms.txt");
 
-  // Book with ROOT backend (the default — no explicit set needed)
+  // Book with the explicitly selected ROOT backend.
+  configManager->set("histogramBackend", "root");
   histogramManager->setupFromConfigFile();
   EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
   const auto rootCount = histogramManager->GetHistos().size();
@@ -605,6 +693,116 @@ TEST_F(NDHistogramManagerConfigTest, BoostBackendFunctionallyEquivalentToRoot) {
   const auto boostCount = boostManager->GetHistos().size();
 
   EXPECT_EQ(rootCount, boostCount);
+}
+
+TEST_F(NDHistogramManagerConfigTest, DefaultBoostSparseWarnsOnlyWhenSavingOverfullHistogram) {
+  expectSparseMemoryWarning();
+}
+
+TEST_F(NDHistogramManagerConfigTest, DoubleBoostSparseMemoryWarning) {
+  expectSparseMemoryWarning("double");
+}
+
+#ifdef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+TEST_F(NDHistogramManagerConfigTest, FloatFlatSparseMemoryWarning) {
+  expectSparseMemoryWarning("float", "flat");
+}
+
+TEST_F(NDHistogramManagerConfigTest, DoubleFlatSparseMemoryWarning) {
+  expectSparseMemoryWarning("double", "flat");
+}
+#endif
+
+TEST_F(NDHistogramManagerConfigTest, DenseBoostDoesNotProduceSparseMemoryWarning) {
+  expectSparseMemoryWarning("float", "map", "boost", "64");
+}
+
+TEST_F(NDHistogramManagerConfigTest, RootDoesNotProduceBoostMemoryWarning) {
+  expectSparseMemoryWarning("", "", "root");
+}
+
+TEST_F(NDHistogramManagerConfigTest, DefaultBoostUsesRootFloatCancellationArithmetic) {
+  dataManager->DefineNominal("cancel_values", [] {
+    return ROOT::VecOps::RVec<float>{.5f, .5f, .5f};
+  });
+  dataManager->DefineNominal("cancel_weights", [] {
+    return ROOT::VecOps::RVec<float>{16777216.f, 1.f, -16777216.f};
+  });
+  histogramManager->setupFromConfigFile();
+  histInfo info("cancel", "cancel_values", "", "cancel_weights", 1, 0, 1);
+  histogramManager->BookSingleHistogram(info);
+  auto *histogram = histogramManager->GetHistos().front().GetPtr();
+  const int point[] = {1, 1, 1, 1, 1};
+  const auto bin = histogram->GetBin(point, false);
+  ASSERT_GE(bin, 0);
+  EXPECT_EQ(histogram->GetBinContent(bin), 0);
+  EXPECT_EQ(histogram->GetBinError2(bin), 2.0 * 16777216.0 * 16777216.0 + 1.0);
+}
+
+TEST_F(NDHistogramManagerConfigTest, DenseMemoryLimitRejectsInvalidValues) {
+  for (const auto *value : {"-1", "1.5", "64MiB", "18446744073709551615"}) {
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    config->set("histogramDenseLimitMiB", value);
+    NDHistogramManager manager(*config);
+    ManagerContext context{*config, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+    manager.setContext(context);
+    EXPECT_THROW(manager.setupFromConfigFile(), std::runtime_error) << value;
+  }
+}
+
+TEST_F(NDHistogramManagerConfigTest, BoostSelectionPreservesVariableEdgesThroughRootFallback) {
+  dataManager->DefineNominal("variable_observable", []() { return 15.f; });
+  dataManager->DefineNominal("variable_weight", []() { return 2.f; });
+  configManager->set("histogramBackend", "boost");
+  configManager->set("histogramBoostPrecision", "double");
+  configManager->set("histogramDenseLimitMiB", "0");
+  histogramManager->setupFromConfigFile();
+  histInfo info("variable_edges", "variable_observable", "", "variable_weight",
+                2, 0, 30, std::vector<Double_t>{0, 10, 30});
+  histogramManager->BookSingleHistogram(info);
+  auto histogram = histogramManager->GetHistos().front().GetPtr();
+  EXPECT_EQ(histogram->GetAxis(4)->GetBinUpEdge(1), 10);
+  EXPECT_EQ(histogram->GetAxis(4)->GetBinUpEdge(2), 30);
+  const Int_t indices[] = {1, 1, 1, 1, 2};
+  const auto bin = histogram->GetBin(indices, false);
+  ASSERT_GE(bin, 0);
+  EXPECT_EQ(histogram->GetBinContent(bin), 2);
+  EXPECT_EQ(histogram->GetBinError2(bin), 4);
+}
+
+TEST_F(NDHistogramManagerConfigTest, BoostFloatSupportsVariableEdgesAtExactBoundary) {
+  dataManager->DefineNominal("float_observable", []() { return 10.f; });
+  dataManager->DefineNominal("float_weight", []() { return -2.f; });
+  configManager->set("histogramBackend", "boost");
+  configManager->set("histogramBoostPrecision", "float");
+  configManager->set("histogramDenseLimitMiB", "0");
+#ifdef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+  configManager->set("histogramBoostSparseBackend", "flat");
+#endif
+  histogramManager->setupFromConfigFile();
+  histInfo info("float_variable_edges", "float_observable", "", "float_weight",
+                2, 0, 30, std::vector<Double_t>{0, 10, 30});
+  histogramManager->BookSingleHistogram(info);
+  auto histogram = histogramManager->GetHistos().front().GetPtr();
+  EXPECT_EQ(histogram->GetAxis(4)->GetBinUpEdge(1), 10);
+  EXPECT_EQ(histogram->GetAxis(4)->GetBinUpEdge(2), 30);
+  const Int_t indices[] = {1, 1, 1, 1, 2};
+  const auto bin = histogram->GetBin(indices, false);
+  ASSERT_GE(bin, 0);
+  EXPECT_EQ(histogram->GetBinContent(bin), -2);
+  EXPECT_EQ(histogram->GetBinError2(bin), 4);
+}
+
+TEST_F(NDHistogramManagerConfigTest, ZeroDenseMemoryLimitIsSupportedForBothBackends) {
+  for (const auto *backend : {"root", "boost"}) {
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    config->set("histogramDenseLimitMiB", "0");
+    config->set("histogramBackend", backend);
+    NDHistogramManager manager(*config);
+    ManagerContext context{*config, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+    manager.setContext(context);
+    EXPECT_NO_THROW(manager.setupFromConfigFile());
+  }
 }
 
 TEST_F(NDHistogramManagerConfigTest,
@@ -697,6 +895,8 @@ TEST_F(NDHistogramManagerConfigTest, RootBackendAutoSelectsDense) {
   dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
   dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
 
+  configManager->set("histogramBackend", "root");
+  configManager->set("histogramDenseLimitMiB", "64");
   configManager->set("histogramConfig", "cfg/test_histograms.txt");
   histogramManager->setupFromConfigFile();
   EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
@@ -706,13 +906,12 @@ TEST_F(NDHistogramManagerConfigTest, RootBackendAutoSelectsDense) {
 }
 
 TEST_F(NDHistogramManagerConfigTest, BoostBackendAutoSelectsDenseForSmallHist) {
-  // For a small histogram that fits within kDenseMemoryThresholdBytes, BHnMulti
-  // auto-selects weight_storage (dense) on Boost >= 1.76, or uses weight_storage
-  // unconditionally on older Boost.  Either way the histogram must be bookable.
+  // An explicit nonzero budget permits dense storage for a small histogram.
   dataManager->Define("bvar1", []() { return 3.0f; }, {}, *systematicManager);
   dataManager->Define("bw1", []() { return 1.0f; }, {}, *systematicManager);
 
   configManager->set("histogramBackend", "boost");
+  configManager->set("histogramDenseLimitMiB", "64");
   histogramManager->setupFromConfigFile();
 
   histInfo info("boost_dense_auto", "bvar1", "bvar1", "bw1", 10, 0.0, 10.0);
@@ -1018,4 +1217,58 @@ TEST_F(NDHistogramManagerConfigTest, ExcludedDiagnosticsDoNotRequireTheirColumns
   EXPECT_EQ(histogramManager->GetHistos()[0]->GetEntries(), 1);
   EXPECT_THROW(histogramManager->bookConfigHistograms({"test_hist1"}),
                std::runtime_error);
+}
+
+TEST_F(NDHistogramManagerConfigTest, PerHistogramNominalOnlyDoesNotDisableOtherSystematics) {
+  const auto path = std::filesystem::temp_directory_path() /
+      ("rdf_nominal_debug_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".yaml");
+  {
+    std::ofstream out(path);
+    out << "- name: debug\n  variable: value\n  weight: weight\n  bins: 10\n  lowerBound: 0\n  upperBound: 10\n  nominalOnly: true\n"
+        << "- name: physics\n  variable: value\n  weight: weight\n  bins: 10\n  lowerBound: 0\n  upperBound: 10\n";
+  }
+  dataManager->Define("value", [](){return 5.f;}, {}, *systematicManager);
+  dataManager->Define("weight", [](){return 1.f;}, {}, *systematicManager);
+  dataManager->Define("weight_up", [](){return 2.f;}, {}, *systematicManager);
+  dataManager->Define("weight_down", [](){return .5f;}, {}, *systematicManager);
+  systematicManager->registerVariationColumn("weight","testUp","weight_up");
+  systematicManager->registerVariationColumn("weight","testDown","weight_down");
+  configManager->set("histogramConfig", path.string());
+  configManager->set("histogramSystematics", "true");
+  histogramManager->setupFromConfigFile();
+  histogramManager->bookConfigHistograms();
+  ASSERT_EQ(histogramManager->GetHistos().size(),2u);
+  auto debug=histogramManager->GetHistos()[0].GetPtr();
+  auto physics=histogramManager->GetHistos()[1].GetPtr();
+  EXPECT_EQ(debug->GetAxis(3)->GetNbins(),1);
+  EXPECT_EQ(physics->GetAxis(3)->GetNbins(),3);
+  EXPECT_EQ(debug->GetEntries(),1);
+  EXPECT_EQ(physics->GetEntries(),3);
+  std::filesystem::remove(path);
+}
+
+TEST_F(NDHistogramManagerConfigTest, NominalSideBranchesKeepRejectedEntriesWithoutChangingSelection) {
+  ROOT::RDataFrame frame(2);
+  auto input=frame.Define("stage_value",[](){return 1.f;}).Define("stage_weight",[](){return 1.f;})
+      .Define("stage_weight_up",[](){return 2.f;}).Define("stage_weight_down",[](){return .5f;});
+  dataManager->setDataFrame(input);
+  systematicManager->registerVariationColumn("stage_weight","shiftUp","stage_weight_up");
+  systematicManager->registerVariationColumn("stage_weight","shiftDown","stage_weight_down");
+  auto selected=input.Filter([](ULong64_t entry){return entry==0;},{"rdfentry_"});
+  std::vector<std::pair<std::string,ROOT::RDF::RNode>> stages{{"before",input},{"after",selected}};
+  for(const auto &stage:stages) {
+    dataManager->setDataFrame(stage.second);
+    std::vector<histInfo> histograms{histInfo(stage.first.c_str(),"stage_value","Unweighted entries","stage_weight",1,.5,1.5)};
+    std::vector<selectionInfo> selections;
+    std::vector<std::vector<std::string>> names{{"Default"},{"Default"},{"Default"}};
+    histogramManager->bookND(histograms,selections,"",names,true);
+  }
+  ASSERT_EQ(histogramManager->GetHistos().size(),2u);
+  const auto sum=[](const THnSparseF &hist){
+    double result=0.;for(Long64_t i=0;i<hist.GetNbins();++i)result+=hist.GetBinContent(i);return result;
+  };
+  EXPECT_EQ(sum(*histogramManager->GetHistos()[0]),2);
+  EXPECT_EQ(sum(*histogramManager->GetHistos()[1]),1);
+  EXPECT_EQ(histogramManager->GetHistos()[0]->GetAxis(3)->GetNbins(),1);
+  EXPECT_EQ(*selected.Count(),1u);
 }

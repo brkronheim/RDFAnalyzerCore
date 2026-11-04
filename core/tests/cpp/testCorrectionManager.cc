@@ -1,3 +1,4 @@
+#include <limits>
 /**
  * @file testCorrectionManager.cc
  * @brief Unit tests for the CorrectionManager class
@@ -219,7 +220,13 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionRangeErrorsUseNeutralFallback) {
   correctionManager->applyCorrection("test_correction_range_error", {"A"});
   auto df = testDataManager->getDataFrame();
   auto result = df.Take<float>("test_correction_range_error_A");
-  ASSERT_EQ(result->size(), 3u);
+  testing::internal::CaptureStderr();
+  const auto values = result.GetValue();
+  const auto warnings = testing::internal::GetCapturedStderr();
+  EXPECT_NE(warnings.find("Index below bounds"), std::string::npos);
+  EXPECT_NE(warnings.find("Index above bounds"), std::string::npos);
+  EXPECT_NE(warnings.find("using fallback 1"), std::string::npos);
+  ASSERT_EQ(values.size(), 3u);
   EXPECT_FLOAT_EQ(result->at(0), 1.0f);
   EXPECT_NEAR(result->at(1), 0.1f, 1e-6f);
   EXPECT_FLOAT_EQ(result->at(2), 1.0f);
@@ -343,31 +350,22 @@ TEST_F(CorrectionManagerTest, ExtremeNumericValues) {
  * Verifies that the CorrectionManager handles NaN and infinity values
  * gracefully without crashing or producing undefined behavior.
  */
-TEST_F(CorrectionManagerTest, NaNAndInfinityHandling) {
-  // Create a new DataManager for this test
-  auto testDataManager = std::make_unique<DataManager>(3);
-  setContextFor(*testDataManager);
-  
-  testDataManager->Define("float_arg",
-                [](ULong64_t i) -> double {
-                  return i == 0   ? std::numeric_limits<double>::quiet_NaN()
-                         : i == 1 ? std::numeric_limits<double>::infinity()
-                                  : -std::numeric_limits<double>::infinity();
-                },
-                {"rdfentry_"}, *systematicManager);
-  testDataManager->Define("int_arg", [](ULong64_t i) -> double { return 1; }, {"rdfentry_"}, *systematicManager);
-  std::vector<std::string> stringArguments = {"A"};
-  EXPECT_NO_THROW({
-    correctionManager->applyCorrection("test_correction", stringArguments);
-  });
-  auto df = testDataManager->getDataFrame();
-  auto result = df.Take<float>("test_correction_A");
-  ASSERT_EQ(result->size(), 3);
-  for (size_t i = 0; i < result->size(); ++i) {
-    EXPECT_TRUE(std::isnan(result->at(i)) || std::abs(result->at(i)) < 1e-6);
+TEST_F(CorrectionManagerTest, NaNAndInfinityFailWithDiagnostic) {
+  for (const auto bad : {std::numeric_limits<double>::quiet_NaN(),
+                         std::numeric_limits<double>::infinity(),
+                         -std::numeric_limits<double>::infinity()}) {
+    DataManager dm(1);
+    setContextFor(dm);
+    dm.DefineNominal("float_arg", [bad] { return bad; });
+    dm.DefineNominal("int_arg", [] { return 1.; });
+    correctionManager->applyCorrection("test_correction", {"A"});
+    try {
+      dm.getDataFrame().Take<float>("test_correction_A").GetValue();
+      FAIL() << "non-finite input accepted";
+    } catch (const std::runtime_error &error) {
+      EXPECT_NE(std::string(error.what()).find("non-finite numeric correction input"), std::string::npos);
+    }
   }
-  
-  // Restore the original data manager
   setContextFor(*dataManager);
 }
 
@@ -477,6 +475,10 @@ TEST_F(CorrectionManagerTest, MultipleCorrections) {
 
 // Thread safety test using ROOT's implicit multithreading
 TEST_F(CorrectionManagerTest, ThreadSafetyWithROOTImplicitMT) {
+  struct RestoreImplicitMT {
+    bool wasEnabled = ROOT::IsImplicitMTEnabled();
+    ~RestoreImplicitMT() { if (!wasEnabled) ROOT::DisableImplicitMT(); }
+  } restoreImplicitMT;
   ROOT::EnableImplicitMT();
   ASSERT_TRUE(ROOT::IsImplicitMTEnabled());
   int nThreads = ROOT::GetThreadPoolSize();
@@ -617,7 +619,14 @@ TEST_F(CorrectionManagerTest, ApplyVectorCorrectionRangeErrorsUseNeutralFallback
   auto df = testDataManager->getDataFrame();
   auto result = df.Take<ROOT::VecOps::RVec<Float_t>>(
       "test_correction_range_error_A");
-  ASSERT_EQ(result->size(), 1u);
+  testing::internal::CaptureStderr();
+  const auto values = result.GetValue();
+  const auto warnings = testing::internal::GetCapturedStderr();
+  EXPECT_NE(warnings.find("Index below bounds"), std::string::npos);
+  EXPECT_NE(warnings.find("Index above bounds"), std::string::npos);
+  EXPECT_NE(warnings.find("inputs [-0.5, 1, A]"), std::string::npos);
+  EXPECT_NE(warnings.find("inputs [2, 1, A]"), std::string::npos);
+  ASSERT_EQ(values.size(), 1u);
   ASSERT_EQ(result->at(0).size(), 3u);
   EXPECT_FLOAT_EQ(result->at(0)[0], 1.0f);
   EXPECT_NEAR(result->at(0)[1], 0.1f, 1e-6f);
@@ -1141,18 +1150,71 @@ TEST_F(CorrectionManagerTest, BatchVectorSharesMixedInputs) {
   EXPECT_NEAR(b[1], .6f, 1.e-6);
 }
 
-TEST(ColumnPackerTest, RowMajorPackingHandlesUnequalEmptyAndRepeatedInputs) {
-  ROOT::RDataFrame input(3);
+TEST(ColumnPackerTest, CorrectionPackingRejectsUnequalArraysIncludingEmptyAndSingleton) {
+  for (const auto size : {0u, 1u, 2u, 4u}) {
+    ROOT::RDataFrame input(1);
+    auto df = ROOT::RDF::RNode(input)
+        .Define("a", [] { return ROOT::VecOps::RVec<float>{1, 2, 3}; })
+        .Define("b", [size] { return ROOT::VecOps::RVec<int>(size, 4); });
+    df = rdfcolumnpacker::defineFlattenedNumericInputs(df, "packed", {"a", "b"}, "test");
+    try {
+      df.Take<ROOT::VecOps::RVec<double>>("packed").GetValue();
+      FAIL() << "misaligned input accepted";
+    } catch (const std::runtime_error &error) {
+      EXPECT_NE(std::string(error.what()).find("packed"), std::string::npos);
+      EXPECT_NE(std::string(error.what()).find("array 'b'"), std::string::npos);
+    }
+  }
+}
+
+TEST(ColumnPackerTest, CorrectionPackingBroadcastsScalarsAndPreservesEmptyArrays) {
+  ROOT::RDataFrame input(2);
   auto df = ROOT::RDF::RNode(input)
-      .Define("a", [](ULong64_t i) { return i == 1 ? ROOT::VecOps::RVec<float>{} : ROOT::VecOps::RVec<float>{1, 2, 3}; }, {"rdfentry_"})
-      .Define("b", [](ULong64_t i) { return i == 2 ? ROOT::VecOps::RVec<int>{} : ROOT::VecOps::RVec<int>{4, 5}; }, {"rdfentry_"})
-      .Define("c", []() { return 7.; });
+      .Define("a", [](ULong64_t i) { return ROOT::VecOps::RVec<float>(i * 3, 2); }, {"rdfentry_"})
+      .Define("b", [](ULong64_t i) { return ROOT::VecOps::RVec<int>(i * 3, 4); }, {"rdfentry_"})
+      .Define("c", [] { return 7.; });
   df = rdfcolumnpacker::defineFlattenedNumericInputs(df, "packed", {"a", "b", "c", "a"}, "test");
   const auto packed = df.Take<ROOT::VecOps::RVec<double>>("packed").GetValue();
-  const ROOT::VecOps::RVec<double> expected{1,4,7,1,2,5,7,2,3,5,7,3};
-  EXPECT_EQ(std::vector<double>(packed[0].begin(), packed[0].end()), std::vector<double>(expected.begin(), expected.end()));
-  EXPECT_TRUE(packed[1].empty());
-  EXPECT_TRUE(packed[2].empty());
+  EXPECT_TRUE(packed[0].empty());
+  const std::vector<double> expected{2,4,7,2,2,4,7,2,2,4,7,2};
+  EXPECT_EQ(std::vector<double>(packed[1].begin(), packed[1].end()), expected);
+}
+
+TEST(ColumnPackerTest, SizedPackingPreservesRowsAndConcatenationAcrossStorageSizes) {
+  ROOT::RDataFrame input(4);
+  auto df = ROOT::RDF::RNode(input)
+      .Define("a", [](ULong64_t i) {
+        ROOT::VecOps::RVec<float> values(i == 0 ? 0 : i == 1 ? 1 : i == 2 ? 16 : 65);
+        for (std::size_t j = 0; j < values.size(); ++j) values[j] = j + .5f;
+        return values;
+      }, {"rdfentry_"})
+      .Define("b", []() { return ROOT::VecOps::RVec<int>{-2, 3}; })
+      .Define("scalar", []() { return 7.; });
+  df = rdfcolumnpacker::definePackedVector(df, "rows", {"a", "scalar", "b", "a"},
+      "double", rdfcolumnpacker::PackingLayout::Rows);
+  df = rdfcolumnpacker::definePackedVector(df, "concat", {"a", "b", "a"},
+      "float", rdfcolumnpacker::PackingLayout::Concatenate);
+  auto rows = df.Take<ROOT::VecOps::RVec<double>>("rows");
+  auto concat = df.Take<ROOT::VecOps::RVec<float>>("concat");
+  const auto &rowValues = rows.GetValue();
+  const auto &concatValues = concat.GetValue();
+  for (std::size_t entry = 0; entry < 4; ++entry) {
+    const std::size_t n = entry == 0 ? 0 : entry == 1 ? 1 : entry == 2 ? 16 : 65;
+    ASSERT_EQ(rowValues[entry].size(), n == 0 ? 0 : 4 * std::max(n, std::size_t(2)));
+    for (std::size_t row = 0; row < rowValues[entry].size() / 4; ++row) {
+      EXPECT_EQ(rowValues[entry][row * 4], std::min(row, n - 1) + .5);
+      EXPECT_EQ(rowValues[entry][row * 4 + 1], 7.);
+      EXPECT_EQ(rowValues[entry][row * 4 + 2], row == 0 ? -2 : 3);
+      EXPECT_EQ(rowValues[entry][row * 4 + 3], std::min(row, n - 1) + .5);
+    }
+    ASSERT_EQ(concatValues[entry].size(), n * 2 + 2);
+    EXPECT_EQ(concatValues[entry][n], -2.f);
+    EXPECT_EQ(concatValues[entry][n + 1], 3.f);
+    for (std::size_t j = 0; j < n; ++j) {
+      EXPECT_EQ(concatValues[entry][j], j + .5f);
+      EXPECT_EQ(concatValues[entry][n + 2 + j], j + .5f);
+    }
+  }
 }
 
 TEST_F(CorrectionManagerTest, BatchCanExpandOnlyNominalOutputWithLaterPropagationRequest) {
@@ -1181,4 +1243,189 @@ TEST(ColumnPackerTest, ScalarConjunctionHandlesMixedTypesRepeatedInputsAndEmptyC
   EXPECT_TRUE(pass[0]);
   EXPECT_FALSE(pass[1]);
   EXPECT_TRUE(df.Take<bool>("empty")->at(1));
+}
+
+TEST_F(CorrectionManagerTest, InvalidNumericInputsFailBeforePayloadEvaluation) {
+  for (const auto bad : {std::numeric_limits<double>::quiet_NaN(),
+                         std::numeric_limits<double>::infinity(), 1.e20, 1.5}) {
+    DataManager dm(1);
+    setContextFor(dm);
+    dm.DefineNominal("float_arg", [] { return 0.5; });
+    dm.DefineNominal("int_arg", [bad] { return bad; });
+    correctionManager->applyCorrection("test_correction", {"A"});
+    EXPECT_THROW(dm.getDataFrame().Take<float>("test_correction_A").GetValue(), std::runtime_error);
+  }
+  setContextFor(*dataManager);
+}
+
+TEST_F(CorrectionManagerTest, SelectedCorrectionsEvaluateOnlyTheChosenCaseAndPropagateSelectors) {
+  dataManager->DefineNominal("float_arg", [] { return ROOT::VecOps::RVec<double>{.5, 1.5}; });
+  dataManager->DefineNominal("floatUp", [] { return ROOT::VecOps::RVec<double>{1.5, .5}; });
+  dataManager->DefineNominal("floatDown", [] { return ROOT::VecOps::RVec<double>{.5, .5}; });
+  systematicManager->registerVariationColumns("float_arg", "shape", "floatUp", "floatDown");
+  dataManager->DefineNominal("int_arg", [] { return 1.; });
+  dataManager->DefineNominal("case", [] { return ROOT::VecOps::RVec<int>{0, 1}; });
+  dataManager->DefineNominal("caseUp", [] { return ROOT::VecOps::RVec<int>{1, 0}; });
+  dataManager->DefineNominal("caseDown", [] { return ROOT::VecOps::RVec<int>{0, 0}; });
+  systematicManager->registerVariationColumns("case", "shape", "caseUp", "caseDown");
+  correctionManager->applySelectedCorrectionsVec(
+      {{"test_correction", {"A"}}, {"test_correction", {"B"}},
+       {"test_correction", {"missing_category_must_not_be_evaluated"}}},
+      "case", {"float_arg", "int_arg"}, "selected_sf");
+  auto df = dataManager->getDataFrame();
+  testing::internal::CaptureStderr();
+  const auto nominal = df.Take<ROOT::VecOps::RVec<float>>("selected_sf").GetValue();
+  const auto up = df.Take<ROOT::VecOps::RVec<float>>("selected_sf_shapeUp").GetValue();
+  const auto warnings = testing::internal::GetCapturedStderr();
+  EXPECT_TRUE(warnings.empty()) << warnings;
+  EXPECT_FLOAT_EQ(nominal[0][0], .1f);
+  EXPECT_FLOAT_EQ(nominal[0][1], .6f);
+  EXPECT_FLOAT_EQ(up[0][0], .6f);
+  EXPECT_FLOAT_EQ(up[0][1], .1f);
+}
+
+TEST_F(CorrectionManagerTest, SelectedCorrectionRejectsInvalidOrMisalignedSelectors) {
+  for (const auto selectors : {ROOT::VecOps::RVec<int>{-1, 0}, {0, 1}, {0}}) {
+    DataManager dm(1);
+    setContextFor(dm);
+    dm.DefineNominal("float_arg", [] { return ROOT::VecOps::RVec<double>{.5, 1.5}; });
+    dm.DefineNominal("int_arg", [] { return 1.; });
+    dm.DefineNominal("case", [selectors] { return selectors; });
+    correctionManager->applySelectedCorrectionsVec({{"test_correction", {"A"}}},
+        "case", {"float_arg", "int_arg"}, "selected_sf");
+    EXPECT_THROW(dm.getDataFrame().Take<ROOT::VecOps::RVec<float>>("selected_sf").GetValue(),
+                 std::runtime_error);
+  }
+  setContextFor(*dataManager);
+}
+
+TEST_F(CorrectionManagerTest, SelectedCompoundCorrectionBroadcastsScalarsAndHandlesEmptySelections) {
+  dataManager->DefineNominal("run", [] { return 1; });
+  dataManager->DefineNominal("case", [](ULong64_t i) {
+    return i == 0 ? ROOT::VecOps::RVec<int>{0, 0} : ROOT::VecOps::RVec<int>{};
+  }, {"rdfentry_"});
+  correctionManager->registerCorrection("selected_compound", "aux/mock_compound_integer.json",
+                                        "integer_compound", {"run"});
+  correctionManager->applySelectedCorrectionsVec({{"selected_compound", {}}}, "case", {"run"}, "sf");
+  const auto result = dataManager->getDataFrame().Take<ROOT::VecOps::RVec<float>>("sf").GetValue();
+  ASSERT_EQ(result.size(), 2u);
+  ASSERT_EQ(result[0].size(), 2u);
+  EXPECT_FLOAT_EQ(result[0][0], 1.5f);
+  EXPECT_FLOAT_EQ(result[0][1], 1.5f);
+  EXPECT_TRUE(result[1].empty());
+}
+
+TEST_F(CorrectionManagerTest, ConditionalCorrectionSkipsInactiveInvalidInputsAndKeepsWeightVariationsNominal) {
+  dataManager->DefineNominal("float_arg", [] { return .5; });
+  dataManager->DefineNominal("int_arg", [] { return 1; });
+  dataManager->DefineNominal("active", [] { return false; });
+  dataManager->DefineNominal("activeUp", [] { return true; });
+  dataManager->DefineNominal("activeDown", [] { return false; });
+  systematicManager->registerVariationColumns("active", "shape", "activeUp", "activeDown");
+  correctionManager->applyConditionalCorrection("test_correction", {"A"}, {}, "active", "conditional");
+  correctionManager->applyConditionalCorrection("test_correction", {"missing_category"}, {},
+                                                 "active", "weight_only", false);
+  auto df = dataManager->getDataFrame();
+  EXPECT_FALSE(df.HasColumn("weight_only_shapeUp"));
+  testing::internal::CaptureStderr();
+  const auto nominal = df.Take<float>("conditional").GetValue();
+  const auto up = df.Take<float>("conditional_shapeUp").GetValue();
+  const auto weightOnly = df.Take<float>("weight_only").GetValue();
+  const auto warnings = testing::internal::GetCapturedStderr();
+  EXPECT_TRUE(warnings.empty()) << warnings;
+  EXPECT_FLOAT_EQ(nominal[0], 1.f);
+  EXPECT_FLOAT_EQ(up[0], .1f);
+  EXPECT_FLOAT_EQ(weightOnly[0], 1.f);
+}
+
+TEST_F(CorrectionManagerTest, SelectedBatchSharesPacksAndRefreshesReadersAfterRedefine) {
+  using Vec = ROOT::VecOps::RVec<float>;
+  dataManager->DefineNominal("float_arg", [] { return Vec{.5f, 1.5f}; });
+  dataManager->DefineNominal("numericUp", [] { return Vec{1.5f, .5f}; });
+  dataManager->DefineNominal("numericDown", [] { return Vec{.5f, .5f}; });
+  dataManager->DefineNominal("int_arg", [] { return 1; });
+  dataManager->DefineNominal("case", [] { return ROOT::VecOps::RVec<int>{0, 1}; });
+  systematicManager->registerVariationColumns("float_arg", "shape", "numericUp", "numericDown");
+  const std::vector<CorrectionManager::VectorCorrectionCase> first{
+      {"test_correction", {"A"}}, {"test_correction", {"B"}}};
+  const std::vector<CorrectionManager::VectorCorrectionCase> second{
+      {"test_correction", {"B"}}, {"test_correction", {"A"}}};
+  correctionManager->applySelectedCorrectionsVecBatch({first, second}, "case",
+      {"float_arg", "int_arg"}, {"one", "two"}, {false, true});
+  auto df = dataManager->getDataFrame();
+  const auto columns = df.GetColumnNames();
+  EXPECT_EQ(std::count_if(columns.begin(), columns.end(), [](const auto &name) {
+    return name.find("__rdf_selected_correction_input_") == 0;
+  }), 3); // one nominal pack plus the two shape packs, shared by both outputs
+  EXPECT_FALSE(df.HasColumn("one_shapeUp"));
+  EXPECT_FLOAT_EQ(df.Take<Vec>("one").GetValue()[0][0], .1f);
+  EXPECT_FLOAT_EQ(df.Take<Vec>("two").GetValue()[0][0], .5f);
+  EXPECT_FLOAT_EQ(df.Take<Vec>("two_shapeUp").GetValue()[0][0], .6f);
+  dataManager->Redefine("float_arg", [] { return Vec{1.5f, 1.5f}; });
+  correctionManager->applySelectedCorrectionsVecBatch({first, first}, "case",
+      {"float_arg", "int_arg"}, {"one", "fresh"});
+  EXPECT_FLOAT_EQ(dataManager->getDataFrame().Take<Vec>("fresh").GetValue()[0][0], .2f);
+  EXPECT_THROW(correctionManager->applySelectedCorrectionsVecBatch({first}, "case",
+      {"float_arg", "int_arg"}, {"a", "b"}), std::invalid_argument);
+}
+
+TEST_F(CorrectionManagerTest, ConditionalBatchSharesPacksWithoutBoxingScalarOutputs) {
+  dataManager->DefineNominal("float_arg", [] { return .5; });
+  dataManager->DefineNominal("numericUp", [] { return 1.5; });
+  dataManager->DefineNominal("numericDown", [] { return .5; });
+  dataManager->DefineNominal("int_arg", [] { return 1; });
+  dataManager->DefineNominal("active", [](ULong64_t i) { return i == 0; }, {"rdfentry_"});
+  systematicManager->registerVariationColumns("float_arg", "shape", "numericUp", "numericDown");
+  correctionManager->applyConditionalCorrections("test_correction", {{"A"}, {"B"}}, {},
+      "active", {"one", "two"}, {false, true});
+  auto df = dataManager->getDataFrame();
+  const auto columns = df.GetColumnNames();
+  EXPECT_EQ(std::count_if(columns.begin(), columns.end(), [](const auto &name) {
+    return name.find("__rdf_conditional_correction_input_") == 0;
+  }), 3);
+  EXPECT_FALSE(df.HasColumn("one__active_case"));
+  EXPECT_FALSE(df.HasColumn("one_shapeUp"));
+  const auto one = df.Take<float>("one").GetValue();
+  EXPECT_FLOAT_EQ(one[0], .1f);
+  EXPECT_FLOAT_EQ(one[1], 1.f);
+  EXPECT_FLOAT_EQ(df.Take<float>("two_shapeUp").GetValue()[0], .6f);
+  dataManager->Redefine("float_arg", [] { return 1.5; });
+  correctionManager->applyConditionalCorrections("test_correction", {{"A"}}, {},
+      "active", {"fresh"});
+  EXPECT_FLOAT_EQ(dataManager->getDataFrame().Take<float>("fresh").GetValue()[0], .2f);
+  EXPECT_THROW(correctionManager->applyConditionalCorrections("test_correction", {{"A"}}, {},
+      "active", {"a", "b"}), std::invalid_argument);
+}
+
+TEST_F(CorrectionManagerTest, ConditionalPreparationIsGatedAndDoesNotMutateSharedInputs) {
+  dataManager->DefineNominal("float_arg", [] { return -1.; });
+  dataManager->DefineNominal("numericUp", [] { return 1.5; });
+  dataManager->DefineNominal("numericDown", [] { return -.5; });
+  dataManager->DefineNominal("int_arg", [] { return 1; });
+  dataManager->DefineNominal("active", [](ULong64_t i) { return i == 0; }, {"rdfentry_"});
+  dataManager->DefineNominal("inactive", [] { return false; });
+  systematicManager->registerVariationColumns("float_arg", "shape", "numericUp", "numericDown");
+  correctionManager->applyConditionalCorrections("test_correction", {{"A"}, {"B"}}, {},
+      "active", {"prepared_one", "prepared_two"}, {true, false},
+      [](ROOT::VecOps::RVec<double> &values) {
+        if (values[0] < 0.) values[0] = .5;
+      });
+  correctionManager->applyConditionalCorrections("test_correction", {{"missing_category"}}, {},
+      "inactive", {"prepared_inactive"}, {false},
+      [](ROOT::VecOps::RVec<double> &) { throw std::runtime_error("must be gated"); });
+  auto df = dataManager->getDataFrame();
+  auto one = df.Take<float>("prepared_one");
+  auto two = df.Take<float>("prepared_two");
+  auto up = df.Take<float>("prepared_one_shapeUp");
+  auto down = df.Take<float>("prepared_one_shapeDown");
+  auto inactive = df.Take<float>("prepared_inactive");
+  auto original = df.Take<double>("float_arg");
+  EXPECT_FLOAT_EQ((*one)[0], .1f);
+  EXPECT_FLOAT_EQ((*two)[0], .5f);
+  EXPECT_FLOAT_EQ((*up)[0], .2f);
+  EXPECT_FLOAT_EQ((*down)[0], .1f);
+  EXPECT_FLOAT_EQ((*one)[1], 1.f);
+  EXPECT_FLOAT_EQ((*inactive)[0], 1.f);
+  EXPECT_DOUBLE_EQ((*original)[0], -1.);
+  EXPECT_FALSE(df.HasColumn("prepared_two_shapeUp"));
 }

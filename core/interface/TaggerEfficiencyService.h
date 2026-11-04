@@ -26,7 +26,7 @@
 //       bins: 20
 //       lowerBound: 0.0
 //       upperBound: 1.0
-//       channelVariable: "vhbb_channel"
+//       channelVariable: "analysis_channel"
 //       channelBins: 3
 //       channelLabels: ["2L", "1L", "0L"]
 //       flavorSplit: "Jet_hadronFlavour"     # optional
@@ -36,7 +36,7 @@
 //       weightColumn: "weight_nominal"
 //       taggerManagerRole: "btagManager"
 //       workingPoints: ["loose", "medium", "tight"]
-//       channelVariable: "vhbb_channel"
+//       channelVariable: "analysis_channel"
 //       channelBins: 3
 //       channelLabels: ["2L", "1L", "0L"]
 //       flavorSplit: "Jet_hadronFlavour"     # optional
@@ -49,7 +49,7 @@
 //   taggerEfficiencyNBins: 20
 //   taggerEfficiencyLow: 0.0
 //   taggerEfficiencyHigh: 1.0
-//   taggerEfficiencyChannelVariable: "vhbb_channel"
+//   taggerEfficiencyChannelVariable: "analysis_channel"
 //   taggerEfficiencyChannelBins: 3
 //   taggerEfficiencyChannelRegions: "2L,1L,0L"
 //   taggerEfficiencyFlavorSplit: "Jet_hadronFlavour"   # optional
@@ -93,7 +93,7 @@ struct TaggerEfficiencySpec {
   double lowerBound = 0.0;
   double upperBound = 1.0;
 
-  /// Channel-splitting variable (e.g. "vhbb_channel"). Empty = no channel axis.
+  /// Channel-splitting variable (e.g. "analysis_channel"). Empty = no channel axis.
   std::string channelVariable;
   int channelBins = 0;
   double channelLowerBound = 0.0;

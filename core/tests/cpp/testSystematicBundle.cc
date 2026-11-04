@@ -97,6 +97,59 @@ TEST_F(SystematicBundleTest, ScalarBundleLayout) {
       "__syst_scalar", "JES"));
 }
 
+TEST_F(SystematicBundleTest, ManyVariationsRetainFeatureOrderAndNominalFallbacks) {
+  defineScalar("a", [](ULong64_t i) { return float(i); });
+  defineScalar("b", [](ULong64_t i) { return float(i + 10); });
+  std::vector<std::string> labels{"Nominal"};
+  for (const auto &syst : {"JES", "JER"}) {
+    registerSystematic(syst, {"a"});
+    for (const auto &suffix : {"Up", "Down"}) {
+      const auto label = std::string(syst) + suffix;
+      labels.push_back(label);
+      const float offset = float(labels.size() * 100);
+      defineVariation("a", label, [offset](ULong64_t i) { return float(i) + offset; });
+    }
+  }
+  // Repeated input positions exercise the packer's deduplicated readers.
+  definePackedInputBundle(*dataManager, *systematicManager, {"b", "a", "b"},
+                          labels, "bundle", true);
+  const auto rows = dataManager->getDataFrame().Take<ROOT::VecOps::RVec<float>>("bundle").GetValue();
+  for (std::size_t e = 0; e < rows.size(); ++e) {
+    ASSERT_EQ(rows[e].size(), labels.size() * 3);
+    for (std::size_t v = 0; v < labels.size(); ++v) {
+      EXPECT_EQ(rows[e][v * 3], float(e + 10));
+      EXPECT_EQ(rows[e][v * 3 + 1], float(e) + (v ? float((v + 1) * 100) : 0.f));
+      EXPECT_EQ(rows[e][v * 3 + 2], float(e + 10));
+    }
+  }
+}
+
+TEST_F(SystematicBundleTest, SingleVectorFeatureRetainsEmptyAndUnequalVariationLengths) {
+  registerSystematic("JES", {"a"});
+  auto df = dataManager->getDataFrame();
+  df = df.Define("a", [] { return ROOT::VecOps::RVec<float>{1, 2}; });
+  df = df.Define("a_JESUp", [] { return ROOT::VecOps::RVec<float>{}; });
+  df = df.Define("a_JESDown", [] { return ROOT::VecOps::RVec<float>{3, 4, 5}; });
+  dataManager->setDataFrame(df);
+  definePackedInputBundle(*dataManager, *systematicManager, {"a"},
+                          {"Nominal", "JESUp", "JESDown", "Nominal"}, "bundle", true);
+  const auto rows = dataManager->getDataFrame().Take<ROOT::VecOps::RVec<float>>("bundle").GetValue();
+  EXPECT_TRUE(ROOT::VecOps::All(rows.front() == ROOT::VecOps::RVec<float>{1, 2, 3, 4, 5, 1, 2}));
+}
+
+TEST_F(SystematicBundleTest, SingleFeatureRetainsMixedScalarAndVectorVariations) {
+  registerSystematic("JES", {"a"});
+  auto df = dataManager->getDataFrame();
+  df = df.Define("a", [] { return 1.f; });
+  df = df.Define("a_JESUp", [] { return ROOT::VecOps::RVec<float>{2, 3}; });
+  df = df.Define("a_JESDown", [] { return 4.f; });
+  dataManager->setDataFrame(df);
+  definePackedInputBundle(*dataManager, *systematicManager, {"a"},
+                          {"Nominal", "JESUp", "JESDown"}, "bundle", true);
+  const auto rows = dataManager->getDataFrame().Take<ROOT::VecOps::RVec<float>>("bundle").GetValue();
+  EXPECT_TRUE(ROOT::VecOps::All(rows.front() == ROOT::VecOps::RVec<float>{1, 2, 3, 4}));
+}
+
 TEST_F(SystematicBundleTest, FanOutScalarMatchesVariationOrder) {
   registerSystematic("JES", {"x"});
   defineScalar("x", [](ULong64_t i) { return static_cast<float>(i); });

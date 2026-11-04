@@ -42,16 +42,12 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Known CMS XRootD redirectors (tried in order when no site override is given)
-# ---------------------------------------------------------------------------
-
-#: Ordered list of CMS XRootD redirectors to probe.  Tier-1/global entries
-#: come first so they are tried before purely regional fallbacks.
-CMS_REDIRECTORS: list[str] = [
-    #"root://cmsxrootd.fnal.gov/",       # FNAL (US Tier-1)
-    #"root://xrootd-cms.infn.it/",       # INFN (European Tier-1)
-    #"root://cms-xrd-global.cern.ch/",   # Global CMS redirector (fallback)
-]
+# Optional experiment policy; ranking/probing remains reusable.
+if __package__:
+    from . import io_policy as _policy
+else:
+    import io_policy as _policy
+CMS_REDIRECTORS = list(_policy.DEFAULT_REDIRECTORS)  # compatibility name
 
 # Bytes to read when probing a site.  1 MiB gives a more realistic bandwidth
 # sample than a tiny read while still completing quickly on a healthy site.
@@ -79,28 +75,8 @@ DEFAULT_SLOW_THRESHOLD_MBS: float = 1.0
 # important than the relative ordering it produces.
 _LATENCY_SYNTHETIC_SCALE: float = 10.0
 
-# Environment variable names that may contain the local CMS site name.
-_SITE_ENV_VARS: tuple[str, ...] = (
-    "CMS_LOCAL_SITE",    # set by some grid job environments
-    "GLIDEIN_CMSSite",   # HTCondor pilot job attributes
-    "OSG_SITE_NAME",     # OSG glidein environments
-    "SITE_NAME",         # generic site name variable
-)
-
-# Mapping from CMS site name fragments to the redirector host domain that
-# serves that region.  Used when applying the local-site bonus during ranking.
-_SITE_TO_REDIRECTOR_DOMAIN: dict[str, str] = {
-    "T1_US_FNAL":   "fnal.gov",
-    "T0_CH_CERN":   "cern.ch",
-    "T2_US_":       "fnal.gov",   # US Tier-2 sites → prefer FNAL redirector
-    "T2_DE_":       "infn.it",    # German sites → prefer European redirector
-    "T2_IT_":       "infn.it",
-    "T2_FR_":       "infn.it",
-    "T2_UK_":       "infn.it",
-    "T2_ES_":       "infn.it",
-    "T2_CH_":       "cern.ch",
-    "T3_US_":       "fnal.gov",
-}
+_SITE_ENV_VARS = _policy.SITE_ENV_VARS
+_SITE_TO_REDIRECTOR_DOMAIN = _policy.SITE_DOMAINS
 
 
 def _local_site_matches_redirector(local_site: str, redirector: str) -> bool:
@@ -144,10 +120,9 @@ def detect_local_site() -> str:
     # Hostname-based heuristic as last resort.
     try:
         hostname = socket.getfqdn().lower()
-        if hostname.endswith(".fnal.gov") or hostname == "fnal.gov":
-            return "T1_US_FNAL"
-        if hostname.endswith(".cern.ch") or hostname == "cern.ch":
-            return "T0_CH_CERN"
+        for domain, site in _policy.HOST_SITES.items():
+            if hostname.endswith("." + domain) or hostname == domain:
+                return site
     except Exception:
         pass
 
@@ -266,9 +241,7 @@ def _is_blacklisted(redirector: str, blacklisted_sites: list[str]) -> bool:
 # uses ``if (ok)`` (i.e. if the call returned non-zero / kTRUE) to detect
 # errors.
 #
-# NOTE: If you update this template also update ROOT_MACRO_TMPL in
-# submission_backend.py::xrootd_optimize_block() which embeds a copy for
-# execution on Condor worker nodes.
+# This standalone diagnostic is not run by Condor worker scripts.
 _ROOT_PROBE_MACRO_TMPL: str = """\
 void {funcname}() {{
   const char* url = "{url}";

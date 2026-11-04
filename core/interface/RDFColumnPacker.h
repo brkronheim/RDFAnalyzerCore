@@ -89,7 +89,7 @@ inline InputTypeToken tokenizeInputType(const std::string &typeName) {
 }
 
 
-enum class PackingLayout { Scalars, Concatenate, Rows };
+enum class PackingLayout { Scalars, Concatenate, Rows, AlignedRows };
 
 // Factories are cached by input types and layout, independent of column names.
 ROOT::RDF::RNode definePackedVector(
@@ -107,9 +107,10 @@ ROOT::RDF::RNode defineScalarAll(
     ROOT::RDF::RNode df, const std::string &name,
     const std::vector<std::string> &columns);
 
-// Row-major numeric features: scalars broadcast to the largest collection;
-// shorter nonempty collections repeat their final value. An empty collection
-// produces no rows. This preserves the original compiled flattening semantics.
+// Row-major correction features: only scalars broadcast. All object arrays
+// must have identical lengths (including empty arrays); mismatches throw with
+// the packed column and input names. Generic PackingLayout::Rows retains its
+// legacy repeat-last behavior for callers that explicitly request it.
 ROOT::RDF::RNode defineFlattenedNumericInputs(
     ROOT::RDF::RNode df, const std::string &name,
     const std::vector<std::string> &columns, const std::string &context);
