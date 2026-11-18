@@ -20,7 +20,7 @@ RDFAnalyzerCore provides a complete workflow from analysis to statistical infere
 
 - ROOT 6.30+ with Python bindings
 - CMake 3.19+
-- Python 3.8+ with PyYAML
+- ROOT-matched Python with PyYAML and pandas
 - Git
 
 ### Build Options
@@ -52,21 +52,21 @@ cmake -S . -B build \
 ### Building
 
 ```bash
-# Clone the repository
-git clone https://github.com/brkronheim/RDFAnalyzerCore.git
-cd RDFAnalyzerCore
-
-# Setup ROOT environment
+# From a checkout, activate the ROOT environment and initialize the core submodules.
 source env.sh
+git submodule update --init --recursive -- core/extern
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt pandas
 
-# Configure with Combine support
-cmake -S . -B build \
-    -DBUILD_COMBINE=ON \
-    -DBUILD_COMBINE_HARVESTER=ON
-
-# Build (this will take several minutes)
-cmake --build build -j$(nproc)
+# Configure and build both tools.
+cmake -S . -B build -DBUILD_COMBINE=ON -DBUILD_COMBINE_HARVESTER=ON
+cmake --build build --parallel "$(nproc)"
 ```
+
+Set the library, Python, and executable paths in the
+[standalone Combine setup](BUILD_WITH_COMBINE.md#usage) before running the
+commands below.
 
 After building, Combine and CombineHarvester will be available at:
 - **Combine**: `build/external/HiggsAnalysis/CombinedLimit/`

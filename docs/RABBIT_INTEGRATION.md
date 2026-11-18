@@ -16,10 +16,14 @@ RDF_RABBIT_BASE_PYTHON="$PWD/.venv/bin/python" bash scripts/setup_rabbit.sh gpu
 ```
 
 This pins Rabbit commit `a0e8323a1f6489abc5d25b6c1c90933ccee55deb`, TensorFlow
-2.20.0 with the `and-cuda` extra, TensorFlow Probability 0.25.0, and Keras 2.20.1.
+2.20.0 with the `and-cuda` extra, TensorFlow Probability 0.25.0, and the
+`tf-keras` compatibility package at version 2.20.1.
 `requirements/rabbit-gpu.lock` records the complete tested environment, including
 CUDA libraries and test dependencies. To reproduce it exactly, create the venv
-and install that lock file with pip. `setup_rabbit.sh cpu` omits CUDA packages.
+and install that lock file with pip. For a fresh CPU-only environment, run
+`setup_rabbit.sh cpu`. To keep CPU and GPU installations side by side, set
+`RDF_RABBIT_VENV` to a distinct path for each and select the environment with
+`RDF_RABBIT_PYTHON`.
 
 The GPU worker exposes pip-installed NVIDIA libraries before importing
 TensorFlow and enables memory growth. It requires real GPU visibility; a request
@@ -31,8 +35,8 @@ package solely because it has the same version number.
 
 ## Run generic cards
 
-Combine requires the existing ROOT/Combine environment. Source `env.sh` and,
-when needed by this checkout's virtualenv, add `$ROOTSYS/lib` to `PYTHONPATH`.
+Combine requires the [ROOT/Combine environment](BUILD_WITH_COMBINE.md#usage)
+and pandas in the Python environment used to convert datacards.
 Rabbit runs in its separate environment and needs no PyROOT.
 
 ```bash

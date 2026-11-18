@@ -15,9 +15,12 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 ### 1. ONNX Runtime Integration (CMake)
 - **File**: `cmake/SetupOnnxRuntime.cmake`
 - Downloads the official Microsoft release archive during CMake configuration.
-  Linux CPU builds automatically fall back to Microsoft's checksum-verified NuGet
-  package at the same version when GitHub is unavailable. Set
+  Linux CPU and CUDA builds automatically fall back to Microsoft's
+  checksum-verified NuGet packages at the same version when GitHub is unavailable. Set
   `-DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime` to use an extracted package.
+  For Linux CUDA inference with 1.24.1, use CUDA 12.8 or newer within the
+  12.x series and cuDNN 9.x. See the
+  [ONNX Runtime CUDA requirements](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements).
 - Supports Linux (x64, aarch64) and macOS (x64, arm64)
 - Version: 1.24.1
 - No manual installation or building required
@@ -229,7 +232,7 @@ ctest -R OnnxManagerTest
 
 ## Security Considerations
 
-- ONNX Runtime binaries come from Microsoft's GitHub releases or its Linux CPU NuGet package
+- ONNX Runtime binaries come from Microsoft's GitHub releases or its Linux CPU and CUDA NuGet packages
 - Version is pinned to 1.20.0 for reproducibility
 - CMake verifies download success before proceeding
 - No external code execution during model loading (only model inference)

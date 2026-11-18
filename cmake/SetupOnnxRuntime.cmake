@@ -69,11 +69,19 @@ if(NOT ONNXRUNTIME_ROOT_DIR)
         if(_onnx_release_code EQUAL 0)
             file(ARCHIVE_EXTRACT INPUT "${_onnx_stage}/${ONNX_FILENAME}"
                 DESTINATION "${_onnx_stage}")
-        elseif(ONNX_PLATFORM STREQUAL "linux" AND NOT ONNXRUNTIME_USE_CUDA)
-            # Microsoft's NuGet distribution contains the same-version native
-            # Linux CPU libraries and headers for both supported architectures.
-            set(_onnx_nuget_name "microsoft.ml.onnxruntime.${ONNXRUNTIME_VERSION}.nupkg")
-            set(_onnx_nuget_url "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ONNXRUNTIME_VERSION}/${_onnx_nuget_name}")
+        elseif(ONNX_PLATFORM STREQUAL "linux")
+            # Keep these digests and the package layouts paired with ONNXRUNTIME_VERSION.
+            if(ONNXRUNTIME_USE_CUDA)
+                set(_onnx_nuget_id "microsoft.ml.onnxruntime.gpu.linux")
+                set(_onnx_nuget_headers "buildTransitive/native/include")
+                set(_onnx_nuget_expected_sha256 "6333c1e8eb22ec4f26c8097b35eb94cc5c8cd211fe18b82a112cba39fb2cf16c")
+            else()
+                set(_onnx_nuget_id "microsoft.ml.onnxruntime")
+                set(_onnx_nuget_headers "build/native/include")
+                set(_onnx_nuget_expected_sha256 "5fca4421974b450711520f17a27e527fec60a78c2b6f9db3b05c159d9b5a346d")
+            endif()
+            set(_onnx_nuget_name "${_onnx_nuget_id}.${ONNXRUNTIME_VERSION}.nupkg")
+            set(_onnx_nuget_url "https://api.nuget.org/v3-flatcontainer/${_onnx_nuget_id}/${ONNXRUNTIME_VERSION}/${_onnx_nuget_name}")
             set(_onnx_nuget_archive "${_onnx_stage}/${_onnx_nuget_name}")
             message(STATUS "GitHub download failed (${_onnx_release_status}); trying Microsoft's NuGet package")
             file(DOWNLOAD "${_onnx_nuget_url}" "${_onnx_nuget_archive}"
@@ -85,22 +93,19 @@ if(NOT ONNXRUNTIME_ROOT_DIR)
                     "or ${_onnx_nuget_url} (${_onnx_nuget_status}). "
                     "Check network access or set ONNXRUNTIME_ROOT_DIR to an extracted ONNX Runtime package.")
             endif()
-            # Update this digest together with ONNXRUNTIME_VERSION.
             file(SHA256 "${_onnx_nuget_archive}" _onnx_nuget_sha256)
-            if(NOT _onnx_nuget_sha256 STREQUAL "5fca4421974b450711520f17a27e527fec60a78c2b6f9db3b05c159d9b5a346d")
+            if(NOT _onnx_nuget_sha256 STREQUAL _onnx_nuget_expected_sha256)
                 message(FATAL_ERROR "ONNX Runtime NuGet package SHA-256 does not match the pinned archive")
             endif()
             set(_onnx_nuget_native "runtimes/linux-${ONNX_ARCH}/native")
             file(ARCHIVE_EXTRACT INPUT "${_onnx_nuget_archive}" DESTINATION "${_onnx_stage}"
-                PATTERNS "build/native/include/*" "${_onnx_nuget_native}/*"
+                PATTERNS "${_onnx_nuget_headers}/*" "${_onnx_nuget_native}/*"
                     "LICENSE" "ThirdPartyNotices.txt")
             set(_onnx_package "${_onnx_stage}/${ONNX_DIR_NAME}")
-            file(COPY "${_onnx_stage}/build/native/include"
+            file(COPY "${_onnx_stage}/${_onnx_nuget_headers}"
                 "${_onnx_stage}/LICENSE" "${_onnx_stage}/ThirdPartyNotices.txt"
                 DESTINATION "${_onnx_package}")
-            file(MAKE_DIRECTORY "${_onnx_package}/lib")
-            file(COPY "${_onnx_stage}/${_onnx_nuget_native}/libonnxruntime.so"
-                "${_onnx_stage}/${_onnx_nuget_native}/libonnxruntime_providers_shared.so"
+            file(COPY "${_onnx_stage}/${_onnx_nuget_native}/"
                 DESTINATION "${_onnx_package}/lib")
             # NuGet ships an unversioned filename for a versioned ELF SONAME.
             file(CREATE_LINK "libonnxruntime.so" "${_onnx_package}/lib/libonnxruntime.so.1" SYMBOLIC)

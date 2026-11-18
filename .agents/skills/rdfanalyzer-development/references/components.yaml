@@ -636,11 +636,19 @@ components:
   kind: component
   skill: rdfanalyzer-build
   reference: rdfanalyzer-build/references/wrappers-dependencies.md
+- path: scripts/build_common.sh
+  kind: component
+  skill: rdfanalyzer-build
+  reference: rdfanalyzer-build/references/wrappers-dependencies.md
 - path: build.sh
   kind: component
   skill: rdfanalyzer-build
   reference: rdfanalyzer-build/references/wrappers-dependencies.md
 - path: buildFast.sh
+  kind: component
+  skill: rdfanalyzer-build
+  reference: rdfanalyzer-build/references/wrappers-dependencies.md
+- path: buildFastCombine.sh
   kind: component
   skill: rdfanalyzer-build
   reference: rdfanalyzer-build/references/wrappers-dependencies.md

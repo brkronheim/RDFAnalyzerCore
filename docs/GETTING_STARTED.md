@@ -31,7 +31,7 @@ source env.sh
 
 This script sets up ROOT and other required dependencies from CVMFS.
 
-For a machine without CVMFS, follow the [standalone ROOT build](../README.md#standalone-root-installation).
+For a machine without CVMFS, follow the [standalone ROOT build](#standalone-root-installation).
 
 Create the test environment before configuring CMake so the build and tests
 select the same Python interpreter.
@@ -75,6 +75,23 @@ cd analyses/ExampleAnalysis
 ```
 
 This runs the Z→μμ example on ATLAS Open Data. Its configured inputs are remote EOS files, so you need XRootD access or must replace `fileList` in `cfg.yaml` with accessible ROOT files. The config sets `enableSkim: false`, so this run does not write an event tree to `saveFile`; `saveConfig: output.txt` is used only if skim writing is enabled. The booked histograms are written to `Output/ZMuMuL_meta.root`, derived from `saveFile` because this config does not set `metaFile`.
+
+## Standalone ROOT Installation
+
+Use a standalone ROOT installation with matching Python, Boost and the XRootD
+development package. Set `XROOTD_ROOT` to the XRootD prefix if CMake cannot find it.
+
+```bash
+# Setup ROOT
+source /path/to/root/bin/thisroot.sh
+git submodule update --init --recursive -- core/extern
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt
+
+cmake -S . -B build -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+cmake --build build -j$(nproc)
+```
 
 ## Understanding the Output
 

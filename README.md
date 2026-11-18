@@ -263,20 +263,26 @@ source build.sh -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 
 ### Standalone ROOT Installation
 
-Use a standalone ROOT installation with matching Python, Boost and the XRootD
-development package. Set `XROOTD_ROOT` to the XRootD prefix if CMake cannot find it.
+See the [standalone ROOT instructions](docs/GETTING_STARTED.md#standalone-root-installation).
 
-```bash
-# Setup ROOT
-source /path/to/root/bin/thisroot.sh
-git submodule update --init --recursive -- core/extern
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements-ci.txt
+### Build wrappers
 
-cmake -S . -B build -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
-cmake --build build -j$(nproc)
-```
+All four wrappers build into the checkout's `build/` directory. They use the
+active ROOT environment when available and otherwise source `env.sh`. Extra
+CMake cache options override the wrapper defaults.
+
+| Script | Defaults |
+|---|---|
+| `build.sh` | CPU, tests enabled |
+| `buildFast.sh` | CPU, tests disabled |
+| `buildFastCombine.sh` | CPU with Combine and CombineHarvester, tests disabled |
+| `buildFull.sh` | CUDA, tests enabled. Enables Combine and CombineHarvester when the Combine repository is reachable. |
+
+For `buildFull.sh`, make a matching CUDA toolkit available through `PATH` or
+`CUDACXX`. GPU inference also requires the CUDA and cuDNN libraries supported by
+the [pinned ONNX Runtime package](docs/ONNX_IMPLEMENTATION.md#1-onnx-runtime-integration-cmake).
+Set `CMAKE_BUILD_PARALLEL_LEVEL` to override the default number of workers.
+Use direct CMake commands when building in a different directory.
 
 ### Build Options
 

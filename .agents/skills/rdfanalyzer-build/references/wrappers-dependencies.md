@@ -2,20 +2,26 @@
 
 Use when reproducing a root script, switching optional toolchains, or diagnosing configuration/link differences. Read the selected wrapper before executing it; its filename is not a guarantee of its flags or side effects.
 
-| Entry point | Current behavior to account for |
+| Entry point | Build or action |
 |---|---|
-| [build.sh](../../../../build.sh) | Sources root `env.sh`, initializes recursive submodules, configures Release with tests and CPU-only optional paths, then builds `build/`. |
-| [buildFast.sh](../../../../buildFast.sh) | Initializes submodules, disables tests/Combine/CUDA, configures/builds `build/`; it does not perform the same environment sourcing as build.sh. |
-| [buildFull.sh](../../../../buildFull.sh) | Probes remote Combine availability, can disable Combine/Harvester on failure, enables CUDA paths and builds with bounded parallelism. Successful completion does not imply every optional feature remained enabled. |
-| [buildTest.sh](../../../../buildTest.sh), [test.sh](../../../../test.sh) | Source the build/test sequence or run CTest from `build`; inspect cwd and failure propagation because the shell wrappers do not all enable strict error handling. |
-| [clean.sh](../../../../clean.sh), [cleanBuild.sh](../../../../cleanBuild.sh), [cleanTest.sh](../../../../cleanTest.sh) | Delete build/testing directories and compose rebuild/test steps. They discard state; do not use them merely to inspect or diagnose an existing build. |
-| [test_python_bindings.sh](../../../../test_python_bindings.sh) | Checks ROOT/Python/packages, imports the built extension, then invokes binding tests. Inspect its active interpreter and module path before treating it as ABI validation. |
+| [build.sh](../../../../build.sh) | CPU build with tests. |
+| [buildFast.sh](../../../../buildFast.sh) | CPU build without tests. |
+| [buildFastCombine.sh](../../../../buildFastCombine.sh) | CPU build with Combine and CombineHarvester, without tests. |
+| [buildFull.sh](../../../../buildFull.sh) | CUDA build with tests. Enables Combine and CombineHarvester by default when the Combine repository is reachable. |
+| [buildTest.sh](../../../../buildTest.sh), [test.sh](../../../../test.sh) | Build and run CTest, or run CTest on the existing build. |
+| [clean.sh](../../../../clean.sh), [cleanBuild.sh](../../../../cleanBuild.sh), [cleanTest.sh](../../../../cleanTest.sh) | Remove the checkout's build and testing directories, optionally rebuild and run CTest. |
 
-Commands assume the appropriate cwd; sourcing a script can also change the caller's directory/environment. Prefer the affected configured CMake target for a bounded change when a full wrapper would perform unrelated work.
+The build scripts share [the wrapper implementation](../../../../scripts/build_common.sh).
+They reuse an active ROOT environment or source the repository's `env.sh`,
+initialize the pinned core submodules, and configure the checkout's `build/`
+directory. They accept CMake cache options and can run from another directory.
+Set `CMAKE_BUILD_PARALLEL_LEVEL` to select the number of build workers. The full
+build defaults to at most 16 workers. The wrappers can be sourced to keep the
+environment active in the calling shell.
 
 [CMakePresets.json](../../../../CMakePresets.json) defines GCC and Clang configurations with explicit dependency paths and flags, currently sharing the `build` directory. Inspect the active cache/compiler/generator before switching presets; do not reuse a GCC cache as though it were a fresh Clang configuration. Preset CVMFS paths and root `env.sh` need not select identical ROOT/Python stacks. Check them in the actual environment instead of copying version strings into new instructions.
 
-[SetupOnnxRuntime.cmake](../../../../cmake/SetupOnnxRuntime.cmake) and [core/extern/CMakeLists.txt](../../../../core/extern/CMakeLists.txt) own native dependency setup. Linux CPU downloads fall back to Microsoft's pinned NuGet archive if the GitHub release cannot be fetched. Read the setup modules for alternate package roots and GPU selection. [requirements-production.txt](../../../../requirements-production.txt) and [requirements-ci.txt](../../../../requirements-ci.txt) describe Python dependencies; the latter includes the production requirements. Optional Dask and ABI-matched PyROOT/native libraries are distinct requirements.
+[SetupOnnxRuntime.cmake](../../../../cmake/SetupOnnxRuntime.cmake) and [core/extern/CMakeLists.txt](../../../../core/extern/CMakeLists.txt) own native dependency setup. Linux CPU and CUDA downloads fall back to Microsoft's pinned NuGet archives if the GitHub release cannot be fetched. Read the setup modules for alternate package roots and GPU selection. [requirements-production.txt](../../../../requirements-production.txt) and [requirements-ci.txt](../../../../requirements-ci.txt) describe Python dependencies; the latter includes the production requirements. Optional Dask and ABI-matched PyROOT/native libraries are distinct requirements.
 
 [SetupCombine.cmake](../../../../cmake/SetupCombine.cmake) creates external Combine/Harvester builds and applies repository patches via [PatchCombinePyROOT](../../../../cmake/PatchCombinePyROOT.cmake), [PatchCombineRobustHesse](../../../../cmake/PatchCombineRobustHesse.cmake), and [PatchCombineHarvesterForRoot](../../../../cmake/PatchCombineHarvesterForRoot.cmake). Trace configured tags, patch commands/stamps and actual external build outputs. Editing a patch file does not prove a previously built external project reapplied it. Keep Harvester's standalone CMake support in view at [CombineHarvesterStandalone](../../../../cmake/CombineHarvesterStandalone).
 
