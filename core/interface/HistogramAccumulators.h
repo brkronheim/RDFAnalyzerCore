@@ -118,7 +118,10 @@ public:
   }
   template <class T>
   FloatWeightedSum &operator+=(const boost::histogram::weight_type<T> &weight) {
-    const double w = weight.value;
+    return *this += static_cast<double>(weight.value);
+  }
+  // Boost.Histogram 1.74 detects weight support via `accumulator += 0`.
+  FloatWeightedSum &operator+=(double w) {
     value_ = static_cast<float>(static_cast<double>(value_) + w);
     variance_ += w * w;
     return *this;
