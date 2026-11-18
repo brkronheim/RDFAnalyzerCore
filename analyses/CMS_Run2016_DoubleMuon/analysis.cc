@@ -29,7 +29,8 @@
  *
  *   cmake -S . -B build && cmake --build build -j$(nproc)
  *   cd build/analyses/CMS_Run2016_DoubleMuon
- *   ./analysis ../../../analyses/CMS_Run2016_DoubleMuon/cfg.yaml
+ *   mkdir -p output
+ *   ./cms_doublemu_analysis ../../../analyses/CMS_Run2016_DoubleMuon/cfg.yaml
  */
 
 #include "analyzer.h"

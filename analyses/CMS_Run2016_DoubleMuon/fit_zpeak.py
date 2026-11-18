@@ -37,13 +37,14 @@ per-channel (``decay_0j``, etc.).
 
 Usage
 -----
-  # Build workspaces and datacards, print LAW fit commands
+  # Project the metadata histograms first, following the analysis README.
+  # Build workspaces and datacards, then print the LAW fit command.
   python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py
 
   # Explicit paths
   python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py \\
       --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \\
-      --input  output/dimuon_zpeak.root \\
+      --input  analyses/CMS_Run2016_DoubleMuon/output/dimuon_zpeak_projected.root \\
       --outdir zpeak_fit
 
 Running the fits via LAW
@@ -55,7 +56,7 @@ After this script completes, run the full pipeline with the generic LAW task::
   law run AnalyticWorkspaceFitTask \\
       --name zpeak_run2016g \\
       --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \\
-      --histogram-file output/dimuon_zpeak.root \\
+      --histogram-file analyses/CMS_Run2016_DoubleMuon/output/dimuon_zpeak_projected.root \\
       --method FitDiagnostics \\
       --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
 
@@ -108,7 +109,7 @@ except ImportError:
 # Default paths (relative to repo root)
 # ---------------------------------------------------------------------------
 DEFAULT_WS_CFG = os.path.join(_SCRIPT_DIR, "zpeak_workspace.yaml")
-DEFAULT_INPUT  = os.path.join(_SCRIPT_DIR, "output", "dimuon_zpeak.root")
+DEFAULT_INPUT  = os.path.join(_SCRIPT_DIR, "output", "dimuon_zpeak_projected.root")
 DEFAULT_OUTDIR = os.path.join(_SCRIPT_DIR, "zpeak_fit")
 
 

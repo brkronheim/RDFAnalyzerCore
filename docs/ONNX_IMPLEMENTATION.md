@@ -14,7 +14,10 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 
 ### 1. ONNX Runtime Integration (CMake)
 - **File**: `cmake/SetupOnnxRuntime.cmake`
-- Automatically downloads ONNX Runtime binaries from official Microsoft releases during CMake configuration
+- Downloads the official Microsoft release archive during CMake configuration.
+  Linux CPU builds automatically fall back to Microsoft's checksum-verified NuGet
+  package at the same version when GitHub is unavailable. Set
+  `-DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime` to use an extracted package.
 - Supports Linux (x64, aarch64) and macOS (x64, arm64)
 - Version: 1.24.1
 - No manual installation or building required
@@ -226,7 +229,7 @@ ctest -R OnnxManagerTest
 
 ## Security Considerations
 
-- ONNX Runtime binaries are downloaded from official Microsoft GitHub releases
+- ONNX Runtime binaries come from Microsoft's GitHub releases or its Linux CPU NuGet package
 - Version is pinned to 1.20.0 for reproducibility
 - CMake verifies download success before proceeding
 - No external code execution during model loading (only model inference)

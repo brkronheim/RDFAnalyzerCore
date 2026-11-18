@@ -4,9 +4,7 @@ name: CMS DoubleMuon Analysis
 # This job builds the CMS Run2016G DoubleMuon analysis, runs the analysis
 # executable over a single public CMS Open Data NanoAOD file, and then builds
 # the analytic Z→μμ fit inputs (RooFit workspaces + Combine datacards).
-# The CI runner's py312 environment is used for the lightweight Python checks,
-# while the workspace builder runs with the system Python that matches the
-# installed ROOT bindings.
+# The self-hosted runner needs the CVMFS environment and a CERN GitLab SSH key.
 #
 # To trigger:
 #   GitHub UI:  Actions → "CMS DoubleMuon Analysis (on request)" → Run workflow
@@ -18,9 +16,9 @@ on:
         description: "CMS extension Git URL (optional override of the pinned repository URL)"
         required: false
       threads:
-        description: "Number of RDataFrame threads (default: -1 = all CPUs)"
+        description: "Number of RDataFrame threads (default: 1)"
         required: false
-        default: "-1"
+        default: "1"
 
 jobs:
   run-analysis:
@@ -32,140 +30,76 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Verify runner environment
-        run: |
-          echo "Using self-hosted runner with preinstalled dependencies"
-          uname -a
-
-      - name: Verify ROOT
-        run: |
-          if command -v root-config >/dev/null 2>&1; then
-            echo "root-config found:"; root-config --version
-          elif command -v root >/dev/null 2>&1; then
-            echo "root found:"; root --version
-          else
-            echo "ERROR: ROOT not found on runner"; exit 1
-          fi
-
-      - name: Install Python dependencies
-        run: pip3 install -r requirements-ci.txt
-
-      - name: Download pinned CMS extension
+      - name: Fetch CMS and build the DoubleMuon analysis
         env:
           CMS_REPOSITORY: ${{ inputs.cms_repository }}
-        run: python3 scripts/fetch_cms.py --repository "$CMS_REPOSITORY"
-
-      - name: Configure CMake
-        run: cmake -S . -B build -DRDF_ENABLE_CMS=ON -DRDF_REQUIRED_EXTENSIONS=cms
-
-      - name: Build cms_doublemu_analysis
         run: |
-          cmake . \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-          -DBUILD_TESTS=OFF \
-          -DBUILD_COMBINE=ON \
-          -DBUILD_COMBINE_HARVESTER=ON \
-          -DUSE_CUDA=OFF \
-          -DONNXRUNTIME_USE_CUDA=OFF \
-          -B build # `correction config --cmake`  # --trace
-          cd build
-          make -j$(( $(nproc) > 8 ? 8 : $(nproc) ))
-          cd ..
+          python3 scripts/fetch_cms.py --repository "$CMS_REPOSITORY"
+          source env.sh
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install -r requirements-ci.txt
+          cmake -S . -B build -DRDF_REQUIRED_EXTENSIONS=cms \
+            -DRDF_ANALYSES=CMS_Run2016_DoubleMuon -DBUILD_TESTS=OFF \
+            -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+          cmake --build build --target cms_doublemu_analysis --parallel 8
 
-      - name: Run analysis executable
-        working-directory: build/analyses/CMS_Run2016_DoubleMuon
+      - name: Run the public NanoAOD example
         env:
-          THREADS: ${{ github.event.inputs.threads }}
+          THREADS: ${{ inputs.threads }}
         run: |
-          # Write a minimal override config so the thread count can be injected
-          # without modifying the committed ci_cfg.yaml.
-          if [ -n "${THREADS}" ] && [ "${THREADS}" != "-1" ]; then
-            sed "s/^threads:.*/threads: \"${THREADS}\"/" \
-              "${GITHUB_WORKSPACE}/analyses/CMS_Run2016_DoubleMuon/ci_cfg.yaml" \
-              > /tmp/ci_cfg_override.yaml
-            CFG=/tmp/ci_cfg_override.yaml
-          else
-            CFG="${GITHUB_WORKSPACE}/analyses/CMS_Run2016_DoubleMuon/ci_cfg.yaml"
+          source env.sh
+          analysis="$PWD/analyses/CMS_Run2016_DoubleMuon"
+          cfg="$analysis/ci_cfg.yaml"
+          if [[ -n "$THREADS" && "$THREADS" != "1" ]]; then
+            [[ "$THREADS" =~ ^(-1|[0-9]+)$ ]] || { echo "Invalid thread count: $THREADS" >&2; exit 1; }
+            cfg=$(mktemp "$analysis/ci_cfg.XXXXXX.yaml")
+            trap 'rm -f -- "$cfg"' EXIT
+            sed "s/^threads:.*/threads: \"${THREADS}\"/" "$analysis/ci_cfg.yaml" > "$cfg"
           fi
-          ./cms_doublemu_analysis "$CFG"
+          cd build/analyses/CMS_Run2016_DoubleMuon
+          ./cms_doublemu_analysis "$cfg"
 
-      - name: Verify analysis output ROOT file
-        working-directory: build/analyses/CMS_Run2016_DoubleMuon
+      - name: Verify histograms and build Z-peak workspaces
         run: |
-          # Choose meta file if present; histograms and counters are written
-          # to the meta file by default, with the main output reserved for the
-          # skim tree.  The old CI check assumed the histograms lived in the
-          # primary file which caused failures.
-          OUT="dimuon_zpeak_ci.root"
-          META="dimuon_zpeak_ci_meta.root"
-          if [ -f "$META" ]; then
-            CHECK="$META"
-            echo "Checking meta file for histograms"
-          else
-            CHECK="$OUT"
-            echo "Checking main output file for histograms"
-          fi
-          python3 - <<'EOF'
-          import uproot, sys, os
-          f = uproot.open(os.environ['CHECK'])
-          keys = f.keys()
-          print("ROOT file keys:", keys[:20])
-          hist_keys = [k for k in keys if "DimuonMass" in k]
-          if not hist_keys:
-              print("ERROR: no DimuonMass histograms found in file", os.environ['CHECK'])
-              sys.exit(1)
-          print(f"OK: found {len(hist_keys)} DimuonMass histogram(s)")
-          EOF
+          source env.sh
+          source .venv/bin/activate
+          export PYTHONPATH="$ROOTSYS/lib${PYTHONPATH:+:$PYTHONPATH}"
+          meta="build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci_meta.root"
+          projected="build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci_projected.root"
+          python core/python/extract_nd_histograms.py "$meta" --output "$projected" --nominal-only
+          python - "$projected" <<'PYTHON'
+          import sys
+          import uproot
 
-      - name: Build analytic Z-peak workspaces and datacards
+          with uproot.open(sys.argv[1]) as output:
+              directory = output["Default_Default/Default"]
+              inclusive = directory["DimuonMass"].values().sum()
+              categories = sum(directory[f"DimuonMass_{jet}"].values().sum()
+                               for jet in ("0j", "1j", "2j", "ge3j"))
+              if inclusive <= 0 or categories != inclusive:
+                  sys.exit(f"Invalid dimuon yields: inclusive={inclusive}, categories={categories}")
+              print(f"Verified {inclusive:.0f} selected dimuons")
+          PYTHON
+
+          python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py \
+            --input "$projected" --outdir analyticFit_ci_run
+
+      - name: Verify fit outputs
         run: |
-          # Use the ROOT-compatible system Python here. The self-hosted py312
-          # environment is fine for uproot-based checks but its PyROOT bindings
-          # are not ABI-compatible on the runner.
-          HIST_FILE="${GITHUB_WORKSPACE}/build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci_meta.root"
-          WS_CFG="${GITHUB_WORKSPACE}/analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml"
-          FIT_DIR="${GITHUB_WORKSPACE}/analyticFit_ci_run"
-
-          /usr/bin/python3 "${GITHUB_WORKSPACE}/analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py" \
-            --workspace-config "${WS_CFG}" \
-            --input "${HIST_FILE}" \
-            --outdir "${FIT_DIR}"
-
-      - name: Verify fit outputs (datacards + workspaces + plots)
-        run: |
-          FIT_DIR="${GITHUB_WORKSPACE}/analyticFit_ci_run"
-          python3 - << EOF
-          import os, sys, glob
-          fit_dir = "${FIT_DIR}"
-          if not os.path.isdir(fit_dir):
-              print(f"ERROR: fit output directory not found: {fit_dir}")
-              sys.exit(1)
-          datacards = glob.glob(os.path.join(fit_dir, "datacard_*.txt"))
-          workspaces = glob.glob(os.path.join(fit_dir, "ws_*.root"))
-          plots = glob.glob(os.path.join(fit_dir, "fit_*.png"))
-          print(f"Fit output dir: {fit_dir}")
-          print(f"  Datacards   : {[os.path.basename(f) for f in datacards]}")
-          print(f"  Workspaces  : {[os.path.basename(f) for f in workspaces]}")
-          print(f"  Plots       : {[os.path.basename(f) for f in plots]}")
-          if not datacards:
-              print("ERROR: no datacards found in fit output directory!")
-              sys.exit(1)
-          if not workspaces:
-              print("ERROR: no workspaces found in fit output directory!")
-              sys.exit(1)
-          if not plots:
-            print("ERROR: no fit plots found in fit output directory!")
-            sys.exit(1)
-          print("OK: fit outputs look good.")
-          EOF
+          for channel in 0j 1j 2j ge3j; do
+            test -s "analyticFit_ci_run/ws_${channel}.root"
+            test -s "analyticFit_ci_run/datacard_${channel}.txt"
+            test -s "analyticFit_ci_run/fit_${channel}.png"
+          done
+          test -s analyticFit_ci_run/datacard_combined.txt
 
       - name: Upload analysis artifacts
         uses: actions/upload-artifact@v4
         with:
           name: doublemu-analysis-output
           path: |
-            build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci.root
+            build/analyses/CMS_Run2016_DoubleMuon/dimuon_zpeak_ci_meta.root
             analyticFit_ci_run/
           if-no-files-found: error
           retention-days: 7

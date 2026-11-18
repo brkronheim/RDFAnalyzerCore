@@ -40,7 +40,12 @@ class DeclarationTests(unittest.TestCase):
                 if previous_histograms is None:previous_histograms=analysis.histograms
                 else:self.assertEqual(analysis.histograms,previous_histograms)
             broken=Analysis(AnalysisConfig(files=[str(source)],output=str(directory/'broken.root'),skim=False))
-            stage=Stage('broken',record_sources=True).project('unknown','missing',0)
+            missing=Stage('missing',record_sources=True).project('unknown','missing',0)
+            with self.assertRaisesRegex(ValueError,'unknown explicit input columns'):
+                broken.apply(missing)
+            self.assertFalse(missing.describe().as_dict()['details']['sealed'])
+            self.assertFalse(broken._stage_failure)
+            stage=Stage('broken',record_sources=True).project('unknown','value',0)
             declared=stage.describe().as_dict()['details']['steps'][0]['source']
             with self.assertRaisesRegex(RuntimeError,'declared at') as caught:broken.apply(stage)
             self.assertIn(f"{declared['file']}:{declared['line']}",str(caught.exception))
@@ -215,7 +220,17 @@ class DeclarationTests(unittest.TestCase):
                     before=analysis.columns;stats=analysis.compilation_stats
                     preview=recipe.preview(analysis).as_dict()['details']
                     self.assertEqual(preview['region_order'],['base','signal'])
-                    self.assertEqual(len(preview['actions']),11)
+                    self.assertEqual(preview['actions'][0]['kind'],'count')
+                    histogram_actions = preview['actions'][1:]
+                    kinds = [action['kind'] for action in histogram_actions]
+                    if kinds == ['histogram_batch']:
+                        names = [item['name'] for item in histogram_actions[0]['arguments']]
+                    else:
+                        self.assertEqual(kinds, ['histogram'] * 10)
+                        names = [action['arguments']['name'] for action in histogram_actions]
+                    self.assertEqual(names, [f'kinematics/{region}/{label}/twice_pt'
+                                             for region in ('base','signal')
+                                             for label in analysis.variation_labels])
                     self.assertEqual(analysis.columns,before)
                     self.assertEqual(analysis.compilation_stats,stats)
                     analysis.apply(recipe)

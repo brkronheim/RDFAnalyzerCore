@@ -95,9 +95,9 @@ while IFS= read -r rdf_extension_environment; do
 done <<< "${rdf_extension_env_paths}"
 # RDF_EXTENSION_ENV_END
 
-# Honor an explicitly selected XRootD package with or without an experiment
-# checkout. Optional presets may supply a default prefix.
-LCG_XROOTD_ROOT=${XROOTD_ROOT:-${XRD_ROOT:-}}
+# Honor an explicit XRootD prefix or an extension preset. Use the generic
+# CVMFS package when neither supplies one.
+LCG_XROOTD_ROOT=${XROOTD_ROOT:-${XRD_ROOT:-/cvmfs/sft.cern.ch/lcg/releases/xrootd/5.7.2-46b79/x86_64-el9-gcc11-opt}}
 if [ -n "${LCG_XROOTD_ROOT}" ]; then
     LCG_XROOTD_LIBDIR=${LCG_XROOTD_ROOT}/lib64
     if [ ! -f "${LCG_XROOTD_LIBDIR}/libXrdCl.so" ]; then

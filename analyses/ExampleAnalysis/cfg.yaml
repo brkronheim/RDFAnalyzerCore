@@ -12,7 +12,8 @@
 saveDirectory: ""
 saveTree: Events
 treeList: CollectionTree,POOLCollectionTree
-threads: "-1"
+# A single reader is a good initial setting for remote PHYSLITE files.
+threads: "1"
 antiglobs: output.root,hists.root
 saveConfig: output.txt
 saveFile: Output/ZMuMuL.root

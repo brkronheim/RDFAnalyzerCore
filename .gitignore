@@ -48,6 +48,7 @@ rucioFileList*/
 xrdfsFileList*/
 
 AGENTS/
+/.venv/
 .venv-rabbit/
 analyticFit_ci_run/
 python_env.tar.gz

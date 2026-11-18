@@ -39,14 +39,11 @@ CMS Open Data NanoAOD (XRootD — public)
                     └── output.yaml     (output branches)
          │
          ▼
-   output/dimuon_zpeak.root
-    ├── Events tree (DimuonMass, nGoodJets, …)
-    ├── histograms/DimuonMass_{0j,1j,2j,ge3j}   ◄── fit inputs
-    ├── histograms/DimuonMass (inclusive)
-    ├── histograms/nGoodJets, LeadMuPt, …
+   output/dimuon_zpeak_meta.root
+    ├── nd_histograms_v1/ (inclusive and jet-bin dimuon mass, jet and muon kinematics)
     └── cutflow / cutflow_nminus1
          │
-         ▼
+         ▼ extract_nd_histograms.py
    zpeak_workspace.yaml          law run AnalyticWorkspaceFitTask
     (Voigtian+exp model) ──────────────────────────────────────►
                                  per-channel + simultaneous fits
@@ -203,55 +200,30 @@ Every config file in this analysis uses YAML:
 
 ## Building
 
-```bash
-# Source the environment (ROOT, compiler, …)
-source env.sh
-
-# Core framework only
-cmake -S . -B build && cmake --build build -j$(nproc)
-
-# With CMS Combine (needed to run fits after fit_zpeak.py)
-cmake -S . -B build -DBUILD_COMBINE=ON
-cmake --build build -j$(nproc)
-
-# With CombineHarvester (structured datacard writing in fit_zpeak.py)
-cmake -S . -B build -DBUILD_COMBINE=ON -DBUILD_COMBINE_HARVESTER=ON
-cmake --build build -j$(nproc)
-```
-
----
+Follow the [CMS extension setup](../../docs/CMS_EXTENSION.md#download-and-build)
+to fetch the pinned checkout over CERN GitLab SSH and build `cms_doublemu_analysis`.
+The analysis and standalone workspace builder run with the standard build.
+The full LAW fit workflow uses the optional
+[Combine integration](../../docs/COMBINE_INTEGRATION.md).
 
 ## Running Locally
 
-```bash
-cd build/analyses/CMS_Run2016_DoubleMuon
-./cms_doublemu_analysis ../../../analyses/CMS_Run2016_DoubleMuon/cfg.yaml
-```
-
-Output: `output/dimuon_zpeak.root` with the skimmed tree, histograms, and cutflow.
-
-### Single-threaded debugging
-
-Edit `cfg.yaml`: `threads: "0"`, then rerun.
-
-### Using a local or different file
+From the framework checkout with the build environment active:
 
 ```bash
-# Minimal override config
-cat > /tmp/test_cfg.yaml << 'EOF'
-fileList: /path/to/your_nanoaod.root
-treeList: Events
-saveFile: /tmp/test_out.root
-type: "0"
-histogramConfig: /abs/path/to/histograms.yaml
-floatConfig: /abs/path/to/floats.yaml
-intConfig: /abs/path/to/ints.yaml
-saveConfig: /abs/path/to/output.yaml
-triggerConfig: /abs/path/to/triggers.yaml
-threads: "4"
-EOF
-./analysis /tmp/test_cfg.yaml
+(cd analyses/CMS_Run2016_DoubleMuon && mkdir -p output && ../../build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis cfg.yaml)
 ```
+
+The default config reads one public Run2016G DoubleMuon NanoAOD file using
+XRootD. The result is
+`analyses/CMS_Run2016_DoubleMuon/output/dimuon_zpeak_meta.root`, containing the
+histograms, sequential and N-1 cutflows, and provenance. Enable the optional
+skim with `enableSkim: true` to also write the `Events` tree to
+`output/dimuon_zpeak.root`.
+
+For a different sample, copy `cfg.yaml` alongside the original, update
+`fileList` with a local path or XRootD URL, and give the copy a new `saveFile`.
+Run from the analysis directory so relative config and output paths resolve.
 
 ### Getting the full file list
 
@@ -392,6 +364,18 @@ Parameters with `shared: true` receive a name **without** a channel suffix
 the combined simultaneous fit, implementing a shared Z mass and detector
 resolution across all jet bins.
 
+### Prepare the fit histograms
+
+From the repository root, use the ROOT-matched Python environment to project the
+nominal sparse histograms into the 1D inputs used by both fit workflows.
+
+```bash
+export PYTHONPATH="$ROOTSYS/lib${PYTHONPATH:+:$PYTHONPATH}"
+output=analyses/CMS_Run2016_DoubleMuon/output
+python core/python/extract_nd_histograms.py "$output/dimuon_zpeak_meta.root" \
+    --output "$output/dimuon_zpeak_projected.root" --nominal-only
+```
+
 ### Step 1 — Run via `AnalyticWorkspaceFitTask` (recommended)
 
 ```bash
@@ -400,7 +384,7 @@ source law/env.sh && law index
 law run AnalyticWorkspaceFitTask \
     --name zpeak_run2016g \
     --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \
-    --histogram-file output/dimuon_zpeak.root \
+    --histogram-file "$output/dimuon_zpeak_projected.root" \
     --method FitDiagnostics \
     --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
 ```
@@ -425,8 +409,7 @@ For quick workspace inspection without a LAW environment:
 ```bash
 python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py \
     --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \
-    --input  output/dimuon_zpeak.root \
-    --outdir zpeak_fit
+    --input "$output/dimuon_zpeak_projected.root" --outdir zpeak_fit
 ```
 
 The script builds workspaces and datacards, then prints the exact
@@ -471,7 +454,7 @@ Then re-run with `--skip-fit` to build workspaces without requiring Combine:
 law run AnalyticWorkspaceFitTask \
     --name zpeak_cb_cheb \
     --workspace-config /tmp/cb_cheb_workspace.yaml \
-    --histogram-file output/dimuon_zpeak.root \
+    --histogram-file "$output/dimuon_zpeak_projected.root" \
     --skip-fit
 ```
 

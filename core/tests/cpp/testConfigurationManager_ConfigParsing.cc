@@ -31,9 +31,14 @@ TEST_F(BaseConfigSetup, ParseMultiKeyConfigWorks) {
   auto mapVector = config->parseMultiKeyConfig(
       correctionConfigFile,
       {"file", "correctionName", "name", "inputVariables"});
-  ASSERT_EQ(mapVector.size(), 2);
-  auto map1 = mapVector.at(0);
-  auto map2 = mapVector.at(1);
+  ASSERT_EQ(mapVector.size(), 3);
+  const auto &map1 = mapVector.at(0);
+  const auto &rangeError = mapVector.at(1);
+  const auto &map2 = mapVector.at(2);
+  EXPECT_EQ(rangeError.at("file"), "aux/correction.json");
+  EXPECT_EQ(rangeError.at("correctionName"), "test_correction_range_error");
+  EXPECT_EQ(rangeError.at("name"), "test_correction_range_error");
+  EXPECT_EQ(rangeError.at("inputVariables"), "float_arg,int_arg");
   EXPECT_EQ(map1.at("file"), "aux/correction.json");
   EXPECT_EQ(map1.at("correctionName"), "test_correction");
   EXPECT_EQ(map1.at("name"), "test_correction");

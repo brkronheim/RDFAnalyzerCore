@@ -18,28 +18,41 @@ This guide will help you get up and running with RDFAnalyzerCore quickly — fro
 ### 1. Clone the Repository
 
 ```bash
-git clone git@github.com:brkronheim/RDFAnalyzerCore.git
+git clone --branch dev https://github.com/brkronheim/RDFAnalyzerCore.git
 cd RDFAnalyzerCore
 ```
 
 ### 2. Set Up Environment
 
-On a CVMFS-backed HEP host such as lxplus, cmsconnect, or a site-managed analysis node:
+On a CVMFS-backed x86-64 EL9 host or in the matching container, run:
 ```bash
 source env.sh
 ```
 
 This script sets up ROOT and other required dependencies from CVMFS.
 
-If you are using a standalone ROOT installation instead, source that environment before building.
+For a machine without CVMFS, follow the [standalone ROOT build](../README.md#standalone-root-installation).
+
+Create the test environment before configuring CMake so the build and tests
+select the same Python interpreter.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt
+```
+
+To enable CMS, follow the [CMS extension setup](CMS_EXTENSION.md#download-and-build)
+for the SSH checkout and build commands.
 
 ### 3. Build the Framework
 
 ```bash
-source build.sh
+source build.sh -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 ```
 
 This will:
+- Initialize the pinned core Git submodules recursively
 - Configure a Release build in `build/` with the defaults used by `build.sh`
 - Download ONNX Runtime automatically
 - Build the core framework
@@ -50,6 +63,7 @@ The build artifacts will be placed in the `build/` directory.
 To run the registered tests from the repository root:
 
 ```bash
+export PYTHONPATH="$ROOTSYS/lib${PYTHONPATH:+:$PYTHONPATH}"
 source test.sh
 ```
 

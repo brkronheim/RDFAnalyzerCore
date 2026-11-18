@@ -79,7 +79,6 @@ class BundleStagingTests(unittest.TestCase):
 
     def test_changed_execution_cannot_refresh_an_existing_runs_workers(self):
         from unittest.mock import patch
-        from run_bundle import BundleError
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
             (root/"datasets.yaml").write_text('lumi: 1\ndatasets:\n- name: data\n  dtype: data\n  files: [input.root]\n')
@@ -99,7 +98,7 @@ class BundleStagingTests(unittest.TestCase):
                 staged=root/"skimRun_sealed/shared_inputs/analysis"
                 before=staged.read_bytes()
                 executable.write_text('#!/bin/sh\nexit 1\n')
-                with self.assertRaisesRegex(BundleError,"new run name"):
+                with self.assertRaisesRegex(ValueError, "Job-sizing workload changed; use a new run name"):
                     task._run_impl()
                 self.assertEqual(staged.read_bytes(),before)
 
