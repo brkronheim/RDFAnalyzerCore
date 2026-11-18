@@ -63,11 +63,8 @@ set_tests_properties(NativeRunResultInteropTest PROPERTIES
 # can resolve when CTest runs from the build directory.
 set(_PYTHONPATH "${CMAKE_SOURCE_DIR}:${_LAW_DIR}:${_CORE_PY}:$ENV{PYTHONPATH}")
 
-# Several tests invoke _run_analysis_job() which creates shell scripts in a
-# temporary directory and then exec()s them.  If the system /tmp is mounted
-# noexec (common in hardened CI environments), those scripts fail with exit 126.
-# Point TMPDIR at a directory inside the build tree which is guaranteed to be
-# on an exec-capable filesystem.
+# Tests that execute temporary scripts or compiled fixtures need an
+# executable filesystem. Use the build tree when the system /tmp is noexec.
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tmp")
 set(_EXEC_TMPDIR "TMPDIR=${CMAKE_BINARY_DIR}/tmp")
 
@@ -143,6 +140,8 @@ add_python_unittest(PythonProductionManagerTest        test_production_manager)
 add_python_unittest(PythonRegionSchemaTest             test_region_schema)
 add_python_unittest(PythonReproducibilityReportTest    test_reproducibility_report)
 add_python_unittest(PythonSubmissionBackendTest        test_submission_backend)
+set_property(TEST PythonOptionalExtensionsTest PythonSubmissionBackendTest
+    APPEND PROPERTY ENVIRONMENT "${_EXEC_TMPDIR}")
 add_python_unittest(PythonRefreshXRootDRuntimeTest      test_refresh_xrootd_runtime)
 add_python_unittest(PythonStitchingPlottingTest        test_stitching_plotting)
 add_python_unittest(PythonUprootDatacardTest           test_uproot_datacard)
@@ -170,10 +169,10 @@ add_test(NAME Shared_BundleStaging COMMAND ${_PYTHON_EXECUTABLE} -m unittest
 set_tests_properties(Shared_BundleStaging PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
 add_test(NAME PythonCompiledWorkflowTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
     discover -s ${_TEST_DIR}/python -p test_rdfworkflow.py -v)
-set_tests_properties(PythonCompiledWorkflowTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+set_tests_properties(PythonCompiledWorkflowTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${_EXEC_TMPDIR}")
 add_test(NAME PythonBuildIdentityTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
     discover -s ${_TEST_DIR}/python -p test_rdfbuildidentity.py -v)
-set_tests_properties(PythonBuildIdentityTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+set_tests_properties(PythonBuildIdentityTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${_EXEC_TMPDIR}")
 add_test(NAME PythonTypedSettingsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
     discover -s ${_TEST_DIR}/python -p test_rdfsettings.py -v)
 set_tests_properties(PythonTypedSettingsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")

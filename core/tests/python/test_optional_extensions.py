@@ -122,9 +122,11 @@ def test_multiple_non_cms_extensions_link_and_register(tmp_path):
     result = configure(source)
     assert result.returncode == 0, result.stderr
     assert set(build_and_probe(source).splitlines()) == {"alpha:1", "beta:1"}
+    listing = run("ctest", "--test-dir", str(source / "build"), "--show-only=json-v1")
+    assert listing.returncode == 0, listing.stderr
+    assert {test["name"] for test in json.loads(listing.stdout)["tests"]} == {"alpha_test", "beta_test"}
     result = run("ctest", "--test-dir", str(source / "build"), "--output-on-failure")
     assert result.returncode == 0, result.stdout
-    assert "0 tests failed out of 2" in result.stdout
     assert "RDF_ENABLE_CMS" not in (source / "build/CMakeCache.txt").read_text()
 
 

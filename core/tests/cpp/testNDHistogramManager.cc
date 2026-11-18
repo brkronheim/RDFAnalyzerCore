@@ -1030,9 +1030,11 @@ TEST_F(NDHistogramManagerTest, PerSlotCollectionsPreserveIndependentRootOracle) 
   // Different empty-slot positions, unrelated weight labels and a one-sided
   // shape are intentional. The oracle uses original event/object loops only.
   for (const auto& backend : {"root", "boost"}) {
-    for (const auto& sparse : (std::string(backend) == "boost"
-                                  ? std::vector<std::string>{"map", "flat"}
-                                  : std::vector<std::string>{"map"})) {
+    std::vector<std::string> sparseBackends{"map"};
+#ifdef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+    if (std::string(backend) == "boost") sparseBackends.emplace_back("flat");
+#endif
+    for (const auto& sparse : sparseBackends) {
     for (const bool dense : {false, true}) {
       for (const bool objectWeights : {false, true}) {
         SCOPED_TRACE(std::string(backend) + (dense ? " dense" : " sparse") +
