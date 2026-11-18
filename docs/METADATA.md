@@ -48,6 +48,10 @@ can specify a logical ID; otherwise the C++ writer derives it from the original
 metadata output path (absolute for local paths). Direct callers whose retries
 use unrelated working directories should supply the same `metadataJobId`.
 `metadataAttemptId` records an optional attempt label.
+The AGC range driver supplies a stable SHA-256 identity from input content hash
+(or URL when unavailable) and half-open entry bounds. It intentionally excludes
+output paths, worker names and partition ordinals, so computed-but-uncommitted
+retries cannot contribute twice when their ROOT outputs are accidentally mixed.
 For legacy jobs, config/file-list fingerprints identify contributions, with
 the source path as an explicit fallback when no identity evidence exists.
 Distinct copies of otherwise unidentified legacy files cannot be proven to
@@ -138,6 +142,48 @@ must explicitly supply the policy again; reading an earlier exception does not
 authorize another merge. Changing the producer's hashing rules cannot repair
 hashes already embedded in worker outputs.
 
+### Explicit analysis Git snapshots
+
+By default, provenance queries `git rev-parse HEAD` and `git status --porcelain`
+in the worker's current directory for every Analyzer. A runner creating multiple
+Analyzers over one fixed analysis revision can collect this once at worker start
+and supply both `metadataAnalysisGitHash` and `metadataAnalysisGitDirty`.
+The hash must be a full 40/64-digit hexadecimal Git revision or `unknown`; dirty
+state must be `true`, `false` or `unknown`. Partial or malformed pairs fail.
+
+Configured values skip Git subprocesses and record
+`analysis.git_source=configured-snapshot`; normal collection records
+`live-current-working-directory`. This is an explicit caller-owned snapshot,
+not a process-wide cache: refresh it when the analysis working tree changes.
+The two metadata settings do not affect `config.semantic_hash`. The complete
+configuration hash still records them. Keep source/artifact hashes as well;
+a Git dirty flag does not identify uncommitted source contents.
+
 The broader numerical-output session remains unchanged: counter, STXS and
 histogram writers can still open ROOT independently. Consolidating those opens
 is a separate API migration, conditional on profiling showing a benefit.
+
+### Registry construction diagnostics and merge compatibility
+
+The per-job `root.registry_definitions`,
+`root.registry_input_bindings_before`, and
+`root.registry_input_bindings_after` values measure graph construction. They
+remain in portable leaf provenance but are excluded from build-identity equality
+checks. Graph sizes can change under an output-equivalent analysis optimization.
+The registry implementation mode, ROOT/framework/extension build identities,
+expected executable identity, plugin definitions and semantic configuration
+compatibility remain subject to the existing strict merge guards.
+
+### Analysis-owned sparse histogram schemas
+
+`merge_root_files(..., sparse_validator=callback)` supports an explicitly chosen
+analysis schema. The callback validates the complete physical sparse inventory,
+classes, axes and owned declarations, and returns canonical per-object
+axis/schema signatures. The merger compares those signatures across all inputs;
+build, normalization, logical-job and semantic configuration guards remain
+unchanged. Without a callback the framework ND schema remains mandatory.
+Uniform category axes can be validated by bin count and bounds without
+materializing millions of redundant edges. The caller can use `postprocess` to
+publish its common, validated schema in the atomically committed merged ROOT file.
+`partial_merge --metadata-merger PATH` delegates to a chosen analysis merger and
+records the entry point's SHA-256 in its derived-artifact snapshot.

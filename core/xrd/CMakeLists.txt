@@ -68,3 +68,12 @@ add_custom_command(TARGET RDFXrdAdaptor POST_BUILD
         ${_xrd_runtime_headers}
         "$<TARGET_FILE_DIR:RDFXrdAdaptor>"
     VERBATIM)
+
+# The Python component is a usable local prefix, including its dynamic adaptor
+# and dictionary payload. External ROOT/XRootD runtimes retain their own ABI.
+install(TARGETS RDFXrdAdaptor LIBRARY DESTINATION lib COMPONENT Python)
+install(FILES ${_xrd_runtime_headers}
+    "${CMAKE_CURRENT_BINARY_DIR}/libRDFXrdAdaptor_rdict.pcm"
+    "${CMAKE_CURRENT_BINARY_DIR}/libRDFXrdAdaptor.rootmap"
+    "${CMAKE_CURRENT_BINARY_DIR}/RDFXrdOpenPolicy.h"
+    DESTINATION lib COMPONENT Python OPTIONAL)

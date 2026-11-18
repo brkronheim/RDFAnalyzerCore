@@ -371,10 +371,17 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
   if (openTimeoutSeconds == 0)
     throw std::runtime_error(
         "Invalid 'xrdOpenTimeoutSeconds' value '0' (expected 1 to 300).");
+  rdf::xrd::configureXrdSiteRanking(setting("xrdSiteRankingFile"), setting("xrdSiteOrigin"),
+                                   integer("xrdSiteRankingMaxAgeDays", 30, 365));
   rdf::xrd::configureXrdAdaptor(
       probeSeconds, static_cast<std::size_t>(cacheMB) * 1024 * 1024,
       preferredSiteBand, explorationShare, maxReadSources,
       readTimeoutSeconds, openTimeoutSeconds);
+  const auto depth = integer("xrdReadPipelineDepth", 2, 4);
+  if (!depth) throw std::runtime_error("xrdReadPipelineDepth must be 1 to 4");
+  const auto hedgeMs = integer("xrdReadHedgeDelayMs", 50, 1000);
+  const auto diagnostics = integer("xrdReadDiagnostics", 0, 1);
+  rdf::xrd::configureXrdReadScheduling(depth, hedgeMs, diagnostics != 0);
   rdf::xrd::registerXrdAdaptor();
   std::cout << "ROOT input backend: XrdAdaptor (source probe interval="
             << probeSeconds << " s, handoff cache=" << cacheMB
@@ -384,7 +391,8 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
             << maxReadSources << ", read/request timeout="
             << readTimeoutSeconds << " s, initial-open timeout="
             << openTimeoutSeconds << " s, exploration site enabled="
-            << (explorationShare > 0 ? "yes" : "no") << ")\n";
+            << (explorationShare > 0 ? "yes" : "no")
+            << ", pipeline depth=" << depth << ", hedge delay=" << hedgeMs << " ms)\n";
 #endif
 }
 

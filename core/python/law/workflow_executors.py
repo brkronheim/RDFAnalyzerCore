@@ -656,10 +656,18 @@ class DaskWorkflowProxy(BaseWorkflowProxy):
         )
 
         if scheduler:
+            if getattr(task, "dask_workers", 1) != 1:
+                task.publish_message(
+                    "dask_workers applies only to a local Dask cluster; "
+                    "the external scheduler controls its worker count."
+                )
             client = Client(scheduler)
         else:
             # Fall back to a local Dask cluster (useful for testing)
-            client = Client()
+            workers = getattr(task, "dask_workers", 1)
+            if type(workers) is not int or workers < 1:
+                raise ValueError("dask_workers must be a positive integer for a local Dask cluster")
+            client = Client(n_workers=workers)
 
         try:
             branch_map = task.branch_map

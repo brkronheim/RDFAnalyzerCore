@@ -1,0 +1,4 @@
+0	[ml_feature<0.6] yes=1 no=2
+1	leaf=-1
+2	leaf=1
+base_score=[0]

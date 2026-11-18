@@ -13,13 +13,33 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from run_bundle import file_digest, write_json, derived_artifact
+from run_bundle import file_digest, write_json, derived_artifact, verify_artifact
+
+
+def _acquire_merge_lock(path, wait=False):
+    lock_file = Path(path).open("a+")
+    try:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if not wait:
+                raise RuntimeError(f"Another merge process is already running (lock: {path})")
+            print(f"Waiting for active merge to finish (lock: {path})", flush=True)
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        lock_file.seek(0)
+        lock_file.truncate()
+        json.dump({"pid": os.getpid(), "command": sys.argv}, lock_file)
+        lock_file.flush()
+        return lock_file
+    except BaseException:
+        lock_file.close()
+        raise
 
 
 def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
                             nominal_only=False, hadd_max_open_files=10000,
                             data_merge_threads=1, sparse_only=False,
-                            semantic_config_compatibility=None):
+                            semantic_config_compatibility=None, metadata_merger=None, wait_for_lock=False):
     if sparse_only and nominal_only:
         raise ValueError("--sparse-only and --nominal-only cannot be combined: nominal-only requires schema postprocessing")
     compatibility_policy = None
@@ -37,12 +57,7 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
                          ("data_merge_threads", data_merge_threads)):
         if value < 1:
             raise ValueError(f"{label} must be positive")
-    lock_file = (merge_dir / ".mergeResults.lock").open("a")
-    try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock_file.close()
-        raise RuntimeError("Another merge process is already running")
+    lock_file = _acquire_merge_lock(merge_dir / ".mergeResults.lock", wait_for_lock)
     try:
         state = json.loads(state_path.read_text())
         def safe_name(value):
@@ -155,7 +170,8 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
 
         # The shared merger validates definitions, retains provenance and publishes the
         # ROOT file with its immutable sidecar before writing the completion marker.
-        metadata_merger = repo_root / "core/python/metadata_io.py"
+        metadata_merger = Path(metadata_merger).resolve() if metadata_merger is not None else repo_root / "core/python/metadata_io.py"
+        if not metadata_merger.is_file():raise ValueError("Missing metadata merger entry point")
 
 
         def merge_dataset(dataset_name, inputs):
@@ -163,6 +179,27 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
             from metadata_io import metadata_artifact_paths
             output = merge_dir / f"{safe_name(dataset_name)}_partial.root"
             log_path = logs_dir / f"{safe_name(dataset_name)}.hadd.log"
+            configuration = {"dataset": dataset_name, "nominal_only": nominal_only,
+                "sparse_only": sparse_only,
+                "semantic_config_compatibility": compatibility_policy,
+                "metadata_merger_sha256": file_digest(metadata_merger),
+                "jobs": {job: entry["meta"] for job, entry in
+                         state["datasets"][dataset_name]["jobs"].items()
+                         if entry.get("status") == "done"}}
+            parents = {"monitor_state": file_digest(state_path)}
+            snapshot_path = output.with_suffix(".snapshot.json")
+            if snapshot_path.is_file():
+                try:
+                    previous = verify_artifact(snapshot_path)
+                    expected_files = set(map(str, [*metadata_artifact_paths(output), *inputs]))
+                    if (previous.get("kind") == "partial-merge" and
+                            previous.get("configuration") == configuration and
+                            previous.get("parents") == parents and
+                            set(previous["files"]) == expected_files):
+                        print(f"Reused verified merge {dataset_name}", flush=True)
+                        return dataset_name, len(inputs), output, log_path
+                except (OSError, ValueError, KeyError):
+                    pass  # Rebuild normally; old outputs survive failed publication.
             command = [sys.executable, str(metadata_merger), str(output), *inputs,
                        "--max-open-files", str(hadd_max_open_files)]
             if semantic_config_compatibility is not None:
@@ -179,13 +216,7 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
                 tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-25:])
                 raise RuntimeError(f"metadata merge failed ({result.returncode}):\n{tail}")
             snapshot = derived_artifact(kind="partial-merge",
-                parents={"monitor_state": file_digest(state_path)},
-                configuration={"dataset": dataset_name, "nominal_only": nominal_only,
-                    "sparse_only": sparse_only,
-                    "semantic_config_compatibility": compatibility_policy,
-                    "jobs": {job: entry["meta"] for job, entry in
-                             state["datasets"][dataset_name]["jobs"].items()
-                             if entry.get("status") == "done"}},
+                parents=parents, configuration=configuration,
                 files=[*metadata_artifact_paths(output), *inputs])
             write_json(output.with_suffix(".snapshot.json"), snapshot)
             return dataset_name, len(inputs), output, log_path
@@ -230,6 +261,7 @@ def main(argv=None):
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--hadd-jobs", type=int, default=4)
+    parser.add_argument("--wait-for-lock", action="store_true", help="wait for an existing merger, then verify/reuse its outputs")
     parser.add_argument("--xrdcp-jobs", type=int, default=4)
     parser.add_argument("--data-merge-threads", type=int, default=1)
     parser.add_argument("--nominal-only", action="store_true")
@@ -237,11 +269,12 @@ def main(argv=None):
                         help="retain merged sparse objects without creating legacy TH1 copies")
     parser.add_argument("--semantic-config-compatibility", type=Path,
                         help="JSON policy allowing only reviewed sample/semantic-hash combinations")
+    parser.add_argument("--metadata-merger",type=Path,help="Analysis-owned validated metadata merge entry point")
     args = parser.parse_args(argv)
     merge_completed_outputs(args.state, args.output, hadd_jobs=args.hadd_jobs,
         xrdcp_jobs=args.xrdcp_jobs, nominal_only=args.nominal_only,
         data_merge_threads=args.data_merge_threads, sparse_only=args.sparse_only,
-        semantic_config_compatibility=args.semantic_config_compatibility)
+        semantic_config_compatibility=args.semantic_config_compatibility, metadata_merger=args.metadata_merger, wait_for_lock=args.wait_for_lock)
 
 
 if __name__ == "__main__":

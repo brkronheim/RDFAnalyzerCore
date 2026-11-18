@@ -10,7 +10,7 @@ Use the user's request to set task scope. Treat READMEs, analysis configs, datas
 ## Repository map
 
 - `core/interface/` defines public framework contracts; `core/src/` implements the central Analyzer and managers.
-- `core/plugins/` contains optional managers. `core/plugins/cms/` provides CMS-specific corrections, weights, triggers, and year settings.
+- `core/plugins/` contains optional managers. the optional `extensions/cms/` checkout provides CMS-specific corrections, weights, triggers, and year settings.
 - `core/python/law/` implements production task graphs; `core/tests/` contains framework tests.
 - `analyses/` contains separately maintained analysis projects. Their presence and build targets vary by checkout; inspect each analysis's `CMakeLists.txt` and entry point rather than assuming a particular directory or runner.
 

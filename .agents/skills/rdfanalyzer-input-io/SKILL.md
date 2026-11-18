@@ -25,6 +25,45 @@ defaults to 30 for open/stat/discovery; `xrdReadTimeoutSeconds` remains 120
 for vectored reads. Both accept explicit values from 1 through 300.
 Adaptor private read payloads have a process-wide 64 MiB budget and 8 MiB
 windows; successful buffers can also be shared with the per-URL handoff cache.
+`xrdReadPipelineDepth` defaults to 2 (1--4); depth 1 is serial. All submitted
+windows drain before an error propagates or destination buffers return to the
+caller. Logical cache priority is independent of completion order. Future-file
+reads and backup copies leave 16 MiB and the second per-site slot for demand
+reads; active ROOT asynchronous prefetch retains demand priority. The default
+backup delay is `xrdReadHedgeDelayMs=50` (0 restores immediate racing).
+`treeCacheOpenAheadFiles=2` retains at most two future transports without
+additional trees or payload warmups; 0 disables early transport opens. This
+requires the sequential next-file warmup path and is disabled under IMT.
+Use `xrdReadDiagnostics=1` to expose successful request and scheduling diagnostics
+on workers, where they are normally suppressed.
+Initial file opens use bounded asynchronous metadata location queries, then
+origin/live-ranked connection attempts (two concurrent, four distinct sites).
+Metadata queries use NoWait throughout the recursive walk: cold federation
+metadata can request a five-second wait that exceeds the three-second budget.
+Results are always best-effort/partial; Open/Stat still validates candidates.
+Partial location results suffice; losing attempts retain their own transports.
+The defaults are a three-second locate deadline and an eight-second candidate
+open/stat deadline. `RDF_XRD_LOCATE_TIMEOUT_SECONDS=0` restores ordinary global
+opens. Retained located candidates seed later discovery before global fallback.
+See [initial connection controls](../../../docs/xrd-adaptor.md#ranked-initial-connections).
+Endpoints beaten in initial open/stat and full-read races enter a process-local
+60-second cooldown immediately on the winner, before late callbacks finish.
+Candidate/read selection and replica discovery skip them while a usable
+alternative exists, retaining a cooled endpoint as a last resort. Identity is
+hostname plus port (including advertised and known resolved endpoints), never
+a site-wide or unresolved-global-redirector ban. History is capped at 512;
+winning clears cooldown and late losers do not prolong it.
+`RDF_XRD_ENDPOINT_COOLDOWN_SECONDS=0` disables the cooldown (maximum 3600).
+Already staged production archives require a separate authorized refresh.
+
+Open/stat starts and redirect-chain results remain visible without diagnostics.
+An initial global destination is unresolved until XrdCl reports its host list;
+do not attribute unresolved failures to a storage site. Historical preferences
+are read by [XrdSiteRanking](../../../core/xrd/XrdSiteRanking.h), scoped by worker
+origin, and replaced by live observations. Use the
+[ranking tool](../../../core/python/xrd_site_rankings.py) to refine snapshots;
+see [format and staging](../../../docs/xrd-adaptor.md#historical-site-preferences-and-open-attempt-logging).
+Loaded priors are never exported as actual samples or blacklists.
 The budget excludes ROOT destinations, handoff caches and XrdCl internals.
 Poor-file history saturates at two paths per site and the host lookup cache
 at 256 entries; site quality and blacklists persist. See

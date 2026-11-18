@@ -1,4 +1,5 @@
 #include <SystematicManager.h>
+#include <DataManager.h>
 #include <test_util.h>
 #include <gtest/gtest.h>
 #include <memory>
@@ -20,6 +21,26 @@ TEST_F(SystematicManagerTest, ConstructorCreatesEmptyManager) {
   SystematicManager manager;
 
   EXPECT_TRUE(manager.getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, SharedPairedAndExplicitLabelsHaveOneSlotAndContiguousCounters) {
+  auto &sm=*systematicManager;
+  sm.registerVariationColumns("jet", "HEJER", "jet_up", "jet_down");
+  sm.registerVariationColumn("met", "HEJERUp", "met_up");
+  sm.registerVariationColumn("met", "HEJERDown", "met_down");
+  sm.registerVariationColumn("weight", "AReplica", "weight_a");
+  sm.registerVariationColumn("weight", "ZReplica", "weight_z");
+  const std::vector<std::string> expected{"Nominal","HEJERUp","HEJERDown","AReplica","ZReplica"};
+  EXPECT_EQ(sm.getVariationLabels(),expected);
+  EXPECT_EQ(sm.ISystematicManager::getVariationLabels(),expected);
+  EXPECT_EQ(sm.getVariationColumnName("met","HEJERUp"),"met_up");
+  EXPECT_EQ(sm.getVariationColumnName("jet","HEJERUp"),"jet_up");
+  DataManager dm(1);
+  EXPECT_EQ(sm.makeSystList("counter",dm),expected);
+  for(std::size_t i=0;i<expected.size();++i) {
+    const auto column=i==0?"counter":"counter_"+expected[i];
+    EXPECT_FLOAT_EQ(dm.getDataFrame().Take<float>(column).GetValue()[0],float(i));
+  }
 }
 
 TEST_F(SystematicManagerTest, DisabledManagerRemainsNominalOnly) {

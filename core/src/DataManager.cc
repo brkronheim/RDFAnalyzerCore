@@ -13,6 +13,8 @@
 #include <util.h>
 #include <filesystem>
 #include <utility>
+#include <limits>
+#include <RVersion.h>
 
 #include <ROOT/RDFHelpers.hxx>
 #include <functions.h>
@@ -320,21 +322,46 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
 
     // Apply optional entry-range restriction.
     // Written by law tasks when partition='entry_range' is selected.
-    // Both keys must be present; if only one is set the range is ignored.
-    // Note: Range() disables implicit multi-threading (ImplicitMT) when
-    // used with ROOT < 6.28.  In entry_range partition mode each condor
-    // job is a separate process, so per-job parallelism is unaffected;
-    // only the in-process thread count is restricted to 1 on older ROOT.
+    // Both keys must be present. Legacy filter mode ignores a lone bound;
+    // opt-in source mode rejects it. Entry-range workers use one RDF thread.
     const std::string firstEntryStr = configProvider.get("firstEntry");
     const std::string lastEntryStr  = configProvider.get("lastEntry");
+    const auto modeSetting=configProvider.getConfigMap().find("entryRangeMode");
+    const std::string rangeMode=modeSetting==configProvider.getConfigMap().end() ? "filter":modeSetting->second;
+    if(rangeMode!="filter" && rangeMode!="source")
+      throw std::invalid_argument("entryRangeMode must be filter or source");
+    if(rangeMode=="source" && (firstEntryStr.empty() || lastEntryStr.empty()))
+      throw std::invalid_argument("entryRangeMode=source requires firstEntry and lastEntry");
     if (!firstEntryStr.empty() && !lastEntryStr.empty()) {
+      if(rangeMode=="source" &&
+         (!std::all_of(firstEntryStr.begin(),firstEntryStr.end(),[](unsigned char c){return std::isdigit(c);}) ||
+          !std::all_of(lastEntryStr.begin(),lastEntryStr.end(),[](unsigned char c){return std::isdigit(c);})))
+        throw std::invalid_argument("source entry bounds must be nonnegative decimal integers");
       const ULong64_t firstEntry = std::stoull(firstEntryStr);
       const ULong64_t lastEntry  = std::stoull(lastEntryStr);
       if (lastEntry > firstEntry) {
-        df_m = df_m.Range(firstEntry, lastEntry);
+        if(rangeMode=="source") {
+#if ROOT_VERSION_CODE >= ROOT_VERSION(6,40,0) && ROOT_VERSION_CODE < ROOT_VERSION(6,41,0)
+          if(ROOT::IsImplicitMTEnabled())
+            throw std::invalid_argument("entryRangeMode=source currently requires threads=1");
+          if(lastEntry>static_cast<ULong64_t>(std::numeric_limits<Long64_t>::max()))
+            throw std::invalid_argument("source entry range exceeds signed64-bit ROOT limits");
+          // This mutates the initial source before consumers capture nodes.
+          // Unlike RRange it seeks instead of walking rejected prefix entries.
+          // Keep this internal ROOT API opt-in and limited to the tested series.
+          ROOT::Internal::RDF::ChangeBeginAndEndEntries(df_m,static_cast<Long64_t>(firstEntry),static_cast<Long64_t>(lastEntry));
+#else
+          throw std::runtime_error("entryRangeMode=source is validated only with ROOT6.40; use filter on this ROOT version");
+#endif
+        } else {
+          if(lastEntry>std::numeric_limits<unsigned int>::max())
+            throw std::invalid_argument("ROOT Range uses32-bit bounds; entryRangeMode=source supports larger initial ranges on ROOT6.40");
+          df_m = df_m.Range(static_cast<unsigned int>(firstEntry),static_cast<unsigned int>(lastEntry));
+        }
         std::cout << "Entry range applied: [" << firstEntry << ", "
-                  << lastEntry << ")" << std::endl;
+                  << lastEntry << ") mode=" << rangeMode << std::endl;
       } else {
+        if(rangeMode=="source")throw std::invalid_argument("source entry range requires lastEntry > firstEntry");
         std::cerr << "Warning: firstEntry (" << firstEntry
                   << ") >= lastEntry (" << lastEntry
                   << "); entry range ignored." << std::endl;
@@ -576,6 +603,19 @@ void DataManager::defineVectorImpl(std::string name,
     defineVectorColumn(downName, downColumns);
     systematicManager.registerVariationColumns(name, systematic, upName,
                                                downName);
+  }
+
+  // Explicit labels also need packed inputs. Without this, a model consuming
+  // the pack silently falls back to nominal for an explicitly varied feature.
+  for (const auto &label : systematicManager.getExplicitVariationLabels()) {
+    std::vector<std::string> inputs;
+    for (const auto &column : columns)
+      inputs.push_back(systematicManager.getVariationColumnName(column, label));
+    if (inputs == columns) continue;
+    const auto mapped = systematicManager.getVariationColumnName(name, label);
+    const auto output = mapped == name ? name + "_" + label : mapped;
+    defineVectorColumn(output, inputs);
+    systematicManager.registerVariationColumn(name, label, output);
   }
 
   /*

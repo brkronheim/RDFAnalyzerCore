@@ -7,32 +7,20 @@ remain in RDFAnalyzerCore and do not require the CMS extension.
 
 ## Download and build
 
-The tested extension commit is recorded in `extensions/cms.lock.json`.
-Configuration and ordinary builds never download or update the extension.
+The [CMS repository](https://gitlab.cern.ch/bkronhei/RDFAnalyzerCMS) is pinned by the framework in `extensions/cms.lock.json`. Use a CERN GitLab account with read access if Git asks for credentials.
 
 ```bash
-python3 scripts/fetch_cms.py --repository <CMS-Git-URL-or-local-bundle>
+git submodule update --init --recursive
+python3 scripts/fetch_cms.py
 source env.sh
-cmake -S . -B build -DRDF_ENABLE_CMS=ON
-cmake --build build --target vjet_njetpt
+cmake -S . -B build -DRDF_REQUIRED_EXTENSIONS=cms -DRDF_ANALYSES=CMS_Run2016_DoubleMuon
+cmake --build build --target cms_doublemu_analysis
 ```
 
-The helper checks out the pinned commit. It refuses to update an existing
-checkout, preserving local changes. A repository URL can be recorded in the
-lock file once the extracted repository has a hosting destination. Until then,
-use `--repository` with the extraction's Git bundle or another local clone.
-The local extraction also provides `extensions/RDFAnalyzerCMS.bundle` as an
-ignored distribution artifact. The helper uses this bundle automatically when
-it is present and no repository URL is configured. Share the bundle separately
-from the framework repository, then clone it with ordinary Git or the helper.
-
-An ordinary clone also works, including outside the framework tree:
-
-```bash
-git clone <CMS-Git-URL> /path/to/RDFAnalyzerCMS
-cmake -S . -B build -DRDF_ENABLE_CMS=ON \
-  -DRDF_EXTENSION_PATHS=/path/to/RDFAnalyzerCMS
-```
+The helper verifies the revision of an existing checkout and preserves local work.
+Use `--repository` to select an authenticated SSH clone URL or a local mirror.
+For an external checkout, pass its path through `RDF_EXTENSION_PATHS` when sourcing `env.sh`, and pass
+`-DRDF_EXTENSION_PATHS=/path/to/RDFAnalyzerCMS` to CMake. The extension repository owns its tests.
 
 `RDF_ENABLE_CMS` is declared by the CMS extension's `cmake/Configure.cmake`,
 which the framework loads through `rdf-extension.json`. It accepts `AUTO`

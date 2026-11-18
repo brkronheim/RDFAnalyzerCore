@@ -294,18 +294,15 @@ def run_test() -> int:
         if analyzer.getTriggerGroups("trigger") != []:
             raise AssertionError("Expected no trigger groups with empty config")
 
-        # Define pt explicitly as a fallback for when the file-based RDF is not
-        # available (e.g. when GetEntries() returns <=0 for files written by external
-        # tools like uproot that are incompatible with this ROOT version).
-        # Analyzer.Define silently skips the define when pt already exists in the RDF
-        # (file-based mode), so this is a no-op in that case.
-        # With pt = 30.0, the nominal value does not pass the >110 threshold.
-        analyzer.Define("pt", "30.0", [])  # [] = no column dependencies for constant
+        # The input TTree is required. Python definitions now reject duplicate
+        # names instead of silently ignoring a notebook/configuration mistake.
+        try:
+            analyzer.Define("pt", "30.0", [])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Expected duplicate input definition to fail")
         analyzer.registerSystematic("jes", ["pt", "first"])
-        # These constants provide shifted-input values only if the input file
-        # did not expose the same named branches.
-        analyzer.Define("pt_jesUp", "33.0", [])
-        analyzer.Define("pt_jesDown", "27.0", [])
         analyzer.Define(
             "raw_literal_probe",
             'static_cast<double>(sizeof(R"tag(pt)tag")) + pt',

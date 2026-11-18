@@ -9,6 +9,7 @@
 
 
 #include <api/ISystematicManager.h>
+#include <detail/DefineVariations.h>
 
 /**
  * @brief Interface for dataframe providers to enable dependency injection
@@ -41,6 +42,10 @@ public:
 
     /**
      * @brief Define exactly one column without systematic expansion.
+     * Existing names retain their first definition for legacy compatibility.
+     * For a new explicit calibration producer, check name ownership before
+     * calling this method and use names distinct from auto-generated shifts.
+     * Install variation mappings before defining downstream consumers.
      * @tparam F Callable type for the variable definition
      * @param name Name of the variable
      * @param f Callable to compute the variable
@@ -61,54 +66,19 @@ public:
      */
     template <typename F>
     void Define(std::string name, F f, const std::vector<std::string> &columns, ISystematicManager &systematicManager) {
-        auto df = getDataFrame();
-        if (df.HasColumn(name)) {
-            return;
-        }
-
-        std::vector<std::string> systList(systematicManager.getSystematics().begin(), systematicManager.getSystematics().end());
-        if (!systList.empty()) {
-            for (const auto &syst : systList) {
-                int nAffected = 0;
-                std::vector<std::string> newColumnsUp;
-                std::vector<std::string> newColumnsDown;
-                for (const auto &col : columns) {
-                    const std::string upColumn =
-                        systematicManager.getVariationColumnName(col, syst + "Up");
-                    const std::string downColumn =
-                        systematicManager.getVariationColumnName(col, syst + "Down");
-                    if (upColumn != col || downColumn != col) {
-                        newColumnsUp.push_back(upColumn);
-                        newColumnsDown.push_back(downColumn);
-                        nAffected++;
-                    } else {
-                        newColumnsUp.push_back(col);
-                        newColumnsDown.push_back(col);
-                    }
-                }
-                if (nAffected > 0) {
-                    const auto upName = name + "_" + syst + "Up";
-                    const auto downName = name + "_" + syst + "Down";
-                    if (!df.HasColumn(upName)) {
-                        df = df.Define(upName, f, newColumnsUp);
-                    }
-                    if (!df.HasColumn(downName)) {
-                        df = df.Define(downName, f, newColumnsDown);
-                    }
-                    systematicManager.registerSystematic(syst, {name});
-                }
-            }
-        }
-
-        df = df.Define(name, f, columns);
-        setDataFrame(df);
+        setDataFrame(rdf::detail::defineWithVariations(
+            getDataFrame(), name, columns, systematicManager,
+            [&f](ROOT::RDF::RNode df, const std::string &output,
+                 const std::vector<std::string> &inputs) {
+                return df.Define(output, f, inputs);
+            }));
     }
     
     /**
      * @brief Define a vector variable in the dataframe
      *
-     * DataFrame providers should also define paired Up/Down outputs for each
-     * registered systematic affecting one or more inputs, leave unaffected
+     * DataFrame providers should also define paired Up/Down and explicitly
+     * labelled outputs for registered variations affecting inputs, leave unaffected
      * inputs nominal, and register the output as affected by that systematic.
      * @param name Name of the variable
      * @param columns Input columns

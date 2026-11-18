@@ -9,6 +9,9 @@ build. Combine and CombineHarvester integration remain available in core.
 [Run bundles](docs/RUN_BUNDLES.md) provide verified configuration snapshots,
 independent run collections, and shared execution/reduction identities.
 
+[Tag-and-probe helpers](docs/TAG_AND_PROBE.md) provide reusable denominator-pair
+sampling and trigger-object matching for compiled C++ and Python/RDataFrame.
+
 [![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](https://brkronheim.github.io/RDFAnalyzerCore/)
 [![ROOT](https://img.shields.io/badge/ROOT-6.30%2B-blue.svg)](https://root.cern/)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
@@ -26,6 +29,21 @@ RDFAnalyzerCore provides a core, analysis-agnostic framework for constructing an
 - **Statistical Analysis**: Optional CMS Combine integration for limit setting and fits
 
 ## Quick Start
+
+Choose the authoring path that fits your analysis:
+
+| Analysis code | Start here |
+|---|---|
+| Python with Numba kernels | [Installation and doctor](docs/PYTHON_INSTALLATION.md), then the [small installed tutorial](docs/PYTHON_TYPING_AND_TUTORIAL.md) |
+| Compiled C++, steered from Python | [Compiled workflow](docs/COMPILED_CPP_WORKFLOWS.md); the Python controller needs only the standard library |
+| Direct C++ executable | [Getting started](docs/GETTING_STARTED.md) and the existing Analyzer/manager APIs |
+
+All three paths retain native managers and explicit systematic choices. Python
+definitions and filters can be interleaved. Check the
+[compatibility table](docs/AUTHORING_COMPATIBILITY.md) before selecting optional
+batching or variable-axis features: isolated development candidates have not
+replaced shared builds. [The current status](docs/USER_EXPERIENCE_STATUS.md)
+distinguishes implemented features, numerical acceptance and sustained timing.
 
 ### NDHistogramManager
 Books and fills N-dimensional histograms with support for systematics, regions, and categories. Supports both manual histogram booking and config-driven histogram definitions.
@@ -83,10 +101,14 @@ cd analyses/ExampleAnalysis
 - **[Getting Started](docs/GETTING_STARTED.md)** - Installation and first steps
 - **[Configuration Reference](docs/CONFIG_REFERENCE.md)** - Complete config file documentation
 - **[Generic Stitching](docs/STITCHING.md)** - Reusable counters, binning, and validation
-- **[V+jets Stitching Analysis](analyses/rdfAnalyzerStitch/README.md)** - Concrete Run 2/Run 3 configuration and production workflow
 - **[Agent analysis walkthrough](docs/ANALYSIS_WALKTHROUGH.md)** - How to trace an RDFAnalyzer analysis, with ExampleAnalysis as a compact illustration
 - **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Building analyses step-by-step
 - **[Python Bindings](docs/PYTHON_BINDINGS.md)** - Using the framework from Python
+- **[Python Authoring](docs/PYTHON_AUTHORING.md)** - Typed settings and fluent analysis definitions
+- **[Compiled C++ with Python Steering](docs/COMPILED_CPP_WORKFLOWS.md)** - Lightweight local build/run control, artifact checks and file-backed logs
+- **[Authoring Compatibility](docs/AUTHORING_COMPATIBILITY.md)** - Runtime requirements, optional capabilities, migration and current acceptance
+- **[Installed typing checks](docs/PYRIGHT_ACCEPTANCE.md)** - Pinned Pyright client/tutorial acceptance and its limits
+- **[Interface Development Plan](docs/USER_EXPERIENCE_PLAN.md)** - Planned UX improvements, compiled C++ workflows with Python steering, and a [running status log](docs/USER_EXPERIENCE_STATUS.md)
 - **[API Reference](docs/API_REFERENCE.md)** - Detailed API documentation
 
 ### Statistical Analysis
@@ -172,8 +194,8 @@ Manages ONNX machine learning models from any ML framework.
 #### SofieManager
 Manages SOFIE (System for Optimized Fast Inference code Emit) models from ROOT TMVA.
 - Build-time compilation from ONNX for maximum performance
-- Zero runtime overhead (compiled C++ code)
-- Eliminates runtime model loading overhead compared to ONNX Runtime
+- Executes generated C++ model code; setup and inference costs remain distinct
+- Does not require loading an ONNX Runtime session for generated models
 - Manual registration required (rebuild for model updates)
 - **See**: [SOFIE Implementation Guide](docs/SOFIE_IMPLEMENTATION.md)
 
@@ -626,7 +648,7 @@ For new plugins, see [Plugin Development Guide](docs/PLUGIN_DEVELOPMENT.md).
 
 ## License
 
-This project is licensed under the terms specified in the repository.
+RDFAnalyzerCore is distributed under the [MIT License](LICENSE). Third-party components retain their own licenses and notices.
 
 ## Acknowledgments
 

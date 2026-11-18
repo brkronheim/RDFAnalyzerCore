@@ -13,6 +13,7 @@ Set the appropriate status text yourself; none is assumed.
 
 ## Quick start
 
+{% raw %}
 ```cpp
 #include <PlottingUtility.h>
 
@@ -35,6 +36,7 @@ auto result = session.render(request);
 if (!result.success) throw std::runtime_error(result.message);
 // Modify the request and render again, or call session.renderBatch(requests).
 ```
+{% endraw %}
 
 Every exported primitive remains alive until painting/export finishes. Canvases,
 pads, graphs, legend primitives, and scratch arrays are reused within the

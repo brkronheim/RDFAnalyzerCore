@@ -40,6 +40,7 @@ private:
   void configureCurrentTree();
   void scheduleNextFileOpen();
   void scheduleNextFilePrefetch();
+  void scheduleAheadFileOpens();
   void releaseWarmFileFor(const std::string &url);
   bool asyncPrefetch_ = true;
   bool asyncOpenNextFile_ = false;
@@ -48,6 +49,7 @@ private:
   bool statistics_ = true;
   bool optimize_ = true;
   bool dependenciesResolved_ = false;
+  unsigned openAheadFiles_ = 2;
   int verbosity_ = 0;
   Long64_t first_ = 0;
   Long64_t last_ = -1;
@@ -62,6 +64,12 @@ private:
     bool consumed = false;
   };
   std::vector<WarmTask> warmTasks_;
+  struct OpenTask {
+    std::string url;
+    int tree;
+    std::future<std::shared_ptr<void>> transport;
+  };
+  std::vector<OpenTask> openTasks_;
   std::chrono::steady_clock::time_point fileStarted_ = std::chrono::steady_clock::now();
   mutable std::string lastReport_;
   mutable const TFilePrefetch *lastPrefetcher_ = nullptr;

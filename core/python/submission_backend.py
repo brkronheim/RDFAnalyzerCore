@@ -1,5 +1,8 @@
 import os
 import shlex
+import base64
+import hashlib
+import warnings
 from pathlib import Path
 import yaml
 if __package__:
@@ -103,7 +106,8 @@ def get_copy_file_list(config_dict):
     for key in config_dict:
         value = config_dict[key]
         if (".txt" in value or ".yaml" in value or ".yml" in value
-                or ".json" in value or ".onnx" in value):
+                or ".json" in value or ".onnx" in value
+                or (key == "xrdSiteRankingFile" and value not in ("auto", "none", ""))):
             transfer_list.append(value)
     return transfer_list
 
@@ -253,11 +257,23 @@ RDFINPUT
 """
 
 
+def _warn_ignored_option(value, name):
+    if value:
+        warnings.warn(
+            f"{name} is deprecated and has no effect; remove this argument. "
+            "Nondefault values will be rejected at a future compatibility boundary.",
+            FutureWarning,
+            stacklevel=3,
+        )
+
+
 def stage_inputs_block(eos_sched=False, config_file="submit_config.txt"):
+    _warn_ignored_option(eos_sched, 'eos_sched')
     return _worker_input_block(config_file, stage_inputs=True)
 
 
 def stage_outputs_blocks(eos_sched=False, config_file="submit_config.txt"):
+    _warn_ignored_option(eos_sched, 'eos_sched')
     pre_block = f"""
 run_helper_python - << 'PY'
 import os
@@ -515,9 +531,79 @@ def xrootd_optimize_block(config_file="submit_config.txt", blacklisted_sites=Non
     """Compatibility entry point: global URL routing, without site probing.
 
     Site quality and blacklisting are handled by the input adaptor. The legacy
-    ``blacklisted_sites`` argument is accepted for source compatibility only.
+    ``blacklisted_sites`` argument is accepted for source compatibility only;
+    nonempty requests warn because they have no effect in this helper.
     """
+    _warn_ignored_option(blacklisted_sites, 'blacklisted_sites')
     return _worker_input_block(config_file, stage_inputs=False)
+
+
+def _site_ranking_block(site_ranking_file=None):
+    """Freeze a validated ranking in the worker script; no checkout on workers.
+
+    Embedding is deliberate: every submission path already ships its script,
+    including shared archives, containers and per-job transfer lists.
+    """
+    source = site_ranking_file
+    if source is None:
+        if __package__:
+            from .xrd_site_rankings import submission_ranking_source
+        else:
+            from xrd_site_rankings import submission_ranking_source
+        source = submission_ranking_source(_io_policy.SITE_RANKING_FILE)
+    if source == "none":
+        return "export RDF_XRD_SITE_RANKING_FILE=none\n" + _site_origin_block()
+    if not source:
+        return _site_origin_block()
+    if __package__:
+        from .xrd_site_rankings import read_snapshot
+    else:
+        from xrd_site_rankings import read_snapshot
+    read_snapshot(source)
+    payload = Path(source).read_bytes()
+    if len(payload) > 4 * 1024 * 1024:
+        raise ValueError("XRootD site ranking snapshot exceeds 4 MiB")
+    encoded = base64.b64encode(payload).decode("ascii")
+    digest = hashlib.sha256(payload).hexdigest()
+    return f"""
+# Immutable snapshot selected on the submission host, materialized after setup.
+run_helper_python - <<'RDF_SITE_RANKING'
+import base64, hashlib
+payload = base64.b64decode({encoded!r})
+assert hashlib.sha256(payload).hexdigest() == {digest!r}
+with open('rdf_xrd_site_rankings.tsv', 'wb') as stream:
+    stream.write(payload)
+print('[input] XRootD ranking snapshot sha256={digest}', flush=True)
+RDF_SITE_RANKING
+export RDF_XRD_SITE_RANKING_FILE="$PWD/rdf_xrd_site_rankings.tsv"
+""" + _site_origin_block()
+
+
+def _site_origin_block():
+    # Evaluate site tags on the worker, never freeze the submitter's location.
+    variables = " ".join(_io_policy.SITE_ENV_VARS)
+    return f"""
+if [ -z "${{RDF_XRD_SITE_ORIGIN:-}}" ]; then
+  for _rdf_site_variable in {variables}; do
+    _rdf_site_value="${{!_rdf_site_variable:-}}"
+    if [ -n "$_rdf_site_value" ]; then export RDF_XRD_SITE_ORIGIN="$_rdf_site_value"; break; fi
+  done
+fi
+if [ -z "${{RDF_XRD_SITE_ORIGIN:-}}" ] && [ -n "${{_CONDOR_MACHINE_AD:-}}" ]; then
+  RDF_XRD_SITE_ORIGIN="$(run_helper_python - <<'RDF_WORKER_ORIGIN'
+import os, re
+try:
+    with open(os.environ['_CONDOR_MACHINE_AD']) as stream:
+        text = stream.read()
+    match = re.search(r'^Machine\\s*=\\s*"([^"\\n]+)"', text, re.MULTILINE)
+    print(match.group(1) if match else '')
+except (OSError, KeyError):
+    print('')
+RDF_WORKER_ORIGIN
+)"
+  if [ -n "$RDF_XRD_SITE_ORIGIN" ]; then export RDF_XRD_SITE_ORIGIN; fi
+fi
+"""
 
 
 def generate_condor_runscript(
@@ -534,12 +620,19 @@ def generate_condor_runscript(
     python_env_tarball=None,
     shared_archive_name=None,
     runtime_config_relpath=None,
+    request_cpus=1,
+    site_ranking_file=None,
+    sizing_pilot_entries=0,
 ):
-    stage_block = stage_inputs_block(eos_sched, config_file) if stage_inputs else ""
+    _warn_ignored_option(eos_sched, 'eos_sched')
+    request_cpus = int(request_cpus)
+    if request_cpus < 1:
+        raise ValueError("request_cpus must be positive")
+    stage_block = stage_inputs_block(config_file=config_file) if stage_inputs else ""
     stage_out_pre = ""
     stage_out_post = ""
     if stage_outputs:
-        stage_out_pre, stage_out_post = stage_outputs_blocks(eos_sched, config_file)
+        stage_out_pre, stage_out_post = stage_outputs_blocks(config_file=config_file)
     def _relax_ulimit_commands(setup_text):
         if not setup_text:
             return ""
@@ -598,6 +691,7 @@ def generate_condor_runscript(
         )
 
     config_runtime_path = runtime_config_relpath or config_file
+    site_ranking_block = _site_ranking_block(site_ranking_file)
     xrd_optimize_block = "" if stage_inputs else xrootd_optimize_block(config_runtime_path)
     config_runtime_dir = os.path.dirname(config_runtime_path)
     materialize_config_block = ""
@@ -648,12 +742,22 @@ def generate_condor_runscript(
         'export ROOT_INCLUDE_PATH="$PWD${ROOT_INCLUDE_PATH:+:$ROOT_INCLUDE_PATH}"\n'
     )
 
+    analysis_exec = "os.execv(sys.argv[2], sys.argv[2:])"
+    pilot_start, pilot_setup_report = "", ""
+    if sizing_pilot_entries:
+        if int(sizing_pilot_entries) < 1:
+            raise ValueError("sizing_pilot_entries must be positive")
+        analysis_exec = ("sys.argv = ['rdf-sizing-pilot'] + sys.argv[2:] + [" + repr(str(sizing_pilot_entries)) + "]\n"
+                         + Path(__file__).with_name('job_sizing_worker.py').read_text())
+        pilot_start = 'rdf_pilot_worker_start=$(date +%s)'
+        pilot_setup_report = 'echo "Worker setup time: $((analysis_start - rdf_pilot_worker_start - stage_in_end + stage_in_start))s"'
     run_script = f"""#!/bin/bash
 # fail fast on any command error, undefined var, or pipeline failure
 set -euo pipefail
 trap 'rc=$?; echo "ERROR: wrapper exited with code $rc"; exit $rc' ERR
 # log and re-raise SIGTERM so Condor records ExitBySignal (do not swallow the signal)
 trap 'echo "Received SIGTERM - likely timed out by scheduler"; trap - SIGTERM; kill -s SIGTERM $$' SIGTERM
+{pilot_start}
 RDF_ORIG_LD_LIBRARY_PATH="${{LD_LIBRARY_PATH:-}}"
 # The helper interpreter is selected before setup scripts adjust PATH. Keep
 # embedded Python compatible with the older subprocess API on worker nodes.
@@ -665,6 +769,17 @@ run_helper_python() {{
     fi
     env -u PYTHONHOME LD_LIBRARY_PATH="${{RDF_ORIG_LD_LIBRARY_PATH:-}}" "$helper" "$@"
 }}
+# Preserve the site's inherited CPU placement, including for transfer helpers.
+# request_cpus specifies a count; it does not identify CPUs we may assign.
+run_helper_python - {request_cpus} <<'RDF_CPU_REPORT'
+import os, sys
+count = int(sys.argv[1])
+allowed = sorted(os.sched_getaffinity(0))
+print('[cpu] worker requested={{}} allowed={{}} policy=inherited'.format(count, allowed), flush=True)
+RDF_CPU_REPORT
+export OMP_NUM_THREADS={request_cpus} OMP_THREAD_LIMIT={request_cpus}
+export OPENBLAS_NUM_THREADS={request_cpus} MKL_NUM_THREADS={request_cpus}
+export NUMEXPR_NUM_THREADS={request_cpus} VECLIB_MAXIMUM_THREADS={request_cpus}
 {root_block}{pre_block}{shared_block}{x509_block}{python_env_block}{root_include_path_block}ls
 stage_in_start=$(date +%s)
 {stage_out_pre}{stage_block}
@@ -672,13 +787,28 @@ stage_in_end=$(date +%s)
 echo "Stage-in time: $((stage_in_end - stage_in_start))s"
 echo "Check file existence"
 ls
-{materialize_config_block}{xrd_optimize_block}
+{materialize_config_block}{site_ranking_block}{xrd_optimize_block}
 analysis_start=$(date +%s)
+{pilot_setup_report}
 echo "Starting Analysis"
 chmod +x ./{exe_relpath}
 # run the analysis but capture its exit status so we can re-raise a signal
 set +e
-./{exe_relpath} {config_runtime_path}
+# Retain inherited affinity before library initialization. Numerical pool
+# limits remain tied to request_cpus; they are not an aggregate CPU quota.
+# Python exec preserves the analysis exit/signal handling below.
+RDF_ANALYSIS_LD_LIBRARY_PATH="${{LD_LIBRARY_PATH:-}}" run_helper_python - {request_cpus} ./{exe_relpath} {config_runtime_path} <<'RDF_CPU_EXEC'
+import os, sys
+os.environ['LD_LIBRARY_PATH'] = os.environ.pop('RDF_ANALYSIS_LD_LIBRARY_PATH')
+count = int(sys.argv[1])
+allowed = sorted(os.sched_getaffinity(0))
+for key in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+            'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
+    os.environ[key] = str(count)
+os.environ['OMP_THREAD_LIMIT'] = str(count)
+print('[cpu] requested={{}} allowed={{}} policy=inherited'.format(count, allowed), flush=True)
+{analysis_exec}
+RDF_CPU_EXEC
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
@@ -861,6 +991,7 @@ def generate_condor_submit(
     sample_name="",
     run_name="",
 ):
+    _warn_ignored_option(eos_sched, 'eos_sched')
     Path(main_dir + "/condor_logs").mkdir(parents=True, exist_ok=True)
     transfer_files = [
         f"{main_dir}/job_$(Process)/{config_file}",
@@ -964,7 +1095,9 @@ def write_submit_files(
     runtime_config_relpath=None,
     sample_name="",
     run_name="",
+    sizing_pilot_entries=0,
 ):
+    _warn_ignored_option(eos_sched, 'eos_sched')
     submit_path = os.path.join(main_dir, "condor_submit.sub")
     runscript_path = os.path.join(main_dir, "condor_runscript.sh")
 
@@ -983,12 +1116,13 @@ def write_submit_files(
         x509loc=x509loc,
         pre_setup_lines=pre_setup_lines,
         use_shared_inputs=use_shared_inputs,
-        eos_sched=eos_sched,
         shared_dir_name=shared_dir_name,
         config_file=config_file,
         python_env_tarball=python_env_tarball,
         shared_archive_name=shared_archive_name,
         runtime_config_relpath=runtime_config_relpath,
+        request_cpus=request_cpus,
+        sizing_pilot_entries=sizing_pilot_entries,
     )
 
     if container_setup:
@@ -1013,7 +1147,6 @@ def write_submit_files(
                 extra_transfer_files=submit_extra_transfer_files,
                 use_shared_inputs=use_shared_inputs,
                 stream_logs=stream_logs,
-                eos_sched=eos_sched,
                 include_aux=include_aux,
                 shared_dir_name=shared_dir_name,
                 shared_archive_name=shared_archive_name,

@@ -86,6 +86,20 @@ extension-owned enable-variable names. Configuration schemas can have multiple
 providers; the transport `io_policy` service permits a single enabled provider.
 Errors inside a provider are not silently ignored.
 
+The existing `config_schemas` service may additionally export `settings_specs()`
+returning provider-owned `SettingsSpec` objects. Explicit
+`discover_settings_specs()` exposes schema/help and configuration/asset reports;
+legacy `PLUGIN_SCHEMAS` providers remain supported. See
+[provider validation](PROVIDER_VALIDATION.md). No discovery occurs on frontend import.
+
+The optional `authoring_modules` service exports `module_specs()` returning
+`ModuleSpec` descriptions. Explicit `discover_module_specs()` loads these through
+the existing Python service registry; frontend imports do no discovery. Providers
+can also offer ordinary module factories without manifest-based discovery.
+See [module composition](MODULES_AND_PLUGINS.md) and the
+[external example](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/authoring-extension/README.md). Native manager
+metadata remains optional and does not change C++ plugin contracts.
+
 LAW snapshots the marked extension-environment block in the framework
 `env.sh` before embedding it in local or Condor setup scripts. Enabled hook
 contents travel with the setup, so relocated scripts do not invoke the

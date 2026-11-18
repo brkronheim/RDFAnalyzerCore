@@ -19,4 +19,16 @@ For `GoldenJsonManager`, `JetVetoMapManager`, and CMS MET/HEM cleaning, read [CM
 
 ## Verify
 
+For moving cheap necessary conditions before expensive reconstruction, read
+[systematic-aware gate placement](../../../docs/SYSTEMATIC_AUTHORING.md).
+A callable's early return does not prevent evaluation of its RDF inputs.
+Preserve both migration directions and the independent populations of counters,
+normalization sums, tag-and-probe and preselection actions; a raw nominal filter
+cannot generally replace `Analyzer::Filter`.
+
 Use [trigger tests](../../../core/tests/cpp/testTriggerManager.cc), [Analyzer trigger logic](../../../core/tests/cpp/testAnalyzer_TriggerLogic.cc), [region tests](../../../core/tests/cpp/testRegionManager.cc), and [cutflow tests](../../../core/tests/cpp/testCutflowManager.cc). Verify known events at boundaries and parent/child counts, with weighted and unweighted totals distinguished.
+
+For reusable tag-and-probe pairing and trigger-object matching, use
+[TagAndProbe.h and rdftnp](../../../docs/TAG_AND_PROBE.md). The denominator pair
+and event-keyed orientation must precede tag acceptance; do not swap to another
+tag after a failure or feed a measured probe decision into pair selection.

@@ -68,7 +68,12 @@ entry-count passes.
 
 `makeTChain()` constructs one primary chain from `fileList` or directory discovery,
 with optional friend chains. `DataManager` constructs RDF over that primary chain
-and applies `firstEntry`/`lastEntry` as an initial `Range`. Providers and plugins
+and applies `firstEntry`/`lastEntry` as an initial `Range` by default. Experimental
+`entryRangeMode=source` instead sets initial source bounds before consumers are
+booked; it retains the same InputCache chain and global entry identities. It is
+restricted to ROOT6.40.x, one thread and valid signed64-bit bounds. See the
+[configuration reference](CONFIG_REFERENCE.md#inputoutput-configuration) for
+the opt-in and compatibility limits. Providers and plugins
 expose raw `RNode`s, so there is no complete framework-owned graph of all
 Define/Filter/action dependencies. `Analyzer::run()` invokes plugin `execute()`
 hooks, then output sinks, histograms, and finalizers materialize results. Eager
@@ -118,6 +123,15 @@ Relevant ROOT implementation/API references:
 
 ## Diagnostics
 
+With sequential XrdAdaptor next-file warmup, `treeCacheOpenAheadFiles` defaults
+to 2 (range 0--4). This separately opens future transports before branch
+learning finishes, without reading extra file payloads or constructing extra
+ROOT trees. Only the next file receives a data warmup. Setting this option to 0
+restores the previous one-file data-warmup behavior without additional early
+transport opens. The cap includes still-pending opens from earlier transitions.
+See [adaptor scheduling](xrd-adaptor.md) for bounded read-window pipelining,
+active-read priority and delayed backup reads.
+
 `treeCacheVerbosity=1` reports the requested size and observed cache state when
 ROOT completes proxy registration: file name, actual buffer size, prefetch state,
 learning state, registered branch count, dependency status, fallback reason, and
@@ -129,6 +143,15 @@ The primary chain and friends report before file transitions/end of
 input and at destruction (including jobs ending partway through a file).
 Unchanged final snapshots are suppressed. The last report is normally near the
 end of the executable's output, when the DataManager is destroyed.
+
+Transition diagnostic clocks are sampled only at file boundaries. Ordinary
+in-file `LoadTree` calls retain entry tracking but do not sample discarded
+transition timestamps. `callback_total_ms` starts after boundary detection;
+the other phase fields retain their existing scope. The internal clock guard
+does not change cache settings, data reads, notification ordering or reporting
+defaults. The GNU/Linux regression counts framework clock calls directly and
+also checks forward/backward/EOF values and transition timing fields; other
+platforms keep the normal semantic suite.
 
 Reports contain the file URL/backend, tree/file index, entries, last loaded entry,
 file bytes and read calls, readahead overhead, average bytes per read, observed

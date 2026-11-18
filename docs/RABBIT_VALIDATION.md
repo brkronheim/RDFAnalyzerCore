@@ -2,7 +2,7 @@
 
 The integration was exercised on four NVIDIA L40 GPUs (46,068 MiB each), with
 NVIDIA driver 615.71.10. The dedicated environment uses the pinned Rabbit commit
-and CUDA dependencies in [the lock file](../requirements/rabbit-gpu.lock).
+and CUDA dependencies in [the lock file](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/requirements/rabbit-gpu.lock).
 
 ## Completed checks
 
@@ -72,10 +72,6 @@ smaller than Combine's, and the largest explicit-nuisance error difference is
 MC-stat policies are not asserted equivalent. The generated datasets differ
 by at most 0.0235 events per physical bin.
 
-The
-[production report](../analyses/vjet-njetpt/fit_results/backend_benchmark_2022prepost_20261029/REPORT.md)
-records completion status, timings, fit results, covariance checks and native
-build details. Its accompanying JSON and native logs retain the full evidence.
 The compact [production validation record](examples/statistics/production_backend_benchmark_20261029.json)
 keeps the numerical summary with the framework documentation.
 
@@ -130,10 +126,7 @@ they give a particularly large JES uncertainty difference at nominal floor
 bins. Saved Asimov counts also retain a generation-rounding difference of at
 most 0.031 events per bin (relative difference below 6e-8).
 
-The [compatible production report](../analyses/vjet-njetpt/fit_results/backend_benchmark_2022prepost_20261029/combine_equivalent/REPORT.md)
-contains the complete timing, covariance and independent validation artifacts,
-including an assessment of model fidelity, numerical accuracy and interval
-validity. A compact [compatibility validation record](examples/statistics/rabbit_combine_compatibility_20261029.json)
+A compact [compatibility validation record](examples/statistics/rabbit_combine_compatibility_20261029.json)
 preserves the numerical evidence with the framework documentation.
 Smaller native Rabbit errors are not evidence of a better result;
 they came from a different statistical model. Compatible Rabbit on one GPU is

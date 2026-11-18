@@ -58,6 +58,12 @@ For framework behavior, start with [Architecture](../../../docs/ARCHITECTURE.md)
 
 ## Run or change an analysis
 
+When adding explicit variations or optimizing graph dependencies, use
+[safe systematic authoring](../../../docs/SYSTEMATIC_AUTHORING.md). In particular,
+give calibrated shifts distinct physical names, register them before consumers,
+and keep early selection unions on the intended action branch. Legacy C++
+definition idempotence is not a producer-consistency check.
+
 Before editing, check framework status and the analysis directory's Git root, HEAD, and status independently; `analyses/*` is ignored at the framework root. Before running, check the executable target, input files, data/MC mode, payloads, normalization, path resolution, and output destinations. Build the relevant target and use a small local sample when one is available. Do not assume `run()` writes a skim: verify `enableSkim` and the registered output actions. If behavior changes, update matching analysis docs/configs and add a meaningful regression test when the project has a test harness.
 
 For a framework capability missing from the analysis API, also read `rdfanalyzer-development` and keep the reusable change in the framework. For batch workflows, follow that analysis's actual task graph and the generic [LAW Tasks](../../../docs/LAW_TASKS.md) and [Batch Submission](../../../docs/BATCH_SUBMISSION.md) references. Keep discovery, remote jobs, retries, and shared-storage writes within the user's requested execution scope; a diagnosis alone does not authorize recovery actions.

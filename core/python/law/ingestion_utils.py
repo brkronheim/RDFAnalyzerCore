@@ -16,7 +16,9 @@ import re
 import shutil
 import subprocess
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from submission_backend import (
     condor_machine_requirements as _condor_machine_requirements,
@@ -218,19 +220,15 @@ def rechunk_urls(urls: list[str], max_files: int) -> dict[int, str]:
 
 
 def eos_file_exists(eos_path: str, timeout: int = 30) -> bool:
-    """Return ``True`` if *eos_path* can be stat'd on eosuser.cern.ch via xrdfs."""
+    """Stat an XRootD path, defaulting plain paths to eosuser.cern.ch."""
     if not eos_path:
         return False
-    eos_path = eos_path.strip()
-    if eos_path.startswith("root://"):
-        parts = eos_path.split("/", 3)
-        if len(parts) >= 4:
-            eos_path = "/" + parts[3].lstrip("/")
-        else:
-            return False
+    server, eos_path = _remote_output_location(eos_path, "root://eosuser.cern.ch/")
+    if not eos_path:
+        return False
     try:
         r = subprocess.run(
-            ["xrdfs", "root://eosuser.cern.ch/", "stat", eos_path],
+            ["xrdfs", server, "stat", eos_path],
             capture_output=True,
             timeout=timeout,
         )
@@ -239,71 +237,106 @@ def eos_file_exists(eos_path: str, timeout: int = 30) -> bool:
         return False
 
 
-def eos_files_exist_batch(
+def _remote_output_location(path: str, server: str) -> tuple[str, str]:
+    clean = path.strip()
+    if clean.startswith("root://"):
+        parts = urlsplit(clean)
+        if not parts.netloc:
+            return server, ""
+        return f"root://{parts.netloc}/", "/" + parts.path.lstrip("/")
+    return server, clean
+
+
+def _xrdfs_listing_info(line: str) -> tuple[str, dict] | None:
+    """Parse long listings with owner/group fields or date-first formatting."""
+    date = r"(?P<mtime>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})"
+    for fields in (rf"(?P<size>\d+)\s+{date}", rf"{date}\s+(?P<size>\d+)"):
+        match = re.search(rf"\s{fields}\s+(?P<path>/.*)$", line)
+        if match:
+            mode = line.split(None, 1)[0]
+            if not mode.startswith(("-", "d", "l")):
+                return None
+            return match["path"], dict(size=int(match["size"]),
+                mtime=match["mtime"], mode=mode)
+    return None
+
+
+def eos_file_info_batch(
     eos_paths: list[str],
     server: str = "root://eosuser.cern.ch/",
     timeout: int = 60,
-) -> dict[str, bool]:
-    """Check existence of multiple EOS files using directory-level ``xrdfs ls``.
+) -> dict[str, dict | None]:
+    """Batch size/mtime checks by (server, directory), with four bounded workers.
 
-    Files are grouped by their parent directory so that a single ``xrdfs ls``
-    call is made per parent directory, reducing round-trips to the XRootD
-    server significantly.
-
-    Parameters
-    ----------
-    eos_paths:
-        List of EOS paths to check.  Each path may be in ``root://...`` URL
-        form or a plain ``/eos/...`` path.
-    server:
-        XRootD server URL used for ``xrdfs ls`` calls.
-    timeout:
-        Timeout in seconds for each ``xrdfs ls`` invocation.
-
-    Returns
-    -------
-    dict[str, bool]
-        Mapping from each original path string to ``True`` / ``False``.
+    None means absent/unreadable. An empty dict means present but without a
+    trustworthy signature: callers must not reuse an integrity receipt for it.
+    Unknown listing formats fall back to an ordinary directory listing. Failed
+    listings retain the existing per-file stat fallback without caching it.
     """
-    result: dict[str, bool] = {}
-    by_dir: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    result: dict[str, dict | None] = {}
+    by_dir: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
 
     for path in eos_paths:
         if not path:
-            result[path] = False
+            result[path] = None
             continue
-        clean = path.strip()
-        if clean.startswith("root://"):
-            parts = clean.split("/", 3)
-            clean_path = "/" + parts[3].lstrip("/") if len(parts) >= 4 else ""
-        else:
-            clean_path = clean
+        host, clean_path = _remote_output_location(path, server)
         if not clean_path:
-            result[path] = False
+            result[path] = None
             continue
         parent = os.path.dirname(clean_path)
-        by_dir[parent].append((path, clean_path))
+        by_dir[(host, parent)].append((path, clean_path))
 
-    for parent_dir, items in by_dir.items():
+    def check_directory(entry):
+        (host, parent_dir), items = entry
+        found: dict[str, dict | None] = {}
         try:
             r = subprocess.run(
-                ["xrdfs", server, "ls", parent_dir],
+                ["xrdfs", host, "ls", "-l", parent_dir],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
             )
             if r.returncode != 0:
-                for orig_path, _ in items:
-                    result[orig_path] = eos_file_exists(orig_path, timeout)
-                continue
-            existing = set(r.stdout.splitlines())
+                raise OSError("directory listing failed")
+            lines = [line for line in r.stdout.splitlines() if line.strip()]
+            parsed = [_xrdfs_listing_info(line) for line in lines]
+            if any(record is None for record in parsed):
+                plain = subprocess.run(["xrdfs", host, "ls", parent_dir],
+                    capture_output=True, text=True, timeout=timeout)
+                if plain.returncode != 0:
+                    raise OSError("plain directory listing failed")
+                existing = {line.strip(): {} for line in plain.stdout.splitlines()}
+            else:
+                existing = dict(parsed)
             for orig_path, clean_path in items:
-                result[orig_path] = clean_path in existing
+                info = existing.get(clean_path)
+                if info and info.get("mode", "-").startswith("d"):
+                    info = None
+                elif info and info.get("mode", "-").startswith("l"):
+                    info = {}  # A link's metadata does not fingerprint its target.
+                found[orig_path] = info
         except Exception:
-            for orig_path, _ in items:
-                result[orig_path] = eos_file_exists(orig_path, timeout)
+            for orig_path, clean_path in items:
+                url = host.rstrip("/") + "/" + clean_path
+                found[orig_path] = {} if eos_file_exists(url, timeout) else None
+        return found
 
+    if by_dir:
+        with ThreadPoolExecutor(max_workers=min(4, len(by_dir))) as pool:
+            for found in pool.map(check_directory, by_dir.items()):
+                result.update(found)
     return result
+
+
+def eos_files_exist_batch(
+    eos_paths: list[str],
+    server: str = "root://eosuser.cern.ch/",
+    timeout: int = 60,
+) -> dict[str, bool]:
+    """Check output paths using the shared directory-level XRootD batch."""
+    return {path: info is not None
+            for path, info in eos_file_info_batch(eos_paths, server, timeout).items()}
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +414,71 @@ def condor_history_exit(cluster_id: str) -> dict[int, int]:
     except Exception as e:
         print(f"Warning: condor_history failed for cluster {cluster_id}: {e}")
         return {}
+
+
+def condor_event_log_exit(
+    main_dir: str, cluster_id: str, proc_id: int, job_idx: int,
+    job_dir: str = "", log_cache: dict | None = None,
+) -> tuple[int, str] | None:
+    """Read exact-job normal termination when scheduler history is unavailable.
+
+    Only generated event-log paths are considered, never stdout or mere output
+    presence. The latest matching event must be a complete termination record.
+    Callers must exclude live jobs and still validate all expected outputs.
+    Cache parsed shared cluster logs by file identity/mtime/size, not per job.
+    """
+    if not str(cluster_id).isdigit() or int(proc_id) < 0:
+        return None
+    base = Path(main_dir) / "condor_logs"
+    candidates = [base / f"log_{cluster_id}.log", base / f"resub_{job_idx}.log"]
+    match = re.fullmatch(r"job_(\d+_retry\d+_part\d+)", Path(job_dir).name)
+    if match:
+        candidates.append(base / f"resub_{match.group(1)}.log")
+    header = re.compile(r"^(\d{3}) \((\d+)\.(\d+)\.(\d+)\)")
+    target = (str(int(cluster_id)), int(proc_id))
+    evidence = []
+    for path in dict.fromkeys(candidates):
+        try:
+            stat = path.stat()
+            signature = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+            cached = (log_cache or {}).get(str(path))
+            if cached is not None and cached[0] == signature:
+                exits = cached[1]
+            else:
+                exits = {}
+                current = None
+                code = None
+                body = []
+                with path.open(errors="replace") as stream:
+                    for line in stream:
+                        event = header.match(line)
+                        if event:
+                            current = (str(int(event[2])), int(event[3]))
+                            # A newer/incomplete record invalidates prior success.
+                            exits.pop(current, None)
+                            code = event[1]
+                            body = []
+                        elif line.strip() == "...":
+                            if current is not None and code == "005":
+                                normal = re.search(
+                                    r"(?m)^\s*\(1\) Normal termination \(return value (\d+)\)\s*$",
+                                    "".join(body),
+                                )
+                                if normal:
+                                    exits[current] = int(normal[1])
+                            current = None
+                            body = []
+                        elif current is not None:
+                            body.append(line)
+                if log_cache is not None:
+                    log_cache[str(path)] = (signature, exits)
+            if target in exits:
+                evidence.append((exits[target], str(path)))
+        except OSError:
+            continue
+    if not evidence or len({item[0] for item in evidence}) != 1:
+        return None
+    return evidence[0]
 
 
 def read_failed_job_error(

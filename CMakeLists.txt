@@ -31,6 +31,8 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 message(STATUS "CMAKE_MODULE_PATH = ${CMAKE_MODULE_PATH}")
 
 project(RDFAnalyzer)
+include("${PROJECT_SOURCE_DIR}/cmake/InstallNativeAuthoring.cmake")
+rdf_install_native_authoring(COMPONENT NativeAuthoring)
 include("${PROJECT_SOURCE_DIR}/cmake/SetupExtensions.cmake")
 rdf_discover_extensions()
 rdf_generate_extension_config()
@@ -232,4 +234,12 @@ set(RDF_CUSTOM_DICT_SOURCES "" CACHE STRING "Semicolon-separated list of sources
 set(RDF_CUSTOM_DICT_TARGET "RDFCustomDict" CACHE STRING "Target name for the custom ROOT dictionary library")
 
 add_subdirectory(core)
+
+# Optional installed delivery of the existing core-only Analyzer contract.
+option(RDF_BUILD_ANALYZER_SDK "Prepare the optional core-only AnalyzerSDK install component" OFF)
+if(RDF_BUILD_ANALYZER_SDK)
+    include("${PROJECT_SOURCE_DIR}/cmake/InstallAnalyzerSDK.cmake")
+    rdf_install_analyzer_sdk()
+endif()
+
 add_subdirectory(analyses)

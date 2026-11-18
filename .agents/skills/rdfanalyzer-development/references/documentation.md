@@ -6,7 +6,7 @@ Use for maintaining the repository's docs and generated API/search outputs. Star
 
 ## Generated API and search coverage
 
-[Doxyfile](../../../../Doxyfile) currently selects `core/interface core/src`, disables recursive traversal, writes HTML directly under `docs/doxygen`, and does not treat warnings as errors. Plugin directories and nested API headers therefore are not automatically fully covered. Check actual INPUT/RECURSIVE/exclusion settings before claiming an API page exists. Use [DOXYGEN_GUIDE](../../../../docs/DOXYGEN_GUIDE.md) for authoring patterns, verified against configuration.
+[Doxyfile](../../../../Doxyfile) currently selects `core/interface core/interface/api core/src`, disables recursive traversal, writes HTML directly under `docs/doxygen`, and does not treat warnings as errors. Public API headers are included explicitly. Plugin directories have separate documentation. Check actual INPUT/RECURSIVE/exclusion settings before claiming an API page exists. Use [DOXYGEN_GUIDE](../../../../docs/DOXYGEN_GUIDE.md) for authoring patterns, verified against configuration.
 
 [build_search_index.py](../../../../docs/build_search_index.py) scans Markdown under docs, omits listed files/directories including generated Doxygen, strips frontmatter/markup, converts paths to `.html` URLs, and writes `docs/search.json`. [search.js](../../../../docs/search.js) consumes that artifact. For a new guide, verify title extraction, inclusion and the published URL. Skill files under `.agents/skills` are outside that search root; their discoverability comes from skill metadata and the main skill routes.
 

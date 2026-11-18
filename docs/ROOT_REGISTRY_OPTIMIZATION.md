@@ -7,7 +7,7 @@ leaving public dataframe, action and filter registries complete. It also avoids
 excess capacity when adding a definition to a registry. This reduces metadata
 memory without changing the event graph, selection, arithmetic or output schema.
 
-The implementation is in [Root640Registry.cc](../core/root_compat/Root640Registry.cc).
+The implementation is in [Root640Registry.cc](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/root_compat/Root640Registry.cc).
 It adapts two ROOT implementations under ROOT's LGPL 2.1 license. It is a
 repository compatibility patch, not an installed or upstream ROOT modification.
 ROOT itself and the existing CVMFS installation remain unchanged.
@@ -80,7 +80,7 @@ The counters describe construction operations, not live bytes or process RSS.
 The binding counters remain zero when pruning is disabled. They do not run
 per event. C++ callers can inspect the same information through
 `rdf::rootRegistryOptimizationStatus()` in
-[RootRegistryOptimization.h](../core/interface/RootRegistryOptimization.h).
+[RootRegistryOptimization.h](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/interface/RootRegistryOptimization.h).
 
 Shared/Python extension modules do not inject the compatibility override into
 an already-running ROOT/PyROOT process. They retain ordinary ROOT behavior and
@@ -101,7 +101,7 @@ correction payloads or histogram accumulators are deleted by this patch.
 pruning, JIT expressions, redefinition and native variations. Its separate
 `RootRegistryOptimizationDisabledTest` checks runtime rollback in a fresh
 process. Provenance tests verify the output fields. The validation driver in
-[the enablement study](../benchmarks/root_registry_enablement_20261031/REPORT.md)
+the enablement study
 also runs selected unmodified upstream ROOT tests against stock and linked
 implementations and compares full-analysis outputs. This is bounded coverage,
 not the entire ROOT project's regression matrix.

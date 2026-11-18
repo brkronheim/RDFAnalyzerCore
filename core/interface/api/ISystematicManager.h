@@ -255,6 +255,7 @@ public:
      * @brief Return the ordered labels represented by the systematic axis.
      *
      * Nominal is first, followed by paired Up/Down labels and explicit labels.
+     * Exact labels shared by paired and explicit registrations appear once.
      * This default supports managers that only implement paired systematics.
      */
     virtual std::vector<std::string> getVariationLabels() const {
@@ -264,7 +265,9 @@ public:
             labels.push_back(systematic + "Down");
         }
         const auto explicitLabels = getExplicitVariationLabels();
-        labels.insert(labels.end(), explicitLabels.begin(), explicitLabels.end());
+        std::set<std::string> seen(labels.begin(), labels.end());
+        for (const auto &label : explicitLabels)
+            if (seen.insert(label).second) labels.push_back(label);
         return labels;
     }
 

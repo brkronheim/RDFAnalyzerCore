@@ -174,6 +174,15 @@ int main(int argc, char** argv) {
 
 Histogram systematic handling is enabled by default. Before the first booking, `NDHistogramManager` scans available dataframe column names for complete `baseVariable_nameUp` / `baseVariable_nameDown` pairs and registers the matching systematic against the base variable. You can disable this behavior with `histogramSystematics: false` in the main config to book nominal-only histograms. For a complete nominal-only framework graph, use `enableSystematics: false`; this also prevents systematic registration and propagation outside histogram booking. A registered name alone does not calculate a shifted value: the analysis or an input source must provide the varied columns, or the analysis must define and map the variations itself.
 
+The experimental `histogramShareCollectionTransport: true` option shares scalar
+broadcasts and collection fill-count vectors when histograms use the exact same
+input/reference columns and systematic layout within a single `bookND()` or
+`bookConfigHistograms()` call. It defaults to `false`; it does not combine RDF
+actions or share caches across definitions, filters or booking calls. Different
+binnings of a collection can benefit; unrelated collection columns are never
+assumed to have equal lengths. Scalar/systematic packing already shared by the
+ordinary path remains available with the option disabled.
+
 ```cpp
 // Define a complete Up/Down pair using the expected baseVar_nameUp/Down form.
 analyzer.Define("jet_pt_JESUp", applyJESUp, {"jet_pt"});

@@ -44,11 +44,10 @@ This will:
 - Download ONNX Runtime automatically
 - Build the core framework
 - Discover and build any analyses in the `analyses/` directory
-- Run the registered CTest suite
 
 The build artifacts will be placed in the `build/` directory.
 
-To rerun the test suite later from the repository root:
+To run the registered tests from the repository root:
 
 ```bash
 source test.sh
@@ -891,7 +890,7 @@ in the main analysis.
 - **Documentation**: See the `docs/` directory for detailed guides
 - **Working example**: `analyses/ExampleAnalysis/` is a complete, runnable reference
 - **Issues**: Open a GitHub issue if you encounter problems
-- **README**: [README.md](../README.md) has comprehensive technical documentation
+- **README**: [README.md](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/README.md) has comprehensive technical documentation
 
 ---
 

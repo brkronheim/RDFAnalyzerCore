@@ -7,7 +7,30 @@
 #include <cctype>
 #include <iostream>
 #include <unordered_set>
+#include <algorithm>
+#include <utility>
 #include <ROOT/RSnapshotOptions.hxx>
+
+namespace {
+// ROOT Snapshot rejects an alias and its resolved target in the same list.
+// Use the same protected validation routine as Snapshot, through an ordinary
+// copied RNode, to obtain canonical names for the implicit full-output case.
+// Explicit column lists retain their chosen names and ROOT's duplicate checks.
+struct SnapshotColumnView : ROOT::RDF::RNode {
+  explicit SnapshotColumnView(ROOT::RDF::RNode node) : ROOT::RDF::RNode(std::move(node)) {}
+  std::vector<std::string> canonicalColumns() {
+    auto names=GetColumnNames();
+    names.erase(std::remove_if(names.begin(),names.end(),[](const std::string& name) {
+      return name.rfind("R_rdf_sizeof_",0)==0;
+    }),names.end());
+    auto resolved=GetValidatedColumnNames(names.size(),names);
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> unique;unique.reserve(resolved.size());
+    for(auto& name:resolved)if(seen.insert(name).second)unique.push_back(std::move(name));
+    return unique;
+  }
+};
+}
 
 static std::string makeMetaFileName(const std::string& saveFile) {
   if (saveFile.empty()) {
@@ -188,7 +211,8 @@ static void writeSnapshot(ROOT::RDF::RNode& df, const OutputSpec& spec,
   }
 
   if (spec.columns.empty()) {
-    df.Snapshot(spec.treeName, spec.outputFile, ".*", options);
+    const auto columns=SnapshotColumnView(df).canonicalColumns();
+    df.Snapshot(spec.treeName, spec.outputFile, columns, options);
   } else {
     df.Snapshot(spec.treeName, spec.outputFile, spec.columns, options);
   }
@@ -216,10 +240,16 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df,
     throw std::runtime_error("RootOutputSink: outputFile is empty");
   }
 
-  // Resolve and cache columns once.  GetColumnNames() is called only when
-  // the cache is cold, which in practice means exactly once per sink lifetime.
+  // Resolve columns while the cache is cold. Full snapshots also canonicalize
+  // aliases; subsequent writes reuse the cached column list.
   if (!columnsCached_) {
     cachedColumns_ = parseSaveColumns(configProvider, df.GetColumnNames());
+    const auto save=configMap.find("saveConfig");
+    if(save!=configMap.end()) {
+      const auto patterns=configProvider.parseVectorConfig(save->second);
+      if(patterns.size()==1 && patterns.front().substr(0,patterns.front().find(' '))=="*")
+        cachedColumns_=SnapshotColumnView(df).canonicalColumns();
+    }
     const auto skimSystematicsIt = configMap.find("skimSystematics");
     const bool includeSystematics =
         channel == OutputChannel::Skim &&

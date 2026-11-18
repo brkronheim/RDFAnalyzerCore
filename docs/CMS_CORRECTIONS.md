@@ -5,7 +5,7 @@
 > work at the framework level.  For the **CMS-specific convenience functions** that
 > wire these managers up for standard CMS analysis years (payload paths, flags,
 > column names), see:
-> - [`extensions/cms/plugins/cms/README.md`](../extensions/cms/plugins/cms/README.md) — implementation status matrix
+> - [`extensions/cms/plugins/cms/README.md`](https://gitlab.cern.ch/bkronhei/RDFAnalyzerCMS/-/blob/505e81b28e5ec39bf6761c7a151e6d18dd98850f/plugins/cms/README.md) — implementation status matrix
 > - [`docs/CMS_STANDARD_STACK.md`](CMS_STANDARD_STACK.md) — user recipe with call order and flags
 >
 > Key distinction: photon energy scale is available through the generic

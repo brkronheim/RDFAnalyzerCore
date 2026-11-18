@@ -55,25 +55,8 @@ jobs:
     - name: Run tests
       run: ctest --test-dir build --output-on-failure 
 
-  cms:
-    # Set this repository variable once the extracted repository is hosted.
-    if: vars.RDF_CMS_REPOSITORY != ''
-    runs-on: [self-hosted, linux]
-    env:
-      RDF_ENABLE_CMS: "ON"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Install Python test dependencies
-        run: pip3 install -r requirements-ci.txt
-      - name: Download pinned CMS extension
-        env:
-          CMS_REPOSITORY: ${{ vars.RDF_CMS_REPOSITORY }}
-        run: python3 scripts/fetch_cms.py --repository "$CMS_REPOSITORY"
-      - name: Configure with CMS
-        run: cmake -S . -B build -DRDF_ENABLE_CMS=ON -DRDF_REQUIRED_EXTENSIONS=cms -DUSE_CUDA=OFF -DONNXRUNTIME_USE_CUDA=OFF
-      - name: Build
-        run: cmake --build build --parallel $(nproc)
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+    - name: Check installed Python authoring
+      run: |
+        cmake --install build --prefix "$RUNNER_TEMP/rdf-python" --component Python
+        export PYTHONPATH="$RUNNER_TEMP/rdf-python/python:$(root-config --prefix)/lib:${PYTHONPATH:-}"
+        python3 -m rdfanalysis doctor --numba

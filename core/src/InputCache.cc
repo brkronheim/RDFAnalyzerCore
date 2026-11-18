@@ -16,6 +16,9 @@
 #include <stdexcept>
 #include <sstream>
 #include <future>
+#ifdef RDF_HAS_XRD_ADAPTOR
+#include <XrdSourceManager.h>
+#endif
 
 namespace {
 std::string setting(const IConfigurationProvider &config, const char *key) {
@@ -119,6 +122,7 @@ InputCacheChain::InputCacheChain(const std::string &name,
       verbosity_(number(config, "treeCacheVerbosity", 0, 2)) {
   warmCacheLimitBytes_ = number(config, "xrdPrefetchCacheMB", 32, 131072) *
                          1024 * 1024;
+  openAheadFiles_ = number(config, "treeCacheOpenAheadFiles", 2, 4);
   if (prefetchNextFile_) ROOT::EnableThreadSafety();
   if (prefetchNextFile_) asyncOpenNextFile_ = false;
   if (!setting(config, "firstEntry").empty() && !setting(config, "lastEntry").empty()) {
@@ -156,7 +160,6 @@ InputCacheChain::~InputCacheChain() {
 }
 
 Long64_t InputCacheChain::LoadTree(Long64_t entry) {
-  const auto callbackStarted = std::chrono::steady_clock::now();
   const int previousTree = GetTreeNumber();
   auto *previousTreeObject = GetTree();
   bool crossingBoundary = false;
@@ -165,6 +168,13 @@ Long64_t InputCacheChain::LoadTree(Long64_t entry) {
     crossingBoundary = entry < offset ||
                        entry >= offset + previousTreeObject->GetEntries();
   }
+  // Entry-local calls need no transition timing. Keep this guard ahead of
+  // every diagnostic clock read on the ordinary event path.
+  const bool reportTransition = crossingBoundary &&
+      (statistics_ || asyncOpenNextFile_ || prefetchNextFile_);
+  const auto callbackStarted = reportTransition
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point{};
 
   int expectedTree = -1;
   std::string expectedUrl;
@@ -196,8 +206,8 @@ Long64_t InputCacheChain::LoadTree(Long64_t entry) {
     }
     return state;
   };
-  const auto warmBefore = warmStateFor(expectedUrl);
-  const auto openStatusBefore = expectedUrl.empty()
+  const auto warmBefore = reportTransition ? warmStateFor(expectedUrl) : WarmState{};
+  const auto openStatusBefore = !reportTransition || expectedUrl.empty()
                                     ? TFile::kAOSNotAsync
                                     : TFile::GetAsyncOpenStatus(expectedUrl.c_str());
 
@@ -213,13 +223,16 @@ Long64_t InputCacheChain::LoadTree(Long64_t entry) {
                      .count();
     }
   }
-  const auto loadStarted = std::chrono::steady_clock::now();
+  const auto loadStarted = reportTransition
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point{};
   const auto result = TChain::LoadTree(entry);
-  const double rootLoadMs = std::chrono::duration<double, std::milli>(
-                                std::chrono::steady_clock::now() - loadStarted)
-                                .count();
-  const auto warmAfterLoad = warmStateFor(expectedUrl);
-  const auto openStatusAfterLoad = expectedUrl.empty()
+  const double rootLoadMs = reportTransition
+      ? std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - loadStarted).count()
+      : 0.;
+  const auto warmAfterLoad = reportTransition ? warmStateFor(expectedUrl) : WarmState{};
+  const auto openStatusAfterLoad = !reportTransition || expectedUrl.empty()
                                        ? TFile::kAOSNotAsync
                                        : TFile::GetAsyncOpenStatus(expectedUrl.c_str());
   double configureMs = 0.;
@@ -244,6 +257,7 @@ Long64_t InputCacheChain::LoadTree(Long64_t entry) {
                         .count();
     const auto scheduleStarted = std::chrono::steady_clock::now();
     scheduleNextFileOpen();
+    scheduleAheadFileOpens();
     // The first lookahead is queued when ROOT finishes learning the proxy
     // branches. Repeat it after each file switch so every current file warms
     // the next one, once that branch set is known to be complete.
@@ -254,8 +268,7 @@ Long64_t InputCacheChain::LoadTree(Long64_t entry) {
                      .count();
   }
 
-  if (crossingBoundary &&
-      (statistics_ || asyncOpenNextFile_ || prefetchNextFile_)) {
+  if (reportTransition) {
     const auto *currentFile = GetCurrentFile();
     const auto callbackMs = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - callbackStarted)
@@ -482,6 +495,9 @@ void InputCacheChain::scheduleNextFilePrefetch() {
           return std::chrono::duration<double, std::milli>(end - start).count();
         };
         const auto openStarted = std::chrono::steady_clock::now();
+#ifdef RDF_HAS_XRD_ADAPTOR
+        rdf::xrd::BackgroundReadScope background;
+#endif
         TDirectory::TContext directoryContext;
         std::unique_ptr<TFile> opened(TFile::Open(url.c_str(), "READ"));
         const auto openedAt = std::chrono::steady_clock::now();
@@ -590,6 +606,48 @@ void InputCacheChain::scheduleNextFilePrefetch() {
         return std::shared_ptr<TFile>(opened.release());
       });
   warmTasks_.push_back(std::move(task));
+}
+
+void InputCacheChain::scheduleAheadFileOpens() {
+#ifdef RDF_HAS_XRD_ADAPTOR
+  if (!prefetchNextFile_ || !openAheadFiles_ || !GetCurrentFile() ||
+      std::string(GetCurrentFile()->ClassName()) != "RDFXrdFile") return;
+  // Retain only transports, not additional ROOT trees or data caches. A
+  // background open can outlive a quick transition; never block that transition
+  // just to release it. At most the configured number are retained/in flight.
+  for (auto it = openTasks_.begin(); it != openTasks_.end();) {
+    if (it->tree <= GetTreeNumber() &&
+        it->transport.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+      try { it->transport.get(); }
+      catch (const std::exception &e) {
+        std::cerr << "[InputCache] lookahead open failed file=" << it->url
+                  << " reason=" << e.what() << '\n';
+      }
+      it = openTasks_.erase(it);
+    } else ++it;
+  }
+  auto *files = GetListOfFiles();
+  for (unsigned ahead = 1; ahead <= openAheadFiles_ && openTasks_.size() < openAheadFiles_; ++ahead) {
+    const int index = GetTreeNumber() + ahead;
+    if (!files || index >= files->GetEntriesFast()) break;
+    auto *element = dynamic_cast<TChainElement *>(files->At(index));
+    if (!element || !element->GetTitle()) continue;
+    const std::string url = element->GetTitle();
+    if (std::any_of(openTasks_.begin(), openTasks_.end(),
+                    [&](const auto &task) { return task.url == url; })) continue;
+    OpenTask task;
+    task.url = url;
+    task.tree = index;
+    task.transport = std::async(std::launch::async, [url]() -> std::shared_ptr<void> {
+      rdf::xrd::BackgroundReadScope background;
+      return rdf::xrd::acquireXrdSourceManager(url);
+    });
+    openTasks_.push_back(std::move(task));
+    if (verbosity_ || statistics_)
+      std::cout << "[InputCache] queued transport open file_index=" << index
+                << " lookahead=" << ahead << " file=" << url << '\n';
+  }
+#endif
 }
 
 void InputCacheChain::reportCache(const char *reason) const {

@@ -14,7 +14,48 @@ This document provides a complete reference for all configuration options in RDF
 
 The main configuration file controls the overall behavior of the framework. It's typically passed as a command-line argument to your analysis executable.
 
+### Correction and collection inference precision
+
+`correctionScalarOutputType=float|double` selects CorrectionManager scalar output
+precision (default `float`). `double` preserves correctionlib's returned precision
+for scalar, compound, batch and conditional scalar corrections. Vector corrections
+remain `RVec<float>`. Nonfinite or unrepresentable outputs still fail. Set this
+before booking corrections; existing columns retain their booked types.
+
+`bdtInputLayout=scalar|flatRows` selects BDTManager input layout (default `scalar`).
+`flatRows` consumes a predefined event-local `input_<model>` `RVec<float>` whose
+row width/order follows `inputVariables`, and returns one float score per row.
+Empty inputs are allowed and invalid dimensions fail. An inactive gate returns
+-1 for each row. Existing dependency propagation applies to the input and gate;
+scalar `bdtCombineModels` grouping is bypassed for collection input.
+With `flatRows`, optional `bdtFlatRowsInputColumn=<column>` lets multiple models
+consume one predefined matrix directly. `applyAllBDTs` requires identical ordered
+`inputVariables` when sharing; each model retains its own gate and output. The
+default per-model `input_<model>` path remains available.
+
+`persistPythonHistograms=true|false` controls standard Python TH1D persistence
+(default `false`). The typed frontend exposes `persist_histograms=True`. Slices
+are stored under `python_histograms/` in the metadata file during finalization,
+before canonical provenance is written. This namespace is replaced on a rerun;
+the histogram name supplies its relative path. NDHistogramManager retains its
+own format and namespace.
+
 ### Input/Output Configuration
+
+`firstEntry` and `lastEntry` restrict the primary input chain to the half-open
+global entry interval `[firstEntry,lastEntry)`. Use one RDF thread for partition
+workers. The default `entryRangeMode=filter` uses RDF `Range` and rejects bounds
+above its unsigned 32-bit limit. A lone bound retains the legacy ignored-range
+behavior; provide both bounds explicitly.
+
+`entryRangeMode=source` is an experimental, opt-in alternative which seeks the
+initial source directly, avoiding traversal of rejected prefix entries. It
+requires both bounds as nonnegative decimal integers, `lastEntry > firstEntry`,
+signed 64-bit bounds, disabled implicit multithreading, and ROOT 6.40.x. Other
+ROOT series fail with a clear error: this path uses a ROOT internal hook and
+needs revalidation before widening its version guard. Original `rdfentry_`
+identities are preserved, including cross-file ranges. This changes no public
+C++ signatures or production defaults.
 
 #### Required Options
 
@@ -33,6 +74,9 @@ The main configuration file controls the overall behavior of the framework. It's
 | `metaFile` | Path | Derived from `saveFile` as `<stem>_meta.root` | Separate file for histograms and metadata |
 | `antiglobs` | Comma-separated | (empty) | Reject input files containing these strings |
 | `globs` | Comma-separated | (empty) | Accept only input files containing these strings |
+| `xrdSiteRankingFile` | Path, `auto`, `none` | `auto` | Origin-scoped historical source scores; `auto` reads `RDF_XRD_SITE_RANKING_FILE`. See [XrdAdaptor](xrd-adaptor.md#historical-site-preferences-and-open-attempt-logging). |
+| `xrdSiteOrigin` | String | Worker environment/hostname | Explicit execution network identity; overrides `RDF_XRD_SITE_ORIGIN`. |
+| `xrdSiteRankingMaxAgeDays` | Integer 0–365 | `30` | Age limit for historical scores; 0 disables priors. |
 
 ### Performance Configuration
 
@@ -66,6 +110,12 @@ metadata and histogram compression are unchanged. Existing frozen workers keep
 their staged executable and configuration.
 
 The `saveConfig` file contains one branch name per line. It also supports **glob patterns** for flexible column selection:
+
+Without `saveConfig`, or with a single `*`, full snapshots write each resolved
+column once under its canonical name. This prevents ROOT rejecting cached
+aliases together with their targets. Select an alias explicitly to save its
+chosen branch name. Explicit lists that request both an alias and its target
+retain ROOT's duplicate-column error; choose the intended output name.
 
 ```
 # Exact column names
@@ -576,6 +626,7 @@ The YAML config is validated at startup against a JSON Schema. See **[CONFIGURAT
 | `histogramBoostPrecision` | String | `"float"` | Boost contents: `"float"` for ROOT-compatible float contents with double sumw2 and ROOT bin lookup, or explicit `"double"` for double weighted sums. |
 | `histogramBoostSparseBackend` | String | `"map"` | Boost sparse container: `"map"` uses `std::unordered_map`; `"flat"` uses `boost::unordered_flat_map` when its header is available. |
 | `histogramSystematics` | Boolean | `true` | Enable histogram systematic variations and auto-detect complete `baseVariable_nameUp` / `baseVariable_nameDown` column pairs. Set to `false` for nominal-only histograms. |
+| `histogramShareCollectionTransport` | Boolean (`true` / `false`) | `false` | Experimental packed-histogram optimization: share scalar broadcasts and collection fill counts for exact matching input/reference columns within one booking call. No sharing across booking calls or unrelated collections. Sustained performance acceptance is deferred. |
 
 **ROOT backend** (`"root"`, explicit override): stores mergeable `THnSparseF` objects in
 the meta ROOT output file, including axis labels and exact bin edges. The
@@ -661,11 +712,11 @@ generator-weight factor and normalization denominator. It defaults to `sign`:
 the event factor is `sign(genWeight)` and the denominator is
 `sum(sign(genWeight))`. Set it to `full` to use `genWeight` and
 `sum(genWeight)` instead. The LAW skim workflow writes the selected mode to
-`genWeightMode` in each MC job config and uses the same mode in its
-`normalization.json` result. A selected denominator that is zero, negative, or
-nonfinite marks the dataset normalization as an error; it never falls back to
-the other mode. Keep `counterWeightBranch=genWeight` when collecting these
-normalization counters so the selected totals use the generator-weight branch.
+`genWeightMode` in each MC job config. Downstream consumers calculate the
+normalization from the counters in their input files; skim monitoring does not
+collect a separate normalization result. Keep `counterWeightBranch=genWeight`
+when collecting these normalization counters so the selected totals use the
+generator-weight branch.
 
 `setupCmsGenWeights()` applies this basis to the nominal generator-weight
 column and its LHE, PDF, and parton-shower variations. Weight Up/Down columns

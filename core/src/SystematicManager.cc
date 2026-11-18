@@ -137,8 +137,9 @@ std::vector<std::string> SystematicManager::getVariationLabels() const {
     labels.push_back(systematic + "Up");
     labels.push_back(systematic + "Down");
   }
-  labels.insert(labels.end(), explicitVariationLabels_m.begin(),
-                explicitVariationLabels_m.end());
+  std::set<std::string> seen(labels.begin(), labels.end());
+  for (const auto &label : explicitVariationLabels_m)
+    if (seen.insert(label).second) labels.push_back(label);
   return labels;
 }
 
@@ -415,19 +416,9 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
      columnSet.insert(name);
    };
 
-   int var = 0;
-   ensureColumn(branchName, var);
-
-   for (const auto &syst : getSystematics()) {
-     var++;
-     ensureColumn(branchName + "_" + syst + "Up", var);
-     var++;
-     ensureColumn(branchName + "_" + syst + "Down", var);
-   }
-   for (const auto &label : explicitVariationLabels_m) {
-     var++;
-     ensureColumn(branchName + "_" + label, var);
-   }
+   for (std::size_t i = 0; i < systList.size(); ++i)
+     ensureColumn(i == 0 ? branchName : branchName + "_" + systList[i],
+                  static_cast<int>(i));
 
    // Cache the list for this branchName so future calls are no-ops.
    materializedSystLists_m[branchName] = systList;

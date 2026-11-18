@@ -49,6 +49,16 @@ set(_LAW_DIR  "${CMAKE_SOURCE_DIR}/core/python/law")
 set(_CORE_PY  "${CMAKE_SOURCE_DIR}/core/python")
 set(_TEST_DIR "${CMAKE_SOURCE_DIR}/core/tests")
 
+add_test(NAME NativeValidationReportInteropTest
+    COMMAND "${_PYTHON_EXECUTABLE}" "${_TEST_DIR}/native_authoring/test_interop.py" -v)
+set_tests_properties(NativeValidationReportInteropTest PROPERTIES
+    ENVIRONMENT "RDF_COMMON_SETTINGS_FIXTURE=$<TARGET_FILE:testCommonSettings>;RDF_NATIVE_PREFLIGHT_FIXTURE=$<TARGET_FILE:testNativePreflight>")
+
+add_test(NAME NativeRunResultInteropTest
+    COMMAND "${_PYTHON_EXECUTABLE}" "${_TEST_DIR}/native_authoring/test_run_result_interop.py" -v)
+set_tests_properties(NativeRunResultInteropTest PROPERTIES
+    ENVIRONMENT "RDF_RUN_RESULT_FIXTURE=$<TARGET_FILE:testRunResult>")
+
 # Add the repository source root so imports like `core.python.submission_backend`
 # can resolve when CTest runs from the build directory.
 set(_PYTHONPATH "${CMAKE_SOURCE_DIR}:${_LAW_DIR}:${_CORE_PY}:$ENV{PYTHONPATH}")
@@ -158,3 +168,54 @@ endforeach()
 add_test(NAME Shared_BundleStaging COMMAND ${_PYTHON_EXECUTABLE} -m unittest
     discover -s ${_TEST_DIR}/law -p test_run_bundle_staging.py -q)
 set_tests_properties(Shared_BundleStaging PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonCompiledWorkflowTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfworkflow.py -v)
+set_tests_properties(PythonCompiledWorkflowTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonBuildIdentityTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfbuildidentity.py -v)
+set_tests_properties(PythonBuildIdentityTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonTypedSettingsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfsettings.py -v)
+set_tests_properties(PythonTypedSettingsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonDeclarationConfigTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfdeclarations.py -v)
+set_tests_properties(PythonDeclarationConfigTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonVariableAxisConfigTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_variable_axes.py -v)
+set_tests_properties(PythonVariableAxisConfigTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonColumnReferencesTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfcolumns.py)
+set_tests_properties(PythonColumnReferencesTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonModuleContractsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfmodules.py -v)
+set_tests_properties(PythonModuleContractsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonProviderValidationTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfvalidation.py -v)
+set_tests_properties(PythonProviderValidationTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonInputSchemaContractsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfschema.py -v)
+set_tests_properties(PythonInputSchemaContractsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonRunResultsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfresults.py -v)
+set_tests_properties(PythonRunResultsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonCliResultsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_cli_results.py -v)
+set_tests_properties(PythonCliResultsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonRecordedCommandResultsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_recorded_command_results.py -v)
+set_tests_properties(PythonRecordedCommandResultsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonRuntimeCapabilitiesTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_runtime_capabilities.py -v)
+set_tests_properties(PythonRuntimeCapabilitiesTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonControllerInstallTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_controller_install.py -v)
+set_tests_properties(PythonControllerInstallTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonAuthoringTypingTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_authoring_typing.py -v)
+set_tests_properties(PythonAuthoringTypingTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonProviderTypingTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_provider_typing.py -v)
+set_tests_properties(PythonProviderTypingTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonCommandProgressTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_command_progress.py -v)
+set_tests_properties(PythonCommandProgressTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")

@@ -7,6 +7,12 @@ description: Trace or change skim/meta sinks, counters, provenance, validation/r
 
 For generated validation/reproducibility artifacts, read [reports and evidence limits](references/reports.md). For concrete merge tasks and `CollectHistogramsTask`, read [LAW merges](references/law-merges.md).
 
+For optional analysis-owned result JSON, use [RunResult.h](../../../core/interface/RunResult.h)
+and its [value/serialization contract](../../../docs/NATIVE_RUN_RESULTS.md). It
+serializes already evaluated C++ values to the Python-compatible result envelope;
+it does not evaluate actions, inspect paths, certify physics or replace production
+metadata/completion schemas. The explicit analysis owns acquisition and scope.
+
 ## Trace what a run writes
 
 Read [IOutputSink](../../../core/interface/api/IOutputSink.h), [RootOutputSink.cc](../../../core/src/RootOutputSink.cc), [NullOutputSink](../../../core/interface/NullOutputSink.h), and `Analyzer::run` in [analyzer.cc](../../../core/src/analyzer.cc). Skim and metadata are separate channels. `enableSkim`, `saveFile`, `metaFile`, branch selection, `skimFilter`, and `skimSystematics` affect different parts of the contract. `skimFilter` restricts the output branch while histogram actions retain their booked graph.
@@ -19,6 +25,11 @@ Defaults remain ZSTD level 5; these keys do not change histogram/meta output.
 Compare the same branches/events when measuring compression savings.
 
 [CounterService](../../../core/src/CounterService.cc) and [ProvenanceService](../../../core/src/ProvenanceService.cc) own accounting and reproducibility metadata. Trace prefilter capture, weighted counters, task metadata, build hash/dirty status, config/file hashes, and plugin contributions. `plugin.<role>.*` entries and service-provided keys are collected at the end; do not manually invent evidence of a payload or variation being used.
+
+For multiple Analyzers over a fixed checkout, callers may supply the validated
+`metadataAnalysisGitHash`/`metadataAnalysisGitDirty` pair to avoid repeated Git
+subprocesses. Refresh this explicit snapshot when sources change; inspect
+`analysis.git_source` and the [snapshot contract](../../../docs/METADATA.md#explicit-analysis-git-snapshots).
 
 New jobs use one versioned `__rdf_job_metadata_v1` document. Plugins contribute
 typed definitions/audits through [OutputMetadata](../../../core/interface/OutputMetadata.h)

@@ -5,7 +5,7 @@ Use this map to select the relevant workflow source and detail reference. Every 
 | Task family | Classes | Source / details |
 |---|---|---|
 | Remote discovery | `GetXRDFSFileList`, `GetRucioFileList`, `GetOpenDataFileList` | [xrdfs_tasks](../../../../core/python/law/xrdfs_tasks.py), [rucio_tasks](../../../../extensions/cms/python/rdfanalyzer_cms/rucio_tasks.py), [opendata_tasks](../../../../core/python/law/opendata_tasks.py) |
-| Preparation and bounded test | `PrepareSkimJobs`, `RunSkimTestJob` | [analysis_tasks](../../../../core/python/law/analysis_tasks.py); [staging](task-graph.md) |
+| Preparation and bounded test | `PrepareSkimJobs`, `RunSkimTestJob`, `RunSkimSizingPilots` | [analysis_tasks](../../../../core/python/law/analysis_tasks.py); [staging](task-graph.md) |
 | Delegated Condor dispatch | `BuildSkimSubmission`, `SubmitSkimJobs`, `MonitorSkimJobs` | analysis_tasks; [diagnosis](diagnosis.md) |
 | Event execution and refill | `SkimTask`, `HistFillTask` | analysis_tasks; [environment/backend](law-environment.md) |
 | Stitching | `StitchingDerivationTask`, `StitchingApplySubmitJobs`, `StitchingApplyMonitorJobs`, `StitchingApplyTask`, `StitchingValidationTask` | [two-pass stitching](stitching.md) |
@@ -40,8 +40,32 @@ For delegated skim monitoring, `SkimMixin.output_validation` selects `exists`
 (batched path checks without ROOT opens) or `integrity` (the framework default,
 also checking ROOT contents and MC counters). It propagates from `SkimTask` to
 `MonitorSkimJobs` without changing the run identity. Both monitor polling and
-completion use the policy. Final normalization still reads MC counters once
-after all jobs finish. Analysis wrappers can choose a different default.
+completion use the policy. Monitoring does not aggregate sample counters or
+write `normalization.json`; downstream consumers read the counters from their
+input ROOT files when needed. Analysis wrappers can choose a different default.
+
+Polling and completion share a persistent `output_validation.json` receipt
+cache. Directory-level `xrdfs ls -l` batches (up to four directories in flight)
+check existence, size and mtime, preserving each URL's server. Unchanged output
+pairs reuse their integrity receipts; changed/missing outputs or changed
+configuration, manifest, execution identity, tree or job attempt invalidate
+them. Local signatures additionally include inode, device and nanosecond
+mtime/ctime. Old `done` states without receipts receive one full validation;
+existence-only or unknown-signature checks never certify ROOT integrity.
+Receipts checkpoint every 25 results or ten seconds, and on normal exception
+unwinding, using a locked atomic merge separate from monitor state. Cache-write
+failure warns without failing validated outputs. Remote signatures are storage
+metadata, not content hashes: same-size changes preserving the listed mtime
+need explicit cache removal and revalidation.
+
+On successful completion, `MonitorSkimJobs.run()` automatically refines the
+origin-scoped XRootD user cache before writing its completion marker. It keeps
+the bundled seed unchanged and writes `xrd_site_rankings_update.json` in the run
+directory. This is ancillary: update failures warn without invalidating verified
+physics outputs. `complete()` never backfills learned rankings/sizing or changes
+job state; it may refresh output-validation receipts. See [ranking aggregation](../../../../core/python/xrd_site_rankings.py)
+and its `update_after_run` entry point. Newly generated submission scripts
+reuse the learned cache unless an explicit ranking file is pinned.
 
 `MonitorSkimJobs` checks running jobs for runtime overruns on every poll and
 removes them above 150% of their Condor `MaxRuntime` (falling back to the task's
@@ -52,6 +76,35 @@ Only successful removal enters the existing retry/splitting path, which respects
 `max_retries`. See `_condor_job_elapsed_runtime` and `_condor_job_exceeded_runtime`
 in `analysis_tasks.py` and the runtime-monitor tests in
 [test_analysis_tasks.py](../../../../core/tests/law/test_analysis_tasks.py).
+
+File/event policy is implemented by `partition_utils.py` and
+[job_sizing.py](../../../../core/python/job_sizing.py). The latter owns offline
+CPU-rate learning, process/dataset budget rules and tree-entry cache snapshots.
+`partition=auto` is the default: first-run grouping and learned event budgets
+for matching datasets later. Verified monitor completion learns from stdout and
+Condor Run Remote Usage; the shared cache is origin/workload scoped, locked and
+idempotent. Preparation snapshots its choice once; no shared-cache reads or
+learning belong in `complete()`. Test cold starts, later reuse, explicit pins,
+concurrent updates, cache failures and immunity of prepared identities to updates.
+`--sizing-pilots` inserts `RunSkimSizingPilots` between discovery and preparation.
+It submits one-file diagnostic Condor jobs only for datasets without sizing
+evidence, with `--sizing-pilot-parallel` bounding batch size. Child runs disable
+pilot recursion and retries. Each worker uses
+[job_sizing_worker.py](../../../../core/python/job_sizing_worker.py) to pair a
+short prefix with the full file. Fit CPU/wall slopes separately from fixed
+setup, then freeze the combined profile before bulk preparation. Keep diagnostic
+outputs outside production merge paths. Paired job CPU must never enter ordinary
+single-execution rate learning; provisional priors are replaced by supported
+production rates. Test batch gating, timing cancellation, worker execution and
+failed-pilot behavior without submitting jobs.
+Size fresh and cached pilot priors with `--sizing-pilot-target-seconds` (1800),
+and production rates with `--sizing-target-seconds` (3600). `--max-runtime`
+(7200) independently controls the Condor request. Test mixed evidence, explicit
+profile precedence, custom targets and frozen selection reuse.
+See [job-sizing controls](../../../../docs/JOB_SIZING.md). Preserve existing
+execution identities when controls are unused; explicit profile/seed contents
+are hashed. Test both prep and fallback branch maps, stitching forwarding,
+cached-group precedence, and half-open retry coverage when changing this path.
 
 For a requested command, resolve task parameters, their `significant` settings, `requires`/`workflow_requires`, branch maps, output targets, overridden `complete`, and `run`. Read [branch_map_policy.py](../../../../core/python/law/branch_map_policy.py) and [partition_utils.py](../../../../core/python/law/partition_utils.py) for the actual partition strategy. A parameter marked nonsignificant can change behavior without changing task identity. Confirm the existing artifact/config before reusing a run name.
 

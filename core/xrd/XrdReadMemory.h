@@ -30,9 +30,12 @@ public:
     std::size_t bytes_;
   };
 
-  std::unique_ptr<Reservation> tryReserve(std::size_t bytes) {
+  std::unique_ptr<Reservation> tryReserve(std::size_t bytes, bool background = false) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (bytes > kLimit - used_) return {};
+    // Leave two windows available for active readers, even while warmup and
+    // late duplicate callbacks occupy the background share.
+    const auto limit = background ? kLimit - 2 * kWindow : kLimit;
+    if (used_ > limit || bytes > limit - used_) return {};
     auto reservation = std::unique_ptr<Reservation>(new Reservation(*this, bytes));
     used_ += bytes;
     return reservation;

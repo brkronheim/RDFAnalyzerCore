@@ -134,11 +134,35 @@ endif()
 message(STATUS "ONNX Runtime library: ${ONNXRUNTIME_LIBRARY}")
 message(STATUS "ONNX Runtime include dir: ${ONNXRUNTIME_INCLUDE_DIRS}")
 
+# Keep link-time artifacts inside this build tree. CMake can then retain
+# automatic external runtime paths (ROOT, CUDA, extension dependencies, etc.)
+# without appending the selected producer ONNX directory to installed RPATH.
+# Stage all provider/version symlinks as well, preserving GPU provider lookup.
+string(SHA256 _onnx_link_identity "${ONNXRUNTIME_ROOT_DIR}")
+set(_onnx_link_dir "${CMAKE_BINARY_DIR}/_rdf_onnx_link/${_onnx_link_identity}")
+file(MAKE_DIRECTORY "${_onnx_link_dir}")
+file(GLOB _onnx_link_files "${ONNXRUNTIME_LIB_DIR}/*.so*" "${ONNXRUNTIME_LIB_DIR}/*.dylib")
+list(APPEND _onnx_link_files "${ONNXRUNTIME_LIBRARY}")
+list(REMOVE_DUPLICATES _onnx_link_files)
+foreach(_onnx_link_file IN LISTS _onnx_link_files)
+    get_filename_component(_onnx_link_name "${_onnx_link_file}" NAME)
+    set(_onnx_link_path "${_onnx_link_dir}/${_onnx_link_name}")
+    if(IS_SYMLINK "${_onnx_link_path}")
+        file(READ_SYMLINK "${_onnx_link_path}" _onnx_link_previous)
+        if(_onnx_link_previous STREQUAL _onnx_link_file)
+            continue()
+        endif()
+    endif()
+    file(CREATE_LINK "${_onnx_link_file}" "${_onnx_link_path}" SYMBOLIC COPY_ON_ERROR)
+endforeach()
+get_filename_component(_onnx_link_selected "${ONNXRUNTIME_LIBRARY}" NAME)
+set(_onnx_link_library "${_onnx_link_dir}/${_onnx_link_selected}")
+
 # Create an imported target for ONNX Runtime
 if(NOT TARGET OnnxRuntime::OnnxRuntime)
     add_library(OnnxRuntime::OnnxRuntime SHARED IMPORTED)
     set_target_properties(OnnxRuntime::OnnxRuntime PROPERTIES
-        IMPORTED_LOCATION "${ONNXRUNTIME_LIBRARY}"
+        IMPORTED_LOCATION "${_onnx_link_library}"
         INTERFACE_INCLUDE_DIRECTORIES "${ONNXRUNTIME_INCLUDE_DIRS}"
     )
 endif()

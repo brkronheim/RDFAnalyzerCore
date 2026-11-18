@@ -17,6 +17,9 @@
 #include <TChain.h>
 #include <TEnv.h>
 #include <TTreeCache.h>
+#include <TFile.h>
+#include <TTree.h>
+#include <RVersion.h>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -90,6 +93,50 @@ TEST(DataManagerInputTest, ExplicitInMemoryConstructorCreatesRequestedEntries) {
   DataManager dataManager(3);
   EXPECT_EQ(dataManager.getDataFrame().Count().GetValue(), 3u);
 }
+
+#if ROOT_VERSION_CODE >= ROOT_VERSION(6,40,0) && ROOT_VERSION_CODE < ROOT_VERSION(6,41,0)
+TEST(DataManagerInputTest, SourceRangePreservesChainEntryIdentitiesAndPayload) {
+  const auto directory=std::filesystem::temp_directory_path()/std::filesystem::path("rdf-source-range-"+std::to_string(getpid()));
+  std::filesystem::create_directories(directory);
+  for(int file=0;file<2;++file){
+    TFile output((directory/(std::to_string(file)+".root")).c_str(),"RECREATE");
+    TTree tree("Events","");float value=0;tree.Branch("value",&value);
+    for(int entry=0;entry<4;++entry){value=file*4+entry;tree.Fill();}
+    tree.Write();
+  }
+  for(const auto& mode:{"filter","source"}){
+    const auto path=directory/(std::string(mode)+".txt");
+    {std::ofstream config(path);config<<"fileList="<<(directory/"0.root").string()<<','<<(directory/"1.root").string()
+      <<"\ntreeList=Events\nthreads=1\nfirstEntry=3\nlastEntry=6\nentryRangeMode="<<mode<<'\n';}
+    ConfigurationManager config(path.string());DataManager data(config);
+    auto node=data.getDataFrame();auto count=node.Count();auto entries=node.Take<ULong64_t>("rdfentry_");auto values=node.Take<float>("value");
+    EXPECT_EQ(count.GetValue(),3u);
+    EXPECT_EQ(entries.GetValue(),(std::vector<ULong64_t>{3,4,5}));
+    EXPECT_EQ(values.GetValue(),(std::vector<float>{3,4,5}));
+    EXPECT_EQ(node.GetNRuns(),1u);
+  }
+  std::filesystem::remove_all(directory);
+}
+
+TEST(DataManagerInputTest, SourceRangeUses64BitBoundsWithoutWalkingPrefix) {
+  const auto directory=std::filesystem::temp_directory_path()/std::filesystem::path("rdf-source-range64-"+std::to_string(getpid()));
+  std::filesystem::create_directories(directory);const auto input=directory/"empty-columns.root";
+  const Long64_t begin=Long64_t{1}<<32;
+  {TFile output(input.c_str(),"RECREATE");TTree tree("Events","");tree.SetEntries(begin+10);tree.Write();}
+  const auto path=directory/"config.txt";
+  {std::ofstream config(path);config<<"fileList="<<input.string()<<"\ntreeList=Events\nthreads=1\nfirstEntry="<<begin
+    <<"\nlastEntry="<<begin+3<<"\nentryRangeMode=source\n";}
+  ConfigurationManager config(path.string());
+  {DataManager data(config);auto entries=data.getDataFrame().Take<ULong64_t>("rdfentry_");
+   EXPECT_EQ(entries.GetValue(),(std::vector<ULong64_t>{ULong64_t(begin),ULong64_t(begin+1),ULong64_t(begin+2)}));}
+  const auto filterPath=directory/"filter-config.txt";
+  {std::ofstream stream(filterPath);stream<<"fileList="<<input.string()<<"\ntreeList=Events\nthreads=1\nfirstEntry="<<begin
+    <<"\nlastEntry="<<begin+3<<"\nentryRangeMode=filter\n";}
+  ConfigurationManager filterConfig(filterPath.string());
+  EXPECT_THROW(DataManager data(filterConfig),std::invalid_argument);
+  std::filesystem::remove_all(directory);
+}
+#endif
 
 TEST(DataManagerInputTest, InvalidThreadSettingFailsWithValueContext) {
   const auto configPath = std::filesystem::temp_directory_path() /
@@ -292,6 +339,34 @@ TEST_F(DataManagerTest, DefineVectorCreatesVectorColumn) {
       EXPECT_EQ((*result)[0][1], 2.0f);
     }
   });
+}
+
+TEST_F(DataManagerTest, HomogeneousFloatPackingPreservesWidthsOrderAndDuplicates) {
+  DataManager local(3);
+  std::vector<std::string> features;
+  for (int index = 0; index < 32; ++index) {
+    const auto name = "float_feature_" + std::to_string(index);
+    local.Define(name, [index](ULong64_t entry) {
+      return float(index - 16) + .25f * float(entry);
+    }, {"rdfentry_"}, *systematicManager);
+    features.push_back(name);
+  }
+  for (int width : {2, 4, 8, 9, 16, 20, 32, 5}) {
+    const std::vector<std::string> columns(features.begin(), features.begin() + width);
+    const auto output = "packed_float_" + std::to_string(width);
+    local.DefineVectorNominal(output, columns, "Float_t", *systematicManager);
+    auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<float>>(output);
+    for (int entry = 0; entry < 3; ++entry) {
+      ASSERT_EQ(values->at(entry).size(), std::size_t(width));
+      for (int feature = 0; feature < width; ++feature)
+        EXPECT_FLOAT_EQ(values->at(entry)[feature], float(feature - 16) + .25f * float(entry));
+    }
+  }
+  local.DefineVectorNominal("duplicate_floats", {features[1], features[0], features[1], features[0]},
+                            "float", *systematicManager);
+  auto duplicates = local.getDataFrame().Take<ROOT::VecOps::RVec<float>>("duplicate_floats");
+  const auto &first = duplicates->at(0);
+  EXPECT_EQ(std::vector<float>(first.begin(), first.end()), (std::vector<float>{-15, -16, -15, -16}));
 }
 
 TEST_F(DataManagerTest, DefineVectorRepeatedScalarsPreserveOrderAndEventValues) {

@@ -2,9 +2,9 @@
 
 The framework separates frozen analysis inputs, collections of independent
 profiles, execution state, and derived products. The implementations are in
-[run_bundle.py](../core/python/run_bundle.py),
-[run_collection.py](../core/python/run_collection.py), and
-[partial_merge.py](../core/python/partial_merge.py).
+[run_bundle.py](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/run_bundle.py),
+[run_collection.py](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/run_collection.py), and
+[partial_merge.py](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/partial_merge.py).
 
 ## Frozen inputs
 
@@ -84,14 +84,14 @@ generic variable takes precedence.
 
 Both `mergeResults.sh` wrappers delegate completed-output staging, cache
 management, locking, and dataset snapshots to `partial_merge`. The adapter
-calls [metadata_io.py](../core/python/metadata_io.py) for numerical reduction,
+calls [metadata_io.py](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/metadata_io.py) for numerical reduction,
 schema validation, and metadata preservation. The merger's completion record
 and metadata sidecar remain authoritative. A separate `.snapshot.json` records
 completed-job membership, input content hashes, and reduction configuration.
 Failed refreshes retain the previous ROOT result. Nominal-only extraction is
 an explicit option and does not waive the merger's compatibility checks.
 
-[analysis_inputs.py](../core/python/analysis_inputs.py) selects one dataset
+[analysis_inputs.py](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/analysis_inputs.py) selects one dataset
 representation in order: final result, partial snapshot, then job files. It
 also returns normalization factors together with denominator mode, luminosity,
 and contributing files. Vjet and VH plotters use these helpers. VH prefers

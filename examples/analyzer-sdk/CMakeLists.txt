@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.19)
+project(AnalyzerSdkExample LANGUAGES CXX)
+find_package(RDFAnalyzerCore CONFIG REQUIRED)
+add_executable(analyzer-onboarding analysis.cc)
+target_link_libraries(analyzer-onboarding PRIVATE RDFAnalyzer::Core)

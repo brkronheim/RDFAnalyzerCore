@@ -81,7 +81,7 @@ analyzer.DefineFromVector(
 
 - See [Python Bindings Deep Dive](./PYTHON_BINDINGS_DEEP.md) for advanced patterns
 - See [Python Bindings Testing](./PYTHON_BINDINGS_TESTING.md) for verification
-- See [Examples](../examples/) for complete workflows
+- See [Examples](https://github.com/brkronheim/RDFAnalyzerCore/tree/main/examples) for complete workflows
 
 ## Common Issues
 

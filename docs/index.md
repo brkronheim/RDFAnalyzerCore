@@ -43,7 +43,10 @@ New to RDFAnalyzerCore? Start here:
 
 ### Python Analysis
 
-- **[Python Bindings](PYTHON_BINDINGS.md)** - Full Python API and usage patterns
+- **[Python installation](PYTHON_INSTALLATION.md)** - Install the frontend and verify the native runtime
+- **[Python authoring](PYTHON_AUTHORING.md)** - Build an analysis with settings, filters and histograms
+- **[Compiled C++ workflows](COMPILED_CPP_WORKFLOWS.md)** - Steer an existing executable from Python
+- **[Python bindings](PYTHON_BINDINGS.md)** - Access the underlying native API
 - **[Python Bindings Testing](PYTHON_BINDINGS_TESTING.md)** - Validation and troubleshooting guide
 - **[Combine and Rabbit fits](RABBIT_INTEGRATION.md)** - Shared statistical tools, native CUDA and multi-GPU fitting, and vjet adapters
 
@@ -118,12 +121,14 @@ New to RDFAnalyzerCore? Start here:
   - Data management
   - Plugin interfaces
   - Manager implementations
+- **[Installed C++ SDK](ANALYZER_SDK.md)** - Build and link an external analysis with CMake
 - **[Search Documentation](SEARCH.html)** - Keyword search across all site pages
 - **[Doxygen API Documentation](doxygen/index.html)** - Generated C++ API docs from source
 
 ## Developer Documentation
 
 ### Extending the Framework
+
 
 - **[Architecture](ARCHITECTURE.md)** - Internal design and structure
   - Design philosophy
@@ -283,10 +288,8 @@ For framework design details, see the [Architecture Guide](ARCHITECTURE.md) and
 
 ## License
 
-See repository for license information.
+RDFAnalyzerCore uses the [MIT License](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/LICENSE). Third-party components retain their own licenses and notices.
 
 ---
 
 **Repository**: https://github.com/brkronheim/RDFAnalyzerCore
-
-**Last Updated**: March 2026

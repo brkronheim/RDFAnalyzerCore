@@ -349,7 +349,7 @@ Similar to above but with more events (10,000+) for realistic performance testin
 
 ## Known Issues and Limitations
 
-See [docs/PYTHON_BINDINGS.md - Limitations and Known Issues](../docs/PYTHON_BINDINGS.md#limitations-and-known-issues) for current limitations.
+See [docs/PYTHON_BINDINGS.md - Limitations and Known Issues](PYTHON_BINDINGS.md#limitations-and-known-issues) for current limitations.
 
 ## Support
 

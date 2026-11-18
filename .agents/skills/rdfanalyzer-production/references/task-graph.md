@@ -38,6 +38,7 @@ For environment/module registration use [LAW setup](law-environment.md); for eve
 | Input discovery | [xrdfs_tasks.py](../../../../core/python/law/xrdfs_tasks.py), [rucio_tasks.py](../../../../extensions/cms/python/rdfanalyzer_cms/rucio_tasks.py), [opendata_tasks.py](../../../../core/python/law/opendata_tasks.py) |
 | Dataset metadata and file-list conversion | [dataset_manifest.py](../../../../core/python/dataset_manifest.py), [build_manifest_from_filelist_dir.py](../../../../core/python/law/build_manifest_from_filelist_dir.py) |
 | Prepare, test, dispatch, monitor, fill | [analysis_tasks.py](../../../../core/python/law/analysis_tasks.py): `PrepareSkimJobs`, `RunSkimTestJob`, `BuildSkimSubmission`, `SubmitSkimJobs`, `MonitorSkimJobs`, `SkimTask`, `HistFillTask` |
+| Optional missing-rate pilots | `RunSkimSizingPilots`: discovery, bounded one-file Condor batches, paired prefix/full timing fit, then bulk preparation. |
 | Shell/Condor submission generation | [submission_backend.py](../../../../core/python/submission_backend.py), [htcondor_bootstrap.sh](../../../../core/python/law/htcondor_bootstrap.sh) |
 | Dask/executor behavior | [workflow_executors.py](../../../../core/python/law/workflow_executors.py), [branch_map_policy.py](../../../../core/python/law/branch_map_policy.py), [partition_utils.py](../../../../core/python/law/partition_utils.py) |
 | Retry classification and metrics | [failure_handler.py](../../../../core/python/law/failure_handler.py), [performance_recorder.py](../../../../core/python/law/performance_recorder.py) |
@@ -50,8 +51,12 @@ Inspect `_write_job_config`, config/payload copying helpers, shared-input archiv
 
 Legacy prepared job directories expose `aux/` through a local link; remote
 workers receive its contents through the shared archive. Sealed bundles use
-their declared dependency closure. `MonitorSkimJobs.complete()` revalidates
-the required ROOT artifacts and normalization records, so a saved completion
-marker does not hide subsequent corruption or a missing skim tree.
+their declared dependency closure. `MonitorSkimJobs.complete()` checks fresh
+storage metadata under the selected validation policy. In `integrity` mode,
+matching persistent receipts skip ROOT opens; changed artifacts receive the
+full tree/metadata/counter checks. Missing files still invalidate completion.
+The storage-signature contract and its remote timestamp precision limits are
+documented in [monitor validation](law-tasks.md). `exists` mode checks paths
+without opening ROOT files and does not certify integrity receipts.
 
 For merges, inspect output-manifest validation and embedded histogram schema before `hadd` or equivalent aggregation. Choose resources within allocation and confirm where final outputs are written. Use [outputs](../../rdfanalyzer-outputs/SKILL.md) for schema contracts and [diagnosis](diagnosis.md) for recovery rather than rebuilding the workflow from defaults.

@@ -139,6 +139,8 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import fcntl
+import stat
 import json
 import math
 import os
@@ -178,7 +180,6 @@ from extract_nd_histograms import extract_nd_histograms  # noqa: E402
 from dataset_manifest import (  # noqa: E402
     DatasetManifest,
     DatasetEntry,
-    select_generator_weight_denominator,
 )
 from derivation_correctionlib import (  # noqa: E402
     _build_correctionlib_cset as _shared_build_correctionlib_cset,
@@ -199,10 +200,16 @@ from submission_backend import (  # noqa: E402
     write_submit_files,
 )
 import io_policy as _io_policy
+from xrd_site_rankings import update_after_run as _update_xrd_site_rankings
 from run_bundle import (find_bundle, verify_config_bundle, rewrite_references,
                         file_digest, execution_identity, record_execution)
 from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
 from partition_utils import _make_partitions  # noqa: E402
+from job_sizing import EntryCache, event_budget, load_profile  # noqa: E402
+from job_sizing import (profile_matches, select_sizing, sizing_context,
+                        update_sizing_after_run as _update_job_sizing)  # noqa: E402
+from job_sizing import atomic_json, condor_event_ads, collect_log, fit_pilot, seed_pilot_sizing, pilot_inputs  # noqa: E402
+from partition_utils import _query_tree_entries  # noqa: E402
 from output_schema import (  # noqa: E402
     ArtifactResolutionStatus,
     CutflowSchema,
@@ -220,6 +227,28 @@ from output_schema import (  # noqa: E402
 )
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
+
+# Shared defaults/types for ordinary and source-prefixed sizing parameters.
+# Construct a distinct Luigi Parameter each time to retain descriptor ownership.
+_JOB_SIZING_PARAMETERS = {
+    "sizing_pilots": (luigi.BoolParameter, False),
+    "sizing_target_seconds": (luigi.IntParameter, 3600),
+    "sizing_pilot_target_seconds": (luigi.IntParameter, 1800),
+    "sizing_pilot_parallel": (luigi.IntParameter, 4),
+    "sizing_pilot_prefix_entries": (luigi.IntParameter, 10000),
+    "sizing_pilot_safety_factor": (luigi.FloatParameter, 1.5),
+}
+
+
+def _job_sizing_parameter(name, **options):
+    parameter, default = _JOB_SIZING_PARAMETERS[name]
+    return parameter(default=default, **options)
+
+
+def _job_sizing_kwargs(task, *, input_prefix="", output_prefix=""):
+    """Adapt the same six operational fields across the source-task boundary."""
+    return {output_prefix + name: getattr(task, input_prefix + name)
+            for name in _JOB_SIZING_PARAMETERS}
 
 
 def _stream_analysis_output() -> bool:
@@ -255,9 +284,11 @@ def _remove_mc_generator_config_for_data(config: dict[str, str]) -> None:
 from ingestion_utils import (  # noqa: E402
     collect_local_shared_libs as _collect_skim_shared_libs,
     condor_history_exit as _condor_history_exit,
+    condor_event_log_exit as _condor_event_log_exit,
     condor_q_ads as _condor_q_ads,
     condor_rm_job as _condor_rm_job,
     eos_files_exist_batch as _eos_files_exist_batch_util,
+    eos_file_info_batch as _eos_file_info_batch_util,
     read_failed_job_error as _read_failed_job_error,
 )
 
@@ -1074,6 +1105,26 @@ def _output_files_exist_batch(output_paths: list[str]) -> dict[str, bool]:
     return result
 
 
+def _output_file_info_batch(output_paths: list[str]) -> dict[str, dict | None]:
+    """Cheap fresh signatures; unknown remote signatures must not be cached."""
+    result: dict[str, dict | None] = {}
+    remote = []
+    for path in dict.fromkeys(output_paths):
+        if path.startswith(("root://", "/eos/", "/store/")):
+            remote.append(path)
+        else:
+            try:
+                info = os.stat(path)
+                result[path] = dict(size=info.st_size, mtime_ns=info.st_mtime_ns,
+                    ctime_ns=info.st_ctime_ns, inode=info.st_ino, device=info.st_dev) \
+                    if stat.S_ISREG(info.st_mode) else None
+            except OSError:
+                result[path] = None
+    if remote:
+        result.update(_eos_file_info_batch_util(remote))
+    return result
+
+
 def _root_file_tree_error(path: str, tree_name: Optional[str]) -> Optional[str]:
     """Check a ROOT file, optionally requiring a named tree inside it."""
     if not path:
@@ -1331,6 +1382,32 @@ def _split_skim_file_list(file_list: list[str]) -> list[list[str]]:
     return [file_list[:midpoint], file_list[midpoint:]]
 
 
+def _split_skim_partition(job_dir: str, metadata_cache: str = "") -> list[dict]:
+    """Bisect bounded entry ranges before considering whole-file bisection."""
+    files = _skim_job_file_list(job_dir)
+    config_path = os.path.join(job_dir, "submit_config.txt")
+    config = read_config(config_path) if os.path.isfile(config_path) else {}
+    first, last = 0, 0
+    if "firstEntry" in config and "lastEntry" in config:
+        first, last = int(config["firstEntry"]), int(config["lastEntry"])
+        if first < 0 or last < 0:
+            raise ValueError("Retry entry bounds must be nonnegative")
+        if (first or last) and last <= first:
+            raise ValueError("Retry entry interval must be increasing")
+    if last <= first and len(files) == 1:
+        last = int(config.get("plannedInputEntries", 0))
+        if not last and metadata_cache and os.path.isfile(metadata_cache):
+            last = EntryCache(metadata_cache).get(files[0], str(config.get("treeList", "Events"))) or 0
+        first = 0
+    if last > first:
+        if last - first > 1:
+            middle = first + (last - first) // 2
+            return [{"files": files, "first_entry": a, "last_entry": b}
+                    for a, b in ((first, middle), (middle, last))]
+        return [{"files": files, "first_entry": first, "last_entry": last}]
+    return [{"files": part} for part in _split_skim_file_list(files)]
+
+
 def _append_output_part_suffix(path: str, part_index: int) -> str:
     """Add a split-part suffix while preserving the output file extension."""
     if not path:
@@ -1346,6 +1423,8 @@ def _prepare_split_skim_job(
     retry_attempt: int,
     part_index: int,
     file_list: list[str],
+    first_entry: Optional[int] = None,
+    last_entry: Optional[int] = None,
 ) -> dict[str, str]:
     """Create an isolated per-file-group directory for a split retry."""
     resub_dir = os.path.join(submission_dir, "resubmissions")
@@ -1364,6 +1443,11 @@ def _prepare_split_skim_job(
     config["fileList"] = normalized_file_list
     if "__orig_fileList" in config:
         config["__orig_fileList"] = normalized_file_list
+    config.pop("plannedInputEntries", None)
+    if first_entry is not None and last_entry is not None:
+        config["firstEntry"] = str(first_entry)
+        config["lastEntry"] = str(last_entry)
+        config["plannedInputEntries"] = str(last_entry - first_entry)
 
     for key in ("saveFile", "metaFile", "__orig_saveFile", "__orig_metaFile"):
         if config.get(key):
@@ -2395,156 +2479,6 @@ def _dataset_job_metadata(dataset: DatasetEntry) -> dict[str, str]:
     return metadata
 
 
-def _collect_skim_normalization(
-    dataset_manifest_path: str,
-    dataset_job_info: dict[str, dict[int, dict[str, str]]],
-    state: dict[str, Any],
-) -> dict[str, Any]:
-    """Collect per-job generator-weight counters after a skim run completes."""
-    manifest = DatasetManifest.load(dataset_manifest_path)
-    output: dict[str, Any] = {
-        "schema_version": 1,
-        "manifest": dataset_manifest_path,
-        "lumi": manifest.lumi,
-        "datasets": {},
-    }
-
-    for dataset_name, job_info in sorted(dataset_job_info.items()):
-        dataset = manifest.by_name(dataset_name)
-        if dataset is None:
-            output["datasets"][dataset_name] = {
-                "status": "error",
-                "errors": ["dataset is not present in the dataset manifest"],
-            }
-            continue
-
-        effective_lumi = manifest.lumi_for(dataset.year, dataset.era)
-        dataset_output: dict[str, Any] = {
-            "manifest_entry": dataset.to_dict(),
-            "lumi": effective_lumi,
-            "jobs": {},
-            "sum_weights": None,
-            "sum_sign_weights": None,
-            "normalization_mode": (
-                dataset.generator_weight_mode if dataset.dtype == "mc" else None
-            ),
-            "normalization_denominator": None,
-            "normalization_denominator_name": None,
-            "normalization": None,
-            "status": "complete",
-            "errors": [],
-        }
-
-        raw_total = 0.0
-        sign_total = 0.0
-        completed_jobs = 0
-        for job_index, job_info_entry in sorted(job_info.items()):
-            job_state = (
-                state.get("datasets", {})
-                .get(dataset_name, {})
-                .get("jobs", {})
-                .get(str(job_index), {})
-            )
-            job_output: dict[str, Any] = {
-                "status": job_state.get("status", "unknown"),
-                "meta_file": job_info_entry.get("meta", ""),
-                "sum_weights": None,
-                "sum_sign_weights": None,
-                "error": None,
-            }
-
-            if dataset.dtype != "mc":
-                if job_output["status"] != "done":
-                    job_output["error"] = "job did not finish successfully"
-                    dataset_output["errors"].append(
-                        f"job {job_index} status is {job_output['status']}"
-                    )
-                else:
-                    completed_jobs += 1
-                dataset_output["jobs"][str(job_index)] = job_output
-                continue
-
-            if job_output["status"] != "done":
-                job_output["error"] = "job did not finish successfully"
-                dataset_output["errors"].append(
-                    f"job {job_index} status is {job_output['status']}"
-                )
-                dataset_output["jobs"][str(job_index)] = job_output
-                continue
-
-            completed_jobs += 1
-            meta_file = str(job_info_entry.get("meta", ""))
-            if not meta_file:
-                job_output["error"] = "job has no meta output path"
-                dataset_output["errors"].append(
-                    f"job {job_index} has no meta output path"
-                )
-                dataset_output["jobs"][str(job_index)] = job_output
-                continue
-
-            try:
-                raw_sum = _shared_read_weight_sum(meta_file, dataset_name)
-                sign_sum = _shared_read_weight_sign_sum(meta_file, dataset_name)
-                job_output["sum_weights"] = raw_sum
-                job_output["sum_sign_weights"] = sign_sum
-                raw_total += raw_sum
-                sign_total += sign_sum
-            except (OSError, RuntimeError, ValueError) as exc:
-                job_output["error"] = str(exc)
-                dataset_output["errors"].append(
-                    f"job {job_index} counter read failed: {exc}"
-                )
-            dataset_output["jobs"][str(job_index)] = job_output
-
-        expected_jobs = len(job_info)
-        if dataset_output["errors"] or completed_jobs != expected_jobs:
-            dataset_output["status"] = "incomplete"
-        elif dataset.dtype == "mc":
-            dataset_output["sum_weights"] = raw_total
-            dataset_output["sum_sign_weights"] = sign_total
-            if dataset.xsec is None:
-                dataset_output["status"] = "error"
-                dataset_output["errors"].append(
-                    "MC normalization requires a manifest xsec"
-                )
-            else:
-                try:
-                    denominator = select_generator_weight_denominator(
-                        dataset.generator_weight_mode,
-                        raw_total,
-                        sign_total,
-                        dataset_name=dataset_name,
-                    )
-                except ValueError as exc:
-                    dataset_output["status"] = "error"
-                    dataset_output["errors"].append(str(exc))
-                else:
-                    denominator_name = (
-                        "sum_sign_weights"
-                        if dataset.generator_weight_mode == "sign"
-                        else "sum_weights"
-                    )
-                    dataset_output["normalization_denominator"] = denominator
-                    dataset_output["normalization_denominator_name"] = (
-                        denominator_name
-                    )
-                    dataset_output["normalization"] = (
-                        dataset.xsec
-                        * dataset.filter_efficiency
-                        * dataset.kfac
-                        * dataset.extra_scale
-                        * effective_lumi
-                        * 1000.0
-                        / denominator
-                    )
-
-        dataset_output["job_count"] = expected_jobs
-        dataset_output["completed_jobs"] = completed_jobs
-        output["datasets"][dataset_name] = dataset_output
-
-    return output
-
-
 def _resolve_output_destination_base(
     template_config_path: str,
     config_dict: dict[str, str],
@@ -2841,6 +2775,9 @@ def _plan_file_source_jobs(
     jobs_dir: str,
     outputs_dir: str,
     manifest: Optional[DatasetManifest] = None,
+    partition_profile: str = "",
+    input_metadata_cache: str = "",
+    tree_name: str = "Events",
 ) -> list[dict[str, object]]:
     """Plan only manifest datasets, allowing reuse of a larger discovery cache."""
     job_plans: list[dict[str, object]] = []
@@ -2849,6 +2786,10 @@ def _plan_file_source_jobs(
         manifest = DatasetManifest.load(dataset_manifest_path)
     manifest_entries = {entry.name: entry for entry in manifest.datasets}
     discovered_datasets: set[str] = set()
+    profile = load_profile(partition_profile if partition_profile != "none" else "")
+    if profile and partition not in {"auto", "events", "entry_range"}:
+        raise ValueError("--partition-profile requires --partition auto, events or entry_range")
+    entry_cache = EntryCache(input_metadata_cache or None)
 
     for json_path in sorted(Path(file_list_dir).glob("*.json")):
         if json_path.name.endswith(".perf.json"):
@@ -2875,23 +2816,40 @@ def _plan_file_source_jobs(
         # non-Rucio sources or explicit file lists).
         site_redirectors: dict[str, list[str]] = payload.get("site_redirectors", {})
 
-        # Prefer pre-computed group partitions when available (e.g. from GetRucioFileList).
-        # If the file list is empty but groups exist, we still want to create jobs.
-        if groups:
-            partitions = [
-                {"files": g, "first_entry": 0, "last_entry": 0}
-                for g in groups
-                if g
-            ]
+        # Discovery groups retain their byte-size boundaries, but must not
+        # override explicit file/event policies or a tighter file-count cap.
+        group_files = [[u.strip() for u in str(g).split(",") if u.strip()]
+                       for g in groups if g]
+        flat_files = sorted({u.strip() for u in (all_files or [u for g in group_files for u in g])
+                             if u.strip()})
+        if not flat_files:
+            missing_datasets.append(str(dataset_name))
+            continue
+        if group_files and set(flat_files) != {u for g in group_files for u in g}:
+            raise ValueError(f"Discovery files/groups disagree for {dataset_name}")
+        budget = entries_per_job
+        mode = ("events" if profile_matches(profile, dataset_entry) else "file_group") if partition == "auto" else partition
+        if mode in {"events", "entry_range"}:
+            budget = event_budget(profile, dataset_entry, entries_per_job)
+            entry_cache.populate(flat_files, _query_tree_entries, tree_name)
+        if groups and mode in {"file_group", "events"}:
+            partitions = []
+            seen = set()
+            for urls in group_files:
+                if seen.intersection(urls) or len(set(urls)) != len(urls):
+                    raise ValueError(f"Duplicate files in discovery groups for {dataset_name}")
+                seen.update(urls)
+                partitions.extend(_make_partitions(
+                    urls=urls, mode=mode, files_per_job=files_per_job,
+                    entries_per_job=budget, entry_cache=entry_cache, tree_name=tree_name))
         else:
-            if not all_files:
-                missing_datasets.append(str(dataset_name))
-                continue
             partitions = _make_partitions(
-                urls=all_files,
-                mode=partition,
+                urls=flat_files,
+                mode=mode,
                 files_per_job=files_per_job,
-                entries_per_job=entries_per_job,
+                entries_per_job=budget,
+                entry_cache=entry_cache,
+                tree_name=tree_name,
             )
 
         dtype = dataset_entry.dtype
@@ -2916,6 +2874,7 @@ def _plan_file_source_jobs(
                 "files": part["files"],
                 "first_entry": part.get("first_entry", 0),
                 "last_entry": part.get("last_entry", 0),
+                "planned_entries": part.get("planned_entries"),
                 "dtype": dtype,
                 "lumi": lumi,
                 "site_redirectors": job_site_redirectors,
@@ -3038,21 +2997,115 @@ class SkimMixin:
         ),
     )
     partition = luigi.Parameter(
-        default="file_group",
+        default="auto",
         description=(
             "Partitioning mode for splitting file lists into per-job chunks: "
-            "'file_group' (default – group by file count), "
+            "'auto' (default: learned event budgets, otherwise file grouping), "
+            "'file_group' (group by file count), "
             "'file' (one file per job), "
-            "'entry_range' (split by TTree entry ranges, requires uproot)."
+            "'entry_range' (split every file by entries), or 'events' "
+            "(pack whole files by entries, splitting oversized files)."
         ),
     )
     entries_per_job = luigi.IntParameter(
         default=100_000,
         description=(
-            "Maximum TTree entries per job in 'entry_range' mode (default: 100000). "
-            "Requires uproot.  Ignored for 'file_group' and 'file' modes."
+            "Maximum TTree entries per job in 'entry_range'/'events' modes "
+            "(default: 100000); overridden by a matching partition profile."
         ),
     )
+    partition_profile = luigi.Parameter(
+        default="", description="JSON/YAML sizing profile; empty uses matching learned history, 'none' disables lookup.",
+    )
+    input_metadata_cache = luigi.Parameter(
+        default="", description="Optional entry-cache JSON seed; copied into the new run before planning.",
+    )
+    entry_range_mode = luigi.ChoiceParameter(
+        default="filter", choices=("filter", "source"),
+        description="Entry-range execution: filter, or direct source seeking on ROOT 6.40 (threads=1).",
+    )
+    sizing_pilots = _job_sizing_parameter(
+        'sizing_pilots',
+        description='Before main preparation, run one-file Condor pilots for datasets without sizing evidence.',
+    )
+    sizing_target_seconds = _job_sizing_parameter(
+        'sizing_target_seconds',
+        description='Estimated work per job from learned production rates, in seconds (default: 3600).',
+    )
+    sizing_pilot_target_seconds = _job_sizing_parameter(
+        'sizing_pilot_target_seconds',
+        description='Estimated work per job from provisional pilot rates, in seconds (default: 1800).',
+    )
+    sizing_pilot_parallel = _job_sizing_parameter(
+        'sizing_pilot_parallel',
+        description='Maximum simultaneous pilot jobs; submit/verify batches of this size.',
+    )
+    sizing_pilot_prefix_entries = _job_sizing_parameter(
+        'sizing_pilot_prefix_entries',
+        description='Short-prefix size paired with a full-file pilot to separate fixed overhead.',
+    )
+    sizing_pilot_safety_factor = _job_sizing_parameter(
+        'sizing_pilot_safety_factor',
+        description='Conservative multiplier for provisional pilot rates and fixed overhead (>=1).',
+    )
+    sizing_pilot_child = luigi.BoolParameter(default=False,
+        description="Internal paired-measurement worker mode; disables pilot recursion and regular cost learning.")
+
+    def _job_sizing_context(self) -> dict:
+        config = dict(read_config(self.submit_config), **_stitch_job_overrides(self))
+        # Input inventories and output locations do not describe computational
+        # work. Calibration/selection assets, executable and runtime do.
+        workload_config = {k: v for k, v in config.items()
+                           if k not in {"sampleConfig", "fileList", "saveFile", "metaFile", "saveDirectory"}}
+        return sizing_context(config, self.exe,
+            payloads=_analysis_config_payload_sources(self.submit_config, workload_config),
+            runtime=_local_shared_libs_with_signature(os.path.abspath(self.exe))[1],
+            environment=json.dumps({"root_setup": self._root_setup_content if self.root_setup else "",
+                                    "container": self.container_setup, "python_env": self.python_env}, sort_keys=True))
+
+    def _sizing_selection(self, freeze=False) -> dict:
+        receipt = Path(self._run_dir) / "job_sizing_selection.json"
+        if receipt.is_file() and not freeze:
+            return json.loads(receipt.read_text())
+        if not freeze:
+            return {}
+        profile, seed = self.partition_profile, self.input_metadata_cache
+        if self.sizing_pilots:
+            pilot_result = Path(self._run_dir) / 'sizing_pilots/result.json'
+            if not pilot_result.is_file():
+                raise RuntimeError('Sizing pilots must finish before main preparation')
+            result = json.loads(pilot_result.read_text())
+            profile, seed = result['profile'], result['metadata_seed']
+        result = select_sizing(self._run_dir, self._job_sizing_context(), profile=profile,
+                               metadata_seed=seed,
+                               target_seconds=self.sizing_target_seconds,
+                               pilot_target_seconds=self.sizing_pilot_target_seconds,
+                               allow_refresh=not (Path(self._run_dir) / "execution_identity.json").is_file())
+        if result.get("warning"):
+            self.publish_message("WARNING: " + result["warning"])
+        return result
+
+    def _planning_profile(self) -> str:
+        if self.partition not in {"auto", "events", "entry_range"}:
+            # Preserve the existing error for an incompatible explicit profile.
+            return self.partition_profile if self.partition_profile != "none" else ""
+        if self.partition == "auto" and str(read_config(self.submit_config).get("threads", "1")) != "1":
+            # Automatic reuse must not introduce unsupported ranged execution
+            # into a previously valid multi-threaded workflow.
+            return ""
+        return str(self._sizing_selection(freeze=True).get("profile", ""))
+
+    def _planning_metadata_cache(self) -> str:
+        """Keep mutable discovered counts isolated from the user's seed snapshot."""
+        if self.partition not in {"auto", "events", "entry_range"}:
+            return ""
+        path = os.path.join(self._run_dir, "input_metadata.json")
+        seed = self._sizing_selection(freeze=True).get("metadata_seed", "")
+        if seed and not os.path.exists(path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(seed, path)
+        return path
+
     prepare_workers = luigi.IntParameter(
         default=4,
         significant=False,
@@ -3068,7 +3121,7 @@ class SkimMixin:
         description=(
             "Delegated HTCondor output checks: 'exists' uses batched xrdfs listings "
             "without opening ROOT files; 'integrity' also checks ROOT contents and "
-            "MC counters (default). Final normalization counters are read in either mode."
+            "MC counters (default)."
         ),
     )
 
@@ -3170,9 +3223,9 @@ class SkimMixin:
         ),
     )
     max_runtime = luigi.IntParameter(
-        default=3600,
+        default=7200,
         significant=False,
-        description="Maximum HTCondor job runtime in seconds (default: 3600).",
+        description="Maximum HTCondor job runtime in seconds (default: 7200); independent of event-sizing targets.",
     )
     request_memory = luigi.IntParameter(
         default=2000,
@@ -3320,9 +3373,24 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         with open(self.submit_config, "rb") as config_fh:
             for chunk in iter(lambda: config_fh.read(1024 * 1024), b""):
                 digest.update(chunk)
+        for key in ("partition_profile", "input_metadata_cache"):
+            path = getattr(self, key, "")
+            if path and path != "none":
+                digest.update(key.encode())
+                digest.update(file_digest(path).encode())
+        selected = self._sizing_selection()
+        if self.partition in {"auto", "events", "entry_range"}:
+            for key in ("profile", "metadata_seed"):
+                if selected.get(key):
+                    digest.update(file_digest(selected[key]).encode())
         return digest.hexdigest()
 
     def requires(self):
+        if self.sizing_pilots:
+            return RunSkimSizingPilots.req(self)
+        return self._discovery_requirement()
+
+    def _discovery_requirement(self):
         """Declare LAW dependency on the file-list task when ``--file-source`` is set.
 
         For ``--file-source xrdfs`` the dependency on
@@ -3367,11 +3435,28 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         if self.file_source:
             discovery = {str(p.relative_to(self._file_list_dir())): file_digest(p) for p in sorted(Path(self._file_list_dir()).rglob("*"))
                          if p.is_file()}
+        partition_options = {"files_per_job": self.files_per_job,
+                             "rucio_group_size_gb": self.rucio_group_size_gb,
+                             "partition": self.partition, "entries_per_job": self.entries_per_job}
+        # Preserve identities of existing/default campaigns. New controls are
+        # explicitly sealed when used, before any staged worker is rewritten.
+        for key in ("partition_profile", "input_metadata_cache"):
+            path = getattr(self, key, "")
+            if path and path != "none":
+                partition_options[key + "_sha256"] = file_digest(path)
+        selected = self._sizing_selection()
+        if selected.get("profile") and self.partition in {"auto", "events", "entry_range"}:
+            partition_options["selected_profile_sha256"] = file_digest(selected["profile"])
+        if selected.get("metadata_seed") and self.partition in {"auto", "events", "entry_range"}:
+            partition_options["selected_metadata_sha256"] = file_digest(selected["metadata_seed"])
+        if self.entry_range_mode != "filter":
+            partition_options["entry_range_mode"] = self.entry_range_mode
+        if self.sizing_pilots:
+            partition_options['sizing_pilots'] = dict(parallel=self.sizing_pilot_parallel,
+                prefix_entries=self.sizing_pilot_prefix_entries, safety_factor=self.sizing_pilot_safety_factor)
         return execution_identity(bundle_record["bundle_id"],
             inputs={"manifest_sha256": file_digest(self.dataset_manifest), "discovery": discovery},
-            partitions={"files_per_job": self.files_per_job,
-                        "rucio_group_size_gb": self.rucio_group_size_gb,
-                        "partition": self.partition, "entries_per_job": self.entries_per_job},
+            partitions=partition_options,
             runtime={"executable": file_digest(exe_path),
                      "libraries": _local_shared_libs_with_signature(exe_path)[1]},
             options={"output_directory": self.output_directory,
@@ -3380,6 +3465,8 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
 
     def complete(self):
         """Invalidate prepared inputs when their config, executable, or proxy changes."""
+        if self.sizing_pilots and not RunSkimSizingPilots.req(self).complete():
+            return False
         bundle_record = verify_config_bundle(self.submit_config)
         identity_path = Path(self._run_dir) / "execution_identity.json"
         if bundle_record and identity_path.is_file():
@@ -3470,6 +3557,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
 
         manifest = DatasetManifest.load(self.dataset_manifest)
         template_config = read_config(self.submit_config)
+        self._sizing_selection(freeze=True)
         if bundle_record:
             # Lock source identity before modifying staged workers. Discovery
             # and the partition plan are recorded once preparation is complete.
@@ -3618,6 +3706,7 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 )
 
             planning_start = time.monotonic()
+            metadata_cache = self._planning_metadata_cache()
             planned_jobs = _plan_file_source_jobs(
                 dataset_manifest_path=self.dataset_manifest,
                 file_list_dir=fl_dir,
@@ -3627,6 +3716,9 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 jobs_dir=self._jobs_dir,
                 outputs_dir=self._outputs_dir,
                 manifest=manifest,
+                partition_profile=self._planning_profile(),
+                input_metadata_cache=metadata_cache,
+                tree_name=str(template_config.get("treeList", "Events")),
             )
             self.publish_message(
                 f"PrepareSkimJobs: planned {len(planned_jobs)} job(s) in "
@@ -3653,9 +3745,12 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 transient.das = None
 
                 extra_overrides = dict(base_extra_overrides)
+                if plan.get("planned_entries") is not None:
+                    extra_overrides["plannedInputEntries"] = str(plan["planned_entries"])
                 if int(plan.get("last_entry", 0)) > 0:
                     extra_overrides["firstEntry"] = str(plan["first_entry"])
                     extra_overrides["lastEntry"] = str(plan["last_entry"])
+                    extra_overrides["entryRangeMode"] = self.entry_range_mode
 
                 manifest_lumi = (
                     float(plan["lumi"])
@@ -3870,6 +3965,165 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
 # ===========================================================================
 # RunSkimTestJob – pre-flight data/MC local tests
 # ===========================================================================
+
+class RunSkimSizingPilots(AnalysisMixin, SkimMixin, law.Task):
+    """Calibrate missing datasets on Condor, in bounded one-file batches."""
+    task_namespace = ""
+
+    @property
+    def _run_dir(self):
+        return os.path.join(WORKSPACE, f"skimRun_{self.name}")
+
+    @property
+    def _pilots_dir(self):
+        return Path(self._run_dir) / 'sizing_pilots'
+
+    def requires(self):
+        return PrepareSkimJobs._discovery_requirement(self)
+
+    def output(self):
+        return law.LocalFileTarget(str(self._pilots_dir / 'result.json'))
+
+    def _pilot_identity(self):
+        if self.sizing_pilot_parallel < 1 or self.sizing_pilot_prefix_entries < 1:
+            raise ValueError('Pilot parallelism and prefix entries must be positive')
+        if not math.isfinite(self.sizing_pilot_safety_factor) or self.sizing_pilot_safety_factor < 1:
+            raise ValueError('Pilot safety factor must be finite and at least one')
+        if not self.file_source or self.partition not in {'auto', 'events', 'entry_range'}:
+            raise ValueError('Sizing pilots require a file source and partition auto, events or entry_range')
+        if str(read_config(self.submit_config).get('threads', '1')) != '1':
+            raise ValueError('Paired sizing pilots currently require threads=1')
+        inputs = dict(context=self._job_sizing_context(), manifest=file_digest(self.dataset_manifest),
+                      discovery={p.name: file_digest(p) for p in sorted(Path(self._file_list_dir()).glob('*.json'))
+                                 if not p.name.endswith('.perf.json')},
+                      profile=self.partition_profile, metadata_seed=self.input_metadata_cache,
+                      parallel=self.sizing_pilot_parallel, prefix=self.sizing_pilot_prefix_entries,
+                      safety=self.sizing_pilot_safety_factor, max_runtime=self.max_runtime,
+                      target_seconds=self.sizing_target_seconds,
+                      pilot_target_seconds=self.sizing_pilot_target_seconds)
+        for key, source in [('profile', self.partition_profile), ('metadata_seed', self.input_metadata_cache)]:
+            if source and source != 'none':
+                inputs[key+'_sha256'] = file_digest(source)
+        return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+    def complete(self):
+        if not super().complete():
+            return False
+        try:
+            result = json.loads(Path(self.output().path).read_text())
+            return (result['identity'] == self._pilot_identity() and
+                    file_digest(result['profile']) == result['profile_sha256'] and
+                    file_digest(result['metadata_seed']) == result['metadata_sha256'])
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    def _prepare_plan(self):
+        identity = self._pilot_identity()
+        path = self._pilots_dir / 'plan.json'
+        if path.is_file():
+            plan = json.loads(path.read_text())
+            if plan['identity'] != identity:
+                raise RuntimeError('Sizing pilot inputs changed; use a new run name')
+            return plan
+        context = self._job_sizing_context()
+        selected = select_sizing(self._pilots_dir, context, profile=self.partition_profile,
+                                 metadata_seed=self.input_metadata_cache,
+                                 target_seconds=self.sizing_target_seconds,
+                                 pilot_target_seconds=self.sizing_pilot_target_seconds)
+        profile = load_profile(selected['profile'])
+        manifest = DatasetManifest.load(self.dataset_manifest)
+        missing = pilot_inputs(manifest, self._file_list_dir(), profile)
+        base = _resolve_output_destination_base(self.submit_config, read_config(self.submit_config), self.output_directory)
+        if missing and not base:
+            raise ValueError('Sizing pilots require a remote --output-directory for diagnostic stage-out')
+        batches = []
+        for start in range(0, len(missing), self.sizing_pilot_parallel):
+            number = len(batches)
+            directory = self._pilots_dir / f'batch_{number:04d}'
+            directory.mkdir(parents=True, exist_ok=True)
+            child_manifest = DatasetManifest(datasets=missing[start:start+self.sizing_pilot_parallel],
+                 lumi=manifest.lumi, lumi_by_year=manifest.lumi_by_year,
+                 whitelist=manifest.whitelist, blacklist=manifest.blacklist)
+            child_manifest.save_yaml(str(directory/'datasets.yaml'))
+            batches.append(dict(name=f'{self.name}__sizing_pilot_{number:04d}',
+                manifest=str((directory/'datasets.yaml').resolve()), datasets=[e.name for e in child_manifest.datasets],
+                output_directory=base.rstrip('/') + f'_sizing_pilots/batch_{number:04d}'))
+        plan = dict(schema_version=1, identity=identity, context=context, selection=selected, batches=batches)
+        atomic_json(path, plan)
+        return plan
+
+    def _pilot_monitor(self, batch):
+        return MonitorSkimJobs.req(self, name=batch['name'], dataset_manifest=batch['manifest'],
+            file_source='', file_source_name='', partition='file_group',
+            partition_profile='none', input_metadata_cache='', make_test_job=False,
+            output_directory=batch['output_directory'], sizing_pilots=False, sizing_pilot_child=True,
+            max_retries=0, poll_interval=15)
+
+    def run(self):
+        plan = self._prepare_plan()
+        for batch in plan['batches']:
+            monitor = self._pilot_monitor(batch)
+            self.publish_message(f"Calibrating {len(batch['datasets'])} dataset(s) in {batch['name']}")
+            # Dynamic dependencies release the LAW worker while the batch runs.
+            # Yielding one batch at a time bounds both queued and running pilots.
+            yield monitor
+            if not monitor.complete():
+                raise RuntimeError(f"Sizing pilot batch failed: {batch['name']}; bulk preparation stopped")
+
+        profile = load_profile(plan['selection']['profile']) or {'schema_version': 1,
+                                      'target_runtime_seconds': self.sizing_target_seconds}
+        profile.setdefault('datasets', {})
+        metadata = EntryCache(plan['selection']['metadata_seed'] or None)
+        provisional = {}
+        observations = {}
+        for batch in plan['batches']:
+            run = Path(WORKSPACE) / ('skimRun_' + batch['name'])
+            logs = sorted(run.glob('condor_submissions/*/condor_logs/*out'))
+            ads = condor_event_ads(list(run.glob('condor_submissions/*/condor_logs/*.log')))
+            found = set()
+            for log in logs:
+                match = re.search(r'_(\d+)_(\d+)\.(?:stdout|out)$', log.name)
+                if not match or (int(match[1]), int(match[2])) not in ads:
+                    continue
+                text = log.read_text(errors='replace')
+                samples = re.findall(r'^RDF_JOB_SIZING_PILOT=(.+)$', text, re.M)
+                if len(samples) != 1:
+                    raise RuntimeError(f'Missing or ambiguous paired measurements in {log}')
+                measurement = json.loads(samples[0])
+                name = log.parent.parent.name
+                if name not in batch['datasets'] or name in found:
+                    raise RuntimeError(f'Ambiguous pilot dataset {name}')
+                found.add(name)
+                if measurement['full']['events'] == 0:
+                    observations[name] = {'status': 'empty_file', 'measurement': measurement}
+                else:
+                    transfer = sum(float(v) for v in re.findall(r'^(?:Stage-(?:in|out)|Worker setup) time:\s*([\d.]+)s', text, re.M))
+                    sizing = fit_pilot(measurement, self.sizing_pilot_safety_factor, transfer)
+                    sizing['target_runtime_seconds'] = self.sizing_pilot_target_seconds
+                    profile['datasets'][name] = sizing
+                    provisional[name] = sizing
+                    observations[name] = {'status': 'measured', 'sizing': sizing}
+                entries, _ = collect_log(log, {})
+                for url, n, tree in entries:
+                    known = metadata.get(url, tree)
+                    if known is not None and known != n:
+                        raise ValueError(f'Conflicting pilot entry count for {url}')
+                    metadata.put(url, n, tree)
+            if found != set(batch['datasets']):
+                raise RuntimeError(f"Missing successful measurements: {set(batch['datasets']) - found}")
+        profile_path, metadata_path = self._pilots_dir/'profile.json', self._pilots_dir/'metadata.json'
+        atomic_json(profile_path, profile)
+        atomic_json(metadata_path, metadata.data)
+        try:
+            cache_update = seed_pilot_sizing(plan['context'], {'datasets': provisional}, metadata.data)
+        except Exception as exc:
+            cache_update = {'status': 'error', 'reason': str(exc)}
+            self.publish_message(f'WARNING: Could not cache pilot estimates: {exc}')
+        atomic_json(self.output().path, dict(schema_version=1, identity=plan['identity'],
+            profile=str(profile_path.resolve()), profile_sha256=file_digest(profile_path),
+            metadata_seed=str(metadata_path.resolve()), metadata_sha256=file_digest(metadata_path),
+            observations=observations, batches=plan['batches'], cache_update=cache_update))
+
 
 class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
     """Run one-file data and MC preflights before dispatching :class:`SkimTask`.
@@ -4409,6 +4663,7 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 runtime_config_relpath=os.path.join("cfg", "submit_config.txt"),
                 sample_name=dataset_name,
                 run_name=self.name,
+                sizing_pilot_entries=self.sizing_pilot_prefix_entries if self.sizing_pilot_child else 0,
             )
             _rewrite_submit_transfer_files(
                 submit_path,
@@ -4540,17 +4795,9 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             os.path.join(self._run_dir, "all_outputs_verified.txt")
         )
 
-    @property
-    def _normalization_path(self) -> str:
-        return os.path.join(self._run_dir, "normalization.json")
-
-    def normalization_output(self):
-        """Return the post-job normalization artifact produced by monitoring."""
-        return law.LocalFileTarget(self._normalization_path)
-
     def complete(self):
-        """Require completed jobs, valid output artifacts, and normalization records."""
-        if not super().complete() or not os.path.isfile(self._normalization_path):
+        """Require completed jobs and valid output artifacts under the selected policy."""
+        if not super().complete():
             return False
 
         try:
@@ -4568,74 +4815,25 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             ):
                 return False
 
-            with open(self._normalization_path) as fh:
-                normalization = json.load(fh)
             with open(self._state_file) as fh:
                 state = json.load(fh)
 
-            if normalization.get("manifest") != self.dataset_manifest:
-                return False
             dataset_states = state.get("datasets")
-            normalization_datasets = normalization.get("datasets")
             if not isinstance(dataset_states, dict) or not dataset_states:
-                return False
-            if normalization.get("schema_version") != 1:
-                return False
-            if not isinstance(normalization_datasets, dict):
-                return False
-            if set(dataset_states) != set(normalization_datasets):
                 return False
 
             manifest = DatasetManifest.load(self.dataset_manifest)
             checked_jobs = 0
-            expected_output_paths: list[str] = []
+            jobs_to_check = {}
+            job_states = {}
             for dataset_name, dataset_state in dataset_states.items():
                 dataset = manifest.by_name(dataset_name)
-                norm_record = normalization_datasets[dataset_name]
-                if dataset is None or not isinstance(norm_record, dict):
+                if dataset is None:
                     return False
-                if norm_record.get("status") != "complete":
-                    return False
-                if dataset.dtype == "mc":
-                    expected_denominator_name = (
-                        "sum_sign_weights"
-                        if dataset.generator_weight_mode == "sign"
-                        else "sum_weights"
-                    )
-                    try:
-                        denominator = float(norm_record["normalization_denominator"])
-                        normalized_yield = float(norm_record["normalization"])
-                    except (KeyError, TypeError, ValueError, OverflowError):
-                        return False
-                    if (
-                        norm_record.get("normalization_mode")
-                        != dataset.generator_weight_mode
-                        or norm_record.get("normalization_denominator_name")
-                        != expected_denominator_name
-                        or not math.isfinite(denominator)
-                        or denominator <= 0.0
-                        or not math.isfinite(normalized_yield)
-                    ):
-                        return False
-
                 jobs = dataset_state.get("jobs")
                 if not isinstance(jobs, dict) or not jobs:
                     return False
-                norm_jobs = norm_record.get("jobs")
-                if not isinstance(norm_jobs, dict) or set(norm_jobs) != set(jobs):
-                    return False
-                if (
-                    norm_record.get("job_count") != len(jobs)
-                    or norm_record.get("completed_jobs") != len(jobs)
-                ):
-                    return False
-                if any(
-                    not isinstance(norm_job, dict)
-                    or norm_job.get("status") != "done"
-                    for norm_job in norm_jobs.values()
-                ):
-                    return False
-                for job_state in jobs.values():
+                for index, job_state in jobs.items():
                     if not isinstance(job_state, dict) or job_state.get("status") != "done":
                         return False
                     job_config = os.path.join(
@@ -4643,7 +4841,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     )
                     require_skim = (
                         _config_enables_skim(job_config)
-                        if job_state.get("job_dir")
+                        if os.path.isfile(job_config)
                         else _config_enables_skim(self.submit_config)
                     )
                     output_roles = ("save", "meta") if require_skim else ("meta",)
@@ -4652,24 +4850,140 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     ]
                     if any(not path for path in job_output_paths):
                         return False
-                    if self.output_validation == "integrity" and _skim_job_output_errors(
-                        dataset_name=dataset_name,
-                        dtype=dataset.dtype,
-                        save_path=str(job_state.get("save", "")),
-                        meta_path=str(job_state.get("meta", "")),
-                        tree_name=str(job_state.get("tree_name", "Events")),
-                        require_skim=require_skim,
-                    ):
-                        return False
-                    expected_output_paths.extend(job_output_paths)
+                    key = (dataset_name, index)
+                    jobs_to_check[key] = (dict(dir=job_state.get("job_dir", ""),
+                        save=job_state.get("save", ""), meta=job_state.get("meta", ""),
+                        tree_name=job_state.get("tree_name", "Events")), output_roles)
+                    job_states[key] = job_state
                     checked_jobs += 1
 
-            outputs_exist = _output_files_exist_batch(expected_output_paths)
-            if not all(outputs_exist.get(path, False) for path in expected_output_paths):
+            if checked_jobs != total:
                 return False
-            return checked_jobs == total
+            return not any(self._validate_output_jobs(
+                jobs_to_check, job_states, manifest).values())
         except Exception:  # completion checks fail closed on corrupt persisted records
             return False
+
+    @property
+    def _validation_cache_path(self) -> Path:
+        return Path(self._run_dir) / "output_validation.json"
+
+    def _read_validation_cache(self) -> dict:
+        try:
+            cache = json.loads(self._validation_cache_path.read_text())
+            if cache.get("schema_version") == 1 and isinstance(cache.get("jobs"), dict):
+                return cache["jobs"]
+        except (OSError, ValueError, AttributeError):
+            pass
+        return {}
+
+    def _save_validation_updates(self, updates: dict) -> None:
+        """Merge receipts atomically without rewriting the monitor's job state."""
+        if not updates:
+            return
+        path = self._validation_cache_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            current = self._read_validation_cache()
+            for key, receipt in updates.items():
+                if receipt is None:
+                    current.pop(key, None)
+                else:
+                    current[key] = receipt
+            atomic_json(path, dict(schema_version=1, jobs=current))
+
+    def _validate_output_jobs(self, jobs: dict, job_states: dict,
+                              manifest: DatasetManifest) -> dict:
+        """Share fresh batched path checks and persistent integrity receipts.
+
+        Receipts are only valid for the same job attempt, configuration, output
+        paths and fresh storage signatures. Old done states alone are not proof
+        of integrity. Existence-only checks never populate this cache.
+        """
+        paths = list(dict.fromkeys(str(info.get(role, ""))
+            for info, roles in jobs.values() for role in roles if info.get(role)))
+        signatures = {}
+        if self.output_validation == "integrity":
+            signatures = _output_file_info_batch(paths)
+            exists = {path: info is not None for path, info in signatures.items()}
+        else:
+            exists = _output_files_exist_batch(paths)
+        cache = self._read_validation_cache() if signatures else {}
+        updates = {}
+        errors_by_job = {}
+        last_checkpoint = time.monotonic()
+        checked = reused = 0
+        cache_writable = True
+        def checkpoint():
+            nonlocal cache_writable
+            if cache_writable:
+                try:
+                    self._save_validation_updates(updates)
+                except OSError as error:
+                    cache_writable = False
+                    self.publish_message(f"WARNING: output validation receipts could not be "
+                        f"saved; full validation results remain valid: {error}")
+            updates.clear()
+        manifest_sha = file_digest(self.dataset_manifest) if signatures else ""
+        identity = Path(self._run_dir) / "execution_identity.json"
+        execution_sha = file_digest(identity) if signatures and identity.is_file() else ""
+        self.publish_message(f"Checking {len(jobs)} output pair(s): batched storage metadata, "
+                             "then uncached integrity checks.")
+        try:
+            for key, (info, roles) in jobs.items():
+                dataset_name, index = key
+                dataset = manifest.by_name(dataset_name)
+                errors = []
+                job_paths = [str(info.get(role, "")) for role in roles]
+                for role, path in zip(roles, job_paths):
+                    if not path:
+                        errors.append(f"{role} output path is not configured")
+                    elif not exists.get(path, False):
+                        errors.append(f"{role} output {path!r} is absent or unreadable")
+                if dataset is None:
+                    errors.append(f"dataset {dataset_name!r} is missing from the dataset manifest")
+                cache_key = json.dumps([dataset_name, str(index)])
+                if not errors and self.output_validation == "integrity":
+                    state = job_states[key]
+                    config = Path(str(info.get("dir", ""))) / "submit_config.txt"
+                    if not config.is_file():
+                        config = Path(self.submit_config)
+                    contract = dict(version=1, dataset=dataset_name, dtype=dataset.dtype,
+                        tree_name=info.get("tree_name", "Events"), roles=list(roles),
+                        config_sha256=file_digest(config) if config.is_file() else None,
+                        manifest_sha256=manifest_sha, execution_sha256=execution_sha,
+                        cluster=state.get("cluster"), proc=state.get("proc"),
+                        retries=state.get("retries", 0))
+                    files = {path: signatures.get(path) for path in job_paths}
+                    receipt = dict(contract=contract, files=files)
+                    cacheable = all(files.values())
+                    if cacheable and cache.get(cache_key) == receipt:
+                        reused += 1
+                    else:
+                        errors.extend(_skim_job_output_errors(dataset_name=dataset_name,
+                            dtype=dataset.dtype, save_path=str(info.get("save", "")),
+                            meta_path=str(info.get("meta", "")),
+                            tree_name=str(info.get("tree_name", "Events")),
+                            require_skim="save" in roles))
+                        checked += 1
+                        # Unknown metadata (e.g. stat fallback) cannot establish
+                        # file identity, even after successful full validation.
+                        updates[cache_key] = receipt if not errors and cacheable else None
+                elif errors and self.output_validation == "integrity":
+                    updates[cache_key] = None
+                errors_by_job[key] = errors
+                now = time.monotonic()
+                if updates and (len(updates) >= 25 or now - last_checkpoint >= 10):
+                    checkpoint()
+                    self.publish_message(f"Output validation: {len(errors_by_job)}/{len(jobs)} "
+                        f"checked, {checked} ROOT checks, {reused} receipts reused.")
+                    last_checkpoint = now
+        finally:
+            checkpoint()
+        self.publish_message(f"Output validation finished: {len(jobs)} checked, "
+                             f"{checked} ROOT checks, {reused} receipts reused.")
+        return errors_by_job
 
     @property
     def _state_file(self) -> str:
@@ -4826,6 +5140,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         )
         self.publish_message(f"Output validation: {self.output_validation}")
 
+        event_log_cache: dict = {}
         while True:
             active_clusters = set()
             for dataset_state in state.get("datasets", {}).values():
@@ -4847,8 +5162,29 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 for proc, exit_code in _condor_history_exit(cluster_id).items():
                     history_exit[(cluster_id, proc)] = exit_code
 
+            # History can expire independently of the retained local event log.
+            # Recover terminal evidence only for absent jobs with no history;
+            # successful exit never bypasses output integrity/provenance checks.
+            for dataset_name, job_info in dataset_job_info.items():
+                dataset_state = state["datasets"][dataset_name]
+                for idx, info in job_info.items():
+                    job_state = dataset_state["jobs"][str(idx)]
+                    key = (str(job_state["cluster"]), job_state["proc"])
+                    if (job_state["status"] in ("done", "perm_fail") or
+                            key in live_status or key in history_exit):
+                        continue
+                    evidence = _condor_event_log_exit(
+                        dataset_state["submission_dir"], key[0], key[1], idx,
+                        str(info.get("dir", "")), event_log_cache,
+                    )
+                    if evidence is not None and evidence[0] == 0:
+                        history_exit[key] = 0
+                        job_state["completion_evidence"] = {
+                            "source": "condor_event_log", "path": evidence[1],
+                            "cluster": key[0], "proc": key[1], "exit_code": 0,
+                        }
+
             successful_jobs: dict[tuple[str, int], tuple[dict, tuple[str, ...]]] = {}
-            output_paths_to_check: list[str] = []
             for dataset_name, job_info in dataset_job_info.items():
                 dataset_state = state["datasets"][dataset_name]
                 for idx in sorted(list(job_info.keys())):
@@ -4867,11 +5203,6 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         )
                         output_roles = ("save", "meta") if require_skim else ("meta",)
                         successful_jobs[(dataset_name, idx)] = (info, output_roles)
-                        output_paths_to_check.extend(
-                            str(info.get(role, ""))
-                            for role in output_roles
-                            if info.get(role)
-                        )
                         continue
                     cluster_id = str(job_state["cluster"])
                     proc = job_state["proc"]
@@ -4891,36 +5222,9 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     )
                     output_roles = ("save", "meta") if require_skim else ("meta",)
                     successful_jobs[(dataset_name, idx)] = (info, output_roles)
-                    output_paths_to_check.extend(
-                        str(info.get(role, ""))
-                        for role in output_roles
-                        if info.get(role)
-                    )
-            output_exists = _output_files_exist_batch(output_paths_to_check)
-            output_errors: dict[tuple[str, int], list[str]] = {}
-            for (dataset_name, idx), (info, output_roles) in successful_jobs.items():
-                dataset = manifest.by_name(dataset_name)
-                errors: list[str] = []
-                for role in output_roles:
-                    path = str(info.get(role, ""))
-                    if not path:
-                        errors.append(f"{role} output path is not configured")
-                    elif not output_exists.get(path, False):
-                        errors.append(f"{role} output {path!r} is absent or unreadable")
-                if dataset is None:
-                    errors.append(
-                        f"dataset {dataset_name!r} is missing from the dataset manifest"
-                    )
-                elif not errors and self.output_validation == "integrity":
-                    errors.extend(_skim_job_output_errors(
-                        dataset_name=dataset_name,
-                        dtype=dataset.dtype,
-                        save_path=str(info.get("save", "")),
-                        meta_path=str(info.get("meta", "")),
-                        tree_name=str(info.get("tree_name", "Events")),
-                        require_skim="save" in output_roles,
-                    ))
-                output_errors[(dataset_name, idx)] = errors
+            job_states = {key: state["datasets"][key[0]]["jobs"][str(key[1])]
+                          for key in successful_jobs}
+            output_errors = self._validate_output_jobs(successful_jobs, job_states, manifest)
 
             for dataset_name, job_info in dataset_job_info.items():
                 dataset_state = state["datasets"][dataset_name]
@@ -5058,18 +5362,9 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         summary = self._status_summary(state)
         done = summary.get("done", 0)
         perm_fail = summary.get("perm_fail", 0)
-        normalization = _collect_skim_normalization(
-            dataset_manifest_path=self.dataset_manifest,
-            dataset_job_info=dataset_job_info,
-            state=state,
-        )
-        normalization_path = self._normalization_path
-        with open(normalization_path, "w") as fh:
-            json.dump(normalization, fh, indent=2)
-        self.publish_message(
-            f"Collected per-job generator-weight counters: {normalization_path}"
-        )
-
+        if not perm_fail and done:
+            self._update_site_rankings()
+            self._update_job_sizing()
         with self.output().open("w") as fh:
             fh.write(f"done={done}\n")
             fh.write(f"perm_fail={perm_fail}\n")
@@ -5089,6 +5384,45 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             )
         else:
             self.publish_message(f"All {done} skim output(s) verified. Monitoring complete.")
+
+    def _update_site_rankings(self) -> None:
+        """Ancillary learning must not turn verified physics outputs into a retry."""
+        try:
+            result = _update_xrd_site_rankings(self._run_dir, seed=_io_policy.SITE_RANKING_FILE)
+        except Exception as exc:
+            result = {"status": "error", "reason": str(exc)}
+            self.publish_message(f"WARNING: XRootD site ranking update failed: {exc}")
+        try:
+            path = Path(self._run_dir) / "xrd_site_rankings_update.json"
+            path.write_text(json.dumps(result, indent=2) + "\n")
+        except OSError as exc:
+            self.publish_message(f"WARNING: Could not save XRootD ranking update receipt: {exc}")
+        if result.get("status") == "updated":
+            self.publish_message(
+                f"Updated XRootD site rankings from {result['completed_runs']} completed run(s): "
+                f"{result['cache']}"
+            )
+
+    def _update_job_sizing(self) -> None:
+        """Learning is ancillary to verified outputs; never resubmit on failure."""
+        try:
+            selection = self._sizing_selection()
+            if self.sizing_pilot_child:
+                result = {"status": "skipped", "reason": "paired pilots publish provisional rates separately"}
+            elif not selection:
+                result = {"status": "skipped", "reason": "no preparation workload identity"}
+            else:
+                result = _update_job_sizing(self._run_dir, selection["context"],
+                                            target_seconds=self.sizing_target_seconds)
+        except Exception as exc:
+            result = {"status": "error", "reason": str(exc)}
+            self.publish_message(f"WARNING: Job-sizing profile update failed: {exc}")
+        try:
+            (Path(self._run_dir) / "job_sizing_update.json").write_text(json.dumps(result, indent=2) + "\n")
+        except OSError as exc:
+            self.publish_message(f"WARNING: Could not save job-sizing update receipt: {exc}")
+        if result.get("status") == "updated":
+            self.publish_message(f"Updated job-sizing history: {result['datasets']} trained dataset(s), {result['cache']}")
 
     def _try_resubmit(
         self,
@@ -5123,12 +5457,13 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         source_job_dir = str(
             source_info.get("dir") or os.path.join(submission_dir, f"job_{idx}")
         )
-        file_list = _skim_job_file_list(source_job_dir)
-        file_groups = _split_skim_file_list(file_list)
+        file_groups = _split_skim_partition(
+            source_job_dir, os.path.join(self._run_dir, "input_metadata.json"))
         retry_attempt = retries + 1
         submitted_parts: list[tuple[dict[str, str], str]] = []
 
-        for part_index, part_files in enumerate(file_groups):
+        for part_index, partition in enumerate(file_groups):
+            part_files = partition["files"]
             part_info = source_info
             log_label = None
             if len(file_groups) > 1:
@@ -5140,6 +5475,8 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         retry_attempt=retry_attempt,
                         part_index=part_index,
                         file_list=part_files,
+                        first_entry=partition.get("first_entry"),
+                        last_entry=partition.get("last_entry"),
                     )
                 except (OSError, ValueError) as exc:
                     self.publish_message(
@@ -5303,6 +5640,31 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
         if self.file_source:
             fl_dir = self._file_list_dir()
             if os.path.isdir(fl_dir):
+                # Workflow completion can request this preview before upstream
+                # preparation runs. Never freeze/consult mutable learned history
+                # here. The branch map resets to authoritative prepared entries.
+                selection = self._sizing_selection()
+                profile = selection.get("profile", self.partition_profile)
+                if profile == "none":
+                    profile = ""
+                if self.partition == "auto" and str(read_config(self.submit_config).get("threads", "1")) != "1":
+                    profile = ""
+                seed = os.path.join(self._run_dir, "input_metadata.json")
+                if not os.path.isfile(seed):
+                    seed = selection.get("metadata_seed", self.input_metadata_cache)
+                # The preview may query missing counts for explicit entry modes;
+                # its scratch cache must not mutate an input seed or prepared run.
+                with tempfile.TemporaryDirectory(prefix="rdf_sizing_preview_") as scratch:
+                    metadata = os.path.join(scratch, "entries.json")
+                    if seed:
+                        shutil.copy2(seed, metadata)
+                    plans = _plan_file_source_jobs(
+                        dataset_manifest_path=self.dataset_manifest,
+                        file_list_dir=fl_dir, partition=self.partition,
+                        files_per_job=self.files_per_job, entries_per_job=self.entries_per_job,
+                        jobs_dir=self._jobs_dir, outputs_dir=self._outputs_dir,
+                        partition_profile=profile, input_metadata_cache=metadata,
+                        tree_name=str(read_config(self.submit_config).get("treeList", "Events")))
                 return [
                     {
                         "dataset_name": str(entry["dataset_name"]),
@@ -5310,15 +5672,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
                         "config_path": os.path.join(str(entry["job_dir"]), "submit_config.txt"),
                         "out_dir": str(entry["out_dir"]),
                     }
-                    for entry in _plan_file_source_jobs(
-                        dataset_manifest_path=self.dataset_manifest,
-                        file_list_dir=fl_dir,
-                        partition=self.partition,
-                        files_per_job=self.files_per_job,
-                        entries_per_job=self.entries_per_job,
-                        jobs_dir=self._jobs_dir,
-                        outputs_dir=self._outputs_dir,
-                    )
+                    for entry in plans
                 ]
 
             manifest = DatasetManifest.load(self.dataset_manifest)
@@ -6448,8 +6802,17 @@ class StitchingDerivationTask(law.Task):
     source_file_source = luigi.Parameter(default="")
     source_file_source_name = luigi.Parameter(default="")
     source_files_per_job = luigi.IntParameter(default=50)
-    source_partition = luigi.Parameter(default="file_group")
+    source_partition = luigi.Parameter(default="auto")
     source_entries_per_job = luigi.IntParameter(default=100_000)
+    source_partition_profile = luigi.Parameter(default="")
+    source_sizing_pilots = _job_sizing_parameter('sizing_pilots')
+    source_sizing_target_seconds = _job_sizing_parameter('sizing_target_seconds')
+    source_sizing_pilot_target_seconds = _job_sizing_parameter('sizing_pilot_target_seconds')
+    source_sizing_pilot_parallel = _job_sizing_parameter('sizing_pilot_parallel')
+    source_sizing_pilot_prefix_entries = _job_sizing_parameter('sizing_pilot_prefix_entries')
+    source_sizing_pilot_safety_factor = _job_sizing_parameter('sizing_pilot_safety_factor')
+    source_input_metadata_cache = luigi.Parameter(default="")
+    source_entry_range_mode = luigi.Parameter(default="filter")
     source_x509 = luigi.Parameter(default="")
     source_stage_in = luigi.BoolParameter(default=False)
     source_root_setup = luigi.Parameter(default="")
@@ -6459,7 +6822,7 @@ class StitchingDerivationTask(law.Task):
     source_make_test_job = luigi.BoolParameter(default=False)
     source_dask_scheduler = luigi.Parameter(default="", significant=False)
     source_dask_workers = luigi.IntParameter(default=1, significant=False)
-    source_max_runtime = luigi.IntParameter(default=3600, significant=False)
+    source_max_runtime = luigi.IntParameter(default=7200, significant=False)
     source_workflow = luigi.Parameter(default="", significant=False)
     source_stitch_mode = luigi.Parameter(default="none", significant=False)
 
@@ -6485,6 +6848,10 @@ class StitchingDerivationTask(law.Task):
             "files_per_job": self.source_files_per_job,
             "partition": self.source_partition,
             "entries_per_job": self.source_entries_per_job,
+            "partition_profile": self.source_partition_profile,
+            **_job_sizing_kwargs(self, input_prefix="source_"),
+            "input_metadata_cache": self.source_input_metadata_cache,
+            "entry_range_mode": self.source_entry_range_mode,
             "x509": self.source_x509,
             "stage_in": self.source_stage_in,
             "root_setup": self.source_root_setup,
@@ -6652,6 +7019,10 @@ def _make_stitching_derivation_task(
         source_files_per_job=task.files_per_job,
         source_partition=task.partition,
         source_entries_per_job=task.entries_per_job,
+        source_partition_profile=task.partition_profile,
+        **_job_sizing_kwargs(task, output_prefix="source_"),
+        source_input_metadata_cache=task.input_metadata_cache,
+        source_entry_range_mode=task.entry_range_mode,
         source_x509=task.x509,
         source_stage_in=task.stage_in,
         source_root_setup=task.root_setup,

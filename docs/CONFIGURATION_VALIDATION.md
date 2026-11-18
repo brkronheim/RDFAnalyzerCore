@@ -1,5 +1,10 @@
 # Configuration Validation
 
+Compiled C++ analyses can also use the optional standard-library
+[native settings and validation reports](NATIVE_SETTINGS_AND_VALIDATION.md).
+That configuration-only helper emits the existing native option map and shared
+JSON diagnostics; the broader validators below retain their existing behavior.
+
 RDFAnalyzerCore ships a configuration validation tool that catches mis-spelled keys, missing files, bad numeric values and structural inconsistencies **before** a long analysis run starts.  Fixing problems early avoids silent data-quality issues and wasted CPU time on the grid.
 
 The tool lives in `core/python/validate_config.py` and supports two independent validation modes:

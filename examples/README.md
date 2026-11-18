@@ -1,6 +1,51 @@
-# Python Bindings Examples and Workflow Scripts
+# Analysis examples and workflow scripts
+
+Start with the [Analyzer SDK example](analyzer-sdk/README.md) to compare three
+authoring routes with the same signed-weight scalar physics and output contract:
+
+| Route | Starting point | Runtime requirements |
+|---|---|---|
+| Direct C++ | Build the Analyzer-linked analysis library and executable | Optional AnalyzerSDK, matching ROOT/native dependencies; compiler at build time |
+| Python steering of C++ | Run the same executable through `steer.py` | PythonController plus the executable's native runtime; no Python binding or event callback |
+| Python-authored physics | Edit `physics.py`, run `python_analysis.py` | Matching Python component and ROOT/Numba; native CFunc registration, no raw function-pointer management |
+
+All three routes pass private installed/relocated core-only CPU acceptance,
+including signed sums, histogram flows/Sumw2 and bundled ONNX runtime mapping.
+This establishes finite onboarding, with broader SDK configurations, complex ML,
+threading coverage and independent novice trials still separate. See
+[exact SDK acceptance and limits](../docs/ANALYZER_SDK.md).
+
+For a smaller Python-only first run, use the
+[three-event Python/Numba tutorial](python-authoring/README.md), which includes
+explicit input creation, expected outputs and nonexecuting descriptions.
+
+The [compiled native preflight example](native-preflight/README.md) shows
+generated settings help and explicit ROOT schema inspection, with zero event
+loops, in a C++ library linked into an executable. The same binary can be steered
+by the lightweight Python controller.
+
+The [linked native result example](native-results/README.md) uses the optional
+`RunResult.h` header with a separately compiled ROOT analysis library, a native
+CLI and Python steering. Its finite validation checks signed histogram flows,
+variances and direct/steered equality; actual acceptance is recorded separately
+from source readiness.
 
 This directory contains example scripts demonstrating the use of RDFAnalyzerCore Python bindings and complete analysis workflows.
+
+The [systematics/inference tutorial](systematics-inference/README.md) shows a
+synthetic shape shift, independent weight variations and real native BDT setup
+inside a Python-authored event graph. Installed native execution, systematic
+migrations, persisted histograms and one-event-loop acceptance pass; the tutorial
+guide links the retained evidence.
+
+The [small installed Python/Numba example](python-authoring/README.md) starts
+with nonexecuting descriptions, then demonstrates explicit custom Python kernels,
+interleaved cuts/definitions and detached results on a three-event fixture.
+
+The [installed compiled-controller example](compiled-controller/README.md)
+shows Python steering of a separately compiled C++ executable. Its controller
+installation needs no native Python bindings; execution uses the analysis's
+native runtime. The binding prerequisites below apply to the other examples.
 
 ## Analysis Workflow Scripts
 
@@ -31,7 +76,11 @@ See [Combine Integration Guide](../docs/COMBINE_INTEGRATION.md) for complete doc
 
 ---
 
-## Python Bindings Examples
+## Advanced binding examples
+
+The examples below demonstrate lower-level interfaces. The high-level Python
+route above manages native bridges and their lifetimes; analysis authors need
+not manage raw pointers to write custom Python physics.
 
 Note: the Python API supports C++-style names (`Define`, `Filter`, `DefineVector`) and legacy aliases (`DefineJIT`, `FilterJIT`, `DefineFromVector`).
 
@@ -51,7 +100,9 @@ Before running these examples, ensure you have:
    pip install pybind11 numpy numba
    ```
 
-3. The Python module is available at `build/python/rdfanalyzer.so`
+3. The matching Python module is available as `build/python/rdfanalyzer*.so`.
+   Its ABI suffix depends on the selected interpreter; renaming a binary does
+   not make it compatible with another Python runtime.
 
 ## Examples
 

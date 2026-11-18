@@ -101,6 +101,33 @@ TEST_F(RootOutputSinkTest, ExactColumnNamesAreWritten) {
   f.Close();
 }
 
+TEST_F(RootOutputSinkTest, FullSnapshotsResolveAliasDuplicatesButExplicitAliasesKeepTheirNames) {
+  auto dm=makeDataManager();
+  auto df=dm->getDataFrame().Alias("Electron_pt_copy","Electron_pt").Alias("Electron_pt_copy2","Electron_pt_copy");
+  for(const bool wildcard:{false,true}) {
+    RootOutputSink sink;
+    if(wildcard) {
+      writeSaveConfigFile(saveConfigPath,{"*"});writeAnalysisConfig(cfgPath,outputPath,saveConfigPath);
+      ConfigurationManager config(cfgPath);SystematicManager sm;
+      ASSERT_NO_THROW(sink.writeDataFrame(df,config,&sm,OutputChannel::Skim));
+    } else {
+      ASSERT_NO_THROW(sink.writeDataFrame(df,OutputSpec{outputPath,"Events",{}}));
+    }
+    TFile file(outputPath.c_str(),"READ");auto* tree=dynamic_cast<TTree*>(file.Get("Events"));
+    ASSERT_NE(tree,nullptr);EXPECT_EQ(tree->GetEntries(),5);
+    EXPECT_NE(tree->GetBranch("Electron_pt"),nullptr);
+    EXPECT_EQ(tree->GetBranch("Electron_pt_copy"),nullptr);
+    EXPECT_EQ(tree->GetBranch("Electron_pt_copy2"),nullptr);
+    EXPECT_NE(tree->GetBranch("Electron_eta"),nullptr);
+  }
+  RootOutputSink explicitSink;
+  ASSERT_NO_THROW(explicitSink.writeDataFrame(df,OutputSpec{outputPath,"Events",{"Electron_pt_copy2"}}));
+  TFile file(outputPath.c_str(),"READ");auto* tree=dynamic_cast<TTree*>(file.Get("Events"));
+  ASSERT_NE(tree,nullptr);EXPECT_NE(tree->GetBranch("Electron_pt_copy2"),nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt"),nullptr);
+  float value=0.;tree->SetBranchAddress("Electron_pt_copy2",&value);tree->GetEntry(0);EXPECT_FLOAT_EQ(value,30.f);
+}
+
 /// A glob pattern like Electron_* must expand to all matching columns
 TEST_F(RootOutputSinkTest, GlobPatternExpandsMatchingColumns) {
   writeSaveConfigFile(saveConfigPath, {"Electron_*"});

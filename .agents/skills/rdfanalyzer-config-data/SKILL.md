@@ -11,6 +11,30 @@ Start with the analysis constructor and generated job config. Read [IConfigurati
 
 Trace `resolveConfigPath` at each load site. Main-config-relative resolution and process-working-directory resolution matter for staging. Current [DataManager.cc](../../../core/src/DataManager.cc) resolves constant-file paths with `resolveConfigPath`; older prose in [CONFIG_REFERENCE](../../../docs/CONFIG_REFERENCE.md) describes a direct existence check. Follow the executable implementation and report the discrepancy if it affects a run. Likewise inspect the input tree fallback in code rather than assuming documentation defaults.
 
+For optional C++17 setup helpers, use [CommonSettings.h](../../../core/interface/CommonSettings.h)
+and [ValidationReport.h](../../../core/interface/ValidationReport.h), documented in
+[native settings/validation](../../../docs/NATIVE_SETTINGS_AND_VALIDATION.md).
+They emit existing native string-map options and `rdf-validation-v1` diagnostics
+without changing providers, defaults or event graphs. Unset fields preserve
+advanced options; explicitly typed collisions fail. Paths remain native-owned;
+configuration validation does not open files or certify schemas/payloads.
+Explicit [NativePreflight.h](../../../core/interface/NativePreflight.h) checks
+only caller-declared local assets or supplied column metadata. It does not
+recursively discover configs, normalize ROOT type spellings, open ROOT inputs,
+compile kernels or certify every file in a chain. Asset and schema reports
+advertise only the checked phase. [CommonSettingsSchema.h](../../../core/interface/CommonSettingsSchema.h)
+generates help/descriptions from the same native keys/ranges used by settings
+lowering; it neither queries runtime defaults nor intercepts executable arguments.
+
+For explicitly requested Python input preflight, [rdfschema.py](../../../core/python/rdfschema.py)
+compares supplied metadata or opens each supplied file separately through its
+optional ROOT reader. [Input schema preflight](../../../docs/INPUT_SCHEMA_PREFLIGHT.md)
+documents exact type spellings, coverage and custom readers. Import/configuration
+checks stay stdlib-only; ROOT is loaded only for acquisition. The reader books no
+actions and verifies zero RDF event loops. These are original input columns, not
+aliases, optional defaults, friends or derived analysis columns. Do not certify a
+mixed chain from its first file or treat schema success as later-read/physics proof.
+
 ## Construct and extend the dataframe
 
 - Read [IDataFrameProvider](../../../core/interface/api/IDataFrameProvider.h) and [DataManager](../../../core/interface/DataManager.h). Track chain construction, `finalizeSetup`, constants, aliases, optional branches, and friend attachment before analysis `Define`s.

@@ -45,6 +45,7 @@ core/python/law/index
 skimRun*/
 mergeRun*/
 rucioFileList*/
+xrdfsFileList*/
 
 AGENTS/
 .venv-rabbit/

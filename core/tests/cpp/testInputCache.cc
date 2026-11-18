@@ -15,6 +15,24 @@
 #include <tuple>
 #include <unistd.h>
 
+#ifdef RDF_INPUT_CACHE_CLOCK_TEST
+#include <atomic>
+#include <TLeaf.h>
+
+// Only the GNU/Linux instrumentation executable wraps this libstdc++ symbol.
+// Shared ROOT libraries are not relinked; count framework object references.
+namespace {
+std::atomic<unsigned long> frameworkClockReads{0};
+}
+extern "C" std::chrono::steady_clock::time_point
+__real__ZNSt6chrono3_V212steady_clock3nowEv();
+extern "C" std::chrono::steady_clock::time_point
+__wrap__ZNSt6chrono3_V212steady_clock3nowEv() {
+  frameworkClockReads.fetch_add(1, std::memory_order_relaxed);
+  return __real__ZNSt6chrono3_V212steady_clock3nowEv();
+}
+#endif
+
 namespace {
 class InputCacheTest : public ::testing::Test {
 protected:
@@ -262,6 +280,8 @@ TEST_F(InputCacheTest, ZeroSizeAndInvalidConfiguration) {
   EXPECT_EQ(cache(data), nullptr);
   auto invalid = config("treeCacheEnabled=maybe\n");
   EXPECT_THROW(DataManager{invalid}, std::runtime_error);
+  auto invalidAhead = config("treeCacheOpenAheadFiles=5\n");
+  EXPECT_THROW(DataManager{invalidAhead}, std::runtime_error);
 }
 
 TEST_F(InputCacheTest, SplitBranchUsesRootMetadata) {
@@ -348,4 +368,68 @@ TEST_F(InputCacheTest, FriendChainsRetainResultsWithDefaultReporting) {
   EXPECT_NE(log.find("file_index=1"), std::string::npos);
   EXPECT_NE(log.find("file_read_calls="), std::string::npos);
 }
+
+#ifdef RDF_INPUT_CACHE_CLOCK_TEST
+TEST_F(InputCacheTest, EntryLocalCallsAvoidTransitionClocks) {
+  for (const auto &extra : {
+      std::string("treeCacheEnabled=0\ntreeCacheStats=1\n"),
+      std::string("treeCacheEnabled=1\ntreeCacheStats=0\n")}) {
+    auto cfg = config(extra);
+    DataManager data(cfg);
+    auto &chain = data.getChain();
+    ASSERT_NE(dynamic_cast<InputCacheChain *>(&chain), nullptr);
+    ASSERT_EQ(chain.LoadTree(0), 0);
+    const auto before = frameworkClockReads.load(std::memory_order_relaxed);
+    bool correctEntries = true;
+    for (Long64_t entry = 1; entry < 20; ++entry)
+      correctEntries = (chain.LoadTree(entry) == entry) && correctEntries;
+    const auto after = frameworkClockReads.load(std::memory_order_relaxed);
+    EXPECT_TRUE(correctEntries);
+    EXPECT_EQ(after, before)
+        << "In-file calls must not sample discarded transition timestamps";
+    const auto beforeBoundary = frameworkClockReads.load(std::memory_order_relaxed);
+    const auto local = chain.LoadTree(20);
+    const auto afterBoundary = frameworkClockReads.load(std::memory_order_relaxed);
+    EXPECT_EQ(local, 0);
+    EXPECT_EQ(chain.GetTreeNumber(), 1);
+    // Report/configuration clocks still work on actual file transitions.
+    EXPECT_GT(afterBoundary, beforeBoundary);
+  }
+}
+
+TEST_F(InputCacheTest, TransitionTimingAndValuesSurviveRandomAccess) {
+  auto cfg = config("treeCacheEnabled=0\ntreeCacheStats=1\n");
+  InputCacheChain chain("Events", cfg, false, false);
+  chain.Add((dir / "0.root").c_str());
+  chain.Add((dir / "1.root").c_str());
+  ASSERT_EQ(chain.LoadTree(0), 0);
+  testing::internal::CaptureStdout();
+  const auto forward = chain.LoadTree(20);
+  chain.GetEntry(20);
+  const auto forwardValue = chain.GetLeaf("Jet_pt")->GetValue();
+  const auto backward = chain.LoadTree(0);
+  chain.GetEntry(0);
+  const auto backwardValue = chain.GetLeaf("Jet_pt")->GetValue();
+  const auto eof = chain.LoadTree(40);
+  const auto log = testing::internal::GetCapturedStdout();
+  EXPECT_EQ(forward, 0);
+  EXPECT_EQ(backward, 0);
+  EXPECT_EQ(forwardValue, 20.f);
+  EXPECT_EQ(backwardValue, 0.f);
+  EXPECT_LT(eof, 0);
+  EXPECT_NE(log.find("from_index=0 expected_to_index=1 actual_to_index=1 requested_entry=20 result=0"),
+            std::string::npos);
+  // expected_to_index remains the existing next-file prediction for backwards
+  // access; validate actual identity rather than silently changing that policy.
+  EXPECT_NE(log.find("actual_to_index=0 requested_entry=0 result=0"), std::string::npos);
+  EXPECT_NE(log.find("requested_entry=40 result="), std::string::npos);
+  for (const auto *key : {"cache_report_ms=", "root_loadtree_ms=", "configure_tree_ms=",
+                          "warm_release_ms=", "schedule_next_ms=", "callback_total_ms="}) {
+    auto start = log.find(key);
+    ASSERT_NE(start, std::string::npos) << key;
+    for (; start != std::string::npos; start = log.find(key, start + 1))
+      EXPECT_GE(std::stod(log.substr(start + std::string(key).size())), 0.) << key;
+  }
+}
+#endif
 }

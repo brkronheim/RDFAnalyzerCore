@@ -2,7 +2,6 @@
 
 ## Quick Links
 
-- **[Audit and improvement plan](./AUDIT_PLAN.md)** - Parallel workstreams, dependencies, acceptance criteria, and agent handoffs
 - **[Architecture](./ARCHITECTURE.md)** - Core C++ architecture and manager lifecycle
 - **[API Reference](./API_REFERENCE.md)** - Canonical C++ API surface
 - **[Getting Started](./GETTING_STARTED.md)** - Installation and first steps
@@ -19,7 +18,7 @@
 **Getting Started**
 - [Installation](./GETTING_STARTED.md) - Build requirements
 - [Quick Start](./GETTING_STARTED.md) - Minimal example
-- [Examples](../examples/README.md) - Runnable examples and scripts
+- [Examples](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/README.md) - Runnable examples and scripts
 
 **Analysis Guide**
 - [Building Analyses](./ANALYSIS_GUIDE.md) - Step-by-step tutorials
@@ -92,7 +91,7 @@
 
 - **Agents (automation + validation)**
   - Start: [Documentation Index](./INDEX.md)
-  - Analysis workflow: [analysis skill](../.agents/skills/rdfanalyzer-analysis/SKILL.md), [framework development skill](../.agents/skills/rdfanalyzer-development/SKILL.md), and [the analysis walkthrough](./ANALYSIS_WALKTHROUGH.md)
+  - Analysis workflow: [analysis skill](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/.agents/skills/rdfanalyzer-analysis/SKILL.md), [framework development skill](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/.agents/skills/rdfanalyzer-development/SKILL.md), and [the analysis walkthrough](./ANALYSIS_WALKTHROUGH.md)
   - Then: [Errors and Tracing](./ERRORS_AND_TRACING.md), [Configuration Validation](./CONFIGURATION_VALIDATION.md), [Output Schema](./OUTPUT_SCHEMA.md), [Validation Reports](./VALIDATION_REPORTS.md)
 
 ## Documentation Quality

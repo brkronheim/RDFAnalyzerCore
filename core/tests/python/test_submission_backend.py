@@ -248,6 +248,55 @@ def test_generated_workers_have_no_redirector_probe_processes(stage_in):
     subprocess.run(['bash', '-n'], input=script, text=True, check=True)
 
 
+@pytest.mark.parametrize('cpus,site_cpus', [(1, None), (1, 1), (2, None), (2, 2), (2, 1)])
+def test_worker_preserves_inherited_affinity_and_limits_thread_pools(tmp_path, cpus, site_cpus):
+    import json
+    import subprocess
+    import sys
+    if len(os.sched_getaffinity(0)) < cpus:
+        pytest.skip('Insufficient CPUs in the test allocation')
+    exe = tmp_path / 'myexe'
+    exe.write_text(
+        '#!' + sys.executable + '\n'
+        'import json, os, pathlib, subprocess, sys, threading\n'
+        'seen = []\n'
+        't = threading.Thread(target=lambda: seen.extend(os.sched_getaffinity(0)))\n'
+        't.start(); t.join()\n'
+        'child = subprocess.check_output([sys.executable, "-c", '
+        '"import os, json; print(json.dumps(sorted(os.sched_getaffinity(0))))"], text=True)\n'
+        'pathlib.Path("cpu.json").write_text(json.dumps(dict('
+        'affinity=sorted(os.sched_getaffinity(0)), thread=sorted(seen), child=json.loads(child), '
+        'omp=os.environ["OMP_NUM_THREADS"], blas=os.environ["OPENBLAS_NUM_THREADS"])))\n')
+    (tmp_path / 'submit_config.txt').write_text('fileList=local.root\nthreads=1\n')
+    script = generate_condor_runscript('myexe', False, False, '', request_cpus=cpus)
+    # Setup/staging must retain the same inherited placement as the analysis.
+    script = script.replace('stage_in_start=$(date +%s)',
+        "run_helper_python -c 'import os; print(len(os.sched_getaffinity(0)))' > setup_cpus.txt\n"
+        'stage_in_start=$(date +%s)')
+    env = dict(os.environ, OPENBLAS_NUM_THREADS='64', OMP_NUM_THREADS='64')
+    site_affinity = set(sorted(os.sched_getaffinity(0))[:site_cpus])
+    subprocess.run(['bash'], input=script, cwd=tmp_path, env=env,
+                   text=True, check=True, capture_output=True,
+                   preexec_fn=(lambda: os.sched_setaffinity(0, site_affinity)) if site_cpus else None)
+    result = json.loads((tmp_path / 'cpu.json').read_text())
+    expected = sorted(site_affinity if site_cpus else os.sched_getaffinity(0))
+    assert result['affinity'] == expected
+    assert result['thread'] == result['affinity']
+    assert result['child'] == expected
+    assert result['omp'] == result['blas'] == str(cpus)
+    assert int((tmp_path / 'setup_cpus.txt').read_text()) == len(expected)
+
+
+def test_worker_cpu_launcher_preserves_analysis_failure(tmp_path):
+    import subprocess
+    (tmp_path / 'myexe').write_text('#!/bin/sh\nexit 23\n')
+    (tmp_path / 'submit_config.txt').write_text('fileList=local.root\n')
+    script = generate_condor_runscript('myexe', False, False, '')
+    result = subprocess.run(['bash'], input=script, cwd=tmp_path,
+                            text=True, capture_output=True)
+    assert result.returncode == 23
+
+
 @pytest.mark.parametrize('stage_in', [False, True])
 def test_worker_executes_with_materialized_runtime_config(tmp_path, monkeypatch, stage_in):
     import subprocess

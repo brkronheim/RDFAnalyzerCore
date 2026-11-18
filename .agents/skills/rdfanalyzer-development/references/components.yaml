@@ -1,6 +1,41 @@
 # Repository-relative component ownership and task routes. References are skill-root relative.
 version: 1
 components:
+- path: core/interface/TagAndProbe.h
+  kind: component
+  skill: rdfanalyzer-selection-regions
+- path: core/python/rdftnp.py
+  kind: component
+  skill: rdfanalyzer-selection-regions
+- path: core/interface/detail/DefineVariations.h
+  kind: component
+  skill: rdfanalyzer-systematics
+- path: docs/SYSTEMATIC_AUTHORING.md
+  kind: component
+  skill: rdfanalyzer-systematics
+- path: core/interface/detail/SelectionFilters.h
+  kind: component
+  skill: rdfanalyzer-systematics
+- path: core/python/rdfanalysis.py
+  kind: component
+  skill: rdfanalyzer-python
+  reference: rdfanalyzer-python/references/analysis-authoring.md
+- path: core/python/_rdfjson.py
+  kind: component
+  skill: rdfanalyzer-python
+  reference: rdfanalyzer-python/references/analysis-authoring.md
+- path: core/python/_rdftext.py
+  kind: component
+  skill: rdfanalyzer-python
+  reference: rdfanalyzer-python/references/analysis-authoring.md
+- path: core/python/rdfdeclarations.py
+  kind: component
+  skill: rdfanalyzer-python
+  reference: rdfanalyzer-python/references/analysis-authoring.md
+- path: analyses/AGC
+  optional: true
+  kind: component
+  skill: rdfanalyzer-build
 - path: core/root_compat
   kind: component
   skill: rdfanalyzer-build
@@ -67,6 +102,9 @@ components:
   kind: component
   skill: rdfanalyzer-build
 - path: core/python/io_policy.py
+  kind: component
+  skill: rdfanalyzer-input-io
+- path: core/python/xrd_site_rankings.py
   kind: component
   skill: rdfanalyzer-input-io
 - path: core/python/sample_config.py
@@ -176,6 +214,45 @@ components:
 - path: core/src/ConfigurationManager.cc
   kind: component
   skill: rdfanalyzer-config-data
+- path: core/interface/CommonSettings.h
+  kind: component
+  skill: rdfanalyzer-config-data
+- path: core/interface/ValidationReport.h
+  kind: component
+  skill: rdfanalyzer-config-data
+- path: core/interface/NativePreflight.h
+  kind: component
+  skill: rdfanalyzer-config-data
+- path: core/interface/RunResult.h
+  kind: component
+  skill: rdfanalyzer-outputs
+- path: core/python/rdfschema.py
+  kind: component
+  skill: rdfanalyzer-config-data
+- path: core/interface/CommonSettingsSchema.h
+  kind: component
+  skill: rdfanalyzer-config-data
+- path: core/native_authoring
+  kind: component
+  skill: rdfanalyzer-build
+- path: cmake/InstallAnalyzerSDK.cmake
+  kind: component
+  skill: rdfanalyzer-build
+- path: cmake/RDFAnalyzerCoreConfig.cmake.in
+  kind: component
+  skill: rdfanalyzer-build
+- path: examples/analyzer-sdk
+  kind: component
+  skill: rdfanalyzer-build
+- path: cmake/InstallNativeAuthoring.cmake
+  kind: component
+  skill: rdfanalyzer-build
+- path: examples/native-preflight
+  kind: component
+  skill: rdfanalyzer-build
+- path: examples/native-results
+  kind: component
+  skill: rdfanalyzer-build
 - path: core/src/TextConfigAdapter.cc
   kind: component
   skill: rdfanalyzer-config-data
@@ -231,6 +308,9 @@ components:
   kind: component
   skill: rdfanalyzer-input-io
 - path: core/xrd
+  kind: component
+  skill: rdfanalyzer-input-io
+- path: core/xrd/XrdReadPipeline.h
   kind: component
   skill: rdfanalyzer-input-io
 - path: core/tests/cpp/testXrdReadMemory.cc
@@ -318,6 +398,9 @@ components:
   kind: component
   skill: rdfanalyzer-production
 - path: core/python/submission_backend.py
+  kind: component
+  skill: rdfanalyzer-production
+- path: core/python/update_queued_xrd_runtime.py
   kind: component
   skill: rdfanalyzer-production
 - path: core/python/refresh_xrootd_runtime.py
@@ -470,6 +553,14 @@ components:
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-tasks.md
 - path: core/python/law/partition_utils.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/law-tasks.md
+- path: core/python/job_sizing.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/law-tasks.md
+- path: core/python/job_sizing_worker.py
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-tasks.md
@@ -653,6 +744,10 @@ law_tasks:
   reference: rdfanalyzer-production/references/law-tasks.md
 - module: core/python/law/analysis_tasks.py
   class: RunSkimTestJob
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/law-tasks.md
+- module: core/python/law/analysis_tasks.py
+  class: RunSkimSizingPilots
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-tasks.md
 - module: core/python/law/analysis_tasks.py

@@ -20,3 +20,4 @@ HOST_SITES = getattr(_provider, "HOST_SITES", {})
 
 NORMALIZE_SITE_URL_PATTERN = getattr(_provider, "NORMALIZE_SITE_URL_PATTERN", r"(?!)")
 SITE_PATH_PATTERN = getattr(_provider, "SITE_PATH_PATTERN", r"(?!)")
+SITE_RANKING_FILE = getattr(_provider, "SITE_RANKING_FILE", None)

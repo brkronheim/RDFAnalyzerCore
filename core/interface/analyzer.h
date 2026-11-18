@@ -26,6 +26,7 @@
 
 #include <ROOT/RDFHelpers.hxx>
 #include <ROOT/RDataFrame.hxx>
+#include <detail/SelectionFilters.h>
 
 
 #include <api/IConfigurationProvider.h>
@@ -275,22 +276,17 @@ public:
       }
     }
 
-    // Generate one short-circuiting expression over unique mask columns. All
-    // columns use framework-owned identifiers, avoiding per-event allocation
-    // of an RVec solely for the row filter (the histogram action packs its own
-    // per-variation mask once for all booked histograms).
-    std::string anyVariationPasses;
+    // Reuse masks without per-event packing. Common small unions use compiled
+    // callables so a native analysis does not need Cling for a boolean OR.
+    std::vector<std::string> uniqueMasks;
     std::unordered_set<std::string> includedMasks;
     for (const auto &mask : cumulativeMasks) {
       if (!includedMasks.insert(mask).second) {
         continue;
       }
-      if (!anyVariationPasses.empty()) {
-        anyVariationPasses += " || ";
-      }
-      anyVariationPasses += "(" + mask + ")";
+      uniqueMasks.push_back(mask);
     }
-    df = df.Filter(anyVariationPasses, filterLabel);
+    df = rdf::detail::filterAnyMask(df, uniqueMasks, filterLabel);
     dataFrameProvider_m->setDataFrame(df);
     ++filterCount_m;
     return this;

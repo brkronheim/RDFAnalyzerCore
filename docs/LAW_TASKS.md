@@ -1,9 +1,9 @@
 # LAW Task System Reference
 
-> **Quick start**: See [`core/python/law/README.md`](../core/python/law/README.md) for environment setup
+> **Quick start**: See [`core/python/law/README.md`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/README.md) for environment setup
 > and an introduction to the broader batch-submission workflows.  This document
 > is a detailed reference for the analysis-specific tasks defined in
-> [`core/python/law/analysis_tasks.py`](../core/python/law/analysis_tasks.py) and their supporting modules.
+> [`core/python/law/analysis_tasks.py`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/analysis_tasks.py) and their supporting modules.
 
 ---
 
@@ -213,13 +213,31 @@ file-discovery/execution options provided by `SkimMixin`.
 | `--file-source` | `""` | Use manifest `files`/`das` directly, or select `xrdfs`, `rucio`, or `opendata` discovery. |
 | `--file-source-name` | `""` | Name of the file-list task run to consume. If omitted, it defaults to `--name`. |
 | `--files-per-job` | `50` | Maximum files per job for file-count grouping; also the group limit for Rucio queries. |
-| `--partition` | `file_group` | File-source partition mode: `file_group`, `file` (one file per job), or `entry_range` (split by TTree entries; requires `uproot`). |
-| `--entries-per-job` | `100000` | Maximum TTree entries per job in `entry_range` mode; ignored by other modes. |
+| `--partition` | `auto` | Learned event budgets for matching datasets, otherwise file grouping. Explicit `file_group`, `file`, `entry_range`, and `events` remain available. |
+| `--entries-per-job` | `100000` | Event budget/fallback for `events` and `entry_range`; ignored by file-count modes. |
+| `--partition-profile` | `""` | Automatic matching-history lookup; a JSON/YAML path pins fixed budgets or rates, and `none` disables lookup. |
+| `--input-metadata-cache` | `""` | Optional entry-cache snapshot copied into the new run; missing counts are queried once with bounded concurrency. |
+| `--entry-range-mode` | `filter` | Logical `Range`, or `source` for direct seeking on ROOT 6.40 with one RDF thread. |
+| `--sizing-pilots` | `false` | Run one-file Condor calibration jobs for unprofiled datasets before bulk preparation. |
+| `--sizing-target-seconds` | `3600` | Estimated work per job from production measurements; independent of the runtime request. |
+| `--sizing-pilot-target-seconds` | `1800` | Estimated work per job from fresh or cached pilot measurements. |
+| `--max-runtime` | `7200` | HTCondor runtime request in seconds for both sizing sources and pilot jobs. |
+| `--sizing-pilot-parallel` | `4` | Maximum pilot jobs per batch, per LAW run. |
+| `--sizing-pilot-prefix-entries` | `10000` | Prefix paired with a full-file measurement to fit fixed setup and per-event costs. |
+| `--sizing-pilot-safety-factor` | `1.5` | Multiplier for provisional pilot rate/setup estimates; must be at least one. |
 | `--prepare-workers` | `4` | Maximum number of threads used to write independent per-job configs and redirector maps. Set to `1` for serial preparation. |
 
-Partition settings apply when the file-list payload contains a flat file list.
-If it includes precomputed groups, such as the groups produced by Rucio
-discovery, `PrepareSkimJobs` preserves those groups as job partitions.
+Explicit partition modes also apply to payloads with precomputed Rucio groups.
+`file_group` respects the requested file cap within each group; `events` packs
+within those groups to retain discovery's byte-size boundaries. `file` and
+`entry_range` operate on the flat file inventory. Duplicate or inconsistent
+group inventories are rejected. These policies affect newly prepared jobs.
+
+See [event budgets and learned runtime profiles](JOB_SIZING.md) for calibration,
+cache snapshots, deterministic coverage and range-aware retries.
+After all outputs are verified, the monitor automatically updates the workload
+and submission-origin sizing cache. Future preparations save their own selected
+profile/cache snapshots; shared history cannot change an existing run's plan.
 
 #### `--output-directory` *(str, optional)*
 
@@ -390,6 +408,16 @@ Log locations in delegated `htcondor` mode:
 
 When a job is held before payload execution, only the `.log` file may exist because the job never reached the execution wrapper.
 
+If scheduler history has expired, the monitor can recover a successful exit
+from the generated Condor event log for the exact cluster/process. The latest
+matching record must be a complete normal termination; live queue entries and
+available history take priority. Split retries use their persisted job directory
+rather than the reassigned logical index. This is terminal evidence only:
+configured output existence/integrity and provenance checks still run before a
+job becomes `done`. The monitor records the fallback source in
+`completion_evidence`. Shared logs are cached by file identity, modification
+time and size so recovery does not repeatedly parse a cluster log for each job.
+
 At the configured HTCondor output destination, staged outputs are flattened
 into each dataset directory rather than nested under a job directory. Each
 submitted job or partition produces its own output pair:
@@ -399,6 +427,33 @@ submitted job or partition produces its own output pair:
 
 For XRootD destinations, this keeps all outputs for one dataset under a single
 directory, matching monitor verification via directory-level `xrdfs ls` calls.
+
+The monitor now uses directory-level `xrdfs ls -l` batches with at most four
+directories queried concurrently. Successful ROOT integrity checks are saved
+in `skimRun_<name>/output_validation.json`, independently of job state.
+Polling and `complete()` reuse those receipts when fresh storage metadata and
+the validation contract match. Missing or changed outputs and changed job
+attempts/configurations trigger validation again; no receipt is inferred from
+an old `done` status or from `output_validation=exists`. Existing runs therefore
+need one full validation to establish receipts. Normal polling, restarts and
+completion checks then avoid repeated ROOT reads for unchanged files.
+
+The contract binds the dataset/type, expected tree and output roles, file paths,
+staged configuration hash, dataset-manifest hash, execution identity and job
+attempt. Remote signatures contain file size, listed mtime and permissions;
+local signatures include device/inode and nanosecond mtime/ctime. These are not
+content checksums: an external rewrite preserving both remote size and listed
+mtime cannot be detected by this metadata cache. Remove `output_validation.json`
+to force full validation when such a rewrite is suspected. Unsupported listing
+formats and stat fallbacks remain uncacheable and use full integrity checks.
+
+Receipts checkpoint every 25 results or ten seconds, and when Python unwinds
+an interrupted pass. Writes use a locked atomic merge; cache failures warn
+without invalidating successful physics checks. Validation progress reports
+completed checks, full ROOT checks and reused receipts. `complete()` may refresh
+these receipts but never modifies job status or learns sizing/site preferences.
+Existing running monitors keep their imported code; this optimization takes
+effect in a new monitor process and requires no executable rebuild or MC rerun.
 
 ---
 
@@ -788,6 +843,13 @@ law run RunMyJobs --workflow dask \
 | `--dask-scheduler` | str | `""` | Dask scheduler address, e.g. `tcp://host:8786`.  Empty = start a local cluster (testing only). |
 | `--dask-workers` | int | `1` | Workers in the local cluster when `--dask-scheduler` is empty. |
 
+Local worker counts must be positive integers and are forwarded to
+`Client(n_workers=...)`; the default starts one local worker. With an external
+scheduler, that scheduler owns its worker count; a nondefault `--dask-workers`
+request produces an explanatory task message and does not resize the cluster.
+This controls local worker count, without changing Dask's thread-per-worker
+policy or the analysis process's separate CPU/thread settings.
+
 These parameters are marked `significant=False` and are not forwarded to
 branch tasks.
 
@@ -1157,3 +1219,11 @@ for f in skimRun_v1/job_outputs/*.perf.json; do
 throughput={d[\"throughput_mbs\"]}MB/s')"
 done
 ```
+
+For an intentional second partial-merge caller, `partial_merge --wait-for-lock`
+waits for the current writer rather than failing immediately. The default core
+CLI remains fail-fast. A newly acquired lock records its PID/command; never
+remove a lock file to bypass a live writer. After acquiring the lock, completed
+dataset merges can be reused only when their snapshot identity, monitor parent,
+merge contract, exact input/output file inventory and all digests validate.
+ROOT output, metadata sidecar and completion marker remain one artifact.

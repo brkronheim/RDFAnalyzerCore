@@ -20,6 +20,8 @@
 #include <yaml-cpp/yaml.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -55,6 +57,90 @@ protected:
         std::remove(metaPath.c_str());
     }
 };
+
+TEST_F(ProvenanceServiceTest, ConfiguredGitSnapshotAvoidsSubprocessAndIsRecorded) {
+    namespace fs = std::filesystem;
+    const auto directory = fs::path(cfgPath + ".git-probe");
+    fs::create_directories(directory);
+    const auto executable = directory / "git";
+    { std::ofstream script(executable); script << "#!/bin/sh\nprintf called >> \"${0}.called\"\nexit 1\n"; }
+    fs::permissions(executable, fs::perms::owner_all);
+    const char *old = std::getenv("PATH");
+    const bool hadPath = old != nullptr;
+    const std::string previous = old ? old : "";
+    struct Restore {
+        bool hadPath;
+        std::string path;
+        fs::path directory;
+        ~Restore() { if (hadPath) setenv("PATH", path.c_str(), 1); else unsetenv("PATH"); fs::remove_all(directory); }
+    } restore{hadPath, previous, directory};
+    setenv("PATH", (directory.string()+":"+previous).c_str(), 1);
+    writeMinimalConfig(cfgPath, metaPath);
+    const std::string revision(40, 'a');
+    { std::ofstream config(cfgPath, std::ios::app);
+      config << "metadataAnalysisGitHash=" << revision << "\nmetadataAnalysisGitDirty=true\n"; }
+    ConfigurationManager config(cfgPath);
+    DataManager data(3);
+    SystematicManager systematics;
+    DefaultLogger logger;
+    NullOutputSink skim;
+    RootOutputSink meta;
+    ManagerContext context{config, data, systematics, logger, skim, meta};
+    ProvenanceService service;
+    service.initialize(context);
+    const auto &values = service.getProvenance();
+    EXPECT_EQ(values.at("analysis.git_hash"), revision);
+    EXPECT_EQ(values.at("analysis.git_dirty"), "true");
+    EXPECT_EQ(values.at("analysis.git_source"), "configured-snapshot");
+    EXPECT_FALSE(fs::exists(executable.string()+".called"));
+    auto node = data.getDataFrame();
+    service.finalize(node);
+    TFile output(metaPath.c_str(), "READ");
+    auto *object = dynamic_cast<TObjString*>(output.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["provenance"]["analysis.git_source"].as<std::string>(), "configured-snapshot");
+}
+
+TEST_F(ProvenanceServiceTest, RejectsIncompleteOrMalformedGitSnapshot) {
+    for (const auto &settings : {std::string("metadataAnalysisGitHash=")+std::string(40, 'a')+"\n",
+          std::string("metadataAnalysisGitDirty=true\n"),
+          std::string("metadataAnalysisGitHash=invalid\nmetadataAnalysisGitDirty=true\n"),
+          std::string("metadataAnalysisGitHash=")+std::string(40, 'a')+"\nmetadataAnalysisGitDirty=yes\n"}) {
+        writeMinimalConfig(cfgPath, metaPath);
+        { std::ofstream config(cfgPath, std::ios::app); config << settings; }
+        ConfigurationManager config(cfgPath);
+        DataManager data(3);
+        SystematicManager systematics;
+        DefaultLogger logger;
+        NullOutputSink skim;
+        RootOutputSink meta;
+        ManagerContext context{config, data, systematics, logger, skim, meta};
+        ProvenanceService service;
+        EXPECT_THROW(service.initialize(context), std::runtime_error) << settings;
+    }
+}
+
+TEST_F(ProvenanceServiceTest, GitSnapshotChangesFullConfigHashButNotSemanticHash) {
+    DataManager data(3);
+    SystematicManager systematics;
+    DefaultLogger logger;
+    NullOutputSink skim;
+    RootOutputSink meta;
+    std::string semanticHash, fullHash;
+    for (char digit : {'a', 'b'}) {
+        writeMinimalConfig(cfgPath, metaPath);
+        { std::ofstream config(cfgPath, std::ios::app);
+          config << "metadataAnalysisGitHash=" << std::string(40, digit) << "\nmetadataAnalysisGitDirty=true\n"; }
+        ConfigurationManager config(cfgPath);
+        ManagerContext context{config, data, systematics, logger, skim, meta};
+        ProvenanceService service;
+        service.initialize(context);
+        const auto &values = service.getProvenance();
+        if (digit == 'a') { semanticHash = values.at("config.semantic_hash"); fullHash = values.at("config.hash"); }
+        else { EXPECT_EQ(values.at("config.semantic_hash"), semanticHash); EXPECT_NE(values.at("config.hash"), fullHash); }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Test: required provenance keys are present and non-empty in the output file

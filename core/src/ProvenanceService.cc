@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -264,13 +265,29 @@ void ProvenanceService::collectRuntimeInfo(const IConfigurationProvider& config)
     // -----------------------------------------------------------------------
     // Analysis repository git info (current working directory)
     // -----------------------------------------------------------------------
-    const std::string analysisHash =
-        runCommand("git rev-parse HEAD 2>/dev/null");
-    provenance_m["analysis.git_hash"] = analysisHash.empty() ? "unknown" : analysisHash;
-
-    const std::string gitStatus =
-        runCommand("git status --porcelain 2>/dev/null");
-    provenance_m["analysis.git_dirty"] = analysisHash.empty() ? "unknown" : (gitStatus.empty() ? "false" : "true");
+    const auto& initialConfig = config.getConfigMap();
+    const auto hashSetting = initialConfig.find("metadataAnalysisGitHash");
+    const auto dirtySetting = initialConfig.find("metadataAnalysisGitDirty");
+    if (hashSetting != initialConfig.end() || dirtySetting != initialConfig.end()) {
+        if (hashSetting == initialConfig.end() || dirtySetting == initialConfig.end())
+            throw std::runtime_error("metadataAnalysisGitHash and metadataAnalysisGitDirty must be supplied together");
+        const auto &hash = hashSetting->second, &dirty = dirtySetting->second;
+        const bool hexHash = (hash.size() == 40 || hash.size() == 64) &&
+            std::all_of(hash.begin(), hash.end(), [](unsigned char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            });
+        if ((!hexHash && hash != "unknown") || (dirty != "true" && dirty != "false" && dirty != "unknown"))
+            throw std::runtime_error("Invalid configured analysis Git snapshot: expected a full Git hash or unknown, and true/false/unknown dirty state");
+        provenance_m["analysis.git_hash"] = hash;
+        provenance_m["analysis.git_dirty"] = dirty;
+        provenance_m["analysis.git_source"] = "configured-snapshot";
+    } else {
+        const std::string analysisHash = runCommand("git rev-parse HEAD 2>/dev/null");
+        provenance_m["analysis.git_hash"] = analysisHash.empty() ? "unknown" : analysisHash;
+        const std::string gitStatus = runCommand("git status --porcelain 2>/dev/null");
+        provenance_m["analysis.git_dirty"] = analysisHash.empty() ? "unknown" : (gitStatus.empty() ? "false" : "true");
+        provenance_m["analysis.git_source"] = "live-current-working-directory";
+    }
 
     // -----------------------------------------------------------------------
     // Runtime environment / container tag
@@ -327,7 +344,7 @@ void ProvenanceService::collectRuntimeInfo(const IConfigurationProvider& config)
     auto semanticConfig = configMap;
     for (const char* key : {"saveFile", "metaFile", "__orig_saveFile", "__orig_metaFile",
                             "saveDirectory", "fileList", "firstEntry", "lastEntry",
-                            "metadataJobId", "metadataAttemptId"})
+                            "metadataJobId", "metadataAttemptId", "metadataAnalysisGitHash", "metadataAnalysisGitDirty"})
         semanticConfig.erase(key);
     provenance_m["config.semantic_hash"] = hashString(serializeConfigMap(semanticConfig));
 

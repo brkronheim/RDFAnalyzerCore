@@ -18,7 +18,7 @@ ClassImp(RDFXrdFile);
 
 RDFXrdFile::RDFXrdFile(const char *path, Option_t *option, const char *title,
                        Int_t compress, Int_t /*netopt*/)
-    : TFile(path, "NET", title, compress) {
+    : TFile(path, "NET", title, compress), background_(rdf::xrd::isBackgroundRead()) {
   if (!path || !*path) {
     MakeZombie();
     gDirectory = gROOT;
@@ -59,6 +59,7 @@ Bool_t RDFXrdFile::ReadBuffer(char *buffer, Int_t length) {
 }
 
 Bool_t RDFXrdFile::ReadBuffer(char *buffer, Long64_t position, Int_t length) {
+  rdf::xrd::BackgroundReadScope priority(background_);
   if (!sourceManager_ || closed_ || IsZombie() || length < 0 || position < 0 ||
       (!buffer && length)) {
     Error("ReadBuffer", "invalid read (position=%lld, length=%d)", position,
@@ -81,6 +82,7 @@ Bool_t RDFXrdFile::ReadBuffer(char *buffer, Long64_t position, Int_t length) {
 }
 
 Bool_t RDFXrdFile::ReadBufferAsync(Long64_t position, Int_t length) {
+  rdf::xrd::BackgroundReadScope priority(background_);
   if (!sourceManager_ || closed_ || IsZombie() || position < 0 || length < 0)
     return kTRUE;
   if (length == 0) return kFALSE;
@@ -97,6 +99,7 @@ Bool_t RDFXrdFile::ReadBufferAsync(Long64_t position, Int_t length) {
 
 Bool_t RDFXrdFile::ReadBuffers(char *buffer, Long64_t *positions,
                                Int_t *lengths, Int_t count) {
+  rdf::xrd::BackgroundReadScope priority(background_);
   if (!sourceManager_ || closed_ || IsZombie() || count < 0 ||
       (count && (!positions || !lengths))) {
     Error("ReadBuffers", "invalid vector read request");

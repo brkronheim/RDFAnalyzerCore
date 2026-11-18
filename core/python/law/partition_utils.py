@@ -22,16 +22,15 @@ Partition modes
     The number of partitions per file equals
     ``ceil(total_entries / entries_per_job)``.
 
-    .. note::
-       Entry-range partitions are applied by the C++ ``DataManager`` via
-       ``ROOT::RDataFrame::Range(firstEntry, lastEntry)``.  This disables
-       implicit multi-threading for the processing job when ROOT < 6.28 is
-       used.  When running with ``--threads > 1``, prefer ``"file"`` or
-       ``"file_group"`` mode unless all workers use ROOT ≥ 6.28.
+``"events"``
+    Pack whole files up to an event budget and file-count cap; split oversized
+    files into half-open entry ranges. Optional cached counts avoid repeat opens.
+    Ranged jobs require one RDF thread. ``entryRangeMode=source`` can seek
+    directly on ROOT 6.40; the default logical Range walks rejected prefixes.
 
 Determinism and reproducibility
 --------------------------------
-All three modes sort the input URL list before partitioning, so the same
+All modes sort the input URL list before partitioning, so the same
 input always produces the same partition layout.  Failed partitions can be
 rerun by specifying the corresponding law branch number.
 """
@@ -64,12 +63,12 @@ def _query_tree_entries(url: str, tree_name: str = "Events") -> int:
         import uproot  # type: ignore
     except ImportError as exc:
         raise RuntimeError(
-            "partition='entry_range' requires uproot.\n"
+            "Event-based partitioning requires uproot.\n"
             "Install it with:  pip install uproot"
         ) from exc
 
     try:
-        with uproot.open(url) as f:
+        with uproot.open(url, timeout=30) as f:
             # uproot keys include cycle numbers (e.g. "Events;1") – strip them
             keys_no_cycle = [k.split(";")[0] for k in f.keys()]
             if tree_name in keys_no_cycle:
@@ -90,6 +89,7 @@ def _make_partitions(
     files_per_job: int,
     entries_per_job: int,
     tree_name: str = "Events",
+    entry_cache=None,
 ) -> list[dict]:
     """Split a URL list into job partitions.
 
@@ -98,14 +98,13 @@ def _make_partitions(
     urls:
         Input file URLs.  Sorted internally so the result is deterministic.
     mode:
-        Partitioning strategy.  One of ``"file_group"``, ``"file"``, or
-        ``"entry_range"``.
+        Partitioning strategy: ``file_group``, ``file``, ``entry_range`` or ``events``.
     files_per_job:
-        Maximum number of files per partition (``"file_group"`` mode only).
+        Maximum files per partition in ``file_group``/``events`` modes.
     entries_per_job:
-        Maximum TTree entries per partition (``"entry_range"`` mode only).
+        Maximum TTree entries in ``entry_range``/``events`` modes.
     tree_name:
-        TTree name used to query entry counts in ``"entry_range"`` mode.
+        TTree name used to query entry counts in event-based modes.
 
     Returns
     -------
@@ -125,7 +124,49 @@ def _make_partitions(
         If ``"entry_range"`` mode is requested but ``uproot`` is not
         installed, or a file's entry count cannot be determined.
     """
+    if mode not in {"file", "file_group", "entry_range", "events"}:
+        raise ValueError(f"Unknown partition mode {mode!r}. Valid modes: file_group, file, entry_range, events.")
+    if isinstance(files_per_job, bool) or not isinstance(files_per_job, int) or files_per_job < 1:
+        raise ValueError("files_per_job must be positive")
+    if mode in {"entry_range", "events"} and (isinstance(entries_per_job, bool) or not isinstance(entries_per_job, int) or entries_per_job < 1):
+        raise ValueError("entries_per_job must be positive")
     sorted_urls = sorted(set(urls))
+
+    def entries(url):
+        value = entry_cache.get(url, tree_name) if entry_cache else None
+        if value is None:
+            value = _query_tree_entries(url, tree_name)
+            if entry_cache is not None:
+                entry_cache.put(url, value, tree_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"Invalid entry count for {url}: {value!r}")
+        return value
+
+    if mode == "events":
+        partitions, chunk, count = [], [], 0
+
+        def flush():
+            nonlocal chunk, count
+            if chunk:
+                partitions.append({"files": ",".join(chunk), "first_entry": 0,
+                                   "last_entry": 0, "planned_entries": count})
+                chunk, count = [], 0
+
+        for url in sorted_urls:
+            n = entries(url)
+            if n > entries_per_job:
+                flush()
+                for first in range(0, n, entries_per_job):
+                    last = min(n, first + entries_per_job)
+                    partitions.append({"files": url, "first_entry": first,
+                                       "last_entry": last, "planned_entries": last-first})
+                continue
+            if chunk and (count + n > entries_per_job or len(chunk) >= files_per_job):
+                flush()
+            chunk.append(url)
+            count += n
+        flush()
+        return partitions
 
     if mode == "file":
         return [
@@ -156,9 +197,9 @@ def _make_partitions(
     if mode == "entry_range":
         partitions = []
         for u in sorted_urls:
-            n_entries = _query_tree_entries(u, tree_name)
+            n_entries = entries(u)
             if n_entries <= 0:
-                # File is empty or entry count is unavailable.  Emit a single
+                # File is empty. Emit a single
                 # partition with last_entry=0 so the C++ job will process the
                 # file in full (no Range() applied), which is a safe no-op for
                 # an empty file and avoids silently discarding the file.
@@ -174,8 +215,3 @@ def _make_partitions(
                     "last_entry": last,
                 })
         return partitions
-
-    raise ValueError(
-        f"Unknown partition mode {mode!r}. "
-        "Valid modes: 'file_group', 'file', 'entry_range'."
-    )

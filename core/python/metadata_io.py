@@ -273,12 +273,18 @@ def build_bundle(records, *, semantic_config_compatibility=None):
         seen.add(record["id"])
         prov = record["provenance"]
         # Configure timestamps are retained as evidence, not compatibility IDs.
+        # Registry cardinalities describe each event graph, not the ROOT build.
+        # Retain them in leaf provenance; the registry implementation mode and
+        # every other framework/ROOT/extension identity remain strict.
         # Legacy files have no deployed-binary digest; do not pretend their Git
         # labels prove identical dirty sources. New jobs also identify the
         # expected staged executable by its content hash.
         build = {k: v for k, v in prov.items()
                  if (k.startswith(("framework.", "root.", "extensions."))
-                     and k != "framework.build_timestamp")
+                     and k not in {"framework.build_timestamp",
+                                   "root.registry_definitions",
+                                   "root.registry_input_bindings_before",
+                                   "root.registry_input_bindings_after"})
                  or k == "run.expected_executable_sha256"}
         if build:
             if build_reference is not None and build_reference != build:
@@ -404,7 +410,7 @@ def _sparse_axes(path, names, cache):
     return cache[text]
 
 
-def _inspect_inputs(paths, role, *, semantic_config_compatibility=None):
+def _inspect_inputs(paths, role, *, semantic_config_compatibility=None, sparse_validator=None):
     import uproot
     from extract_nd_histograms import validate_compatible_histogram_schemas
     records, schemas, exclusions = [], [], {JOB_KEY, REFERENCE_KEY, SCHEMA_KEY, "provenance", "regions"}
@@ -422,8 +428,12 @@ def _inspect_inputs(paths, role, *, semantic_config_compatibility=None):
             schemas.append((str(path), schema))
             sparse_names = set()
             classes = f.classnames(recursive=True, cycle=False)
-            physical_sparse_axes = _sparse_axes(path, [key for key, cls in classes.items()
-                                                       if cls.startswith("THn")], physical_cache) if role != "cutflow" else {}
+            sparse_keys = [key for key, cls in classes.items() if cls.startswith("THn")]
+            physical_sparse_axes = ((sparse_validator(path, sparse_keys) if sparse_validator is not None
+                                     else _sparse_axes(path, sparse_keys, physical_cache))
+                                    if role != "cutflow" else {})
+            if role != "cutflow" and set(physical_sparse_axes) != set(sparse_keys):
+                raise ValueError("Sparse validator did not cover the complete physical inventory")
             for key, cls in classes.items():
                 name = key.rsplit("/", 1)[-1]
                 if cls.startswith("TDirectory"):
@@ -456,24 +466,26 @@ def _inspect_inputs(paths, role, *, semantic_config_compatibility=None):
                     sparse_names.add(key)
                     axes = physical_sparse_axes[key]
                     token = (id(axes), id(schema), key)
-                    if token in validated_axes:
-                        continue
-                    validated_axes.add(token)
-                    if schema is None:
+                    if sparse_validator is None:
+                        if token in validated_axes:
+                            continue
+                        validated_axes.add(token)
+                    if sparse_validator is None and schema is None:
                         raise ValueError(f"Sparse histogram {key} requires its embedded schema")
-                    declared = next((entry["axes"] for entry in schema["histograms"]
-                                     if schema["directory"] + "/" + entry["key"] == key), None)
-                    if declared is None or len(axes) != len(declared):
-                        raise ValueError(f"Physical sparse dimensions differ from schema: {key}")
-                    for actual, expected in zip(axes, declared):
-                        edges = expected["edges"]
-                        labels = expected.get("labels", [])
-                        if (len(actual["edges"]) != len(edges)
-                            or len(actual["edges"]) != expected["bins"] + 1
-                            or any(not math.isclose(a, b, rel_tol=1e-13, abs_tol=1e-13)
-                                   for a, b in zip(actual["edges"], edges))
-                            or actual["labels"][:len(labels)] != labels):
-                            raise ValueError(f"Physical sparse axes differ from schema: {key}")
+                    if sparse_validator is None:
+                        declared = next((entry["axes"] for entry in schema["histograms"]
+                                         if schema["directory"] + "/" + entry["key"] == key), None)
+                        if declared is None or len(axes) != len(declared):
+                            raise ValueError(f"Physical sparse dimensions differ from schema: {key}")
+                        for actual, expected in zip(axes, declared):
+                            edges = expected["edges"]
+                            labels = expected.get("labels", [])
+                            if (len(actual["edges"]) != len(edges)
+                                or len(actual["edges"]) != expected["bins"] + 1
+                                or any(not math.isclose(a, b, rel_tol=1e-13, abs_tol=1e-13)
+                                       for a, b in zip(actual["edges"], edges))
+                                or actual["labels"][:len(labels)] != labels):
+                                raise ValueError(f"Physical sparse axes differ from schema: {key}")
                 else:
                     hist = f[key]
                     axes = [_axis_metadata(a) for a in hist.axes]
@@ -483,12 +495,12 @@ def _inspect_inputs(paths, role, *, semantic_config_compatibility=None):
                 axis_reference[key] = signature
             sparse_inventories.append(sparse_names)
     present = [(p, s) for p, s in schemas if s is not None]
-    if present and len(present) != len(schemas):
+    if sparse_validator is None and present and len(present) != len(schemas):
         raise ValueError("Cannot merge mixed legacy and sparse-first histogram schemas")
     # Identical serialized declarations need parsing/validation only once.
-    schema = validate_compatible_histogram_schemas(
+    schema = (validate_compatible_histogram_schemas(
         [("unique schema " + str(i), value) for i, value in enumerate(schema_cache.values())]
-    )
+    ) if sparse_validator is None else None)
     if schema is not None and role != "cutflow":
         expected = {schema["directory"] + "/" + h["key"] for h in schema["histograms"]}
         if any(names != expected for names in sparse_inventories):
@@ -499,11 +511,13 @@ def _inspect_inputs(paths, role, *, semantic_config_compatibility=None):
 
 def merge_root_files(output, inputs, *, role="all", hadd="hadd", jobs=1,
                      max_open_files=10000, postprocess=None, log=None,
-                     semantic_config_compatibility=None):
+                     semantic_config_compatibility=None, sparse_validator=None):
     """Validate and merge numerical objects; publish a portable metadata bundle.
 
     Unknown descriptive strings are archived per job. Unknown non-histogram
-    objects are rejected. Main histograms use ROOT's reducer; audit records use
+    objects are rejected. A caller-supplied sparse_validator must validate every
+    sparse object against its owned schema and return exact axis/schema signatures.
+    The default requires the framework ND schema. Main histograms use ROOT's reducer; audit records use
     sufficient statistics. Existing outputs survive validation/merge failures.
     """
     paths = list(map(str, inputs))
@@ -516,7 +530,7 @@ def merge_root_files(output, inputs, *, role="all", hadd="hadd", jobs=1,
         raise ValueError("Merge output cannot overwrite an input")
     validate_semantic_config_compatibility(semantic_config_compatibility)
     bundle, schema, exclusions = _inspect_inputs(
-        paths, role, semantic_config_compatibility=semantic_config_compatibility)
+        paths, role, semantic_config_compatibility=semantic_config_compatibility, sparse_validator=sparse_validator)
     payload = gzip.compress(canonical(bundle).encode(), mtime=0)
     sha = hashlib.sha256(payload).hexdigest()
     sidecar = output.with_name(output.name + ".metadata." + sha + ".json.gz")

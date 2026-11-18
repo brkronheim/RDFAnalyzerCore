@@ -1,8 +1,16 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../extern/gtest/googletest/include ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_executable(testTagAndProbe testTagAndProbe.cc)
+target_include_directories(testTagAndProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../interface)
+target_link_libraries(testTagAndProbe PRIVATE gtest gtest_main)
+add_test(NAME TagAndProbeTest COMMAND testTagAndProbe)
+
 # Define the test source directory for all test executables
 add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_compile_definitions(TEST_BINARY_DIR="${CMAKE_BINARY_DIR}")
+
+# Setup-only C++17 contracts; this target has no ROOT or framework link dependency.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../native_authoring/Targets.cmake")
 
 add_executable(testRootOutputSink testRootOutputSink.cc)
 target_link_libraries(testRootOutputSink core gtest gtest_main)
@@ -29,6 +37,11 @@ if(TARGET RDFXrdAdaptor)
     target_link_libraries(testXrdOpenRetry PRIVATE RDFXrdAdaptor gtest gtest_main)
     target_compile_features(testXrdOpenRetry PRIVATE cxx_std_17)
     add_test(NAME XrdOpenRetryTest COMMAND testXrdOpenRetry)
+
+    add_executable(testXrdSiteRanking testXrdSiteRanking.cc)
+    target_link_libraries(testXrdSiteRanking PRIVATE core RDFXrdAdaptor gtest gtest_main)
+    target_compile_features(testXrdSiteRanking PRIVATE cxx_std_17)
+    add_test(NAME XrdSiteRankingTest COMMAND testXrdSiteRanking)
 
     add_executable(testXrdReadMemory testXrdReadMemory.cc)
     target_include_directories(testXrdReadMemory PRIVATE
@@ -98,6 +111,17 @@ add_test(NAME DataManagerTest COMMAND testDataManager)
 add_executable(testInputCache testInputCache.cc)
 target_link_libraries(testInputCache coreAll gtest gtest_main)
 add_test(NAME InputCacheTest COMMAND testInputCache)
+
+# Deterministic framework clock-call instrumentation uses a GNU libstdc++
+# symbol. Other compilers/platforms retain the ordinary semantic suite above.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_executable(testInputCacheClock testInputCache.cc)
+    target_link_libraries(testInputCacheClock PRIVATE coreAll gtest gtest_main)
+    target_compile_definitions(testInputCacheClock PRIVATE RDF_INPUT_CACHE_CLOCK_TEST=1)
+    target_link_options(testInputCacheClock PRIVATE
+        "-Wl,--wrap=_ZNSt6chrono3_V212steady_clock3nowEv")
+    add_test(NAME InputCacheClockTest COMMAND testInputCacheClock)
+endif()
 
 add_executable(benchmarkInputCache EXCLUDE_FROM_ALL benchmarkInputCache.cc)
 target_link_libraries(benchmarkInputCache coreAll)
@@ -236,6 +260,51 @@ set_tests_properties(PythonPlottingBindingsTest PROPERTIES
                     ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python;RDF_PLOT_EXECUTABLE=$<TARGET_FILE:rdf-plot>")
 add_test(NAME PythonBindingsIntegrationTest
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_bindings.py)
+add_test(NAME PythonAuthoringTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_authoring.py)
+add_test(NAME PythonBoolColumnFilterTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_filter_column.py)
+add_test(NAME PythonInputSchemaTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_input_schema.py)
+set_tests_properties(PythonInputSchemaTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+    TIMEOUT 120)
+add_test(NAME PythonHistogramBatchTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_histogram_batch.py)
+set_tests_properties(PythonHistogramBatchTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+    TIMEOUT 120)
+add_test(NAME PythonVariableHistogramTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_variable_histograms.py)
+set_tests_properties(PythonVariableHistogramTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDF_VARIABLE_AXES_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+add_test(NAME PythonCorrectionBatchTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_correction_batch.py)
+set_tests_properties(PythonCorrectionBatchTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+    TIMEOUT 120)
+add_test(NAME PythonNDHistogramTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_nd_histograms.py)
+set_tests_properties(PythonNDHistogramTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDF_ND_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+set_tests_properties(PythonBoolColumnFilterTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+set_tests_properties(PythonAuthoringTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+add_test(NAME PythonDeclarationsTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_declarations.py)
+set_tests_properties(PythonDeclarationsTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+add_test(NAME PythonModulesTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_modules.py)
+set_tests_properties(PythonModulesTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
 # Prepend our build/python to PYTHONPATH but preserve the user's PYTHONPATH
 # so imports provided by the user's environment (e.g. ROOT from an LCG view)
 # remain available when running under CTest.

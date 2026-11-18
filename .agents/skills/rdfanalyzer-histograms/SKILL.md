@@ -17,6 +17,20 @@ Read [NDHistogramManager.h](../../../core/plugins/NDHistogramManager/NDHistogram
 
 Follow histogram `name`, variable/weight, numeric bounds or edges, channel, control-region, sample-category, and systematic axes into the output. Inspect `histogramBackend`, `histogramSystematics`, and per-histogram `nominalOnly` separately. Dense/legacy split objects and packed sparse storage need different readers. With RegionManager, overlapping membership can create multiple fills; check broadcasting and ordering of value/weight/category vectors.
 
+The optional [Python ND facade](../../../docs/PACKED_ND_HISTOGRAMS.md) uses the
+canonical manager lifecycle with explicit category axes and all/nominal groups;
+it does not expose arbitrary continuous ND axes or inferred region expansion.
+`histogramShareCollectionTransport` is a separate opt-in experiment, default
+false: it shares exact-reference collection broadcasts/fill counts within a
+booking call. Do not infer support for unequal systematic-slot collection
+lengths from that cache. Check the linked guide and source for actual layouts.
+`histogramCollectionLayout=per-slot` is a separate opt-in layout candidate. It
+uses each slot's actual input lengths, requires object-valued weights/categories
+to align exactly, and skips empty slots through a private action adapter.
+`fixed` remains the default; implicit region/object expansion is unsupported in
+the new path. Do not infer a speed improvement or production applicability from
+its local correctness acceptance.
+
 NDHistogramManager defaults to `histogramBackend=boost`,
 `histogramBoostPrecision=float`, `histogramBoostSparseBackend=map`, and
 `histogramDenseLimitMiB=0` (sparse). Explicit overrides retain ROOT, double,

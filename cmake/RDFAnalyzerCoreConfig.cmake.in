@@ -1,0 +1,70 @@
+@PACKAGE_INIT@
+
+# A deliberately bounded core-only CPU SDK; no package lookup downloads or builds.
+set(_rdf_sdk_prefix "${PACKAGE_PREFIX_DIR}")
+if(TARGET RDFAnalyzer::Core)
+    get_target_property(_rdf_sdk_existing RDFAnalyzer::Core RDF_SDK_PREFIX)
+    if(NOT _rdf_sdk_existing STREQUAL _rdf_sdk_prefix)
+        message(FATAL_ERROR "RDFAnalyzer::Core is already loaded from another SDK prefix")
+    endif()
+    return()
+endif()
+include(CMakeFindDependencyMacro)
+find_dependency(ROOT @ROOT_VERSION@ EXACT CONFIG COMPONENTS ROOTDataFrame ROOTVecOps Core RIO Tree Hist HistPainter MathCore Gpad Graf TMVA)
+find_dependency(Boost @Boost_VERSION@ EXACT CONFIG)
+find_dependency(ZLIB)
+find_dependency(Threads)
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "@CMAKE_CXX_COMPILER_ID@" OR
+   NOT CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL "@CMAKE_CXX_COMPILER_VERSION@")
+    set(RDFAnalyzerCore_FOUND FALSE)
+    set(RDFAnalyzerCore_NOT_FOUND_MESSAGE "SDK compiler ABI requires @CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@; selected ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+    return()
+endif()
+foreach(_rdf_sdk_file IN ITEMS
+        "@CMAKE_INSTALL_LIBDIR@/rdfanalyzer/@SDK_CORE_FILE@"
+        "@CMAKE_INSTALL_LIBDIR@/rdfanalyzer/@SDK_PLUGINS_FILE@"
+        "@CMAKE_INSTALL_LIBDIR@/rdfanalyzer/@SDK_YAML_FILE@"
+        "lib/@SDK_ONNX_FILE@"
+        "@CMAKE_INSTALL_INCLUDEDIR@/rdfanalyzer/analyzer.h")
+    if(NOT EXISTS "${_rdf_sdk_prefix}/${_rdf_sdk_file}")
+        set(RDFAnalyzerCore_FOUND FALSE)
+        set(RDFAnalyzerCore_NOT_FOUND_MESSAGE "Incomplete AnalyzerSDK installation: missing ${_rdf_sdk_file}")
+        return()
+    endif()
+endforeach()
+foreach(_rdf_sdk_pair IN ITEMS "core;@SDK_CORE_FILE@" "plugins;@SDK_PLUGINS_FILE@" "yaml;@SDK_YAML_FILE@")
+    list(GET _rdf_sdk_pair 0 _rdf_sdk_name)
+    list(GET _rdf_sdk_pair 1 _rdf_sdk_file)
+    add_library(_rdf_sdk_${_rdf_sdk_name} STATIC IMPORTED)
+    set_target_properties(_rdf_sdk_${_rdf_sdk_name} PROPERTIES
+        IMPORTED_LOCATION "${_rdf_sdk_prefix}/@CMAKE_INSTALL_LIBDIR@/rdfanalyzer/${_rdf_sdk_file}")
+endforeach()
+add_library(_rdf_sdk_onnx SHARED IMPORTED)
+set_target_properties(_rdf_sdk_onnx PROPERTIES
+    IMPORTED_LOCATION "${_rdf_sdk_prefix}/lib/@SDK_ONNX_FILE@")
+add_library(RDFAnalyzer::Core INTERFACE IMPORTED)
+set_target_properties(RDFAnalyzer::Core PROPERTIES
+    RDF_SDK_PREFIX "${_rdf_sdk_prefix}"
+    INTERFACE_COMPILE_FEATURES cxx_std_17
+    INTERFACE_COMPILE_DEFINITIONS "YAML_CPP_STATIC_DEFINE;@SDK_FEATURE_DEFINITIONS@"
+    INTERFACE_LINK_LIBRARIES "-Wl,--start-group;_rdf_sdk_core;_rdf_sdk_plugins;_rdf_sdk_yaml;-Wl,--end-group;_rdf_sdk_onnx;ROOT::ROOTDataFrame;ROOT::ROOTVecOps;ROOT::Core;ROOT::RIO;ROOT::Tree;ROOT::Hist;ROOT::HistPainter;ROOT::MathCore;ROOT::Gpad;ROOT::Graf;ROOT::TMVA;Boost::headers;ZLIB::ZLIB;Threads::Threads;${CMAKE_DL_LIBS}"
+    INTERFACE_INCLUDE_DIRECTORIES "${_rdf_sdk_prefix}/@CMAKE_INSTALL_INCLUDEDIR@/rdfanalyzer;${_rdf_sdk_prefix}/@CMAKE_INSTALL_INCLUDEDIR@/rdfanalyzer/dependencies;${_rdf_sdk_prefix}/@CMAKE_INSTALL_INCLUDEDIR@/rdfanalyzer/dependencies/onnxruntime")
+foreach(_rdf_sdk_plugin IN ITEMS @SDK_PLUGIN_NAMES@)
+    set_property(TARGET RDFAnalyzer::Core APPEND PROPERTY INTERFACE_INCLUDE_DIRECTORIES
+        "${_rdf_sdk_prefix}/@CMAKE_INSTALL_INCLUDEDIR@/rdfanalyzer/plugins/${_rdf_sdk_plugin}")
+endforeach()
+# Resolve external runtime dependencies in the consumer environment, never from
+# producer source/build locations. Some ROOT packages expose bare tbb names.
+foreach(_rdf_sdk_dependency IN ITEMS tbb gslcblas gsl xxhash)
+    find_library(_rdf_sdk_resolved_${_rdf_sdk_dependency} NAMES ${_rdf_sdk_dependency})
+    if(_rdf_sdk_resolved_${_rdf_sdk_dependency})
+        set_property(TARGET RDFAnalyzer::Core APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+            "${_rdf_sdk_resolved_${_rdf_sdk_dependency}}")
+        get_filename_component(_rdf_sdk_directory "${_rdf_sdk_resolved_${_rdf_sdk_dependency}}" DIRECTORY)
+        set_property(TARGET RDFAnalyzer::Core APPEND PROPERTY INTERFACE_LINK_DIRECTORIES "${_rdf_sdk_directory}")
+    endif()
+endforeach()
+set(RDFAnalyzerCore_PRODUCER_COMPILER "@CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@")
+set(RDFAnalyzerCore_ROOT_VERSION "@ROOT_VERSION@")
+set(RDFAnalyzerCore_FEATURES "core-only;cpu;onnx-cpu;xrootd-disabled")
+check_required_components(RDFAnalyzerCore)

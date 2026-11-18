@@ -282,7 +282,7 @@ Planned improvements:
 For issues or questions:
 - Check the [AFS/EOS permissions guidance](#permission-denied-in-afseos)
 - Review existing issues on GitHub
-- Consult the main [README](../README.md) and [batch submission docs](BATCH_SUBMISSION.md)
+- Consult the main [README](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/README.md) and [batch submission docs](BATCH_SUBMISSION.md)
 
 ---
 

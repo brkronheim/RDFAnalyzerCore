@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       cms_repository:
-        description: "CMS extension Git URL (defaults to RDF_CMS_REPOSITORY repository variable)"
+        description: "CMS extension Git URL (optional override of the pinned repository URL)"
         required: false
       threads:
         description: "Number of RDataFrame threads (default: -1 = all CPUs)"
@@ -52,7 +52,7 @@ jobs:
 
       - name: Download pinned CMS extension
         env:
-          CMS_REPOSITORY: ${{ inputs.cms_repository || vars.RDF_CMS_REPOSITORY }}
+          CMS_REPOSITORY: ${{ inputs.cms_repository }}
         run: python3 scripts/fetch_cms.py --repository "$CMS_REPOSITORY"
 
       - name: Configure CMake

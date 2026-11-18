@@ -35,6 +35,7 @@ private:
   std::shared_ptr<rdf::xrd::XrdSourceManager> sourceManager_; //!
   Long64_t position_ = 0; //!
   bool closed_ = false; //!
+  bool background_ = false; //!
 
   ClassDefOverride(RDFXrdFile, 1);
 };

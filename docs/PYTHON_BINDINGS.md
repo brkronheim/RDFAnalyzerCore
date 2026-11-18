@@ -1,5 +1,10 @@
 # Python Bindings for RDFAnalyzerCore
 
+For new analyses, start with the [typed Python authoring interface](PYTHON_AUTHORING.md).
+The native bindings documented here remain the plugin/expert API. Python
+definitions now infer dependencies and propagate paired and explicit variations
+through the shared C++ planner; duplicate output names raise `ValueError`.
+
 This document describes the Python bindings for the RDFAnalyzerCore framework, allowing you to use the high-performance C++ framework from Python with the convenience and prototyping speed of Python.
 
 ## Overview
@@ -552,17 +557,25 @@ See the [Configuration Reference](CONFIG_REFERENCE.md) for complete documentatio
 ## Performance Considerations
 
 ### String-based expressions (DefineJIT)
+
 - **Compilation overhead**: First call may be slow (~seconds) while ROOT compiles
 - **Runtime performance**: Good C++ performance after compilation
 - **Caching**: ROOT caches compiled functions
 - **Best for**: Complex expressions, vector operations, one-time definitions
 
 ### Numba function pointers (DefineFromPointer)
-- **Compilation overhead**: Numba compiles on first function call (milliseconds)
-- **Runtime performance**: Compiled to native code
+
+- **Compilation overhead**: Depends on the kernel, signature and runtime;
+  `DefineFromPointer` expects an already valid function pointer. Measure Numba
+  registration and deferred ROOT JIT separately from event processing.
+- **Runtime performance**: A native function pointer executes compiled code.
+  The higher-level `Analysis.define_numba` uses ROOT's bridge, whose selected
+  wrapper and vector-return allocation/copy costs need separate inspection;
+  see [bridge diagnostics](NUMBA_BRIDGES.md).
 - **Best for**: Custom algorithms, physics calculations, reusable functions
 
 ### Numpy arrays (DefineFromVector)
+
 - **Memory overhead**: Minimal (uses pointers, no deep copying)
 - **Runtime performance**: Direct memory access
 - **Best for**: Pre-computed weights, lookup tables, corrections
@@ -585,9 +598,20 @@ Complete examples are available in the `examples/` directory:
 
 4. **ROOT environment**: Requires proper ROOT environment setup. Source `env.sh` or `thisroot.sh` before running Python scripts.
 
-5. **Systematic variations**: Currently handled automatically for DefineJIT. Not yet implemented for DefineFromPointer or DefineFromVector.
+5. **Systematic variations**: Expressions and native function pointers propagate
+paired and explicitly registered input variations. Constant pointer-vector inputs
+have no event-column dependencies and therefore do not create variations by
+themselves. Use `define_nominal` for intentionally terminal definitions.
 
-6. **Python threads**: `save()` runs synchronously while holding the Python GIL. The current graph API invokes native C++/Numba functions and does not support Python callbacks from dataframe workers; other Python threads therefore cannot make progress until `save()` returns.
+6. **Python threads**: `save()` and its `run()` alias are synchronous. The current
+binding source releases the GIL around `Analyzer::run()` and reacquires it for
+completion/error bookkeeping, so other Python threads can progress. Wrapper
+graph-construction and guarded inspection methods reject access during execution;
+this does not make arbitrary sharing of the analysis thread-safe. Older built
+modules may differ from current source. Numba registration can also select a
+ctypes callback fallback, which can reacquire the GIL; use the optional
+[bridge diagnostics](NUMBA_BRIDGES.md) to inspect registration rather than infer
+callback behavior from the Python authoring syntax.
 
 ## Troubleshooting
 

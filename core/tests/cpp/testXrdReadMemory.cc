@@ -8,6 +8,88 @@
 #include <unistd.h>
 
 namespace rdf::xrd {
+TEST(XrdReadMemory, SerialPipelineUsesCallingThread) {
+  const auto caller = std::this_thread::get_id();
+  std::vector<int> windows{0, 1, 2};
+  unsigned completed = 0;
+  EXPECT_TRUE(detail::runReadWindows(windows, 1, [&](int, std::size_t) {
+    EXPECT_EQ(std::this_thread::get_id(), caller);
+    ++completed;
+    return true;
+  }));
+  EXPECT_EQ(completed, windows.size());
+}
+
+TEST(XrdReadMemory, PipelineOverlapsWindowsAndDrainsOnFailure) {
+  std::vector<int> windows{0, 1, 2, 3};
+  std::atomic<unsigned> active{0}, peak{0}, completed{0};
+  std::promise<void> overlapped;
+  auto gate = overlapped.get_future().share();
+  const auto read = [&](int window, std::size_t) {
+    const auto n = ++active;
+    auto old = peak.load();
+    while (old < n && !peak.compare_exchange_weak(old, n)) {}
+    if (n == 2) overlapped.set_value();
+    EXPECT_EQ(gate.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    --active;
+    ++completed;
+    return window != 0;
+  };
+  EXPECT_FALSE(detail::runReadWindows(windows, 2, read));
+  EXPECT_EQ(peak, 2U);
+  EXPECT_EQ(active, 0U);
+  EXPECT_EQ(completed, 2U);
+}
+
+TEST(XrdReadMemory, PipelineDrainsOtherWritersBeforeRethrowing) {
+  std::vector<int> windows{0, 1};
+  std::atomic<bool> written{false};
+  EXPECT_THROW(detail::runReadWindows(windows, 2, [&](int i, std::size_t) {
+    if (!i) throw std::runtime_error("read failed");
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    written = true;
+    return true;
+  }), std::runtime_error);
+  EXPECT_TRUE(written);
+}
+
+TEST(XrdReadMemory, BackgroundReadsLeaveDemandCapacityAndSiteSlot) {
+  detail::ReadMemoryBudget budget;
+  auto speculative = budget.tryReserve(48 * 1024 * 1024, true);
+  ASSERT_TRUE(speculative);
+  EXPECT_FALSE(budget.tryReserve(1, true));
+  auto demand = budget.tryReserve(16 * 1024 * 1024);
+  EXPECT_TRUE(demand);
+  auto &monitor = SiteQualityMonitor::instance();
+  const std::string site = "priority-reservation-test";
+  EXPECT_TRUE(monitor.beginFullRead(site, true));
+  EXPECT_FALSE(monitor.beginFullRead(site, true));
+  EXPECT_TRUE(monitor.beginFullRead(site, false));
+  EXPECT_FALSE(monitor.beginFullRead(site, false));
+  monitor.endFullRead(site);
+  monitor.endFullRead(site);
+  EXPECT_FALSE(backgroundRead);
+  { BackgroundReadScope scope;
+    EXPECT_TRUE(backgroundRead);
+    EXPECT_FALSE(std::async(std::launch::async, [] { return backgroundRead; }).get());
+    { BackgroundReadScope nested; EXPECT_TRUE(backgroundRead); }
+    EXPECT_TRUE(backgroundRead);
+  }
+  EXPECT_FALSE(backgroundRead);
+}
+
+TEST(XrdReadMemory, OutOfOrderWindowsPreserveEarliestHandoffData) {
+  XrdSourceManager::PrefetchCache cache(8);
+  const auto stamp = cache.reserveUses(4);
+  cache.insert(0, std::make_shared<std::vector<char>>(4, 'a'), stamp);
+  cache.insert(4, std::make_shared<std::vector<char>>(4, 'b'), stamp-1);
+  cache.insert(8, std::make_shared<std::vector<char>>(4, 'c'), stamp-2);
+  char bytes[8];
+  ASSERT_TRUE(cache.copy(0, 8, bytes));
+  EXPECT_EQ(std::string(bytes, 8), "aaaabbbb");
+  EXPECT_EQ(cache.usedBytes, 8U);
+}
+
 TEST(XrdReadMemory, CompletedReadDoesNotLoseNotificationBeforeWait) {
   ReadRaceState race;
   ASSERT_TRUE(race.complete(0, true, "local", "/notification-test", "file:///test", 1.));
@@ -205,5 +287,196 @@ TEST(XrdReadMemory, LocalTransportWindowedDemandAndPrefetch) {
   EXPECT_FALSE(closedCache.expired());
   closedReader->stop();
   EXPECT_TRUE(closedCache.expired());
+}
+} // namespace rdf::xrd
+
+namespace rdf::xrd {
+TEST(XrdInitialOpen, RankUsesHistoryAndLiveScoresAndDiversifiesSites) {
+  std::vector<detail::InitialCandidate> candidates{
+      {"root://unknown//f", "unknown", {}},
+      {"root://slow//f", "slow", {500, false, false, true}},
+      {"root://fast-a//f", "fast", {20, false, false, true}},
+      {"root://fast-b//f", "fast", {20, false, false, true}},
+      {"root://live//f", "live", {40, true, true, true}}};
+  auto ranked = detail::rankInitial(std::move(candidates));
+  ASSERT_EQ(ranked.size(), 4U);
+  EXPECT_EQ(ranked[0].site, "live");
+  EXPECT_EQ(ranked[1].site, "fast");
+  EXPECT_EQ(ranked[2].site, "unknown");
+  EXPECT_EQ(ranked[3].site, "slow");
+}
+
+TEST(XrdInitialOpen, LocateDeduplicatesAndSkipsOfflineReplicasPreservingUrlParameters) {
+  detail::InitialLocations state("roots://user@redirector//store/f?authz=token");
+  XrdCl::LocationInfo locations;
+  using L = XrdCl::LocationInfo;
+  locations.Add(L::Location("server:1095", L::ServerOnline, L::Read));
+  locations.Add(L::Location("server:1095", L::ServerOnline, L::Read));
+  locations.Add(L::Location("offline:1094", L::ServerPending, L::Read));
+  locations.Add(L::Location("manager:1094", L::ManagerOnline, L::Read));
+  state.add("roots://user@redirector//store/f?authz=token", locations);
+  ASSERT_EQ(state.servers.size(), 1U);
+  const XrdCl::URL endpoint(state.servers[0]);
+  EXPECT_EQ(endpoint.GetHostName(), "server");
+  EXPECT_EQ(endpoint.GetProtocol(), "roots");
+  EXPECT_EQ(endpoint.GetUserName(), "user");
+  EXPECT_EQ(endpoint.GetPort(), 1095);
+  EXPECT_EQ(endpoint.GetPathWithParams(), "/store/f?authz=token");
+  EXPECT_EQ(state.managers.size(), 2U);
+  for (unsigned i = 0; i < 600; ++i) {
+    XrdCl::LocationInfo extra;
+    extra.Add(L::Location("node" + std::to_string(i) + ":1094", L::ServerOnline, L::Read));
+    extra.Add(L::Location("manager" + std::to_string(i) + ":1094", L::ManagerOnline, L::Read));
+    state.add("root://redirector//f", extra);
+  }
+  EXPECT_EQ(state.servers.size(), 256U);
+  EXPECT_EQ(state.seenManagers.size(), 32U);
+}
+
+TEST(XrdInitialOpen, BackupWinsWithoutWaitingForStalledFirstOpenOrLateCallback) {
+  std::shared_ptr<detail::InitialOpenState> late;
+  const auto before = std::chrono::steady_clock::now();
+  auto result = detail::openInitialCandidates({{"first", "a", {}}, {"backup", "b", {}}}, 1, {},
+      [&](auto state, const auto &candidate, unsigned attempt) {
+        if (attempt == 1) late = state;
+        else state->complete(std::make_shared<XrdCl::File>(), true, 123, candidate.url);
+      });
+  ASSERT_TRUE(result.file);
+  EXPECT_EQ(result.candidate, "backup");
+  EXPECT_EQ(result.size, 123U);
+  EXPECT_LT(std::chrono::steady_clock::now()-before, std::chrono::milliseconds(700));
+  ASSERT_TRUE(late);
+  EXPECT_TRUE(late->stopped);
+  late->complete(std::make_shared<XrdCl::File>(), true, 456, "first");
+  EXPECT_FALSE(late->winner.file);
+  EXPECT_EQ(late->pending, 0U);
+}
+
+TEST(XrdInitialOpen, CallerDeadlineAndProcessBudgetBoundUnresponsiveTransports) {
+  std::shared_ptr<detail::InitialOpenState> late;
+  unsigned launches = 0;
+  const auto before = std::chrono::steady_clock::now();
+  auto result = detail::openInitialCandidates({{"a", "a", {}}, {"b", "b", {}}, {"c", "c", {}}}, 1, {},
+      [&](auto state, const auto &, unsigned) { late = state; ++launches; });
+  EXPECT_FALSE(result.file);
+  EXPECT_EQ(launches, 2U);
+  EXPECT_LT(std::chrono::steady_clock::now()-before, std::chrono::seconds(2));
+  late->complete({}, false, 0); late->complete({}, false, 0);
+  std::vector<std::unique_ptr<detail::InitialOperation>> owned;
+  for (unsigned i=0; i<32; ++i) {
+    owned.push_back(std::make_unique<detail::InitialOperation>());
+    EXPECT_TRUE(owned.back()->acquired);
+  }
+  EXPECT_FALSE(detail::InitialOperation().acquired);
+  owned.clear();
+  EXPECT_EQ(detail::initialOperations.load(), 0U);
+}
+
+TEST(XrdInitialOpen, RealLocalCallbacksStatWinnerAndRecoverFromMissingCandidate) {
+  char path[] = "/tmp/rdf-xrd-initial-XXXXXX";
+  const int fd = mkstemp(path);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(write(fd, "payload", 7), 7);
+  close(fd);
+  auto cleanup = std::shared_ptr<const char>(path, [](const char *p) { unlink(p); });
+  const std::string url = "file://" + std::string(path);
+  auto result = detail::openInitialCandidates({{"file:///rdf-no-such-initial-file", "missing", {}}, {url, "local", {}}}, 2,
+      [](const auto &candidate, unsigned attempt) { return openTrace(candidate, 991, attempt, "ranked-primary"); });
+  ASSERT_TRUE(result.file);
+  EXPECT_EQ(result.size, 7U);
+  EXPECT_EQ(result.candidate, url);
+  closeAsync(std::move(result.file));
+}
+} // namespace rdf::xrd
+
+namespace rdf::xrd {
+TEST(XrdEndpointCooldown, EndpointIdentityExpiryRecoveryAndBoundedHistory) {
+  using C = detail::EndpointCooldown;
+  C cooldown(10);
+  const auto now = C::Clock::now();
+  const std::string loser = "root://user:password@STORAGE.example:1095//file?authz=secret";
+  EXPECT_EQ(detail::cooldownKey(loser), "storage.example:1095");
+  cooldown.beaten({loser}, {"winner.example:1094"}, now);
+  EXPECT_TRUE(cooldown.active("root://storage.example:1095//different-file",now));
+  EXPECT_FALSE(cooldown.active("storage.example:1094",now));
+  EXPECT_FALSE(cooldown.active("other.example:1095",now));
+  // A late loser callback does not prolong its original cooldown.
+  cooldown.beaten({loser},{"winner.example:1094"},now+std::chrono::seconds(9));
+  EXPECT_FALSE(cooldown.active(loser,now+std::chrono::seconds(10)));
+  cooldown.beaten({loser},{"winner.example:1094"},now+std::chrono::seconds(11));
+  cooldown.beaten({"winner.example:1094"},{loser},now+std::chrono::seconds(12));
+  EXPECT_FALSE(cooldown.active(loser,now+std::chrono::seconds(12)));
+  EXPECT_TRUE(cooldown.active("winner.example:1094",now+std::chrono::seconds(12)));
+  for (unsigned i=0;i<700;++i) cooldown.beaten({"node"+std::to_string(i)+":1094"},{},now);
+  EXPECT_EQ(cooldown.hosts(now).size(),512U);
+  EXPECT_TRUE(cooldown.hosts(now+std::chrono::seconds(30)).empty());
+  C disabled(0);
+  disabled.beaten({loser},{},now);
+  EXPECT_FALSE(disabled.active(loser,now));
+}
+
+TEST(XrdEndpointCooldown, HealthyAlternativesWinButSoleCooledEndpointRemainsUsable) {
+  detail::EndpointCooldown cooldown;
+  cooldown.beaten({"cold.example:1094"},{"healthy.example:1094"});
+  const auto cooling = [&](const std::string &url) { return cooldown.active(url); };
+  auto selected = detail::cooldownChoices(std::vector<std::string>{"cold.example:1094","healthy.example:1094"},cooling);
+  ASSERT_EQ(selected.size(),1U);
+  EXPECT_EQ(selected.front(),"healthy.example:1094");
+  selected = detail::cooldownChoices(std::vector<std::string>{"cold.example:1094"},cooling);
+  ASSERT_EQ(selected.size(),1U);
+  EXPECT_EQ(selected.front(),"cold.example:1094");
+}
+
+TEST(XrdEndpointCooldown, OpenLoserIsSkippedImmediatelyThenRetriedWhenAlternativesFail) {
+  const std::string cold="root://cooldown-open-loser.example//file";
+  const std::string healthy="root://cooldown-open-winner.example//file";
+  const std::string backend="root://cooldown-open-backend.example:1095//file";
+  std::shared_ptr<detail::InitialOpenState> late;
+  const std::vector<detail::InitialCandidate> candidates{{cold,"cold",{}},{healthy,"healthy",{}}};
+  auto first=detail::openInitialCandidates(candidates,1,{},[&](auto state,const auto &c,unsigned i) {
+    if (i==1) {
+      late=state;
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->attemptedEndpoints[cold]=backend;
+    } else state->complete(std::make_shared<XrdCl::File>(),true,7,c.url);
+  });
+  ASSERT_TRUE(first.file);
+  EXPECT_TRUE(detail::endpointCooldown().active(cold));
+  EXPECT_TRUE(detail::endpointCooldown().active(backend));
+  std::vector<std::string> launched;
+  auto second=detail::openInitialCandidates(candidates,1,{},[&](auto state,const auto &c,unsigned) {
+    launched.push_back(c.url);
+    state->complete(std::make_shared<XrdCl::File>(),true,7,c.url);
+  });
+  ASSERT_EQ(launched.size(),1U);
+  EXPECT_EQ(launched[0],healthy);
+  // The healthy connection now fails: cooldown cannot cause an availability failure.
+  launched.clear();
+  auto recovered=detail::openInitialCandidates(candidates,1,{},[&](auto state,const auto &c,unsigned) {
+    launched.push_back(c.url);
+    state->complete(c.url==cold ? std::make_shared<XrdCl::File>() : nullptr,c.url==cold,7,c.url);
+  });
+  ASSERT_TRUE(recovered.file);
+  ASSERT_EQ(launched.size(),2U);
+  EXPECT_EQ(launched[0],healthy);
+  EXPECT_EQ(launched[1],cold);
+  EXPECT_FALSE(detail::endpointCooldown().active(cold));
+  late->complete({},false,0,cold);
+}
+
+TEST(XrdEndpointCooldown, FullReadWinnerCoolsPendingLoserAndSoleSourceCanRecover) {
+  const std::string slow="cooldown-read-slow.example:1094";
+  const std::string fast="cooldown-read-fast.example:1094";
+  ReadRaceState race;
+  ASSERT_TRUE(race.registerEndpoints(0,{slow}));
+  ASSERT_TRUE(race.registerEndpoints(1,{fast}));
+  EXPECT_TRUE(race.complete(1,true,"fast","/f","root://file//f",10));
+  EXPECT_TRUE(detail::endpointCooldown().active(slow)); // Before its callback.
+  EXPECT_FALSE(race.registerEndpoints(2,{"late-copy.example:1094"}));
+  EXPECT_FALSE(race.complete(0,true,"slow","/f","root://file//f",100));
+  ReadRaceState only;
+  ASSERT_TRUE(only.registerEndpoints(0,{slow}));
+  EXPECT_TRUE(only.complete(0,true,"slow","/f","root://file//f",10));
+  EXPECT_FALSE(detail::endpointCooldown().active(slow));
 }
 } // namespace rdf::xrd

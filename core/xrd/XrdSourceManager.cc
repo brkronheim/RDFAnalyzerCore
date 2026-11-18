@@ -1,6 +1,10 @@
 #include "XrdSourceManager.h"
 #include "XrdOpenRetry.h"
 #include "XrdReadMemory.h"
+#include "XrdReadPipeline.h"
+#include "XrdSiteRanking.h"
+#include "XrdOpenTrace.h"
+#include "XrdInitialOpen.h"
 
 #include <XrdCl/XrdClBuffer.hh>
 #include <XrdCl/XrdClFile.hh>
@@ -18,6 +22,7 @@
 #include <cstring>
 #include <functional>
 #include <future>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -29,6 +34,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <unistd.h>
 
 namespace rdf::xrd {
 namespace {
@@ -40,6 +46,10 @@ constexpr std::uint64_t kMaxExplorationBytesPerRead = 2ULL * 1024 * 1024;
 // Permit one active-file and one lookahead-file full read to share a site.
 constexpr unsigned kMaxFullReadsPerSite = 2;
 std::atomic<std::uint64_t> nextManagerId{1};
+thread_local bool backgroundRead = false;
+std::atomic<unsigned> pipelineDepth{2};
+std::atomic<unsigned> hedgeDelayMs{50};
+std::atomic<bool> readDiagnostics{false};
 
 detail::ReadMemoryBudget &readMemoryBudget() {
   // XrdCl callbacks may still own reservations during static teardown.
@@ -59,12 +69,13 @@ bool isRemoteCondorJob() {
   return remote;
 }
 
-enum class LogLevel { Info, Error };
+enum class LogLevel { Info, Always, Error };
 
 void logLine(const std::string &line, LogLevel level = LogLevel::Info) {
-  if (isRemoteCondorJob() && level != LogLevel::Error) return;
+  if (isRemoteCondorJob() && !readDiagnostics && level == LogLevel::Info) return;
   std::lock_guard<std::mutex> lock(outputMutex());
   std::cout << line << '\n';
+  if (level != LogLevel::Info) std::cout.flush();
 }
 
 struct GlobalSettings {
@@ -277,11 +288,7 @@ std::string querySiteName(const std::string &lastUrl) {
 
 class SiteQualityMonitor {
 public:
-  struct QualitySnapshot {
-    double qualityMs = 260;
-    bool preferred = false;
-    bool enoughMeasurements = false;
-  };
+  using QualitySnapshot = detail::SiteRank;
 
   struct Decision {
     double sampleMs = 0;
@@ -293,7 +300,7 @@ public:
     std::string reason;
   };
 
-  static SiteQualityMonitor &instance() {
+  static SiteQualityMonitor &instance(bool initialize = true) {
     // Keep the monitor alive through process shutdown so the atexit summary
     // cannot race static destruction in a ROOT/XrdCl teardown path.
     static SiteQualityMonitor *monitor = [] {
@@ -301,6 +308,7 @@ public:
       std::atexit([] { SiteQualityMonitor::instance().printSummary(); });
       return value;
     }();
+    if (initialize) monitor->ensureRanking();
     return *monitor;
   }
 
@@ -308,6 +316,59 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     preferredBandPercent_ = std::min(percent, 100U);
     recomputePreferredLocked();
+  }
+
+  void ensureRanking() {
+    std::call_once(rankingOnce_, [this] { loadRanking({}, {}, 30); });
+  }
+
+  void configureRanking(std::string path, std::string origin, unsigned maxAgeDays) {
+    bool first = false;
+    std::call_once(rankingOnce_, [&] { loadRanking(path, origin, maxAgeDays); first = true; });
+    if (!first) loadRanking(path, origin, maxAgeDays);
+  }
+
+  void loadRanking(std::string path, std::string origin, unsigned maxAgeDays) {
+    if (path == "auto") path.clear();
+    if (path.empty()) {
+      const auto *value = std::getenv("RDF_XRD_SITE_RANKING_FILE");
+      if (value) path = value;
+    }
+    char hostname[256]{};
+    gethostname(hostname, sizeof(hostname) - 1);
+    if (origin.empty()) {
+      const auto *value = std::getenv("RDF_XRD_SITE_ORIGIN");
+      origin = value && *value ? value : hostname;
+    }
+    detail::SiteRanking ranking;
+    if (!path.empty() && path != "none") {
+      std::ifstream stream(path);
+      if (!stream) throw std::runtime_error("Cannot read XRootD site rankings: " + path);
+      ranking = detail::SiteRanking::read(stream);
+    }
+    const auto resolved = ranking.origin(origin);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ranking_ = std::move(ranking);
+      origin_ = resolved;
+      maxRankingAgeSeconds_ = static_cast<std::int64_t>(maxAgeDays) * 86400;
+    }
+    logLine("[XrdAdaptor] context origin=" + resolved + " execution_host=" + hostname +
+            " epoch=" + std::to_string(std::time(nullptr)) + " ranking_file=" +
+            (path.empty() ? "none" : path), LogLevel::Always);
+  }
+
+  std::string origin() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return origin_;
+  }
+
+  std::string endpointSite(const std::string &host) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto known = siteByServer_.find(lowercase(host));
+    if (known != siteByServer_.end()) return known->second;
+    const auto saved = ranking_.siteForEndpoint(host);
+    return saved.empty() ? fallbackSiteName(host) : saved;
   }
 
   std::string identify(XrdCl::File &file, const std::string &server) {
@@ -334,7 +395,14 @@ public:
       if (siteByServer_.size() >= 256 && !siteByServer_.count(serverKey))
         siteByServer_.erase(siteByServer_.begin());
       const auto result = siteByServer_.emplace(serverKey, std::move(site));
-      sites_[result.first->second];
+      const auto inserted = sites_.try_emplace(result.first->second).second;
+      if (inserted) {
+        const auto prior = ranking_.quality(origin_, result.first->second,
+                                              std::time(nullptr), maxRankingAgeSeconds_);
+        if (prior) logLine("[XrdAdaptor] site-prior origin=" + origin_ +
+                          " site=" + result.first->second + " quality_ms=" +
+                          std::to_string(*prior) + " weight=1", LogLevel::Always);
+      }
       return result.first->second;
     }
   }
@@ -368,10 +436,10 @@ public:
     explorationProbesInFlight_.erase(site);
   }
 
-  bool beginFullRead(const std::string &site) {
+  bool beginFullRead(const std::string &site, bool background = false) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto &inFlight = fullReadsInFlight_[site];
-    if (inFlight >= kMaxFullReadsPerSite) return false;
+    if (inFlight >= (background ? 1U : kMaxFullReadsPerSite)) return false;
     ++inFlight;
     return true;
   }
@@ -395,9 +463,11 @@ public:
   QualitySnapshot snapshot(const std::string &site) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = sites_.find(site);
-    if (found == sites_.end()) return {};
-    return {found->second.quality.value(), found->second.preferred,
-            enoughMeasurements(found->second)};
+    const auto prior = ranking_.quality(origin_, site, std::time(nullptr), maxRankingAgeSeconds_);
+    if (found == sites_.end()) return {prior.value_or(260), false, false, prior.has_value()};
+    const auto &state = found->second;
+    return {detail::initialSiteQuality(prior, state.quality.value(), state.qualitySamples),
+            state.preferred, enoughMeasurements(state), prior.has_value()};
   }
 
   Decision observe(const std::string &site, const std::string &file,
@@ -509,6 +579,14 @@ public:
                 << (row.blacklisted ? "yes" : "no") << ' '
                 << row.readErrors << ' ' << row.poorFiles << ' '
                 << row.qualitySamples << ' ' << row.successfulBytes << '\n';
+      if (row.qualitySamples) {
+        logLine("[XrdAdaptor] site-stat origin=" + origin() + " site=" + row.site +
+                " quality_ms=" + std::to_string(row.qualityMs) +
+                " samples=" + std::to_string(row.qualitySamples) +
+                " read_errors=" + std::to_string(row.readErrors) +
+                " successful_bytes=" + std::to_string(row.successfulBytes) +
+                " epoch=" + std::to_string(std::time(nullptr)), LogLevel::Always);
+      }
     }
   }
 
@@ -622,7 +700,19 @@ private:
   std::unordered_set<std::string> explorationProbesInFlight_;
   std::unordered_map<std::string, unsigned> fullReadsInFlight_;
   unsigned preferredBandPercent_ = 20;
+  detail::SiteRanking ranking_;
+  std::once_flag rankingOnce_;
+  std::string origin_;
+  std::int64_t maxRankingAgeSeconds_ = 30 * 86400;
 };
+
+detail::OpenTrace openTrace(const std::string &url, std::uint64_t handle,
+                            std::uint64_t attempt, const std::string &role) {
+  auto &monitor = SiteQualityMonitor::instance();
+  return {monitor.origin(), fileIdentity(url), url, role, handle, attempt,
+          [](const std::string &line) { logLine(line, LogLevel::Always); },
+          [](const std::string &host) { return SiteQualityMonitor::instance().endpointSite(host); }};
+}
 
 void logSiteDecision(const std::string &site, const std::string &file,
                      const SiteQualityMonitor::Decision &decision) {
@@ -674,18 +764,30 @@ public:
   static constexpr std::size_t kNoWinner =
       std::numeric_limits<std::size_t>::max();
 
+  bool registerEndpoints(std::size_t attempt, const std::vector<std::string> &endpoints) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (winner_ != kNoWinner) return false;
+    endpoints_[attempt] = endpoints;
+    return true;
+  }
+
   bool complete(std::size_t attempt, bool success, const std::string &site,
                 const std::string &file, const std::string &url,
                 double qualityMs) {
     bool won = false;
     std::string poorSite;
     double peerQuality = 0;
+    std::vector<std::string> beaten, winnerEndpoints;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       results_[attempt] = success;
       if (success && winner_ == kNoWinner) {
         winner_ = attempt;
         won = true;
+        for (const auto &entry : endpoints_) {
+          if (entry.first == attempt) winnerEndpoints = entry.second;
+          else beaten.insert(beaten.end(), entry.second.begin(), entry.second.end());
+        }
       }
       if (success) {
         for (const auto &peer : qualitySamples_) {
@@ -702,6 +804,8 @@ public:
         qualitySamples_.push_back({site, qualityMs});
       }
     }
+    if (won) detail::recordEndpointWinner(beaten, winnerEndpoints,
+        [](const std::string &line) { logLine(line, LogLevel::Always); });
     if (!poorSite.empty()) {
       const auto decision = SiteQualityMonitor::instance().markRelativePoor(
           poorSite, file, peerQuality);
@@ -746,6 +850,7 @@ private:
   mutable std::mutex mutex_;
   std::condition_variable condition_;
   std::unordered_map<std::size_t, bool> results_;
+  std::map<std::size_t, std::vector<std::string>> endpoints_;
   std::vector<QualitySample> qualitySamples_;
   std::size_t winner_ = kNoWinner;
 };
@@ -790,6 +895,11 @@ struct XrdSourceManager::Source {
   std::string server;
   std::string site;
   std::string exclude;
+  std::string requestedUrl;
+  bool cooling() const {
+    return detail::endpointCooldown().active(server) || detail::endpointCooldown().active(requestedUrl);
+  }
+  std::deque<std::string> locatedReplicas;
   std::atomic<bool> failed{false};
 };
 
@@ -950,8 +1060,8 @@ private:
 class XrdSourceManager::ProbeHandler final : public XrdCl::ResponseHandler {
 public:
   ProbeHandler(std::weak_ptr<XrdSourceManager> manager,
-               std::shared_ptr<XrdCl::File> file)
-      : manager_(std::move(manager)), file_(std::move(file)) {}
+               std::shared_ptr<XrdCl::File> file, detail::OpenTrace trace)
+      : manager_(std::move(manager)), file_(std::move(file)), trace_(std::move(trace)) {}
 
   void HandleResponse(XrdCl::XRootDStatus *status,
                       XrdCl::AnyObject *response) override {
@@ -962,14 +1072,15 @@ public:
                                XrdCl::AnyObject *response,
                                XrdCl::HostList *hosts) override {
     std::unique_ptr<XrdCl::HostList> ownedHosts(hosts);
-    finish(status, response, nullptr);
+    finish(status, response, hosts);
   }
 
 private:
   void finish(XrdCl::XRootDStatus *status, XrdCl::AnyObject *response,
-              XrdCl::HostList *) {
+              XrdCl::HostList *hosts) {
     std::unique_ptr<XrdCl::XRootDStatus> ownedStatus(status);
     std::unique_ptr<XrdCl::AnyObject> ownedResponse(response);
+    if (status) trace_.result(*file_, *status, hosts);
     bool adopted = false;
     if (auto manager = manager_.lock())
       adopted = manager->completeProbe(file_, ownedStatus.get());
@@ -979,6 +1090,7 @@ private:
 
   std::weak_ptr<XrdSourceManager> manager_;
   std::shared_ptr<XrdCl::File> file_;
+  detail::OpenTrace trace_;
 };
 
 struct XrdSourceManager::PrefetchCache {
@@ -1014,26 +1126,35 @@ struct XrdSourceManager::PrefetchCache {
     return cursor == end;
   }
 
-  void insert(std::uint64_t offset, std::shared_ptr<std::vector<char>> data) {
+  std::uint64_t reserveUses(std::size_t count) {
+    std::lock_guard<std::mutex> lock(mutex);
+    clock += count;
+    return clock;
+  }
+
+  void insert(std::uint64_t offset, std::shared_ptr<std::vector<char>> data,
+              std::uint64_t use = 0) {
     if (!data || data->empty() || data->size() > limit) return;
     std::lock_guard<std::mutex> lock(mutex);
+    if (!use) use = ++clock;
     auto found = entries.find(offset);
     if (found != entries.end()) {
+      if (found->second.use > use) return;
       usedBytes -= found->second.data->size();
       entries.erase(found);
     }
+    usedBytes += data->size();
+    entries.emplace(offset, CacheEntry{std::move(data), use});
     // Tiny metadata reads must not turn a payload-byte cap into millions of
     // map nodes and separately allocated vector/control blocks.
-    while ((usedBytes + data->size() > limit ||
-            entries.size() >= kMaxPrefetchEntries) && !entries.empty()) {
+    while ((usedBytes > limit ||
+            entries.size() > kMaxPrefetchEntries) && !entries.empty()) {
       auto oldest = std::min_element(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
         return a.second.use < b.second.use;
       });
       usedBytes -= oldest->second.data->size();
       entries.erase(oldest);
     }
-    usedBytes += data->size();
-    entries.emplace(offset, CacheEntry{std::move(data), ++clock});
   }
 
   std::size_t limit;
@@ -1062,6 +1183,15 @@ std::shared_ptr<XrdSourceManager::PrefetchCache> acquireCache(
 }
 } // namespace
 
+BackgroundReadScope::BackgroundReadScope(bool background) : previous_(backgroundRead) { backgroundRead = previous_ || background; }
+bool isBackgroundRead() { return backgroundRead; }
+BackgroundReadScope::~BackgroundReadScope() { backgroundRead = previous_; }
+void configureXrdReadScheduling(unsigned depth, unsigned delay, bool diagnostics) {
+  pipelineDepth = std::clamp(depth, 1U, 4U);
+  hedgeDelayMs = std::min(delay, 1000U);
+  readDiagnostics = diagnostics;
+}
+
 XrdSourceManager::XrdSourceManager(std::string url, unsigned probeIntervalSeconds,
                                    std::size_t prefetchCacheBytes,
                                    unsigned readTimeoutSeconds)
@@ -1085,18 +1215,84 @@ XrdSourceManager::XrdSourceManager(std::string url,
   auto primary = std::make_shared<Source>();
   const auto timeout = static_cast<std::uint16_t>(openTimeoutSeconds_);
   std::string lastError;
-  const bool opened = detail::openWithRetry(
+  // Library-only controls also work in already prepared worker executables.
+  const auto envSeconds = [](const char *name, unsigned fallback, unsigned cap) {
+    const char *value = std::getenv(name);
+    if (!value || !*value) return fallback;
+    char *end = nullptr;
+    const auto parsed = std::strtoul(value, &end, 10);
+    return end && !*end && *value != '-' ? static_cast<unsigned>(std::min<unsigned long>(parsed, cap)) : fallback;
+  };
+  const unsigned locateSeconds = envSeconds("RDF_XRD_LOCATE_TIMEOUT_SECONDS", 3, 10);
+  const unsigned candidateSeconds = std::max(1U, std::min(openTimeoutSeconds_,
+      envSeconds("RDF_XRD_INITIAL_OPEN_TIMEOUT_SECONDS", 8, 30)));
+  const XrdCl::URL initialUrl(url_);
+  if (locateSeconds && (initialUrl.GetProtocol() == "root" || initialUrl.GetProtocol() == "roots")) {
+    auto &monitor = SiteQualityMonitor::instance();
+    const auto started = std::chrono::steady_clock::now();
+    logLine("[XrdAdaptor] locate-start origin=" + monitor.origin() + " handle=" +
+        std::to_string(instanceId_) + " file=" + fileKey_ + " deadline_s=" +
+        std::to_string(locateSeconds) + " mode=nowait", LogLevel::Always);
+    const auto endpoints = detail::locateInitial(url_, locateSeconds,
+        [&](const std::vector<std::string> &urls) {
+          std::set<std::string> good;
+          for (const auto &candidate : urls) {
+            const auto site = monitor.endpointSite(XrdCl::URL(candidate).GetHostName());
+            const auto rank = monitor.snapshot(site);
+            if (!monitor.isBlacklisted(site) && (rank.hasPrior || rank.enoughMeasurements) && rank.qualityMs < 260)
+              good.insert(site);
+          }
+          return good.size() >= 2;
+        }, [&](unsigned count, unsigned failures, bool partial) {
+          logLine("[XrdAdaptor] locate-result origin=" + monitor.origin() + " handle=" +
+              std::to_string(instanceId_) + " file=" + fileKey_ + " endpoints=" + std::to_string(count) +
+              " failed_queries=" + std::to_string(failures) + " partial=" + (partial ? "yes" : "no") +
+              " elapsed_s=" + std::to_string(std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()), LogLevel::Always);
+        }, [](const std::string &line) { logLine(line, LogLevel::Always); });
+    std::vector<detail::InitialCandidate> candidates;
+    for (const auto &candidate : endpoints) {
+      const auto site = monitor.endpointSite(XrdCl::URL(candidate).GetHostName());
+      if (!monitor.isBlacklisted(site) && !monitor.isPoorForFile(site, fileKey_))
+        candidates.push_back({candidate, site, monitor.snapshot(site)});
+    }
+    candidates = detail::rankInitial(std::move(candidates));
+    auto result = detail::openInitialCandidates(candidates, candidateSeconds,
+        [&](const std::string &candidate, unsigned attempt) {
+          return openTrace(candidate, instanceId_, attempt, "ranked-primary");
+        });
+    if (result.file) {
+      primary->file = std::move(result.file);
+      primary->requestedUrl = result.candidate;
+      fileSize_ = result.size;
+    }
+    // Keep the catalogue on the private transport, preserving the public ABI.
+    // Subsequent replica discovery tries these ranked sites before global routing.
+    for (const auto &candidate : candidates)
+      if (candidate.url != result.candidate) primary->locatedReplicas.push_back(candidate.url);
+    logLine("[XrdAdaptor] initial-selection handle=" + std::to_string(instanceId_) +
+        " file=" + fileKey_ + " mode=" + (primary->file ? "ranked" : "global-fallback") +
+        " candidates=" + std::to_string(candidates.size()), LogLevel::Always);
+  }
+  const bool opened = primary->file || detail::openWithRetry(
       url_,
       [&](const std::string &candidateUrl, std::size_t attempt) {
         // A failed XrdCl handle must not be reused on the next attempt.
         auto file = std::make_shared<XrdCl::File>();
-        const auto status = file->Open(candidateUrl, XrdCl::OpenFlags::Read,
-                                       XrdCl::Access::None, timeout);
+        const auto status = detail::tracedOpen(*file,
+            openTrace(candidateUrl, instanceId_, attempt, "primary"), timeout);
         if (!status.IsOK()) {
-          lastError = "XrdCl could not open '" + candidateUrl + "': " + status.ToStr();
+          lastError = "XrdCl could not open '" + fileIdentity(candidateUrl) + "': " + status.ToStr();
         } else {
           XrdCl::StatInfo *statInfo = nullptr;
+          std::string resolvedUrl;
+          file->GetProperty("LastURL", resolvedUrl);
+          auto statTrace = openTrace(resolvedUrl.empty() ? candidateUrl : resolvedUrl,
+                                      instanceId_, attempt, "primary");
+          statTrace.file = fileIdentity(candidateUrl);
+          statTrace.operation = "stat";
+          statTrace.begin();
           const auto statStatus = file->Stat(false, statInfo, timeout);
+          statTrace.result(*file, statStatus, nullptr);
           std::unique_ptr<XrdCl::StatInfo> ownedStat(statInfo);
           if (statStatus.IsOK() && ownedStat) {
             fileSize_ = ownedStat->GetSize();
@@ -1105,7 +1301,7 @@ XrdSourceManager::XrdSourceManager(std::string url,
             url_ = candidateUrl;
             return true;
           }
-          lastError = "XrdCl could not stat '" + candidateUrl + "': " + statStatus.ToStr();
+          lastError = "XrdCl could not stat '" + fileIdentity(candidateUrl) + "': " + statStatus.ToStr();
         }
         logLine("[XrdAdaptor] initial open attempt " + std::to_string(attempt) +
                     "/3 failed: " + lastError, LogLevel::Error);
@@ -1133,9 +1329,9 @@ XrdSourceManager::XrdSourceManager(std::string url,
   sources_.push_back(std::move(primary));
   const auto &openedPrimary = sources_.front();
   logLine("[XrdAdaptor] source handle=" + std::to_string(instanceId_) +
-          " role=primary file=" + url_ + " site=" + openedPrimary->site +
+          " role=primary file=" + fileKey_ + " site=" + openedPrimary->site +
           " server=" +
-          (openedPrimary->server.empty() ? "<unknown>" : openedPrimary->server));
+          detail::OpenTrace::endpoint(XrdCl::URL("root://" + openedPrimary->server + "//")), LogLevel::Always);
 }
 
 XrdSourceManager::~XrdSourceManager() { stop(); }
@@ -1146,6 +1342,7 @@ void XrdSourceManager::startDiscovery() {
   const auto desiredSites = std::min(
       3U, maxReadSources() + (explorationShare > 0 ? 1U : 0U));
   std::vector<std::string> tried;
+  std::string locatedCandidate;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     sources_.erase(std::remove_if(sources_.begin(), sources_.end(),
@@ -1167,6 +1364,30 @@ void XrdSourceManager::startDiscovery() {
       return;
     probeInFlight_ = true;
     tried = triedHosts_;
+    bool healthyAvailable = !healthySites.empty();
+    for (const auto &source : sources_) {
+      auto &catalogue = source->locatedReplicas;
+      for (auto i=catalogue.begin(); i!=catalogue.end();) {
+        const auto host = hostnameOnly(XrdCl::URL(*i).GetHostId());
+        if (std::find(tried.begin(), tried.end(), host) != tried.end()) { i=catalogue.erase(i); continue; }
+        if (!detail::endpointCooldown().active(*i)) {
+          locatedCandidate = *i; catalogue.erase(i); break;
+        }
+        ++i;
+      }
+      if (!locatedCandidate.empty()) break;
+    }
+    if (locatedCandidate.empty() && !healthyAvailable) {
+      for (const auto &source : sources_) if (!source->locatedReplicas.empty()) {
+        locatedCandidate = source->locatedReplicas.front(); source->locatedReplicas.pop_front(); break;
+      }
+    }
+    // Suppress repeated global redirects to cooled hosts only while a usable
+    // source exists. With no usable alternative retain ordinary recovery.
+    if (healthyAvailable) {
+      for (const auto &host : detail::endpointCooldown().hosts())
+        if (std::find(tried.begin(),tried.end(),host)==tried.end()) tried.push_back(host);
+    }
   }
 
   std::string opaque = "tried=";
@@ -1185,12 +1406,15 @@ void XrdSourceManager::startDiscovery() {
   probeLog << ']';
   logLine(probeLog.str());
   auto file = std::make_shared<XrdCl::File>();
-  auto *handler = new ProbeHandler(weak_from_this(), file);
-  const auto candidateUrl = appendOpaque(url_, opaque);
+  const auto candidateUrl = locatedCandidate.empty() ? appendOpaque(url_, opaque) : locatedCandidate;
+  auto trace = openTrace(candidateUrl, instanceId_, ++probeSequence_, "replica");
+  trace.begin();
+  auto *handler = new ProbeHandler(weak_from_this(), file, trace);
   const auto status = file->Open(candidateUrl, XrdCl::OpenFlags::Read,
                                  XrdCl::Access::None, handler,
                                  static_cast<std::uint16_t>(openTimeoutSeconds_));
   if (!status.IsOK()) {
+    trace.result(*file, status, nullptr);
     logLine("[XrdAdaptor] replica probe request failed handle=" +
             std::to_string(instanceId_) + " file=" + url_ +
             " status=" + status.ToStr(),
@@ -1254,16 +1478,10 @@ XrdSourceManager::sources(bool includeBlacklistedFallbacks) const {
       ranked.push_back({candidate, monitor.snapshot(candidate->site)});
     std::stable_sort(ranked.begin(), ranked.end(),
                      [](const RankedSource &a, const RankedSource &b) {
-                       if (a.quality.preferred != b.quality.preferred)
-                         return a.quality.preferred;
-                       if (a.quality.enoughMeasurements !=
-                           b.quality.enoughMeasurements)
-                         return a.quality.enoughMeasurements;
-                       if (a.quality.enoughMeasurements &&
-                           a.quality.qualityMs != b.quality.qualityMs)
-                         return a.quality.qualityMs < b.quality.qualityMs;
-                       return false;
+                       return detail::siteRankBefore(a.quality, b.quality);
                      });
+
+    ranked = detail::cooldownChoices(ranked, [](const RankedSource &candidate) { return candidate.source->cooling(); });
 
     const auto distinctSite = [](const Source &source) {
       if (!source.site.empty() && source.site != "unknown-site")
@@ -1421,14 +1639,15 @@ bool XrdSourceManager::completeProbe(
   }
   std::ostringstream resultLog;
   resultLog << "[XrdAdaptor] replica probe result handle=" << instanceId_
-            << " file=" << url_;
+            << " file=" << fileKey_;
   if (!status || !status->IsOK())
     resultLog << " status=failed detail="
               << (status ? status->ToStr() : "<no status>");
   else if (server.empty())
     resultLog << " status=opened server=<unknown> action=discarded";
   else
-    resultLog << " status=opened server=" << server << " site=" << site
+    resultLog << " status=opened server="
+              << detail::OpenTrace::endpoint(XrdCl::URL("root://" + server + "//")) << " site=" << site
               << " action="
               << (globallyBlacklisted
                       ? (blacklistedFallbackAvailable
@@ -1443,7 +1662,7 @@ bool XrdSourceManager::completeProbe(
   if (sourceLimitReached) resultLog << " source_limit=" << kMaxSourcesPerFile;
   if (stopped) resultLog << " manager=stopped";
   logLine(resultLog.str(),
-          (!status || !status->IsOK()) ? LogLevel::Error : LogLevel::Info);
+          (!status || !status->IsOK()) ? LogLevel::Error : LogLevel::Always);
   condition_.notify_all();
   return added;
 }
@@ -1456,9 +1675,9 @@ bool XrdSourceManager::copyPrefetched(std::uint64_t offset,
 }
 
 void XrdSourceManager::savePrefetched(
-    std::uint64_t offset, std::shared_ptr<std::vector<char>> bytes) {
+    std::uint64_t offset, std::shared_ptr<std::vector<char>> bytes, std::uint64_t use) {
   if (const auto cache = std::atomic_load(&cache_))
-    cache->insert(offset, std::move(bytes));
+    cache->insert(offset, std::move(bytes), use);
 }
 
 std::unique_ptr<XrdSourceManager::PendingRead> XrdSourceManager::submit(
@@ -1530,7 +1749,7 @@ void XrdSourceManager::scheduleExplorationProbe(
 
   std::size_t sampleBytes = 0;
   for (const auto &range : ranges) sampleBytes += range.length;
-  auto memory = readMemoryBudget().tryReserve(sampleBytes);
+  auto memory = readMemoryBudget().tryReserve(sampleBytes, true);
   if (!memory) {
     monitor.endExplorationProbe(source->site);
     return;
@@ -1576,16 +1795,17 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges, bool prefetch
         range.offset > std::numeric_limits<std::uint64_t>::max() - range.length))
       return false;
   }
+  std::vector<std::vector<ReadRange>> windows;
   std::vector<ReadRange> window;
   std::size_t bytes = 0;
   const auto flush = [&] {
     if (stopped_) return false;
     if (window.empty()) return true;
     std::reverse(window.begin(), window.end());
-    const bool ok = readvWindow(window, prefetch);
-    window.clear();
+    windows.push_back(std::move(window));
+    window = {};
     bytes = 0;
-    return ok;
+    return true;
   };
   for (auto range = ranges.rbegin(); range != ranges.rend(); ++range) {
     std::uint32_t remaining = range->length;
@@ -1601,11 +1821,23 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges, bool prefetch
         return false;
     }
   }
-  return flush();
+  if (!flush()) return false;
+  const auto cache = std::atomic_load(&cache_);
+  if (!cache) return false;
+  // Reserve LRU ordering before launching: completion order must not evict
+  // the earliest ranges, which ROOT consumes first, from a bounded handoff.
+  constexpr auto stride = kMaxChunksPerRequest + detail::ReadMemoryBudget::kWindow / kReadChunkBytes + 1;
+  const auto base = cache->reserveUses(windows.size() * stride) - windows.size() * stride;
+  const bool background = backgroundRead;
+  return detail::runReadWindows(windows, pipelineDepth.load(),
+      [&](const auto &part, std::size_t i) {
+        return readvWindow(part, prefetch, background,
+                           base + i * stride + 1);
+      });
 }
 
 bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
-                                   bool prefetch) {
+                                   bool prefetch, bool background, std::uint64_t cacheUse) {
   const auto cache = std::atomic_load(&cache_);
   if (!cache || stopped_) return false;
   const auto readStarted = std::chrono::steady_clock::now();
@@ -1748,12 +1980,20 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
   std::vector<std::shared_ptr<Source>> explorationSources;
   bool explorationScheduled = false;
 
+  std::uint64_t slotDeferrals = 0, budgetDeferrals = 0;
   const auto launchFullRead = [&](const std::shared_ptr<Source> &source) {
     if (race->winner() != ReadRaceState::kNoWinner) return false;
     if (!source || source->failed.load()) return false;
+    // A different pipeline window can cool an endpoint after sources() took
+    // its snapshot. Recheck immediately before issuing a speculative copy.
+    if (source->cooling() && std::any_of(active.begin(), active.end(), [](const auto &other) {
+          return other && !other->failed.load() && !other->cooling();
+        })) return false;
     const auto key = sourceKey(source);
     if (key.empty() || attemptedSites.count(key)) return false;
-    if (!siteMonitor.beginFullRead(key)) {
+    const bool speculative = background || !fullAttempts.empty();
+    if (!siteMonitor.beginFullRead(key, speculative)) {
+      ++slotDeferrals;
       bool reportLimit = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1771,8 +2011,9 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
       return false;
     }
 
-    auto memory = readMemoryBudget().tryReserve(networkBytes);
+    auto memory = readMemoryBudget().tryReserve(networkBytes, speculative);
     if (!memory) {
+      ++budgetDeferrals;
       siteMonitor.endFullRead(key);
       return false;
     }
@@ -1793,6 +2034,10 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
                         ? "full-read-1"
                         : (fullAttempts.size() == 1 ? "full-read-2"
                                                     : "full-read-replacement");
+    if (!race->registerEndpoints(attempt->sourceIndex, {source->server, source->requestedUrl})) {
+      siteMonitor.endFullRead(key);
+      return false;
+    }
     attempt->ownedBuffers.reserve(pieces.size());
     for (const auto &piece : pieces)
       attempt->ownedBuffers.push_back(
@@ -1887,11 +2132,13 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
     }
   };
 
-  // Start both currently-known full sites before waiting for either response.
+  // Start the best site first; a backup joins after the hedge delay (zero
+  // retains immediate racing), or immediately following a read failure.
   // If only one site is known, keep its request asynchronous while discovery
   // runs so a second site can join the race before the primary finishes.
   for (const auto &source : active) {
-    if (fullAttempts.size() >= fullReadSiteLimit) break;
+    if (fullAttempts.size() >= fullReadSiteLimit ||
+        (!fullAttempts.empty() && hedgeDelayMs.load() > 0)) break;
     launchFullRead(source);
   }
   scheduleExploration(active);
@@ -1908,6 +2155,9 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
     // keeps its slot until its timing callback completes.
     for (const auto &source : active) {
       if (fullReadCount() >= fullReadSiteLimit) break;
+      if (fullReadCount() > 0 && !fullAttempts.empty() &&
+          std::chrono::steady_clock::now() - fullAttempts.front()->started <
+              std::chrono::milliseconds(hedgeDelayMs.load())) break;
       launchFullRead(source);
     }
     scheduleExploration(active);
@@ -2016,7 +2266,8 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
     // order. Mark earlier requests as newer in the bounded LRU so a warmup
     // larger than the handoff budget preserves the first data it will read.
     for (auto piece = pieces.rbegin(); piece != pieces.rend(); ++piece) {
-      savePrefetched(piece->range.offset, piece->owned);
+      savePrefetched(piece->range.offset, piece->owned,
+                     cacheUse + static_cast<std::uint64_t>(std::distance(pieces.rbegin(), piece)));
       if (piece->range.length <= cache->limit)
         handoffStoredBytes += piece->range.length;
     }
@@ -2029,12 +2280,25 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
       if (piece->range.length > cache->limit) continue;
       // The winner is immutable once all its callbacks have completed.
       // Share that allocation instead of copying ROOT's destination again.
-      savePrefetched(piece->range.offset, piece->owned);
+      savePrefetched(piece->range.offset, piece->owned,
+                     cacheUse + static_cast<std::uint64_t>(std::distance(pieces.rbegin(), piece)));
       handoffStoredBytes += piece->range.length;
     }
   }
+  if (slotDeferrals || budgetDeferrals) {
+    std::ostringstream contention;
+    contention << "[XrdAdaptor] read scheduling handle=" << instanceId_
+               << " background=" << background << " slot_deferrals=" << slotDeferrals
+               << " budget_deferrals=" << budgetDeferrals;
+    logLine(contention.str());
+  }
   logReadTiming("ok", readSources);
   return true;
+}
+
+void configureXrdSiteRanking(const std::string &file, const std::string &origin,
+                             unsigned maxAgeDays) {
+  SiteQualityMonitor::instance(false).configureRanking(file, origin, maxAgeDays);
 }
 
 void configureXrdAdaptor(unsigned probeIntervalSeconds,

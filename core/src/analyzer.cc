@@ -22,6 +22,25 @@
 #include <SystematicManager.h>
 #include <api/ManagerContext.h> // for wiring plugins and services
 
+ROOT::RDF::RNode rdf::detail::filterAnyMask(
+    ROOT::RDF::RNode df, const std::vector<std::string> &masks,
+    const std::string &label) {
+    switch (masks.size()) {
+    case 0: throw std::logic_error("Analyzer::Filter: empty selection mask union");
+    case 1: return df.Filter([](bool a) { return a; }, masks, label);
+    case 2: return df.Filter([](bool a, bool b) { return a || b; }, masks, label);
+    case 3: return df.Filter([](bool a, bool b, bool c) { return a || b || c; }, masks, label);
+    case 4: return df.Filter([](bool a, bool b, bool c, bool d) { return a || b || c || d; }, masks, label);
+    default:
+        std::string expression;
+        for (const auto &mask : masks) {
+            if (!expression.empty()) expression += " || ";
+            expression += "(" + mask + ")";
+        }
+        return df.Filter(expression, label);
+    }
+}
+
 template <typename T>
 static T& requireCoreDependency(const std::unique_ptr<T>& dependency,
                                 const char* name) {

@@ -25,6 +25,11 @@ This comprehensive guide walks you through creating a complete analysis with RDF
 
 ## Overview
 
+For explicit calibration uncertainties or moving expensive calculations behind
+selections, read [safe systematic authoring](SYSTEMATIC_AUTHORING.md). It explains
+column-name collisions, terminal variation definitions, mapping order, true
+dependencies and migration-safe gate placement in C++ and Python.
+
 RDFAnalyzerCore uses a **config-driven architecture** where:
 - Core behavior is controlled by text configuration files
 - Plugin managers handle common tasks (BDTs, corrections, triggers)

@@ -25,6 +25,15 @@ namespace {
 
 using CorrectionValue = std::variant<int, double, std::string>;
 
+bool scalarDoubleOutput(const IConfigurationProvider &config) {
+  const auto &settings = config.getConfigMap();
+  const auto it = settings.find("correctionScalarOutputType");
+  const auto type = it == settings.end() ? "float" : it->second;
+  if (type != "float" && type != "double")
+    throw std::invalid_argument("CorrectionManager: correctionScalarOutputType must be float or double");
+  return type == "double";
+}
+
 ROOT::RDF::RNode defineCorrectionInputPacks(
     ROOT::RDF::RNode df, const std::string &name,
     const std::vector<std::string> &inputs, ISystematicManager &systematics,
@@ -49,6 +58,16 @@ ROOT::RDF::RNode defineCorrectionInputPacks(
     if (up != inputs) df = pack(df, upName, up);
     if (down != inputs) df = pack(df, downName, down);
     systematics.registerVariationColumns(name, source, upName, downName);
+  }
+  for (const auto &label : systematics.getExplicitVariationLabels()) {
+    std::vector<std::string> columns;
+    for (const auto &input : inputs)
+      columns.push_back(systematics.getVariationColumnName(input, label));
+    if (columns == inputs) continue;
+    const auto mapped = systematics.getVariationColumnName(name, label);
+    const auto output = mapped == name ? name + "_" + label : mapped;
+    df = pack(df, output, columns);
+    systematics.registerVariationColumn(name, label, output);
   }
   return df;
 }
@@ -146,10 +165,10 @@ void populateCorrectionValues(std::vector<CorrectionValue> &values,
 /// For any other exception type the evaluation is still re-thrown as a
 /// `std::runtime_error` with a descriptive message, since those indicate
 /// genuine problems (corrupt files, schema mismatches, etc.).
-template <typename CorrectionRef>
-Float_t safeEvaluate(const CorrectionRef &correction,
+template <typename Output = Float_t, typename CorrectionRef>
+Output safeEvaluate(const CorrectionRef &correction,
                      std::vector<CorrectionValue> &values,
-                     Float_t fallback = 1.0f) {
+                     Output fallback = Output(1)) {
   const auto reportFallback = [&](const char *type, const std::exception &error) {
     std::ostringstream warning;
     warning << std::setprecision(17)
@@ -173,7 +192,7 @@ Float_t safeEvaluate(const CorrectionRef &correction,
   };
   try {
     const auto result = correction->evaluate(values);
-    if (!std::isfinite(result) || std::abs(result) > std::numeric_limits<Float_t>::max())
+    if (!std::isfinite(result) || std::abs(result) > std::numeric_limits<Output>::max())
       throw std::runtime_error("non-finite or unrepresentable correction result");
     return result;
   } catch (const std::out_of_range &e) {
@@ -207,7 +226,8 @@ Float_t safeEvaluate(const CorrectionRef &correction,
   }
 }
 
-Float_t evaluateScalarCorrection(
+template <typename Output = Float_t>
+Output evaluateScalarCorrection(
     const correction::Correction::Ref &correction,
     const std::vector<std::string> &stringArgs,
     const std::vector<CorrectionInputKind> &inputKinds,
@@ -215,10 +235,11 @@ Float_t evaluateScalarCorrection(
   std::vector<CorrectionValue> values;
   values.reserve(inputKinds.size());
   populateCorrectionValues(values, inputKinds, stringArgs, inputVector.begin());
-  return safeEvaluate(correction, values);
+  return safeEvaluate<Output>(correction, values);
 }
 
-Float_t evaluateScalarCorrection(
+template <typename Output = Float_t>
+Output evaluateScalarCorrection(
     const correction::CompoundCorrection::Ref &correction,
     const std::vector<std::string> &stringArgs,
     const std::vector<CorrectionInputKind> &inputKinds,
@@ -226,7 +247,7 @@ Float_t evaluateScalarCorrection(
   std::vector<CorrectionValue> values;
   values.reserve(inputKinds.size());
   populateCorrectionValues(values, inputKinds, stringArgs, inputVector.begin());
-  return safeEvaluate(correction, values);
+  return safeEvaluate<Output>(correction, values);
 }
 
 ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
@@ -578,21 +599,26 @@ void CorrectionManager::applyConditionalCorrections(
     else
       dataManager_m->DefineVectorNominal(packed, resolved, "double", *systematicManager_m);
     for (std::size_t i = 0; i < arguments.size(); ++i) {
-      const auto evaluate = [correction, kinds, strings = arguments[i], prepareInputs](
-          const ROOT::VecOps::RVec<double> &values, bool active) -> float {
-        if (!active) return 1.f;
-        if (!prepareInputs)
-          return evaluateScalarCorrection(correction, strings, kinds, values);
-        auto prepared = values;
-        prepareInputs(prepared);
-        if (prepared.size() != values.size())
-          throw std::runtime_error("CorrectionManager: conditional input preparation changed input count");
-        return evaluateScalarCorrection(correction, strings, kinds, prepared);
+      const auto bookOutput = [&](auto outputTag) {
+        using Output = decltype(outputTag);
+        const auto evaluate = [correction, kinds, strings = arguments[i], prepareInputs](
+            const ROOT::VecOps::RVec<double> &values, bool active) -> Output {
+          if (!active) return Output(1);
+          if (!prepareInputs)
+            return evaluateScalarCorrection<Output>(correction, strings, kinds, values);
+          auto prepared = values;
+          prepareInputs(prepared);
+          if (prepared.size() != values.size())
+            throw std::runtime_error("CorrectionManager: conditional input preparation changed input count");
+          return evaluateScalarCorrection<Output>(correction, strings, kinds, prepared);
+        };
+        if (propagate.empty() || propagate[i])
+          dataManager_m->Define(outputs[i], evaluate, {packed, condition}, *systematicManager_m);
+        else
+          dataManager_m->DefineNominal(outputs[i], evaluate, {packed, condition});
       };
-      if (propagate.empty() || propagate[i])
-        dataManager_m->Define(outputs[i], evaluate, {packed, condition}, *systematicManager_m);
-      else
-        dataManager_m->DefineNominal(outputs[i], evaluate, {packed, condition});
+      if (scalarDoubleOutput(*configManager_m)) bookOutput(double{});
+      else bookOutput(Float_t{});
     }
   };
   if (objects_m.count(name)) book(objects_m.at(name));
@@ -633,10 +659,27 @@ void CorrectionManager::applyCorrectionBatch(
                   [&df](const std::string &branch) { return df.HasColumn(branch); })) return;
   // Never cache readers between calls: Redefine can change an input without
   // changing its name. A partial repeat also needs fresh inputs for new outputs.
+  const auto labels = systematicManager_m->getVariationLabels();
+  const auto conflictsWithPack = [&](const std::string &candidate) {
+    const auto prefix = candidate + "_";
+    const auto aliasesPack = [&](const std::string &column) {
+      return column == candidate || column.rfind(prefix, 0) == 0;
+    };
+    if (df.HasColumn(candidate) ||
+        !systematicManager_m->getSystematicsForVariable(candidate).empty()) return true;
+    for (const auto &label : labels)
+      if (df.HasColumn(prefix + label)) return true;
+    for (const auto &branch : branches) {
+      if (aliasesPack(branch)) return true;
+      for (const auto &label : labels)
+        if (aliasesPack(systematicManager_m->getVariationColumnName(branch, label))) return true;
+    }
+    return false;
+  };
   std::string packed;
   do {
     packed = "__rdf_correction_input_" + std::to_string(batchInputIndex_m++);
-  } while (df.HasColumn(packed));
+  } while (conflictsWithPack(packed));
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const bool expand = propagateSystematics.empty() || propagateSystematics[i];
     if (vector) applyCorrectionVecImpl(name, arguments[i], inputs, branches[i], packed, expand);
@@ -673,6 +716,7 @@ void CorrectionManager::applyCorrectionImpl(
   if (!dataManager_m || !systematicManager_m) {
     throw std::runtime_error("CorrectionManager: DataManager or SystematicManager not set");
   }
+  const bool doubleOutput = scalarDoubleOutput(*configManager_m);
 
   const std::string branchName = outputBranch.empty()
                                      ? makeBranchName(correctionName, stringArguments)
@@ -700,35 +744,22 @@ void CorrectionManager::applyCorrectionImpl(
   } else {
     dataManager_m->DefineVectorNominal(inputColName, resolvedInputs, "double", *systematicManager_m);
   }
-  if (const auto corrIt = this->objects_m.find(correctionName);
-      corrIt != this->objects_m.end()) {
-    auto correction = corrIt->second;
-    auto stringArgs = stringArguments;
-    auto inputKinds = buildCorrectionInputKinds(correction);
-    auto correctionLambda =
-        [correction, stringArgs, inputKinds](const ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
-      return evaluateScalarCorrection(correction, stringArgs, inputKinds, inputVector);
+  const auto book = [&](const auto &correction, auto outputTag) {
+    using Output = decltype(outputTag);
+    const auto stringArgs = stringArguments;
+    const auto inputKinds = buildCorrectionInputKinds(correction);
+    const auto evaluate = [correction, stringArgs, inputKinds](const ROOT::VecOps::RVec<double> &inputs) -> Output {
+      return evaluateScalarCorrection<Output>(correction, stringArgs, inputKinds, inputs);
     };
-    if (propagateSystematics)
-      dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
-    else dataManager_m->DefineNominal(branchName, correctionLambda, {inputColName});
-    return;
-  }
-
-  if (const auto compoundIt = compoundObjects_m.find(correctionName);
-      compoundIt != compoundObjects_m.end()) {
-    auto correction = compoundIt->second;
-    auto stringArgs = stringArguments;
-    auto inputKinds = buildCorrectionInputKinds(correction);
-    auto correctionLambda =
-        [correction, stringArgs, inputKinds](const ROOT::VecOps::RVec<double> &inputVector) -> Float_t {
-      return evaluateScalarCorrection(correction, stringArgs, inputKinds, inputVector);
-    };
-    if (propagateSystematics)
-      dataManager_m->Define(branchName, correctionLambda, {inputColName}, *systematicManager_m);
-    else dataManager_m->DefineNominal(branchName, correctionLambda, {inputColName});
-    return;
-  }
+    if (propagateSystematics) dataManager_m->Define(branchName, evaluate, {inputColName}, *systematicManager_m);
+    else dataManager_m->DefineNominal(branchName, evaluate, {inputColName});
+  };
+  const auto dispatch = [&](const auto &correction) {
+    if (doubleOutput) book(correction, double{});
+    else book(correction, Float_t{});
+  };
+  if (const auto it = objects_m.find(correctionName); it != objects_m.end()) {dispatch(it->second); return;}
+  if (const auto it = compoundObjects_m.find(correctionName); it != compoundObjects_m.end()) {dispatch(it->second); return;}
 
   throw std::runtime_error("CorrectionManager::applyCorrection: unknown correction '" + correctionName + "'");
 }
@@ -860,11 +891,13 @@ void CorrectionManager::applyCorrectionVecImpl(
       }
 
     }
-    // Legacy vector callers include energy-workflow steps whose explicitly
+    // Legacy single-vector callers include energy-workflow steps whose explicitly
     // resolved inputs are booked before their future variation columns exist.
-    // Dispatching APIs above own the paired numeric/selector expansion.
+    // Explicit batch calls own expansion; a later output can be the first to
+    // request it after an earlier nominal-only output reused this same pack.
     dfNode = defineCorrectionInputPacks(dfNode, inputVecName, resolvedInputs,
-                                       *systematicManager_m, false);
+                                       *systematicManager_m,
+                                       !packedInput.empty() && propagateSystematics);
     dataManager_m->setDataFrame(dfNode);
   }
 

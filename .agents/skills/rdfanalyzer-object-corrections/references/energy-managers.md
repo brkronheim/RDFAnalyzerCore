@@ -14,6 +14,15 @@ not prescribe a payload schema. Check immediate versus deferred evaluation,
 input/output types, variation propagation and at least one numerical case.
 For selected object indices, read [collections](collections.md).
 
+Python can explicitly use [correction batches](../../../../docs/CORRECTION_BATCHES.md)
+through `Analysis.correction_batch()` or the raw native batch bindings. Default
+propagation is preserved; explicit per-output false flags disable automatic input
+variation expansion. Scalar precision follows manager configuration and vector
+output remains Float_t. Sharing is call-local; readers are fresh after later
+Redefine operations. Check the loaded binding's `correction-batch` capability;
+source additions are unavailable in an older module until rebuilt. This adds no
+mandatory native interface or complete declaration-level plugin graph metadata.
+
 Correction input packing broadcasts scalars only: every per-object array must
 have the same length, including empty arrays. The generic `PackingLayout::Rows`
 API retains its explicit repeat-last contract; correction evaluation uses

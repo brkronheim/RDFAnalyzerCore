@@ -4,7 +4,7 @@ Reviewed 2026-10-30. The historical inventory and prototype measurements below
 motivated the implemented [metadata contract](METADATA.md). Production writers,
 readers, LAW merges and the vjet wrapper now use that contract. Existing staged
 jobs and saved analysis products were not modified. The original experiment is
-in [`benchmarks/metadata_20261030`](../benchmarks/metadata_20261030/README.md).
+in `benchmarks/metadata_20261030`.
 
 ## Recommendation
 
@@ -38,21 +38,21 @@ normalization and derivation inputs. These objects need distinct policies:
 | `ProvenanceService::finalize` | One `TNamed` for each `provenance/*` entry | Deduplicate shared values and preserve job-specific values with explicit job/source identity. |
 
 Source locations:
-[`analyzer.cc`](../core/src/analyzer.cc),
-[`ProvenanceService.cc`](../core/src/ProvenanceService.cc),
-[`CounterService.cc`](../core/src/CounterService.cc),
-[`NDHistogramManager.cc`](../core/plugins/NDHistogramManager/NDHistogramManager.cc),
-[`WeightManager.cc`](../core/plugins/WeightManager/WeightManager.cc),
-[`CutflowManager.cc`](../core/plugins/CutflowManager/CutflowManager.cc),
-[`RegionManager.cc`](../core/plugins/RegionManager/RegionManager.cc),
-[`TaggerEfficiencyService.cc`](../core/src/TaggerEfficiencyService.cc),
-[`TaggerWorkingPointManager.cc`](../core/plugins/TaggerWorkingPointManager/TaggerWorkingPointManager.cc),
-[`StxsManager.cc`](../core/plugins/StxsManager/StxsManager.cc).
+[`analyzer.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/src/analyzer.cc),
+[`ProvenanceService.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/src/ProvenanceService.cc),
+[`CounterService.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/src/CounterService.cc),
+[`NDHistogramManager.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/plugins/NDHistogramManager/NDHistogramManager.cc),
+[`WeightManager.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/plugins/WeightManager/WeightManager.cc),
+[`CutflowManager.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/plugins/CutflowManager/CutflowManager.cc),
+[`RegionManager.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/plugins/RegionManager/RegionManager.cc),
+[`TaggerEfficiencyService.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/src/TaggerEfficiencyService.cc),
+[`TaggerWorkingPointManager.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/plugins/TaggerWorkingPointManager/TaggerWorkingPointManager.cc),
+[`StxsManager.cc`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/plugins/StxsManager/StxsManager.cc).
 
 `reportMetadata()` mostly reports to the logger. It should not be confused with
 `finalize()` methods that actually open and update the ROOT file. Most of these
 writers independently open the same file in `UPDATE`; the current
-[`IOutputSink`](../core/interface/api/IOutputSink.h) supplies file resolution and
+[`IOutputSink`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/interface/api/IOutputSink.h) supplies file resolution and
 dataframe output, not a common object-writing or metadata-reduction contract.
 
 ## Observed duplication
@@ -78,7 +78,7 @@ of this final file. This is independent of the cost of keeping both sparse
 histograms and exported TH1 projections, which is outside this review's scope.
 
 The existing analysis wrapper
-[`mergeResults.sh`](../analyses/vjet-njetpt/mergeResults.sh) excludes only the
+`mergeResults.sh` excludes only the
 `provenance` directory and uses eight `hadd` workers for DATA. That avoids one
 source of duplication but loses provenance from the merged artifact and still
 copies the schema and normalization keys per job. The implementation now routes the wrapper through the shared metadata merger.
@@ -164,13 +164,13 @@ aggregate mean, rather than silently returning the sum of means.
 
 ### A pile of key cycles is not a provenance table
 
-The current [`load_provenance_from_root`](../core/python/reproducibility_report.py)
+The current [`load_provenance_from_root`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/reproducibility_report.py)
 iterates keys, removes cycle suffixes and assigns values into one flat map.
 It cannot express multiple jobs' differing values. A merged file therefore
 needs a separate aggregate-report interface; returning one arbitrary job's
 configuration/build value as the merged identity is misleading.
 
-[`MergeMetadata`](../core/python/law/merge_tasks.py) is already a separate LAW
+[`MergeMetadata`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/merge_tasks.py) is already a separate LAW
 task, but its summary records only manifest path, framework hash, user-repository
 hash and config mtime. It does not read the complete C++ provenance or reduce
 the numerical ROOT diagnostics. It cannot currently replace those records.
@@ -250,7 +250,7 @@ sidecar as well as ROOT to keep its evidence self-contained.
 
 ## Provenance identity needs clearer semantics
 
-[`ProvenanceService::hashFile`](../core/src/ProvenanceService.cc) hashes a local
+[`ProvenanceService::hashFile`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/src/ProvenanceService.cc) hashes a local
 path/size/mtime fingerprint, or a remote URI string. It does not hash the input
 file contents. Use an explicitly named reference fingerprint for that evidence;
 hash small configs/models/payload manifests by content once during staging,

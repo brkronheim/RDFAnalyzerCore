@@ -7,6 +7,31 @@ description: Configure, build, test, or diagnose RDFAnalyzerCore CMake targets, 
 
 Read [wrappers and dependencies](references/wrappers-dependencies.md) for build/test/cleanup scripts, presets, optional external builds and installation. Use [CI and containers](references/ci-containers.md) for GitHub workflows and runner lifecycle; source changes do not themselves establish a successful CI run.
 
+The independent [native helper installer](../../../core/native_authoring/CMakeLists.txt)
+uses `LANGUAGES NONE` and installs only the `NativeAuthoring` headers/CMake target,
+without compiler or ROOT discovery. The root build shares
+[InstallNativeAuthoring.cmake](../../../cmake/InstallNativeAuthoring.cmake).
+External consumers use `find_package(RDFNativeAuthoring CONFIG REQUIRED)` and
+`RDFAnalyzer::NativeAuthoring`; this is not the complete Analyzer/plugin SDK.
+It includes the optional [RunResult.h](../../../core/interface/RunResult.h)
+value serializer. Standalone result contracts/receiver tests live beside the
+settings checks; the [linked result example](../../../examples/native-results/README.md)
+separately requires ROOT and uses the installed helper target. Source changes
+and language-free installation alone do not establish compiled/runtime acceptance.
+The [native preflight example](../../../examples/native-preflight/README.md)
+explicitly requires ROOT, and can be built independently of the shared framework
+build. Focused contracts live in `core/tests/native_authoring/` and
+`core/tests/python/test_native_authoring_install.py`.
+
+The separately selected [Analyzer SDK installer](../../../cmake/InstallAnalyzerSDK.cmake)
+provides `RDFAnalyzerCore`, `RDFAnalyzer::Core` and component `AnalyzerSDK` for
+its validated core-only CPU configuration. It preserves the existing Analyzer
+contract and static archive rescan semantics; it adds no provider/compiler ABI.
+[SDK usage and acceptance limits](../../../docs/ANALYZER_SDK.md) distinguish
+private installed scalar onboarding from broader HT10/IMT/deployment acceptance.
+The [three-route example](../../../examples/analyzer-sdk/README.md) uses genuine
+Analyzer-linked C++, steering of that executable and Python-authored kernels.
+
 ## Select the actual target and environment
 
 For native ROOT registry compaction and its ABI/version guards, use
@@ -31,6 +56,8 @@ ctest --test-dir build -R '<registered-test-pattern>' --output-on-failure
 Replace placeholders with targets and available resources. Read [test CMake](../../../core/tests/cpp/CMakeLists.txt) and [LAW CMake](../../../core/python/law/CMakeLists.txt) for environment and names. Python unit suites are under `core/tests/python` and `core/tests/law`; select files relevant to the change and use the matching interpreter/virtualenv. Generated-config or plugin wiring changes need an execution that actually consumes that config, not just compilation.
 
 For performance work, choose a representative bounded workload and record baseline/result timing plus numerical agreement. [PERFORMANCE_TUNING](../../../docs/PERFORMANCE_TUNING.md), [PERFORMANCE_MONITORING](../../../docs/PERFORMANCE_MONITORING.md), and [MEMORY_MODEL](../../../docs/MEMORY_MODEL.md) help locate existing instrumentation. Distinguish configure/build, synthetic tests, event runs, and staged worker validation in the result.
+
+The IRIS-HEP AGC comparison harness is maintained in a separate analysis repository.
 
 For the skill tree itself, run the [skill validator](../rdfanalyzer-development/scripts/validate_skill_tree.py); it checks metadata, local links, routing reachability, and plugin coverage without building or starting jobs.
 

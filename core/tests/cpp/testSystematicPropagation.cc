@@ -106,6 +106,42 @@ TEST_F(SystematicPropagationTest, DefineWithSystematicsPropagates) {
   EXPECT_NE(std::find(columns.begin(), columns.end(), "energy_testSystDown"), columns.end());
 }
 
+TEST_F(SystematicPropagationTest, DerivedChainPropagatesExplicitReplicas) {
+  auto &systematics = analyzer->getSystematicManager();
+  analyzer->DefineNominal("replica_pt", [](ULong64_t e) { return float(e + 24); },
+                           {"rdfentry_"});
+  analyzer->DefineNominal("replica_shift", [](ULong64_t e) { return float(e + 27); },
+                           {"rdfentry_"});
+  systematics.registerVariationColumn("replica_pt", "pdf_0", "replica_shift");
+  analyzer->Define("scaled_pt", [](float pt) { return pt * 2; }, {"replica_pt"});
+  analyzer->Define("observable", [](float pt) { return pt + 1; }, {"scaled_pt"});
+  analyzer->Filter("kin", [](float value) { return value > 50; }, {"observable"});
+  auto df = analyzer->getDataFrameProvider().getDataFrame();
+  auto nominal = df.Take<float>("observable");
+  auto varied = df.Take<float>("observable_pdf_0");
+  auto mask = df.Take<bool>(systematics.getSelectionMaskColumn("Nominal"));
+  analyzer->run();
+  EXPECT_EQ(nominal.GetValue(), (std::vector<float>{49, 51, 53, 55, 57}));
+  EXPECT_EQ(varied.GetValue(), (std::vector<float>{55, 57, 59, 61, 63}));
+  EXPECT_EQ(mask.GetValue(), (std::vector<bool>{false, true, true, true, true}));
+}
+
+TEST(SelectionMaskUnionTest, CompiledAndFallbackUnionsPreserveAcceptance) {
+  ROOT::RDataFrame source(5);
+  ROOT::RDF::RNode df = source;
+  std::vector<std::string> masks;
+  for (unsigned i = 0; i < 5; ++i) {
+    const auto name = "mask_" + std::to_string(i);
+    df = df.Define(name, [i](ULong64_t entry) { return entry == i; }, {"rdfentry_"});
+    masks.push_back(name);
+  }
+  for (unsigned count = 1; count <= 5; ++count) {
+    const std::vector<std::string> inputs(masks.begin(), masks.begin() + count);
+    auto selected = rdf::detail::filterAnyMask(df, inputs, "selection");
+    EXPECT_EQ(*selected.Count(), count);
+  }
+}
+
 /**
  * @brief Test that filtering on a variable with systematics does not remove systematic columns.
  */
@@ -390,4 +426,91 @@ TEST_F(SystematicPropagationTest, TerminalVariationDoesNotExpandIndependentShape
   EXPECT_FLOAT_EQ(*df.Take<float>(sys.getVariationColumnName("nominal_weight", "pileupUp"))->begin(), 22.f);
   EXPECT_FALSE(df.HasColumn("weight_pileup_up_shiftUp"));
   EXPECT_FALSE(sys.isVariableAffectedBySystematic("weight_pileup_up", "shiftUp"));
+}
+
+TEST(VariationDefinitionPreflight, RejectsConflictingRequestsBeforeLowering) {
+  for (bool pairedCollision : {false, true}) {
+    SCOPED_TRACE(pairedCollision);
+    ROOT::RDataFrame frame(1);
+    ROOT::RDF::RNode df = frame.Define("input", [] { return 1.f; })
+        .Define("up", [] { return 2.f; })
+        .Define("down", [] { return 0.f; })
+        .Define("replica", [] { return 3.f; });
+    SystematicManager sm;
+    sm.registerVariationColumn("input", "pdfA", "up");
+    sm.registerVariationColumn("input", "pdfB", "replica");
+    const std::string target = pairedCollision ? "result_shiftUp" : "shared_result";
+    if (pairedCollision) {
+      sm.registerVariationColumns("input", "shift", "up", "down");
+      sm.registerVariationColumn("result", "pdfB", target);
+    } else {
+      sm.registerVariationColumn("result", "pdfA", target);
+      sm.registerVariationColumn("result", "pdfB", target);
+    }
+    const auto beforeLabels = sm.getVariationLabels();
+    const auto beforeResultFamilies = sm.getSystematicsForVariable("result");
+    unsigned definitions = 0;
+    try {
+      rdf::detail::defineWithVariations(df, "result", {"input"}, sm,
+          [&](ROOT::RDF::RNode node, const std::string &name,
+              const std::vector<std::string> &inputs) {
+            ++definitions;
+            return node.Define(name, [](float value) { return 2 * value; }, inputs);
+          });
+      FAIL() << "Conflicting producers must not silently share a column";
+    } catch (const std::invalid_argument &error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find(target), std::string::npos);
+      EXPECT_NE(message.find("pdfB"), std::string::npos);
+      EXPECT_NE(message.find("replica"), std::string::npos);
+      EXPECT_NE(message.find(pairedCollision ? "shiftUp" : "pdfA"), std::string::npos);
+      EXPECT_NE(message.find("up"), std::string::npos);
+    }
+    EXPECT_EQ(definitions, 0u);
+    EXPECT_FALSE(df.HasColumn("result"));
+    EXPECT_EQ(sm.getVariationLabels(), beforeLabels);
+    EXPECT_EQ(sm.getSystematicsForVariable("result"), beforeResultFamilies);
+  }
+}
+
+TEST(VariationDefinitionPreflight, SharedIdenticalRequestsUseOneComputation) {
+  ROOT::RDataFrame frame(4);
+  ROOT::RDF::RNode df = frame.Define("input", [] { return 1.f; })
+      .Define("shifted", [] { return 2.f; });
+  SystematicManager sm;
+  sm.registerVariationColumn("input", "pdfA", "shifted");
+  sm.registerVariationColumn("input", "pdfB", "shifted");
+  sm.registerVariationColumn("result", "pdfA", "shared_result");
+  sm.registerVariationColumn("result", "pdfB", "shared_result");
+  unsigned definitions = 0, calls = 0;
+  df = rdf::detail::defineWithVariations(df, "result", {"input"}, sm,
+      [&](ROOT::RDF::RNode node, const std::string &name,
+          const std::vector<std::string> &inputs) {
+        ++definitions;
+        return node.Define(name, [&calls](float value) { ++calls; return 2 * value; }, inputs);
+      });
+  auto a = df.Take<float>(sm.getVariationColumnName("result", "pdfA"));
+  auto b = df.Take<float>(sm.getVariationColumnName("result", "pdfB"));
+  EXPECT_EQ(a.GetValue(), (std::vector<float>{4, 4, 4, 4}));
+  EXPECT_EQ(b.GetValue(), a.GetValue());
+  EXPECT_EQ(definitions, 2u); // Shared varied producer plus nominal.
+  EXPECT_EQ(calls, 4u); // Only the demanded shared producer, once per entry.
+}
+
+TEST(VariationDefinitionPreflight, PreexistingExplicitProducerKeepsLegacyBehavior) {
+  ROOT::RDataFrame frame(1);
+  ROOT::RDF::RNode df = frame.Define("input", [] { return 1.f; })
+      .Define("shifted", [] { return 2.f; })
+      .Define("calibrated", [] { return 42.f; });
+  SystematicManager sm;
+  sm.registerVariationColumn("input", "pdfA", "shifted");
+  sm.registerVariationColumn("result", "pdfA", "calibrated");
+  df = rdf::detail::defineWithVariations(df, "result", {"input"}, sm,
+      [](ROOT::RDF::RNode node, const std::string &name,
+          const std::vector<std::string> &inputs) {
+        return node.Define(name, [](float value) { return 2 * value; }, inputs);
+      });
+  EXPECT_EQ(sm.getVariationColumnName("result", "pdfA"), "calibrated");
+  EXPECT_FLOAT_EQ(df.Take<float>("calibrated").GetValue()[0], 42.f);
+  EXPECT_FLOAT_EQ(df.Take<float>("result").GetValue()[0], 2.f);
 }

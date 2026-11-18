@@ -75,7 +75,7 @@ omit the adapter and provide boundaries directly under `validation`.
 
 The complete concrete V+jets workflow, configuration matrix, branch contract,
 Run 2/Run 3 behavior, campaign wrappers, and troubleshooting guide is in the
-[rdfAnalyzerStitch analysis README](../analyses/rdfAnalyzerStitch/README.md).
+rdfAnalyzerStitch analysis README.
 
 ## Cartesian Coordinates
 

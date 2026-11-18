@@ -150,6 +150,36 @@ TEST_F(CorrectionManagerTest, ApplyCorrectionPositive) {
   EXPECT_NEAR(result->at(1), 0.4, 1e-6);
 }
 
+TEST_F(CorrectionManagerTest, ScalarDoublePrecisionIsOptInAndPreservesVariations) {
+  ROOT::DisableImplicitMT();
+  dataManager->DefineNominal("float_arg", [] { return .5; });
+  dataManager->DefineNominal("shifted", [] { return 1.5; });
+  dataManager->DefineNominal("int_arg", [] { return 1.; });
+  dataManager->DefineNominal("active", [](ULong64_t i) { return i == 0; }, {"rdfentry_"});
+  systematicManager->registerVariationColumn("float_arg", "shape", "shifted");
+  correctionManager->applyCorrection("test_correction", {"A"}, {}, "default_precision");
+  configManager->set("correctionScalarOutputType", "double");
+  correctionManager->applyCorrection("test_correction", {"A"}, {}, "double_precision");
+  correctionManager->applyConditionalCorrections("test_correction", {{"A"}}, {},
+      "active", {"conditional_double"});
+  auto df = dataManager->getDataFrame();
+  EXPECT_EQ(df.GetColumnType("default_precision"), "float");
+  EXPECT_EQ(df.GetColumnType("double_precision"), "double");
+  auto result = df.Take<double>("double_precision");
+  auto shifted = df.Take<double>("double_precision_shape");
+  auto gated = df.Take<double>("conditional_double");
+  EXPECT_DOUBLE_EQ((*result)[0], .1);
+  EXPECT_NE((*result)[0], double(float(.1)));
+  EXPECT_DOUBLE_EQ((*shifted)[0], .2);
+  EXPECT_DOUBLE_EQ((*gated)[0], .1);
+  EXPECT_DOUBLE_EQ((*gated)[1], 1.);
+}
+
+TEST_F(CorrectionManagerTest, ScalarOutputPrecisionRejectsInvalidConfiguration) {
+  configManager->set("correctionScalarOutputType", "invalid");
+  EXPECT_THROW(correctionManager->applyCorrection("test_correction", {"A"}, {}, "bad_precision"), std::invalid_argument);
+}
+
 /**
  * @brief Test correction application with different string arguments
  *
@@ -1428,4 +1458,63 @@ TEST_F(CorrectionManagerTest, ConditionalPreparationIsGatedAndDoesNotMutateShare
   EXPECT_FLOAT_EQ((*inactive)[0], 1.f);
   EXPECT_DOUBLE_EQ((*original)[0], -1.);
   EXPECT_FALSE(df.HasColumn("prepared_two_shapeUp"));
+}
+
+TEST_F(CorrectionManagerTest, SelectedVectorExplicitLabelsPropagateNumericInputsAndSelectorsWithoutCartesianExpansion) {
+  using Vec = ROOT::VecOps::RVec<float>;
+  using Cases = ROOT::VecOps::RVec<int>;
+  dataManager->DefineNominal("float_arg", [] { return Vec{.5f, 1.5f}; });
+  dataManager->DefineNominal("numeric_shift", [] { return Vec{1.5f, .5f}; });
+  dataManager->DefineNominal("int_arg", [] { return 1; });
+  dataManager->DefineNominal("case", [] { return Cases{0, 1}; });
+  dataManager->DefineNominal("selector_shift", [] { return Cases{1, 0}; });
+  dataManager->DefineNominal("unrelated", [] { return false; });
+  dataManager->DefineNominal("unrelated_shift", [] { return true; });
+  systematicManager->registerVariationColumn("float_arg", "numeric", "numeric_shift");
+  systematicManager->registerVariationColumn("case", "selector", "selector_shift");
+  systematicManager->registerVariationColumn("float_arg", "coherent", "numeric_shift");
+  systematicManager->registerVariationColumn("case", "coherent", "selector_shift");
+  systematicManager->registerVariationColumn("unrelated", "unused", "unrelated_shift");
+  systematicManager->registerVariationColumn("selected_sf", "coherent", "custom_coherent_sf");
+  const std::vector<CorrectionManager::VectorCorrectionCase> cases{
+      {"test_correction", {"A"}}, {"test_correction", {"B"}}};
+  correctionManager->applySelectedCorrectionsVecBatch({cases, cases}, "case",
+      {"float_arg", "int_arg"}, {"selected_sf", "terminal_sf"}, {true, false});
+  auto df = dataManager->getDataFrame();
+  EXPECT_FALSE(df.HasColumn("selected_sf_coherent"));
+  EXPECT_FALSE(df.HasColumn("selected_sf_unused"));
+  EXPECT_FALSE(df.HasColumn("selected_sf_numeric_selector"));
+  EXPECT_FALSE(df.HasColumn("terminal_sf_numeric"));
+  EXPECT_FALSE(df.HasColumn("terminal_sf_selector"));
+  EXPECT_FALSE(df.HasColumn("terminal_sf_coherent"));
+  const auto labels = systematicManager->getVariationLabels();
+  EXPECT_EQ(labels.size(), 5u);
+  for (const auto &label : {"Nominal", "numeric", "selector", "coherent", "unused"})
+    EXPECT_NE(std::find(labels.begin(), labels.end(), label), labels.end());
+  // Book every result before the first GetValue so all assertions use one loop.
+  auto nominal = df.Take<Vec>("selected_sf");
+  auto numeric = df.Take<Vec>("selected_sf_numeric");
+  auto selector = df.Take<Vec>("selected_sf_selector");
+  auto coherent = df.Take<Vec>("custom_coherent_sf");
+  auto terminal = df.Take<Vec>("terminal_sf");
+  ASSERT_EQ(nominal.GetValue().size(), 2u);
+  for (std::size_t event = 0; event < 2; ++event) {
+    ASSERT_EQ(nominal.GetValue()[event].size(), 2u);
+    ASSERT_EQ(numeric.GetValue()[event].size(), 2u);
+    ASSERT_EQ(selector.GetValue()[event].size(), 2u);
+    ASSERT_EQ(coherent.GetValue()[event].size(), 2u);
+    ASSERT_EQ(terminal.GetValue()[event].size(), 2u);
+    // Independent payload oracle: A=[.1,.2], B=[.5,.6] in the two pt bins.
+    EXPECT_FLOAT_EQ(nominal.GetValue()[event][0], .1f);
+    EXPECT_FLOAT_EQ(nominal.GetValue()[event][1], .6f);
+    EXPECT_FLOAT_EQ(numeric.GetValue()[event][0], .2f);
+    EXPECT_FLOAT_EQ(numeric.GetValue()[event][1], .5f);
+    EXPECT_FLOAT_EQ(selector.GetValue()[event][0], .5f);
+    EXPECT_FLOAT_EQ(selector.GetValue()[event][1], .2f);
+    EXPECT_FLOAT_EQ(coherent.GetValue()[event][0], .6f);
+    EXPECT_FLOAT_EQ(coherent.GetValue()[event][1], .1f);
+    EXPECT_FLOAT_EQ(terminal.GetValue()[event][0], .1f);
+    EXPECT_FLOAT_EQ(terminal.GetValue()[event][1], .6f);
+  }
+  EXPECT_EQ(df.GetNRuns(), 1u);
 }

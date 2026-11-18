@@ -6,6 +6,17 @@ managed through [law](https://github.com/riga/law) (Luigi Analysis Workflow),
 which provides dependency tracking, automatic resubmission, and restart-safe
 monitoring.
 
+Generated workers also carry an immutable, origin-scoped XRootD ranking
+snapshot, preferring the learned user cache over the experiment provider seed.
+After successful LAW Condor monitoring, rankings update automatically for future
+submissions. The default cache is `~/.cache/rdfanalyzer/xrd_site_rankings.tsv`
+(under `XDG_CACHE_HOME` when set). Set
+`RDF_XRD_SITE_RANKING_FILE=/path/to/rankings.tsv` before generating scripts to
+ship a refined snapshot, or `none` to disable it. The
+[ranking tool and format](xrd-adaptor.md#historical-site-preferences-and-open-attempt-logging)
+describe log aggregation and per-worker network scope. Rebuild the adaptor and
+regenerate scripts to deploy these changes; existing production is untouched.
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -50,15 +61,25 @@ For HTCondor skim production, the primary sequence is:
    `shared_inputs/`.
 3. **SubmitSkimJobs** – runs `condor_submit` and records the cluster ID.
 4. **MonitorSkimJobs** – blocking polling loop that verifies EOS outputs,
-  resubmits held/failed jobs, collects per-job generator-weight counters into
-  `normalization.json`, and writes `all_outputs_verified.txt`.
+   resubmits held/failed jobs, and writes `all_outputs_verified.txt`.
 
 Monitor completion rechecks the required ROOT files, skim trees when enabled,
-MC weight counters, and normalization records. An existing completion marker
-does not make a missing or corrupt output complete.
+and MC weight counters under the selected validation policy. In `integrity` mode,
+an existing completion marker does not make a missing or corrupt output complete;
+`exists` mode checks paths without opening ROOT files.
 
 Law tracks task outputs so you can run the final task directly and earlier
 steps execute automatically if not yet complete.
+
+Generated worker scripts preserve the CPU affinity inherited from the site
+through setup, staging and analysis execution. They do not select or reassign
+CPUs, even when the allowed set is larger than `request_cpus`. ROOT, XRootD
+helpers and child processes inherit that placement. Common numerical
+thread-pool limits are set to the requested count, but these are not an
+aggregate CPU quota; CPU enforcement comes from the site's affinity or cgroup
+policy. Startup lines report the requested count, allowed CPUs and
+`policy=inherited`. This applies to freshly generated scripts; rebuilding the
+executable does not change already prepared or running jobs.
 
 ---
 
@@ -551,10 +572,10 @@ The `Monitor*Jobs` tasks run a blocking poll loop:
 
 For MC, generator-weight sums are never scanned over the full dataset during
 preparation. Each partition writes its own counter to its metadata ROOT file;
-only after every job has finished does `MonitorSkimJobs` sum those counters and
-write the process normalization to `skimRun_{name}/normalization.json`.
-This final counter read is required in both validation modes. The vjet submit
-wrapper selects `exists` by default; its `--output-validation integrity` option
+downstream consumers read those counters from their input files when needed.
+`MonitorSkimJobs` does not aggregate sample counters or write `normalization.json`.
+The vjet submit wrapper selects `exists` by default; its
+`--output-validation integrity` option
 restores the stronger checks. The policy does not change worker payloads,
 partitions, saved monitoring state, or the run identity.
 
@@ -706,7 +727,7 @@ cat skimRun_myRun/condor_submissions/sample/condor_logs/log_<cluster>_<process>.
 
 ## See Also
 
-- [core/python/law/README.md](../core/python/law/README.md) – law workflow quick reference
+- [core/python/law/README.md](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/README.md) – law workflow quick reference
 - [Configuration Reference](CONFIG_REFERENCE.md) – config file formats
 - [Analysis Guide](ANALYSIS_GUIDE.md) – building analyses
 - [Getting Started](GETTING_STARTED.md) – setup and installation

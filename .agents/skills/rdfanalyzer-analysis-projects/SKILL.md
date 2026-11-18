@@ -14,6 +14,7 @@ Use after [rdfanalyzer-analysis](../rdfanalyzer-analysis/SKILL.md) identifies th
 | VH-RDF resolved/boosted selections, taggers, fits, models | [VH-RDF](references/vh-rdf.md) |
 | nlo-reweight skims/training/export, testReweight comparisons, stitching | [Reweighting and stitching](references/reweighting.md) |
 | ExampleAnalysis or CMS_Run2016_DoubleMuon | [Examples and open data](references/examples.md) |
+| IRIS-HEP AGC v2 RDF/Coffea processing and BDT inference comparison | Separate AGC repository |
 
 Before changes near a project, record `git -C analyses/<name> rev-parse --show-toplevel`, `rev-parse HEAD`, and `status --short`. Some directories inherit the framework Git root; others are independent, and a checkout can have no valid commit. Root `.gitignore` ignores `analyses/*`; a clean framework status says nothing about nested work. Keep the reusable skill files in this framework's tracked `.agents/skills`, not in an ignored analysis output directory.
 

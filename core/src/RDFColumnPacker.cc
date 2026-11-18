@@ -8,6 +8,17 @@
 
 namespace rdfcolumnpacker {
 namespace {
+template <std::size_t> using FloatArgument = float;
+
+template <std::size_t... Indices>
+ROOT::RDF::RNode defineFloatScalars(ROOT::RDF::RNode df, const std::string &name,
+                                   const std::vector<std::string> &columns,
+                                   std::index_sequence<Indices...>) {
+  return df.Define(name, [](const FloatArgument<Indices>&... values) {
+    return ROOT::VecOps::RVec<float>{values...};
+  }, columns);
+}
+
 bool isRowCollectionType(const std::string &type) {
   return isRVecColumnType(type) || type.find("vector<") != std::string::npos;
 }
@@ -185,6 +196,25 @@ ROOT::RDF::RNode definePackedVector(
     ROOT::RDF::RNode df, const std::string &name,
     const std::vector<std::string> &columns,
     const std::string &targetType, PackingLayout layout) {
+  // Common homogeneous model inputs do not need an interpreter-generated
+  // factory. Other widths, numeric conversions and layouts keep the cached
+  // generic path. Restrict this to exact float inputs to preserve cast rules.
+  if (layout == PackingLayout::Scalars && tokenizeInputType(targetType) == InputTypeToken::Float &&
+      std::all_of(columns.begin(), columns.end(), [&](const std::string &column) {
+        return tokenizeInputType(df.GetColumnType(column)) == InputTypeToken::Float;
+      })) {
+    switch (columns.size()) {
+      case 2: return defineFloatScalars(df, name, columns, std::make_index_sequence<2>{});
+      case 4: return defineFloatScalars(df, name, columns, std::make_index_sequence<4>{});
+      case 8: return defineFloatScalars(df, name, columns, std::make_index_sequence<8>{});
+      // Nominal plus four paired weight sources is a common histogram pack.
+      case 9: return defineFloatScalars(df, name, columns, std::make_index_sequence<9>{});
+      case 16: return defineFloatScalars(df, name, columns, std::make_index_sequence<16>{});
+      case 20: return defineFloatScalars(df, name, columns, std::make_index_sequence<20>{});
+      case 32: return defineFloatScalars(df, name, columns, std::make_index_sequence<32>{});
+      default: break;
+    }
+  }
   return defineKernel(std::move(df), name, columns, targetType, layout, Reduction::None, 1.);
 }
 

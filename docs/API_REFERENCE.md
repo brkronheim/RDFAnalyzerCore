@@ -5,6 +5,11 @@ and benchmark commands, see [ROOT input caching](INPUT_CACHE.md).
 
 Complete API documentation for RDFAnalyzerCore interfaces and key classes.
 
+Optional standalone C++17 helpers include [settings and validation](NATIVE_SETTINGS_AND_VALIDATION.md)
+and [RunResult.h](NATIVE_RUN_RESULTS.md). They use the `NativeAuthoring` header
+package and preserve the Analyzer/plugin contracts below. Result serialization
+accepts already evaluated owned values and never starts processing.
+
 ## Table of Contents
 
 - [Analyzer](#analyzer)
@@ -743,12 +748,14 @@ set. Empty output names are derived as in the single-output API. All argument
 counts are validated before adding definitions. Sharing is scoped to one call;
 subsequent batches use fresh readers even after an input is redefined.
 
+{% raw %}
 ```cpp
 correctionManager.applyCorrections("trigger_sf",
     {{"nominal"}, {"up"}, {"down"}}, {"eta", "pt"},
     {"trigger_nominal", "trigger_up", "trigger_down"},
     {true, false, false});
 ```
+{% endraw %}
 
 By default all scalar outputs propagate input shape variations. The optional
 boolean per output can disable this for terminal SF variations, avoiding unused
@@ -2118,7 +2125,7 @@ public:
 
 `SystematicValidationResult` and `IDataFrameProvider` are declared in the
 same public API headers. See
-[`ISystematicManager.h`](../core/interface/api/ISystematicManager.h) for the
+[`ISystematicManager.h`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/interface/api/ISystematicManager.h) for the
 complete documented contract and method semantics.
 
 Automatic systematic discovery requires the nominal base column to exist.

@@ -18,6 +18,26 @@ class XRootDStatus;
 
 namespace rdf::xrd {
 
+// Marks future-file warmup, including its ordinary destination-buffer reads.
+// ROOT's active-file asynchronous prefetch retains demand priority.
+class BackgroundReadScope {
+public:
+  explicit BackgroundReadScope(bool background = true);
+  ~BackgroundReadScope();
+  BackgroundReadScope(const BackgroundReadScope &) = delete;
+  BackgroundReadScope &operator=(const BackgroundReadScope &) = delete;
+private:
+  bool previous_;
+};
+bool isBackgroundRead();
+void configureXrdReadScheduling(unsigned pipelineDepth, unsigned hedgeDelayMs,
+                                bool diagnostics = false);
+// Empty file/origin use RDF_XRD_SITE_RANKING_FILE / RDF_XRD_SITE_ORIGIN.
+// "none" disables priors. Unknown origins retain ordinary live selection.
+void configureXrdSiteRanking(const std::string &file = {},
+                             const std::string &origin = {},
+                             unsigned maxAgeDays = 30);
+
 struct ReadRange {
   std::uint64_t offset = 0;
   std::uint32_t length = 0;
@@ -52,7 +72,8 @@ private:
   struct Source;
   struct PendingRead;
 
-  bool readvWindow(const std::vector<ReadRange> &ranges, bool prefetch);
+  bool readvWindow(const std::vector<ReadRange> &ranges, bool prefetch,
+                   bool background, std::uint64_t cacheUse);
 
   bool completeProbe(const std::shared_ptr<XrdCl::File> &file,
                      const XrdCl::XRootDStatus *status);
@@ -69,7 +90,7 @@ private:
   bool copyPrefetched(std::uint64_t offset, std::uint32_t length,
                       char *destination);
   void savePrefetched(std::uint64_t offset,
-                      std::shared_ptr<std::vector<char>> bytes);
+                      std::shared_ptr<std::vector<char>> bytes, std::uint64_t use = 0);
   std::vector<std::shared_ptr<Source>>
   sources(bool includeBlacklistedFallbacks = false) const;
 
@@ -90,6 +111,7 @@ private:
   std::atomic<bool> stopped_{false};
   std::uint64_t instanceId_ = 0;
   std::atomic<std::uint64_t> readvSequence_{0};
+  std::atomic<std::uint64_t> probeSequence_{0};
   std::atomic<std::uint64_t> demandReadSequence_{0};
 };
 

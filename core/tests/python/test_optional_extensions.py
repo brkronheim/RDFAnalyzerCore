@@ -128,6 +128,36 @@ def test_multiple_non_cms_extensions_link_and_register(tmp_path):
     assert "RDF_ENABLE_CMS" not in (source / "build/CMakeCache.txt").read_text()
 
 
+def test_optional_python_configurator_dispatch_and_disabled_errors(tmp_path):
+    source=project(tmp_path)
+    alpha=extension(source/'extensions/alpha','alpha')
+    config=alpha/'Configure.cmake'
+    config.write_text(config.read_text().replace('PYTHON_CAPABILITY',
+        'PYTHON_ANALYZER_CONFIGURATOR alphaConfigure PYTHON_CAPABILITY'))
+    header=alpha/'alpha.h'
+    header.write_text(header.read_text()+'''
+#include <unordered_map>
+inline std::unordered_map<std::string,std::string> alphaConfigure(Analyzer &,
+    const std::unordered_map<std::string,std::string>& settings) {return settings;}
+''')
+    probe=source/'probe.cc'
+    extra='''
+#ifdef HAVE_ALPHA
+  if (rdf::configureExtensionPythonAnalyzer(analyzer,"alpha",{{"threshold","42"}}).at("threshold")!="42") return 5;
+#else
+  try {rdf::configureExtensionPythonAnalyzer(analyzer,"alpha",{});return 6;}
+  catch (const std::invalid_argument&) {}
+#endif
+  try {rdf::configureExtensionPythonAnalyzer(analyzer,"unknown",{});return 7;}
+  catch (const std::invalid_argument&) {}
+'''
+    probe.write_text(probe.read_text().replace('  return rdf::addExtensionPythonPlugin',extra+'  return rdf::addExtensionPythonPlugin'))
+    for flag in ('ON','OFF'):
+        result=configure(source,'-DDEMO_ALPHA='+flag)
+        assert result.returncode==0,result.stderr
+        assert build_and_probe(source).strip()==('alpha:1' if flag=='ON' else 'alpha:0')
+
+
 def test_extension_owns_its_enable_flag(tmp_path):
     source = project(tmp_path)
     extension(source / "extensions/alpha", "alpha")
@@ -251,6 +281,7 @@ def test_download_preserves_existing_directories(tmp_path):
     (destination / "user-work.txt").write_text("preserve me")
     result = run(sys.executable, str(ROOT / "scripts/fetch_cms.py"), "--destination", str(destination))
     assert result.returncode != 0
+    assert "not a separate repository" in result.stderr, result.stderr
     assert (destination / "user-work.txt").read_text() == "preserve me"
 
 
