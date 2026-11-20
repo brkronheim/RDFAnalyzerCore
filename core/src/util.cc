@@ -8,9 +8,14 @@
  * TChain and RDataFrame.
  */
 #include <cstdlib>
+#include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <dlfcn.h>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,7 +23,13 @@
 #include <ROOT/RDFHelpers.hxx>
 #include <ROOT/RDataFrame.hxx>
 #include <TChain.h>
+#include <TEnv.h>
 #include <TROOT.h>
+#include <TTreeCache.h>
+#include <InputCache.h>
+#ifdef RDF_HAS_XRD_ADAPTOR
+#include <XrdSourceManager.h>
+#endif
 
 #include <dirent.h>
 
@@ -161,24 +172,41 @@ static int scanDirectory(TChain &chain, const std::string &directory,
  * @brief Setup ROOT thread configuration based on config map
  * @param configProvider Configuration provider containing thread settings
  *
- * If threads > 1, enables that many threads.
- * If threads = 1, runs single-threaded.
+ * ROOT's implicit-MT setting is process-global. If threads > 1, enables that
+ * many threads. If threads = 1, disables the process-wide pool.
  * If threads < 1 or not specified, enables maximum number of threads.
  */
 static void setupROOTThreads(const IConfigurationProvider &configProvider) {
   int threads = -1;
   const auto &configMap = configProvider.getConfigMap();
   auto it = configMap.find("threads");
-  if (it != configMap.end()) {
+  if (it != configMap.end() && !it->second.empty()) {
     const std::string value = it->second;
-    if (value == "auto" || value == "max") {
+    const auto first = value.find_first_not_of(" \t\n\r\f\v");
+    const auto last = value.find_last_not_of(" \t\n\r\f\v");
+    const std::string trimmed = first == std::string::npos
+                                    ? std::string{}
+                                    : value.substr(first, last - first + 1);
+
+    std::string normalized = trimmed;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char character) {
+                     return static_cast<char>(std::tolower(character));
+                   });
+
+    if (normalized == "auto" || normalized == "max") {
       threads = 0;
-    } else {
+    } else if (!trimmed.empty()) {
       try {
-        threads = std::stoi(value);
+        size_t consumed = 0;
+        threads = std::stoi(trimmed, &consumed);
+        if (consumed != trimmed.size()) {
+          throw std::invalid_argument("trailing characters");
+        }
       } catch (const std::exception &) {
-        std::cout << "Invalid threads value '" << value << "', defaulting to auto" << std::endl;
-        threads = 0;
+        throw std::runtime_error(
+            "Invalid 'threads' value '" + trimmed +
+            "' (expected an integer, 'auto', or 'max').");
       }
     }
   }
@@ -187,11 +215,185 @@ static void setupROOTThreads(const IConfigurationProvider &configProvider) {
     ROOT::EnableImplicitMT(threads);
     std::cout << "Running with " << threads << " threads" << std::endl;
   } else if (threads == 1) {
+    ROOT::DisableImplicitMT();
     std::cout << "Running with 1 thread" << std::endl;
   } else {
     ROOT::EnableImplicitMT();
     std::cout << "Running with maximum number of threads" << std::endl;
   }
+}
+
+// ROOT_TTREECACHE_SIZE is a multiplier of ROOT's estimated cluster size, not
+// a byte count. Keep an explicit size separate so its units remain clear.
+static std::optional<Long64_t>
+setupROOTInputCache(const IConfigurationProvider &configProvider) {
+  const auto &config = configProvider.getConfigMap();
+  auto setting = [&config](const char *key) -> std::string {
+    auto it = config.find(key);
+    if (it == config.end()) return {};
+    const auto first = it->second.find_first_not_of(" \t\n\r");
+    if (first == std::string::npos) return {};
+    const auto last = it->second.find_last_not_of(" \t\n\r");
+    return it->second.substr(first, last - first + 1);
+  };
+  auto integer = [](const std::string &value, const char *key, long long max) {
+    try {
+      size_t end = 0;
+      const auto result = std::stoll(value, &end);
+      if (end == value.size() && result >= 0 && result <= max) return result;
+    } catch (const std::exception &) {}
+    throw std::runtime_error("Invalid '" + std::string(key) + "' value '" +
+                             value + "' (expected an integer from 0 to " +
+                             std::to_string(max) + ").");
+  };
+
+  const auto fixedMB = setting("treeCacheSizeMB");
+  const auto namedFactor = setting("rootTTreeCacheSize");
+  const auto envFactor = setting("ROOT_TTREECACHE_SIZE");
+  if (!namedFactor.empty() && !envFactor.empty()) {
+    throw std::runtime_error("Set only one of rootTTreeCacheSize and "
+                             "ROOT_TTREECACHE_SIZE.");
+  }
+  const auto factor = namedFactor.empty() ? envFactor : namedFactor;
+  if (!fixedMB.empty() && !factor.empty()) {
+    throw std::runtime_error("Set either treeCacheSizeMB or the "
+                             "ROOT_TTREECACHE_SIZE factor, not both.");
+  }
+
+  std::optional<Long64_t> fixedBytes;
+  if (!fixedMB.empty()) {
+    fixedBytes = integer(fixedMB, "treeCacheSizeMB", 512) * 1024 * 1024;
+    std::cout << "ROOT tree cache size: " << fixedMB << " MiB" << std::endl;
+  }
+  if (!factor.empty()) {
+    try {
+      size_t end = 0;
+      const auto value = std::stod(factor, &end);
+      if (end != factor.size() || !std::isfinite(value) || value <= 0 ||
+          value > 16) throw std::invalid_argument("out of range");
+    } catch (const std::exception &) {
+      throw std::runtime_error("Invalid ROOT_TTREECACHE_SIZE factor '" + factor +
+                               "' (expected a factor greater than 0 and at most 16).");
+    }
+    if (setenv("ROOT_TTREECACHE_SIZE", factor.c_str(), 1) != 0)
+      throw std::runtime_error("Could not set ROOT_TTREECACHE_SIZE.");
+    std::cout << "ROOT tree cache size factor: " << factor << std::endl;
+  }
+
+  const auto learnEntries = setting("treeCacheLearnEntries");
+  if (!learnEntries.empty()) {
+    const auto count = integer(learnEntries, "treeCacheLearnEntries", 100000);
+    if (count == 0)
+      throw std::runtime_error("treeCacheLearnEntries must be at least 1.");
+    TTreeCache::SetLearnEntries(static_cast<Int_t>(count));
+    std::cout << "ROOT tree cache learning entries: " << count << std::endl;
+  }
+
+  const auto prefill = setting("treeCachePrefill");
+  if (!prefill.empty()) {
+    integer(prefill, "treeCachePrefill", 1);
+    if (setenv("ROOT_TTREECACHE_PREFILL", prefill.c_str(), 1) != 0)
+      throw std::runtime_error("Could not set ROOT_TTREECACHE_PREFILL.");
+    std::cout << "ROOT tree cache prefill: " << prefill << std::endl;
+  }
+
+  const auto async = setting("treeCacheAsyncPrefetch");
+  if (!async.empty()) {
+    integer(async, "treeCacheAsyncPrefetch", 1);
+    gEnv->SetValue("TFile.AsyncReading", async.c_str());
+    std::cout << "ROOT tree cache asynchronous prefetch: " << async
+              << std::endl;
+  }
+  return fixedBytes;
+}
+
+static void setupROOTInputBackend(const IConfigurationProvider &configProvider) {
+  const auto &config = configProvider.getConfigMap();
+  auto setting = [&config](const char *key) -> std::string {
+    const auto it = config.find(key);
+    if (it == config.end()) return {};
+    const auto first = it->second.find_first_not_of(" \t\n\r");
+    if (first == std::string::npos) return {};
+    const auto last = it->second.find_last_not_of(" \t\n\r");
+    return it->second.substr(first, last - first + 1);
+  };
+  auto backend = setting("rootInputBackend");
+#ifdef RDF_HAS_XRD_ADAPTOR
+  if (backend.empty()) backend = "xrd-adaptor";
+#else
+  if (backend.empty()) backend = "root";
+#endif
+  const auto nextFilePrefetch = setting("treeCachePrefetchNextFile");
+  const bool wantsNextFilePrefetch =
+      nextFilePrefetch == "1" || nextFilePrefetch == "true" ||
+      nextFilePrefetch == "True";
+  if (backend == "root") {
+    if (wantsNextFilePrefetch)
+      throw std::runtime_error(
+          "treeCachePrefetchNextFile requires rootInputBackend=xrd-adaptor.");
+    return;
+  }
+  if (backend != "xrd-adaptor")
+    throw std::runtime_error("Unknown rootInputBackend '" + backend +
+                             "' (expected 'root' or 'xrd-adaptor').");
+#ifndef RDF_HAS_XRD_ADAPTOR
+  throw std::runtime_error(
+      "rootInputBackend=xrd-adaptor requires a build configured with "
+      "-DRDF_ENABLE_XRD_ADAPTOR=ON and the XrdCl development package.");
+#else
+  auto integer = [&setting](const char *key, unsigned fallback,
+                            unsigned maximum) {
+    const auto value = setting(key);
+    if (value.empty()) return fallback;
+    try {
+      std::size_t end = 0;
+      const auto parsed = std::stoul(value, &end);
+      if (end == value.size() && parsed <= maximum)
+        return static_cast<unsigned>(parsed);
+    } catch (const std::exception &) {
+    }
+    throw std::runtime_error("Invalid '" + std::string(key) + "' value '" +
+                             value + "'.");
+  };
+  const auto probeSeconds = integer("xrdSourceProbeIntervalSeconds", 5, 300);
+  const auto cacheMB = integer("xrdPrefetchCacheMB", 32, 131072);
+  const auto preferredSiteBand = integer("xrdPreferredSiteBandPercent", 20, 100);
+  const auto explorationShare = integer("xrdExplorationSharePercent", 10, 50);
+  const auto maxReadSources = integer("xrdMaxReadSources", 2, 2);
+  if (maxReadSources == 0)
+    throw std::runtime_error(
+        "Invalid 'xrdMaxReadSources' value '0' (expected 1 or 2).");
+  const auto readTimeoutSeconds = integer("xrdReadTimeoutSeconds", 120, 300);
+  if (readTimeoutSeconds == 0)
+    throw std::runtime_error(
+        "Invalid 'xrdReadTimeoutSeconds' value '0' (expected 1 to 300).");
+  const auto openTimeoutSeconds = integer("xrdOpenTimeoutSeconds", 30, 300);
+  if (openTimeoutSeconds == 0)
+    throw std::runtime_error(
+        "Invalid 'xrdOpenTimeoutSeconds' value '0' (expected 1 to 300).");
+  rdf::xrd::configureXrdSiteRanking(setting("xrdSiteRankingFile"), setting("xrdSiteOrigin"),
+                                   integer("xrdSiteRankingMaxAgeDays", 30, 365));
+  rdf::xrd::configureXrdAdaptor(
+      probeSeconds, static_cast<std::size_t>(cacheMB) * 1024 * 1024,
+      preferredSiteBand, explorationShare, maxReadSources,
+      readTimeoutSeconds, openTimeoutSeconds);
+  const auto depth = integer("xrdReadPipelineDepth", 2, 4);
+  if (!depth) throw std::runtime_error("xrdReadPipelineDepth must be 1 to 4");
+  const auto hedgeMs = integer("xrdReadHedgeDelayMs", 50, 1000);
+  const auto diagnostics = integer("xrdReadDiagnostics", 0, 1);
+  rdf::xrd::configureXrdReadScheduling(depth, hedgeMs, diagnostics != 0);
+  rdf::xrd::registerXrdAdaptor();
+  std::cout << "ROOT input backend: XrdAdaptor (source probe interval="
+            << probeSeconds << " s, handoff cache=" << cacheMB
+            << " MiB, preferred-site band=" << preferredSiteBand
+            << "% with 10% hysteresis, exploration sample budget="
+            << explorationShare << "% max 2 MiB/read, max full-read sites="
+            << maxReadSources << ", read/request timeout="
+            << readTimeoutSeconds << " s, initial-open timeout="
+            << openTimeoutSeconds << " s, exploration site enabled="
+            << (explorationShare > 0 ? "yes" : "no")
+            << ", pipeline depth=" << depth << ", hedge delay=" << hedgeMs << " ms)\n";
+#endif
 }
 
 /**
@@ -239,10 +441,28 @@ makeTChain(const IConfigurationProvider &configProvider) {
   // setup ROOT threads now before any dataframes are created
   setupROOTThreads(configProvider);
 
+  // Register an optional TFile backend before TChain::Add opens URLs.
+  setupROOTInputBackend(configProvider);
+
+  // Apply I/O controls before TChain::Add opens remote files. An explicit
+  // cache size is stored by TChain and carried to each file it opens.
+  const auto fixedCacheBytes = setupROOTInputCache(configProvider);
+
+  // Permanently suppress non-fatal ROOT warnings (e.g. "no dictionary for
+  // class ..." when opening NanoAOD files with residual CMSSW objects).
+  // These warnings are emitted during TChain::Add(), RDataFrame construction,
+  // and lazy evaluation, so the suppression must outlive the makeTChain scope.
+  gErrorIgnoreLevel = kError;
+
   std::vector<std::unique_ptr<TChain>> tchainVector;
   auto treeListVec = getTreeList(configProvider);
   for (const auto &tree : treeListVec) {
-    tchainVector.emplace_back(new TChain(tree.c_str()));
+    // Only the primary sequential input uses the optimized policy. Friends
+    // may use indexed/non-sequential entry access and keep ROOT's defaults.
+    tchainVector.emplace_back(
+        makeInputCacheChain(tree, configProvider, tchainVector.empty()));
+    if (fixedCacheBytes && tchainVector.back()->SetCacheSize(*fixedCacheBytes) != 0)
+      throw std::runtime_error("Could not set TChain cache size.");
   }
 
   std::vector<std::string> globs = configProvider.getList("globs", {".root"});
@@ -373,4 +593,3 @@ parseFriendTreeConfig(const std::string &configFile) {
 
   return specs;
 }
-

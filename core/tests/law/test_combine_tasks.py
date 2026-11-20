@@ -63,6 +63,16 @@ class TestFindCombine(unittest.TestCase):
         finally:
             os.unlink(tmp_path)
 
+    def test_relative_executable_survives_fit_working_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "combine"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+            resolved = self._import()._find_combine(os.path.relpath(binary))
+            result_directory = Path(directory) / "fit"
+            result_directory.mkdir()
+            subprocess.run([resolved], cwd=result_directory, check=True)
+
     def test_explicit_path_missing_raises(self):
         """_find_combine raises RuntimeError for a non-existent path."""
         mod = self._import()
@@ -76,27 +86,17 @@ class TestFindCombine(unittest.TestCase):
             fake_combine = os.path.join(tmpdir, "combine")
             Path(fake_combine).write_text("#!/bin/sh\n")
             os.chmod(fake_combine, 0o755)
-            old_path = os.environ.get("PATH", "")
-            os.environ["PATH"] = tmpdir + ":" + old_path
-            try:
-                result = mod._find_combine("")
-                self.assertEqual(result, fake_combine)
-            finally:
-                os.environ["PATH"] = old_path
+            with patch.object(mod, "_COMBINE_SEARCH_PATHS", ["combine"]), patch.dict(os.environ, PATH=tmpdir):
+                self.assertEqual(mod._find_combine(""), fake_combine)
 
     def test_not_found_raises(self):
         """_find_combine raises RuntimeError when combine cannot be located."""
         mod = self._import()
         with tempfile.TemporaryDirectory() as tmpdir:
             # Use an empty directory so shutil.which finds nothing
-            old_path = os.environ.get("PATH", "")
-            os.environ["PATH"] = tmpdir
-            try:
-                with self.assertRaises(RuntimeError) as ctx:
+            with patch.object(mod, "_COMBINE_SEARCH_PATHS", ["combine"]), patch.dict(os.environ, PATH=tmpdir):
+                with self.assertRaisesRegex(RuntimeError, "Combine binary not found"):
                     mod._find_combine("")
-                self.assertIn("Combine binary not found", str(ctx.exception))
-            finally:
-                os.environ["PATH"] = old_path
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
@@ -385,6 +385,19 @@ class TestDeriveAvailableVariations(unittest.TestCase):
         self.assertIn("h_jesUp", result["h_jes"])
         self.assertIn("h_jesDown", result["h_jes"])
 
+    def test_sparse_histogram_schema_uses_systematic_axis_labels(self):
+        mod = self._import()
+        from output_schema import OutputManifest, HistogramSchema
+        manifest = OutputManifest()
+        manifest.histograms = HistogramSchema(
+            output_file="merged.root",
+            histogram_names=["nd_histograms_v1/pt__nominal"],
+            axis_labels={"systematic": ["Nominal", "jesUp", "jesDown"]},
+        )
+
+        result = mod._derive_available_variations(manifest)
+        self.assertEqual(result, {"jes": ["jesUp", "jesDown"]})
+
     def test_case_insensitive_suffix_detection(self):
         mod = self._import()
         from output_schema import OutputManifest, HistogramSchema
@@ -472,7 +485,7 @@ class TestPrepareManifestDatacardConfig(unittest.TestCase):
                         },
                         "control_regions": {
                             "Zll/Zee_BB": {
-                                "observable": "vhbb_dnn_stxs",
+                                "observable": "analysis_score_stxs",
                                 "processes": ["signal", "background"],
                             }
                         },
@@ -508,6 +521,63 @@ class TestPrepareManifestDatacardConfig(unittest.TestCase):
             finally:
                 os.unlink(prepared)
 
+    def test_manifest_nuisance_groups_scope_datacard_systematics(self):
+        mod = self._import()
+        from output_schema import (
+            HistogramSchema, NuisanceGroupDefinition, OutputManifest,
+        )
+        from create_datacards import DatacardGenerator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "datacard.yaml")
+            with open(config_path, "w") as fh:
+                yaml.safe_dump(
+                    {
+                        "output_dir": os.path.join(tmpdir, "out"),
+                        "input_files": {
+                            "signal_sample": {"path": "unused.root"},
+                            "background_sample": {"path": "unused.root"},
+                        },
+                        "processes": {
+                            "signal": {"samples": ["signal_sample"]},
+                            "background": {"samples": ["background_sample"]},
+                        },
+                        "systematics": {"JES": {"type": "shape"}},
+                        "control_regions": {
+                            "SR": {"observable": "mass", "processes": ["signal", "background"]}
+                        },
+                    },
+                    fh,
+                )
+            manifest = OutputManifest(
+                histograms=HistogramSchema(output_file="merged.root"),
+                nuisance_groups=[
+                    NuisanceGroupDefinition(
+                        name="signal_jes", systematics=["JES"],
+                        processes=["signal"], regions=["SR"],
+                        output_usage=["datacard"],
+                    )
+                ],
+            )
+            manifest_path = os.path.join(tmpdir, "output_manifest.yaml")
+            manifest.save_yaml(manifest_path)
+
+            prepared = mod._prepare_manifest_datacard_config(
+                config_path, manifest, manifest_path, target_region="SR"
+            )
+            try:
+                generator = DatacardGenerator(prepared)
+                self.assertEqual(
+                    list(generator._get_systematics_for_process("signal", "SR")),
+                    ["JES"],
+                )
+                self.assertEqual(
+                    generator._get_systematics_for_process("background", "SR"),
+                    {},
+                )
+            finally:
+                os.unlink(prepared)
+
     def test_synthesizes_regions_from_manifest_defaults(self):
         mod = self._import()
         from output_schema import OutputManifest, HistogramSchema, RegionDefinition
@@ -521,7 +591,7 @@ class TestPrepareManifestDatacardConfig(unittest.TestCase):
                     {
                         "processes": {"signal": {"samples": ["wh_301"]}},
                         "manifest_defaults": {
-                            "observable": "vhbb_dnn_stxs",
+                            "observable": "analysis_score_stxs",
                             "processes": ["signal"],
                             "rebin": 2,
                         },
@@ -544,7 +614,7 @@ class TestPrepareManifestDatacardConfig(unittest.TestCase):
                 with open(prepared, "r") as fh:
                     prepared_cfg = yaml.safe_load(fh)
                 region_cfg = prepared_cfg["control_regions"]["Zll/Zee_BB"]
-                self.assertEqual(region_cfg["observable"], "vhbb_dnn_stxs")
+                self.assertEqual(region_cfg["observable"], "analysis_score_stxs")
                 self.assertEqual(region_cfg["processes"], ["signal"])
                 self.assertEqual(region_cfg["rebin"], 2)
             finally:
@@ -1110,6 +1180,41 @@ class TestWriteAnalyticCombinedDatacard(unittest.TestCase):
             self.assertIn("ch_b", content)
 
 
+class TestExplicitAnalyticRates(unittest.TestCase):
+    def test_common_signal_and_independent_background_card(self):
+        from analytic_datacards import configured_rates, write_rate_card
+
+        config = {
+            "channels": [{"name": "0j"}, {"name": "ge3j"}],
+            "combine_rates": {
+                "0j": {"signal": 120, "background": 10},
+                "ge3j": {"signal": 25, "background": 4},
+            },
+        }
+        rates = configured_rates(config)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            card = write_rate_card(["0j", "ge3j"], rates, tmpdir, tag="combined")
+            lines = Path(card).read_text().splitlines()
+        self.assertIn("bin ch_0j ch_ge3j", lines)
+        self.assertIn("shapes data_obs ch_0j ws_0j.root ws_0j:data_obs_0j", lines)
+        self.assertIn("process 0 1 0 1", lines)
+        self.assertIn("rate 120 10 25 4", lines)
+        self.assertEqual([line.split()[:4] for line in lines if "rateParam" in line], [
+            ["bkg_scale_0j", "rateParam", "ch_0j", "bkg"],
+            ["bkg_scale_ge3j", "rateParam", "ch_ge3j", "bkg"],
+        ])
+
+    def test_reference_rates_must_cover_every_channel_and_be_positive(self):
+        from analytic_datacards import configured_rates
+
+        config = {"channels": [{"name": "0j"}], "combine_rates": {}}
+        with self.assertRaisesRegex(ValueError, "each configured channel"):
+            configured_rates(config)
+        config["combine_rates"]["0j"] = {"signal": 0, "background": 10}
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            configured_rates(config)
+
+
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
 class TestMakeRooVar(unittest.TestCase):
     """Tests for _make_roo_var parameter helper."""
@@ -1212,6 +1317,31 @@ class TestAnalyticWorkspaceFitTaskRun(unittest.TestCase):
         f.Close()
         return path
 
+    def test_standalone_loads_shared_gaussian_builder(self):
+        """Resolve the shared helper from the checkout when run outside LAW."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hist = self._make_histogram_file(tmpdir)
+            if hist is None:
+                self.skipTest("PyROOT unavailable")
+            import ROOT
+            script = Path(_REPO_ROOT, "analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py")
+            env = os.environ.copy()
+            # Keep PyROOT's path, but prevent a preconfigured LAW path masking
+            # a broken checkout-relative import in the standalone script.
+            env["PYTHONPATH"] = os.pathsep.join(
+                p for p in env.get("PYTHONPATH", "").split(os.pathsep)
+                if p and Path(p).resolve() != Path(_LAW_DIR)
+            )
+            subprocess.run(
+                [sys.executable, str(script), "--workspace-config",
+                 self._make_workspace_config(tmpdir), "--input", hist,
+                 "--outdir", tmpdir, "--strict"],
+                cwd=tmpdir, env=env, check=True,
+            )
+            with ROOT.TFile.Open(str(Path(tmpdir, "ws_inclusive.root"))) as output:
+                ws = output.Get("ws_inclusive")
+                self.assertEqual(ws.pdf("sig_inclusive").ClassName(), "RooGaussian")
+
     def test_skip_fit_builds_workspaces_and_datacards(self):
         """With --skip-fit, workspaces and datacards are created without running combine."""
         mod = self._import()
@@ -1224,7 +1354,6 @@ class TestAnalyticWorkspaceFitTaskRun(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             ws_cfg_path   = self._make_workspace_config(tmpdir)
             hist_file     = self._make_histogram_file(tmpdir)
-            out_dir       = os.path.join(tmpdir, "fit_out")
 
             if hist_file is None:
                 self.skipTest("ROOT not available for histogram creation")
@@ -1236,7 +1365,8 @@ class TestAnalyticWorkspaceFitTaskRun(unittest.TestCase):
                     histogram_file=hist_file,
                     skip_fit=True,
                 )
-                # run() is a LAW method; call it directly
+                # LAW owns the run directory; use its declared output target.
+                out_dir = task.output().path
                 task.run()
 
             # Workspace must exist

@@ -14,7 +14,7 @@ MARKDOWN_EXTENSIONS = {".md", ".markdown"}
 def slugify_path(path: Path) -> str:
     rel = path.relative_to(ROOT)
     parts = [p for p in rel.parts]
-    if parts[-1].lower() == "index.md":
+    if parts[-1] == "index.md":
         parts[-1] = "index.html"
     else:
         parts[-1] = parts[-1].rsplit(".", 1)[0] + ".html"

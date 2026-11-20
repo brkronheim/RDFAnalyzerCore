@@ -31,6 +31,8 @@ import sys
 import tempfile
 from typing import List
 
+from submission_backend import ensure_condor_machine_exclusion
+
 
 def parse_job_list(s: str) -> List[int]:
     out = []
@@ -72,7 +74,7 @@ def make_per_job_submit(template: str, job_index: int, double_maxruntime: bool =
         if replaced:
             # keep behavior explicit: only modify when a +MaxRuntime line exists
             pass
-    return s
+    return ensure_condor_machine_exclusion(s)
 
 
 def ensure_job_dir_has_submit_config(main_dir: str, job_index: int) -> bool:

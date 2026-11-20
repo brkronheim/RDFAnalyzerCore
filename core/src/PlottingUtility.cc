@@ -1,70 +1,32 @@
 #include <PlottingUtility.h>
-
-#include <TCanvas.h>
-#include <TDirectory.h>
-#include <TFile.h>
-#include <TH1D.h>
-#include <THStack.h>
-#include <TLegend.h>
+#include <TAxis.h>
 #include <TMatrixD.h>
 #include <TMatrixDSym.h>
 #include <TMatrixDSymEigen.h>
-#include <TPad.h>
-#include <TLine.h>
-#include <TROOT.h>
-
-#include <functional>
-#include <future>
-#include <mutex>
+#include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace {
 constexpr double kMinDenominator = 1e-12;
-constexpr int kCanvasWidth = 900;
-constexpr int kCanvasHeightWithRatio = 900;
-constexpr int kCanvasHeightNoRatio = 700;
-constexpr double kLegendX1 = 0.65;
-constexpr double kLegendY1 = 0.68;
-constexpr double kLegendX2 = 0.88;
-constexpr double kLegendY2 = 0.88;
-
-TH1* getHistogram(TFile& file, const PlotProcessConfig& process) {
-  if (process.directory.empty()) {
-    return dynamic_cast<TH1*>(file.Get(process.histogramName.c_str()));
+void validateAxes(const TH1 &a, const TH1 &b) {
+  if (a.GetDimension() != 1 || b.GetDimension() != 1 ||
+      a.GetNbinsX() != b.GetNbinsX())
+    throw std::invalid_argument("Histogram dimensions/binning disagree");
+  for (int i = 1; i <= a.GetNbinsX() + 1; ++i) {
+    const double x = a.GetXaxis()->GetBinLowEdge(i),
+                 y = b.GetXaxis()->GetBinLowEdge(i);
+    if (std::abs(x - y) > 1e-9 * std::max({1.0, std::abs(x), std::abs(y)}))
+      throw std::invalid_argument("Histogram bin edges disagree");
   }
-
-  TDirectory* directory = file.GetDirectory(process.directory.c_str());
-  if (!directory) {
-    return nullptr;
-  }
-  return dynamic_cast<TH1*>(directory->Get(process.histogramName.c_str()));
 }
-
-double getNormalizationScale(TFile& file, const PlotProcessConfig& process) {
-  if (process.normalizationHistogram.empty()) {
-    return process.scale;
-  }
-  auto* normHist = dynamic_cast<TH1*>(file.Get(process.normalizationHistogram.c_str()));
-  if (!normHist) {
-    return process.scale;
-  }
-
-  const double norm = normHist->GetBinContent(1);
-  if (std::abs(norm) < kMinDenominator) {
-    return process.scale;
-  }
-  return process.scale / norm;
-}
-
-// Mutex to protect ROOT GUI/IO (TCanvas/TPad/SaveAs) which is not safe to run concurrently
-static std::mutex gCanvasMutex;
-
 } // namespace
 
-std::unique_ptr<TH1D> PlottingUtility::computeRatioHistogram(const TH1D& numerator,
-                                                             const TH1D& denominator,
-                                                             const std::string& name) {
-  auto ratio = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(numerator.Clone(name.c_str())));
+std::unique_ptr<TH1D> PlottingUtility::computeRatioHistogram(
+    const TH1D &numerator, const TH1D &denominator, const std::string &name) {
+  validateAxes(numerator, denominator);
+  auto ratio = std::unique_ptr<TH1D>(
+      dynamic_cast<TH1D *>(numerator.Clone(name.c_str())));
   if (!ratio) {
     return nullptr;
   }
@@ -79,15 +41,20 @@ std::unique_ptr<TH1D> PlottingUtility::computeRatioHistogram(const TH1D& numerat
       continue;
     }
     ratio->SetBinContent(i, ratio->GetBinContent(i) / denomValue);
-    ratio->SetBinError(i, ratio->GetBinError(i) / denomValue);
+    ratio->SetBinError(i, ratio->GetBinError(i) / std::abs(denomValue));
   }
   return ratio;
 }
 
-RatioSummary PlottingUtility::computeRatioSummary(const TH1D& loHist,
-                                                  const TH1D& nloHist,
-                                                  const TH1D* covariance,
-                                                  const TH1D* systematic) {
+RatioSummary PlottingUtility::computeRatioSummary(const TH1D &loHist,
+                                                  const TH1D &nloHist,
+                                                  const TH1D *covariance,
+                                                  const TH1D *systematic) {
+  validateAxes(loHist, nloHist);
+  if (covariance)
+    validateAxes(loHist, *covariance);
+  if (systematic)
+    validateAxes(loHist, *systematic);
   RatioSummary summary;
   const int binCount = loHist.GetNbinsX();
   summary.ratio.resize(binCount, 0.0);
@@ -100,17 +67,21 @@ RatioSummary PlottingUtility::computeRatioSummary(const TH1D& loHist,
     const double loVar = std::pow(loHist.GetBinError(i), 2.0);
     const double nloVar = std::pow(nloHist.GetBinError(i), 2.0);
     const double cov = covariance ? covariance->GetBinContent(i) : 0.0;
-    const double systVar = systematic ? std::pow(systematic->GetBinContent(i), 2.0) : 0.0;
+    const double systVar =
+        systematic ? std::pow(systematic->GetBinContent(i), 2.0) : 0.0;
+    if (!std::isfinite(lo) || !std::isfinite(nlo) || !std::isfinite(loVar) ||
+        !std::isfinite(nloVar) || !std::isfinite(cov) ||
+        !std::isfinite(systVar) ||
+        std::abs(cov) > std::sqrt(loVar * nloVar) + 1e-9)
+      throw std::invalid_argument("Invalid ratio inputs or covariance");
 
     if (std::abs(nlo) >= kMinDenominator) {
       const double ratio = lo / nlo;
       summary.ratio[i - 1] = ratio;
-      const bool loValid = std::abs(lo) >= kMinDenominator;
-      const double relLo = loValid ? loVar / (lo * lo) : 0.0;
-      const double relNlo = nloVar / (nlo * nlo);
-      const double relCov = loValid ? (2.0 * cov / (nlo * lo)) : 0.0;
-      const double err2 = std::max(0.0, relLo + relNlo - relCov);
-      summary.error[i - 1] = std::abs(ratio) * std::sqrt(err2);
+      const double d2 = nlo * nlo;
+      const double variance = loVar / d2 + lo * lo * nloVar / (d2 * d2) -
+                              2.0 * lo * cov / (d2 * nlo);
+      summary.error[i - 1] = std::sqrt(std::max(0.0, variance));
     }
 
     const double denom2 = std::max(0.0, loVar + nloVar - 2.0 * cov + systVar);
@@ -122,9 +93,10 @@ RatioSummary PlottingUtility::computeRatioSummary(const TH1D& loHist,
   return summary;
 }
 
-PCAResult PlottingUtility::computePCAEnvelope(const TH1D& nominal,
-                                              const std::vector<const TH1D*>& variations,
-                                              const std::string& baseName) {
+PCAResult
+PlottingUtility::computePCAEnvelope(const TH1D &nominal,
+                                    const std::vector<const TH1D *> &variations,
+                                    const std::string &baseName) {
   PCAResult result;
   const int binCount = nominal.GetNbinsX();
   if (variations.empty() || binCount <= 0) {
@@ -210,9 +182,12 @@ PCAResult PlottingUtility::computePCAEnvelope(const TH1D& nominal,
     uncert[b] = stddev[b] * std::sqrt(std::max(0.0, variance));
   }
 
-  result.mean = std::unique_ptr<TH1D>(static_cast<TH1D*>(nominal.Clone((baseName + "_mean").c_str())));
-  result.up = std::unique_ptr<TH1D>(static_cast<TH1D*>(nominal.Clone((baseName + "_up").c_str())));
-  result.down = std::unique_ptr<TH1D>(static_cast<TH1D*>(nominal.Clone((baseName + "_down").c_str())));
+  result.mean = std::unique_ptr<TH1D>(
+      static_cast<TH1D *>(nominal.Clone((baseName + "_mean").c_str())));
+  result.up = std::unique_ptr<TH1D>(
+      static_cast<TH1D *>(nominal.Clone((baseName + "_up").c_str())));
+  result.down = std::unique_ptr<TH1D>(
+      static_cast<TH1D *>(nominal.Clone((baseName + "_down").c_str())));
   if (!result.mean || !result.up || !result.down) {
     result = PCAResult{};
     return result;
@@ -233,308 +208,16 @@ PCAResult PlottingUtility::computePCAEnvelope(const TH1D& nominal,
   return result;
 }
 
-PlotResult PlottingUtility::makeStackPlot(const PlotRequest& request) const {
-  PlotResult result;
-  TFile file(request.metaFile.c_str(), "READ");
-  if (file.IsZombie()) {
-    result.message = "Unable to open meta file: " + request.metaFile;
-    return result;
-  }
-
-  THStack stack("stack", request.title.c_str());
-  std::vector<std::unique_ptr<TH1D>> mcHists;
-  std::unique_ptr<TH1D> dataHist;
-  std::unique_ptr<TH1D> mcSum;
-  TLegend legend(kLegendX1, kLegendY1, kLegendX2, kLegendY2);
-
-  for (size_t processIndex = 0; processIndex < request.processes.size(); ++processIndex) {
-    const auto& process = request.processes[processIndex];
-    TH1* source = getHistogram(file, process);
-    if (!source) {
-      result.message = "Missing histogram '" + process.histogramName + "'";
-      return result;
-    }
-
-    const std::string cloneName = "plot_hist_" + std::to_string(processIndex);
-    auto hist = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(source->Clone(cloneName.c_str())));
-    if (!hist) {
-      result.message = "Histogram is not TH1D: '" + process.histogramName + "'";
-      return result;
-    }
-    hist->SetDirectory(nullptr);
-    hist->Scale(getNormalizationScale(file, process));
-    hist->SetLineColor(process.color);
-    hist->SetMarkerColor(process.color);
-
-    if (process.isData) {
-      hist->SetMarkerStyle(20);
-      dataHist = std::move(hist);
-      legend.AddEntry(dataHist.get(), process.legendLabel.c_str(), "lep");
-      continue;
-    }
-
-    hist->SetFillColor(process.color);
-    hist->SetLineWidth(1);
-
-    if (!mcSum) {
-      mcSum = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(hist->Clone("mc_sum")));
-      if (!mcSum) {
-        result.message = "Failed to create MC sum histogram";
-        return result;
-      }
-      mcSum->SetDirectory(nullptr);
-    } else {
-      mcSum->Add(hist.get());
-    }
-
-    legend.AddEntry(hist.get(), process.legendLabel.c_str(), "f");
-    mcHists.push_back(std::move(hist));
-    stack.Add(mcHists.back().get(), "hist");
-  }
-
-  if (request.processes.empty()) {
-    result.message = "No processes provided";
-    return result;
-  }
-
-  if (mcSum) {
-    result.mcIntegral = mcSum->Integral();
-  }
-  if (dataHist) {
-    result.dataIntegral = dataHist->Integral();
-  }
-
-  // Serialize all ROOT GUI/IO operations (TCanvas/TPad/SaveAs) because they are not
-  // safe to run concurrently even when ROOT thread-safety is enabled.
-  {
-    std::lock_guard<std::mutex> lock(gCanvasMutex);
-
-    // create canvas and stacked layout (top: data+MC, bottom: ratio)
-    TCanvas canvas("canvas", "canvas", kCanvasWidth,
-                   request.drawRatio ? kCanvasHeightWithRatio : kCanvasHeightNoRatio);
-
-    std::unique_ptr<TPad> topPad;
-    std::unique_ptr<TPad> ratioPad;
-    if (request.drawRatio && dataHist && mcSum) {
-      // 60% / 40% split (top / ratio) similar to the python layout
-      topPad = std::make_unique<TPad>("topPad", "topPad", 0.0, 0.35, 1.0, 1.0);
-      ratioPad = std::make_unique<TPad>("ratioPad", "ratioPad", 0.0, 0.0, 1.0, 0.35);
-      topPad->SetBottomMargin(0.02);
-      topPad->SetLeftMargin(0.12);
-      topPad->SetRightMargin(0.05);
-      ratioPad->SetTopMargin(0.03);
-      ratioPad->SetBottomMargin(0.30);
-      ratioPad->SetLeftMargin(0.12);
-      ratioPad->SetRightMargin(0.05);
-      topPad->Draw();
-      ratioPad->Draw();
-      topPad->cd();
-    } else {
-      canvas.SetLeftMargin(0.12);
-      canvas.SetRightMargin(0.05);
-    }
-
-    // Draw stacked MC and customize appearance
-    stack.Draw("hist");
-    stack.GetXaxis()->SetTitle(request.xAxisTitle.c_str());
-    stack.GetYaxis()->SetTitle(request.yAxisTitle.c_str());
-    stack.SetTitle(request.title.c_str());
-    stack.GetXaxis()->SetTitleSize(0.045);
-    stack.GetYaxis()->SetTitleSize(0.045);
-    stack.GetYaxis()->SetTitleOffset(1.15);
-    stack.GetXaxis()->SetLabelSize(request.drawRatio && dataHist && mcSum ? 0.0 : 0.035);
-
-    // draw MC uncertainty band (use mcSum's bin errors)
-    if (mcSum) {
-      mcSum->Sumw2();
-      // create a copy for the uncertainty band
-      auto mcUnc = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(mcSum->Clone("mc_unc")));
-      if (mcUnc) {
-        mcUnc->SetDirectory(nullptr);
-        mcUnc->SetMarkerSize(0);
-        mcUnc->SetFillColor(kGray+2);
-        mcUnc->SetFillStyle(3354);
-        // draw as uncertainty band on top of stack
-        mcUnc->Draw("E2 same");
-      }
-    }
-
-    // draw data points on top
-    if (dataHist) {
-      dataHist->SetMarkerStyle(20);
-      dataHist->SetMarkerSize(0.9);
-      dataHist->Draw("same e1");
-    }
-
-    // refine legend
-    legend.SetBorderSize(0);
-    legend.SetFillStyle(0);
-    legend.SetTextSize(0.035);
-    legend.Draw();
-
-    // log-scale handling
-    if (request.logY) {
-      topPad ? topPad->cd() : canvas.cd();
-      gPad->SetLogy(true);
-      // ensure a positive minimum for log scale
-      auto ymin = stack.GetHistogram() ? stack.GetHistogram()->GetMinimum(0.0) : 0.0;
-      if (ymin <= 0.0) {
-        stack.SetMinimum(1e-2);
-      }
-    }
-
-    // Ratio pad + Pull pad: draw data/MC points with MC uncertainty band and a pull histogram
-    std::unique_ptr<TPad> pullPad;
-    if (request.drawRatio && dataHist && mcSum) {
-      // create an extra pull pad beneath the ratio pad
-      pullPad = std::make_unique<TPad>("pullPad", "pullPad", 0.0, 0.0, 1.0, 0.18);
-      pullPad->SetTopMargin(0.05);
-      pullPad->SetBottomMargin(0.30);
-      pullPad->SetLeftMargin(0.12);
-      pullPad->SetRightMargin(0.05);
-      pullPad->Draw();
-
-      // RATIO PAD
-      ratioPad->cd();
-      // relative MC uncertainty band (content = 1, error = rel error)
-      auto mcRel = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(mcSum->Clone("mc_rel")));
-      if (mcRel) {
-        const int nBins = mcRel->GetNbinsX();
-        for (int b = 1; b <= nBins; ++b) {
-          const double mcVal = mcSum->GetBinContent(b);
-          const double mcErr = mcSum->GetBinError(b);
-          if (std::abs(mcVal) < kMinDenominator) {
-            mcRel->SetBinContent(b, 1.0);
-            mcRel->SetBinError(b, 0.0);
-          } else {
-            mcRel->SetBinContent(b, 1.0);
-            mcRel->SetBinError(b, mcErr / mcVal);
-          }
-        }
-        mcRel->SetDirectory(nullptr);
-        mcRel->SetFillColor(kGray+2);
-        mcRel->SetFillStyle(3354); // hatched-like pattern
-        mcRel->SetLineColor(kGray+2);
-        mcRel->Draw("E2");
-      }
-
-      auto ratio = computeRatioHistogram(*dataHist, *mcSum, "ratio_hist");
-      if (ratio) {
-        ratio->SetStats(false);
-        ratio->GetYaxis()->SetTitle("Data/MC");
-        ratio->GetXaxis()->SetTitle(request.xAxisTitle.c_str());
-        ratio->GetYaxis()->SetTitleSize(0.12);
-        ratio->GetXaxis()->SetTitleSize(0.12);
-        ratio->GetYaxis()->SetLabelSize(0.10);
-        ratio->GetXaxis()->SetLabelSize(0.10);
-        ratio->GetXaxis()->SetTitleOffset(1.0);
-        ratio->GetYaxis()->SetTitleOffset(0.35);
-        // set sensible default range (close to python behaviour)
-        ratio->SetMinimum(0.59);
-        ratio->SetMaximum(1.41);
-        ratio->Draw("e1 same");
-
-        // horizontal line at 1
-        TLine line(ratio->GetXaxis()->GetXmin(), 1.0, ratio->GetXaxis()->GetXmax(), 1.0);
-        line.SetLineStyle(2);
-        line.SetLineWidth(1);
-        line.Draw("same");
-      }
-
-      ratioPad->SetGridy(true);
-
-      // PULL PAD
-      pullPad->cd();
-      const int nBins = mcSum->GetNbinsX();
-      auto pullHist = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(mcSum->Clone("pull_hist")));
-      if (pullHist) {
-        pullHist->SetDirectory(nullptr);
-        for (int b = 1; b <= nBins; ++b) {
-          const double d = dataHist->GetBinContent(b);
-          const double dErr = dataHist->GetBinError(b);
-          const double m = mcSum->GetBinContent(b);
-          const double mErr = mcSum->GetBinError(b);
-          const double denom = std::sqrt(dErr * dErr + mErr * mErr);
-          const double pull = (std::abs(denom) < kMinDenominator) ? 0.0 : (d - m) / denom;
-          pullHist->SetBinContent(b, pull);
-          pullHist->SetBinError(b, 0.0);
-        }
-
-        // split into positive / negative for hatched bars
-        auto posPull = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(pullHist->Clone("pos_pull")));
-        auto negPull = std::unique_ptr<TH1D>(dynamic_cast<TH1D*>(pullHist->Clone("neg_pull")));
-        posPull->SetDirectory(nullptr);
-        negPull->SetDirectory(nullptr);
-        for (int b = 1; b <= nBins; ++b) {
-          const double v = pullHist->GetBinContent(b);
-          posPull->SetBinContent(b, v > 0.0 ? v : 0.0);
-          negPull->SetBinContent(b, v < 0.0 ? -v : 0.0);
-        }
-
-        posPull->SetFillColor(kRed+1);
-        posPull->SetFillStyle(3354);
-        posPull->SetLineColor(kRed+1);
-        negPull->SetFillColor(kBlue+1);
-        negPull->SetFillStyle(3354);
-        negPull->SetLineColor(kBlue+1);
-
-        // determine y-range for pulls
-        double maxPull = 1.5;
-        for (int b = 1; b <= nBins; ++b) {
-          maxPull = std::max(maxPull, std::abs(pullHist->GetBinContent(b)) * 1.2);
-        }
-        pullHist->SetMaximum(maxPull);
-        pullHist->SetMinimum(-maxPull);
-
-        // draw axes and bars
-        pullHist->GetYaxis()->SetTitle("(Data - MC)/Unc");
-        pullHist->GetYaxis()->CenterTitle(true);
-        pullHist->GetYaxis()->SetTitleSize(0.10);
-        pullHist->GetYaxis()->SetLabelSize(0.09);
-        pullHist->GetXaxis()->SetLabelSize(0.10);
-        pullHist->Draw("axis");
-        posPull->Draw("hist same");
-        negPull->Draw("hist same");
-
-        // zero line
-        TLine zline(pullHist->GetXaxis()->GetXmin(), 0.0, pullHist->GetXaxis()->GetXmax(), 0.0);
-        zline.SetLineWidth(1);
-        zline.Draw("same");
-      }
-    }
-
-    canvas.SaveAs(request.outputFile.c_str());
-  }
-
-  result.success = true;
-  return result;
+PlotResult PlottingUtility::makeStackPlot(const PlotRequest &request) const {
+  Session session;
+  return session.render(request);
 }
 
 std::vector<PlotResult>
-PlottingUtility::makeStackPlots(const std::vector<PlotRequest>& requests,
+PlottingUtility::makeStackPlots(const std::vector<PlotRequest> &requests,
                                 bool parallel) const {
-  std::vector<PlotResult> results(requests.size());
-  if (!parallel || requests.size() < 2) {
-    for (size_t i = 0; i < requests.size(); ++i) {
-      results[i] = makeStackPlot(requests[i]);
-    }
-    return results;
-  }
-
-  static const bool threadSafetyEnabled = []() {
-    ROOT::EnableThreadSafety();
-    return true;
-  }();
-  (void)threadSafetyEnabled;
-  std::vector<std::future<PlotResult>> futures;
-  futures.reserve(requests.size());
-  for (size_t i = 0; i < requests.size(); ++i) {
-    futures.emplace_back(std::async(std::launch::async, [this, request = std::cref(requests[i])]() {
-      return makeStackPlot(request.get());
-    }));
-  }
-  for (size_t i = 0; i < futures.size(); ++i) {
-    results[i] = futures[i].get();
-  }
-  return results;
+  PlotBatchOptions options;
+  options.workers = parallel ? 4 : 1;
+  Session session(options);
+  return session.renderBatch(requests);
 }

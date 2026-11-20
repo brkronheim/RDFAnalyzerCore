@@ -1,9 +1,23 @@
 import argparse
+import math
 import os
+import re
+import sys
+import struct
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
+# Ensure yaml is available (LCG Python 3.12 may need system site-packages)
+try:
+    import yaml
+except ImportError:
+    for _candidate in [
+        "/usr/lib64/python3.9/site-packages",
+        "/usr/lib/python3.9/site-packages",
+    ]:
+        if os.path.isdir(_candidate) and _candidate not in sys.path:
+            sys.path.insert(0, _candidate)
+    import yaml  # will re-raise if still not found
 
 from submission_backend import read_config
 from dataset_manifest import DatasetManifest, FriendTreeConfig
@@ -65,6 +79,23 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "optional_keys": ["corrections"],
         "key_types": {"corrections": list},
     },
+    "DerivationManager": {
+        "required_keys": [],
+        "optional_keys": [
+            "enabled",
+            "mode",
+            "stitching",
+            "taggerEfficiencies",
+            "stxs",
+        ],
+        "key_types": {
+            "enabled": bool,
+            "mode": str,
+            "stitching": dict,
+            "taggerEfficiencies": dict,
+            "stxs": dict,
+        },
+    },
     "BDTManager": {
         "required_keys": [],
         "optional_keys": ["models"],
@@ -85,11 +116,6 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "optional_keys": ["triggers"],
         "key_types": {"triggers": list},
     },
-    "GoldenJsonManager": {
-        "required_keys": [],
-        "optional_keys": ["json_files"],
-        "key_types": {"json_files": list},
-    },
     "KinematicFitManager": {
         "required_keys": [],
         "optional_keys": ["fits"],
@@ -99,25 +125,6 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "required_keys": [],
         "optional_keys": ["objects"],
         "key_types": {"objects": list},
-    },
-    "JetEnergyScaleManager": {
-        "required_keys": [],
-        "optional_keys": [
-            "jet_columns",
-            "met_columns",
-            "raw_factor_column",
-            "corrections",
-            "systematic_sets",
-            "variations",
-        ],
-        "key_types": {
-            "jet_columns": dict,
-            "met_columns": dict,
-            "raw_factor_column": str,
-            "corrections": list,
-            "systematic_sets": dict,
-            "variations": list,
-        },
     },
     "TaggerWorkingPointManager": {
         "required_keys": [],
@@ -145,6 +152,15 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         },
     },
 }
+
+# Optional providers extend validation without introducing mandatory imports.
+if __package__:
+    from .optional_extensions import load_extension_services as _load_extension_services
+else:
+    from optional_extensions import load_extension_services as _load_extension_services
+for _extension_schemas in _load_extension_services("config_schemas"):
+    _KNOWN_PLUGINS.update(_extension_schemas.PLUGIN_SCHEMAS)
+
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +741,7 @@ _ANALYSIS_CONFIG_KNOWN_KEYS = {
     "histogram_config",
     "friend_trees",
     "plugins",
+    "derivations",
 }
 
 
@@ -859,6 +876,14 @@ def validate_analysis_config(
         errors.extend(errs)
         warnings.extend(warns)
 
+    # ------------------------------------------------------------ derivations
+    if "derivations" in data:
+        errs, warns = validate_plugin_config(
+            {"DerivationManager": data["derivations"]}, source_context
+        )
+        errors.extend(errs)
+        warnings.extend(warns)
+
     return errors, warnings
 
 
@@ -907,6 +932,70 @@ def _is_int(val: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _parse_cpp_int(value: str) -> Optional[int]:
+    """Parse the signed decimal token accepted by C++ ``std::stoi``."""
+    token = value.strip()
+    if not re.fullmatch(r"[+-]?[0-9]+", token):
+        return None
+    parsed = int(token, 10)
+    if parsed < -(2 ** 31) or parsed > (2 ** 31 - 1):
+        return None
+    return parsed
+
+
+def _parse_cpp_float(value: str) -> Optional[float]:
+    """Parse a complete ``std::stof``-style value representable as a float."""
+    token = value.strip()
+    lower = token.lower()
+    if re.fullmatch(r"[+-]?nan(?:\([a-z0-9_]*\))?", lower):
+        return None
+    if re.fullmatch(r"[+-]?inf(?:inity)?", lower):
+        return None
+
+    try:
+        if re.fullmatch(
+            r"[+-]?0[xX](?:(?:[0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?)|(?:\.[0-9a-fA-F]+))[pP][+-]?[0-9]+",
+            token,
+        ):
+            parsed = float.fromhex(token)
+        else:
+            if not re.fullmatch(
+                r"[+-]?(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)",
+                token,
+            ):
+                return None
+            parsed = float(token)
+        if not math.isfinite(parsed):
+            return None
+        converted = struct.unpack("f", struct.pack("f", parsed))[0]
+        # std::stof reports ERANGE for overflow and non-zero subnormal results.
+        if not math.isfinite(converted) or (converted == 0.0 and parsed != 0.0):
+            return None
+        if converted != 0.0 and abs(converted) < 1.1754943508222875e-38:
+            return None
+        return converted
+    except (OverflowError, ValueError, struct.error):
+        return None
+
+
+def _validate_constant_file(config_key: str, path: str, errors: List[str]) -> None:
+    """Validate constant values before C++ registers them as dataframe columns."""
+    try:
+        entries = read_config(path)
+    except Exception as exc:
+        errors.append(f"Could not read '{config_key}' file '{path}': {exc}")
+        return
+
+    parser = _parse_cpp_float if config_key == "floatConfig" else _parse_cpp_int
+    expected = "a complete finite float value" if config_key == "floatConfig" else "a complete signed 32-bit integer"
+    for name, value in entries.items():
+        if parser(value) is None:
+            errors.append(
+                f"Invalid value in '{config_key}' file '{path}' for '{name}': "
+                f"{value!r}; expected {expected}"
+            )
 
 
 def _validate_yaml_sample_config(sample_config_path: str, mode: str = "auto"):
@@ -1038,6 +1127,8 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
             p = _resolve_path(config_path, cfg[key])
             if not os.path.exists(p):
                 errors.append(f"File not found for '{key}': {p}")
+            elif key in {"floatConfig", "intConfig"}:
+                _validate_constant_file(key, p, errors)
 
     # saveConfig is optional; if provided, warn if the referenced file doesn't exist
     if "saveConfig" in cfg and cfg["saveConfig"].strip():
@@ -1048,7 +1139,7 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
     # threads validation (optional)
     if "threads" in cfg and cfg["threads"].strip():
         threads_val = cfg["threads"].strip().lower()
-        if threads_val not in {"auto", "max"} and not _is_int(threads_val):
+        if threads_val not in {"auto", "max"} and _parse_cpp_int(threads_val) is None:
             errors.append("Invalid 'threads' value (expected int, 'auto', or 'max')")
 
     sample_config = cfg.get("sampleConfig", "")
@@ -1143,6 +1234,7 @@ def main():
         default="auto",
         help="Validation mode for submit config (auto detects from sample config)",
     )
+
     args = parser.parse_args()
 
     try:

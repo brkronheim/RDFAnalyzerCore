@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 #include <api/IContextAware.h>
+#include <OutputMetadata.h>
 
 /**
  * @brief Abstract base class for all pluggable manager types.
@@ -20,7 +21,7 @@
  *  4. initialize()          – post-wiring setup; all declared dependencies
  *                             are guaranteed to be registered at this point
  *  5. execute()             – called immediately before the RDataFrame
- *                             computation is triggered (inside save()/run())
+ *                             computation is triggered by Analyzer::run()
  *  6. finalize()            – called after the RDataFrame computation completes
  *  7. reportMetadata()      – called after finalize() for metadata emission
  *
@@ -93,7 +94,7 @@ public:
     /**
      * @brief Pre-execution hook.
      *
-     * Called inside Analyzer::save()/run(), immediately before the RDataFrame
+     * Called inside Analyzer::run(), immediately before the RDataFrame
      * computation is triggered.
      */
     virtual void execute() {}
@@ -101,7 +102,7 @@ public:
     /**
      * @brief Post-execution hook.
      *
-     * Called inside Analyzer::save()/run(), after the RDataFrame computation
+     * Called inside Analyzer::run(), after the RDataFrame computation
      * has completed.
      */
     virtual void finalize() {}
@@ -136,8 +137,11 @@ public:
      *
      * @return Map of provenance key-value pairs (without role prefix).
      */
+    /** Typed, reducible output metadata, collected after finalize(). */
+    virtual rdf::OutputMetadata collectOutputMetadata() const { return {}; }
+
     virtual std::unordered_map<std::string, std::string>
     collectProvenanceEntries() const { return {}; }
 };
 
-#endif // IPLUGGABLEMANAGER_H_INCLUDED 
+#endif // IPLUGGABLEMANAGER_H_INCLUDED

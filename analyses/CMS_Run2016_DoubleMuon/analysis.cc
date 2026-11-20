@@ -27,9 +27,8 @@
  *
  * ## Build & run
  *
- *   cmake -S . -B build && cmake --build build -j$(nproc)
- *   cd build/analyses/CMS_Run2016_DoubleMuon
- *   ./analysis ../../../analyses/CMS_Run2016_DoubleMuon/cfg.yaml
+ *   See README.md for CMS extension setup, the cms_doublemu_analysis target,
+ *   local output directory and nominal histogram extraction.
  */
 
 #include "analyzer.h"
@@ -325,7 +324,7 @@ int main(int argc, char **argv) {
     //    skimmed tree, which was the source of the CI failure when histo
     //    verification was performed.
     //      - Skimmed event tree  → saveFile in cfg.yaml
-    //      - Histograms          → histograms/ directory of the meta file
+    //      - Histograms          → nd_histograms_v1/ in the meta file
     //      - Cutflow tables      → cutflow, cutflow_nminus1 histograms
     // -----------------------------------------------------------------------
     an.run();

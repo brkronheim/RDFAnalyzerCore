@@ -7,6 +7,7 @@
 #include <ROOT/RVec.hxx>
 #include <RtypesCore.h>
 #include <correction.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -24,6 +25,8 @@ class Analyzer;
  *
  * Corrections can be registered either from a config file (via the constructor
  * or setupFromConfigFile()) or directly from C++ using registerCorrection().
+ * During evaluation, each range/category fallback writes a warning to
+ * stderr with the correction name, exception, inputs, and fallback value.
  */
 class CorrectionManager
     : public NamedObjectManager<correction::Correction::Ref> {
@@ -120,6 +123,11 @@ public:
    * underscores) so that the same correction can be applied with different
    * variations without column name collisions.
    *
+   * Only scalars broadcast. All vector inputs must have equal lengths;
+   * malformed arrays and non-finite numeric inputs/results throw. Every
+   * payload range/category fallback reports the correction, ordered input
+   * values/names and original error to stderr, while retaining unity.
+   *
    * @param correctionName  Name of the correction (must have been loaded via
    *        the configuration or registerCorrection()).
    * @param stringArguments Constant string arguments consumed by the
@@ -152,6 +160,88 @@ public:
                           const std::vector<std::string> &stringArguments,
                           const std::vector<std::string> &inputColumns = {},
                           const std::string &outputBranch = "");
+
+  /// Book compatible two-input binned corrections together. Returns false for scalar fallback.
+  bool tryApplyBinnedGroup(const std::vector<std::string>& names,
+                           const std::vector<std::string>& inputs);
+
+  struct VectorCorrectionCase {
+    std::string correctionName;
+    std::vector<std::string> stringArguments;
+  };
+
+  /** Evaluate exactly one case per object, selected before calling correctionlib.
+   * selectorColumn is an aligned RVec<int> of zero-based case indices. Numeric
+   * inputs share the same ordered columns across cases; scalars broadcast and
+   * arrays must align. Invalid selectors/inputs throw. Range/category failures
+   * retain the logged unity fallback. Input/selector systematics propagate.
+   */
+  void applySelectedCorrectionsVec(
+      const std::vector<VectorCorrectionCase> &cases,
+      const std::string &selectorColumn,
+      const std::vector<std::string> &inputColumns,
+      const std::string &outputBranch,
+      bool propagateSystematics = true);
+
+  /// Selected outputs sharing numeric inputs and a selector use one pack per
+  /// input variation. Sharing lasts only for this call, preserving Redefine.
+  void applySelectedCorrectionsVecBatch(
+      const std::vector<std::vector<VectorCorrectionCase>> &caseSets,
+      const std::string &selectorColumn,
+      const std::vector<std::string> &inputColumns,
+      const std::vector<std::string> &outputBranches,
+      const std::vector<bool> &propagateSystematics = {});
+
+  /// Scalar correction gated by a bool column. Inactive events return unity
+  /// without calling correctionlib; nominal-only outputs can opt out of shapes.
+  void applyConditionalCorrection(
+      const std::string &correctionName,
+      const std::vector<std::string> &stringArguments,
+      const std::vector<std::string> &inputColumns,
+      const std::string &conditionColumn,
+      const std::string &outputBranch,
+      bool propagateSystematics = true);
+
+  /// Gated scalar variants share a numeric pack and consume the bool condition
+  /// directly, without allocating selector or result vectors for each output.
+  void applyConditionalCorrections(
+      const std::string &correctionName,
+      const std::vector<std::vector<std::string>> &argumentSets,
+      const std::vector<std::string> &inputColumns,
+      const std::string &conditionColumn,
+      const std::vector<std::string> &outputBranches,
+      const std::vector<bool> &propagateSystematics = {});
+
+  /** Fuse numeric input preparation with gated scalar evaluation. The callback
+   * runs on a private copy of the ordered numeric inputs, only for active
+   * events. It must preserve input count/order and be safe for concurrent RDF
+   * slots. The shared raw pack and other outputs are never modified. */
+  void applyConditionalCorrections(
+      const std::string &correctionName,
+      const std::vector<std::vector<std::string>> &argumentSets,
+      const std::vector<std::string> &inputColumns,
+      const std::string &conditionColumn,
+      const std::vector<std::string> &outputBranches,
+      const std::vector<bool> &propagateSystematics,
+      std::function<void(ROOT::VecOps::RVec<double> &)> prepareInputs);
+
+  /// Apply several string-argument variants with one shared numeric input
+  /// pack. Output branches must match argumentSets in length, or be empty to
+  /// derive the names. Sharing is scoped to this call, so subsequent Redefine
+  /// operations cannot reuse stale inputs. Scalar input systematics propagate
+  /// exactly as in applyCorrection; the vector path retains applyCorrectionVec
+  /// semantics. An optional boolean per output disables shape propagation for
+  /// explicitly varied terminal outputs; the default propagates all outputs.
+  void applyCorrections(const std::string &correctionName,
+                        const std::vector<std::vector<std::string>> &argumentSets,
+                        const std::vector<std::string> &inputColumns = {},
+                        const std::vector<std::string> &outputBranches = {},
+                        const std::vector<bool> &propagateSystematics = {});
+  void applyCorrectionsVec(const std::string &correctionName,
+                           const std::vector<std::vector<std::string>> &argumentSets,
+                           const std::vector<std::string> &inputColumns = {},
+                           const std::vector<std::string> &outputBranches = {},
+                           const std::vector<bool> &propagateSystematics = {});
 
   /**
    * @brief Get a correction object by key
@@ -194,17 +284,42 @@ public:
   void reportMetadata() override;
 
 private:
+  void applyCorrectionImpl(const std::string &correctionName,
+                           const std::vector<std::string> &stringArguments,
+                           const std::vector<std::string> &inputColumns,
+                           const std::string &outputBranch,
+                           const std::string &packedInput,
+                           bool propagateSystematics = true);
+  void applyCorrectionVecImpl(const std::string &correctionName,
+                              const std::vector<std::string> &stringArguments,
+                              const std::vector<std::string> &inputColumns,
+                              const std::string &outputBranch,
+                              const std::string &packedInput,
+                           bool propagateSystematics = true);
+  void applyCorrectionBatch(bool vector,
+                            const std::string &correctionName,
+                            const std::vector<std::vector<std::string>> &argumentSets,
+                            const std::vector<std::string> &inputColumns,
+                            const std::vector<std::string> &outputBranches,
+                            const std::vector<bool> &propagateSystematics);
   /**
    * @brief Register corrections from correctionlib using the configuration
    * @param configProvider Reference to the configuration provider
    */
   void registerCorrectionlib(const IConfigurationProvider &configProvider);
 
-  std::unordered_map<std::string, correction::CompoundCorrection::Ref> compoundObjects_m;
+  std::shared_ptr<const correction::CorrectionSet>
+  loadCorrectionSet(const std::string &file);
 
+  std::unordered_map<std::string, correction::CompoundCorrection::Ref> compoundObjects_m;
+  std::unordered_map<std::string,
+                     std::shared_ptr<const correction::CorrectionSet>>
+      correctionSets_m;
+
+  std::size_t batchInputIndex_m = 0;
   bool initialized_m = false;
 };
 
 
 
-#endif // CORRECTIONMANAGER_H_INCLUDED 
+#endif // CORRECTIONMANAGER_H_INCLUDED

@@ -1,0 +1,72 @@
+name: Python authoring contracts
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/python-authoring.yml'
+      - 'core/python/**'
+      - 'core/tests/python/**'
+      - 'core/tests/CMakeLists.txt'
+      - 'core/interface/RunResult.h'
+      - 'core/native_authoring/**'
+      - 'core/tests/native_authoring/**'
+      - 'cmake/InstallPython*.cmake'
+      - 'cmake/InstallNativeAuthoring.cmake'
+      - 'cmake/RDFNativeAuthoringConfig.cmake'
+      - 'examples/compiled-controller/**'
+      - 'examples/python-authoring/**'
+      - 'examples/systematics-inference/**'
+      - 'examples/native-results/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lightweight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check stdlib contracts and language-free installation
+        env:
+          PYTHONPATH: core/python:core/tests/python
+        run: >-
+          python -m unittest -v
+          test_rdfresults
+          test_recorded_command_results
+          test_local_resources
+          test_runtime_capabilities
+          test_cli_results
+          test_controller_install
+          test_authoring_typing
+          test_provider_typing
+          test_variable_axes
+          test_nd_histograms
+          test_rdfdeclarations
+          test_numba_bridges
+          test_rdfcolumns
+          test_rdfschema
+      - name: Check linked-example orchestration without native execution
+        run: python examples/native-results/tests/test_example.py
+
+  native-result-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build standalone native helpers without ROOT
+        run: |
+          cmake -S core/tests/native_authoring -B native-authoring-checks -DCMAKE_BUILD_TYPE=Release
+          cmake --build native-authoring-checks --parallel 2
+          ctest --test-dir native-authoring-checks --output-on-failure
+      - name: Install and relocate the optional header package
+        env:
+          PYTHONPATH: core/python:core/tests/python
+        run: python -m unittest -v test_native_authoring_install

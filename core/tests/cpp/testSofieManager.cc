@@ -15,6 +15,26 @@
 #include <SystematicManager.h>
 #include <ROOT/TThreadExecutor.hxx>
 
+#ifdef RDF_TEST_SOFIE_BLAS
+// Exercise the same LP64 Fortran symbol used by generated CPU sessions.
+// This executable links only the ordinary framework and GoogleTest targets.
+extern "C" void sgemm_(const char*, const char*, const int*, const int*, const int*,
+                       const float*, const float*, const int*, const float*, const int*,
+                       const float*, float*, const int*);
+
+TEST(SofieLinkageTest, GeneratedGemmResolvesThroughFramework) {
+  const char normal = 'N';
+  const int rows = 1, cols = 1, inner = 2;
+  const float alpha = 1.f, beta = 0.f;
+  const float features[] = {2.f, 3.f};
+  const float weights[] = {5.f, 7.f};
+  float score = 0.f;
+  sgemm_(&normal, &normal, &rows, &cols, &inner, &alpha,
+         features, &rows, weights, &inner, &beta, &score, &rows);
+  EXPECT_FLOAT_EQ(score, 31.f);
+}
+#endif
+
 // Mock SOFIE inference function for testing
 std::vector<float> mockSofieInference(const std::vector<float>& input) {
   // Simple mock: return sum of inputs

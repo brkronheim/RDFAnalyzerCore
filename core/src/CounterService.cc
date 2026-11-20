@@ -9,6 +9,7 @@
 #include <TH1D.h>
 #include <TObject.h>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -140,6 +141,10 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
   }
 
   unsigned long long selectedCountValue = countResult.GetValue();
+
+  if (std::getenv("RDF_ANALYZER_SUMMARY")) {
+    std::cout << "RDF_ANALYZER_EVENTS=" << selectedCountValue << std::endl;
+  }
 
   // compute elapsed time from initialize() -> finalize()
   double elapsed_s = 0.0;

@@ -3,11 +3,10 @@
 fit_zpeak.py — Standalone workspace and datacard builder for the Z→μμ peak.
 
 This script is a **convenience wrapper** around the generic
-``AnalyticWorkspaceFitTask`` (law/combine_tasks.py).  It reads the same
+``AnalyticWorkspaceFitTask`` (core/python/law/combine_tasks.py).  It reads the same
 workspace config (``zpeak_workspace.yaml``) that the LAW task uses, builds
 per-channel RooWorkspaces and Combine datacards in one step, and prints the
-exact ``law run AnalyticWorkspaceFitTask`` command to run the fits inside the
-full LAW pipeline.
+``law run AnalyticWorkspaceFitTask`` command to reproduce the inputs.
 
 Use this script when:
   - You want to quickly inspect workspaces before running LAW
@@ -26,38 +25,42 @@ Fit model (from zpeak_workspace.yaml)
               sigma — floating Gaussian detector resolution (~2 GeV)
   Background: Exponential(mass; decay)
               decay — floating slope (< 0)
-  Yields  : nsig_<ch>, nbkg_<ch> freely floating (rate -1 in datacard)
+  Yields  : nsig_<ch>, nbkg_<ch> freely floating in the RooFit overlay
 
 Shared parameters
 ------------------
 Parameters with ``shared: true`` in the config get a name without a channel
-suffix (e.g. ``mean``, ``sigma``).  Combine ties these automatically across
+suffix (e.g. ``mean``, ``width``).  Combine ties these automatically across
 channels in the simultaneous combined fit.  Background slope (``decay``) is
 per-channel (``decay_0j``, etc.).
 
 Usage
 -----
+  # From the repository root, project the producer output once
+  # (use a Python environment with PyROOT, NumPy and PyYAML).
+  d=analyses/CMS_Run2016_DoubleMuon/output
+  python core/python/extract_nd_histograms.py "$d/dimuon_zpeak_meta.root" --nominal-only --output "$d/dimuon_zpeak_fit.root"
+
   # Build workspaces and datacards, print LAW fit commands
   python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py
 
   # Explicit paths
   python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py \\
       --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \\
-      --input  output/dimuon_zpeak.root \\
+      --input  analyses/CMS_Run2016_DoubleMuon/output/dimuon_zpeak_fit.root \\
       --outdir zpeak_fit
 
-Running the fits via LAW
-------------------------
-After this script completes, run the full pipeline with the generic LAW task::
+Building inputs via LAW
+-----------------------
+From the repository root, reproduce the workspace and card build with LAW::
 
-  source law/env.sh && law index
+  source core/python/law/env.sh && law index
 
   law run AnalyticWorkspaceFitTask \\
       --name zpeak_run2016g \\
       --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \\
-      --histogram-file output/dimuon_zpeak.root \\
-      --method FitDiagnostics \\
-      --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
+      --histogram-file analyses/CMS_Run2016_DoubleMuon/output/dimuon_zpeak_fit.root \\
+      --skip-fit
 
 The task is generic — other analyses can provide a different workspace config
 (e.g. ``jpsi_workspace.yaml``, ``upsilon_workspace.yaml``) without any code
@@ -66,6 +69,7 @@ changes.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -73,12 +77,17 @@ from pathlib import Path
 import yaml
 
 # ---------------------------------------------------------------------------
-# Try to import the generic workspace helpers from law/combine_tasks.py.
+# Try to import the generic workspace helpers from core/python/law/combine_tasks.py.
 # Fall back to the built-in implementation if the LAW path is not set up.
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
-_LAW_DIR = os.path.join(_REPO_ROOT, "law")
+_CORE_PYTHON = os.path.join(_REPO_ROOT, "core", "python")
+_LAW_DIR = os.path.join(_CORE_PYTHON, "law")
+if _CORE_PYTHON not in sys.path:
+    sys.path.insert(0, _CORE_PYTHON)
+
+from analytic_datacards import configured_rates, write_rate_card
 
 _GENERIC_WORKSPACE = False
 if _LAW_DIR not in sys.path:
@@ -108,7 +117,7 @@ except ImportError:
 # Default paths (relative to repo root)
 # ---------------------------------------------------------------------------
 DEFAULT_WS_CFG = os.path.join(_SCRIPT_DIR, "zpeak_workspace.yaml")
-DEFAULT_INPUT  = os.path.join(_SCRIPT_DIR, "output", "dimuon_zpeak.root")
+DEFAULT_INPUT  = os.path.join(_SCRIPT_DIR, "output", "dimuon_zpeak_fit.root")
 DEFAULT_OUTDIR = os.path.join(_SCRIPT_DIR, "zpeak_fit")
 
 
@@ -153,6 +162,10 @@ def build_workspace(ws_cfg: dict, hist: ROOT.TH1, channel: str) -> ROOT.RooWorks
     """
     if _GENERIC_WORKSPACE:
         return _ct._build_analytic_workspace(ws_cfg, hist, channel)
+    if (ws_cfg["signal"]["pdf"].lower(), ws_cfg["background"]["pdf"].lower()) != (
+        "voigtian", "exponential"
+    ):
+        raise RuntimeError("Install the LAW dependencies for the configured PDF types")
     return _build_workspace_fallback(ws_cfg, hist, channel)
 
 
@@ -277,7 +290,7 @@ def write_combined_datacard(channels: list, out_dir: str) -> str:
     return card_path
 
 
-def save_fit_plot(ws: ROOT.RooWorkspace, channel: str, out_dir: Path) -> str:
+def save_fit_plot(ws: ROOT.RooWorkspace, channel: str, out_dir: Path) -> tuple[str, int]:
     """Fit the analytic model to the channel data and save a PNG overlay."""
     obs = ws.var("mass")
     data = ws.data(f"data_obs_{channel}")
@@ -339,7 +352,9 @@ def save_fit_plot(ws: ROOT.RooWorkspace, channel: str, out_dir: Path) -> str:
     plot_path = out_dir / f"fit_{channel}.png"
     canvas.SaveAs(str(plot_path))
     canvas.Close()
-    return str(plot_path)
+    status = fit_result.status()
+    print(f"  RooFit status = {status}, covQual = {fit_result.covQual()}")
+    return str(plot_path), status
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +381,10 @@ def main() -> None:
         "--outdir", default=DEFAULT_OUTDIR,
         help=f"Output directory for workspaces and datacards (default: {DEFAULT_OUTDIR})",
     )
+    parser.add_argument(
+        "--strict", action="store_true",
+        help="Require a 1D histogram with at least 10 in-range events and RooFit status 0 for every configured channel.",
+    )
     args = parser.parse_args()
 
     # ---- Load workspace config -------------------------------------------
@@ -374,12 +393,13 @@ def main() -> None:
         sys.exit(f"ERROR: workspace config not found: {ws_cfg_path}")
     with open(ws_cfg_path) as fh:
         ws_cfg = yaml.safe_load(fh)
+    rates = configured_rates(ws_cfg)
 
-    out = Path(args.outdir)
+    out = Path(args.outdir).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
     if _GENERIC_WORKSPACE:
-        print(f"Using generic workspace helpers from law/combine_tasks.py")
+        print(f"Using generic workspace helpers from core/python/law/combine_tasks.py")
     else:
         print(f"INFO: combine_tasks.py not importable; using built-in Voigtian+exp fallback")
 
@@ -400,8 +420,11 @@ def main() -> None:
         print(f"{'─' * 60}")
 
         hist, hist_path = find_histogram(root_file, hist_key)
-        if not hist or hist.IsZombie():
-            print(f"  WARNING: histogram '{hist_key}' not found in input file — skipping.")
+        if not hist or hist.IsZombie() or hist.GetDimension() != 1:
+            message = f"Missing 1D histogram '{hist_key}' for channel '{channel}'. Use the nominal TH1 projection."
+            if args.strict or rates is not None:
+                sys.exit(message)
+            print(f"  WARNING: {message} Skipping.")
             continue
 
         hist.SetDirectory(0)
@@ -409,7 +432,9 @@ def main() -> None:
         n_obs = hist.Integral()
         print(f"  Events in fit range: {n_obs:.0f}")
 
-        if n_obs < 10:
+        if not math.isfinite(n_obs) or n_obs < 10:
+            if args.strict or rates is not None:
+                sys.exit(f"Channel '{channel}' requires at least 10 in-range events, found {n_obs}.")
             print(f"  WARNING: too few events ({n_obs:.0f}) — skipping channel.")
             continue
 
@@ -420,10 +445,15 @@ def main() -> None:
         ws_file.Close()
         print(f"  Workspace : {ws_path}")
 
-        card_path = write_datacard(channel, n_obs, ws_path, str(out))
+        if rates is None:
+            card_path = write_datacard(channel, n_obs, ws_path, str(out))
+        else:
+            card_path = write_rate_card([channel], rates, out, tag=channel)
         print(f"  Datacard  : {card_path}")
 
-        plot_path = save_fit_plot(ws, channel, out)
+        plot_path, status = save_fit_plot(ws, channel, out)
+        if args.strict and status != 0:
+            sys.exit(f"Channel '{channel}' returned RooFit status {status}.")
         print(f"  Plot      : {plot_path}")
         active_channels.append(channel)
 
@@ -432,27 +462,29 @@ def main() -> None:
     if not active_channels:
         sys.exit("ERROR: no channels with sufficient statistics.")
 
-    combined_card = write_combined_datacard(active_channels, str(out))
+    if rates is None:
+        combined_card = write_combined_datacard(active_channels, str(out))
+    else:
+        combined_card = write_rate_card(active_channels, rates, out, tag="combined")
     print(f"\nCombined datacard : {combined_card}")
 
     # ---- Print the LAW AnalyticWorkspaceFitTask command -----------------
-    rel_ws_cfg = os.path.relpath(ws_cfg_path)
-    rel_input  = os.path.relpath(os.path.abspath(args.input))
+    rel_ws_cfg = os.path.relpath(ws_cfg_path, _REPO_ROOT)
+    rel_input  = os.path.relpath(os.path.abspath(args.input), _REPO_ROOT)
     print(f"\n{'═' * 68}")
-    print(" Run the full fit pipeline using the generic LAW task:")
+    print(" Build the same workspace inputs with LAW:")
     print(f"{'═' * 68}\n")
-    print("  source law/env.sh && law index\n")
+    print("  # From the repository root")
+    print("  source core/python/law/env.sh && law index\n")
     print(f"  law run AnalyticWorkspaceFitTask \\")
     print(f"      --name zpeak_run2016g \\")
     print(f"      --workspace-config {rel_ws_cfg} \\")
     print(f"      --histogram-file {rel_input} \\")
-    print(f"      --method FitDiagnostics \\")
-    print(f"      --combine-options \"--saveShapes --floatAllNuisances --saveNormalizations\"\n")
+    print("      --skip-fit\n")
     print("  # Results: analyticFit_zpeak_run2016g/")
-    print("  #   ws_0j.root, ws_1j.root, ws_2j.root, ws_ge3j.root")
-    print("  #   datacard_{0j,1j,2j,ge3j,combined}.txt")
-    print("  #   fitDiagnostics_*.root, combine_*.log, provenance.json\n")
-    print("  # The same task works for any resonance — just provide a")
+    print("  #   per-channel ws_*.root, datacard_*.txt and datacard_combined.txt")
+    print("  #   provenance.json\n")
+    print("  # The same task builds workspaces for other resonances — just provide a")
     print("  # different workspace config YAML (no code changes needed).")
 
 

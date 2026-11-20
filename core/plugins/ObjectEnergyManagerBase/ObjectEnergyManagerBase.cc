@@ -537,7 +537,18 @@ void ObjectEnergyManagerBase::execute() {
         outPt,
         [](const ROOT::VecOps::RVec<Float_t> &pt,
            const ROOT::VecOps::RVec<Float_t> &sig,
-           const ROOT::VecOps::RVec<Float_t> &u) { return pt + sig * u; },
+           const ROOT::VecOps::RVec<Float_t> &u) {
+          if (sig.size() != u.size())
+            throw std::runtime_error("Cannot call operator * on vectors of different sizes.");
+          if (pt.size() != sig.size())
+            throw std::runtime_error("Cannot call operator + on vectors of different sizes.");
+          ROOT::VecOps::RVec<Float_t> result(pt.size());
+          for (std::size_t i = 0; i < pt.size(); ++i) {
+            const float shift = sig[i] * u[i];
+            result[i] = pt[i] + shift;
+          }
+          return result;
+        },
         {inPt, sigma, rnd});
     dataManager_m->setDataFrame(newDf);
   }

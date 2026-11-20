@@ -1,0 +1,4 @@
+interface:
+  display_name: "Builds, tests, and runtime environments"
+  short_description: "Build and test locally or reproduce CI workflows"
+  default_prompt: "Use $rdfanalyzer-build to trace the selected build, test, CI or container workflow and verify its actual targets and environment."

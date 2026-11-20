@@ -1,6 +1,15 @@
 include(CMakePrintHelpers)
 
 cmake_minimum_required(VERSION 3.19.0)
+
+# Use optimized code for normal builds unless the caller selected a build type.
+# This applies to both the framework and analysis targets, while still allowing
+# explicit Debug/RelWithDebInfo builds and multi-configuration generators.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+endif()
+
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 17)
 # Ensure static libraries are built position-independent so they can be linked
@@ -22,6 +31,12 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 message(STATUS "CMAKE_MODULE_PATH = ${CMAKE_MODULE_PATH}")
 
 project(RDFAnalyzer)
+include("${PROJECT_SOURCE_DIR}/cmake/InstallNativeAuthoring.cmake")
+rdf_install_native_authoring(COMPONENT NativeAuthoring)
+include("${PROJECT_SOURCE_DIR}/cmake/SetupSofieBLAS.cmake")
+include("${PROJECT_SOURCE_DIR}/cmake/SetupExtensions.cmake")
+rdf_discover_extensions()
+rdf_generate_extension_config()
 
 # ---------------------------------------------------------------------------
 # Capture git provenance information at configure time and write GitVersion.h
@@ -73,6 +88,7 @@ option(BUILD_TESTS "Build analysis tests" ON)
 option(BUILD_COMBINE "Build CMS Combine package for statistical analysis" OFF)
 option(BUILD_COMBINE_HARVESTER "Build CombineHarvester tools (requires BUILD_COMBINE)" OFF)
 option(USE_CUDA "Enable CUDA GPU support for kinematic fits" OFF)
+option(RDF_ENABLE_XRD_ADAPTOR "Build the default standalone XrdCl input backend" ON)
 
 if(USE_CUDA)
     enable_language(CUDA)
@@ -89,6 +105,8 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 find_package(ROOT REQUIRED)
 find_package(Boost REQUIRED CONFIG)
+include("${CMAKE_SOURCE_DIR}/cmake/SetupMimalloc.cmake")
+include("${CMAKE_SOURCE_DIR}/cmake/SetupRootRegistry.cmake")
 
 # Setup yaml-cpp
 # include(SetupYamlCpp)
@@ -154,7 +172,12 @@ if(ROOT_CORE_LOCATION)
 	# Some ROOT binaries depend on libtbb/libgslcblas that may not be in system paths
 	# on cmssw-el9 worker nodes. Resolve them at configure time and propagate both link
 	# libraries and RPATH entries.
-	find_library(RDF_TBB_LIB NAMES tbb)
+	set(RDF_ENV_LIBRARY_DIRS "")
+	if(DEFINED ENV{LD_LIBRARY_PATH})
+		string(REPLACE ":" ";" RDF_ENV_LIBRARY_DIRS "$ENV{LD_LIBRARY_PATH}")
+	endif()
+
+	find_library(RDF_TBB_LIB NAMES tbb HINTS ${RDF_ENV_LIBRARY_DIRS})
 	if(RDF_TBB_LIB)
 		get_filename_component(RDF_TBB_LIB_DIR "${RDF_TBB_LIB}" DIRECTORY)
 		list(APPEND RDF_ROOT_TRANSITIVE_LIBS "${RDF_TBB_LIB}")
@@ -164,7 +187,7 @@ if(ROOT_CORE_LOCATION)
 		message(WARNING "Could not find libtbb for ROOT::Imt. Link failures may occur if libImt.so is used.")
 	endif()
 
-	find_library(RDF_CBLAS_LIB NAMES gslcblas openblas cblas blas)
+	find_library(RDF_CBLAS_LIB NAMES gslcblas openblas cblas blas HINTS ${RDF_ENV_LIBRARY_DIRS})
 	if(RDF_CBLAS_LIB)
 		get_filename_component(RDF_CBLAS_LIB_DIR "${RDF_CBLAS_LIB}" DIRECTORY)
 		list(APPEND RDF_ROOT_TRANSITIVE_LIBS "${RDF_CBLAS_LIB}")
@@ -174,7 +197,7 @@ if(ROOT_CORE_LOCATION)
 		message(WARNING "Could not find libgslcblas/openblas for ROOT::TMVA. Link failures may occur if libTMVA.so is used.")
 	endif()
 
-	find_library(RDF_GSL_LIB NAMES gsl)
+	find_library(RDF_GSL_LIB NAMES gsl HINTS ${RDF_ENV_LIBRARY_DIRS})
 	if(RDF_GSL_LIB)
 		get_filename_component(RDF_GSL_LIB_DIR "${RDF_GSL_LIB}" DIRECTORY)
 		list(APPEND RDF_ROOT_TRANSITIVE_LIBS "${RDF_GSL_LIB}")
@@ -213,4 +236,12 @@ set(RDF_CUSTOM_DICT_SOURCES "" CACHE STRING "Semicolon-separated list of sources
 set(RDF_CUSTOM_DICT_TARGET "RDFCustomDict" CACHE STRING "Target name for the custom ROOT dictionary library")
 
 add_subdirectory(core)
+
+# Optional installed delivery of the existing core-only Analyzer contract.
+option(RDF_BUILD_ANALYZER_SDK "Prepare the optional core-only AnalyzerSDK install component" OFF)
+if(RDF_BUILD_ANALYZER_SDK)
+    include("${PROJECT_SOURCE_DIR}/cmake/InstallAnalyzerSDK.cmake")
+    rdf_install_analyzer_sdk()
+endif()
+
 add_subdirectory(analyses)

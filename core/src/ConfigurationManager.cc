@@ -72,7 +72,7 @@ std::string ConfigurationManager::get(const std::string &key) const {
  */
 void ConfigurationManager::set(const std::string &key,
                                const std::string &value) {
-  if (get(key) != "") {
+  if (configMap_m.find(key) != configMap_m.end()) {
     throw std::runtime_error(
         "Error: Key " + key +
         " already exists. Do not use set to overwrite existing keys.");
@@ -82,9 +82,9 @@ void ConfigurationManager::set(const std::string &key,
 }
 
 /**
- * @brief Strip comments from a line
- * @param line Input line
- * @return Line with comments removed
+ * @brief Strip leading and trailing whitespace.
+ * @param s Input view
+ * @return A view of the trimmed text, or an empty view for whitespace-only input
  */
 std::string_view ConfigurationManager::trim(std::string_view s) const {
   size_t first = s.find_first_not_of(" \t\n\r");
@@ -104,6 +104,9 @@ std::string_view ConfigurationManager::trim(std::string_view s) const {
 std::vector<std::string>
 ConfigurationManager::splitString(std::string_view input,
                                   std::string_view delimiter) const {
+  if (delimiter.empty()) {
+    throw std::invalid_argument("ConfigurationManager::splitString: delimiter must not be empty");
+  }
   std::vector<std::string> splitStringVector;
   size_t pos = 0, prev = 0;
   while ((pos = input.find(delimiter, prev)) != std::string_view::npos) {
@@ -120,12 +123,6 @@ ConfigurationManager::splitString(std::string_view input,
   return splitStringVector;
 }
 
-/**
- * @brief Parse a key-value pair from a line
- * @param line Input line
- * @param stripComments Whether to strip comments
- * @return Pair of key and value strings
- */
 /**
  * @brief Process the top-level configuration file
  * @param configFile Path to the configuration file
@@ -212,6 +209,10 @@ ConfigurationManager::parsePairBasedConfig(
     YamlConfigAdapter yamlAdapter;
     return yamlAdapter.parsePairBasedConfig(resolvedPath);
   }
+  if (dynamic_cast<YamlConfigAdapter *>(adapter_m.get())) {
+    TextConfigAdapter textAdapter;
+    return textAdapter.parsePairBasedConfig(resolvedPath);
+  }
   return adapter_m->parsePairBasedConfig(resolvedPath);
 }
 
@@ -235,6 +236,10 @@ ConfigurationManager::parseMultiKeyConfig(
     YamlConfigAdapter yamlAdapter;
     return yamlAdapter.parseMultiKeyConfig(resolvedPath, requiredEntryKeys);
   }
+  if (dynamic_cast<YamlConfigAdapter *>(adapter_m.get())) {
+    TextConfigAdapter textAdapter;
+    return textAdapter.parseMultiKeyConfig(resolvedPath, requiredEntryKeys);
+  }
   return adapter_m->parseMultiKeyConfig(resolvedPath, requiredEntryKeys);
 }
 
@@ -253,6 +258,10 @@ ConfigurationManager::parseVectorConfig(const std::string &configFile) const {
   if (isYamlFile(resolvedPath)) {
     YamlConfigAdapter yamlAdapter;
     return yamlAdapter.parseVectorConfig(resolvedPath);
+  }
+  if (dynamic_cast<YamlConfigAdapter *>(adapter_m.get())) {
+    TextConfigAdapter textAdapter;
+    return textAdapter.parseVectorConfig(resolvedPath);
   }
   return adapter_m->parseVectorConfig(resolvedPath);
 }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Configuration and input columns"
+  short_description: "Configuration and input columns"
+  default_prompt: "Use $rdfanalyzer-config-data to trace the effective configuration into constants, branches, friend trees, and dataset metadata."

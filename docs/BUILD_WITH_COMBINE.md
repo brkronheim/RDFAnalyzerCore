@@ -2,28 +2,31 @@
 
 ## Quick Start
 
-To build RDFAnalyzerCore with CMS Combine support:
+From a checkout of RDFAnalyzerCore, initialize the pinned core submodules and
+use Python from the same environment as ROOT. Combine 11.1.0 also imports
+pandas when converting a datacard.
 
 ```bash
-# Setup ROOT environment first
-source env.sh  # on a CVMFS-backed host, or source your ROOT installation
+source env.sh  # On a supported CVMFS host. Otherwise activate your ROOT environment.
+git submodule update --init --recursive -- core/extern
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt pandas
 
-# Configure with Combine
-cmake -S . -B build -DBUILD_COMBINE=ON
+# Configure one of these two variants.
+cmake -S . -B build -DBUILD_COMBINE=ON -DBUILD_COMBINE_HARVESTER=OFF
+# cmake -S . -B build -DBUILD_COMBINE=ON -DBUILD_COMBINE_HARVESTER=ON
 
-# Or with both Combine and CombineHarvester
-cmake -S . -B build -DBUILD_COMBINE=ON -DBUILD_COMBINE_HARVESTER=ON
-
-# Build (this will take several minutes)
-cmake --build build -j$(nproc)
+cmake --build build --parallel "$(nproc)"
 ```
 
 ## Requirements
 
 Building Combine requires:
 - ROOT 6.30+ with development headers
-- Python 3.8+
+- A Python interpreter that matches PyROOT
 - Boost libraries
+- libxml2 development headers for the CombineHarvester build
 - Git
 
 These should already be available on CVMFS-backed HEP hosts or with a properly configured standalone ROOT installation.
@@ -41,18 +44,23 @@ After building with `BUILD_COMBINE_HARVESTER=ON`:
 
 ## Usage
 
-After building, run combine directly:
+From the repository root with the build environment and virtualenv active:
 
 ```bash
-# From datacards directory
-../build/external/HiggsAnalysis/CombinedLimit/bin/combine -M AsymptoticLimits datacard.txt
+export COMBINE_PREFIX="$PWD/build/external/HiggsAnalysis/CombinedLimit"
+export PATH="$COMBINE_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$COMBINE_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PYTHONPATH="$COMBINE_PREFIX/python:$ROOTSYS/lib${PYTHONPATH:+:$PYTHONPATH}"
+combine -M AsymptoticLimits datacards/datacard.txt
 ```
 
-Or add to your PATH:
+For standalone CombineHarvester tools, also add their library directory:
 
 ```bash
-export PATH="$PWD/build/external/HiggsAnalysis/CombinedLimit/bin:$PATH"
-combine -M AsymptoticLimits datacards/datacard.txt
+export HARVESTER_PREFIX="$PWD/build/external/CombineHarvester"
+export LD_LIBRARY_PATH="$HARVESTER_PREFIX/lib:$LD_LIBRARY_PATH"
+"$HARVESTER_PREFIX/CombineTools/bin/RoundTrip" \
+    --input datacards/datacard.txt --output roundtrip.txt --root roundtrip.root --mass 125
 ```
 
 ## Complete Workflow
@@ -66,7 +74,7 @@ See [Combine Integration Guide](COMBINE_INTEGRATION.md) for the complete analysi
 If the Combine build fails:
 1. Ensure ROOT is properly sourced before running cmake
 2. Check that you have network access (Combine is cloned from GitHub)
-3. Look at build logs in: `build/external/src/CombineTool-stamp/`
+3. Look at build logs in: `build/external/HiggsAnalysis/CombinedLimit/src/CombineTool-stamp/`
 
 ### Clean Rebuild
 

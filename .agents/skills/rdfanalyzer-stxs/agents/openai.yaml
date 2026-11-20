@@ -1,0 +1,4 @@
+interface:
+  display_name: "STXS classification and derivation"
+  short_description: "STXS classification and derivation"
+  default_prompt: "Use $rdfanalyzer-stxs to trace STXS classification, acceptance or migration definitions, and downstream weight integration."

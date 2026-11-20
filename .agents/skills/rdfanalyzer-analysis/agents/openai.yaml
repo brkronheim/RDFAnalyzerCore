@@ -1,0 +1,4 @@
+interface:
+  display_name: "RDFAnalyzer Analysis"
+  short_description: "Understand analyses built on RDFAnalyzerCore"
+  default_prompt: "Use $rdfanalyzer-analysis to trace this analysis from its config to event selection and outputs, loading only the relevant focused skills."

@@ -116,9 +116,10 @@ You can also use both formats side-by-side in the same analysis. The framework w
 ## Testing
 
 ### Python Tests
-Run the Python test suite:
+From the repository root, use a Python environment with `pytest` and `PyYAML`
+installed, and run the YAML configuration tests:
 ```bash
-python3 core/tests/cpp/test_yaml_config.py
+PYTHONPATH=core/python python3 -m pytest -q -p no:cacheprovider core/tests/python/test_yaml_config.py
 ```
 
 ### C++ Tests

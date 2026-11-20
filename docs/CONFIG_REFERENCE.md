@@ -14,7 +14,47 @@ This document provides a complete reference for all configuration options in RDF
 
 The main configuration file controls the overall behavior of the framework. It's typically passed as a command-line argument to your analysis executable.
 
+### Correction and collection inference precision
+
+`correctionScalarOutputType=float|double` selects CorrectionManager scalar output
+precision (default `float`). `double` preserves correctionlib's returned precision
+for scalar, compound, batch and conditional scalar corrections. Vector corrections
+remain `RVec<float>`. Nonfinite or unrepresentable outputs still fail. Set this
+before booking corrections; existing columns retain their booked types.
+
+`bdtInputLayout=scalar|flatRows` selects BDTManager input layout (default `scalar`).
+`flatRows` consumes a predefined event-local `input_<model>` `RVec<float>` whose
+row width/order follows `inputVariables`, and returns one float score per row.
+Empty inputs are allowed and invalid dimensions fail. An inactive gate returns
+-1 for each row. Existing dependency propagation applies to the input and gate;
+scalar `bdtCombineModels` grouping is bypassed for collection input.
+With `flatRows`, optional `bdtFlatRowsInputColumn=<column>` lets multiple models
+consume one predefined matrix directly. `applyAllBDTs` requires identical ordered
+`inputVariables` when sharing; each model retains its own gate and output. The
+default per-model `input_<model>` path remains available.
+
+`persistPythonHistograms=true|false` controls standard Python TH1D persistence
+(default `false`). The typed frontend exposes `persist_histograms=True`. Slices
+are stored under `python_histograms/` in the metadata file during finalization,
+before canonical provenance is written. This namespace is replaced on a rerun;
+the histogram name supplies its relative path. NDHistogramManager retains its
+own format and namespace.
+
 ### Input/Output Configuration
+
+`firstEntry` and `lastEntry` restrict the primary input chain to the half-open
+global entry interval `[firstEntry,lastEntry)`. Use one RDF thread for partition
+workers. The default `entryRangeMode=filter` uses RDF `Range` and rejects bounds
+above its unsigned 32-bit limit. A lone bound retains the legacy ignored-range
+behavior; provide both bounds explicitly.
+
+`entryRangeMode=source` is an experimental, opt-in alternative which seeks the
+initial source directly, avoiding traversal of rejected prefix entries. It
+requires both bounds as nonnegative decimal integers, `lastEntry > firstEntry`,
+signed 64-bit bounds, disabled implicit multithreading, and ROOT 6.40.x or
+6.42.00-rc1. The internal ROOT hook is version-gated. Original `rdfentry_`
+identities are preserved, including cross-file ranges. This changes no public
+C++ signatures or production defaults.
 
 #### Required Options
 
@@ -30,15 +70,22 @@ The main configuration file controls the overall behavior of the framework. It's
 | `saveDirectory` | Path | (empty) | Local directory where intermediate outputs are saved |
 | `saveTree` | String | `Events` | Name of the output tree |
 | `treeList` | Comma-separated | `CollectionTree,POOLCollectionTree` | Tree names to search for in input files (tried in order) |
-| `metaFile` | Path | Same as `saveFile` | Separate file for histograms and metadata |
+| `metaFile` | Path | Derived from `saveFile` as `<stem>_meta.root` | Separate file for histograms and metadata |
 | `antiglobs` | Comma-separated | (empty) | Reject input files containing these strings |
 | `globs` | Comma-separated | (empty) | Accept only input files containing these strings |
+| `xrdSiteRankingFile` | Path, `auto`, `none` | `auto` | Origin-scoped historical source scores; `auto` reads `RDF_XRD_SITE_RANKING_FILE`. See [XrdAdaptor](xrd-adaptor.md#historical-site-preferences-and-open-attempt-logging). |
+| `xrdSiteOrigin` | String | Worker environment/hostname | Explicit execution network identity; overrides `RDF_XRD_SITE_ORIGIN`. |
+| `xrdSiteRankingMaxAgeDays` | Integer 0–365 | `30` | Age limit for historical scores; 0 disables priors. |
 
 ### Performance Configuration
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `threads` | Integer | `-1` | Number of ROOT ImplicitMT threads. `-1` = auto (all cores) |
+| `threads` | Integer, `auto`, or `max` | `-1` | Number of ROOT ImplicitMT threads. `1` disables implicit multithreading; values greater than `1` set the thread count; values less than or equal to `0`, `auto`, and `max` use all available cores. |
+
+The runtime rejects malformed values instead of silently switching to all
+available cores. When running on HTCondor, set `threads` no higher than the
+CPUs requested by the job.
 
 ### Batch Processing
 
@@ -48,11 +95,26 @@ The main configuration file controls the overall behavior of the framework. It's
 
 ### Output Branch Configuration
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `saveConfig` | Path | Configuration file listing branches to save in output tree |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `saveConfig` | Path | All columns | Configuration file listing branches to save in output tree |
+| `skimFilter` | RDataFrame expression | None | Optional event filter applied only when writing the skim; histogram actions use the unfiltered analysis graph |
+| `skimSystematics` | Boolean | `false` | When `true`, expand configured skim branches with their registered paired Up/Down systematic columns. This affects only skim output and does not enable framework systematics. |
+| `skimCompressionAlgorithm` | String | `zstd` | ROOT skim compression: `zstd`, `lzma`, `zlib`, or `lz4`. |
+| `skimCompressionLevel` | Integer | 5 | ROOT skim compression level, 0 through 9. Level 0 disables compression. Higher levels trade write CPU time for file size. |
+
+For stronger lossless skim compression, set `skimCompressionAlgorithm=zstd`
+and `skimCompressionLevel=9`. These settings apply to the ROOT skim sink;
+metadata and histogram compression are unchanged. Existing frozen workers keep
+their staged executable and configuration.
 
 The `saveConfig` file contains one branch name per line. It also supports **glob patterns** for flexible column selection:
+
+Without `saveConfig`, or with a single `*`, full snapshots write each resolved
+column once under its canonical name. This prevents ROOT rejecting cached
+aliases together with their targets. Select an alias explicitly to save its
+chosen branch name. Explicit lists that request both an alias and its target
+retain ROOT's duplicate-column error; choose the intended output name.
 
 ```
 # Exact column names
@@ -73,16 +135,22 @@ Jet_eta          # Specific column
 - Exact column names continue to work unchanged
 - Overlapping patterns are automatically deduplicated
 - Non-matching patterns are silently skipped (no error)
+- If all entries are skipped and no columns remain selected, the current sink
+  snapshots all DataFrame columns for backwards compatibility; an empty list
+  cannot be used to request a zero-branch skim. Check patterns carefully to
+  avoid broadening the output unintentionally.
 - Mix exact names and glob patterns in the same file
 
 ### Data Loading Helpers
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `floatConfig` | Path | Configuration file with float constants to define |
-| `intConfig` | Path | Configuration file with integer constants to define |
+| `floatConfig` | Path | Configuration file with float constants to define. `DataManager` checks this path relative to the process working directory before registering constants. |
+| `intConfig` | Path | Configuration file with integer constants to define. `DataManager` checks this path relative to the process working directory before registering constants. |
 | `aliasConfig` | Path | Configuration file with branch aliases |
 | `optionalBranchesConfig` | Path | Configuration file listing branches that may not exist in all inputs |
+
+For other config files loaded through `ConfigurationManager`, a relative path is resolved from the process working directory if it exists there; otherwise it is resolved relative to the main config file. The constant-file existence check above is performed directly against the configured path by `DataManager`, so use a working-directory-relative or absolute path for `floatConfig` and `intConfig`.
 
 #### Float/Int Config Format
 
@@ -111,7 +179,7 @@ another_optional_branch
 
 ## Plugin Configurations
 
-Plugins are configured via separate files referenced from the main config.
+Plugins read settings from separate files referenced from the main config. Referencing a plugin config file does not construct or activate that plugin; the analysis must create and register each manager in C++.
 
 ### BDT Manager Configuration
 
@@ -157,30 +225,28 @@ file=models/particle_transformer.onnx name=transformer inputVariables=jet_featur
 
 ### SOFIE Manager Configuration
 
-**Main config option**: `sofieConfig=path/to/sofie_models.txt`
+Optional main config entry `sofieConfig=path/to/sofie_models.txt`.
 
 **SOFIE config format** (one model per line):
 ```
 name=output_column inputVariables=var1,var2,var3 runVar=condition_column
 ```
 
-**Parameters**: Same as ONNX/BDT but WITHOUT `file` (SOFIE models are compiled code, not runtime files)
-
-**Example**:
+The record declares an output name, ordered input columns and a scalar bool
+gate. For example:
 ```
 name=sofie_dnn inputVariables=pt,eta,phi,mass runVar=has_jet
 name=sofie_classifier inputVariables=lep_pt,met runVar=pass_selection
 ```
 
-**Key Differences from ONNX/BDT**:
-- No `file` parameter (models compiled at build time)
-- Must manually register models via `registerModel()` in C++ code
-- Potentially faster inference (compiled code eliminates runtime overhead) but less flexible (rebuild required for updates)
+The configuration has no `file` setting. Supply the generated inference
+callable with `registerModel()` in C++. Earlier feature and gate entries
+for a given name are retained during registration, so keep both declarations
+consistent. The generated session can read a separate weights file whose
+path is managed by the C++ wrapper.
 
-**See**: [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for complete usage including:
-- Generating SOFIE C++ code from ONNX
-- Registering models in analysis code
-- When to use SOFIE vs ONNX
+See the [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for standalone
+PyPI generation, compilation and deployment.
 
 ### Correction Manager Configuration
 
@@ -322,10 +388,10 @@ workflowConfig=cfg/corrected_jets_workflow.txt
 ```text
 type=setJetColumns ptColumn=Jet_pt etaColumn=Jet_eta phiColumn=Jet_phi massColumn=Jet_mass
 type=removeExistingCorrections rawFactorColumn=Jet_rawFactor sample=mc
-type=registerCorrection sample=mc name=vhqq_jec_nominal file=${jmeFile} correctionName=${jecCompoundCorrection} inputVariables=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
-type=applyCorrectionlib sample=mc correction=vhqq_jec_nominal inputPtColumn=Jet_pt_raw outputPtColumn=${correctedPtColumn} applyToMass=true inputMassColumn=Jet_mass_raw outputMassColumn=${correctedMassColumn} inputColumns=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
-type=applyResolutionSmearingSystematic sample=mc correction=vhqq_electron_smear systematicName=electron_smear
-type=applyRelativePtUncertaintySystematic sample=mc correction=vhqq_electron_smear systematicName=electron_scale stringArgs=escale
+type=registerCorrection sample=mc name=analysis_jec_nominal file=${jmeFile} correctionName=${jecCompoundCorrection} inputVariables=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+type=applyCorrectionlib sample=mc correction=analysis_jec_nominal inputPtColumn=Jet_pt_raw outputPtColumn=${correctedPtColumn} applyToMass=true inputMassColumn=Jet_mass_raw outputMassColumn=${correctedMassColumn} inputColumns=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+type=applyResolutionSmearingSystematic sample=mc correction=analysis_electron_smear systematicName=electron_smear
+type=applyRelativePtUncertaintySystematic sample=mc correction=analysis_electron_smear systematicName=electron_scale stringArgs=escale
 type=applyScaleResolutionSystematics jsonFile=${muonScaleResolutionFile}
 ```
 
@@ -540,27 +606,64 @@ The YAML config is validated at startup against a JSON Schema. See **[CONFIGURAT
 
 ## Advanced Configuration
 
+### Systematics
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enableSystematics` | Boolean | `true` | Enable systematic registration and propagation throughout the framework. Set to `false` for a nominal-only graph; registrations, varied definitions, varied selection masks, and systematic histogram axes are disabled. |
+
 ### Histogram Backend
 
 `NDHistogramManager` supports two histogram backends:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `histogramBackend` | String | `"root"` | Histogram backend: `"root"` (THnSparseF) or `"boost"` (Boost.Histogram) |
+| `histogramBackend` | String | `"boost"` | Histogram backend: `"root"` or `"boost"` (Boost.Histogram). Both persist THnSparseF. |
+| `histogramDenseLimitMiB` | Non-negative integer | `0` | Dense accumulator budget per histogram, summed over all RDF slots and including flow cells. Default `0` forces sparse accumulation. This is not a process-wide memory cap. |
+| `histogramBoostPrecision` | String | `"float"` | Boost contents: `"float"` for ROOT-compatible float contents with double sumw2 and ROOT bin lookup, or explicit `"double"` for double weighted sums. |
+| `histogramBoostSparseBackend` | String | `"map"` | Boost sparse container: `"map"` uses `std::unordered_map`; `"flat"` uses `boost::unordered_flat_map` when its header is available. |
+| `histogramSystematics` | Boolean | `true` | Enable histogram systematic variations and auto-detect complete `baseVariable_nameUp` / `baseVariable_nameDown` column pairs. Set to `false` for nominal-only histograms. |
+| `histogramShareCollectionTransport` | Boolean (`true` / `false`) | `false` | Experimental packed-histogram optimization: share scalar broadcasts and collection fill counts for exact matching input/reference columns within one booking call. No sharing across booking calls or unrelated collections. Sustained performance acceptance is deferred. |
 
-**ROOT backend** (`"root"`, default): stores histograms as `THnSparseF` objects in the meta ROOT output file.  This is compatible with all downstream tools and is the correct choice for most analyses.
+**ROOT backend** (`"root"`, explicit override): stores mergeable `THnSparseF` objects in
+the meta ROOT output file, including axis labels and exact bin edges. The
+manifest-driven merge task combines these objects with `hadd`, then writes the
+reconstructed `TH1F` objects alongside them for downstream plotting and
+datacard tools. For manual merges, run
+`python core/python/extract_nd_histograms.py merged.root` after `hadd`.
 
-**Boost.Histogram backend** (`"boost"`): stores histograms in-memory using Boost.Histogram during the event loop, then converts to ROOT format for output.  This can improve memory performance for analyses with very large numbers of histogram bins.
+**Boost.Histogram backend** (`"boost"`, default): stores histograms in-memory using
+Boost.Histogram during the event loop, then converts to the same mergeable
+`THnSparseF` format for output. Regular-axis histograms use dense weighted
+arrays or sparse weighted maps. With explicit double precision,
+variable-width observables use the ROOT action. The default float precision
+uses a custom accumulator with float contents and double sumw2, plus ROOT's
+axis lookup for both regular and variable bins. Dense float storage uses
+separate arrays (12 bytes per cell), avoiding structure padding. The explicit
+double option accumulates contents in double and rounds to float at export;
+negative-weight cancellations can therefore differ from ROOT.
 
 ```
-# Use ROOT backend (default — compatible with all downstream tools including Combine)
-histogramBackend=root
-
-# Use Boost.Histogram backend (in-memory optimisation, same output format)
+# Default: ROOT-compatible float arithmetic, sparse standard map
 histogramBackend=boost
+histogramBoostPrecision=float
+histogramBoostSparseBackend=map
+histogramDenseLimitMiB=0
+
+# To restore ROOT accumulation with the former dense budget, instead use:
+# histogramBackend=root
+# histogramDenseLimitMiB=64
 ```
 
-Both backends produce the same output format and are fully interchangeable.
+Both backends produce the same output format. Both retain flow bins and
+double sumw2. Numerical agreement must be checked before changing a backend.
+Set `RDF_HISTOGRAM_PROFILE=1` to report each action's storage choice, estimated
+dense bytes, occupied output bins, and finalization CPU/wall time.
+At metadata save time, Boost sparse actions warn once per histogram when
+tracked container allocations observed during finalization exceed the dense
+array estimate across the same slots. The warning includes the file/histogram,
+both byte counts, and the dense-budget override. See
+[storage accounting and its limits](CONFIG_HISTOGRAMS.md#storage-selection-and-output).
 
 ### Counter Service
 
@@ -570,17 +673,27 @@ Track event counts and weight sums per sample.
 |--------|------|---------|-------------|
 | `enableCounters` | Boolean | `false` | Enable the CounterService |
 | `counterWeightBranch` | String | (empty) | Column name for per-event weights (e.g., `genWeight`) |
-| `counterIntWeightBranch` | String | (empty) | Column name for integer-valued weights (e.g., stitching codes) |
+| `counterIntWeightBranch` | String | (empty) | Column name for an integer event category (e.g., a stitching code) |
+| `counterIntWeightBranchNBins` | Integer | `10` | Number of bins for automatic integer-category booking |
+| `counterIntWeightBranchMin` | Number | `-0.5` | Lower edge for automatic integer-category booking |
+| `counterIntWeightBranchMax` | Number | `9.5` | Upper edge for automatic integer-category booking |
 
 **When enabled**, the CounterService logs:
 - Total entries per sample
 - Sum of `counterWeightBranch` (if set)
 - Sum of `counterIntWeightBranch` (if set)
 
-**For integer weights**, a histogram is written to the metadata file:
+**For integer categories**, a histogram is written to the metadata file:
 - Name: `counter_intWeightSum_<sample>`
 - X-axis: Integer values from `counterIntWeightBranch`
 - Bin content: Sum of `counterWeightBranch` for events with that integer value
+- Signed companion: `counter_intWeightSignSum_<sample>` with the signed event count
+
+The automatic booking defaults to integer IDs `0` through `9`. Configure the
+bin count and range when a classifier uses a different valid-ID range. An
+analysis that needs a custom underflow or invalid-event policy should define
+and filter its integer branch explicitly before calling
+`Analyzer::bookCounterIntHistogram`.
 
 **Example**:
 ```
@@ -588,6 +701,30 @@ enableCounters=true
 counterWeightBranch=genWeight
 counterIntWeightBranch=stitchWeight
 ```
+
+### CMS generator-weight basis
+
+For MC datasets, the manifest field `generator_weight_mode` selects the raw
+generator-weight factor and normalization denominator. It defaults to `sign`:
+the event factor is `sign(genWeight)` and the denominator is
+`sum(sign(genWeight))`. Set it to `full` to use `genWeight` and
+`sum(genWeight)` instead. The LAW skim workflow writes the selected mode to
+`genWeightMode` in each MC job config. Downstream consumers calculate the
+normalization from the counters in their input files; skim monitoring does not
+collect a separate normalization result. Keep `counterWeightBranch=genWeight`
+when collecting these normalization counters so the selected totals use the
+generator-weight branch.
+
+`setupCmsGenWeights()` applies this basis to the nominal generator-weight
+column and its LHE, PDF, and parton-shower variations. Weight Up/Down columns
+use the same nominal sample normalization, so their yield changes are retained.
+Data jobs do not use this MC-only setting.
+
+`genWeightEnableIsr` and `genWeightEnableFsr` independently select the ISR and
+FSR pairs from `PSWeight`; both default to `true` and take effect when
+`genWeightEnablePs` is enabled. The ISR pair is `ps_isr2_fsr1` /
+`ps_isr0p5_fsr1`, and the FSR pair is `ps_isr1_fsr2` /
+`ps_isr1_fsr0p5`.
 
 ### Custom ROOT Dictionaries
 
@@ -639,7 +776,10 @@ Boolean values can be specified as:
 
 ### Path Handling
 
-- Relative paths are resolved relative to the working directory
+- Relative paths used as configuration-file references are first checked relative to the working directory, then resolved relative to the main config file's directory if not found.
+- Input and output paths are generally passed through as written and are interpreted by their consumers; check the analysis working-directory convention when they are relative.
+- Some loaders perform an existence check before config-path resolution. For example, `DataManager` checks relative `floatConfig` and `intConfig` files from the process working directory, so run from the directory containing those files or use suitable paths.
+- Unless `metaFile` is set explicitly, the ROOT metadata/histogram path is derived from `saveFile` by inserting `_meta` before its extension (for example, `output.root` becomes `output_meta.root`).
 - XRootD URLs are supported for remote file access: `root://server//path/file.root`
 - EOS paths: `root://eospublic.cern.ch//eos/path/file.root`
 

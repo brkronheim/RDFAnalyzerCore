@@ -25,6 +25,7 @@ class Analyzer;
 struct WeightAuditEntry {
   std::string name;          ///< Human-readable label
   std::string column;        ///< Dataframe column that was audited
+  std::uint64_t entryCount = 0; ///< Number of audited events
   double sumWeights = 0.0;   ///< Sum of per-event weight values
   double meanWeight = 0.0;   ///< Arithmetic mean
   double minWeight = 0.0;    ///< Minimum value seen
@@ -104,6 +105,8 @@ public:
    *
    * The column must already be defined on the dataframe when
    * defineNominalWeight() is called.
+   * Component names are unique: registering the same name/column pair again
+   * is idempotent, while reusing a name for another column throws.
    *
    * @param name   Human-readable label used in audit output.
    * @param column Dataframe column name (float or double).
@@ -252,11 +255,12 @@ public:
   void execute() override;
 
   /**
-   * @brief Retrieve audit results and write them to the meta output file.
+   * @brief Retrieve audit results for the typed metadata contribution.
    *
    * Called by the framework after the RDataFrame computation completes.
    */
   void finalize() override;
+  rdf::OutputMetadata collectOutputMetadata() const override;
 
   /**
    * @brief Log weight audit summary via the analysis logger.
@@ -305,15 +309,19 @@ private:
   std::vector<std::pair<VariedColumnKey, std::string>> variedColumns_m;
 
   // ---- Lazy audit RDF results (booked in execute(), read in finalize()) ---
+  struct AuditAccumulator {
+    double sumWeights = 0.0;
+    double minWeight = 0.0;
+    double maxWeight = 0.0;
+    ULong64_t negativeCount = 0;
+    ULong64_t zeroCount = 0;
+    ULong64_t entryCount = 0;
+  };
+
   struct AuditPending {
     std::string name;
     std::string column;
-    ROOT::RDF::RResultPtr<double> sumResult;
-    ROOT::RDF::RResultPtr<double> meanResult;
-    ROOT::RDF::RResultPtr<double> minResult;
-    ROOT::RDF::RResultPtr<double> maxResult;
-    ROOT::RDF::RResultPtr<ULong64_t> negCount;
-    ROOT::RDF::RResultPtr<ULong64_t> zeroCount;
+    ROOT::RDF::RResultPtr<AuditAccumulator> aggregateResult;
   };
   std::vector<AuditPending> auditPending_m;
 

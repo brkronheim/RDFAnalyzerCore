@@ -85,7 +85,10 @@ Use each hook intentionally:
 - `execute()`: define RDF columns and book lazy actions
 - `finalize()`: consume booked results after the event loop
 - `reportMetadata()`: emit human-readable summaries
-- `collectProvenanceEntries()`: emit stable structured metadata
+- `collectProvenanceEntries()`: emit stable structured provenance
+- `collectOutputMetadata()`: contribute typed region definitions, normalization
+  constants and sufficient weight-audit statistics after finalize. The Analyzer
+  combines these in one job document; see [metadata contracts](METADATA.md).
 
 ## Minimal Interface
 
@@ -253,7 +256,7 @@ Recommended reference implementations by pattern:
 - `core/plugins/RegionManager/RegionManager.h`
 - `core/plugins/CutflowManager/CutflowManager.h`
 - `core/plugins/WeightManager/WeightManager.h`
-- `core/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
+- `extensions/cms/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
 - `core/plugins/ObjectEnergyManagerBase/ObjectEnergyManagerBase.h`
 - `core/plugins/TaggerWorkingPointManager/TaggerWorkingPointManager.h`
 
@@ -264,7 +267,7 @@ Use existing implementations as the source of truth for output naming convention
 Examples:
 
 - `OnnxManager`: single-output models create one column; multi-output models create `{modelName}_output0`, `{modelName}_output1`, and so on
-- `NDHistogramManager`: books lazy histogram results and saves them in `saveHists()` or `bookConfigHistograms()` workflows
+- `NDHistogramManager`: books lazy histogram results; `Analyzer::run()` saves its histograms for the `histogramManager` role
 - `CutflowManager`: books count actions in `execute()` and materializes summary histograms in `finalize()`
 
 ## Testing Checklist
@@ -274,7 +277,7 @@ For a new plugin, add tests under `core/tests/cpp/` and verify:
 - dependency validation behavior
 - config parsing and missing-key failure modes
 - correct column names or output object names
-- execution through `Analyzer::run()` or `Analyzer::save()`
+- execution through `Analyzer::run()`
 - provenance keys when the plugin contributes structured metadata
 
 ## Documentation Checklist

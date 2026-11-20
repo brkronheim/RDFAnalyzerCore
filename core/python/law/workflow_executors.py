@@ -54,6 +54,7 @@ Usage in a task file
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -259,6 +260,8 @@ def _optimize_job_config_xrootd(config_path: str) -> None:
     file_list_raw = cfg.get("fileList", "")
     if not file_list_raw:
         return
+    if str(cfg.get("xrootdRedirector", "") or cfg.get("redirector", "")).strip():
+        return
 
     files = [f.strip() for f in file_list_raw.split(",") if f.strip()]
     optimizable_indices = [
@@ -307,6 +310,7 @@ def _run_analysis_job(
     container_setup: str = "",
     config_relpath: str = "submit_config.txt",
     stream_output: bool = False,
+    worker_number: Optional[int] = None,
 ) -> str:
     """
     Run a single analysis job in *job_dir* by invoking *exe_path* with a
@@ -380,6 +384,21 @@ def _run_analysis_job(
 
     cmd_parts: list[str] = []
 
+    gpu_devices = [
+        device.strip()
+        for device in os.environ.get("RDF_GPU_DEVICE_IDS", os.environ.get("RDF_VH_GPU_DEVICE_IDS", "")).split(",")
+        if device.strip()
+    ]
+    gpu_setup: list[str] = []
+    if worker_number is not None and gpu_devices:
+        gpu_device = gpu_devices[worker_number % len(gpu_devices)]
+        gpu_setup.extend(
+            [
+                f"export CUDA_VISIBLE_DEVICES={shlex.quote(gpu_device)}",
+                f"echo {shlex.quote(f'[LAW] worker {worker_number} uses CUDA device {gpu_device}')}",
+            ]
+        )
+
     # Optional ROOT / CMSSW environment setup
     if root_setup:
         tmp = tempfile.NamedTemporaryFile(
@@ -392,8 +411,15 @@ def _run_analysis_job(
         tmp.close()
         cmd_parts.append(f"source {shlex.quote(tmp.name)}")
 
+    # Apply the assignment after ROOT/CMSSW setup in case that setup script
+    # changes CUDA_VISIBLE_DEVICES.  The analysis then sees its chosen GPU as
+    # CUDA device 0, which is what the CUDA kinematic-fit manager uses.
+    cmd_parts.extend(gpu_setup)
+
     cmd_parts.extend([
         f"cd {shlex.quote(job_dir)}",
+        'export LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+        'export ROOT_INCLUDE_PATH="$PWD${ROOT_INCLUDE_PATH:+:$ROOT_INCLUDE_PATH}"',
         "if [ -f x509 ]; then export X509_USER_PROXY=$PWD/x509; fi",
         f"chmod +x {shlex.quote(exe_path)}",
         f"{shlex.quote(exe_path)} {shlex.quote(config_relpath)}",
@@ -416,7 +442,7 @@ def _run_analysis_job(
 
     task_label = f"analysis_job:{os.path.basename(job_dir)}"
 
-    def _append_tail(buf: bytearray, chunk: bytes, max_bytes: int = 2000) -> None:
+    def _append_tail(buf: bytearray, chunk: bytes, max_bytes: int = 65536) -> None:
         buf.extend(chunk)
         overflow = len(buf) - max_bytes
         if overflow > 0:
@@ -431,7 +457,11 @@ def _run_analysis_job(
         target.write(chunk.decode(errors="replace"))
         target.flush()
 
-    def _stream_subprocess_output(proc: subprocess.Popen) -> tuple[str, str]:
+    def _stream_subprocess_output(
+        proc: subprocess.Popen,
+        *,
+        emit: bool,
+    ) -> tuple[str, str]:
         stdout_tail = bytearray()
         stderr_tail = bytearray()
 
@@ -442,7 +472,8 @@ def _run_analysis_job(
                     if not chunk:
                         break
                     _append_tail(tail_buf, chunk)
-                    _write_stream(sink, chunk)
+                    if emit:
+                        _write_stream(sink, chunk)
             finally:
                 stream.close()
 
@@ -474,21 +505,16 @@ def _run_analysis_job(
                 "shell": True,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
+                "bufsize": 0,
             }
-            if stream_output:
-                popen_kwargs["bufsize"] = 0
-            else:
-                popen_kwargs["text"] = True
             proc = subprocess.Popen(**popen_kwargs)
             rec.monitor_process(proc.pid)
             slow_detector = _IOThroughputMonitor(proc.pid)
             slow_detector.start()
-            if stream_output:
-                stdout_data, stderr_data = _stream_subprocess_output(proc)
-                returncode = proc.wait()
-            else:
-                stdout_data, stderr_data = proc.communicate()
-                returncode = proc.returncode
+            stdout_data, stderr_data = _stream_subprocess_output(
+                proc, emit=stream_output
+            )
+            returncode = proc.wait()
             slow_detector.stop()
             rec.set_throughput(input_bytes)
 
@@ -519,26 +545,62 @@ def _run_analysis_job(
             )
     else:
         # Fallback: original subprocess.run path (no performance recording)
-        if stream_output:
-            proc = subprocess.Popen(
-                full_cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-            )
-            _, stderr_data = _stream_subprocess_output(proc)
-            returncode = proc.wait()
-            stderr_tail = stderr_data[-2000:] if stderr_data else ""
-        else:
-            result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
-            returncode = result.returncode
-            stderr_tail = result.stderr[-2000:] if result.stderr else ""
+        proc = subprocess.Popen(
+            full_cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        stdout_data, stderr_data = _stream_subprocess_output(
+            proc, emit=stream_output
+        )
+        returncode = proc.wait()
+        stderr_tail = stderr_data[-2000:] if stderr_data else ""
         if returncode != 0:
             raise RuntimeError(
                 f"Analysis job failed (exit {returncode}) in {job_dir!r}."
                 + (f"\nstderr:\n{stderr_tail}" if stderr_tail else "")
             )
+
+    if os.environ.get("RDF_JOB_SUMMARY", os.environ.get("RDF_VH_JOB_SUMMARY", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        output = "\n".join((stdout_data or "", stderr_data or ""))
+        event_match = re.search(
+            r"^RDF_ANALYZER_EVENTS=(\d+)\s*$", output, re.MULTILINE
+        )
+        timing_match = re.search(
+            r"^RDF_ANALYZER_TIMING\s+setup_s=([0-9.eE+-]+)"
+            r"\s+execution_s=([0-9.eE+-]+)\s*$",
+            output,
+            re.MULTILINE,
+        )
+
+        if timing_match:
+            setup_seconds = float(timing_match.group(1))
+            execution_seconds = float(timing_match.group(2))
+            timing_text = (
+                f"setup={setup_seconds:.2f}s "
+                f"execution={execution_seconds:.2f}s"
+            )
+        else:
+            timing_text = "setup=unknown execution=unknown"
+
+        if event_match:
+            events = int(event_match.group(1))
+            rate = events / execution_seconds if execution_seconds > 0 else 0.0
+            event_text = f"events={events:,} rate={rate:,.1f} events/s"
+        else:
+            event_text = "events=unknown rate=unknown"
+
+        job_name = os.path.basename(job_dir)
+        if job_name.startswith("job_"):
+            job_name = os.path.join(os.path.basename(os.path.dirname(job_dir)), job_name)
+        print(
+            f"[RDF_JOB_FINISHED] {job_name}: {timing_text} {event_text}",
+            flush=True,
+        )
 
     return f"done:{job_dir}"
 
@@ -594,10 +656,18 @@ class DaskWorkflowProxy(BaseWorkflowProxy):
         )
 
         if scheduler:
+            if getattr(task, "dask_workers", 1) != 1:
+                task.publish_message(
+                    "dask_workers applies only to a local Dask cluster; "
+                    "the external scheduler controls its worker count."
+                )
             client = Client(scheduler)
         else:
             # Fall back to a local Dask cluster (useful for testing)
-            client = Client()
+            workers = getattr(task, "dask_workers", 1)
+            if type(workers) is not int or workers < 1:
+                raise ValueError("dask_workers must be a positive integer for a local Dask cluster")
+            client = Client(n_workers=workers)
 
         try:
             branch_map = task.branch_map

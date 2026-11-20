@@ -46,12 +46,72 @@ Load a YAML manifest and query it::
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import warnings
 from dataclasses import dataclass, field, fields, asdict
 from typing import Any, Dict, List, Optional, Union
 
 import yaml
+
+
+GENERATOR_WEIGHT_MODES = ("sign", "full")
+
+
+def normalize_generator_weight_mode(value: object) -> str:
+    """Return a validated generator-weight mode (``sign`` or ``full``)."""
+    if not isinstance(value, str):
+        raise ValueError(
+            "generator_weight_mode must be 'sign' or 'full', "
+            f"got {value!r}"
+        )
+    mode = value.strip().lower()
+    if mode not in GENERATOR_WEIGHT_MODES:
+        raise ValueError(
+            "generator_weight_mode must be 'sign' or 'full', "
+            f"got {value!r}"
+        )
+    return mode
+
+
+def select_generator_weight_denominator(
+    mode: str,
+    sum_weights: float,
+    sum_sign_weights: float,
+    *,
+    dataset_name: Optional[str] = None,
+) -> float:
+    """Select the normalization denominator and require it to be positive.
+
+    ``sign`` selects the sum of generator-weight signs; ``full`` selects the
+    raw generator-weight sum. No fallback is attempted when the selected sum
+    is invalid.
+    """
+    selected_mode = normalize_generator_weight_mode(mode)
+    if selected_mode == "sign":
+        denominator_name = "sum_sign_weights"
+        denominator = sum_sign_weights
+    else:
+        denominator_name = "sum_weights"
+        denominator = sum_weights
+
+    try:
+        selected_denominator = float(denominator)
+    except (TypeError, ValueError, OverflowError):
+        selected_denominator = math.nan
+
+    if not math.isfinite(selected_denominator) or selected_denominator <= 0.0:
+        sample_context = (
+            f" for dataset {dataset_name!r}" if dataset_name is not None else ""
+        )
+        raise ValueError(
+            f"MC normalization{sample_context} selected "
+            f"generator_weight_mode={selected_mode!r}, whose "
+            f"{denominator_name} denominator is {denominator!r}; it must be "
+            "finite and strictly positive. No fallback to the other weight "
+            "mode is performed."
+        )
+    return selected_denominator
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +252,11 @@ class DatasetEntry:
     extra_scale : float
         Additional arbitrary scale factor. Defaults to 1.0.
     sum_weights : float or None
-        Sum of generator weights (computed at run-time if None).
+        Optional raw sum of generator weights.
+    generator_weight_mode : str
+        ``"sign"`` (default) normalises by ``sum(sign(genWeight))`` and uses
+        ``sign(genWeight)`` per event. ``"full"`` uses the raw generator
+        weight for both quantities.
 
     Dataset type
     ------------
@@ -235,6 +299,7 @@ class DatasetEntry:
     kfac: float = 1.0
     extra_scale: float = 1.0
     sum_weights: Optional[float] = None
+    generator_weight_mode: str = "sign"
     energy: float = 13600.0
 
     # -- type ---
@@ -270,6 +335,11 @@ class DatasetEntry:
     See :class:`FriendTreeConfig` for the full list of supported options.
     """
 
+    def __post_init__(self) -> None:
+        self.generator_weight_mode = normalize_generator_weight_mode(
+            self.generator_weight_mode
+        )
+
     # ------------------------------------------------------------------ helpers
 
     def to_legacy_dict(self) -> Dict[str, str]:
@@ -289,6 +359,8 @@ class DatasetEntry:
             d["filterEfficiency"] = str(self.filter_efficiency)
         if self.sum_weights is not None:
             d["norm"] = str(self.sum_weights)
+        if self.dtype == "mc":
+            d["genWeightMode"] = self.generator_weight_mode
         if self.das is not None:
             d["das"] = self.das
         if self.files:
@@ -330,9 +402,26 @@ class DatasetEntry:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DatasetEntry":
         """Construct a ``DatasetEntry`` from a plain dict (e.g. loaded from
-        YAML).  Unknown keys are silently ignored for forward-compatibility."""
+        YAML).
+
+        Unknown top-level keys are preserved under ``extra`` for forward-
+        compatibility and to support compact manifests where analysis-specific
+        metadata (e.g. ``ptcut``) is declared directly on the dataset entry.
+        """
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in data.items() if k in known}
+        extra: Dict[str, Any] = {}
+        raw_extra = filtered.get("extra")
+        if isinstance(raw_extra, dict):
+            extra.update(raw_extra)
+
+        for key, value in data.items():
+            if key not in known:
+                extra[key] = value
+
+        if extra:
+            filtered["extra"] = extra
+
         # Deserialise nested FriendTreeConfig objects
         if "friend_trees" in filtered and isinstance(filtered["friend_trees"], list):
             filtered["friend_trees"] = [
@@ -494,7 +583,27 @@ class DatasetManifest:
                 )
             entries.append(DatasetEntry.from_dict(item))
 
-        return cls(datasets=entries, lumi=lumi, whitelist=whitelist, blacklist=blacklist, lumi_by_year=lumi_by_year)
+        manifest = cls(
+            datasets=entries,
+            lumi=lumi,
+            whitelist=whitelist,
+            blacklist=blacklist,
+            lumi_by_year=lumi_by_year,
+        )
+
+        # Structural YAML checks above catch malformed fields; this second pass
+        # catches relationships that can only be checked after all entries are
+        # constructed (for example duplicate names and missing parents).
+        validation_messages = manifest.validate()
+        errors = [message for message in validation_messages if not message.startswith("Warning:")]
+        if errors:
+            details = "\n  - ".join(errors)
+            raise ValueError(f"Dataset manifest '{path}' is invalid:\n  - {details}")
+        for message in validation_messages:
+            if message.startswith("Warning:"):
+                warnings.warn(message, UserWarning, stacklevel=2)
+
+        return manifest
 
     def save_yaml(self, path: str) -> None:
         """Serialise the manifest to a YAML file.
@@ -779,13 +888,11 @@ def _validate_dataset_entry(raw_entry: Dict[str, Any], path: str, index: int) ->
             f"Dataset manifest '{path}' entry #{index} must contain a string 'name' field."
         )
 
-    known_entry_keys = {f.name for f in fields(DatasetEntry)}
-    unknown_entry_keys = set(raw_entry) - known_entry_keys
-    if unknown_entry_keys:
-        raise ValueError(
-            f"Dataset manifest '{path}' entry '{dataset_label}' contains unknown keys: "
-            f"{', '.join(sorted(unknown_entry_keys))}"
-        )
+    if "extra" in raw_entry and raw_entry["extra"] is not None:
+        if not isinstance(raw_entry["extra"], dict):
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}': 'extra' must be a YAML mapping."
+            )
 
     if "dtype" in raw_entry and raw_entry["dtype"] is not None:
         if not isinstance(raw_entry["dtype"], str):
@@ -796,6 +903,14 @@ def _validate_dataset_entry(raw_entry: Dict[str, Any], path: str, index: int) ->
             raise ValueError(
                 f"Dataset manifest '{path}' entry '{dataset_label}' contains invalid dtype {raw_entry['dtype']!r}."
             )
+
+    if "generator_weight_mode" in raw_entry:
+        try:
+            normalize_generator_weight_mode(raw_entry["generator_weight_mode"])
+        except ValueError as exc:
+            raise ValueError(
+                f"Dataset manifest '{path}' entry '{dataset_label}': {exc}."
+            ) from exc
 
     if "files" in raw_entry and raw_entry["files"] is not None:
         if not isinstance(raw_entry["files"], list) or any(not isinstance(item, str) for item in raw_entry["files"]):
@@ -899,6 +1014,7 @@ def _entry_from_legacy_kv(kv: Dict[str, str]) -> DatasetEntry:
         sum_weights=_float("norm"),
         energy=_float("energy", 13600.0),
         dtype=dtype,
+        generator_weight_mode=kv.get("genWeightMode", "sign"),
         das=kv.get("das"),
         files=[f for f in kv.get("fileList", "").split(",") if f],
         parent=kv.get("parent"),

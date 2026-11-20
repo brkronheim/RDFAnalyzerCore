@@ -9,6 +9,7 @@ import sys
 import tempfile
 import yaml
 import numpy as np
+import pytest
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,8 +34,8 @@ def create_mock_root_file_with_uproot(filename, histograms):
     return True
 
 
-def test_basic_functionality():
-    """Test basic datacard generator functionality."""
+def _run_basic_functionality():
+    """Run the legacy datacard generator check and return its result."""
     print("=" * 80)
     print("Testing Datacard Generator (uproot-based)")
     print("=" * 80)
@@ -231,5 +232,11 @@ def test_basic_functionality():
 
 
 if __name__ == "__main__":
-    success = test_basic_functionality()
+    success = _run_basic_functionality()
     sys.exit(0 if success else 1)
+
+
+def test_basic_functionality():
+    """Expose the legacy script check as a failing/skip-aware pytest test."""
+    pytest.importorskip("uproot")
+    assert _run_basic_functionality(), "datacard generator output checks failed"

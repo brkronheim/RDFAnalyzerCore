@@ -1,0 +1,1 @@
+set(RDF_ANALYSIS_REQUIRES cms)

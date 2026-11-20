@@ -1,0 +1,6 @@
+# Validated upstream source includes native multi-GPU bin sharding.
+rabbit-fit @ git+https://github.com/WMass/rabbit.git@a0e8323a1f6489abc5d25b6c1c90933ccee55deb
+tensorflow-probability==0.25.0
+tf-keras==2.20.1
+uproot>=5,<6
+PyYAML>=6,<7

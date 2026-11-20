@@ -47,10 +47,16 @@ jobs:
       run: pip3 install -r requirements-ci.txt
 
     - name: Configure CMake
-      run: cmake -S . -B build -DUSE_CUDA=OFF -DONNXRUNTIME_USE_CUDA=OFF
+      run: cmake -S . -B build -DBUILD_TESTS=ON -DRDF_BUILD_EXTENSIONS=OFF -DUSE_CUDA=OFF -DONNXRUNTIME_USE_CUDA=OFF
 
     - name: Build
       run: cmake --build build --parallel $(nproc)
 
     - name: Run tests
-      run: ctest --test-dir build --output-on-failure 
+      run: ctest --test-dir build --output-on-failure --no-tests=error
+
+    - name: Check installed Python authoring
+      run: |
+        cmake --install build --prefix "$RUNNER_TEMP/rdf-python" --component Python
+        export PYTHONPATH="$RUNNER_TEMP/rdf-python/python:$(root-config --prefix)/lib:${PYTHONPATH:-}"
+        python3 -m rdfanalysis doctor --numba

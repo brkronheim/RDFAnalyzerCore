@@ -1,5 +1,10 @@
 # Configuration Validation
 
+Compiled C++ analyses can also use the optional standard-library
+[native settings and validation reports](NATIVE_SETTINGS_AND_VALIDATION.md).
+That configuration-only helper emits the existing native option map and shared
+JSON diagnostics; the broader validators below retain their existing behavior.
+
 RDFAnalyzerCore ships a configuration validation tool that catches mis-spelled keys, missing files, bad numeric values and structural inconsistencies **before** a long analysis run starts.  Fixing problems early avoids silent data-quality issues and wasted CPU time on the grid.
 
 The tool lives in `core/python/validate_config.py` and supports two independent validation modes:
@@ -34,6 +39,7 @@ The two modes are mutually exclusive; exactly one of `--config` or `--analysis-c
 |------|---------|
 | `0` | Validation passed (warnings may still be printed). |
 | `1` | One or more errors were found, or the config file was not found. |
+| `2` | Invalid command-line arguments, including omitted or conflicting input flags. |
 
 ### Example output
 
@@ -93,6 +99,8 @@ Paths are resolved relative to the parent directory of the submit config file.
 #### `threads` value
 
 When `threads` is present its value must be an integer, the string `auto`, or the string `max`; anything else is an error.
+
+The C++ runtime applies the same validation when it reads the analysis config, so skipping this preflight does not silently turn a malformed value into an all-cores job.
 
 ### Sample config validation
 

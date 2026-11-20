@@ -57,7 +57,7 @@ class Analyzer;
  *
  * initialize() validates the region hierarchy (no cycles, no missing parents,
  * no duplicate names) and throws std::runtime_error on failure. finalize()
- * writes a region-summary TNamed to the meta output ROOT file.
+ * contributes region definitions to the Analyzer compact metadata writer.
  */
 class RegionManager : public IPluggableManager {
 public:
@@ -167,6 +167,7 @@ public:
    * @brief Validate regions and write a summary to the meta output ROOT file.
    */
   void finalize() override;
+  rdf::OutputMetadata collectOutputMetadata() const override;
 
   /**
    * @brief Log the region hierarchy to the analysis logger.

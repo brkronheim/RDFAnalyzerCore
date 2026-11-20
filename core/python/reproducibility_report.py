@@ -7,8 +7,8 @@ plugins, services, task metadata, and dataset manifests—into a single
 human- and machine-readable reproducibility artifact.
 
 Provenance data is collected at C++ analysis time by
-:class:`ProvenanceService` and written as TNamed objects into a ``provenance``
-TDirectory inside the meta ROOT output file.  This module provides:
+:class:`ProvenanceService` and written as a compact versioned job document.
+Legacy TNamed directories and merged provenance bundles are also readable.  This module provides:
 
 * :class:`ReproducibilityReport` – structured report object with
   ``to_dict()`` / ``to_yaml()`` / ``to_json()`` / ``to_text()`` output and
@@ -122,10 +122,10 @@ class ReproducibilityReport:
       timestamp) and the ROOT version.
     * **Analysis** – runtime git info of the analysis repository.
     * **Environment** – container tag and thread-pool size.
-    * **Configuration** – deterministic hash of the configuration map and of
-      the file-list file.
-    * **File hashes** – MD5 digests of auxiliary input files referenced by
-      configuration values (``file.hash.*`` entries).
+        * **Configuration** – deterministic hash of the configuration map and a
+            cheap fingerprint of the file-list reference.
+        * **File hashes** – MD5 digests of cheap fingerprints for auxiliary input
+            files referenced by configuration values (``file.hash.*`` entries).
     * **Dataset manifest** – identity of the dataset manifest that was used
       (file hash, query parameters, resolved dataset names).
     * **Plugins** – per-plugin provenance entries contributed via
@@ -160,8 +160,10 @@ class ReproducibilityReport:
         self,
         provenance: Optional[Dict[str, str]] = None,
         timestamp: Optional[str] = None,
+        job_records: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.provenance: Dict[str, str] = dict(provenance or {})
+        self.job_records = job_records
         self.timestamp: str = (
             timestamp
             or datetime.datetime.now(tz=datetime.timezone.utc).isoformat(
@@ -284,7 +286,7 @@ class ReproducibilityReport:
         dict
             Full report as a nested dictionary.
         """
-        return {
+        result = {
             "report_version": self.report_version,
             "timestamp": self.timestamp,
             "summary": {
@@ -310,6 +312,10 @@ class ReproducibilityReport:
             "other": dict(self.other),
             "provenance": {k: v for k, v in sorted(self.provenance.items())},
         }
+        if self.job_records is not None:
+            from metadata_io import build_bundle
+            result["metadata_bundle"] = build_bundle(self.job_records)
+        return result
 
     def to_yaml(self) -> str:
         """Return the report serialised as a YAML string.
@@ -373,6 +379,8 @@ class ReproducibilityReport:
         lines.append("=" * 60)
         lines.append("  REPRODUCIBILITY REPORT")
         lines.append(f"  Timestamp : {self.timestamp}")
+        if self.job_records is not None:
+            lines.append(f"  Jobs      : {len(self.job_records)} (shared provenance shown below)")
         lines.append(
             f"  Entries   : {len(self.provenance)} total"
         )
@@ -517,6 +525,7 @@ class ReproducibilityReport:
                     "plugins",
                     "task_metadata",
                     "other",
+                    "metadata_bundle",
                 )
             }
         provenance = {str(k): str(v) for k, v in raw_prov.items() if v is not None}
@@ -524,6 +533,9 @@ class ReproducibilityReport:
             provenance=provenance,
             timestamp=data.get("timestamp"),
         )
+        if data.get("metadata_bundle") is not None:
+            from metadata_io import expand_bundle
+            report.job_records = expand_bundle(data["metadata_bundle"])
         report.report_version = data.get("report_version", REPRODUCIBILITY_REPORT_VERSION)
         return report
 
@@ -583,62 +595,25 @@ class ReproducibilityReport:
 
 
 def load_provenance_from_root(meta_root_path: str) -> Dict[str, str]:
-    """Read the provenance key–value map from a ROOT meta output file.
+    """Read shared provenance from legacy, compact or merged ROOT metadata.
 
-    Uses **uproot** to read all :class:`TNamed` objects stored in the
-    ``"provenance"`` TDirectory of the given ROOT file.  The TNamed name is
-    used as the key and the TNamed title as the value.
-
-    Parameters
-    ----------
-    meta_root_path : str
-        Path to the ROOT meta file written by the framework.
-
-    Returns
-    -------
-    dict
-        Flat ``{key: value}`` provenance map.  Returns an empty dict when the
-        ``"provenance"`` directory is absent or uproot is not available.
-
-    Raises
-    ------
-    FileNotFoundError
-        If *meta_root_path* does not exist on disk.
-    ImportError
-        If uproot is not installed.
+    Complete job records are available through load_provenance_records_from_root.
+    Missing files/dependencies and invalid metadata raise errors. A legacy file
+    with no provenance returns an empty map. Merged values are never taken from
+    one arbitrary input job.
     """
     if not os.path.exists(meta_root_path):
-        raise FileNotFoundError(
-            f"ROOT meta file not found: {meta_root_path!r}"
-        )
+        raise FileNotFoundError(f"ROOT meta file not found: {meta_root_path!r}")
+    from metadata_io import load_metadata_records, common_provenance
+    # For merged files this returns only shared values. Call the record reader
+    # for per-job differences; never label an arbitrary job as the merged run.
+    return common_provenance(load_metadata_records(meta_root_path))
 
-    try:
-        import uproot  # type: ignore[import]
-    except ImportError as exc:
-        raise ImportError(
-            "uproot is required to read ROOT meta files.  "
-            "Install it with: pip install uproot"
-        ) from exc
 
-    provenance: Dict[str, str] = {}
-    with uproot.open(meta_root_path) as root_file:
-        # The provenance directory may or may not exist
-        if "provenance" not in root_file:
-            return provenance
-        prov_dir = root_file["provenance"]
-        for key in prov_dir.keys():
-            # Strip cycle numbers (";1") that uproot appends
-            clean_key = re.sub(r";[0-9]+$", "", key)
-            obj = prov_dir[key]
-            # TNamed objects have a .title attribute
-            if hasattr(obj, "title"):
-                provenance[clean_key] = str(obj.title)
-            elif hasattr(obj, "member"):
-                try:
-                    provenance[clean_key] = str(obj.member("fTitle"))
-                except Exception:  # noqa: BLE001
-                    provenance[clean_key] = ""
-    return provenance
+def load_provenance_records_from_root(meta_root_path: str):
+    """Return full, identified job records, including merged provenance."""
+    from metadata_io import load_metadata_records
+    return load_metadata_records(meta_root_path)
 
 
 # ---------------------------------------------------------------------------
@@ -770,6 +745,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.root_file:
             prov = load_provenance_from_root(args.root_file)
             report = build_report_from_provenance(prov)
+            report.job_records = load_provenance_records_from_root(args.root_file)
         else:
             parser.print_help()
             return 1

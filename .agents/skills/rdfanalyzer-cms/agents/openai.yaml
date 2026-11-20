@@ -1,0 +1,4 @@
+interface:
+  display_name: "CMS eras, corrections, and MET"
+  short_description: "CMS eras, corrections, and MET"
+  default_prompt: "Use $rdfanalyzer-cms to trace the configured CMS era, payloads, correction stack, and MET or cleaning behavior."

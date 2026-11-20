@@ -45,6 +45,7 @@ from output_schema import (
     PROVENANCE_REQUIRED_KEYS,
     SCHEMA_REGISTRY,
     SKIM_SCHEMA_VERSION,
+    SYSTEMATIC_COLUMN_INVENTORY_VERSION,
     ArtifactResolutionStatus,
     CachedArtifact,
     CutflowSchema,
@@ -60,6 +61,9 @@ from output_schema import (
     ProvenanceRecord,
     SchemaVersionError,
     SkimSchema,
+    RegionDefinition,
+    SystematicColumnEntry,
+    SystematicColumnInventory,
     check_cache_validity,
     merge_manifests,
     read_cache_sidecar,
@@ -87,6 +91,7 @@ class TestConstants:
             "intermediate_artifact",
             "region_definition",
             "nuisance_group_definition",
+            "systematic_column_inventory",
             "output_manifest",
         }
         assert set(SCHEMA_REGISTRY.keys()) == expected
@@ -99,6 +104,7 @@ class TestConstants:
         assert SCHEMA_REGISTRY["law_artifact"] == LAW_ARTIFACT_SCHEMA_VERSION
         assert SCHEMA_REGISTRY["intermediate_artifact"] == INTERMEDIATE_ARTIFACT_SCHEMA_VERSION
         assert SCHEMA_REGISTRY["nuisance_group_definition"] == NUISANCE_GROUP_DEFINITION_VERSION
+        assert SCHEMA_REGISTRY["systematic_column_inventory"] == SYSTEMATIC_COLUMN_INVENTORY_VERSION
         assert SCHEMA_REGISTRY["output_manifest"] == OUTPUT_MANIFEST_VERSION
 
     def test_provenance_required_keys_non_empty(self):
@@ -642,6 +648,7 @@ class TestOutputManifestSerialization:
             ),
             metadata=MetadataSchema(output_file="meta.root"),
             cutflow=CutflowSchema(output_file="meta.root", counter_keys=["s.total"]),
+            task_config_hash="sha256:abc",
             law_artifacts=[
                 LawArtifactSchema(
                     artifact_type="prepare_sample",
@@ -666,6 +673,7 @@ class TestOutputManifestSerialization:
         assert m2.cutflow.counter_keys == ["s.total"]
         assert len(m2.law_artifacts) == 1
         assert m2.law_artifacts[0].artifact_type == "prepare_sample"
+        assert m2.task_config_hash == "sha256:abc"
 
     def test_from_dict_none_schemas(self):
         d = {
@@ -1542,6 +1550,97 @@ class TestMergeManifests:
         assert result.metadata is not None
         assert result.cutflow is not None
 
+    def test_merge_preserves_and_round_trips_analysis_metadata(self, tmp_path):
+        region = RegionDefinition(name="signal", filter_column="is_signal")
+        nuisance = NuisanceGroupDefinition(
+            name="jes", systematics=["JES"], processes=["signal"],
+            regions=["signal"], output_usage=["datacard"],
+        )
+        provenance = lambda entry: DatasetManifestProvenance(
+            manifest_path="datasets.yaml", manifest_hash="abc123",
+            query_params={"year": 2022}, resolved_entry_names=[entry],
+        )
+        m1 = OutputManifest(
+            histograms=HistogramSchema(output_file="a.root"),
+            regions=[region], nuisance_groups=[nuisance],
+            dataset_manifest_provenance=provenance("sample_a"),
+            column_inventory=SystematicColumnInventory(entries=[
+                SystematicColumnEntry(
+                    family="jes", base_name="JES", up_column="weight_JESUp",
+                    producer="WeightManager", nominal_column="weight_nominal",
+                )
+            ]),
+            coverage_report={"pass": 2, "fail": 0, "warn": 1},
+        )
+        m2 = OutputManifest(
+            histograms=HistogramSchema(output_file="b.root"),
+            regions=[RegionDefinition.from_dict(region.to_dict())],
+            nuisance_groups=[NuisanceGroupDefinition.from_dict(nuisance.to_dict())],
+            dataset_manifest_provenance=provenance("sample_b"),
+            column_inventory=SystematicColumnInventory(entries=[
+                SystematicColumnEntry(
+                    family="jes", base_name="JES", down_column="weight_JESDown",
+                    producer="WeightManager", nominal_column="weight_nominal",
+                )
+            ]),
+            coverage_report={"pass": 3, "fail": 1, "warn": 0},
+        )
+
+        merged = merge_manifests([m1, m2])
+        output = tmp_path / "merged_manifest.yaml"
+        merged.save_yaml(str(output))
+        loaded = OutputManifest.load_yaml(str(output))
+
+        assert [item.name for item in loaded.regions] == ["signal"]
+        assert [item.name for item in loaded.nuisance_groups] == ["jes"]
+        assert loaded.dataset_manifest_provenance.resolved_entry_names == [
+            "sample_a", "sample_b"
+        ]
+        assert loaded.column_inventory.entries[0].up_column == "weight_JESUp"
+        assert loaded.column_inventory.entries[0].down_column == "weight_JESDown"
+        assert loaded.coverage_report == {"pass": 5, "fail": 1, "warn": 1}
+
+    def test_merge_rejects_incompatible_analysis_metadata(self):
+        m1 = OutputManifest(
+            skim=SkimSchema(output_file="a.root"),
+            regions=[RegionDefinition(name="signal")],
+        )
+        m2 = OutputManifest(
+            skim=SkimSchema(output_file="b.root"),
+            regions=[RegionDefinition(name="control")],
+        )
+        with pytest.raises(MergeInputValidationError, match="Inconsistent regions"):
+            merge_manifests([m1, m2])
+
+    def test_merge_rejects_different_dataset_manifest_sources(self):
+        m1 = OutputManifest(
+            skim=SkimSchema(output_file="a.root"),
+            dataset_manifest_provenance=DatasetManifestProvenance(
+                manifest_path="a.yaml", manifest_hash="a",
+            ),
+        )
+        m2 = OutputManifest(
+            skim=SkimSchema(output_file="b.root"),
+            dataset_manifest_provenance=DatasetManifestProvenance(
+                manifest_path="b.yaml", manifest_hash="b",
+            ),
+        )
+        with pytest.raises(MergeInputValidationError, match="source identity differs"):
+            merge_manifests([m1, m2])
+
+    def test_unknown_column_inventory_version_is_rejected(self):
+        manifest = OutputManifest(
+            skim=SkimSchema(output_file="out.root"),
+            column_inventory=SystematicColumnInventory(
+                schema_version=SYSTEMATIC_COLUMN_INVENTORY_VERSION + 1,
+                entries=[],
+            ),
+        )
+        assert any("column_inventory" in error and "version mismatch" in error
+                   for error in manifest.validate())
+        with pytest.raises(SchemaVersionError, match="column_inventory"):
+            OutputManifest.check_version_compatibility(manifest)
+
     def test_merge_copies_schema_from_first_input(self):
         m1 = OutputManifest(
             skim=SkimSchema(output_file="first.root", tree_name="MyTree", branches=["pt"])
@@ -2229,6 +2328,17 @@ class TestOutputManifestProvenanceDataset:
         )
         p = m.provenance()
         assert p.dataset_manifest_hash == "ds_hash_abc"
+
+    def test_task_config_hash_round_trip_and_cache_comparison(self):
+        provenance = ProvenanceRecord(
+            framework_hash="fw", task_config_hash="task-a"
+        )
+        round_trip = ProvenanceRecord.from_dict(provenance.to_dict())
+        assert round_trip.task_config_hash == "task-a"
+        assert provenance.matches(ProvenanceRecord(task_config_hash="task-a"))
+        assert not provenance.matches(ProvenanceRecord(task_config_hash="task-b"))
+        # Old sidecars have no task hash and cannot establish cache identity.
+        assert not provenance.matches(ProvenanceRecord())
 
     def test_provenance_dataset_manifest_hash_none_when_no_dmp(self):
         m = OutputManifest(skim=SkimSchema(output_file="s.root"), framework_hash="fw1")

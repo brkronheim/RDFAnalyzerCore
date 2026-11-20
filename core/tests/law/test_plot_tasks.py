@@ -26,6 +26,17 @@ _SKIP_MSG = "law and luigi packages not available"
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
 class TestPlotTasks(unittest.TestCase):
+    def test_chunked_branches_keep_requests_in_one_session(self):
+        configs = [{"outputFile": f"plot{i}.svg"} for i in range(5)]
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "plots.json")
+            with open(path, "w") as stream:
+                json.dump(configs, stream)
+            task = plot_tasks.MakePlots(meta_file="meta.root", plot_config=path, branch=0, plots_per_branch=2)
+            self.assertEqual(task.create_branch_map(), {0: configs[:2], 1: configs[2:4], 2: configs[4:]})
+            self.assertEqual([target.path for target in task.output()],
+                             [cfg["outputFile"] for cfg in configs[:2]])
+
     def test_build_plot_request_converts_process_config(self):
         class FakePlotProcessConfig:
             pass

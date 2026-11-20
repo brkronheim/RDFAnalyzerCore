@@ -96,3 +96,12 @@ TEST(ConfigurationManagerConsistency, YamlAndTextProduceSameResults) {
   EXPECT_EQ(yamlConfig.get("threads"), textConfig.get("threads"));
   EXPECT_EQ(yamlConfig.get("globs"), textConfig.get("globs"));
 }
+
+TEST(ConfigurationManagerYamlConversion, ScalarsSequencesAndMappingsAreFlattened) {
+  ChangeToTestSourceDir();
+  ConfigurationManager config("cfg/yaml_conversion.yaml");
+  EXPECT_EQ(config.get("scalar"), "quoted scalar");
+  EXPECT_EQ(config.get("enabled"), "true");
+  EXPECT_EQ(config.get("labels"), "[alpha, beta]");
+  EXPECT_EQ(config.get("mapping"), "{mode: fast, flags: [x, y]}");
+}

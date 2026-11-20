@@ -7,7 +7,7 @@
 include(ExternalProject)
 
 # Users can override the git tags/branches if desired.
-set(COMBINE_GIT_TAG "v10.5.1" CACHE STRING "Git tag or branch to checkout for Combine")
+set(COMBINE_GIT_TAG "v11.1.0" CACHE STRING "Git tag or branch to checkout for Combine")
 set(COMBINEHARV_GIT_TAG "v3.0.0" CACHE STRING "Git tag or branch to checkout for CombineHarvester")
 
 # Validate options
@@ -74,7 +74,7 @@ endif()
 
 set(_gsl_linker_flags "")
 if(_gsl_lib_dir)
-    set(_gsl_linker_flags "-L${_gsl_lib_dir} -Wl,-rpath,${_gsl_lib_dir}")
+    set(_gsl_linker_flags "-L${_gsl_lib_dir} -Wl,-rpath,${_gsl_lib_dir} -Wl,-rpath-link,${_gsl_lib_dir}")
     message(STATUS "Passing GSL library directory to Combine ExternalProject: ${_gsl_lib_dir}")
 endif()
 
@@ -85,17 +85,28 @@ set(_common_args
     -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     -DEigen3_DIR=${Eigen3_DIR}
+    -DROOT_DIR=${ROOT_DIR}
     -DBUILD_TESTS=OFF
     -DBUILD_TESTING=OFF
-    -DCMAKE_EXE_LINKER_FLAGS="${_gsl_linker_flags}"
-    -DCMAKE_SHARED_LINKER_FLAGS="${_gsl_linker_flags}"
+    "-DCMAKE_EXE_LINKER_FLAGS=${_gsl_linker_flags}"
+    "-DCMAKE_SHARED_LINKER_FLAGS=${_gsl_linker_flags}"
 )
+if(NOT TARGET VDT::VDT)
+    # ROOT 6.42 can link Vdt privately. Combine still finds and links it directly.
+    list(APPEND _common_args "-DCMAKE_MODULE_PATH=${CMAKE_CURRENT_LIST_DIR}/CombineDependencies")
+endif()
 
 ExternalProject_Add(CombineTool
     GIT_REPOSITORY https://github.com/cms-analysis/HiggsAnalysis-CombinedLimit.git
     GIT_TAG ${COMBINE_GIT_TAG}
     PREFIX "${_combine_prefix}"
     CMAKE_ARGS ${_common_args}
+    PATCH_COMMAND ${CMAKE_COMMAND}
+        -DCOMBINE_SOURCE_DIR=<SOURCE_DIR>
+        -P ${CMAKE_SOURCE_DIR}/cmake/PatchCombinePyROOT.cmake
+        COMMAND ${CMAKE_COMMAND}
+        -DCOMBINE_SOURCE_DIR=<SOURCE_DIR>
+        -P ${CMAKE_SOURCE_DIR}/cmake/PatchCombineRobustHesse.cmake
     UPDATE_COMMAND ""
     TEST_COMMAND ""
 )

@@ -180,8 +180,9 @@ def xrdfs_list_files(
                     next_queue.extend(subdirs)
         queue = next_queue
 
+    # The second slash makes the exported path absolute for XRootD servers.
     return [
-        f"{server.rstrip('/')}/{p.lstrip('/')}"
+        f"{server.rstrip('/')}//{p.lstrip('/')}"
         for p in sorted(all_files)
     ]
 

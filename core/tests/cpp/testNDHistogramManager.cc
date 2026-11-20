@@ -9,6 +9,9 @@
 #include <TH2D.h>
 #include <TH3D.h>
 #include <gtest/gtest.h>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -208,6 +211,92 @@ TEST_F(NDHistogramManagerTest, SaveHistsBasic) {
   std::vector<std::vector<std::string>> allRegionNames = {{"region1", "region2"}};
   EXPECT_NO_THROW(histogramManager->saveHists(fullHistList, allRegionNames));
   EXPECT_TRUE(true);
+}
+
+TEST_F(NDHistogramManagerTest, RejectsInterruptedOutputBeforeRunningGraph) {
+  const auto prefix = std::filesystem::temp_directory_path() /
+      ("rdf-incomplete-output-" + std::to_string(getpid()));
+  const auto source = prefix.string() + "-source.root";
+  const auto damaged = prefix.string() + "-damaged.root";
+  {
+    // Keep the header above ROOT's initial 300-byte probe, reproducing the
+    // non-zombie/no-free-segments case rather than a rejected short file.
+    const std::string title(128, 'x');
+    TFile unfinished(source.c_str(), "RECREATE", title.c_str());
+    unfinished.Flush();
+    // Copy the on-disk state before Close writes the free-segment table.
+    std::filesystem::copy_file(source, damaged,
+                              std::filesystem::copy_options::overwrite_existing);
+  }
+  configManager->set("metaFile", damaged);
+  const auto readBytes = [](const std::string &path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input),
+                       std::istreambuf_iterator<char>());
+  };
+  const auto originalBytes = readBytes(damaged);
+  int processed = 0;
+  dataManager->Define("x", [&processed]() { ++processed; return 1.f; }, {}, *systematicManager);
+  dataManager->Define("w", []() { return 1.f; }, {}, *systematicManager);
+  std::vector<histInfo> infos = {histInfo("x", "x", "x", "w", 10, 0, 10)};
+  std::vector<selectionInfo> selections;
+  std::vector<std::vector<std::string>> regions = {{"interrupted"}};
+  histogramManager->bookND(infos, selections, "", regions);
+  try {
+    histogramManager->saveHists();
+    FAIL() << "Expected an actionable error for incomplete output";
+  } catch (const std::runtime_error &error) {
+    EXPECT_NE(std::string(error.what()).find("no free-segment table"), std::string::npos);
+    EXPECT_NE(std::string(error.what()).find(damaged), std::string::npos);
+  }
+  EXPECT_EQ(processed, 0);
+  EXPECT_EQ(readBytes(damaged), originalBytes);
+  std::filesystem::remove(source);
+  std::filesystem::remove(damaged);
+}
+
+TEST_F(NDHistogramManagerTest, SavesEmptyFineHistogramsAndCancelledBinErrors) {
+  dataManager->Define("pt", []() { return 250.0f; }, {}, *systematicManager);
+  dataManager->Define("weight", []() { return 1.0f; }, {}, *systematicManager);
+  std::vector<histInfo> infos = {
+      histInfo("LHE_Vpt", "pt", "pt", "weight", 200, 0, 2000),
+      histInfo("LHE_Vpt_fine", "pt", "pt", "weight", 130, -5, 60),
+      histInfo("LHE_Vpt_fine_stitched", "pt", "pt", "weight", 130, -5, 60)};
+  std::vector<selectionInfo> selections;
+  std::vector<std::vector<std::string>> regions = {{"fine_regression"}};
+  histogramManager->bookND(infos, selections, "", regions);
+
+  // The high-pT event is outside the fine range. Also model a bin whose
+  // signed weights cancel; serialization must retain its variance.
+  auto &histos = histogramManager->GetHistos();
+  histos[2]->Reset();
+  const Double_t coordinates[] = {0.5, 0.5, 0.5, 0.5, 10.25};
+  const auto bin = histos[2]->GetBin(coordinates, true);
+  histos[2]->SetBinContent(bin, 0.0);
+  histos[2]->SetBinError2(bin, 2.0);
+  histogramManager->saveHists();
+
+  const auto path = metaSink->resolveOutputFile(*configManager, OutputChannel::Meta);
+  TFile output(path.c_str(), "READ");
+  for (const auto &info : infos) {
+    // The manager persists packed histograms. Legacy TH1 extraction is an
+    // explicit downstream step, so inspect a projection of the saved object.
+    auto *packed = output.Get<THnSparseF>(("nd_histograms_v1/" + info.name() + "_").c_str());
+    ASSERT_NE(packed, nullptr) << info.name();
+    std::unique_ptr<TH1D> hist(packed->Projection(4));
+    ASSERT_NE(hist, nullptr);
+    EXPECT_EQ(hist->GetNbinsX(), info.bins());
+    EXPECT_DOUBLE_EQ(hist->GetXaxis()->GetXmin(), info.lowerBound());
+    EXPECT_DOUBLE_EQ(hist->GetXaxis()->GetXmax(), info.upperBound());
+    if (info.name() == "LHE_Vpt") {
+      EXPECT_DOUBLE_EQ(hist->Integral(), 1.0);
+    } else {
+      EXPECT_DOUBLE_EQ(hist->Integral(), 0.0);
+      EXPECT_NEAR(hist->GetBinError(hist->FindBin(10.25)),
+                  info.name() == "LHE_Vpt_fine_stitched" ? std::sqrt(2.0) : 0.0,
+                  1e-6);
+    }
+  }
 }
 
 TEST_F(NDHistogramManagerTest, SaveHistsWithEmptyHistList) {
@@ -449,4 +538,825 @@ TEST_F(NDHistogramManagerTest, ExecuteAndFinalizeAreNoOps) {
 
 TEST_F(NDHistogramManagerTest, GetDependenciesReturnsEmpty) {
   EXPECT_TRUE(histogramManager->getDependencies().empty());
+}
+
+TEST(HistogramStorage, DenseAndForcedSparseRetainCancellationVarianceAcrossSlots) {
+  for (const bool sparse : {false, true}) {
+    histFillInfo info;
+    info.name = "cancelled";
+    info.nSlots = 2;
+    info.nbins = {1, 1, 1, 1, 2};
+    info.xmin = {0, 0, 0, 0, 0};
+    info.xmax = {1, 1, 1, 1, 2};
+    info.forceSparse = sparse;
+    THnMulti action(info);
+    action.Exec(0, {.5f}, {2.f}, {.5f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+    action.Exec(1, {.5f}, {-2.f}, {.5f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+    action.Exec(1, {1.5f}, {3.f}, {.5f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+    action.Finalize();
+    const auto result = action.GetResultPtr();
+    const Double_t cancelled[] = {.5, .5, .5, .5, .5};
+    const auto bin = result->GetBin(cancelled, false);
+    ASSERT_GE(bin, 0);
+    EXPECT_DOUBLE_EQ(result->GetBinContent(bin), 0);
+    EXPECT_NEAR(result->GetBinError2(bin), 8, 1e-10);
+    const Double_t populated[] = {.5, .5, .5, .5, 1.5};
+    EXPECT_DOUBLE_EQ(result->GetBinContent(result->GetBin(populated, false)), 3);
+  }
+}
+
+template <class Action>
+void checkStorageFlowsAndCancellation(bool sparse, bool floatContents = false,
+                                     const std::string &backend = "map") {
+  histFillInfo info;
+  info.name = "storage_contract";
+  info.nSlots = 2;
+  info.nbins = {2, 1, 1, 2, 3};
+  info.xmin = {-.5, -.5, -.5, 0, 0};
+  info.xmax = {1.5, .5, .5, 2, 3};
+  info.denseMemoryLimitBytes = sparse ? 0 : kDenseMemoryThresholdBytes;
+  info.boostFloatContents = floatContents;
+  info.boostSparseBackend = backend;
+  Action action(info);
+  // Interior cancellation retains variance; flows in both observable and
+  // category axes must survive every storage/backend and the slot merge.
+  action.Exec(0, {.5f}, {2.f}, {0.f}, {true}, {0.f}, {0.f}, {0.f}, {1});
+  action.Exec(1, {.5f}, {-2.f}, {0.f}, {true}, {0.f}, {0.f}, {0.f}, {1});
+  action.Exec(0, {-1.f}, {3.f}, {0.f}, {true}, {0.f}, {0.f}, {0.f}, {1});
+  action.Exec(1, {3.f}, {-4.f}, {0.f}, {true}, {0.f}, {0.f}, {0.f}, {1});
+  action.Exec(1, {1.f}, {5.f}, {0.f}, {true}, {0.f}, {0.f}, {2.f}, {1});
+  action.Exec(0, {2.f}, {9.f}, {0.f}, {false}, {0.f}, {0.f}, {0.f}, {1});
+  action.Finalize();
+  const auto result = action.GetResultPtr();
+  const std::array<std::array<int, 5>, 4> coordinates{{
+      {{1, 1, 1, 1, 1}}, {{1, 1, 1, 1, 0}},
+      {{1, 1, 1, 1, 4}}, {{3, 1, 1, 1, 2}}}};
+  const double contents[] = {0, 3, -4, 5};
+  const double variances[] = {8, 9, 16, 25};
+  ASSERT_EQ(result->GetNbins(), 4);
+  for (std::size_t i = 0; i < coordinates.size(); ++i) {
+    const auto bin = result->GetBin(coordinates[i].data(), false);
+    ASSERT_GE(bin, 0);
+    EXPECT_DOUBLE_EQ(result->GetBinContent(bin), contents[i]);
+    EXPECT_DOUBLE_EQ(result->GetBinError2(bin), variances[i]);
+  }
+}
+
+TEST(HistogramStorage, RootDenseAndSparsePreserveFlowsAndSelection) {
+  checkStorageFlowsAndCancellation<THnMulti>(false);
+  checkStorageFlowsAndCancellation<THnMulti>(true);
+}
+
+TEST(HistogramStorage, BoostDenseAndSparsePreserveFlowsAndSelection) {
+  checkStorageFlowsAndCancellation<BHnMulti>(false);
+  checkStorageFlowsAndCancellation<BHnMulti>(true);
+}
+
+TEST(HistogramStorage, BoostFloatDenseAndSparsePreserveFlowsAndSelection) {
+  checkStorageFlowsAndCancellation<BHnMulti>(false, true);
+  checkStorageFlowsAndCancellation<BHnMulti>(true, true);
+#ifdef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+  checkStorageFlowsAndCancellation<BHnMulti>(true, true, "flat");
+  checkStorageFlowsAndCancellation<BHnMulti>(true, false, "flat");
+#endif
+}
+
+TEST(HistogramStorage, BoostFloatMatchesRootForRepresentativeObservableEdges) {
+  for (const auto &range : std::vector<std::array<double, 3>>{
+      {40, 0, 400}, {60, -3, 3}, {40, -3.2, 3.2}, {35, 0, 700}, {69, 0, 69}}) {
+    histFillInfo info;
+    info.name = "float_edges"; info.nSlots = 1;
+    info.nbins = {1, 1, 1, 1, static_cast<int>(range[0])};
+    info.xmin = {0, 0, 0, 0, range[1]};
+    info.xmax = {1, 1, 1, 1, range[2]};
+    info.boostFloatContents = true;
+    THnMulti root(info);
+    BHnMulti boost(info);
+    for (int bin = 0; bin <= info.nbins[4]; ++bin) {
+      const float boundary = range[1] + (range[2]-range[1])*bin/info.nbins[4];
+      for (const float value : {std::nextafter(boundary, -INFINITY), boundary,
+                                std::nextafter(boundary, INFINITY)}) {
+        root.Exec(0, {value}, {1.f}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+        boost.Exec(0, {value}, {1.f}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+      }
+    }
+    root.Finalize(); boost.Finalize();
+    auto first = root.GetResultPtr(), second = boost.GetResultPtr();
+    for (int bin = 0; bin <= info.nbins[4]+1; ++bin) {
+      const int coord[] = {1, 1, 1, 1, bin};
+      const auto a = first->GetBin(coord, false), b = second->GetBin(coord, false);
+      ASSERT_EQ(a < 0, b < 0) << bin;
+      if (a >= 0) {
+        EXPECT_EQ(first->GetBinContent(a), second->GetBinContent(b)) << bin;
+        EXPECT_EQ(first->GetBinError2(a), second->GetBinError2(b)) << bin;
+      }
+    }
+  }
+}
+
+TEST(HistogramStorage, SparseAllocationCountersAreSlotLocalAndSurviveFinalization) {
+  for (const auto *storage : {"map", "flat"}) {
+#ifndef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+    if (std::string(storage) == "flat") continue;
+#endif
+    histFillInfo info;
+    info.name = "memory_slots";
+    info.nSlots = 2;
+    info.nbins = {8, 8, 8, 8, 8};
+    info.xmin = {0, 0, 0, 0, 0};
+    info.xmax = {8, 8, 8, 8, 8};
+    info.boostFloatContents = true;
+    info.boostSparseBackend = storage;
+    info.denseMemoryLimitBytes = 0;
+    BHnMulti action(info);
+    auto memory = action.GetStorageMemoryUsage();
+    EXPECT_EQ(memory->sparseBytes, 0u);
+    for (int cell = 0; cell < 32768; ++cell) {
+      auto linear = cell;
+      float coordinate[5];
+      for (auto &value : coordinate) { value = (linear % 8) + .5f; linear /= 8; }
+      for (unsigned slot = 0; slot < 2; ++slot)
+        action.Exec(slot, {coordinate[4]}, {1.f}, {coordinate[3]}, {true},
+                    {coordinate[2]}, {coordinate[1]}, {coordinate[0]}, {1});
+    }
+    action.Finalize();
+    EXPECT_EQ(memory->slots, 2u);
+    EXPECT_EQ(memory->denseBytes, estimateDenseMemoryBytes(info.nbins, 2, 12));
+    EXPECT_TRUE(memory->sparse);
+    EXPECT_GT(memory->sparseBytes, memory->denseBytes);
+    EXPECT_EQ(action.GetResultPtr()->GetNbins(), 32768);
+    EXPECT_EQ(action.GetResultPtr()->GetBinContent(Long64_t{0}), 2);
+    EXPECT_EQ(action.GetResultPtr()->GetBinError2(0), 2);
+  }
+  BHnMulti::FloatSparseMap first, second;
+  first[0] += boost::histogram::weight(1.);
+  EXPECT_GT(first.get_allocator().bytes->current, 0u);
+  EXPECT_EQ(second.get_allocator().bytes->current, 0u);
+  auto counter = first.get_allocator().bytes;
+  { auto moved = std::move(first); EXPECT_GT(counter->current, 0u); }
+  EXPECT_EQ(counter->current, 0u);
+}
+
+TEST(HistogramStorage, BoostHugeLogicalGridUsesOnlyAllocatedCells) {
+  histFillInfo info;
+  info.name = "huge_sparse";
+  info.nSlots = 2;
+  info.nbins = {1000, 1000, 1000, 10, 1000};
+  info.xmin = {0, 0, 0, 0, 0};
+  info.xmax = {1000, 1000, 1000, 10, 1000};
+  BHnMulti action(info);
+  action.Exec(0, {.5f}, {2.f}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+  action.Exec(1, {.5f}, {-2.f}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+  action.Finalize();
+  ASSERT_EQ(action.GetResultPtr()->GetNbins(), 1);
+  EXPECT_DOUBLE_EQ(action.GetResultPtr()->GetBinContent(Long64_t{0}), 0);
+  EXPECT_DOUBLE_EQ(action.GetResultPtr()->GetBinError2(0), 8);
+}
+
+TEST(HistogramStorage, RootFloatAndBoostDoubleHaveDifferentCancellationPrecision) {
+  histFillInfo info;
+  info.name = "precision";
+  info.nSlots = 1;
+  info.nbins = {1, 1, 1, 1, 1};
+  info.xmin = {0, 0, 0, 0, 0};
+  info.xmax = {1, 1, 1, 1, 1};
+  THnMulti root(info);
+  BHnMulti boost(info);
+  for (float weight : {16777216.f, 1.f, -16777216.f}) {
+    root.Exec(0, {.5f}, {weight}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+    boost.Exec(0, {.5f}, {weight}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+  }
+  root.Finalize();
+  boost.Finalize();
+  EXPECT_EQ(root.GetResultPtr()->GetBinContent(Long64_t{0}), 0);
+  EXPECT_EQ(boost.GetResultPtr()->GetBinContent(Long64_t{0}), 1);
+  EXPECT_EQ(root.GetResultPtr()->GetBinError2(0), boost.GetResultPtr()->GetBinError2(0));
+  for (const auto *storage : {"map", "flat"}) {
+#ifndef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+    if (std::string(storage) == "flat") continue;
+#endif
+    for (const auto limit : {std::size_t{0}, kDenseMemoryThresholdBytes}) {
+      info.boostFloatContents = true;
+      info.boostSparseBackend = storage;
+      info.denseMemoryLimitBytes = limit;
+      BHnMulti compatible(info);
+      for (float weight : {16777216.f, 1.f, -16777216.f})
+        compatible.Exec(0, {.5f}, {weight}, {0.f}, {true}, {.5f}, {.5f}, {.5f}, {1});
+      compatible.Finalize();
+      EXPECT_EQ(compatible.GetResultPtr()->GetBinContent(Long64_t{0}), 0);
+      EXPECT_EQ(compatible.GetResultPtr()->GetBinError2(0), root.GetResultPtr()->GetBinError2(0));
+    }
+  }
+}
+
+TEST_F(NDHistogramManagerTest, SharedAxisPacksDoNotCrossRedefineBetweenBookingCalls) {
+  dataManager->DefineNominal("obs", []() { return 1.5f; });
+  dataManager->DefineNominal("weight", []() { return 2.f; });
+  dataManager->DefineNominal("weight_shiftUp", []() { return 3.f; });
+  dataManager->DefineNominal("weight_shiftDown", []() { return 1.f; });
+  systematicManager->registerVariationColumns("weight", "shift", "weight_shiftUp", "weight_shiftDown");
+  histogramManager->setupFromConfigFile();
+  std::vector<histInfo> first{
+      histInfo("first", "obs", "", "weight", 2, 0, 2),
+      histInfo("second", "obs", "", "weight", 2, 0, 2)};
+  std::vector<selectionInfo> selections;
+  std::vector<std::vector<std::string>> regions{{"ch"}, {"cr"}, {"sample"}};
+  histogramManager->bookND(first, selections, "", regions);
+  auto df = dataManager->getDataFrame();
+  std::size_t weightPacks = 0;
+  for (const auto &column : df.GetColumnNames())
+    if (column.find("weight_systVector_") == 0) ++weightPacks;
+  EXPECT_EQ(weightPacks, 1u);
+  dataManager->Redefine("weight", []() { return 4.f; });
+  histInfo third("third", "obs", "", "weight", 2, 0, 2);
+  histogramManager->BookSingleHistogram(third);
+  Double_t point[] = {.5, .5, .5, .5, 1.5};
+  auto &histograms = histogramManager->GetHistos();
+  ASSERT_EQ(histograms.size(), 3u);
+  EXPECT_FLOAT_EQ(histograms[0]->GetBinContent(histograms[0]->GetBin(point, false)), 2.f);
+  EXPECT_FLOAT_EQ(histograms[1]->GetBinContent(histograms[1]->GetBin(point, false)), 2.f);
+  EXPECT_FLOAT_EQ(histograms[2]->GetBinContent(histograms[2]->GetBin(point, false)), 4.f);
+}
+
+TEST_F(NDHistogramManagerTest, CollectionTransportReusePreservesIndependentRootOracle) {
+  for (const auto &backend : {"root", "boost"}) {
+    for (const bool shapes : {false, true}) {
+      for (const bool share : {false, true}) {
+      SCOPED_TRACE(std::string(backend) + (shapes ? " shapes" : " nominal") + (share ? " reuse" : " ordinary"));
+      auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+      cfg->set("histogramBackend", backend);
+      cfg->set("histogramSystematics", shapes ? "true" : "false");
+      cfg->set("histogramShareCollectionTransport", share ? "true" : "false");
+      DataManager data(5);
+      SystematicManager sys;
+      NDHistogramManager manager(*cfg);
+      ManagerContext context{*cfg, data, sys, *logger, *skimSink, *metaSink};
+      manager.setContext(context);
+      const std::vector<ROOT::VecOps::RVec<float>> values{
+          {.25f, 1.25f}, {}, {-.25f, 2.5f}, {1.25f}, {.25f}};
+      const std::vector<float> weights{2.f, 3.f, -2.f, -4.f, 2.f};
+      data.DefineNominal("objects", [values](ULong64_t i) { return values.at(i); }, {"rdfentry_"});
+      data.DefineNominal("weight", [weights](ULong64_t i) { return weights.at(i); }, {"rdfentry_"});
+      data.DefineNominal("category", [] { return .5f; });
+      data.DefineNominal("nominal_pass", [](ULong64_t i) { return i != 4; }, {"rdfentry_"});
+      if (shapes) {
+        sys.registerSelectionMaskColumn("Nominal", "nominal_pass");
+        data.DefineNominal("objects_moveUp", [](const ROOT::VecOps::RVec<float>& x) { return x + .5f; }, {"objects"});
+        data.DefineNominal("objects_moveDown", [](const ROOT::VecOps::RVec<float>& x) { return x - .5f; }, {"objects"});
+        sys.registerVariationColumns("objects", "move", "objects_moveUp", "objects_moveDown");
+        data.DefineNominal("up_pass", [](ULong64_t i) { return i != 0; }, {"rdfentry_"});
+        data.DefineNominal("down_pass", [](ULong64_t i) { return i != 3; }, {"rdfentry_"});
+        sys.registerSelectionMaskColumn("moveUp", "up_pass");
+        sys.registerSelectionMaskColumn("moveDown", "down_pass");
+      }
+      manager.setupFromConfigFile();
+      std::vector<histInfo> infos{
+          histInfo("objects_coarse", "objects", "", "weight", 2, 0, 2),
+          histInfo("objects_fine", "objects", "", "weight", 4, 0, 2),
+          histInfo("objects_edges", "objects", "", "weight", 3, 0, 2, {0., .5, 1.5, 2.})};
+      std::vector<selectionInfo> selections(3, selectionInfo("category", 1, 0, 1));
+      std::vector<std::vector<std::string>> regions{{"ch"}, {"cr"}, {"sample"}};
+      manager.bookND(infos, selections, "", regions);
+      auto node = data.getDataFrame();
+      EXPECT_EQ(node.GetNRuns(), 0u);
+      std::size_t broadcasts = 0, counts = 0;
+      for (const auto &name : node.GetColumnNames()) {
+        if (name.find("_FillRVec") != std::string::npos) ++broadcasts;
+        if (name.find("SystematicCounter_nFills_") == 0) ++counts;
+      }
+      // Three different binnings share exactly the same transport layout.
+      // Systematic weights use one packed scalar per slot; nominal weights
+      // broadcast over the collection. All three category axes share a pack.
+      EXPECT_EQ(broadcasts, (shapes ? 1u : 2u) * (share ? 1u : 3u));
+      EXPECT_EQ(counts, share ? 1u : 3u);
+      const auto labels = shapes ? sys.makeSystList("SystematicCounter", data)
+                                 : std::vector<std::string>{"Nominal"};
+      auto &results = manager.GetHistos();
+      ASSERT_EQ(results.size(), infos.size());
+      for (std::size_t h = 0; h < infos.size(); ++h) {
+        const auto &info = infos[h];
+        const Int_t bins[] = {1, 1, 1, Int_t(labels.size()), info.bins()};
+        const Double_t lower[] = {0., 0., 0., 0., 0.};
+        const Double_t upper[] = {1., 1., 1., double(labels.size()), 2.};
+        THnSparseF reference("oracle", "", 5, bins, lower, upper);
+        reference.Sumw2();
+        if (!info.binEdges().empty()) reference.SetBinEdges(4, info.binEdges().data());
+        for (std::size_t e = 0; e < values.size(); ++e) {
+          for (std::size_t s = 0; s < labels.size(); ++s) {
+            const auto &label = labels[s];
+            const bool accepted = !shapes || (label == "moveUp" ? e != 0 : label == "moveDown" ? e != 3 : e != 4);
+            const float shift = label == "moveUp" ? .5f : label == "moveDown" ? -.5f : 0.f;
+            if (!accepted) continue;
+            for (const auto x : values[e]) {
+              Double_t point[] = {.5, .5, .5, double(s), double(x + shift)};
+              reference.Fill(point, weights[e]);
+            }
+          }
+        }
+        auto *actual = results[h].GetPtr();
+        ASSERT_EQ(actual->GetNbins(), reference.GetNbins());
+        // ROOT retains fill entries. Existing Boost export reconstructs bins
+        // with SetBinContent, so its GetEntries is not a fill-count oracle.
+        if (std::string(backend) == "root")
+          EXPECT_EQ(actual->GetEntries(), reference.GetEntries());
+        for (Long64_t b = 0; b < reference.GetNbins(); ++b) {
+          Int_t coordinates[5];
+          const auto expected = reference.GetBinContent(b, coordinates);
+          const auto found = actual->GetBin(coordinates, false);
+          ASSERT_GE(found, 0);
+          EXPECT_EQ(actual->GetBinContent(found), expected);
+          EXPECT_EQ(actual->GetBinError2(found), reference.GetBinError2(b));
+        }
+      }
+      EXPECT_EQ(node.GetNRuns(), 1u);
+      }
+    }
+  }
+}
+
+TEST_F(NDHistogramManagerTest, InvalidCollectionTransportPolicyRejectsBeforeBooking) {
+  configManager->set("histogramSystematics", "false");
+  configManager->set("histogramShareCollectionTransport", "yes");
+  histogramManager->setupFromConfigFile();
+  const auto before = dataManager->getDataFrame().GetColumnNames();
+  histInfo info("unused", "missing", "", "missing", 2, 0, 2);
+  EXPECT_THROW(histogramManager->BookSingleHistogram(info), std::invalid_argument);
+  EXPECT_EQ(dataManager->getDataFrame().GetColumnNames(), before);
+  EXPECT_TRUE(histogramManager->GetHistos().empty());
+  EXPECT_EQ(dataManager->getDataFrame().GetNRuns(), 0u);
+}
+
+TEST_F(NDHistogramManagerTest, CollectionReuseSeparatesReferencesAndBookingBoundaries) {
+  configManager->set("histogramShareCollectionTransport", "true");
+  dataManager->DefineNominal("short_objects", [] { return ROOT::VecOps::RVec<float>{.25f}; });
+  dataManager->DefineNominal("long_objects", [] { return ROOT::VecOps::RVec<float>{.25f, 1.25f, 2.25f}; });
+  dataManager->DefineNominal("weight", [] { return 2.f; });
+  dataManager->DefineNominal("category", [] { return .5f; });
+  configManager->set("histogramSystematics", "false");
+  histogramManager->setupFromConfigFile();
+  std::vector<histInfo> infos{
+      histInfo("short", "short_objects", "", "weight", 2, 0, 2),
+      histInfo("long", "long_objects", "", "weight", 2, 0, 2),
+      histInfo("long_again", "long_objects", "", "weight", 2, 0, 2)};
+  std::vector<selectionInfo> selections(3, selectionInfo("category", 2, 0, 2));
+  std::vector<std::vector<std::string>> regions{{"low", "high"}, {"low", "high"}, {"low", "high"}};
+  histogramManager->bookND(infos, selections, "", regions);
+  dataManager->Redefine("weight", [] { return -4.f; });
+  dataManager->Redefine("category", [] { return 1.5f; });
+  histInfo after("after", "long_objects", "", "weight", 2, 0, 2);
+  histogramManager->BookSingleHistogram(after, selectionInfo("category", 2, 0, 2),
+      selectionInfo("category", 2, 0, 2), selectionInfo("category", 2, 0, 2));
+  auto node = dataManager->getDataFrame();
+  EXPECT_EQ(node.GetNRuns(), 0u);
+  auto &results = histogramManager->GetHistos();
+  ASSERT_EQ(results.size(), 4u);
+  for (std::size_t h = 0; h < results.size(); ++h) {
+    const float category = h == 3 ? 1.5f : .5f;
+    const float weight = h == 3 ? -4.f : 2.f;
+    auto *histogram = results[h].GetPtr();
+    const int size = h == 0 ? 1 : 3;
+    EXPECT_EQ(histogram->GetNbins(), size);
+    for (int i = 0; i < size; ++i) {
+      Double_t point[] = {category, category, category, .5, .25 + i};
+      const auto bin = histogram->GetBin(point, false);
+      ASSERT_GE(bin, 0);
+      EXPECT_EQ(histogram->GetBinContent(bin), weight);
+      EXPECT_EQ(histogram->GetBinError2(bin), weight * weight);
+    }
+  }
+  // The actions booked before and after Redefine still execute in one loop.
+  EXPECT_EQ(node.GetNRuns(), 1u);
+}
+
+TEST_F(NDHistogramManagerTest, ChangedSelectionMasksDoNotReuseEarlierHistogramMaskPack) {
+  dataManager->DefineNominal("obs", []() { return 1.5f; });
+  dataManager->DefineNominal("weight", []() { return 1.f; });
+  dataManager->DefineNominal("mask_first", []() { return true; });
+  dataManager->DefineNominal("mask_second", []() { return false; });
+  histogramManager->setupFromConfigFile();
+  systematicManager->registerSelectionMaskColumn("Nominal", "mask_first");
+  histInfo before("before_mask", "obs", "", "weight", 2, 0, 2);
+  histogramManager->BookSingleHistogram(before);
+  systematicManager->registerSelectionMaskColumn("Nominal", "mask_second");
+  histInfo after("after_mask", "obs", "", "weight", 2, 0, 2);
+  histogramManager->BookSingleHistogram(after);
+  Double_t point[] = {.5, .5, .5, .5, 1.5};
+  auto &histograms = histogramManager->GetHistos();
+  EXPECT_FLOAT_EQ(histograms[0]->GetBinContent(histograms[0]->GetBin(point, false)), 1.f);
+  EXPECT_EQ(histograms[1]->GetNbins(), 0);
+}
+
+TEST(HistogramStorage, IndexedCategoriesMatchRootForEdgesMasksAndVariableObservable) {
+  for (bool variableCategories : {false, true}) {
+    histFillInfo info;
+    info.name = "category_edges";
+    info.nSlots = 2;
+    info.nbins = {3, 3, 2, 2, 3};
+    info.xmin = {-.5, .5, 0., 0., 0.};
+    info.xmax = {2.5, 3.5, 2., 2., 5.};
+    info.binEdges.resize(5);
+    info.binEdges[4] = {0., .5, 2., 5.};
+    if (variableCategories) info.binEdges[0] = {-.5, .25, 1.5, 2.5};
+    THnMulti action(info);
+    THnF reference("category_reference", "", 5, info.nbins.data(),
+                   info.xmin.data(), info.xmax.data());
+    reference.Sumw2();
+    reference.SetBinEdges(4, info.binEdges[4].data());
+    if (variableCategories) reference.SetBinEdges(0, info.binEdges[0].data());
+    const ROOT::VecOps::RVec<Int_t> fills{1};
+    const std::vector<float> values{-1.f, -.5f, 0.f, .25f, .5f, 1.f, 1.5f,
+        2.f, 2.5f, 3.f, 3.5f, 5.f,
+        std::nextafter(2.f, 0.f), std::nextafter(2.f, 3.f),
+        std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::quiet_NaN()};
+    for (int variedAxis = 0; variedAxis < 5; ++variedAxis) {
+      for (std::size_t i = 0; i < values.size(); ++i) {
+        Double_t point[5] = {1., 2., 1., 0., 1.};
+        point[variedAxis] = values[i];
+        for (float weight : {1.5f, -1.5f, .25f}) {
+          const bool pass = i % 4 != 0;
+          action.Exec(i % 2, {float(point[4])}, {weight}, {float(point[3])},
+                      {pass}, {float(point[2])}, {float(point[1])},
+                      {float(point[0])}, fills);
+          if (pass) reference.Fill(point, weight);
+        }
+      }
+    }
+    action.Finalize();
+    const auto result = action.GetResultPtr();
+    Long64_t occupied = 0;
+    Int_t coordinates[5];
+    for (Long64_t i = 0; i < reference.GetNbins(); ++i) {
+      const auto content = reference.GetBinContent(i, coordinates);
+      const auto error2 = reference.GetBinError2(i);
+      if (content == 0 && error2 == 0) continue;
+      ++occupied;
+      const auto bin = result->GetBin(coordinates, false);
+      ASSERT_GE(bin, 0);
+      EXPECT_EQ(result->GetBinContent(bin), content);
+      EXPECT_EQ(result->GetBinError2(bin), error2);
+    }
+    EXPECT_EQ(result->GetNbins(), occupied);
+  }
+}
+
+TEST_F(NDHistogramManagerTest, ScalarBroadcastKeepsVariationOnlyAcceptance) {
+  configManager->set("histogramSystematics", "true");
+  dataManager->DefineNominal("obs", []() { return .5f; });
+  dataManager->DefineNominal("obs_shiftUp", []() { return 1.5f; });
+  dataManager->DefineNominal("obs_shiftDown", []() { return .25f; });
+  dataManager->DefineNominal("weight", []() { return 1.f; });
+  dataManager->DefineNominal("reject", []() { return false; });
+  dataManager->DefineNominal("accept", []() { return true; });
+  systematicManager->registerVariationColumns("obs", "shift", "obs_shiftUp", "obs_shiftDown");
+  systematicManager->registerSelectionMaskColumn("Nominal", "reject");
+  systematicManager->registerSelectionMaskColumn("shiftUp", "accept");
+  systematicManager->registerSelectionMaskColumn("shiftDown", "reject");
+  histogramManager->setupFromConfigFile();
+  std::vector<histInfo> histograms{histInfo("migration", "obs", "", "weight", 2, 0, 2)};
+  std::vector<selectionInfo> selections;
+  std::vector<std::vector<std::string>> regions{{"ch"}, {"cr"}, {"sample"}};
+  histogramManager->bookND(histograms, selections, "", regions);
+  const auto result = histogramManager->GetHistos().front().GetPtr();
+  EXPECT_EQ(result->GetAxis(3)->GetNbins(), 3);
+  ASSERT_EQ(result->GetNbins(), 1);
+  Int_t coordinates[5];
+  EXPECT_EQ(result->GetBinContent(0, coordinates), 1.f);
+  EXPECT_EQ(coordinates[4], 2);
+}
+
+TEST_F(NDHistogramManagerTest, PerSlotCollectionsPreserveIndependentRootOracle) {
+  // Different empty-slot positions, unrelated weight labels and a one-sided
+  // shape are intentional. The oracle uses original event/object loops only.
+  for (const auto& backend : {"root", "boost"}) {
+    std::vector<std::string> sparseBackends{"map"};
+#ifdef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+    if (std::string(backend) == "boost") sparseBackends.emplace_back("flat");
+#endif
+    for (const auto& sparse : sparseBackends) {
+    for (const bool dense : {false, true}) {
+      for (const bool objectWeights : {false, true}) {
+        SCOPED_TRACE(std::string(backend) + (dense ? " dense" : " sparse") +
+                     (objectWeights ? " object weights " : " scalar weights ") + sparse);
+        auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+        cfg->set("histogramBackend", backend);
+        cfg->set("histogramBoostPrecision", objectWeights ? "double" : "float");
+        cfg->set("histogramBoostSparseBackend", sparse);
+        cfg->set("histogramDenseLimitMiB", dense ? "64" : "0");
+        cfg->set("histogramCollectionLayout", "per-slot");
+        cfg->set("histogramSystematics", "true");
+        DataManager data(20);
+        SystematicManager sys;
+        NDHistogramManager manager(*cfg);
+        ManagerContext context{*cfg, data, sys, *logger, *skimSink, *metaSink};
+        manager.setContext(context);
+        auto count = [](ULong64_t e, bool shifted) -> std::size_t {
+          return e == 6 ? 0 : (e + (shifted ? 1 : 0)) % 4;
+        };
+        for (bool shifted : {false, true}) {
+          const std::string suffix = shifted ? "_shift" : "";
+          data.DefineNominal("objects" + suffix, [count, shifted](ULong64_t e) {
+            ROOT::VecOps::RVec<double> out(count(e, shifted));
+            for (std::size_t j = 0; j < out.size(); ++j) out[j] = -1. + 1.5 * j + (shifted ? .5 : 0.);
+            return out;
+          }, {"rdfentry_"});
+          data.DefineNominal("control" + suffix, [count, shifted](ULong64_t e) {
+            ROOT::VecOps::RVec<Int_t> out(count(e, shifted));
+            for (std::size_t j = 0; j < out.size(); ++j) out[j] = j % 4;
+            return out;
+          }, {"rdfentry_"});
+          if (objectWeights) {
+            data.DefineNominal("weight" + suffix, [count, shifted](ULong64_t e) {
+              ROOT::VecOps::RVec<double> out(count(e, shifted));
+              for (std::size_t j = 0; j < out.size(); ++j) out[j] = (e % 2 ? -.5 : 1.25) * (j + 1);
+              return out;
+            }, {"rdfentry_"});
+          }
+        }
+        if (objectWeights) {
+          data.DefineNominal("weight_up", [](const ROOT::VecOps::RVec<double>& w) { return w * 2.; }, {"weight"});
+          data.DefineNominal("weight_down", [](const ROOT::VecOps::RVec<double>& w) { return w * 0.; }, {"weight"});
+          sys.registerVariationColumn("weight", "shapeOnly", "weight_shift");
+        } else {
+          data.DefineNominal("weight", [](ULong64_t e) { return e % 2 ? -.5 : 1.25; }, {"rdfentry_"});
+          data.DefineNominal("weight_up", [](double w) { return w * 2.; }, {"weight"});
+          data.DefineNominal("weight_down", [] { return 0.; });
+        }
+        data.DefineNominal("channel", [](ULong64_t e) { return float(e % 4) - .5f; }, {"rdfentry_"});
+        data.DefineNominal("sample", [] { return .5f; });
+        data.DefineNominal("sample_shift", [] { return 1.5f; });
+        data.DefineNominal("nominal_pass", [](ULong64_t e) { return e % 5 != 0; }, {"rdfentry_"});
+        data.DefineNominal("shape_pass", [](ULong64_t e) { return e % 5 != 1; }, {"rdfentry_"});
+        sys.registerVariationColumns("weight", "weight", "weight_up", "weight_down");
+        sys.registerVariationColumn("objects", "shapeOnly", "objects_shift");
+        sys.registerVariationColumn("control", "shapeOnly", "control_shift");
+        sys.registerVariationColumn("sample", "shapeOnly", "sample_shift");
+        sys.registerSelectionMaskColumn("Nominal", "nominal_pass");
+        sys.registerSelectionMaskColumn("shapeOnly", "shape_pass");
+        manager.setupFromConfigFile();
+        std::vector<histInfo> infos{
+            histInfo("ragged", "objects", "", "weight", 2, 0, 2),
+            histInfo("ragged_edges", "objects", "", "weight", 3, 0, 2, {0., .5, 1.5, 2.})};
+        std::vector<selectionInfo> selections{
+            selectionInfo("channel", 2, 0, 2), selectionInfo("control", 2, 0, 2),
+            selectionInfo("sample", 2, 0, 2)};
+        std::vector<std::vector<std::string>> regions(3, {"a", "b"});
+        manager.bookND(infos, selections, "", regions);
+        const auto labels = sys.makeSystList("SystematicCounter", data);
+        ASSERT_EQ(labels.size(), 4u);
+        auto node = data.getDataFrame();
+        EXPECT_EQ(node.GetNRuns(), 0u);
+        auto& results = manager.GetHistos();
+        for (std::size_t h = 0; h < infos.size(); ++h) {
+          const auto& info = infos[h];
+          const Int_t bins[] = {2, 2, 2, Int_t(labels.size()), info.bins()};
+          const Double_t lower[] = {0., 0., 0., 0., 0.};
+          const Double_t upper[] = {2., 2., 2., double(labels.size()), 2.};
+          THnSparseF reference("per_slot_oracle", "", 5, bins, lower, upper);
+          reference.Sumw2();
+          if (!info.binEdges().empty()) reference.SetBinEdges(4, info.binEdges().data());
+          for (ULong64_t e = 0; e < 20; ++e) {
+            for (std::size_t s = 0; s < labels.size(); ++s) {
+              const bool shifted = labels[s] == "shapeOnly";
+              if (e % 5 == (shifted ? 1u : 0u)) continue;
+              const double scale = labels[s] == "weightUp" ? 2. : labels[s] == "weightDown" ? 0. : 1.;
+              if (!scale) continue;
+              for (std::size_t j = 0; j < count(e, shifted); ++j) {
+                Double_t point[] = {double(e % 4) - .5, double(j % 4), shifted ? 1.5 : .5,
+                    double(s), -1. + 1.5 * j + (shifted ? .5 : 0.)};
+                const double weight = (e % 2 ? -.5 : 1.25) * scale * (objectWeights ? j + 1 : 1);
+                reference.Fill(point, weight);
+              }
+            }
+          }
+          auto* actual = results[h].GetPtr();
+          ASSERT_EQ(actual->GetNbins(), reference.GetNbins());
+          if (std::string(backend) == "root" || (!info.binEdges().empty() && objectWeights))
+            EXPECT_EQ(actual->GetEntries(), reference.GetEntries());
+          for (Long64_t b = 0; b < reference.GetNbins(); ++b) {
+            Int_t coordinates[5];
+            const auto expected = reference.GetBinContent(b, coordinates);
+            const auto found = actual->GetBin(coordinates, false);
+            ASSERT_GE(found, 0);
+            EXPECT_EQ(actual->GetBinContent(found), expected);
+            EXPECT_EQ(actual->GetBinError2(found), reference.GetBinError2(b));
+          }
+        }
+        EXPECT_EQ(node.GetNRuns(), 1u);
+      }
+    }
+    }
+  }
+}
+
+TEST_F(NDHistogramManagerTest, PerSlotCollectionsPreserveSlotOwnershipUnderImplicitMT) {
+  struct RestoreMT { ~RestoreMT() { ROOT::DisableImplicitMT(); } } restore;
+  ROOT::EnableImplicitMT(2);
+  ASSERT_GE(ROOT::GetThreadPoolSize(), 2u);
+  for (const auto& backend : {"root", "boost"}) {
+    auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    cfg->set("histogramBackend", backend);
+    cfg->set("histogramCollectionLayout", "per-slot");
+    cfg->set("histogramSystematics", "true");
+    cfg->set("histogramDenseLimitMiB", "0");
+    DataManager data(256);
+    SystematicManager sys;
+    NDHistogramManager manager(*cfg);
+    ManagerContext context{*cfg, data, sys, *logger, *skimSink, *metaSink};
+    manager.setContext(context);
+    ASSERT_GE(data.getDataFrame().GetNSlots(), 2u);
+    data.DefineNominal("objects", [](ULong64_t e) {
+      ROOT::VecOps::RVec<float> values(e % 4);
+      for (std::size_t j = 0; j < values.size(); ++j) values[j] = float(j) - .5f;
+      return values;
+    }, {"rdfentry_"});
+    data.DefineNominal("shifted", [](ULong64_t e) {
+      ROOT::VecOps::RVec<float> values((e + 1) % 4);
+      for (std::size_t j = 0; j < values.size(); ++j) values[j] = float(j) + .5f;
+      return values;
+    }, {"rdfentry_"});
+    data.DefineNominal("weight", [](ULong64_t e) { return e % 2 ? -.5f : 1.25f; }, {"rdfentry_"});
+    sys.registerVariationColumn("objects", "shapeOnly", "shifted");
+    manager.setupFromConfigFile();
+    histInfo info("threaded_layout", "objects", "", "weight", 2, 0, 2);
+    manager.BookSingleHistogram(info);
+    const auto labels = sys.makeSystList("SystematicCounter", data);
+    ASSERT_EQ(labels.size(), 2u);
+    const Int_t bins[] = {1, 1, 1, 2, 2};
+    const Double_t lower[] = {0., 0., 0., 0., 0.};
+    const Double_t upper[] = {1., 1., 1., 2., 2.};
+    THnSparseF reference("threaded_oracle", "", 5, bins, lower, upper);
+    reference.Sumw2();
+    for (ULong64_t e = 0; e < 256; ++e) {
+      for (std::size_t s = 0; s < labels.size(); ++s) {
+        const bool shift = labels[s] == "shapeOnly";
+        for (ULong64_t j = 0; j < (e + (shift ? 1 : 0)) % 4; ++j) {
+          Double_t point[] = {0., 0., 0., double(s), double(j) + (shift ? .5 : -.5)};
+          reference.Fill(point, e % 2 ? -.5 : 1.25);
+        }
+      }
+    }
+    auto* actual = manager.GetHistos().front().GetPtr();
+    ASSERT_EQ(actual->GetNbins(), reference.GetNbins());
+    for (Long64_t b = 0; b < reference.GetNbins(); ++b) {
+      Int_t coordinates[5];
+      const auto expected = reference.GetBinContent(b, coordinates);
+      const auto found = actual->GetBin(coordinates, false);
+      ASSERT_GE(found, 0);
+      EXPECT_EQ(actual->GetBinContent(found), expected);
+      EXPECT_EQ(actual->GetBinError2(found), reference.GetBinError2(b));
+    }
+    EXPECT_EQ(data.getDataFrame().GetNRuns(), 1u);
+  }
+}
+
+TEST_F(NDHistogramManagerTest, PerSlotCollectionsKeepCancellationVarianceAndWhollyEmptyOutput) {
+  for (const auto& backend : {"root", "boost"}) {
+    for (const bool allEmpty : {false, true}) {
+      auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+      cfg->set("histogramBackend", backend);
+      cfg->set("histogramCollectionLayout", "per-slot");
+      cfg->set("histogramSystematics", "true");
+      DataManager data(3);
+      SystematicManager sys;
+      NDHistogramManager manager(*cfg);
+      ManagerContext context{*cfg, data, sys, *logger, *skimSink, *metaSink};
+      manager.setContext(context);
+      data.DefineNominal("objects", [allEmpty](ULong64_t e) {
+        return allEmpty || e == 0 ? ROOT::VecOps::RVec<float>{} : ROOT::VecOps::RVec<float>{.5f};
+      }, {"rdfentry_"});
+      data.DefineNominal("shifted", [allEmpty](ULong64_t e) {
+        return allEmpty || e == 1 ? ROOT::VecOps::RVec<float>{} : ROOT::VecOps::RVec<float>{.5f};
+      }, {"rdfentry_"});
+      data.DefineNominal("weight", [](ULong64_t e) { return e == 2 ? -1.f : 1.f; }, {"rdfentry_"});
+      sys.registerVariationColumn("objects", "shapeOnly", "shifted");
+      manager.setupFromConfigFile();
+      histInfo info("cancelled_layout", "objects", "", "weight", 2, 0, 2);
+      manager.BookSingleHistogram(info);
+      auto* histogram = manager.GetHistos().front().GetPtr();
+      ASSERT_EQ(histogram->GetNbins(), allEmpty ? 0 : 2);
+      if (!allEmpty) {
+        for (int s = 0; s < 2; ++s) {
+          Double_t point[] = {0., 0., 0., double(s), .5};
+          const auto bin = histogram->GetBin(point, false);
+          ASSERT_GE(bin, 0);
+          EXPECT_EQ(histogram->GetBinContent(bin), 0.f);
+          EXPECT_EQ(histogram->GetBinError2(bin), 2.);
+        }
+      }
+      EXPECT_EQ(data.getDataFrame().GetNRuns(), 1u);
+    }
+  }
+}
+
+TEST_F(NDHistogramManagerTest, PerSlotRejectsMisalignedArraysEvenInRejectedSlot) {
+  configManager->set("histogramCollectionLayout", "per-slot");
+  dataManager->DefineNominal("objects", [] { return ROOT::VecOps::RVec<float>{.5f, 1.5f}; });
+  dataManager->DefineNominal("weight", [] { return ROOT::VecOps::RVec<float>{1.f}; });
+  dataManager->DefineNominal("reject", [] { return false; });
+  systematicManager->registerSelectionMaskColumn("Nominal", "reject");
+  histogramManager->setupFromConfigFile();
+  histInfo info("misaligned", "objects", "", "weight", 2, 0, 2);
+  histogramManager->BookSingleHistogram(info);
+  try {
+    histogramManager->GetHistos().front().GetValue();
+    FAIL() << "An object array of length one must not broadcast";
+  } catch (const std::exception& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("weight length mismatch"), std::string::npos) << message;
+    EXPECT_NE(message.find("systematic slot 0"), std::string::npos) << message;
+  }
+}
+
+TEST_F(NDHistogramManagerTest, PerSlotRejectsChangedScalarCollectionKind) {
+  configManager->set("histogramCollectionLayout", "per-slot");
+  configManager->set("histogramSystematics", "true");
+  dataManager->DefineNominal("objects", [] { return ROOT::VecOps::RVec<float>{.5f}; });
+  dataManager->DefineNominal("objects_shift", [] { return .5f; });
+  dataManager->DefineNominal("weight", [] { return 1.f; });
+  systematicManager->registerVariationColumn("objects", "shapeOnly", "objects_shift");
+  histogramManager->setupFromConfigFile();
+  histInfo info("kind_change", "objects", "", "weight", 2, 0, 2);
+  EXPECT_THROW(histogramManager->BookSingleHistogram(info), std::invalid_argument);
+  EXPECT_TRUE(histogramManager->GetHistos().empty());
+  EXPECT_EQ(dataManager->getDataFrame().GetNRuns(), 0u);
+  dataManager->Redefine("objects", [] { return .5f; });
+  dataManager->Redefine("objects_shift", [] { return ROOT::VecOps::RVec<float>{.5f}; });
+  histInfo reverse("kind_change_reverse", "objects", "", "weight", 2, 0, 2);
+  EXPECT_THROW(histogramManager->BookSingleHistogram(reverse), std::invalid_argument);
+  EXPECT_TRUE(histogramManager->GetHistos().empty());
+  EXPECT_EQ(dataManager->getDataFrame().GetNRuns(), 0u);
+}
+
+TEST_F(NDHistogramManagerTest, InvalidCollectionLayoutRejectsBeforeBooking) {
+  configManager->set("histogramCollectionLayout", "auto");
+  configManager->set("histogramSystematics", "false");
+  histogramManager->setupFromConfigFile();
+  const auto before = dataManager->getDataFrame().GetColumnNames();
+  histInfo info("unused_layout", "missing", "", "missing", 2, 0, 2);
+  EXPECT_THROW(histogramManager->BookSingleHistogram(info), std::invalid_argument);
+  EXPECT_EQ(dataManager->getDataFrame().GetColumnNames(), before);
+  EXPECT_TRUE(histogramManager->GetHistos().empty());
+}
+
+TEST_F(NDHistogramManagerTest, PerSlotPacksResetAcrossRedefineAndFilterBookings) {
+  configManager->set("histogramCollectionLayout", "per-slot");
+  configManager->set("histogramSystematics", "false");
+  dataManager->DefineNominal("objects", [] { return ROOT::VecOps::RVec<float>{.25f}; });
+  dataManager->DefineNominal("weight", [] { return 2.f; });
+  dataManager->DefineNominal("category", [] { return .5f; });
+  histogramManager->setupFromConfigFile();
+  auto book = [&](const std::string& name) {
+    histInfo info(name.c_str(), "objects", "", "weight", 3, 0, 3);
+    histogramManager->BookSingleHistogram(info, selectionInfo("category", 2, 0, 2),
+        selectionInfo("category", 2, 0, 2), selectionInfo("category", 2, 0, 2));
+  };
+  book("before_layout");
+  dataManager->Redefine("objects", [] { return ROOT::VecOps::RVec<float>{.25f, 1.25f, 2.25f}; });
+  dataManager->Redefine("weight", [] { return -2.f; });
+  dataManager->Redefine("category", [] { return 1.5f; });
+  book("after_layout");
+  auto node = dataManager->getDataFrame().Filter([] { return false; });
+  dataManager->setDataFrame(node);
+  book("rejected_layout");
+  EXPECT_EQ(node.GetNRuns(), 0u);
+  auto& results = histogramManager->GetHistos();
+  ASSERT_EQ(results.size(), 3u);
+  for (std::size_t h = 0; h < 2; ++h) {
+    auto* histogram = results[h].GetPtr();
+    const auto expected = h == 0 ? 1 : 3;
+    ASSERT_EQ(histogram->GetNbins(), expected);
+    for (int j = 0; j < expected; ++j) {
+      const double category = h == 0 ? .5 : 1.5;
+      Double_t point[] = {category, category, category, .5, .25 + j};
+      const auto bin = histogram->GetBin(point, false);
+      ASSERT_GE(bin, 0);
+      EXPECT_EQ(histogram->GetBinContent(bin), h == 0 ? 2.f : -2.f);
+      EXPECT_EQ(histogram->GetBinError2(bin), 4.);
+    }
+  }
+  EXPECT_EQ(results[2]->GetNbins(), 0);
+  EXPECT_EQ(node.GetNRuns(), 1u);
+}
+
+TEST_F(NDHistogramManagerTest, PerSlotScalarGraphsKeepOriginalPathAndRejectImplicitExpansion) {
+  configManager->set("histogramCollectionLayout", "per-slot");
+  configManager->set("histogramSystematics", "false");
+  dataManager->DefineNominal("scalar", [] { return .5f; });
+  dataManager->DefineNominal("weight", [] { return -2.f; });
+  dataManager->DefineNominal("memberships", [] { return ROOT::VecOps::RVec<float>{.5f, 1.5f}; });
+  histogramManager->setupFromConfigFile();
+  histInfo scalar("scalar_layout", "scalar", "", "weight", 2, 0, 2);
+  histogramManager->BookSingleHistogram(scalar);
+  for (const auto& name : dataManager->getDataFrame().GetColumnNames())
+    EXPECT_NE(name.find("__nd_slot_"), 0u);
+  histInfo ambiguous("ambiguous_layout", "scalar", "", "weight", 2, 0, 2);
+  EXPECT_THROW(histogramManager->BookSingleHistogram(ambiguous,
+      selectionInfo("memberships", 2, 0, 2)), std::invalid_argument);
+  auto& results = histogramManager->GetHistos();
+  ASSERT_EQ(results.size(), 1u);
+  ASSERT_EQ(results[0]->GetNbins(), 1);
+  EXPECT_EQ(results[0]->GetBinContent(Long64_t{0}), -2.f);
+  EXPECT_EQ(results[0]->GetBinError2(0), 4.);
 }

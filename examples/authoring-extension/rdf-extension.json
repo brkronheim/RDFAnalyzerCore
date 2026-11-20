@@ -1,0 +1,8 @@
+{
+  "name": "example_authoring",
+  "core_api_version": 1,
+  "configure": "cmake/Configure.cmake",
+  "enable_variable": "RDF_ENABLE_EXAMPLE_AUTHORING",
+  "python_package": "rdfexample_authoring",
+  "python_services": {"authoring_modules": "modules"}
+}

@@ -6,7 +6,7 @@ This feature allows histograms to be defined in a configuration file and automat
 
 ## Configuration File Format
 
-Create a histogram configuration file with one histogram definition per line. Each line contains key=value pairs.
+The file extension selects the parser. Text files (`.txt`) use one histogram definition per line with `key=value` fields. YAML files (`.yaml` or `.yml`) use a sequence of mappings, as in `analyses/ExampleAnalysis/histograms.yaml`.
 
 ### Required Fields
 
@@ -39,6 +39,8 @@ Create a histogram configuration file with one histogram definition per line. Ea
 
 ## Example Configuration File
 
+Text format (`histograms.txt`):
+
 ```txt
 # Simple 1D histogram
 name=pt_hist variable=jet_pt weight=event_weight bins=50 lowerBound=0.0 upperBound=500.0 label=Jet pT [GeV] suffix=jets
@@ -48,6 +50,18 @@ name=eta_hist variable=jet_eta weight=event_weight bins=40 lowerBound=-5.0 upper
 
 # Full N-dimensional histogram with all separations
 name=mass_hist variable=dimuon_mass weight=event_weight bins=60 lowerBound=70.0 upperBound=110.0 channelVariable=channel channelBins=2 channelLowerBound=0.0 channelUpperBound=2.0 channelRegions=signal,control controlRegionVariable=region controlRegionBins=3 controlRegionLowerBound=0.0 controlRegionUpperBound=3.0 controlRegionRegions=SR,CR1,CR2 sampleCategoryVariable=sample sampleCategoryBins=2 sampleCategoryLowerBound=0.0 sampleCategoryUpperBound=2.0 sampleCategoryRegions=data,MC suffix=analysis
+```
+
+Equivalent YAML format (`histograms.yaml`):
+
+```yaml
+- name: pt_hist
+  variable: jet_pt
+  weight: event_weight
+  bins: 50
+  lowerBound: 0.0
+  upperBound: 500.0
+  label: "Jet pT [GeV]"
 ```
 
 ## Usage in Code
@@ -101,7 +115,7 @@ analyzer.bookConfigHistograms();
 
 ```cpp
 // Trigger dataframe execution and save histograms
-analyzer.save();
+analyzer.run();
 ```
 
 ## Complete Example
@@ -142,7 +156,7 @@ int main(int argc, char** argv) {
     // (config histograms and manual histograms work together)
     
     // Execute dataframe and save results
-    analyzer.save();
+    analyzer.run();
 
     return 0;
 }
@@ -158,18 +172,23 @@ int main(int argc, char** argv) {
 
 ### Systematic Variations
 
-Config-defined histograms automatically handle systematic variations. If you register systematics that affect variables used in histograms, the histograms will be filled for each systematic variation.
+Histogram systematic handling is enabled by default. Before the first booking, `NDHistogramManager` scans available dataframe column names for complete `baseVariable_nameUp` / `baseVariable_nameDown` pairs and registers the matching systematic against the base variable. You can disable this behavior with `histogramSystematics: false` in the main config to book nominal-only histograms. For a complete nominal-only framework graph, use `enableSystematics: false`; this also prevents systematic registration and propagation outside histogram booking. A registered name alone does not calculate a shifted value: the analysis or an input source must provide the varied columns, or the analysis must define and map the variations itself.
+
+The experimental `histogramShareCollectionTransport: true` option shares scalar
+broadcasts and collection fill-count vectors when histograms use the exact same
+input/reference columns and systematic layout within a single `bookND()` or
+`bookConfigHistograms()` call. It defaults to `false`; it does not combine RDF
+actions or share caches across definitions, filters or booking calls. Different
+binnings of a collection can benefit; unrelated collection columns are never
+assumed to have equal lengths. Scalar/systematic packing already shared by the
+ordinary path remains available with the option disabled.
 
 ```cpp
-// Register systematic
-analyzer.getSystematicManager().registerSystematic("JES_up", {"jet_pt", "jet_eta"});
+// Define a complete Up/Down pair using the expected baseVar_nameUp/Down form.
+analyzer.Define("jet_pt_JESUp", applyJESUp, {"jet_pt"});
+analyzer.Define("jet_pt_JESDown", applyJESDown, {"jet_pt"});
 
-// Define systematic variations
-analyzer.Define("jet_pt_JES_up", applyJESUp, {"jet_pt"})
-        .Define("jet_eta_JES_up", applyJESUpEta, {"jet_eta"});
-
-// Histograms using jet_pt and jet_eta will automatically 
-// include JES_up variation bins
+// NDHistogramManager can detect and register the pair during booking.
 analyzer.bookConfigHistograms();
 ```
 
@@ -190,44 +209,99 @@ You can use config-driven histograms alongside manually-defined histograms in th
 
 ## Boost Histogram Backend
 
-NDHistogramManager supports both ROOT (`THnMulti`) and Boost.Histogram (`BHnMulti`) backends for N-dimensional histograms. The framework automatically selects the optimal storage strategy based on the histogram memory requirements.
+NDHistogramManager supports both ROOT (`THnMulti`) and Boost.Histogram (`BHnMulti`) backends for N-dimensional histograms. The framework selects storage using a configurable dense-memory estimate; the best CPU/memory tradeoff depends on occupancy and workload.
 
-### Storage Selection
+### Storage selection and output
 
-The backend automatically chooses between two storage strategies:
+The default is **Boost float with sparse standard-map accumulation**:
 
-- **Dense storage**: For small histograms (< 64 MiB per thread)
-  - Uses contiguous array storage with O(1) bin access
-  - Optimal for histograms with small bin counts
-  - 10-50x faster than sparse storage for typical cases
-
-- **Sparse storage**: For large histograms (≥ 64 MiB per thread)
-  - Uses hash-based storage that only allocates filled bins
-  - Prevents memory issues with high-dimensional histograms
-  - Automatic fallback for memory safety
-
-### Performance Examples
-
-**Typical 5D histogram** (4×4×5×50×40 = 160K bins):
-- Dense memory: ~26 MB → selects dense storage (fast)
-- Fill performance: ~10-50x faster than always-sparse
-
-**Large histogram** (10×10×10×200×100 = 20M bins):
-- Dense memory: ~14 GB → falls back to sparse storage (safe)
-
-### Configuration
-
-No configuration changes are required. The framework automatically:
-1. Calculates memory requirements based on bin counts
-2. Selects dense or sparse storage per histogram
-3. Uses the same configuration format for both backends
-
-```
-# histograms.txt - same format works with both backends
-name=jet_pt_eta variable=jet_pt,jet_eta bins=50,20 lowerBound=0.0,-2.5 upperBound=500.0,2.5 weight=weight
+```yaml
+histogramBackend: boost
+histogramBoostPrecision: float
+histogramBoostSparseBackend: map
+histogramDenseLimitMiB: 0
 ```
 
-The backend selection is transparent to users—the booking interface, filling, and saving remain identical for both ROOT and Boost.Histogram backends.
+Float Boost uses ROOT-compatible axes, including variable edges, float bin
+contents and double sumw2. Explicit `histogramBoostPrecision=double` selects
+double weighted sums and routes variable-width observables through the ROOT
+action. Explicit `histogramBackend=root` selects `THnF` dense or `THnSparseF`
+sparse slot accumulators according to the same configured dense threshold.
+
+`histogramDenseLimitMiB` defaults to 0 (sparse). With a nonzero budget, dense storage is selected when
+`product(bins + 2) * RDF_slots * bytes_per_cell` fits within that limit, unless
+the C++ `histInfo` explicitly requests sparse storage. ROOT cells use 12 bytes
+(float content plus double sumw2); Boost double cells use 16 bytes. Boost
+float contents with double sumw2 use custom separate arrays at 12 bytes per
+cell; `weighted_sum<float>` alone would incorrectly reduce variance precision.
+The limit covers
+**all slots for one histogram**, including underflow/overflow cells. It is not
+a per-thread or process-wide limit: hundreds of eligible histograms can still
+allocate substantial memory. Set it to `8` or `64`, for example, to permit
+dense accumulation for histograms that fit within that per-histogram budget.
+
+When saving to the meta file, each Boost sparse histogram warns once if its
+observed container allocations exceed the estimated dense arrays for the same
+precision, logical grid (including flows) and RDF slot count. Counting allocators
+include map nodes and bucket/capacity storage for both `map` and `flat`. Counters
+are slot-local; finalization samples them before merging and after each slot
+merge, preserving the largest observed total after containers are released.
+The warning names the histogram and output file, reports both byte counts,
+and suggests increasing `histogramDenseLimitMiB`. It does not switch storage.
+This comparison excludes allocator overhead, transient event-time rehash peaks,
+the common ROOT output representation, and other process memory; it is not an
+RSS measurement. ROOT and dense Boost actions do not emit this warning.
+
+Both backends always persist `THnSparseF` under `nd_histograms_v1`, accompanied
+by `__rdf_histogram_schema_v1`. Dense ROOT finalization visits the allocated
+array, decodes occupied cells only, and transfers integer coordinates and
+sumw2 directly. Sparse ROOT finalization reuses slot zero and merges other
+slots into it. Boost sparse merging/export visits allocated map entries rather
+than the complete logical grid. Flow bins and zero-content cells with nonzero
+variance are retained. Compiled projections discard flow coordinates; legacy
+TH1 extraction retains observable underflow/overflow while rejecting invalid
+category coordinates.
+
+ROOT and the default float Boost accumulate contents in float.
+`histogramBoostPrecision=double` rounds double contents to float at export;
+`histogramBoostPrecision=float` matches ROOT
+arithmetic and axis boundary handling. This is a numerical choice, especially
+with large
+positive and negative weights; a faster backend is not automatically an exact
+replacement. Both accumulate sumw2 in double. Boost sparse storage can use
+`histogramBoostSparseBackend=map` (the default node-based standard hash map)
+or `flat` (Boost flat hash map, when available in the installed Boost). Both
+merge/export allocated entries only. Float sparse cells still have ordinary
+structure padding; the 12-byte saving applies to the dense separate arrays.
+Sparse storage does not imply a universal speedup; benchmark the analysis workload.
+
+### Extraction and direct reading
+
+`core/python/histogram_io.py` exposes compiled batch projection to NumPy, with
+a Python fallback. Readers that understand the schema can consume sparse
+files directly. Reconstructing every category/systematic combination as TH1F
+can produce many empty objects and duplicate the original sparse data.
+
+`extract_nd_histograms.py` remains available for legacy consumers. When the
+compiled extension is present, its validation/repair pass is followed by
+native slice creation, filling and writing, with one source histogram and
+one output TH1 resident at a time. Only nonempty slice data are grouped in
+small bin buffers; empty TH1 combinations are streamed directly to the file.
+The Python implementation is retained as a fallback. Both preserve
+empty combinations, variable edges, flow bins, sumw2 and unrelated objects;
+publication still uses an atomic replacement of a copied input file.
+
+The generic partial merger retains its compatibility default. Pass
+`python -m partial_merge ... --sparse-only` to omit legacy extraction.
+`analyses/vjet-njetpt/mergeResults.sh` defaults to sparse-only output because
+its plotting and fit readers consume that format. Use `--extract-histograms`
+to retain the former expanded layout. `--nominal-only` still performs schema
+postprocessing and nominal TH1 extraction; it cannot be combined with an
+explicit `--sparse-only`.
+
+Set `RDF_HISTOGRAM_PROFILE=1` for per-action storage/finalization diagnostics.
+See `benchmarks/histogram_lifecycle_20261030/REPORT.md` for the measured vjet
+tradeoffs and reproduction commands.
 
 ## Notes
 
@@ -235,4 +309,4 @@ The backend selection is transparent to users—the booking interface, filling, 
 - If no `histogramConfig` is specified in the main config, no config histograms are loaded
 - Missing required fields in the histogram config will throw an exception
 - Invalid config files will throw an exception with details
-- Histograms are saved to the file specified by `metaFile` or `saveFile` in the main config
+- Histograms are saved to `metaFile` when specified. Otherwise, the framework derives a sibling path by inserting `_meta` before the `saveFile` extension (for example, `output.root` becomes `output_meta.root`).

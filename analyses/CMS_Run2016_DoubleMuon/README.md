@@ -1,8 +1,7 @@
 # CMS Run2016G DoubleMuon Z→μμ Example Analysis
 
-A complete end-to-end CMS Open Data analysis demonstrating a Voigtian +
-exponential fit to the dimuon Z peak in bins of jet multiplicity using
-the full RDFAnalyzerCore feature set and CMS Combine / CombineHarvester.
+This CMS Open Data example produces dimuon mass histograms in four jet bins,
+fits each Z peak with RooFit, and builds workspaces and datacards through LAW.
 
 **Data source**: CMS Open Data — no credentials required  
 **Record**: <https://opendata.cern.ch/record/30522>  
@@ -20,7 +19,7 @@ the full RDFAnalyzerCore feature set and CMS Combine / CombineHarvester.
 5. [Building](#building)
 6. [Running Locally](#running-locally)
 7. [CMS Open Data — Full Dataset via LAW](#cms-open-data--full-dataset-via-law)
-8. [Z Peak Fit with CombineHarvester and Combine](#z-peak-fit-with-combineharvester-and-combine)
+8. [Z Peak Fit](#z-peak-fit)
 9. [Extending the Example](#extending-the-example)
 
 ---
@@ -39,19 +38,21 @@ CMS Open Data NanoAOD (XRootD — public)
                     └── output.yaml     (output branches)
          │
          ▼
-   output/dimuon_zpeak.root
-    ├── Events tree (DimuonMass, nGoodJets, …)
-    ├── histograms/DimuonMass_{0j,1j,2j,ge3j}   ◄── fit inputs
-    ├── histograms/DimuonMass (inclusive)
-    ├── histograms/nGoodJets, LeadMuPt, …
+   output/dimuon_zpeak_meta.root
+    ├── nd_histograms_v1/ (sparse dimuon, jet and muon histograms)
+    ├── __rdf_histogram_schema_v1
     └── cutflow / cutflow_nminus1
          │
          ▼
+   extract_nd_histograms.py --nominal-only
+         │
+         ▼
+   output/dimuon_zpeak_fit.root (nominal TH1F slices)
+         +
    zpeak_workspace.yaml          law run AnalyticWorkspaceFitTask
     (Voigtian+exp model) ──────────────────────────────────────►
-                                 per-channel + simultaneous fits
-                                 ws_*.root, datacard_*.txt
-                                 fitDiagnostics_*.root
+                                 per-channel workspaces and cards
+                                 combined datacard
 ```
 
 ---
@@ -95,7 +96,7 @@ f(m) = nsig × Voigtian(m; μZ, ΓZ, σ) + nbkg × Exponential(m; τ)
 ```
 - **Voigtian**: Breit-Wigner ⊗ Gaussian; μZ, σ floating; ΓZ fixed to PDG
 - **Exponential**: off-peak background; τ floating
-- **nsig, nbkg**: freely floating yields (`rate -1` in Combine datacards)
+- **nsig, nbkg**: freely floating yields in the per-channel RooFit overlay
 
 ---
 
@@ -203,36 +204,34 @@ Every config file in this analysis uses YAML:
 
 ## Building
 
+From the repository root, set up the pinned CMS checkout in `extensions/cms` and its build environment. [CMS extension setup](../../docs/CMS_EXTENSION.md)
+
 ```bash
-# Source the environment (ROOT, compiler, …)
+python3 scripts/fetch_cms.py
 source env.sh
-
-# Core framework only
-cmake -S . -B build && cmake --build build -j$(nproc)
-
-# With CMS Combine (needed to run fits after fit_zpeak.py)
-cmake -S . -B build -DBUILD_COMBINE=ON
-cmake --build build -j$(nproc)
-
-# With CombineHarvester (structured datacard writing in fit_zpeak.py)
-cmake -S . -B build -DBUILD_COMBINE=ON -DBUILD_COMBINE_HARVESTER=ON
-cmake --build build -j$(nproc)
+cmake -S . -B build -DRDF_REQUIRED_EXTENSIONS=cms -DRDF_ANALYSES=CMS_Run2016_DoubleMuon
+cmake --build build --target cms_doublemu_analysis --parallel
 ```
+
+For LAW fits with Combine, also configure with `-DBUILD_COMBINE=ON` and run
+`cmake --build build --parallel`. Standalone fits use PyROOT with RooFit,
+NumPy and PyYAML.
 
 ---
 
 ## Running Locally
 
 ```bash
-cd build/analyses/CMS_Run2016_DoubleMuon
-./cms_doublemu_analysis ../../../analyses/CMS_Run2016_DoubleMuon/cfg.yaml
+cd analyses/CMS_Run2016_DoubleMuon
+mkdir -p output
+../../build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis cfg.yaml
 ```
 
-Output: `output/dimuon_zpeak.root` with the skimmed tree, histograms, and cutflow.
+`output/dimuon_zpeak_meta.root` contains histogram and cutflow output. The default configuration leaves the event skim disabled.
 
 ### Single-threaded debugging
 
-Edit `cfg.yaml`: `threads: "0"`, then rerun.
+Set `threads: "1"` in `cfg.yaml` and rerun. Zero selects the maximum thread count.
 
 ### Using a local or different file
 
@@ -250,7 +249,7 @@ saveConfig: /abs/path/to/output.yaml
 triggerConfig: /abs/path/to/triggers.yaml
 threads: "4"
 EOF
-./analysis /tmp/test_cfg.yaml
+../../build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis /tmp/test_cfg.yaml
 ```
 
 ### Getting the full file list
@@ -266,25 +265,27 @@ Paste the XRootD paths into `fileList` in `cfg.yaml` (comma-separated).
 
 ## CMS Open Data — Full Dataset via LAW
 
+Run the LAW commands below from the repository root.
+
 `dataset_manifest.yaml` uses `das: "30522"` as the CERN Open Data record ID.
 
 ### Option A: File listing + local SkimTask (recommended for smaller datasets)
 
 ```bash
-source law/env.sh && law index
+source core/python/law/env.sh && law index
 
 # Discover files from the Open Data portal (one branch per sample, parallelized)
 law run GetOpenDataFileList \
     --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --name run2016g \
-    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+    --exe build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis \
     --workers 4
 
 # Skim all datasets (pre-flight test job runs automatically by default)
 # RunSkimTestJob → PrepareSkimJobs → SkimTask
 law run SkimTask \
     --name run2016g_zpeak \
-    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+    --exe build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis \
     --submit-config analyses/CMS_Run2016_DoubleMuon/cfg.yaml \
     --dataset-manifest analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --file-source opendata \
@@ -294,7 +295,7 @@ law run SkimTask \
 # Disable the pre-flight test if desired
 law run SkimTask \
     --name run2016g_zpeak \
-    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+    --exe build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis \
     --submit-config analyses/CMS_Run2016_DoubleMuon/cfg.yaml \
     --dataset-manifest analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --no-make-test-job \
@@ -310,13 +311,13 @@ verification during monitoring uses directory-level `xrdfs ls` queries for
 efficiency.
 
 ```bash
-source law/env.sh && law index
+source core/python/law/env.sh && law index
 
 # Step 1 — Create per-job configs (30 files per job, one branch per sample)
 law run PrepareOpenDataSample \
     --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --name run2016g_zpeak \
-    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+    --exe build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis \
     --files 30 \
     --workers 4
 
@@ -324,20 +325,20 @@ law run PrepareOpenDataSample \
 law run BuildOpenDataSubmission \
     --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --name run2016g_zpeak \
-    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis
+    --exe build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis
 
 # Step 3 — Submit jobs
 law run SubmitOpenDataJobs \
     --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --name run2016g_zpeak \
-    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis
+    --exe build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis
 
 # Step 4 — Monitor and auto-resubmit failed jobs
 #           (EOS file checks now use directory-level xrdfs ls for speed)
 law run MonitorOpenDataJobs \
     --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --name run2016g_zpeak \
-    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis
+    --exe build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis
 ```
 
 Because law tracks task outputs, you can jump straight to step 4 and law will
@@ -349,19 +350,31 @@ automatically run steps 1–3 if they haven't completed yet.
 law run PrepareOpenDataSample \
     --submit-config analyses/CMS_Run2016_DoubleMuon/dataset_manifest.yaml \
     --name run2016g_zpeak \
-    --exe build/analyses/CMS_Run2016_DoubleMuon/analysis \
+    --exe build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis \
     --partition-mode entry_range \
     --files 500000   # entries per job
 ```
 
 ---
 
-## Z Peak Fit — Generic `AnalyticWorkspaceFitTask`
+## Z Peak Fit
 
 The fit is driven entirely by `zpeak_workspace.yaml` and the generic
-`AnalyticWorkspaceFitTask` in `law/combine_tasks.py`.  To fit a different
+`AnalyticWorkspaceFitTask` in `core/python/law/combine_tasks.py`.  To fit a different
 resonance (J/ψ, Υ, H→γγ, …) you only need a different workspace config YAML
 — no code changes.
+
+From the repository root, project the nominal sparse slices once before running
+either fit command. Use the Python environment that matches the active ROOT
+build. The extractor reads the embedded schema and writes a copy
+with 1D mass histograms. The fit uses the visible 70–110 GeV bins, excluding
+the jet-category sentinel in underflow.
+
+```bash
+d=analyses/CMS_Run2016_DoubleMuon/output
+python3 core/python/extract_nd_histograms.py "$d/dimuon_zpeak_meta.root" \
+    --nominal-only --output "$d/dimuon_zpeak_fit.root"
+```
 
 ### Workspace config (`zpeak_workspace.yaml`)
 
@@ -373,7 +386,7 @@ signal:
   parameters:
     mean:  {init: 91.19, min: 88.0, max: 94.0, shared: true}   # shared mZ
     width: {init: 2.495, fixed: true, shared: true}             # PDG width
-    sigma: {init: 2.0,   min: 0.3,   max: 6.0,  shared: true}  # shared σ
+    sigma: {init: 2.0,   min: 0.1,   max: 8.0}                 # per-channel σ
 
 background:
   pdf: exponential       # exponential|polynomial|chebychev|bernstein
@@ -385,24 +398,35 @@ channels:
   - {name: "1j",   histogram: "DimuonMass_1j",   label: "1 jet"}
   - {name: "2j",   histogram: "DimuonMass_2j",   label: "2 jets"}
   - {name: "ge3j", histogram: "DimuonMass_ge3j", label: "≥3 jets"}
+
+combine_rates:
+  0j:   {signal: 12000, background: 1000}
+  1j:   {signal:  3600, background:  400}
+  2j:   {signal:  1000, background:  150}
+  ge3j: {signal:   250, background:   40}
 ```
 
 Parameters with `shared: true` receive a name **without** a channel suffix
-(e.g. `mean`, `sigma`).  Combine ties these across channels automatically in
-the combined simultaneous fit, implementing a shared Z mass and detector
-resolution across all jet bins.
+(e.g. `mean`, `width`). The default model shares the Z mass, fixes its natural
+width, and floats the detector resolution and background slope per jet bin.
 
-### Step 1 — Run via `AnalyticWorkspaceFitTask` (recommended)
+The simultaneous tutorial model fits one common signal strength `r`. The
+expected signal yield in each channel is `r` times its configured signal
+reference. Each background has its own unconstrained scale within `[0, 100]`,
+starting at 1. The reference rates above are illustrative yields for the
+70–110 GeV window. Use independent signal predictions for the dataset and
+luminosity being fitted before interpreting `r` as a measurement.
+
+### Step 1 — Build workspaces and cards via LAW
 
 ```bash
-source law/env.sh && law index
+source core/python/law/env.sh && law index
 
 law run AnalyticWorkspaceFitTask \
     --name zpeak_run2016g \
     --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \
-    --histogram-file output/dimuon_zpeak.root \
-    --method FitDiagnostics \
-    --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
+    --histogram-file analyses/CMS_Run2016_DoubleMuon/output/dimuon_zpeak_fit.root \
+    --skip-fit
 ```
 
 Outputs land in `analyticFit_zpeak_run2016g/`:
@@ -411,9 +435,7 @@ Outputs land in `analyticFit_zpeak_run2016g/`:
 analyticFit_zpeak_run2016g/
   ws_0j.root / ws_1j.root / ws_2j.root / ws_ge3j.root
   datacard_0j.txt / datacard_1j.txt / datacard_2j.txt / datacard_ge3j.txt
-  datacard_combined.txt   ← simultaneous fit across all jet bins
-  combine_0j.log / …
-  fitDiagnostics_0j.root / …
+  datacard_combined.txt
   provenance.json
   analytic_fit.perf.json
 ```
@@ -425,22 +447,49 @@ For quick workspace inspection without a LAW environment:
 ```bash
 python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py \
     --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \
-    --input  output/dimuon_zpeak.root \
-    --outdir zpeak_fit
+    --input  analyses/CMS_Run2016_DoubleMuon/output/dimuon_zpeak_fit.root \
+    --outdir zpeak_fit --strict
 ```
 
-The script builds workspaces and datacards, then prints the exact
-`law run AnalyticWorkspaceFitTask` command to run the full fit.
+The explicit-rate model requires a 1D histogram with at least 10 finite
+in-range events in every configured channel. With `--strict`, the standalone
+builder also requires RooFit status 0 from each per-channel overlay. The fit log
+and plots report covariance quality (`covQual`). LAW records the active
+channels and reference rates in `provenance.json`. `--skip-fit` prepares the
+inputs for a separate Combine invocation.
 
-### Step 2 — Inspect results
+### Step 2 — Run the simultaneous Combine fit
+
+From the repository root, load the local Combine installation before changing
+to the directory containing the card and workspaces.
 
 ```bash
-python - << 'EOF'
-import ROOT
-f = ROOT.TFile("analyticFit_zpeak_run2016g/fitDiagnostics_0j.root")
-f.fit_s.Print("v")   # all parameter values and uncertainties
-EOF
+source env.sh
+combine_dir="$PWD/build/external/HiggsAnalysis/CombinedLimit"
+export PATH="$combine_dir/bin:$PATH"
+export PYTHONPATH="$combine_dir/python:$PYTHONPATH"
+export LD_LIBRARY_PATH="$combine_dir/lib:$LD_LIBRARY_PATH"
+
+cd zpeak_fit  # or analyticFit_zpeak_run2016g for the LAW inputs
+combine -M FitDiagnostics datacard_combined.txt -n _combined \
+    --rMin 0 --rMax 5 --saveShapes --saveNormalizations --skipBOnlyFit
 ```
+
+Inspect `fitDiagnostics_combined.root` for the `fit_s` result and
+`norm_fit_s` per-process yields. Check fit status, covariance quality and
+whether the solution touches a bound. Use `r` and the four `bkg_scale_*`
+parameters to read the fitted normalizations. LAW can also invoke Combine
+directly by omitting `--skip-fit` and supplying the same fit options with
+`--combine-options='--rMin 0 --rMax 5 --saveShapes --saveNormalizations --skipBOnlyFit'`.
+Use a new LAW run name for the fit so it does not reuse the preparation
+directory.
+
+### Inspect the standalone RooFit overlays
+
+Open `zpeak_fit/fit_0j.png` (and the corresponding plots for the other jet
+bins) for the separate RooFit fits with both yields free in each bin. The
+saved `ws_*.root` files contain the input models and binned observations
+before the overlay fits.
 
 ### Using a different signal or background model
 
@@ -471,7 +520,7 @@ Then re-run with `--skip-fit` to build workspaces without requiring Combine:
 law run AnalyticWorkspaceFitTask \
     --name zpeak_cb_cheb \
     --workspace-config /tmp/cb_cheb_workspace.yaml \
-    --histogram-file output/dimuon_zpeak.root \
+    --histogram-file analyses/CMS_Run2016_DoubleMuon/output/dimuon_zpeak_fit.root \
     --skip-fit
 ```
 
@@ -481,16 +530,17 @@ law run AnalyticWorkspaceFitTask \
 # datacard_0j.txt
 imax 1
 jmax 1
-kmax 0   # shape parameters float freely inside the workspace
-shapes sig       0j  .../ws_0j.root  ws_0j:sig_0j
-shapes bkg       0j  .../ws_0j.root  ws_0j:bkg_0j
-shapes data_obs  0j  .../ws_0j.root  ws_0j:data_obs_0j
-bin          0j
-observation  <n_obs>
-bin          0j      0j
+kmax *
+shapes sig       ch_0j  ws_0j.root  ws_0j:sig_0j
+shapes bkg       ch_0j  ws_0j.root  ws_0j:bkg_0j
+shapes data_obs  ch_0j  ws_0j.root  ws_0j:data_obs_0j
+bin          ch_0j
+observation  -1
+bin          ch_0j   ch_0j
 process      sig     bkg
 process      0       1
-rate         -1      -1   # yields from workspace extended PDFs
+rate         12000   1000
+bkg_scale_0j rateParam ch_0j bkg 1 [0,100]
 ```
 
 ---
@@ -553,7 +603,7 @@ cfm->bindToRegionManager(rm);   // per-region cutflow tables
 
 - [Config Reference](../../docs/CONFIG_REFERENCE.md)
 - [Combine Integration](../../docs/COMBINE_INTEGRATION.md)
-- [LAW Batch Submission](../../law/README.md)
+- [LAW Batch Submission](../../docs/LAW_TASKS.md)
 - [PhysicsObjectCollection](../../core/interface/PhysicsObjectCollection.h)
 - [CutflowManager](../../core/plugins/CutflowManager/CutflowManager.h)
 - [TriggerManager](../../core/plugins/TriggerManager/TriggerManager.h)

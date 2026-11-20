@@ -15,7 +15,14 @@
 #include <ManagerFactory.h>
 #include <ROOT/RDataFrame.hxx>
 #include <TChain.h>
+#include <TEnv.h>
+#include <TTreeCache.h>
+#include <TFile.h>
+#include <TTree.h>
+#include <ROOT/RVersion.hxx>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -53,6 +60,161 @@ TEST_F(DataManagerTest, ConstructorCreatesValidManager) {
     auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
     auto manager = ManagerFactory::createDataManager(*config);
   });
+}
+
+TEST_F(DataManagerTest, ConfiguredInputWithoutEntriesFailsClearly) {
+  const auto configPath = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-no-input-" + std::to_string(getpid()) + ".txt");
+  const auto missingDirectory = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-missing-input-" + std::to_string(getpid()));
+  {
+    std::ofstream configFile(configPath);
+    ASSERT_TRUE(configFile.good());
+    configFile << "directory=" << missingDirectory.string() << "\n"
+               << "threads=1\n"
+               << "treeList=Events\n";
+  }
+
+  ConfigurationManager config(configPath.string());
+  std::string errorMessage;
+  try {
+    DataManager manager(config);
+  } catch (const std::runtime_error &error) {
+    errorMessage = error.what();
+  }
+  std::filesystem::remove(configPath);
+
+  EXPECT_NE(errorMessage.find("no input entries found"), std::string::npos);
+  EXPECT_NE(errorMessage.find(missingDirectory.string()), std::string::npos);
+  EXPECT_NE(errorMessage.find("Events"), std::string::npos);
+}
+
+TEST(DataManagerInputTest, ExplicitInMemoryConstructorCreatesRequestedEntries) {
+  DataManager dataManager(3);
+  EXPECT_EQ(dataManager.getDataFrame().Count().GetValue(), 3u);
+}
+
+#if (ROOT_VERSION_CODE >= ROOT_VERSION(6,40,0) && ROOT_VERSION_CODE < ROOT_VERSION(6,41,0)) || \
+    ROOT_VERSION_CODE == ROOT_VERSION(6,41,99)
+TEST(DataManagerInputTest, SourceRangePreservesChainEntryIdentitiesAndPayload) {
+  const auto directory=std::filesystem::temp_directory_path()/std::filesystem::path("rdf-source-range-"+std::to_string(getpid()));
+  std::filesystem::create_directories(directory);
+  for(int file=0;file<2;++file){
+    TFile output((directory/(std::to_string(file)+".root")).c_str(),"RECREATE");
+    TTree tree("Events","");float value=0;tree.Branch("value",&value);
+    for(int entry=0;entry<4;++entry){value=file*4+entry;tree.Fill();}
+    tree.Write();
+  }
+  for(const auto& mode:{"filter","source"}){
+    const auto path=directory/(std::string(mode)+".txt");
+    {std::ofstream config(path);config<<"fileList="<<(directory/"0.root").string()<<','<<(directory/"1.root").string()
+      <<"\ntreeList=Events\nthreads=1\nfirstEntry=3\nlastEntry=6\nentryRangeMode="<<mode<<'\n';}
+    ConfigurationManager config(path.string());DataManager data(config);
+    auto node=data.getDataFrame();auto count=node.Count();auto entries=node.Take<ULong64_t>("rdfentry_");auto values=node.Take<float>("value");
+    EXPECT_EQ(count.GetValue(),3u);
+    EXPECT_EQ(entries.GetValue(),(std::vector<ULong64_t>{3,4,5}));
+    EXPECT_EQ(values.GetValue(),(std::vector<float>{3,4,5}));
+    EXPECT_EQ(node.GetNRuns(),1u);
+  }
+  std::filesystem::remove_all(directory);
+}
+
+TEST(DataManagerInputTest, SourceRangeUses64BitBoundsWithoutWalkingPrefix) {
+  const auto directory=std::filesystem::temp_directory_path()/std::filesystem::path("rdf-source-range64-"+std::to_string(getpid()));
+  std::filesystem::create_directories(directory);const auto input=directory/"empty-columns.root";
+  const Long64_t begin=Long64_t{1}<<32;
+  {TFile output(input.c_str(),"RECREATE");TTree tree("Events","");tree.SetEntries(begin+10);tree.Write();}
+  const auto path=directory/"config.txt";
+  {std::ofstream config(path);config<<"fileList="<<input.string()<<"\ntreeList=Events\nthreads=1\nfirstEntry="<<begin
+    <<"\nlastEntry="<<begin+3<<"\nentryRangeMode=source\n";}
+  ConfigurationManager config(path.string());
+  {DataManager data(config);auto entries=data.getDataFrame().Take<ULong64_t>("rdfentry_");
+   EXPECT_EQ(entries.GetValue(),(std::vector<ULong64_t>{ULong64_t(begin),ULong64_t(begin+1),ULong64_t(begin+2)}));}
+  const auto filterPath=directory/"filter-config.txt";
+  {std::ofstream stream(filterPath);stream<<"fileList="<<input.string()<<"\ntreeList=Events\nthreads=1\nfirstEntry="<<begin
+    <<"\nlastEntry="<<begin+3<<"\nentryRangeMode=filter\n";}
+  ConfigurationManager filterConfig(filterPath.string());
+  EXPECT_THROW(DataManager data(filterConfig),std::invalid_argument);
+  std::filesystem::remove_all(directory);
+}
+#endif
+
+TEST(DataManagerInputTest, InvalidThreadSettingFailsWithValueContext) {
+  const auto configPath = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-invalid-threads-" + std::to_string(getpid()) + ".txt");
+  const auto missingDirectory = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-missing-input-" + std::to_string(getpid()));
+
+  for (const std::string &invalidValue : {"4oops", "nope"}) {
+    {
+      std::ofstream configFile(configPath);
+      ASSERT_TRUE(configFile.good());
+      configFile << "threads=" << invalidValue << "\n"
+                 << "directory=" << missingDirectory.string() << "\n"
+                 << "treeList=Events\n";
+    }
+
+    ConfigurationManager config(configPath.string());
+    std::string errorMessage;
+    try {
+      DataManager manager(config);
+    } catch (const std::runtime_error &error) {
+      errorMessage = error.what();
+    }
+    std::filesystem::remove(configPath);
+
+    EXPECT_NE(errorMessage.find("Invalid 'threads' value '" + invalidValue + "'"),
+              std::string::npos)
+        << "Malformed thread setting should fail before input discovery";
+  }
+}
+
+TEST(DataManagerInputTest, RootInputCacheSettingsApplyBeforeOpeningFiles) {
+  const auto configPath = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-cache-" + std::to_string(getpid()) + ".txt");
+  const char *previousFactor = std::getenv("ROOT_TTREECACHE_SIZE");
+  const char *previousPrefill = std::getenv("ROOT_TTREECACHE_PREFILL");
+  const std::string oldFactor = previousFactor ? previousFactor : "";
+  const std::string oldPrefill = previousPrefill ? previousPrefill : "";
+  const int oldLearnEntries = TTreeCache::GetLearnEntries();
+  const int oldAsync = gEnv->GetValue("TFile.AsyncReading", 0);
+
+  auto writeConfig = [&](const std::string &settings) {
+    std::ofstream file(configPath);
+    file << "threads=1\n"
+         << "treeList=Events\n"
+         << "directory=" << configPath.parent_path().string()
+         << "/rdfanalyzer-nonexistent-input\n" << settings;
+  };
+
+  writeConfig("treeCacheSizeMB=64\n"
+              "treeCacheLearnEntries=7\n"
+              "treeCachePrefill=0\n"
+              "treeCacheAsyncPrefetch=1\n");
+  ConfigurationManager fixedConfig(configPath.string());
+  auto chains = makeTChain(fixedConfig);
+  ASSERT_EQ(chains.size(), 1u);
+  EXPECT_EQ(chains[0]->GetCacheSize(), 64LL * 1024 * 1024);
+  EXPECT_EQ(TTreeCache::GetLearnEntries(), 7);
+  EXPECT_STREQ(std::getenv("ROOT_TTREECACHE_PREFILL"), "0");
+  EXPECT_EQ(gEnv->GetValue("TFile.AsyncReading", 0), 1);
+
+  writeConfig("ROOT_TTREECACHE_SIZE=2.5\n");
+  ConfigurationManager factorConfig(configPath.string());
+  EXPECT_NO_THROW(makeTChain(factorConfig));
+  EXPECT_STREQ(std::getenv("ROOT_TTREECACHE_SIZE"), "2.5");
+
+  writeConfig("rootTTreeCacheSize=67108864\n");
+  ConfigurationManager invalidConfig(configPath.string());
+  EXPECT_THROW(makeTChain(invalidConfig), std::runtime_error);
+
+  if (previousFactor) setenv("ROOT_TTREECACHE_SIZE", oldFactor.c_str(), 1);
+  else unsetenv("ROOT_TTREECACHE_SIZE");
+  if (previousPrefill) setenv("ROOT_TTREECACHE_PREFILL", oldPrefill.c_str(), 1);
+  else unsetenv("ROOT_TTREECACHE_PREFILL");
+  TTreeCache::SetLearnEntries(oldLearnEntries);
+  gEnv->SetValue("TFile.AsyncReading", oldAsync);
+  std::filesystem::remove(configPath);
 }
 
 /**
@@ -155,8 +317,8 @@ TEST_F(DataManagerTest, SetDataFrameUpdatesNode) {
  * Verifies that getChain returns a non-null pointer when constructed with a config file.
  */
 TEST_F(DataManagerTest, GetChainReturnsValidPointer) {
-  auto chain = dynamic_cast<DataManager*>(dataManager.get())->getChain();
-  EXPECT_NE(chain, nullptr);
+  auto& chain = dynamic_cast<DataManager*>(dataManager.get())->getChain();
+  EXPECT_TRUE(chain.GetEntries() >= 0);
   // Optionally check chain properties if needed
 }
 
@@ -177,6 +339,291 @@ TEST_F(DataManagerTest, DefineVectorCreatesVectorColumn) {
       EXPECT_EQ((*result)[0][0], 1.0f);
       EXPECT_EQ((*result)[0][1], 2.0f);
     }
+  });
+}
+
+TEST_F(DataManagerTest, HomogeneousFloatPackingPreservesWidthsOrderAndDuplicates) {
+  DataManager local(3);
+  std::vector<std::string> features;
+  for (int index = 0; index < 32; ++index) {
+    const auto name = "float_feature_" + std::to_string(index);
+    local.Define(name, [index](ULong64_t entry) {
+      return float(index - 16) + .25f * float(entry);
+    }, {"rdfentry_"}, *systematicManager);
+    features.push_back(name);
+  }
+  for (int width : {2, 4, 8, 9, 16, 20, 32, 5}) {
+    const std::vector<std::string> columns(features.begin(), features.begin() + width);
+    const auto output = "packed_float_" + std::to_string(width);
+    local.DefineVectorNominal(output, columns, "Float_t", *systematicManager);
+    auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<float>>(output);
+    for (int entry = 0; entry < 3; ++entry) {
+      ASSERT_EQ(values->at(entry).size(), std::size_t(width));
+      for (int feature = 0; feature < width; ++feature)
+        EXPECT_FLOAT_EQ(values->at(entry)[feature], float(feature - 16) + .25f * float(entry));
+    }
+  }
+  local.DefineVectorNominal("duplicate_floats", {features[1], features[0], features[1], features[0]},
+                            "float", *systematicManager);
+  auto duplicates = local.getDataFrame().Take<ROOT::VecOps::RVec<float>>("duplicate_floats");
+  const auto &first = duplicates->at(0);
+  EXPECT_EQ(std::vector<float>(first.begin(), first.end()), (std::vector<float>{-15, -16, -15, -16}));
+}
+
+TEST_F(DataManagerTest, DefineVectorRepeatedScalarsPreserveOrderAndEventValues) {
+  DataManager local(3);
+  local.Define("x", [](ULong64_t entry) { return double(entry) + 0.5; },
+               {"rdfentry_"}, *systematicManager);
+  local.Define("y", [](ULong64_t entry) { return int(entry) + 10; },
+               {"rdfentry_"}, *systematicManager);
+  local.DefineVectorNominal("repeated", {"x", "y", "x", "x", "y"},
+                            "Float_t", *systematicManager);
+  const auto values = local.getDataFrame()
+                          .Take<ROOT::VecOps::RVec<Float_t>>("repeated").GetValue();
+  ASSERT_EQ(values.size(), 3u);
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    const ROOT::VecOps::RVec<Float_t> expected{
+        float(i) + 0.5f, float(i) + 10.f, float(i) + 0.5f,
+        float(i) + 0.5f, float(i) + 10.f};
+    EXPECT_EQ(std::vector<Float_t>(values[i].begin(), values[i].end()),
+              std::vector<Float_t>(expected.begin(), expected.end()));
+  }
+}
+
+TEST_F(DataManagerTest, WidePackingCreatesOneColumnAndPreservesInputOrder) {
+  DataManager local(3);
+  std::vector<std::string> inputs;
+  for (int i = 0; i < 96; ++i) {
+    const auto name = "input_" + std::to_string(i);
+    local.Define(name, [i](ULong64_t entry) { return i + .25f * entry; },
+                 {"rdfentry_"}, *systematicManager);
+    inputs.push_back(name);
+  }
+  // Exercise repeated dependencies and nontrivial requested ordering too.
+  inputs.push_back(inputs[3]);
+  std::reverse(inputs.begin(), inputs.end());
+  const auto before = local.getDataFrame().GetColumnNames().size();
+  local.DefineVectorNominal("wide", inputs, "float", *systematicManager);
+  EXPECT_EQ(local.getDataFrame().GetColumnNames().size(), before + 1);
+  const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<float>>("wide").GetValue();
+  ASSERT_EQ(values.size(), 3u);
+  for (std::size_t entry = 0; entry < values.size(); ++entry) {
+    ASSERT_EQ(values[entry].size(), inputs.size());
+    for (std::size_t i = 0; i < inputs.size(); ++i)
+      EXPECT_FLOAT_EQ(values[entry][i], std::stoi(inputs[i].substr(6)) + .25f * entry);
+  }
+}
+
+TEST_F(DataManagerTest, CachedPackingBindsNewColumnNamesAndPreservesNumericTypes) {
+  for (const std::string prefix : {"first_", "second_"}) {
+    DataManager local(2);
+    local.Define(prefix + "x", [](ULong64_t entry) { return double(entry) + .125; },
+                 {"rdfentry_"}, *systematicManager);
+    local.Define(prefix + "i", []() { return 7; }, {}, *systematicManager);
+    local.Define(prefix + "b", []() { return true; }, {}, *systematicManager);
+    local.Define(prefix + "wide", []() { return ULong64_t{9007199254740993ULL}; }, {}, *systematicManager);
+    local.DefineVectorNominal(prefix + "packed", {prefix + "x", prefix + "i", prefix + "b", prefix + "x"},
+                              "double", *systematicManager);
+    local.DefineVectorNominal(prefix + "integers", {prefix + "wide", prefix + "i"},
+                              "ULong64_t", *systematicManager);
+    const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<double>>(prefix + "packed").GetValue();
+    ASSERT_EQ(values.size(), 2u);
+    for (std::size_t entry = 0; entry < values.size(); ++entry) {
+      const ROOT::VecOps::RVec<double> expected{entry + .125, 7, 1, entry + .125};
+      EXPECT_EQ(std::vector<double>(values[entry].begin(), values[entry].end()),
+                std::vector<double>(expected.begin(), expected.end()));
+    }
+    const auto integers = local.getDataFrame().Take<ROOT::VecOps::RVec<ULong64_t>>(prefix + "integers").GetValue();
+    EXPECT_EQ(integers.front()[0], 9007199254740993ULL);
+    EXPECT_EQ(integers.front()[1], 7u);
+  }
+}
+
+TEST_F(DataManagerTest, VectorPackingConcatenatesRepeatedAndEmptyVectorsPerEvent) {
+  DataManager local(3);
+  local.Define("a", [](ULong64_t entry) { return ROOT::VecOps::RVec<int>(entry, int(entry)); },
+               {"rdfentry_"}, *systematicManager);
+  local.Define("b", []() { return ROOT::VecOps::RVec<double>{.5}; }, {}, *systematicManager);
+  local.Define("empty", []() { return ROOT::VecOps::RVec<bool>{}; }, {}, *systematicManager);
+  const auto before = local.getDataFrame().GetColumnNames().size();
+  local.DefineVectorNominal("packed", {"a", "empty", "b", "a"}, "double", *systematicManager);
+  EXPECT_EQ(local.getDataFrame().GetColumnNames().size(), before + 1);
+  const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<double>>("packed").GetValue();
+  for (std::size_t entry = 0; entry < values.size(); ++entry) {
+    std::vector<double> expected(entry, double(entry));
+    expected.push_back(.5);
+    expected.insert(expected.end(), entry, double(entry));
+    EXPECT_EQ(std::vector<double>(values[entry].begin(), values[entry].end()), expected);
+  }
+}
+
+TEST_F(DataManagerTest, PackedBooleansAndRuntimeNumericTypesUseDirectCasts) {
+  DataManager local(1);
+  local.Define("extended", []() { return long{123456789}; }, {}, *systematicManager);
+  local.Define("zero", []() { return 0; }, {}, *systematicManager);
+  local.Define("negative", []() { return -2; }, {}, *systematicManager);
+  local.DefineVectorNominal("numeric", {"extended", "negative"}, "double", *systematicManager);
+  local.DefineVectorNominal("bits", {"zero", "negative", "zero"}, "Bool_t", *systematicManager);
+  const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<double>>("numeric").GetValue();
+  EXPECT_DOUBLE_EQ(values.front()[0], 123456789);
+  EXPECT_DOUBLE_EQ(values.front()[1], -2);
+  const auto bits = local.getDataFrame().Take<ROOT::VecOps::RVec<bool>>("bits").GetValue();
+  EXPECT_FALSE(bits.front()[0]);
+  EXPECT_TRUE(bits.front()[1]);
+  EXPECT_FALSE(bits.front()[2]);
+}
+
+TEST_F(DataManagerTest, PackedVectorsEvaluateIndependentlyAcrossRdfSlots) {
+  struct DisablePoolOnExit {
+    ~DisablePoolOnExit() { ROOT::DisableImplicitMT(); }
+  } resetPool;
+  ROOT::EnableImplicitMT(2);
+  {
+    DataManager local(1000);
+    local.Define("entry", [](ULong64_t entry) { return double(entry); },
+                 {"rdfentry_"}, *systematicManager);
+    local.Define("twice", [](double entry) { return entry * 2; },
+                 {"entry"}, *systematicManager);
+    local.DefineVectorNominal("packed", {"entry", "twice", "entry"}, "double", *systematicManager);
+    const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<double>>("packed").GetValue();
+    ASSERT_EQ(values.size(), 1000u);
+    for (const auto &value : values) {
+      ASSERT_EQ(value.size(), 3u);
+      EXPECT_DOUBLE_EQ(value[1], 2 * value[0]);
+      EXPECT_DOUBLE_EQ(value[2], value[0]);
+    }
+  }
+}
+
+TEST_F(DataManagerTest, UnknownInterpreterInputFailsWithoutBreakingLaterPacking) {
+  DataManager local(1);
+  struct UnregisteredNumber {
+    operator double() const { return 3.125; }
+  };
+  local.Define("unknown", []() { return UnregisteredNumber{}; }, {}, *systematicManager);
+  local.Define("known", []() { return 2; }, {}, *systematicManager);
+  // This local C++ type has no interpreter declaration or ROOT dictionary.
+  ASSERT_NE(local.getDataFrame().GetColumnType("unknown").find("CLING_UNKNOWN_TYPE_"), std::string::npos);
+  EXPECT_THROW(local.DefineVectorNominal("bad", {"unknown", "known"}, "double", *systematicManager),
+               std::runtime_error);
+  local.DefineVectorNominal("good", {"known", "known"}, "int", *systematicManager);
+  const auto values = local.getDataFrame().Take<ROOT::VecOps::RVec<int>>("good").GetValue();
+  EXPECT_EQ(values.front().size(), 2u);
+  EXPECT_EQ(values.front()[0], 2);
+  EXPECT_EQ(values.front()[1], 2);
+}
+
+TEST_F(DataManagerTest, DefineVectorPropagatesPairedSystematicVariations) {
+  DataManager localDataManager(5);
+  localDataManager.Define("pt", []() { return 100.0f; }, {}, *systematicManager);
+  localDataManager.Define("eta", []() { return 1.0f; }, {}, *systematicManager);
+  localDataManager.Define("pt_shift_up", []() { return 120.0f; }, {},
+                          *systematicManager);
+  localDataManager.Define("pt_shift_down", []() { return 80.0f; }, {},
+                          *systematicManager);
+  localDataManager.Define("eta_scale_up", []() { return 2.0f; }, {},
+                          *systematicManager);
+  localDataManager.Define("eta_scale_down", []() { return 0.5f; }, {},
+                          *systematicManager);
+
+  systematicManager->registerVariationColumns("pt", "jes", "pt_shift_up",
+                                               "pt_shift_down");
+  systematicManager->registerVariationColumns(
+      "leptons", "jes", "leptons_jes_custom_up",
+      "leptons_jes_custom_down");
+  systematicManager->registerVariationColumns("eta", "etaScale", "eta_scale_up",
+                                               "eta_scale_down");
+
+  const auto beforePacking = localDataManager.getDataFrame().GetColumnNames().size();
+  localDataManager.DefineVector("leptons", {"pt", "eta"}, "Float_t",
+                                *systematicManager);
+  // Nominal plus the two paired sources, each as one direct Define.
+  EXPECT_EQ(localDataManager.getDataFrame().GetColumnNames().size(), beforePacking + 5);
+  localDataManager.Define(
+      "lepton_pt_sum",
+      [](const ROOT::VecOps::RVec<float> &values) { return values[0] + values[1]; },
+      {"leptons"}, *systematicManager);
+
+  auto df = localDataManager.getDataFrame();
+  auto nominal = df.Take<ROOT::VecOps::RVec<float>>("leptons");
+  auto jesUp = df.Take<ROOT::VecOps::RVec<float>>("leptons_jes_custom_up");
+  auto jesDown = df.Take<ROOT::VecOps::RVec<float>>("leptons_jes_custom_down");
+  auto etaUp = df.Take<ROOT::VecOps::RVec<float>>("leptons_etaScaleUp");
+  auto etaDown = df.Take<ROOT::VecOps::RVec<float>>("leptons_etaScaleDown");
+
+  ASSERT_EQ(nominal->size(), 5u);
+  ASSERT_EQ(jesUp->size(), 5u);
+  ASSERT_EQ(jesDown->size(), 5u);
+  ASSERT_EQ(etaUp->size(), 5u);
+  ASSERT_EQ(etaDown->size(), 5u);
+  ASSERT_EQ(nominal->front().size(), 2u);
+  EXPECT_FLOAT_EQ(nominal->front()[0], 100.0f);
+  EXPECT_FLOAT_EQ(nominal->front()[1], 1.0f);
+  EXPECT_FLOAT_EQ(jesUp->front()[0], 120.0f);
+  EXPECT_FLOAT_EQ(jesUp->front()[1], 1.0f);
+  EXPECT_FLOAT_EQ(jesDown->front()[0], 80.0f);
+  EXPECT_FLOAT_EQ(jesDown->front()[1], 1.0f);
+  EXPECT_FLOAT_EQ(etaUp->front()[0], 100.0f);
+  EXPECT_FLOAT_EQ(etaUp->front()[1], 2.0f);
+  EXPECT_FLOAT_EQ(etaDown->front()[0], 100.0f);
+  EXPECT_FLOAT_EQ(etaDown->front()[1], 0.5f);
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("leptons", "jes"));
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("leptons", "etaScale"));
+  EXPECT_EQ(systematicManager->getVariationColumnName("leptons", "jesUp"),
+            "leptons_jes_custom_up");
+  auto jesUpSum =
+      localDataManager.getDataFrame().Take<float>("lepton_pt_sum_jesUp");
+  ASSERT_EQ(jesUpSum->size(), 5u);
+  EXPECT_FLOAT_EQ(jesUpSum->front(), 121.0f);
+}
+
+TEST_F(DataManagerTest, DefineVectorConcatenatesRVecColumnsAndCasts) {
+  dataManager->Define(
+      "vec1",
+      []() -> ROOT::VecOps::RVec<int> { return {1, 2}; },
+      {}, *systematicManager);
+  dataManager->Define(
+      "vec2",
+      []() -> ROOT::VecOps::RVec<double> { return {3.5, 4.5}; },
+      {}, *systematicManager);
+
+  EXPECT_NO_THROW({
+    dataManager->DefineVector("vec_concat", {"vec1", "vec2"}, "Float_t",
+                              *systematicManager);
+    auto df = dataManager->getDataFrame();
+    auto result = df.Take<ROOT::VecOps::RVec<Float_t>>("vec_concat");
+    ASSERT_EQ(result->size(), df.Count().GetValue());
+    ASSERT_FALSE(result->empty());
+    ASSERT_EQ((*result)[0].size(), 4u);
+    EXPECT_FLOAT_EQ((*result)[0][0], 1.0f);
+    EXPECT_FLOAT_EQ((*result)[0][1], 2.0f);
+    EXPECT_FLOAT_EQ((*result)[0][2], 3.5f);
+    EXPECT_FLOAT_EQ((*result)[0][3], 4.5f);
+  });
+}
+
+TEST_F(DataManagerTest, DefineVectorRejectsMixedScalarAndRVecInputs) {
+  dataManager->Define("scalar_col", []() { return 1.0f; }, {},
+                      *systematicManager);
+  dataManager->Define(
+      "vector_col",
+      []() -> ROOT::VecOps::RVec<float> { return {2.0f, 3.0f}; },
+      {}, *systematicManager);
+
+  EXPECT_THROW(
+      { dataManager->DefineVector("mixed_vec", {"scalar_col", "vector_col"},
+                                  "Float_t", *systematicManager); },
+      std::runtime_error);
+}
+
+TEST_F(DataManagerTest, DefineVectorWithNoInputsCreatesEmptyVectorColumn) {
+  EXPECT_NO_THROW({
+    dataManager->DefineVector("empty_vec", {}, "float", *systematicManager);
+    auto df = dataManager->getDataFrame();
+    auto result = df.Take<ROOT::VecOps::RVec<float>>("empty_vec");
+    ASSERT_EQ(result->size(), df.Count().GetValue());
+    ASSERT_FALSE(result->empty());
+    EXPECT_TRUE((*result)[0].empty());
   });
 }
 
@@ -491,6 +938,115 @@ TEST_F(DataManagerTest, AttachFriendTreeNoSourceSkipsGracefully) {
     auto dm = dynamic_cast<DataManager*>(dataManager.get());
     dm->attachFriendTree(spec);
   });
+}
+
+TEST(DataManagerConfigTest, RelativeAuxiliaryPathsResolveFromMainConfigDirectory) {
+  const auto tempRoot = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-relative-config-" + std::to_string(getpid()));
+  const auto configDir = tempRoot / "cfg";
+  const auto workingDir = tempRoot / "work";
+  std::filesystem::create_directories(configDir);
+  std::filesystem::create_directories(workingDir);
+
+  {
+    std::ofstream(configDir / "floats.txt") << "mass=125.0\n";
+    std::ofstream(configDir / "ints.txt") << "count=7\n";
+    std::ofstream(configDir / "aliases.txt")
+        << "existingName=source newName=source_alias\n";
+    std::ofstream(configDir / "optional.txt")
+        << "name=optional_branch type=1 default=42\n";
+    std::ofstream(tempRoot / "submit.txt")
+        << "floatConfig=cfg/floats.txt\n"
+        << "intConfig=cfg/ints.txt\n"
+        << "aliasConfig=cfg/aliases.txt\n"
+        << "optionalBranchesConfig=cfg/optional.txt\n";
+  }
+
+  const auto oldWorkingDir = std::filesystem::current_path();
+  std::filesystem::current_path(workingDir);
+  {
+    ConfigurationManager config((tempRoot / "submit.txt").string());
+    DataManager data(2);
+    SystematicManager systematics;
+    data.Define("source", []() { return 3.0; }, {}, systematics);
+    data.finalizeSetup(config);
+
+    const auto names = data.getDataFrame().GetColumnNames();
+    EXPECT_NE(std::find(names.begin(), names.end(), "mass"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "count"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "source_alias"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "optional_branch"), names.end());
+  }
+  std::filesystem::current_path(oldWorkingDir);
+  std::filesystem::remove_all(tempRoot);
+}
+
+TEST(DataManagerConfigTest, ConstantValuesRequireFullTokensAndCppRanges) {
+  const auto tempRoot = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-invalid-constant-" + std::to_string(getpid()));
+  const auto valueDirName = "invalid-values-" + std::to_string(getpid());
+  std::filesystem::create_directories(tempRoot / valueDirName);
+
+  const auto expectInvalid = [&](const std::string& key,
+                                 const std::string& value,
+                                 const std::string& expectedMessage) {
+    const bool isFloat = key == "floatConfig";
+    const auto valuePath = tempRoot / valueDirName /
+        (isFloat ? "floats.txt" : "ints.txt");
+    {
+      std::ofstream values(valuePath);
+      values << "bad=" << value << "\n";
+    }
+    const auto configPath = tempRoot / ("main-" + key + ".txt");
+    {
+      std::ofstream configFile(configPath);
+      configFile << key << "=" << valueDirName << "/"
+                 << valuePath.filename().string() << "\n";
+    }
+    ConfigurationManager config(configPath.string());
+    DataManager data(1);
+    std::string observed;
+    try {
+      data.registerConstants(config);
+    } catch (const std::runtime_error& error) {
+      observed = error.what();
+    }
+    EXPECT_NE(observed.find(expectedMessage), std::string::npos)
+        << "input value was " << value << "; observed " << observed;
+  };
+
+  for (const auto& value : {"12junk", "3.5", "2147483648"}) {
+    expectInvalid("intConfig", value, "invalid integer constant 'bad=");
+  }
+  for (const auto& value : {"12junk", "1e39", "nan", "inf"}) {
+    expectInvalid("floatConfig", value, "invalid float constant 'bad=");
+  }
+
+  std::filesystem::remove_all(tempRoot);
+}
+
+TEST(DataManagerConfigTest, ThreadCountOneDisablesGlobalImplicitMTAfterPriorEnable) {
+  const auto tempRoot = std::filesystem::temp_directory_path() /
+      ("rdfanalyzer-thread-config-" + std::to_string(getpid()));
+  std::filesystem::create_directories(tempRoot);
+
+  const auto constructWithThreads = [&](const std::string& value) {
+    const auto configPath = tempRoot / ("threads-" + value + ".txt");
+    {
+      std::ofstream configFile(configPath);
+      configFile << "threads=" << value << "\n"
+                 << "directory=" << (tempRoot / "missing").string() << "\n";
+    }
+    ConfigurationManager config(configPath.string());
+    EXPECT_THROW(DataManager data(config), std::runtime_error);
+  };
+
+  ROOT::DisableImplicitMT();
+  constructWithThreads("2");
+  EXPECT_TRUE(ROOT::IsImplicitMTEnabled());
+  constructWithThreads("1");
+  EXPECT_FALSE(ROOT::IsImplicitMTEnabled());
+  std::filesystem::remove_all(tempRoot);
 }
 
 int main(int argc, char **argv) {

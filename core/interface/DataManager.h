@@ -44,16 +44,30 @@ public:
    */
   ROOT::RDF::RNode getDataFrame() override;
   void setDataFrame(const ROOT::RDF::RNode &node) override;
+  void markInputDependenciesIncomplete(const std::string &reason) override;
 
   /**
-   * @brief Get the main TChain pointer
-   * @return Pointer to the main TChain
+   * @brief Get the main TChain reference
+   * @return Reference to the main TChain
+   *
+   * The returned reference is valid for the lifetime of this DataManager.
    */
-  TChain *getChain() const;
+  TChain &getChain() const;
 
 
   /**
-   * @brief Define a vector variable in the dataframe. If all columns are scalars, creates a vector from them. If all columns are RVecs, concatenates and casts them to the target type. Mixed types are not supported and will throw an error at runtime. Uses a JIT lambda for type deduction and concatenation.
+   * @brief Define a vector variable in the dataframe.
+   *
+   * If all input columns are scalars, creates a vector from them. If all input
+   * columns are RVecs, concatenates and casts them to the target type. Mixed
+   * scalar/RVec input is rejected. Multi-input packing queries RDF input types
+   * and uses a cached typed JIT callable with one output Define and no packing
+   * helper columns. Common zero-/one-input cases use native compiled callables.
+   * For each registered paired systematic affecting an input, also defines
+   * ``name_<systematic>Up`` and ``name_<systematic>Down`` with only the
+   * affected inputs shifted, then registers ``name`` as affected by that
+   * systematic so later derived definitions can propagate it. Explicit output
+   * column mappings already registered for ``name`` are honored.
    * @param name Name of the variable
    * @param columns Input columns (scalars or vectors)
    * @param type Data type (default: Float_t)
@@ -65,16 +79,16 @@ public:
                     ISystematicManager &systematicManager) override;
 
   /**
-   * @brief Filter the dataframe
-   * @param f Filter function
-   * @param columns Input columns
+   * @brief Define a vector from already-resolved nominal or packed inputs.
+   *
+   * Unlike DefineVector(), this does not create additional Up/Down outputs.
+   * It is intended for framework helper bundles whose input ordering already
+   * encodes the variations.
    */
-
-  /**
-   * @brief Define a per-sample variable in the dataframe
-   * @param name Name of the variable
-   * @param f Function to define the variable
-   */
+  void DefineVectorNominal(std::string name,
+                           const std::vector<std::string> &columns,
+                           std::string type,
+                           ISystematicManager &systematicManager) override;
 
   /**
    * @brief Template function to define a constant value for all samples
@@ -91,30 +105,24 @@ public:
   }
 
   /**
-   * @brief Redefine a variable in the dataframe
-   * @param name Name of the variable
-   * @param f Function to redefine the variable
-   * @param columns Input columns
-   */
-
-  /**
    * @brief Register constant variables from configuration
    * @param configProvider Reference to the configuration provider
-   * @param configKey The key in the configuration for the constants file (default: "floatConfig")
+   * @param floatConfigKey Configuration key for the floating-point constants file
+   * @param intConfigKey Configuration key for the integer constants file
    */
   void registerConstants(const IConfigurationProvider &configProvider, const std::string& floatConfigKey = "floatConfig", const std::string& intConfigKey = "intConfig");
 
   /**
    * @brief Register aliases from configuration
    * @param configProvider Reference to the configuration provider
-   * @param configKey The key in the configuration for the alias file (default: "aliasConfig")
+   * @param aliasConfigKey Configuration key for the alias file
    */
   void registerAliases(const IConfigurationProvider &configProvider, const std::string& aliasConfigKey = "aliasConfig");
 
   /**
    * @brief Register optional branches from configuration
    * @param configProvider Reference to the configuration provider
-   * @param configKey The key in the configuration for the optional branches file (default: "optionalBranchesConfig")
+   * @param optionalBranchesConfigKey Configuration key for the optional branches file
    */
   void registerOptionalBranches(const IConfigurationProvider &configProvider, const std::string& optionalBranchesConfigKey = "optionalBranchesConfig");
 
@@ -182,6 +190,12 @@ public:
   virtual ~DataManager();
 
 private:
+  void defineVectorImpl(std::string name,
+                        const std::vector<std::string> &columns,
+                        std::string type,
+                        ISystematicManager &systematicManager,
+                        bool propagateSystematics);
+
   /// Owns TChain objects attached as ROOT friend trees.
   /// Must be declared before chain_vec_m so that friend chains are destroyed
   /// AFTER the main TChain (C++ destroys members in reverse declaration order).

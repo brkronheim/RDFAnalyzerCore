@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "corrections": [{
+    "name": "table", "version": 1,
+    "inputs": [{"name":"eta","type":"real"},{"name":"pt","type":"real"}],
+    "output": {"name":"uncertainty","type":"real"},
+    "generic_formulas": [{"nodetype":"formula","expression":"[0]*max(min(x,[3]),[2])+[1]","parser":"TFormula","variables":["pt"]}],
+    "data": {
+      "nodetype":"binning","input":"eta","edges":[-2.0,2.0],"flow":-999.0,
+      "content":[{
+        "nodetype":"binning","input":"pt","edges":[0.0,10.0,20.0],"flow":"clamp",
+        "content":[
+          {"nodetype":"formularef","index":0,"parameters":[0.5,1,0,10]},
+          {"nodetype":"formularef","index":0,"parameters":[2,3,10,20]}
+        ]
+      }]
+    }
+  }]
+}

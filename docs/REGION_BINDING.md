@@ -121,9 +121,18 @@ lowerBound = 0.0
 upperBound = 200.0
 ```
 
-With regions bound, `SaveHists()` extracts each region's slice of the
-`THnSparse` and writes a standard `TH1F` named `pt` into the appropriate
-region directory inside the ROOT file.
+With regions bound, `SaveHists()` writes the five-dimensional `THnSparseF`
+and its axis labels to the `nd_histograms_v1/` directory. Per-job files keep
+this compact representation so `hadd` can combine the arrays directly. After
+merging, run the extractor to add the standard `TH1F` objects used by existing
+plotting and datacard tools:
+
+```bash
+python core/python/extract_nd_histograms.py merged_histograms.root
+```
+
+The extractor retains the sparse arrays and recreates the historical layout,
+for example `channel_control/sample/pt` and `channel_control/sample/pt_jesUp`.
 
 > **Note**: The region-aware booking path supports *scalar* (per-event) base
 > variables.  For per-object collections (RVec variables) keep using the

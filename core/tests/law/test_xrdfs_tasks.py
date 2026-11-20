@@ -41,7 +41,7 @@ def test_xrdfs_list_files_returns_matching_roots(monkeypatch):
         max_workers=2,
     )
 
-    assert files == ["root://eosuser.cern.ch/eos/foo/bar/event1.root", "root://eosuser.cern.ch/eos/foo/bar/event2.root"]
+    assert files == ["root://eosuser.cern.ch//eos/foo/bar/event1.root", "root://eosuser.cern.ch//eos/foo/bar/event2.root"]
 
 
 def test_get_xrdfs_file_list_branch_map(tmp_path):

@@ -7,6 +7,9 @@ Welcome to the RDFAnalyzerCore documentation! This framework provides a powerful
 New to RDFAnalyzerCore? Start here:
 
 - **[Getting Started Guide](GETTING_STARTED.md)** - Installation, setup, and your first analysis
+- **[Source Extensions](EXTENSIONS.md)** - Generic discovery and extension-owned build options
+- **[Optional CMS Extension](CMS_EXTENSION.md)** - Separate checkout, build modes, and analysis compatibility
+- **[Run Bundles](RUN_BUNDLES.md)** - Frozen inputs, execution identities, shared workflow and physics helpers
 - **[Quick Start](GETTING_STARTED.md#quick-start)** - Get running in 5 minutes
 
 ## Who should read what?
@@ -40,19 +43,25 @@ New to RDFAnalyzerCore? Start here:
 
 ### Python Analysis
 
-- **[Python Bindings](PYTHON_BINDINGS.md)** - Full Python API and usage patterns
+- **[Python installation](PYTHON_INSTALLATION.md)** - Install the frontend and verify the native runtime
+- **[Python authoring](PYTHON_AUTHORING.md)** - Build an analysis with settings, filters and histograms
+- **[Compiled C++ workflows](COMPILED_CPP_WORKFLOWS.md)** - Steer an existing executable from Python
+- **[Python bindings](PYTHON_BINDINGS.md)** - Access the underlying native API
 - **[Python Bindings Testing](PYTHON_BINDINGS_TESTING.md)** - Validation and troubleshooting guide
+- **[Combine and Rabbit fits](RABBIT_INTEGRATION.md)** - Shared statistical tools, native CUDA and multi-GPU fitting, and vjet adapters
 
 ### Framework Features
 
 - **[Machine Learning](ANALYSIS_GUIDE.md#machine-learning-integration)**
   - **[ONNX Models](ONNX_IMPLEMENTATION.md)** - Runtime ML from any framework (PyTorch, TensorFlow, scikit-learn)
-  - **[SOFIE Models](SOFIE_IMPLEMENTATION.md)** - Build-time compiled models for maximum performance
+  - **[SOFIE Models](SOFIE_IMPLEMENTATION.md)** - C++ inference generated with the standalone PyPI package
   - **[BDT Models](CONFIG_REFERENCE.md#bdt-manager-configuration)** - FastForest boosted decision trees
   - **[ONNX Multi-Output](ONNX_MULTI_OUTPUT.md)** - Models with multiple outputs
 
 - **[Batch Submission](BATCH_SUBMISSION.md)** - HTCondor job submission guide
 - **[Production Manager](PRODUCTION_MANAGER.md)** - Production-scale job management and monitoring
+- **[XrdAdaptor input](xrd-adaptor.md)** - Default framework XRootD reader and worker runtime
+- **[ROOT input cache](INPUT_CACHE.md)** - TTree cache and next-file prefetch controls
 
 ### Data Management & Outputs
 
@@ -112,12 +121,14 @@ New to RDFAnalyzerCore? Start here:
   - Data management
   - Plugin interfaces
   - Manager implementations
+- **[Installed C++ SDK](ANALYZER_SDK.md)** - Build and link an external analysis with CMake
 - **[Search Documentation](SEARCH.html)** - Keyword search across all site pages
 - **[Doxygen API Documentation](doxygen/index.html)** - Generated C++ API docs from source
 
 ## Developer Documentation
 
 ### Extending the Framework
+
 
 - **[Architecture](ARCHITECTURE.md)** - Internal design and structure
   - Design philosophy
@@ -155,7 +166,7 @@ Framework is extensible via plugins:
 
 - **BDTManager**: Boosted decision trees
 - **OnnxManager**: Neural networks and ML models
-- **SofieManager**: Build-time compiled models
+- **SofieManager**: Compiled inference callables
 - **CorrectionManager**: Scale factors and corrections
 - **JetEnergyScaleManager**: JES/JER corrections, JER smearing, CMS systematic sets, MET propagation, and PhysicsObjectCollection integration
 - **ElectronEnergyScaleManager**: Electron scale and smearing workflows via ObjectEnergyManagerBase
@@ -176,7 +187,7 @@ Built on ROOT RDataFrame's lazy evaluation:
 ```cpp
 analyzer.Define("var", ...);    // Queued
 analyzer.Filter("cut", ...);    // Queued
-analyzer.save();                // Executes all at once
+analyzer.run();                // Executes all at once
 ```
 
 Efficient processing with automatic optimization.
@@ -185,15 +196,15 @@ Efficient processing with automatic optimization.
 
 ### For New Users
 
-1. [Installation](GETTING_STARTED.md#installation-and-building)
-2. [First Analysis](GETTING_STARTED.md#run-the-example-analysis)
+1. [Installation](GETTING_STARTED.md#quick-start)
+2. [Create Your First Analysis](GETTING_STARTED.md#step-1-create-your-analysis-directory)
 3. [Configuration Basics](CONFIG_REFERENCE.md#main-configuration-file)
 4. [Analysis Tutorial](ANALYSIS_GUIDE.md#step-by-step-tutorial)
 
 ### For Advanced Users
 
-1. [Architecture Overview](ARCHITECTURE.md#architecture-overview)
-2. [Creating Plugins](PLUGIN_DEVELOPMENT.md#step-by-step-creating-a-plugin)
+1. [Architecture Overview](ARCHITECTURE.md#design-philosophy)
+2. [Creating Plugins](PLUGIN_DEVELOPMENT.md#plugin-shapes)
 3. [Systematic Uncertainties](ANALYSIS_GUIDE.md#systematics)
 4. [HTCondor Submission](ANALYSIS_GUIDE.md#advanced-topics)
 
@@ -238,7 +249,7 @@ int main(int argc, char **argv) {
     onnx->applyAllModels();
     
     // Save
-    analyzer.save();
+    analyzer.run();
     return 0;
 }
 ```
@@ -272,14 +283,13 @@ ONNX Runtime is downloaded automatically during build.
 
 Contributions welcome! See [Plugin Development Guide](PLUGIN_DEVELOPMENT.md) to get started.
 
-For implementation details and design notes for major features, see the [DEVELOPMENT](DEVELOPMENT/) directory.
+For framework design details, see the [Architecture Guide](ARCHITECTURE.md) and
+[Plugin Development Guide](PLUGIN_DEVELOPMENT.md).
 
 ## License
 
-See repository for license information.
+RDFAnalyzerCore uses the [MIT License](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/LICENSE). Third-party components retain their own licenses and notices.
 
 ---
 
 **Repository**: https://github.com/brkronheim/RDFAnalyzerCore
-
-**Last Updated**: March 2026

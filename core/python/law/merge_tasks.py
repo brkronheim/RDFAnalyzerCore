@@ -55,11 +55,13 @@ Usage
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -78,11 +80,19 @@ for _p in (_HERE, _CORE_PYTHON):
 
 from output_schema import (  # noqa: E402
     OutputManifest,
-    MergeInputValidationError,
+    MetadataSchema,
+    SystematicColumnInventory,
+    SystematicColumnEntry,
     merge_manifests,
-    validate_merge_inputs,
 )
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
+from metadata_io import (merge_root_files, load_metadata_records, build_bundle,
+                         validate_metadata_bundle)  # noqa: E402
+from extract_nd_histograms import (  # noqa: E402
+    extract_nd_histograms,
+    read_embedded_histogram_schema,
+    validate_compatible_histogram_schemas,
+)
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 
@@ -93,6 +103,43 @@ DEFAULT_MANIFEST_GLOB = "**/output_manifest.yaml"
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _derive_systematic_family(base_name: str) -> str:
+    """Map a systematic base name to a family grouping key.
+
+    Examples:
+      - ``"jesTotal"``, ``"jesAbsolute"`` -> ``"jes"``
+      - ``"jer"`` -> ``"jer"``
+      - ``"btag"``, ``"btagHF"`` -> ``"btag"``
+      - ``"ctag"`` -> ``"ctag"``
+      - ``"muon_id"``, ``"muon_iso"`` -> ``"muon"``
+      - ``"electron_id"``, ``"electron_reco"`` -> ``"electron"``
+      - ``"pileup"`` -> ``"pileup"``
+      - ``"lumi"`` -> ``"lumi"``
+      - ``"stxs_acceptance"``, ``"stxs_delta1"`` -> ``"stxs"``
+      - ``"vjet_"`` prefixed -> ``"vjet"``
+      - Everything else -> ``"other"``
+    """
+    lower = base_name.lower()
+
+    # Known family prefixes (longest-first for specificity)
+    known_prefixes = [
+        ("jes", "jes"),
+        ("jer", "jer"),
+        ("btag", "btag"),
+        ("ctag", "ctag"),
+        ("muon", "muon"),
+        ("electron", "electron"),
+        ("pileup", "pileup"),
+        ("lumi", "lumi"),
+        ("stxs", "stxs"),
+        ("vjet", "vjet"),
+    ]
+    for prefix, family in known_prefixes:
+        if lower.startswith(prefix):
+            return family
+    return "other"
 
 
 def _find_hadd() -> str:
@@ -125,7 +172,7 @@ def _find_hadd() -> str:
 
 
 def _run_hadd(output_path: str, input_paths: List[str]) -> None:
-    """Run ``hadd`` to merge *input_paths* into *output_path*.
+    """Run ``hadd`` to merge local or XRootD inputs into a local output.
 
     Parameters
     ----------
@@ -154,6 +201,34 @@ def _run_hadd(output_path: str, input_paths: List[str]) -> None:
             f"hadd failed (exit {result.returncode}) merging "
             f"{len(input_paths)} file(s) into {output_path!r}.\n"
             f"stderr: {result.stderr.strip()}"
+            + (
+                "\nFor root:// inputs, confirm this ROOT installation has "
+                "XRootD support and the current credentials can read the files."
+                if any(_is_xrootd_url(path) for path in input_paths)
+                else ""
+            )
+        )
+
+
+def _is_xrootd_url(path: str) -> bool:
+    """Return whether *path* is a ROOT XRootD URL."""
+    return path.startswith("root://")
+
+
+def _resolve_manifest_root_path(manifest_path: str, root_path: str) -> str:
+    """Resolve a manifest ROOT path while preserving remote ``root://`` URLs."""
+    if _is_xrootd_url(root_path) or os.path.isabs(root_path):
+        return root_path
+    return os.path.join(os.path.dirname(manifest_path), root_path)
+
+
+def _require_local_root_input(path: str, role: str, manifest_path: str) -> None:
+    """Check local inputs early; remote inputs are validated by ROOT/hadd."""
+    if _is_xrootd_url(path):
+        return
+    if not os.path.isfile(path):
+        raise RuntimeError(
+            f"{role} file not found: {path!r} (referenced in {manifest_path!r})"
         )
 
 
@@ -190,6 +265,8 @@ def _group_files_by_basename(
 
 class MergeMixin:
     """Parameters and helpers shared by all merge tasks."""
+
+    output_manifest_role: Optional[str] = None
 
     name = luigi.Parameter(
         description=(
@@ -273,6 +350,20 @@ class MergeMixin:
             )
         pattern = os.path.join(input_dir, self.manifest_glob)
         paths = sorted(_glob.glob(pattern, recursive=True))
+        # A caller may put merged output beneath the input tree. Exclude the
+        # task's own output directory so a later run cannot recursively merge
+        # its previous result together with original job products.
+        input_real = os.path.realpath(input_dir)
+        output_real = os.path.realpath(self._merge_dir)
+        try:
+            output_is_nested = os.path.commonpath([input_real, output_real]) == input_real
+        except ValueError:
+            output_is_nested = False
+        if output_is_nested:
+            paths = [
+                path for path in paths
+                if os.path.commonpath([output_real, os.path.realpath(path)]) != output_real
+            ]
         if not paths:
             raise RuntimeError(
                 f"No manifests found matching {pattern!r}.  "
@@ -308,32 +399,6 @@ class MergeMixin:
             )
         return loaded
 
-    def _validate(
-        self,
-        manifests: List[OutputManifest],
-        required_roles: Optional[List[str]] = None,
-    ) -> None:
-        """Validate manifests for merge compatibility.
-
-        Parameters
-        ----------
-        manifests:
-            Loaded :class:`OutputManifest` objects.
-        required_roles:
-            Role names that must be present in every manifest.
-
-        Raises
-        ------
-        MergeInputValidationError
-            If any validation check fails.
-        """
-        errors = validate_merge_inputs(manifests, required_roles=required_roles)
-        if errors:
-            raise MergeInputValidationError(
-                "Pre-merge validation failed:\n"
-                + "\n".join(f"  {e}" for e in errors)
-            )
-
     def _build_merged_manifest(
         self, manifests: List[OutputManifest], required_roles: Optional[List[str]] = None
     ) -> OutputManifest:
@@ -344,6 +409,80 @@ class MergeMixin:
             user_repo_hash=self.user_repo_hash or None,
             required_roles=required_roles,
         )
+
+    def complete(self) -> bool:
+        """Require the manifest and every merged artifact it describes.
+
+        A manifest is written last, but it can outlive a ROOT/JSON artifact if
+        an operator removes or truncates one after a completed run. Treat such
+        a cache as stale so Luigi can rebuild it.
+        """
+        if not super().complete():
+            return False
+        role = self.output_manifest_role
+        if role is None:
+            return True
+
+        manifest_path = self.output().path
+        try:
+            manifest = OutputManifest.load_yaml(manifest_path)
+            if manifest.validate():
+                return False
+            schema = getattr(manifest, role)
+            if schema is None or not schema.output_file:
+                return False
+            primary = schema.output_file
+            if not os.path.isabs(primary):
+                primary = os.path.join(os.path.dirname(manifest_path), primary)
+
+            if role == "metadata":
+                with open(primary, "r", encoding="utf-8") as stream:
+                    summary = json.load(stream)
+                if not isinstance(summary, dict):
+                    return False
+                records = summary.get("provenance_records")
+                if not isinstance(records, list) or not records or summary.get("n_inputs") != len(records):
+                    return False
+                if summary.get("metadata_bundle") is not None:
+                    from metadata_io import expand_bundle
+                    expand_bundle(summary["metadata_bundle"])
+                return True
+
+            groups_name = {
+                "skim": "merged_skim_groups.json",
+                "histograms": "merged_histogram_groups.json",
+                "cutflow": "merged_cutflow_groups.json",
+            }[role]
+            with open(os.path.join(os.path.dirname(manifest_path), groups_name),
+                      "r", encoding="utf-8") as stream:
+                groups = json.load(stream)
+            paths = list(groups.values()) if isinstance(groups, dict) else []
+            paths = [os.path.abspath(os.path.join(os.path.dirname(manifest_path), path))
+                     for path in paths]
+            if os.path.abspath(primary) not in paths:
+                return False
+
+            import uproot  # type: ignore
+
+            for resolved in dict.fromkeys(paths):
+                if not os.path.isfile(resolved) or os.path.getsize(resolved) <= 0:
+                    return False
+                if role != "skim":
+                    validate_metadata_bundle(resolved)
+                with uproot.open(resolved) as root_file:
+                    if role == "skim":
+                        tree_name = getattr(schema, "tree_name", "Events")
+                        obj = root_file[tree_name]
+                        classname = getattr(obj, "classname", None)
+                        if classname is not None and classname not in (
+                            "TTree", "ROOT::RNTuple"
+                        ):
+                            return False
+                    elif not root_file.keys():
+                        return False
+            return True
+        except Exception:  # malformed manifests or artifacts are stale targets
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -364,11 +503,27 @@ class MergeSkims(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+    output_manifest_role = "skim"
 
     def output(self):
         return law.LocalFileTarget(
             os.path.join(self._merge_dir, "skims", "output_manifest.yaml")
         )
+
+    def complete(self) -> bool:
+        # Keep the index, manifest and ROOT reads within one publication.
+        try:
+            directory = os.open(Path(self.output().path).parent, os.O_RDONLY | os.O_DIRECTORY)
+        except FileNotFoundError:
+            return False
+        try:
+            try:
+                fcntl.flock(directory, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            return super().complete()
+        finally:
+            os.close(directory)
 
     def run(self):
         out_dir = os.path.join(self._merge_dir, "skims")
@@ -391,19 +546,16 @@ class MergeSkims(MergeMixin, law.Task):
             f"{len(skim_manifests)} manifest(s) contain a skim schema."
         )
 
-        self._validate([m for _, m in skim_manifests], required_roles=["skim"])
+        merged = self._build_merged_manifest(
+            [m for _, m in skim_manifests], required_roles=["skim"]
+        )
 
         # Collect skim output file paths from manifests
         skim_files: List[str] = []
         for p, m in skim_manifests:
-            job_dir = os.path.dirname(p)
             skim_path = m.skim.output_file  # type: ignore[union-attr]
-            if not os.path.isabs(skim_path):
-                skim_path = os.path.join(job_dir, skim_path)
-            if not os.path.isfile(skim_path):
-                raise RuntimeError(
-                    f"Skim file not found: {skim_path!r}  (referenced in {p!r})"
-                )
+            skim_path = _resolve_manifest_root_path(p, skim_path)
+            _require_local_root_input(skim_path, "Skim", p)
             skim_files.append(skim_path)
 
         groups = _group_files_by_basename(skim_files)
@@ -412,32 +564,37 @@ class MergeSkims(MergeMixin, law.Task):
             f"{len(groups)} group(s): {sorted(groups.keys())}"
         )
 
-        merged_output_files: Dict[str, str] = {}
-        with PerformanceRecorder("MergeSkims") as rec:
-            for basename, paths in groups.items():
-                out_path = os.path.join(out_dir, basename)
-                self.publish_message(
-                    f"hadd: {len(paths)} → {out_path}"
-                )
-                _run_hadd(out_path, paths)
-                merged_output_files[basename] = out_path
+        out = Path(out_dir)
+        manifest = Path(self.output().path)
+        index_name = "merged_skim_groups.json"
+        perf_name = "merge_skims.perf.json"
+        if groups.keys() & {manifest.name, index_name, perf_name}:
+            raise ValueError("Skim basename conflicts with a publication metadata filename.")
+        with tempfile.TemporaryDirectory(dir=out, prefix=".skim-merge-") as staging:
+            staged = Path(staging)
+            with PerformanceRecorder("MergeSkims") as rec:
+                for basename, paths in groups.items():
+                    self.publish_message(f"hadd: {len(paths)} → {out / basename}")
+                    _run_hadd(str(staged / basename), paths)
 
-        rec.save(os.path.join(out_dir, "merge_skims.perf.json"))
+            rec.save(str(staged / perf_name))
+            groups_meta = {name: str(out / name) for name in sorted(groups)}
+            merged.skim.output_file = groups_meta[min(groups)]
+            with (staged / index_name).open("w") as stream:
+                json.dump(groups_meta, stream, indent=2)
+            merged.save_yaml(str(staged / manifest.name))
 
-        # Build merged manifest using the first skim group as the template
-        merged = self._build_merged_manifest(
-            [m for _, m in skim_manifests], required_roles=["skim"]
-        )
-        # Update output_file to the primary (first) merged skim
-        primary_basename = sorted(merged_output_files.keys())[0]
-        merged.skim.output_file = merged_output_files[primary_basename]  # type: ignore[union-attr]
+            # The public manifest is the commit marker. A retry can rebuild
+            # every group even after process death releases the directory lock.
+            directory = os.open(out, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(directory, fcntl.LOCK_EX)
+                manifest.unlink(missing_ok=True)
+                for name in (*groups_meta, perf_name, index_name, manifest.name):
+                    os.replace(staged / name, out / name)
+            finally:
+                os.close(directory)
 
-        # Persist a sidecar JSON listing all merged groups for downstream use
-        groups_meta = {k: v for k, v in sorted(merged_output_files.items())}
-        with open(os.path.join(out_dir, "merged_skim_groups.json"), "w") as fh:
-            json.dump(groups_meta, fh, indent=2)
-
-        merged.save_yaml(self.output().path)
         self.publish_message(f"Merged manifest written to: {self.output().path}")
 
 
@@ -456,6 +613,7 @@ class MergeHistograms(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+    output_manifest_role = "histograms"
 
     def output(self):
         return law.LocalFileTarget(
@@ -480,18 +638,15 @@ class MergeHistograms(MergeMixin, law.Task):
             f"{len(hist_manifests)} manifest(s) contain a histograms schema."
         )
 
-        self._validate([m for _, m in hist_manifests], required_roles=["histograms"])
+        merged = self._build_merged_manifest(
+            [m for _, m in hist_manifests], required_roles=["histograms"]
+        )
 
         hist_files: List[str] = []
         for p, m in hist_manifests:
-            job_dir = os.path.dirname(p)
             hist_path = m.histograms.output_file  # type: ignore[union-attr]
-            if not os.path.isabs(hist_path):
-                hist_path = os.path.join(job_dir, hist_path)
-            if not os.path.isfile(hist_path):
-                raise RuntimeError(
-                    f"Histogram file not found: {hist_path!r}  (referenced in {p!r})"
-                )
+            hist_path = _resolve_manifest_root_path(p, hist_path)
+            _require_local_root_input(hist_path, "Histogram", p)
             hist_files.append(hist_path)
 
         groups = _group_files_by_basename(hist_files)
@@ -500,25 +655,131 @@ class MergeHistograms(MergeMixin, law.Task):
             f"{len(groups)} group(s): {sorted(groups.keys())}"
         )
 
+        # A THnSparse can only be added directly when every file uses the same
+        # category-to-bin mapping and exact binning. Validate every group
+        # before writing any merged output.
+        group_schemas: Dict[str, Optional[dict]] = {}
+        for basename, paths in groups.items():
+            schemas = [(path, read_embedded_histogram_schema(path)) for path in paths]
+            present = [(path, schema) for path, schema in schemas if schema is not None]
+            if present and len(present) != len(schemas):
+                missing = [path for path, schema in schemas if schema is None]
+                raise RuntimeError(
+                    f"Cannot merge mixed legacy and sparse-first histogram files for "
+                    f"{basename!r}; files without the embedded schema: {missing}"
+                )
+            group_schemas[basename] = validate_compatible_histogram_schemas(present)
+
+        # ---- Pre-merge coverage prediction ----
+        # Collect all histogram names across input manifests to predict
+        # which systematic variations will be available post-merge.
+        coverage_prediction = {}
+        for _, m in hist_manifests:
+            if m.histograms:
+                names = (m.histograms.axis_labels or {}).get("systematic", [])
+                if not names:
+                    names = m.histograms.histogram_names or []
+                for name in names:
+                    lower = name.lower()
+                    for suffix in ("up", "down"):
+                        if lower.endswith(suffix):
+                            base = name[:-len(suffix)].rstrip("_-")
+                            if base:
+                                coverage_prediction.setdefault(base, set()).add(suffix)
+        if coverage_prediction:
+            n_complete = sum(
+                1 for directions in coverage_prediction.values() if len(directions) == 2
+            )
+            self.publish_message(
+                f"Pre-merge coverage prediction: {len(coverage_prediction)} systematic "
+                f"base(s) detected, {n_complete} with both up+down variations."
+            )
+
         merged_output_files: Dict[str, str] = {}
         with PerformanceRecorder("MergeHistograms") as rec:
             for basename, paths in groups.items():
                 out_path = os.path.join(out_dir, basename)
                 self.publish_message(f"hadd: {len(paths)} → {out_path}")
-                _run_hadd(out_path, paths)
+                merge_root_files(
+                    out_path, paths, role="histograms", hadd=_find_hadd(),
+                    postprocess=(lambda path: extract_nd_histograms(path, path))
+                    if group_schemas[basename] is not None else None,
+                )
                 merged_output_files[basename] = out_path
 
         rec.save(os.path.join(out_dir, "merge_histograms.perf.json"))
 
-        merged = self._build_merged_manifest(
-            [m for _, m in hist_manifests], required_roles=["histograms"]
-        )
         primary_basename = sorted(merged_output_files.keys())[0]
         merged.histograms.output_file = merged_output_files[primary_basename]  # type: ignore[union-attr]
 
         groups_meta = {k: v for k, v in sorted(merged_output_files.items())}
         with open(os.path.join(out_dir, "merged_histogram_groups.json"), "w") as fh:
             json.dump(groups_meta, fh, indent=2)
+
+        # ---- Build systematic column inventory from histogram names ----
+        all_hist_names: List[str] = []
+        for _, m in hist_manifests:
+            if m.histograms:
+                systematic_labels = (m.histograms.axis_labels or {}).get(
+                    "systematic", []
+                )
+                if systematic_labels:
+                    all_hist_names.extend(
+                        label for label in systematic_labels if label != "Nominal"
+                    )
+                elif m.histograms.histogram_names:
+                    all_hist_names.extend(m.histograms.histogram_names)
+
+        if all_hist_names:
+            # Deduplicate while preserving order
+            seen: set = set()
+            unique_names: List[str] = []
+            for n in all_hist_names:
+                if n not in seen:
+                    seen.add(n)
+                    unique_names.append(n)
+
+            # Derive systematic variations from histogram names
+            # (e.g. "h_jesUp" -> base="jes", direction="up")
+            syst_entries: Dict[str, SystematicColumnEntry] = {}
+            for name in unique_names:
+                lower = name.lower()
+                direction = None
+                base = None
+                for suffix, d in [("up", "up"), ("down", "down")]:
+                    if lower.endswith(suffix):
+                        base_candidate = name[:-len(suffix)].rstrip("_-")
+                        if base_candidate:
+                            base = base_candidate
+                            direction = d
+                            break
+
+                if base and direction:
+                    if base not in syst_entries:
+                        # Determine family from common prefixes
+                        family = _derive_systematic_family(base)
+                        syst_entries[base] = SystematicColumnEntry(
+                            family=family,
+                            base_name=base,
+                            nominal_column="weight_nominal",
+                            producer="NDHistogramManager",
+                            affected_observable="weight",
+                        )
+                    entry = syst_entries[base]
+                    if direction == "up":
+                        entry.up_column = name
+                    elif direction == "down":
+                        entry.down_column = name
+
+            if syst_entries:
+                merged.column_inventory = SystematicColumnInventory(
+                    entries=list(syst_entries.values())
+                )
+                self.publish_message(
+                    f"Built systematic column inventory with "
+                    f"{len(syst_entries)} entries: "
+                    f"{sorted(syst_entries.keys())}"
+                )
 
         merged.save_yaml(self.output().path)
         self.publish_message(f"Merged manifest written to: {self.output().path}")
@@ -540,6 +801,7 @@ class MergeCutflows(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+    output_manifest_role = "cutflow"
 
     def output(self):
         return law.LocalFileTarget(
@@ -564,18 +826,15 @@ class MergeCutflows(MergeMixin, law.Task):
             f"{len(cf_manifests)} manifest(s) contain a cutflow schema."
         )
 
-        self._validate([m for _, m in cf_manifests], required_roles=["cutflow"])
+        merged = self._build_merged_manifest(
+            [m for _, m in cf_manifests], required_roles=["cutflow"]
+        )
 
         cf_files: List[str] = []
         for p, m in cf_manifests:
-            job_dir = os.path.dirname(p)
             cf_path = m.cutflow.output_file  # type: ignore[union-attr]
-            if not os.path.isabs(cf_path):
-                cf_path = os.path.join(job_dir, cf_path)
-            if not os.path.isfile(cf_path):
-                raise RuntimeError(
-                    f"Cutflow file not found: {cf_path!r}  (referenced in {p!r})"
-                )
+            cf_path = _resolve_manifest_root_path(p, cf_path)
+            _require_local_root_input(cf_path, "Cutflow", p)
             cf_files.append(cf_path)
 
         groups = _group_files_by_basename(cf_files)
@@ -589,14 +848,11 @@ class MergeCutflows(MergeMixin, law.Task):
             for basename, paths in groups.items():
                 out_path = os.path.join(out_dir, basename)
                 self.publish_message(f"hadd: {len(paths)} → {out_path}")
-                _run_hadd(out_path, paths)
+                merge_root_files(out_path, paths, role="cutflow", hadd=_find_hadd())
                 merged_output_files[basename] = out_path
 
         rec.save(os.path.join(out_dir, "merge_cutflows.perf.json"))
 
-        merged = self._build_merged_manifest(
-            [m for _, m in cf_manifests], required_roles=["cutflow"]
-        )
         primary_basename = sorted(merged_output_files.keys())[0]
         merged.cutflow.output_file = merged_output_files[primary_basename]  # type: ignore[union-attr]
 
@@ -628,6 +884,7 @@ class MergeMetadata(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+    output_manifest_role = "metadata"
 
     def output(self):
         return law.LocalFileTarget(
@@ -645,12 +902,7 @@ class MergeMetadata(MergeMixin, law.Task):
 
         # For metadata we accept any manifests (schema presence is optional)
         all_manifests = [m for _, m in loaded]
-        errors = validate_merge_inputs(all_manifests)
-        if errors:
-            raise MergeInputValidationError(
-                "Pre-merge validation failed:\n"
-                + "\n".join(f"  {e}" for e in errors)
-            )
+        merged = self._build_merged_manifest(all_manifests)
 
         with PerformanceRecorder("MergeMetadata") as rec:
             # Collect provenance from all manifests
@@ -664,12 +916,27 @@ class MergeMetadata(MergeMixin, law.Task):
                 }
                 provenance_records.append(record)
 
+            root_records = []
+            seen_metadata_paths = set()
+            for manifest_path, manifest in loaded:
+                if manifest.metadata is None or not manifest.metadata.output_file:
+                    continue
+                metadata_path = _resolve_manifest_root_path(
+                    manifest_path, manifest.metadata.output_file)
+                if metadata_path in seen_metadata_paths:
+                    raise ValueError(f"Duplicate metadata artifact: {metadata_path}")
+                seen_metadata_paths.add(metadata_path)
+                # Manifests may describe metadata-only tasks with no ROOT artifact.
+                if metadata_path.endswith((".root", ".json", ".json.gz")):
+                    root_records.extend(load_metadata_records(metadata_path))
+            metadata_bundle = build_bundle(root_records) if root_records else None
             summary_path = os.path.join(out_dir, "provenance_summary.json")
             with open(summary_path, "w") as fh:
                 json.dump(
                     {
                         "n_inputs": len(loaded),
                         "provenance_records": provenance_records,
+                        "metadata_bundle": metadata_bundle,
                     },
                     fh,
                     indent=2,
@@ -677,13 +944,9 @@ class MergeMetadata(MergeMixin, law.Task):
 
         rec.save(os.path.join(out_dir, "merge_metadata.perf.json"))
 
-        merged = merge_manifests(
-            all_manifests,
-            framework_hash=self.framework_hash or None,
-            user_repo_hash=self.user_repo_hash or None,
-        )
-        # Point metadata output_file to the provenance summary we just wrote
-        if merged.metadata is not None:
+        if merged.metadata is None:
+            merged.metadata = MetadataSchema(output_file=summary_path)
+        else:
             merged.metadata.output_file = summary_path
 
         merged.save_yaml(self.output().path)
@@ -719,6 +982,14 @@ class MergeAll(MergeMixin, law.Task):
     """
 
     task_namespace = ""
+
+    def complete(self) -> bool:
+        if not super().complete():
+            return False
+        try:
+            return all(task.complete() for task in self.requires())
+        except Exception:
+            return False
 
     skip_skims = luigi.BoolParameter(
         default=False,

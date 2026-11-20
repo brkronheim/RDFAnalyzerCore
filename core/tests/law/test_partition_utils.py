@@ -40,3 +40,24 @@ class TestPartitionUtils(unittest.TestCase):
             partition_utils._make_partitions([], mode="bad", files_per_job=1, entries_per_job=1)
         self.assertIn("file_group", str(ctx.exception))
         self.assertIn("entry_range", str(ctx.exception))
+
+class TestEventPartitions(unittest.TestCase):
+    def test_event_budget_packs_files_and_splits_oversized_without_gaps(self):
+        counts = {'a': 40, 'b': 30, 'c': 250, 'd': 0, 'e': 50}
+        with patch.object(partition_utils, '_query_tree_entries', side_effect=lambda u,t: counts[u]):
+            parts = partition_utils._make_partitions(list(counts), 'events', 2, 100)
+        self.assertEqual([p['files'] for p in parts], ['a,b', 'c', 'c', 'c', 'd,e'])
+        self.assertEqual([(p['first_entry'], p['last_entry']) for p in parts if p['files']=='c'], [(0,100),(100,200),(200,250)])
+        self.assertEqual(sum(p['planned_entries'] for p in parts), sum(counts.values()))
+        self.assertTrue(all(p['planned_entries']<=100 for p in parts))
+
+    def test_file_cap_even_for_empty_files(self):
+        with patch.object(partition_utils, '_query_tree_entries', return_value=0):
+            parts=partition_utils._make_partitions(['a','b','c'], 'events', 2, 100)
+        self.assertEqual([p['files'] for p in parts], ['a,b','c'])
+
+    def test_invalid_budgets_fail_instead_of_silently_processing_whole_file(self):
+        for mode in ['entry_range','events']:
+            for budget in [0,-1]:
+                with self.assertRaises(ValueError):
+                    partition_utils._make_partitions(['a'], mode, 2, budget)

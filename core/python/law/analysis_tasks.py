@@ -20,6 +20,15 @@ Provides workflow helpers that extend the typical analysis workflow:
       → Output: per-dataset ``.done`` marker files in
         ``histRun_{name}/job_outputs/``.
 
+    StitchingApplyTask  (SkimTask)
+            → Runs a counter pass, derives correctionlib stitching weights, and
+                runs a second application pass with the derived JSON staged once in
+                the shared worker archive.
+
+    StitchingValidationTask  (Task)
+            → Validates every application metadata file, including file-source
+                partitions, for the derived correction and stitched histograms.
+
   StitchingDerivationTask  (Task)
       → Derives binwise MC stitching scale factors from counter histograms
         written by the framework's ``CounterService``.
@@ -27,15 +36,14 @@ Provides workflow helpers that extend the typical analysis workflow:
         ``counter_intWeightSignSum_{sample}`` histograms from the merged meta
         ROOT files using **uproot** (preferred), with a PyROOT fallback for
         environments where uproot is unavailable.
-      → Computes the net signed counts ``C_n(k) = P_n(k) − N_n(k)`` and the
-        per-bin scale factor
+            → Computes the net signed counts ``C_n(k) = P_n(k) − N_n(k)`` and treats
+                negative net bins as zero when deriving the per-bin scale factor
 
-            b_n(k) = C_n(k) / Σ_m C_m(k)
+            b_n(k) = max(C_n(k), 0) / Σ_m max(C_m(k), 0)
 
-        This is the exact formula described in the stitching derivation: each
-        sample's scale factor equals its share of the total signed counts in
-        that stitch bin, ensuring correct normalisation across overlapping
-        phase-space samples (e.g. HT-binned W+jets).
+        Each sample's scale factor equals its share of the nonnegative net
+        signed counts in that stitch bin, ensuring physical normalisation
+        across overlapping phase-space samples (e.g. HT-binned W+jets).
       → Reads group/sample configuration from a YAML file (``--stitch-config``).
       → Output: ``stitchWeights_{name}/stitch_weights.json`` — a
         **correctionlib** ``CorrectionSet`` JSON with one ``Correction`` per
@@ -50,12 +58,12 @@ magnitude a_n, so its net signed count is C_n = P_n - N_n.  Requiring that the
 combined normalised distribution equals the true cross-section leads to the
 per-sample scale factor
 
-    b_n = C_n / Σ_m C_m
+    b_n = max(C_n, 0) / Σ_m max(C_m, 0)
 
 For the integer-binned (stitch_id) case the same formula is applied
 independently in each histogram bin k:
 
-    b_n(k) = C_n(k) / Σ_m C_m(k)
+    b_n(k) = max(C_n(k), 0) / Σ_m max(C_m(k), 0)
 
 where k is the integer stitch_id value stored per event by
 ``counterIntWeightBranch`` and counted by ``CounterService``.
@@ -90,16 +98,24 @@ Stitch config YAML format
 --------------------------
 ::
 
-    groups:
-      wjets_ht:
-        meta_files:
-          wjets_ht_0: /path/to/merged/wjets_ht_0_meta.root
-          wjets_ht_1: /path/to/merged/wjets_ht_1_meta.root
-          wjets_ht_2: /path/to/merged/wjets_ht_2_meta.root
+        groups:
+            wjets_ht:
+                meta_files:
+                    wjets_ht_0: /path/to/merged/wjets_ht_0_meta.root
+                    wjets_ht_1: /path/to/merged/wjets_ht_1_meta.root
+                    wjets_ht_2: /path/to/merged/wjets_ht_2_meta.root
+                inclusive_samples:
+                    - wjets_inclusive_axis0
+                    - wjets_inclusive_axis1
 
 Each key under ``meta_files`` is the ``sampleName`` used by CounterService
 when booking the ``counter_intWeightSignSum_{sampleName}`` histogram.  This
 matches the ``sample`` / ``type`` key in the analysis submit_config.txt.
+``inclusive_sample`` accepts one sample name, while ``inclusive_samples`` (or
+the plural form nested under a cross-section era) accepts a flat or nested
+collection of samples. Their signed counters are summed before the inclusive
+bin fractions are calculated. Inclusive cross sections must be configured in
+the stitch YAML; Core does not provide process-specific defaults.
 
 Correctionlib output format
 ----------------------------
@@ -122,7 +138,11 @@ C++ (via CorrectionManager) or Python::
 from __future__ import annotations
 
 import datetime
+import hashlib
+import fcntl
+import stat
 import json
+import math
 import os
 import re
 import shutil
@@ -131,15 +151,19 @@ import sys
 import tarfile
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from fnmatch import fnmatch
-from typing import Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import luigi  # type: ignore
 import law  # type: ignore
 import yaml
 from law.util import DotDict  # type: ignore
 from law.workflow.base import BaseWorkflow, BaseWorkflowProxy  # type: ignore
+
+if TYPE_CHECKING:
+    import correctionlib.schemav2
 
 # ---------------------------------------------------------------------------
 # Make sure core/python and law/ are importable regardless of invocation path
@@ -151,16 +175,41 @@ for _p in (_HERE, _CORE_PYTHON):
         sys.path.insert(0, _p)
 
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
-from dataset_manifest import DatasetManifest, DatasetEntry  # noqa: E402
+from optional_extensions import render_environment_setup  # noqa: E402
+from extract_nd_histograms import extract_nd_histograms  # noqa: E402
+from dataset_manifest import (  # noqa: E402
+    DatasetManifest,
+    DatasetEntry,
+)
+from derivation_correctionlib import (  # noqa: E402
+    _build_correctionlib_cset as _shared_build_correctionlib_cset,
+    _derive_stitch_cross_sections as _shared_derive_stitch_cross_sections,
+    _derive_stitch_weights as _shared_derive_stitch_weights,
+    _normalize_sample_names as _shared_normalize_sample_names,
+    _read_intweight_sign_hist as _shared_read_intweight_sign_hist,
+    _read_weight_sum as _shared_read_weight_sum,
+    _read_weight_sign_sum as _shared_read_weight_sign_sum,
+)
+from stitching_plotting import plot_ratio_comparison as _plot_ratio_comparison  # noqa: E402
 from submission_backend import (  # noqa: E402
+    ensure_condor_machine_exclusion,
     ensure_xrootd_redirector,
     get_copy_file_list,
     read_config,
     write_config,
     write_submit_files,
 )
+import io_policy as _io_policy
+from xrd_site_rankings import update_after_run as _update_xrd_site_rankings
+from run_bundle import (find_bundle, verify_config_bundle, rewrite_references,
+                        file_digest, execution_identity, record_execution)
 from workflow_executors import DaskWorkflow, HTCondorWorkflow, _run_analysis_job  # noqa: E402
 from partition_utils import _make_partitions  # noqa: E402
+from job_sizing import EntryCache, event_budget, load_profile  # noqa: E402
+from job_sizing import (profile_matches, select_sizing, sizing_context,
+                        update_sizing_after_run as _update_job_sizing)  # noqa: E402
+from job_sizing import atomic_json, condor_event_ads, collect_log, fit_pilot, seed_pilot_sizing, pilot_inputs  # noqa: E402
+from partition_utils import _query_tree_entries  # noqa: E402
 from output_schema import (  # noqa: E402
     ArtifactResolutionStatus,
     CutflowSchema,
@@ -179,12 +228,67 @@ from output_schema import (  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 
+# Shared defaults/types for ordinary and source-prefixed sizing parameters.
+# Construct a distinct Luigi Parameter each time to retain descriptor ownership.
+_JOB_SIZING_PARAMETERS = {
+    "sizing_pilots": (luigi.BoolParameter, False),
+    "sizing_target_seconds": (luigi.IntParameter, 3600),
+    "sizing_pilot_target_seconds": (luigi.IntParameter, 1800),
+    "sizing_pilot_parallel": (luigi.IntParameter, 4),
+    "sizing_pilot_prefix_entries": (luigi.IntParameter, 10000),
+    "sizing_pilot_safety_factor": (luigi.FloatParameter, 1.5),
+}
+
+
+def _job_sizing_parameter(name, **options):
+    parameter, default = _JOB_SIZING_PARAMETERS[name]
+    return parameter(default=default, **options)
+
+
+def _job_sizing_kwargs(task, *, input_prefix="", output_prefix=""):
+    """Adapt the same six operational fields across the source-task boundary."""
+    return {output_prefix + name: getattr(task, input_prefix + name)
+            for name in _JOB_SIZING_PARAMETERS}
+
+
+def _stream_analysis_output() -> bool:
+    """Return whether local analysis subprocess logs should be shown live."""
+    return os.environ.get("RDF_VERBOSE", os.environ.get("RDF_VH_VERBOSE", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+_MC_GENERATOR_CONFIG_KEYS = (
+    "counterWeightBranch",
+    "genWeightMode",
+    "genWeightBaseWeightColumn",
+    "genWeightNominalColumn",
+    "genWeightLheScaleBranch",
+    "genWeightPsBranch",
+    "genWeightPdfBranch",
+    "genWeightEnableLheScale",
+    "genWeightEnablePs",
+    "genWeightEnableIsr",
+    "genWeightEnableFsr",
+    "genWeightEnablePdf",
+    "genWeightEnablePdfAs",
+)
+
+
+def _remove_mc_generator_config_for_data(config: dict[str, str]) -> None:
+    """Remove generator-weight settings from data job configurations."""
+    if str(config.get("dtype", "")).lower() != "data":
+        return
+    for key in _MC_GENERATOR_CONFIG_KEYS:
+        config.pop(key, None)
+
 from ingestion_utils import (  # noqa: E402
     collect_local_shared_libs as _collect_skim_shared_libs,
     condor_history_exit as _condor_history_exit,
+    condor_event_log_exit as _condor_event_log_exit,
     condor_q_ads as _condor_q_ads,
     condor_rm_job as _condor_rm_job,
     eos_files_exist_batch as _eos_files_exist_batch_util,
+    eos_file_info_batch as _eos_file_info_batch_util,
     read_failed_job_error as _read_failed_job_error,
 )
 
@@ -205,6 +309,19 @@ def _find_dataset_entry(
     return None
 
 
+def _manifest_lumi_for_dataset(
+    dataset_manifest_path: str, dataset: DatasetEntry
+) -> Optional[float]:
+    """Return manifest luminosity when the manifest is available."""
+    if not dataset_manifest_path or not os.path.isfile(dataset_manifest_path):
+        return None
+    try:
+        manifest = DatasetManifest.load(dataset_manifest_path)
+    except (OSError, ValueError, TypeError):
+        return None
+    return manifest.lumi_for(dataset.year, dataset.era)
+
+
 def _resolve_analysis_config_path(
     template_config_path: str,
     path_value: str,
@@ -213,32 +330,99 @@ def _resolve_analysis_config_path(
 
     Analysis submit-config templates often live under ``analysis/cfg/`` while
     referenced payload files are written as ``cfg/foo.yaml`` relative to the
-    analysis root.  Resolve both layouts consistently.
+    analysis root. Materialized job configs can also contain the staging-only
+    ``cfg/`` prefix; retry without it when resolving against the source tree.
     """
     if not path_value:
         return path_value
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        record = json.loads((bundle / "bundle_manifest.json").read_text())
+        if path_value in record["files"]:
+            return str(bundle / path_value)
+        if path_value in record["assets"]:
+            return str(bundle / record["assets"][path_value])
+        if path_value.startswith("cfg/"):
+            members = [name for name in record["files"] if Path(name).name == Path(path_value).name]
+            if len(members) == 1:
+                return str(bundle / members[0])
+        if os.path.isabs(path_value):
+            return path_value
+        raise FileNotFoundError(f"undeclared bundle dependency {path_value!r} in {bundle}")
     if os.path.isabs(path_value):
         return path_value
 
     template_dir = os.path.dirname(os.path.abspath(template_config_path))
-    candidates = [os.path.abspath(path_value)]
 
-    current_dir = template_dir
-    visited: set[str] = set()
-    while current_dir not in visited:
-        visited.add(current_dir)
-        candidates.append(os.path.join(current_dir, path_value))
+    def _candidates(value: str) -> list[str]:
+        paths = [os.path.abspath(value)]
+        current_dir = template_dir
+        visited: set[str] = set()
+        while current_dir not in visited:
+            visited.add(current_dir)
+            paths.append(os.path.join(current_dir, value))
 
-        parent_dir = os.path.dirname(current_dir)
-        if parent_dir == current_dir:
-            break
-        current_dir = parent_dir
+            parent_dir = os.path.dirname(current_dir)
+            if parent_dir == current_dir:
+                break
+            current_dir = parent_dir
+        return paths
 
-    for candidate in candidates:
+    for candidate in _candidates(path_value):
         if os.path.exists(candidate):
             return os.path.abspath(candidate)
 
+    # Job configs are normalized to cfg/<basename> after their inputs have
+    # been materialized. A later layout pass may see that runtime path while
+    # resolving against the original template directory, so retry the
+    # corresponding source reference without the staging-only cfg/ prefix.
+    if path_value.startswith("cfg/"):
+        for candidate in _candidates(path_value[len("cfg/"):]):
+            if os.path.exists(candidate):
+                return os.path.abspath(candidate)
+
     return os.path.abspath(os.path.join(template_dir, path_value))
+
+
+def _analysis_config_payload_sources(
+    template_config_path: str,
+    config_dict: dict[str, str],
+    staged_config_dir: Optional[str] = None,
+) -> list[str]:
+    """Resolve payload references, including paths already staged under cfg/."""
+    sources: list[str] = []
+    basename_sources: dict[str, str] = {}
+    paths = list(get_copy_file_list(config_dict))
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        declared = json.loads((bundle / "bundle_manifest.json").read_text())
+        paths.extend(str(bundle / value) for value in declared["assets"].values())
+    for path_value in paths:
+        if staged_config_dir and path_value.startswith("cfg/"):
+            staged_path = os.path.join(staged_config_dir, path_value)
+            if os.path.isfile(staged_path):
+                # Repeated layout passes should be idempotent. This payload
+                # was resolved and staged on the earlier pass.
+                continue
+
+        src = _resolve_analysis_config_path(template_config_path, path_value)
+        if not os.path.isfile(src):
+            raise FileNotFoundError(
+                f"Configured analysis input {path_value!r} from "
+                f"'{template_config_path}' does not resolve to a file: {src}"
+            )
+
+        basename = os.path.basename(src)
+        previous = basename_sources.get(basename)
+        if previous is not None and previous != src:
+            raise ValueError(
+                f"Configured analysis inputs '{previous}' and '{src}' both "
+                f"stage as '{basename}'; give them distinct basenames"
+            )
+        basename_sources[basename] = src
+        if src not in sources:
+            sources.append(src)
+    return sources
 
 
 def _copy_analysis_config_files(
@@ -252,23 +436,24 @@ def _copy_analysis_config_files(
     config values to point at the copied files.
     """
     copied: set[str] = set()
-    for path_value in get_copy_file_list(config_dict):
-        src = _resolve_analysis_config_path(template_config_path, path_value)
-        if src and os.path.isfile(src):
-            dst = os.path.join(destination_dir, os.path.basename(src))
-            if not os.path.exists(dst):
-                shutil.copy2(src, dst)
-            _rewrite_staged_analysis_config(
-                template_config_path=template_config_path,
-                source_config_path=src,
-                staged_config_path=dst,
-            )
-            copied.add(os.path.basename(src))
+    Path(destination_dir).mkdir(parents=True, exist_ok=True)
+    for src in _analysis_config_payload_sources(template_config_path, config_dict):
+        dst = os.path.join(destination_dir, os.path.basename(src))
+        shutil.copy2(src, dst)
+        _rewrite_staged_analysis_config(
+            template_config_path=template_config_path,
+            source_config_path=src,
+            staged_config_path=dst,
+        )
+        copied.add(os.path.basename(src))
     return copied
 
 
 def _analysis_aux_dir(template_config_path: str) -> str:
     """Return the analysis-local aux directory for a submit-config template."""
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        return str(bundle / "aux")
     return _resolve_analysis_config_path(template_config_path, "aux")
 
 
@@ -280,9 +465,7 @@ def _copy_analysis_aux_dir(template_config_path: str, destination_dir: str) -> b
 
     aux_dst = os.path.join(destination_dir, "aux")
     Path(aux_dst).mkdir(parents=True, exist_ok=True)
-    for aux_entry in sorted(Path(aux_src).iterdir()):
-        if aux_entry.is_file():
-            shutil.copy2(str(aux_entry), os.path.join(aux_dst, aux_entry.name))
+    shutil.copytree(aux_src, aux_dst, dirs_exist_ok=True)
     return True
 
 
@@ -302,13 +485,10 @@ def _bundle_analysis_config_files(
     template_config_path: str,
     config_dict: dict[str, str],
     destination_dir: str,
+    prepared_payloads: Optional[dict[str, bytes]] = None,
 ) -> Optional[str]:
-    """Create a tar.gz archive containing shared cfg/ payload files."""
-    payload_paths: list[str] = []
-    for path_value in get_copy_file_list(config_dict):
-        src = _resolve_analysis_config_path(template_config_path, path_value)
-        if src and os.path.isfile(src):
-            payload_paths.append(src)
+    """Archive cfg/ payloads, optionally retaining rewritten text for local jobs."""
+    payload_paths = _analysis_config_payload_sources(template_config_path, config_dict)
     if not payload_paths:
         return None
 
@@ -324,6 +504,8 @@ def _bundle_analysis_config_files(
                 source_config_path=src,
                 staged_config_path=staged_path,
             )
+            if prepared_payloads is not None and Path(src).suffix in {".yaml", ".yml", ".txt"}:
+                prepared_payloads[src] = Path(staged_path).read_bytes()
         with tarfile.open(archive_path, "w:gz") as archive:
             archive.add(cfg_stage_dir, arcname="cfg")
     return archive_path
@@ -345,31 +527,184 @@ def _symlink_or_copy_path(src_path: str, dst_path: str) -> None:
             shutil.copy2(src_abs, dst_path)
 
 
+def _staged_copy_is_current(source_path: str, staged_path: str) -> bool:
+    """Return whether a staged file matches source contents, including same-stat edits."""
+    try:
+        source_stat = os.stat(source_path)
+        staged_stat = os.stat(staged_path)
+    except OSError:
+        return False
+    return source_stat.st_size == staged_stat.st_size and file_digest(source_path) == file_digest(staged_path)
+
+
+def _local_shared_libs_with_signature(exe_path: str) -> tuple[dict[str, str], str]:
+    """Collect local runtime libraries and fingerprint their source metadata."""
+    local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+    digest = hashlib.sha256()
+    for name, source_path in sorted(local_libs.items()):
+        try:
+            source_stat = os.stat(source_path)
+        except OSError:
+            return local_libs, ""
+        record = f"{name}\0{file_digest(source_path)}\n"
+        digest.update(record.encode())
+    return local_libs, digest.hexdigest()
+
+
 def _ensure_local_analysis_runtime_layout(
     template_config_path: str,
     config_dict: dict[str, str],
     destination_dir: str,
+    include_aux: bool = True,
+    payload_sources: Optional[list[str]] = None,
+    prepared_payloads: Optional[dict[str, bytes]] = None,
 ) -> None:
-    """Populate local job directories with cfg/ payloads and an aux/ tree."""
+    """Populate local job directories with referenced cfg/ and aux payloads."""
     cfg_dir = os.path.join(destination_dir, "cfg")
     Path(cfg_dir).mkdir(parents=True, exist_ok=True)
 
-    for path_value in get_copy_file_list(config_dict):
-        src = _resolve_analysis_config_path(template_config_path, path_value)
-        if not src or not os.path.isfile(src):
-            continue
+    sources = payload_sources
+    if sources is None:
+        sources = _analysis_config_payload_sources(
+            template_config_path,
+            config_dict,
+            staged_config_dir=destination_dir,
+        )
+    sealed = find_bundle(template_config_path) is not None
+    for src in sources:
         dst = os.path.join(cfg_dir, os.path.basename(src))
-        _symlink_or_copy_path(src, dst)
+        if sealed and Path(src).suffix in {".yaml", ".yml", ".txt"}:
+            # Nested references differ in the worker layout. Never rewrite a
+            # symlink into the immutable source bundle.
+            if os.path.islink(dst):
+                os.unlink(dst)
+            if prepared_payloads is not None and src in prepared_payloads:
+                Path(dst).write_bytes(prepared_payloads[src])
+            else:
+                shutil.copy2(src, dst)
+                _rewrite_staged_analysis_config(template_config_path, src, dst)
+        else:
+            _symlink_or_copy_path(src, dst)
 
-    aux_src = _analysis_aux_dir(template_config_path)
-    if aux_src and os.path.isdir(aux_src):
-        aux_dst = os.path.join(destination_dir, "aux")
-        _symlink_or_copy_path(aux_src, aux_dst)
+    if include_aux:
+        aux_src = _analysis_aux_dir(template_config_path)
+        if aux_src and os.path.isdir(aux_src):
+            aux_dst = os.path.join(destination_dir, "aux")
+            _symlink_or_copy_path(aux_src, aux_dst)
 
 
 def _shared_inputs_archive_name() -> str:
     """Return the canonical filename for the skim shared-input archive."""
     return "shared_inputs.tar.gz"
+
+
+def _validate_staged_skim_executable(shared_dir: str, exe_path: str) -> None:
+    """Require the worker executable to match the current configured binary."""
+    exe_path = os.path.abspath(exe_path)
+    exe_name = os.path.basename(exe_path)
+    archive_path = os.path.join(os.path.dirname(shared_dir), _shared_inputs_archive_name())
+    staged_path = os.path.join(shared_dir, exe_name)
+    remedy = (
+        "Rerun PrepareSkimJobs to restage the executable and rebuild "
+        "shared_inputs.tar.gz before submitting; use a new run name if the "
+        "sealed bundle's execution identity has changed."
+    )
+    try:
+        if not os.path.isfile(exe_path):
+            raise RuntimeError(f"Current analysis executable not found: {exe_path!r}. {remedy}")
+        expected_digest = file_digest(exe_path)
+        if os.path.isfile(archive_path):
+            staged_path = f"{archive_path}:{exe_name}"
+            with tarfile.open(archive_path, "r:gz") as archive:
+                member = next(
+                    (entry for entry in archive if entry.name in (exe_name, f"./{exe_name}")),
+                    None,
+                )
+                if member is None or not member.isfile():
+                    raise RuntimeError(
+                        f"Staged executable {staged_path!r} is missing or is not a regular file. {remedy}"
+                    )
+                digest = hashlib.sha256()
+                with archive.extractfile(member) as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                staged_digest = digest.hexdigest()
+        else:
+            if not os.path.isfile(staged_path):
+                raise RuntimeError(f"Staged executable not found: {staged_path!r}. {remedy}")
+            staged_digest = file_digest(staged_path)
+        if staged_digest != expected_digest:
+            raise RuntimeError(
+                f"Staged executable {staged_path!r} does not match the current "
+                f"--exe binary {exe_path!r} (SHA-256 differs). {remedy}"
+            )
+    except (OSError, tarfile.TarError) as exc:
+        raise RuntimeError(
+            f"Cannot verify staged executable {staged_path!r} against {exe_path!r}: {exc}. {remedy}"
+        ) from exc
+
+
+def _validate_x509_proxy(proxy_path: str, *, label: Optional[str] = None) -> None:
+    """Require at least two days of validity on a staged X509 proxy."""
+    description = label or proxy_path
+    remedy = (
+        "Renew the proxy (for CMS: voms-proxy-init -voms cms -rfc --valid 168:0) "
+        "and rerun PrepareSkimJobs to restage it and rebuild shared_inputs.tar.gz "
+        "before submitting."
+    )
+    try:
+        result = subprocess.run(
+            ["voms-proxy-info", "-file", proxy_path, "-timeleft"],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        seconds_left = int(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise RuntimeError(
+            f"Cannot verify staged X509 proxy {description!r}; "
+            f"at least 48 hours (172800 seconds) of validity are required. {remedy}"
+        ) from exc
+    if seconds_left < 172800:
+        raise RuntimeError(
+            f"Staged X509 proxy {description!r} has {seconds_left} seconds remaining; "
+            f"at least 48 hours (172800 seconds) are required. {remedy}"
+        )
+
+
+def _validate_staged_skim_proxy(shared_dir: str, *, required: bool = False) -> None:
+    """Check the credential workers receive, preferring the archived copy."""
+    proxy_path = os.path.join(shared_dir, "x509")
+    archive_path = os.path.join(os.path.dirname(shared_dir), _shared_inputs_archive_name())
+    if not os.path.isfile(archive_path):
+        if required or os.path.lexists(proxy_path):
+            _validate_x509_proxy(proxy_path)
+        return
+
+    try:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            member = next(
+                (entry for entry in archive if entry.name in ("x509", "./x509")),
+                None,
+            )
+            if member is None:
+                if required or os.path.lexists(proxy_path):
+                    raise RuntimeError(
+                        f"Staged X509 proxy is missing from {archive_path!r}. "
+                        "Rerun PrepareSkimJobs with --x509 to rebuild the archive "
+                        "with a proxy valid for at least 48 hours."
+                    )
+                return
+            if not member.isfile():
+                raise RuntimeError(f"Staged X509 proxy in {archive_path!r} is not a regular file.")
+            # Do not extract archive paths or retain a second credential copy.
+            with archive.extractfile(member) as source, tempfile.TemporaryDirectory(
+                prefix="skim_proxy_check_"
+            ) as tmpdir:
+                check_path = os.path.join(tmpdir, "x509")
+                with open(check_path, "xb", opener=lambda path, flags: os.open(path, flags, 0o600)) as target:
+                    shutil.copyfileobj(source, target)
+                _validate_x509_proxy(check_path, label=f"{archive_path}:x509")
+    except (OSError, tarfile.TarError) as exc:
+        raise RuntimeError(f"Cannot inspect staged proxy in {archive_path!r}: {exc}") from exc
 
 
 def _build_shared_inputs_archive(shared_dir: str, archive_path: str) -> str:
@@ -391,15 +726,20 @@ def _build_shared_inputs_archive(shared_dir: str, archive_path: str) -> str:
         if os.path.isfile(aux_bundle):
             _extract_tar_archive(aux_bundle, tmpdir)
 
-        with tarfile.open(archive_path, "w:gz") as archive:
-            for entry_name in ("cfg", "aux"):
-                entry_path = os.path.join(tmpdir, entry_name)
-                if os.path.isdir(entry_path):
-                    archive.add(entry_path, arcname=entry_name)
-            for entry in sorted(Path(shared_dir).iterdir()):
-                if not entry.is_file() or entry.name in excluded_files:
-                    continue
-                archive.add(str(entry), arcname=entry.name)
+        # Publish only a closed archive. Readers and retries can keep using
+        # the previous generation if copying any member fails.
+        with tempfile.TemporaryDirectory(dir=Path(archive_path).parent) as staging:
+            pending = Path(staging) / "shared_inputs.tar.gz"
+            with tarfile.open(pending, "w:gz") as archive:
+                for entry_name in ("cfg", "aux"):
+                    entry_path = os.path.join(tmpdir, entry_name)
+                    if os.path.isdir(entry_path):
+                        archive.add(entry_path, arcname=entry_name)
+                for entry in sorted(Path(shared_dir).iterdir()):
+                    if not entry.is_file() or entry.name in excluded_files:
+                        continue
+                    archive.add(str(entry), arcname=entry.name)
+            os.replace(pending, archive_path)
 
     return archive_path
 
@@ -407,20 +747,27 @@ def _build_shared_inputs_archive(shared_dir: str, archive_path: str) -> str:
 def _normalize_shared_config_references(
     template_config_path: str,
     job_config: dict[str, str],
+    staged_payload_names: Optional[set[str]] = None,
 ) -> None:
     """Rewrite referenced payload files to the runtime cfg/ layout."""
-    staged_payloads = {
-        os.path.basename(
-            _resolve_analysis_config_path(template_config_path, path_value)
-        )
-        for path_value in get_copy_file_list(job_config)
-        if path_value
-    }
+    staged_payloads = set(staged_payload_names or set())
+    if staged_payload_names is None:
+        for path_value in get_copy_file_list(job_config):
+            if not path_value:
+                continue
+            source_path = _resolve_analysis_config_path(template_config_path, path_value)
+            if os.path.isfile(source_path):
+                staged_payloads.add(os.path.basename(source_path))
     for key, val in list(job_config.items()):
         if key.startswith("__"):
             continue
         if isinstance(val, str) and (
-            val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
+            val.endswith(".txt")
+            or val.endswith(".yaml")
+            or val.endswith(".yml")
+            or val.endswith(".json")
+            or val.endswith(".json.gz")
+            or val.endswith(".onnx")
         ):
             basename = os.path.basename(val)
             if basename in staged_payloads:
@@ -500,24 +847,6 @@ def _materialize_runtime_staged_inputs(runtime_cfg_path: str, sandbox_dir: str) 
         write_config(config_dict, runtime_cfg_path)
 
 
-def _flatten_job_cfg_overlay_files(job_dir: str) -> list[str]:
-    """Flatten per-job cfg overlay payloads into *job_dir* for file-based transfer."""
-    overlay_dir = os.path.join(job_dir, "cfg")
-    flattened: list[str] = []
-    if not os.path.isdir(overlay_dir):
-        return flattened
-
-    for entry in sorted(Path(overlay_dir).iterdir()):
-        if not entry.is_file():
-            continue
-        flat_path = os.path.join(job_dir, entry.name)
-        if not os.path.exists(flat_path):
-            shutil.copy2(str(entry), flat_path)
-        flattened.append(flat_path)
-
-    return flattened
-
-
 def _skim_shared_loose_input_files(shared_dir: str) -> list[str]:
     """Return shared input files that should be transferred individually."""
     excluded = {
@@ -530,6 +859,49 @@ def _skim_shared_loose_input_files(shared_dir: str) -> list[str]:
         for entry in os.listdir(shared_dir)
         if os.path.isfile(os.path.join(shared_dir, entry)) and entry not in excluded
     )
+
+
+def _shared_archive_top_level_files(archive_path: str) -> set[str]:
+    """Return files the archive supplies at the worker sandbox root."""
+    if not os.path.isfile(archive_path):
+        return set()
+
+    with tarfile.open(archive_path, "r:gz") as archive:
+        return {
+            Path(member.name).name
+            for member in archive.getmembers()
+            if member.isfile() and Path(member.name).parent == Path(".")
+        }
+
+
+def _copy_job_submission_files(
+    source_dir: str,
+    destination_dir: str,
+    shared_archive_file_names: Optional[set[str]] = None,
+) -> None:
+    """Copy per-job payloads without expanding shared configuration overlays.
+
+    ``PrepareSkimJobs`` keeps a local ``cfg/`` overlay so local execution can
+    use the same prepared job directory.  Remote skim jobs receive the
+    equivalent payload through ``shared_inputs.tar.gz`` instead, so copying
+    that overlay into every concrete Condor job would duplicate potentially
+    large correction/configuration files.  Keep job-specific files (the
+    submit config, redirector map, and any future per-job payloads) while
+    omitting directories and files represented by the shared archive.
+    """
+    shared_names = set(shared_archive_file_names or set())
+    per_job_names = {"submit_config.txt", "site_redirectors.json"}
+    for entry in sorted(Path(source_dir).iterdir()):
+        if entry.name in {"cfg", "aux"}:
+            continue
+        if entry.name in shared_names and entry.name not in per_job_names:
+            continue
+
+        destination = os.path.join(destination_dir, entry.name)
+        if entry.is_dir():
+            shutil.copytree(str(entry), destination, dirs_exist_ok=True)
+        elif entry.is_file():
+            shutil.copy2(str(entry), destination)
 
 
 def _copy_tree_contents(src_dir: str, dst_dir: str) -> None:
@@ -546,12 +918,15 @@ def _copy_tree_contents(src_dir: str, dst_dir: str) -> None:
 
 
 def _extract_tar_archive(archive_path: str, destination_dir: str) -> None:
-    """Extract a tar archive using the safest available tarfile mode."""
+    """Extract a staged archive with the standard library's data filter."""
+    data_filter = getattr(tarfile, "data_filter", None)
+    if not callable(data_filter):
+        raise RuntimeError(
+            "LAW archive staging requires tarfile.data_filter. Use Python 3.12 "
+            "or newer, or an interpreter with the extraction-filter backport."
+        )
     with tarfile.open(archive_path, "r:gz") as archive:
-        try:
-            archive.extractall(destination_dir, filter="data")
-        except TypeError:
-            archive.extractall(destination_dir)
+        archive.extractall(destination_dir, filter=data_filter)
 
 
 def _materialize_file_source_runtime_job(
@@ -647,6 +1022,7 @@ def _run_prepared_skim_job(
     source_config_path: Optional[str] = None,
     shared_archive_path: Optional[str] = None,
     stream_output: bool = False,
+    worker_number: Optional[int] = None,
 ) -> str:
     """Run a prepared skim job after materializing a worker-local sandbox."""
     runtime_job_dir = None
@@ -665,6 +1041,7 @@ def _run_prepared_skim_job(
             container_setup=container_setup,
             config_relpath=os.path.join("cfg", "submit_config.txt"),
             stream_output=stream_output,
+            worker_number=worker_number,
         )
     finally:
         if runtime_job_dir and os.path.isdir(runtime_job_dir):
@@ -736,6 +1113,221 @@ def _output_files_exist_batch(output_paths: list[str]) -> dict[str, bool]:
     return result
 
 
+def _output_file_info_batch(output_paths: list[str]) -> dict[str, dict | None]:
+    """Cheap fresh signatures; unknown remote signatures must not be cached."""
+    result: dict[str, dict | None] = {}
+    remote = []
+    for path in dict.fromkeys(output_paths):
+        if path.startswith(("root://", "/eos/", "/store/")):
+            remote.append(path)
+        else:
+            try:
+                info = os.stat(path)
+                result[path] = dict(size=info.st_size, mtime_ns=info.st_mtime_ns,
+                    ctime_ns=info.st_ctime_ns, inode=info.st_ino, device=info.st_dev) \
+                    if stat.S_ISREG(info.st_mode) else None
+            except OSError:
+                result[path] = None
+    if remote:
+        result.update(_eos_file_info_batch_util(remote))
+    return result
+
+
+def _root_file_tree_error(path: str, tree_name: Optional[str]) -> Optional[str]:
+    """Check a ROOT file, optionally requiring a named tree inside it."""
+    if not path:
+        return "output path is not configured"
+
+    is_url = path.startswith("root://")
+    is_remote_storage_path = path.startswith(("/eos/", "/store/"))
+    if not is_url and not is_remote_storage_path:
+        try:
+            if not os.path.isfile(path):
+                return "file is absent or is not a regular file"
+            if os.path.getsize(path) <= 0:
+                return "file is empty"
+        except OSError as exc:
+            return f"file is unreadable: {exc}"
+
+    open_paths = [
+        ensure_xrootd_redirector(path, "root://eosuser.cern.ch/")
+        if is_url or is_remote_storage_path
+        else path
+    ]
+    if is_remote_storage_path:
+        open_paths.insert(0, path)
+
+    errors: list[str] = []
+    try:
+        import uproot  # type: ignore
+    except ImportError:
+        uproot = None  # type: ignore[assignment]
+
+    if uproot is not None:
+        for open_path in dict.fromkeys(open_paths):
+            try:
+                with uproot.open(open_path) as root_file:
+                    if tree_name is None:
+                        root_file.keys()
+                        # Compact metadata is part of the artifact contract.
+                        # Validate while the file is already open; legacy files
+                        # without the versioned keys retain their old contract.
+                        from metadata_io import JOB_KEY, REFERENCE_KEY, load_metadata_records
+                        if JOB_KEY in root_file or REFERENCE_KEY in root_file:
+                            try:
+                                load_metadata_records(open_path)
+                            except Exception as exc:
+                                return f"invalid compact metadata: {exc}"
+                        return None
+                    obj = root_file[tree_name]
+                    classname = getattr(obj, "classname", None)
+                    if classname is not None and classname not in ("TTree", "ROOT::RNTuple"):
+                        return f"object '{tree_name}' is {classname}, not a tree"
+                    return None
+            except Exception as exc:  # uproot uses several backend-specific exceptions
+                errors.append(f"uproot could not read {open_path!r}: {exc}")
+
+    try:
+        import ROOT  # type: ignore
+    except Exception as exc:  # broken optional PyROOT installations can fail at import time
+        errors.append(f"PyROOT could not be imported: {exc}")
+        ROOT = None  # type: ignore[assignment]
+
+    if ROOT is not None:
+        for open_path in dict.fromkeys(open_paths):
+            root_file = None
+            try:
+                root_file = ROOT.TFile.Open(open_path, "READ")
+                if not root_file or root_file.IsZombie():
+                    raise OSError("ROOT reported a zombie or unopened file")
+                if tree_name is None:
+                    from metadata_io import JOB_KEY, REFERENCE_KEY, _normalize_record
+                    obj = root_file.Get(JOB_KEY)
+                    if obj:
+                        try:
+                            _normalize_record(json.loads(str(obj.GetString().Data())), open_path)
+                        except Exception as exc:
+                            return f"invalid compact metadata: {exc}"
+                    if root_file.Get(REFERENCE_KEY):
+                        return "merged metadata references require uproot for integrity validation"
+                    return None
+                obj = root_file.Get(tree_name)
+                if not obj or not obj.InheritsFrom("TTree"):
+                    return f"object '{tree_name}' is missing or is not a TTree"
+                return None
+            except Exception as exc:  # ROOT can raise framework-specific exceptions
+                errors.append(f"PyROOT could not read {open_path!r}: {exc}")
+            finally:
+                if root_file:
+                    root_file.Close()
+
+    detail = "; ".join(errors) if errors else "neither uproot nor PyROOT is available"
+    if tree_name is None:
+        return f"cannot validate ROOT file {path!r}: {detail}"
+    return f"cannot validate ROOT tree '{tree_name}' in {path!r}: {detail}"
+
+
+def _config_enables_skim(config_path: str) -> bool:
+    """Read the Analyzer skim switch from a staged or template config."""
+    if not config_path or not os.path.isfile(config_path):
+        return False
+    value = read_config(config_path).get("enableSkim", False)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _skim_job_output_errors(
+    *,
+    dataset_name: str,
+    dtype: str,
+    save_path: str,
+    meta_path: str,
+    tree_name: str = "Events",
+    require_skim: bool = True,
+) -> list[str]:
+    """Validate a skim when enabled and always validate the metadata output."""
+    errors: list[str] = []
+    if require_skim:
+        if not save_path:
+            errors.append("skim output path is not configured")
+        else:
+            reason = _root_file_tree_error(save_path, tree_name)
+            if reason:
+                errors.append(f"skim output {save_path!r}: {reason}")
+
+    if not meta_path:
+        errors.append("metadata output path is not configured")
+    else:
+        reason = _root_file_tree_error(meta_path, None)
+        if reason:
+            errors.append(f"metadata output {meta_path!r}: {reason}")
+
+    if dtype.lower() == "mc" and meta_path and not any(
+        error.startswith("metadata output") for error in errors
+    ):
+        for description, reader in (
+            ("raw generator-weight counter", _shared_read_weight_sum),
+            ("generator-weight sign counter", _shared_read_weight_sign_sum),
+        ):
+            try:
+                reader(meta_path, dataset_name)
+            except Exception as exc:  # malformed ROOT metadata can raise backend-specific errors
+                errors.append(
+                    f"metadata output {meta_path!r} has invalid {description}: {exc}"
+                )
+    return errors
+
+
+def _run_skim_job_with_output_contract(
+    job_runner,
+    job_args: list,
+    job_kwargs: dict,
+    dataset_manifest_path: str,
+    submit_config_path: str,
+    dataset_name: str,
+    save_path: str,
+    meta_path: str,
+    tree_name: str,
+    write_cache: bool,
+    extra_input_paths: Optional[list[str]] = None,
+) -> str:
+    """Run a Dask skim and validate outputs before the proxy writes its marker."""
+    result = job_runner(*job_args, **job_kwargs)
+    dataset = _find_dataset_entry(dataset_manifest_path, dataset_name)
+    if dataset is None:
+        raise RuntimeError(
+            f"Skim output contract cannot find dataset {dataset_name!r} in "
+            f"{dataset_manifest_path!r}."
+        )
+
+    require_skim = _config_enables_skim(submit_config_path)
+    errors = _skim_job_output_errors(
+        dataset_name=dataset_name,
+        dtype=dataset.dtype,
+        save_path=save_path,
+        meta_path=meta_path,
+        tree_name=tree_name,
+        require_skim=require_skim,
+    )
+    if errors:
+        raise RuntimeError(
+            f"Skim output contract failed for dataset {dataset_name!r}: "
+            + "; ".join(errors)
+        )
+
+    if write_cache and require_skim:
+        manifest = _build_skim_manifest(
+            dataset=dataset,
+            submit_config_path=submit_config_path,
+            dataset_manifest_path=dataset_manifest_path,
+            skim_output_file=save_path,
+            extra_input_paths=extra_input_paths,
+        )
+        write_cache_sidecar(save_path, manifest)
+    return result
+
+
 def _safe_dataset_submission_name(dataset_name: str) -> str:
     """Return a filesystem-safe directory name for a dataset submission bundle."""
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(dataset_name)).strip("._") or "dataset"
@@ -774,9 +1366,157 @@ def _discover_jobs_in_submission_dir(submission_dir: str) -> dict[int, dict[str,
             "dir": os.path.realpath(job_dir),
             "save": save,
             "meta": meta,
+            "tree_name": str(cfg.get("saveTree", "Events") or "Events"),
         }
         idx += 1
     return info
+
+
+def _skim_job_file_list(job_dir: str) -> list[str]:
+    """Return the concrete input files configured for a prepared skim job."""
+    config_path = os.path.join(job_dir, "submit_config.txt")
+    if not os.path.isfile(config_path):
+        return []
+    config = read_config(config_path)
+    raw_file_list = config.get("__orig_fileList", config.get("fileList", ""))
+    return [item.strip() for item in str(raw_file_list or "").split(",") if item.strip()]
+
+
+def _split_skim_file_list(file_list: list[str]) -> list[list[str]]:
+    """Split a multi-file skim into two balanced file groups."""
+    if len(file_list) <= 1:
+        return [file_list]
+    midpoint = (len(file_list) + 1) // 2
+    return [file_list[:midpoint], file_list[midpoint:]]
+
+
+def _split_skim_partition(job_dir: str, metadata_cache: str = "") -> list[dict]:
+    """Bisect bounded entry ranges before considering whole-file bisection."""
+    files = _skim_job_file_list(job_dir)
+    config_path = os.path.join(job_dir, "submit_config.txt")
+    config = read_config(config_path) if os.path.isfile(config_path) else {}
+    first, last = 0, 0
+    if "firstEntry" in config and "lastEntry" in config:
+        first, last = int(config["firstEntry"]), int(config["lastEntry"])
+        if first < 0 or last < 0:
+            raise ValueError("Retry entry bounds must be nonnegative")
+        if (first or last) and last <= first:
+            raise ValueError("Retry entry interval must be increasing")
+    if last <= first and len(files) == 1:
+        last = int(config.get("plannedInputEntries", 0))
+        if not last and metadata_cache and os.path.isfile(metadata_cache):
+            last = EntryCache(metadata_cache).get(files[0], str(config.get("treeList", "Events"))) or 0
+        first = 0
+    if last > first:
+        if last - first > 1:
+            middle = first + (last - first) // 2
+            return [{"files": files, "first_entry": a, "last_entry": b}
+                    for a, b in ((first, middle), (middle, last))]
+        return [{"files": files, "first_entry": first, "last_entry": last}]
+    return [{"files": part} for part in _split_skim_file_list(files)]
+
+
+def _append_output_part_suffix(path: str, part_index: int) -> str:
+    """Add a split-part suffix while preserving the output file extension."""
+    if not path:
+        return path
+    base, extension = os.path.splitext(path)
+    return f"{base}_part{part_index}{extension}"
+
+
+def _prepare_split_skim_job(
+    source_job_dir: str,
+    submission_dir: str,
+    job_index: int,
+    retry_attempt: int,
+    part_index: int,
+    file_list: list[str],
+    first_entry: Optional[int] = None,
+    last_entry: Optional[int] = None,
+) -> dict[str, str]:
+    """Create an isolated per-file-group directory for a split retry."""
+    resub_dir = os.path.join(submission_dir, "resubmissions")
+    target_job_dir = os.path.join(
+        resub_dir,
+        f"job_{job_index}_retry{retry_attempt}_part{part_index}",
+    )
+    Path(resub_dir).mkdir(parents=True, exist_ok=True)
+    if os.path.exists(target_job_dir):
+        shutil.rmtree(target_job_dir)
+    shutil.copytree(source_job_dir, target_job_dir)
+
+    config_path = os.path.join(target_job_dir, "submit_config.txt")
+    config = read_config(config_path)
+    normalized_file_list = ",".join(file_list)
+    config["fileList"] = normalized_file_list
+    if "__orig_fileList" in config:
+        config["__orig_fileList"] = normalized_file_list
+    config.pop("plannedInputEntries", None)
+    if first_entry is not None and last_entry is not None:
+        config["firstEntry"] = str(first_entry)
+        config["lastEntry"] = str(last_entry)
+        config["plannedInputEntries"] = str(last_entry - first_entry)
+
+    for key in ("saveFile", "metaFile", "__orig_saveFile", "__orig_metaFile"):
+        if config.get(key):
+            config[key] = _append_output_part_suffix(str(config[key]), part_index)
+
+    write_config(config, config_path)
+    return {
+        "dir": os.path.realpath(target_job_dir),
+        "save": str(config.get("__orig_saveFile", config.get("saveFile", ""))),
+        "meta": str(config.get("__orig_metaFile", config.get("metaFile", ""))),
+        "tree_name": str(config.get("saveTree", "Events") or "Events"),
+    }
+
+
+def _condor_job_elapsed_runtime(ad: dict) -> float:
+    """Return wall time for the current run, using the schedd's clock when available."""
+    # RemoteWallClockTime is cumulative across executions and can lag while a
+    # job is running. Prefer the current start date so a stuck first execution
+    # is detected and an earlier eviction does not penalize a fresh execution.
+    for attribute in ("JobCurrentStartDate", "EnteredCurrentStatus"):
+        try:
+            started = float(ad.get(attribute, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(started) or started <= 0:
+            continue
+        try:
+            now = float(ad.get("ServerTime", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            now = 0
+        if not math.isfinite(now) or now <= 0:
+            now = time.time()
+        return max(0.0, now - started)
+
+    # Compatibility with ads that do not expose a current-run timestamp.
+    try:
+        elapsed = float(ad.get("RemoteWallClockTime", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return elapsed if math.isfinite(elapsed) and elapsed > 0 else 0.0
+
+
+def _condor_job_exceeded_runtime(
+    ad: dict,
+    fallback_max_runtime: Optional[int] = None,
+    grace_factor: float = 1.5,
+) -> bool:
+    """Return whether a running Condor job exceeded its assigned runtime."""
+    try:
+        assigned_runtime = float(ad.get("MaxRuntime", 0) or 0)
+        if assigned_runtime <= 0 and fallback_max_runtime:
+            assigned_runtime = float(fallback_max_runtime)
+        elapsed_runtime = _condor_job_elapsed_runtime(ad)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+    return (
+        math.isfinite(assigned_runtime)
+        and assigned_runtime > 0
+        and elapsed_runtime > assigned_runtime * grace_factor
+    )
 
 
 def _submit_single_skim_job(
@@ -786,11 +1526,15 @@ def _submit_single_skim_job(
     request_memory: int,
     extra_transfer_files: Optional[list[str]] = None,
     config_file: str = "submit_config.txt",
+    source_job_dir: Optional[str] = None,
+    log_label: Optional[str] = None,
 ) -> Optional[str]:
     """Submit a single prepared skim job for monitor-driven resubmission."""
-    job_dir = os.path.join(submission_dir, f"job_{job_index}")
+    job_dir = source_job_dir or os.path.join(submission_dir, f"job_{job_index}")
     resub_dir = os.path.join(submission_dir, "resubmissions")
     Path(resub_dir).mkdir(parents=True, exist_ok=True)
+    job_reference = os.path.relpath(job_dir, submission_dir).replace(os.sep, "/").rstrip("/") + "/"
+    resub_label = log_label or f"resub_{job_index}"
 
     submit_template_path = os.path.join(submission_dir, "condor_submit.sub")
     log_base = os.path.join(submission_dir, "condor_logs")
@@ -800,22 +1544,22 @@ def _submit_single_skim_job(
         with open(submit_template_path) as fh:
             sub_content = fh.read()
 
-        sub_content = sub_content.replace("job_$(Process)/", f"job_{job_index}/")
+        sub_content = sub_content.replace("job_$(Process)/", job_reference)
         sub_content = sub_content.replace("$(Process)", str(job_index))
         sub_content = re.sub(r"(?mi)^[ \t]*queue\b.*$", "queue 1", sub_content)
         sub_content = re.sub(
             r"(?mi)^[ \t]*Output\s*=.*$",
-            f"Output = {log_base}/resub_{job_index}_$(Cluster)_$(Process).stdout",
+            f"Output = {log_base}/{resub_label}_$(Cluster)_$(Process).stdout",
             sub_content,
         )
         sub_content = re.sub(
             r"(?mi)^[ \t]*Error\s*=.*$",
-            f"Error = {log_base}/resub_{job_index}_$(Cluster)_$(Process).stderr",
+            f"Error = {log_base}/{resub_label}_$(Cluster)_$(Process).stderr",
             sub_content,
         )
         sub_content = re.sub(
             r"(?mi)^[ \t]*Log\s*=.*$",
-            f"Log = {log_base}/resub_{job_index}.log",
+            f"Log = {log_base}/{resub_label}.log",
             sub_content,
         )
         sub_content = re.sub(
@@ -869,13 +1613,19 @@ max_transfer_input_mb = 10000
 WhenToTransferOutput = On_Exit
 transfer_output_files = {config_file}
 
-Output = {log_base}/resub_{job_index}_$(Cluster)_$(Process).stdout
-Error  = {log_base}/resub_{job_index}_$(Cluster)_$(Process).stderr
-Log    = {log_base}/resub_{job_index}.log
+        Output = {log_base}/{resub_label}_$(Cluster)_$(Process).stdout
+Error  = {log_base}/{resub_label}_$(Cluster)_$(Process).stderr
+Log    = {log_base}/{resub_label}.log
 queue 1
 """
 
-    sub_path = os.path.join(resub_dir, f"resub_job{job_index}.sub")
+    sub_content = ensure_condor_machine_exclusion(sub_content)
+    submit_filename = (
+        f"resub_job{job_index}.sub"
+        if log_label is None
+        else f"{resub_label}.sub"
+    )
+    sub_path = os.path.join(resub_dir, submit_filename)
     with open(sub_path, "w") as fh:
         fh.write(sub_content)
 
@@ -884,7 +1634,7 @@ queue 1
             ["condor_submit", sub_path],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=420,
         )
         if result.returncode != 0:
             return None
@@ -906,28 +1656,72 @@ def _rewrite_staged_analysis_config(
     source_config_path: str,
     staged_config_path: str,
 ) -> None:
-    """Rewrite staged YAML config payloads so aux references stay valid locally."""
+    """Rewrite staged YAML payload references to the worker's ``aux/`` tree.
+
+    Payloads may be nested below ``aux/`` (for example
+    ``aux/payloads/run3_2022_preEE/...``). Preserve that relative layout when
+    rewriting paths; using only the basename can both miss nested files and
+    select the wrong era when basenames are repeated.
+    """
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        record = json.loads((bundle / "bundle_manifest.json").read_text())
+        replacements = {}
+        prefix = "cfg/" if Path(staged_config_path).parent.name == "cfg" else ""
+        for source, relative in record["assets"].items():
+            runtime = prefix + Path(relative).name
+            replacements.update({source: runtime, relative: runtime,
+                                 str(bundle / relative): runtime})
+        path = Path(staged_config_path)
+        if path.suffix in {".yaml", ".yml"}:
+            value = yaml.safe_load(path.read_text())
+            path.write_text(yaml.safe_dump(rewrite_references(value, replacements), sort_keys=False))
+        elif path.suffix == ".txt":
+            content = path.read_text()
+            for source, runtime in replacements.items():
+                content = content.replace("file=" + source, "file=" + runtime)
+            path.write_text(content)
+        return
     if not staged_config_path.lower().endswith((".yaml", ".yml")):
         return
 
     aux_src = _analysis_aux_dir(template_config_path)
-    aux_files: set[str] = set()
-    if aux_src and os.path.isdir(aux_src):
-        aux_files = {
-            aux_entry.name
-            for aux_entry in Path(aux_src).iterdir()
-            if aux_entry.is_file()
-        }
-    if not aux_files:
+    if not aux_src or not os.path.isdir(aux_src):
         return
-
-    try:
-        import yaml  # type: ignore
-    except ImportError:
-        return
+    aux_root = Path(aux_src).resolve()
+    aux_files_by_name: dict[str, list[Path]] = {}
+    for aux_entry in aux_root.rglob("*"):
+        if aux_entry.is_file():
+            aux_files_by_name.setdefault(aux_entry.name, []).append(aux_entry)
 
     with open(staged_config_path) as fh:
         payload = yaml.safe_load(fh)
+
+    def _worker_aux_path(value: str) -> Optional[str]:
+        value = value.strip()
+        if not value or value.startswith(("root://", "http://", "https://")):
+            return None
+
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            resolved_value = _resolve_analysis_config_path(source_config_path, value)
+            candidate = Path(resolved_value).expanduser()
+        try:
+            resolved_candidate = candidate.resolve()
+            relative = resolved_candidate.relative_to(aux_root)
+        except (OSError, RuntimeError, ValueError):
+            relative = None
+        if relative is not None and resolved_candidate.is_file():
+            return (Path("aux") / relative).as_posix()
+
+        # Keep support for configs that name a payload by basename. Only
+        # rewrite it when that basename uniquely identifies a file in aux.
+        if os.path.isabs(value) or os.path.sep in value:
+            return None
+        matches = aux_files_by_name.get(value, [])
+        if len(matches) == 1:
+            return (Path("aux") / matches[0].relative_to(aux_root)).as_posix()
+        return None
 
     def _rewrite(node):
         if isinstance(node, list):
@@ -936,21 +1730,9 @@ def _rewrite_staged_analysis_config(
             rewritten: dict[object, object] = {}
             for key, value in node.items():
                 if isinstance(key, str) and key.lower().endswith("file") and isinstance(value, str):
-                    basename = os.path.basename(value.strip())
-                    if basename in aux_files:
-                        rewritten[key] = os.path.join("aux", basename)
-                        continue
-
-                    resolved_value = _resolve_analysis_config_path(source_config_path, value.strip())
-                    if (
-                        resolved_value
-                        and os.path.isfile(resolved_value)
-                        and os.path.basename(resolved_value) in aux_files
-                    ):
-                        rewritten[key] = os.path.join(
-                            "aux",
-                            os.path.basename(resolved_value),
-                        )
+                    worker_path = _worker_aux_path(value)
+                    if worker_path is not None:
+                        rewritten[key] = worker_path
                         continue
                 rewritten[key] = _rewrite(value)
             return rewritten
@@ -972,6 +1754,7 @@ def _rewrite_staged_analysis_config(
 def _build_task_provenance(
     submit_config_path: Optional[str] = None,
     dataset_manifest_path: Optional[str] = None,
+    extra_input_paths: Optional[list[str]] = None,
 ) -> ProvenanceRecord:
     """Collect a :class:`~output_schema.ProvenanceRecord` for the current task.
 
@@ -986,6 +1769,8 @@ def _build_task_provenance(
     * **dataset_manifest_hash** – SHA-256 hex digest of *dataset_manifest_path*
       via :meth:`~dataset_manifest.DatasetManifest.file_hash` (omitted when
       the file does not exist or the hash cannot be computed).
+    * **task_config_hash** – SHA-256 digest of the effective job config and
+      referenced stitching weights, when those inputs are available.
 
     Parameters
     ----------
@@ -993,6 +1778,8 @@ def _build_task_provenance(
         Path to the submit_config.txt template for the current task.
     dataset_manifest_path:
         Path to the dataset manifest YAML file for the current task.
+    extra_input_paths:
+        Optional file inputs whose content should participate in cache identity.
 
     Returns
     -------
@@ -1027,10 +1814,50 @@ def _build_task_provenance(
         except Exception:
             pass
 
+    task_config_hash: Optional[str] = None
+    if (submit_config_path and os.path.isfile(submit_config_path)) or extra_input_paths:
+        digest = hashlib.sha256()
+        input_paths = list(extra_input_paths or [])
+        if submit_config_path and os.path.isfile(submit_config_path):
+            config_path = os.path.abspath(submit_config_path)
+            digest.update(b"config-path\0" + config_path.encode("utf-8") + b"\0")
+            with open(config_path, "rb") as config_fh:
+                for chunk in iter(lambda: config_fh.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            configured = read_config(config_path)
+            stitch_weights = str(configured.get("stitchWeights", "")).strip()
+            if stitch_weights:
+                input_paths.append(stitch_weights)
+        seen_paths: set[str] = set()
+        for input_path in input_paths:
+            if not input_path:
+                continue
+            resolved_path = (
+                _resolve_analysis_config_path(submit_config_path, input_path)
+                if submit_config_path
+                else input_path
+            )
+            normalized_path = os.path.abspath(resolved_path) if not str(resolved_path).startswith("root://") else str(resolved_path)
+            if normalized_path in seen_paths:
+                continue
+            seen_paths.add(normalized_path)
+            digest.update(b"input-path\0" + normalized_path.encode("utf-8") + b"\0")
+            if os.path.isfile(normalized_path):
+                with open(normalized_path, "rb") as input_fh:
+                    for chunk in iter(lambda: input_fh.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            else:
+                # Remote URLs and missing optional files still affect the
+                # identity by path; task setup separately validates required
+                # inputs before execution.
+                digest.update(b"unreadable-or-remote\0")
+        task_config_hash = digest.hexdigest()
+
     return ProvenanceRecord(
         framework_hash=framework_hash,
         config_mtime=config_mtime,
         dataset_manifest_hash=dataset_manifest_hash,
+        task_config_hash=task_config_hash,
     )
 
 
@@ -1039,6 +1866,7 @@ def _build_skim_manifest(
     submit_config_path: str,
     dataset_manifest_path: str,
     skim_output_file: str,
+    extra_input_paths: Optional[list[str]] = None,
 ) -> OutputManifest:
     """Build an :class:`~output_schema.OutputManifest` for a skim artifact.
 
@@ -1067,6 +1895,7 @@ def _build_skim_manifest(
     prov = _build_task_provenance(
         submit_config_path=submit_config_path,
         dataset_manifest_path=dataset_manifest_path,
+        extra_input_paths=extra_input_paths,
     )
 
     manifest_hash: Optional[str] = None
@@ -1091,6 +1920,7 @@ def _build_skim_manifest(
         intermediate_artifacts=[artifact],
         framework_hash=prov.framework_hash,
         config_mtime=prov.config_mtime,
+        task_config_hash=prov.task_config_hash,
         dataset_manifest_provenance=dataset_manifest_prov,
     )
 
@@ -1129,72 +1959,127 @@ def _read_histogram_config_entries(config_path: str) -> list[dict[str, str]]:
     return entries
 
 
-def _read_root_histogram_names(meta_file: str) -> list[str]:
-    """Return deduplicated histogram names found recursively in *meta_file*."""
-    if not meta_file or not os.path.isfile(meta_file):
-        return []
+def _read_root_histogram_metadata(
+    meta_file: str,
+) -> tuple[list[str], Optional[dict[str, Any]]]:
+    """Read histogram keys and any embedded sparse-first schema."""
+    if not meta_file:
+        return [], None
+    is_remote_path = meta_file.startswith(
+        ("root://", "xroot://", "/eos/", "/store/")
+    )
+    if not is_remote_path and not os.path.isfile(meta_file):
+        return [], None
 
     try:
         import uproot  # type: ignore
     except ImportError:
-        return []
+        return [], None
 
     names: list[str] = []
     seen: set[str] = set()
 
-    def _visit(directory) -> None:
+    def _visit(directory, prefix: str = "") -> None:
         for key in directory.keys(cycle=False):
             try:
                 obj = directory[key]
             except Exception:
                 continue
 
-            if hasattr(obj, "keys") and not hasattr(obj, "values"):
-                _visit(obj)
+            name = str(key).split(";", 1)[0]
+            if hasattr(obj, "keys") and not (
+                hasattr(obj, "axes") and hasattr(obj, "values")
+            ):
+                _visit(obj, f"{prefix}{name}/")
                 continue
 
             if not hasattr(obj, "values"):
                 continue
 
-            name = str(key).split(";", 1)[0]
-            if name and name not in seen:
-                names.append(name)
-                seen.add(name)
+            full_name = f"{prefix}{name}"
+            if full_name and full_name not in seen:
+                names.append(full_name)
+                seen.add(full_name)
 
-    with uproot.open(meta_file) as root_file:
+    open_path = meta_file
+    if meta_file.startswith(("root://", "/eos/", "/store/")):
+        remote_open_path = ensure_xrootd_redirector(
+            meta_file, "root://eosuser.cern.ch/"
+        )
+        if meta_file.startswith("root://") or not os.path.isfile(meta_file):
+            open_path = remote_open_path
+    with uproot.open(open_path) as root_file:
+        try:
+            embedded = json.loads(str(root_file["__rdf_histogram_schema_v1"]))
+        except KeyError:
+            embedded = None
+        if isinstance(embedded, dict) and isinstance(
+            embedded.get("histograms"), list
+        ):
+            directory = embedded.get("directory", "nd_histograms_v1")
+            names = [
+                f"{directory}/{entry['key']}"
+                for entry in embedded["histograms"]
+                if isinstance(entry, dict) and isinstance(entry.get("key"), str)
+            ]
+            return names, embedded
         _visit(root_file)
-    return names
+    return names, None
+
+
+def _read_root_histogram_names(meta_file: str) -> list[str]:
+    """Return deduplicated histogram names found recursively in *meta_file*."""
+    return _read_root_histogram_metadata(meta_file)[0]
 
 
 def _histogram_axis_labels_from_entries(
     entries: list[dict[str, str]],
     histogram_names: list[str],
+    embedded_schema: Optional[dict[str, Any]] = None,
 ) -> dict[str, list[str]]:
     """Build axis-label metadata from parsed histogram config entries."""
     axis_labels: dict[str, list[str]] = {}
-    if not entries:
-        return axis_labels
+    if embedded_schema and isinstance(embedded_schema.get("histograms"), list):
+        for histogram in embedded_schema["histograms"]:
+            if not isinstance(histogram, dict):
+                continue
+            for axis in histogram.get("axes", []):
+                if not isinstance(axis, dict):
+                    continue
+                role = axis.get("role")
+                labels = axis.get("labels")
+                if (
+                    isinstance(role, str)
+                    and isinstance(labels, list)
+                    and labels
+                    and role not in axis_labels
+                ):
+                    axis_labels[role] = labels
 
-    first = entries[0]
-    for role, key in (
-        ("channel", "channelRegions"),
-        ("control", "controlRegionRegions"),
-        ("sample", "sampleCategoryRegions"),
-    ):
-        raw = first.get(key, "")
-        labels = [label.strip() for label in raw.split(",") if label.strip()]
-        if labels:
-            axis_labels[role] = labels
+    if entries:
+        first = entries[0]
+        for role, key in (
+            ("channel", "channelRegions"),
+            ("control", "controlRegionRegions"),
+            ("sample", "sampleCategoryRegions"),
+        ):
+            if role in axis_labels:
+                continue
+            raw = first.get(key, "")
+            labels = [label.strip() for label in raw.split(",") if label.strip()]
+            if labels:
+                axis_labels[role] = labels
 
-    systematic_labels = sorted(
-        {
-            match.group(1)
-            for name in histogram_names
-            for match in [re.search(r"_(.+(?:Up|Down))$", name)]
-            if match
-        }
-    )
-    axis_labels["systematic"] = ["Nominal"] + systematic_labels
+    if "systematic" not in axis_labels:
+        systematic_labels = sorted(
+            {
+                match.group(1)
+                for name in histogram_names
+                for match in [re.search(r"_(.+(?:Up|Down))$", name)]
+                if match
+            }
+        )
+        axis_labels["systematic"] = ["Nominal"] + systematic_labels
     return axis_labels
 
 
@@ -1456,8 +2341,12 @@ def _build_histfill_manifest(
         job_config.get("histogramConfig", ""),
     )
     histogram_entries = _read_histogram_config_entries(histogram_config_path)
-    histogram_names = _read_root_histogram_names(meta_file)
-    axis_labels = _histogram_axis_labels_from_entries(histogram_entries, histogram_names)
+    histogram_names, embedded_histogram_schema = _read_root_histogram_metadata(
+        meta_file
+    )
+    axis_labels = _histogram_axis_labels_from_entries(
+        histogram_entries, histogram_names, embedded_histogram_schema
+    )
 
     sample_metadata = _initial_sample_metadata(dataset)
     _augment_sample_metadata_with_axis_labels(sample_metadata, axis_labels)
@@ -1565,6 +2454,7 @@ def _dataset_job_metadata(dataset: DatasetEntry) -> dict[str, str]:
     _store("energy", dataset.energy)
     _store("extra_scale", dataset.extra_scale)
     _store("sum_weights", dataset.sum_weights)
+    _store("genWeightMode", dataset.generator_weight_mode)
     _store("dtype", dataset.dtype)
     _store("parent", dataset.parent)
     _store("das", dataset.das)
@@ -1586,21 +2476,43 @@ def _dataset_job_metadata(dataset: DatasetEntry) -> dict[str, str]:
     if legacy_type is not None:
         metadata["type"] = str(legacy_type)
 
+    # Forward analysis-specific dataset metadata (for example ptcut) into
+    # per-job submit configs. Standard metadata keys above win on collisions.
+    if isinstance(dataset.extra, dict):
+        for key, value in dataset.extra.items():
+            if key in metadata or key is None:
+                continue
+            _store(str(key), value)
+
     return metadata
 
 
 def _resolve_output_destination_base(
     template_config_path: str,
     config_dict: dict[str, str],
+    output_directory: str = "",
 ) -> str:
-    """Resolve the configured final saveDirectory for staged skim outputs."""
-    save_dir = str(config_dict.get("saveDirectory", "") or "").strip()
+    """Resolve an EOS/XRootD destination for staged HTCondor skim outputs."""
+    save_dir = str(
+        output_directory or config_dict.get("saveDirectory", "") or ""
+    ).strip()
     if not save_dir:
         return ""
-    if os.path.isabs(save_dir):
+    if (
+        save_dir.startswith("root://")
+        or save_dir.startswith("/eos/")
+    ):
         return save_dir
-    template_dir = os.path.dirname(os.path.abspath(template_config_path))
-    return os.path.abspath(os.path.join(template_dir, save_dir))
+    if os.path.isabs(save_dir):
+        resolved_save_dir = save_dir
+    else:
+        template_dir = os.path.dirname(os.path.abspath(template_config_path))
+        resolved_save_dir = os.path.abspath(os.path.join(template_dir, save_dir))
+    raise RuntimeError(
+        "HTCondor stage-out requires an EOS destination (/eos/...) or an explicit "
+        f"root:// URL; saveDirectory {save_dir!r} resolves to local path "
+        f"{resolved_save_dir!r}. Pass --output-directory with a remote destination."
+    )
 
 
 def _rewrite_job_output_destinations(config_path: str, final_output_dir: str) -> None:
@@ -1618,6 +2530,18 @@ def _rewrite_job_output_destinations(config_path: str, final_output_dir: str) ->
                 fh.write(f"{key}={value}\n")
 
 
+def _stitch_job_overrides(task: object) -> dict[str, str]:
+    """Return optional stitching keys to inject into prepared job configs."""
+    overrides: dict[str, str] = {}
+    stitch_mode = str(getattr(task, "stitch_mode", "") or "").strip()
+    stitch_weights = str(getattr(task, "stitch_weights", "") or "").strip()
+    if stitch_mode:
+        overrides["stitchMode"] = stitch_mode
+    if stitch_weights:
+        overrides["stitchWeights"] = stitch_weights
+    return overrides
+
+
 # ===========================================================================
 # Helper: write a job submit_config.txt from a template + dataset overrides
 # ===========================================================================
@@ -1627,8 +2551,12 @@ def _write_job_config(
     template_config_path: str,
     dataset: DatasetEntry,
     output_dir: str,
+    manifest_lumi: Optional[float] = None,
     extra_overrides: Optional[dict[str, str]] = None,
     stage_shared_inputs_locally: bool = True,
+    template_config: Optional[dict[str, str]] = None,
+    runtime_payload_sources: Optional[list[str]] = None,
+    prepared_payloads: Optional[dict[str, bytes]] = None,
 ) -> None:
     """Create a ``submit_config.txt`` inside *job_dir* for *dataset*.
 
@@ -1656,10 +2584,14 @@ def _write_job_config(
     extra_overrides:
         Additional key-value overrides applied after the standard ones.
     """
-    template_config = read_config(template_config_path)
+    if template_config is None:
+        template_config = read_config(template_config_path)
     template_dir = os.path.dirname(os.path.abspath(template_config_path))
 
     job_config = dict(template_config)
+    bundle = find_bundle(template_config_path)
+    if bundle:
+        job_config["runBundleId"] = json.loads((bundle / "bundle_manifest.json").read_text())["bundle_id"]
 
     # ---- file list ----------------------------------------------------------
     if dataset.files:
@@ -1671,12 +2603,20 @@ def _write_job_config(
 
     # Ensure each entry is accessible via XRootD redirector when appropriate.
     # Do not modify local filenames (input_*.root) or other non-EOS paths.
+    redirector = (
+        str(template_config.get("xrootdRedirector", "") or "").strip()
+        or str(template_config.get("redirector", "") or "").strip()
+    )
+
     normalized_files = []
     for f in file_list:
         if not f:
             continue
         if f.startswith("/") or f.startswith("store/") or f.startswith("root://"):
-            normalized_files.append(ensure_xrootd_redirector(f))
+            if redirector:
+                normalized_files.append(ensure_xrootd_redirector(f, redirector))
+            else:
+                normalized_files.append(ensure_xrootd_redirector(f))
         else:
             normalized_files.append(f)
 
@@ -1689,12 +2629,17 @@ def _write_job_config(
     job_config["metaFile"] = os.path.join(output_dir, "meta.root")
     job_config["saveDirectory"] = output_dir
 
+    # The caller may provide a new job directory; create it before staging
+    # auxiliary inputs and writing submit_config.txt.
+    os.makedirs(job_dir, exist_ok=True)
+
     # ---- sample identity / manifest metadata --------------------------------
     job_config.update(_dataset_job_metadata(dataset))
+    if manifest_lumi is not None:
+        job_config["lumi"] = str(manifest_lumi)
 
     # Data samples do not carry MC-only generator weights.
-    if str(dataset.dtype or "").lower() == "data":
-        job_config.pop("counterWeightBranch", None)
+    _remove_mc_generator_config_for_data(job_config)
 
     # ---- caller-supplied overrides ------------------------------------------
     if extra_overrides:
@@ -1702,9 +2647,12 @@ def _write_job_config(
 
     # ---- copy referenced auxiliary files ------------------------------------
     if stage_shared_inputs_locally:
+        staging_config = dict(template_config)
+        if extra_overrides:
+            staging_config.update(extra_overrides)
         copied_payloads = _copy_analysis_config_files(
             template_config_path=template_config_path,
-            config_dict=template_config,
+            config_dict=staging_config,
             destination_dir=job_dir,
         )
         _copy_analysis_aux_dir(template_config_path, job_dir)
@@ -1712,13 +2660,33 @@ def _write_job_config(
             if key.startswith("__"):
                 continue
             if isinstance(val, str) and (
-                val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
+                val.endswith(".txt")
+                or val.endswith(".yaml")
+                or val.endswith(".yml")
+                or val.endswith(".json")
+                or val.endswith(".json.gz")
+                or val.endswith(".onnx")
             ):
                 basename = os.path.basename(val)
                 if basename in copied_payloads:
                     job_config[key] = basename
     else:
-        _normalize_shared_config_references(template_config_path, job_config)
+        _ensure_local_analysis_runtime_layout(
+            template_config_path,
+            job_config,
+            job_dir,
+            payload_sources=runtime_payload_sources,
+            prepared_payloads=prepared_payloads,
+        )
+        _normalize_shared_config_references(
+            template_config_path,
+            job_config,
+            staged_payload_names=(
+                {os.path.basename(src) for src in runtime_payload_sources}
+                if runtime_payload_sources is not None
+                else None
+            ),
+        )
 
     # ---- write the final config file ----------------------------------------
     config_path = os.path.join(job_dir, "submit_config.txt")
@@ -1747,10 +2715,62 @@ def _extract_lfn_for_redirect(url: str) -> str:
     path = "/" + m.group(1).lstrip("/")
     # For site-specific test redirectors the path is
     # /store/test/xrootd/<site>//store/... — extract the actual LFN.
-    test_m = _re.match(r"/store/test/xrootd/[^/]+/(.*)", path)
+    test_m = _re.match(_io_policy.SITE_PATH_PATTERN, path)
     if test_m:
         path = "/" + test_m.group(1).lstrip("/")
     return path
+
+
+def _select_test_input_url(input_url: str, job_dir: str) -> str:
+    """Select a readable Rucio replica URL for the local preflight job."""
+    config_path = os.path.join(job_dir, "submit_config.txt")
+    if os.path.isfile(config_path):
+        config = read_config(config_path)
+        redirector = str(
+            config.get("xrootdRedirector", "") or config.get("redirector", "")
+        ).strip()
+        if redirector:
+            return ensure_xrootd_redirector(
+                _extract_lfn_for_redirect(input_url), redirector
+            )
+
+    redirectors_path = os.path.join(job_dir, "site_redirectors.json")
+    if not os.path.isfile(redirectors_path):
+        return input_url
+
+    try:
+        with open(redirectors_path) as fh:
+            redirector_map = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return input_url
+
+    lfn = _extract_lfn_for_redirect(input_url)
+    candidates = redirector_map.get(lfn, [])
+    if not candidates:
+        return input_url
+
+    try:
+        from xrootd_site_selector import select_best_url  # type: ignore
+
+        selected = select_best_url(lfn, redirectors=list(candidates))
+        if selected and selected.startswith("root://") and selected != input_url:
+            return selected
+    except Exception:
+        pass
+
+    # Rucio only supplies replicas that exist at the listed sites. Use the
+    # first candidate when probing is unavailable or inconclusive.
+    redirector = str(candidates[0]).rstrip("/")
+    separator = "/" if _io_policy.SITE_REDIRECTOR_MARKER in redirector else "//"
+    return f"{redirector}{separator}{lfn.lstrip('/')}"
+
+
+def _write_config_file(config_path: str, config: dict[str, str]) -> None:
+    """Write a key/value analysis config while preserving internal-key rules."""
+    with open(config_path, "w") as fh:
+        for key, value in config.items():
+            if not key.startswith("__"):
+                fh.write(f"{key}={value}\n")
 
 
 def _plan_file_source_jobs(
@@ -1762,10 +2782,22 @@ def _plan_file_source_jobs(
     entries_per_job: int,
     jobs_dir: str,
     outputs_dir: str,
+    manifest: Optional[DatasetManifest] = None,
+    partition_profile: str = "",
+    input_metadata_cache: str = "",
+    tree_name: str = "Events",
 ) -> list[dict[str, object]]:
-    """Build deterministic per-job metadata from file-list JSON outputs."""
+    """Plan only manifest datasets, allowing reuse of a larger discovery cache."""
     job_plans: list[dict[str, object]] = []
     missing_datasets: list[str] = []
+    if manifest is None:
+        manifest = DatasetManifest.load(dataset_manifest_path)
+    manifest_entries = {entry.name: entry for entry in manifest.datasets}
+    discovered_datasets: set[str] = set()
+    profile = load_profile(partition_profile if partition_profile != "none" else "")
+    if profile and partition not in {"auto", "events", "entry_range"}:
+        raise ValueError("--partition-profile requires --partition auto, events or entry_range")
+    entry_cache = EntryCache(input_metadata_cache or None)
 
     for json_path in sorted(Path(file_list_dir).glob("*.json")):
         if json_path.name.endswith(".perf.json"):
@@ -1775,33 +2807,61 @@ def _plan_file_source_jobs(
             payload = json.load(fh)
 
         dataset_name = payload.get("sample", json_path.stem)
+        dataset_entry = manifest_entries.get(str(dataset_name))
+        if dataset_entry is None:
+            # A reused cache can contain other eras or analyses. Such entries
+            # must never become jobs with fallback MC identity/calibrations.
+            continue
+        if dataset_entry.name in discovered_datasets:
+            raise RuntimeError(
+                f"Duplicate file-list discovery payload for dataset {dataset_entry.name!r} "
+                f"in {file_list_dir!r}; remove the ambiguous cache entry before preparation."
+            )
+        discovered_datasets.add(dataset_entry.name)
         all_files = payload.get("files", [])
         groups = payload.get("groups", [])
         # Per-file redirector list from Rucio discovery (may be absent for
         # non-Rucio sources or explicit file lists).
         site_redirectors: dict[str, list[str]] = payload.get("site_redirectors", {})
 
-        # Prefer pre-computed group partitions when available (e.g. from GetRucioFileList).
-        # If the file list is empty but groups exist, we still want to create jobs.
-        if groups:
-            partitions = [
-                {"files": g, "first_entry": 0, "last_entry": 0}
-                for g in groups
-                if g
-            ]
+        # Discovery groups retain their byte-size boundaries, but must not
+        # override explicit file/event policies or a tighter file-count cap.
+        group_files = [[u.strip() for u in str(g).split(",") if u.strip()]
+                       for g in groups if g]
+        flat_files = sorted({u.strip() for u in (all_files or [u for g in group_files for u in g])
+                             if u.strip()})
+        if not flat_files:
+            missing_datasets.append(str(dataset_name))
+            continue
+        if group_files and set(flat_files) != {u for g in group_files for u in g}:
+            raise ValueError(f"Discovery files/groups disagree for {dataset_name}")
+        budget = entries_per_job
+        mode = ("events" if profile_matches(profile, dataset_entry) else "file_group") if partition == "auto" else partition
+        if mode in {"events", "entry_range"}:
+            budget = event_budget(profile, dataset_entry, entries_per_job)
+            entry_cache.populate(flat_files, _query_tree_entries, tree_name)
+        if groups and mode in {"file_group", "events"}:
+            partitions = []
+            seen = set()
+            for urls in group_files:
+                if seen.intersection(urls) or len(set(urls)) != len(urls):
+                    raise ValueError(f"Duplicate files in discovery groups for {dataset_name}")
+                seen.update(urls)
+                partitions.extend(_make_partitions(
+                    urls=urls, mode=mode, files_per_job=files_per_job,
+                    entries_per_job=budget, entry_cache=entry_cache, tree_name=tree_name))
         else:
-            if not all_files:
-                missing_datasets.append(str(dataset_name))
-                continue
             partitions = _make_partitions(
-                urls=all_files,
-                mode=partition,
+                urls=flat_files,
+                mode=mode,
                 files_per_job=files_per_job,
-                entries_per_job=entries_per_job,
+                entries_per_job=budget,
+                entry_cache=entry_cache,
+                tree_name=tree_name,
             )
 
-        dataset_entry = _find_dataset_entry(dataset_manifest_path, dataset_name)
-        dtype = dataset_entry.dtype if dataset_entry else "mc"
+        dtype = dataset_entry.dtype
+        lumi = manifest.lumi_for(dataset_entry.year, dataset_entry.era)
 
         for sub_idx, part in enumerate(partitions):
             # Build per-job site_redirectors: only include LFNs in this partition.
@@ -1822,10 +2882,18 @@ def _plan_file_source_jobs(
                 "files": part["files"],
                 "first_entry": part.get("first_entry", 0),
                 "last_entry": part.get("last_entry", 0),
+                "planned_entries": part.get("planned_entries"),
                 "dtype": dtype,
+                "lumi": lumi,
                 "site_redirectors": job_site_redirectors,
             })
 
+    undiscovered = sorted(set(manifest_entries) - discovered_datasets)
+    if undiscovered:
+        raise RuntimeError(
+            "File-list discovery is missing payloads for manifest dataset(s): "
+            f"{', '.join(undiscovered)}. Complete discovery before preparing skim jobs."
+        )
     if missing_datasets:
         missing_display = ", ".join(sorted(set(missing_datasets)))
         raise RuntimeError(
@@ -1930,20 +2998,138 @@ class SkimMixin:
             "the Rucio query in GetRucioFileList."
         ),
     )
+    rucio_group_size_gb = luigi.FloatParameter(
+        default=10.0,
+        description=(
+            "Rucio file-group size threshold in GB (default: 10)."
+        ),
+    )
     partition = luigi.Parameter(
-        default="file_group",
+        default="auto",
         description=(
             "Partitioning mode for splitting file lists into per-job chunks: "
-            "'file_group' (default – group by file count), "
+            "'auto' (default: learned event budgets, otherwise file grouping), "
+            "'file_group' (group by file count), "
             "'file' (one file per job), "
-            "'entry_range' (split by TTree entry ranges, requires uproot)."
+            "'entry_range' (split every file by entries), or 'events' "
+            "(pack whole files by entries, splitting oversized files)."
         ),
     )
     entries_per_job = luigi.IntParameter(
         default=100_000,
         description=(
-            "Maximum TTree entries per job in 'entry_range' mode (default: 100000). "
-            "Requires uproot.  Ignored for 'file_group' and 'file' modes."
+            "Maximum TTree entries per job in 'entry_range'/'events' modes "
+            "(default: 100000); overridden by a matching partition profile."
+        ),
+    )
+    partition_profile = luigi.Parameter(
+        default="", description="JSON/YAML sizing profile; empty uses matching learned history, 'none' disables lookup.",
+    )
+    input_metadata_cache = luigi.Parameter(
+        default="", description="Optional entry-cache JSON seed; copied into the new run before planning.",
+    )
+    entry_range_mode = luigi.ChoiceParameter(
+        default="filter", choices=("filter", "source"),
+        description="Entry-range execution: filter, or direct source seeking on ROOT 6.40.x or 6.42.00-rc1 (threads=1).",
+    )
+    sizing_pilots = _job_sizing_parameter(
+        'sizing_pilots',
+        description='Before main preparation, run one-file Condor pilots for datasets without sizing evidence.',
+    )
+    sizing_target_seconds = _job_sizing_parameter(
+        'sizing_target_seconds',
+        description='Estimated work per job from learned production rates, in seconds (default: 3600).',
+    )
+    sizing_pilot_target_seconds = _job_sizing_parameter(
+        'sizing_pilot_target_seconds',
+        description='Estimated work per job from provisional pilot rates, in seconds (default: 1800).',
+    )
+    sizing_pilot_parallel = _job_sizing_parameter(
+        'sizing_pilot_parallel',
+        description='Maximum simultaneous pilot jobs; submit/verify batches of this size.',
+    )
+    sizing_pilot_prefix_entries = _job_sizing_parameter(
+        'sizing_pilot_prefix_entries',
+        description='Short-prefix size paired with a full-file pilot to separate fixed overhead.',
+    )
+    sizing_pilot_safety_factor = _job_sizing_parameter(
+        'sizing_pilot_safety_factor',
+        description='Conservative multiplier for provisional pilot rates and fixed overhead (>=1).',
+    )
+    sizing_pilot_child = luigi.BoolParameter(default=False,
+        description="Internal paired-measurement worker mode; disables pilot recursion and regular cost learning.")
+
+    def _job_sizing_context(self) -> dict:
+        config = dict(read_config(self.submit_config), **_stitch_job_overrides(self))
+        # Input inventories and output locations do not describe computational
+        # work. Calibration/selection assets, executable and runtime do.
+        workload_config = {k: v for k, v in config.items()
+                           if k not in {"sampleConfig", "fileList", "saveFile", "metaFile", "saveDirectory"}}
+        return sizing_context(config, self.exe,
+            payloads=_analysis_config_payload_sources(self.submit_config, workload_config),
+            runtime=_local_shared_libs_with_signature(os.path.abspath(self.exe))[1],
+            environment=json.dumps({"root_setup": self._root_setup_content if self.root_setup else "",
+                                    "container": self.container_setup, "python_env": self.python_env}, sort_keys=True))
+
+    def _sizing_selection(self, freeze=False) -> dict:
+        receipt = Path(self._run_dir) / "job_sizing_selection.json"
+        if receipt.is_file() and not freeze:
+            return json.loads(receipt.read_text())
+        if not freeze:
+            return {}
+        profile, seed = self.partition_profile, self.input_metadata_cache
+        if self.sizing_pilots:
+            pilot_result = Path(self._run_dir) / 'sizing_pilots/result.json'
+            if not pilot_result.is_file():
+                raise RuntimeError('Sizing pilots must finish before main preparation')
+            result = json.loads(pilot_result.read_text())
+            profile, seed = result['profile'], result['metadata_seed']
+        result = select_sizing(self._run_dir, self._job_sizing_context(), profile=profile,
+                               metadata_seed=seed,
+                               target_seconds=self.sizing_target_seconds,
+                               pilot_target_seconds=self.sizing_pilot_target_seconds,
+                               allow_refresh=not (Path(self._run_dir) / "execution_identity.json").is_file())
+        if result.get("warning"):
+            self.publish_message("WARNING: " + result["warning"])
+        return result
+
+    def _planning_profile(self) -> str:
+        if self.partition not in {"auto", "events", "entry_range"}:
+            # Preserve the existing error for an incompatible explicit profile.
+            return self.partition_profile if self.partition_profile != "none" else ""
+        if self.partition == "auto" and str(read_config(self.submit_config).get("threads", "1")) != "1":
+            # Automatic reuse must not introduce unsupported ranged execution
+            # into a previously valid multi-threaded workflow.
+            return ""
+        return str(self._sizing_selection(freeze=True).get("profile", ""))
+
+    def _planning_metadata_cache(self) -> str:
+        """Keep mutable discovered counts isolated from the user's seed snapshot."""
+        if self.partition not in {"auto", "events", "entry_range"}:
+            return ""
+        path = os.path.join(self._run_dir, "input_metadata.json")
+        seed = self._sizing_selection(freeze=True).get("metadata_seed", "")
+        if seed and not os.path.exists(path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(seed, path)
+        return path
+
+    prepare_workers = luigi.IntParameter(
+        default=4,
+        significant=False,
+        description=(
+            "Maximum number of threads used to prepare independent per-job "
+            "directories and configs (default: 4)."
+        ),
+    )
+    output_validation = luigi.ChoiceParameter(
+        default="integrity",
+        choices=("exists", "integrity"),
+        significant=False,
+        description=(
+            "Delegated HTCondor output checks: 'exists' uses batched xrdfs listings "
+            "without opening ROOT files; 'integrity' also checks ROOT contents and "
+            "MC counters (default)."
         ),
     )
 
@@ -1953,7 +3139,8 @@ class SkimMixin:
         default="",
         description=(
             "Path to the VOMS x509 proxy file.  Copied into "
-            "``skimRun_{name}/shared_inputs/x509`` for use by HTCondor workers."
+            "``skimRun_{name}/shared_inputs/x509`` for use by HTCondor workers. "
+            "The staged proxy must have at least 48 hours of validity remaining."
         ),
     )
     stage_in = luigi.BoolParameter(
@@ -1968,6 +3155,14 @@ class SkimMixin:
         description=(
             "Path to a ROOT environment setup script whose contents are "
             "embedded in the worker inner runscript."
+        ),
+    )
+    output_directory = luigi.Parameter(
+        default="",
+        description=(
+            "Optional final output directory for delegated HTCondor jobs. "
+            "When set, it overrides saveDirectory from the submit config and "
+            "may be a local EOS path or a root:// URL."
         ),
     )
     container_setup = luigi.Parameter(
@@ -1988,17 +3183,31 @@ class SkimMixin:
         default="",
         description=(
             "Path to a Python environment tarball created by "
-            "``law/setup_python_env.sh``.  Staged to every HTCondor worker "
+            "``core/python/law/setup_python_env.sh``.  Staged to every HTCondor worker "
             "node alongside the executable."
         ),
     )
     make_test_job = luigi.BoolParameter(
         default=True,
         description=(
-            "If True (default), run a single-file local test job before dispatching "
-            "the full SkimTask workflow.  This catches analysis runtime errors early "
-            "before submitting potentially hundreds of jobs.  Set --no-make-test-job "
-            "to skip the test and submit immediately."
+            "If True (default), run one-file local preflight jobs for each available "
+            "data and MC sample type before dispatching the full SkimTask workflow. "
+            "This catches sample-specific runtime errors before batch submission. "
+            "Set --no-make-test-job to skip the preflight and submit immediately."
+        ),
+    )
+    stitch_mode = luigi.Parameter(
+        default="",
+        description=(
+            "Optional stitching mode override written into each job config "
+            "(for example 'none' or 'correctionlib')."
+        ),
+    )
+    stitch_weights = luigi.Parameter(
+        default="",
+        description=(
+            "Optional correctionlib stitching JSON staged in the shared worker "
+            "archive and exposed as the 'stitchWeights' config value."
         ),
     )
 
@@ -2022,9 +3231,14 @@ class SkimMixin:
         ),
     )
     max_runtime = luigi.IntParameter(
-        default=3600,
+        default=7200,
         significant=False,
-        description="Maximum HTCondor job runtime in seconds (default: 3600).",
+        description="Maximum HTCondor job runtime in seconds (default: 7200); independent of event-sizing targets.",
+    )
+    request_memory = luigi.IntParameter(
+        default=2000,
+        significant=False,
+        description="HTCondor memory request per job in MB (default: 2000).",
     )
 
     # ---- derived helpers --------------------------------------------------
@@ -2050,7 +3264,7 @@ class SkimMixin:
 
     @property
     def _root_setup_content(self) -> str:
-        """Return the content of the root_setup script, or empty string."""
+        """Return portable setup text with enabled extension hooks embedded."""
         if not self.root_setup:
             return ""
         path = self._resolve_skim(self.root_setup)
@@ -2059,7 +3273,7 @@ class SkimMixin:
                 f"root_setup must point to an existing file, got: {self.root_setup!r}"
             )
         with open(path) as fh:
-            return fh.read().rstrip("\n")
+            return render_environment_setup(fh.read()).rstrip("\n")
 
     def _python_env_path(self) -> Optional[str]:
         """Return the resolved path to the Python environment tarball, or None."""
@@ -2070,7 +3284,7 @@ class SkimMixin:
             raise RuntimeError(
                 f"python_env must point to an existing tarball, "
                 f"got: {self.python_env!r}\n"
-                "Create one with:  bash law/setup_python_env.sh --output python_env.tar.gz"
+                "Create one with:  bash core/python/law/setup_python_env.sh --output python_env.tar.gz"
             )
         return path
 
@@ -2095,6 +3309,19 @@ class SkimMixin:
     def _test_job_dir(self) -> str:
         """Directory for the local pre-submission test job."""
         return os.path.join(self._run_dir, "test_job")
+
+    @property
+    def _test_jobs_manifest_path(self) -> str:
+        """Manifest of per-dtype configurations used by the local preflight."""
+        return os.path.join(self._test_job_dir, "test_jobs.json")
+
+    def _prepare_skim_jobs_requirement(self):
+        return PrepareSkimJobs.req(
+            self,
+            prepare_workers=self.prepare_workers,
+            stitch_mode=self.stitch_mode,
+            stitch_weights=self.stitch_weights,
+        )
 
 
 # ===========================================================================
@@ -2145,17 +3372,42 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
     def _run_dir(self) -> str:
         return os.path.join(WORKSPACE, f"skimRun_{self.name}")
 
+    @property
+    def _prepared_config_hash_path(self) -> str:
+        return os.path.join(self._run_dir, "prep_submission.config.sha256")
+
+    def _submit_config_hash(self) -> str:
+        digest = hashlib.sha256()
+        with open(self.submit_config, "rb") as config_fh:
+            for chunk in iter(lambda: config_fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        for key in ("partition_profile", "input_metadata_cache"):
+            path = getattr(self, key, "")
+            if path and path != "none":
+                digest.update(key.encode())
+                digest.update(file_digest(path).encode())
+        selected = self._sizing_selection()
+        if self.partition in {"auto", "events", "entry_range"}:
+            for key in ("profile", "metadata_seed"):
+                if selected.get(key):
+                    digest.update(file_digest(selected[key]).encode())
+        return digest.hexdigest()
+
     def requires(self):
+        if self.sizing_pilots:
+            return RunSkimSizingPilots.req(self)
+        return self._discovery_requirement()
+
+    def _discovery_requirement(self):
         """Declare LAW dependency on the file-list task when ``--file-source`` is set.
 
         For ``--file-source xrdfs`` the dependency on
         :class:`~xrdfs_tasks.GetXRDFSFileList` is declared automatically because
         both tasks share the same ``dataset_manifest`` parameter.
 
-        For ``--file-source rucio`` and ``--file-source opendata`` the skim
-        submit config is reused directly when it contains the corresponding
-        ``sampleConfig`` payload, allowing the file-list step to be chained
-        automatically from :class:`SkimTask`.
+        For ``--file-source rucio``, the dataset manifest is passed directly
+        to file discovery. For ``--file-source opendata``, the submit config
+        supplies its ``sampleConfig`` payload.
         """
         if self.file_source == "xrdfs":
             from xrdfs_tasks import GetXRDFSFileList  # noqa: PLC0415
@@ -2168,6 +3420,9 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             return GetRucioFileList.req(
                 self,
                 name=self._effective_file_source_name,
+                dataset_manifest=self.dataset_manifest,
+                size=self.rucio_group_size_gb,
+                files_per_job=self.files_per_job,
             )
         if self.file_source == "opendata":
             from opendata_tasks import GetOpenDataFileList  # noqa: PLC0415
@@ -2182,20 +3437,225 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             os.path.join(self._run_dir, "prep_submission.json")
         )
 
+    def _bundle_execution_identity(self, bundle_record):
+        exe_path = os.path.abspath(self.exe)
+        discovery = {}
+        if self.file_source:
+            discovery = {str(p.relative_to(self._file_list_dir())): file_digest(p) for p in sorted(Path(self._file_list_dir()).rglob("*"))
+                         if p.is_file()}
+        partition_options = {"files_per_job": self.files_per_job,
+                             "rucio_group_size_gb": self.rucio_group_size_gb,
+                             "partition": self.partition, "entries_per_job": self.entries_per_job}
+        # Preserve identities of existing/default campaigns. New controls are
+        # explicitly sealed when used, before any staged worker is rewritten.
+        for key in ("partition_profile", "input_metadata_cache"):
+            path = getattr(self, key, "")
+            if path and path != "none":
+                partition_options[key + "_sha256"] = file_digest(path)
+        selected = self._sizing_selection()
+        if selected.get("profile") and self.partition in {"auto", "events", "entry_range"}:
+            partition_options["selected_profile_sha256"] = file_digest(selected["profile"])
+        if selected.get("metadata_seed") and self.partition in {"auto", "events", "entry_range"}:
+            partition_options["selected_metadata_sha256"] = file_digest(selected["metadata_seed"])
+        if self.entry_range_mode != "filter":
+            partition_options["entry_range_mode"] = self.entry_range_mode
+        if self.sizing_pilots:
+            partition_options['sizing_pilots'] = dict(parallel=self.sizing_pilot_parallel,
+                prefix_entries=self.sizing_pilot_prefix_entries, safety_factor=self.sizing_pilot_safety_factor)
+        return execution_identity(bundle_record["bundle_id"],
+            inputs={"manifest_sha256": file_digest(self.dataset_manifest), "discovery": discovery},
+            partitions=partition_options,
+            runtime={"executable": file_digest(exe_path),
+                     "libraries": _local_shared_libs_with_signature(exe_path)[1]},
+            options={"output_directory": self.output_directory,
+                         "root_setup": hashlib.sha256(self._root_setup_content.encode()).hexdigest() if self.root_setup else "",
+                         "container_setup": self.container_setup})
+
+    def complete(self):
+        """Invalidate prepared inputs when their config, executable, or proxy changes."""
+        if self.sizing_pilots and not RunSkimSizingPilots.req(self).complete():
+            return False
+        bundle_record = verify_config_bundle(self.submit_config)
+        identity_path = Path(self._run_dir) / "execution_identity.json"
+        if bundle_record and identity_path.is_file():
+            if json.loads(identity_path.read_text()) != self._bundle_execution_identity(bundle_record):
+                return False
+        if not super().complete():
+            return False
+
+        if self.x509 and not _staged_copy_is_current(
+            os.path.abspath(self.x509), os.path.join(self._shared_dir, "x509")
+        ):
+            return False
+
+        try:
+            with open(self._prepared_config_hash_path) as hash_fh:
+                if hash_fh.read().strip() != self._submit_config_hash():
+                    return False
+        except OSError:
+            # Older preparation outputs did not record their source config.
+            # Rebuild once so staged job configs cannot silently omit settings.
+            return False
+
+        exe_path = os.path.abspath(self.exe)
+        if not os.path.isfile(exe_path):
+            return False
+
+        staged_exe_paths = [os.path.join(self._shared_dir, self._exe_relpath)]
+        local_libs, _ = _local_shared_libs_with_signature(exe_path)
+        try:
+            exe_mtime_ns = os.stat(exe_path).st_mtime_ns
+            archive_mtime_ns = os.stat(self._shared_archive_path).st_mtime_ns
+        except OSError:
+            return False
+        if archive_mtime_ns < exe_mtime_ns:
+            return False
+        for lib_name, lib_src in local_libs.items():
+            try:
+                if os.stat(lib_src).st_mtime_ns > archive_mtime_ns:
+                    return False
+            except OSError:
+                return False
+            if not _staged_copy_is_current(
+                lib_src, os.path.join(self._shared_dir, lib_name)
+            ):
+                return False
+
+        test_config_path = os.path.join(self._test_job_dir, "submit_config.txt")
+        if self.make_test_job and not os.path.isfile(self._test_jobs_manifest_path):
+            return False
+        if self.make_test_job and os.path.isfile(test_config_path):
+            staged_exe_paths.append(
+                os.path.join(self._test_job_dir, self._exe_relpath)
+            )
+            if any(
+                not _staged_copy_is_current(
+                    lib_src, os.path.join(self._test_job_dir, lib_name)
+                )
+                for lib_name, lib_src in local_libs.items()
+            ):
+                return False
+
+        if not all(
+            _staged_copy_is_current(exe_path, staged_path)
+            for staged_path in staged_exe_paths
+        ):
+            return False
+        try:
+            _validate_staged_skim_executable(self._shared_dir, exe_path)
+        except RuntimeError:
+            return False
+        return True
+
     def run(self):
         with PerformanceRecorder("PrepareSkimJobs") as rec:
             self._run_impl()
         rec.save(os.path.join(self._run_dir, "prep_submission.perf.json"))
 
     def _run_impl(self):  # noqa: C901 - intentionally comprehensive
+        bundle_record = verify_config_bundle(self.submit_config)
         exe_path = os.path.abspath(self.exe)
         if not os.path.isfile(exe_path):
             raise RuntimeError(
                 f"Analysis executable not found: {exe_path!r}. "
                 "Build the analysis before running PrepareSkimJobs."
             )
+        if self.prepare_workers < 1:
+            raise ValueError("--prepare-workers must be at least 1")
+
+        manifest = DatasetManifest.load(self.dataset_manifest)
+        template_config = read_config(self.submit_config)
+        self._sizing_selection(freeze=True)
+        if bundle_record:
+            # Lock source identity before modifying staged workers. Discovery
+            # and the partition plan are recorded once preparation is complete.
+            identity = self._bundle_execution_identity(bundle_record)
+            record_execution(Path(self._run_dir) / "execution_identity.json", identity)
+        base_extra_overrides = _stitch_job_overrides(self)
+        base_extra_overrides["metadataExecutableSha256"] = file_digest(exe_path)
+        if bundle_record:
+            base_extra_overrides["metadataExecutionId"] = identity["execution_id"]
+
+        # These references depend on the template, optional stitching override,
+        # and whether generator-only settings are removed for data. Resolve them
+        # once per dtype instead of rescanning the config paths for every job.
+        runtime_payload_sources_by_dtype: dict[str, list[str]] = {}
+        # Filled while building the archive, before preparation threads start.
+        # Keep this cache local to this invocation so a later preparation cannot
+        # reuse stale payloads. Jobs receive independent files with identical bytes.
+        prepared_payloads: Optional[dict[str, bytes]] = {} if bundle_record else None
+        dataset_dtypes = {
+            str(entry.dtype or "mc").lower() for entry in manifest.datasets
+        } | {"mc"}
+        for dtype in dataset_dtypes:
+            config_for_dtype = dict(template_config)
+            config_for_dtype["dtype"] = dtype
+            _remove_mc_generator_config_for_data(config_for_dtype)
+            config_for_dtype.update(base_extra_overrides)
+            runtime_payload_sources_by_dtype[dtype] = _analysis_config_payload_sources(
+                self.submit_config, config_for_dtype
+            )
+
+        def write_job_entry(
+            *,
+            dataset: DatasetEntry,
+            job_dir: str,
+            out_dir: str,
+            manifest_lumi: Optional[float],
+            extra_overrides: dict[str, str],
+            site_redirectors: dict,
+        ) -> dict[str, str]:
+            dtype = str(dataset.dtype or "mc").lower()
+            runtime_payload_sources = runtime_payload_sources_by_dtype.get(
+                dtype, runtime_payload_sources_by_dtype["mc"]
+            )
+            _write_job_config(
+                job_dir=job_dir,
+                template_config_path=self.submit_config,
+                dataset=dataset,
+                output_dir=out_dir,
+                manifest_lumi=manifest_lumi,
+                extra_overrides=extra_overrides,
+                stage_shared_inputs_locally=False,
+                template_config=template_config,
+                runtime_payload_sources=runtime_payload_sources,
+                prepared_payloads=prepared_payloads,
+            )
+
+            # Write the per-job site redirector list so Condor workers can
+            # probe replicas from all available sites.
+            with open(os.path.join(job_dir, "site_redirectors.json"), "w") as sr_fh:
+                json.dump(site_redirectors, sr_fh)
+
+            return {
+                "dataset_name": dataset.name,
+                "job_dir": job_dir,
+                "config_path": os.path.join(job_dir, "submit_config.txt"),
+                "out_dir": out_dir,
+            }
+
+        def prepare_in_parallel(items, prepare_one) -> list[dict[str, str]]:
+            if not items:
+                return []
+
+            worker_count = min(self.prepare_workers, len(items))
+            prepared: list[dict[str, str]] = []
+            start_time = time.monotonic()
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                for count, job_entry in enumerate(
+                    executor.map(prepare_one, items), start=1
+                ):
+                    prepared.append(job_entry)
+                    if count % 500 == 0 or count == len(items):
+                        elapsed = time.monotonic() - start_time
+                        self.publish_message(
+                            f"PrepareSkimJobs: prepared {count}/{len(items)} job "
+                            f"configs in {elapsed:.1f}s ({worker_count} thread(s))."
+                        )
+            return prepared
 
         # ---- set up shared_inputs/ ----------------------------------------
+        shared_inputs_start = time.monotonic()
         shared_dir = self._shared_dir
         Path(shared_dir).mkdir(parents=True, exist_ok=True)
 
@@ -2203,11 +3663,10 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         shutil.copy2(exe_path, os.path.join(shared_dir, self._exe_relpath))
 
         # Copy local shared libraries
-        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        local_libs, _ = _local_shared_libs_with_signature(exe_path)
         for lib_name, lib_src in sorted(local_libs.items()):
             lib_dst = os.path.join(shared_dir, lib_name)
-            if (not os.path.exists(lib_dst)
-                    or os.path.getsize(lib_dst) != os.path.getsize(lib_src)):
+            if not _staged_copy_is_current(lib_src, lib_dst):
                 shutil.copy2(lib_src, lib_dst)
         if local_libs:
             self.publish_message(
@@ -2217,12 +3676,11 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         # Copy x509 proxy
         if self.x509:
             x509_src = os.path.abspath(self.x509)
-            if os.path.isfile(x509_src):
-                shutil.copy2(x509_src, os.path.join(shared_dir, "x509"))
-            else:
-                self.publish_message(
-                    f"Warning: x509 file not found: {x509_src!r}; skipping."
-                )
+            if not os.path.isfile(x509_src):
+                raise RuntimeError(f"X509 proxy file not found: {x509_src!r}")
+            shutil.copy2(x509_src, os.path.join(shared_dir, "x509"))
+        if self.x509 or os.path.lexists(os.path.join(shared_dir, "x509")):
+            _validate_x509_proxy(os.path.join(shared_dir, "x509"))
 
         # Copy Python env tarball
         python_env_src = self._python_env_path()
@@ -2231,11 +3689,16 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             shutil.copy2(python_env_src, os.path.join(shared_dir, tarball_name))
 
         # Bundle shared configs and aux once for remote worker materialization.
-        if os.path.isfile(self.submit_config):
-            template_config = read_config(self.submit_config)
-            _bundle_analysis_config_files(self.submit_config, template_config, shared_dir)
-            _bundle_analysis_aux_dir(self.submit_config, shared_dir)
+        _bundle_analysis_config_files(
+            self.submit_config, template_config, shared_dir,
+            prepared_payloads=prepared_payloads,
+        )
+        _bundle_analysis_aux_dir(self.submit_config, shared_dir)
         _build_shared_inputs_archive(shared_dir, self._shared_archive_path)
+        self.publish_message(
+            "PrepareSkimJobs: shared inputs and archive ready in "
+            f"{time.monotonic() - shared_inputs_start:.1f}s."
+        )
 
         # ---- determine datasets and file groups ---------------------------
         job_entries: list = []
@@ -2250,6 +3713,8 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                     f"--name {self.file_source_name!r} ..."
                 )
 
+            planning_start = time.monotonic()
+            metadata_cache = self._planning_metadata_cache()
             planned_jobs = _plan_file_source_jobs(
                 dataset_manifest_path=self.dataset_manifest,
                 file_list_dir=fl_dir,
@@ -2258,118 +3723,105 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 entries_per_job=self.entries_per_job,
                 jobs_dir=self._jobs_dir,
                 outputs_dir=self._outputs_dir,
+                manifest=manifest,
+                partition_profile=self._planning_profile(),
+                input_metadata_cache=metadata_cache,
+                tree_name=str(template_config.get("treeList", "Events")),
+            )
+            self.publish_message(
+                f"PrepareSkimJobs: planned {len(planned_jobs)} job(s) in "
+                f"{time.monotonic() - planning_start:.1f}s."
             )
 
-            for plan in planned_jobs:
+            manifest_entries = {entry.name: entry for entry in manifest.datasets}
+
+            def prepare_file_source_plan(plan: dict[str, object]) -> dict[str, str]:
                 job_dir = str(plan["job_dir"])
                 out_dir = str(plan["out_dir"])
                 dataset_name = str(plan["dataset_name"])
-                Path(job_dir).mkdir(parents=True, exist_ok=True)
 
-                manifest_entry = _find_dataset_entry(self.dataset_manifest, dataset_name)
-                if manifest_entry is not None:
-                    transient = DatasetEntry.from_dict(manifest_entry.to_dict())
-                    transient.files = [
-                        f.strip()
-                        for f in str(plan["files"]).split(",")
-                        if f.strip()
-                    ]
-                    transient.das = None
-                else:
-                    transient = DatasetEntry(
-                        name=dataset_name,
-                        files=[
-                            f.strip()
-                            for f in str(plan["files"]).split(",")
-                            if f.strip()
-                        ],
-                        dtype=str(plan["dtype"]),
-                    )
+                # Plans must retain manifest identity, even when a caller
+                # supplies or caches the plan separately from this invocation.
+                if dataset_name not in manifest_entries:
+                    raise RuntimeError(f"Planned dataset is absent from the manifest: {dataset_name!r}")
+                transient = DatasetEntry.from_dict(manifest_entries[dataset_name].to_dict())
+                transient.files = [
+                    f.strip()
+                    for f in str(plan["files"]).split(",")
+                    if f.strip()
+                ]
+                transient.das = None
 
-                extra_overrides: dict[str, str] = {}
+                extra_overrides = dict(base_extra_overrides)
+                if plan.get("planned_entries") is not None:
+                    extra_overrides["plannedInputEntries"] = str(plan["planned_entries"])
                 if int(plan.get("last_entry", 0)) > 0:
                     extra_overrides["firstEntry"] = str(plan["first_entry"])
                     extra_overrides["lastEntry"] = str(plan["last_entry"])
+                    extra_overrides["entryRangeMode"] = self.entry_range_mode
 
-
-                _write_job_config(
-                    job_dir=job_dir,
-                    template_config_path=self.submit_config,
+                manifest_lumi = (
+                    float(plan["lumi"])
+                    if plan.get("lumi") is not None
+                    else manifest.lumi_for(transient.year, transient.era)
+                )
+                return write_job_entry(
                     dataset=transient,
-                    output_dir=out_dir,
+                    job_dir=job_dir,
+                    out_dir=out_dir,
+                    manifest_lumi=manifest_lumi,
                     extra_overrides=extra_overrides,
-                    stage_shared_inputs_locally=False,
-                )
-                _ensure_local_analysis_runtime_layout(
-                    self.submit_config,
-                    read_config(os.path.join(job_dir, "submit_config.txt")),
-                    job_dir,
+                    site_redirectors=plan.get("site_redirectors", {}),
                 )
 
-                # Write the per-job site redirector list so Condor workers
-                # can probe all available sites instead of only the generic
-                # CMS_REDIRECTORS.
-                job_site_redirectors = plan.get("site_redirectors", {})
-                with open(os.path.join(job_dir, "site_redirectors.json"), "w") as sr_fh:
-                    json.dump(job_site_redirectors, sr_fh)
-
-                job_entries.append({
-                    "dataset_name": dataset_name,
-                    "job_dir": job_dir,
-                    "config_path": os.path.join(job_dir, "submit_config.txt"),
-                    "out_dir": out_dir,
-                })
+            job_entries = prepare_in_parallel(planned_jobs, prepare_file_source_plan)
 
         else:
             # Standard manifest mode: one job dir per dataset entry
-            manifest = DatasetManifest.load(self.dataset_manifest)
-            for entry in manifest.datasets:
+            def prepare_manifest_entry(entry: DatasetEntry) -> dict[str, str]:
                 job_dir = os.path.join(self._jobs_dir, entry.name)
-                Path(job_dir).mkdir(parents=True, exist_ok=True)
                 out_dir = os.path.join(self._outputs_dir, entry.name)
-                _write_job_config(
-                    job_dir=job_dir,
-                    template_config_path=self.submit_config,
+                return write_job_entry(
                     dataset=entry,
-                    output_dir=out_dir,
-                    stage_shared_inputs_locally=False,
+                    job_dir=job_dir,
+                    out_dir=out_dir,
+                    manifest_lumi=manifest.lumi_for(entry.year, entry.era),
+                    extra_overrides=dict(base_extra_overrides),
+                    site_redirectors={},
                 )
-                _ensure_local_analysis_runtime_layout(
-                    self.submit_config,
-                    read_config(os.path.join(job_dir, "submit_config.txt")),
-                    job_dir,
-                )
-                # Write empty site_redirectors.json so Condor transfer works
-                # consistently; workers fall back to CMS_REDIRECTORS when empty.
-                with open(os.path.join(job_dir, "site_redirectors.json"), "w") as sr_fh:
-                    json.dump({}, sr_fh)
-                job_entries.append({
-                    "dataset_name": entry.name,
-                    "job_dir": job_dir,
-                    "config_path": os.path.join(job_dir, "submit_config.txt"),
-                    "out_dir": out_dir,
-                })
+
+            job_entries = prepare_in_parallel(
+                manifest.datasets, prepare_manifest_entry
+            )
 
         # ---- write the branch-map manifest --------------------------------
         Path(self._run_dir).mkdir(parents=True, exist_ok=True)
         with open(self.output().path, "w") as fh:
             json.dump(job_entries, fh, indent=2)
+        if bundle_record:
+            record_execution(Path(self._run_dir) / "execution_plan.json", execution_identity(
+                bundle_record["bundle_id"], inputs=identity["inputs"],
+                partitions=[{"dataset": entry["dataset_name"],
+                             "config_sha256": file_digest(entry["config_path"])} for entry in job_entries],
+                runtime=identity["runtime"], options=identity["options"]))
 
         self.publish_message(
             f"PrepareSkimJobs: {len(job_entries)} job dir(s) prepared.\n"
             f"  shared_inputs/ ready at {shared_dir}"
         )
 
-        # ---- create local test job (one file) for pre-flight validation -----
-        if self.make_test_job and job_entries:
+        # ---- create local sample-type preflight configs --------------------
+        if self.make_test_job:
             self._create_test_job(exe_path, job_entries)
 
-    def _create_test_job(self, exe_path: str, job_entries: list) -> None:
-        """Create a minimal single-file ``test_job/`` directory for pre-flight testing.
+        with open(self._prepared_config_hash_path, "w") as hash_fh:
+            hash_fh.write(self._submit_config_hash() + "\n")
 
-        The first available input file from the first job entry is used.  The test
-        job writes outputs to ``test_job/`` itself (not EOS/shared storage) so that
-        it runs entirely locally without staging.
+    def _create_test_job(self, exe_path: str, job_entries: list) -> None:
+        """Create one local test configuration for each available data/MC type.
+
+        Each test uses the first available file from one representative prepared
+        job. Outputs are written under ``test_job/`` rather than to remote storage.
 
         Parameters
         ----------
@@ -2384,35 +3836,49 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
 
         exe_relpath = self._exe_relpath
 
-        # Find the first input file from the first job entry
-        first_file = ""
-        first_job_dir = ""
+        # Keep one representative input job for every sample type that has a
+        # prepared file. This checks both the data and MC configuration paths
+        # when both are present in the manifest.
+        candidates: dict[str, dict[str, Any]] = {}
         for entry in job_entries:
             jcfg_path = os.path.join(entry["job_dir"], "submit_config.txt")
             if os.path.exists(jcfg_path):
                 jcfg = read_config(jcfg_path)
                 file_list = jcfg.get("__orig_fileList", jcfg.get("fileList", ""))
-                if file_list:
-                    first_file = file_list.split(",")[0].strip()
-                    first_job_dir = entry["job_dir"]
-                    break
+                if not file_list:
+                    continue
+                dtype = str(jcfg.get("dtype", "")).strip().lower()
+                if dtype not in {"data", "mc"}:
+                    dtype = "other"
+                candidates.setdefault(
+                    dtype,
+                    {
+                        "entry": entry,
+                        "config": jcfg,
+                        "input": file_list.split(",")[0].strip(),
+                    },
+                )
 
-        if not first_file:
-            self.publish_message(
-                "Warning: no input files found in job entries; test job not created."
+        if not candidates:
+            raise RuntimeError(
+                "Cannot create the requested preflight: no prepared job has an input file."
             )
-            return
+
+        test_types = [dtype for dtype in ("data", "mc") if dtype in candidates]
+        if not test_types:
+            test_types = [next(iter(candidates))]
+        test_jobs = []
 
         # Copy the analysis executable into the test job dir
         dst_exe = os.path.join(test_dir, exe_relpath)
-        if not os.path.exists(dst_exe):
+        if not _staged_copy_is_current(exe_path, dst_exe):
             shutil.copy2(exe_path, dst_exe)
 
         # Copy local shared libraries
-        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        local_libs, _ = _local_shared_libs_with_signature(exe_path)
         for lib_name, lib_src in sorted(local_libs.items()):
             lib_dst = os.path.join(test_dir, lib_name)
-            if not os.path.exists(lib_dst):
+            if not _staged_copy_is_current(lib_src, lib_dst):
                 shutil.copy2(lib_src, lib_dst)
 
         # Copy auxiliary config files referenced in the template
@@ -2420,9 +3886,19 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         if os.path.isfile(self.submit_config):
             template_config = read_config(self.submit_config)
             _copy_analysis_config_files(self.submit_config, template_config, test_dir)
+            # Keep a cfg/ copy as well as the loose files above. Prepared
+            # file-source jobs already refer to staged payloads as cfg/foo;
+            # this makes the local preflight layout match the worker archive.
+            _ensure_local_analysis_runtime_layout(
+                self.submit_config,
+                template_config,
+                test_dir,
+                include_aux=False,
+            )
             _copy_analysis_aux_dir(self.submit_config, test_dir)
 
-        # Reuse floats.txt / ints.txt from the first job dir if available
+        # Reuse floats.txt / ints.txt from the first selected job if available.
+        first_job_dir = candidates[test_types[0]]["entry"]["job_dir"]
         for aux_name in ("floats.txt", "ints.txt"):
             src = os.path.join(first_job_dir, aux_name)
             if os.path.exists(src):
@@ -2430,76 +3906,247 @@ class PrepareSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 if not os.path.exists(dst):
                     shutil.copy2(src, dst)
 
-        # Build a minimal submit config: single file, local outputs, single thread
-        #if os.path.isfile(self.submit_config):
-        #    test_config = dict(read_config(self.submit_config))
-        #else:
-        #    test_config = {}
-        import copy
-        test_config = copy.deepcopy(template_config)
-        test_config.update(jcfg)
-        test_config["fileList"] = first_file
-        test_config["saveFile"] = "test_output.root"
-        test_config["metaFile"] = "test_output_meta.root"
-        test_config["saveDirectory"] = test_dir
-        test_config.setdefault("threads", "1")
-        # Remove any stage-out sentinel keys
-        for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
-            test_config.pop(key, None)
+        for dtype in test_types:
+            candidate = candidates[dtype]
+            job_dir = candidate["entry"]["job_dir"]
+            test_config = dict(template_config)
+            test_config.update(candidate["config"])
+            _remove_mc_generator_config_for_data(test_config)
+            test_config["fileList"] = _select_test_input_url(
+                candidate["input"], job_dir
+            )
+            test_config["saveFile"] = f"test_output_{dtype}.root"
+            test_config["metaFile"] = f"test_output_{dtype}_meta.root"
+            test_config["saveDirectory"] = test_dir
+            test_config["threads"] = "1"
+            for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
+                test_config.pop(key, None)
 
-        if os.path.isfile(self.submit_config):
-            _ensure_local_analysis_runtime_layout(
-                self.submit_config,
-                test_config,
-                test_dir,
+            if os.path.isfile(self.submit_config):
+                _ensure_local_analysis_runtime_layout(
+                    self.submit_config,
+                    test_config,
+                    test_dir,
+                )
+
+            for key, value in list(test_config.items()):
+                if key.startswith("__") or not isinstance(value, str):
+                    continue
+                if value.endswith((".txt", ".yaml", ".yml", ".json", ".json.gz", ".onnx")):
+                    basename = os.path.basename(value)
+                    cfg_path = os.path.join(test_dir, "cfg", basename)
+                    if os.path.exists(cfg_path):
+                        test_config[key] = os.path.join("cfg", basename)
+                    elif os.path.exists(os.path.join(test_dir, basename)):
+                        test_config[key] = basename
+
+            config_name = f"submit_config_{dtype}.txt"
+            config_path = os.path.join(test_dir, config_name)
+            _write_config_file(config_path, test_config)
+            test_jobs.append(
+                {
+                    "dtype": dtype,
+                    "dataset": str(candidate["entry"].get("dataset_name", "")),
+                    "config": config_name,
+                    "input": test_config["fileList"],
+                    "config_sha256": hashlib.sha256(
+                        Path(config_path).read_bytes()
+                    ).hexdigest(),
+                }
             )
 
-        # Resolve config-file references to their basenames (files are already copied)
-        for key, val in list(test_config.items()):
-            if key.startswith("__"):
-                continue
-            if isinstance(val, str) and (
-                val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
-            ):
-                basename = os.path.basename(val)
-                cfg_path = os.path.join(test_dir, "cfg", basename)
-                if os.path.exists(cfg_path):
-                    test_config[key] = os.path.join("cfg", basename)
-                    continue
-                if os.path.exists(os.path.join(test_dir, basename)):
-                    test_config[key] = basename
-
-        with open(os.path.join(test_dir, "submit_config.txt"), "w") as fh:
-            for k, v in test_config.items():
-                if not k.startswith("__"):
-                    fh.write(f"{k}={v}\n")
+        # Keep the historic config filename for manual inspection and older
+        # tooling; RunSkimTestJob uses the explicit per-type manifest above.
+        primary_config = os.path.join(test_dir, test_jobs[0]["config"])
+        shutil.copy2(primary_config, os.path.join(test_dir, "submit_config.txt"))
+        with open(self._test_jobs_manifest_path, "w", encoding="utf-8") as manifest_fh:
+            json.dump({"schema_version": 1, "jobs": test_jobs}, manifest_fh, indent=2)
 
         self.publish_message(
-            f"[PrepareSkimJobs] Test job created in {test_dir}/\n"
-            f"  Input file: {first_file}\n"
-            f"  Run manually with:  cd {test_dir} && ./{exe_relpath} submit_config.txt"
+            f"[PrepareSkimJobs] Test jobs created in {test_dir}/ for "
+            f"{', '.join(test_types)}.\n"
+            f"  Inputs: "
+            + "; ".join(f"{job['dataset']} ({job['dtype']}): {job['input']}" for job in test_jobs)
         )
 
 
 # ===========================================================================
-# RunSkimTestJob – pre-flight single-file local test
+# RunSkimTestJob – pre-flight data/MC local tests
 # ===========================================================================
 
-class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
-    """Run a single-file local test before dispatching the full :class:`SkimTask`.
+class RunSkimSizingPilots(AnalysisMixin, SkimMixin, law.Task):
+    """Calibrate missing datasets on Condor, in bounded one-file batches."""
+    task_namespace = ""
 
-    This task mirrors the test job functionality in earlier workflow versions.  It
-    runs the analysis executable with a single input file and validates the exit
-    code, catching analysis runtime errors **before** expensive batch or
-    multi-dataset dispatch.
+    @property
+    def _run_dir(self):
+        return os.path.join(WORKSPACE, f"skimRun_{self.name}")
+
+    @property
+    def _pilots_dir(self):
+        return Path(self._run_dir) / 'sizing_pilots'
+
+    def requires(self):
+        return PrepareSkimJobs._discovery_requirement(self)
+
+    def output(self):
+        return law.LocalFileTarget(str(self._pilots_dir / 'result.json'))
+
+    def _pilot_identity(self):
+        if self.sizing_pilot_parallel < 1 or self.sizing_pilot_prefix_entries < 1:
+            raise ValueError('Pilot parallelism and prefix entries must be positive')
+        if not math.isfinite(self.sizing_pilot_safety_factor) or self.sizing_pilot_safety_factor < 1:
+            raise ValueError('Pilot safety factor must be finite and at least one')
+        if not self.file_source or self.partition not in {'auto', 'events', 'entry_range'}:
+            raise ValueError('Sizing pilots require a file source and partition auto, events or entry_range')
+        if str(read_config(self.submit_config).get('threads', '1')) != '1':
+            raise ValueError('Paired sizing pilots currently require threads=1')
+        inputs = dict(context=self._job_sizing_context(), manifest=file_digest(self.dataset_manifest),
+                      discovery={p.name: file_digest(p) for p in sorted(Path(self._file_list_dir()).glob('*.json'))
+                                 if not p.name.endswith('.perf.json')},
+                      profile=self.partition_profile, metadata_seed=self.input_metadata_cache,
+                      parallel=self.sizing_pilot_parallel, prefix=self.sizing_pilot_prefix_entries,
+                      safety=self.sizing_pilot_safety_factor, max_runtime=self.max_runtime,
+                      target_seconds=self.sizing_target_seconds,
+                      pilot_target_seconds=self.sizing_pilot_target_seconds)
+        for key, source in [('profile', self.partition_profile), ('metadata_seed', self.input_metadata_cache)]:
+            if source and source != 'none':
+                inputs[key+'_sha256'] = file_digest(source)
+        return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+    def complete(self):
+        if not super().complete():
+            return False
+        try:
+            result = json.loads(Path(self.output().path).read_text())
+            return (result['identity'] == self._pilot_identity() and
+                    file_digest(result['profile']) == result['profile_sha256'] and
+                    file_digest(result['metadata_seed']) == result['metadata_sha256'])
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    def _prepare_plan(self):
+        identity = self._pilot_identity()
+        path = self._pilots_dir / 'plan.json'
+        if path.is_file():
+            plan = json.loads(path.read_text())
+            if plan['identity'] != identity:
+                raise RuntimeError('Sizing pilot inputs changed; use a new run name')
+            return plan
+        context = self._job_sizing_context()
+        selected = select_sizing(self._pilots_dir, context, profile=self.partition_profile,
+                                 metadata_seed=self.input_metadata_cache,
+                                 target_seconds=self.sizing_target_seconds,
+                                 pilot_target_seconds=self.sizing_pilot_target_seconds)
+        profile = load_profile(selected['profile'])
+        manifest = DatasetManifest.load(self.dataset_manifest)
+        missing = pilot_inputs(manifest, self._file_list_dir(), profile)
+        base = _resolve_output_destination_base(self.submit_config, read_config(self.submit_config), self.output_directory)
+        if missing and not base:
+            raise ValueError('Sizing pilots require a remote --output-directory for diagnostic stage-out')
+        batches = []
+        for start in range(0, len(missing), self.sizing_pilot_parallel):
+            number = len(batches)
+            directory = self._pilots_dir / f'batch_{number:04d}'
+            directory.mkdir(parents=True, exist_ok=True)
+            child_manifest = DatasetManifest(datasets=missing[start:start+self.sizing_pilot_parallel],
+                 lumi=manifest.lumi, lumi_by_year=manifest.lumi_by_year,
+                 whitelist=manifest.whitelist, blacklist=manifest.blacklist)
+            child_manifest.save_yaml(str(directory/'datasets.yaml'))
+            batches.append(dict(name=f'{self.name}__sizing_pilot_{number:04d}',
+                manifest=str((directory/'datasets.yaml').resolve()), datasets=[e.name for e in child_manifest.datasets],
+                output_directory=base.rstrip('/') + f'_sizing_pilots/batch_{number:04d}'))
+        plan = dict(schema_version=1, identity=identity, context=context, selection=selected, batches=batches)
+        atomic_json(path, plan)
+        return plan
+
+    def _pilot_monitor(self, batch):
+        return MonitorSkimJobs.req(self, name=batch['name'], dataset_manifest=batch['manifest'],
+            file_source='', file_source_name='', partition='file_group',
+            partition_profile='none', input_metadata_cache='', make_test_job=False,
+            output_directory=batch['output_directory'], sizing_pilots=False, sizing_pilot_child=True,
+            max_retries=0, poll_interval=15)
+
+    def run(self):
+        plan = self._prepare_plan()
+        for batch in plan['batches']:
+            monitor = self._pilot_monitor(batch)
+            self.publish_message(f"Calibrating {len(batch['datasets'])} dataset(s) in {batch['name']}")
+            # Dynamic dependencies release the LAW worker while the batch runs.
+            # Yielding one batch at a time bounds both queued and running pilots.
+            yield monitor
+            if not monitor.complete():
+                raise RuntimeError(f"Sizing pilot batch failed: {batch['name']}; bulk preparation stopped")
+
+        profile = load_profile(plan['selection']['profile']) or {'schema_version': 1,
+                                      'target_runtime_seconds': self.sizing_target_seconds}
+        profile.setdefault('datasets', {})
+        metadata = EntryCache(plan['selection']['metadata_seed'] or None)
+        provisional = {}
+        observations = {}
+        for batch in plan['batches']:
+            run = Path(WORKSPACE) / ('skimRun_' + batch['name'])
+            logs = sorted(run.glob('condor_submissions/*/condor_logs/*out'))
+            ads = condor_event_ads(list(run.glob('condor_submissions/*/condor_logs/*.log')))
+            found = set()
+            for log in logs:
+                match = re.search(r'_(\d+)_(\d+)\.(?:stdout|out)$', log.name)
+                if not match or (int(match[1]), int(match[2])) not in ads:
+                    continue
+                text = log.read_text(errors='replace')
+                samples = re.findall(r'^RDF_JOB_SIZING_PILOT=(.+)$', text, re.M)
+                if len(samples) != 1:
+                    raise RuntimeError(f'Missing or ambiguous paired measurements in {log}')
+                measurement = json.loads(samples[0])
+                name = log.parent.parent.name
+                if name not in batch['datasets'] or name in found:
+                    raise RuntimeError(f'Ambiguous pilot dataset {name}')
+                found.add(name)
+                if measurement['full']['events'] == 0:
+                    observations[name] = {'status': 'empty_file', 'measurement': measurement}
+                else:
+                    transfer = sum(float(v) for v in re.findall(r'^(?:Stage-(?:in|out)|Worker setup) time:\s*([\d.]+)s', text, re.M))
+                    sizing = fit_pilot(measurement, self.sizing_pilot_safety_factor, transfer)
+                    sizing['target_runtime_seconds'] = self.sizing_pilot_target_seconds
+                    profile['datasets'][name] = sizing
+                    provisional[name] = sizing
+                    observations[name] = {'status': 'measured', 'sizing': sizing}
+                entries, _ = collect_log(log, {})
+                for url, n, tree in entries:
+                    known = metadata.get(url, tree)
+                    if known is not None and known != n:
+                        raise ValueError(f'Conflicting pilot entry count for {url}')
+                    metadata.put(url, n, tree)
+            if found != set(batch['datasets']):
+                raise RuntimeError(f"Missing successful measurements: {set(batch['datasets']) - found}")
+        profile_path, metadata_path = self._pilots_dir/'profile.json', self._pilots_dir/'metadata.json'
+        atomic_json(profile_path, profile)
+        atomic_json(metadata_path, metadata.data)
+        try:
+            cache_update = seed_pilot_sizing(plan['context'], {'datasets': provisional}, metadata.data)
+        except Exception as exc:
+            cache_update = {'status': 'error', 'reason': str(exc)}
+            self.publish_message(f'WARNING: Could not cache pilot estimates: {exc}')
+        atomic_json(self.output().path, dict(schema_version=1, identity=plan['identity'],
+            profile=str(profile_path.resolve()), profile_sha256=file_digest(profile_path),
+            metadata_seed=str(metadata_path.resolve()), metadata_sha256=file_digest(metadata_path),
+            observations=observations, batches=plan['batches'], cache_update=cache_update))
+
+
+class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
+    """Run one-file data and MC preflights before dispatching :class:`SkimTask`.
+
+    This task runs the analysis executable once per available sample type,
+    using one input file each for data and MC when both are present. It validates
+    each exit code before expensive batch or multi-dataset dispatch.
 
     In **file-source mode** (``--file-source`` set) the test job directory is
     prepared by :class:`PrepareSkimJobs`, which is declared as a formal LAW
     prerequisite.
 
     In **standard manifest mode** (``--file-source`` empty) the task creates the
-    test job directory itself using the first file from the first dataset entry in
-    the manifest.
+    test job directory itself using the first file from one data and one MC entry
+    when both types are present in the manifest.
 
     Output
     ------
@@ -2515,7 +4162,7 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
     def requires(self):
         """Require PrepareSkimJobs in file-source mode (creates the test_job/ dir)."""
         if self.file_source:
-            return PrepareSkimJobs.req(self)
+            return self._prepare_skim_jobs_requirement()
         return None
 
     def output(self):
@@ -2523,24 +4170,150 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
             os.path.join(self._test_job_dir, "test_passed.txt")
         )
 
+    def complete(self):
+        """Require passing preflight markers for every configured sample type."""
+        if not super().complete():
+            return False
+
+        exe_path = os.path.abspath(self.exe)
+        staged_exe = os.path.join(self._test_job_dir, self._exe_relpath)
+        if not _staged_copy_is_current(exe_path, staged_exe):
+            return False
+        local_libs, library_signature = _local_shared_libs_with_signature(exe_path)
+        if not library_signature or any(
+            not _staged_copy_is_current(
+                lib_src, os.path.join(self._test_job_dir, lib_name)
+            )
+            for lib_name, lib_src in local_libs.items()
+        ):
+            return False
+        try:
+            with open(self._test_jobs_manifest_path, encoding="utf-8") as jobs_fh:
+                jobs_manifest = json.load(jobs_fh)
+            if (
+                not isinstance(jobs_manifest, dict)
+                or jobs_manifest.get("schema_version") != 1
+                or not isinstance(jobs_manifest.get("jobs"), list)
+            ):
+                return False
+            manifest_hash = hashlib.sha256(
+                Path(self._test_jobs_manifest_path).read_bytes()
+            ).hexdigest()
+            expected_types = sorted(
+                {
+                    str(job.get("dtype", "")).lower()
+                    for job in jobs_manifest.get("jobs", [])
+                    if isinstance(job, dict) and job.get("dtype")
+                }
+            )
+            if not expected_types:
+                return False
+            exe_stat = os.stat(exe_path)
+            with open(self.output().path) as marker_fh:
+                marker = {}
+                for line in marker_fh:
+                    key, sep, value = line.strip().partition("=")
+                    if sep:
+                        marker[key] = value
+        except (OSError, json.JSONDecodeError):
+            return False
+        try:
+            return (
+                marker.get("status") == "passed"
+                and marker.get("test_schema_version") == "3"
+                and sorted(marker.get("test_types", "").split(",")) == expected_types
+                and marker.get("test_jobs_sha256") == manifest_hash
+                and marker.get("runtime_libs_sha256") == library_signature
+                and marker.get("root_setup_sha256") == hashlib.sha256(self._root_setup_content.encode()).hexdigest()
+                and int(marker.get("exe_size", "-1")) == exe_stat.st_size
+                and int(marker.get("exe_mtime_ns", "-1")) == exe_stat.st_mtime_ns
+            )
+        except ValueError:
+            return False
+
+    def _refresh_test_input_url(self, config_path: str) -> None:
+        """Refresh a reused file-source test config from its prepared job."""
+        if not self.file_source:
+            return
+
+        config = read_config(config_path)
+        input_url = str(config.get("fileList", "")).split(",", 1)[0].strip()
+        if not input_url:
+            return
+
+        prep_path = os.path.join(self._run_dir, "prep_submission.json")
+        if not os.path.isfile(prep_path):
+            return
+        try:
+            with open(prep_path) as fh:
+                prepared_jobs = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return
+
+        input_lfn = _extract_lfn_for_redirect(input_url)
+        for entry in prepared_jobs:
+            if not isinstance(entry, dict):
+                continue
+            source_job_dir = str(entry.get("job_dir", ""))
+            if not source_job_dir:
+                continue
+            source_redirectors = os.path.join(
+                source_job_dir, "site_redirectors.json"
+            )
+            if not os.path.isfile(source_redirectors):
+                continue
+            try:
+                with open(source_redirectors) as fh:
+                    redirector_map = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if input_lfn not in redirector_map:
+                continue
+
+            config["fileList"] = _select_test_input_url(input_url, source_job_dir)
+            _write_config_file(config_path, config)
+            return
+
     def run(self):
         test_dir = self._test_job_dir
-
-        if not os.path.isdir(test_dir):
-            # Standard manifest mode: PrepareSkimJobs did not create the test_job/
-            # dir because no file-source mode was used.  Build it from scratch.
+        if not os.path.isfile(self._test_jobs_manifest_path):
+            if self.file_source:
+                raise RuntimeError(
+                    f"Preflight job manifest is missing: {self._test_jobs_manifest_path}. "
+                    "PrepareSkimJobs must create one test per available data/MC type."
+                )
+            # Standard manifest mode has no PrepareSkimJobs dependency, so
+            # create the local preflight configs directly from its manifest.
             self._prepare_standard_test_job(test_dir)
 
-        config_path = os.path.join(test_dir, "submit_config.txt")
-        if not os.path.isfile(config_path):
+        try:
+            with open(self._test_jobs_manifest_path, encoding="utf-8") as jobs_fh:
+                jobs_manifest = json.load(jobs_fh)
+        except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(
-                f"Test job config not found: {config_path!r}. "
-                "Ensure PrepareSkimJobs has completed (file-source mode) or "
-                "that the dataset manifest contains at least one dataset with files."
+                f"Could not read preflight job manifest: {self._test_jobs_manifest_path}"
+            ) from exc
+        if (
+            not isinstance(jobs_manifest, dict)
+            or jobs_manifest.get("schema_version") != 1
+        ):
+            raise RuntimeError(
+                f"Invalid preflight job manifest: {self._test_jobs_manifest_path}"
+            )
+        test_jobs = jobs_manifest.get("jobs")
+        if not isinstance(test_jobs, list) or not test_jobs:
+            raise RuntimeError(
+                f"No preflight inputs were recorded in {self._test_jobs_manifest_path}. "
+                "Ensure the manifest has at least one available data or MC sample."
             )
 
         exe_relpath = self._exe_relpath
         exe_in_test = os.path.join(test_dir, exe_relpath)
+        current_exe = os.path.abspath(self.exe)
+        if os.path.isfile(current_exe) and not _staged_copy_is_current(
+            current_exe, exe_in_test
+        ):
+            shutil.copy2(current_exe, exe_in_test)
         if not os.path.isfile(exe_in_test):
             # Try the absolute path directly (in case shared_inputs is on PATH)
             exe_in_test = os.path.abspath(self.exe)
@@ -2551,32 +4324,78 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
                 "Build the analysis before running RunSkimTestJob."
             )
 
+        local_libs, library_signature = _local_shared_libs_with_signature(
+            current_exe
+        )
+        for lib_name, lib_src in sorted(local_libs.items()):
+            lib_dst = os.path.join(test_dir, lib_name)
+            if not _staged_copy_is_current(lib_src, lib_dst):
+                shutil.copy2(lib_src, lib_dst)
+
         self.publish_message(
-            f"[RunSkimTestJob] Running single-file test in {test_dir} …"
+            f"[RunSkimTestJob] Running {len(test_jobs)} sample-type preflight job(s) "
+            f"in {test_dir} …"
         )
 
         with PerformanceRecorder("RunSkimTestJob") as rec:
-            result = _run_analysis_job(
-                exe_path=exe_in_test,
-                job_dir=test_dir,
-                root_setup=self._root_setup_content,
-                container_setup=self.container_setup or "",
-                stream_output=True,
-            )
+            results = []
+            tested_types = []
+            tested_samples = []
+            for test_job in test_jobs:
+                if not isinstance(test_job, dict):
+                    raise RuntimeError("Invalid preflight job record")
+                config_name = str(test_job.get("config", ""))
+                config_path = os.path.join(test_dir, config_name)
+                if not config_name or not os.path.isfile(config_path):
+                    raise RuntimeError(f"Preflight config not found: {config_path!r}")
+                test_config = read_config(config_path)
+                _remove_mc_generator_config_for_data(test_config)
+                _write_config_file(config_path, test_config)
+                self._refresh_test_input_url(config_path)
+                dtype = str(test_job.get("dtype", "unknown")).lower()
+                sample = str(test_job.get("dataset", "unknown"))
+                self.publish_message(
+                    f"[RunSkimTestJob] Testing {dtype} sample {sample} …"
+                )
+                result = _run_analysis_job(
+                    exe_path=exe_in_test,
+                    job_dir=test_dir,
+                    root_setup=self._root_setup_content,
+                    container_setup="",
+                    config_relpath=config_name,
+                    stream_output=_stream_analysis_output(),
+                    worker_number=0,
+                )
+                results.append(result)
+                tested_types.append(dtype)
+                tested_samples.append(sample)
         rec.save(os.path.join(test_dir, "test_job.perf.json"))
 
         self.publish_message(
-            f"[RunSkimTestJob] Test passed: {result}"
+            f"[RunSkimTestJob] Preflight passed for {', '.join(tested_types)}: "
+            f"{'; '.join(results)}"
         )
 
+        exe_stat = os.stat(current_exe)
         with self.output().open("w") as fh:
-            fh.write(f"status=passed\n{result}\n")
+            fh.write(
+                f"status=passed\n"
+                f"test_schema_version=3\n"
+                f"test_types={','.join(sorted(tested_types))}\n"
+                f"test_samples={','.join(tested_samples)}\n"
+                f"test_jobs_sha256={hashlib.sha256(Path(self._test_jobs_manifest_path).read_bytes()).hexdigest()}\n"
+                f"runtime_libs_sha256={library_signature}\n"
+                f"root_setup_sha256={hashlib.sha256(self._root_setup_content.encode()).hexdigest()}\n"
+                f"exe_size={exe_stat.st_size}\n"
+                f"exe_mtime_ns={exe_stat.st_mtime_ns}\n"
+                f"{';'.join(results)}\n"
+            )
 
     def _prepare_standard_test_job(self, test_dir: str) -> None:
         """Create a minimal test job directory in standard (non-file-source) mode.
 
-        Reads the first dataset from the manifest, takes the first file, copies
-        the executable and config files, and writes a minimal ``submit_config.txt``.
+        Selects one dataset with files for each available data/MC type, then
+        writes a minimal config for every selected one.
         """
         exe_path = os.path.abspath(self.exe)
         if not os.path.isfile(exe_path):
@@ -2586,23 +4405,29 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
             )
 
         manifest = DatasetManifest.load(self.dataset_manifest)
-        first_dataset = next(iter(manifest.datasets), None)
-        if first_dataset is None:
+        if not manifest.datasets:
             raise RuntimeError(
                 f"Dataset manifest '{self.dataset_manifest}' contains no datasets."
             )
 
-        first_file = ""
-        if first_dataset.files:
-            first_file = first_dataset.files[0]
-        elif first_dataset.das:
-            first_file = first_dataset.das
+        candidates: dict[str, tuple[Any, str]] = {}
+        for dataset in manifest.datasets:
+            first_file = dataset.files[0] if dataset.files else dataset.das
+            if not first_file:
+                continue
+            dtype = str(dataset.dtype or "").strip().lower()
+            if dtype not in {"data", "mc"}:
+                dtype = "other"
+            candidates.setdefault(dtype, (dataset, str(first_file)))
 
-        if not first_file:
+        if not candidates:
             raise RuntimeError(
-                f"Dataset '{first_dataset.name}' has no files or DAS path; "
-                "cannot create a test job."
+                f"Dataset manifest '{self.dataset_manifest}' has no dataset with "
+                "a file or DAS identifier for preflight."
             )
+        test_types = [dtype for dtype in ("data", "mc") if dtype in candidates]
+        if not test_types:
+            test_types = [next(iter(candidates))]
 
         Path(test_dir).mkdir(parents=True, exist_ok=True)
 
@@ -2613,10 +4438,10 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
             shutil.copy2(exe_path, dst_exe)
 
         # Copy local shared libraries
-        local_libs = _collect_skim_shared_libs(exe_path, WORKSPACE)
+        local_libs, _ = _local_shared_libs_with_signature(exe_path)
         for lib_name, lib_src in sorted(local_libs.items()):
             lib_dst = os.path.join(test_dir, lib_name)
-            if not os.path.exists(lib_dst):
+            if not _staged_copy_is_current(lib_src, lib_dst):
                 shutil.copy2(lib_src, lib_dst)
 
         # Copy auxiliary config files referenced in template
@@ -2624,57 +4449,82 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task):
             template_config = read_config(self.submit_config)
             _copy_analysis_config_files(self.submit_config, template_config, test_dir)
             _copy_analysis_aux_dir(self.submit_config, test_dir)
-            test_config = dict(template_config)
         else:
-            test_config = {}
+            template_config = {}
 
-        # Override dataset-specific keys
-        test_config["fileList"] = first_file
-        test_config["saveFile"] = "test_output.root"
-        test_config["metaFile"] = "test_output_meta.root"
-        test_config["saveDirectory"] = test_dir
-        test_config.update(_dataset_job_metadata(first_dataset))
-        if str(first_dataset.dtype or "").lower() == "data":
-            test_config.pop("counterWeightBranch", None)
-        test_config.setdefault("threads", "1")
-        for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
-            test_config.pop(key, None)
+        test_jobs = []
+        for dtype in test_types:
+            dataset, first_file = candidates[dtype]
+            test_config = dict(template_config)
+            test_config.update(_dataset_job_metadata(dataset))
+            test_config["fileList"] = first_file
+            test_config["saveFile"] = f"test_output_{dtype}.root"
+            test_config["metaFile"] = f"test_output_{dtype}_meta.root"
+            test_config["saveDirectory"] = test_dir
+            test_config["lumi"] = str(
+                manifest.lumi_for(dataset.year, dataset.era)
+            )
+            test_config["threads"] = "1"
+            _remove_mc_generator_config_for_data(test_config)
+            for key in ("__orig_saveFile", "__orig_metaFile", "__orig_fileList"):
+                test_config.pop(key, None)
 
-        if os.path.isfile(self.submit_config):
-            _ensure_local_analysis_runtime_layout(
-                self.submit_config,
-                test_config,
-                test_dir,
+            if os.path.isfile(self.submit_config):
+                _ensure_local_analysis_runtime_layout(
+                    self.submit_config,
+                    test_config,
+                    test_dir,
+                )
+
+            for key, value in list(test_config.items()):
+                if key.startswith("__") or not isinstance(value, str):
+                    continue
+                if value.endswith((".txt", ".yaml", ".yml", ".json", ".json.gz", ".onnx")):
+                    basename = os.path.basename(value)
+                    cfg_path = os.path.join(test_dir, "cfg", basename)
+                    if os.path.exists(cfg_path):
+                        test_config[key] = os.path.join("cfg", basename)
+                    elif os.path.exists(os.path.join(test_dir, basename)):
+                        test_config[key] = basename
+
+            config_name = f"submit_config_{dtype}.txt"
+            config_path = os.path.join(test_dir, config_name)
+            _write_config_file(config_path, test_config)
+            test_jobs.append(
+                {
+                    "dtype": dtype,
+                    "dataset": dataset.name,
+                    "config": config_name,
+                    "input": first_file,
+                    "config_sha256": hashlib.sha256(
+                        Path(config_path).read_bytes()
+                    ).hexdigest(),
+                }
             )
 
-        # Resolve referenced config files to basenames
-        for key, val in list(test_config.items()):
-            if key.startswith("__"):
-                continue
-            if isinstance(val, str) and (
-                val.endswith(".txt") or val.endswith(".yaml") or val.endswith(".yml")
-            ):
-                basename = os.path.basename(val)
-                cfg_path = os.path.join(test_dir, "cfg", basename)
-                if os.path.exists(cfg_path):
-                    test_config[key] = os.path.join("cfg", basename)
-                    continue
-                if os.path.exists(os.path.join(test_dir, basename)):
-                    test_config[key] = basename
-
-        with open(os.path.join(test_dir, "submit_config.txt"), "w") as fh:
-            for k, v in test_config.items():
-                if not k.startswith("__"):
-                    fh.write(f"{k}={v}\n")
+        primary_config = os.path.join(test_dir, test_jobs[0]["config"])
+        shutil.copy2(primary_config, os.path.join(test_dir, "submit_config.txt"))
+        with open(self._test_jobs_manifest_path, "w", encoding="utf-8") as manifest_fh:
+            json.dump({"schema_version": 1, "jobs": test_jobs}, manifest_fh, indent=2)
 
         self.publish_message(
-            f"[RunSkimTestJob] Test job prepared in {test_dir}/\n"
-            f"  First dataset: {first_dataset.name}, input: {first_file}"
+            f"[RunSkimTestJob] Test jobs prepared in {test_dir}/ for "
+            f"{', '.join(test_types)}.\n"
+            f"  Inputs: "
+            + "; ".join(
+                f"{job['dataset']} ({job['dtype']}): {job['input']}"
+                for job in test_jobs
+            )
         )
 
 
 class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
-    """Write concrete Condor submission files for prepared skim jobs."""
+    """Write concrete Condor submission files for prepared skim jobs.
+
+    Shared executable, library, configuration, auxiliary, and optional
+    stitching payloads are transferred as one run-level archive.  Concrete
+    per-job directories contain only job-specific metadata and configuration.
+    """
 
     task_namespace = ""
 
@@ -2714,8 +4564,7 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
 
         template_config = read_config(self.submit_config)
         final_output_base = _resolve_output_destination_base(
-            self.submit_config,
-            template_config,
+            self.submit_config, template_config, self.output_directory
         )
         bookkeeping_outputs_dir = os.path.join(self._run_dir, "outputs")
 
@@ -2728,6 +4577,7 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 "Run PrepareSkimJobs first."
             )
 
+        _validate_staged_skim_executable(shared_dir, self.exe)
         python_env_staged = None
         python_env_src = self._python_env_path()
         if python_env_src:
@@ -2735,7 +4585,25 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
             if os.path.isfile(candidate):
                 python_env_staged = candidate
 
+        stitch_weights_path = str(getattr(self, "stitch_weights", "") or "").strip()
+        if stitch_weights_path and not os.path.isfile(stitch_weights_path):
+            raise RuntimeError(
+                f"Stitching weights file not found: {stitch_weights_path!r}"
+            )
+        if stitch_weights_path:
+            # Stitch weights are identical for every job.  Add them to the
+            # run-level archive instead of copying one JSON into each job.
+            shutil.copy2(
+                stitch_weights_path,
+                os.path.join(shared_dir, "stitch_weights.json"),
+            )
+            _build_shared_inputs_archive(shared_dir, self._shared_archive_path)
+
         shared_transfer_files = _skim_shared_input_files(shared_dir)
+        _validate_staged_skim_proxy(shared_dir, required=bool(self.x509))
+        shared_archive_file_names = _shared_archive_top_level_files(
+            self._shared_archive_path
+        )
 
         submission_records: list[dict[str, object]] = []
         for dataset_name, dataset_jobs in grouped_jobs.items():
@@ -2749,9 +4617,19 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 job_dir_abs = str(entry["job_dir"])
                 staged_job_dir = os.path.join(submission_dir, f"job_{local_index}")
                 Path(staged_job_dir).mkdir(parents=True, exist_ok=True)
-                _copy_tree_contents(job_dir_abs, staged_job_dir)
-                _flatten_job_cfg_overlay_files(staged_job_dir)
-
+                _copy_job_submission_files(
+                    job_dir_abs,
+                    staged_job_dir,
+                    shared_archive_file_names,
+                )
+                if stitch_weights_path:
+                    staged_config_path = os.path.join(staged_job_dir, "submit_config.txt")
+                    staged_config = read_config(staged_config_path)
+                    staged_config["stitchWeights"] = "stitch_weights.json"
+                    with open(staged_config_path, "w") as staged_config_fh:
+                        for key, value in staged_config.items():
+                            if not key.startswith("__"):
+                                staged_config_fh.write(f"{key}={value}\n")
                 if final_output_base and entry.get("out_dir"):
                     final_output_dir = os.path.join(final_output_base, dataset_name)
                     _rewrite_job_output_destinations(
@@ -2767,6 +4645,8 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                     "out_dir": str(entry.get("out_dir", "")),
                 })
 
+            submission_transfer_files = list(shared_transfer_files)
+
             submit_path = write_submit_files(
                 submission_dir,
                 len(dataset_jobs),
@@ -2776,10 +4656,10 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 root_setup=self._root_setup_content,
                 x509loc=None,
                 max_runtime=str(self.max_runtime),
-                request_memory=2000,
+                request_memory=self.request_memory,
                 request_cpus=1,
                 request_disk=20000,
-                extra_transfer_files=shared_transfer_files,
+                extra_transfer_files=submission_transfer_files,
                 include_aux=False,
                 shared_dir_name=None,
                 eos_sched=False,
@@ -2789,6 +4669,9 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
                 python_env_tarball=python_env_staged,
                 shared_archive_name=os.path.basename(self._shared_archive_path),
                 runtime_config_relpath=os.path.join("cfg", "submit_config.txt"),
+                sample_name=dataset_name,
+                run_name=self.name,
+                sizing_pilot_entries=self.sizing_pilot_prefix_entries if self.sizing_pilot_child else 0,
             )
             _rewrite_submit_transfer_files(
                 submit_path,
@@ -2847,6 +4730,8 @@ class SubmitSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             if not dataset_records:
                 raise RuntimeError("No dataset submissions found in submission manifest.")
 
+            _validate_staged_skim_proxy(self._shared_dir, required=bool(self.x509))
+            _validate_staged_skim_executable(self._shared_dir, self.exe)
             submitted_records: list[dict[str, object]] = []
             for record in dataset_records:
                 dataset_name = str(record["dataset_name"])
@@ -2898,8 +4783,8 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
     task_namespace = ""
 
     max_retries = luigi.IntParameter(
-        default=3,
-        description="Maximum resubmission attempts per failed skim job (default: 3)",
+        default=50,
+        description="Maximum resubmission attempts per failed skim job (default: 50)",
     )
     poll_interval = luigi.IntParameter(
         default=120,
@@ -2918,22 +4803,236 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
             os.path.join(self._run_dir, "all_outputs_verified.txt")
         )
 
+    def complete(self):
+        """Require completed jobs and valid output artifacts under the selected policy."""
+        if not super().complete():
+            return False
+
+        try:
+            summary: dict[str, int] = {}
+            with open(self.output().path) as fh:
+                for line in fh:
+                    key, separator, value = line.strip().partition("=")
+                    if separator and key in {"done", "perm_fail", "total"}:
+                        summary[key] = int(value)
+            total = summary.get("total", 0)
+            if (
+                total <= 0
+                or summary.get("done") != total
+                or summary.get("perm_fail") != 0
+            ):
+                return False
+
+            with open(self._state_file) as fh:
+                state = json.load(fh)
+
+            dataset_states = state.get("datasets")
+            if not isinstance(dataset_states, dict) or not dataset_states:
+                return False
+
+            manifest = DatasetManifest.load(self.dataset_manifest)
+            checked_jobs = 0
+            jobs_to_check = {}
+            job_states = {}
+            for dataset_name, dataset_state in dataset_states.items():
+                dataset = manifest.by_name(dataset_name)
+                if dataset is None:
+                    return False
+                jobs = dataset_state.get("jobs")
+                if not isinstance(jobs, dict) or not jobs:
+                    return False
+                for index, job_state in jobs.items():
+                    if not isinstance(job_state, dict) or job_state.get("status") != "done":
+                        return False
+                    job_config = os.path.join(
+                        str(job_state.get("job_dir", "")), "submit_config.txt"
+                    )
+                    require_skim = (
+                        _config_enables_skim(job_config)
+                        if os.path.isfile(job_config)
+                        else _config_enables_skim(self.submit_config)
+                    )
+                    output_roles = ("save", "meta") if require_skim else ("meta",)
+                    job_output_paths = [
+                        str(job_state.get(role, "")) for role in output_roles
+                    ]
+                    if any(not path for path in job_output_paths):
+                        return False
+                    key = (dataset_name, index)
+                    jobs_to_check[key] = (dict(dir=job_state.get("job_dir", ""),
+                        save=job_state.get("save", ""), meta=job_state.get("meta", ""),
+                        tree_name=job_state.get("tree_name", "Events")), output_roles)
+                    job_states[key] = job_state
+                    checked_jobs += 1
+
+            if checked_jobs != total:
+                return False
+            return not any(self._validate_output_jobs(
+                jobs_to_check, job_states, manifest).values())
+        except Exception:  # completion checks fail closed on corrupt persisted records
+            return False
+
+    @property
+    def _validation_cache_path(self) -> Path:
+        return Path(self._run_dir) / "output_validation.json"
+
+    def _read_validation_cache(self) -> dict:
+        try:
+            cache = json.loads(self._validation_cache_path.read_text())
+            if cache.get("schema_version") == 1 and isinstance(cache.get("jobs"), dict):
+                return cache["jobs"]
+        except (OSError, ValueError, AttributeError):
+            pass
+        return {}
+
+    def _save_validation_updates(self, updates: dict) -> None:
+        """Merge receipts atomically without rewriting the monitor's job state."""
+        if not updates:
+            return
+        path = self._validation_cache_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            current = self._read_validation_cache()
+            for key, receipt in updates.items():
+                if receipt is None:
+                    current.pop(key, None)
+                else:
+                    current[key] = receipt
+            atomic_json(path, dict(schema_version=1, jobs=current))
+
+    def _validate_output_jobs(self, jobs: dict, job_states: dict,
+                              manifest: DatasetManifest) -> dict:
+        """Share fresh batched path checks and persistent integrity receipts.
+
+        Receipts are only valid for the same job attempt, configuration, output
+        paths and fresh storage signatures. Old done states alone are not proof
+        of integrity. Existence-only checks never populate this cache.
+        """
+        paths = list(dict.fromkeys(str(info.get(role, ""))
+            for info, roles in jobs.values() for role in roles if info.get(role)))
+        signatures = {}
+        if self.output_validation == "integrity":
+            signatures = _output_file_info_batch(paths)
+            exists = {path: info is not None for path, info in signatures.items()}
+        else:
+            exists = _output_files_exist_batch(paths)
+        cache = self._read_validation_cache() if signatures else {}
+        updates = {}
+        errors_by_job = {}
+        last_checkpoint = time.monotonic()
+        checked = reused = 0
+        cache_writable = True
+        def checkpoint():
+            nonlocal cache_writable
+            if cache_writable:
+                try:
+                    self._save_validation_updates(updates)
+                except OSError as error:
+                    cache_writable = False
+                    self.publish_message(f"WARNING: output validation receipts could not be "
+                        f"saved; full validation results remain valid: {error}")
+            updates.clear()
+        manifest_sha = file_digest(self.dataset_manifest) if signatures else ""
+        identity = Path(self._run_dir) / "execution_identity.json"
+        execution_sha = file_digest(identity) if signatures and identity.is_file() else ""
+        self.publish_message(f"Checking {len(jobs)} output pair(s): batched storage metadata, "
+                             "then uncached integrity checks.")
+        try:
+            for key, (info, roles) in jobs.items():
+                dataset_name, index = key
+                dataset = manifest.by_name(dataset_name)
+                errors = []
+                job_paths = [str(info.get(role, "")) for role in roles]
+                for role, path in zip(roles, job_paths):
+                    if not path:
+                        errors.append(f"{role} output path is not configured")
+                    elif not exists.get(path, False):
+                        errors.append(f"{role} output {path!r} is absent or unreadable")
+                if dataset is None:
+                    errors.append(f"dataset {dataset_name!r} is missing from the dataset manifest")
+                cache_key = json.dumps([dataset_name, str(index)])
+                if not errors and self.output_validation == "integrity":
+                    state = job_states[key]
+                    config = Path(str(info.get("dir", ""))) / "submit_config.txt"
+                    if not config.is_file():
+                        config = Path(self.submit_config)
+                    contract = dict(version=1, dataset=dataset_name, dtype=dataset.dtype,
+                        tree_name=info.get("tree_name", "Events"), roles=list(roles),
+                        config_sha256=file_digest(config) if config.is_file() else None,
+                        manifest_sha256=manifest_sha, execution_sha256=execution_sha,
+                        cluster=state.get("cluster"), proc=state.get("proc"),
+                        retries=state.get("retries", 0))
+                    files = {path: signatures.get(path) for path in job_paths}
+                    receipt = dict(contract=contract, files=files)
+                    cacheable = all(files.values())
+                    if cacheable and cache.get(cache_key) == receipt:
+                        reused += 1
+                    else:
+                        errors.extend(_skim_job_output_errors(dataset_name=dataset_name,
+                            dtype=dataset.dtype, save_path=str(info.get("save", "")),
+                            meta_path=str(info.get("meta", "")),
+                            tree_name=str(info.get("tree_name", "Events")),
+                            require_skim="save" in roles))
+                        checked += 1
+                        # Unknown metadata (e.g. stat fallback) cannot establish
+                        # file identity, even after successful full validation.
+                        updates[cache_key] = receipt if not errors and cacheable else None
+                elif errors and self.output_validation == "integrity":
+                    updates[cache_key] = None
+                errors_by_job[key] = errors
+                now = time.monotonic()
+                if updates and (len(updates) >= 25 or now - last_checkpoint >= 10):
+                    checkpoint()
+                    self.publish_message(f"Output validation: {len(errors_by_job)}/{len(jobs)} "
+                        f"checked, {checked} ROOT checks, {reused} receipts reused.")
+                    last_checkpoint = now
+        finally:
+            checkpoint()
+        self.publish_message(f"Output validation finished: {len(jobs)} checked, "
+                             f"{checked} ROOT checks, {reused} receipts reused.")
+        return errors_by_job
+
     @property
     def _state_file(self) -> str:
         return os.path.join(self._run_dir, "monitor_state.json")
 
     def _load_state(self) -> dict:
-        if os.path.exists(self._state_file):
+        if not os.path.exists(self._state_file):
+            return {"datasets": {}}
+        try:
             with open(self._state_file) as fh:
-                try:
-                    return json.load(fh)
-                except json.JSONDecodeError:
-                    pass
-        return {"datasets": {}}
+                state = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Cannot read monitor state {self._state_file!r}; preserve and "
+                "inspect the file before resuming to avoid losing retry history."
+            ) from exc
+        if not isinstance(state, dict) or not isinstance(state.get("datasets"), dict):
+            raise RuntimeError(
+                f"Monitor state {self._state_file!r} has an invalid structure; "
+                "expected a JSON object containing a datasets object."
+            )
+        return state
 
     def _save_state(self, state: dict) -> None:
-        with open(self._state_file, "w") as fh:
-            json.dump(state, fh, indent=2)
+        parent = os.path.dirname(self._state_file)
+        Path(parent).mkdir(parents=True, exist_ok=True)
+        fd, temporary_path = tempfile.mkstemp(
+            prefix=".monitor_state.", suffix=".tmp", dir=parent
+        )
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(state, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temporary_path, self._state_file)
+        except Exception:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+            raise
 
     def _discover_jobs(self, submission_dir: str) -> dict[int, dict[str, str]]:
         return _discover_jobs_in_submission_dir(submission_dir)
@@ -2946,6 +5045,19 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 counts[status] = counts.get(status, 0) + 1
         return counts
 
+    def _reactivate_retryable_failures(self, state: dict) -> int:
+        """Make prior permanent failures retryable when the retry budget grew."""
+        reactivated = 0
+        for dataset_state in state.get("datasets", {}).values():
+            for job_state in dataset_state.get("jobs", {}).values():
+                if job_state.get("status") != "perm_fail":
+                    continue
+                retries = int(job_state.get("retries", 0))
+                if retries < self.max_retries:
+                    job_state["status"] = "submitted"
+                    reactivated += 1
+        return reactivated
+
     def run(self):
         with self.input().open("r") as fh:
             submitted_payload = json.load(fh)
@@ -2953,6 +5065,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         dataset_records = list(submitted_payload.get("datasets", []))
         if not dataset_records:
             raise RuntimeError("No submitted dataset clusters found in submitted.json")
+        manifest = DatasetManifest.load(self.dataset_manifest)
 
         state = self._load_state()
         dataset_job_info: dict[str, dict[int, dict[str, str]]] = {}
@@ -2988,12 +5101,54 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         "cluster": initial_cluster,
                         "proc": idx,
                     }
+
+            for key, persisted_job in dataset_state["jobs"].items():
+                if not isinstance(persisted_job, dict):
+                    continue
+                try:
+                    persisted_idx = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if not persisted_job.get("job_dir"):
+                    continue
+                persisted_job_dir = str(persisted_job["job_dir"])
+                persisted_config = os.path.join(
+                    persisted_job_dir, "submit_config.txt"
+                )
+                tree_name = persisted_job.get("tree_name")
+                if not tree_name and os.path.isfile(persisted_config):
+                    try:
+                        tree_name = read_config(persisted_config).get("saveTree")
+                    except (OSError, ValueError):
+                        tree_name = None
+                job_info[persisted_idx] = {
+                    "dir": persisted_job_dir,
+                    "save": str(persisted_job.get("save", "")),
+                    "meta": str(persisted_job.get("meta", "")),
+                    "tree_name": str(tree_name or "Events"),
+                }
+
+            for idx, info in job_info.items():
+                job_state = dataset_state["jobs"].setdefault(str(idx), {})
+                job_state.setdefault("job_dir", info.get("dir", ""))
+                job_state.setdefault("save", info.get("save", ""))
+                job_state.setdefault("meta", info.get("meta", ""))
+                job_state.setdefault("tree_name", info.get("tree_name", "Events"))
+
+        reactivated = self._reactivate_retryable_failures(state)
+        if reactivated:
+            self.publish_message(
+                f"Reactivated {reactivated} prior permanent failure(s) "
+                f"for retry (limit={self.max_retries})."
+            )
         self._save_state(state)
 
         self.publish_message(
             f"Monitoring {sum(len(job_info) for job_info in dataset_job_info.values())} skim job(s) across {len(dataset_job_info)} dataset cluster(s)."
         )
+        self.publish_message(f"Output validation: {self.output_validation}")
 
+        event_log_cache: dict = {}
         while True:
             active_clusters = set()
             for dataset_state in state.get("datasets", {}).values():
@@ -3002,50 +5157,144 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         active_clusters.add(str(job_state["cluster"]))
 
             live_status: dict[tuple[str, int], int] = {}
+            live_ads: dict[tuple[str, int], dict] = {}
             live_hold_reason: dict[tuple[str, int], str] = {}
             history_exit: dict[tuple[str, int], int] = {}
             for cluster_id in active_clusters:
                 for proc, ad in _condor_q_ads(cluster_id).items():
                     if "JobStatus" in ad:
                         live_status[(cluster_id, proc)] = ad["JobStatus"]
+                        live_ads[(cluster_id, proc)] = ad
                     if ad.get("HoldReason"):
                         live_hold_reason[(cluster_id, proc)] = str(ad.get("HoldReason"))
                 for proc, exit_code in _condor_history_exit(cluster_id).items():
                     history_exit[(cluster_id, proc)] = exit_code
 
-            output_paths_to_check: list[str] = []
+            # History can expire independently of the retained local event log.
+            # Recover terminal evidence only for absent jobs with no history;
+            # successful exit never bypasses output integrity/provenance checks.
             for dataset_name, job_info in dataset_job_info.items():
                 dataset_state = state["datasets"][dataset_name]
-                for idx in sorted(job_info.keys()):
+                for idx, info in job_info.items():
                     job_state = dataset_state["jobs"][str(idx)]
-                    if job_state["status"] in ("done", "perm_fail"):
+                    key = (str(job_state["cluster"]), job_state["proc"])
+                    if (job_state["status"] in ("done", "perm_fail") or
+                            key in live_status or key in history_exit):
+                        continue
+                    evidence = _condor_event_log_exit(
+                        dataset_state["submission_dir"], key[0], key[1], idx,
+                        str(info.get("dir", "")), event_log_cache,
+                    )
+                    if evidence is not None:
+                        history_exit[key] = evidence[0]
+                        job_state["completion_evidence"] = {
+                            "source": "condor_event_log", "path": evidence[1],
+                            "cluster": key[0], "proc": key[1], "exit_code": evidence[0],
+                        }
+
+            successful_jobs: dict[tuple[str, int], tuple[dict, tuple[str, ...]]] = {}
+            for dataset_name, job_info in dataset_job_info.items():
+                dataset_state = state["datasets"][dataset_name]
+                for idx in sorted(list(job_info.keys())):
+                    job_state = dataset_state["jobs"][str(idx)]
+                    if job_state["status"] == "perm_fail":
+                        continue
+                    if job_state["status"] == "done":
+                        info = job_info[idx]
+                        job_config = os.path.join(
+                            str(info.get("dir", "")), "submit_config.txt"
+                        )
+                        require_skim = (
+                            _config_enables_skim(job_config)
+                            if os.path.isfile(job_config)
+                            else _config_enables_skim(self.submit_config)
+                        )
+                        output_roles = ("save", "meta") if require_skim else ("meta",)
+                        successful_jobs[(dataset_name, idx)] = (info, output_roles)
                         continue
                     cluster_id = str(job_state["cluster"])
                     proc = job_state["proc"]
-                    if live_status.get((cluster_id, proc)) is None:
-                        if job_info[idx]["save"]:
-                            output_paths_to_check.append(job_info[idx]["save"])
-                        if job_info[idx]["meta"]:
-                            output_paths_to_check.append(job_info[idx]["meta"])
-            output_exists = _output_files_exist_batch(output_paths_to_check)
+                    if live_status.get((cluster_id, proc)) is not None:
+                        continue
+                    if history_exit.get((cluster_id, proc)) != 0:
+                        continue
+
+                    info = job_info[idx]
+                    job_config = os.path.join(
+                        str(info.get("dir", "")), "submit_config.txt"
+                    )
+                    require_skim = (
+                        _config_enables_skim(job_config)
+                        if os.path.isfile(job_config)
+                        else _config_enables_skim(self.submit_config)
+                    )
+                    output_roles = ("save", "meta") if require_skim else ("meta",)
+                    successful_jobs[(dataset_name, idx)] = (info, output_roles)
+            job_states = {key: state["datasets"][key[0]]["jobs"][str(key[1])]
+                          for key in successful_jobs}
+            output_errors = self._validate_output_jobs(successful_jobs, job_states, manifest)
 
             for dataset_name, job_info in dataset_job_info.items():
                 dataset_state = state["datasets"][dataset_name]
                 submission_dir = str(dataset_state["submission_dir"])
-                for idx in sorted(job_info.keys()):
+                for idx in sorted(list(job_info.keys())):
                     key = str(idx)
                     job_state = dataset_state["jobs"][key]
                     cluster_id = str(job_state["cluster"])
                     proc = job_state["proc"]
                     status = job_state["status"]
-                    if status in ("done", "perm_fail"):
+                    if status == "perm_fail":
                         continue
 
                     condor_status = live_status.get((cluster_id, proc))
                     exit_code = history_exit.get((cluster_id, proc))
 
+                    if status == "done":
+                        errors = output_errors.get((dataset_name, idx), [])
+                        if errors:
+                            self._try_resubmit(
+                                dataset_name,
+                                idx,
+                                dataset_state,
+                                job_state,
+                                reason="; ".join(errors),
+                                job_info=job_info,
+                                monitor_state=state,
+                            )
+                        continue
+
                     if condor_status == 2:
                         job_state["status"] = "running"
+                        condor_ad = live_ads.get((cluster_id, proc), {})
+                        if _condor_job_exceeded_runtime(condor_ad, self.max_runtime):
+                            assigned_runtime = float(condor_ad.get("MaxRuntime", 0) or 0)
+                            if assigned_runtime <= 0:
+                                assigned_runtime = self.max_runtime
+                            elapsed_runtime = _condor_job_elapsed_runtime(condor_ad)
+                            removed = _condor_rm_job(cluster_id, proc)
+                            if removed:
+                                self.publish_message(
+                                    f"[{dataset_name}] Job {idx} exceeded Condor runtime "
+                                    f"({elapsed_runtime}s > 1.5 * {assigned_runtime}s); "
+                                    "removed from queue."
+                                )
+                                self._try_resubmit(
+                                    dataset_name,
+                                    idx,
+                                    dataset_state,
+                                    job_state,
+                                    reason=(
+                                        f"runtime {elapsed_runtime}s exceeded "
+                                        f"1.5 * assigned runtime {assigned_runtime}s"
+                                    ),
+                                    job_info=job_info,
+                                    monitor_state=state,
+                                )
+                            else:
+                                self.publish_message(
+                                    f"[{dataset_name}] Job {idx} exceeded Condor runtime "
+                                    "but could not be removed; leaving it running."
+                                )
                         continue
 
                     if condor_status == 5:
@@ -3055,7 +5304,16 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                             self.publish_message(f"[{dataset_name}] Job {idx} held and removed from queue: {hold_reason}")
                         else:
                             self.publish_message(f"[{dataset_name}] Job {idx} held (could not confirm condor_rm): {hold_reason}")
-                        self._try_resubmit(dataset_name, idx, dataset_state, job_state, reason=f"held: {hold_reason}")
+                            continue
+                        self._try_resubmit(
+                            dataset_name,
+                            idx,
+                            dataset_state,
+                            job_state,
+                            reason=f"held: {hold_reason}",
+                            job_info=job_info,
+                            monitor_state=state,
+                        )
                         continue
 
                     if condor_status is None and exit_code is not None and exit_code != 0:
@@ -3064,18 +5322,35 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                             self.publish_message(
                                 f"[{dataset_name}] Job {idx} failed with exit code {exit_code}. stderr tail:\n{error_tail}"
                             )
-                        self._try_resubmit(dataset_name, idx, dataset_state, job_state, reason=f"exit code {exit_code}")
+                        self._try_resubmit(
+                            dataset_name,
+                            idx,
+                            dataset_state,
+                            job_state,
+                            reason=f"exit code {exit_code}",
+                            job_info=job_info,
+                            monitor_state=state,
+                        )
                         continue
 
-                    if condor_status is None:
-                        save_path = job_info[idx]["save"]
-                        meta_path = job_info[idx]["meta"]
-                        if (
-                            (save_path and output_exists.get(save_path, False))
-                            or (meta_path and output_exists.get(meta_path, False))
-                        ):
+                    if condor_status is None and exit_code == 0:
+                        errors = output_errors.get((dataset_name, idx), [])
+                        if not errors:
                             job_state["status"] = "done"
-                            self.publish_message(f"[{dataset_name}] Job {idx}: output verified.")
+                            self.publish_message(
+                                f"[{dataset_name}] Job {idx}: successful exit and "
+                                "expected output paths verified."
+                            )
+                        else:
+                            self._try_resubmit(
+                                dataset_name,
+                                idx,
+                                dataset_state,
+                                job_state,
+                                reason="; ".join(errors),
+                                job_info=job_info,
+                                monitor_state=state,
+                            )
 
             self._save_state(state)
 
@@ -3096,6 +5371,9 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         summary = self._status_summary(state)
         done = summary.get("done", 0)
         perm_fail = summary.get("perm_fail", 0)
+        if not perm_fail and done:
+            self._update_site_rankings()
+            self._update_job_sizing()
         with self.output().open("w") as fh:
             fh.write(f"done={done}\n")
             fh.write(f"perm_fail={perm_fail}\n")
@@ -3116,36 +5394,174 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
         else:
             self.publish_message(f"All {done} skim output(s) verified. Monitoring complete.")
 
-    def _try_resubmit(self, dataset_name: str, idx: int, dataset_state: dict, job_state: dict, reason: str) -> None:
-        retries = job_state["retries"]
+    def _update_site_rankings(self) -> None:
+        """Ancillary learning must not turn verified physics outputs into a retry."""
+        try:
+            result = _update_xrd_site_rankings(self._run_dir, seed=_io_policy.SITE_RANKING_FILE)
+        except Exception as exc:
+            result = {"status": "error", "reason": str(exc)}
+            self.publish_message(f"WARNING: XRootD site ranking update failed: {exc}")
+        try:
+            path = Path(self._run_dir) / "xrd_site_rankings_update.json"
+            path.write_text(json.dumps(result, indent=2) + "\n")
+        except OSError as exc:
+            self.publish_message(f"WARNING: Could not save XRootD ranking update receipt: {exc}")
+        if result.get("status") == "updated":
+            self.publish_message(
+                f"Updated XRootD site rankings from {result['completed_runs']} completed run(s): "
+                f"{result['cache']}"
+            )
+
+    def _update_job_sizing(self) -> None:
+        """Learning is ancillary to verified outputs; never resubmit on failure."""
+        try:
+            selection = self._sizing_selection()
+            if self.sizing_pilot_child:
+                result = {"status": "skipped", "reason": "paired pilots publish provisional rates separately"}
+            elif not selection:
+                result = {"status": "skipped", "reason": "no preparation workload identity"}
+            else:
+                result = _update_job_sizing(self._run_dir, selection["context"],
+                                            target_seconds=self.sizing_target_seconds)
+        except Exception as exc:
+            result = {"status": "error", "reason": str(exc)}
+            self.publish_message(f"WARNING: Job-sizing profile update failed: {exc}")
+        try:
+            (Path(self._run_dir) / "job_sizing_update.json").write_text(json.dumps(result, indent=2) + "\n")
+        except OSError as exc:
+            self.publish_message(f"WARNING: Could not save job-sizing update receipt: {exc}")
+        if result.get("status") == "updated":
+            self.publish_message(f"Updated job-sizing history: {result['datasets']} trained dataset(s), {result['cache']}")
+
+    def _try_resubmit(
+        self,
+        dataset_name: str,
+        idx: int,
+        dataset_state: dict,
+        job_state: dict,
+        reason: str,
+        job_info: Optional[dict[int, dict[str, str]]] = None,
+        monitor_state: Optional[dict] = None,
+    ) -> None:
+        retries = int(job_state.get("retries", 0))
         if retries >= self.max_retries:
             self.publish_message(
                 f"[{dataset_name}] Job {idx}: permanently failed ({reason}, {retries} retries exhausted)."
             )
             job_state["status"] = "perm_fail"
+            if monitor_state is not None:
+                self._save_state(monitor_state)
             return
 
+        _validate_staged_skim_proxy(self._shared_dir, required=bool(self.x509))
+        _validate_staged_skim_executable(self._shared_dir, self.exe)
         self.publish_message(
             f"[{dataset_name}] Job {idx} failed ({reason}) - resubmitting "
             f"(attempt {retries + 1}/{self.max_retries})."
         )
-        new_cluster = _submit_single_skim_job(
-            idx,
-            str(dataset_state["submission_dir"]),
-            self.max_runtime,
-            2000,
-            extra_transfer_files=list(dataset_state.get("shared_transfer_files", [])),
-            config_file="submit_config.txt",
+
+        submission_dir = str(dataset_state["submission_dir"])
+        tracked_job_info = job_info if job_info is not None else {}
+        source_info = dict(tracked_job_info.get(idx, {}))
+        source_job_dir = str(
+            source_info.get("dir") or os.path.join(submission_dir, f"job_{idx}")
         )
-        if new_cluster:
-            job_state.update(
-                cluster=new_cluster,
-                proc=0,
-                retries=retries + 1,
-                status="resubmitting",
+        file_groups = _split_skim_partition(
+            source_job_dir, os.path.join(self._run_dir, "input_metadata.json"))
+        retry_attempt = retries + 1
+        submitted_parts: list[tuple[dict[str, str], str]] = []
+
+        for part_index, partition in enumerate(file_groups):
+            part_files = partition["files"]
+            part_info = source_info
+            log_label = None
+            if len(file_groups) > 1:
+                try:
+                    part_info = _prepare_split_skim_job(
+                        source_job_dir=source_job_dir,
+                        submission_dir=submission_dir,
+                        job_index=idx,
+                        retry_attempt=retry_attempt,
+                        part_index=part_index,
+                        file_list=part_files,
+                        first_entry=partition.get("first_entry"),
+                        last_entry=partition.get("last_entry"),
+                    )
+                except (OSError, ValueError) as exc:
+                    self.publish_message(
+                        f"[{dataset_name}] Job {idx}: could not prepare split retry "
+                        f"part {part_index}: {exc}"
+                    )
+                    continue
+                log_label = f"resub_{idx}_retry{retry_attempt}_part{part_index}"
+
+            new_cluster = _submit_single_skim_job(
+                idx,
+                submission_dir,
+                self.max_runtime,
+                self.request_memory,
+                extra_transfer_files=list(dataset_state.get("shared_transfer_files", [])),
+                config_file="submit_config.txt",
+                source_job_dir=part_info.get("dir") or source_job_dir,
+                log_label=log_label,
             )
-        else:
-            job_state["status"] = "perm_fail"
+            if new_cluster:
+                submitted_parts.append((part_info, new_cluster))
+
+        if len(submitted_parts) != len(file_groups):
+            for _, cluster_id in submitted_parts:
+                _condor_rm_job(cluster_id, 0)
+            self.publish_message(
+                f"[{dataset_name}] Job {idx}: retry submission did not return "
+                "all expected clusters; leaving it retryable."
+            )
+            job_state["status"] = "submitted"
+            if monitor_state is not None:
+                self._save_state(monitor_state)
+            return
+
+        def _record_part(
+            target_idx: int,
+            part_info: dict[str, str],
+            cluster_id: str,
+        ) -> None:
+            tracked_job_info[target_idx] = {
+                "dir": str(part_info.get("dir", "")),
+                "save": str(part_info.get("save", "")),
+                "meta": str(part_info.get("meta", "")),
+                "tree_name": str(part_info.get("tree_name", "Events")),
+            }
+            target_state = (
+                job_state
+                if target_idx == idx
+                else dataset_state.setdefault("jobs", {}).setdefault(str(target_idx), {})
+            )
+            target_state.pop("completion_evidence", None)
+            target_state.update(
+                cluster=cluster_id,
+                proc=0,
+                retries=retry_attempt,
+                status="resubmitting",
+                job_dir=str(part_info.get("dir", "")),
+                save=str(part_info.get("save", "")),
+                meta=str(part_info.get("meta", "")),
+                tree_name=str(part_info.get("tree_name", "Events")),
+            )
+
+        first_part, first_cluster = submitted_parts[0]
+        _record_part(idx, first_part, first_cluster)
+        next_idx = max(tracked_job_info.keys(), default=idx) + 1
+        for part_info, cluster_id in submitted_parts[1:]:
+            while str(next_idx) in dataset_state.get("jobs", {}):
+                next_idx += 1
+            _record_part(next_idx, part_info, cluster_id)
+            next_idx += 1
+
+        # Persist new cluster identifiers before processing another job. This
+        # narrows the restart window after Condor accepts a retry; the external
+        # submit itself cannot be made transactional with this local JSON file.
+        if monitor_state is not None:
+            self._save_state(monitor_state)
 
 
 class SkimHTCondorWorkflowProxy(BaseWorkflowProxy):
@@ -3160,7 +5576,7 @@ class SkimHTCondorWorkflowProxy(BaseWorkflowProxy):
         return self._delegate_task().complete()
 
     def requires(self):
-        return DotDict(delegate=self._delegate_task())
+        return getattr(self.task, "htcondor_workflow_requires")()
 
     def output(self):
         return self._delegate_task().output()
@@ -3208,7 +5624,14 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
         getattr(law.LocalWorkflow, "exclude_params_branch", set())
         | getattr(SkimHTCondorWorkflow, "exclude_params_branch", set())
         | getattr(DaskWorkflow, "exclude_params_branch", set())
-        | {"dask_scheduler", "dask_workers", "max_runtime", "make_test_job"}
+        | {
+            "dask_scheduler",
+            "dask_workers",
+            "max_runtime",
+            "request_memory",
+            "make_test_job",
+            "prepare_workers",
+        }
     )
     cache_branch_map_default = False
     reset_branch_map_before_run = True
@@ -3227,6 +5650,31 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
         if self.file_source:
             fl_dir = self._file_list_dir()
             if os.path.isdir(fl_dir):
+                # Workflow completion can request this preview before upstream
+                # preparation runs. Never freeze/consult mutable learned history
+                # here. The branch map resets to authoritative prepared entries.
+                selection = self._sizing_selection()
+                profile = selection.get("profile", self.partition_profile)
+                if profile == "none":
+                    profile = ""
+                if self.partition == "auto" and str(read_config(self.submit_config).get("threads", "1")) != "1":
+                    profile = ""
+                seed = os.path.join(self._run_dir, "input_metadata.json")
+                if not os.path.isfile(seed):
+                    seed = selection.get("metadata_seed", self.input_metadata_cache)
+                # The preview may query missing counts for explicit entry modes;
+                # its scratch cache must not mutate an input seed or prepared run.
+                with tempfile.TemporaryDirectory(prefix="rdf_sizing_preview_") as scratch:
+                    metadata = os.path.join(scratch, "entries.json")
+                    if seed:
+                        shutil.copy2(seed, metadata)
+                    plans = _plan_file_source_jobs(
+                        dataset_manifest_path=self.dataset_manifest,
+                        file_list_dir=fl_dir, partition=self.partition,
+                        files_per_job=self.files_per_job, entries_per_job=self.entries_per_job,
+                        jobs_dir=self._jobs_dir, outputs_dir=self._outputs_dir,
+                        partition_profile=profile, input_metadata_cache=metadata,
+                        tree_name=str(read_config(self.submit_config).get("treeList", "Events")))
                 return [
                     {
                         "dataset_name": str(entry["dataset_name"]),
@@ -3234,15 +5682,7 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
                         "config_path": os.path.join(str(entry["job_dir"]), "submit_config.txt"),
                         "out_dir": str(entry["out_dir"]),
                     }
-                    for entry in _plan_file_source_jobs(
-                        dataset_manifest_path=self.dataset_manifest,
-                        file_list_dir=fl_dir,
-                        partition=self.partition,
-                        files_per_job=self.files_per_job,
-                        entries_per_job=self.entries_per_job,
-                        jobs_dir=self._jobs_dir,
-                        outputs_dir=self._outputs_dir,
-                    )
+                    for entry in plans
                 ]
 
             manifest = DatasetManifest.load(self.dataset_manifest)
@@ -3307,14 +5747,14 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
         if self._uses_delegated_htcondor_workflow():
             return DotDict(delegate=self.htcondor_delegate_task())
         reqs = super().workflow_requires()
-        reqs["prep"] = PrepareSkimJobs.req(self)
+        reqs["prep"] = self._prepare_skim_jobs_requirement()
         if self.make_test_job:
             reqs["test"] = RunSkimTestJob.req(self)
         return reqs
 
     def requires(self):
-        reqs = [PrepareSkimJobs.req(self)]
-        if self.make_test_job:
+        reqs = [self._prepare_skim_jobs_requirement()]
+        if self.make_test_job and not self.is_branch():
             reqs.append(RunSkimTestJob.req(self))
         if len(reqs) == 1:
             return reqs[0]
@@ -3349,11 +5789,11 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
     # ------------------------------------------------------------------
 
     def complete(self):
-        """Return True only when the `.done` marker and a valid cache sidecar exist.
+        """Require the done marker and the complete set of readable ROOT outputs.
 
         Cache validity is checked only in standard manifest mode (one job per
-        dataset).  In file-source mode there is no canonical single skim file
-        per dataset, so only the ``.done`` marker is checked.
+        dataset). File-source branches still require their own skim and
+        metadata ROOT outputs, but do not write a single-dataset cache sidecar.
         """
         if self._uses_delegated_htcondor_workflow():
             return self.htcondor_delegate_task().complete()
@@ -3364,25 +5804,57 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
             return super().complete()
         if not super().complete():
             return False
-        if self.file_source:
-            return True
-
         branch_data = self.branch_data
         if isinstance(branch_data, DatasetEntry):
             dataset = branch_data
             dataset_name = dataset.name
-            skim_file = os.path.join(self._outputs_dir, dataset.name, "skim.root")
+            out_dir = os.path.join(self._outputs_dir, dataset.name)
         else:
             branch_entry = cast(dict[str, str], branch_data)
             dataset_name = str(branch_entry["dataset_name"])
-            skim_file = os.path.join(str(branch_entry["out_dir"]), "skim.root")
+            out_dir = str(branch_entry["out_dir"])
             dataset = _find_dataset_entry(self.dataset_manifest, dataset_name)
             if dataset is None:
-                return True
+                return False
 
+        skim_file = os.path.join(out_dir, "skim.root")
+        meta_file = os.path.join(out_dir, "meta.root")
+        config_path = (
+            str(branch_data.get("config_path", ""))
+            if isinstance(branch_data, dict)
+            else ""
+        )
+        config = read_config(config_path) if config_path and os.path.isfile(config_path) else {}
+        tree_name = str(config.get("saveTree", "Events") or "Events")
+        output_errors = _skim_job_output_errors(
+            dataset_name=dataset_name,
+            dtype=dataset.dtype,
+            save_path=skim_file,
+            meta_path=meta_file,
+            tree_name=tree_name,
+            require_skim=str(config.get("enableSkim", "")).strip().lower()
+            in {"1", "true", "yes", "on"},
+        )
+        if output_errors:
+            done_path = str(self.output().path)
+            if os.path.exists(done_path):
+                os.remove(done_path)
+            self.publish_message(
+                f"[SkimTask] Outputs for '{dataset_name}' are incomplete: "
+                + "; ".join(output_errors)
+            )
+            return False
+
+        if self.file_source:
+            return True
+
+        effective_config_path = config_path or os.path.join(
+            self._jobs_dir, dataset.name, "submit_config.txt"
+        )
         current_prov = _build_task_provenance(
-            submit_config_path=self.submit_config,
+            submit_config_path=effective_config_path,
             dataset_manifest_path=self.dataset_manifest,
+            extra_input_paths=[self.stitch_weights] if self.stitch_weights else None,
         )
         status = check_cache_validity(
             skim_file, current_provenance=current_prov, strict=True
@@ -3433,6 +5905,8 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
                 template_config_path=self.submit_config,
                 dataset=dataset,
                 output_dir=out_dir,
+                manifest_lumi=_manifest_lumi_for_dataset(self.dataset_manifest, dataset),
+                extra_overrides=_stitch_job_overrides(self),
             )
 
             task_label = f"SkimTask[{dataset.name}]"
@@ -3440,7 +5914,8 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
                 result = _run_analysis_job(
                     exe_path=exe_path,
                     job_dir=job_dir,
-                    stream_output=True,
+                    stream_output=_stream_analysis_output(),
+                    worker_number=self.branch,
                 )
 
             Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
@@ -3450,9 +5925,10 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
             if os.path.isfile(skim_file):
                 mf = _build_skim_manifest(
                     dataset=dataset,
-                    submit_config_path=self.submit_config,
+                    submit_config_path=os.path.join(job_dir, "submit_config.txt"),
                     dataset_manifest_path=self.dataset_manifest,
                     skim_output_file=skim_file,
+                    extra_input_paths=[self.stitch_weights] if self.stitch_weights else None,
                 )
                 write_cache_sidecar(skim_file, mf)
                 self.publish_message(
@@ -3500,7 +5976,8 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
                     container_setup=self.container_setup or "",
                     source_config_path=config_path,
                     shared_archive_path=self._shared_archive_path,
-                    stream_output=True,
+                    stream_output=_stream_analysis_output(),
+                    worker_number=self.branch,
                 )
 
             Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
@@ -3512,9 +5989,10 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
                 if dataset is not None and os.path.isfile(skim_file):
                     mf = _build_skim_manifest(
                         dataset=dataset,
-                        submit_config_path=self.submit_config,
+                        submit_config_path=config_path,
                         dataset_manifest_path=self.dataset_manifest,
                         skim_output_file=skim_file,
+                        extra_input_paths=[self.stitch_weights] if self.stitch_weights else None,
                     )
                     write_cache_sidecar(skim_file, mf)
                     self.publish_message(
@@ -3642,7 +6120,7 @@ eval "${cmd}"
 
     def dask_workflow_requires(self):
         """Ensure prepared jobs and optional pre-flight validation exist first."""
-        reqs = DotDict(prep=PrepareSkimJobs.req(self))
+        reqs = DotDict(prep=self._prepare_skim_jobs_requirement())
         if self.make_test_job:
             reqs["test"] = RunSkimTestJob.req(self)
         return reqs
@@ -3661,23 +6139,58 @@ eval "${cmd}"
         if isinstance(branch_data, DatasetEntry):
             exe_path = os.path.abspath(self.exe)
             job_dir = os.path.join(self._jobs_dir, branch_data.name)
+            config_path = os.path.join(job_dir, "submit_config.txt")
+            config = read_config(config_path) if os.path.isfile(config_path) else {}
+            out_dir = os.path.join(self._outputs_dir, branch_data.name)
             return (
-                _run_analysis_job,
-                [exe_path, job_dir, self._root_setup_content,
-                 self.container_setup or ""],
+                _run_skim_job_with_output_contract,
+                [
+                    _run_analysis_job,
+                    [exe_path, job_dir, self._root_setup_content,
+                     self.container_setup or ""],
+                    {"worker_number": branch_num},
+                    self.dataset_manifest,
+                    config_path,
+                    branch_data.name,
+                    os.path.join(out_dir, "skim.root"),
+                    os.path.join(out_dir, "meta.root"),
+                    str(config.get("saveTree", "Events") or "Events"),
+                    True,
+                    [self.stitch_weights] if self.stitch_weights else None,
+                ],
                 {},
             )
         branch_entry = cast(dict[str, str], branch_data)
+        config_path = str(
+            branch_entry.get(
+                "config_path",
+                os.path.join(str(branch_entry["job_dir"]), "submit_config.txt"),
+            )
+        )
+        config = read_config(config_path) if os.path.isfile(config_path) else {}
+        out_dir = str(branch_entry["out_dir"])
         return (
-            _run_prepared_skim_job,
+            _run_skim_job_with_output_contract,
             [
-                self._shared_dir,
-                str(branch_entry["job_dir"]),
-                self._exe_relpath,
-                self._root_setup_content,
-                self.container_setup or "",
-                str(branch_entry.get("config_path", os.path.join(str(branch_entry["job_dir"]), "submit_config.txt"))),
-                self._shared_archive_path,
+                _run_prepared_skim_job,
+                [
+                    self._shared_dir,
+                    str(branch_entry["job_dir"]),
+                    self._exe_relpath,
+                    self._root_setup_content,
+                    self.container_setup or "",
+                    config_path,
+                    self._shared_archive_path,
+                ],
+                {"worker_number": branch_num},
+                self.dataset_manifest,
+                config_path,
+                str(branch_entry["dataset_name"]),
+                os.path.join(out_dir, "skim.root"),
+                os.path.join(out_dir, "meta.root"),
+                str(config.get("saveTree", "Events") or "Events"),
+                not bool(self.file_source),
+                [self.stitch_weights] if self.stitch_weights else None,
             ],
             {},
         )
@@ -3722,6 +6235,14 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
             "Leave empty to use the ``fileList`` from the submit_config template."
         ),
     )
+    stitch_mode = luigi.Parameter(
+        default="",
+        description="Stitching mode forwarded to the prerequisite SkimTask.",
+    )
+    stitch_weights = luigi.Parameter(
+        default="",
+        description="Stitching weights file forwarded to the prerequisite SkimTask.",
+    )
 
     @property
     def _run_dir(self) -> str:
@@ -3743,6 +6264,8 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
                 dataset_manifest=self.dataset_manifest,
                 submit_config=self.submit_config,
                 exe=self.exe,
+                stitch_mode=self.stitch_mode,
+                stitch_weights=self.stitch_weights,
             )
         return reqs
 
@@ -3754,6 +6277,8 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
                 dataset_manifest=self.dataset_manifest,
                 submit_config=self.submit_config,
                 exe=self.exe,
+                stitch_mode=self.stitch_mode,
+                stitch_weights=self.stitch_weights,
             )
         return None
 
@@ -3795,7 +6320,11 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
 
             # ---- validate skim cache before consuming it -------------------
             current_prov = _build_task_provenance(
-                submit_config_path=self.submit_config,
+                submit_config_path=os.path.join(
+                    self._skim_run_dir, "jobs", dataset.name, "submit_config.txt"
+                ) if os.path.isfile(os.path.join(
+                    self._skim_run_dir, "jobs", dataset.name, "submit_config.txt"
+                )) else self.submit_config,
                 dataset_manifest_path=self.dataset_manifest,
             )
             cache_status = check_cache_validity(
@@ -3843,6 +6372,7 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
             template_config_path=self.submit_config,
             dataset=dataset,
             output_dir=out_dir,
+            manifest_lumi=_manifest_lumi_for_dataset(self.dataset_manifest, dataset),
             extra_overrides=extra_overrides,
         )
 
@@ -3852,7 +6382,8 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow):
             result = _run_analysis_job(
                 exe_path=exe_path,
                 job_dir=job_dir,
-                stream_output=True,
+                stream_output=_stream_analysis_output(),
+                worker_number=self.branch,
             )
 
         Path(self._job_outputs_dir).mkdir(parents=True, exist_ok=True)
@@ -3883,272 +6414,306 @@ def _read_intweight_sign_hist(
     meta_file: str,
     sample_name: str,
 ) -> list[float]:
-    """Read ``counter_intWeightSignSum_{sample_name}`` from *meta_file*.
+    return _shared_read_intweight_sign_hist(meta_file, sample_name)
 
-    **uproot is the preferred reader** because it requires no ROOT installation
-    and runs in any Python environment.  PyROOT is used as a fallback for
-    environments (e.g. CMSSW) where uproot is unavailable.
 
-    Parameters
-    ----------
-    meta_file:
-        Path to a merged meta ROOT file containing CounterService histograms.
-    sample_name:
-        The sample name key embedded in the histogram name, i.e. the value
-        of the ``sample`` / ``type`` config key used during the analysis run.
-
-    Returns
-    -------
-    list[float]
-        Bin contents of ``counter_intWeightSignSum_{sample_name}`` ordered by
-        bin index (bin k corresponds to stitch_id = k).
-
-    Raises
-    ------
-    RuntimeError
-        If the histogram is not found in the file, or neither uproot nor
-        PyROOT is available.
-    """
-    hist_name = f"counter_intWeightSignSum_{sample_name}"
-
-    # ---- uproot (preferred) -----------------------------------------------
-    try:
-        import uproot  # type: ignore
-
-        with uproot.open(meta_file) as root_file:
-            # uproot key strings include cycle numbers, e.g. "histName;1"
-            keys_no_cycle = {k.split(";")[0]: k for k in root_file.keys()}
-            if hist_name not in keys_no_cycle:
-                raise RuntimeError(
-                    f"Histogram '{hist_name}' not found in '{meta_file}'. "
-                    f"Available histograms: {sorted(keys_no_cycle)}"
-                )
-            return root_file[keys_no_cycle[hist_name]].values().tolist()
-
-    except ImportError:
-        pass  # fall through to PyROOT
-
-    # ---- PyROOT fallback --------------------------------------------------
-    try:
-        import ROOT  # type: ignore
-
-        tfile = ROOT.TFile.Open(meta_file, "READ")
-        if not tfile or tfile.IsZombie():
-            raise RuntimeError(f"Cannot open ROOT file: '{meta_file}'")
-        hist = tfile.Get(hist_name)
-        if not hist:
-            tfile.Close()
-            raise RuntimeError(
-                f"Histogram '{hist_name}' not found in '{meta_file}'."
-            )
-        values = [hist.GetBinContent(b) for b in range(1, hist.GetNbinsX() + 1)]
-        tfile.Close()
-        return values
-
-    except ImportError:
-        raise RuntimeError(
-            "Neither uproot nor ROOT (PyROOT) is importable. "
-            "Install uproot (``pip install uproot``) to read counter histograms "
-            "without a full ROOT installation."
-        )
+def _read_weight_sign_sum(meta_file: str, sample_name: str) -> float:
+    return _shared_read_weight_sign_sum(meta_file, sample_name)
 
 
 def _derive_stitch_weights(
     group_name: str,
-    meta_files: dict[str, str],
+    meta_files: dict[str, Union[str, list[str]]],
 ) -> dict[str, list[float]]:
-    """Compute per-bin stitching scale factors for one group.
+    return _shared_derive_stitch_weights(
+        group_name,
+        meta_files,
+        _read_intweight_sign_hist,
+    )
 
-    For each stitch bin *k*, the scale factor for sample *n* is::
 
-        b_n(k) = C_n(k) / Σ_m C_m(k)
+def _derive_stitch_cross_sections(
+    group_name: str,
+    meta_files: dict[str, Union[str, list[str]]],
+    inclusive_sample: Union[str, list[str]],
+    inclusive_cross_section: float,
+) -> list[float]:
+    return _shared_derive_stitch_cross_sections(
+        group_name,
+        meta_files,
+        inclusive_sample,
+        inclusive_cross_section,
+        _read_intweight_sign_hist,
+    )
 
-    where ``C_n(k)`` is the net signed count (positive minus negative weight
-    events) in bin *k* of sample *n*'s
-    ``counter_intWeightSignSum_{sample_name}`` histogram.
 
-    Bins where all samples have ``C_m(k) = 0`` (no events contribute) are
-    assigned a scale factor of 0 for every sample.
+def _normalize_stitch_cross_section_era(value: object) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
+    if normalized in {"run2", "2", "2016", "2017", "2018"}:
+        return "run2"
+    if normalized in {"24", "2024", "run3_24", "run3_2024"}:
+        return "run3_24"
+    if normalized in {
+        "22_23",
+        "2022_2023",
+        "run3",
+        "run3_22_23",
+        "run3_2022_2023",
+    }:
+        return "run3_22_23"
+    raise ValueError(
+        f"Unknown stitching cross-section era '{value}'; expected run2, "
+        "22/23, or 24"
+    )
 
-    Parameters
-    ----------
-    group_name:
-        Human-readable name for the group (used only in error messages).
-    meta_files:
-        Mapping from ``sample_name`` to absolute path of the merged meta
-        ROOT file for that sample.
 
-    Returns
-    -------
-    dict[str, list[float]]
-        Mapping from ``sample_name`` to its array of per-bin scale factors.
-        The arrays have the same length as the histogram (up to the last
-        non-zero bin across all samples; trailing zero-only bins are trimmed
-        to keep the correctionlib output compact).
-    """
-    import numpy as np  # type: ignore
+def _resolve_stitch_cross_section_era(
+    group_cfg: dict[str, Any],
+    sample_names: list[str],
+    source_dataset_manifest: str = "",
+    source_skim_name: str = "",
+) -> str:
+    configured = group_cfg.get("cross_section_era")
+    if configured is not None:
+        return _normalize_stitch_cross_section_era(configured)
 
-    sample_names = list(meta_files.keys())
-
-    # ---- read C_n(k) for every sample in the group -------------------------
-    sign_counts: dict[str, "np.ndarray"] = {}
-    ref_len: Optional[int] = None
-
-    for sample_name, meta_file in meta_files.items():
-        if not os.path.isfile(meta_file):
+    if source_dataset_manifest and os.path.isfile(source_dataset_manifest):
+        manifest = DatasetManifest.load(source_dataset_manifest)
+        selected = set(sample_names)
+        years = {
+            int(entry.year)
+            for entry in manifest.datasets
+            if entry.name in selected and entry.year is not None
+        }
+        run2_years = years & {16, 17, 18, 2016, 2017, 2018}
+        run3_years = years & {22, 23, 24, 2022, 2023, 2024}
+        if run2_years and run3_years:
             raise RuntimeError(
-                f"[StitchingDerivationTask] Meta file not found for sample "
-                f"'{sample_name}' in group '{group_name}': '{meta_file}'"
+                "Binned cross sections cannot combine Run 2 and Run 3 "
+                "samples in one stitching derivation"
             )
-        values = _read_intweight_sign_hist(meta_file, sample_name)
-        arr = np.array(values, dtype=np.float64)
+        if years and years <= {2016, 2017, 2018, 16, 17, 18}:
+            return "run2"
+        if years and years & {24, 2024}:
+            if years - {24, 2024}:
+                raise RuntimeError(
+                    "Binned cross sections cannot combine Run 3 2024 samples "
+                    "with 2022/23 samples in one stitching derivation"
+                )
+            return "run3_24"
+        if years and years <= {2022, 2023, 22, 23}:
+            return "run3_22_23"
 
-        if ref_len is None:
-            ref_len = len(arr)
-        elif len(arr) != ref_len:
+    if source_skim_name:
+        lowered = source_skim_name.lower()
+        if "run2" in lowered:
+            return "run2"
+        if re.search(r"(?:^|[^0-9])24(?:[^0-9]|$)", lowered):
+            return "run3_24"
+    return "run3_22_23"
+
+
+def _resolve_stitch_inclusive_sample(
+    group_name: str,
+    group_cfg: dict[str, Any],
+    sample_names: list[str],
+    cross_section_era: str = "",
+) -> Optional[Union[str, list[str]]]:
+    configured = group_cfg.get("inclusive_samples")
+    if configured is None:
+        configured = group_cfg.get("inclusive_sample")
+    if configured is None:
+        return None
+
+    if isinstance(configured, dict):
+        era_keys = [cross_section_era, "default"] if cross_section_era else ["default"]
+        selected = next(
+            (configured[key] for key in era_keys if key in configured), None
+        )
+        if selected is None:
             raise RuntimeError(
-                f"[StitchingDerivationTask] Histogram length mismatch in "
-                f"group '{group_name}': sample '{sample_name}' has "
-                f"{len(arr)} bins but previous samples had {ref_len} bins. "
-                "All samples in a group must use the same stitch variable "
-                "with the same binning."
+                f"Inclusive samples for group '{group_name}' have no entry for "
+                f"cross-section era '{cross_section_era}'"
             )
-        sign_counts[sample_name] = arr
+        configured = selected
 
-    assert ref_len is not None  # guaranteed: meta_files is non-empty
+    try:
+        configured_samples = _shared_normalize_sample_names(
+            configured, "inclusive_sample"
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Invalid inclusive samples for group '{group_name}': {exc}"
+        ) from exc
 
-    # ---- Σ_m C_m(k) for each bin k ----------------------------------------
-    total = np.zeros(ref_len, dtype=np.float64)
-    for arr in sign_counts.values():
-        total += arr
+    missing_samples = [
+        sample_name
+        for sample_name in configured_samples
+        if sample_name not in sample_names
+    ]
+    if missing_samples:
+        raise RuntimeError(
+            f"Inclusive sample(s) {missing_samples} for group '{group_name}' "
+            "are not present in the resolved stitch samples"
+        )
+    return (
+        configured_samples[0]
+        if len(configured_samples) == 1
+        else configured_samples
+    )
 
-    # ---- b_n(k) = C_n(k) / Σ_m C_m(k); guard against division by zero ----
-    # np.where evaluates both branches before masking, so suppress the
-    # expected divide-by-zero warning for bins where total = 0.
-    scale_factors: dict[str, "np.ndarray"] = {}
-    with np.errstate(invalid="ignore", divide="ignore"):
-        for sample_name in sample_names:
-            c_n = sign_counts[sample_name]
-            scale_factors[sample_name] = np.where(total != 0.0, c_n / total, 0.0)
 
-    # ---- trim trailing all-zero bins to keep the correctionlib file compact -
-    # Find the highest bin index where at least one sample has a non-zero total
-    non_zero_mask = total != 0.0
-    if np.any(non_zero_mask):
-        last_active = int(np.where(non_zero_mask)[0][-1])
-        n_used = last_active + 1
-    else:
-        # All bins are zero; keep at least one bin so correctionlib is valid
-        n_used = 1
+def _resolve_stitch_inclusive_cross_section(
+    group_name: str,
+    group_cfg: dict[str, Any],
+    config: dict[str, Any],
+    era: str,
+) -> Optional[float]:
+    configured = group_cfg.get(
+        "inclusive_cross_section_pb",
+        group_cfg.get("inclusive_cross_section"),
+    )
+    if configured is None:
+        configured_by_group = config.get("inclusive_cross_sections", {})
+        if isinstance(configured_by_group, dict):
+            configured = configured_by_group.get(group_name)
+            if isinstance(configured, dict):
+                configured = configured.get(era)
 
-    return {
-        name: arr[:n_used].tolist()
-        for name, arr in scale_factors.items()
-    }
+    if configured is None:
+        return None
+    try:
+        return float(configured)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Invalid inclusive cross section '{configured}' for group '{group_name}'"
+        ) from exc
 
 
 def _build_correctionlib_cset(
     all_scale_factors: dict[str, dict[str, list[float]]],
     description: str = "Stitching scale factors derived from counter_intWeightSignSum histograms",
 ) -> "correctionlib.schemav2.CorrectionSet":
-    """Build a correctionlib :class:`CorrectionSet` from derived scale factors.
+    return _shared_build_correctionlib_cset(all_scale_factors, description)
 
-    One :class:`~correctionlib.schemav2.Correction` is created per group.
-    Each correction takes two inputs:
 
-    * ``sample_name`` (string) – identifies which sample's factors to return
-    * ``stitch_id``   (int)    – integer bin from ``counterIntWeightBranch``
+def _stitch_meta_read_path(path: str) -> str:
+    """Convert EOS stage-out paths into worker-independent XRootD URLs."""
+    if path.startswith("/eos/"):
+        return f"root://eosuser.cern.ch/{path}"
+    return path
 
-    and returns the stitching scale factor ``b_n(stitch_id)``.
 
-    The internal structure is a ``Category`` node (keyed by ``sample_name``)
-    containing per-sample ``Binning`` nodes (keyed by integer ``stitch_id``
-    value).  Out-of-range stitch IDs are clamped to the nearest edge.
-
-    Parameters
-    ----------
-    all_scale_factors:
-        ``{group_name: {sample_name: [b_n(0), b_n(1), ...]}}``
-    description:
-        Top-level description string for the ``CorrectionSet``.
-
-    Returns
-    -------
-    correctionlib.schemav2.CorrectionSet
-    """
-    try:
-        import correctionlib.schemav2 as cs  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "correctionlib is required to write stitching scale factors as a "
-            "correction JSON.  Install it with: pip install correctionlib"
-        ) from exc
-
-    corrections = []
-
-    for group_name, sample_factors in all_scale_factors.items():
-        # All arrays in a group have the same trimmed length
-        n_bins = max(len(v) for v in sample_factors.values())
-        # Integer edges: stitch_id=k maps to interval [k, k+1)
-        edges = [float(k) for k in range(n_bins + 1)]
-
-        cat_items = []
-        for sample_name, factors in sample_factors.items():
-            # Pad to n_bins if a sample's array is shorter (shouldn't normally
-            # happen after trimming, but defensively handled)
-            padded = factors + [0.0] * (n_bins - len(factors))
-            binning = cs.Binning(
-                nodetype="binning",
-                input="stitch_id",
-                edges=edges,
-                content=padded,
-                flow="clamp",
-            )
-            cat_items.append(cs.CategoryItem(key=sample_name, value=binning))
-
-        correction = cs.Correction(
-            name=group_name,
-            description=(
-                f"Binwise stitching scale factors for group '{group_name}'. "
-                f"Evaluate: cset[\"{group_name}\"].evaluate(sample_name, stitch_id). "
-                "b_n(k) = C_n(k) / sum_m C_m(k) where C_n(k) is the net signed "
-                "event count (positive minus negative weight events) for sample n "
-                "in stitch bin k."
-            ),
-            version=1,
-            inputs=[
-                cs.Variable(
-                    name="sample_name",
-                    type="string",
-                    description="Sample identifier (matches meta_files key in stitch config)",
-                ),
-                cs.Variable(
-                    name="stitch_id",
-                    type="int",
-                    description=(
-                        "Integer stitching bin ID stored per event by "
-                        "counterIntWeightBranch"
-                    ),
-                ),
-            ],
-            output=cs.Variable(
-                name="weight",
-                type="real",
-                description="Stitching scale factor b_n(k) = C_n(k) / sum_m C_m(k)",
-            ),
-            data=cs.Category(
-                nodetype="category",
-                input="sample_name",
-                content=cat_items,
-            ),
-        )
-        corrections.append(correction)
-
-    return cs.CorrectionSet(
-        schema_version=2,
-        description=description,
-        corrections=corrections,
+def _stitch_meta_files_for_sample(
+    run_name: str,
+    sample_name: str,
+) -> list[str]:
+    """Return local metadata files or staged Condor metadata destinations."""
+    output_dir = Path(WORKSPACE) / f"skimRun_{run_name}" / "outputs" / sample_name
+    local_paths = sorted(
+        str(path)
+        for path in output_dir.rglob("meta.root")
+        if path.is_file()
     )
+    if local_paths:
+        return local_paths
+
+    submission_dir = (
+        Path(WORKSPACE)
+        / f"skimRun_{run_name}"
+        / "condor_submissions"
+        / _safe_dataset_submission_name(sample_name)
+    )
+    staged_paths: list[str] = []
+    for config_path in sorted(submission_dir.glob("job_*/submit_config.txt")):
+        config = read_config(str(config_path))
+        meta_path = str(
+            config.get("__orig_metaFile", config.get("metaFile", "")) or ""
+        ).strip()
+        if not meta_path:
+            continue
+        if (
+            os.path.isfile(meta_path)
+            or meta_path.startswith("root://")
+            or meta_path.startswith(("/eos/", "/store/"))
+        ):
+            staged_paths.append(_stitch_meta_read_path(meta_path))
+    return sorted(dict.fromkeys(staged_paths))
+
+
+def _resolve_stitch_meta_files(
+    group_name: str,
+    group_cfg: dict[str, Any],
+    stitch_config_path: str,
+    source_skim_name: str = "",
+    source_dataset_manifest: str = "",
+) -> dict[str, Union[str, list[str]]]:
+    """Resolve one stitch group to sample names and metadata ROOT files."""
+    raw_meta_files = group_cfg.get("meta_files")
+    if isinstance(raw_meta_files, dict):
+        resolved: dict[str, Union[str, list[str]]] = {}
+        for sample_name, raw_paths in raw_meta_files.items():
+            paths = raw_paths if isinstance(raw_paths, list) else [raw_paths]
+            resolved_paths = [
+                _resolve_analysis_config_path(stitch_config_path, str(path))
+                for path in paths
+            ]
+            resolved[str(sample_name)] = (
+                resolved_paths[0]
+                if len(resolved_paths) == 1
+                else resolved_paths
+            )
+        return resolved
+
+    if not source_skim_name:
+        raise RuntimeError(
+            f"Group '{group_name}' must contain 'meta_files' unless "
+            "source_skim_name is configured."
+        )
+    if not source_dataset_manifest:
+        raise RuntimeError(
+            "source_dataset_manifest is required when resolving stitch metadata "
+            "from a source skim run."
+        )
+
+    manifest = DatasetManifest.load(source_dataset_manifest)
+    sample_names = group_cfg.get("samples", [])
+    if sample_names and not isinstance(sample_names, list):
+        raise RuntimeError(
+            f"Group '{group_name}' has a 'samples' value that is not a list."
+        )
+    if not sample_names:
+        selector = group_cfg.get("select")
+        if selector is None:
+            selector = {"group": group_name}
+        if not isinstance(selector, dict):
+            raise RuntimeError(
+                f"Group '{group_name}' has a 'select' value that is not a mapping."
+            )
+        try:
+            sample_names = [entry.name for entry in manifest.query(**selector)]
+        except TypeError as exc:
+            raise RuntimeError(
+                f"Invalid dataset selector for stitch group '{group_name}': {selector}"
+            ) from exc
+
+    if not sample_names:
+        raise RuntimeError(
+            f"Stitch group '{group_name}' did not resolve to any dataset samples."
+        )
+
+    resolved = {}
+    for sample_name in sample_names:
+        sample = str(sample_name)
+        meta_paths = _stitch_meta_files_for_sample(source_skim_name, sample)
+        if not meta_paths:
+            raise RuntimeError(
+                f"No meta.root files found for stitch sample '{sample}' under "
+                f"'skimRun_{source_skim_name}/outputs/{sample}' or its Condor "
+                "submission metadata."
+            )
+        resolved[sample] = meta_paths[0] if len(meta_paths) == 1 else meta_paths
+    return resolved
 
 
 class StitchingDerivationTask(law.Task):
@@ -4160,10 +6725,11 @@ class StitchingDerivationTask(law.Task):
     ROOT files of a set of stitched MC samples and computes the binwise
     scale factor
 
-        b_n(k) = C_n(k) / Σ_m C_m(k)
+        b_n(k) = max(C_n(k), 0) / Σ_m max(C_m(k), 0)
 
     where ``C_n(k) = P_n(k) − N_n(k)`` is the net signed count (positive
-    minus negative weight events) for sample *n* in stitch bin *k*.  See the
+    minus negative weight events) for sample *n* in stitch bin *k*. Negative
+    values are treated as zero before normalisation. See the
     module docstring for the full mathematical derivation.
 
     ROOT files are read with **uproot** (preferred); PyROOT is used as a
@@ -4224,6 +6790,51 @@ class StitchingDerivationTask(law.Task):
             "Output is written to ``stitchWeights_{name}/``."
         ),
     )
+    source_skim_name = luigi.Parameter(
+        default="",
+        description=(
+            "Optional completed SkimTask run used to discover metadata ROOT "
+            "files for declarative stitch groups."
+        ),
+    )
+    source_submit_config = luigi.Parameter(
+        default="",
+        description="Submit config used for the source counter pass.",
+    )
+    source_exe = luigi.Parameter(
+        default="",
+        description="Executable used for the source counter pass.",
+    )
+    source_dataset_manifest = luigi.Parameter(
+        default="",
+        description="Dataset manifest used for source sample selection.",
+    )
+    source_file_source = luigi.Parameter(default="")
+    source_file_source_name = luigi.Parameter(default="")
+    source_files_per_job = luigi.IntParameter(default=50)
+    source_partition = luigi.Parameter(default="auto")
+    source_entries_per_job = luigi.IntParameter(default=100_000)
+    source_partition_profile = luigi.Parameter(default="")
+    source_sizing_pilots = _job_sizing_parameter('sizing_pilots')
+    source_sizing_target_seconds = _job_sizing_parameter('sizing_target_seconds')
+    source_sizing_pilot_target_seconds = _job_sizing_parameter('sizing_pilot_target_seconds')
+    source_sizing_pilot_parallel = _job_sizing_parameter('sizing_pilot_parallel')
+    source_sizing_pilot_prefix_entries = _job_sizing_parameter('sizing_pilot_prefix_entries')
+    source_sizing_pilot_safety_factor = _job_sizing_parameter('sizing_pilot_safety_factor')
+    source_input_metadata_cache = luigi.Parameter(default="")
+    source_entry_range_mode = luigi.Parameter(default="filter")
+    source_x509 = luigi.Parameter(default="")
+    source_stage_in = luigi.BoolParameter(default=False)
+    source_root_setup = luigi.Parameter(default="")
+    source_container_setup = luigi.Parameter(default="")
+    source_want_os = luigi.Parameter(default="")
+    source_python_env = luigi.Parameter(default="")
+    source_make_test_job = luigi.BoolParameter(default=False)
+    source_dask_scheduler = luigi.Parameter(default="", significant=False)
+    source_dask_workers = luigi.IntParameter(default=1, significant=False)
+    source_max_runtime = luigi.IntParameter(default=7200, significant=False)
+    source_workflow = luigi.Parameter(default="", significant=False)
+    source_stitch_mode = luigi.Parameter(default="none", significant=False)
 
     @property
     def _output_dir(self) -> str:
@@ -4233,6 +6844,44 @@ class StitchingDerivationTask(law.Task):
         return law.LocalFileTarget(
             os.path.join(self._output_dir, "stitch_weights.json")
         )
+
+    def requires(self):
+        if not self.source_skim_name:
+            return None
+        required = {
+            "name": self.source_skim_name,
+            "submit_config": self.source_submit_config,
+            "exe": self.source_exe,
+            "dataset_manifest": self.source_dataset_manifest,
+            "file_source": self.source_file_source,
+            "file_source_name": self.source_file_source_name,
+            "files_per_job": self.source_files_per_job,
+            "partition": self.source_partition,
+            "entries_per_job": self.source_entries_per_job,
+            "partition_profile": self.source_partition_profile,
+            **_job_sizing_kwargs(self, input_prefix="source_"),
+            "input_metadata_cache": self.source_input_metadata_cache,
+            "entry_range_mode": self.source_entry_range_mode,
+            "x509": self.source_x509,
+            "stage_in": self.source_stage_in,
+            "root_setup": self.source_root_setup,
+            "container_setup": self.source_container_setup,
+            "want_os": self.source_want_os,
+            "python_env": self.source_python_env,
+            "make_test_job": self.source_make_test_job,
+            "dask_scheduler": self.source_dask_scheduler,
+            "dask_workers": self.source_dask_workers,
+            "max_runtime": self.source_max_runtime,
+            "workflow": self.source_workflow,
+            "stitch_mode": self.source_stitch_mode,
+        }
+        missing = [key for key in ("submit_config", "exe", "dataset_manifest")
+                   if not required[key]]
+        if missing:
+            raise RuntimeError(
+                "Source stitching requires: " + ", ".join(missing)
+            )
+        return SkimTask.req(self, **required)
 
     def run(self):
         import yaml  # type: ignore
@@ -4253,20 +6902,22 @@ class StitchingDerivationTask(law.Task):
             )
 
         all_scale_factors: dict[str, dict[str, list[float]]] = {}
+        all_binned_cross_sections: dict[str, dict[str, Any]] = {}
 
         with PerformanceRecorder("StitchingDerivationTask") as rec:
             for group_name, group_cfg in config["groups"].items():
-                if "meta_files" not in group_cfg or not isinstance(
-                    group_cfg["meta_files"], dict
-                ):
+                if not isinstance(group_cfg, dict):
                     raise RuntimeError(
-                        f"Group '{group_name}' in '{config_path}' must contain a "
-                        "'meta_files' mapping of sample_name → path."
+                        f"Group '{group_name}' in '{config_path}' must be a mapping."
                     )
 
-                meta_files: dict[str, str] = {
-                    str(k): str(v) for k, v in group_cfg["meta_files"].items()
-                }
+                meta_files = _resolve_stitch_meta_files(
+                    str(group_name),
+                    group_cfg,
+                    config_path,
+                    source_skim_name=self.source_skim_name,
+                    source_dataset_manifest=self.source_dataset_manifest,
+                )
 
                 self.publish_message(
                     f"Processing group '{group_name}' "
@@ -4275,6 +6926,51 @@ class StitchingDerivationTask(law.Task):
 
                 scale_factors = _derive_stitch_weights(group_name, meta_files)
                 all_scale_factors[group_name] = scale_factors
+
+                cross_section_era = _resolve_stitch_cross_section_era(
+                    group_cfg,
+                    list(meta_files),
+                    source_dataset_manifest=self.source_dataset_manifest,
+                    source_skim_name=self.source_skim_name,
+                )
+                inclusive_sample = _resolve_stitch_inclusive_sample(
+                    str(group_name),
+                    group_cfg,
+                    list(meta_files),
+                    cross_section_era,
+                )
+                inclusive_cross_section = _resolve_stitch_inclusive_cross_section(
+                    str(group_name), group_cfg, config, cross_section_era
+                )
+                if inclusive_sample and inclusive_cross_section is not None:
+                    binned_cross_sections = _derive_stitch_cross_sections(
+                        str(group_name),
+                        meta_files,
+                        inclusive_sample,
+                        inclusive_cross_section,
+                    )
+                    all_binned_cross_sections[str(group_name)] = {
+                        "era": cross_section_era,
+                        "inclusive_sample": inclusive_sample,
+                        "inclusive_samples": _shared_normalize_sample_names(
+                            inclusive_sample, "inclusive_sample"
+                        ),
+                        "inclusive_cross_section_pb": inclusive_cross_section,
+                        "bin_fractions": [
+                            value / inclusive_cross_section
+                            for value in binned_cross_sections
+                        ],
+                        "binned_cross_sections_pb": binned_cross_sections,
+                    }
+                    self.publish_message(
+                        f"  group '{group_name}': binned cross sections computed from "
+                        f"inclusive sample '{inclusive_sample}' for {cross_section_era}."
+                    )
+                elif inclusive_cross_section is not None:
+                    self.publish_message(
+                        f"  group '{group_name}': no unambiguous inclusive sample; "
+                        "binned cross sections were not written for this group."
+                    )
 
                 self.publish_message(
                     f"  group '{group_name}': scale factors computed for "
@@ -4289,14 +6985,1464 @@ class StitchingDerivationTask(law.Task):
         with open(json_path, "w") as fh:
             fh.write(cset.model_dump_json(indent=2))
 
+        cross_sections_path = os.path.join(
+            self._output_dir, "stitch_cross_sections.json"
+        )
+        with open(cross_sections_path, "w") as fh:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "description": (
+                        "Cross sections split into stitch bins using the "
+                        "nonnegative net signed event fractions of each "
+                        "inclusive sample."
+                    ),
+                    "groups": all_binned_cross_sections,
+                },
+                fh,
+                indent=2,
+            )
+
         rec.save(os.path.join(self._output_dir, "stitch_derivation.perf.json"))
         self.publish_message(
-            f"Stitch weights (correctionlib) written to: {json_path}"
+            f"Stitch weights (correctionlib) written to: {json_path}; "
+            f"binned cross sections written to: {cross_sections_path}"
+        )
+
+
+def _make_stitching_derivation_task(
+    task: SkimTask,
+    stitch_config: str,
+    stitch_name: str,
+    source_skim_name: str,
+    source_workflow: str,
+) -> StitchingDerivationTask:
+    return StitchingDerivationTask(
+        stitch_config=stitch_config,
+        name=stitch_name or task.name,
+        source_skim_name=source_skim_name or f"{task.name}_counts",
+        source_submit_config=task.submit_config,
+        source_exe=task.exe,
+        source_dataset_manifest=task.dataset_manifest,
+        source_file_source=task.file_source,
+        source_file_source_name=task.file_source_name,
+        source_files_per_job=task.files_per_job,
+        source_partition=task.partition,
+        source_entries_per_job=task.entries_per_job,
+        source_partition_profile=task.partition_profile,
+        **_job_sizing_kwargs(task, output_prefix="source_"),
+        source_input_metadata_cache=task.input_metadata_cache,
+        source_entry_range_mode=task.entry_range_mode,
+        source_x509=task.x509,
+        source_stage_in=task.stage_in,
+        source_root_setup=task.root_setup,
+        source_container_setup=task.container_setup,
+        source_want_os=task.want_os,
+        source_python_env=task.python_env,
+        source_make_test_job=False,
+        source_dask_scheduler=task.dask_scheduler,
+        source_dask_workers=task.dask_workers,
+        source_max_runtime=task.max_runtime,
+        source_workflow=source_workflow,
+        source_stitch_mode="none",
+    )
+
+
+class StitchingApplySubmitJobs(SubmitSkimJobs):
+    """Submit application jobs only after stitching weights are available."""
+
+    task_namespace = ""
+
+    stitch_config = luigi.Parameter()
+    stitch_name = luigi.Parameter(default="", significant=False)
+    source_skim_name = luigi.Parameter(default="", significant=False)
+    source_workflow = luigi.Parameter(default="", significant=False)
+
+    def __init__(self, *args, **kwargs):
+        stitch_name = kwargs.get("stitch_name") or kwargs.get("name", "")
+        kwargs.setdefault("stitch_mode", "correctionlib")
+        kwargs.setdefault(
+            "stitch_weights",
+            os.path.join(WORKSPACE, f"stitchWeights_{stitch_name}", "stitch_weights.json"),
+        )
+        super().__init__(*args, **kwargs)
+
+    def _derivation_task(self) -> StitchingDerivationTask:
+        return _make_stitching_derivation_task(
+            self,
+            self.stitch_config,
+            self.stitch_name,
+            self.source_skim_name,
+            self.source_workflow,
+        )
+
+    def requires(self):
+        requirements = super().requires()
+        requirements["stitch_weights"] = self._derivation_task()
+        return requirements
+
+    def complete(self):
+        if not os.path.isfile(self._derivation_task().output().path):
+            return False
+        return super().complete()
+
+    def run(self):
+        if self.output().exists():
+            return
+        super().run()
+
+
+class StitchingApplyMonitorJobs(MonitorSkimJobs):
+    """Monitor application jobs after their stitching weights are ready."""
+
+    task_namespace = ""
+
+    stitch_config = luigi.Parameter()
+    stitch_name = luigi.Parameter(default="", significant=False)
+    source_skim_name = luigi.Parameter(default="", significant=False)
+    source_workflow = luigi.Parameter(default="", significant=False)
+
+    def requires(self):
+        return StitchingApplySubmitJobs.req(
+            self,
+            stitch_config=self.stitch_config,
+            stitch_name=self.stitch_name,
+            source_skim_name=self.source_skim_name,
+            source_workflow=self.source_workflow,
         )
 
 
 # ===========================================================================
-# Task 4 – CollectHistogramsTask
+# Task 4 – StitchingApplyTask
+# ===========================================================================
+
+class StitchingApplyTask(SkimTask):
+    """Run the analysis again with LAW-derived stitching weights.
+
+    The task first runs a counter-only :class:`SkimTask` named
+    ``<name>_counts`` through :class:`StitchingDerivationTask`, then reuses the
+    normal SkimTask executors for the application pass.  The generated
+    correctionlib JSON is staged into every application job as
+    ``stitchWeights`` and the executable receives ``stitchMode=correctionlib``.
+    The weights are included once in the shared worker archive.
+
+    The stitch configuration accepts either explicit ``meta_files`` or
+    declarative groups using ``samples`` / ``select``; in the latter case the
+    source skim outputs are discovered automatically.
+    """
+
+    task_namespace = ""
+
+    stitch_config = luigi.Parameter(
+        description="YAML configuration describing the stitched sample groups.",
+    )
+    stitch_name = luigi.Parameter(
+        default="",
+        significant=False,
+        description=(
+            "Name of the derived stitching-weight output. Defaults to the "
+            "application run name."
+        ),
+    )
+    source_skim_name = luigi.Parameter(
+        default="",
+        significant=False,
+        description=(
+            "Name of the counter pass. Defaults to '<name>_counts'."
+        ),
+    )
+    max_retries = luigi.IntParameter(
+        default=50,
+        significant=False,
+        description="Maximum resubmission attempts per failed job.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        apply_name = kwargs.get("name", "")
+        stitch_name = kwargs.get("stitch_name") or apply_name
+        source_skim_name = kwargs.get("source_skim_name") or f"{apply_name}_counts"
+        kwargs.setdefault("stitch_name", stitch_name)
+        kwargs.setdefault("source_skim_name", source_skim_name)
+        kwargs.setdefault("stitch_mode", "correctionlib")
+        kwargs.setdefault(
+            "stitch_weights",
+            os.path.join(WORKSPACE, f"stitchWeights_{stitch_name}", "stitch_weights.json"),
+        )
+        super().__init__(*args, **kwargs)
+
+    def htcondor_delegate_task(self):
+        return StitchingApplyMonitorJobs.req(
+            self,
+            stitch_config=self.stitch_config,
+            stitch_name=self.stitch_name,
+            source_skim_name=self.source_skim_name,
+            source_workflow=self.workflow,
+            max_retries=self.max_retries,
+        )
+
+    def _derivation_task(self) -> StitchingDerivationTask:
+        return _make_stitching_derivation_task(
+            self,
+            self.stitch_config,
+            self.stitch_name,
+            self.source_skim_name,
+            self.workflow,
+        )
+
+    def workflow_requires(self):
+        requirements = super().workflow_requires()
+        requirements["stitch_weights"] = self._derivation_task()
+        return requirements
+
+    def requires(self):
+        requirements = super().requires()
+        derivation = self._derivation_task()
+        if requirements is None:
+            return derivation
+        if isinstance(requirements, list):
+            return requirements + [derivation]
+        return [requirements, derivation]
+
+
+# ===========================================================================
+# Task 5 – StitchingValidationTask
+# ===========================================================================
+
+def _validate_stitch_monitor_summary(run_name: str) -> None:
+    """Refuse validation when the application monitor recorded failed jobs."""
+    summary_path = Path(WORKSPACE) / f"skimRun_{run_name}" / "all_outputs_verified.txt"
+    if not summary_path.is_file():
+        return
+
+    summary: dict[str, str] = {}
+    with summary_path.open() as fh:
+        for raw_line in fh:
+            key, separator, value = raw_line.partition("=")
+            if separator:
+                summary[key.strip()] = value.strip()
+
+    try:
+        permanent_failures = int(summary.get("perm_fail", "0"))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Invalid permanent-failure count in stitching monitor summary "
+            f"'{summary_path}'."
+        ) from exc
+
+    if permanent_failures <= 0:
+        return
+
+    failed_jobs = summary.get("perm_failed_jobs", "")
+    details = f" Failed jobs: {failed_jobs}." if failed_jobs else ""
+    raise RuntimeError(
+        f"Stitching application run '{run_name}' has {permanent_failures} "
+        f"permanently failed job(s); refusing to validate partial outputs. "
+        f"See '{summary_path}'.{details}"
+    )
+
+
+def _stitch_output_meta_files(
+    run_name: str,
+    dataset_manifest_path: str,
+) -> dict[str, list[str]]:
+    """Return every application metadata file grouped by manifest sample."""
+    _validate_stitch_monitor_summary(run_name)
+    manifest = DatasetManifest.load(dataset_manifest_path)
+    meta_files: dict[str, list[str]] = {}
+    missing_samples: list[str] = []
+
+    for dataset in manifest.datasets:
+        paths = _stitch_meta_files_for_sample(run_name, dataset.name)
+        if paths:
+            meta_files[dataset.name] = paths
+        else:
+            missing_samples.append(dataset.name)
+
+    if missing_samples:
+        raise RuntimeError(
+            f"Stitching application run '{run_name}' has no meta.root output for: "
+            + ", ".join(missing_samples)
+        )
+    return meta_files
+
+
+def _root_key_basename(key: object) -> str:
+    """Return a ROOT object key without its directory or cycle suffix."""
+    return str(key).split(";", 1)[0].rsplit("/", 1)[-1]
+
+
+def _load_stitch_validation_adapter(
+    adapter_name: str,
+) -> Optional[Any]:
+    """Load an optional analysis-owned validation adapter module."""
+    if not adapter_name:
+        return None
+    import importlib
+
+    workspace_path = os.path.abspath(WORKSPACE)
+    added_workspace_path = workspace_path not in sys.path
+    if added_workspace_path:
+        sys.path.insert(0, workspace_path)
+    try:
+        return importlib.import_module(adapter_name)
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Could not import stitching validation adapter '{adapter_name}'."
+        ) from exc
+    finally:
+        if added_workspace_path:
+            sys.path.remove(workspace_path)
+
+
+def _stitch_validation_boundaries(
+    stitch_config: dict[str, Any],
+    submit_config: str = "",
+    validation_adapter: Optional[Any] = None,
+) -> dict[str, list[float]]:
+    """Resolve generic histogram boundaries or delegate to an adapter."""
+    if validation_adapter is not None:
+        resolver = getattr(validation_adapter, "validation_boundaries", None)
+        if callable(resolver):
+            return resolver(submit_config)
+
+    validation_config = stitch_config.get("validation", {})
+    raw_boundaries = (
+        validation_config.get("boundaries", {})
+        if isinstance(validation_config, dict)
+        else {}
+    )
+    if not isinstance(raw_boundaries, dict):
+        raise RuntimeError("Stitch validation 'boundaries' must be a mapping.")
+    boundaries: dict[str, list[float]] = {}
+    for variable, values in raw_boundaries.items():
+        if not isinstance(values, list):
+            raise RuntimeError(
+                f"Stitch validation boundaries for '{variable}' must be a list."
+            )
+        try:
+            boundaries[str(variable)] = [float(value) for value in values]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Stitch validation boundaries for '{variable}' must be numeric."
+            ) from exc
+    return boundaries
+
+
+def _stitch_validation_boundaries_by_process(
+    stitch_config: dict[str, Any],
+    submit_config: str = "",
+    validation_adapter: Optional[Any] = None,
+) -> dict[str, list[float]]:
+    """Resolve generic group-specific boundaries or delegate to an adapter."""
+    if validation_adapter is not None:
+        resolver = getattr(
+            validation_adapter,
+            "validation_boundaries_by_process",
+            None,
+        )
+        if callable(resolver):
+            return resolver(submit_config)
+
+    validation_config = stitch_config.get("validation", {})
+    raw_boundaries = (
+        validation_config.get("boundaries_by_group", {})
+        if isinstance(validation_config, dict)
+        else {}
+    )
+    if not isinstance(raw_boundaries, dict):
+        raise RuntimeError(
+            "Stitch validation 'boundaries_by_group' must be a mapping."
+        )
+    return {
+        str(group): [float(value) for value in values]
+        for group, values in raw_boundaries.items()
+        if isinstance(values, list)
+    }
+
+
+def _load_stitch_cross_section_report(
+    report_path: str,
+) -> dict[str, dict[str, Any]]:
+    """Load and validate per-bin cross sections from a derivation report."""
+    import numpy as np
+
+    if not os.path.isfile(report_path):
+        raise RuntimeError(
+            f"Stitching cross-section report not found: '{report_path}'"
+        )
+    with open(report_path) as fh:
+        report = json.load(fh)
+
+    groups = report.get("groups") if isinstance(report, dict) else None
+    if not isinstance(groups, dict):
+        raise RuntimeError(
+            f"Stitching cross-section report '{report_path}' has no groups mapping."
+        )
+
+    parsed: dict[str, dict[str, Any]] = {}
+    for group_name, group_report in groups.items():
+        if not isinstance(group_report, dict):
+            raise RuntimeError(
+                f"Cross-section report group '{group_name}' must be a mapping."
+            )
+        raw_bins = group_report.get("binned_cross_sections_pb")
+        if not isinstance(raw_bins, list) or not raw_bins:
+            raise RuntimeError(
+                f"Cross-section report group '{group_name}' has no "
+                "binned_cross_sections_pb values."
+            )
+        try:
+            bins = [float(value) for value in raw_bins]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Cross-section report group '{group_name}' contains a non-numeric "
+                "binned cross section."
+            ) from exc
+        if any(not np.isfinite(value) or value < 0.0 for value in bins):
+            raise RuntimeError(
+                f"Cross-section report group '{group_name}' contains invalid "
+                "binned cross sections."
+            )
+        raw_inclusive_sample = group_report.get("inclusive_sample")
+        try:
+            inclusive_samples = _shared_normalize_sample_names(
+                raw_inclusive_sample, "inclusive_sample"
+            )
+        except ValueError:
+            raise RuntimeError(
+                f"Cross-section report group '{group_name}' has no valid "
+                "inclusive_sample."
+            )
+        inclusive_sample: Union[str, list[str]] = (
+            inclusive_samples[0]
+            if len(inclusive_samples) == 1
+            else inclusive_samples
+        )
+        parsed[str(group_name)] = {
+            "era": str(group_report.get("era", "")),
+            "inclusive_sample": inclusive_sample,
+            "binned_cross_sections_pb": bins,
+        }
+    return parsed
+
+
+def _stitch_validation_sample_groups(
+    sample_names: list[str],
+    manifest: DatasetManifest,
+    stitch_config: str,
+    weights: dict[str, Any],
+    report_groups: set[str],
+) -> dict[str, str]:
+    """Resolve every application sample to its derived stitching group."""
+    sample_groups: dict[str, str] = {}
+
+    for correction in weights.get("corrections", []):
+        if not isinstance(correction, dict):
+            continue
+        group_name = str(correction.get("name", ""))
+        data = correction.get("data")
+        content = data.get("content", []) if isinstance(data, dict) else []
+        if data and data.get("nodetype") == "category":
+            for item in content:
+                if isinstance(item, dict) and "key" in item:
+                    sample_groups[str(item["key"])] = group_name
+
+    for entry in manifest.datasets:
+        if entry.name in sample_names and entry.group in report_groups:
+            sample_groups.setdefault(entry.name, str(entry.group))
+
+    if stitch_config:
+        config_path = os.path.abspath(stitch_config)
+        if not os.path.isfile(config_path):
+            raise RuntimeError(f"Stitch configuration file not found: '{config_path}'")
+        with open(config_path) as fh:
+            config = yaml.safe_load(fh) or {}
+        groups = config.get("groups", {})
+        if isinstance(groups, dict):
+            for group_name, group_cfg in groups.items():
+                if not isinstance(group_cfg, dict):
+                    continue
+                group = str(group_name)
+                configured_samples = group_cfg.get("samples", [])
+                if isinstance(configured_samples, list):
+                    for sample_name in configured_samples:
+                        sample_groups.setdefault(str(sample_name), group)
+                meta_files = group_cfg.get("meta_files", {})
+                if isinstance(meta_files, dict):
+                    for sample_name in meta_files:
+                        sample_groups.setdefault(str(sample_name), group)
+                selector = group_cfg.get("select")
+                if isinstance(selector, dict):
+                    try:
+                        selected = manifest.query(**selector)
+                    except TypeError as exc:
+                        raise RuntimeError(
+                            f"Invalid dataset selector for stitch group '{group}': "
+                            f"{selector}"
+                        ) from exc
+                    for entry in selected:
+                        sample_groups.setdefault(entry.name, group)
+
+    missing = sorted(set(sample_names) - set(sample_groups))
+    if missing:
+        raise RuntimeError(
+            "Could not resolve stitching group for application sample(s): "
+            + ", ".join(missing)
+        )
+    unresolved_groups = sorted(
+        {sample_groups[sample] for sample in sample_names} - set(report_groups)
+    )
+    if unresolved_groups:
+        raise RuntimeError(
+            "Application samples resolved to groups missing from the cross-section "
+            "report: "
+            + ", ".join(unresolved_groups)
+        )
+    return {sample: sample_groups[sample] for sample in sample_names}
+
+
+def _stitch_validation_process_label(
+    group_name: str,
+    validation_adapter: Optional[Any] = None,
+) -> str:
+    """Return an adapter-provided or sanitized group label."""
+    if validation_adapter is not None:
+        resolver = getattr(validation_adapter, "process_label", None)
+        if callable(resolver):
+            return str(resolver(group_name))
+    label = re.sub(r"[^A-Za-z0-9]+", "_", group_name).strip("_")
+    return label or "unknown"
+
+
+def _stitch_validation_year_set(
+    entry: Optional[DatasetEntry],
+    report_era: str,
+    validation_adapter: Optional[Any] = None,
+) -> str:
+    """Return an adapter-provided or report-era validation label."""
+    if validation_adapter is not None:
+        resolver = getattr(validation_adapter, "year_set", None)
+        if callable(resolver):
+            return str(resolver(entry, report_era))
+    if str(report_era).strip():
+        return str(report_era).strip()
+    year = getattr(entry, "year", None)
+    return str(year) if year is not None else "unknown"
+
+
+def _stitch_validation_sample_scale(
+    sample_name: str,
+    meta_files: list[str],
+    group_report: dict[str, Any],
+    excluded_bins: Optional[set[int]] = None,
+    stitch_factors: Optional[list[float]] = None,
+    factor_threshold: float = 1e-6,
+) -> tuple[float, float, float]:
+    """Return (plot scale, sample cross section, signed event sum)."""
+    import numpy as np
+
+    sign_counts: Optional[np.ndarray] = None
+    for meta_file in meta_files:
+        values = np.asarray(
+            _read_intweight_sign_hist(meta_file, sample_name),
+            dtype=float,
+        )
+        if sign_counts is None:
+            sign_counts = values
+        elif len(values) != len(sign_counts):
+            raise RuntimeError(
+                f"Signed counter histogram length mismatch for sample '{sample_name}'."
+            )
+        else:
+            sign_counts += values
+
+    if sign_counts is None or not len(sign_counts):
+        raise RuntimeError(f"No signed counter values found for sample '{sample_name}'.")
+    if any(not np.isfinite(value) for value in sign_counts):
+        raise RuntimeError(
+            f"Signed counter histogram for sample '{sample_name}' contains non-finite values."
+        )
+
+    cross_section_bins = np.asarray(
+        group_report["binned_cross_sections_pb"],
+        dtype=float,
+    )
+    if len(sign_counts) > len(cross_section_bins):
+        raise RuntimeError(
+            f"Cross-section report has {len(cross_section_bins)} bins for sample "
+            f"'{sample_name}', but its signed counter has {len(sign_counts)} bins."
+        )
+    if stitch_factors is None:
+        active_bins = sign_counts > 0.0
+    else:
+        if factor_threshold < 0.0 or not np.isfinite(factor_threshold):
+            raise RuntimeError(
+                "Stitch factor threshold must be finite and non-negative."
+            )
+        factors = np.zeros(len(sign_counts), dtype=float)
+        factor_values = np.asarray(stitch_factors, dtype=float)
+        if any(not np.isfinite(value) for value in factor_values):
+            raise RuntimeError(
+                f"Stitch factors for sample '{sample_name}' contain non-finite values."
+            )
+        factor_count = min(len(factors), len(factor_values))
+        factors[:factor_count] = factor_values[:factor_count]
+        active_bins = (sign_counts > 0.0) & (factors > factor_threshold)
+    if excluded_bins:
+        invalid_bins = [
+            index for index in excluded_bins
+            if index < 0 or index >= len(sign_counts)
+        ]
+        if invalid_bins:
+            raise RuntimeError(
+                f"Excluded stitch bin(s) {invalid_bins} are outside the signed "
+                f"counter range for sample '{sample_name}'."
+            )
+        active_bins[list(excluded_bins)] = False
+
+    active_signed_sum = float(np.sum(sign_counts[active_bins]))
+    if active_signed_sum == 0.0:
+        raise RuntimeError(
+            f"Sample '{sample_name}' has zero signed event sum in its active "
+            "stitch bins; cannot normalize plots."
+        )
+    sample_cross_section = float(np.sum(cross_section_bins[: len(sign_counts)][active_bins]))
+    return sample_cross_section / active_signed_sum, sample_cross_section, active_signed_sum
+
+
+def _stitch_validation_sample_factors(
+    weights: dict[str, Any],
+    group_name: str,
+    sample_name: str,
+) -> list[float]:
+    """Return the derived correction factors for one validation sample."""
+    for correction in weights.get("corrections", []):
+        if not isinstance(correction, dict) or str(correction.get("name")) != group_name:
+            continue
+        data = correction.get("data")
+        if not isinstance(data, dict) or data.get("nodetype") != "category":
+            break
+        for item in data.get("content", []):
+            if not isinstance(item, dict) or str(item.get("key")) != sample_name:
+                continue
+            value = item.get("value")
+            if not isinstance(value, dict) or value.get("nodetype") != "binning":
+                break
+            content = value.get("content")
+            if not isinstance(content, list):
+                break
+            try:
+                return [float(factor) for factor in content]
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Stitch factors for sample '{sample_name}' are not numeric."
+                ) from exc
+    raise RuntimeError(
+        f"Stitching correction JSON has no factors for sample '{sample_name}' "
+        f"in group '{group_name}'."
+    )
+
+
+def _stitch_validation_configured_weight_scale(
+    entry: Optional[DatasetEntry],
+) -> float:
+    """Return the per-event scale already present in application histograms."""
+    import math
+
+    if entry is None:
+        return 1.0
+
+    configured_scale = (
+        (1.0 if entry.xsec is None else float(entry.xsec))
+        * float(entry.kfac)
+        * float(entry.filter_efficiency)
+        * float(entry.extra_scale)
+    )
+    if not math.isfinite(configured_scale) or configured_scale == 0.0:
+        raise RuntimeError(
+            f"Application weight scale for sample '{entry.name}' must be finite "
+            "and non-zero for validation plots."
+        )
+    return configured_scale
+
+
+def _find_stitch_histogram_key(root_file: object, histogram_name: str) -> str:
+    keys = getattr(root_file, "keys")(recursive=True)
+    for key in keys:
+        if _root_key_basename(key) == histogram_name:
+            return str(key).split(";", 1)[0]
+    raise RuntimeError(
+        f"ROOT output is missing validation histogram '{histogram_name}'."
+    )
+
+
+def _stitch_validation_variable_boundaries(
+    variable: str,
+    process_family: str,
+    boundaries: dict[str, list[float]],
+    process_boundaries: dict[str, list[float]],
+    validation_adapter: Optional[Any] = None,
+) -> list[float]:
+    if validation_adapter is not None:
+        resolver = getattr(validation_adapter, "variable_boundaries", None)
+        if callable(resolver):
+            return list(
+                resolver(variable, process_family, boundaries, process_boundaries)
+            )
+    return list(boundaries.get(variable, process_boundaries.get(process_family, [])))
+
+
+def _stitch_validation_histogram_specs(
+    stitch_config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Resolve generic inclusive/stitched histogram plotting specifications."""
+    validation_config = stitch_config.get("validation", {})
+    if validation_config is None:
+        validation_config = {}
+    if not isinstance(validation_config, dict):
+        raise RuntimeError("Stitch validation configuration must be a mapping.")
+
+    raw_specs = validation_config.get("histograms")
+    if raw_specs is None:
+        return [
+            {
+                "name": "LHE_Vpt",
+                "stitched_name": "LHE_Vpt_stitched",
+                "label": "LHE VpT [GeV]",
+                "boundaries": None,
+                "xlim": None,
+                "log_y": True,
+                "ratio_range": [0.8, 1.2],
+            },
+            {
+                "name": "LHE_NpNLO",
+                "stitched_name": "LHE_NpNLO_stitched",
+                "label": "LHE NpNLO",
+                "boundaries": None,
+                "xlim": None,
+                "log_y": True,
+                "ratio_range": [0.8, 1.2],
+            },
+        ]
+
+    if not isinstance(raw_specs, list) or not raw_specs:
+        raise RuntimeError(
+            "Stitch validation 'histograms' must be a non-empty list."
+        )
+
+    specs: list[dict[str, Any]] = []
+    for raw_spec in raw_specs:
+        if not isinstance(raw_spec, dict):
+            raise RuntimeError("Each stitch validation histogram must be a mapping.")
+        name = str(raw_spec.get("name", "")).strip()
+        if not name:
+            raise RuntimeError(
+                "Each stitch validation histogram requires a non-empty 'name'."
+            )
+        stitched_name = str(
+            raw_spec.get("stitched_name", f"{name}_stitched")
+        ).strip()
+        if not stitched_name:
+            raise RuntimeError(
+                f"Stitch validation histogram '{name}' has an empty 'stitched_name'."
+            )
+
+        boundaries = raw_spec.get("boundaries")
+        if boundaries is not None:
+            if not isinstance(boundaries, list):
+                raise RuntimeError(
+                    f"Stitch validation boundaries for '{name}' must be a list."
+                )
+            try:
+                boundaries = [float(value) for value in boundaries]
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Stitch validation boundaries for '{name}' must be numeric."
+                ) from exc
+
+        xlim = raw_spec.get("xlim")
+        if xlim is not None:
+            if not isinstance(xlim, list) or len(xlim) != 2:
+                raise RuntimeError(
+                    f"Stitch validation xlim for '{name}' must contain two values."
+                )
+            try:
+                xlim = [float(value) for value in xlim]
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Stitch validation xlim for '{name}' must be numeric."
+                ) from exc
+            if xlim[1] <= xlim[0]:
+                raise RuntimeError(
+                    f"Stitch validation xlim for '{name}' must be increasing."
+                )
+
+        ratio_range = raw_spec.get("ratio_range", [0.8, 1.2])
+        if not isinstance(ratio_range, list) or len(ratio_range) != 2:
+            raise RuntimeError(
+                f"Stitch validation ratio_range for '{name}' must contain two values."
+            )
+        try:
+            ratio_range = [float(value) for value in ratio_range]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Stitch validation ratio_range for '{name}' must be numeric."
+            ) from exc
+        if ratio_range[1] <= ratio_range[0]:
+            raise RuntimeError(
+                f"Stitch validation ratio_range for '{name}' must be increasing."
+            )
+
+        specs.append(
+            {
+                "name": name,
+                "stitched_name": stitched_name,
+                "label": str(raw_spec.get("label", name)),
+                "boundaries": boundaries,
+                "xlim": xlim,
+                "log_y": bool(raw_spec.get("log_y", True)),
+                "ratio_range": ratio_range,
+            }
+        )
+    return specs
+
+
+def _stitch_validation_histogram_data(
+    histogram: Any,
+) -> tuple[Any, Any, Optional[Any]]:
+    import numpy as np
+
+    values, edges = histogram.to_numpy(flow=False)
+    values = np.asarray(values, dtype=float)
+    edges = np.asarray(edges, dtype=float)
+    variances = None
+    variance_reader = getattr(histogram, "variances", None)
+    if variance_reader is not None:
+        raw_variances = variance_reader(flow=False)
+        if raw_variances is not None:
+            variances = np.asarray(raw_variances, dtype=float)
+            if variances.shape != values.shape:
+                raise RuntimeError(
+                    "Validation histogram variances do not match its values."
+                )
+    return values, edges, variances
+
+
+def _stitch_validation_excluded_bins(
+    sample_name: str,
+    group_name: str,
+    group_report: dict[str, Any],
+    submit_config: str,
+    number_of_bins: int,
+    validation_adapter: Optional[Any] = None,
+) -> set[int]:
+    """Return adapter-provided bins absent from a sample."""
+    if validation_adapter is not None:
+        resolver = getattr(validation_adapter, "excluded_bins", None)
+        if callable(resolver):
+            return set(
+                resolver(
+                    sample_name,
+                    group_name,
+                    group_report,
+                    submit_config,
+                    number_of_bins,
+                )
+            )
+    return set()
+
+
+def _write_stitch_validation_plots(
+    meta_files: dict[str, list[str]],
+    output_dir: str,
+    boundaries: dict[str, list[float]],
+    sample_metadata: dict[str, DatasetEntry],
+    sample_groups: dict[str, str],
+    cross_section_groups: dict[str, dict[str, Any]],
+    process_boundaries: dict[str, list[float]],
+    weights: dict[str, Any],
+    histogram_specs: Optional[list[dict[str, Any]]] = None,
+    submit_config: str = "",
+    validation_adapter: Optional[Any] = None,
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    """Write normalized inclusive-versus-stitched validation plots."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import uproot  # type: ignore
+
+    if histogram_specs is None:
+        histogram_specs = _stitch_validation_histogram_specs({})
+    specs_by_name = {spec["name"]: spec for spec in histogram_specs}
+
+    aggregate: dict[
+        tuple[str, str],
+        dict[
+            str,
+            tuple[Any, Any, Optional[Any], Optional[Any], Any],
+        ],
+    ] = {}
+    plot_process_families: dict[tuple[str, str], str] = {}
+    normalization_records: dict[str, dict[str, Any]] = {}
+    for sample_name, paths in meta_files.items():
+        group_name = sample_groups[sample_name]
+        group_report = cross_section_groups[group_name]
+        raw_inclusive_sample = group_report["inclusive_sample"]
+        try:
+            inclusive_samples = _shared_normalize_sample_names(
+                raw_inclusive_sample, "inclusive_sample"
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid inclusive samples for stitching group '{group_name}': {exc}"
+            ) from exc
+        if any(sample_name not in meta_files for sample_name in inclusive_samples):
+            raise RuntimeError(
+                f"Inclusive sample(s) {inclusive_samples} for stitching group "
+                f"'{group_name}' have no application metadata output."
+            )
+        excluded_bins = _stitch_validation_excluded_bins(
+            sample_name,
+            group_name,
+            group_report,
+            submit_config,
+            len(group_report["binned_cross_sections_pb"]),
+            validation_adapter,
+        )
+        scale, sample_cross_section, signed_sum = _stitch_validation_sample_scale(
+            sample_name,
+            paths,
+            group_report,
+            excluded_bins,
+            _stitch_validation_sample_factors(weights, group_name, sample_name),
+        )
+        configured_weight_scale = _stitch_validation_configured_weight_scale(
+            sample_metadata.get(sample_name)
+        )
+        scale /= configured_weight_scale
+        process_family = group_name
+        if validation_adapter is not None:
+            resolver = getattr(validation_adapter, "process_family", None)
+            if callable(resolver):
+                process_family = str(resolver(group_name) or "all")
+        process_label = _stitch_validation_process_label(
+            group_name,
+            validation_adapter,
+        )
+        year_set = _stitch_validation_year_set(
+            sample_metadata.get(sample_name),
+            str(group_report.get("era", "")),
+            validation_adapter,
+        )
+        plot_key = (process_label, year_set)
+        plot_process_families.setdefault(plot_key, process_family)
+        plot_key_name = f"{process_label}_{year_set}"
+        normalization_record = normalization_records.setdefault(
+            plot_key_name,
+            {
+                "process": process_label,
+                "year_set": year_set,
+                "samples": {},
+            },
+        )
+        normalization_record["samples"][sample_name] = {
+            "stitch_group": group_name,
+            "cross_section_pb": sample_cross_section,
+            "signed_event_sum": signed_sum,
+            "scale": scale,
+            "configured_weight_scale": configured_weight_scale,
+            "is_inclusive_sample": sample_name in inclusive_samples,
+            "excluded_stitch_bins": sorted(excluded_bins),
+        }
+        grouped = aggregate.setdefault(plot_key, {})
+        for meta_file in paths:
+            with cast(Any, uproot.open(meta_file)) as root_file:
+                for histogram_spec in histogram_specs:
+                    variable = histogram_spec["name"]
+                    inclusive_key = _find_stitch_histogram_key(
+                        root_file, variable
+                    )
+                    stitched_key = _find_stitch_histogram_key(
+                        root_file, histogram_spec["stitched_name"]
+                    )
+                    inclusive, edges, inclusive_variance = (
+                        _stitch_validation_histogram_data(root_file[inclusive_key])
+                    )
+                    stitched, stitched_edges, stitched_variance = (
+                        _stitch_validation_histogram_data(root_file[stitched_key])
+                    )
+                    inclusive *= scale
+                    stitched *= scale
+                    if inclusive_variance is not None:
+                        inclusive_variance *= scale * scale
+                    if stitched_variance is not None:
+                        stitched_variance *= scale * scale
+                    if (
+                        inclusive.shape != stitched.shape
+                        or not np.array_equal(edges, stitched_edges)
+                    ):
+                        raise RuntimeError(
+                            f"Validation histograms for '{variable}' in "
+                            f"'{meta_file}' have incompatible binning."
+                        )
+                    inclusive_contribution = (
+                        inclusive
+                        if sample_name in inclusive_samples
+                        else np.zeros_like(inclusive)
+                    )
+                    inclusive_variance_contribution = (
+                        inclusive_variance
+                        if sample_name in inclusive_samples
+                        else (
+                            None
+                            if inclusive_variance is None
+                            else np.zeros_like(inclusive_variance)
+                        )
+                    )
+                    if variable not in grouped:
+                        grouped[variable] = (
+                            inclusive_contribution,
+                            stitched,
+                            inclusive_variance_contribution,
+                            stitched_variance,
+                            edges,
+                        )
+                    else:
+                        (
+                            previous_inclusive,
+                            previous_stitched,
+                            previous_inclusive_variance,
+                            previous_stitched_variance,
+                            previous_edges,
+                        ) = grouped[variable]
+                        if not np.array_equal(previous_edges, edges):
+                            raise RuntimeError(
+                                f"Validation histograms for '{variable}' do not "
+                                "share binning across application files."
+                            )
+                        grouped[variable] = (
+                            previous_inclusive + inclusive_contribution,
+                            previous_stitched + stitched,
+                            (
+                                None
+                                if previous_inclusive_variance is None
+                                or inclusive_variance_contribution is None
+                                else previous_inclusive_variance
+                                + inclusive_variance_contribution
+                            ),
+                            (
+                                None
+                                if previous_stitched_variance is None
+                                or stitched_variance is None
+                                else previous_stitched_variance + stitched_variance
+                            ),
+                            previous_edges,
+                        )
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    plot_paths: list[str] = []
+    for (process_label, year_set), variables in sorted(aggregate.items()):
+        for (
+            variable,
+            (
+                inclusive,
+                stitched,
+                inclusive_variance,
+                stitched_variance,
+                edges,
+            ),
+        ) in variables.items():
+            histogram_spec = specs_by_name[variable]
+            variable_boundaries = histogram_spec["boundaries"]
+            if variable_boundaries is None:
+                variable_boundaries = _stitch_validation_variable_boundaries(
+                    variable,
+                    plot_process_families[(process_label, year_set)],
+                    boundaries,
+                    process_boundaries,
+                    validation_adapter,
+                )
+            xlim = histogram_spec["xlim"]
+            x_ticks = None
+            x_ticklabels = None
+            if variable == "LHE_NpNLO":
+                centers = edges[:-1] + 0.5 * np.diff(edges)
+                x_ticks = centers
+                x_ticklabels = [str(int(round(edge))) for edge in edges[:-1]]
+                if xlim is None:
+                    xlim = [float(edges[0]), float(edges[-1])]
+            elif variable == "LHE_Vpt" and xlim is None:
+                xlim = [float(edges[0]), 1000.0]
+            safe_process = re.sub(r"[^A-Za-z0-9]+", "_", process_label).strip("_")
+            safe_year_set = re.sub(r"[^A-Za-z0-9]+", "_", year_set).strip("_")
+            plot_path = os.path.join(
+                output_dir,
+                f"stitch_{safe_process}_{safe_year_set}_{variable}_comparison.png",
+            )
+            _plot_ratio_comparison(
+                inclusive,
+                stitched,
+                edges,
+                plot_path,
+                title=f"Stitching validation: {process_label} {year_set} {variable}",
+                xlabel=histogram_spec["label"],
+                boundaries=variable_boundaries,
+                xlim=xlim,
+                log_y=histogram_spec["log_y"],
+                ratio_range=histogram_spec["ratio_range"],
+                inclusive_variance=inclusive_variance,
+                stitched_variance=stitched_variance,
+                x_ticks=x_ticks,
+                x_ticklabels=x_ticklabels,
+            )
+            plot_paths.append(plot_path)
+
+    return plot_paths, normalization_records
+
+
+def _validate_stitch_meta_file(
+    meta_file: str,
+    sample_name: str,
+    require_stitched_histograms: bool = True,
+    stitched_histograms: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Validate one application metadata file and return its summary."""
+    import math
+
+    try:
+        import uproot  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "StitchingValidationTask requires uproot to inspect ROOT outputs."
+        ) from exc
+
+    required_names = [
+        f"counter_intWeightSignSum_{sample_name}",
+        f"counter_weightSignSum_{sample_name}",
+    ]
+    if require_stitched_histograms:
+        required_names.extend(
+            stitched_histograms
+            or ("LHE_Vpt_stitched", "LHE_NpNLO_stitched")
+        )
+
+    with uproot.open(meta_file) as root_file:
+        keys = list(root_file.keys(recursive=True))
+        matches: dict[str, str] = {}
+        for key in keys:
+            basename = _root_key_basename(key)
+            if basename in required_names and basename not in matches:
+                matches[basename] = str(key).split(";", 1)[0]
+
+        missing = [name for name in required_names if name not in matches]
+        if missing:
+            raise RuntimeError(
+                f"Stitching output '{meta_file}' is missing histogram(s): "
+                + ", ".join(missing)
+            )
+
+        histogram_bins: dict[str, int] = {}
+        for name, key in matches.items():
+            try:
+                values, _ = root_file[key].to_numpy(flow=False)
+                if any(not math.isfinite(float(value)) for value in values):
+                    raise RuntimeError(
+                        f"Stitching output '{meta_file}' contains non-finite values "
+                        f"in histogram '{name}'."
+                    )
+                histogram_bins[name] = len(values)
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Could not read histogram '{name}' from '{meta_file}': {exc}"
+                ) from exc
+
+    return {
+        "meta_file": meta_file,
+        "sample": sample_name,
+        "histograms": sorted(matches),
+        "histogram_bins": histogram_bins,
+    }
+
+
+class StitchingValidationTask(law.Task):
+    """Validate stitched application outputs across every dataset job.
+
+    The task is intentionally separate from :class:`StitchingApplyTask` so it
+    can be rerun cheaply after a batch application pass.  It checks all
+    ``meta.root`` files below ``skimRun_<name>/outputs/``, including files
+    created when a file source split one dataset into multiple jobs.
+    """
+
+    task_namespace = ""
+
+    name = luigi.Parameter(
+        description="Application run name to validate (the run directory is skimRun_<name>)."
+    )
+    dataset_manifest = luigi.Parameter(
+        description="Dataset manifest used by the application pass."
+    )
+    stitch_config = luigi.Parameter(
+        default="",
+        significant=False,
+        description=(
+            "Optional stitch YAML config. When supplied, every configured group "
+            "must be present in the derived correction JSON."
+        ),
+    )
+    stitch_weights = luigi.Parameter(
+        default="",
+        significant=False,
+        description=(
+            "Optional correctionlib JSON path. Defaults to "
+            "stitchWeights_<name>/stitch_weights.json."
+        ),
+    )
+    stitch_cross_sections = luigi.Parameter(
+        default="",
+        significant=False,
+        description=(
+            "Optional stitching cross-section report. Defaults to "
+            "stitchWeights_<name>/stitch_cross_sections.json."
+        ),
+    )
+    submit_config = luigi.Parameter(
+        default="",
+        significant=False,
+        description=(
+            "Optional submit config passed to the validation adapter."
+        ),
+    )
+    validation_adapter = luigi.Parameter(
+        default="",
+        significant=False,
+        description=(
+            "Optional Python module providing analysis-owned validation labels, "
+            "boundaries, and exclusion policy. Defaults to the adapter named "
+            "under validation.adapter in the stitch YAML."
+        ),
+    )
+    require_stitched_histograms = luigi.BoolParameter(
+        default=True,
+        significant=False,
+        description="Require stitched validation histograms in every application metadata file.",
+    )
+
+    @property
+    def _output_dir(self) -> str:
+        return os.path.join(WORKSPACE, f"stitchValidation_{self.name}")
+
+    @property
+    def _weights_path(self) -> str:
+        raw_path = self.stitch_weights or os.path.join(
+            WORKSPACE, f"stitchWeights_{self.name}", "stitch_weights.json"
+        )
+        return (
+            raw_path
+            if os.path.isabs(raw_path)
+            else os.path.abspath(os.path.join(WORKSPACE, raw_path))
+        )
+
+    @property
+    def _cross_sections_path(self) -> str:
+        raw_path = self.stitch_cross_sections or os.path.join(
+            WORKSPACE,
+            f"stitchWeights_{self.name}",
+            "stitch_cross_sections.json",
+        )
+        return (
+            raw_path
+            if os.path.isabs(raw_path)
+            else os.path.abspath(os.path.join(WORKSPACE, raw_path))
+        )
+
+    def output(self):
+        return law.LocalFileTarget(
+            os.path.join(self._output_dir, "stitch_validation.json")
+        )
+
+    def complete(self):
+        if not self.output().exists():
+            return False
+        if not self.require_stitched_histograms:
+            return True
+
+        try:
+            with open(self.output().path) as fh:
+                report = json.load(fh)
+            if not isinstance(report, dict):
+                return False
+            plot_paths = report.get("plots")
+            if not isinstance(plot_paths, list) or any(
+                not isinstance(path, str) or not os.path.isfile(path)
+                for path in plot_paths
+            ):
+                return False
+
+            stitch_config_data: dict[str, Any] = {}
+            if self.stitch_config:
+                with open(os.path.abspath(self.stitch_config)) as fh:
+                    loaded_config = yaml.safe_load(fh) or {}
+                if not isinstance(loaded_config, dict):
+                    return False
+                stitch_config_data = loaded_config
+            histogram_specs = _stitch_validation_histogram_specs(stitch_config_data)
+            return all(
+                any(
+                    path.endswith(f"_{spec['name']}_comparison.png")
+                    for path in plot_paths
+                )
+                for spec in histogram_specs
+            )
+        except (OSError, TypeError, ValueError, RuntimeError):
+            return False
+
+    def run(self):
+        meta_files = _stitch_output_meta_files(self.name, self.dataset_manifest)
+        manifest = DatasetManifest.load(self.dataset_manifest)
+        weights_path = self._weights_path
+        if not os.path.isfile(weights_path):
+            raise RuntimeError(
+                f"Stitching correction JSON not found: '{weights_path}'"
+            )
+
+        expected_groups: set[str] = set()
+        stitch_config_data: dict[str, Any] = {}
+        if self.stitch_config:
+            config_path = os.path.abspath(self.stitch_config)
+            if not os.path.isfile(config_path):
+                raise RuntimeError(f"Stitch configuration file not found: '{config_path}'")
+            with open(config_path) as fh:
+                stitch_config_data = yaml.safe_load(fh) or {}
+            groups = stitch_config_data.get("groups")
+            if not isinstance(groups, dict):
+                raise RuntimeError(
+                    f"Stitch config '{config_path}' must contain a top-level 'groups' mapping."
+                )
+            expected_groups = {str(group_name) for group_name in groups}
+
+        adapter_name = str(self.validation_adapter).strip()
+        if not adapter_name:
+            validation_config = stitch_config_data.get("validation", {})
+            if isinstance(validation_config, dict):
+                adapter_name = str(validation_config.get("adapter", "")).strip()
+        validation_adapter = _load_stitch_validation_adapter(adapter_name)
+
+        with open(weights_path) as fh:
+            weights = json.load(fh)
+        if not isinstance(weights, dict) or not isinstance(
+            weights.get("corrections"), list
+        ):
+            raise RuntimeError(
+                f"Stitching correction JSON '{weights_path}' has no corrections list."
+            )
+        correction_names = {
+            str(correction.get("name"))
+            for correction in weights.get("corrections", [])
+            if isinstance(correction, dict) and correction.get("name")
+        }
+        missing_groups = sorted(expected_groups - correction_names)
+        if missing_groups:
+            raise RuntimeError(
+                f"Stitching correction JSON '{weights_path}' is missing group(s): "
+                + ", ".join(missing_groups)
+            )
+
+        validation_histograms = _stitch_validation_histogram_specs(
+            stitch_config_data
+        )
+
+        cross_section_groups: dict[str, dict[str, Any]] = {}
+        sample_groups: dict[str, str] = {}
+        sample_metadata = {entry.name: entry for entry in manifest.datasets}
+        if self.require_stitched_histograms:
+            cross_sections_path = self._cross_sections_path
+            cross_section_groups = _load_stitch_cross_section_report(
+                cross_sections_path
+            )
+            sample_groups = _stitch_validation_sample_groups(
+                list(meta_files),
+                manifest,
+                self.stitch_config,
+                weights,
+                set(cross_section_groups),
+            )
+
+        validation_records: list[dict[str, Any]] = []
+        for sample_name, paths in sorted(meta_files.items()):
+            for meta_file in paths:
+                validation_records.append(
+                    _validate_stitch_meta_file(
+                        meta_file,
+                        sample_name,
+                        require_stitched_histograms=self.require_stitched_histograms,
+                        stitched_histograms=(
+                            [
+                                spec["stitched_name"]
+                                for spec in validation_histograms
+                            ]
+                            if self.require_stitched_histograms
+                            else None
+                        ),
+                    )
+                )
+
+        Path(self._output_dir).mkdir(parents=True, exist_ok=True)
+        plot_boundaries = _stitch_validation_boundaries(
+            stitch_config_data,
+            self.submit_config,
+            validation_adapter,
+        )
+        plot_process_boundaries = _stitch_validation_boundaries_by_process(
+            stitch_config_data,
+            self.submit_config,
+            validation_adapter,
+        )
+        plot_paths: list[str] = []
+        plot_normalization: dict[str, dict[str, Any]] = {}
+        if self.require_stitched_histograms:
+            plot_paths, plot_normalization = _write_stitch_validation_plots(
+                meta_files,
+                self._output_dir,
+                plot_boundaries,
+                sample_metadata,
+                sample_groups,
+                cross_section_groups,
+                plot_process_boundaries,
+                weights,
+                histogram_specs=validation_histograms,
+                submit_config=self.submit_config,
+                validation_adapter=validation_adapter,
+            )
+        with open(self.output().path, "w") as fh:
+            json.dump(
+                {
+                    "application_run": self.name,
+                    "weights": weights_path,
+                    "samples": len(meta_files),
+                    "meta_files": len(validation_records),
+                    "groups": sorted(expected_groups or correction_names),
+                    "plots": plot_paths,
+                    "plot_boundaries": plot_boundaries,
+                    "plot_boundaries_by_process": plot_process_boundaries,
+                    "plot_normalization": plot_normalization,
+                    "files": validation_records,
+                },
+                fh,
+                indent=2,
+            )
+
+        self.publish_message(
+            f"Validated stitching outputs for {len(meta_files)} sample(s) and "
+            f"{len(validation_records)} metadata file(s)."
+        )
+
+
+# ===========================================================================
+# Task 6 – CollectHistogramsTask
 # ===========================================================================
 
 class CollectHistogramsTask(law.Task):
@@ -4414,6 +8560,12 @@ class CollectHistogramsTask(law.Task):
                 f"hadd failed (exit {result.returncode}):\n"
                 f"stdout: {result.stdout}\nstderr: {result.stderr}"
             )
+
+        # Older workflows may collect histogram-bearing skim files directly.
+        # Sparse-first files need the same post-hadd reconstruction as the
+        # manifest-driven MergeHistograms task; ordinary skim files are left
+        # unchanged.
+        extract_nd_histograms(merged_path, merged_path, required=False)
 
         self.publish_message(
             f"CollectHistogramsTask: merged histogram written to {merged_path}"

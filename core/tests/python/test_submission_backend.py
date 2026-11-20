@@ -1,5 +1,13 @@
 import os
-from core.python.submission_backend import ensure_xrootd_redirector, generate_condor_submit, generate_condor_runscript, stage_outputs_blocks
+
+import pytest
+from core.python.submission_backend import ensure_xrootd_redirector, generate_condor_submit, generate_condor_runscript, get_copy_file_list, stage_outputs_blocks
+
+
+def test_get_copy_file_list_includes_onnx_payloads():
+    assert get_copy_file_list({"model": "cfg/model_even_train.onnx"}) == [
+        "cfg/model_even_train.onnx"
+    ]
 
 
 def test_ensure_xrootd_redirector_preserves_absolute_local_paths():
@@ -47,16 +55,30 @@ def test_generate_condor_submit_sets_want_os(tmp_path):
     assert 'MY.WantOS = "el8"' in sub
 
 
-def test_generate_condor_submit_sets_x86_v2_requirements(tmp_path):
+def test_generate_condor_submit_sets_x86_v2_requirements(tmp_path, monkeypatch):
+    monkeypatch.delenv("RDF_CONDOR_EXTRA_BLOCKED_HOSTS", raising=False)
     sub = generate_condor_submit(
         main_dir=str(tmp_path),
         jobs=1,
         exe_relpath="bin/fakeexe",
         config_file="submit_config.txt",
     )
-    assert 'requirements = (TARGET.Arch =?= "X86_64")' in sub
+    assert 'requirements =' in sub
+    assert '(TARGET.Arch =?= "X86_64")' in sub
     assert 'TARGET.Microarch =!= UNDEFINED' in sub
     assert 'TARGET.Has_sse4_1 =?= True' in sub
+    assert 'TARGET.Machine != "hepcms-henrietta.privnet"' in sub
+    assert 'TARGET.Machine != "hepcms-namenode.privnet"' in sub
+
+    monkeypatch.setenv("RDF_CONDOR_EXTRA_BLOCKED_HOSTS", "")
+    sub = generate_condor_submit(
+        main_dir=str(tmp_path),
+        jobs=1,
+        exe_relpath="bin/fakeexe",
+        config_file="submit_config.txt",
+    )
+    assert 'TARGET.Machine != "hepcms-henrietta.privnet"' in sub
+    assert 'TARGET.Machine != "hepcms-namenode.privnet"' not in sub
 
 
 def test_stage_outputs_preblock_contains_condor_proc_handling():
@@ -64,11 +86,14 @@ def test_stage_outputs_preblock_contains_condor_proc_handling():
     # ensure pre-block reads CONDOR_PROC and will append process id to filenames
     assert "CONDOR_PROC" in pre
     assert "_proc" not in pre  # we don't hardcode a literal suffix, but proc-aware logic exists
-    assert "check_output_endpoint(cfg.get(\"__orig_saveFile\", \"\"))" in pre
-    assert "check_output_endpoint(cfg.get(\"__orig_metaFile\", \"\"))" in pre
+    # Remote EOS checks are deferred until stage-out so a slow endpoint does
+    # not prevent the analysis executable from running.
+    assert "check_output_endpoint" not in pre
+    assert "xrdfs" not in pre
     assert "ensure_output_endpoint_ready" in post
     assert "verify_remote_file" in post
-    assert 'xrdfs_ok(host_url, "stat", eos_dir)' in post
+    assert 'xrdfs_ok(host_url, "mkdir", "-p", eos_dir)' in post
+    assert 'xrdfs_ok(host_url, "stat", eos_dir)' not in post
     assert 'xrdfs_ok(host_url, "stat", remote_path)' in post
     assert 'XRDCP_TIMEOUT_FLOOR' in post
 
@@ -136,7 +161,7 @@ def test_runscript_uses_preserved_host_python_for_helpers():
     assert 'RDF_HELPER_PYTHON="$(command -v python3 || command -v python || true)"' in script
     assert 'run_helper_python() {' in script
     assert 'env -u PYTHONHOME LD_LIBRARY_PATH="${RDF_ORIG_LD_LIBRARY_PATH:-}" "$helper" "$@"' in script
-    assert "run_helper_python - << 'XRDPY'" in script
+    assert "run_helper_python - << 'RDFINPUT'" in script
 
 
 def test_runscript_relaxes_ulimit_commands_in_root_setup():
@@ -150,192 +175,145 @@ def test_runscript_relaxes_ulimit_commands_in_root_setup():
     assert "export FOO=bar" in script
 
 
-def test_runscript_includes_xrootd_optimize_when_no_stage_in():
-    """When stage_inputs=False, the runscript must include the XRootD
-    optimisation block that probes and selects the fastest redirector."""
-    script = generate_condor_runscript(
-        exe_relpath="myexe",
-        stage_inputs=False,
-        stage_outputs=False,
-        root_setup="",
-    )
-    assert "Optimizing XRootD redirectors" in script
-    assert "xrd-opt" in script
-    assert "SITE_REDIRECTOR_MARKER" in script
-    assert "detect_local_site" in script
-    # Must use ROOT macro, not pyxrootd
-    assert "probe_via_root_macro" in script
-    assert "probe_via_pyxrootd" not in script
-    assert "probe_via_subprocess" not in script
+def _run_input_block(tmp_path, monkeypatch, stage_in=False, yaml_config=False, failures=0):
+    import subprocess
+    import yaml
+    from core.python import submission_backend as backend
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(backend._io_policy, "GLOBAL_REDIRECTOR", "root://cms-xrd-global.cern.ch")
+    monkeypatch.setattr(backend._io_policy, "PUBLIC_STORAGE_PREFIXES", ("/store/mc/", "/store/data/"))
+    monkeypatch.setattr(backend._io_policy, "SITE_REDIRECTOR_MARKER", "/store/test/xrootd/")
+    path = tmp_path / ("input.yaml" if yaml_config else "input.txt")
+    values = ["root://site//store/test/xrootd/T2_Site/store/mc/a.root?tried=bad&token=keep",
+              "root://old//store/data/b.root", "root://private//store/user/me/c.root",
+              "/store/mc/d.root", "/tmp/local.root", "https://other/file.root"]
+    cfg = dict(fileList=values if yaml_config else ','.join(values),
+               enableSystematics=True if yaml_config else 'true', saveFile='keep.root')
+    if yaml_config:
+        path.write_text(yaml.safe_dump(cfg))
+    else:
+        path.write_text(''.join('{}={}\n'.format(k, v) for k, v in cfg.items()))
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command[0] == 'xrdcp'
+        if len(calls) <= failures:
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 0)
+    monkeypatch.setattr(subprocess, 'run', run)
+    block = backend.stage_inputs_block(config_file=str(path)) if stage_in else backend.xrootd_optimize_block(str(path))
+    code = block.split("<< 'RDFINPUT'\n", 1)[1].rsplit('\nRDFINPUT', 1)[0]
+    exec(compile(code, '<worker-input>', 'exec'), {})
+    actual = backend.read_config(str(path))
+    return actual, calls
 
 
-def test_runscript_excludes_xrootd_optimize_when_stage_in():
-    """When stage_inputs=True, files are staged locally so no XRootD
-    optimisation is needed and the block must be absent."""
-    script = generate_condor_runscript(
-        exe_relpath="myexe",
-        stage_inputs=True,
-        stage_outputs=False,
-        root_setup="",
-    )
-    assert "Optimizing XRootD redirectors" not in script
-    # Stage-in block must be present instead
-    assert "Staging input files" in script
+@pytest.mark.parametrize('yaml_config', [False, True])
+def test_worker_routes_public_inputs_globally_without_probes(tmp_path, monkeypatch, yaml_config):
+    actual, calls = _run_input_block(tmp_path, monkeypatch, yaml_config=yaml_config)
+    assert calls == []
+    assert actual['fileList'].split(',') == [
+        'root://cms-xrd-global.cern.ch//store/mc/a.root?token=keep',
+        'root://cms-xrd-global.cern.ch//store/data/b.root',
+        'root://private//store/user/me/c.root',
+        'root://cms-xrd-global.cern.ch//store/mc/d.root',
+        '/tmp/local.root', 'https://other/file.root']
+    assert actual['enableSystematics'] == 'true'
+    assert actual['saveFile'] == 'keep.root'
 
 
-def test_stage_in_uses_site_selection():
-    """The stage-in block must probe redirectors in parallel and pick the best."""
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "rank_redirectors_parallel" in block
-    assert "filter_site_redirectors" in block
-    assert "ThreadPoolExecutor" in block
+def test_stage_in_retries_global_endpoint_without_probing(tmp_path, monkeypatch):
+    actual, calls = _run_input_block(tmp_path, monkeypatch, stage_in=True, failures=2)
+    assert actual['fileList'] == ','.join('input_{}.root'.format(i) for i in range(6))
+    assert len(calls) == 8
+    assert all(cmd[-2] == 'root://cms-xrd-global.cern.ch//store/mc/a.root?token=keep' for cmd in calls[:3])
+    assert actual['saveFile'] == 'keep.root'
 
 
-def test_stage_in_probe_bytes_is_1mb():
-    """Stage-in probing should use 1 MiB (not tiny 32 KiB)."""
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "1 * 1024 * 1024" in block
+def test_failed_stage_in_preserves_original_input_config(tmp_path, monkeypatch):
+    import subprocess
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_input_block(tmp_path, monkeypatch, stage_in=True, failures=100)
+    assert 'input_0.root' not in (tmp_path / 'input.txt').read_text()
 
 
-def test_stage_in_uses_60s_timeout():
-    """Each xrdcp copy in stage-in must use a 60-second timeout."""
-    from core.python.submission_backend import stage_inputs_block
-    import re
-    block = stage_inputs_block()
-    m = re.search(r"STAGE_COPY_TIMEOUT\s*=\s*(\d+)", block)
-    assert m is not None, "STAGE_COPY_TIMEOUT not found in stage_inputs_block"
-    assert int(m.group(1)) == 60
+@pytest.mark.parametrize('stage_in', [False, True])
+def test_generated_workers_have_no_redirector_probe_processes(stage_in):
+    import subprocess
+    script = generate_condor_runscript('myexe', stage_in, False, '', runtime_config_relpath='cfg/custom.txt')
+    assert 'probe_via_root_macro' not in script
+    assert 'ThreadPoolExecutor' not in script
+    assert 'site_redirectors.json' not in script
+    assert './myexe cfg/custom.txt' in script
+    subprocess.run(['bash', '-n'], input=script, text=True, check=True)
 
 
-def test_stage_in_caps_retries_at_3():
-    """Stage-in must cap total attempts at 3 per file."""
-    from core.python.submission_backend import stage_inputs_block
-    import re
-    block = stage_inputs_block()
-    m = re.search(r"MAX_ATTEMPTS\s*=\s*(\d+)", block)
-    assert m is not None, "MAX_ATTEMPTS not found in stage_inputs_block"
-    assert int(m.group(1)) == 3
+@pytest.mark.parametrize('cpus,site_cpus', [(1, None), (1, 1), (2, None), (2, 2), (2, 1)])
+def test_worker_preserves_inherited_affinity_and_limits_thread_pools(tmp_path, cpus, site_cpus):
+    import json
+    import subprocess
+    import sys
+    if len(os.sched_getaffinity(0)) < cpus:
+        pytest.skip('Insufficient CPUs in the test allocation')
+    exe = tmp_path / 'myexe'
+    exe.write_text(
+        '#!' + sys.executable + '\n'
+        'import json, os, pathlib, subprocess, sys, threading\n'
+        'seen = []\n'
+        't = threading.Thread(target=lambda: seen.extend(os.sched_getaffinity(0)))\n'
+        't.start(); t.join()\n'
+        'child = subprocess.check_output([sys.executable, "-c", '
+        '"import os, json; print(json.dumps(sorted(os.sched_getaffinity(0))))"], text=True)\n'
+        'pathlib.Path("cpu.json").write_text(json.dumps(dict('
+        'affinity=sorted(os.sched_getaffinity(0)), thread=sorted(seen), child=json.loads(child), '
+        'omp=os.environ["OMP_NUM_THREADS"], blas=os.environ["OPENBLAS_NUM_THREADS"])))\n')
+    (tmp_path / 'submit_config.txt').write_text('fileList=local.root\nthreads=1\n')
+    script = generate_condor_runscript('myexe', False, False, '', request_cpus=cpus)
+    # Setup/staging must retain the same inherited placement as the analysis.
+    script = script.replace('stage_in_start=$(date +%s)',
+        "run_helper_python -c 'import os; print(len(os.sched_getaffinity(0)))' > setup_cpus.txt\n"
+        'stage_in_start=$(date +%s)')
+    env = dict(os.environ, OPENBLAS_NUM_THREADS='64', OMP_NUM_THREADS='64')
+    site_affinity = set(sorted(os.sched_getaffinity(0))[:site_cpus])
+    subprocess.run(['bash'], input=script, cwd=tmp_path, env=env,
+                   text=True, check=True, capture_output=True,
+                   preexec_fn=(lambda: os.sched_setaffinity(0, site_affinity)) if site_cpus else None)
+    result = json.loads((tmp_path / 'cpu.json').read_text())
+    expected = sorted(site_affinity if site_cpus else os.sched_getaffinity(0))
+    assert result['affinity'] == expected
+    assert result['thread'] == result['affinity']
+    assert result['child'] == expected
+    assert result['omp'] == result['blas'] == str(cpus)
+    assert int((tmp_path / 'setup_cpus.txt').read_text()) == len(expected)
 
 
-def test_stage_in_uses_only_site_specific_redirectors():
-    """Stage-in must rank and retry only site-specific redirectors."""
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "SITE_REDIRECTOR_MARKER" in block
-    assert "GLOBAL_REDIRECTOR" not in block
-    assert "build_url(extract_lfn(url), GLOBAL_REDIRECTOR)" not in block
+def test_worker_cpu_launcher_preserves_analysis_failure(tmp_path):
+    import subprocess
+    (tmp_path / 'myexe').write_text('#!/bin/sh\nexit 23\n')
+    (tmp_path / 'submit_config.txt').write_text('fileList=local.root\n')
+    script = generate_condor_runscript('myexe', False, False, '')
+    result = subprocess.run(['bash'], input=script, cwd=tmp_path,
+                            text=True, capture_output=True)
+    assert result.returncode == 23
 
 
-def test_stage_in_uses_root_macro():
-    """Stage-in probing must use the ROOT macro (not pyxrootd)."""
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "probe_via_root_macro" in block
-    assert "probe_via_pyxrootd" not in block
-
-
-def test_runscript_xrootd_optimize_uses_correct_config_file():
-    """The XRootD optimisation block must reference the custom config file."""
-    script = generate_condor_runscript(
-        exe_relpath="myexe",
-        stage_inputs=False,
-        stage_outputs=False,
-        root_setup="",
-        config_file="cfg/my_config.txt",
-    )
-    assert "cfg/my_config.txt" in script
-
-
-def test_runscript_xrootd_optimize_uses_runtime_config_relpath():
-    script = generate_condor_runscript(
-        exe_relpath="myexe",
-        stage_inputs=False,
-        stage_outputs=False,
-        root_setup="",
-        config_file="submit_config.txt",
-        runtime_config_relpath="cfg/submit_config.txt",
-    )
-    assert 'cfg_path = "cfg/submit_config.txt"' in script
-    assert './myexe cfg/submit_config.txt' in script
-
-
-def test_xrootd_optimize_block_includes_blacklist():
-    """Blacklisted sites passed to xrootd_optimize_block must appear in the
-    generated script so the worker node can skip them."""
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block(blacklisted_sites=["T2_Bad_Site", "bad-host.cern.ch"])
-    assert "T2_Bad_Site" in block
-    assert "bad-host.cern.ch" in block
-
-
-def test_xrootd_optimize_block_uses_short_timeout():
-    """The probe timeout in the worker-side script must be <= 10 s."""
-    from core.python.submission_backend import xrootd_optimize_block
-    import re
-    block = xrootd_optimize_block()
-    m = re.search(r"PROBE_TIMEOUT\s*=\s*(\d+(?:\.\d+)?)", block)
-    assert m is not None, "PROBE_TIMEOUT not found in generated block"
-    assert float(m.group(1)) <= 10.0, f"PROBE_TIMEOUT too large: {m.group(1)}"
-
-
-def test_xrootd_optimize_block_reads_runtime_blacklist():
-    """The generated script must read the xrdBlacklist key from the config."""
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert "xrdBlacklist" in block
-
-
-def test_xrootd_optimize_block_filters_site_specific_redirectors():
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert "filter_site_redirectors" in block
-    assert "SITE_REDIRECTOR_MARKER" in block
-
-
-def test_stage_in_block_filters_site_specific_redirectors():
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "filter_site_redirectors" in block
-    assert "SITE_REDIRECTOR_MARKER" in block
-
-
-def test_stage_in_block_accepts_direct_pfn_candidates():
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "is_direct_xrootd_candidate" in block
-    assert "GENERIC_REDIRECTOR_HOSTS" in block
-    assert "candidate_url" in block
-
-
-def test_stage_in_block_fails_job_when_any_redirector_selection_fails():
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert 'redirector_failures = []' in block
-    assert 'sys.exit(42)' in block
-    assert 'raise RuntimeError(f"all probes failed for {lfn}")' in block
-    assert 'using original URL' not in block
-
-
-def test_xrootd_optimize_block_uses_root_probe_only():
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert "probe_via_subprocess" not in block
-    assert "probe_via_root_macro" in block
-
-
-def test_xrootd_optimize_block_accepts_direct_pfn_candidates():
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert "is_direct_xrootd_candidate" in block
-    assert "GENERIC_REDIRECTOR_HOSTS" in block
-    assert "candidate_url" in block
-
-
-def test_xrootd_optimize_block_fails_job_when_any_redirector_selection_fails():
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert 'redirector_failures = []' in block
-    assert 'sys.exit(42)' in block
-    assert 'raise RuntimeError(f"all probes failed for {lfn}")' in block
+@pytest.mark.parametrize('stage_in', [False, True])
+def test_worker_executes_with_materialized_runtime_config(tmp_path, monkeypatch, stage_in):
+    import subprocess
+    import sys
+    from pathlib import Path
+    monkeypatch.chdir(tmp_path)
+    # The fake analysis consumes the actual config passed by the complete worker.
+    fake = tmp_path / 'myexe'
+    fake.write_text('#!' + sys.executable + '\nimport pathlib, sys\n'
+                    'pathlib.Path("consumed.txt").write_text(pathlib.Path(sys.argv[1]).read_text())\n')
+    (tmp_path / 'local.root').write_bytes(b'local input fixture')
+    (tmp_path / 'submit_config.txt').write_text('fileList=' + str(tmp_path / 'local.root') + '\nthreads=1\n')
+    script = generate_condor_runscript('myexe', stage_in, False, '',
+                                      runtime_config_relpath='cfg/submit_config.txt')
+    subprocess.run(['bash'], input=script, text=True, check=True, capture_output=True)
+    consumed = (tmp_path / 'consumed.txt').read_text()
+    assert 'threads=1' in consumed
+    assert ('fileList=input_0.root' if stage_in else str(tmp_path / 'local.root')) in consumed
+    if stage_in:
+        assert (tmp_path / 'input_0.root').read_bytes() == b'local input fixture'

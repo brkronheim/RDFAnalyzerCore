@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plugin lifecycle and services"
+  short_description: "Plugin lifecycle and services"
+  default_prompt: "Use $rdfanalyzer-plugin-lifecycle to trace manager roles, dependencies, context ownership, and lifecycle timing."

@@ -162,6 +162,33 @@ TEST_F(WeightManagerTest, AddScaleFactorWithEmptyColumnThrows) {
   EXPECT_THROW(mgr.addScaleFactor("sf", ""), std::invalid_argument);
 }
 
+TEST_F(WeightManagerTest, RepeatedScaleFactorRegistrationDoesNotSquareWeight) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+  dm->Define("genWeight_nominal", [](ULong64_t) { return 2.0; },
+             {"rdfentry_"}, *systematicManager);
+
+  // setupCmsStandardWeights() and setupCmsGenWeights() both register this
+  // same nominal component in the documented CMS stack.
+  mgr->addScaleFactor("genWeight", "genWeight_nominal");
+  mgr->addScaleFactor("genWeight", "genWeight_nominal");
+  mgr->defineNominalWeight("weight_nominal");
+  mgr->execute();
+  mgr->finalize();
+
+  ASSERT_EQ(mgr->getAuditEntries().size(), 1u);
+  EXPECT_DOUBLE_EQ(mgr->getAuditEntries()[0].sumWeights, 6.0);
+  EXPECT_DOUBLE_EQ(mgr->getAuditEntries()[0].meanWeight, 2.0);
+}
+
+TEST_F(WeightManagerTest, ScaleFactorNameCannotUseTwoColumns) {
+  WeightManager mgr;
+  mgr.addScaleFactor("genWeight", "genWeight_nominal");
+  EXPECT_THROW(
+      mgr.addScaleFactor("genWeight", "other_genWeight"),
+      std::invalid_argument);
+}
+
 // ---------------------------------------------------------------------------
 // Weight variation registration
 // ---------------------------------------------------------------------------
@@ -297,6 +324,29 @@ TEST_F(WeightManagerTest, NominalWeightWithTwoScaleFactors) {
   EXPECT_DOUBLE_EQ(e.sumWeights, 1.5);
   EXPECT_DOUBLE_EQ(e.minWeight, 0.5);
   EXPECT_DOUBLE_EQ(e.maxWeight, 1.0);
+}
+
+TEST_F(WeightManagerTest, NominalWeightWithIntegerScaleFactor) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+
+  dm->Define("sf_int",
+             [](ULong64_t i) { return static_cast<int>(i) + 1; },
+             {"rdfentry_"}, *systematicManager);
+
+  mgr->addScaleFactor("sf_int", "sf_int");
+  mgr->addNormalization("norm", 0.5);
+  mgr->defineNominalWeight("weight_nominal");
+
+  mgr->execute();
+  mgr->finalize();
+
+  ASSERT_EQ(mgr->getAuditEntries().size(), 1u);
+  const auto &e = mgr->getAuditEntries()[0];
+  EXPECT_DOUBLE_EQ(e.sumWeights, 3.0);
+  EXPECT_DOUBLE_EQ(e.meanWeight, 1.0);
+  EXPECT_DOUBLE_EQ(e.minWeight, 0.5);
+  EXPECT_DOUBLE_EQ(e.maxWeight, 1.5);
 }
 
 // ---------------------------------------------------------------------------
@@ -544,4 +594,48 @@ TEST_F(WeightManagerTest, CollectProvenanceEntriesContainsNominalColumn) {
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+TEST_F(WeightManagerTest, WideMixedProductPreservesOrderAndNormalizationWithoutAccumulatorChain) {
+  DataManager dm(2);
+  auto mgr = makeMgr(dm);
+  dm.DefineNominal("factor_float", []() { return 1.125f; });
+  dm.DefineNominal("factor_short", []() { return Short_t(1); });
+  dm.DefineNominal("factor_sign", [](ULong64_t i) { return i == 0 ? -2. : 0.; }, {"rdfentry_"});
+  double expected = 1.;
+  for (int i = 0; i < 40; ++i) {
+    const std::string column = i % 2 ? "factor_short" : "factor_float";
+    mgr->addScaleFactor("sf_" + std::to_string(i), column);
+    expected *= i % 2 ? 1. : 1.125;
+  }
+  mgr->addScaleFactor("sign", "factor_sign");
+  expected *= -2.;
+  mgr->addNormalization("scale", .3);
+  const auto before = dm.getDataFrame().GetColumnNames().size();
+  mgr->defineNominalWeight("wide_weight");
+  mgr->execute();
+  auto df = dm.getDataFrame();
+  EXPECT_EQ(df.GetColumnNames().size(), before + 1);
+  const auto result = df.Take<double>("wide_weight").GetValue();
+  EXPECT_DOUBLE_EQ(result[0], expected * .3);
+  EXPECT_DOUBLE_EQ(result[1], 0.);
+}
+
+TEST_F(WeightManagerTest, OutputMetadataContainsSufficientStatistics) {
+  auto dm = std::make_unique<DataManager>(3);
+  auto mgr = makeMgr(*dm);
+  dm->Define("sf", [](ULong64_t i) { return double(i) - 1.; },
+             {"rdfentry_"}, *systematicManager);
+  mgr->addScaleFactor("sf", "sf");
+  mgr->defineNominalWeight("audit_weight");
+  mgr->execute();
+  mgr->finalize();
+  const auto metadata = mgr->collectOutputMetadata();
+  const auto& audit = metadata.weightAudits.at("weight_audit_audit_weight");
+  EXPECT_EQ(audit.count, 3U);
+  EXPECT_EQ(audit.negativeCount, 1U);
+  EXPECT_EQ(audit.zeroCount, 1U);
+  EXPECT_DOUBLE_EQ(audit.sum, 0.);
+  EXPECT_DOUBLE_EQ(audit.minimum, -1.);
+  EXPECT_DOUBLE_EQ(audit.maximum, 1.);
 }

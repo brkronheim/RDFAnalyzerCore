@@ -1,0 +1,4 @@
+interface:
+  display_name: "Histograms and sparse schemas"
+  short_description: "Histograms and sparse schemas"
+  default_prompt: "Use $rdfanalyzer-histograms to trace histogram booking, stored axes, schema labels, and the appropriate projection path."

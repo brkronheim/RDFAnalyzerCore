@@ -161,15 +161,21 @@ Describes a single axis dimension of a `THnSparseF` histogram.
 
 ### HistogramSchema
 
-Describes `THnSparseF` histogram objects saved by `NDHistogramManager` into the meta-output ROOT file.
+Describes histogram objects saved by `NDHistogramManager` into the meta-output
+ROOT file. Per-job outputs contain mergeable `THnSparseF` objects under
+`nd_histograms_v1/` plus an embedded `__rdf_histogram_schema_v1` metadata
+object. After `hadd`, compatibility merge workflows can add reconstructed
+`TH1F` objects while retaining the sparse arrays. Schema-aware readers do not
+require that expansion; the vjet merge wrapper defaults to sparse-only output
+and accepts `--extract-histograms` for legacy consumers.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `schema_version` | `int` | `1` | Schema format version. |
 | `output_file` | `str` | `""` | Path or pattern of the meta-output ROOT file. Must not be empty. |
-| `histogram_names` | `list[str]` | `[]` | Names of the `THnSparseF` objects expected in the file. |
+| `histogram_names` | `list[str]` | `[]` | ROOT paths of the `THnSparseF` objects expected in the file. |
 | `axes` | `list[HistogramAxisSpec]` | `[]` | Axis specifications shared across all histograms in this schema. |
-| `axis_labels` | `dict[str, list[str]]` | `{}` | Optional label payloads inferred from histogram config axes such as channel, control-region, or sample-category labels. |
+| `axis_labels` | `dict[str, list[str]]` | `{}` | Category labels for the channel, control, sample, and systematic axes, read from the embedded ROOT schema when available. |
 | `sample_metadata` | `dict[str, dict]` | `{}` | Optional per-sample or per-alias metadata used by downstream tools to resolve fit groupings. |
 | `sample_combinations` | `dict[str, dict]` | `{}` | Optional pre-resolved sample-combination definitions, compatible with the datacard generator `sample_combinations` block. |
 | `processes` | `dict[str, dict]` | `{}` | Optional pre-resolved process definitions, compatible with the datacard generator `processes` block. |
@@ -204,13 +210,18 @@ These extra histogram fields are intended for downstream automation rather than 
 
 ### MetadataSchema
 
-Describes the provenance metadata output written by `ProvenanceService` as `TNamed` objects inside a `TDirectory` in the meta-output ROOT file.
+Describes compact job metadata, legacy provenance directories and merged bundle
+references. The manifest envelope remains version 1; embedded formats have
+independent versions. See [metadata storage and merging](METADATA.md).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `schema_version` | `int` | `1` | Schema format version. |
 | `output_file` | `str` | `""` | Path or pattern of the meta-output ROOT file. Must not be empty. |
 | `provenance_dir` | `str` | `"provenance"` | Name of the `TDirectory` holding the provenance objects. Must not be empty. |
+| `storage_format` | `str` | `"auto"` | Auto-detect legacy/compact storage; also accepts `legacy` or `compact`. |
+| `document_key` | `str` | `"__rdf_job_metadata_v1"` | Compact job document key. |
+| `reference_key` | `str` | `"__rdf_metadata_reference_v1"` | Portable merged metadata reference key. |
 | `required_keys` | `list[str]` | `PROVENANCE_REQUIRED_KEYS` | Keys that must be present. Defaults to the framework-defined required set. |
 | `optional_keys` | `list[str]` | `PROVENANCE_OPTIONAL_KEYS` | Keys that may optionally be present. |
 

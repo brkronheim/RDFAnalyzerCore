@@ -38,9 +38,24 @@ aux/Run3/*
 aux/Run2/*
 docs/doxygen/*
 analyses/*
+!/analyses/CMS_Run2016_DoubleMuon/
+/analyses/CMS_Run2016_DoubleMuon/*
+!/analyses/CMS_Run2016_DoubleMuon/rdf-dependencies.cmake
 core/python/law/index
+skimRun*/
+mergeRun*/
+rucioFileList*/
+xrdfsFileList*/
 
 AGENTS/
+/.venv/
+.venv-rabbit/
 analyticFit_ci_run/
 python_env.tar.gz
 submit_config.txt
+
+# Optional independently versioned extension checkout.
+/extensions/cms/
+/extensions/*.bundle
+/build-core-only/
+/build-clang/

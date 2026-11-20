@@ -7,6 +7,8 @@
 - **[Getting Started](./GETTING_STARTED.md)** - Installation and first steps
 - **[Python Bindings](./PYTHON_BINDINGS_QUICKSTART.md)** - Using RDFAnalyzerCore from Python
 - **[Configuration Reference](./CONFIG_REFERENCE.md)** - All config options
+- **[Generic Stitching](./STITCHING.md)** - Reusable counters, binning, and validation
+- **[Agent analysis walkthrough](./ANALYSIS_WALKTHROUGH.md)** - Trace framework execution through a compact ExampleAnalysis
 - **[Error Handling](./ERRORS_AND_TRACING.md)** - Common errors and solutions
 
 ## Documentation Structure
@@ -16,7 +18,7 @@
 **Getting Started**
 - [Installation](./GETTING_STARTED.md) - Build requirements
 - [Quick Start](./GETTING_STARTED.md) - Minimal example
-- [Examples](../examples/README.md) - Runnable examples and scripts
+- [Examples](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/README.md) - Runnable examples and scripts
 
 **Analysis Guide**
 - [Building Analyses](./ANALYSIS_GUIDE.md) - Step-by-step tutorials
@@ -56,7 +58,7 @@
 - [ONNX](./ONNX_IMPLEMENTATION.md) - ML models
 - [Correction](./CMS_CORRECTIONS.md) - Scale factors
 - [Jet Energy Scale](./JET_ENERGY_CORRECTIONS.md) - JES corrections
-- [SOFIE](./SOFIE_IMPLEMENTATION.md) - Compiled models
+- [SOFIE](./SOFIE_IMPLEMENTATION.md) - Standalone PyPI generation and C++ registration
 
 **Systematics**
 - [Nuisance Groups](./NUISANCE_GROUPS.md) - Grouping variations
@@ -89,6 +91,7 @@
 
 - **Agents (automation + validation)**
   - Start: [Documentation Index](./INDEX.md)
+  - Analysis workflow: [analysis skill](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/.agents/skills/rdfanalyzer-analysis/SKILL.md), [framework development skill](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/.agents/skills/rdfanalyzer-development/SKILL.md), and [the analysis walkthrough](./ANALYSIS_WALKTHROUGH.md)
   - Then: [Errors and Tracing](./ERRORS_AND_TRACING.md), [Configuration Validation](./CONFIGURATION_VALIDATION.md), [Output Schema](./OUTPUT_SCHEMA.md), [Validation Reports](./VALIDATION_REPORTS.md)
 
 ## Documentation Quality

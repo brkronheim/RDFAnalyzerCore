@@ -5,8 +5,8 @@
 # RDataFrame accessible by any Define, Filter, or histogram weight expression.
 # =============================================================================
 
-# Per-event normalisation weight = xsec * filter_efficiency / sum_weights
+# Constant histogram weight used by the current analysis.
 normScale: 1.5715650132731668e-12
 
-# Sum of generator event weights (used to compute normScale)
+# Retained sample metadata; analysis.cc does not consume this constant.
 sampleNorm: 1196323400000000.0

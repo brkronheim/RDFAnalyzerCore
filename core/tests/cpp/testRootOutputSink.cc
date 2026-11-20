@@ -88,16 +88,44 @@ TEST_F(RootOutputSinkTest, ExactColumnNamesAreWritten) {
   RootOutputSink sink;
   auto df = dm->getDataFrame();
   ASSERT_NO_THROW(
-      sink.writeDataFrame(df, config, dm.get(), &sm, OutputChannel::Skim));
+      sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
 
   TFile f(outputPath.c_str(), "READ");
   ASSERT_FALSE(f.IsZombie());
+  EXPECT_EQ(f.GetCompressionSettings(), 505);
   auto* tree = dynamic_cast<TTree*>(f.Get("Events"));
   ASSERT_NE(tree, nullptr);
   EXPECT_NE(tree->GetBranch("Electron_pt"),  nullptr);
   EXPECT_NE(tree->GetBranch("Muon_pt"),      nullptr);
   EXPECT_EQ(tree->GetBranch("Electron_eta"), nullptr); // not requested
   f.Close();
+}
+
+TEST_F(RootOutputSinkTest, FullSnapshotsResolveAliasDuplicatesButExplicitAliasesKeepTheirNames) {
+  auto dm=makeDataManager();
+  auto df=dm->getDataFrame().Alias("Electron_pt_copy","Electron_pt").Alias("Electron_pt_copy2","Electron_pt_copy");
+  for(const bool wildcard:{false,true}) {
+    RootOutputSink sink;
+    if(wildcard) {
+      writeSaveConfigFile(saveConfigPath,{"*"});writeAnalysisConfig(cfgPath,outputPath,saveConfigPath);
+      ConfigurationManager config(cfgPath);SystematicManager sm;
+      ASSERT_NO_THROW(sink.writeDataFrame(df,config,&sm,OutputChannel::Skim));
+    } else {
+      ASSERT_NO_THROW(sink.writeDataFrame(df,OutputSpec{outputPath,"Events",{}}));
+    }
+    TFile file(outputPath.c_str(),"READ");auto* tree=dynamic_cast<TTree*>(file.Get("Events"));
+    ASSERT_NE(tree,nullptr);EXPECT_EQ(tree->GetEntries(),5);
+    EXPECT_NE(tree->GetBranch("Electron_pt"),nullptr);
+    EXPECT_EQ(tree->GetBranch("Electron_pt_copy"),nullptr);
+    EXPECT_EQ(tree->GetBranch("Electron_pt_copy2"),nullptr);
+    EXPECT_NE(tree->GetBranch("Electron_eta"),nullptr);
+  }
+  RootOutputSink explicitSink;
+  ASSERT_NO_THROW(explicitSink.writeDataFrame(df,OutputSpec{outputPath,"Events",{"Electron_pt_copy2"}}));
+  TFile file(outputPath.c_str(),"READ");auto* tree=dynamic_cast<TTree*>(file.Get("Events"));
+  ASSERT_NE(tree,nullptr);EXPECT_NE(tree->GetBranch("Electron_pt_copy2"),nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt"),nullptr);
+  float value=0.;tree->SetBranchAddress("Electron_pt_copy2",&value);tree->GetEntry(0);EXPECT_FLOAT_EQ(value,30.f);
 }
 
 /// A glob pattern like Electron_* must expand to all matching columns
@@ -112,7 +140,7 @@ TEST_F(RootOutputSinkTest, GlobPatternExpandsMatchingColumns) {
   RootOutputSink sink;
   auto df = dm->getDataFrame();
   ASSERT_NO_THROW(
-      sink.writeDataFrame(df, config, dm.get(), &sm, OutputChannel::Skim));
+      sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
 
   TFile f(outputPath.c_str(), "READ");
   ASSERT_FALSE(f.IsZombie());
@@ -136,7 +164,7 @@ TEST_F(RootOutputSinkTest, MixedExactAndGlobPatterns) {
   RootOutputSink sink;
   auto df = dm->getDataFrame();
   ASSERT_NO_THROW(
-      sink.writeDataFrame(df, config, dm.get(), &sm, OutputChannel::Skim));
+      sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
 
   TFile f(outputPath.c_str(), "READ");
   ASSERT_FALSE(f.IsZombie());
@@ -145,6 +173,119 @@ TEST_F(RootOutputSinkTest, MixedExactAndGlobPatterns) {
   EXPECT_NE(tree->GetBranch("Electron_pt"),  nullptr);
   EXPECT_NE(tree->GetBranch("Electron_eta"), nullptr);
   EXPECT_NE(tree->GetBranch("Muon_pt"),      nullptr);
+  f.Close();
+}
+
+TEST_F(RootOutputSinkTest, SystematicColumnsAreOptInForSkims) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+
+  ConfigurationManager config(cfgPath);
+  config.set("skimSystematics", "true");
+
+  auto dm = std::make_unique<DataManager>(5);
+  SystematicManager sm;
+  sm.registerSystematic("jes", {"Electron_pt"});
+
+  auto df = dm->getDataFrame();
+  df = df.Define("Electron_pt", []() { return 30.0f; });
+  df = df.Define("Electron_pt_jesUp", []() { return 31.0f; });
+  df = df.Define("Electron_pt_jesDown", []() { return 29.0f; });
+  dm->setDataFrame(df);
+
+  RootOutputSink sink;
+  auto outputDf = dm->getDataFrame();
+  ASSERT_NO_THROW(
+      sink.writeDataFrame(outputDf, config, &sm, OutputChannel::Skim));
+
+  TFile f(outputPath.c_str(), "READ");
+  ASSERT_FALSE(f.IsZombie());
+  auto *tree = dynamic_cast<TTree *>(f.Get("Events"));
+  ASSERT_NE(tree, nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt"), nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt_jesUp"), nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt_jesDown"), nullptr);
+  f.Close();
+}
+
+TEST_F(RootOutputSinkTest, SkimSystematicsUseRegisteredColumnMappings) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt", "Muon_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+
+  ConfigurationManager config(cfgPath);
+  config.set("skimSystematics", "true");
+
+  auto dm = std::make_unique<DataManager>(5);
+  SystematicManager sm;
+  sm.registerVariationColumns("Electron_pt", "jes", "custom_jes_up",
+                              "custom_jes_down");
+  sm.registerVariationColumn("Electron_pt", "pdfReplica0", "pdf_replica_zero");
+  // An explicit label can share a name with a paired family affecting a
+  // different variable. Skims must keep that registration scoped per variable.
+  sm.registerVariationColumn("Electron_pt", "scale", "electron_scale_only");
+  sm.registerVariationColumns("Muon_pt", "scale", "muon_scale_up",
+                              "muon_scale_down");
+
+  auto df = dm->getDataFrame();
+  df = df.Define("Electron_pt", []() { return 30.0f; });
+  df = df.Define("custom_jes_up", []() { return 31.0f; });
+  df = df.Define("custom_jes_down", []() { return 29.0f; });
+  df = df.Define("pdf_replica_zero", []() { return 32.0f; });
+  df = df.Define("electron_scale_only", []() { return 33.0f; });
+  df = df.Define("Muon_pt", []() { return 20.0f; });
+  df = df.Define("muon_scale_up", []() { return 21.0f; });
+  df = df.Define("muon_scale_down", []() { return 19.0f; });
+  dm->setDataFrame(df);
+
+  RootOutputSink sink;
+  auto outputDf = dm->getDataFrame();
+  ASSERT_NO_THROW(
+      sink.writeDataFrame(outputDf, config, &sm, OutputChannel::Skim));
+
+  TFile f(outputPath.c_str(), "READ");
+  ASSERT_FALSE(f.IsZombie());
+  auto* tree = dynamic_cast<TTree*>(f.Get("Events"));
+  ASSERT_NE(tree, nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt"), nullptr);
+  EXPECT_NE(tree->GetBranch("custom_jes_up"), nullptr);
+  EXPECT_NE(tree->GetBranch("custom_jes_down"), nullptr);
+  EXPECT_NE(tree->GetBranch("pdf_replica_zero"), nullptr);
+  EXPECT_NE(tree->GetBranch("electron_scale_only"), nullptr);
+  EXPECT_NE(tree->GetBranch("muon_scale_up"), nullptr);
+  EXPECT_NE(tree->GetBranch("muon_scale_down"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Muon_pt_scale"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt_jesUp"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt_pdfReplica0Up"), nullptr);
+  f.Close();
+}
+
+TEST_F(RootOutputSinkTest, SystematicColumnsAreExcludedByDefault) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+
+  ConfigurationManager config(cfgPath);
+  auto dm = std::make_unique<DataManager>(5);
+  SystematicManager sm;
+  sm.registerSystematic("jes", {"Electron_pt"});
+
+  auto df = dm->getDataFrame();
+  df = df.Define("Electron_pt", []() { return 30.0f; });
+  df = df.Define("Electron_pt_jesUp", []() { return 31.0f; });
+  df = df.Define("Electron_pt_jesDown", []() { return 29.0f; });
+  dm->setDataFrame(df);
+
+  RootOutputSink sink;
+  auto outputDf = dm->getDataFrame();
+  ASSERT_NO_THROW(
+      sink.writeDataFrame(outputDf, config, &sm, OutputChannel::Skim));
+
+  TFile f(outputPath.c_str(), "READ");
+  ASSERT_FALSE(f.IsZombie());
+  auto *tree = dynamic_cast<TTree *>(f.Get("Events"));
+  ASSERT_NE(tree, nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_pt"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt_jesUp"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Electron_pt_jesDown"), nullptr);
   f.Close();
 }
 
@@ -161,5 +302,52 @@ TEST_F(RootOutputSinkTest, GlobPatternWithNoMatchDoesNotThrow) {
   auto df = dm->getDataFrame();
   // When the glob matches nothing, columns is empty so all columns are snapshotted.
   ASSERT_NO_THROW(
-      sink.writeDataFrame(df, config, dm.get(), &sm, OutputChannel::Skim));
+      sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
+}
+
+TEST_F(RootOutputSinkTest, ConfiguredCompressionPreservesEntriesAndValues) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+  auto dm = makeDataManager();
+  SystematicManager sm;
+  auto df = dm->getDataFrame();
+  for (const auto& setting : std::vector<std::pair<std::string, int>>{
+           {"zstd", 509}, {"lzma", 209}, {"zlib", 109}, {"lz4", 409}}) {
+    ConfigurationManager config(cfgPath);
+    config.set("skimCompressionAlgorithm", setting.first);
+    config.set("skimCompressionLevel", "9");
+    RootOutputSink sink;
+    sink.writeDataFrame(df, config, &sm, OutputChannel::Skim);
+    TFile file(outputPath.c_str(), "READ");
+    ASSERT_FALSE(file.IsZombie());
+    EXPECT_EQ(file.GetCompressionSettings(), setting.second);
+    auto* tree = dynamic_cast<TTree*>(file.Get("Events"));
+    ASSERT_NE(tree, nullptr);
+    EXPECT_EQ(tree->GetEntries(), 5);
+    float value = 0;
+    tree->SetBranchAddress("Electron_pt", &value);
+    for (int entry = 0; entry < 5; ++entry) {
+      tree->GetEntry(entry);
+      EXPECT_FLOAT_EQ(value, 30.f);
+    }
+  }
+}
+
+TEST_F(RootOutputSinkTest, InvalidCompressionFailsBeforeCreatingOutput) {
+  writeSaveConfigFile(saveConfigPath, {"Electron_pt"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+  auto dm = makeDataManager();
+  SystematicManager sm;
+  auto df = dm->getDataFrame();
+  for (const auto& setting : std::vector<std::pair<std::string, std::string>>{
+           {"skimCompressionAlgorithm", "typo"}, {"skimCompressionLevel", "10"},
+           {"skimCompressionLevel", "-1"}, {"skimCompressionLevel", "9oops"},
+           {"skimCompressionLevel", ""}}) {
+    ConfigurationManager config(cfgPath);
+    config.set(setting.first, setting.second);
+    RootOutputSink sink;
+    EXPECT_THROW(sink.writeDataFrame(df, config, &sm, OutputChannel::Skim), std::invalid_argument);
+    std::ifstream output(outputPath);
+    EXPECT_FALSE(output.good());
+  }
 }

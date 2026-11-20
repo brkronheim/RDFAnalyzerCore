@@ -1,0 +1,4 @@
+interface:
+  display_name: "Triggers, regions, and cutflows"
+  short_description: "Triggers, regions, and cutflows"
+  default_prompt: "Use $rdfanalyzer-selection-regions to trace trigger acceptance, region branches, filters, and weighted cutflow accounting."

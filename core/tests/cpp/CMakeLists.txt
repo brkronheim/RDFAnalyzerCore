@@ -1,8 +1,16 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../extern/gtest/googletest/include ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_executable(testTagAndProbe testTagAndProbe.cc)
+target_include_directories(testTagAndProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../interface)
+target_link_libraries(testTagAndProbe PRIVATE gtest gtest_main)
+add_test(NAME TagAndProbeTest COMMAND testTagAndProbe)
+
 # Define the test source directory for all test executables
 add_compile_definitions(TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_compile_definitions(TEST_BINARY_DIR="${CMAKE_BINARY_DIR}")
+
+# Setup-only C++17 contracts; this target has no ROOT or framework link dependency.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../native_authoring/Targets.cmake")
 
 add_executable(testRootOutputSink testRootOutputSink.cc)
 target_link_libraries(testRootOutputSink core gtest gtest_main)
@@ -13,6 +21,48 @@ target_link_libraries(testProvenanceService core gtest gtest_main)
 add_test(NAME ProvenanceServiceTest COMMAND testProvenanceService)
 
 # Basic functionality tests
+add_executable(testRootRegistryOptimization testRootRegistryOptimization.cc)
+target_link_libraries(testRootRegistryOptimization PRIVATE core gtest gtest_main)
+target_compile_definitions(testRootRegistryOptimization PRIVATE
+    RDF_EXPECT_ROOT_REGISTRY=$<BOOL:${RDF_ROOT_REGISTRY_AVAILABLE}>
+    RDF_EXPECT_PACKED_READERS=$<BOOL:${RDF_ROOT_LOCALITY_AVAILABLE}>
+    RDF_EXPECT_MIMALLOC=$<BOOL:${RDF_USE_MIMALLOC}>)
+if(RDF_ROOT_LOCALITY_AVAILABLE)
+    target_include_directories(testRootRegistryOptimization BEFORE PRIVATE "${RDF_ROOT_INLINE_INCLUDE}")
+endif()
+if(RDF_USE_MIMALLOC)
+    target_include_directories(testRootRegistryOptimization PRIVATE "${PROJECT_SOURCE_DIR}/core/extern/mimalloc/include")
+endif()
+add_test(NAME RootRegistryOptimizationTest COMMAND testRootRegistryOptimization)
+add_test(NAME RootRegistryOptimizationDisabledTest COMMAND testRootRegistryOptimization)
+set_tests_properties(RootRegistryOptimizationDisabledTest PROPERTIES
+    ENVIRONMENT "RDF_ROOT_REGISTRY_OPTIMIZATION=0")
+
+if(TARGET RDFXrdAdaptor)
+    add_executable(testXrdOpenRetry testXrdOpenRetry.cc)
+    target_include_directories(testXrdOpenRetry PRIVATE
+        "${CMAKE_SOURCE_DIR}/core/xrd" "${XRDCL_INCLUDE_DIR}")
+    target_link_libraries(testXrdOpenRetry PRIVATE RDFXrdAdaptor gtest gtest_main)
+    target_compile_features(testXrdOpenRetry PRIVATE cxx_std_17)
+    add_test(NAME XrdOpenRetryTest COMMAND testXrdOpenRetry)
+
+    add_executable(testXrdSiteRanking testXrdSiteRanking.cc)
+    target_link_libraries(testXrdSiteRanking PRIVATE core RDFXrdAdaptor gtest gtest_main)
+    target_compile_features(testXrdSiteRanking PRIVATE cxx_std_17)
+    add_test(NAME XrdSiteRankingTest COMMAND testXrdSiteRanking)
+
+    add_executable(testXrdReadMemory testXrdReadMemory.cc)
+    target_include_directories(testXrdReadMemory PRIVATE
+        "${CMAKE_SOURCE_DIR}/core/xrd" "${XRDCL_INCLUDE_DIR}")
+    target_link_libraries(testXrdReadMemory PRIVATE "${XRDCL_LIBRARY}" gtest gtest_main)
+    target_compile_features(testXrdReadMemory PRIVATE cxx_std_17)
+    add_test(NAME XrdReadMemoryTest COMMAND testXrdReadMemory)
+
+    add_executable(testXrdSharedFile testXrdSharedFile.cc)
+    target_link_libraries(testXrdSharedFile PRIVATE RDFXrdAdaptor gtest gtest_main)
+    target_compile_features(testXrdSharedFile PRIVATE cxx_std_17)
+    add_test(NAME XrdSharedFileTest COMMAND testXrdSharedFile)
+endif()
 
 add_executable(testConfigurationManager testConfigurationManager.cc)
 target_link_libraries(testConfigurationManager core gtest gtest_main)
@@ -54,6 +104,10 @@ add_executable(testCounterService testCounterService.cc)
 target_link_libraries(testCounterService core gtest gtest_main)
 add_test(NAME CounterServiceTest COMMAND testCounterService)
 
+add_executable(testCartesianBinning testCartesianBinning.cc)
+target_link_libraries(testCartesianBinning core gtest gtest_main)
+add_test(NAME CartesianBinningTest COMMAND testCartesianBinning)
+
 add_executable(testCounterService_Dedup testCounterService_Dedup.cc)
 target_link_libraries(testCounterService_Dedup coreAll gtest gtest_main)
 add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)
@@ -61,6 +115,24 @@ add_test(NAME CounterServiceDedupTest COMMAND testCounterService_Dedup)
 add_executable(testDataManager testDataManager.cc)
 target_link_libraries(testDataManager coreAll gtest gtest_main)
 add_test(NAME DataManagerTest COMMAND testDataManager)
+
+add_executable(testInputCache testInputCache.cc)
+target_link_libraries(testInputCache coreAll gtest gtest_main)
+add_test(NAME InputCacheTest COMMAND testInputCache)
+
+# Deterministic framework clock-call instrumentation uses a GNU libstdc++
+# symbol. Other compilers/platforms retain the ordinary semantic suite above.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_executable(testInputCacheClock testInputCache.cc)
+    target_link_libraries(testInputCacheClock PRIVATE coreAll gtest gtest_main)
+    target_compile_definitions(testInputCacheClock PRIVATE RDF_INPUT_CACHE_CLOCK_TEST=1)
+    target_link_options(testInputCacheClock PRIVATE
+        "-Wl,--wrap=_ZNSt6chrono3_V212steady_clock3nowEv")
+    add_test(NAME InputCacheClockTest COMMAND testInputCacheClock)
+endif()
+
+add_executable(benchmarkInputCache EXCLUDE_FROM_ALL benchmarkInputCache.cc)
+target_link_libraries(benchmarkInputCache coreAll)
 
 add_executable(testSystematicBundle testSystematicBundle.cc)
 target_link_libraries(testSystematicBundle coreAll gtest gtest_main)
@@ -73,10 +145,6 @@ add_test(NAME ColumnProjectionTest COMMAND testColumnProjection)
 add_executable(testWorkingPointRecipe testWorkingPointRecipe.cc)
 target_link_libraries(testWorkingPointRecipe coreAll gtest gtest_main)
 add_test(NAME WorkingPointRecipeTest COMMAND testWorkingPointRecipe)
-
-
-
-
 
 # Plugin tests
 
@@ -106,6 +174,9 @@ add_test(NAME OnnxManagerTest COMMAND testOnnxManager)
 
 add_executable(testSofieManager testSofieManager.cc)
 target_link_libraries(testSofieManager coreAll gtest gtest_main)
+if(RDF_SOFIE_BLAS_LIBRARY OR RDF_SOFIE_OPENBLAS_LIBRARY)
+    target_compile_definitions(testSofieManager PRIVATE RDF_TEST_SOFIE_BLAS)
+endif()
 add_test(NAME SofieManagerTest COMMAND testSofieManager)
 
 add_executable(testNDHistogramManager testNDHistogramManager.cc)
@@ -134,21 +205,14 @@ add_executable(testCutflowManager testCutflowManager.cc)
 target_link_libraries(testCutflowManager coreAll gtest gtest_main)
 add_test(NAME CutflowManagerTest COMMAND testCutflowManager)
 
-add_executable(testJetEnergyScaleManager testJetEnergyScaleManager.cc)
-target_link_libraries(testJetEnergyScaleManager coreAll gtest gtest_main)
-add_test(NAME JetEnergyScaleManagerTest COMMAND testJetEnergyScaleManager)
 
 add_executable(testTaggerWorkingPointManager testTaggerWorkingPointManager.cc)
 target_link_libraries(testTaggerWorkingPointManager coreAll gtest gtest_main)
 add_test(NAME TaggerWorkingPointManagerTest COMMAND testTaggerWorkingPointManager)
 
-add_executable(testLeptonPhotonEnergyManagers testLeptonPhotonEnergyManagers.cc)
-target_link_libraries(testLeptonPhotonEnergyManagers coreAll gtest gtest_main)
-add_test(NAME LeptonPhotonEnergyManagersTest COMMAND testLeptonPhotonEnergyManagers)
 
-add_executable(testCorrectedObjectCollectionManagers testCorrectedObjectCollectionManagers.cc)
-target_link_libraries(testCorrectedObjectCollectionManagers coreAll gtest gtest_main)
-add_test(NAME CorrectedObjectCollectionManagersTest COMMAND testCorrectedObjectCollectionManagers)
+
+
 
 add_executable(testRegionManager testRegionManager.cc)
 target_link_libraries(testRegionManager coreAll gtest gtest_main)
@@ -158,9 +222,10 @@ add_executable(testWeightManager testWeightManager.cc)
 target_link_libraries(testWeightManager coreAll gtest gtest_main)
 add_test(NAME WeightManagerTest COMMAND testWeightManager)
 
-add_executable(testGoldenJsonManager testGoldenJsonManager.cc)
-target_link_libraries(testGoldenJsonManager coreAll gtest gtest_main)
-add_test(NAME GoldenJsonManagerTest COMMAND testGoldenJsonManager)
+add_executable(testGenWeightManager testGenWeightManager.cc)
+target_link_libraries(testGenWeightManager coreAll gtest gtest_main)
+add_test(NAME GenWeightManagerTest COMMAND testGenWeightManager)
+
 
 
 add_executable(testAnalyzer_TriggerLogic testAnalyzer_TriggerLogic.cc)
@@ -179,7 +244,7 @@ add_executable(testRootEnvironmentGuard testRootEnvironmentGuard.cc)
 target_link_libraries(testRootEnvironmentGuard core gtest gtest_main)
 add_test(NAME RootEnvironmentGuardTest COMMAND testRootEnvironmentGuard)
 
-add_executable(testPlottingUtility testPlottingUtility.cc)
+add_executable(testPlottingUtility testPlottingUtility.cc testPlottingSession.cc)
 target_link_libraries(testPlottingUtility core gtest gtest_main)
 add_test(NAME PlottingUtilityTest COMMAND testPlottingUtility)
 
@@ -194,13 +259,68 @@ add_test(NAME OnnxManagerGpuIntegrationTest COMMAND testOnnxManagerGpu)
 endif()
 
 if(TARGET rdfanalyzer AND Python_EXECUTABLE)
-add_test(NAME PythonBindingsNumbaIntegration
+add_test(NAME ExtensionBuildIntegrationTest COMMAND ${Python_EXECUTABLE}
+         ${CMAKE_CURRENT_SOURCE_DIR}/test_extension_build.py
+         ${CMAKE_BINARY_DIR}/python "${RDF_ENABLED_EXTENSIONS}")
+set_tests_properties(ExtensionBuildIntegrationTest PROPERTIES
+                     ENVIRONMENT "PYTHONPATH=$ENV{PYTHONPATH}"
+                     TIMEOUT 60)
+add_test(NAME PythonPlottingBindingsTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_plotting_bindings.py)
+set_tests_properties(PythonPlottingBindingsTest PROPERTIES
+                    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python;RDF_PLOT_EXECUTABLE=$<TARGET_FILE:rdf-plot>")
+add_test(NAME PythonBindingsIntegrationTest
          COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_bindings.py)
+add_test(NAME PythonAuthoringTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_authoring.py)
+add_test(NAME PythonBoolColumnFilterTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_filter_column.py)
+add_test(NAME PythonInputSchemaTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_input_schema.py)
+set_tests_properties(PythonInputSchemaTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+    TIMEOUT 120)
+add_test(NAME PythonHistogramBatchTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_histogram_batch.py)
+set_tests_properties(PythonHistogramBatchTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+    TIMEOUT 120)
+add_test(NAME PythonVariableHistogramTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_variable_histograms.py)
+set_tests_properties(PythonVariableHistogramTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDF_VARIABLE_AXES_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+add_test(NAME PythonCorrectionBatchTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_correction_batch.py)
+set_tests_properties(PythonCorrectionBatchTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+    TIMEOUT 120)
+add_test(NAME PythonNDHistogramTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_nd_histograms.py)
+set_tests_properties(PythonNDHistogramTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDF_ND_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+set_tests_properties(PythonBoolColumnFilterTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+set_tests_properties(PythonAuthoringTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+add_test(NAME PythonDeclarationsTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_declarations.py)
+set_tests_properties(PythonDeclarationsTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
+add_test(NAME PythonModulesTest
+         COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_python_modules.py)
+set_tests_properties(PythonModulesTest PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
+    TIMEOUT 120)
 # Prepend our build/python to PYTHONPATH but preserve the user's PYTHONPATH
 # so imports provided by the user's environment (e.g. ROOT from an LCG view)
 # remain available when running under CTest.
-set_tests_properties(PythonBindingsNumbaIntegration PROPERTIES
-                    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+set_tests_properties(PythonBindingsIntegrationTest PROPERTIES
+                    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH};RDFANALYZER_PYTHON_MODULE_DIR=${CMAKE_BINARY_DIR}/python"
                     SKIP_RETURN_CODE 77)
 endif()
 
@@ -237,3 +357,6 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyCombineHarvesterConfig.cmake)
 endif()
 
+add_executable(testStxsManager testStxsManager.cc)
+target_link_libraries(testStxsManager PRIVATE core corePlugins gtest gtest_main)
+add_test(NAME StxsManagerTest COMMAND testStxsManager)

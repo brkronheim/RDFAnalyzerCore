@@ -266,6 +266,8 @@ class ManifestPlotTask(law.Task):
                     "Plot stubs will be written instead of real plots."
                 )
 
+            from plot_config import apply_plot_options
+            pending = []
             contexts = region_names if region_names else [""]
             for cfg in plot_cfgs:
                 for region in contexts:
@@ -303,17 +305,29 @@ class ManifestPlotTask(law.Task):
                             processes_cfg=cfg.get("processes", []),
                             rdfanalyzer=rdfanalyzer,
                         )
-                        result = pu.makeStackPlot(req)
-                        if result.success:
-                            plots_created.append(out_path)
-                            self.publish_message(
-                                f"  [{region or 'combined'}] {out_file} saved "
-                                f"(MC={result.mcIntegral:.3g}, data={result.dataIntegral:.3g})"
-                            )
-                        else:
-                            errors.append(f"PlottingUtility failed for {out_file!r}: {result.message}")
+                        # Explicit placeholders also work in sparse selections.
+                        def expand(value):
+                            if isinstance(value, str):
+                                return value.replace("{region}", region)
+                            if isinstance(value, list):
+                                return [expand(item) for item in value]
+                            if isinstance(value, dict):
+                                return {key: expand(item) for key, item in value.items()}
+                            return value
+                        expanded = expand(cfg)
+                        req = apply_plot_options(req, expanded, rdfanalyzer)
+                        pending.append(req)
                     except Exception as exc:  # noqa: BLE001
                         errors.append(f"Error plotting {out_file!r}: {exc}")
+
+            if pending:
+                results = pu.makeStackPlots(pending)
+                for req, result in zip(pending, results):
+                    if result.success:
+                        plots_created.append(req.outputFile)
+                    else:
+                        errors.append(f"PlottingUtility failed for {req.outputFile!r}: {result.message}")
+                provenance["warnings"] = [warning for result in results for warning in result.warnings]
 
         rec.save(os.path.join(self._plots_dir, "manifest_plot.perf.json"))
 
@@ -327,7 +341,7 @@ class ManifestPlotTask(law.Task):
             msg = f"ManifestPlotTask completed with {len(errors)} error(s):\n" + "\n".join(
                 f"  {e}" for e in errors
             )
-            self.publish_message(msg)
+            raise RuntimeError(msg)
         else:
             self.publish_message(
                 f"ManifestPlotTask complete.  {len(plots_created)} plot(s) written to {self._plots_dir}."

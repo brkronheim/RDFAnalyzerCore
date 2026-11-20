@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <ColumnProjection.h>
+#include <functions.h>
 #include <analyzer.h>
 #include <test_util.h>
 
 #include <ROOT/RVec.hxx>
 
+#include <limits>
 #include <string>
 
 namespace {
@@ -33,7 +35,7 @@ TEST(ColumnProjection, MemberProjectionDefinesMultipleColumns) {
       rdfanalysis::column::memberProjection("enabled_flag",
                                             &TestClassification::enabled));
 
-  auto df = analyzer.getDF();
+  auto df = analyzer.getDataFrameUnsafe();
   auto counts = df.Take<int>("count_value");
   auto flags = df.Take<bool>("enabled_flag");
 
@@ -58,7 +60,7 @@ TEST(ColumnProjection, IndexProjectionUnpacksPackedVectors) {
       rdfanalysis::column::indexProjection<FloatVec>("weight_up", 1),
       rdfanalysis::column::indexProjection<FloatVec>("weight_down", 2));
 
-  auto df = analyzer.getDF();
+  auto df = analyzer.getDataFrameUnsafe();
   auto nominal = df.Take<float>("weight_nominal");
   auto up = df.Take<float>("weight_up");
   auto down = df.Take<float>("weight_down");
@@ -82,7 +84,7 @@ TEST(ColumnProjection, SizeProjectionCountsCollectionEntries) {
       analyzer, "values",
       rdfanalysis::column::sizeProjection<FloatVec>("value_count"));
 
-  auto df = analyzer.getDF();
+  auto df = analyzer.getDataFrameUnsafe();
   auto counts = df.Take<int>("value_count");
 
   ASSERT_EQ(counts->size(), 2UL);
@@ -93,4 +95,37 @@ TEST(ColumnProjection, SizeProjectionCountsCollectionEntries) {
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+TEST(VectorUtilities, SelectsRequestedNumberAndPadsMissingRanks) {
+  ROOT::VecOps::RVec<int> values{4, 1, 7};
+  auto ranks = selectTop<int, 2>(values);
+  EXPECT_EQ(std::vector<int>(ranks.begin(), ranks.end()), (std::vector<int>{2, 0}));
+  EXPECT_TRUE((selectTop<int, 0>(values).empty()));
+  EXPECT_EQ((selectTop<int, 4>(values)[3]), -1);
+}
+
+TEST(VectorUtilities, EmptyCollectionsYieldZeroFlattenedRows) {
+  FloatVec empty, shortInput{3}, longInput{1, 2};
+  EXPECT_TRUE(FlattenRVec(9, empty, longInput).empty());
+  EXPECT_TRUE(FlattenRVecCast<int>(empty).empty());
+  auto rows = FlattenRVec(9, shortInput, longInput);
+  EXPECT_EQ(std::vector<double>(rows.begin(), rows.end()),
+            (std::vector<double>{9, 3, 1, 9, 3, 2}));
+  EXPECT_THROW(maximumVector(longInput, shortInput), std::invalid_argument);
+  EXPECT_EQ(maximumVector(shortInput, longInput)[0], 3);
+}
+
+TEST(VectorUtilities, SelectTopRanksNaNsAfterNumericValues) {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  FloatVec values{nan, -inf, 2, nan, inf};
+  auto ranks = selectTop<float, 5>(values);
+  ASSERT_EQ(ranks.size(), 5U);
+  EXPECT_EQ(ranks[0], 4);
+  EXPECT_EQ(ranks[1], 2);
+  EXPECT_EQ(ranks[2], 1);
+  EXPECT_TRUE(std::isnan(values.at(ranks[3])));
+  EXPECT_TRUE(std::isnan(values.at(ranks[4])));
+  EXPECT_NE(ranks[3], ranks[4]);
 }

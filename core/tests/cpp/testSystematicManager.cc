@@ -1,23 +1,65 @@
 #include <SystematicManager.h>
+#include <DataManager.h>
 #include <test_util.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
 class SystematicManagerTest : public ::testing::Test {
 protected:
-  void SetUp() override { ChangeToTestSourceDir(); systematicManager = new SystematicManager(); }
+  void SetUp() override {
+    ChangeToTestSourceDir();
+    systematicManager = std::make_unique<SystematicManager>();
+  }
 
-  void TearDown() override { delete systematicManager; }
-
-  SystematicManager *systematicManager = nullptr;
+  std::unique_ptr<SystematicManager> systematicManager;
 };
 
 TEST_F(SystematicManagerTest, ConstructorCreatesEmptyManager) {
   SystematicManager manager;
 
   EXPECT_TRUE(manager.getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, SharedPairedAndExplicitLabelsHaveOneSlotAndContiguousCounters) {
+  auto &sm=*systematicManager;
+  sm.registerVariationColumns("jet", "HEJER", "jet_up", "jet_down");
+  sm.registerVariationColumn("met", "HEJERUp", "met_up");
+  sm.registerVariationColumn("met", "HEJERDown", "met_down");
+  sm.registerVariationColumn("weight", "AReplica", "weight_a");
+  sm.registerVariationColumn("weight", "ZReplica", "weight_z");
+  const std::vector<std::string> expected{"Nominal","HEJERUp","HEJERDown","AReplica","ZReplica"};
+  EXPECT_EQ(sm.getVariationLabels(),expected);
+  EXPECT_EQ(sm.ISystematicManager::getVariationLabels(),expected);
+  EXPECT_EQ(sm.getVariationColumnName("met","HEJERUp"),"met_up");
+  EXPECT_EQ(sm.getVariationColumnName("jet","HEJERUp"),"jet_up");
+  DataManager dm(1);
+  EXPECT_EQ(sm.makeSystList("counter",dm),expected);
+  for(std::size_t i=0;i<expected.size();++i) {
+    const auto column=i==0?"counter":"counter_"+expected[i];
+    EXPECT_FLOAT_EQ(dm.getDataFrame().Take<float>(column).GetValue()[0],float(i));
+  }
+}
+
+TEST_F(SystematicManagerTest, DisabledManagerRemainsNominalOnly) {
+  systematicManager->setEnabled(false);
+
+  EXPECT_FALSE(systematicManager->isEnabled());
+  systematicManager->registerSystematic("jes", {"pt"});
+  systematicManager->registerVariationColumn("weight", "pdf1", "weight_pdf1");
+  systematicManager->registerVariationColumns(
+      "mass", "jer", "mass_jerUp", "mass_jerDown");
+
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+  EXPECT_TRUE(systematicManager->getExplicitVariationLabels().empty());
+  const std::vector<std::string> nominalOnly{"Nominal"};
+  EXPECT_EQ(systematicManager->getVariationLabels(), nominalOnly);
+  EXPECT_TRUE(systematicManager->getSystematicsForVariable("pt").empty());
+  EXPECT_TRUE(systematicManager->autoRegisterSystematics(
+                            {"pt_jesUp", "pt_jesDown"})
+                  .registered.empty());
 }
 
 TEST_F(SystematicManagerTest, RegisterSystematicBasic) {
@@ -430,6 +472,40 @@ TEST_F(SystematicManagerTest, AutoRegisterSystematics_CompoundVariableName) {
   EXPECT_TRUE(result.missingUp.empty());
 
   EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("my_var_name", "jes"));
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_RegisteredUnderscoreNuisance) {
+  systematicManager->registerSystematic("Absolute_2024", {"Jet_pt"});
+  // A similarly named nominal column must not override the registered suffix.
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"eventWeight", "eventWeight_Absolute",
+       "eventWeight_Absolute_2024Up", "eventWeight_Absolute_2024Down"});
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first, "eventWeight");
+  EXPECT_EQ(result.registered[0].second, "Absolute_2024");
+  EXPECT_EQ(systematicManager->getSystematics().count("2024"), 0u);
+  EXPECT_EQ(systematicManager->getVariationColumnName("eventWeight", "Absolute_2024Up"),
+            "eventWeight_Absolute_2024Up");
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_RequiresExistingBase) {
+  // NanoAOD's ptUnclustered is not a variation of a column named PuppiMET.
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"PuppiMET_pt", "PuppiMET_ptUnclusteredUp", "PuppiMET_ptUnclusteredDown"});
+  EXPECT_TRUE(result.registered.empty());
+  EXPECT_TRUE(systematicManager->getSystematics().empty());
+}
+
+TEST_F(SystematicManagerTest, AutoRegisterSystematics_UnderscoreNuisanceFromBase) {
+  const auto result = systematicManager->autoRegisterSystematics(
+      {"jet_pt", "jet_pt_Absolute_2024Up", "jet_pt_Absolute_2024Down",
+       "weight", "weight_BBEC1_2024Down"});
+  ASSERT_EQ(result.registered.size(), 1u);
+  EXPECT_EQ(result.registered[0].first, "jet_pt");
+  EXPECT_EQ(result.registered[0].second, "Absolute_2024");
+  ASSERT_EQ(result.missingUp.size(), 1u);
+  EXPECT_EQ(result.missingUp[0], "weight_BBEC1_2024Down");
+  EXPECT_EQ(systematicManager->getSystematics().count("2024"), 0u);
 }
 
 TEST_F(SystematicManagerTest, AutoRegisterSystematics_Idempotent) {

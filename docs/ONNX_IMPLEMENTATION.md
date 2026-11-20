@@ -1,10 +1,10 @@
 # ONNX Manager Implementation Summary
 
 > **See Also**: 
-> - [Getting Started with ONNX](../docs/GETTING_STARTED.md#machine-learning-integration)
-> - [ONNX Configuration Reference](../docs/CONFIG_REFERENCE.md#onnx-manager-configuration)
-> - [Using ONNX in Analyses](../docs/ANALYSIS_GUIDE.md#using-onnx-models-recommended)
-> - [ONNX API Reference](../docs/API_REFERENCE.md#onnxmanager)
+> - [Getting Started Guide](GETTING_STARTED.md)
+> - [ONNX Configuration Reference](CONFIG_REFERENCE.md#onnx-manager-configuration)
+> - [Using ONNX in Analyses](ANALYSIS_GUIDE.md#using-onnx-models-recommended)
+> - [ONNX API Reference](API_REFERENCE.md#onnxmanager)
 > - [Multi-Output Model Support](ONNX_MULTI_OUTPUT.md)
 
 ## Overview
@@ -14,7 +14,13 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 
 ### 1. ONNX Runtime Integration (CMake)
 - **File**: `cmake/SetupOnnxRuntime.cmake`
-- Automatically downloads ONNX Runtime binaries from official Microsoft releases during CMake configuration
+- Downloads the official Microsoft release archive during CMake configuration.
+  Linux CPU and CUDA builds automatically fall back to Microsoft's
+  checksum-verified NuGet packages at the same version when GitHub is unavailable. Set
+  `-DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime` to use an extracted package.
+  For Linux CUDA inference with 1.24.1, use CUDA 12.8 or newer within the
+  12.x series and cuDNN 9.x. See the
+  [ONNX Runtime CUDA requirements](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements).
 - Supports Linux (x64, aarch64) and macOS (x64, arm64)
 - Version: 1.24.1
 - No manual installation or building required
@@ -33,6 +39,8 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 - Returns -1.0 when runVar is false (to skip unnecessary computation)
 - Thread-safe for use with ROOT's ImplicitMT
 - Follows the same patterns as BDTManager for consistency
+- Packs scalar feature columns as one input element and appends vector-valued
+  feature columns in order
 - **Supports multiple outputs** (e.g., ParticleTransformer with bootstrapped models)
 - **Deferred execution**: Models loaded but NOT applied until explicitly invoked
 
@@ -115,8 +123,10 @@ file=transformer.onnx name=ParT inputVariables=pt,eta,phi paddingSize=128
 - Input vectors shorter than `paddingSize` are zero-padded to the specified size
 - Input vectors longer than the model's expected packed input size are rejected with a runtime error
 - Omitting `paddingSize` preserves existing behavior for fixed known shapes, but dynamic dimensions still require `paddingSize` or explicit `inputShapes`
-- When `systematicBundle=auto|required` is configured for scalar input features, OnnxManager batches all active systematic evaluations for an event into one ONNX call and pads any remaining fixed batch slots with zeros.
-- `selectionMaskColumn=<column>` can be combined with `systematicBundle` to skip masked variations while keeping their output columns at the disabled sentinel value.
+- `systematicBundle=auto` or `required` can batch active variations of one event in a single ONNX call. The bundle accepts scalar feature columns or one vector-valued feature column, and requires each output tensor to yield one scalar per variation row. For unsupported layouts, `auto` uses the ordinary path and `required` reports an error.
+- The active rows must fit the model's batch dimension. Remaining slots in a larger fixed batch are zero-padded. With no active rows, inference is skipped. [SOFIE systematic execution](SOFIE_IMPLEMENTATION.md#systematic-variations) describes how compiled callables consume variations.
+- `selectionMaskColumn=<column>` applies on the bundled path. Masked rows retain the disabled sentinel value.
+- In ordinary execution (`off` or an unsupported `auto` layout), the current ONNX input packer builds a nominal `input_<model>` column. If feature-only shifts must propagate in this path, define that packed column and its variation mappings before `applyModel`; the manager reuses it. Gate shifts propagate through the score definition. Include any required selection in the run gate on this path.
 
 **Example**:
 
@@ -224,7 +234,7 @@ ctest -R OnnxManagerTest
 
 ## Security Considerations
 
-- ONNX Runtime binaries are downloaded from official Microsoft GitHub releases
+- ONNX Runtime binaries come from Microsoft's GitHub releases or its Linux CPU and CUDA NuGet packages
 - Version is pinned to 1.20.0 for reproducibility
 - CMake verifies download success before proceeding
 - No external code execution during model loading (only model inference)
@@ -251,9 +261,9 @@ Potential improvements for future work:
 ## Limitations
 
 1. **Float Input**: Input features are converted to float32
-2. **Fixed Shape Input**: Dynamic ONNX dimensions require either `paddingSize` or explicit `inputShapes` to resolve; otherwise model loading can fail
+2. **Fixed Shape Input**: Dynamic or omitted ONNX input dimensions require either `paddingSize` or explicit `inputShapes` to resolve; otherwise model loading can fail
 3. **CPU by Default**: ONNX Runtime uses CPU inference unless built with `ONNXRUNTIME_USE_CUDA=ON` and the model is configured with `useCuda=true`
-4. **Single Scalar Output Per Tensor**: Each output tensor must produce a single scalar value
+4. **Single Scalar Output Per Tensor**: Each output tensor must produce a single scalar value; omitted output shape metadata is treated as `[batch, 1]` and validated by ONNX Runtime at execution
 
 ## References
 

@@ -6,6 +6,17 @@ managed through [law](https://github.com/riga/law) (Luigi Analysis Workflow),
 which provides dependency tracking, automatic resubmission, and restart-safe
 monitoring.
 
+Generated workers also carry an immutable, origin-scoped XRootD ranking
+snapshot, preferring the learned user cache over the experiment provider seed.
+After successful LAW Condor monitoring, rankings update automatically for future
+submissions. The default cache is `~/.cache/rdfanalyzer/xrd_site_rankings.tsv`
+(under `XDG_CACHE_HOME` when set). Set
+`RDF_XRD_SITE_RANKING_FILE=/path/to/rankings.tsv` before generating scripts to
+ship a refined snapshot, or `none` to disable it. The
+[ranking tool and format](xrd-adaptor.md#historical-site-preferences-and-open-attempt-logging)
+describe log aggregation and per-worker network scope. Rebuild the adaptor and
+regenerate scripts to deploy these changes; existing production is untouched.
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -17,6 +28,7 @@ monitoring.
 - [Legacy Compatibility Notes](#legacy-compatibility-notes)
 - [Common Parameters](#common-parameters)
 - [Configuration File Format](#configuration-file-format)
+- [ONNX Runtime for HTCondor workers](#onnx-runtime-for-htcondor-workers)
 - [Monitoring and Resubmission](#monitoring-and-resubmission)
 - [Advanced Features](#advanced-features)
 - [Troubleshooting](#troubleshooting)
@@ -37,8 +49,14 @@ file-discovery backends:
 
 For HTCondor skim production, the primary sequence is:
 
-1. **PrepareSkimJobs** – discovers input files and creates per-job configuration
-   directories (one branch per sample, runs in parallel).
+1. **PrepareSkimJobs** – plans the run and creates per-dataset/per-job
+   configuration directories in one task. When `--file-source` is set, it
+   requires the corresponding file-discovery task.
+   The dataset manifest is authoritative: preparation ignores cached discovery
+   entries for other samples/eras and fails if a requested dataset has no
+   payload, an empty payload, or duplicate payloads. Reusing a larger cache
+   cannot introduce jobs with fallback sample identity. Separate cache names
+   per concurrent era are still recommended to avoid concurrent cache writes.
 2. **BuildSkimSubmission** – assembles `condor_submit.sub`, run scripts, and
    stages the executable, `aux/`, x509 proxy, and local shared libraries into
    `shared_inputs/`.
@@ -46,8 +64,23 @@ For HTCondor skim production, the primary sequence is:
 4. **MonitorSkimJobs** – blocking polling loop that verifies EOS outputs,
    resubmits held/failed jobs, and writes `all_outputs_verified.txt`.
 
+Monitor completion rechecks the required ROOT files, skim trees when enabled,
+and MC weight counters under the selected validation policy. In `integrity` mode,
+an existing completion marker does not make a missing or corrupt output complete;
+`exists` mode checks paths without opening ROOT files.
+
 Law tracks task outputs so you can run the final task directly and earlier
 steps execute automatically if not yet complete.
+
+Generated worker scripts preserve the CPU affinity inherited from the site
+through setup, staging and analysis execution. They do not select or reassign
+CPUs, even when the allowed set is larger than `request_cpus`. ROOT, XRootD
+helpers and child processes inherit that placement. Common numerical
+thread-pool limits are set to the requested count, but these are not an
+aggregate CPU quota; CPU enforcement comes from the site's affinity or cgroup
+policy. Startup lines report the requested count, allowed CPUs and
+`policy=inherited`. This applies to freshly generated scripts; rebuilding the
+executable does not change already prepared or running jobs.
 
 ---
 
@@ -70,6 +103,11 @@ law run MonitorSkimJobs --workers 4 \
   --x509 x509 \
   --exe build/analyses/myAnalysis/myanalysis
 ```
+
+Because this command uses `--file-source rucio`, its submit config must set
+`sampleConfig` to the discovery manifest. It can point to the same YAML file as
+`--dataset-manifest` when that file contains the fields required by both task
+interfaces. For `xrdfs`, file discovery reads the dataset manifest directly.
 
 ---
 
@@ -123,11 +161,12 @@ law index
 
 ### Sample config format
 
-The sample configuration describes the datasets to process. In the primary
-workflow, pass a typed dataset manifest via `--dataset-manifest` and keep
-`sampleConfig=` in the submit config only for compatibility paths.
-
-Two formats are accepted for dataset manifests:
+The primary `SkimTask` workflow reads its typed dataset list from YAML passed
+with `--dataset-manifest`. When `--file-source rucio` or `opendata` is
+selected, the automatically chained discovery task also reads `sampleConfig`
+from the submit config. It can point to the same YAML manifest when its schema
+contains the fields required by the discovery task. The `xrdfs` source uses
+the dataset manifest directly and does not need `sampleConfig`.
 
 #### Preferred format – YAML dataset manifest
 
@@ -136,9 +175,9 @@ supports multi-year analyses, and is validated by the framework at submission
 time.  See `core/python/example_dataset_manifest.yaml` for a fully annotated
 example.
 
-> **Preferred:** pass a YAML manifest via `sampleConfig=` in the submit config.
-> Legacy `.txt` dataset manifests are deprecated compatibility paths only and
-> should not be used for new workflows.
+> Use YAML for `--dataset-manifest` and, when Rucio/Open Data discovery is
+> selected, for `sampleConfig` as well. Legacy `.txt` sample configs are
+> deprecated compatibility inputs and should not be used for new workflows.
 
 ```yaml
 # Luminosity in fb^-1 (used as default; lumi_by_year takes precedence when set)
@@ -173,7 +212,9 @@ datasets:
     stitch_id: 0
 ```
 
-Pass the manifest as `sampleConfig` in the submit config file:
+The automatically chained discovery task uses `sampleConfig` from the submit
+config. The primary `SkimTask` still receives its typed dataset manifest via
+`--dataset-manifest`:
 
 ```
 sampleConfig=analyses/myAnalysis/cfg/samples.yaml
@@ -258,16 +299,17 @@ law run BuildSkimSubmission --workers 4 \
 
 ### Sample config format
 
-The same two manifest formats are supported here.
+The primary `SkimTask` input is a typed YAML manifest. The deprecated text
+format is supported only on the legacy discovery path.
 
 #### Preferred format – YAML dataset manifest
 
 For Open Data workflows, each entry's `das` field stores a comma-separated
 list of CERN Open Data **record IDs** (instead of DAS paths).
 
-> **Preferred:** pass a YAML manifest via `sampleConfig=` in the submit config.
-> Legacy `.txt` dataset manifests are deprecated compatibility paths only and
-> should not be used for new Open Data workflows.
+> Use YAML for `--dataset-manifest` and, when Open Data discovery is selected,
+> for `sampleConfig` as well. Legacy `.txt` sample configs are deprecated
+> compatibility inputs and should not be used for new workflows.
 
 ```yaml
 lumi: 11.58   # fb^-1
@@ -344,9 +386,20 @@ law run BuildSkimSubmission --workers 4 \
 
 ---
 
+## Legacy Compatibility Notes
+
+The primary skim workflow receives its typed dataset list with
+`--dataset-manifest`. When `--file-source rucio` or `opendata` is selected,
+LAW chains a discovery task that reads `sampleConfig` from the submit config.
+Point both parameters at the same YAML file when it has fields required by
+both task interfaces. The `sampleConfig` key is also accepted by standalone
+discovery tasks. Legacy key/value text is deprecated and supported only by
+compatibility discovery paths.
+
 ## Common Parameters
 
-These parameters apply to **all** law submission tasks:
+These options are shared by the primary skim-submission tasks; discovery and
+post-processing tasks can have additional task-specific parameters:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -369,6 +422,36 @@ These parameters apply to **all** law submission tasks:
 
 ---
 
+## ONNX Runtime for HTCondor workers
+
+For a submit-host ONNX Runtime package outside the checkout, configure a
+build directory inside the framework workspace. Point `ONNXRUNTIME_ROOT_DIR`
+at the package root that contains `include/` and `lib/`. For example, from
+the checkout root after sourcing the build environment:
+
+```bash
+cmake -S . -B build-worker \
+  -DONNXRUNTIME_ROOT_DIR=/absolute/path/to/onnxruntime \
+  -DONNXRUNTIME_USE_CUDA=OFF
+cmake --build build-worker --target myanalysis
+ldd build-worker/analyses/myAnalysis/myanalysis | grep libonnxruntime
+```
+
+Pass that executable as `--exe` to the LAW skim tasks. When `ldd` resolves
+ONNX Runtime through the build's `_rdf_onnx_link/<id>/` directory,
+`PrepareSkimJobs` stages the external library under its linker SONAME
+(for example, `libonnxruntime.so.1`) and its versioned filename. The worker
+loader searches the unpacked archive. Verify the staged names before submission:
+
+```bash
+tar -tzf skimRun_myRun/shared_inputs.tar.gz | grep '^libonnxruntime\.so'
+```
+
+For a shared CVMFS ONNX Runtime package, point `ONNXRUNTIME_ROOT_DIR` at
+the CVMFS package used by the workers. The worker loads it from CVMFS using
+its usual runtime environment. For CUDA builds, the worker environment
+continues to supply the compatible GPU provider and CUDA dependencies.
+
 ## Python Environment for Remote Jobs
 
 To use the RDFAnalyzerCore Python bindings (`rdfanalyzer`) or any other Python
@@ -378,7 +461,7 @@ create a portable tarball and pass it to law tasks via `--python-env`.
 ### Step 1: Set up the environment inside the container
 
 Run the setup script **inside the same container** you use for remote jobs.
-This ensures binary compatibility between local and remote nodes.
+Use the worker Python and ROOT runtime when building and checking the binding.
 
 ```bash
 # Basic usage (packages law, luigi, requests + rdfanalyzer.so)
@@ -389,9 +472,7 @@ cmssw-el9 --command-to-run \
   "bash core/python/law/setup_python_env.sh --extras 'numpy uproot numba' --output python_env.tar.gz"
 ```
 
-The script installs packages into a staging directory using
-`pip install --target` (no virtual-env activation scripts, fully portable)
-and copies the compiled `rdfanalyzer*.so` module from `build/python/`.
+The script stages packages with `pip install --target`. It selects a binding from `build/python/` using the requested interpreter’s extension suffixes. Set `RDFANALYZER_PYTHON_MODULE_DIR` for another build, such as `$PWD/build-clang/python`. If no matching module is found, the script prints a warning and writes a package-only archive. Workers need compatible native libraries. LAW archive extraction requires a Python runtime with `tarfile.data_filter`.
 
 **Setup script options:**
 
@@ -458,22 +539,74 @@ onnxConfig=config/onnx_models.txt
 saveDirectory=/eos/user/u/username/output
 saveTree=Events
 treeList=Events
-sampleConfig=config/samples.yaml
 enableCounters=true
-enableSkim=false
+enableSkim=true
 ```
+
+Set `enableSkim=true` for skim submissions. The framework writes the event
+tree only when this option is enabled; LAW does not override it. Use
+`enableSkim=false` for histogram-only runs that should not create a skim.
 
 ---
 
 ## Monitoring and Resubmission
+
+LAW skim submissions automatically set Condor's `JobBatchName` to
+`<sample> [<run name>]`, using the dataset name and `--name`. This applies
+to all analyses using `BuildSkimSubmission`, including the vjet-njetpt
+submission wrapper. Normal `condor_q` batch summaries show this label in
+`BATCH_NAME`; retries and split retries inherit it from the submission template.
+The sample comes first so it is visible even when the column is truncated.
+
+Each job also carries the string ClassAd attributes `RDFSample` and `RDFRun`:
+
+```bash
+# Show full batch names in the usual summary
+condor_q -wide
+
+# Show full labels for individual jobs (including retries)
+condor_q -af ClusterId ProcId JobStatus RDFSample RDFRun
+
+# Restrict the query to one sample
+condor_q -constraint 'RDFSample == "DYJets"'
+```
+
+These labels apply to newly generated submission files. Existing queued jobs
+and previously prepared submission templates retain their original attributes.
+Python callers of `write_submit_files` or `generate_condor_submit` can opt in
+with `sample_name=...` and `run_name=...`.
 
 The `Monitor*Jobs` tasks run a blocking poll loop:
 
 1. Every `--poll-interval` seconds, query `condor_q` and `condor_history`.
 2. **Held jobs**: remove from queue and resubmit automatically.
 3. **Failed jobs** (non-zero exit code): resubmit if `--max-retries` not reached.
-4. **Completed jobs**: verify the expected EOS output exists via `xrdfs stat`.
-5. Write `skimRun_{name}/all_outputs_verified.txt` when all outputs confirmed.
+4. **Overlong jobs**: remove and resubmit a running job when its
+   current execution exceeds 150% of its Condor `MaxRuntime` (for example,
+   over 90 minutes for a 60-minute limit). This check is always enabled in
+   `MonitorSkimJobs` and runs on each poll. Elapsed time uses
+   `ServerTime - JobCurrentStartDate`, with the local clock used if
+   `ServerTime` is unavailable. If the start date is absent, the monitor uses
+   `EnteredCurrentStatus`, then `RemoteWallClockTime` as a final fallback.
+   The job's positive `MaxRuntime` takes precedence over `--max-runtime`,
+   which is used if the ad omits the limit. Resubmission requires successful
+   removal and respects `--max-retries`.
+5. **Multi-file retries**: split a retry with more than one input file into two
+  balanced file groups, with separate output and metadata files for each part.
+6. **Completed jobs**: check expected output paths using batched `xrdfs ls`
+   (falling back to `stat`). `--output-validation integrity` (the framework
+   default) additionally opens ROOT files to check their contents and MC
+   counters. `--output-validation exists` skips these per-poll ROOT reads.
+7. Write `skimRun_{name}/all_outputs_verified.txt` when all outputs confirmed.
+
+For MC, generator-weight sums are never scanned over the full dataset during
+preparation. Each partition writes its own counter to its metadata ROOT file;
+downstream consumers read those counters from their input files when needed.
+`MonitorSkimJobs` does not aggregate sample counters or write `normalization.json`.
+The vjet submit wrapper selects `exists` by default; its
+`--output-validation integrity` option
+restores the stronger checks. The policy does not change worker payloads,
+partitions, saved monitoring state, or the run identity.
 
 **State persistence**: monitoring state is saved to
 `skimRun_{name}/monitor_state.json` after each poll cycle.  If you interrupt
@@ -492,6 +625,12 @@ law run MonitorSkimJobs --workers 1 \
 
 ### Input staging
 
+Workers route public CMS dataset inputs through `cms-xrd-global.cern.ch`.
+Streaming and stage-in workers perform no per-site redirector probing and
+launch no ROOT probe subprocesses. The XrdAdaptor handles replica discovery
+and read races during streaming. Stage-in uses `xrdcp` directly with bounded
+retries. Local inputs and private/non-CMS endpoints retain their URLs.
+
 Copy input files to the worker node before running the analysis:
 
 ```bash
@@ -503,12 +642,42 @@ The `submit_config.txt` for each job stores the original URLs in
 `__orig_fileList` and uses local filenames (`input_0.root`, …) for the
 analysis.
 
+### Refresh XRootD fixes for an existing skim production
+
+Stop the production's LAW monitors before refreshing prepared retry inputs.
+Rebuilding the adaptor or restarting the monitor alone does not replace the
+scripts and runtime library already staged in the run directory. Preview and
+then apply a focused refresh from the repository root:
+
+```bash
+python3 core/python/refresh_xrootd_runtime.py \
+  --library build/core/xrd/libRDFXrdAdaptor.so skimRun_myRun
+python3 core/python/refresh_xrootd_runtime.py --apply \
+  --library build/core/xrd/libRDFXrdAdaptor.so skimRun_myRun
+```
+
+The refresh replaces legacy embedded worker probes with global URL routing
+and updates the adaptor library
+in `shared_inputs/` and `shared_inputs.tar.gz`. It verifies that every other
+regular archive member has identical contents, including the analysis binary
+and physics configuration. Original scripts, library, archive, and a rollback
+manifest are saved under `runtime_patches/xrootd_<timestamp>/`. Files are
+replaced atomically after validation. Resume the same monitor tasks with the
+same run names and parameters; their existing state and completed outputs are
+preserved. Jobs that already received their inputs keep those copies; future
+resubmissions transfer the refreshed files. The refresh itself does not submit,
+cancel, or restart any jobs. Executable changes, including lazy initial chain
+validation, require a freshly staged executable; this refresh preserves the
+saved analysis binary.
+
 ### Output staging
 
-Output staging is **always active** in the law workflows.  After each job
-completes, the output ROOT files are xrdcp'd to their final EOS destination.
-The local basenames are stored in `saveFile` / `metaFile` and the EOS paths
-in `__orig_saveFile` / `__orig_metaFile`.
+The delegated HTCondor workflow enables output staging for each job: ROOT
+outputs are copied to their final EOS destinations after the job completes.
+The local basenames are stored in `saveFile` / `metaFile`, with final
+destinations in `__orig_saveFile` / `__orig_metaFile`. Local and Dask execution
+do not use this HTCondor staging mechanism; their output paths follow the
+configuration and executor setup.
 
 ### ROOT and container setup
 
@@ -522,11 +691,15 @@ in `__orig_saveFile` / `__orig_metaFile`.
 
 ### Parallel file discovery
 
-The Prepare tasks run as law LocalWorkflows with one branch per sample.
-Set `--workers N` to discover files for up to N samples in parallel:
+File-discovery tasks run as law LocalWorkflows with one branch per sample.
+Set `--workers N` to discover files for up to N samples in parallel. The
+subsequent `PrepareSkimJobs` task writes independent job configs and redirector
+maps with a bounded four-thread pool by default; tune it with
+`--prepare-workers N` (or use `1` for serial preparation):
 
 ```bash
-law run PrepareSkimJobs --workers 8 --file-source rucio [other params]
+law run PrepareSkimJobs \
+  --workers 8 --prepare-workers 4 --file-source rucio [other params]
 ```
 
 ---
@@ -583,7 +756,7 @@ cat skimRun_myRun/condor_submissions/sample/condor_logs/log_<cluster>_<process>.
 
 ## See Also
 
-- [core/python/law/README.md](../core/python/law/README.md) – law workflow quick reference
+- [core/python/law/README.md](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/README.md) – law workflow quick reference
 - [Configuration Reference](CONFIG_REFERENCE.md) – config file formats
 - [Analysis Guide](ANALYSIS_GUIDE.md) – building analyses
 - [Getting Started](GETTING_STARTED.md) – setup and installation

@@ -1,9 +1,9 @@
 # LAW Task System Reference
 
-> **Quick start**: See [`core/python/law/README.md`](../core/python/law/README.md) for environment setup
+> **Quick start**: See [`core/python/law/README.md`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/README.md) for environment setup
 > and an introduction to the broader batch-submission workflows.  This document
 > is a detailed reference for the analysis-specific tasks defined in
-> [`core/python/law/analysis_tasks.py`](../core/python/law/analysis_tasks.py) and their supporting modules.
+> [`core/python/law/analysis_tasks.py`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/analysis_tasks.py) and their supporting modules.
 
 ---
 
@@ -61,6 +61,23 @@ source core/python/law/env.sh
 law run <TaskName> [parameters]
 ```
 
+The merge tasks can read per-job ROOT inputs whose manifest paths are XRootD
+URLs (for example, `root://host//store/user/analysis/job/meta.root`). The
+`output_manifest.yaml` files must still be available under the local
+`--input-dir`; relative ROOT paths are resolved from each manifest's directory,
+while `root://` URLs are passed directly to ROOT `hadd`. Merged products are
+written to the local `--output-dir`. Use a ROOT installation with XRootD
+support and valid credentials for the remote storage. `MergeHistograms` also
+uses Uproot or PyROOT to inspect each remote file's embedded histogram schema
+before merging.
+
+```bash
+law run MergeHistograms \
+  --name myRun \
+  --input-dir /scratch/job_manifests \
+  --output-dir /scratch/merged/myRun
+```
+
 ### Typical task dependency chain
 
 ```
@@ -108,7 +125,7 @@ end-to-end.
 ## 2. AnalysisMixin Parameters
 
 `AnalysisMixin` is a Python mixin class that injects a common set of Luigi
-parameters into `SkimTask` and `HistFillTask`.  Every parameter listed here is
+parameters into `SkimTask` and `HistFillTask`. Every parameter listed here is
 available on both tasks.
 
 ### `--submit-config` *(str, required)*
@@ -120,14 +137,18 @@ files (`.txt`, `.yaml`) into the per-job directory, and writes a finalised
 
 Keys overridden automatically per dataset:
 
+The paths below show the local run-directory layout. Delegated HTCondor
+submissions can rewrite output paths to the configured final destination.
+
 | Key | Value |
 |-----|-------|
 | `fileList` | Comma-separated list of input ROOT files (or DAS path) |
-| `saveFile` | `<outputs_dir>/<dataset>/skim.root` |
-| `metaFile` | `<outputs_dir>/<dataset>/meta.root` |
-| `saveDirectory` | `<outputs_dir>/<dataset>/` |
+| `saveFile` | Skim output in the job's output directory (standard manifest mode: `<outputs_dir>/<dataset>/skim.root`; file-source mode: `<outputs_dir>/<dataset>/job_<i>/skim.root`) |
+| `metaFile` | Metadata output in the job's output directory (standard manifest mode: `<outputs_dir>/<dataset>/meta.root`; file-source mode: `<outputs_dir>/<dataset>/job_<i>/meta.root`) |
+| `saveDirectory` | Job output directory (standard manifest mode: `<outputs_dir>/<dataset>/`; file-source mode: `<outputs_dir>/<dataset>/job_<i>/`) |
 | `sample` | Dataset name from the manifest |
-| `type` | Dataset `dtype` field from the manifest (if set) |
+| `dtype` | Framework dataset classification (`mc` or `data`) |
+| `type` | Legacy sample code, derived from `sample_type`, `stitch_id`, or `dtype` |
 
 All other keys in the template are forwarded verbatim.
 
@@ -151,17 +172,9 @@ Run name used to namespace output directories.
 
 ### `--dataset-manifest` *(str, required)*
 
-Path to the YAML dataset manifest file.  One workflow branch is created per
-`DatasetEntry` in the manifest.
-
-### `--num-workers` *(str, default: `"auto"`)*
-
-Thread pool size for parallel branch execution under `--workflow local`.  The
-special value `"auto"` lets LAW choose based on the number of CPU cores.
-
-### `--log-level` *(str, default: `"info"`)*
-
-Logging verbosity.  Valid values: `"debug"`, `"info"`, `"warning"`, `"error"`.
+Path to the YAML dataset manifest file. `HistFillTask` creates one branch per
+manifest entry. `SkimTask` does the same in standard manifest mode; in
+file-source mode it creates one branch per planned file partition.
 
 ---
 
@@ -173,50 +186,104 @@ class SkimTask(AnalysisMixin, SkimMixin, law.LocalWorkflow, SkimHTCondorWorkflow
 
 ### Purpose
 
-Runs the analysis executable once per dataset to produce skimmed ROOT output
-files.  Each branch corresponds to one `DatasetEntry` from the dataset manifest.
+Runs the analysis executable to produce skimmed ROOT output files. In standard
+manifest mode each branch processes one `DatasetEntry`; in file-source mode
+each branch processes one planned file partition, so a dataset can span several
+branches.
+The analysis config must set `enableSkim=true` for the executable to write the
+event tree. LAW passes the config through; it does not turn skim writing on.
+With `enableSkim=false`, the task can run successfully without producing the
+skim its output layout describes.
 
-Before dispatching the full multi-dataset workflow a **pre-flight test job**
-(`RunSkimTestJob`) is run automatically on a single input file.  This catches
-analysis runtime errors early, before potentially hundreds of jobs are
-submitted.  Pass ``--no-make-test-job`` to skip the test.
+Before dispatching the full multi-dataset workflow a **pre-flight test**
+(`RunSkimTestJob`) is run automatically on one input file for each available
+data and MC sample type. This catches sample-specific runtime errors before
+potentially hundreds of jobs are submitted. Pass ``--no-make-test-job`` to
+skip the test.
 
 ### Parameters
 
-Inherits all [AnalysisMixin parameters](#2-analysismixin-parameters) and
-[SkimMixin parameters](#skimmixin-parameters).  Key additions:
+Inherits all [AnalysisMixin parameters](#2-analysismixin-parameters) and the
+file-discovery/execution options provided by `SkimMixin`.
+
+#### File discovery and partitioning
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `--file-source` | `""` | Use manifest `files`/`das` directly, or select `xrdfs`, `rucio`, or `opendata` discovery. |
+| `--file-source-name` | `""` | Name of the file-list task run to consume. If omitted, it defaults to `--name`. |
+| `--files-per-job` | `50` | Maximum files per job for file-count grouping; also the group limit for Rucio queries. |
+| `--partition` | `auto` | Learned event budgets for matching datasets, otherwise file grouping. Explicit `file_group`, `file`, `entry_range`, and `events` remain available. |
+| `--entries-per-job` | `100000` | Event budget/fallback for `events` and `entry_range`; ignored by file-count modes. |
+| `--partition-profile` | `""` | Automatic matching-history lookup; a JSON/YAML path pins fixed budgets or rates, and `none` disables lookup. |
+| `--input-metadata-cache` | `""` | Optional entry-cache snapshot copied into the new run; missing counts are queried once with bounded concurrency. |
+| `--entry-range-mode` | `filter` | Logical `Range`, or `source` for direct seeking on ROOT 6.40.x or 6.42.00-rc1 with one RDF thread. |
+| `--sizing-pilots` | `false` | Run one-file Condor calibration jobs for unprofiled datasets before bulk preparation. |
+| `--sizing-target-seconds` | `3600` | Estimated work per job from production measurements; independent of the runtime request. |
+| `--sizing-pilot-target-seconds` | `1800` | Estimated work per job from fresh or cached pilot measurements. |
+| `--max-runtime` | `7200` | HTCondor runtime request in seconds for both sizing sources and pilot jobs. |
+| `--sizing-pilot-parallel` | `4` | Maximum pilot jobs per batch, per LAW run. |
+| `--sizing-pilot-prefix-entries` | `10000` | Prefix paired with a full-file measurement to fit fixed setup and per-event costs. |
+| `--sizing-pilot-safety-factor` | `1.5` | Multiplier for provisional pilot rate/setup estimates; must be at least one. |
+| `--prepare-workers` | `4` | Maximum number of threads used to write independent per-job configs and redirector maps. Set to `1` for serial preparation. |
+
+Explicit partition modes also apply to payloads with precomputed Rucio groups.
+`file_group` respects the requested file cap within each group; `events` packs
+within those groups to retain discovery's byte-size boundaries. `file` and
+`entry_range` operate on the flat file inventory. Duplicate or inconsistent
+group inventories are rejected. These policies affect newly prepared jobs.
+
+See [event budgets and learned runtime profiles](JOB_SIZING.md) for calibration,
+cache snapshots, deterministic coverage and range-aware retries.
+After all outputs are verified, the monitor automatically updates the workload
+and submission-origin sizing cache. Future preparations save their own selected
+profile/cache snapshots; shared history cannot change an existing run's plan.
+
+#### `--output-directory` *(str, optional)*
+
+SkimMixin parameter inherited by `PrepareSkimJobs` and `SkimTask`. The
+delegated HTCondor submission chain uses it as the final output destination,
+overriding `saveDirectory` in the generated submit configs; it may be a local
+EOS path or an explicit `root://` URL. Relative paths and ordinary local
+filesystem paths are rejected because workers stage outputs through XRootD.
+It does not apply to `HistFillTask`.
 
 #### `--make-test-job` *(bool, default: `True`)*
 
 When ``True`` (the default), `SkimTask` declares `RunSkimTestJob` as a
-workflow prerequisite.  `RunSkimTestJob` will run the analysis executable on
-a single input file and fail with a clear error message before any branch is
-dispatched if the executable crashes.
+workflow prerequisite. `RunSkimTestJob` runs the analysis executable on one
+input file for each available data and MC sample type. It fails before any
+branch is dispatched if either preflight crashes.
 
 Pass ``--no-make-test-job`` to disable the pre-flight test and submit
 immediately.
 
-#### `--file-source` *(str, default: `""`)*
+#### File-list source chaining
 
-File-list source controlling where input files are discovered.  Valid values:
+The file-list source controls where input files are discovered. Valid values:
 
 | Value | Source | Required prerequisite |
 |-------|--------|-----------------------|
 | `""` (default) | Dataset manifest `files` / `das` fields | None |
-| `xrdfs` | `GetXRDFSFileList` output (auto-chained) | `--file-source-name` |
-| `rucio` | `GetRucioFileList` output (run manually) | `--file-source-name` |
-| `opendata` | `GetOpenDataFileList` output (run manually) | `--file-source-name` |
+| `xrdfs` | `GetXRDFSFileList` output (auto-chained) | None; `--file-source-name` defaults to `--name` |
+| `rucio` | `GetRucioFileList` output (auto-chained) | None; `--file-source-name` defaults to `--name` |
+| `opendata` | `GetOpenDataFileList` output (auto-chained) | None; `--file-source-name` defaults to `--name` |
 
-When `--file-source xrdfs` is set, `PrepareSkimJobs.requires()` automatically
-declares `GetXRDFSFileList` as a dependency, so the full chain
-`GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask` runs
-automatically with a single `law run SkimTask` command.
+When any non-empty `--file-source` is set, `PrepareSkimJobs.requires()`
+automatically declares the corresponding file-list task as a dependency.
+Rucio and OpenData discovery use the `sampleConfig` payload in
+`--submit-config`. The full chain (for example,
+`GetRucioFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask`) runs with a
+single `law run SkimTask` command. Set `--file-source-name` only when the
+file-list task was run under a name different from `--name`.
 
 ### Branch Map
 
-One branch per dataset entry (index 0 … N-1, sorted by dataset name).  The
-`branch_data` object is a `DatasetEntry` with fields `name`, `files`, `das`,
-and `dtype`.
+In standard manifest mode, one branch is created per dataset entry in manifest
+order. In file-source mode, `PrepareSkimJobs` first partitions each dataset's
+discovered files; `SkimTask` then creates one branch per planned partition. A
+dataset can therefore have multiple branches. The `--partition`,
+`--files-per-job`, and `--entries-per-job` parameters control that partitioning.
 
 For multi-dimensional branching (regions, systematics) use
 [BranchMapPolicy](#6-branchmappolicy).
@@ -226,8 +293,11 @@ For multi-dimensional branching (regions, systematics) use
 ```
 skimRun_<name>/
 ├── test_job/
-│   ├── submit_config.txt      ← minimal single-file config
-│   ├── test_output.root        ← test skim output
+│   ├── submit_config_data.txt  ← minimal data config, when data is present
+│   ├── submit_config_mc.txt    ← minimal MC config, when MC is present
+│   ├── test_jobs.json          ← selected sample types and input files
+│   ├── test_output_data.root   ← data test output, when data is present
+│   ├── test_output_mc.root     ← MC test output, when MC is present
 │   └── test_passed.txt         ← RunSkimTestJob success marker
 ├── jobs/
 │   └── <dataset_name>/
@@ -242,10 +312,25 @@ skimRun_<name>/
     └── <dataset_name>.perf.json ← performance metrics
 ```
 
+This tree shows standard manifest mode. In file-source mode, jobs and outputs
+are partitioned beneath each dataset:
+
+```text
+skimRun_<name>/
+├── jobs/<dataset_name>/job_<i>/submit_config.txt
+├── outputs/<dataset_name>/job_<i>/{skim.root,meta.root}
+└── job_outputs/
+    ├── <dataset_name>_b<branch>.done
+    └── <dataset_name>_b<branch>.perf.json
+```
+
+File-source mode therefore has no canonical
+`outputs/<dataset_name>/skim.root` file for a whole dataset.
+
 ### Caching and `complete()`
 
-`SkimTask` overrides `complete()` to perform a provenance-based cache
-validity check:
+In standard manifest mode, `SkimTask` overrides `complete()` to perform a
+provenance-based cache validity check:
 
 1. If `<dataset_name>.done` does not exist → **not complete**.
 2. Reads `.cache.yaml` sidecar co-located with `skim.root`.
@@ -255,7 +340,8 @@ validity check:
 5. If the cache is stale or absent, the `.done` marker is **deleted** and the
    task is rescheduled, guaranteeing that stale artifacts are regenerated.
 
-This check only applies at branch level; at the workflow level the standard
+In file-source mode, completion is tracked per partition by its branch marker;
+the single-file cache check does not apply. At the workflow level the standard
 LAW behaviour is preserved.
 
 ### Example Commands
@@ -276,27 +362,21 @@ law run SkimTask \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
     --no-make-test-job
 
-# Automatic chain: GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask
+# Automatic chain: GetRucioFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask
 law run SkimTask \
     --submit-config analyses/myAnalysis/cfg/skim_config.txt \
     --exe build/analyses/myAnalysis/myanalysis \
     --name mySkimRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-    --file-source xrdfs \
-    --file-source-name myFiles
+    --file-source rucio
 
-# Manual Rucio discovery followed by SkimTask
-law run GetRucioFileList \
-    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
-    --name myRun --x509 /tmp/x509 \
-    --exe build/analyses/myAnalysis/myanalysis
-
+# Override the file-list task name when it differs from --name
 law run SkimTask \
     --submit-config analyses/myAnalysis/cfg/skim_config.txt \
     --exe build/analyses/myAnalysis/myanalysis \
     --name mySkimRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-    --file-source rucio --file-source-name myRun
+    --file-source opendata --file-source-name priorDiscoveryRun
 
 # Same task, different executor: delegate to concrete per-dataset HTCondor submission
 law run SkimTask \
@@ -328,12 +408,52 @@ Log locations in delegated `htcondor` mode:
 
 When a job is held before payload execution, only the `.log` file may exist because the job never reached the execution wrapper.
 
-Final staged skim outputs in delegated `htcondor` mode are flattened per dataset directory rather than nested per job directory:
+If scheduler history has expired, the monitor can recover a successful exit
+from the generated Condor event log for the exact cluster/process. The latest
+matching record must be a complete normal termination; live queue entries and
+available history take priority. Split retries use their persisted job directory
+rather than the reassigned logical index. This is terminal evidence only:
+configured output existence/integrity and provenance checks still run before a
+job becomes `done`. The monitor records the fallback source in
+`completion_evidence`. Shared logs are cached by file identity, modification
+time and size so recovery does not repeatedly parse a cluster log for each job.
+
+At the configured HTCondor output destination, staged outputs are flattened
+into each dataset directory rather than nested under a job directory. Each
+submitted job or partition produces its own output pair:
 
 - `.../<dataset>/output_<job>.root`
 - `.../<dataset>/meta_<job>.root`
 
-This layout keeps all outputs for one dataset under a single XRootD directory, which matches monitor verification via directory-level `xrdfs ls` calls.
+For XRootD destinations, this keeps all outputs for one dataset under a single
+directory, matching monitor verification via directory-level `xrdfs ls` calls.
+
+The monitor now uses directory-level `xrdfs ls -l` batches with at most four
+directories queried concurrently. Successful ROOT integrity checks are saved
+in `skimRun_<name>/output_validation.json`, independently of job state.
+Polling and `complete()` reuse those receipts when fresh storage metadata and
+the validation contract match. Missing or changed outputs and changed job
+attempts/configurations trigger validation again; no receipt is inferred from
+an old `done` status or from `output_validation=exists`. Existing runs therefore
+need one full validation to establish receipts. Normal polling, restarts and
+completion checks then avoid repeated ROOT reads for unchanged files.
+
+The contract binds the dataset/type, expected tree and output roles, file paths,
+staged configuration hash, dataset-manifest hash, execution identity and job
+attempt. Remote signatures contain file size, listed mtime and permissions;
+local signatures include device/inode and nanosecond mtime/ctime. These are not
+content checksums: an external rewrite preserving both remote size and listed
+mtime cannot be detected by this metadata cache. Remove `output_validation.json`
+to force full validation when such a rewrite is suspected. Unsupported listing
+formats and stat fallbacks remain uncacheable and use full integrity checks.
+
+Receipts checkpoint every 25 results or ten seconds, and when Python unwinds
+an interrupted pass. Writes use a locked atomic merge; cache failures warn
+without invalidating successful physics checks. Validation progress reports
+completed checks, full ROOT checks and reused receipts. `complete()` may refresh
+these receipts but never modifies job status or learns sizing/site preferences.
+Existing running monitors keep their imported code; this optimization takes
+effect in a new monitor process and requires no executable rebuild or MC rerun.
 
 ---
 
@@ -345,15 +465,16 @@ class RunSkimTestJob(AnalysisMixin, SkimMixin, law.Task)
 
 ### Purpose
 
-Runs the analysis executable on a **single input file** as a pre-flight
-validation step before ``SkimTask`` dispatches the full multi-dataset workflow.
+Runs the analysis executable on one input file for each available data and MC
+sample type as a pre-flight validation step before ``SkimTask`` dispatches the
+full multi-dataset workflow.
 
 In **file-source mode** (``--file-source`` set) ``RunSkimTestJob`` requires
 ``PrepareSkimJobs``, which creates a ``test_job/`` directory with a minimal
-single-file config.
+config for each available sample type.
 
 In **standard manifest mode** (``--file-source`` empty) the task builds the
-test job directory itself from the first dataset's first file.
+test job directory itself from the first dataset file available for each type.
 
 ### Output
 
@@ -372,8 +493,8 @@ class HistFillTask(AnalysisMixin, law.LocalWorkflow)
 ### Purpose
 
 Runs the analysis executable once per dataset to fill analysis histograms.
-Optionally chains after a completed `SkimTask` by automatically wiring the
-skim output as the input file list.
+Optionally chains after a standard manifest-mode `SkimTask` run by wiring its
+per-dataset skim output as the input file list.
 
 ### Parameters
 
@@ -381,8 +502,11 @@ Inherits all [AnalysisMixin parameters](#2-analysismixin-parameters), plus:
 
 #### `--skim-name` *(str, default: `""`)*
 
-Name of a completed `SkimTask` run whose outputs should be used as input
-for this histogram fill pass.
+Name of a `SkimTask` run whose outputs should be used as input
+for this histogram fill pass. This currently expects standard manifest-mode
+skims, which write one `skim.root` per dataset. File-source skims write one
+skim per partition under `outputs/<dataset>/job_<i>/` and do not provide the
+single `outputs/<dataset>/skim.root` path consumed here.
 
 - **When set**: `HistFillTask` declares `SkimTask --name <skim-name>` as a
   dependency.  Before running each branch the task checks the skim cache
@@ -393,8 +517,8 @@ for this histogram fill pass.
 
 ### Chain Mode
 
-When `--skim-name` is set, `HistFillTask` validates the skim cache before
-consuming it:
+When `--skim-name` is set for a standard manifest-mode skim,
+`HistFillTask` validates the skim cache before consuming it:
 
 | Cache status | Behaviour |
 |---|---|
@@ -718,6 +842,13 @@ law run RunMyJobs --workflow dask \
 |-----------|------|---------|-------------|
 | `--dask-scheduler` | str | `""` | Dask scheduler address, e.g. `tcp://host:8786`.  Empty = start a local cluster (testing only). |
 | `--dask-workers` | int | `1` | Workers in the local cluster when `--dask-scheduler` is empty. |
+
+Local worker counts must be positive integers and are forwarded to
+`Client(n_workers=...)`; the default starts one local worker. With an external
+scheduler, that scheduler owns its worker count; a nondefault `--dask-workers`
+request produces an explanatory task message and does not resize the cluster.
+This controls local worker count, without changing Dask's thread-per-worker
+policy or the analysis process's separate CPU/thread settings.
 
 These parameters are marked `significant=False` and are not forwarded to
 branch tasks.
@@ -1088,3 +1219,11 @@ for f in skimRun_v1/job_outputs/*.perf.json; do
 throughput={d[\"throughput_mbs\"]}MB/s')"
 done
 ```
+
+For an intentional second partial-merge caller, `partial_merge --wait-for-lock`
+waits for the current writer rather than failing immediately. The default core
+CLI remains fail-fast. A newly acquired lock records its PID/command; never
+remove a lock file to bypass a live writer. After acquiring the lock, completed
+dataset merges can be reused only when their snapshot identity, monitor parent,
+merge contract, exact input/output file inventory and all digests validate.
+ROOT output, metadata sidecar and completion marker remain one artifact.
