@@ -1,0 +1,15 @@
+# Embed the override in native analysis executables so worker bundles need no
+# preload script or additional shared library. Python owns its host allocator.
+set(_rdf_mi_default OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_C_COMPILER_ID MATCHES "^(GNU|Clang)$")
+    set(_rdf_mi_default ON)
+endif()
+option(RDF_USE_MIMALLOC "Use embedded mimalloc in native analysis executables" ${_rdf_mi_default})
+if(RDF_USE_MIMALLOC)
+    set(_rdf_mi_dir "${CMAKE_CURRENT_LIST_DIR}/../core/extern/mimalloc")
+    add_library(RDFMimalloc OBJECT "${_rdf_mi_dir}/src/static.c")
+    target_include_directories(RDFMimalloc PRIVATE "${_rdf_mi_dir}/include")
+    target_compile_definitions(RDFMimalloc PRIVATE MI_MALLOC_OVERRIDE)
+    target_compile_options(RDFMimalloc PRIVATE -fno-builtin-malloc -ftls-model=initial-exec)
+    set_target_properties(RDFMimalloc PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 11)
+endif()
