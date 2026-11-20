@@ -39,7 +39,7 @@ CMS Open Data NanoAOD (XRootD — public)
          │
          ▼
    output/dimuon_zpeak_meta.root
-    ├── nd_histograms_v1/ (THnSparseF)
+    ├── nd_histograms_v1/ (sparse dimuon, jet and muon histograms)
     ├── __rdf_histogram_schema_v1
     └── cutflow / cutflow_nminus1
          │
@@ -209,7 +209,7 @@ From the repository root, set up the pinned CMS checkout in `extensions/cms` and
 ```bash
 python3 scripts/fetch_cms.py
 source env.sh
-cmake -S . -B build -DRDF_ENABLE_CMS=ON -DRDF_REQUIRED_EXTENSIONS=cms
+cmake -S . -B build -DRDF_REQUIRED_EXTENSIONS=cms -DRDF_ANALYSES=CMS_Run2016_DoubleMuon
 cmake --build build --target cms_doublemu_analysis --parallel
 ```
 
@@ -365,7 +365,8 @@ resonance (J/ψ, Υ, H→γγ, …) you only need a different workspace config Y
 — no code changes.
 
 From the repository root, project the nominal sparse slices once before running
-either fit command. The extractor reads the embedded schema and writes a copy
+either fit command. Use the Python environment that matches the active ROOT
+build. The extractor reads the embedded schema and writes a copy
 with 1D mass histograms. The fit uses the visible 70–110 GeV bins, excluding
 the jet-category sentinel in underflow.
 

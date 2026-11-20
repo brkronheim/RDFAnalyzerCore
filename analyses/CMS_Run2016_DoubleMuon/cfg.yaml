@@ -9,7 +9,7 @@
 # ── Local run ─────────────────────────────────────────────────────────────────
 #   # From the repository root with extensions/cms installed:
 #   source env.sh
-#   cmake -S . -B build -DRDF_ENABLE_CMS=ON -DRDF_REQUIRED_EXTENSIONS=cms
+#   cmake -S . -B build -DRDF_REQUIRED_EXTENSIONS=cms -DRDF_ANALYSES=CMS_Run2016_DoubleMuon
 #   cmake --build build --target cms_doublemu_analysis --parallel
 #   cd analyses/CMS_Run2016_DoubleMuon
 #   mkdir -p output
@@ -23,14 +23,11 @@
 #       --exe build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis
 # =============================================================================
 
-# ---- Input files (CMS Open Data XRootD — publicly accessible) ---------------
-# A representative subset of Run2016G files.  To run over the full dataset,
-# retrieve the complete file list from https://opendata.cern.ch/record/30522 and
-# extend this list, or use the LAW OpenData workflow (see README.md).
+# ---- Input file (CMS Open Data XRootD) -------------------------------------
+# One public input for the local example. Use dataset record 30522 for the
+# complete file list or follow the LAW workflow in README.md.
 fileList: >-
-  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/DoubleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/0022/0E5B2574-86E2-1A4B-B37B-E01BBA4AEC56.root,
-  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/DoubleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/0022/2A9BD6BF-7E89-E943-8B05-EA8C0C18FDAC.root,
-  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/DoubleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/0022/4E68E57B-31D9-AF48-B5A9-5F5ACCBC1B0E.root
+  root://eospublic.cern.ch//eos/opendata/cms/Run2016G/DoubleMuon/NANOAOD/UL2016_MiniAODv2_NanoAODv9-v2/2430000/05DD095C-F6C3-9A4F-9FB3-348A5A6403D5.root
 
 # CMS NanoAOD stores events in the "Events" TTree
 treeList: Events
@@ -40,6 +37,7 @@ saveFile: output/dimuon_zpeak.root
 saveDirectory: output/
 saveTree: Events
 saveConfig: output.yaml
+enableSkim: false
 
 # ---- Sample type (used by TriggerManager to select the trigger group) ------
 # "0" = data.  Must match the 'sample' field in triggers.yaml.
@@ -48,7 +46,7 @@ type: "0"
 # ---- Performance -----------------------------------------------------------
 # -1 = use all available hardware threads.  Set to "1" for single-threaded
 # debugging; set to a positive integer to cap parallelism.
-threads: "-1"
+threads: "1"
 batch: "False"
 
 # ---- File filters ----------------------------------------------------------

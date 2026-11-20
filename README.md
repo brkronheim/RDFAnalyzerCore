@@ -73,10 +73,13 @@ name=pt_hist variable=jet_pt weight=event_weight bins=50 lowerBound=0.0 upperBou
 ## Installing
 Clone the repository:
 ```
-git clone git@github.com:brkronheim/RDFAnalyzerCore.git
+git clone --branch dev https://github.com/brkronheim/RDFAnalyzerCore.git
 cd RDFAnalyzerCore
-source env.sh  # On a CVMFS-backed host
-source build.sh
+source env.sh  # On a supported CVMFS-backed host
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt
+source build.sh -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 
 # Run the example from its source directory so relative config files resolve
 cd analyses/ExampleAnalysis
@@ -242,28 +245,41 @@ See [Configuration Reference](docs/CONFIG_REFERENCE.md) for complete documentati
 
 ```bash
 # Clone repository
-git clone git@github.com:brkronheim/RDFAnalyzerCore.git
+git clone --branch dev https://github.com/brkronheim/RDFAnalyzerCore.git
 cd RDFAnalyzerCore
 
-# Setup environment
+# Set up ROOT and an ABI-matched Python environment
 source env.sh
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt
 
-# Build
-source build.sh
+# Initialize the core submodules and build
+source build.sh -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 ```
 
 ### Standalone ROOT Installation
 
-Ensure ROOT and CMake are available:
+See the [standalone ROOT instructions](docs/GETTING_STARTED.md#standalone-root-installation).
 
-```bash
-# Setup ROOT
-source <root-install>/bin/thisroot.sh
+### Build wrappers
 
-# Build
-cmake -S . -B build
-cmake --build build -j$(nproc)
-```
+All four wrappers build into the checkout's `build/` directory. They use the
+active ROOT environment when available and otherwise source `env.sh`. Extra
+CMake cache options override the wrapper defaults.
+
+| Script | Defaults |
+|---|---|
+| `build.sh` | CPU, tests enabled |
+| `buildFast.sh` | CPU, tests disabled |
+| `buildFastCombine.sh` | CPU with Combine and CombineHarvester, tests disabled |
+| `buildFull.sh` | CUDA, tests enabled. Enables Combine and CombineHarvester when the Combine repository is reachable. |
+
+For `buildFull.sh`, make a matching CUDA toolkit available through `PATH` or
+`CUDACXX`. GPU inference also requires the CUDA and cuDNN libraries supported by
+the [pinned ONNX Runtime package](docs/ONNX_IMPLEMENTATION.md#1-onnx-runtime-integration-cmake).
+Set `CMAKE_BUILD_PARALLEL_LEVEL` to override the default number of workers.
+Use direct CMake commands when building in a different directory.
 
 ### Build Options
 
@@ -304,35 +320,23 @@ See [Combine Integration Guide](docs/COMBINE_INTEGRATION.md) for complete statis
 
 ### Testing
 
-Create and activate a local Python virtual environment before running Python-focused tests. Use the same interpreter for both CTest and direct pytest runs when possible.
+From the repository root in the build environment, activate the same virtual
+environment used to configure CMake. Include the ROOT library directory so
+Python tests can import PyROOT.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-ci.txt pytest
-```
-
-Then run the full C++/Python suite through CTest:
-
-```bash
-cd build
-ctest --output-on-failure
-```
-
-Or run targeted suites directly from the canonical Python test directories:
 ```bash
 source .venv/bin/activate
-PYTHONPATH=core/python:core/python/law python -m pytest core/tests/python/ core/tests/law/ -q
+export PYTHONPATH="$ROOTSYS/lib${PYTHONPATH:+:$PYTHONPATH}"
+ctest --test-dir build --output-on-failure
 ```
 
-The C++ suite and Python binding smoke test now live under `core/tests/cpp/`.
+To run the Python and LAW test directories directly:
 
-If you rebuild or reconfigure after creating the virtual environment, prefer:
 ```bash
-cmake -S . -B build -DPython3_EXECUTABLE=.venv/bin/python
+PYTHONPATH="core/python:core/python/law:$PYTHONPATH" python -m pytest core/tests/python/ core/tests/law/ -q
 ```
 
-For a fast sanity check after edits, run `cd build && ctest --output-on-failure` and then `source .venv/bin/activate && PYTHONPATH=core/python:core/python/law python -m pytest core/tests/python/ core/tests/law/ -q`.
+The C++ suite and native Python binding smoke tests live under `core/tests/cpp/`.
 
 ## Adding Your Analysis
 

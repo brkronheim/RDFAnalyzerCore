@@ -46,6 +46,8 @@ function(rdf_install_analyzer_sdk)
     install(DIRECTORY "${_sdk_source}/interface/" DESTINATION "${_sdk_headers}"
         COMPONENT AnalyzerSDK FILES_MATCHING PATTERN "*.h" PATTERN "*.hxx")
     install(FILES "${CMAKE_BINARY_DIR}/include/GitVersion.h" DESTINATION "${_sdk_headers}" COMPONENT AnalyzerSDK)
+    install(FILES "${CMAKE_BINARY_DIR}/include/correctionlib_version.h"
+        DESTINATION "${_sdk_headers}/dependencies" COMPONENT AnalyzerSDK)
     file(GLOB _sdk_plugins LIST_DIRECTORIES true "${_sdk_source}/plugins/*")
     set(SDK_PLUGIN_NAMES "")
     foreach(_sdk_plugin IN LISTS _sdk_plugins)
@@ -60,7 +62,8 @@ function(rdf_install_analyzer_sdk)
     endforeach()
     install(DIRECTORY "${_sdk_source}/extern/XGBoost-FastForest/include/"
         "${_sdk_source}/extern/correctionlib/include/" "${_sdk_source}/extern/yaml-cpp/include/"
-        DESTINATION "${_sdk_headers}/dependencies" COMPONENT AnalyzerSDK FILES_MATCHING PATTERN "*.h" PATTERN "*.hxx" PATTERN "*.hpp")
+        DESTINATION "${_sdk_headers}/dependencies" COMPONENT AnalyzerSDK FILES_MATCHING PATTERN "*.h" PATTERN "*.hxx" PATTERN "*.hpp"
+        PATTERN "correctionlib_version.h" EXCLUDE)
     install(DIRECTORY "${ONNXRUNTIME_INCLUDE_DIRS}/" DESTINATION "${_sdk_headers}/dependencies/onnxruntime" COMPONENT AnalyzerSDK)
     rdf_install_onnx_runtime(COMPONENT AnalyzerSDK REQUIRED_NOTICES)
     foreach(_sdk_dependency IN ITEMS XGBoost-FastForest correctionlib yaml-cpp)

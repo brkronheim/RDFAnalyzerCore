@@ -4,6 +4,7 @@ name: CMS DoubleMuon Analysis
 # This job builds the CMS Run2016G DoubleMuon analysis, runs the analysis
 # executable over a single public CMS Open Data NanoAOD file, and then builds
 # the analytic Z→μμ fit inputs (RooFit workspaces + Combine datacards).
+# The self-hosted runner needs the CVMFS environment and a CERN GitLab SSH key.
 #
 # To trigger:
 #   GitHub UI:  Actions → "CMS DoubleMuon Analysis (on request)" → Run workflow
@@ -15,9 +16,9 @@ on:
         description: "CMS extension Git URL (optional override of the pinned repository URL)"
         required: false
       threads:
-        description: "Number of RDataFrame threads (default: -1 = all CPUs)"
+        description: "Number of RDataFrame threads, auto, or max (default: 1)"
         required: false
-        default: "-1"
+        default: "1"
 
 jobs:
   run-analysis:
@@ -29,48 +30,31 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Verify runner environment
-        run: |
-          echo "Using self-hosted runner with preinstalled dependencies"
-          uname -a
-
-      - name: Verify ROOT
-        run: |
-          if command -v root-config >/dev/null 2>&1; then
-            echo "root-config found:"; root-config --version
-          elif command -v root >/dev/null 2>&1; then
-            echo "root found:"; root --version
-          else
-            echo "ERROR: ROOT not found on runner"; exit 1
-          fi
-
-      - name: Install Python dependencies
-        run: pip3 install -r requirements-ci.txt
-
-      - name: Download pinned CMS extension
+      - name: Fetch CMS and build the DoubleMuon analysis
         env:
           CMS_REPOSITORY: ${{ inputs.cms_repository }}
-        run: python3 scripts/fetch_cms.py --repository "$CMS_REPOSITORY"
-
-      - name: Configure CMake
-        run: >-
-          cmake -S . -B build -DRDF_ENABLE_CMS=ON -DRDF_REQUIRED_EXTENSIONS=cms
-          -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-          -DBUILD_TESTS=OFF -DBUILD_COMBINE=ON -DBUILD_COMBINE_HARVESTER=ON
-          -DUSE_CUDA=OFF -DONNXRUNTIME_USE_CUDA=OFF
-
-      - name: Build framework and analysis
-        run: >-
-          cmake --build build --parallel "$(( $(nproc) > 8 ? 8 : $(nproc) ))"
-
-      - name: Run analysis executable
-        working-directory: build/analyses/CMS_Run2016_DoubleMuon
-        env:
-          THREADS: ${{ github.event.inputs.threads }}
         run: |
+          python3 scripts/fetch_cms.py --repository "$CMS_REPOSITORY"
+          source env.sh
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install -r requirements-ci.txt
+          cmake -S . -B build -DRDF_REQUIRED_EXTENSIONS=cms \
+            -DRDF_ANALYSES=CMS_Run2016_DoubleMuon -DBUILD_TESTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DBUILD_COMBINE=OFF -DBUILD_COMBINE_HARVESTER=OFF \
+            -DUSE_CUDA=OFF -DONNXRUNTIME_USE_CUDA=OFF \
+            -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+          cmake --build build --target cms_doublemu_analysis --parallel 8
+
+      - name: Run the public NanoAOD example
+        env:
+          THREADS: ${{ inputs.threads }}
+        run: |
+          source env.sh
           # Write a minimal override config so the thread count can be injected
           # without modifying the committed ci_cfg.yaml.
-          THREADS=${THREADS:--1}
+          THREADS=${THREADS:-1}
           [[ "$THREADS" =~ ^(auto|max|[-+]?[0-9]+)$ ]] || { echo "Expected an integer, auto, or max"; exit 1; }
           CFG_DIR="$GITHUB_WORKSPACE/analyses/CMS_Run2016_DoubleMuon"
           CFG=$(mktemp "$CFG_DIR/ci_cfg_override.XXXXXX.yaml")
@@ -80,30 +64,41 @@ jobs:
           echo "RUN_DIR=$RUN_DIR" >> "$GITHUB_ENV"
           echo "HIST_FILE=$RUN_DIR/dimuon_zpeak_ci_meta.root" >> "$GITHUB_ENV"
           echo "FIT_INPUT=$RUN_DIR/dimuon_zpeak_fit.root" >> "$GITHUB_ENV"
-          ANALYSIS="$PWD/cms_doublemu_analysis"
+          ANALYSIS="$GITHUB_WORKSPACE/build/analyses/CMS_Run2016_DoubleMuon/cms_doublemu_analysis"
           cd "$RUN_DIR"
           "$ANALYSIS" "$CFG"
 
-      - name: Project nominal fit histograms
+      - name: Project nominal fit histograms and verify yields
         run: |
-          for py in /usr/bin/python3 "$(command -v python3)"; do
-            if "$py" -c 'import ROOT, numpy, yaml; print(ROOT.gROOT.GetVersion())'; then
-              FIT_PYTHON="$py"
-              break
-            fi
-          done
-          : "${FIT_PYTHON:?Need a Python interpreter with PyROOT, NumPy and PyYAML}"
-          echo "FIT_PYTHON=$FIT_PYTHON" >> "$GITHUB_ENV"
-          "$FIT_PYTHON" core/python/extract_nd_histograms.py "$HIST_FILE" --nominal-only --output "$FIT_INPUT"
+          source env.sh
+          source .venv/bin/activate
+          python core/python/extract_nd_histograms.py "$HIST_FILE" --nominal-only --output "$FIT_INPUT"
+          python - "$FIT_INPUT" <<'PYTHON'
+          import sys
+          import uproot
+
+          with uproot.open(sys.argv[1]) as output:
+              directory = output["Default_Default/Default"]
+              inclusive = directory["DimuonMass"].values().sum()
+              categories = sum(directory[f"DimuonMass_{jet}"].values().sum()
+                               for jet in ("0j", "1j", "2j", "ge3j"))
+              if inclusive <= 0 or categories != inclusive:
+                  sys.exit(f"Invalid dimuon yields: inclusive={inclusive}, categories={categories}")
+              print(f"Verified {inclusive:.0f} selected dimuons")
+          PYTHON
 
       - name: Fit every configured channel
         run: |
-          "$FIT_PYTHON" analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py \
+          source env.sh
+          source .venv/bin/activate
+          python analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py \
             --input "$FIT_INPUT" --outdir "$RUN_DIR/fit" --strict
 
       - name: Verify channel workspaces, cards and plots
         run: |
-          python3 - <<'PYTHON'
+          source env.sh
+          source .venv/bin/activate
+          python - <<'PYTHON'
           import os
           from pathlib import Path
           import yaml

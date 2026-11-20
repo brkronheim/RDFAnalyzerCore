@@ -56,35 +56,69 @@ if(NOT ONNXRUNTIME_ROOT_DIR)
     set(ONNX_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${ONNX_FILENAME}")
     set(ONNXRUNTIME_ROOT_DIR "${CMAKE_BINARY_DIR}/${ONNX_DIR_NAME}")
     
-    # Download and extract if not already present
+    # Publish only a completely extracted package. A failed configure can retry.
     if(NOT EXISTS "${ONNXRUNTIME_ROOT_DIR}")
+        set(_onnx_stage "${CMAKE_BINARY_DIR}/${ONNX_DIR_NAME}-download")
+        file(REMOVE_RECURSE "${_onnx_stage}")
+        file(MAKE_DIRECTORY "${_onnx_stage}")
+
         message(STATUS "Downloading ONNX Runtime ${ONNXRUNTIME_VERSION} for ${ONNX_PLATFORM}-${ONNX_ARCH}...")
-        file(DOWNLOAD
-            "${ONNX_URL}"
-            "${CMAKE_BINARY_DIR}/${ONNX_FILENAME}"
-            SHOW_PROGRESS
-            STATUS DOWNLOAD_STATUS
-        )
-        
-        list(GET DOWNLOAD_STATUS 0 STATUS_CODE)
-        if(NOT STATUS_CODE EQUAL 0)
-            list(GET DOWNLOAD_STATUS 1 ERROR_MESSAGE)
-            message(FATAL_ERROR "Failed to download ONNX Runtime: ${ERROR_MESSAGE}")
+        file(DOWNLOAD "${ONNX_URL}" "${_onnx_stage}/${ONNX_FILENAME}"
+            STATUS _onnx_release_status TLS_VERIFY ON)
+        list(GET _onnx_release_status 0 _onnx_release_code)
+        if(_onnx_release_code EQUAL 0)
+            file(ARCHIVE_EXTRACT INPUT "${_onnx_stage}/${ONNX_FILENAME}"
+                DESTINATION "${_onnx_stage}")
+        elseif(ONNX_PLATFORM STREQUAL "linux")
+            # Keep these digests and the package layouts paired with ONNXRUNTIME_VERSION.
+            if(ONNXRUNTIME_USE_CUDA)
+                set(_onnx_nuget_id "microsoft.ml.onnxruntime.gpu.linux")
+                set(_onnx_nuget_headers "buildTransitive/native/include")
+                set(_onnx_nuget_expected_sha256 "6333c1e8eb22ec4f26c8097b35eb94cc5c8cd211fe18b82a112cba39fb2cf16c")
+            else()
+                set(_onnx_nuget_id "microsoft.ml.onnxruntime")
+                set(_onnx_nuget_headers "build/native/include")
+                set(_onnx_nuget_expected_sha256 "5fca4421974b450711520f17a27e527fec60a78c2b6f9db3b05c159d9b5a346d")
+            endif()
+            set(_onnx_nuget_name "${_onnx_nuget_id}.${ONNXRUNTIME_VERSION}.nupkg")
+            set(_onnx_nuget_url "https://api.nuget.org/v3-flatcontainer/${_onnx_nuget_id}/${ONNXRUNTIME_VERSION}/${_onnx_nuget_name}")
+            set(_onnx_nuget_archive "${_onnx_stage}/${_onnx_nuget_name}")
+            message(STATUS "GitHub download failed (${_onnx_release_status}); trying Microsoft's NuGet package")
+            file(DOWNLOAD "${_onnx_nuget_url}" "${_onnx_nuget_archive}"
+                STATUS _onnx_nuget_status TLS_VERIFY ON)
+            list(GET _onnx_nuget_status 0 _onnx_nuget_code)
+            if(NOT _onnx_nuget_code EQUAL 0)
+                message(FATAL_ERROR
+                    "Could not download ONNX Runtime from ${ONNX_URL} (${_onnx_release_status}) "
+                    "or ${_onnx_nuget_url} (${_onnx_nuget_status}). "
+                    "Check network access or set ONNXRUNTIME_ROOT_DIR to an extracted ONNX Runtime package.")
+            endif()
+            file(SHA256 "${_onnx_nuget_archive}" _onnx_nuget_sha256)
+            if(NOT _onnx_nuget_sha256 STREQUAL _onnx_nuget_expected_sha256)
+                message(FATAL_ERROR "ONNX Runtime NuGet package SHA-256 does not match the pinned archive")
+            endif()
+            set(_onnx_nuget_native "runtimes/linux-${ONNX_ARCH}/native")
+            file(ARCHIVE_EXTRACT INPUT "${_onnx_nuget_archive}" DESTINATION "${_onnx_stage}"
+                PATTERNS "${_onnx_nuget_headers}/*" "${_onnx_nuget_native}/*"
+                    "LICENSE" "ThirdPartyNotices.txt")
+            set(_onnx_package "${_onnx_stage}/${ONNX_DIR_NAME}")
+            file(COPY "${_onnx_stage}/${_onnx_nuget_headers}"
+                "${_onnx_stage}/LICENSE" "${_onnx_stage}/ThirdPartyNotices.txt"
+                DESTINATION "${_onnx_package}")
+            file(COPY "${_onnx_stage}/${_onnx_nuget_native}/"
+                DESTINATION "${_onnx_package}/lib")
+            # NuGet ships an unversioned filename for a versioned ELF SONAME.
+            file(CREATE_LINK "libonnxruntime.so" "${_onnx_package}/lib/libonnxruntime.so.1" SYMBOLIC)
+        else()
+            message(FATAL_ERROR
+                "Could not download ONNX Runtime from ${ONNX_URL} (${_onnx_release_status}). "
+                "Check network access or set ONNXRUNTIME_ROOT_DIR to an extracted ONNX Runtime package.")
         endif()
-        
-        message(STATUS "Extracting ONNX Runtime...")
-        execute_process(
-            COMMAND ${CMAKE_COMMAND} -E tar xzf "${CMAKE_BINARY_DIR}/${ONNX_FILENAME}"
-            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-            RESULT_VARIABLE EXTRACT_RESULT
-        )
-        
-        if(NOT EXTRACT_RESULT EQUAL 0)
-            message(FATAL_ERROR "Failed to extract ONNX Runtime")
+        if(NOT EXISTS "${_onnx_stage}/${ONNX_DIR_NAME}/include/onnxruntime_cxx_api.h")
+            message(FATAL_ERROR "The downloaded ONNX Runtime archive is missing its C++ headers")
         endif()
-        
-        # Clean up the archive
-        file(REMOVE "${CMAKE_BINARY_DIR}/${ONNX_FILENAME}")
+        file(RENAME "${_onnx_stage}/${ONNX_DIR_NAME}" "${ONNXRUNTIME_ROOT_DIR}")
+        file(REMOVE_RECURSE "${_onnx_stage}")
         message(STATUS "ONNX Runtime extracted to ${ONNXRUNTIME_ROOT_DIR}")
     else()
         message(STATUS "Using existing ONNX Runtime at ${ONNXRUNTIME_ROOT_DIR}")

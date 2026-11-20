@@ -1,5 +1,8 @@
 set(CoreDirectory "${RDFAnalyzer_SOURCE_DIR}/core")
 
+# Core and source extensions consume the generated correctionlib version header.
+include_directories("${CMAKE_BINARY_DIR}/include")
+
 if(ROOT_VERSION VERSION_GREATER_EQUAL "6.30.00")
     add_compile_definitions(HAS_ROOT_PROGRESS_BAR)
 endif()

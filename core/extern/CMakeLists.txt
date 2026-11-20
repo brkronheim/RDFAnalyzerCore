@@ -27,7 +27,7 @@ set(CORRECTIONLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/correctionlib")
 
 configure_file(
     ${CORRECTIONLIB_DIR}/include/version.h.in
-    ${CORRECTIONLIB_DIR}/include/correctionlib_version.h
+    ${CMAKE_BINARY_DIR}/include/correctionlib_version.h
 )
 
 # Gather CorrectionLib source files (explicitly list only the required C++ files to avoid pybind/Python dependencies)
@@ -43,6 +43,7 @@ set_target_properties(correctionlib PROPERTIES PUBLIC_HEADER
 )
 target_include_directories(correctionlib PUBLIC
     $<BUILD_INTERFACE:${CORRECTIONLIB_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
     PRIVATE $<BUILD_INTERFACE:${CORRECTIONLIB_DIR}/rapidjson/include>
     $<BUILD_INTERFACE:${CORRECTIONLIB_DIR}/cpp-peglib>
     $<BUILD_INTERFACE:${CORRECTIONLIB_DIR}/xxhash>

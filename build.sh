@@ -1,18 +1,3 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-source "$(dirname -- "${BASH_SOURCE[0]}")/env.sh" &&
-
-# CMS is a separate optional checkout. Only initialize core dependencies here.
-git -C "$REPO_DIR" submodule update --init --recursive -- core/extern &&
-
-cmake -S "$REPO_DIR" -B "$REPO_DIR/build" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" \
-    -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DBUILD_TESTS=ON \
-    -DBUILD_COMBINE=OFF \
-    -DBUILD_COMBINE_HARVESTER=OFF \
-    -DONNXRUNTIME_USE_CUDA=OFF \
-    -DUSE_CUDA=OFF "$@" &&
-cmake --build "$REPO_DIR/build" -j"$(nproc)"
+source "$(dirname -- "${BASH_SOURCE[0]}")/scripts/build_common.sh" standard "$@"

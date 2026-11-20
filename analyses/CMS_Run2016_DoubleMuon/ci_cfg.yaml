@@ -1,12 +1,8 @@
 # =============================================================================
 # ci_cfg.yaml — CI configuration for the CMS Run2016G DoubleMuon analysis
 #
-# This config is used by the on-request analysis CI job
-# (.github/workflows/analysis-doublemu.yml).  It is identical to cfg.yaml
-# except:
-#   - fileList points to a single public CMS Open Data XRootD file
-#   - threads is set to "1" for deterministic, reproducible CI output
-#   - saveFile writes to the workspace root so the artifact upload is simple
+# The on-request analysis CI runs the same single public input as cfg.yaml.
+# The separate output filename keeps local and CI artifacts distinct.
 #
 # The file used is the first Run2016G DoubleMuon NanoAOD file from record 30522:
 #   https://opendata.cern.ch/record/30522
@@ -23,6 +19,7 @@ saveFile: dimuon_zpeak_ci.root
 saveDirectory: ./
 saveTree: Events
 saveConfig: output.yaml
+enableSkim: false
 
 # ---- Sample type -----------------------------------------------------------
 type: "0"

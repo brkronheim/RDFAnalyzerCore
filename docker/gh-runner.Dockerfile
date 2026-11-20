@@ -16,6 +16,14 @@ RUN apt-get update && apt-get install -y \
     libtbb-dev \
     libboost-all-dev \
     libgif-dev \
+    libgsl-dev \
+    libssl-dev \
+    libx11-dev \
+    libxext-dev \
+    libxft-dev \
+    libxpm-dev \
+    libxrootd-client-dev \
+    libxxhash-dev \
     # Python + build deps for numpy/numba
     python3 \
     python3-dev \
@@ -37,12 +45,15 @@ RUN useradd -m runner && echo "runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 WORKDIR /home/runner
 
 # GitHub Actions runner
-RUN curl -L https://github.com/actions/runner/releases/download/v2.331.0/actions-runner-linux-x64-2.331.0.tar.gz \
-    | tar xz
+RUN curl -fsSL -o runner.tar.gz https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-linux-x64-2.338.2.tar.gz \
+    && echo 'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40  runner.tar.gz' | sha256sum -c - \
+    && tar xzf runner.tar.gz \
+    && rm runner.tar.gz
 
 # ROOT binary distribution
-RUN curl -L https://root.cern/download/root_v6.40.04.Linux-ubuntu22.04-x86_64-gcc11.4.tar.gz \
-    | tar xz
+RUN curl -fsSL -o root.tar.gz https://root.cern/download/root_v6.40.04.Linux-ubuntu22.04-x86_64-gcc11.4.tar.gz \
+    && tar xzf root.tar.gz \
+    && rm root.tar.gz
 
 # Persist ROOT environment
 ENV ROOTSYS=/home/runner/root
@@ -62,5 +73,7 @@ COPY start.sh .
 RUN chown -R runner:runner /home/runner && chmod +x start.sh
 
 USER runner
+
+RUN ./bin/Runner.Listener --version
 
 ENTRYPOINT ["./start.sh"]

@@ -10,7 +10,7 @@ if(DEFINED ENV{XRD_ROOT})
 endif()
 
 find_path(XRDCL_INCLUDE_DIR NAMES XrdCl/XrdClFile.hh
-    HINTS ${_xrootd_hints} DOC "Directory containing XrdCl development headers")
+    HINTS ${_xrootd_hints} PATH_SUFFIXES xrootd DOC "Directory containing XrdCl development headers")
 find_library(XRDCL_LIBRARY NAMES XrdCl HINTS ${_xrootd_library_hints}
     DOC "XrdCl client library")
 
