@@ -26,7 +26,7 @@ Partition modes
     Pack whole files up to an event budget and file-count cap; split oversized
     files into half-open entry ranges. Optional cached counts avoid repeat opens.
     Ranged jobs require one RDF thread. ``entryRangeMode=source`` can seek
-    directly on ROOT 6.40; the default logical Range walks rejected prefixes.
+    directly on ROOT 6.40.x or 6.42.00-rc1. The default logical Range walks rejected prefixes.
 
 Determinism and reproducibility
 --------------------------------

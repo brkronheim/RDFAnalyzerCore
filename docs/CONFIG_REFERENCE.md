@@ -51,9 +51,8 @@ behavior; provide both bounds explicitly.
 `entryRangeMode=source` is an experimental, opt-in alternative which seeks the
 initial source directly, avoiding traversal of rejected prefix entries. It
 requires both bounds as nonnegative decimal integers, `lastEntry > firstEntry`,
-signed 64-bit bounds, disabled implicit multithreading, and ROOT 6.40.x. Other
-ROOT series fail with a clear error: this path uses a ROOT internal hook and
-needs revalidation before widening its version guard. Original `rdfentry_`
+signed 64-bit bounds, disabled implicit multithreading, and ROOT 6.40.x or
+6.42.00-rc1. The internal ROOT hook is version-gated. Original `rdfentry_`
 identities are preserved, including cross-file ranges. This changes no public
 C++ signatures or production defaults.
 
@@ -226,30 +225,28 @@ file=models/particle_transformer.onnx name=transformer inputVariables=jet_featur
 
 ### SOFIE Manager Configuration
 
-**Main config option**: `sofieConfig=path/to/sofie_models.txt`
+Optional main config entry `sofieConfig=path/to/sofie_models.txt`.
 
 **SOFIE config format** (one model per line):
 ```
 name=output_column inputVariables=var1,var2,var3 runVar=condition_column
 ```
 
-**Parameters**: Same as ONNX/BDT but WITHOUT `file` (SOFIE models are compiled code, not runtime files)
-
-**Example**:
+The record declares an output name, ordered input columns and a scalar bool
+gate. For example:
 ```
 name=sofie_dnn inputVariables=pt,eta,phi,mass runVar=has_jet
 name=sofie_classifier inputVariables=lep_pt,met runVar=pass_selection
 ```
 
-**Key Differences from ONNX/BDT**:
-- No `file` parameter (models compiled at build time)
-- Must manually register models via `registerModel()` in C++ code
-- Potentially faster inference (compiled code eliminates runtime overhead) but less flexible (rebuild required for updates)
+The configuration has no `file` setting. Supply the generated inference
+callable with `registerModel()` in C++. Earlier feature and gate entries
+for a given name are retained during registration, so keep both declarations
+consistent. The generated session can read a separate weights file whose
+path is managed by the C++ wrapper.
 
-**See**: [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for complete usage including:
-- Generating SOFIE C++ code from ONNX
-- Registering models in analysis code
-- When to use SOFIE vs ONNX
+See the [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for standalone
+PyPI generation, compilation and deployment.
 
 ### Correction Manager Configuration
 

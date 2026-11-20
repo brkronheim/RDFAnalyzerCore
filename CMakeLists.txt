@@ -33,6 +33,7 @@ message(STATUS "CMAKE_MODULE_PATH = ${CMAKE_MODULE_PATH}")
 project(RDFAnalyzer)
 include("${PROJECT_SOURCE_DIR}/cmake/InstallNativeAuthoring.cmake")
 rdf_install_native_authoring(COMPONENT NativeAuthoring)
+include("${PROJECT_SOURCE_DIR}/cmake/SetupSofieBLAS.cmake")
 include("${PROJECT_SOURCE_DIR}/cmake/SetupExtensions.cmake")
 rdf_discover_extensions()
 rdf_generate_extension_config()
@@ -104,6 +105,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 find_package(ROOT REQUIRED)
 find_package(Boost REQUIRED CONFIG)
+include("${CMAKE_SOURCE_DIR}/cmake/SetupMimalloc.cmake")
 include("${CMAKE_SOURCE_DIR}/cmake/SetupRootRegistry.cmake")
 
 # Setup yaml-cpp

@@ -9,7 +9,7 @@
 # SkimTask or RunOpenDataJobs is submitted with --workflow htcondor.
 #
 # This template handles the most common CMS/ATLAS use cases:
-#   1. Unpacking a Python environment tarball (law/setup_python_env.sh output)
+#   1. Unpacking a Python environment tarball (core/python/law/setup_python_env.sh output)
 #   2. Sourcing CVMFS-based ROOT/CMSSW environment (optional)
 #   3. Setting up xrootd / EOS for input/output staging
 #

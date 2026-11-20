@@ -296,7 +296,7 @@ formats. Record warmup separately, per-stage wall time, plots/second, allocation
 counts/bytes, object-construction counters, peak RSS, open files, and throughput
 versus worker count. Include preparation-only and render-without-export runs to
 isolate encoding/I/O costs. Use optimized builds; the inspected build cache
-currently selects Release and ROOT 6.40.04.
+currently selects Release and ROOT 6.42.00-rc1.
 
 Acceptance requires correct numerical/visual parity (with documented fixes),
 stable memory over repeated batches after warmup, bounded resources, and measured

@@ -1,6 +1,6 @@
 #include <GitVersion.h>
 #include <PlottingUtility.h>
-#include <RVersion.h>
+#include <ROOT/RVersion.hxx>
 #include <algorithm>
 #include <cerrno>
 #include <chrono>

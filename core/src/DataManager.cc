@@ -14,7 +14,7 @@
 #include <filesystem>
 #include <utility>
 #include <limits>
-#include <RVersion.h>
+#include <ROOT/RVersion.hxx>
 
 #include <ROOT/RDFHelpers.hxx>
 #include <functions.h>
@@ -341,7 +341,8 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
       const ULong64_t lastEntry  = std::stoull(lastEntryStr);
       if (lastEntry > firstEntry) {
         if(rangeMode=="source") {
-#if ROOT_VERSION_CODE >= ROOT_VERSION(6,40,0) && ROOT_VERSION_CODE < ROOT_VERSION(6,41,0)
+#if (ROOT_VERSION_CODE >= ROOT_VERSION(6,40,0) && ROOT_VERSION_CODE < ROOT_VERSION(6,41,0)) || \
+    ROOT_VERSION_CODE == ROOT_VERSION(6,41,99)
           if(ROOT::IsImplicitMTEnabled())
             throw std::invalid_argument("entryRangeMode=source currently requires threads=1");
           if(lastEntry>static_cast<ULong64_t>(std::numeric_limits<Long64_t>::max()))
@@ -351,11 +352,11 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
           // Keep this internal ROOT API opt-in and limited to the tested series.
           ROOT::Internal::RDF::ChangeBeginAndEndEntries(df_m,static_cast<Long64_t>(firstEntry),static_cast<Long64_t>(lastEntry));
 #else
-          throw std::runtime_error("entryRangeMode=source is validated only with ROOT6.40; use filter on this ROOT version");
+          throw std::runtime_error("entryRangeMode=source requires ROOT 6.40.x or 6.42.00-rc1; use filter on this ROOT version");
 #endif
         } else {
           if(lastEntry>std::numeric_limits<unsigned int>::max())
-            throw std::invalid_argument("ROOT Range uses32-bit bounds; entryRangeMode=source supports larger initial ranges on ROOT6.40");
+            throw std::invalid_argument("ROOT Range uses 32-bit bounds; entryRangeMode=source supports larger ranges on ROOT 6.40.x and 6.42.00-rc1");
           df_m = df_m.Range(static_cast<unsigned int>(firstEntry),static_cast<unsigned int>(lastEntry));
         }
         std::cout << "Entry range applied: [" << firstEntry << ", "
@@ -629,10 +630,6 @@ void DataManager::defineVectorImpl(std::string name,
 
 
 
-/**
- * @brief Register constant variables from configuration
- * @param configProvider Reference to the configuration provider
- */
 void DataManager::registerConstants(const IConfigurationProvider &configProvider, const std::string& floatConfigKey, const std::string& intConfigKey) {
   std::string floatFile = configProvider.get(floatConfigKey);
   if (!floatFile.empty()) {
@@ -658,10 +655,6 @@ void DataManager::registerConstants(const IConfigurationProvider &configProvider
   }
 }
 
-/**
- * @brief Register aliases from configuration
- * @param configProvider Reference to the configuration provider
- */
 void DataManager::registerAliases(const IConfigurationProvider &configProvider, const std::string& aliasConfigKey) {
   auto aliasConfig = configProvider.parseMultiKeyConfig(
       configProvider.get(aliasConfigKey) , {"existingName", "newName"});
@@ -678,10 +671,6 @@ void DataManager::registerAliases(const IConfigurationProvider &configProvider, 
   }
 }
 
-/**
- * @brief Register optional branches from configuration
- * @param configProvider Reference to the configuration provider
- */
 void DataManager::registerOptionalBranches(
     const IConfigurationProvider &configProvider, const std::string& optionalBranchesConfigKey) {
   const auto aliasConfig = configProvider.parseMultiKeyConfig(

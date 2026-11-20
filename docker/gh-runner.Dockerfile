@@ -47,10 +47,10 @@ RUN curl -L https://root.cern/download/root_v6.40.04.Linux-ubuntu22.04-x86_64-gc
 # Persist ROOT environment
 ENV ROOTSYS=/home/runner/root
 ENV PATH=$ROOTSYS/bin:$PATH
-ENV LD_LIBRARY_PATH=$ROOTSYS/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=$ROOTSYS/lib
 # Make PyROOT importable by the system Python used in this image.  ROOT's
 # Python extension modules live under $ROOTSYS/lib and must be on PYTHONPATH.
-ENV PYTHONPATH=$ROOTSYS/lib:$PYTHONPATH
+ENV PYTHONPATH=$ROOTSYS/lib
 
 # Verify PyROOT at build time (smoke test) to fail fast if Python/ROOT mismatch
 RUN python3 -c "import ROOT; print('PyROOT OK —', ROOT.gROOT.GetVersion())"

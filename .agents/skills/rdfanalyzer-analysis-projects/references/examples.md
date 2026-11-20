@@ -10,4 +10,4 @@
 
 The neighboring [fit_zpeak.py](../../../../analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py) and [zpeak_workspace.yaml](../../../../analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml) belong to its specific Z-peak fit workflow. Determine whether a task uses the generic Combine tasks, analytic workspace task, or a local script. Open-data discovery is a separate operation from reading an existing local sample and should be invoked only when the requested run needs it.
 
-These optional directories may inherit the framework Git root; check `--show-toplevel` rather than assuming a nested repository. Read each build target from the checkout and use a bounded local input for execution when available.
+Both example projects have framework-tracked sources; check `--show-toplevel` rather than assuming a nested repository. Read each build target from the checkout and use a bounded local input for execution when available.

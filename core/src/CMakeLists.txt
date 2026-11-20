@@ -4,7 +4,11 @@
 file(GLOB CORE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/*.cc")
 
 add_library(core STATIC ${CORE_SRC})
-if(RDF_ROOT_REGISTRY_AVAILABLE)
+if(TARGET RDFMimalloc)
+    target_sources(core INTERFACE "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:$<TARGET_OBJECTS:RDFMimalloc>>")
+    target_link_libraries(core INTERFACE Threads::Threads ${CMAKE_DL_LIBS})
+endif()
+if(RDF_ROOT_REGISTRY_AVAILABLE OR RDF_ROOT_READER_AVAILABLE)
     rdf_attach_root_registry(core)
 endif()
 

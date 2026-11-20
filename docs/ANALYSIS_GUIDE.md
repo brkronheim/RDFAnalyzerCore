@@ -532,63 +532,26 @@ auto bdtMgr = BDTManager::create(analyzer);
 bdtMgr->applyAllBDTs();
 ```
 
-### Using SOFIE Models (Maximum Performance)
+### Using SOFIE Models
 
-SOFIE (System for Optimized Fast Inference code Emit) generates compiled C++ code from ONNX models for maximum performance.
-
-**Key Difference**: SOFIE models are compiled at build time, not loaded at runtime.
-
-#### 1. Generate SOFIE C++ Code
+Use the standalone `sofie` package to generate C++ before compiling the
+analysis. For an ONNX model, install it with `python -m pip install sofie`.
 
 ```python
-import ROOT
-from ROOT import TMVA
+import sofie
 
-# Convert ONNX to SOFIE C++ code
-model = TMVA.Experimental.SOFIE.RModelParser_ONNX("classifier.onnx")
-model.Generate()
-model.OutputGenerated("ClassifierModel.hxx")
+model = sofie.onnx.parse("classifier.onnx")
+model.generate()
+model.output_generated("classifier.hxx")
 ```
 
-#### 2. Create Wrapper Function
+Include the generated header, link BLAS, and keep the generated weights
+available to the session if the model writes them separately. Register a
+C++ inference callable with `SofieManager` and apply it after the ordered
+input features and the bool gate are defined.
 
-```cpp
-#include "ClassifierModel.hxx"  // SOFIE-generated
-
-std::vector<float> classifierInference(const std::vector<float>& input) {
-    static TMVA_SOFIE_ClassifierModel::Session session;
-    return session.infer(input.data());
-}
-```
-
-#### 3. Register and Use Model
-
-```cpp
-#include <SofieManager.h>
-
-// The factory also registers the manager as "sofieManager".
-auto sofieMgr = SofieManager::create(analyzer);
-
-// Register model manually (not auto-loaded like ONNX/BDT)
-auto inferenceFunc = std::make_shared<SofieInferenceFunction>(classifierInference);
-sofieMgr->registerModel("classifier", inferenceFunc, 
-                       {"jet_pt", "jet_eta", "jet_phi"}, "has_jet");
-
-// Apply model
-sofieMgr->applyModel("classifier");
-```
-
-**When to use SOFIE**:
-- Maximum speed is critical
-- Model is finalized (won't change frequently)
-- Can rebuild between updates
-
-**When to use ONNX**:
-- Model still being developed
-- Need runtime flexibility
-- Want to swap models without recompiling
-
-**See**: [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for complete details.
+See the [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for the C++
+wrapper, CMake example, and deployment checks.
 
 ### Creating ONNX Models for Analysis
 

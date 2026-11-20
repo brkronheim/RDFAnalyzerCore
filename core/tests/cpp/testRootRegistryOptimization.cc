@@ -3,6 +3,13 @@
 #include <ROOT/RDFHelpers.hxx>
 #include <gtest/gtest.h>
 #include <cstdlib>
+#if RDF_EXPECT_MIMALLOC
+#include <mimalloc.h>
+#include <TArrayD.h>
+#endif
+#if RDF_EXPECT_PACKED_READERS
+extern "C" unsigned long rdf_root_packed_reader_bindings_v1();
+#endif
 
 TEST(RootRegistryOptimization, ReportsLinkedImplementationAndPrunesUnusedBindings) {
   const auto initial = rdf::rootRegistryOptimizationStatus();
@@ -47,3 +54,35 @@ TEST(RootRegistryOptimization, JittedRedefineKeepsCapturedInputsAndNativeVariati
   EXPECT_DOUBLE_EQ(results["shape:down"], 600.);
   EXPECT_DOUBLE_EQ(results["shape:up"], 640.);
 }
+
+TEST(RootDefineReaderOptimization, ReusesWithinAnEntryAndRefreshesOnANewLoop) {
+#if RDF_EXPECT_PACKED_READERS
+  const auto initialBindings = rdf_root_packed_reader_bindings_v1();
+#endif
+  ROOT::RDataFrame input(4);
+  int offset = 0;
+  auto graph = input.Define("value", [&offset](ULong64_t entry) {
+                        return static_cast<int>(entry) + offset;
+                      }, {"rdfentry_"})
+                   .Define("left", [](int value) { return 2 * value; }, {"value"})
+                   .Define("right", [](int value) { return 3 * value; }, {"value"})
+                   .Define("total", [](int left, int right) { return left + right; },
+                           {"left", "right"});
+  EXPECT_EQ(*graph.Sum<int>("total"), 30);
+  offset = 10;
+  EXPECT_EQ(*graph.Sum<int>("total"), 230);
+#if RDF_EXPECT_PACKED_READERS
+  EXPECT_GT(rdf_root_packed_reader_bindings_v1(), initialBindings);
+#endif
+}
+
+#if RDF_EXPECT_MIMALLOC
+TEST(NativeAllocator, HandlesCAndRootLibraryAllocations) {
+  void *buffer = std::malloc(1024);
+  ASSERT_NE(buffer, nullptr);
+  EXPECT_TRUE(mi_is_in_heap_region(buffer));
+  std::free(buffer);
+  TArrayD values(1024);
+  EXPECT_TRUE(mi_is_in_heap_region(values.GetArray()));
+}
+#endif

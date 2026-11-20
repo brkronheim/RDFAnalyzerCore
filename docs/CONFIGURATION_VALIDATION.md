@@ -39,6 +39,7 @@ The two modes are mutually exclusive; exactly one of `--config` or `--analysis-c
 |------|---------|
 | `0` | Validation passed (warnings may still be printed). |
 | `1` | One or more errors were found, or the config file was not found. |
+| `2` | Invalid command-line arguments, including omitted or conflicting input flags. |
 
 ### Example output
 

@@ -3,9 +3,9 @@
 source "$(dirname -- "${BASH_SOURCE[0]}")/env.sh" &&
 
 # CMS is a separate optional checkout. Only initialize core dependencies here.
-git submodule update --init --recursive -- core/extern &&
+git -C "$REPO_DIR" submodule update --init --recursive -- core/extern &&
 
-cmake -S . -B build \
+cmake -S "$REPO_DIR" -B "$REPO_DIR/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" \
     -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
@@ -15,4 +15,4 @@ cmake -S . -B build \
     -DBUILD_COMBINE_HARVESTER=OFF \
     -DONNXRUNTIME_USE_CUDA=OFF \
     -DUSE_CUDA=OFF "$@" &&
-cmake --build build -j"$(nproc)"
+cmake --build "$REPO_DIR/build" -j"$(nproc)"

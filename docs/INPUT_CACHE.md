@@ -71,7 +71,7 @@ with optional friend chains. `DataManager` constructs RDF over that primary chai
 and applies `firstEntry`/`lastEntry` as an initial `Range` by default. Experimental
 `entryRangeMode=source` instead sets initial source bounds before consumers are
 booked; it retains the same InputCache chain and global entry identities. It is
-restricted to ROOT6.40.x, one thread and valid signed64-bit bounds. See the
+available with ROOT 6.40.x and 6.42.00-rc1, one thread and valid signed 64-bit bounds. See the
 [configuration reference](CONFIG_REFERENCE.md#inputoutput-configuration) for
 the opt-in and compatibility limits. Providers and plugins
 expose raw `RNode`s, so there is no complete framework-owned graph of all
@@ -108,10 +108,10 @@ passes global chain offsets as local tree entries. With
 successful file transition. Without a configured range, ROOT retains control
 of the range. No event data is copied by the policy.
 
-The repository environment currently selects ROOT 6.40.04; CMake does not declare
+The repository environment currently selects ROOT 6.42.00-rc1; CMake does not declare
 a minimum ROOT release. The implementation uses public APIs and a compile-time
 fallback for builds without the prefetch setter. Integration coverage is run on
-6.36.08 and 6.40.04; other releases need the same tests before claiming compatibility. No
+6.36.08, 6.40.04 and 6.42.00-rc1. No
 private RDF graph structures or version-specific JIT internals are used.
 
 Relevant ROOT implementation/API references:

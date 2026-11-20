@@ -13,29 +13,14 @@ action() {
         this_file="${BASH_SOURCE[0]:-$0}"
     fi
 
-    local this_dir="$( cd "$( dirname "${this_file}" )" && pwd )"
-    local repo_dir="$( cd "${this_dir}/.." && pwd )"
+    local this_dir="$( CDPATH= cd "$( dirname "${this_file}" )" && pwd )"
+    local repo_dir="$( CDPATH= cd "${this_dir}/../../.." && pwd )"
     local repo_venv_activate="${repo_dir}/.venv/bin/activate"
 
     if [ -z "${VIRTUAL_ENV:-}" ] && [ -f "${repo_venv_activate}" ]; then
         # Prefer the repository-local virtualenv for LAW and Luigi imports.
         source "${repo_venv_activate}"
     fi
-
-    # setup external software once when not in the example image
-    #if [ -z "${LAW_DOCKER_EXAMPLE}" ]; then
-    #    local sw_dir="${this_dir}/tmp"
-    #    if [ ! -d "${sw_dir}" ]; then
-    #        mkdir -p "${sw_dir}"
-    #        git clone https://github.com/spotify/luigi.git "${sw_dir}/luigi"
-    #        ( cd "${sw_dir}/luigi" && git checkout tags/2.8.13 )
-    #        git clone https://github.com/benjaminp/six.git "${sw_dir}/six"
-    #    fi
-    #
-    #    # adjust paths to find local software
-    #    export PATH="${law_base}/bin:${sw_dir}/luigi/bin:${PATH}"
-    #    export PYTHONPATH="${law_base}:${sw_dir}/luigi:${sw_dir}/six:${PYTHONPATH}"
-    #fi
 
     if [ -n "${PYTHONPATH:-}" ]; then
         export PYTHONPATH="${this_dir}:${this_dir}/..:${PYTHONPATH}"

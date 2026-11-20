@@ -82,9 +82,9 @@ void ConfigurationManager::set(const std::string &key,
 }
 
 /**
- * @brief Strip comments from a line
- * @param line Input line
- * @return Line with comments removed
+ * @brief Strip leading and trailing whitespace.
+ * @param s Input view
+ * @return A view of the trimmed text, or an empty view for whitespace-only input
  */
 std::string_view ConfigurationManager::trim(std::string_view s) const {
   size_t first = s.find_first_not_of(" \t\n\r");
@@ -123,12 +123,6 @@ ConfigurationManager::splitString(std::string_view input,
   return splitStringVector;
 }
 
-/**
- * @brief Parse a key-value pair from a line
- * @param line Input line
- * @param stripComments Whether to strip comments
- * @return Pair of key and value strings
- */
 /**
  * @brief Process the top-level configuration file
  * @param configFile Path to the configuration file

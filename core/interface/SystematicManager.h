@@ -62,10 +62,12 @@ public:
   /**
    * @brief Get the set of variables affected by a given systematic
    * @param syst Name of the systematic
-   * @return Reference to the set of variable names
+   * @return Set of variable names
    */
   std::set<std::string>
   getVariablesForSystematic(const std::string &syst) const override;
+  bool isVariableAffectedBySystematic(const std::string &variable,
+                                      const std::string &syst) const override;
 
   /**
    * @brief Get the set of systematics affecting a given variable

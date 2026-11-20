@@ -19,7 +19,7 @@
 #include <TTreeCache.h>
 #include <TFile.h>
 #include <TTree.h>
-#include <RVersion.h>
+#include <ROOT/RVersion.hxx>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -94,7 +94,8 @@ TEST(DataManagerInputTest, ExplicitInMemoryConstructorCreatesRequestedEntries) {
   EXPECT_EQ(dataManager.getDataFrame().Count().GetValue(), 3u);
 }
 
-#if ROOT_VERSION_CODE >= ROOT_VERSION(6,40,0) && ROOT_VERSION_CODE < ROOT_VERSION(6,41,0)
+#if (ROOT_VERSION_CODE >= ROOT_VERSION(6,40,0) && ROOT_VERSION_CODE < ROOT_VERSION(6,41,0)) || \
+    ROOT_VERSION_CODE == ROOT_VERSION(6,41,99)
 TEST(DataManagerInputTest, SourceRangePreservesChainEntryIdentitiesAndPayload) {
   const auto directory=std::filesystem::temp_directory_path()/std::filesystem::path("rdf-source-range-"+std::to_string(getpid()));
   std::filesystem::create_directories(directory);

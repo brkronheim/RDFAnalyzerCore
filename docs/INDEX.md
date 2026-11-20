@@ -58,7 +58,7 @@
 - [ONNX](./ONNX_IMPLEMENTATION.md) - ML models
 - [Correction](./CMS_CORRECTIONS.md) - Scale factors
 - [Jet Energy Scale](./JET_ENERGY_CORRECTIONS.md) - JES corrections
-- [SOFIE](./SOFIE_IMPLEMENTATION.md) - Compiled models
+- [SOFIE](./SOFIE_IMPLEMENTATION.md) - Standalone PyPI generation and C++ registration
 
 **Systematics**
 - [Nuisance Groups](./NUISANCE_GROUPS.md) - Grouping variations

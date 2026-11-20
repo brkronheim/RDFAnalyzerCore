@@ -22,6 +22,26 @@ function(rdf_install_analyzer_sdk)
     set(_sdk_source "${PROJECT_SOURCE_DIR}/core")
     set(_sdk_headers "${CMAKE_INSTALL_INCLUDEDIR}/rdfanalyzer")
     set(_sdk_libraries "${CMAKE_INSTALL_LIBDIR}/rdfanalyzer")
+    # Keep native overrides in executable consumers only, just as in the build tree.
+    set(SDK_NATIVE_OBJECTS "")
+    set(SDK_NATIVE_EXPORTS "")
+    foreach(_target IN ITEMS RDFMimalloc RDFRootRegistryCompat)
+        if(TARGET ${_target})
+            install(FILES $<TARGET_OBJECTS:${_target}> DESTINATION "${_sdk_libraries}/native" COMPONENT AnalyzerSDK)
+            get_target_property(_sources ${_target} SOURCES)
+            foreach(_source IN LISTS _sources)
+                get_filename_component(_filename "${_source}" NAME)
+                list(APPEND SDK_NATIVE_OBJECTS "${_filename}.o")
+            endforeach()
+        endif()
+    endforeach()
+    if(TARGET RDFRootRegistryCompat)
+        get_target_property(SDK_NATIVE_EXPORTS RDFRootRegistryCompat RDF_EXPORTED_SYMBOLS)
+    endif()
+    if(TARGET RDFMimalloc)
+        install(FILES "${_sdk_source}/extern/mimalloc/LICENSE"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/rdfanalyzer/licenses/mimalloc" COMPONENT AnalyzerSDK)
+    endif()
     install(TARGETS core corePlugins yaml-cpp ARCHIVE DESTINATION "${_sdk_libraries}" COMPONENT AnalyzerSDK)
     install(DIRECTORY "${_sdk_source}/interface/" DESTINATION "${_sdk_headers}"
         COMPONENT AnalyzerSDK FILES_MATCHING PATTERN "*.h" PATTERN "*.hxx")
@@ -74,5 +94,6 @@ function(rdf_install_analyzer_sdk)
         "${CMAKE_CURRENT_BINARY_DIR}/RDFAnalyzerCoreConfig.cmake"
         INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/RDFAnalyzerCore")
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/RDFAnalyzerCoreConfig.cmake"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/SetupSofieBLAS.cmake"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/RDFAnalyzerCore" COMPONENT AnalyzerSDK)
 endfunction()

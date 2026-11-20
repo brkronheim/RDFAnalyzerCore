@@ -1,4 +1,4 @@
-// ROOT 6.40.04 compatibility patch. Constructor/AddDefine adapted from ROOT:
+// ROOT registry compatibility patch. Constructor/AddDefine adapted from ROOT:
 // RDefineBase: Copyright (C) 1995-2018, Rene Brun and Fons Rademakers.
 // Authors: Enrico Guiraud, Danilo Piparo (CERN).
 // RColumnRegister: Copyright (C) 1995-2021, Rene Brun and Fons Rademakers.
@@ -10,8 +10,7 @@
 #include <ROOT/RDF/RDefineReader.hxx>
 #include <ROOT/RDF/RLoopManager.hxx>
 #include <ROOT/RDF/Utils.hxx>
-#include <TROOT.h>
-#include <RVersion.h>
+#include "RootRuntimeVersion.hxx"
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -23,14 +22,12 @@
 #endif
 
 namespace {
-static_assert(ROOT_VERSION_CODE == ROOT_VERSION(6,40,4), "ROOT registry ABI mismatch");
 static_assert(sizeof(ROOT::Internal::RDF::RColumnRegister) == 56, "ROOT registry layout mismatch");
 std::atomic<std::uint64_t> constructions{0}, bindingsBefore{0}, bindingsAfter{0};
 bool enabled() {
   static const bool result = [] {
-    // TROOT uses decimal version numbers; ROOT_VERSION_CODE is bit-packed.
-    if (gROOT->GetVersionInt() != 64004)
-      throw std::runtime_error("ROOT registry optimization requires the audited ROOT 6.40.04 runtime");
+    if (!rdf::root_compat::runtimeVersionMatches())
+      throw std::runtime_error("ROOT registry optimization requires the exact ROOT runtime used to compile it");
     const char *value = std::getenv("RDF_ROOT_REGISTRY_OPTIMIZATION");
     const std::string mode = value ? value : "1";
     if (mode == "0" || mode == "off" || mode == "OFF" || mode == "false") return false;
@@ -103,7 +100,11 @@ RDefineBase::RDefineBase(std::string_view name, std::string_view type,
     const RDFInternal::RColumnRegister &colRegister, ROOT::Detail::RDF::RLoopManager &lm,
     const ROOT::RDF::ColumnNames_t &columnNames, const std::string &variationName)
     : fName(checkedName(name)), fType(type),
-      fLastCheckedEntry(lm.GetNSlots()*RDFInternal::CacheLineStep<Long64_t>(), -1),
+      fLastCheckedEntry(
+#ifdef RDF_ROOT_PACKED_READER
+          lm.GetNSlots() == 1 ? 1 :
+#endif
+          lm.GetNSlots()*RDFInternal::CacheLineStep<Long64_t>(), -1),
       fColRegister(colRegister), fLoopManager(&lm), fColumnNames(columnNames),
       fIsDefine(columnNames.size()), fVariationDeps(fColRegister.GetVariationDeps(fColumnNames)),
       fVariation(variationName) {

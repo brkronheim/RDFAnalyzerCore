@@ -267,7 +267,8 @@ class AuthoringTests(unittest.TestCase):
         import ROOT
         import numpy as np
         import uproot
-        source_supported=64000<=ROOT.gROOT.GetVersionInt()<64100
+        root_version = ROOT.gROOT.GetVersionInt()
+        source_supported = 64000 <= root_version < 64100 or root_version == 64199
         with tempfile.TemporaryDirectory() as temporary:
             directory=Path(temporary)
             files=[]

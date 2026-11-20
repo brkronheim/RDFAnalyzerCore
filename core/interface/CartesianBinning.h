@@ -113,19 +113,15 @@ inline std::optional<std::size_t> CartesianBinning::flattenOptional(
     return std::nullopt;
   }
 
-  std::vector<std::size_t> resolved;
-  resolved.reserve(coordinates.size());
-  for (const auto& coordinate : coordinates) {
-    if (!coordinate.has_value()) {
+  std::size_t bin = 0;
+  for (std::size_t axis = 0; axis < coordinates.size(); ++axis) {
+    const auto& coordinate = coordinates[axis];
+    if (!coordinate || *coordinate >= axisBinCounts_m[axis]) {
       return std::nullopt;
     }
-    resolved.push_back(*coordinate);
+    bin += *coordinate * strides_m[axis];
   }
-  try {
-    return flatten(resolved);
-  } catch (const std::exception&) {
-    return std::nullopt;
-  }
+  return bin;
 }
 
 inline std::vector<std::size_t> CartesianBinning::unflatten(
@@ -175,9 +171,16 @@ std::size_t flattenCategories(const std::array<std::size_t,N> &sizes,
   for (std::size_t i=0; i<N; ++i) {
     if (indices[i]<0 || static_cast<std::size_t>(indices[i])>=sizes[i])
       throw std::out_of_range("category index outside declared layout");
-    result=result*sizes[i]+indices[i];
+    const auto coordinate = static_cast<std::size_t>(indices[i]);
+    if (result > (std::numeric_limits<std::size_t>::max() - coordinate) / sizes[i]) {
+      throw std::overflow_error("category index overflows size_t");
+    }
+    result = result * sizes[i] + coordinate;
   }
-  return result+base;
+  if (result > std::numeric_limits<std::size_t>::max() - base) {
+    throw std::overflow_error("category index plus base overflows size_t");
+  }
+  return result + base;
 }
 template <std::size_t N>
 std::array<int,N> unflattenCategories(const std::array<std::size_t,N> &sizes,
@@ -187,7 +190,12 @@ std::array<int,N> unflattenCategories(const std::array<std::size_t,N> &sizes,
   std::array<int,N> result{};
   for (std::size_t i=N; i>0; --i) {
     if (!sizes[i-1]) throw std::invalid_argument("empty category axis");
-    result[i-1]=index%sizes[i-1]; index/=sizes[i-1];
+    const auto coordinate = index % sizes[i-1];
+    if (coordinate > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("category coordinate overflows int");
+    }
+    result[i-1] = static_cast<int>(coordinate);
+    index /= sizes[i-1];
   }
   if (index) throw std::out_of_range("category index above layout");
   return result;

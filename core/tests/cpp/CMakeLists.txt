@@ -24,7 +24,15 @@ add_test(NAME ProvenanceServiceTest COMMAND testProvenanceService)
 add_executable(testRootRegistryOptimization testRootRegistryOptimization.cc)
 target_link_libraries(testRootRegistryOptimization PRIVATE core gtest gtest_main)
 target_compile_definitions(testRootRegistryOptimization PRIVATE
-    RDF_EXPECT_ROOT_REGISTRY=$<BOOL:${RDF_ROOT_REGISTRY_AVAILABLE}>)
+    RDF_EXPECT_ROOT_REGISTRY=$<BOOL:${RDF_ROOT_REGISTRY_AVAILABLE}>
+    RDF_EXPECT_PACKED_READERS=$<BOOL:${RDF_ROOT_LOCALITY_AVAILABLE}>
+    RDF_EXPECT_MIMALLOC=$<BOOL:${RDF_USE_MIMALLOC}>)
+if(RDF_ROOT_LOCALITY_AVAILABLE)
+    target_include_directories(testRootRegistryOptimization BEFORE PRIVATE "${RDF_ROOT_INLINE_INCLUDE}")
+endif()
+if(RDF_USE_MIMALLOC)
+    target_include_directories(testRootRegistryOptimization PRIVATE "${PROJECT_SOURCE_DIR}/core/extern/mimalloc/include")
+endif()
 add_test(NAME RootRegistryOptimizationTest COMMAND testRootRegistryOptimization)
 add_test(NAME RootRegistryOptimizationDisabledTest COMMAND testRootRegistryOptimization)
 set_tests_properties(RootRegistryOptimizationDisabledTest PROPERTIES
@@ -166,6 +174,9 @@ add_test(NAME OnnxManagerTest COMMAND testOnnxManager)
 
 add_executable(testSofieManager testSofieManager.cc)
 target_link_libraries(testSofieManager coreAll gtest gtest_main)
+if(RDF_SOFIE_BLAS_LIBRARY OR RDF_SOFIE_OPENBLAS_LIBRARY)
+    target_compile_definitions(testSofieManager PRIVATE RDF_TEST_SOFIE_BLAS)
+endif()
 add_test(NAME SofieManagerTest COMMAND testSofieManager)
 
 add_executable(testNDHistogramManager testNDHistogramManager.cc)

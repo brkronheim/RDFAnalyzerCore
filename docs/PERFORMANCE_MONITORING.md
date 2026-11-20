@@ -4,7 +4,7 @@ RDFAnalyzerCore automatically records execution metrics and classifies failures 
 
 For CPU hotspot analysis of direct RDF jobs, prefer Linux `perf` over ad hoc wall-time measurements. The framework has non-trivial startup overhead from configuration parsing, plugin setup, histogram booking, and RDataFrame graph construction, so sampling should target the steady-state event loop rather than process startup.
 
-Native builds with the audited ROOT 6.40.04 headers automatically compact each
+Native builds with [audited ROOT headers](ROOT_REGISTRY_OPTIMIZATION.md) automatically compact each
 Define's private column registry. See [ROOT registry optimization](ROOT_REGISTRY_OPTIMIZATION.md)
 for support checks, output provenance and the per-process rollback switch.
 The recorded registry counters describe construction operations; use process

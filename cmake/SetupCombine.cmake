@@ -85,11 +85,16 @@ set(_common_args
     -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     -DEigen3_DIR=${Eigen3_DIR}
+    -DROOT_DIR=${ROOT_DIR}
     -DBUILD_TESTS=OFF
     -DBUILD_TESTING=OFF
     "-DCMAKE_EXE_LINKER_FLAGS=${_gsl_linker_flags}"
     "-DCMAKE_SHARED_LINKER_FLAGS=${_gsl_linker_flags}"
 )
+if(NOT TARGET VDT::VDT)
+    # ROOT 6.42 can link Vdt privately. Combine still finds and links it directly.
+    list(APPEND _common_args "-DCMAKE_MODULE_PATH=${CMAKE_CURRENT_LIST_DIR}/CombineDependencies")
+endif()
 
 ExternalProject_Add(CombineTool
     GIT_REPOSITORY https://github.com/cms-analysis/HiggsAnalysis-CombinedLimit.git

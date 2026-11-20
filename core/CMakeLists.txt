@@ -76,6 +76,7 @@ target_link_libraries(coreAll INTERFACE
     ${_rdf_extension_targets}
     -Wl,--end-group
 )
+rdf_add_default_sofie_blas(coreAll)
 
 add_subdirectory(python/bindings)
 

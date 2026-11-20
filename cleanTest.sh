@@ -1,2 +1,3 @@
-source cleanBuild.sh
-source test.sh
+#!/usr/bin/env bash
+source "$(dirname -- "${BASH_SOURCE[0]}")"/cleanBuild.sh &&
+source "$(dirname -- "${BASH_SOURCE[0]}")"/test.sh

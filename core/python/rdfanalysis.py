@@ -1106,7 +1106,12 @@ def diagnose_runtime(*, numba=False, cms=False, require_capabilities=()):
         module=importlib.import_module(name);modules[name]=module
         return {'path':getattr(module,'__file__',None),'version':getattr(module,'__version__',None)}
     for name in ('yaml','numpy','ROOT','rdfanalyzer'):check(name,lambda name=name:load(name))
-    if 'ROOT' in modules:report['root_version']=modules['ROOT'].gROOT.GetVersion()
+    source_entry_ranges = None
+    if 'ROOT' in modules:
+        root = modules['ROOT'].gROOT
+        report['root_version'] = root.GetVersion()
+        root_version = root.GetVersionInt()
+        source_entry_ranges = 64000 <= root_version < 64100 or root_version == 64199
     if 'rdfanalyzer' in modules:
         native=modules['rdfanalyzer']
         def native_api():
@@ -1118,7 +1123,7 @@ def diagnose_runtime(*, numba=False, cms=False, require_capabilities=()):
             return {'has_cms':bool(getattr(native,'has_cms',False)),
                     'native_api_version':native.python_authoring_api_version,'frontend_required_api':_NATIVE_API_VERSION,
                     'optional_capabilities':_native_features(native.Analyzer),
-                    'source_entry_ranges':64000<=modules['ROOT'].gROOT.GetVersionInt()<64100 if 'ROOT' in modules else None}
+                    'source_entry_ranges':source_entry_ranges}
         check('native authoring API',native_api)
         if required:
             def feature_check():

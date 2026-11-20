@@ -315,7 +315,7 @@ Disjoint range workers can use typed half-open bounds:
 `AnalysisConfig(..., entry_range=(500000,1000000), range_mode="source")`.
 Both range modes require one thread. `filter` is the default, with unsigned32-bit
 bounds; experimental `source` accepts signed64-bit bounds and currently requires
-ROOT6.40.x. Invalid bounds/types and conflicting native options fail before
+ROOT 6.40.x or 6.42.00-rc1. Invalid bounds/types and conflicting native options fail before
 opening inputs. The native version guard remains authoritative for source mode.
 Existing `options` range keys remain usable when no typed range is supplied.
 

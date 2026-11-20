@@ -28,6 +28,7 @@ regenerate scripts to deploy these changes; existing production is untouched.
 - [Legacy Compatibility Notes](#legacy-compatibility-notes)
 - [Common Parameters](#common-parameters)
 - [Configuration File Format](#configuration-file-format)
+- [ONNX Runtime for HTCondor workers](#onnx-runtime-for-htcondor-workers)
 - [Monitoring and Resubmission](#monitoring-and-resubmission)
 - [Advanced Features](#advanced-features)
 - [Troubleshooting](#troubleshooting)
@@ -421,6 +422,36 @@ post-processing tasks can have additional task-specific parameters:
 
 ---
 
+## ONNX Runtime for HTCondor workers
+
+For a submit-host ONNX Runtime package outside the checkout, configure a
+build directory inside the framework workspace. Point `ONNXRUNTIME_ROOT_DIR`
+at the package root that contains `include/` and `lib/`. For example, from
+the checkout root after sourcing the build environment:
+
+```bash
+cmake -S . -B build-worker \
+  -DONNXRUNTIME_ROOT_DIR=/absolute/path/to/onnxruntime \
+  -DONNXRUNTIME_USE_CUDA=OFF
+cmake --build build-worker --target myanalysis
+ldd build-worker/analyses/myAnalysis/myanalysis | grep libonnxruntime
+```
+
+Pass that executable as `--exe` to the LAW skim tasks. When `ldd` resolves
+ONNX Runtime through the build's `_rdf_onnx_link/<id>/` directory,
+`PrepareSkimJobs` stages the external library under its linker SONAME
+(for example, `libonnxruntime.so.1`) and its versioned filename. The worker
+loader searches the unpacked archive. Verify the staged names before submission:
+
+```bash
+tar -tzf skimRun_myRun/shared_inputs.tar.gz | grep '^libonnxruntime\.so'
+```
+
+For a shared CVMFS ONNX Runtime package, point `ONNXRUNTIME_ROOT_DIR` at
+the CVMFS package used by the workers. The worker loads it from CVMFS using
+its usual runtime environment. For CUDA builds, the worker environment
+continues to supply the compatible GPU provider and CUDA dependencies.
+
 ## Python Environment for Remote Jobs
 
 To use the RDFAnalyzerCore Python bindings (`rdfanalyzer`) or any other Python
@@ -430,7 +461,7 @@ create a portable tarball and pass it to law tasks via `--python-env`.
 ### Step 1: Set up the environment inside the container
 
 Run the setup script **inside the same container** you use for remote jobs.
-This ensures binary compatibility between local and remote nodes.
+Use the worker Python and ROOT runtime when building and checking the binding.
 
 ```bash
 # Basic usage (packages law, luigi, requests + rdfanalyzer.so)
@@ -441,9 +472,7 @@ cmssw-el9 --command-to-run \
   "bash core/python/law/setup_python_env.sh --extras 'numpy uproot numba' --output python_env.tar.gz"
 ```
 
-The script installs packages into a staging directory using
-`pip install --target` (no virtual-env activation scripts, fully portable)
-and copies the compiled `rdfanalyzer*.so` module from `build/python/`.
+The script stages packages with `pip install --target`. It selects a binding from `build/python/` using the requested interpreter’s extension suffixes. Set `RDFANALYZER_PYTHON_MODULE_DIR` for another build, such as `$PWD/build-clang/python`. If no matching module is found, the script prints a warning and writes a package-only archive. Workers need compatible native libraries. LAW archive extraction requires a Python runtime with `tarfile.data_filter`.
 
 **Setup script options:**
 

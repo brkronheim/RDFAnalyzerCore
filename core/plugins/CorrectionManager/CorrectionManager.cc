@@ -1,3 +1,4 @@
+#include <set>
 #include <CorrectionManager.h>
 #include <ArrayValidation.h>
 #include <RDFColumnPacker.h>
@@ -24,6 +25,22 @@
 namespace {
 
 using CorrectionValue = std::variant<int, double, std::string>;
+
+template <typename Evaluate>
+void defineSlotCorrection(IDataFrameProvider &provider, ISystematicManager &systematics,
+                          const std::string &name, Evaluate evaluate,
+                          const std::vector<std::string> &columns, bool propagate) {
+  auto df = provider.getDataFrame();
+  if (df.HasColumn(name)) return;
+  // ROOT supplies the slot directly to the callable, including in varied Defines.
+  const auto book = [&](ROOT::RDF::RNode node, const std::string &output,
+                        const std::vector<std::string> &inputs) {
+    return node.DefineSlot(output, evaluate, inputs);
+  };
+  provider.setDataFrame(propagate
+      ? rdf::detail::defineWithVariations(df, name, columns, systematics, book)
+      : book(df, name, columns));
+}
 
 bool scalarDoubleOutput(const IConfigurationProvider &config) {
   const auto &settings = config.getConfigMap();
@@ -153,6 +170,21 @@ void populateCorrectionValues(std::vector<CorrectionValue> &values,
   }
 }
 
+struct CorrectionScratch {
+  std::vector<CorrectionValue> values;
+  correction::CompoundCorrection::Workspace compound;
+};
+
+using CorrectionSlots = std::vector<CorrectionScratch>;
+
+double evaluateWithScratch(const correction::Correction::Ref &correction, CorrectionScratch &scratch) {
+  return correction->evaluate(scratch.values);
+}
+
+double evaluateWithScratch(const correction::CompoundCorrection::Ref &correction, CorrectionScratch &scratch) {
+  return correction->evaluate_with_workspace(scratch.values, scratch.compound);
+}
+
 /// Evaluate a correction with safe fallback for out-of-range inputs.
 ///
 /// Attempts `correction->evaluate(values)` and returns the result. Out-of-range
@@ -167,8 +199,9 @@ void populateCorrectionValues(std::vector<CorrectionValue> &values,
 /// genuine problems (corrupt files, schema mismatches, etc.).
 template <typename Output = Float_t, typename CorrectionRef>
 Output safeEvaluate(const CorrectionRef &correction,
-                     std::vector<CorrectionValue> &values,
+                     CorrectionScratch &scratch,
                      Output fallback = Output(1)) {
+  const auto &values = scratch.values;
   const auto reportFallback = [&](const char *type, const std::exception &error) {
     std::ostringstream warning;
     warning << std::setprecision(17)
@@ -191,7 +224,7 @@ Output safeEvaluate(const CorrectionRef &correction,
     std::cerr << warning.str();
   };
   try {
-    const auto result = correction->evaluate(values);
+    const auto result = evaluateWithScratch(correction, scratch);
     if (!std::isfinite(result) || std::abs(result) > std::numeric_limits<Output>::max())
       throw std::runtime_error("non-finite or unrepresentable correction result");
     return result;
@@ -226,36 +259,23 @@ Output safeEvaluate(const CorrectionRef &correction,
   }
 }
 
-template <typename Output = Float_t>
-Output evaluateScalarCorrection(
-    const correction::Correction::Ref &correction,
-    const std::vector<std::string> &stringArgs,
-    const std::vector<CorrectionInputKind> &inputKinds,
-    const ROOT::VecOps::RVec<double> &inputVector) {
-  std::vector<CorrectionValue> values;
-  values.reserve(inputKinds.size());
-  populateCorrectionValues(values, inputKinds, stringArgs, inputVector.begin());
-  return safeEvaluate<Output>(correction, values);
+template <typename Output, typename CorrectionRef>
+Output evaluateScalarCorrection(const CorrectionRef &correction,
+                                const std::vector<std::string> &stringArgs,
+                                const std::vector<CorrectionInputKind> &inputKinds,
+                                const ROOT::VecOps::RVec<double> &inputs,
+                                CorrectionScratch &scratch) {
+  populateCorrectionValues(scratch.values, inputKinds, stringArgs, inputs.begin());
+  return safeEvaluate<Output>(correction, scratch);
 }
 
-template <typename Output = Float_t>
-Output evaluateScalarCorrection(
-    const correction::CompoundCorrection::Ref &correction,
-    const std::vector<std::string> &stringArgs,
-    const std::vector<CorrectionInputKind> &inputKinds,
-    const ROOT::VecOps::RVec<double> &inputVector) {
-  std::vector<CorrectionValue> values;
-  values.reserve(inputKinds.size());
-  populateCorrectionValues(values, inputKinds, stringArgs, inputVector.begin());
-  return safeEvaluate<Output>(correction, values);
-}
-
+template <typename CorrectionRef>
 ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
-    const correction::Correction::Ref &correction,
+    const CorrectionRef &correction,
     const std::vector<std::string> &stringArgs,
     const std::vector<CorrectionInputKind> &inputKinds,
     const ROOT::VecOps::RVec<double> &flatInputVector,
-    size_t featureCount) {
+    size_t featureCount, CorrectionScratch &scratch) {
   if (featureCount == 0) {
     throw std::runtime_error("evaluateVectorCorrection: featureCount must be positive");
   }
@@ -266,38 +286,12 @@ ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
 
   const size_t objectCount = flatInputVector.size() / featureCount;
   ROOT::VecOps::RVec<Float_t> result(objectCount);
-  std::vector<CorrectionValue> values;
+  auto &values = scratch.values;
   values.reserve(inputKinds.size());
   for (size_t i = 0; i < objectCount; ++i) {
     auto doubleArgIt = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
     populateCorrectionValues(values, inputKinds, stringArgs, doubleArgIt);
-    result[i] = safeEvaluate(correction, values);
-  }
-  return result;
-}
-
-ROOT::VecOps::RVec<Float_t> evaluateVectorCorrection(
-    const correction::CompoundCorrection::Ref &correction,
-    const std::vector<std::string> &stringArgs,
-    const std::vector<CorrectionInputKind> &inputKinds,
-    const ROOT::VecOps::RVec<double> &flatInputVector,
-    size_t featureCount) {
-  if (featureCount == 0) {
-    throw std::runtime_error("evaluateVectorCorrection: featureCount must be positive");
-  }
-  if (flatInputVector.size() % featureCount != 0) {
-    throw std::runtime_error(
-        "evaluateVectorCorrection: flattened input size is not divisible by featureCount");
-  }
-
-  const size_t objectCount = flatInputVector.size() / featureCount;
-  ROOT::VecOps::RVec<Float_t> result(objectCount);
-  std::vector<CorrectionValue> values;
-  values.reserve(inputKinds.size());
-  for (size_t i = 0; i < objectCount; ++i) {
-    auto doubleArgIt = flatInputVector.begin() + static_cast<std::ptrdiff_t>(i * featureCount);
-    populateCorrectionValues(values, inputKinds, stringArgs, doubleArgIt);
-    result[i] = safeEvaluate(correction, values);
+    result[i] = safeEvaluate(correction, scratch);
   }
   return result;
 }
@@ -450,6 +444,70 @@ void CorrectionManager::applyCorrectionsVec(
   applyCorrectionBatch(true, name, arguments, inputs, outputs, propagateSystematics);
 }
 
+// Shares the same nominal aligned input pack used by applyCorrectionVec.
+// A failed preparation leaves the dataframe untouched for the scalar path.
+bool CorrectionManager::tryApplyBinnedGroup(const std::vector<std::string>& names,
+                                            const std::vector<std::string>& inputs) {
+  if (!dataManager_m || !systematicManager_m)
+    throw std::runtime_error("CorrectionManager: DataManager or SystematicManager not set");
+  if (names.size() < 2 || inputs.size() != 2) return false;
+  if (std::set<std::string>(names.begin(), names.end()).size() != names.size()) return false;
+  auto df = dataManager_m->getDataFrame();
+  std::vector<correction::Correction::Ref> sources;
+  for (const auto& name : names) {
+    const auto it = objects_m.find(name);
+    if (it == objects_m.end() || df.HasColumn(name) || df.HasColumn("input_vec_" + name) ||
+        !systematicManager_m->getSystematicsForVariable("input_vec_" + name).empty())
+      return false;
+    sources.push_back(it->second);
+  }
+  for (const auto& input : inputs) {
+    if (!df.HasColumn(input) || !rdfcolumnpacker::isRVecColumnType(df.GetColumnType(input)))
+      return false;
+  }
+  std::shared_ptr<const correction::BinnedFormulaGroup> group =
+      correction::BinnedFormulaGroup::prepare(sources);
+  if (!group) return false;
+  std::cout << "CorrectionManager: grouping " << names.size()
+            << " binned corrections starting with " << names.front() << '\n';
+  std::string table;
+  do {
+    table = "__rdf_binned_corrections_" + std::to_string(batchInputIndex_m++);
+  } while (df.HasColumn(table));
+  const std::string pack = "input_vec_" + names.front();
+  df = defineCorrectionInputPacks(df, pack, inputs, *systematicManager_m, false);
+  for (size_t k = 1; k < names.size(); ++k)
+    df = df.Alias("input_vec_" + names[k], pack);
+  df = df.Define(table, [group](const ROOT::VecOps::RVec<double>& flat) {
+    const size_t count = flat.size() / 2;
+    ROOT::VecOps::RVec<double> results(count * group->size());
+    for (size_t jet = 0; jet < count; ++jet) {
+      const double x = flat[2 * jet], y = flat[2 * jet + 1];
+      if (!std::isfinite(x) || !std::isfinite(y))
+        throw std::runtime_error("CorrectionManager: non-finite numeric correction input");
+      group->evaluate(x, y, results.data() + jet * group->size(), group->size());
+    }
+    return results;
+  }, {pack});
+  dataManager_m->setDataFrame(df);
+  for (size_t k = 0; k < names.size(); ++k) {
+    const auto extract = [k, stride = names.size(), name = sources[k]->name()](
+        const ROOT::VecOps::RVec<double>& rows) {
+      ROOT::VecOps::RVec<float> values(rows.size() / stride);
+      for (size_t jet = 0; jet < values.size(); ++jet) {
+        const double v = rows[jet * stride + k];
+        if (!std::isfinite(v) || std::abs(v) > std::numeric_limits<float>::max())
+          throw std::runtime_error("Error evaluating correction '" + name +
+                                   "': non-finite or unrepresentable correction result");
+        values[jet] = static_cast<float>(v);
+      }
+      return values;
+    };
+    dataManager_m->Define(names[k], extract, {table}, *systematicManager_m);
+  }
+  return true;
+}
+
 void CorrectionManager::applySelectedCorrectionsVec(
     const std::vector<VectorCorrectionCase> &cases,
     const std::string &selectorColumn,
@@ -517,35 +575,35 @@ void CorrectionManager::applySelectedCorrectionsVecBatch(
   dataManager_m->setDataFrame(df);
   for (std::size_t output = 0; output < outputs.size(); ++output) {
     const auto outputBranch = outputs[output];
+    auto slots = std::make_shared<CorrectionSlots>(df.GetNSlots());
     std::size_t argumentCount = 0;
     for (const auto &entry : preparedBatch[output])
       argumentCount = std::max(argumentCount, entry.kinds.size());
     const auto evaluate =
         [prepared = std::move(preparedBatch[output]), stride = inputColumns.size(),
-         outputBranch, perObjectInputs, argumentCount](
-            const ROOT::VecOps::RVec<double> &flat,
+         outputBranch, perObjectInputs, argumentCount, slots](
+            unsigned slot, const ROOT::VecOps::RVec<double> &flat,
             const ROOT::VecOps::RVec<int> &selectors) {
           if (flat.size() % stride ||
               (perObjectInputs ? flat.size() / stride != selectors.size() : flat.size() != stride))
             throw std::runtime_error(outputBranch + ": selector and numeric object arrays do not align");
           ROOT::VecOps::RVec<float> result(selectors.size());
           if (selectors.empty()) return result;
-          std::vector<CorrectionValue> values;
+          auto &scratch = (*slots)[slot];
+          auto &values = scratch.values;
           values.reserve(argumentCount);
           for (std::size_t i = 0; i < selectors.size(); ++i) {
             const auto selected = rdf::checkedIndex(outputBranch, selectors[i], prepared.size());
             const auto &entry = prepared[selected];
             populateCorrectionValues(values, entry.kinds, entry.strings,
                                      flat.begin() + (perObjectInputs ? i * stride : 0));
-            result[i] = entry.correction ? safeEvaluate(entry.correction, values)
-                                         : safeEvaluate(entry.compound, values);
+            result[i] = entry.correction ? safeEvaluate(entry.correction, scratch)
+                                         : safeEvaluate(entry.compound, scratch);
           }
           return result;
         };
-    if (propagate.empty() || propagate[output])
-      dataManager_m->Define(outputBranch, evaluate, {packed, selectorColumn}, *systematicManager_m);
-    else
-      dataManager_m->DefineNominal(outputBranch, evaluate, {packed, selectorColumn});
+    defineSlotCorrection(*dataManager_m, *systematicManager_m, outputBranch, evaluate,
+                         {packed, selectorColumn}, propagate.empty() || propagate[output]);
   }
 }
 
@@ -601,21 +659,20 @@ void CorrectionManager::applyConditionalCorrections(
     for (std::size_t i = 0; i < arguments.size(); ++i) {
       const auto bookOutput = [&](auto outputTag) {
         using Output = decltype(outputTag);
-        const auto evaluate = [correction, kinds, strings = arguments[i], prepareInputs](
-            const ROOT::VecOps::RVec<double> &values, bool active) -> Output {
+        const auto slots = std::make_shared<CorrectionSlots>(df.GetNSlots());
+        const auto evaluate = [correction, kinds, strings = arguments[i], prepareInputs, slots](
+            unsigned slot, const ROOT::VecOps::RVec<double> &values, bool active) -> Output {
           if (!active) return Output(1);
           if (!prepareInputs)
-            return evaluateScalarCorrection<Output>(correction, strings, kinds, values);
+            return evaluateScalarCorrection<Output>(correction, strings, kinds, values, (*slots)[slot]);
           auto prepared = values;
           prepareInputs(prepared);
           if (prepared.size() != values.size())
             throw std::runtime_error("CorrectionManager: conditional input preparation changed input count");
-          return evaluateScalarCorrection<Output>(correction, strings, kinds, prepared);
+          return evaluateScalarCorrection<Output>(correction, strings, kinds, prepared, (*slots)[slot]);
         };
-        if (propagate.empty() || propagate[i])
-          dataManager_m->Define(outputs[i], evaluate, {packed, condition}, *systematicManager_m);
-        else
-          dataManager_m->DefineNominal(outputs[i], evaluate, {packed, condition});
+        defineSlotCorrection(*dataManager_m, *systematicManager_m, outputs[i], evaluate,
+                             {packed, condition}, propagate.empty() || propagate[i]);
       };
       if (scalarDoubleOutput(*configManager_m)) bookOutput(double{});
       else bookOutput(Float_t{});
@@ -748,11 +805,13 @@ void CorrectionManager::applyCorrectionImpl(
     using Output = decltype(outputTag);
     const auto stringArgs = stringArguments;
     const auto inputKinds = buildCorrectionInputKinds(correction);
-    const auto evaluate = [correction, stringArgs, inputKinds](const ROOT::VecOps::RVec<double> &inputs) -> Output {
-      return evaluateScalarCorrection<Output>(correction, stringArgs, inputKinds, inputs);
+    const auto slots = std::make_shared<CorrectionSlots>(dataManager_m->getDataFrame().GetNSlots());
+    const auto evaluate = [correction, stringArgs, inputKinds, slots](
+        unsigned slot, const ROOT::VecOps::RVec<double> &inputs) -> Output {
+      return evaluateScalarCorrection<Output>(correction, stringArgs, inputKinds, inputs, (*slots)[slot]);
     };
-    if (propagateSystematics) dataManager_m->Define(branchName, evaluate, {inputColName}, *systematicManager_m);
-    else dataManager_m->DefineNominal(branchName, evaluate, {inputColName});
+    defineSlotCorrection(*dataManager_m, *systematicManager_m, branchName, evaluate,
+                         {inputColName}, propagateSystematics);
   };
   const auto dispatch = [&](const auto &correction) {
     if (doubleOutput) book(correction, double{});
@@ -901,42 +960,19 @@ void CorrectionManager::applyCorrectionVecImpl(
     dataManager_m->setDataFrame(dfNode);
   }
 
-  // Lambda that applies the correction to every object in the collection.
-  if (const auto corrIt = this->objects_m.find(correctionName);
-      corrIt != this->objects_m.end()) {
-    auto correction = corrIt->second;
-    auto stringArgs = stringArguments;
-    auto inputKinds = buildCorrectionInputKinds(correction);
-    const size_t featureCount = resolvedInputs.size();
-    auto correctionLambda =
-      [correction, stringArgs, inputKinds, featureCount](const ROOT::VecOps::RVec<double>
-                                                   &flatInputVector) -> ROOT::VecOps::RVec<Float_t> {
-      return evaluateVectorCorrection(correction, stringArgs, inputKinds, flatInputVector,
-                                      featureCount);
+  const auto book = [&](const auto &correction) {
+    auto slots = std::make_shared<CorrectionSlots>(dataManager_m->getDataFrame().GetNSlots());
+    auto evaluate = [correction, strings = stringArguments, kinds = buildCorrectionInputKinds(correction),
+                     count = resolvedInputs.size(), slots](unsigned slot, const ROOT::VecOps::RVec<double> &inputs) {
+      return evaluateVectorCorrection(correction, strings, kinds, inputs, count, (*slots)[slot]);
     };
-    if (propagateSystematics)
-      dataManager_m->Define(branchName, correctionLambda, {inputVecName}, *systematicManager_m);
-    else dataManager_m->DefineNominal(branchName, correctionLambda, {inputVecName});
-    return;
-  }
-
-  if (const auto compoundIt = compoundObjects_m.find(correctionName);
-      compoundIt != compoundObjects_m.end()) {
-    auto correction = compoundIt->second;
-    auto stringArgs = stringArguments;
-    auto inputKinds = buildCorrectionInputKinds(correction);
-    const size_t featureCount = resolvedInputs.size();
-    auto correctionLambda =
-      [correction, stringArgs, inputKinds, featureCount](const ROOT::VecOps::RVec<double>
-                                                   &flatInputVector) -> ROOT::VecOps::RVec<Float_t> {
-      return evaluateVectorCorrection(correction, stringArgs, inputKinds, flatInputVector,
-                                      featureCount);
-    };
-    if (propagateSystematics)
-      dataManager_m->Define(branchName, correctionLambda, {inputVecName}, *systematicManager_m);
-    else dataManager_m->DefineNominal(branchName, correctionLambda, {inputVecName});
-    return;
-  }
+    defineSlotCorrection(*dataManager_m, *systematicManager_m, branchName, evaluate,
+                         {inputVecName}, propagateSystematics);
+  };
+  if (const auto it = objects_m.find(correctionName); it != objects_m.end())
+    return book(it->second);
+  if (const auto it = compoundObjects_m.find(correctionName); it != compoundObjects_m.end())
+    return book(it->second);
 
   throw std::runtime_error("CorrectionManager::applyCorrectionVec: unknown correction '" + correctionName + "'");
 }

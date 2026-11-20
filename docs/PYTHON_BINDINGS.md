@@ -36,7 +36,7 @@ analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
 analyzer.Filter("pt_cut", "pt_gev > 20.0", ["pt_gev"])
 ```
 
-**Deprecated Aliases**: `DefineJIT`, `FilterJIT`, `DefineFromVector` remain available for backward compatibility but prefer using `Define` and `Filter` directly.
+Use `Define` and `Filter` for expression strings and `DefineVector` for a contiguous array. The corresponding compatibility names are `DefineJIT`, `FilterJIT`, and `DefineFromVector`.
 
 ### Plugin and framework control
 
@@ -208,7 +208,7 @@ Pass numpy arrays to the analyzer via pointer and size.
 - Easy integration with existing numpy workflows
 - Useful for pre-computed weights or corrections
 - Direct memory access (no copying)
-- Support for any numeric dtype
+- Support for the element types listed below
 
 **Example:**
 
@@ -234,8 +234,8 @@ analyzer.DefineFromVector("scale_factor",
                           len(scale_factors),
                           "double")
 
-# Use in expressions
-analyzer.DefineJIT("weighted_pt", "pt * event_weight", 
+# For scalar pt, this produces one weighted pt per table element.
+analyzer.DefineJIT("weighted_pt", "pt * event_weight",
                    ["pt", "event_weight"])
 
 analyzer.save()
@@ -244,7 +244,7 @@ analyzer.save()
 **Important notes:**
 - Arrays must remain in memory during analysis (don't let them go out of scope)
 - The analyzer stores pointers, not copies
-- Ensure array size matches the number of events
+- Each event receives the whole vector. Its length is the number of array elements.
 
 **Supported dtypes:**
 
@@ -345,21 +345,16 @@ vetoes = analyzer.getVetoes("trigger", "group_name")
 
 ### SOFIE Manager
 
-```python
-# Apply SOFIE models
-analyzer.setConfig("sofieConfig", "cfg/sofie_models.txt")
-analyzer.AddPlugin("sofie", "SofieManager")
-analyzer.SetupPlugin("sofie")
+Generate the header separately in Python with the standalone `sofie`
+package. Compile and register the inference callable in C++ as shown in the
+[SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md).
 
-# Apply all SOFIE models
-analyzer.applyAllSofieModels("sofie")
-
-# Apply specific model
-analyzer.applySofieModel("sofie", "model_name")
-
-# Get model names
-model_names = analyzer.getSofieModelNames("sofie")
-```
+The bindings expose `applySofieModel(role, model_name)`,
+`applyAllSofieModels(role)` and `getSofieModelNames(role)`. The apply methods
+require a manager role with the C++ callables already registered.
+`AddPlugin` and `SetupPlugin` can create the manager and load metadata, but
+the bindings expose no SOFIE callable registration method. For Python-only
+analysis authoring with runtime model loading, see [ONNX](ONNX_IMPLEMENTATION.md).
 
 ### Histogram Manager
 
@@ -653,7 +648,7 @@ def func(x):
 ### Segmentation faults
 
 Common causes:
-- Numpy array went out of scope (use DefineFromVector)
+- NumPy array went out of scope before the lazy graph finished reading it
 - Invalid function pointer (check numba function signature)
 - Incorrect C++ signature in DefineFromPointer
 

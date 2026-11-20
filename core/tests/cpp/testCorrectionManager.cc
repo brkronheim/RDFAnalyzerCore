@@ -1518,3 +1518,68 @@ TEST_F(CorrectionManagerTest, SelectedVectorExplicitLabelsPropagateNumericInputs
   }
   EXPECT_EQ(df.GetNRuns(), 1u);
 }
+
+TEST_F(CorrectionManagerTest, GroupedTablesPreserveScalarEdgesFlowAndOrdering) {
+  using Vec = ROOT::VecOps::RVec<float>;
+  const std::vector<std::string> inputs{"eta", "pt"};
+  dataManager->DefineNominal("eta", [] { return Vec{-2, 0, 1, 2, -3}; });
+  dataManager->DefineNominal("pt", [] { return Vec{-1, 10, 21, 0, 0}; });
+  for (const auto& name : {"a", "b", "scalar"})
+    correctionManager->registerCorrection(name, "aux/mock_binned_group.json", "table", inputs);
+  EXPECT_FALSE(correctionManager->tryApplyBinnedGroup({"a"}, inputs));
+  EXPECT_FALSE(correctionManager->tryApplyBinnedGroup({"a", "test_correction"}, inputs));
+  EXPECT_FALSE(dataManager->getDataFrame().HasColumn("input_vec_a"));
+  ASSERT_TRUE(correctionManager->tryApplyBinnedGroup({"a", "b"}, inputs));
+  correctionManager->applyCorrectionVec("scalar", {}, inputs, "reference");
+  auto df = dataManager->getDataFrame();
+  auto a = df.Take<Vec>("a");
+  auto b = df.Take<Vec>("b");
+  auto ref = df.Take<Vec>("reference");
+  const std::vector<float> expected{1, 23, 43, -999, -999};
+  ASSERT_EQ(a->at(0).size(), expected.size());
+  for (size_t k = 0; k < expected.size(); ++k) {
+    EXPECT_EQ(a->at(0)[k], expected[k]);
+    EXPECT_EQ(b->at(0)[k], ref->at(0)[k]);
+  }
+  EXPECT_FALSE(correctionManager->tryApplyBinnedGroup({"a", "b"}, inputs));
+}
+
+TEST_F(CorrectionManagerTest, GroupedTablesRetainAlignedAndFiniteInputChecks) {
+  using Vec = ROOT::VecOps::RVec<float>;
+  const std::vector<std::string> inputs{"eta", "pt"};
+  for (const auto& name : {"a", "b"})
+    correctionManager->registerCorrection(name, "aux/mock_binned_group.json", "table", inputs);
+  for (const auto& pts : {Vec{}, Vec{std::numeric_limits<float>::quiet_NaN()}}) {
+    DataManager dm(1);
+    setContextFor(dm);
+    dm.DefineNominal("eta", [] { return Vec{1}; });
+    dm.DefineNominal("pt", [pts] { return pts; });
+    ASSERT_TRUE(correctionManager->tryApplyBinnedGroup({"a", "b"}, inputs));
+    EXPECT_THROW(dm.getDataFrame().Take<Vec>("a").GetValue(), std::runtime_error);
+  }
+}
+
+TEST_F(CorrectionManagerTest, GroupPreparationChecksBothAxesFlowAndFormula) {
+  std::ifstream input("aux/mock_binned_group.json");
+  ASSERT_TRUE(input.good());
+  const std::string json{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  const auto reference = correction::CorrectionSet::from_string(json.c_str())->at("table");
+  const auto changed = [&](const std::string& before, const std::string& after) {
+    std::string copy = json;
+    copy.replace(copy.find(before), before.size(), after);
+    return correction::CorrectionSet::from_string(copy.c_str())->at("table");
+  };
+  using Group = correction::BinnedFormulaGroup;
+  EXPECT_FALSE(Group::prepare({reference, changed("[-2.0,2.0]", "[-2.0,3.0]")}));
+  EXPECT_FALSE(Group::prepare({reference, changed("[0.0,10.0,20.0]", "[0.0,9.0,20.0]")}));
+  EXPECT_FALSE(Group::prepare({reference, changed("\"clamp\"", "\"error\"")}));
+  EXPECT_FALSE(Group::prepare({reference, changed("x,[3]", "x,[2]")}));
+  const auto second = changed("[2,3,10,20]", "[2,-3,10,20]");
+  const auto group = Group::prepare({second, reference});
+  ASSERT_TRUE(group);
+  double values[2];
+  EXPECT_THROW(group->evaluate(0, 10, values, 1), std::invalid_argument);
+  group->evaluate(0, 10, values, 2);
+  EXPECT_EQ(values[0], 17.);
+  EXPECT_EQ(values[1], 23.);
+}

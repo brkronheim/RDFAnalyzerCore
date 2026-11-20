@@ -174,7 +174,7 @@ bool SystematicManager::hasSelectionMasks() const {
 /**
  * @brief Get the set of variables affected by a given systematic
  * @param syst Name of the systematic
- * @return Reference to the set of variable names
+ * @return Set of variable names
  */
 std::set<std::string>
 SystematicManager::getVariablesForSystematic(const std::string &syst) const {
@@ -187,6 +187,15 @@ SystematicManager::getVariablesForSystematic(const std::string &syst) const {
     return explicitIt->second;
   }
   return {};
+}
+
+bool SystematicManager::isVariableAffectedBySystematic(
+    const std::string &variable, const std::string &syst) const {
+  const auto family = systematicToVariableMap_m.find(normalizeSystematicName(syst));
+  if (family != systematicToVariableMap_m.end())
+    return family->second.count(variable) != 0;
+  const auto label = explicitVariationToVariableMap_m.find(syst);
+  return label != explicitVariationToVariableMap_m.end() && label->second.count(variable) != 0;
 }
 
 /**

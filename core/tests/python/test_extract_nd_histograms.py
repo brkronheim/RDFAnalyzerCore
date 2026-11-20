@@ -105,7 +105,7 @@ def test_extraction_preserves_sparse_data_and_variable_binning(tmp_path, monkeyp
     root_file = ROOT.TFile.Open(str(input_path), "RECREATE")
     directory = root_file.mkdir("nd_histograms_v1")
     directory.cd()
-    sparse = ROOT.THnSparseF("pt__nominal", "h_pt", 5, nbins, lower, upper)
+    sparse = ROOT.THnSparseF("pt__nominal", "h_pt", 5, nbins, lower, upper, 16 * 1024)
     sparse.Sumw2()
     sparse.SetBinEdges(4, array("d", [0.0, 10.0, 30.0]))
     sparse.Fill(coordinates, 2.0)

@@ -91,18 +91,6 @@ public:
                            ISystematicManager &systematicManager) override;
 
   /**
-   * @brief Filter the dataframe
-   * @param f Filter function
-   * @param columns Input columns
-   */
-
-  /**
-   * @brief Define a per-sample variable in the dataframe
-   * @param name Name of the variable
-   * @param f Function to define the variable
-   */
-
-  /**
    * @brief Template function to define a constant value for all samples
    * @tparam T The type of the constant value
    * @param name Name of the variable
@@ -117,30 +105,24 @@ public:
   }
 
   /**
-   * @brief Redefine a variable in the dataframe
-   * @param name Name of the variable
-   * @param f Function to redefine the variable
-   * @param columns Input columns
-   */
-
-  /**
    * @brief Register constant variables from configuration
    * @param configProvider Reference to the configuration provider
-   * @param configKey The key in the configuration for the constants file (default: "floatConfig")
+   * @param floatConfigKey Configuration key for the floating-point constants file
+   * @param intConfigKey Configuration key for the integer constants file
    */
   void registerConstants(const IConfigurationProvider &configProvider, const std::string& floatConfigKey = "floatConfig", const std::string& intConfigKey = "intConfig");
 
   /**
    * @brief Register aliases from configuration
    * @param configProvider Reference to the configuration provider
-   * @param configKey The key in the configuration for the alias file (default: "aliasConfig")
+   * @param aliasConfigKey Configuration key for the alias file
    */
   void registerAliases(const IConfigurationProvider &configProvider, const std::string& aliasConfigKey = "aliasConfig");
 
   /**
    * @brief Register optional branches from configuration
    * @param configProvider Reference to the configuration provider
-   * @param configKey The key in the configuration for the optional branches file (default: "optionalBranchesConfig")
+   * @param optionalBranchesConfigKey Configuration key for the optional branches file
    */
   void registerOptionalBranches(const IConfigurationProvider &configProvider, const std::string& optionalBranchesConfigKey = "optionalBranchesConfig");
 

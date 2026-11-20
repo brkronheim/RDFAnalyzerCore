@@ -33,9 +33,9 @@ from submission_backend import (
 def collect_local_shared_libs(exe_path: str, repo_root: str) -> dict[str, str]:
     """Return local shared-library deps and ROOT dictionary sidecars.
 
-    Only libraries whose resolved real path starts with *repo_root* are
-    returned, so system libraries (glibc, libstdc++, …) are silently ignored.
-    Both the resolved basename and the declared soname are added as keys so
+    Collect libraries under *repo_root* and the non-CVMFS ONNX Runtime
+    selected through its CMake link directory inside *repo_root*.
+    Both the resolved basename and the declared SONAME are added as keys so
     that the loader can find the library under either name. ROOT PCM/rootmap
     files and referenced headers beside a library are staged with it.
     """
@@ -71,8 +71,18 @@ def collect_local_shared_libs(exe_path: str, repo_root: str) -> dict[str, str]:
                 soname = os.path.basename(resolved)
         if not resolved or not os.path.isabs(resolved):
             continue
+        resolved = os.path.normpath(resolved)
         real_path = os.path.realpath(resolved)
-        if not os.path.exists(real_path) or not real_path.startswith(repo_prefix):
+        if not os.path.isfile(real_path):
+            continue
+        # The CMake overlay can link to a configured package outside the repo.
+        configured_onnx = (
+            resolved.startswith(repo_prefix)
+            and Path(resolved).parent.parent.name == "_rdf_onnx_link"
+            and re.fullmatch(r"libonnxruntime\.so(?:\.\d+)*", soname)
+            and not real_path.startswith("/cvmfs/")
+        )
+        if not real_path.startswith(repo_prefix) and not configured_onnx:
             continue
         real_name = os.path.basename(real_path)
         if ".so" not in real_name:

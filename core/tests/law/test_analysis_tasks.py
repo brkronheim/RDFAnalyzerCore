@@ -969,8 +969,8 @@ class TestSkimOutputMonitoring(unittest.TestCase):
         import analysis_tasks
         import law as law_mod
 
-        for errors in ([], ["bad ROOT"]):
-            with self.subTest(errors=errors), tempfile.TemporaryDirectory() as tmpdir, \
+        for exit_code, errors in [(0, []), (0, ["bad ROOT"]), (2, [])]:
+            with self.subTest(exit_code=exit_code, errors=errors), tempfile.TemporaryDirectory() as tmpdir, \
                     patch.object(analysis_tasks, "WORKSPACE", tmpdir):
                 manifest = _write_manifest(tmpdir, [{
                     "name": "sample", "files": ["input.root"], "dtype": "mc",
@@ -988,7 +988,7 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                 logs = submission / "condor_logs";logs.mkdir()
                 event_log = logs / "log_123.log"
                 event_log.write_text("005 (123.000.000) 2026-11-16 10:00:00 Job terminated.\n"
-                                     "\t(1) Normal termination (return value 0)\n...\n")
+                                     f"\t(1) Normal termination (return value {exit_code})\n...\n")
                 submitted = Path(tmpdir, "submitted.json")
                 submitted.write_text(json.dumps({"datasets": [{
                     "dataset_name": "sample", "submission_dir": str(submission),
@@ -996,7 +996,8 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                 }]}))
                 with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
                         patch.object(task, "publish_message"), \
-                        patch("analysis_tasks._condor_q_ads", return_value={}), \
+                        patch("analysis_tasks._condor_q_ads", side_effect=[{0: {"JobStatus": 5}}, {}]), \
+                        patch("analysis_tasks._condor_rm_job", return_value=False) as remove, \
                         patch("analysis_tasks._condor_history_exit", return_value={}), \
                         patch("analysis_tasks._output_file_info_batch", return_value={meta: {}}), \
                         patch("analysis_tasks._skim_job_output_errors", return_value=errors) as integrity, \
@@ -1004,9 +1005,14 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                         patch.object(task, "_update_job_sizing"):
                     task.run()
                 state = task._load_state()["datasets"]["sample"]["jobs"]["0"]
-                self.assertEqual(state["status"], "perm_fail" if errors else "done")
+                self.assertEqual(state["status"], "perm_fail" if errors or exit_code else "done")
                 self.assertEqual(state["completion_evidence"]["path"], str(event_log))
-                integrity.assert_called_once()
+                self.assertEqual(state["completion_evidence"]["exit_code"], exit_code)
+                remove.assert_called_once_with("123", 0)
+                if exit_code:
+                    integrity.assert_not_called()
+                else:
+                    integrity.assert_called_once()
 
     def test_successful_mc_monitor_finishes_without_sample_counter_collection(self):
         import analysis_tasks
@@ -2875,6 +2881,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
             Path(job1).mkdir()
             Path(os.path.join(job0, "cfg")).mkdir()
             Path(os.path.join(job1, "cfg")).mkdir()
+            Path(job0, "weights.json").write_text("job-specific weights")
             Path(os.path.join(job0, "cfg", "shared.yaml")).write_text("shared: true\n")
             Path(os.path.join(job1, "cfg", "shared.yaml")).write_text("shared: true\n")
             Path(os.path.join(job0, "submit_config.txt")).write_text("saveFile=out0.root\nmetaFile=meta0.root\n")
@@ -2932,6 +2939,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(os.path.join(submit_dir, "job_0", "shared.yaml"))
             )
+            self.assertEqual(Path(submit_dir, "job_0", "weights.json").read_text(), "job-specific weights")
             with tarfile.open(os.path.join(run_dir, "shared_inputs.tar.gz"), "r:gz") as archive:
                 self.assertIn("stitch_weights.json", archive.getnames())
             self.assertFalse(
@@ -3241,6 +3249,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 "jobs": {"7": {}},
             }
             job_state = {"status": "submitted", "retries": 0, "cluster": "123", "proc": 7}
+            job_state["completion_evidence"] = {"cluster": "123", "exit_code": 2}
             job_info = {
                 7: {
                     "dir": source_job_dir,
@@ -3277,6 +3286,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     ["root://server/c.root"],
                 ],
             )
+            self.assertNotIn("completion_evidence", job_state)
             self.assertEqual(job_state["cluster"], "101")
             self.assertEqual(job_info[8]["save"], f"{tmpdir}/output_part1.root")
             self.assertEqual(job_info[8]["meta"], f"{tmpdir}/meta_part1.root")

@@ -57,3 +57,4 @@ submit_config.txt
 /extensions/cms/
 /extensions/*.bundle
 /build-core-only/
+/build-clang/

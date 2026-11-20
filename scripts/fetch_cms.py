@@ -30,7 +30,12 @@ def main(argv=None):
         if result.returncode or Path(result.stdout.strip()).resolve() != destination:
             parser.error(f"Destination exists and is not a separate repository: {destination}")
         head = subprocess.check_output(["git", "-C", str(destination), "rev-parse", "HEAD"], text=True).strip()
-        if head != revision:
+        expected = subprocess.run(
+            ["git", "-C", str(destination), "rev-parse", "--verify", "--end-of-options",
+             f"{revision}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        if expected.returncode or head != expected.stdout.strip():
             parser.error(f"Existing checkout is at {head}, expected {revision}; leaving it untouched")
         print(f"CMS checkout already present at {destination} ({head})")
         return

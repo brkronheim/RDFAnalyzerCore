@@ -298,7 +298,7 @@ def sparse_job(path, identity, physical_bins=2):
     roles = ["channel", "control", "sample", "systematic", "observable"]
     labels = ["signal", "default", "sample", "Nominal"]
     h = ROOT.THnSparseF("sparse", "sparse", 5, array('i', [1,1,1,1,physical_bins]),
-                       array('d', [0.]*5), array('d', [1.,1.,1.,1.,float(physical_bins)]))
+                       array('d', [0.]*5), array('d', [1.,1.,1.,1.,float(physical_bins)]), 16 * 1024)
     h.Sumw2()
     for i, label in enumerate(labels):
         h.GetAxis(i).SetBinLabel(1, label)

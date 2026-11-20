@@ -949,7 +949,7 @@ environment into a tarball and ship it with your jobs.
 ### Step 1: Set up the environment inside your container
 
 Run `setup_python_env.sh` **inside the same container** you plan to use on
-worker nodes.  This ensures binary compatibility.
+worker nodes, using the same Python, ROOT and native dependencies.
 
 ```bash
 # Example: using the cmssw-el9 container
@@ -964,8 +964,7 @@ The script:
 1. Creates a staging directory.
 2. Installs `law`, `luigi`, `requests`, and any `--extras` packages using
    `pip install --target` (no virtual-env activation needed).
-3. Copies `build/python/rdfanalyzer*.so` into the package directory (skip with
-   `--no-rdfanalyzer`).
+3. Copies a matching binding from `build/python/` when available. Override the directory with `RDFANALYZER_PYTHON_MODULE_DIR` or skip the lookup with `--no-rdfanalyzer`. A warning identifies a package-only archive when the binding is missing.
 4. Tars everything into `python_env.tar.gz`.
 
 ### Script options
@@ -1031,6 +1030,9 @@ export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
   Reserved hosts remain excluded in all cases.
 - **Local shared libraries** required by the executable (resolved via `ldd` and
   located under the repository root) are automatically staged into `shared_inputs/`.
+  LAW also stages the configured external ONNX Runtime SONAME when it resolves
+  through the workspace's CMake link directory. See the
+  [worker ONNX Runtime configuration](../../../docs/BATCH_SUBMISSION.md#onnx-runtime-for-htcondor-workers).
 
 ---
 

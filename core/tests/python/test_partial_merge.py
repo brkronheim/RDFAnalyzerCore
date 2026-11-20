@@ -57,7 +57,7 @@ class PartialMergeTests(unittest.TestCase):
             source = root/"job.root"
             f = ROOT.TFile.Open(str(source), "RECREATE")
             h = ROOT.THnSparseF("h", "h", 5, array('i', [1]*5),
-                               array('d', [0.]*5), array('d', [1.]*5))
+                               array('d', [0.]*5), array('d', [1.]*5), 16 * 1024)
             h.Sumw2()
             h.Fill(array('d', [.5]*5), 2.)
             for axis, label in enumerate(["signal", "default", "sample", "Nominal"]):

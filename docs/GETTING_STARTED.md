@@ -30,6 +30,8 @@ source env.sh
 ```
 
 This script sets up ROOT and other required dependencies from CVMFS.
+The default is ROOT 6.42.00-rc1. See the [ROOT upgrade notes](ROOT_6_42_UPGRADE.md)
+for the version reported by ROOT, rebuild instructions and the stable override.
 
 If you are using a standalone ROOT installation instead, source that environment before building.
 

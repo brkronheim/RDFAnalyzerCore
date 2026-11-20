@@ -2534,6 +2534,8 @@ class CachedArtifact:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CachedArtifact":
         """Construct from a dict produced by :meth:`to_dict`."""
+        if not isinstance(data.get("manifest"), dict):
+            raise ValueError("Cache sidecar must contain a manifest mapping.")
         manifest = OutputManifest.from_dict(data["manifest"])
         return cls(
             artifact_path=data.get("artifact_path", ""),
@@ -2688,7 +2690,10 @@ def check_cache_validity(
 
     try:
         entry = read_cache_sidecar(artifact_path)
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, ValueError, yaml.YAMLError, TypeError, AttributeError, KeyError):
+        return ArtifactResolutionStatus.MUST_REGENERATE
+
+    if entry.manifest.manifest_version != OutputManifest.CURRENT_VERSION:
         return ArtifactResolutionStatus.MUST_REGENERATE
 
     statuses = resolve_manifest(entry.manifest, current_provenance=current_provenance)

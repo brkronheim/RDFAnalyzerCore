@@ -217,7 +217,7 @@ file-discovery/execution options provided by `SkimMixin`.
 | `--entries-per-job` | `100000` | Event budget/fallback for `events` and `entry_range`; ignored by file-count modes. |
 | `--partition-profile` | `""` | Automatic matching-history lookup; a JSON/YAML path pins fixed budgets or rates, and `none` disables lookup. |
 | `--input-metadata-cache` | `""` | Optional entry-cache snapshot copied into the new run; missing counts are queried once with bounded concurrency. |
-| `--entry-range-mode` | `filter` | Logical `Range`, or `source` for direct seeking on ROOT 6.40 with one RDF thread. |
+| `--entry-range-mode` | `filter` | Logical `Range`, or `source` for direct seeking on ROOT 6.40.x or 6.42.00-rc1 with one RDF thread. |
 | `--sizing-pilots` | `false` | Run one-file Condor calibration jobs for unprofiled datasets before bulk preparation. |
 | `--sizing-target-seconds` | `3600` | Estimated work per job from production measurements; independent of the runtime request. |
 | `--sizing-pilot-target-seconds` | `1800` | Estimated work per job from fresh or cached pilot measurements. |

@@ -117,8 +117,10 @@ file=transformer.onnx name=ParT inputVariables=pt,eta,phi paddingSize=128
 - Input vectors shorter than `paddingSize` are zero-padded to the specified size
 - Input vectors longer than the model's expected packed input size are rejected with a runtime error
 - Omitting `paddingSize` preserves existing behavior for fixed known shapes, but dynamic dimensions still require `paddingSize` or explicit `inputShapes`
-- When `systematicBundle=auto|required` is configured for scalar input features, OnnxManager batches all active systematic evaluations for an event into one ONNX call and pads any remaining fixed batch slots with zeros.
-- `selectionMaskColumn=<column>` can be combined with `systematicBundle` to skip masked variations while keeping their output columns at the disabled sentinel value.
+- `systematicBundle=auto` or `required` can batch active variations of one event in a single ONNX call. The bundle accepts scalar feature columns or one vector-valued feature column, and requires each output tensor to yield one scalar per variation row. For unsupported layouts, `auto` uses the ordinary path and `required` reports an error.
+- The active rows must fit the model's batch dimension. Remaining slots in a larger fixed batch are zero-padded. With no active rows, inference is skipped. [SOFIE systematic execution](SOFIE_IMPLEMENTATION.md#systematic-variations) describes how compiled callables consume variations.
+- `selectionMaskColumn=<column>` applies on the bundled path. Masked rows retain the disabled sentinel value.
+- In ordinary execution (`off` or an unsupported `auto` layout), the current ONNX input packer builds a nominal `input_<model>` column. If feature-only shifts must propagate in this path, define that packed column and its variation mappings before `applyModel`; the manager reuses it. Gate shifts propagate through the score definition. Include any required selection in the run gate on this path.
 
 **Example**:
 

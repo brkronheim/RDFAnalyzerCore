@@ -392,7 +392,8 @@ def run_test() -> int:
 
         _assert_output(uproot, output_file)
 
-    print("PASS: Python bindings numba DefineFromPointer + Define/Filter alias integration")
+    backend = "Numba" if numba is not None else "ctypes"
+    print(f"PASS: Python bindings {backend} DefineFromPointer + Define/Filter alias integration")
     return 0
 
 

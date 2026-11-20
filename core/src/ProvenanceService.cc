@@ -12,7 +12,7 @@
 #include <TMD5.h>
 #include <TObjString.h>
 #include <TObject.h>
-#include <RVersion.h>
+#include <ROOT/RVersion.hxx>
 
 #include <algorithm>
 #include <array>

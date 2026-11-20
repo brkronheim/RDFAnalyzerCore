@@ -6,9 +6,10 @@
 # 2. Generate CMS Combine datacards
 # 3. Perform statistical analysis with Combine
 #
+# Run from the repository root.
 # This script is a template - modify paths and configurations as needed
 
-set -e  # Exit on any error
+set -eo pipefail
 
 # Color output
 RED='\033[0;31m'
@@ -20,14 +21,19 @@ echo -e "${GREEN}=== RDFAnalyzerCore Complete Analysis Workflow ===${NC}"
 echo ""
 
 # Check if Combine is built
-if [ ! -f "build/external/HiggsAnalysis/CombinedLimit/exe/combine" ]; then
+combine_prefix="$PWD/build/external/HiggsAnalysis/CombinedLimit"
+COMBINE="$combine_prefix/bin/combine"
+if [[ ! -x "$COMBINE" && -x "$combine_prefix/exe/combine" ]]; then
+    COMBINE="$combine_prefix/exe/combine"
+fi
+if [ ! -x "$COMBINE" ]; then
     echo -e "${RED}Error: CMS Combine not found!${NC}"
     echo "Please rebuild with: cmake -S . -B build -DBUILD_COMBINE=ON"
     exit 1
 fi
 
 # Configuration (modify these for your analysis)
-ANALYSIS_EXE="./build/analyses/ExampleAnalysis/example"
+ANALYSIS_EXE="./build/analyses/ExampleAnalysis/analysis"
 OUTPUT_DIR="analysis_output"
 DATACARD_CONFIG="example_datacard_config.yaml"
 
@@ -69,8 +75,6 @@ fi
 echo ""
 echo -e "${YELLOW}Step 3: Running CMS Combine statistical analysis...${NC}"
 
-# Set path to combine executable
-COMBINE="./build/external/HiggsAnalysis/CombinedLimit/exe/combine"
 DATACARDS_DIR="datacards"
 
 if [ ! -d "$DATACARDS_DIR" ]; then
@@ -93,37 +97,39 @@ fi
 cd $DATACARDS_DIR
 
 # Find datacards
-DATACARDS=$(ls datacard_*.txt 2>/dev/null || true)
-if [ -z "$DATACARDS" ]; then
+shopt -s nullglob
+DATACARDS=(datacard_*.txt)
+if (( ${#DATACARDS[@]} == 0 )); then
     echo -e "${RED}  No datacards found in $DATACARDS_DIR${NC}"
     echo "  Generate them first with create_datacards.py"
     cd ..
     exit 1
 fi
 
-echo "  Found datacards: $DATACARDS"
+echo "  Found datacards: ${DATACARDS[*]}"
 echo ""
 
 # Run Combine analyses on each datacard
-for DATACARD in $DATACARDS; do
-    REGION=$(basename $DATACARD .txt | sed 's/datacard_//')
+for DATACARD in "${DATACARDS[@]}"; do
+    REGION=${DATACARD#datacard_}
+    REGION=${REGION%.txt}
     echo -e "${GREEN}  Analyzing region: $REGION${NC}"
     
     # 1. Asymptotic limits
     echo "    -> Calculating asymptotic limits..."
-    $COMBINE -M AsymptoticLimits $DATACARD -n .$REGION 2>&1 | tail -10
+    "$COMBINE" -M AsymptoticLimits "$DATACARD" -n ".$REGION" 2>&1 | tail -10
     
     # 2. Maximum likelihood fit
     echo "    -> Performing maximum likelihood fit..."
-    $COMBINE -M FitDiagnostics $DATACARD -n .$REGION --saveShapes 2>&1 | tail -5
+    "$COMBINE" -M FitDiagnostics "$DATACARD" -n ".$REGION" --saveShapes 2>&1 | tail -5
     
     # 3. Significance (if applicable)
     echo "    -> Calculating significance..."
-    $COMBINE -M Significance $DATACARD -n .$REGION 2>&1 | tail -3
+    "$COMBINE" -M Significance "$DATACARD" -n ".$REGION" 2>&1 | tail -3
     
     # 4. Likelihood scan
     echo "    -> Running likelihood scan..."
-    $COMBINE -M MultiDimFit $DATACARD -n .$REGION.scan \
+    "$COMBINE" -M MultiDimFit "$DATACARD" -n ".$REGION.scan" \
         --algo grid --points 30 --setParameterRanges r=0,3 2>&1 | tail -3
     
     echo ""

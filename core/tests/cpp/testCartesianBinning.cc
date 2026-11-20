@@ -49,3 +49,26 @@ TEST(CartesianBinningTest, RejectsMalformedAxes) {
   EXPECT_THROW(RDFAnalyzer::NumericBinningAxis({0.0}), std::invalid_argument);
   EXPECT_THROW(RDFAnalyzer::NumericBinningAxis({0.0, 0.0}), std::invalid_argument);
 }
+
+TEST(CartesianBinningTest, OptionalCoordinatesAgreeWithEveryValidBin) {
+  const RDFAnalyzer::CartesianBinning layout({2, 3, 4});
+  for (std::size_t bin = 0; bin < layout.numberOfBins(); ++bin) {
+    const auto coords = layout.unflatten(bin);
+    EXPECT_EQ(layout.flattenOptional({coords[0], coords[1], coords[2]}), bin);
+  }
+}
+
+TEST(CartesianBinningTest, FixedCategoriesCheckRepresentationBoundaries) {
+  using RDFAnalyzer::flattenCategories;
+  using RDFAnalyzer::unflattenCategories;
+  const auto max = std::numeric_limits<std::size_t>::max();
+  const auto intMax = std::numeric_limits<int>::max();
+  EXPECT_EQ(flattenCategories<2>({2, max}, {1, 0}), max);
+  EXPECT_THROW(flattenCategories<2>({2, max}, {1, 1}), std::overflow_error);
+  EXPECT_THROW(flattenCategories<2>({3, max}, {2, 0}), std::overflow_error);
+  EXPECT_THROW(flattenCategories<1>({2}, {1}, max), std::overflow_error);
+  EXPECT_EQ(unflattenCategories<1>({2}, max, max - 1)[0], 1);
+  EXPECT_EQ(unflattenCategories<1>({max}, intMax)[0], intMax);
+  EXPECT_THROW(unflattenCategories<1>({max}, std::size_t(intMax) + 1),
+               std::overflow_error);
+}

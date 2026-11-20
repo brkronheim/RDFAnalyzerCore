@@ -1,0 +1,51 @@
+{
+  "schema": "native-results-example-source-readiness-v1",
+  "accepted_source_only": true,
+  "source_sha256": {
+    "/home/bkronhei/RDFAnalyzerCore/examples/native-results/CMakeLists.txt": "58f0d48b0b7769dc6bd398659e5bfb87226d63f8a1395fbb053ccbb061ab156f",
+    "/home/bkronhei/RDFAnalyzerCore/examples/native-results/analysis.h": "a1bb7e92f631c38b8bbca6a7fca79253ebe4b970fd1dd722a7870e195de5f19c",
+    "/home/bkronhei/RDFAnalyzerCore/examples/native-results/analysis.cc": "f3182028606753633e28365cfa79d5b11f311c76e3e1c63757682faa63993c77",
+    "/home/bkronhei/RDFAnalyzerCore/examples/native-results/main.cc": "c81891255dd2cab5c2363d9144e4bd755221efb22d715a5f729eb3d9e6881826",
+    "/home/bkronhei/RDFAnalyzerCore/examples/native-results/steer.py": "24ae14d1dc456b822b6db562bbd9ad2ae99527c9be6679db3d766dceffb85797",
+    "/home/bkronhei/RDFAnalyzerCore/examples/native-results/README.md": "e18ac78295d2f9c2aba3395a22df33bad5f4316e5857d2d909e885d85437653c",
+    "/home/bkronhei/RDFAnalyzerCore/examples/native-results/tests/validate.py": "66d61fdf6d78f0589a7fbe67a0972446a2e6612a657e00743d08d917fb471a4a",
+    "/home/bkronhei/RDFAnalyzerCore/examples/native-results/tests/test_example.py": "36dbc9900485fb12a1c7dba361a8a59696493ee728993ea7986236cda3a1b10d"
+  },
+  "selected_dependency_sha256": {
+    "/home/bkronhei/RDFAnalyzerCore/core/interface/RunResult.h": "fd5814469962ab87eb4e8fa0c8d1d826a1ab6c8f76e335d8924722722a1397a8",
+    "/home/bkronhei/RDFAnalyzerCore/core/python/rdfresults.py": "f9476ea26a8b6dee16dc3750bb5f489cb4b9f2f2e2fe7888c1c53427180babae",
+    "/home/bkronhei/RDFAnalyzerCore/core/native_authoring/CMakeLists.txt": "9950d00d1e5cdf72b4e094147d4c3e67d8738c75669321194e26a4a0a3347dff",
+    "/home/bkronhei/RDFAnalyzerCore/core/python/controller/CMakeLists.txt": "9645f47f5cf56740da0811b793339d8e28dc4a961eb3d55512407619248c07ae",
+    "/home/bkronhei/RDFAnalyzerCore/cmake/InstallNativeAuthoring.cmake": "e046f7056449e28445a697fea9a7d073fca9aa5a03b338fb7401833b9cb0c8ea",
+    "/home/bkronhei/RDFAnalyzerCore/cmake/RDFNativeAuthoringConfig.cmake": "c49470bc737c351c7a3c341819cdbb91e89ae4f955fde189fb151a75d0f2b3bb",
+    "/home/bkronhei/RDFAnalyzerCore/cmake/InstallPythonController.cmake": "2fd9be5e8db3eb7a3171b6183e70aef8dd482f96cd29e18dd5ea3b20c04220ce"
+  },
+  "test_methods": 10,
+  "returncode": 0,
+  "tests_sha256": "f21cf8f81dbfe5d72a7e0bee6069a3c3fc0e651e4938e2d690e9e9ff41748af0",
+  "test_command": [
+    "nice",
+    "-n",
+    "19",
+    "taskset",
+    "-c",
+    "81",
+    "/usr/bin/python",
+    "-B",
+    "examples/native-results/tests/test_example.py"
+  ],
+  "source_unchanged": true,
+  "actual_compiler_runs": 0,
+  "actual_root_imports": 0,
+  "actual_native_invocations": 0,
+  "actual_processing_runs": 0,
+  "actual_installed_validation": false,
+  "accepted_for_performance": false,
+  "scope": "stdlib receiver/oracle/default/symlink/argv/parity checks; every subprocess mocked; temporary synthetic outputs only",
+  "future_validation": [
+    "standalone NativeAuthoring/PythonController installs; standalone copied example configure/build/install",
+    "relocate prefix and rename only private copied source/build; retain ABI-compatible external ROOT",
+    "installed validator explicit --run: twozero-loop native inspections and twosingle-loop8event runs; fullindependent signedflow/variance oracle and parity excluding onlytimings",
+    "sourcefree selectedpath/Pythonimport controls; complete filesystemopen/DSO attestation notclaimed"
+  ]
+}

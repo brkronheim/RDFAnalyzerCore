@@ -165,6 +165,11 @@ foreach(_suite IN ITEMS run_bundle analysis_inputs)
         discover -s ${_TEST_DIR}/python -p test_${_suite}.py -q)
     set_tests_properties(Shared_${_suite} PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
 endforeach()
+foreach(_suite IN ITEMS output_merge_validation skim_publication)
+    add_test(NAME Law_${_suite} COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+        discover -s ${_TEST_DIR}/law -p test_${_suite}.py -v)
+    set_tests_properties(Law_${_suite} PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+endforeach()
 add_test(NAME Shared_BundleStaging COMMAND ${_PYTHON_EXECUTABLE} -m unittest
     discover -s ${_TEST_DIR}/law -p test_run_bundle_staging.py -q)
 set_tests_properties(Shared_BundleStaging PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")

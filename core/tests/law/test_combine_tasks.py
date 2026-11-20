@@ -63,6 +63,16 @@ class TestFindCombine(unittest.TestCase):
         finally:
             os.unlink(tmp_path)
 
+    def test_relative_executable_survives_fit_working_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "combine"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+            resolved = self._import()._find_combine(os.path.relpath(binary))
+            result_directory = Path(directory) / "fit"
+            result_directory.mkdir()
+            subprocess.run([resolved], cwd=result_directory, check=True)
+
     def test_explicit_path_missing_raises(self):
         """_find_combine raises RuntimeError for a non-existent path."""
         mod = self._import()
@@ -76,27 +86,17 @@ class TestFindCombine(unittest.TestCase):
             fake_combine = os.path.join(tmpdir, "combine")
             Path(fake_combine).write_text("#!/bin/sh\n")
             os.chmod(fake_combine, 0o755)
-            old_path = os.environ.get("PATH", "")
-            os.environ["PATH"] = tmpdir + ":" + old_path
-            try:
-                result = mod._find_combine("")
-                self.assertEqual(result, fake_combine)
-            finally:
-                os.environ["PATH"] = old_path
+            with patch.object(mod, "_COMBINE_SEARCH_PATHS", ["combine"]), patch.dict(os.environ, PATH=tmpdir):
+                self.assertEqual(mod._find_combine(""), fake_combine)
 
     def test_not_found_raises(self):
         """_find_combine raises RuntimeError when combine cannot be located."""
         mod = self._import()
         with tempfile.TemporaryDirectory() as tmpdir:
             # Use an empty directory so shutil.which finds nothing
-            old_path = os.environ.get("PATH", "")
-            os.environ["PATH"] = tmpdir
-            try:
-                with self.assertRaises(RuntimeError) as ctx:
+            with patch.object(mod, "_COMBINE_SEARCH_PATHS", ["combine"]), patch.dict(os.environ, PATH=tmpdir):
+                with self.assertRaisesRegex(RuntimeError, "Combine binary not found"):
                     mod._find_combine("")
-                self.assertIn("Combine binary not found", str(ctx.exception))
-            finally:
-                os.environ["PATH"] = old_path
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
@@ -1180,6 +1180,41 @@ class TestWriteAnalyticCombinedDatacard(unittest.TestCase):
             self.assertIn("ch_b", content)
 
 
+class TestExplicitAnalyticRates(unittest.TestCase):
+    def test_common_signal_and_independent_background_card(self):
+        from analytic_datacards import configured_rates, write_rate_card
+
+        config = {
+            "channels": [{"name": "0j"}, {"name": "ge3j"}],
+            "combine_rates": {
+                "0j": {"signal": 120, "background": 10},
+                "ge3j": {"signal": 25, "background": 4},
+            },
+        }
+        rates = configured_rates(config)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            card = write_rate_card(["0j", "ge3j"], rates, tmpdir, tag="combined")
+            lines = Path(card).read_text().splitlines()
+        self.assertIn("bin ch_0j ch_ge3j", lines)
+        self.assertIn("shapes data_obs ch_0j ws_0j.root ws_0j:data_obs_0j", lines)
+        self.assertIn("process 0 1 0 1", lines)
+        self.assertIn("rate 120 10 25 4", lines)
+        self.assertEqual([line.split()[:4] for line in lines if "rateParam" in line], [
+            ["bkg_scale_0j", "rateParam", "ch_0j", "bkg"],
+            ["bkg_scale_ge3j", "rateParam", "ch_ge3j", "bkg"],
+        ])
+
+    def test_reference_rates_must_cover_every_channel_and_be_positive(self):
+        from analytic_datacards import configured_rates
+
+        config = {"channels": [{"name": "0j"}], "combine_rates": {}}
+        with self.assertRaisesRegex(ValueError, "each configured channel"):
+            configured_rates(config)
+        config["combine_rates"]["0j"] = {"signal": 0, "background": 10}
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            configured_rates(config)
+
+
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_MSG)
 class TestMakeRooVar(unittest.TestCase):
     """Tests for _make_roo_var parameter helper."""
@@ -1281,6 +1316,31 @@ class TestAnalyticWorkspaceFitTaskRun(unittest.TestCase):
         h.Write()
         f.Close()
         return path
+
+    def test_standalone_loads_shared_gaussian_builder(self):
+        """Resolve the shared helper from the checkout when run outside LAW."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hist = self._make_histogram_file(tmpdir)
+            if hist is None:
+                self.skipTest("PyROOT unavailable")
+            import ROOT
+            script = Path(_REPO_ROOT, "analyses/CMS_Run2016_DoubleMuon/fit_zpeak.py")
+            env = os.environ.copy()
+            # Keep PyROOT's path, but prevent a preconfigured LAW path masking
+            # a broken checkout-relative import in the standalone script.
+            env["PYTHONPATH"] = os.pathsep.join(
+                p for p in env.get("PYTHONPATH", "").split(os.pathsep)
+                if p and Path(p).resolve() != Path(_LAW_DIR)
+            )
+            subprocess.run(
+                [sys.executable, str(script), "--workspace-config",
+                 self._make_workspace_config(tmpdir), "--input", hist,
+                 "--outdir", tmpdir, "--strict"],
+                cwd=tmpdir, env=env, check=True,
+            )
+            with ROOT.TFile.Open(str(Path(tmpdir, "ws_inclusive.root"))) as output:
+                ws = output.Get("ws_inclusive")
+                self.assertEqual(ws.pdf("sig_inclusive").ClassName(), "RooGaussian")
 
     def test_skip_fit_builds_workspaces_and_datacards(self):
         """With --skip-fit, workspaces and datacards are created without running combine."""

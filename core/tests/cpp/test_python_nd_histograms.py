@@ -50,7 +50,8 @@ class NativeNDHistogramTests(unittest.TestCase):
 
     def oracle(self, labels, *, filtered, variable):
         bins=array('i',[2,1,1,len(labels),2]);low=array('d',[0,0,0,0,0]);high=array('d',[2,1,1,len(labels),3])
-        reference=ROOT.THnSparseF('oracle','',5,bins,low,high);reference.Sumw2()
+        reference=ROOT.THnSparseF('oracle','',5,bins,low,high,16 * 1024)
+        reference.Sumw2()
         if variable:reference.SetBinEdges(4,array('d',[0.,1.,3.]))
         for slot,label in enumerate(labels):
             values=self.up if label=='moveUp' else self.down if label=='moveDown' else self.pt
@@ -149,7 +150,7 @@ class NativeNDHistogramTests(unittest.TestCase):
                     for group,name,filtered in [('early','inclusive',False),('late','selected',True),('nominal','nominal',True)]:
                         labels=analysis.inspect()['nd_histograms'][group]['native']['systematic_labels']
                         reference=ROOT.THnSparseF('ragged_oracle','',5,array('i',[1,1,1,len(labels),2]),
-                            array('d',[0.,0.,0.,0.,0.]),array('d',[1.,1.,1.,float(len(labels)),3.]))
+                            array('d',[0.,0.,0.,0.,0.]),array('d',[1.,1.,1.,float(len(labels)),3.]),16 * 1024)
                         reference.Sumw2();reference.SetBinEdges(4,array('d',[0.,1.,3.]))
                         for slot,label in enumerate(labels):
                             objects=shifted if label=='shapeOnly' else nominal

@@ -14,36 +14,37 @@ kramdown:
   input: GFM
   syntax_highlighter: rouge
 
-# Apply the default Cayman layout to all pages so that pages without
-# explicit YAML front matter still render with the full site theme.
+# Wrap Cayman with the documentation navigation.
 defaults:
   - scope:
       path: ""
     values:
-      layout: default
+      layout: documentation
 
 # Navigation
 nav_links:
+  - title: Home
+    url: /
   - title: Getting Started
-    url: GETTING_STARTED.html
+    url: /GETTING_STARTED.html
   - title: Analysis Guide
-    url: ANALYSIS_GUIDE.html
+    url: /ANALYSIS_GUIDE.html
   - title: Configuration
-    url: CONFIG_REFERENCE.html
+    url: /CONFIG_REFERENCE.html
   - title: Python Bindings
-    url: PYTHON_BINDINGS.html
+    url: /PYTHON_BINDINGS.html
   - title: Batch Submission
-    url: BATCH_SUBMISSION.html
+    url: /BATCH_SUBMISSION.html
   - title: Architecture
-    url: ARCHITECTURE.html
+    url: /ARCHITECTURE.html
   - title: Plugin Development
-    url: PLUGIN_DEVELOPMENT.html
+    url: /PLUGIN_DEVELOPMENT.html
   - title: API Reference
-    url: API_REFERENCE.html
+    url: /API_REFERENCE.html
   - title: Search
-    url: SEARCH.html
+    url: /SEARCH.html
   - title: Doxygen Docs
-    url: doxygen/index.html
+    url: /doxygen/index.html
 
 # Exclude files from build
 exclude:

@@ -208,9 +208,10 @@ Retrieve a plugin by role name with type checking.
 
 **Example**:
 ```cpp
-auto onnxMgr = OnnxManager::create(analyzer);  // Registers as "onnxManager"
-onnxMgr->applyAllModels();
+// In setup, register the manager under its default role.
+OnnxManager::create(analyzer);
 
+// In code that can run with or without ONNX, look up the role.
 auto optionalOnnxMgr = analyzer.findPlugin<OnnxManager>("onnxManager");
 if (optionalOnnxMgr) optionalOnnxMgr->applyAllModels();
 
@@ -280,7 +281,7 @@ virtual std::vector<std::string> getList(const std::string& key,
                                          const std::string& delimiter = ",") const = 0;
 ```
 
-Basic key-value retrieval.
+Use `config->resolveConfigPath(path)` for a referenced file. The default provider implementation returns the supplied path. `ConfigurationManager` preserves absolute paths and checks relative paths in the working directory before trying the main configuration directory.
 
 **Example**:
 ```cpp
@@ -478,6 +479,7 @@ public:
     virtual void execute() {}
     virtual void finalize() {}
     virtual void reportMetadata() {}
+    virtual rdf::OutputMetadata collectOutputMetadata() const { return {}; }
     virtual std::unordered_map<std::string, std::string>
     collectProvenanceEntries() const { return {}; }
 };
@@ -494,7 +496,8 @@ public:
 - `execute()`: Called immediately before the RDataFrame computation.
 - `finalize()`: Called after the RDataFrame computation completes.
 - `reportMetadata()`: Called after finalize() for metadata emission.
-- `collectProvenanceEntries()`: Contribute structured provenance entries.
+- `collectOutputMetadata()` contributes typed output metadata to the provenance service.
+- `collectProvenanceEntries()` contributes string entries under `plugin.<role>.<key>`.
 
 ### IContextAware
 
@@ -655,7 +658,9 @@ onnxMgr->applyModel("transformer");
 
 **Header**: `core/plugins/SofieManager/SofieManager.h`
 
-Class for SOFIE model management.
+Registers compiled C++ inference callables. Generate the session header with
+the standalone `sofie` package before compiling the analysis. The callable
+takes `const std::vector<float>&` and returns `std::vector<float>`.
 
 ```cpp
 class SofieManager : public NamedObjectManager<std::shared_ptr<SofieInferenceFunction>> {
@@ -673,22 +678,13 @@ public:
 };
 ```
 
-**Key Difference**: SOFIE models must be manually registered.
+`SofieManager::create(analyzer)` registers the default role `sofieManager`.
+Register each callable, then apply it after its feature and gate columns
+exist. The resulting column is a scalar `Float_t` named after the model.
+The manager publishes element zero for enabled events, throws on an empty
+result, and publishes `-1.0f` when the gate is false.
 
-**Example**:
-```cpp
-#include "MyGeneratedModel.hxx"  // SOFIE-generated code
-
-std::vector<float> myInference(const std::vector<float>& input) {
-    TMVA_SOFIE_MyModel::Session session;
-    return session.infer(input.data());
-}
-
-auto sofieMgr = SofieManager::create(analyzer);  // Registers as "sofieManager"
-auto func = std::make_shared<SofieInferenceFunction>(myInference);
-sofieMgr->registerModel("my_model", func, {"pt", "eta"}, "run_model");
-sofieMgr->applyModel("my_model");
-```
+See the [generated-session example](SOFIE_IMPLEMENTATION.md#register-and-apply-the-compiled-model).
 
 ### CorrectionManager
 

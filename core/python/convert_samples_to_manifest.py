@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,13 +35,14 @@ def convert(
                 continue
 
             year_number = int(year_label[:4])
-            is_mc = bool(metadata.get("isMC", True))
+            flag = metadata.get("isMC", True)
+            token = str(flag).strip().lower()
+            if token not in {"true", "false", "1", "0"}:
+                raise ValueError(f"{sample_key}: invalid isMC flag {flag!r}")
+            is_mc = token in {"true", "1"}
             sample_name = str(payload.get("sample", sample_key)).strip()
             process = process_classifier(sample_name)
             group = group_classifier(process, is_mc)
-            era = None
-            if not is_mc:
-                era = year_label
 
             entry_name = f"{sample_name}_{year_label}"
             das = ",".join(str(value).strip() for value in das_names if str(value).strip())
@@ -47,7 +50,7 @@ def convert(
             entry = DatasetEntry(
                 name=entry_name,
                 year=year_number,
-                era=era,
+                era=None if is_mc else year_label,
                 campaign=year_label,
                 process=process,
                 group=group,
@@ -58,9 +61,21 @@ def convert(
             datasets.append(entry)
 
     manifest = DatasetManifest(datasets=datasets, lumi=1.0, lumi_by_year=lumi_by_year)
-    manifest.save_yaml(str(output_path))
-    # Validate by re-loading through the production parser.
-    DatasetManifest.load_yaml(str(output_path))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    target = output_path.resolve()
+    with tempfile.TemporaryDirectory(dir=target.parent) as directory:
+        candidate = Path(directory) / "manifest.yaml"
+        manifest.save_yaml(str(candidate))
+        DatasetManifest.load_yaml(str(candidate))
+        try:
+            mode = target.stat().st_mode
+        except FileNotFoundError:
+            pass  # save_yaml created the candidate with normal file permissions.
+        else:
+            if not stat.S_ISREG(mode):
+                raise ValueError(f"Expected a regular manifest file at {target}")
+            candidate.chmod(stat.S_IMODE(mode))
+        candidate.replace(target)
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,7 +87,7 @@ def parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Comma-separated year:lumi mapping for manifest metadata. "
-            "Non-integer year tags are ignored."
+            "Use an annual value for each year. Era tags cannot supply an annual luminosity."
         ),
     )
     return parser.parse_args()
@@ -80,6 +95,7 @@ def parse_args() -> argparse.Namespace:
 
 def _parse_lumi_map(spec: str) -> dict[int, float]:
     out: dict[int, float] = {}
+    era_years: set[int] = set()
     for token in spec.split(","):
         token = token.strip()
         if not token or ":" not in token:
@@ -87,9 +103,14 @@ def _parse_lumi_map(spec: str) -> dict[int, float]:
         key, value = token.split(":", 1)
         key = key.strip()
         value = value.strip()
-        if not key[:4].isdigit():
+        if not key.isdecimal():
+            if len(key) > 4 and key[:4].isdecimal():
+                era_years.add(int(key[:4]))
             continue
-        out[int(key[:4])] = float(value)
+        out[int(key)] = float(value)
+    missing = sorted(era_years - out.keys())
+    if missing:
+        raise ValueError(f"Provide annual year:lumi values for {missing}; era luminosities are ambiguous")
     return out
 
 

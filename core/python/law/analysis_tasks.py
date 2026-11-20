@@ -726,15 +726,20 @@ def _build_shared_inputs_archive(shared_dir: str, archive_path: str) -> str:
         if os.path.isfile(aux_bundle):
             _extract_tar_archive(aux_bundle, tmpdir)
 
-        with tarfile.open(archive_path, "w:gz") as archive:
-            for entry_name in ("cfg", "aux"):
-                entry_path = os.path.join(tmpdir, entry_name)
-                if os.path.isdir(entry_path):
-                    archive.add(entry_path, arcname=entry_name)
-            for entry in sorted(Path(shared_dir).iterdir()):
-                if not entry.is_file() or entry.name in excluded_files:
-                    continue
-                archive.add(str(entry), arcname=entry.name)
+        # Publish only a closed archive. Readers and retries can keep using
+        # the previous generation if copying any member fails.
+        with tempfile.TemporaryDirectory(dir=Path(archive_path).parent) as staging:
+            pending = Path(staging) / "shared_inputs.tar.gz"
+            with tarfile.open(pending, "w:gz") as archive:
+                for entry_name in ("cfg", "aux"):
+                    entry_path = os.path.join(tmpdir, entry_name)
+                    if os.path.isdir(entry_path):
+                        archive.add(entry_path, arcname=entry_name)
+                for entry in sorted(Path(shared_dir).iterdir()):
+                    if not entry.is_file() or entry.name in excluded_files:
+                        continue
+                    archive.add(str(entry), arcname=entry.name)
+            os.replace(pending, archive_path)
 
     return archive_path
 
@@ -856,16 +861,16 @@ def _skim_shared_loose_input_files(shared_dir: str) -> list[str]:
     )
 
 
-def _shared_archive_file_basenames(archive_path: str) -> set[str]:
-    """Return file basenames already contained in a shared-input archive."""
+def _shared_archive_top_level_files(archive_path: str) -> set[str]:
+    """Return files the archive supplies at the worker sandbox root."""
     if not os.path.isfile(archive_path):
         return set()
 
     with tarfile.open(archive_path, "r:gz") as archive:
         return {
-            os.path.basename(member.name)
+            Path(member.name).name
             for member in archive.getmembers()
-            if member.isfile() and os.path.basename(member.name)
+            if member.isfile() and Path(member.name).parent == Path(".")
         }
 
 
@@ -913,12 +918,15 @@ def _copy_tree_contents(src_dir: str, dst_dir: str) -> None:
 
 
 def _extract_tar_archive(archive_path: str, destination_dir: str) -> None:
-    """Extract a tar archive using the safest available tarfile mode."""
+    """Extract a staged archive with the standard library's data filter."""
+    data_filter = getattr(tarfile, "data_filter", None)
+    if not callable(data_filter):
+        raise RuntimeError(
+            "LAW archive staging requires tarfile.data_filter. Use Python 3.12 "
+            "or newer, or an interpreter with the extraction-filter backport."
+        )
     with tarfile.open(archive_path, "r:gz") as archive:
-        try:
-            archive.extractall(destination_dir, filter="data")
-        except TypeError:
-            archive.extractall(destination_dir)
+        archive.extractall(destination_dir, filter=data_filter)
 
 
 def _materialize_file_source_runtime_job(
@@ -3022,7 +3030,7 @@ class SkimMixin:
     )
     entry_range_mode = luigi.ChoiceParameter(
         default="filter", choices=("filter", "source"),
-        description="Entry-range execution: filter, or direct source seeking on ROOT 6.40 (threads=1).",
+        description="Entry-range execution: filter, or direct source seeking on ROOT 6.40.x or 6.42.00-rc1 (threads=1).",
     )
     sizing_pilots = _job_sizing_parameter(
         'sizing_pilots',
@@ -3175,7 +3183,7 @@ class SkimMixin:
         default="",
         description=(
             "Path to a Python environment tarball created by "
-            "``law/setup_python_env.sh``.  Staged to every HTCondor worker "
+            "``core/python/law/setup_python_env.sh``.  Staged to every HTCondor worker "
             "node alongside the executable."
         ),
     )
@@ -3276,7 +3284,7 @@ class SkimMixin:
             raise RuntimeError(
                 f"python_env must point to an existing tarball, "
                 f"got: {self.python_env!r}\n"
-                "Create one with:  bash law/setup_python_env.sh --output python_env.tar.gz"
+                "Create one with:  bash core/python/law/setup_python_env.sh --output python_env.tar.gz"
             )
         return path
 
@@ -4593,7 +4601,7 @@ class BuildSkimSubmission(AnalysisMixin, SkimMixin, law.Task):
 
         shared_transfer_files = _skim_shared_input_files(shared_dir)
         _validate_staged_skim_proxy(shared_dir, required=bool(self.x509))
-        shared_archive_file_names = _shared_archive_file_basenames(
+        shared_archive_file_names = _shared_archive_top_level_files(
             self._shared_archive_path
         )
 
@@ -5177,11 +5185,11 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                         dataset_state["submission_dir"], key[0], key[1], idx,
                         str(info.get("dir", "")), event_log_cache,
                     )
-                    if evidence is not None and evidence[0] == 0:
-                        history_exit[key] = 0
+                    if evidence is not None:
+                        history_exit[key] = evidence[0]
                         job_state["completion_evidence"] = {
                             "source": "condor_event_log", "path": evidence[1],
-                            "cluster": key[0], "proc": key[1], "exit_code": 0,
+                            "cluster": key[0], "proc": key[1], "exit_code": evidence[0],
                         }
 
             successful_jobs: dict[tuple[str, int], tuple[dict, tuple[str, ...]]] = {}
@@ -5296,6 +5304,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                             self.publish_message(f"[{dataset_name}] Job {idx} held and removed from queue: {hold_reason}")
                         else:
                             self.publish_message(f"[{dataset_name}] Job {idx} held (could not confirm condor_rm): {hold_reason}")
+                            continue
                         self._try_resubmit(
                             dataset_name,
                             idx,
@@ -5527,6 +5536,7 @@ class MonitorSkimJobs(AnalysisMixin, SkimMixin, law.Task):
                 if target_idx == idx
                 else dataset_state.setdefault("jobs", {}).setdefault(str(target_idx), {})
             )
+            target_state.pop("completion_evidence", None)
             target_state.update(
                 cluster=cluster_id,
                 proc=0,

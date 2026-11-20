@@ -39,8 +39,8 @@ Workflow
       → supported background PDFs: exponential, polynomial, chebychev, bernstein
       → parameters marked shared:true use a common name across channels so that
           Combine ties them together in the simultaneous combined fit
-      → builds per-channel RooWorkspaces, writes Combine datacards (analytic shapes
-          via rate -1), runs combine -M <method> for each channel and for the
+      → builds per-channel RooWorkspaces, writes analytic-shape Combine datacards,
+          runs combine -M <method> for each channel and for the
           combined simultaneous fit
       → output: <workspace>/analyticFit_<name>/
 
@@ -85,7 +85,7 @@ Usage
       --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \\
       --histogram-file output/dimuon_zpeak.root \\
       --method FitDiagnostics \\
-      --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
+      --combine-options "--saveShapes --saveNormalizations"
 """
 
 from __future__ import annotations
@@ -118,11 +118,13 @@ if _HERE not in sys.path:
 
 from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
 from output_schema import OutputManifest  # noqa: E402
+from analytic_datacards import configured_rates, write_rate_card  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 
 # Default search locations for the combine binary
 _COMBINE_SEARCH_PATHS = [
+    os.path.join(WORKSPACE, "build", "external", "HiggsAnalysis", "CombinedLimit", "bin", "combine"),
     os.path.join(WORKSPACE, "build", "external", "HiggsAnalysis", "CombinedLimit", "exe", "combine"),
     "combine",  # system PATH
 ]
@@ -163,14 +165,14 @@ def _find_combine(combine_exe: str = "") -> str:
 
     Searches in:
     1. ``combine_exe`` parameter (if non-empty).
-    2. The build directory: build/external/HiggsAnalysis/CombinedLimit/exe/combine.
+    2. The build directory: build/external/HiggsAnalysis/CombinedLimit/bin/combine (or legacy exe/combine).
     3. System PATH.
 
     Raises RuntimeError if not found.
     """
     if combine_exe:
         if os.path.isfile(combine_exe) and os.access(combine_exe, os.X_OK):
-            return combine_exe
+            return os.path.abspath(combine_exe)
         raise RuntimeError(
             f"Specified combine executable not found or not executable: {combine_exe!r}"
         )
@@ -183,7 +185,7 @@ def _find_combine(combine_exe: str = "") -> str:
             # Relative → check via shutil.which (portable, no subprocess)
             found = shutil.which(candidate)
             if found:
-                return found
+                return os.path.abspath(found)
 
     raise RuntimeError(
         "CMS Combine binary not found.  Either:\n"
@@ -347,7 +349,7 @@ class RunCombine(CombineMixin, law.Task):
         default="",
         description=(
             "Path to the combine binary.  If empty, the task searches in "
-            "build/external/HiggsAnalysis/CombinedLimit/exe/combine and then "
+            "build/external/HiggsAnalysis/CombinedLimit/bin/combine, then legacy exe/combine and then "
             "in the system PATH."
         ),
     )
@@ -1464,7 +1466,7 @@ class AnalyticWorkspaceFitTask(law.Task):
     Reads per-channel histograms from an analysis ROOT file (produced by an
     ``analysis.cc`` run), builds per-channel RooFit workspaces using fully
     configurable analytic signal + background PDFs, generates CMS Combine
-    datacards with analytic shapes (``rate -1``), and runs
+    datacards with analytic shapes, and runs
     ``combine -M <method>`` for every channel and for a combined simultaneous
     fit across all channels.
 
@@ -1528,7 +1530,10 @@ class AnalyticWorkspaceFitTask(law.Task):
     Workspace config YAML format
     ----------------------------
     See ``analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml`` for a
-    fully-annotated example.
+    fully annotated example. The optional ``combine_rates`` mapping supplies
+    reference signal and background yields for each channel. These cards use
+    Combine's common signal-strength POI and a separate free background scale
+    per channel. All configured channels are required when rates are supplied.
 
     Outputs
     -------
@@ -1552,7 +1557,7 @@ class AnalyticWorkspaceFitTask(law.Task):
             --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \\
             --histogram-file output/dimuon_zpeak.root \\
             --method FitDiagnostics \\
-            --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
+            --combine-options "--saveShapes --saveNormalizations"
 
         # J/ψ → μμ Gaussian+Chebyshev fit — just swap the workspace config
         law run AnalyticWorkspaceFitTask \\
@@ -1600,11 +1605,10 @@ class AnalyticWorkspaceFitTask(law.Task):
         ),
     )
     combine_options = luigi.Parameter(
-        default="--saveShapes --floatAllNuisances --saveNormalizations",
+        default="--saveShapes --saveNormalizations",
         description=(
             "Extra command-line options forwarded verbatim to every combine "
-            "invocation.  Default: --saveShapes --floatAllNuisances "
-            "--saveNormalizations."
+            "invocation.  Default: --saveShapes --saveNormalizations."
         ),
     )
     skip_fit = luigi.BoolParameter(
@@ -1644,6 +1648,7 @@ class AnalyticWorkspaceFitTask(law.Task):
             )
         with open(config_path) as fh:
             ws_cfg = yaml.safe_load(fh)
+        rates = configured_rates(ws_cfg)
 
         # ---- Open analysis ROOT file --------------------------------------
         try:
@@ -1674,7 +1679,9 @@ class AnalyticWorkspaceFitTask(law.Task):
                 label = ch_cfg.get("label", channel)
 
                 hist, hist_obj_path = _find_histogram_in_file(root_file, hist_name)
-                if not hist or hist.IsZombie():
+                if not hist or hist.IsZombie() or hist.GetDimension() != 1:
+                    if rates is not None:
+                        raise RuntimeError(f"Missing 1D histogram '{hist_name}' for channel '{channel}'")
                     self.publish_message(
                         f"WARNING: histogram '{hist_name}' not "
                         f"found in {hist_path!r}; skipping channel '{channel}'."
@@ -1683,7 +1690,9 @@ class AnalyticWorkspaceFitTask(law.Task):
 
                 hist.SetDirectory(0)
                 n_obs = hist.Integral()
-                if n_obs < 10:
+                if not np.isfinite(n_obs) or n_obs < 10:
+                    if rates is not None:
+                        raise RuntimeError(f"Channel '{channel}' requires at least 10 finite in-range events")
                     self.publish_message(
                         f"WARNING: channel '{channel}' ({label}) has only "
                         f"{n_obs:.0f} events; skipping."
@@ -1702,7 +1711,10 @@ class AnalyticWorkspaceFitTask(law.Task):
                 ws.Write()
                 ws_file.Close()
 
-                card_path = _write_analytic_datacard(channel, n_obs, ws_path, out_dir)
+                if rates is None:
+                    card_path = _write_analytic_datacard(channel, n_obs, ws_path, out_dir)
+                else:
+                    card_path = write_rate_card([channel], rates, out_dir, tag=channel)
                 active_channels.append(channel)
                 self.publish_message(f"  Workspace : {ws_path}")
                 self.publish_message(f"  Datacard  : {card_path}")
@@ -1717,9 +1729,10 @@ class AnalyticWorkspaceFitTask(law.Task):
                 )
 
             # ---- Combined simultaneous-fit datacard ----------------------
-            combined_card = _write_analytic_combined_datacard(
-                active_channels, out_dir
-            )
+            if rates is None:
+                combined_card = _write_analytic_combined_datacard(active_channels, out_dir)
+            else:
+                combined_card = write_rate_card(active_channels, rates, out_dir, tag="combined")
             self.publish_message(f"Combined datacard: {combined_card}")
 
         rec.save(os.path.join(out_dir, "analytic_fit.perf.json"))
@@ -1734,6 +1747,8 @@ class AnalyticWorkspaceFitTask(law.Task):
             "channels": active_channels,
             "skip_fit": self.skip_fit,
         }
+        if rates is not None:
+            prov["combine_rates"] = ws_cfg["combine_rates"]
         with open(os.path.join(out_dir, "provenance.json"), "w") as fh:
             json.dump(prov, fh, indent=2)
 
@@ -1748,6 +1763,8 @@ class AnalyticWorkspaceFitTask(law.Task):
         try:
             combine_bin = _find_combine(self.combine_exe)
         except RuntimeError as exc:
+            if rates is not None:
+                raise
             self.publish_message(
                 f"WARNING: {exc}  "
                 "Skipping fits — datacards and workspaces are available in "
@@ -1764,7 +1781,7 @@ class AnalyticWorkspaceFitTask(law.Task):
             + [combined_card]
         )
         for card_path in all_cards:
-            tag = Path(card_path).stem.replace("datacard_", "")
+            tag = Path(card_path).stem.removeprefix("datacard_")
             cmd = [combine_bin, "-M", self.method, card_path, "-n", f"_{tag}"] + extra_opts
             log_path = os.path.join(out_dir, f"combine_{tag}.log")
             self.publish_message("Running: " + " ".join(cmd))
@@ -1778,6 +1795,15 @@ class AnalyticWorkspaceFitTask(law.Task):
                     f"(exit {result.returncode}).  Log: {log_path}"
                 )
                 all_ok = False
+            elif rates is not None and self.method == "FitDiagnostics":
+                diagnostic = Path(out_dir) / f"fitDiagnostics_{tag}.root"
+                with ROOT.TFile.Open(str(diagnostic), "READ") as fit_file:
+                    fit = fit_file.Get("fit_s")
+                    if not fit or fit.status() != 0:
+                        self.publish_message(f"ERROR: no successful signal-plus-background fit in {diagnostic}")
+                        all_ok = False
+                    else:
+                        self.publish_message(f"Fit complete: '{tag}'. covQual={fit.covQual()}. Log: {log_path}")
             else:
                 self.publish_message(
                     f"Fit complete: '{tag}'.  Log: {log_path}"
@@ -2075,8 +2101,10 @@ def _write_analytic_datacard(
 ) -> str:
     """Write a CMS Combine datacard that references a RooWorkspace for shapes.
 
-    Uses ``rate -1`` so that Combine reads signal and background yields from
-    the extended PDFs (``nsig_<channel>``, ``nbkg_<channel>``) in the workspace.
+    The shapes refer to the component PDFs. The emitted ``rate -1`` placeholders
+    require a Combine-compatible normalization for each process. In the
+    DoubleMuon tutorial the fitted yields belong to the combined RooAddPdf,
+    so those coefficients do not supply the component rates in this card.
 
     The workspace naming conventions assumed here match those produced by
     :func:`_build_analytic_workspace`.
@@ -2115,7 +2143,7 @@ def _write_analytic_datacard(
         f"bin          {channel}    {channel}",
         "process      sig          bkg",
         "process      0            1",
-        "# rate -1: yields (nsig, nbkg) are read from workspace extended PDFs",
+        "# Component PDFs require Combine-compatible process normalizations for rate -1.",
         "rate         -1           -1",
         "-" * 72,
         "# All shape parameters (mean, sigma, decay, …) float in the workspace.",
@@ -2181,7 +2209,7 @@ def _write_analytic_combined_datacard(
         "bin     " + "    ".join(f"{c}    {c}" for c in channels),
         "process " + "    ".join("sig      bkg" for _ in channels),
         "process " + "    ".join("0        1"   for _ in channels),
-        "# rate -1: yields read from workspace extended PDFs per channel",
+        "# Each channel requires Combine-compatible component normalizations for rate -1.",
         "rate    " + "    ".join("-1       -1"  for _ in channels),
         "-" * 72,
         "# Parameters with the same name across channels are tied by Combine.",

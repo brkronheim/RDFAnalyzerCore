@@ -1,4 +1,5 @@
 #include <RootRegistryOptimization.h>
+#include <TROOT.h>
 #if defined(__linux__)
 #include <dlfcn.h>
 #endif
@@ -17,7 +18,7 @@ RootRegistryOptimizationStatus rootRegistryOptimizationStatus() {
     result.definitions = values[1];
     result.inputBindingsBefore = values[2];
     result.inputBindingsAfter = values[3];
-    result.implementation = result.enabled ? "root64004-direct-inputs-v1" : "disabled-at-runtime";
+    result.implementation = result.enabled ? "root" + std::to_string(gROOT->GetVersionInt()) + "-direct-inputs-v1" : "disabled-at-runtime";
   }
 #endif
   return result;

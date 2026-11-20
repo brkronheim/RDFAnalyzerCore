@@ -1,0 +1,10 @@
+{
+  "/home/bkronhei/RDFAnalyzerCore/examples/native-results/CMakeLists.txt": "58f0d48b0b7769dc6bd398659e5bfb87226d63f8a1395fbb053ccbb061ab156f",
+  "/home/bkronhei/RDFAnalyzerCore/examples/native-results/analysis.h": "a1bb7e92f631c38b8bbca6a7fca79253ebe4b970fd1dd722a7870e195de5f19c",
+  "/home/bkronhei/RDFAnalyzerCore/examples/native-results/analysis.cc": "f3182028606753633e28365cfa79d5b11f311c76e3e1c63757682faa63993c77",
+  "/home/bkronhei/RDFAnalyzerCore/examples/native-results/main.cc": "c81891255dd2cab5c2363d9144e4bd755221efb22d715a5f729eb3d9e6881826",
+  "/home/bkronhei/RDFAnalyzerCore/examples/native-results/steer.py": "24ae14d1dc456b822b6db562bbd9ad2ae99527c9be6679db3d766dceffb85797",
+  "/home/bkronhei/RDFAnalyzerCore/examples/native-results/README.md": "e18ac78295d2f9c2aba3395a22df33bad5f4316e5857d2d909e885d85437653c",
+  "/home/bkronhei/RDFAnalyzerCore/examples/native-results/tests/validate.py": "66d61fdf6d78f0589a7fbe67a0972446a2e6612a657e00743d08d917fb471a4a",
+  "/home/bkronhei/RDFAnalyzerCore/examples/native-results/tests/test_example.py": "36dbc9900485fb12a1c7dba361a8a59696493ee728993ea7986236cda3a1b10d"
+}

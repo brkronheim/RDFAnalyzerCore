@@ -161,6 +161,10 @@ public:
                           const std::vector<std::string> &inputColumns = {},
                           const std::string &outputBranch = "");
 
+  /// Book compatible two-input binned corrections together. Returns false for scalar fallback.
+  bool tryApplyBinnedGroup(const std::vector<std::string>& names,
+                           const std::vector<std::string>& inputs);
+
   struct VectorCorrectionCase {
     std::string correctionName;
     std::vector<std::string> stringArguments;

@@ -1,6 +1,6 @@
 ---
 name: rdfanalyzer-inference
-description: Configure, apply, or modify ONNX, FastForest BDT, and ROOT SOFIE inference managers, including feature ordering, model outputs, batching, and execution providers.
+description: Configure or debug ONNX, FastForest BDT, and SOFIE inference, including standalone PyPI SOFIE generation, compiled callable registration, feature ordering, model outputs, batching, and execution providers.
 ---
 
 # Model inference
@@ -8,7 +8,7 @@ description: Configure, apply, or modify ONNX, FastForest BDT, and ROOT SOFIE in
 Read only the backend reference needed:
 
 - [ONNX](references/onnx.md): runtime model/session configuration, tensor packing, outputs, batches, and GPU selection.
-- [BDT and SOFIE](references/bdt-sofie.md): FastForest text models and compiled callable registration.
+- [BDT and SOFIE](references/bdt-sofie.md): FastForest text models, standalone SOFIE generation, and compiled callable registration.
 
 Trace the model config from the analysis's `bdtConfig`, `onnxConfig`, or `sofieConfig` into the manager's parser and explicit `apply*` call. Resource loading/registration does not prove model columns are defined or consumed. Check that all input and `runVar` columns exist at application time and preserve the trained feature order, preprocessing, shape, and scalar/vector types.
 

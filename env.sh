@@ -7,7 +7,7 @@
 # Vc.pcm at /build/jenkins/...). This causes cling to fail to load modules at
 # runtime with "module file not found" errors even though the .pcm files exist.
 #
-# The lcg/app/releases ROOT 6.40.04 build:
+# The lcg/app/releases ROOT build:
 #   - Has no hardcoded build-server paths in its PCM files.
 #   - Was compiled with the system GCC 11.5 present in the cmssw-el9 container.
 #   - Sets ROOTSYS = its own prefix, so the CMakeLists.txt ROOTSYS check passes.
@@ -17,7 +17,7 @@
 
 # Resolve paths relative to this file so the environment works when sourced
 # from outside the repository root as well.
-export REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+export REPO_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 ulimit -n 10000
 
@@ -28,16 +28,49 @@ export CXX=/usr/bin/g++
 export FC=/usr/bin/gfortran
 
 # ---------------------------------------------------------------------------
-# 1. ROOT 6.40.04  (lcg/app/releases standalone build — no build-server paths
-#                   in PCM files; ROOTSYS set to cvmfs prefix so CMake check passes)
+# 1. Standalone ROOT. Set RDF_CVMFS_ROOT_RELEASE=6.40.04 before sourcing to
+#    select the previous stable release.
 # ---------------------------------------------------------------------------
-source /cvmfs/sft.cern.ch/lcg/app/releases/ROOT/6.40.04/x86_64-almalinux9.8-gcc115-opt/bin/thisroot.sh || return 1
+rdf_root_prefix="/cvmfs/sft.cern.ch/lcg/app/releases/ROOT/${RDF_CVMFS_ROOT_RELEASE:-6.42.00-rc1}/x86_64-almalinux9.8-gcc115-opt"
+if [ ! -x "${rdf_root_prefix}/bin/root-config" ]; then
+    printf 'ROOT installation missing at %s\n' "${rdf_root_prefix}" >&2
+    return 1
+fi
+
+# The release candidate's thisroot.sh misidentifies Bash when its command line
+# contains newlines, as in a batch script passed to bash -c. Set the Linux
+# paths from the known prefix, replacing entries from a previous ROOT setup.
+rdf_prepend_root_path() {
+    local variable=$1 suffix=$2 entry previous
+    local updated="${rdf_root_prefix}${suffix}"
+    local -a entries
+    previous=${!variable-}
+    IFS=: read -r -a entries <<< "$previous"
+    for entry in "${entries[@]}"; do
+        if [[ "$entry" == "${rdf_root_prefix}${suffix}" || ( -n "${ROOTSYS:-}" && "$entry" == "${ROOTSYS}${suffix}" ) ]]; then
+            continue
+        fi
+        updated+=:"$entry"
+    done
+    if [[ "$variable" == MANPATH && ( -z "$previous" || "$previous" == *: ) ]]; then
+        updated+=:
+    fi
+    export "$variable=$updated"
+}
+rdf_prepend_root_path PATH /bin
+rdf_prepend_root_path LD_LIBRARY_PATH /lib
+rdf_prepend_root_path PYTHONPATH /lib
+rdf_prepend_root_path CMAKE_PREFIX_PATH ''
+rdf_prepend_root_path JUPYTER_PATH /etc/notebook
+rdf_prepend_root_path JUPYTER_CONFIG_PATH /etc/notebook
+rdf_prepend_root_path MANPATH /man
+export ROOTSYS="$rdf_root_prefix"
+unset rdf_root_prefix
+unset -f rdf_prepend_root_path
 
 # ---------------------------------------------------------------------------
-# 2. vdt 0.4.4  (ROOT's cmake FindVdt.cmake calls find_dependency(Vdt); the
-#                app/releases ROOT bundles libvdt.so in its own lib/ dir and
-#                thisroot.sh prepends ROOTSYS to CMAKE_PREFIX_PATH so FindVdt
-#                finds it there first — this entry is a safe fallback only)
+# 2. vdt 0.4.4 for consumers that link it directly, including Combine.
+#    ROOT 6.40.04 also exports its bundled Vdt through ROOTConfig.cmake.
 # ---------------------------------------------------------------------------
 LCG_VDT_ROOT=/cvmfs/sft.cern.ch/lcg/releases/vdt/0.4.4-f1a43/x86_64-el9-gcc11-opt
 export CMAKE_PREFIX_PATH=${LCG_VDT_ROOT}:${CMAKE_PREFIX_PATH}
@@ -58,7 +91,7 @@ export LIBRARY_PATH=${LCG_XXHASH_ROOT}/lib:${LIBRARY_PATH}
 # ---------------------------------------------------------------------------
 # 4. tbb + GSL (for linker resolution of ROOT transitive deps)
 #    Some cmssw-el9 images/remote nodes do not provide libtbb.so.2 and
-#    the GSL libraries in default linker search paths. ROOT 6.40.04's
+#    the GSL libraries in default linker search paths. ROOT's
 #    libMathMore.so was built against libgsl.so.25, so select a package that
 #    provides that SONAME instead of simply taking the newest GSL release.
 # ---------------------------------------------------------------------------
@@ -82,6 +115,15 @@ if [ -n "${LCG_GSL_ROOT}" ] && [ -f "${LCG_GSL_ROOT}/lib/libgsl.so.25" ] && [ -f
 	export CMAKE_PREFIX_PATH=${LCG_GSL_ROOT}:${CMAKE_PREFIX_PATH}
 	export LD_LIBRARY_PATH=${LCG_GSL_ROOT}/lib:${LD_LIBRARY_PATH}
 	export LIBRARY_PATH=${LCG_GSL_ROOT}/lib:${LIBRARY_PATH}
+fi
+
+# RooFitCore loads FFTW on the standalone ROOT build. Some EL9 hosts have no
+# system libfftw3.so.3, including for PyROOT's lazy library loading.
+LCG_FFTW_ROOT=/cvmfs/sft.cern.ch/lcg/releases/fftw3/3.3.10-33229/x86_64-el9-gcc11-opt
+if [ -f "${LCG_FFTW_ROOT}/lib/libfftw3.so.3" ]; then
+    export CMAKE_PREFIX_PATH=${LCG_FFTW_ROOT}:${CMAKE_PREFIX_PATH}
+    export LD_LIBRARY_PATH=${LCG_FFTW_ROOT}/lib:${LD_LIBRARY_PATH}
+    export LIBRARY_PATH=${LCG_FFTW_ROOT}/lib:${LIBRARY_PATH}
 fi
 
 # Source the environment hooks declared by installed extensions. Each extension

@@ -54,7 +54,7 @@ New to RDFAnalyzerCore? Start here:
 
 - **[Machine Learning](ANALYSIS_GUIDE.md#machine-learning-integration)**
   - **[ONNX Models](ONNX_IMPLEMENTATION.md)** - Runtime ML from any framework (PyTorch, TensorFlow, scikit-learn)
-  - **[SOFIE Models](SOFIE_IMPLEMENTATION.md)** - Build-time compiled models for maximum performance
+  - **[SOFIE Models](SOFIE_IMPLEMENTATION.md)** - C++ inference generated with the standalone PyPI package
   - **[BDT Models](CONFIG_REFERENCE.md#bdt-manager-configuration)** - FastForest boosted decision trees
   - **[ONNX Multi-Output](ONNX_MULTI_OUTPUT.md)** - Models with multiple outputs
 
@@ -166,7 +166,7 @@ Framework is extensible via plugins:
 
 - **BDTManager**: Boosted decision trees
 - **OnnxManager**: Neural networks and ML models
-- **SofieManager**: Build-time compiled models
+- **SofieManager**: Compiled inference callables
 - **CorrectionManager**: Scale factors and corrections
 - **JetEnergyScaleManager**: JES/JER corrections, JER smearing, CMS systematic sets, MET propagation, and PhysicsObjectCollection integration
 - **ElectronEnergyScaleManager**: Electron scale and smearing workflows via ObjectEnergyManagerBase

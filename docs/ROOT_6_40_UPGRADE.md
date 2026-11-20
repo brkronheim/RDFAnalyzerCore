@@ -1,17 +1,17 @@
 # ROOT 6.40 upgrade
 
-The local environment and both CMake presets select ROOT **6.40.04**, using
+The 6.40 upgrade selected ROOT **6.40.04** in the local environment and both CMake presets, using
 `/cvmfs/sft.cern.ch/lcg/app/releases/ROOT/6.40.04/x86_64-almalinux9.8-gcc115-opt`.
-The runner Dockerfile selects the corresponding Ubuntu 22.04 binary. GCC 11.5,
+The runner Dockerfile selects the corresponding Ubuntu 22.04 binary. See the [current CVMFS setup](ROOT_6_42_UPGRADE.md) for newer builds. GCC 11.5,
 C++17 and the existing Python 3.12 environment remain in use locally.
 
 Re-source the environment and refresh cached ROOT/VDT paths before rebuilding:
 
 ```bash
-source env.sh
+RDF_CVMFS_ROOT_RELEASE=6.40.04 source env.sh
 root-config --version
-cmake -S . -B build -U 'ROOT_*' -U 'VDT_*' -DROOT_DIR="$ROOTSYS/cmake"
-cmake --build build --clean-first -j4
+cmake -S . -B build-root640 -U 'ROOT_*' -U 'VDT_*' -DROOT_DIR="$ROOTSYS/cmake"
+cmake --build build-root640 -j4
 ```
 
 Rebuild all executables and bindings you intend to run; old binaries must not

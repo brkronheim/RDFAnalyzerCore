@@ -284,8 +284,8 @@ public:
   std::shared_ptr<Result_t> GetResultPtr() { return (fFinalResult); }
 
   /**
-   * @brief Called before the event loop to retrieve the result pointer
-   * @return Shared pointer to THnSparseD
+   * @brief Return the shared sparse histogram result.
+   * @return Shared pointer to THnSparseF
    */
   std::shared_ptr<THnSparseF> GetResultPtr() const { return fFinalResult; }
 
@@ -295,9 +295,7 @@ public:
   void Initialize() {}
 
   /**
-   * @brief Initialize a processing task (called at the beginning of each task)
-   * @param reader TTreeReader pointer
-   * @param slot Slot index
+   * @brief Task-start callback, with no additional initialization for this action.
    */
   void InitTask(TTreeReader *, int) {}
 
