@@ -38,7 +38,9 @@ public:
     /// no notification: ROOT resolves their physical reader dependencies.
     virtual void markInputDependenciesIncomplete(const std::string &) {}
     
-    // TODO: Why are these defined here? Shouldn't they be defined in the final classes?
+    /// Book services on the current inclusive node before a custom raw filter.
+    /// This is a no-op for a standalone provider.
+    void notifyBeforeFilter();
 
     /**
      * @brief Define exactly one column without systematic expansion.
@@ -110,6 +112,7 @@ public:
      */
     template <typename F>
     void Filter(F f, const std::vector<std::string> &columns = {}) {
+        notifyBeforeFilter();
         auto df = getDataFrame();
         df = df.Filter(f, columns);
         setDataFrame(df);

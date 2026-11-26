@@ -20,6 +20,13 @@ add_executable(testProvenanceService testProvenanceService.cc)
 target_link_libraries(testProvenanceService core gtest gtest_main)
 add_test(NAME ProvenanceServiceTest COMMAND testProvenanceService)
 
+# Probe both historical Itanium ABI entry points from an independent consumer.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
+    add_executable(testFriendTreeSpecAbi testFriendTreeSpecAbi.cc)
+    target_link_libraries(testFriendTreeSpecAbi PRIVATE core)
+    add_test(NAME FriendTreeSpecAbiTest COMMAND testFriendTreeSpecAbi)
+endif()
+
 # Basic functionality tests
 add_executable(testRootRegistryOptimization testRootRegistryOptimization.cc)
 target_link_libraries(testRootRegistryOptimization PRIVATE core gtest gtest_main)
@@ -133,6 +140,12 @@ endif()
 
 add_executable(benchmarkInputCache EXCLUDE_FROM_ALL benchmarkInputCache.cc)
 target_link_libraries(benchmarkInputCache coreAll)
+add_executable(benchmarkNanoSkim EXCLUDE_FROM_ALL benchmarkNanoSkim.cc)
+target_link_libraries(benchmarkNanoSkim PRIVATE coreAll)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_library(benchmarkWorkerPhases MODULE EXCLUDE_FROM_ALL benchmarkWorkerPhases.cc)
+  target_link_libraries(benchmarkWorkerPhases PRIVATE ROOT::ROOTDataFrame)
+endif()
 
 add_executable(testSystematicBundle testSystematicBundle.cc)
 target_link_libraries(testSystematicBundle coreAll gtest gtest_main)

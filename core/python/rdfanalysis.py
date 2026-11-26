@@ -192,17 +192,17 @@ class AnalysisConfig:
 
     @classmethod
     def from_file(cls, path):
-        import yaml
+        from native_config_io import load_yaml_document
         path = Path(path).resolve()
-        try:
-            data = yaml.safe_load(path.read_text())
-        except yaml.YAMLError as error:
-            raise ValueError(f"{path}: {error}") from error
+        data = load_yaml_document(path, typed=True)
         if not isinstance(data, dict):
             raise ValueError(f"{path}: analysis configuration must be a mapping")
         unknown = data.keys() - cls.__dataclass_fields__.keys()
         if unknown:
-            raise ValueError(f"{path}: unknown analysis fields: " + ", ".join(sorted(map(str, unknown))))
+            detail = f"{path}: unknown analysis fields: " + ", ".join(sorted(map(str, unknown)))
+            if unknown.intersection({"fileList", "treeList", "saveFile", "saveTree"}):
+                detail += ". To open a native worker configuration directly, use rdfanalyzer.Analyzer(str(path))."
+            raise ValueError(detail)
         def resolve(value):
             return value if "://" in value or Path(value).is_absolute() else str(path.parent / value)
         try:
@@ -298,7 +298,7 @@ class Analysis:
         if type(record_graph) is not bool:
             raise TypeError("record_graph must be a boolean")
         config.validate('assets').raise_if_invalid()
-        import yaml
+        from native_config_io import write_config_yaml
         import rdfanalyzer
         if getattr(rdfanalyzer,'python_authoring_api_version',0)<_NATIVE_API_VERSION:
             raise RuntimeError('Native rdfanalyzer is older than this Python frontend; rebuild/install both from the same build')
@@ -327,11 +327,11 @@ class Analysis:
         directory = Path(self._directory.name)
         settings = config.native_config()
         if config.save_columns is not None:
-            columns = directory / "columns.txt"
-            columns.write_text("\n".join(config.save_columns) + "\n")
+            columns = directory / "columns.yaml"
+            write_config_yaml(list(config.save_columns), columns)
             settings["saveConfig"] = str(columns)
         path = directory / "analysis.yaml"
-        path.write_text(yaml.safe_dump(settings, sort_keys=True))
+        write_config_yaml(dict(sorted(settings.items())), path)
         if hasattr(rdfanalyzer.Analyzer,'_graph_description'):
             self.native = rdfanalyzer.Analyzer(str(path),record_graph=record_graph)
         else:
@@ -339,6 +339,17 @@ class Analysis:
 
     def define(self, name, expression, columns=()):
         self.native.define(name, expression, list(columns))
+        return self
+
+    def define_constant_vector(self, name, values):
+        """Copy a 1D native-endian NumPy array at booking. All events share its read-only values.
+
+        Supported dtypes are float32/64, int32/64 and uint32/64. A strided
+        array is copied into contiguous storage. The native graph owns the copy.
+        """
+        if not hasattr(self.native, "define_constant_vector"):
+            raise RuntimeError("Rebuild rdfanalyzer to use graph-owned constant vectors")
+        self.native.define_constant_vector(name, values)
         return self
 
     def define_nominal(self, name, expression, columns=()):

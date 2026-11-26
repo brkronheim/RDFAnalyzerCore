@@ -39,7 +39,7 @@ reader, and packed and inline input readers on the candidate. The release-tag
 check distinguishes the candidate from development builds with the same numeric
 version. The existing source reader patch applies with zero fuzz. The
 column-name patch has a candidate-specific version that also covers the new
-per-sample definition methods. [Patch matrix and instructions](../core/root_compat/patches/README.md)
+per-sample definition methods. [Patch matrix and instructions](https://github.com/brkronheim/RDFAnalyzerCore/blob/dev/core/root_compat/patches/README.md)
 
 ## Features worth using
 

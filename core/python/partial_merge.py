@@ -13,7 +13,19 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from run_bundle import file_digest, write_json, derived_artifact, verify_artifact
+from run_bundle import (
+    content_digest,
+    derived_artifact,
+    file_digest,
+    record_execution,
+    verify_artifact,
+    write_json,
+)
+from rdfproduction.output_index import (
+    load_verified_output_index,
+    local_output_signature,
+    verify_output_signatures,
+)
 
 
 def _acquire_merge_lock(path, wait=False):
@@ -36,7 +48,35 @@ def _acquire_merge_lock(path, wait=False):
         raise
 
 
-def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
+def merge_completed_outputs(state_path, merge_dir, **options):
+    """Merge the completed subset of a potentially active run."""
+    _merge_outputs(state_path, merge_dir, **options)
+
+
+def merge_verified_outputs(output_index, merge_dir, *, receipt=None, check_signatures=None, **options):
+    """Merge the full verified partition inventory and return snapshot paths."""
+    return _merge_outputs(output_index, merge_dir, verified=True,
+                          receipt=receipt, check_signatures=check_signatures, **options)
+
+
+def _existing_merge_receipt(path, owner):
+    try:
+        previous = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        return None
+    except (ValueError, OSError) as error:
+        raise ValueError(f"Cannot use merge receipt destination {path}: {error}") from error
+    if not isinstance(previous, dict):
+        raise ValueError(f"Cannot overwrite unrelated file with merge receipt: {path}")
+    unsigned = {key: value for key, value in previous.items() if key != "receipt_id"}
+    if (any(previous.get(key) != value for key, value in owner.items())
+            or previous.get("receipt_id") != content_digest(unsigned)):
+        raise ValueError(f"Cannot overwrite unrelated file with merge receipt: {path}")
+    return previous
+
+
+def _merge_outputs(state_path, merge_dir, *, verified=False, receipt=None, check_signatures=None,
+                            hadd_jobs=4, xrdcp_jobs=4,
                             nominal_only=False, hadd_max_open_files=10000,
                             data_merge_threads=1, sparse_only=False,
                             semantic_config_compatibility=None, metadata_merger=None, wait_for_lock=False):
@@ -48,8 +88,11 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
         semantic_config_compatibility = Path(semantic_config_compatibility).resolve()
         compatibility_policy = load_semantic_config_compatibility(semantic_config_compatibility)
     state_path, merge_dir = Path(state_path), Path(merge_dir)
-    repo_root = Path(__file__).resolve().parents[2]
-    extractor = repo_root / "core/python/extract_nd_histograms.py"
+    if receipt is not None:
+        receipt = Path(receipt).resolve()
+        reserved = (state_path.resolve(), merge_dir.resolve(), (merge_dir / ".mergeResults.lock").resolve())
+        if receipt in reserved:
+            raise ValueError("Merge receipt must be distinct from the output index and merge workspace")
     cache_dir, logs_dir = merge_dir / ".input_cache", merge_dir / "logs"
     for directory in (merge_dir, cache_dir, logs_dir):
         directory.mkdir(parents=True, exist_ok=True)
@@ -59,7 +102,22 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
             raise ValueError(f"{label} must be positive")
     lock_file = _acquire_merge_lock(merge_dir / ".mergeResults.lock", wait_for_lock)
     try:
-        state = json.loads(state_path.read_text())
+        if verified:
+            inventory = load_verified_output_index(state_path)
+            verify_output_signatures(inventory, check_signatures)
+            state = {"datasets": {dataset: {"jobs": {
+                slot: {"status": "done", "meta": job["outputs"]["meta"],
+                       "signature": job["signatures"][job["outputs"]["meta"]]}
+                for slot, job in data["jobs"].items()}}
+                for dataset, data in inventory["datasets"].items()}}
+            parents = {"verified_output_index": inventory["index_id"]}
+            artifact_kind = "verified-merge"
+        else:
+            state_bytes = state_path.read_bytes()
+            state = json.loads(state_bytes)
+            parents = {"monitor_state": hashlib.sha256(state_bytes).hexdigest()}
+            artifact_kind = "partial-merge"
+
         def safe_name(value):
             return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._") or "dataset"
 
@@ -67,23 +125,34 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
         def source_url(path):
             if path.startswith("root://"):
                 return path
-            if path.startswith("/eos/"):
+            if path.startswith("/eos/") or (verified and path.startswith("/store/")):
                 return "root://eosuser.cern.ch/" + path
             return path
 
 
-        def stage_input(dataset_name, job_id, original_path):
+        def stage_input(dataset_name, job_id, original_path, signature):
             source = source_url(original_path)
             dataset_cache = cache_dir / safe_name(dataset_name)
             dataset_cache.mkdir(parents=True, exist_ok=True)
             basename = Path(original_path.split("?", 1)[0]).name or "meta.root"
-            source_id = hashlib.sha256(source.encode()).hexdigest()[:16]
+            source_identity = source if not verified else json.dumps(
+                [source, inventory["index_id"]], separators=(",", ":"))
+            source_id = hashlib.sha256(source_identity.encode()).hexdigest()[:16]
             target = dataset_cache / f"job_{safe_name(job_id)}__{source_id}__{basename}"
+            cache_receipt = target.with_suffix(target.suffix + ".cache.json")
 
             # Completed monitor entries are immutable outputs. Keeping successful
             # local copies means subsequent runs transfer only newly completed jobs.
             if target.is_file() and target.stat().st_size > 0:
-                return target, False
+                if not verified:
+                    return target, False
+                try:
+                    fingerprint = local_output_signature(target)
+                    if (fingerprint and fingerprint["size"] == signature["size"]
+                            and json.loads(cache_receipt.read_bytes()) == fingerprint):
+                        return target, False
+                except (OSError, ValueError):
+                    pass
 
             fd, temporary_name = tempfile.mkstemp(
                 prefix=f".{target.name}.", suffix=".part", dir=dataset_cache
@@ -106,7 +175,11 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
                     shutil.copy2(source, temporary)
                 if not temporary.is_file() or temporary.stat().st_size == 0:
                     raise RuntimeError(f"Copy produced an empty file: {source}")
+                if verified and temporary.stat().st_size != signature["size"]:
+                    raise RuntimeError(f"Copy differs from the verified size: {source}")
                 os.replace(temporary, target)
+                if verified:
+                    write_json(cache_receipt, local_output_signature(target))
             except Exception:
                 temporary.unlink(missing_ok=True)
                 raise
@@ -120,6 +193,16 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
         copy_counts = {"copied": 0, "reused": 0}
         copy_failures = []
         copy_tasks = []
+        dataset_paths = [safe_name(dataset) for dataset in state.get("datasets", {})]
+        if verified and len(set(dataset_paths)) != len(dataset_paths):
+            raise ValueError("Dataset names map to the same merge destination")
+        if receipt is not None:
+            if any(receipt == (merge_dir / f"{name}_partial.snapshot.json").resolve()
+                   for name in dataset_paths):
+                raise ValueError("Merge receipt must be distinct from dataset snapshots")
+            owner = {"schema": "rdf-verified-merge-v1", "index_id": inventory["index_id"],
+                     "destination": str(merge_dir.resolve())}
+            _existing_merge_receipt(receipt, owner)
 
         for dataset_name, dataset in sorted(state.get("datasets", {}).items()):
             for job_id, job in sorted(dataset.get("jobs", {}).items()):
@@ -130,16 +213,16 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
                     copy_failures.append(f"{dataset_name} job {job_id}: missing meta path")
                     failed_datasets.add(dataset_name)
                     continue
-                copy_tasks.append((dataset_name, job_id, remote_path))
+                copy_tasks.append((dataset_name, job_id, remote_path, job.get("signature")))
 
         with ThreadPoolExecutor(max_workers=xrdcp_jobs) as executor:
             futures = {
-                executor.submit(stage_input, dataset_name, job_id, remote_path): (
+                executor.submit(stage_input, dataset_name, job_id, remote_path, signature): (
                     dataset_name,
                     job_id,
                     remote_path,
                 )
-                for dataset_name, job_id, remote_path in copy_tasks
+                for dataset_name, job_id, remote_path, signature in copy_tasks
             }
             for future in as_completed(futures):
                 dataset_name, job_id, remote_path = futures[future]
@@ -158,6 +241,12 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
             print(f"Skipping {dataset_name}: at least one completed output failed to copy.")
         for dataset_inputs in inputs_by_dataset.values():
             dataset_inputs.sort()
+        if verified:
+            # Catch replacements while files were being staged, including when
+            # a cached copy was selected before the source changed.
+            verify_output_signatures(inventory, check_signatures)
+            if copy_failures:
+                raise RuntimeError("Could not stage verified outputs: " + "; ".join(copy_failures))
 
         print(
             f"Staging complete: {copy_counts['copied']} new file(s) copied, "
@@ -170,7 +259,7 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
 
         # The shared merger validates definitions, retains provenance and publishes the
         # ROOT file with its immutable sidecar before writing the completion marker.
-        metadata_merger = Path(metadata_merger).resolve() if metadata_merger is not None else repo_root / "core/python/metadata_io.py"
+        metadata_merger = Path(metadata_merger).resolve() if metadata_merger is not None else Path(__file__).resolve().with_name("metadata_io.py")
         if not metadata_merger.is_file():raise ValueError("Missing metadata merger entry point")
 
 
@@ -186,18 +275,17 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
                 "jobs": {job: entry["meta"] for job, entry in
                          state["datasets"][dataset_name]["jobs"].items()
                          if entry.get("status") == "done"}}
-            parents = {"monitor_state": file_digest(state_path)}
             snapshot_path = output.with_suffix(".snapshot.json")
             if snapshot_path.is_file():
                 try:
                     previous = verify_artifact(snapshot_path)
                     expected_files = set(map(str, [*metadata_artifact_paths(output), *inputs]))
-                    if (previous.get("kind") == "partial-merge" and
+                    if (previous.get("kind") == artifact_kind and
                             previous.get("configuration") == configuration and
                             previous.get("parents") == parents and
                             set(previous["files"]) == expected_files):
                         print(f"Reused verified merge {dataset_name}", flush=True)
-                        return dataset_name, len(inputs), output, log_path
+                        return dataset_name, len(inputs), output, log_path, snapshot_path
                 except (OSError, ValueError, KeyError):
                     pass  # Rebuild normally; old outputs survive failed publication.
             command = [sys.executable, str(metadata_merger), str(output), *inputs,
@@ -215,14 +303,15 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
             if result.returncode:
                 tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-25:])
                 raise RuntimeError(f"metadata merge failed ({result.returncode}):\n{tail}")
-            snapshot = derived_artifact(kind="partial-merge",
+            snapshot = derived_artifact(kind=artifact_kind,
                 parents=parents, configuration=configuration,
                 files=[*metadata_artifact_paths(output), *inputs])
-            write_json(output.with_suffix(".snapshot.json"), snapshot)
-            return dataset_name, len(inputs), output, log_path
+            write_json(snapshot_path, snapshot)
+            return dataset_name, len(inputs), output, log_path, snapshot_path
 
 
         merge_failures = []
+        snapshots = []
         with ThreadPoolExecutor(max_workers=hadd_jobs) as executor:
             futures = {
                 executor.submit(merge_dataset, dataset_name, inputs): dataset_name
@@ -231,7 +320,8 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
             for future in as_completed(futures):
                 dataset_name = futures[future]
                 try:
-                    name, count, output, log_path = future.result()
+                    name, count, output, log_path, snapshot = future.result()
+                    snapshots.append(snapshot)
                     print(f"Merged {name}: {count} input(s) -> {output} (log: {log_path})")
                 except Exception as exc:
                     merge_failures.append(f"{dataset_name}: {exc}")
@@ -251,7 +341,17 @@ def merge_completed_outputs(state_path, merge_dir, *, hadd_jobs=4, xrdcp_jobs=4,
         if not inputs_by_dataset:
             raise SystemExit("No successfully staged completed job outputs were found.")
 
+        snapshots = tuple(sorted(snapshots))
+        if receipt is not None:
+            previous = _existing_merge_receipt(receipt, owner)
+            merged = dict(owner, snapshots={str(path.resolve()): file_digest(path) for path in snapshots})
+            merged["receipt_id"] = content_digest(merged)
+            if previous is None:
+                record_execution(receipt, merged)
+            elif previous != merged:
+                write_json(receipt, merged)
         print(f"Finished partial merges with at most {hadd_jobs} hadd job(s) at once.")
+        return snapshots
     finally:
         lock_file.close()
 

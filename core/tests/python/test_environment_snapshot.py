@@ -74,14 +74,14 @@ def test_invalid_snapshot_markers_fail(text):
 def test_task_snapshot_runs_through_local_executor_and_condor_wrapper(tmp_path, monkeypatch):
     import analysis_tasks
     from workflow_executors import _run_analysis_job
-    from submission_backend import generate_condor_runscript
+    from submission_backend import generate_condor_runscript, _package_worker_yaml
     hook = tmp_path/'extension.sh'
     hook.write_text('export SNAPSHOT_PRESET=yes\n')
     monkeypatch.setattr(optional_extensions, 'environment_scripts', lambda: iter([hook]))
     original = tmp_path/'original_setup.sh'
     original.write_text(SETUP)
     task = analysis_tasks.RunSkimTestJob(exe='/bin/true', root_setup=str(original),
-        submit_config=str(tmp_path/'submit_config.txt'), dataset_manifest='', name='snapshot')
+        submit_config=str(tmp_path/'submit_config.yaml'), dataset_manifest='', name='snapshot')
     snapshot = task._root_setup_content
     hook.unlink()
     worker = tmp_path/'worker'
@@ -89,12 +89,13 @@ def test_task_snapshot_runs_through_local_executor_and_condor_wrapper(tmp_path, 
     exe = worker/'check.sh'
     exe.write_text('#!/bin/bash\ntest "$SNAPSHOT_PRESET" = yes && test "$SETUP_FINISHED" = yes\n')
     exe.chmod(0o755)
-    (worker/'submit_config.txt').write_text('batch=false\n')
+    (worker/'submit_config.yaml').write_text('batch: false\n')
+    _package_worker_yaml(worker)
     monkeypatch.setenv('XRD_OPTIMIZE_SITES', '0')
     assert _run_analysis_job(exe_path=str(exe), job_dir=str(worker), root_setup=snapshot).startswith('done:')
     wrapper = worker/'run.sh'
     wrapper.write_text(generate_condor_runscript(exe_relpath=exe.name,
-        stage_inputs=False, stage_outputs=False, root_setup=snapshot))
+        stage_inputs=False, stage_outputs=False, root_setup=snapshot, config_file="submit_config.yaml"))
     result = subprocess.run(['bash', str(wrapper)], cwd=worker,
         env=dict(os.environ, XRD_OPTIMIZE_SITES='0'), capture_output=True, text=True)
     assert result.returncode == 0, result.stdout+result.stderr

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+
 import sys
 from pathlib import Path
 
@@ -35,20 +36,14 @@ def test_build_manifest_from_filelist_dir(tmp_path):
 
     output_manifest = tmp_path / "out.yaml"
     repo_root = Path(__file__).resolve().parents[3]
-    subprocess.run(
-        [
-            sys.executable,
-            str(repo_root / "core/python/law/build_manifest_from_filelist_dir.py"),
-            "--base-manifest",
-            str(base_manifest),
-            "--filelist-dir",
-            str(filelist_dir),
-            "--output",
-            str(output_manifest),
-        ],
-        check=True,
-    )
-
+    commands = [("-m", "rdfproduction.filelist_manifest"),
+                (str(repo_root / "core/python/law/build_manifest_from_filelist_dir.py"),)]
+    products = []
+    for command in commands:
+        subprocess.run([sys.executable, *command, "--base-manifest", str(base_manifest),
+                        "--filelist-dir", str(filelist_dir), "--output", str(output_manifest)], check=True)
+        products.append(output_manifest.read_bytes())
+    assert products[0] == products[1]
     out = DatasetManifest.load_yaml(str(output_manifest))
     entry = out.by_name("sampleA")
     assert entry is not None

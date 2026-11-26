@@ -1,5 +1,47 @@
 # Production task graph and staging
 
+The [Snakemake production workflow](../../../../examples/snakemake/README.md)
+accepts a sealed era collection or explicit per-era specs.
+[campaign.py](../../../../core/python/rdfproduction/campaign.py)
+validates the selected era inputs and output ownership before preflight.
+The standalone path needs neither LAW nor Luigi.
+The [Python source map](../../../../core/python/README.md) links to the
+individual production stages. The [jobs package](../../../../core/python/rdfproduction/jobs/)
+separates preparation, staging, submission, monitoring and output validation.
+[discovery.py](../../../../core/python/rdfproduction/discovery.py) materializes
+input inventories and [executors.py](../../../../core/python/rdfproduction/executors.py)
+runs local jobs and dispatches branches to Dask.
+[cli.py](../../../../core/python/rdfproduction/cli.py) provides
+`inspect`, `preflight`, `prepare`, `smoke`, `submit`, `execute`, `status`, `merge`
+and `verify`. Native build receipt checks are in
+[build.py](../../../../core/python/rdfproduction/build.py), and
+Python launchers are prepared in
+[python_runtime.py](../../../../core/python/rdfproduction/python_runtime.py).
+Use `plan` for offline inspection, `preflight` for runtime validation and
+`prepare` for discovery and staging. Use `smoke` for local representative
+jobs when the spec has no Condor sizing pilots. Calibration-enabled specs run pilots
+with `submit` or `execute`. Use `verify` to check existing output and merge
+receipts. See the [batch-stage contract](../../../../docs/BATCH_SUBMISSION.md#standalone-production-stages)
+for initial submission recovery and the supported resume scope.
+
+Use `backend: local` to run every prepared partition through the local skim
+executor and publish the same verified index used by merge. The
+[stitching composition](stitching.md) chains counter production, derivation,
+application production, and validation using the verified indexes.
+Use [`backend: dask`](../../../../examples/snakemake/README.md#dask-production)
+for the same output contract over a shared filesystem. The local cluster
+uses the rule's available cores. A configured Dask scheduler manages
+its own workers.
+
+The [downstream Snakemake stages](../../../../examples/snakemake/README.md#downstream-analysis)
+bind histogram refills to the verified skim files, publish job manifests,
+and hand those manifests to the shared merge, plot, datacard and fit services.
+Existing LAW task entry points call the same services.
+The `fit_diagnostics` rule checks the fit receipt and renders the saved
+backend diagnostics through
+[diagnostic_plots.py](../../../../core/python/statistical_inference/diagnostic_plots.py).
+Start the standalone workflow at a [completed product](../../../../examples/snakemake/README.md#starting-from-completed-products), including verified skim indexes, native histogram inputs, a datacard, or a fit receipt.
+
 For completed-output partial merges, `partial_merge.py --sparse-only` skips
 legacy TH1 expansion while retaining the shared metadata merge, physical-axis
 validation and companion artifacts. The generic compatibility default still
@@ -40,8 +82,8 @@ For environment/module registration use [LAW setup](law-environment.md); for eve
 | Prepare, test, dispatch, monitor, fill | [analysis_tasks.py](../../../../core/python/law/analysis_tasks.py): `PrepareSkimJobs`, `RunSkimTestJob`, `BuildSkimSubmission`, `SubmitSkimJobs`, `MonitorSkimJobs`, `SkimTask`, `HistFillTask` |
 | Optional missing-rate pilots | `RunSkimSizingPilots`: discovery, bounded one-file Condor batches, paired prefix/full timing fit, then bulk preparation. |
 | Shell/Condor submission generation | [submission_backend.py](../../../../core/python/submission_backend.py), [htcondor_bootstrap.sh](../../../../core/python/law/htcondor_bootstrap.sh) |
-| Dask/executor behavior | [workflow_executors.py](../../../../core/python/law/workflow_executors.py), [branch_map_policy.py](../../../../core/python/law/branch_map_policy.py), [partition_utils.py](../../../../core/python/law/partition_utils.py) |
-| Retry classification and metrics | [failure_handler.py](../../../../core/python/law/failure_handler.py), [performance_recorder.py](../../../../core/python/law/performance_recorder.py) |
+| Dask/executor behavior | [workflow_executors.py](../../../../core/python/law/workflow_executors.py), [branch_map_policy.py](../../../../core/python/law/branch_map_policy.py), [partitioning.py](../../../../core/python/rdfproduction/partitioning.py) |
+| Retry classification and metrics | [retry.py](../../../../core/python/rdfproduction/retry.py), [performance.py](../../../../core/python/rdfproduction/performance.py) |
 | Merge/full DAG | [merge_tasks.py](../../../../core/python/law/merge_tasks.py), [dag_tasks.py](../../../../core/python/law/dag_tasks.py) |
 | Other production state machine | [production_manager.py](../../../../core/python/production_manager.py), [production_monitor.py](../../../../core/python/production_monitor.py) |
 

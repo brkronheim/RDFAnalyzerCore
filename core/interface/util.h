@@ -60,7 +60,7 @@ private:
 /**
  * @brief Specification for a single friend tree or sidecar input.
  *
- * Used by DataManager::registerFriendTrees() to attach additional columns from
+ * Passed to DataManager at source construction to attach additional columns from
  * separate ROOT files to the main TChain before the RDataFrame is created.
  * Supports both explicit file lists (local paths or XRootD URLs) and
  * directory-based file discovery with glob/antiglob patterns.
@@ -72,7 +72,7 @@ private:
  *     fileList:
  *       - /path/to/calib.root
  *       - root://server.cern.ch//path/to/remote.root
- *     indexBranches: [run, luminosityBlock, event]
+ *     indexBranches: [run, event]
  * @endcode
  */
 struct FriendTreeSpec {
@@ -109,9 +109,8 @@ struct FriendTreeSpec {
  * ``antiglobs``, ``indexBranches``.
  *
  * @param configFile Path to the YAML configuration file.
- * @return Vector of parsed FriendTreeSpec objects (empty if file is missing
- *         or contains no ``friends`` key).
- * @throws std::runtime_error if the file cannot be parsed as valid YAML.
+ * @return Parsed specs in source order. An explicit ``friends: []`` returns an empty vector.
+ * @throws std::runtime_error on unreadable files, invalid YAML or invalid friend definitions.
  */
 std::vector<FriendTreeSpec>
 parseFriendTreeConfig(const std::string &configFile);

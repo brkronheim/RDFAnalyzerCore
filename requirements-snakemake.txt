@@ -1,0 +1,4 @@
+-r requirements-workflow.txt
+snakemake>=9,<10
+
+# For Dask production, install dask[distributed] on the controller and workers.

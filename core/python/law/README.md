@@ -1,8 +1,8 @@
 # LAW Workflows for Batch Submission
 
-This folder contains the primary LAW task graph plus downstream workflow modules:
+Use the [Snakemake workflow](../../../examples/snakemake/README.md) for new campaigns and for work starting from completed products. This folder supports jobs already submitted under LAW and analysis wrappers that still import these task classes.
 
-- **[analysis_tasks.py](analysis_tasks.py)** – primary skim and histogram task graph for new work
+- **[analysis_tasks.py](analysis_tasks.py)** – skim and histogram tasks for LAW-owned campaigns
 - **[rucio_tasks.py](rucio_tasks.py)** – primary CMS dataset discovery tasks via Rucio
 - **[opendata_tasks.py](opendata_tasks.py)** – CERN Open Data Portal file discovery
 - **[xrdfs_tasks.py](xrdfs_tasks.py)** – XRootD directory listing for dataset discovery
@@ -43,8 +43,7 @@ integrate with their outputs.
 
 `analysis_tasks.py` provides the following LAW tasks for running the analysis
 framework **locally** (or dispatching to HTCondor/Dask).  They are simpler
-than the batch Rucio/OpenData workflows and are the recommended starting point
-for new analyses.  See [docs/LAW_TASKS.md](../../../docs/LAW_TASKS.md) for the
+than the batch Rucio/OpenData workflows for campaigns that already use the LAW controller.  See [docs/LAW_TASKS.md](../../../docs/LAW_TASKS.md) for the
 complete parameter reference.
 
 ```bash
@@ -68,7 +67,7 @@ potentially hundreds of jobs are submitted. The test can be skipped with
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--submit-config` | *(required)* | Path to `submit_config.txt` template |
+| `--submit-config` | *(required)* | Path to `submit_config.yaml` template |
 | `--exe` | *(required)* | Path to the compiled analysis executable |
 | `--name` | *(required)* | Run name; outputs go to `skimRun_<name>/` |
 | `--dataset-manifest` | *(required)* | Path to the YAML dataset manifest |
@@ -92,14 +91,14 @@ skimRun_<name>/
 ```bash
 # Standard mode: one branch per manifest entry, with pre-flight test
 law run SkimTask \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyAnalysis \
   --name myRun \
   --dataset-manifest datasets.yaml
 
 # Skip the pre-flight test
 law run SkimTask \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyAnalysis \
   --name myRun \
   --dataset-manifest datasets.yaml \
@@ -107,7 +106,7 @@ law run SkimTask \
 
 # File-source mode: prefer the primary Rucio backend
 law run SkimTask \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyAnalysis \
   --name myRun \
   --dataset-manifest datasets.yaml \
@@ -115,7 +114,7 @@ law run SkimTask \
 
 # XRDFS mode can chain automatically from GetXRDFSFileList
 law run SkimTask \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyAnalysis \
   --name myRun \
   --dataset-manifest datasets.yaml \
@@ -174,14 +173,14 @@ input file list for each dataset job.
 ```bash
 # Standalone (no SkimTask dependency)
 law run HistFillTask \
-  --submit-config core/python/law/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyHistFill \
   --name myHist \
   --dataset-manifest datasets.yaml
 
 # Chained after SkimTask – inputs are taken from skimRun_myRun/outputs/
 law run HistFillTask \
-  --submit-config core/python/law/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyHistFill \
   --name myHist \
   --dataset-manifest datasets.yaml \
@@ -361,7 +360,7 @@ across DAS entries** for speed.
 
 ```bash
 law run GetRucioFileList \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --name myFiles \
   --exe build/MyAnalysis \
   --x509 /tmp/x509 \
@@ -377,7 +376,7 @@ parallelized via LAW's `LocalWorkflow`).
 
 ```bash
 law run GetOpenDataFileList \
-  --submit-config cfg/opendata_config.txt \
+  --submit-config cfg/opendata_config.yaml \
   --name myFiles \
   --exe build/MyAnalysis \
   --workers 4
@@ -474,7 +473,7 @@ law index
 
 ### Sample config format
 
-The preferred format for Rucio workflows is a YAML dataset manifest. This manifest is passed via `--dataset-manifest`, and any legacy `sampleConfig` reference in a `submit_config.txt` template should point to a YAML file rather than the old line-based text format.
+Rucio workflows accept a YAML dataset manifest through `--dataset-manifest`. A native worker template can refer to the same manifest with `sampleConfig`.
 
 ```yaml
 lumi: 59.7
@@ -504,7 +503,7 @@ Legacy flat text sample configs are still accepted for compatibility, but they a
 ```bash
 # 1. Discover files and create per-job directories (one branch per sample)
 law run PrepareSkimJobs --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun22 \
   --file-source rucio \
@@ -517,7 +516,7 @@ law run PrepareSkimJobs --workers 4 \
 
 # 2. Build condor submission files
 law run BuildSkimSubmission --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun22 \
   --file-source rucio \
@@ -530,7 +529,7 @@ law run BuildSkimSubmission --workers 1 \
 
 # 3. Submit jobs to HTCondor
 law run SubmitSkimJobs --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun22 \
   --file-source rucio \
@@ -543,7 +542,7 @@ law run SubmitSkimJobs --workers 1 \
 
 # 4. Monitor jobs (blocking; resubmits failed/held jobs automatically)
 law run MonitorSkimJobs --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun22 \
   --file-source rucio \
@@ -590,28 +589,28 @@ name=ZEE   das=SMZee_1 type=11 xsec=1.0 norm=1.0
 ```bash
 # 1. Discover files and create per-job directories
 law run PrepareOpenDataSample --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --name openDataRun \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20
 
 # 2. Build condor submission files
 law run BuildOpenDataSubmission --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --name openDataRun \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20
 
 # 3. Submit jobs
 law run SubmitOpenDataJobs --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --name openDataRun \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20
 
 # 4. Monitor
 law run MonitorOpenDataJobs --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --name openDataRun \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20
@@ -801,9 +800,9 @@ merge stage automatically:
 law run FullAnalysisDAG \
   --name myRun \
   --exe build/analyses/myAnalysis/myanalysis \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-  --hist-config analyses/myAnalysis/cfg/hist_config.txt \
+  --hist-config analyses/myAnalysis/cfg/hist_config.yaml \
   --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
   --fitting-backend analysis
 
@@ -811,9 +810,9 @@ law run FullAnalysisDAG \
 law run FullAnalysisDAG \
   --name myNanoRun \
   --exe build/analyses/myAnalysis/myanalysis \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-  --hist-config analyses/myAnalysis/cfg/hist_config.txt \
+  --hist-config analyses/myAnalysis/cfg/hist_config.yaml \
   --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
   --file-source rucio
 ```
@@ -904,7 +903,7 @@ Given a sample config with datasets `ttbar`, `wjets`, and `dy`:
 # Run each dataset independently (can be launched in parallel)
 for DS in ttbar wjets dy; do
   law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
     --name myRun22 \
     --dataset "$DS" \
     --x509 x509 \
@@ -919,7 +918,7 @@ Or submit all three as HTCondor workflow tasks simultaneously:
 ```bash
 for DS in ttbar wjets dy; do
   law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
     --name myRun22 \
     --dataset "$DS" \
     --x509 x509 \
@@ -980,7 +979,7 @@ The script:
 
 ```bash
 law run BuildSkimSubmission --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --name myRun --x509 x509 \
   --exe build/analyses/myAnalysis/myanalysis \
   --container-setup cmssw-el9 \
@@ -1011,7 +1010,7 @@ export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
 
 - **Stage-out is always active**: output ROOT files are always xrdcp'd to EOS
   after each job; `__orig_saveFile` / `__orig_metaFile` in each job's
-  `submit_config.txt` record the final EOS destinations.
+  `submit_config.yaml` record the final EOS destinations.
 - **`root_setup` is a file path**: its contents are embedded verbatim into the
   inner runscript, not executed as a shell command.
 - **`container_setup`** is passed to the outer wrapper script and used to

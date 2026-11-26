@@ -8,6 +8,8 @@
 #include <TH1D.h>
 #include <TCollection.h>
 
+#include <filesystem>
+#include <unistd.h>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -15,15 +17,15 @@
 namespace {
 std::string writeConfig(const std::string& path, const std::string& metaFile) {
   std::ofstream out(path);
-  out << "enableCounters=true\n";
-  out << "counterIntWeightBranch=intCode\n";
-  out << "metaFile=" << metaFile << "\n";
-  out << "sample=TestSample\n";
-  out << "directory=test_data_minimal\n";
-  out << "saveTree=Events\n";
-  out << "saveFile=test_output_dedup.root\n";
-  out << "saveDirectory=test_output_dedup/\n";
-  out << "threads=1\n";
+  out << "enableCounters: true\n";
+  out << "counterIntWeightBranch: intCode\n";
+  out << "metaFile: " << metaFile << "\n";
+  out << "sample: TestSample\n";
+  out << "directory: test_data_minimal\n";
+  out << "saveTree: Events\n";
+  out << "saveFile: test_output_dedup.root\n";
+  out << "saveDirectory: test_output_dedup/\n";
+  out << "threads: 1\n";
   out.close();
   return path;
 }
@@ -32,8 +34,8 @@ std::string writeConfig(const std::string& path, const std::string& metaFile) {
 TEST(CounterServiceDedupTest, AnalyzerPlusNDHistogramManagerRunsCounterOnlyOnce) {
   ChangeToTestSourceDir();
 
-  const std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/aux/test_counter_dedup_config.txt";
-  const std::string metaPath = std::string(TEST_SOURCE_DIR) + "/aux/test_counter_dedup_meta.root";
+  const std::string cfgPath = testWorkspacePath().string() + "/aux/test_counter_dedup_config.yaml";
+  const std::string metaPath = testWorkspacePath().string() + "/aux/test_counter_dedup_meta.root";
 
   std::remove(cfgPath.c_str());
   std::remove(metaPath.c_str());
@@ -76,4 +78,43 @@ TEST(CounterServiceDedupTest, AnalyzerPlusNDHistogramManagerRunsCounterOnlyOnce)
 
   std::remove(cfgPath.c_str());
   std::remove(metaPath.c_str());
+}
+
+TEST(CounterServiceDedupTest, InclusiveServicesUseTheSameNodeWithProviderFiltersAndNoFilters) {
+  ChangeToTestSourceDir();
+  for (bool filter : {false, true}) {
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("rdf-inclusive-" + std::to_string(getpid()) + (filter ? "-filter" : "-inclusive"));
+    std::filesystem::create_directories(directory);
+    const auto meta = directory / "meta.root";
+    const auto config = directory / "analysis.yaml";
+    {
+      std::ofstream out(config);
+      out << "directory: test_data_minimal\nsaveTree: Events\nthreads: 1\n"
+          << "enableCounters: yes\ncounterIntWeightBranch: code\ncounterIntWeightBranchNBins: 5\n"
+          << "enableTaggerEfficiency: true\ntaggerEfficiencyColumns: code\n"
+          << "taggerEfficiencyWeight: w\nsample: inclusive\nmetaFile: " << meta.string() << "\n";
+    }
+    {
+      Analyzer analysis(config.string());
+      analysis.Define("code", [] { return 2; }, {});
+      analysis.Define("w", [] { return 3.f; }, {});
+      auto& provider = analysis.getDataFrameProvider();
+      if (filter) provider.Filter([](int code) { return code < 0; }, {"code"});
+      auto node = provider.getDataFrame();
+      auto count = node.Count();
+      analysis.run();
+      EXPECT_EQ(count.GetValue(), filter ? 0u : 1u);
+      EXPECT_EQ(node.GetNRuns(), 1u);
+      TFile output(meta.c_str(), "READ");
+      auto* tagger = output.Get<TH1D>("taggerEff_code_inclusive");
+      auto* counter = output.Get<TH1D>("counter_intWeightSum_inclusive");
+      ASSERT_NE(tagger, nullptr);
+      ASSERT_NE(counter, nullptr);
+      EXPECT_DOUBLE_EQ(tagger->Integral(0, tagger->GetNbinsX() + 1), 3.);
+      EXPECT_DOUBLE_EQ(counter->GetEntries(), 1.);
+      EXPECT_EQ(counter->GetNbinsX(), 5);
+    }
+    std::filesystem::remove_all(directory);
+  }
 }

@@ -1,53 +1,43 @@
 #!/usr/bin/env python3
-"""
-Convert configuration files between text and YAML formats.
+"""Migrate a native analysis mapping, record list, or string list to YAML."""
+import argparse
+from pathlib import Path
 
-Usage:
-    python convert_config.py input.txt output.yaml
-    python convert_config.py input.yaml output.txt
-"""
+from native_config_io import get_config_extension, load_yaml_document, read_config, read_legacy_aux, read_stxs_table, write_config_yaml
 
-import sys
-import os
-
-# Add the python directory to the path
-script_dir = os.path.dirname(os.path.abspath(__file__))
-python_dir = os.path.join(script_dir, '..', 'python')
-sys.path.insert(0, python_dir)
-
-from submission_backend import read_config, write_config
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: convert_config.py <input_file> <output_file>")
-        print()
-        print("Examples:")
-        print("  convert_config.py config.txt config.yaml")
-        print("  convert_config.py config.yaml config.txt")
-        sys.exit(1)
-    
-    input_file = sys.argv[1]
-    output_file = sys.argv[2]
-    
-    if not os.path.exists(input_file):
-        print(f"Error: Input file '{input_file}' not found")
-        sys.exit(1)
-    
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--kind", choices=("mapping", "records", "list", "samples", "stxs_bins", "stxs_migration"), default="mapping",
+                        help="Use records for plugin definitions, list for skim columns.")
+    args = parser.parse_args()
     try:
-        print(f"Reading config from {input_file}...")
-        config = read_config(input_file)
-        
-        print(f"Writing config to {output_file}...")
-        write_config(config, output_file)
-        
-        print(f"✓ Successfully converted {input_file} to {output_file}")
-        print(f"  {len(config)} configuration keys converted")
-        
-    except Exception as e:
-        print(f"✗ Error during conversion: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        if args.input.resolve() == args.output.resolve():
+            raise ValueError("Supply a different output path to keep the original file.")
+        if get_config_extension(args.input) != ".yaml":
+            value = read_legacy_aux(args.input, args.kind)
+        elif args.kind in ("stxs_bins", "stxs_migration"):
+            value = read_stxs_table(args.input, args.kind)
+        elif args.kind == "samples":
+            from dataset_manifest import DatasetManifest
+            manifest = DatasetManifest.load_yaml(str(args.input))
+            errors = [message for message in manifest.validate() if not message.startswith("Warning:")]
+            if errors:
+                raise ValueError("; ".join(errors))
+            value = manifest.as_yaml_document()
+        elif args.kind == "mapping":
+            value = read_config(args.input)
+        else:
+            value = load_yaml_document(args.input)
+            item_type = dict if args.kind == "records" else str
+            if not isinstance(value, list) or not all(isinstance(item, item_type) for item in value):
+                raise ValueError(f"{args.input}: expected a sequence of {item_type.__name__} entries")
+        write_config_yaml(value, args.output)
+    except (OSError, ValueError) as exc:
+        parser.exit(1, f"Conversion failed: {exc}\n")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

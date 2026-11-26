@@ -1,0 +1,18 @@
+# Additional test-specific configurations
+directory: test_data_minimal
+saveFile: test_output_minimal.root
+saveDirectory: test_output_minimal/
+saveTree: Events
+threads: '1'
+antiglobs: output.root,hists.root
+globs: root,test
+saveConfig: cfg/output.yaml
+bdtConfig: cfg/bdts.yaml
+correctionConfig: cfg/correction.yaml
+triggerConfig: cfg/triggers.yaml
+kinematicFitConfig: cfg/kinematic_fit.yaml
+floatConfig: floats.yaml
+intConfig: ints.yaml
+optionalBranchesConfig: optionalBranches.yaml
+aliasConfig: alias.yaml
+correctionlibConfig: cfg/correctionlibConfig.yaml

@@ -24,15 +24,6 @@ foreach(child ${analyses_children})
 				continue()
 			endif()
 			add_subdirectory(${child})
-			# Only these vjet units showed a repeatable whole-job CPU benefit
-			# from inline input tables over the framework's packed reader.
-			if(RDF_ROOT_LOCALITY_AVAILABLE AND child STREQUAL "vjet-njetpt" AND TARGET vjet_njetpt)
-				set_property(SOURCE
-					"${CMAKE_CURRENT_SOURCE_DIR}/${child}/src/analysis.cc"
-					"${CMAKE_CURRENT_SOURCE_DIR}/${child}/src/BackgroundStudy.cc"
-					TARGET_DIRECTORY vjet_njetpt APPEND PROPERTY
-					INCLUDE_DIRECTORIES "${RDF_ROOT_INLINE_INCLUDE}")
-			endif()
 		elseif(RDF_ANALYSES)
 			message(FATAL_ERROR "Requested analysis ${child} has no CMakeLists.txt")
 		endif()

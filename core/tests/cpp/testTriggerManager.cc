@@ -27,7 +27,7 @@ class TriggerManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
     ChangeToTestSourceDir();
-    std::string configFile = "cfg/test_data_config.txt";
+    std::string configFile = "cfg/test_data_config.yaml";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     triggerManager = std::make_unique<TriggerManager>(*configManager);
   }
@@ -43,7 +43,7 @@ protected:
  */
 TEST_F(TriggerManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
-    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
     auto manager = std::make_unique<TriggerManager>(*config);
   });
 }
@@ -91,7 +91,7 @@ TEST_F(TriggerManagerTest, SampleGroupMapping) {
  * @brief Test memory management for TriggerManager
  */
 TEST_F(TriggerManagerTest, MemoryManagement) {
-  auto localConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+  auto localConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
   auto localManager1 = std::make_unique<TriggerManager>(*localConfig);
   auto localManager2 = std::make_unique<TriggerManager>(*localConfig);
   auto localManager3 = std::make_unique<TriggerManager>(*localConfig);
@@ -109,7 +109,7 @@ class ConcreteTriggerManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
     ChangeToTestSourceDir();
-    std::string configFile = "cfg/test_data_config_minimal.txt";
+    std::string configFile = "cfg/test_data_config_minimal.yaml";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     // Create a concrete TriggerManager
     concreteTriggerManager = std::make_shared<TriggerManager>(*configManager);

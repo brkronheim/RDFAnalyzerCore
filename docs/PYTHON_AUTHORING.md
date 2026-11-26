@@ -231,7 +231,9 @@ options:
 
 Load this with `AnalysisConfig.from_file("analysis.yaml")`. Input/output paths
 in this format resolve relative to its YAML file; URLs are preserved. Native
-paths inside `options` retain native resolution rules. Validate without ROOT
+paths inside `options` retain native resolution rules. Pass an existing native worker YAML directly to `rdfanalyzer.Analyzer("cfg/worker.yaml")` to retain its relative auxiliary paths and provenance. [Shared configuration examples](YAML_CONFIG_SUPPORT.md)
+
+Validate typed settings without ROOT
 or input-file access:
 
 ```bash
@@ -397,3 +399,11 @@ For native category/systematic packing, see [packed ND histogram declarations](P
 separates requested threads from ROOT pool/dataframe capacity and explains stable
 source identifiers under IMT. The new observation hook's installed scope is
 tracked explicitly; older modules return unknown observations without guessing.
+
+
+### Discover plugin types
+
+`rdfanalyzer.core_plugin_types()` returns the manager names and aliases accepted by
+`analysis.native.AddPlugin(role, type_name)`. Names and aliases are case-insensitive.
+Extension-specific managers are registered by the enabled extension. Inspect
+`rdfanalyzer.enabled_extensions` to see which extensions the binding includes.

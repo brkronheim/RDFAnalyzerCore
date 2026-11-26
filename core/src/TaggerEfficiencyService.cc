@@ -1,8 +1,10 @@
+#include "ConfigBoolean.h"
 //==============================================================================
 // TaggerEfficiencyService — Per-process tagger efficiency histogram inputs
 //==============================================================================
 
 #include "TaggerEfficiencyService.h"
+#include "ConfigDocument.h"
 
 #include "api/IConfigurationProvider.h"
 #include "api/IDataFrameProvider.h"
@@ -13,7 +15,11 @@
 #include <TFile.h>
 #include <TObject.h>
 
-#include <fstream>
+#include <yaml-cpp/yaml.h>
+#include <cmath>
+#include <set>
+#include <type_traits>
+#include <stdexcept>
 #include <sstream>
 
 // ===========================================================================
@@ -31,130 +37,131 @@ void TaggerEfficiencyService::initialize(ManagerContext &ctx) {
     return (it != configMap.end()) ? it->second : def;
   };
 
-  auto get_bool = [&](const std::string &key, bool def = false) -> bool {
-    auto it = configMap.find(key);
-    if (it == configMap.end()) {
-      return def;
-    }
-    const auto &val = it->second;
-    return (val == "1" || val == "true" || val == "True");
-  };
-
-  enabled_m = get_bool("enableTaggerEfficiency", false);
-  if (!enabled_m) {
-    return;
-  }
+  const auto enableValue = get_str("enableTaggerEfficiency", "false");
+  enabled_m = rdf_config_detail::parseBooleanConfig("enableTaggerEfficiency", enableValue, false);
+  if (!enabled_m) return;
 
   sampleName_m = get_str("sample", "unknown");
 
-  // Check for YAML config first
   yamlConfigPath_m = get_str("taggerEfficiencyConfig");
-  if (!yamlConfigPath_m.empty()) {
-    configureFromYaml(yamlConfigPath_m);
-    return;
+  if (yamlConfigPath_m.empty()) {
+    configureFromConfigMap();
+  } else {
+    configureFromYaml(ctx.config.resolveConfigPath(yamlConfigPath_m));
   }
-
-  // Fall back to inline config
-  configureFromConfigMap();
 }
 
-void TaggerEfficiencyService::configureFromConfigMap() {
-  const auto &configMap = ctx_m->config.getConfigMap();
+namespace {
 
-  auto get_str = [&](const std::string &key,
-                      const std::string &def = "") -> std::string {
-    auto it = configMap.find(key);
-    return (it != configMap.end()) ? it->second : def;
-  };
-
-  auto get_int = [&](const std::string &key, int def = 0) -> int {
-    auto it = configMap.find(key);
-    if (it == configMap.end()) {
-      return def;
-    }
-    try {
-      return std::stoi(it->second);
-    } catch (...) {
-      return def;
-    }
-  };
-
-  auto get_double = [&](const std::string &key, double def = 0.0) -> double {
-    auto it = configMap.find(key);
-    if (it == configMap.end()) {
-      return def;
-    }
-    try {
-      return std::stod(it->second);
-    } catch (...) {
-      return def;
-    }
-  };
-
-  auto splitComma = [](const std::string &text) -> std::vector<std::string> {
-    std::vector<std::string> parts;
-    std::stringstream stream(text);
-    std::string token;
-    while (std::getline(stream, token, ',')) {
-      // Trim whitespace
-      auto first = token.find_first_not_of(" \t");
-      auto last = token.find_last_not_of(" \t");
-      if (first != std::string::npos) {
-        parts.push_back(token.substr(first, last - first + 1));
+TaggerEfficiencySpec parseSpec(const YAML::Node& node) {
+  static const std::set<std::string> allowed{
+      "mode", "taggerColumn", "weightColumn", "bins", "lowerBound", "upperBound",
+      "channelVariable", "channelBins", "channelLabels", "workingPoints"};
+  if (!node.IsMap()) throw std::invalid_argument("expected a mapping");
+  std::set<std::string> seen;
+  for (const auto& field : node) {
+    const auto key = field.first.as<std::string>();
+    if (!allowed.count(key)) throw std::invalid_argument("unsupported key '" + key + "'");
+    if (!seen.insert(key).second) throw std::invalid_argument("duplicate key '" + key + "'");
+  }
+  TaggerEfficiencySpec spec;
+  auto read = [&](const char* key, auto& value) {
+    if (node[key]) {
+      try {
+        value = node[key].as<std::decay_t<decltype(value)>>();
+      } catch (const YAML::Exception& e) {
+        throw std::invalid_argument(std::string(key) + ": " + e.what());
       }
     }
-    return parts;
   };
-
-  inlineMode_m = get_str("taggerEfficiencyMode", "histogram");
-  inlineTaggerColumns_m = get_str("taggerEfficiencyColumns", "Jet_btagB");
-  inlineWeightColumn_m = get_str("taggerEfficiencyWeight", "weight_nominal");
-  inlineNBins_m = get_int("taggerEfficiencyNBins", 20);
-  inlineLow_m = get_double("taggerEfficiencyLow", 0.0);
-  inlineHigh_m = get_double("taggerEfficiencyHigh", 1.0);
-  inlineChannelVariable_m = get_str("taggerEfficiencyChannelVariable");
-  inlineChannelBins_m = get_int("taggerEfficiencyChannelBins", 0);
-  inlineChannelRegions_m = get_str("taggerEfficiencyChannelRegions");
-  inlineFlavorSplit_m = get_str("taggerEfficiencyFlavorSplit");
-  inlineWPManagerRole_m =
-      get_str("taggerEfficiencyWPManagerRole", "btagManager");
-  inlineWorkingPoints_m = get_str("taggerEfficiencyWorkingPoints");
-
-  // Build a single spec from inline config
-  TaggerEfficiencySpec spec;
-  spec.mode = inlineMode_m;
-  spec.taggerColumn = inlineTaggerColumns_m;
-  spec.weightColumn = inlineWeightColumn_m;
-  spec.nBins = inlineNBins_m;
-  spec.lowerBound = inlineLow_m;
-  spec.upperBound = inlineHigh_m;
-  spec.channelVariable = inlineChannelVariable_m;
-  spec.channelBins = inlineChannelBins_m;
-  spec.channelLowerBound = 1.0;
-  spec.channelUpperBound =
-      static_cast<double>(inlineChannelBins_m) + 1.0;
-  if (!inlineChannelRegions_m.empty()) {
-    spec.channelLabels = splitComma(inlineChannelRegions_m);
-  }
-  spec.flavorSplitBranch = inlineFlavorSplit_m;
-  spec.taggerManagerRole = inlineWPManagerRole_m;
-  if (!inlineWorkingPoints_m.empty()) {
-    spec.workingPoints = splitComma(inlineWorkingPoints_m);
-  }
-
-  specs_m.push_back(std::move(spec));
+  read("mode", spec.mode);
+  read("taggerColumn", spec.taggerColumn);
+  read("weightColumn", spec.weightColumn);
+  read("bins", spec.nBins);
+  read("lowerBound", spec.lowerBound);
+  read("upperBound", spec.upperBound);
+  read("channelVariable", spec.channelVariable);
+  read("channelBins", spec.channelBins);
+  read("channelLabels", spec.channelLabels);
+  read("workingPoints", spec.workingPoints);
+  if (spec.taggerColumn.empty() || spec.weightColumn.empty())
+    throw std::invalid_argument("taggerColumn and weightColumn must name columns");
+  if (spec.mode != "histogram" && spec.mode != "working_point")
+    throw std::invalid_argument("mode must be histogram or working_point");
+  if (spec.nBins < 1 || !std::isfinite(spec.lowerBound) ||
+      !std::isfinite(spec.upperBound) || spec.upperBound <= spec.lowerBound)
+    throw std::invalid_argument("bins must be positive with finite lowerBound < upperBound");
+  if (spec.mode == "working_point" && (node["bins"] || node["lowerBound"] || node["upperBound"]))
+    throw std::invalid_argument("working_point mode derives bins from workingPoints. Remove histogram bounds.");
+  std::set<std::string> wpNames;
+  for (const auto& point : spec.workingPoints)
+    if (point.empty() || !wpNames.insert(point).second)
+      throw std::invalid_argument("workingPoints must contain distinct nonempty names");
+  if (spec.mode == "working_point" && spec.workingPoints.empty())
+    throw std::invalid_argument("working_point mode requires workingPoints");
+  if (spec.mode == "histogram" && !spec.workingPoints.empty())
+    throw std::invalid_argument("workingPoints requires working_point mode");
+  if (spec.channelBins < 0 || (spec.channelBins > 0) != !spec.channelVariable.empty())
+    throw std::invalid_argument("channelVariable requires positive channelBins and vice versa");
+  if (!spec.channelLabels.empty() && spec.channelLabels.size() != static_cast<size_t>(spec.channelBins))
+    throw std::invalid_argument("channelLabels must contain one label per channel bin");
+  spec.channelLowerBound = 1.;
+  spec.channelUpperBound = 1. + spec.channelBins;
+  return spec;
 }
 
-void TaggerEfficiencyService::configureFromYaml(const std::string &path) {
-  // TODO: Implement YAML parsing for full tagger efficiency configuration.
-  // For now, log a warning and fall through to inline config.
-  if (ctx_m) {
-    ctx_m->logger.log(
-        ILogger::Level::Warn,
-        "TaggerEfficiencyService: YAML config parsing not yet implemented. "
-        "Falling back to inline config keys.");
+} // namespace
+
+void TaggerEfficiencyService::configureFromConfigMap() {
+  const auto& values = ctx_m->config.getConfigMap();
+  YAML::Node row(YAML::NodeType::Map);
+  row["taggerColumn"] = "Jet_btagB";
+  for (const auto& [key, field] : std::initializer_list<std::pair<const char*, const char*>>{
+         {"taggerEfficiencyMode","mode"}, {"taggerEfficiencyColumns","taggerColumn"},
+         {"taggerEfficiencyWeight","weightColumn"}, {"taggerEfficiencyNBins","bins"},
+         {"taggerEfficiencyLow","lowerBound"}, {"taggerEfficiencyHigh","upperBound"},
+         {"taggerEfficiencyChannelVariable","channelVariable"}, {"taggerEfficiencyChannelBins","channelBins"},
+         {"taggerEfficiencyFlavorSplit","flavorSplit"}, {"taggerEfficiencyWPManagerRole","taggerManagerRole"}}) {
+    auto it = values.find(key);
+    if (it != values.end() && !it->second.empty()) row[field] = it->second;
   }
-  configureFromConfigMap();
+  for (const auto& [key, field] : std::initializer_list<std::pair<const char*, const char*>>{
+         {"taggerEfficiencyChannelRegions","channelLabels"}, {"taggerEfficiencyWorkingPoints","workingPoints"}}) {
+    auto it = values.find(key);
+    if (it == values.end()) continue;
+    std::istringstream csv(it->second);
+    std::string item;
+    while (std::getline(csv, item, ',')) {
+      auto start = item.find_first_not_of(" \t");
+      if (start != std::string::npos)
+        row[field].push_back(item.substr(start, item.find_last_not_of(" \t") - start + 1));
+    }
+  }
+  try { specs_m.push_back(parseSpec(row)); }
+  catch (const std::exception& e) {
+    throw std::invalid_argument("inline tagger efficiency configuration: " + std::string(e.what()));
+  }
+}
+
+void TaggerEfficiencyService::configureFromYaml(const std::string& path) {
+  size_t rowNumber = 0;
+  try {
+    const auto root = rdf_config_detail::loadDocument(path);
+    if (!root.IsMap() || root.size() != 1 || !root["tagger_efficiency"].IsSequence() ||
+        root["tagger_efficiency"].size() == 0)
+      throw std::invalid_argument("expected a nonempty tagger_efficiency sequence");
+    std::set<std::pair<std::string, std::string>> outputs;
+    for (const auto& row : root["tagger_efficiency"]) {
+      ++rowNumber;
+      auto spec = parseSpec(row);
+      if (!outputs.emplace(spec.mode, spec.taggerColumn).second)
+        throw std::invalid_argument("duplicate histogram for '" + spec.taggerColumn + "'");
+      specs_m.push_back(std::move(spec));
+    }
+  } catch (const std::exception& e) {
+    throw std::invalid_argument(path + (rowNumber ? " tagger_efficiency entry " + std::to_string(rowNumber) : "") +
+                                ": " + e.what());
+  }
 }
 
 // ===========================================================================
@@ -174,6 +181,13 @@ void TaggerEfficiencyService::onPreFilter(ROOT::RDF::RNode &df) {
       "TaggerEfficiencyService: booking " + std::to_string(specs_m.size()) +
           " tagger efficiency histograms for sample '" + sampleName_m + "'");
 
+  for (const auto& spec : specs_m) {
+    const auto score = spec.mode == "working_point" ? spec.taggerColumn + "_wp_category" : spec.taggerColumn;
+    for (const auto& column : {score, spec.weightColumn, spec.channelVariable})
+      if (!column.empty() && !df.HasColumn(column))
+        throw std::invalid_argument("Tagger efficiency column '" + column +
+            "' is unavailable on the inclusive dataframe. Define it before the first filter.");
+  }
   for (const auto &spec : specs_m) {
     if (spec.mode == "working_point") {
       bookWorkingPointHistogram(df, spec);
@@ -317,31 +331,31 @@ void TaggerEfficiencyService::finalize(ROOT::RDF::RNode &df) {
 
   TFile outFile(fileName.c_str(), "UPDATE");
   if (outFile.IsZombie()) {
-    ctx_m->logger.log(
-        ILogger::Level::Error,
-        "TaggerEfficiencyService: failed to open meta output file: " +
-            fileName);
-    return;
+    throw std::runtime_error("Cannot open tagger metadata output '" + fileName + "' for writing");
   }
 
   int nWritten = 0;
-  for (auto &entry : bookedHistograms_m) {
+  for (size_t index = 0; index < bookedHistograms_m.size(); ++index) {
+    auto& entry = bookedHistograms_m[index];
     if (entry.is2D) {
       auto histPtr = entry.result2D.GetPtr();
       if (!histPtr) {
         continue;
       }
-      histPtr->SetDirectory(&outFile);
-      histPtr->Write(histPtr->GetName(), TObject::kOverwrite);
-      nWritten++;
+      const auto& labels = specs_m.at(index).channelLabels;
+      for (size_t bin = 0; bin < labels.size(); ++bin)
+        histPtr->GetYaxis()->SetBinLabel(static_cast<int>(bin + 1), labels[bin].c_str());
+      if (outFile.WriteTObject(histPtr, histPtr->GetName(), "Overwrite") <= 0)
+        throw std::runtime_error("Failed to write tagger histogram '" + entry.name + "' to " + fileName);
+      ++nWritten;
     } else {
       auto histPtr = entry.result1D.GetPtr();
       if (!histPtr) {
         continue;
       }
-      histPtr->SetDirectory(&outFile);
-      histPtr->Write(histPtr->GetName(), TObject::kOverwrite);
-      nWritten++;
+      if (outFile.WriteTObject(histPtr, histPtr->GetName(), "Overwrite") <= 0)
+        throw std::runtime_error("Failed to write tagger histogram '" + entry.name + "' to " + fileName);
+      ++nWritten;
     }
   }
 

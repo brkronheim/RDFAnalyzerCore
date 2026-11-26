@@ -849,20 +849,31 @@ entirely optional and programmatic setup continues to work unchanged.
 
 ### Config file format
 
-Each line defines one setup block using space-separated `key=value` pairs:
+Each record in the YAML sequence defines a setup block. Comma-separated scalar fields retain the ordering expected by the plugin.
 
-```
+```yaml
 # Working-point block (1D — single tagger column)
-type=working_points taggerColumns=Jet_btagDeepFlavB wpNames=loose,medium,tight wpThresholds=0.0521,0.3033,0.7489
+- type: working_points
+  taggerColumns: Jet_btagDeepFlavB
+  wpNames: loose,medium,tight
+  wpThresholds: 0.0521,0.3033,0.7489
 
 # Working-point block (ND — multi-score, colon-separated thresholds)
-type=working_points taggerColumns=Jet_btagDeepFlavCvL,Jet_btagDeepFlavCvB wpNames=loose,medium,tight wpThresholds=0.042:0.135,0.108:0.285,0.274:0.605
+- type: working_points
+  taggerColumns: Jet_btagDeepFlavCvL,Jet_btagDeepFlavCvB
+  wpNames: loose,medium,tight
+  wpThresholds: 0.042:0.135,0.108:0.285,0.274:0.605
 
 # Correction block (stored for deferred application)
-type=correction correctionName=deepjet_sf stringArgs=central inputColumns=Jet_hadronFlavour,Jet_eta,Jet_pt,Jet_btagDeepFlavB
+- type: correction
+  correctionName: deepjet_sf
+  stringArgs: central
+  inputColumns: Jet_hadronFlavour,Jet_eta,Jet_pt,Jet_btagDeepFlavB
 
 # Systematics block
-type=systematics setName=standard sources=hf,lf,hfstats1,hfstats2,lfstats1,lfstats2,cferr1,cferr2
+- type: systematics
+  setName: standard
+  sources: hf,lf,hfstats1,hfstats2,lfstats1,lfstats2,cferr1,cferr2
 ```
 
 ### Role-based config key lookup
@@ -876,9 +887,9 @@ ctwm->setRole("ctag");  // looks for "ctagConfig"
 ```
 
 Then in the analysis config:
-```
-btagConfig=cfg/btag_config.txt
-ctagConfig=cfg/ctag_config.txt
+```yaml
+btagConfig: cfg/btag_config.yaml
+ctagConfig: cfg/ctag_config.yaml
 ```
 
 ### Applying deferred corrections

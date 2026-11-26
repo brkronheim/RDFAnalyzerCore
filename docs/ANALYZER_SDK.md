@@ -22,7 +22,7 @@ cmake -S . -B /tmp/rdf-sdk-build \
   -DRDF_ENABLE_XRD_ADAPTOR=OFF -DUSE_CUDA=OFF \
   -DONNXRUNTIME_USE_CUDA=OFF -DBUILD_TESTS=OFF \
   -DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime
-cmake --build /tmp/rdf-sdk-build --target core corePlugins --parallel 1
+cmake --build /tmp/rdf-sdk-build --target analyzerSDKArtifacts --parallel 1
 cmake --install /tmp/rdf-sdk-build --prefix /tmp/rdf-sdk-prefix --component AnalyzerSDK
 ```
 

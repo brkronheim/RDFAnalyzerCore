@@ -90,7 +90,7 @@ if _HERE not in sys.path:
 if _CORE_PYTHON not in sys.path:
     sys.path.insert(0, _CORE_PYTHON)
 
-from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
+from rdfproduction.performance import PerformanceRecorder, perf_path_for  # noqa: E402
 from output_schema import OutputManifest  # noqa: E402
 
 

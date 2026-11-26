@@ -56,6 +56,41 @@ namespace py = pybind11;
 
 void bindHistogramIO(py::module_ &module);
 
+namespace {
+struct CorePluginType {
+    std::string name;
+    std::vector<std::string> aliases;
+    void (*attach)(Analyzer&, const std::string&);
+};
+
+template <class Manager>
+void attachConfigured(Analyzer& analyzer, const std::string& role) {
+    analyzer.addPlugin(role, std::make_unique<Manager>(analyzer.getConfigurationProvider()));
+}
+
+template <class Manager>
+void attachDefault(Analyzer& analyzer, const std::string& role) {
+    analyzer.addPlugin(role, std::make_unique<Manager>());
+}
+
+const CorePluginType corePluginTypes[] = {
+    {"OnnxManager", {"onnx"}, attachConfigured<OnnxManager>},
+    {"BDTManager", {"bdt"}, attachConfigured<BDTManager>},
+    {"CorrectionManager", {"correction"}, attachConfigured<CorrectionManager>},
+    {"TriggerManager", {"trigger"}, attachConfigured<TriggerManager>},
+    {"SofieManager", {"sofie"}, attachConfigured<SofieManager>},
+    {"NDHistogramManager", {"ndhistogram", "hist"}, attachConfigured<NDHistogramManager>},
+    {"WeightManager", {"weights"}, attachDefault<WeightManager>},
+    {"RegionManager", {"regions"}, attachDefault<RegionManager>},
+};
+
+std::string lowercase(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return name;
+}
+}  // namespace
+
 // Whitelist of allowed element types for DefineFromVector
 static const std::set<std::string> ALLOWED_ELEMENT_TYPES = {
     "float", "double", "int", "long", "unsigned int", "unsigned long",
@@ -229,9 +264,9 @@ static std::string replaceColumnIdentifiers(
 }
 
 static std::vector<std::string> inferExpressionColumns(
-    const std::string& expression, ROOT::RDF::RNode df) {
+    const std::string& expression, const std::vector<std::string>& names) {
     std::unordered_map<std::string, std::string> candidates;
-    for (const auto& column : df.GetColumnNames()) candidates.emplace(column, column);
+    for (const auto& column : names) candidates.emplace(column, column);
     // ROOT's entry/slot columns are usable even when omitted by GetColumnNames.
     candidates.emplace("rdfentry_", "rdfentry_");
     candidates.emplace("rdfslot_", "rdfslot_");
@@ -432,14 +467,14 @@ public:
     AnalyzerPythonWrapper& DefineJIT(const std::string& name, 
                                      const std::string& expression,
                                      const std::vector<std::string>& columns = {}) {
-        if(executed_ || running_)throw std::runtime_error("Build the graph before run()");
+        requireBuilding("Build the graph");
         return defineExpression(name, expression, columns, true);
     }
 
     AnalyzerPythonWrapper& DefineNominal(const std::string& name,
                                          const std::string& expression,
                                          const std::vector<std::string>& columns = {}) {
-        if(executed_ || running_)throw std::runtime_error("Build the graph before run()");
+        requireBuilding("Build the graph");
         return defineExpression(name, expression, columns, false);
     }
 
@@ -447,7 +482,7 @@ public:
                                           const std::string& function,
                                           const std::vector<std::string>& columns,
                                           bool nominal) {
-        if(executed_ || running_)throw std::runtime_error("Build the graph before run()");
+        requireBuilding("Build the graph");
         if (function.empty() || !std::all_of(function.begin(), function.end(),
             [](unsigned char c) { return std::isalnum(c) || c == '_' || c == ':'; }))
             throw std::invalid_argument("Expected a compiled function identifier");
@@ -465,10 +500,20 @@ public:
         if (df.HasColumn(name)) {
             throw std::invalid_argument("Define: column '" + name + "' already exists");
         }
-        const auto columns = requestedColumns.empty()
-                                 ? inferExpressionColumns(expression, df)
-                                 : requestedColumns;
-        const auto inferred = inferExpressionColumns(expression, df);
+        if (!compiledFunction.empty()) {
+            for (const auto& input : requestedColumns)
+                if (!df.HasColumn(input))
+                    throw std::invalid_argument("DefineCompiled: input column '" + input +
+                                                "' is not available on this node");
+        }
+        // A compiled call already supplies its complete argument list. Enumerate
+        // the current node only for expression inference or systematic discovery.
+        const bool discover = propagate && sysMgr.isEnabled();
+        const auto names = compiledFunction.empty() || discover
+            ? df.GetColumnNames() : std::vector<std::string>{};
+        const auto inferred = compiledFunction.empty()
+            ? inferExpressionColumns(expression, names) : std::vector<std::string>{};
+        const auto& columns = requestedColumns.empty() ? inferred : requestedColumns;
         for (const auto& column : inferred) {
             if (std::find(columns.begin(), columns.end(), column) == columns.end())
                 throw std::invalid_argument("Define: expression uses undeclared input '" + column + "'");
@@ -485,8 +530,7 @@ public:
             return next;
         };
         if (propagate) {
-            const auto names = df.GetColumnNames();
-            sysMgr.autoRegisterSystematics({names.begin(), names.end()});
+            if (discover) sysMgr.autoRegisterSystematics(names);
             df = rdf::detail::defineWithVariations(df, name, columns, sysMgr, define);
         } else {
             df = define(df, name, columns);
@@ -506,7 +550,7 @@ public:
     AnalyzerPythonWrapper& FilterJIT(const std::string& name,
                                      const std::string& expression,
                                      const std::vector<std::string>& columns = {}) {
-        if(executed_ || running_)throw std::runtime_error("Build the graph before run()");
+        requireBuilding("Build the graph");
         // Define the expression under a private name, then delegate selection
         // masks and the row filter to Analyzer::Filter. This keeps the Python
         // JIT path aligned with the C++ variation-aware filter behavior.
@@ -537,7 +581,7 @@ public:
     // delegating cumulative variation masks to the unchanged native Filter.
     AnalyzerPythonWrapper& FilterColumn(const std::string& name,
                                        const std::string& column) {
-        if (executed_ || running_) throw std::runtime_error("Build the graph before run()");
+        requireBuilding("Build the graph");
         if (!analyzer_.HasColumn(column))
             throw std::invalid_argument("Filter column does not exist: " + column);
         const auto type = analyzer_.GetColumnType(column);
@@ -585,6 +629,7 @@ public:
                                              uintptr_t func_ptr,
                                              const std::string& signature,
                                              const std::vector<std::string>& columns = {}) {
+        requireBuilding("DefineFromPointer");
         // Validate signature format to prevent code injection
         if (!isValidSignature(signature)) {
             throw std::invalid_argument(
@@ -740,6 +785,7 @@ public:
                                             uintptr_t data_ptr,
                                             size_t size,
                                             const std::string& element_type = "float") {
+        requireBuilding("DefineFromVector");
         if (size > 0 && data_ptr == 0) {
             throw std::invalid_argument(
                 "DefineFromVector: data_ptr must be non-null when size is positive"
@@ -763,6 +809,29 @@ public:
         return DefineJIT(name, jit_expr.str(), {});
     }
 
+    AnalyzerPythonWrapper& defineConstantVector(const std::string& name, const py::array& values) {
+        requireBuilding("define_constant_vector");
+        if (values.ndim() != 1)
+            throw std::invalid_argument("define_constant_vector requires a one-dimensional array");
+        if (!values.dtype().attr("isnative").cast<bool>())
+            throw std::invalid_argument("define_constant_vector requires a native-endian array");
+        const auto dtype = values.dtype().attr("name").cast<std::string>();
+        static const std::map<std::string, std::string> types{
+            {"float32", "float"}, {"float64", "double"}, {"int32", "int32_t"},
+            {"int64", "int64_t"}, {"uint32", "uint32_t"}, {"uint64", "uint64_t"}};
+        const auto type = types.find(dtype);
+        if (type == types.end())
+            throw std::invalid_argument("Unsupported constant-vector dtype '" + dtype +
+                                        "'. Use float32/64, int32/64 or uint32/64.");
+        if (analyzer_.HasColumn(name)) throw std::invalid_argument("Duplicate column '" + name + "'");
+        // Copy once during booking. The per-event RVec borrows this aligned contiguous storage.
+        auto owned = py::module_::import("numpy").attr("array")(values, py::arg("copy") = true,
+            py::arg("order") = "C", py::arg("subok") = false).cast<py::array>();
+        constantVectors_.push_back(owned);
+        return DefineFromVector(name, reinterpret_cast<uintptr_t>(owned.data()),
+                                static_cast<size_t>(owned.size()), type->second);
+    }
+
     // C++-style API name parity with Analyzer::DefineVector
     AnalyzerPythonWrapper& DefineVector(const std::string& name,
                                         uintptr_t data_ptr,
@@ -773,39 +842,27 @@ public:
 
     AnalyzerPythonWrapper& AddPlugin(const std::string& role,
                                      const std::string& pluginType) {
-        const auto normalized = normalizePluginType(pluginType);
-        auto& cfg = analyzer_.getConfigurationProvider();
-
-        if (normalized == "onnx") {
-            analyzer_.addPlugin(role, std::make_unique<OnnxManager>(cfg));
-        } else if (normalized == "bdt") {
-            analyzer_.addPlugin(role, std::make_unique<BDTManager>(cfg));
-        } else if (normalized == "correction") {
-            analyzer_.addPlugin(role, std::make_unique<CorrectionManager>(cfg));
-        } else if (normalized == "trigger") {
-            analyzer_.addPlugin(role, std::make_unique<TriggerManager>(cfg));
-        } else if (normalized == "sofie") {
-            analyzer_.addPlugin(role, std::make_unique<SofieManager>(cfg));
-        } else if (normalized == "ndhistogram") {
-            analyzer_.addPlugin(role, std::make_unique<NDHistogramManager>(cfg));
-        } else if (normalized == "weights") {
-            analyzer_.addPlugin(role, std::make_unique<WeightManager>());
-        } else if (normalized == "regions") {
-            analyzer_.addPlugin(role, std::make_unique<RegionManager>());
-        } else if (rdf::addExtensionPythonPlugin(analyzer_, role, normalized)) {
-            // The selected source extensions own their concrete managers.
-        } else {
-            throw std::invalid_argument(
-                "Unavailable plugin type (check optional extensions): '" + pluginType + "'. Supported: "
-                "OnnxManager, BDTManager, CorrectionManager, TriggerManager, SofieManager, NDHistogramManager, WeightManager, RegionManager"
-            );
+        requireBuilding("AddPlugin");
+        const auto normalized = lowercase(pluginType);
+        std::string supported;
+        for (const auto& type : corePluginTypes) {
+            if (normalized == lowercase(type.name) ||
+                std::find(type.aliases.begin(), type.aliases.end(), normalized) != type.aliases.end()) {
+                type.attach(analyzer_, role);
+                return *this;
+            }
+            if (!supported.empty()) supported += ", ";
+            supported += type.name;
         }
+        if (!rdf::addExtensionPythonPlugin(analyzer_, role, normalized))
+            throw std::invalid_argument("Unavailable plugin type (check optional extensions): '" +
+                                        pluginType + "'. Supported core types: " + supported);
         return *this;
     }
 
     std::unordered_map<std::string, std::string> configureExtension(
         const std::string& extension, const std::unordered_map<std::string, std::string>& settings) {
-        if (executed_ || running_) throw std::runtime_error("Configure extensions before run()");
+        requireBuilding("Configure extensions");
         if (!configuredExtensions_.insert(extension).second)
             throw std::runtime_error("Extension configuration already attempted; construct a fresh Analysis for a different recipe");
         return rdf::configureExtensionPythonAnalyzer(analyzer_, extension, settings);
@@ -816,7 +873,7 @@ public:
         const std::vector<std::pair<std::string,std::string>>& components,
         const std::vector<std::pair<std::string,double>>& normalizations,
         const std::vector<std::array<std::string,4>>& variations) {
-        if(executed_ || running_)throw std::runtime_error("Configure weights before run()");
+        requireBuilding("Configure weights");
         auto& data=analyzer_.getDataFrameProvider();auto& sys=analyzer_.getSystematicManager();
         auto node=data.getDataFrame();const auto labels=sys.getVariationLabels();
         std::unordered_set<std::string> names;
@@ -894,13 +951,14 @@ public:
     }
 
     std::vector<std::string> declareRegion(const std::string& name,const std::string& column,const std::string& parent) {
-        if(executed_ || running_)throw std::runtime_error("Declare regions before run()");
+        requireBuilding("Declare regions");
         auto manager=analyzer_.findPlugin<RegionManager>("python_regions");
         if(!manager)manager=RegionManager::create(analyzer_,"python_regions");
         manager->declareRegion(name,column,parent);return manager->getFilterChain(name);
     }
 
     AnalyzerPythonWrapper& AddDefaultPlugins() {
+        requireBuilding("AddDefaultPlugins");
         AddPlugin("onnx", "OnnxManager");
         AddPlugin("bdt", "BDTManager");
         AddPlugin("correction", "CorrectionManager");
@@ -911,39 +969,19 @@ public:
     }
 
     AnalyzerPythonWrapper& SetupPlugin(const std::string& role) {
-        if (auto mgr = analyzer_.getPlugin<OnnxManager>(role)) {
-            mgr->setupFromConfigFile();
-            return *this;
-        }
-        if (auto mgr = analyzer_.getPlugin<BDTManager>(role)) {
-            mgr->setupFromConfigFile();
-            return *this;
-        }
-        if (auto mgr = analyzer_.getPlugin<CorrectionManager>(role)) {
-            mgr->setupFromConfigFile();
-            return *this;
-        }
-        if (auto mgr = analyzer_.getPlugin<TriggerManager>(role)) {
-            mgr->setupFromConfigFile();
-            return *this;
-        }
-        if (auto mgr = analyzer_.getPlugin<SofieManager>(role)) {
-            mgr->setupFromConfigFile();
-            return *this;
-        }
-        if (auto mgr = analyzer_.getPlugin<NDHistogramManager>(role)) {
-            mgr->setupFromConfigFile();
-            return *this;
-        }
-        throw std::runtime_error("No supported plugin found for role '" + role + "'");
+        requireBuilding("SetupPlugin");
+        analyzer_.getPlugin<IPluggableManager>(role)->setupFromConfigFile();
+        return *this;
     }
 
     std::vector<std::string> GetColumnNames() {
+        requireIdle();
         auto names = analyzer_.GetColumnNames();
         return std::vector<std::string>(names.begin(), names.end());
     }
 
     std::string GetColumnType(const std::string& column) {
+        requireIdle();
         return analyzer_.GetColumnType(column);
     }
 
@@ -954,7 +992,7 @@ public:
 
     AnalyzerPythonWrapper& project(const std::string& name, const std::string& source,
                                    std::size_t index, bool nominal) {
-        if(executed_ || running_)throw std::runtime_error("Build the graph before run()");
+        requireBuilding("Build the graph");
         if (analyzer_.HasColumn(name)) throw std::invalid_argument("Define: column '" + name + "' already exists");
         const auto type = analyzer_.GetColumnType(source);
         const auto element = rdfcolumnpacker::isRVecColumnType(type)
@@ -985,6 +1023,7 @@ public:
 
     AnalyzerPythonWrapper& registerSystematic(const std::string& syst,
                                               const std::vector<std::string>& affectedVariables) {
+        requireBuilding("registerSystematic");
         analyzer_.getSystematicManager().registerSystematic(
             syst,
             std::set<std::string>(affectedVariables.begin(), affectedVariables.end())
@@ -993,6 +1032,7 @@ public:
     }
 
     std::vector<std::string> getSystematics() {
+        requireIdle();
         const auto& setRef = analyzer_.getSystematicManager().getSystematics();
         return std::vector<std::string>(setRef.begin(), setRef.end());
     }
@@ -1000,7 +1040,7 @@ public:
     AnalyzerPythonWrapper& registerVariationColumns(
         const std::string& variable, const std::string& family,
         const std::string& up, const std::string& down) {
-        if(executed_ || running_)throw std::runtime_error("Build the graph before run()");
+        requireBuilding("Build the graph");
         analyzer_.getSystematicManager().registerVariationColumns(variable, family, up, down);
         if (recordGraph_) {
             GraphOperation operation{"variation-registration", variable, graphStage_, "paired", {up, down}};
@@ -1013,7 +1053,7 @@ public:
     AnalyzerPythonWrapper& registerVariationColumn(
         const std::string& variable, const std::string& label,
         const std::string& column) {
-        if(executed_ || running_)throw std::runtime_error("Build the graph before run()");
+        requireBuilding("Build the graph");
         analyzer_.getSystematicManager().registerVariationColumn(variable, label, column);
         if (recordGraph_) {
             GraphOperation operation{"variation-registration", variable, graphStage_, "explicit", {column}};
@@ -1024,10 +1064,12 @@ public:
     }
 
     std::vector<std::string> getVariationLabels() {
+        requireIdle();
         return analyzer_.getSystematicManager().getVariationLabels();
     }
 
     std::unordered_map<std::string, std::string> getSelectionMasks() {
+        requireIdle();
         auto& systematics = analyzer_.getSystematicManager();
         std::unordered_map<std::string, std::string> masks;
         for (const auto& label : systematics.getVariationLabels()) {
@@ -1072,17 +1114,20 @@ public:
     }
 
     std::vector<std::string> getVariablesForSystematic(const std::string& syst) {
+        requireIdle();
         const auto& setRef = analyzer_.getSystematicManager().getVariablesForSystematic(syst);
         return std::vector<std::string>(setRef.begin(), setRef.end());
     }
 
     std::vector<std::string> getSystematicsForVariable(const std::string& var) {
+        requireIdle();
         const auto& setRef = analyzer_.getSystematicManager().getSystematicsForVariable(var);
         return std::vector<std::string>(setRef.begin(), setRef.end());
     }
 
     AnalyzerPythonWrapper& registerExistingSystematics(const std::vector<std::string>& systConfig,
                                                        const std::vector<std::string>& columnList) {
+        requireBuilding("registerExistingSystematics");
         analyzer_.getSystematicManager().registerExistingSystematics(systConfig, columnList);
         return *this;
     }
@@ -1091,6 +1136,7 @@ public:
     /// Returns a dict with keys "registered" (list of "baseVar:systName" strings),
     /// "missing_down" (list of column names), and "missing_up" (list of column names).
     py::dict autoRegisterSystematics(const std::vector<std::string>& columnList) {
+        requireBuilding("autoRegisterSystematics");
         const SystematicValidationResult res =
             analyzer_.getSystematicManager().autoRegisterSystematics(columnList);
 
@@ -1114,15 +1160,18 @@ public:
     }
 
     std::vector<std::string> makeSystList(const std::string& branchName) {
+        requireIdle();
         return analyzer_.getSystematicManager().makeSystList(branchName, analyzer_.getDataFrameProvider());
     }
 
     AnalyzerPythonWrapper& setConfig(const std::string& key, const std::string& value) {
+        requireBuilding("setConfig");
         analyzer_.getConfigurationProvider().set(key, value);
         return *this;
     }
 
     std::unordered_map<std::string, std::string> getConfigMap() {
+        requireIdle();
         const auto& cfg = analyzer_.getConfigurationProvider().getConfigMap();
         return std::unordered_map<std::string, std::string>(cfg.begin(), cfg.end());
     }
@@ -1130,6 +1179,7 @@ public:
     std::vector<std::string> getConfigList(const std::string& key,
                                            const std::vector<std::string>& defaultValue = {},
                                            const std::string& delimiter = ",") {
+        requireIdle();
         return analyzer_.getConfigurationProvider().getList(key, defaultValue, delimiter);
     }
 
@@ -1149,6 +1199,7 @@ public:
 
     AnalyzerPythonWrapper& applyAllOnnxModels(const std::string& role = "onnx",
                                               const std::string& outputSuffix = "") {
+        requireBuilding("applyAllOnnxModels");
         requirePlugin<OnnxManager>(role, "OnnxManager").applyAllModels(outputSuffix);
         return *this;
     }
@@ -1156,37 +1207,44 @@ public:
     AnalyzerPythonWrapper& applyOnnxModel(const std::string& role,
                                           const std::string& modelName,
                                           const std::string& outputSuffix = "") {
+        requireBuilding("applyOnnxModel");
         requirePlugin<OnnxManager>(role, "OnnxManager").applyModel(modelName, outputSuffix);
         return *this;
     }
 
     std::vector<std::string> getOnnxModelNames(const std::string& role = "onnx") {
+        requireIdle();
         return requirePlugin<OnnxManager>(role, "OnnxManager").getAllModelNames();
     }
 
     std::vector<std::string> getOnnxModelFeatures(const std::string& role,
                                                   const std::string& modelName) {
+        requireIdle();
         const auto& features = requirePlugin<OnnxManager>(role, "OnnxManager").getModelFeatures(modelName);
         return std::vector<std::string>(features.begin(), features.end());
     }
 
     AnalyzerPythonWrapper& applyAllBDTs(const std::string& role = "bdt") {
+        requireBuilding("applyAllBDTs");
         requirePlugin<BDTManager>(role, "BDTManager").applyAllBDTs();
         return *this;
     }
 
     AnalyzerPythonWrapper& applyBDT(const std::string& role,
                                     const std::string& bdtName) {
+        requireBuilding("applyBDT");
         requirePlugin<BDTManager>(role, "BDTManager").applyBDT(bdtName);
         return *this;
     }
 
     std::vector<std::string> getBDTNames(const std::string& role = "bdt") {
+        requireIdle();
         return requirePlugin<BDTManager>(role, "BDTManager").getAllBDTNames();
     }
 
     std::vector<std::string> getBDTFeatures(const std::string& role,
                                             const std::string& bdtName) {
+        requireIdle();
         const auto& features = requirePlugin<BDTManager>(role, "BDTManager").getBDTFeatures(bdtName);
         return std::vector<std::string>(features.begin(), features.end());
     }
@@ -1196,6 +1254,7 @@ public:
                                                const std::string& file,
                                                const std::string& correctionlibName,
                                                const std::vector<std::string>& inputVariables) {
+        requireBuilding("registerCorrection");
         requirePlugin<CorrectionManager>(role, "CorrectionManager").registerCorrection(
             name, file, correctionlibName, inputVariables);
         return *this;
@@ -1206,6 +1265,7 @@ public:
                                            const std::vector<std::string>& stringArguments,
                                            const std::vector<std::string>& inputColumns = {},
                                            const std::string& outputBranch = "") {
+        requireBuilding("applyCorrection");
         requirePlugin<CorrectionManager>(role, "CorrectionManager").applyCorrection(
             correctionName, stringArguments, inputColumns, outputBranch);
         return *this;
@@ -1216,6 +1276,7 @@ public:
                                               const std::vector<std::string>& stringArguments,
                                               const std::vector<std::string>& inputColumns = {},
                                               const std::string& outputBranch = "") {
+        requireBuilding("applyCorrectionVec");
         requirePlugin<CorrectionManager>(role, "CorrectionManager").applyCorrectionVec(
             correctionName, stringArguments, inputColumns, outputBranch);
         return *this;
@@ -1227,7 +1288,7 @@ public:
                                             const std::vector<std::string>& inputColumns = {},
                                             const std::vector<std::string>& outputBranches = {},
                                             const std::vector<bool>& propagateSystematics = {}) {
-        if (executed_ || running_) throw std::runtime_error("Apply corrections before run()");
+        requireBuilding("Apply corrections");
         auto& manager = requirePlugin<CorrectionManager>(role, "CorrectionManager");
         validateExplicitCorrectionOutputs(manager, correctionName, argumentSets,
                                           inputColumns, outputBranches, propagateSystematics);
@@ -1242,7 +1303,7 @@ public:
                                                const std::vector<std::string>& inputColumns = {},
                                                const std::vector<std::string>& outputBranches = {},
                                                const std::vector<bool>& propagateSystematics = {}) {
-        if (executed_ || running_) throw std::runtime_error("Apply corrections before run()");
+        requireBuilding("Apply corrections");
         auto& manager = requirePlugin<CorrectionManager>(role, "CorrectionManager");
         validateExplicitCorrectionOutputs(manager, correctionName, argumentSets,
                                           inputColumns, outputBranches, propagateSystematics);
@@ -1253,48 +1314,57 @@ public:
 
     std::vector<std::string> getCorrectionFeatures(const std::string& role,
                                                    const std::string& correctionName) {
+        requireIdle();
         const auto& features = requirePlugin<CorrectionManager>(role, "CorrectionManager").getCorrectionFeatures(correctionName);
         return std::vector<std::string>(features.begin(), features.end());
     }
 
     AnalyzerPythonWrapper& applyAllTriggers(const std::string& role = "trigger") {
+        requireBuilding("applyAllTriggers");
         requirePlugin<TriggerManager>(role, "TriggerManager").applyAllTriggers();
         return *this;
     }
 
     std::vector<std::string> getTriggerGroups(const std::string& role = "trigger") {
+        requireIdle();
         return requirePlugin<TriggerManager>(role, "TriggerManager").getAllGroups();
     }
 
     std::vector<std::string> getTriggers(const std::string& role,
                                          const std::string& group) {
+        requireIdle();
         const auto& triggers = requirePlugin<TriggerManager>(role, "TriggerManager").getTriggers(group);
         return std::vector<std::string>(triggers.begin(), triggers.end());
     }
 
     std::vector<std::string> getVetoes(const std::string& role,
                                        const std::string& group) {
+        requireIdle();
         const auto& vetoes = requirePlugin<TriggerManager>(role, "TriggerManager").getVetoes(group);
         return std::vector<std::string>(vetoes.begin(), vetoes.end());
     }
 
     std::string getTriggerGroupForSample(const std::string& role,
                                          const std::string& sample) {
+        requireIdle();
         return requirePlugin<TriggerManager>(role, "TriggerManager").getGroupForSample(sample);
     }
 
     AnalyzerPythonWrapper& applyAllSofieModels(const std::string& role = "sofie") {
+        requireBuilding("applyAllSofieModels");
         requirePlugin<SofieManager>(role, "SofieManager").applyAllModels();
         return *this;
     }
 
     AnalyzerPythonWrapper& applySofieModel(const std::string& role,
                                            const std::string& modelName) {
+        requireBuilding("applySofieModel");
         requirePlugin<SofieManager>(role, "SofieManager").applyModel(modelName);
         return *this;
     }
 
     std::vector<std::string> getSofieModelNames(const std::string& role = "sofie") {
+        requireIdle();
         return requirePlugin<SofieManager>(role, "SofieManager").getAllModelNames();
     }
 
@@ -1303,6 +1373,7 @@ public:
         const std::vector<histInfo>& infos,
         const std::vector<selectionInfo>& selection,
         const std::string& suffix = "") {
+        requireBuilding("bookNDHistograms");
         if (role=="histogramManager" && ndTyped_) {
             std::set<std::string> fresh;
             for (const auto& info : infos)
@@ -1328,7 +1399,7 @@ public:
     py::dict bookTypedNDHistograms(const std::vector<NDRequest>& requests,
                                   const std::vector<NDCategory>& categories,
                                   bool nominalOnly) {
-        if (executed_ || running_) throw std::runtime_error("Book ND histograms before run()");
+        requireBuilding("Book ND histograms");
         if (requests.empty() || categories.size()!=3)
             throw std::invalid_argument("ND booking requires observables and channel/control/sample descriptors");
         const std::string role="histogramManager";
@@ -1415,6 +1486,7 @@ public:
         const std::string& role,
         const std::vector<std::vector<histInfo>>& fullHistList,
         const std::vector<std::vector<std::string>>& allRegionNames) {
+        requireIdle();
         auto fullHistListCopy = fullHistList;
         auto allRegionNamesCopy = allRegionNames;
         requirePlugin<NDHistogramManager>(role, "NDHistogramManager")
@@ -1423,6 +1495,7 @@ public:
     }
 
     AnalyzerPythonWrapper& clearNDHistograms(const std::string& role) {
+        requireBuilding("clearNDHistograms");
         if (role=="histogramManager" && ndTyped_)
             throw std::runtime_error("Cannot clear typed ND bookings; start a fresh Analysis");
         requirePlugin<NDHistogramManager>(role, "NDHistogramManager").Clear();
@@ -1431,7 +1504,7 @@ public:
     }
 
     AnalyzerPythonWrapper& bookCount(const std::string& name) {
-        if (executed_ || running_) throw std::runtime_error("Book counts before run()");
+        requireBuilding("Book counts");
         if (actions_->counts.count(name)) throw std::invalid_argument("Duplicate count '" + name + "'");
         actions_->counts.emplace(name, analyzer_.getDF().Count());
         if (recordGraph_) {
@@ -1443,7 +1516,7 @@ public:
     }
 
     AnalyzerPythonWrapper& bookSum(const std::string& name, const std::string& column) {
-        if (executed_ || running_) throw std::runtime_error("Book sums before run()");
+        requireBuilding("Book sums");
         if (actions_->sums.count(name)) throw std::invalid_argument("Duplicate sum '" + name + "'");
         auto df = analyzer_.getDF();
         const auto mask = analyzer_.getSystematicManager().getSelectionMaskColumn("Nominal");
@@ -1472,7 +1545,7 @@ public:
         const std::string& name, const std::string& variable, int bins,
         double low, double high, const std::string& weight = "",
         const std::string& selection = "", const std::string& variation = "Nominal") {
-        if (executed_ || running_) throw std::runtime_error("Book histograms before run()");
+        requireBuilding("Book histograms");
         if (actions_->histograms.count(name) || actions_->counts.count(name))
             throw std::invalid_argument("Duplicate histogram/count '" + name + "'");
         const auto& settings=analyzer_.getConfigurationProvider().getConfigMap();
@@ -1527,7 +1600,7 @@ public:
     }
 
     AnalyzerPythonWrapper& bookHistograms(const std::vector<HistogramRequest>& requests) {
-        if (executed_ || running_) throw std::runtime_error("Book histograms before run()");
+        requireBuilding("Book histograms");
         // This cache lives only within one call, pinning the exact booking node.
         // Definitions, filters, plugins or later calls can never reuse a stale slice.
         HistogramSlices slices;
@@ -1553,7 +1626,7 @@ public:
     }
 
     AnalyzerPythonWrapper& bookHistogramsMixed(const std::vector<MixedHistogramRequest>& requests) {
-        if (executed_ || running_) throw std::runtime_error("Book histograms before run()");
+        requireBuilding("Book histograms");
         // One cache for both axis kinds; exact masks/selections at this node only.
         HistogramSlices slices;
         std::set<std::string> names;
@@ -1593,7 +1666,7 @@ private:
         const std::string& name, const std::string& variable, int bins,
         double low, double high, const std::string& weight,
         const std::string& selection, const std::string& variation, HistogramSlices* slices) {
-        if (executed_ || running_) throw std::runtime_error("Book histograms before run()");
+        requireBuilding("Book histograms");
         if (actions_->histograms.count(name) || actions_->counts.count(name))
             throw std::invalid_argument("Duplicate histogram/count '" + name + "'");
         const auto& settings=analyzer_.getConfigurationProvider().getConfigMap();
@@ -1664,7 +1737,7 @@ private:
         const std::string& name, const std::string& variable, const std::vector<double>& edges,
         const std::string& weight,
         const std::string& selection, const std::string& variation, HistogramSlices* slices) {
-        if (executed_ || running_) throw std::runtime_error("Book histograms before run()");
+        requireBuilding("Book histograms");
         if (actions_->histograms.count(name) || actions_->counts.count(name))
             throw std::invalid_argument("Duplicate histogram/count '" + name + "'");
         const auto& settings=analyzer_.getConfigurationProvider().getConfigMap();
@@ -1768,7 +1841,7 @@ public:
         return result;
     }
 
-    unsigned int eventLoops() { return analyzer_.getDF().GetNRuns(); }
+    unsigned int eventLoops() { requireIdle(); return analyzer_.getDF().GetNRuns(); }
     
     /**
      * @brief Save the analysis results
@@ -1777,6 +1850,7 @@ public:
      * for triggering computation and saving outputs.
      */
     AnalyzerPythonWrapper& save() {
+        requireIdle();
         if (ndTyped_ && requirePlugin<NDHistogramManager>("histogramManager","NDHistogramManager").GetHistos().size()!=ndCounts_["histogramManager"])
             throw std::runtime_error("Typed ND manager changed outside recorded booking; start a fresh Analysis");
         if(running_.exchange(true))throw std::runtime_error("Analyzer is already running");
@@ -1799,6 +1873,7 @@ public:
      * @brief Get configuration value by key
      */
     std::string configMap(const std::string& key) {
+        requireIdle();
         return analyzer_.configMap(key);
     }
     
@@ -1810,6 +1885,14 @@ public:
     }
 
 private:
+    void requireBuilding(const char* operation) const {
+        if (executed_ || running_)
+            throw std::runtime_error(std::string(operation) + " before run(); create a fresh Analysis to change the graph");
+    }
+    void requireIdle() const {
+        if (running_) throw std::runtime_error("Wait for run() to finish before inspecting the analysis");
+    }
+
     // The Python facade requests fresh explicit outputs. Check their complete
     // native expansion before any pack or systematic registration is created.
     // Default-naming raw calls and already-existing nominal outputs retain the
@@ -1915,23 +1998,7 @@ private:
         return *plugin;
     }
 
-    static std::string normalizePluginType(const std::string& pluginType) {
-        std::string normalized;
-        normalized.reserve(pluginType.size());
-        for (char c : pluginType) {
-            normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-        }
-        if (normalized == "onnxmanager" || normalized == "onnx") return "onnx";
-        if (normalized == "bdtmanager" || normalized == "bdt") return "bdt";
-        if (normalized == "correctionmanager" || normalized == "correction") return "correction";
-        if (normalized == "triggermanager" || normalized == "trigger") return "trigger";
-        if (normalized == "sofiemanager" || normalized == "sofie") return "sofie";
-        if (normalized == "ndhistogrammanager" || normalized == "ndhistogram" || normalized == "hist") return "ndhistogram";
-        if (normalized == "weightmanager" || normalized == "weights") return "weights";
-        if (normalized == "regionmanager" || normalized == "regions") return "regions";
-        return normalized;
-    }
-
+    std::vector<py::array> constantVectors_; // outlives analyzer_ and its lazy actions
     Analyzer analyzer_;
     std::atomic<bool> executed_{false};
     std::atomic<bool> running_{false};
@@ -1947,6 +2014,11 @@ private:
 };
 
 PYBIND11_MODULE(rdfanalyzer, m) {
+    m.def("core_plugin_types", []() {
+        std::map<std::string, std::vector<std::string>> names;
+        for (const auto& type : corePluginTypes) names.emplace(type.name, type.aliases);
+        return names;
+    }, "Return core plugin types and their case-insensitive AddPlugin aliases.");
     py::list enabledExtensions;
     for (const auto &extension : rdf::extensionBuildInfo) {
         if (extension.enabled) enabledExtensions.append(extension.name);
@@ -2193,6 +2265,9 @@ PYBIND11_MODULE(rdfanalyzer, m) {
              ...                            ["eta1", "eta2"])
              )pbdoc",
              py::return_value_policy::reference_internal)
+        .def("define_constant_vector", &AnalyzerPythonWrapper::defineConstantVector,
+             py::return_value_policy::reference_internal, py::arg("name"), py::arg("values"),
+             "Snapshot a one-dimensional NumPy array once and expose a read-only constant vector on each event.")
         .def("DefineFromVector", &AnalyzerPythonWrapper::DefineFromVector,
              py::arg("name"),
              py::arg("data_ptr"),

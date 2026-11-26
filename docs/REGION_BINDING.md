@@ -109,16 +109,16 @@ hm->saveHists();
 4. Multi-fill: an event in both `presel` and `signal` fills the `presel` bin
    **and** the `signal` bin in the same event-loop pass.  No extra passes.
 
-### Example histogram config (unchanged syntax)
+### Example histogram configuration
 
-```ini
-# histogram_config.txt
-name    = pt
-variable = pt
-weight   = w
-bins     = 50
-lowerBound = 0.0
-upperBound = 200.0
+```yaml
+# histogram_config.yaml
+- name: pt
+  variable: pt
+  weight: w
+  bins: 50
+  lowerBound: 0.0
+  upperBound: 200.0
 ```
 
 With regions bound, `SaveHists()` writes the five-dimensional `THnSparseF`
@@ -183,7 +183,7 @@ print(report.to_text())
 ```cpp
 // analysis.cc
 
-Analyzer analyzer("config.txt");
+Analyzer analyzer("config.yaml");
 
 // 1. Define boolean columns.
 analyzer.Define("pass_presel",  preselFn,  {"pt", "eta"});

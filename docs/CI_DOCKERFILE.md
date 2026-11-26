@@ -26,11 +26,13 @@ Why numpy/numba are included
 Run these commands from the repository root on the Docker host. Enable the
 system Docker service so it starts at boot, then check for existing runners.
 
+{% raw %}
 ```bash
 sudo systemctl enable --now docker.service
 sudo docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 sudo docker build --pull -t gh-runner -f docker/gh-runner.Dockerfile docker
 ```
+{% endraw %}
 
 Set `GITHUB_PAT` to a token with repository Administration write permission
 before creating containers. Enter the token locally using `read` to keep it
@@ -55,11 +57,13 @@ an ephemeral runner finishes a job. Each container requests a new registration
 token on startup, so its PAT must remain valid. Once started, check container
 logs and confirm the runners appear online in the repository's Actions settings.
 
+{% raw %}
 ```bash
 systemctl is-enabled docker.service
 sudo docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' gh-runner-1
 sudo docker logs --tail 30 gh-runner-1
 ```
+{% endraw %}
 
 ## Image notes
 

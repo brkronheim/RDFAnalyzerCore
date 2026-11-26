@@ -80,6 +80,16 @@ functions. For an explicit one-sided label use `registerVariationColumn` /
 `register_variation`, with its exact label. Do not strip `Up`/`Down` from replica
 names or manufacture absent partners.
 
+An explicit label can coincide with a paired family on another variable.
+For example, if `jet` has a paired `scale` shift and `weight` has a single
+explicit `scale` alternative, the three axis entries are `scaleUp` and
+`scaleDown` with the shifted jet, and `scale` with the nominal jet and
+alternate weight. If the weight's explicit label is `scaleUp` instead,
+the upward entry uses both the shifted jet and the alternate weight.
+Use `getVariationColumnName(variable, label)` when binding an axis entry.
+The bare-family membership query `getVariablesForSystematic("scale")` is
+also used to enumerate inputs with paired shifts.
+
 When a mapping must change after descendants exist, reconstruct that branch
 from a valid earlier node with all mappings installed. Renaming the final output
 or re-registering a label alone cannot retroactively fix descendants or saved

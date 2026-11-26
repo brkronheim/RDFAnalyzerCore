@@ -1,3 +1,4 @@
+#include "test_workspace.h"
 /**
  * @file testRootOutputSink.cc
  * @brief Unit tests for the RootOutputSink class, including glob pattern support
@@ -26,8 +27,9 @@ namespace {
 void writeSaveConfigFile(const std::string& path,
                          const std::vector<std::string>& patterns) {
   std::ofstream out(path);
+  if (patterns.empty()) out << "[]\n";
   for (const auto& p : patterns) {
-    out << p << "\n";
+    out << "- '" << p << "'\n";
   }
 }
 
@@ -36,9 +38,9 @@ void writeAnalysisConfig(const std::string& path,
                          const std::string& saveFile,
                          const std::string& saveConfigFile) {
   std::ofstream out(path);
-  out << "saveTree=Events\n";
-  out << "saveFile=" << saveFile << "\n";
-  out << "saveConfig=" << saveConfigFile << "\n";
+  out << "saveTree: Events\n";
+  out << "saveFile: " << saveFile << "\n";
+  out << "saveConfig: " << saveConfigFile << "\n";
 }
 
 } // namespace
@@ -50,9 +52,9 @@ protected:
   std::string outputPath;
 
   void SetUp() override {
-    const std::string base = std::string(TEST_SOURCE_DIR) + "/aux/root_output_sink_test_";
-    cfgPath        = base + "config.txt";
-    saveConfigPath = base + "saveconfig.txt";
+    const std::string base = testWorkspacePath().string() + "/aux/root_output_sink_test_";
+    cfgPath        = base + "config.yaml";
+    saveConfigPath = base + "saveconfig.yaml";
     outputPath     = base + "output.root";
     cleanup();
   }
@@ -289,20 +291,20 @@ TEST_F(RootOutputSinkTest, SystematicColumnsAreExcludedByDefault) {
   f.Close();
 }
 
-/// A glob pattern that matches nothing does not throw
-TEST_F(RootOutputSinkTest, GlobPatternWithNoMatchDoesNotThrow) {
-  writeSaveConfigFile(saveConfigPath, {"Jet_*"});
-  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
-
-  ConfigurationManager config(cfgPath);
-  auto dm = makeDataManager();
-  SystematicManager sm;
-
-  RootOutputSink sink;
-  auto df = dm->getDataFrame();
-  // When the glob matches nothing, columns is empty so all columns are snapshotted.
-  ASSERT_NO_THROW(
-      sink.writeDataFrame(df, config, &sm, OutputChannel::Skim));
+TEST_F(RootOutputSinkTest, UnmatchedPatternFailsBeforeSnapshot) {
+  for (const auto& patterns : std::vector<std::vector<std::string>>{
+           {"Jet_*"}, {"Electron_*", "Jet_*"}, {}}) {
+    writeSaveConfigFile(saveConfigPath, patterns);
+    writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+    ConfigurationManager config(cfgPath);
+    auto dm = makeDataManager();
+    auto df = dm->getDataFrame();
+    RootOutputSink sink;
+    EXPECT_THROW(sink.writeDataFrame(df, config, nullptr, OutputChannel::Skim),
+                 std::invalid_argument);
+    EXPECT_EQ(df.GetNRuns(), 0u);
+    EXPECT_FALSE(std::ifstream(outputPath).good());
+  }
 }
 
 TEST_F(RootOutputSinkTest, ConfiguredCompressionPreservesEntriesAndValues) {
@@ -350,4 +352,26 @@ TEST_F(RootOutputSinkTest, InvalidCompressionFailsBeforeCreatingOutput) {
     std::ifstream output(outputPath);
     EXPECT_FALSE(output.good());
   }
+}
+
+TEST_F(RootOutputSinkTest, ReusedSinkResolvesEachRequestFromItsConfigAndGraph) {
+  writeSaveConfigFile(saveConfigPath, {"Muon_*"});
+  writeAnalysisConfig(cfgPath, outputPath, saveConfigPath);
+  ConfigurationManager original(cfgPath);
+  auto dm = makeDataManager();
+  auto df = dm->getDataFrame();
+  RootOutputSink sink;
+  sink.writeDataFrame(df, original, nullptr, OutputChannel::Skim);
+  const auto secondPath = outputPath + ".second.root";
+  writeSaveConfigFile(saveConfigPath, {"Electron_eta"});
+  writeAnalysisConfig(cfgPath, secondPath, saveConfigPath);
+  ConfigurationManager second(cfgPath);
+  sink.writeDataFrame(df, second, nullptr, OutputChannel::Skim);
+  TFile result(secondPath.c_str(), "READ");
+  auto tree = result.Get<TTree>("Events");
+  ASSERT_NE(tree, nullptr);
+  EXPECT_NE(tree->GetBranch("Electron_eta"), nullptr);
+  EXPECT_EQ(tree->GetBranch("Muon_pt"), nullptr);
+  result.Close();
+  std::remove(secondPath.c_str());
 }

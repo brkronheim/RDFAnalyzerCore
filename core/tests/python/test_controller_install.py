@@ -39,7 +39,7 @@ class ControllerInstallTests(unittest.TestCase):
         self.assertNotIn('CMAKE_C_COMPILER:', cache)
         expected = {'_rdfjson.py', 'rdfworkflow.py', 'rdfworkflow.pyi', 'rdfresults.py', 'rdfresults.pyi',
             'rdfschema.py', 'rdfschema.pyi',
-            'run_bundle.py', 'run_collection.py'}
+            'native_config_io.py', 'sample_config.py', 'dataset_manifest.py', 'run_bundle.py', 'run_collection.py'}
         self.assertEqual({p.name for p in (self.prefix/'python').iterdir()
             if p.is_file()}, expected)
         for name in expected:

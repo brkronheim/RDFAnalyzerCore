@@ -14,7 +14,7 @@
 
 TEST(ManagerFactoryTest, CreateConfigurationManagerProducesValidProvider) {
   ChangeToTestSourceDir();
-  auto configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+  auto configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
   ASSERT_NE(configManager, nullptr);
   EXPECT_EQ(configManager->get("threads"), "1");
   EXPECT_EQ(configManager->get("saveFile"), "test_output.root");
@@ -29,7 +29,7 @@ TEST(ManagerFactoryTest, CreateSystematicManagerReturnsValidManager) {
 
 TEST(ManagerFactoryTest, CreateDataManagerWithConfigurationProvider) {
   ChangeToTestSourceDir();
-  auto configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+  auto configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
   auto dataManager = ManagerFactory::createDataManager(*configManager);
   ASSERT_NE(dataManager, nullptr);
 }

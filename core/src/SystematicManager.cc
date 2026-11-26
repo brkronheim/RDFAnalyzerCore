@@ -178,22 +178,29 @@ bool SystematicManager::hasSelectionMasks() const {
  */
 std::set<std::string>
 SystematicManager::getVariablesForSystematic(const std::string &syst) const {
-  auto it = systematicToVariableMap_m.find(normalizeSystematicName(syst));
-  if (it != systematicToVariableMap_m.end()) {
-    return it->second;
-  }
-  auto explicitIt = explicitVariationToVariableMap_m.find(syst);
-  if (explicitIt != explicitVariationToVariableMap_m.end()) {
-    return explicitIt->second;
-  }
-  return {};
+  const auto familyName = normalizeSystematicName(syst);
+  const auto family = systematicToVariableMap_m.find(familyName);
+  // Bare family queries are used to expand skim branches to Up and Down.
+  if (family != systematicToVariableMap_m.end() && familyName == syst)
+    return family->second;
+  const auto exact = explicitVariationToVariableMap_m.find(syst);
+  if (family == systematicToVariableMap_m.end())
+    return exact == explicitVariationToVariableMap_m.end()
+        ? std::set<std::string>{} : exact->second;
+  auto variables = family->second;
+  if (exact != explicitVariationToVariableMap_m.end())
+    variables.insert(exact->second.begin(), exact->second.end());
+  return variables;
 }
 
 bool SystematicManager::isVariableAffectedBySystematic(
     const std::string &variable, const std::string &syst) const {
-  const auto family = systematicToVariableMap_m.find(normalizeSystematicName(syst));
-  if (family != systematicToVariableMap_m.end())
-    return family->second.count(variable) != 0;
+  const auto familyName = normalizeSystematicName(syst);
+  const auto family = systematicToVariableMap_m.find(familyName);
+  if (family != systematicToVariableMap_m.end()) {
+    if (family->second.count(variable)) return true;
+    if (familyName == syst) return false;
+  }
   const auto label = explicitVariationToVariableMap_m.find(syst);
   return label != explicitVariationToVariableMap_m.end() && label->second.count(variable) != 0;
 }
@@ -231,7 +238,14 @@ std::string SystematicManager::getVariationColumnName(
     }
   }
 
-  if (isVariableAffectedBySystematic(variable, syst)) {
+  // A bare family name is also a legal independent axis label. Once that
+  // label exists, only its exact registrations above affect its axis entry.
+  // The paired shifts still resolve independently as familyUp/familyDown.
+  const auto families = variableToSystematicMap_m.find(variable);
+  if (families == variableToSystematicMap_m.end()) return variable;
+  if (explicitVariationLabels_m.count(syst) && systematics_m.count(syst))
+    return variable;
+  if (families->second.count(normalizeSystematicName(syst))) {
     return variable + "_" + syst;
   }
   return variable;
@@ -273,12 +287,11 @@ void SystematicManager::registerExistingSystematics(
 SystematicValidationResult SystematicManager::autoRegisterSystematics(
     const std::vector<std::string> &columnNames) {
 
-  const std::unordered_set<std::string> colSet(columnNames.begin(), columnNames.end());
   SystematicValidationResult result;
-
   if (!enabled_m) {
     return result;
   }
+  const std::unordered_set<std::string> colSet(columnNames.begin(), columnNames.end());
 
   // A nuisance may itself contain underscores (e.g. Absolute_2024).
   // Prefer the longest explicitly registered suffix, then the longest

@@ -56,7 +56,7 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 
 ### 3. Comprehensive Unit Tests
 - **File**: `core/tests/cpp/testOnnxManager.cc`
-- **Test Configuration**: `core/tests/cpp/cfg/onnx_models.txt`
+- **Test Configuration**: `core/tests/cpp/cfg/onnx_models.yaml`
 - **Test Models**: 
    - `core/tests/cpp/cfg/test_model.onnx` - Single output model
    - `core/tests/cpp/cfg/test_model2.onnx` - Single output model
@@ -90,20 +90,24 @@ This implementation adds support for ONNX (Open Neural Network Exchange) model e
 
 ## Configuration Format
 
-Create a configuration file (e.g., `cfg/onnx_models.txt`):
-```
-file=path/to/model.onnx name=model_output inputVariables=var1,var2,var3 runVar=should_run useCuda=false
+Create a configuration file (e.g., `cfg/onnx_models.yaml`):
+```yaml
+- file: path/to/model.onnx
+  name: model_output
+  inputVariables: var1,var2,var3
+  runVar: should_run
+  useCuda: false
 ```
 
 Add to main config:
-```
-onnxConfig=cfg/onnx_models.txt
+```yaml
+onnxConfig: cfg/onnx_models.yaml
 ```
 
 Optional CUDA settings for models built with ONNX Runtime CUDA support:
-```
-useCuda=true
-cudaDeviceId=0
+```yaml
+useCuda: true
+cudaDeviceId: 0
 ```
 
 ### Input Padding for Fixed-Size Models
@@ -114,9 +118,12 @@ ONNX models with fixed-size inputs (e.g., transformer attention mechanisms) now 
 
 Add `paddingSize` parameter to your model configuration:
 
-```
-# onnx_models.txt
-file=transformer.onnx name=ParT inputVariables=pt,eta,phi paddingSize=128
+```yaml
+# onnx_models.yaml
+- file: transformer.onnx
+  name: ParT
+  inputVariables: pt,eta,phi
+  paddingSize: 128
 ```
 
 **Behavior**:

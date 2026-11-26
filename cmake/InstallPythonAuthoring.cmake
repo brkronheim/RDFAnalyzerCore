@@ -9,16 +9,22 @@ function(rdf_install_python_authoring)
     get_filename_component(_authoring_source "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../core/python" ABSOLUTE)
     set(_authoring_files _rdftext.py rdfanalysis.py rdfanalysis.pyi rdfsettings.py rdfsettings.pyi
         rdfcolumns.py rdfcolumns.pyi rdfdeclarations.py rdfdeclarations.pyi
-        rdfmodules.py rdfmodules.pyi rdfvalidation.py rdfvalidation.pyi optional_extensions.py rdftnp.py rdftnp.pyi)
+        rdfkinematics.py rdfkinematics.pyi rdfmodules.py rdfmodules.pyi rdfvalidation.py rdfvalidation.pyi optional_extensions.py rdftnp.py rdftnp.pyi)
     foreach(_authoring_file IN LISTS _authoring_files)
         configure_file("${_authoring_source}/${_authoring_file}"
             "${CMAKE_BINARY_DIR}/python/${_authoring_file}" COPYONLY)
     endforeach()
+    foreach(header IN ITEMS AnalysisMath.h ArrayValidation.h TagAndProbe.h)
+        configure_file("${_authoring_source}/../interface/${header}"
+            "${CMAKE_BINARY_DIR}/include/rdfanalyzer/${header}" COPYONLY)
+    endforeach()
     list(TRANSFORM _authoring_files PREPEND "${_authoring_source}/")
     install(FILES ${_authoring_files} DESTINATION python COMPONENT "${_authoring_COMPONENT}")
-    # rdftnp JITs this stdlib-only header; the Python component must be relocatable
+    # Python graph helpers JIT the matching native headers; the Python component must be relocatable
     # without requiring a separate NativeAuthoring installation.
     install(FILES "${_authoring_source}/../interface/TagAndProbe.h"
+                  "${_authoring_source}/../interface/AnalysisMath.h"
+                  "${_authoring_source}/../interface/ArrayValidation.h"
         DESTINATION include/rdfanalyzer COMPONENT "${_authoring_COMPONENT}")
     rdf_install_python_controller(COMPONENT "${_authoring_COMPONENT}")
     install(FILES

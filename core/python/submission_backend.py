@@ -1,104 +1,36 @@
-import os
-import shlex
 import base64
 import hashlib
+import os
+import shlex
 import warnings
 from pathlib import Path
+
 import yaml
+
 if __package__:
     from . import io_policy as _io_policy
 else:
     import io_policy as _io_policy
 
 
-def read_config(config_file):
-    """
-    Read config file in either text or YAML format.
-    Auto-detects format based on file extension.
-    """
-    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
-        return read_config_yaml(config_file)
-    else:
-        return read_config_text(config_file)
+if __package__:
+    from . import native_config_io as _config_io
+else:
+    import native_config_io as _config_io
+
+# Preserve the public submission_backend API used by existing scripts.
+read_config = _config_io.read_config
+read_config_text = _config_io.read_config_text
+read_config_yaml = _config_io.read_config_yaml
+parse_config_text = _config_io.parse_config_text
+write_config = _config_io.write_config
+write_config_yaml = _config_io.write_config_yaml
+get_config_extension = _config_io.get_config_extension
 
 
-def read_config_text(config_file):
-    """Read config file in text format (key=value)."""
-    config_dict = {}
-    with open(config_file) as file:
-        for line in file:
-            line = line.split("#", 1)[0]
-            if "=" not in line:
-                continue
-            key, value = (part.strip() for part in line.split("=", 1))
-            if not key:
-                continue
-            if key in config_dict:
-                raise ValueError(
-                    f"Duplicate key '{key}' in text config '{config_file}'."
-                )
-            config_dict[key] = value
-    return config_dict
-
-
-def read_config_yaml(config_file):
-    """Read config file in YAML format."""
-    with open(config_file) as file:
-        config_dict = yaml.safe_load(file)
-    # Ensure all values are strings for consistency
-    return {k: _yaml_value_to_config_string(v) for k, v in config_dict.items()}
-
-
-def _yaml_value_to_config_string(value):
-    """Serialize YAML values like the C++ YAML config adapter does."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return ""
-    if isinstance(value, list):
-        items = []
-        for item in value:
-            if isinstance(item, (dict, list)):
-                return yaml.safe_dump(
-                    value, default_flow_style=True, sort_keys=False
-                ).strip()
-            items.append(_yaml_value_to_config_string(item))
-        return "[" + ", ".join(items) + "]"
-    if isinstance(value, dict):
-        return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
-    return str(value)
-
-
-def write_config(config_dict, output_file):
-    """
-    Write config dict to file in either text or YAML format.
-    Auto-detects format based on file extension.
-    """
-    if output_file.endswith('.yaml') or output_file.endswith('.yml'):
-        write_config_yaml(config_dict, output_file)
-    else:
-        write_config_text(config_dict, output_file)
-
-
-def write_config_text(config_dict, output_file):
-    """Write config dict to text file (key=value format)."""
-    with open(output_file, "w") as file:
-        for key in config_dict.keys():
-            file.write(str(key) + "=" + config_dict[key] + "\n")
-
-
-def write_config_yaml(config_dict, output_file):
-    """Write config dict to YAML file."""
-    with open(output_file, "w") as file:
-        yaml.dump(config_dict, file, default_flow_style=False, sort_keys=False)
-
-
-def get_config_extension(config_file):
-    """Get the extension of a config file."""
-    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
-        return '.yaml'
-    else:
-        return '.txt'
+def _worker_config_io():
+    """Embed the same decoder in workers which run without a source checkout."""
+    return Path(_config_io.__file__).read_text(encoding="utf-8")
 
 
 def get_copy_file_list(config_dict):
@@ -186,18 +118,8 @@ STAGE_COPY_TIMEOUT = 60
 MAX_ATTEMPTS = 3
 cfg_path = {config_file!r}
 
-if cfg_path.endswith(('.yaml', '.yml')):
-    import yaml
-    with open(cfg_path) as stream:
-        cfg = yaml.safe_load(stream) or {{}}
-else:
-    cfg = {{}}
-    with open(cfg_path) as stream:
-        for line in stream:
-            line = line.split('#', 1)[0].strip()
-            if '=' in line:
-                key, value = line.split('=', 1)
-                cfg[key.strip()] = value.strip()
+{_worker_config_io()}
+cfg = read_config(cfg_path)
 
 
 def global_url(value):
@@ -219,7 +141,9 @@ def global_url(value):
     return urlunsplit((endpoint.scheme, endpoint.netloc, '/' + path, query, parsed.fragment))
 
 raw_files = cfg.get('fileList', '')
-files = raw_files if isinstance(raw_files, list) else str(raw_files).split(',')
+if raw_files.startswith('[') and raw_files.endswith(']'):
+    raw_files = raw_files[1:-1]
+files = raw_files.split(',')
 urls = [global_url(str(value).strip()) for value in files if str(value).strip()]
 if STAGE_INPUTS:
     print('Staging input files with xrdcp (no redirector probing)')
@@ -246,13 +170,7 @@ else:
     print('[input] Using global redirector for public inputs; no worker site probing')
 if urls:
     cfg['fileList'] = ','.join(urls)
-    if cfg_path.endswith(('.yaml', '.yml')):
-        with open(cfg_path, 'w') as stream:
-            yaml.safe_dump(cfg, stream, sort_keys=False)
-    else:
-        with open(cfg_path, 'w') as stream:
-            for key, value in cfg.items():
-                stream.write('{{}}={{}}\\n'.format(key, value))
+    write_config(cfg, runtime_yaml_path(cfg_path))
 RDFINPUT
 """
 
@@ -267,56 +185,18 @@ def _warn_ignored_option(value, name):
         )
 
 
-def stage_inputs_block(eos_sched=False, config_file="submit_config.txt"):
+def stage_inputs_block(eos_sched=False, config_file="submit_config.yaml"):
     _warn_ignored_option(eos_sched, 'eos_sched')
     return _worker_input_block(config_file, stage_inputs=True)
 
 
-def stage_outputs_blocks(eos_sched=False, config_file="submit_config.txt"):
+def stage_outputs_blocks(eos_sched=False, config_file="submit_config.yaml"):
     _warn_ignored_option(eos_sched, 'eos_sched')
     pre_block = f"""
 run_helper_python - << 'PY'
 import os
 
-def read_config(config_file):
-    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
-        import yaml
-        with open(config_file) as f:
-            cfg = yaml.safe_load(f)
-        def yaml_value_to_config_string(value):
-            if isinstance(value, bool):
-                return "true" if value else "false"
-            if value is None:
-                return ""
-            if isinstance(value, list):
-                if any(isinstance(item, (dict, list)) for item in value):
-                    return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
-                return "[" + ", ".join(yaml_value_to_config_string(item) for item in value) + "]"
-            if isinstance(value, dict):
-                return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
-            return str(value)
-        return {{k: yaml_value_to_config_string(v) for k, v in cfg.items()}}
-    else:
-        cfg = {{}}
-        with open(config_file) as f:
-            for line in f:
-                line = line.split("#")[0].strip()
-                if not line or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                cfg[k.strip()] = v.strip()
-        return cfg
-
-def write_config(cfg, config_file):
-    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
-        import yaml
-        with open(config_file, "w") as f:
-            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
-    else:
-        with open(config_file, "w") as f:
-            for k, v in cfg.items():
-                f.write(f"{{k}}={{v}}\\n")
-
+{_worker_config_io()}
 cfg = read_config("{config_file}")
 
 save_file = cfg.get("saveFile", "")
@@ -342,7 +222,7 @@ if proc_id and cfg.get("metaFile"):
     base, ext = os.path.splitext(cfg["metaFile"])
     cfg["metaFile"] = f"{{base}}_{{proc_id}}{{ext}}"
 
-write_config(cfg, "{config_file}")
+write_config(cfg, runtime_yaml_path("{config_file}"))
 PY
 """
 
@@ -361,36 +241,8 @@ XRDCP_TIMEOUT_BYTES_PER_SEC = int(
     os.environ.get("XRDCP_TIMEOUT_BYTES_PER_SEC", str(20 * 1024 * 1024))
 )
 
-def read_config(config_file):
-    if config_file.endswith('.yaml') or config_file.endswith('.yml'):
-        import yaml
-        with open(config_file) as f:
-            cfg = yaml.safe_load(f)
-        def yaml_value_to_config_string(value):
-            if isinstance(value, bool):
-                return "true" if value else "false"
-            if value is None:
-                return ""
-            if isinstance(value, list):
-                if any(isinstance(item, (dict, list)) for item in value):
-                    return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
-                return "[" + ", ".join(yaml_value_to_config_string(item) for item in value) + "]"
-            if isinstance(value, dict):
-                return yaml.safe_dump(value, default_flow_style=True, sort_keys=False).strip()
-            return str(value)
-        return {{k: yaml_value_to_config_string(v) for k, v in cfg.items()}}
-    else:
-        cfg = {{}}
-        with open(config_file) as f:
-            for line in f:
-                line = line.split("#")[0].strip()
-                if not line or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                cfg[k.strip()] = v.strip()
-        return cfg
-
-cfg = read_config("{config_file}")
+{_worker_config_io()}
+cfg = read_config(runtime_yaml_path("{config_file}"))
 
 def normalize_dest(dest):
     if not dest:
@@ -527,7 +379,7 @@ PY
     return pre_block, post_block
 
 
-def xrootd_optimize_block(config_file="submit_config.txt", blacklisted_sites=None):
+def xrootd_optimize_block(config_file="submit_config.yaml", blacklisted_sites=None):
     """Compatibility entry point: global URL routing, without site probing.
 
     Site quality and blacklisting are handled by the input adaptor. The legacy
@@ -616,7 +468,7 @@ def generate_condor_runscript(
     use_shared_inputs=False,
     eos_sched=False,
     shared_dir_name=None,
-    config_file="submit_config.txt",
+    config_file="submit_config.yaml",
     python_env_tarball=None,
     shared_archive_name=None,
     runtime_config_relpath=None,
@@ -628,6 +480,14 @@ def generate_condor_runscript(
     request_cpus = int(request_cpus)
     if request_cpus < 1:
         raise ValueError("request_cpus must be positive")
+    legacy_conversion = ""
+    if get_config_extension(config_file) != ".yaml":
+        source_file = config_file
+        config_file = str(_config_io.runtime_yaml_path(config_file))
+        legacy_conversion = ("run_helper_python - <<'RDF_LEGACY_CONFIG'\n" + _worker_config_io()
+                             + "\nmaterialize_runtime_config(" + repr(source_file) + ")\nRDF_LEGACY_CONFIG")
+    if runtime_config_relpath:
+        runtime_config_relpath = str(_config_io.runtime_yaml_path(runtime_config_relpath))
     stage_block = stage_inputs_block(config_file=config_file) if stage_inputs else ""
     stage_out_pre = ""
     stage_out_post = ""
@@ -725,16 +585,19 @@ def generate_condor_runscript(
     if python_env_tarball:
         tarball_name = os.path.basename(python_env_tarball)
         python_env_block = (
-            f"if [ -f \"{tarball_name}\" ]; then\n"
-            f"  echo \"Unpacking Python environment from {tarball_name}...\"\n"
+            f"python_env_archive={shlex.quote(tarball_name)}\n"
+            f"if [ -f \"$python_env_archive\" ]; then\n"
+            f"  echo \"Unpacking Python environment from $python_env_archive...\"\n"
             f"  mkdir -p _python_env\n"
-            f"  tar -xzf \"{tarball_name}\" -C _python_env\n"
+            f"  tar -xzf \"$python_env_archive\" -C _python_env\n"
             f"  export PYTHONPATH=\"$PWD/_python_env:${{PYTHONPATH:-}}\"\n"
             f"  export PATH=\"$PWD/_python_env/bin:${{PATH:-}}\"\n"
             f"  export LD_LIBRARY_PATH=\"$PWD/_python_env:${{LD_LIBRARY_PATH:-}}\"\n"
+            f"  export ROOT_INCLUDE_PATH=\"$PWD/_python_env${{ROOT_INCLUDE_PATH:+:$ROOT_INCLUDE_PATH}}\"\n"
             f"  echo \"Python environment ready (PYTHONPATH=$PYTHONPATH)\"\n"
             f"else\n"
-            f"  echo \"WARNING: Python environment tarball {tarball_name} not found\"\n"
+            f"  echo \"ERROR: Python environment tarball $python_env_archive not found\" >&2\n"
+            f"  exit 1\n"
             f"fi\n"
         )
 
@@ -748,7 +611,8 @@ def generate_condor_runscript(
         if int(sizing_pilot_entries) < 1:
             raise ValueError("sizing_pilot_entries must be positive")
         analysis_exec = ("sys.argv = ['rdf-sizing-pilot'] + sys.argv[2:] + [" + repr(str(sizing_pilot_entries)) + "]\n"
-                         + Path(__file__).with_name('job_sizing_worker.py').read_text())
+                          + _worker_config_io() + "\n" + Path(__file__).with_name('job_sizing_worker.py').read_text().replace(
+                             "from native_config_io import read_config, write_config", ""))
         pilot_start = 'rdf_pilot_worker_start=$(date +%s)'
         pilot_setup_report = 'echo "Worker setup time: $((analysis_start - rdf_pilot_worker_start - stage_in_end + stage_in_start))s"'
     run_script = f"""#!/bin/bash
@@ -762,12 +626,17 @@ RDF_ORIG_LD_LIBRARY_PATH="${{LD_LIBRARY_PATH:-}}"
 # The helper interpreter is selected before setup scripts adjust PATH. Keep
 # embedded Python compatible with the older subprocess API on worker nodes.
 RDF_HELPER_PYTHON="$(command -v python3 || command -v python || true)"
+RDF_WORKER_YAML="$PWD/rdf_worker_yaml.zip"
 run_helper_python() {{
     local helper="${{RDF_HELPER_PYTHON:-python3}}"
     if [ -z "$helper" ]; then
         helper=python3
     fi
-    env -u PYTHONHOME LD_LIBRARY_PATH="${{RDF_ORIG_LD_LIBRARY_PATH:-}}" "$helper" "$@"
+    local helper_path="${{PYTHONPATH:-}}"
+    if [ -f "$RDF_WORKER_YAML" ]; then
+        helper_path="$RDF_WORKER_YAML${{helper_path:+:$helper_path}}"
+    fi
+    env -u PYTHONHOME PYTHONPATH="$helper_path" LD_LIBRARY_PATH="${{RDF_ORIG_LD_LIBRARY_PATH:-}}" "$helper" "$@"
 }}
 # Preserve the site's inherited CPU placement, including for transfer helpers.
 # request_cpus specifies a count; it does not identify CPUs we may assign.
@@ -782,6 +651,7 @@ export OPENBLAS_NUM_THREADS={request_cpus} MKL_NUM_THREADS={request_cpus}
 export NUMEXPR_NUM_THREADS={request_cpus} VECLIB_MAXIMUM_THREADS={request_cpus}
 {root_block}{pre_block}{shared_block}{x509_block}{python_env_block}{root_include_path_block}ls
 stage_in_start=$(date +%s)
+{legacy_conversion}
 {stage_out_pre}{stage_block}
 stage_in_end=$(date +%s)
 echo "Stage-in time: $((stage_in_end - stage_in_start))s"
@@ -797,9 +667,10 @@ set +e
 # Retain inherited affinity before library initialization. Numerical pool
 # limits remain tied to request_cpus; they are not an aggregate CPU quota.
 # Python exec preserves the analysis exit/signal handling below.
-RDF_ANALYSIS_LD_LIBRARY_PATH="${{LD_LIBRARY_PATH:-}}" run_helper_python - {request_cpus} ./{exe_relpath} {config_runtime_path} <<'RDF_CPU_EXEC'
+RDF_ANALYSIS_PYTHONPATH="${{PYTHONPATH:-}}" RDF_ANALYSIS_LD_LIBRARY_PATH="${{LD_LIBRARY_PATH:-}}" run_helper_python - {request_cpus} ./{exe_relpath} {config_runtime_path} <<'RDF_CPU_EXEC'
 import os, sys
 os.environ['LD_LIBRARY_PATH'] = os.environ.pop('RDF_ANALYSIS_LD_LIBRARY_PATH')
+os.environ['PYTHONPATH'] = os.environ.pop('RDF_ANALYSIS_PYTHONPATH')
 count = int(sys.argv[1])
 allowed = sorted(os.sched_getaffinity(0))
 for key in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
@@ -914,6 +785,13 @@ def _classad_string(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def condor_config_return_remap(log_directory, config_file):
+    """Keep each returned worker configuration with its Condor attempt logs."""
+    filename = f"returned_$(Cluster)_$(Process)_{os.path.basename(config_file)}"
+    destination = os.path.abspath(os.path.join(log_directory, filename))
+    return "transfer_output_remaps = " + _classad_string(f"{config_file}={destination}")
+
+
 def _condor_machine_exclusion_expressions():
     """Build exact-host and regex machine veto expressions."""
     expressions = [
@@ -986,19 +864,31 @@ def generate_condor_submit(
     include_aux=True,
     shared_dir_name=None,
     shared_archive_name=None,
-    config_file="submit_config.txt",
+    config_file="submit_config.yaml",
     container_image="",
     sample_name="",
     run_name="",
+    job_indices=None,
+    runscript_path=None,
 ):
     _warn_ignored_option(eos_sched, 'eos_sched')
     Path(main_dir + "/condor_logs").mkdir(parents=True, exist_ok=True)
-    transfer_files = [
-        f"{main_dir}/job_$(Process)/{config_file}",
-        f"{main_dir}/job_$(Process)/floats.txt",
-        f"{main_dir}/job_$(Process)/ints.txt",
-        f"{main_dir}/job_$(Process)/site_redirectors.json",
-    ]
+    job_selector = "$(Process)"
+    queue = f"queue {jobs}"
+    if job_indices is not None:
+        indices = tuple(job_indices)
+        if len(indices) != jobs or len(set(indices)) != jobs or any(type(i) is not int or i < 0 for i in indices):
+            raise ValueError("job_indices must identify each queued job exactly once with a nonnegative integer")
+        job_selector = "$(RDFJobIndex)"
+        queue = "queue RDFJobIndex in " + ",".join(map(str, indices))
+    worker_dir = f"{main_dir}/job_{job_selector}"
+    transfer_files = [f"{worker_dir}/{config_file}"]
+    # ProductionManager workers have no per-job redirector manifest.
+    if config_file not in {"job_config.yaml", "job_config.runtime.yaml", "job_config.txt"}:
+        transfer_files.append(f"{worker_dir}/site_redirectors.json")
+    if get_config_extension(config_file) == ".txt" or config_file in {"job_config.yaml", "job_config.runtime.yaml"}:
+        extension = ".runtime.yaml" if config_file == "job_config.runtime.yaml" else get_config_extension(config_file)
+        transfer_files.extend(f"{worker_dir}/{key}{extension}" for key in ("floats", "ints"))
     if shared_dir_name:
         transfer_files.append(f"{main_dir}/{shared_dir_name}")
     elif shared_archive_name:
@@ -1006,12 +896,12 @@ def generate_condor_submit(
         if os.path.exists(archive_path):
             transfer_files.append(archive_path)
     else:
-        transfer_files.append(f"{main_dir}/job_$(Process)/{exe_relpath}")
+        transfer_files.append(f"{worker_dir}/{exe_relpath}")
         if include_aux:
-            transfer_files.append(f"{main_dir}/job_$(Process)/aux")
+            transfer_files.append(f"{worker_dir}/aux")
         if x509loc:
             x509_name = os.path.basename(x509loc)
-            transfer_files.append(f"{main_dir}/job_$(Process)/{x509_name}")
+            transfer_files.append(f"{worker_dir}/{x509_name}")
     if extra_transfer_files:
         transfer_files.extend(extra_transfer_files)
     filtered_files = []
@@ -1046,26 +936,179 @@ def generate_condor_submit(
     )
 
     submit_file = f"""universe = vanilla
-Executable     =  {main_dir}/condor_runscript.sh
+Executable     =  {runscript_path or os.path.join(main_dir, "condor_runscript.sh")}
 Should_Transfer_Files     = YES
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 Notification     = never
 {labels_block}transfer_input_files = {transfer_input_files}
-environment = "CONDOR_PROC=$(Process) CONDOR_CLUSTER=$(Cluster)"
+environment = "CONDOR_PROC={job_selector} CONDOR_CLUSTER=$(Cluster)"
 {requirements_block}{stream_block}{want_os_block}{container_block}+RequestMemory={request_memory}
 +RequestCpus={request_cpus}
 +RequestDisk={request_disk}
 +MaxRuntime={max_runtime}
 max_transfer_input_mb = 10000
 WhenToTransferOutput=On_Exit
-transfer_output_files = {config_file}
+transfer_output_files = {_config_io.runtime_yaml_path(config_file)}
+{condor_config_return_remap(os.path.join(main_dir, "condor_logs"), str(_config_io.runtime_yaml_path(config_file)))}
 
 Output     = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stdout
 Error      = {main_dir}/condor_logs/log_$(Cluster)_$(Process).stderr
 Log        = {main_dir}/condor_logs/{log_name}
-queue {jobs}
+{queue}
 """
     return ensure_condor_machine_exclusion(submit_file)
+
+
+def _package_worker_yaml(directory):
+    """Stage the installed pure Python YAML reader for the pre-setup worker interpreter."""
+    from importlib.metadata import distribution
+    import tempfile
+    import zipfile
+
+    target = Path(directory) / "rdf_worker_yaml.zip"
+    # Include the distribution's license alongside the portable Python modules.
+    dist = distribution("PyYAML")
+    sources = [(path, "yaml/" + path.name) for path in sorted(Path(yaml.__file__).parent.glob("*.py"))]
+    sources += [(dist.locate_file(path), str(path)) for path in dist.files or ()
+                if "license" in path.name.lower() and path.name.lower() != "licenses"]
+    with tempfile.NamedTemporaryFile(dir=directory, suffix=".zip", delete=False) as temp:
+        temporary = Path(temp.name)
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+            for source, name in sources:
+                archive.write(source, name)
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return str(target.resolve())
+
+
+def materialize_retry_submit(content, submission_dir, config_path):
+    """Give a new retry its own YAML and wrapper, preserving historical receipts and launchers."""
+    from tempfile import mkdtemp
+    import re
+    directory = Path(submission_dir).resolve()
+    transfer = re.search(r"(?mi)^([ \t]*transfer_input_files\s*=\s*)([^\n]+)", content)
+    if not transfer:
+        raise ValueError("Retry needs an explicit transfer_input_files list")
+    inputs = [item.strip() for item in transfer[2].split(",") if item.strip()]
+    names = {Path(item).name for item in inputs}
+    legacy_name = next((name for name in ("submit_config.txt", "job_config.txt") if name in names), None)
+    if legacy_name is None:
+        if any(Path(item).name == "rdf_worker_yaml.zip" and (directory / item).is_file() for item in inputs):
+            return content
+        package = directory / "rdf_worker_yaml.zip"
+        if not package.is_file():
+            _package_worker_yaml(directory)
+        inputs = [item for item in inputs if Path(item).name != package.name]
+        inputs.append(str(package))
+        return content[:transfer.start(2)] + ",".join(inputs) + content[transfer.end(2):]
+
+    source = Path(config_path)
+    executable = re.search(r"(?mi)^\s*executable\s*=\s*(.+?)\s*$", content)
+    if not executable:
+        raise ValueError("Legacy retry has no executable in its Condor submit description")
+    wrapper = directory / executable[1].strip().strip('"')
+    if not wrapper.is_file():
+        raise ValueError(f"Legacy retry wrapper is unavailable: {wrapper}. Prepare a new YAML campaign from the original spec.")
+    scripts = {wrapper}
+    for item in inputs:
+        if Path(item).name == "condor_runscript_inner.sh":
+            scripts.add(directory / item)
+    scripts = {p: p.read_text() for p in scripts}
+    if not any("run_helper_python" in text and legacy_name in text for text in scripts.values()):
+        raise ValueError(f"Unrecognized legacy worker {wrapper}. Prepare a new YAML campaign from its execution settings.")
+
+    configs_dir = directory / "resubmissions"
+    configs_dir.mkdir(exist_ok=True)
+    retry = Path(mkdtemp(prefix="yaml-", dir=configs_dir))
+    target = retry / Path(legacy_name).with_suffix(".yaml").name
+    config = read_config(source)
+    old_constants, new_constants = set(), []
+    for key, stem in (("floatConfig", "floats"), ("intConfig", "ints")):
+        ref = config.get(key)
+        if not ref or get_config_extension(ref) == ".yaml":
+            continue
+        candidates = [source.parent / ref, source.parent / Path(ref).name]
+        for input_path in inputs:
+            entry = directory / input_path
+            if entry.is_dir():
+                candidates.extend((entry / ref, entry / Path(ref).name))
+            elif entry.name == Path(ref).name:
+                candidates.append(entry)
+        constant = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if constant is None:
+            # The reference may live in a sealed input archive. It remains a
+            # read-only dependency and is resolved by the original worker layout.
+            continue
+        converted = retry / (stem + ".yaml")
+        write_config(read_config(constant), converted)
+        config[key] = converted.name
+        old_constants.add(constant.name)
+        new_constants.append(str(converted))
+    write_config(config, target)
+    reader = _package_worker_yaml(retry)
+
+    for path, script in scripts.items():
+        # The original worker can also have a separate container launcher.
+        if "run_helper_python" in script:
+            script = re.sub(r"(?ms)^run_helper_python - <<'RDF_LEGACY_CONFIG'\n.*?^RDF_LEGACY_CONFIG\n", "", script)
+            script = script.replace(str(_config_io.runtime_yaml_path(legacy_name)), target.name).replace(legacy_name, target.name)
+            # Replace the known generated input and output helpers. The remainder
+            # of the original wrapper owns its interpreter, environment and executable.
+            if __package__:
+                from .refresh_xrootd_runtime import patch_probe_functions
+            else:
+                from refresh_xrootd_runtime import patch_probe_functions
+            script = patch_probe_functions(script)
+            def update_output(match):
+                body = match[1]
+                path_arg = re.search(r"""(?m)^cfg = read_config\(["']([^"']+)["']\)""", body)
+                if not path_arg:
+                    return match[0]
+                pre, post = stage_outputs_blocks(config_file=path_arg[1])
+                if "def normalize_dest" in body:
+                    return post.strip("\n")
+                if "__orig_saveFile" in body and "save_file = cfg.get(" in body:
+                    return pre.strip("\n")
+                return match[0]
+            script = re.sub(r"(?ms)^run_helper_python - << 'PY'\n(.*?)^PY$", update_output, script)
+            # Scope the dependency to the helper interpreter, preserving the analysis environment.
+            script = script.replace('env -u PYTHONHOME LD_LIBRARY_PATH=',
+                                    'env -u PYTHONHOME PYTHONPATH="$PWD/rdf_worker_yaml.zip${PYTHONPATH:+:$PYTHONPATH}" LD_LIBRARY_PATH=')
+        cloned = retry / path.name
+        cloned.write_text(script)
+        cloned.chmod(path.stat().st_mode & 0o777)
+
+    updated = []
+    for item in inputs:
+        if Path(item).name == legacy_name:
+            updated.append(str(target))
+        elif Path(item).name in {"floats.txt", "ints.txt"} and not (directory / item).is_file():
+            # Older generated descriptors listed both even for jobs without constants.
+            continue
+        elif Path(item).name == "rdf_worker_yaml.zip" or Path(item).name in old_constants:
+            continue
+        elif directory / item in scripts:
+            updated.append(str(retry / Path(item).name))
+        else:
+            updated.append(item)
+    updated.extend(new_constants)
+    updated.append(reader)
+    content = content[:transfer.start(2)] + ",".join(updated) + content[transfer.end(2):]
+    content = re.sub(r"(?mi)^([ \t]*executable\s*=\s*)[^\n]+",
+                     lambda m: m[1] + str(retry / wrapper.name), content)
+    content = content.replace(str(_config_io.runtime_yaml_path(legacy_name)), target.name).replace(legacy_name, target.name)
+    remap = condor_config_return_remap(str(directory / "condor_logs"), target.name)
+    current = re.search(r'(?mi)^([ \t]*transfer_output_remaps\s*=\s*)"([^"\n]*)"[ \t]*$', content)
+    if current:
+        mappings = [item for item in current[2].split(";") if item and item.partition("=")[0] != target.name]
+        mappings.append(remap.split('"', 2)[1])
+        content = content[:current.start()] + current[1] + '"' + ";".join(mappings) + '"' + content[current.end():]
+    else:
+        content = re.sub(r"(?mi)^([ \t]*queue\b)", lambda m: remap + "\n" + m[1], content)
+    return content
 
 
 def write_submit_files(
@@ -1088,7 +1131,7 @@ def write_submit_files(
     eos_sched=False,
     include_aux=True,
     shared_dir_name=None,
-    config_file="submit_config.txt",
+    config_file=None,
     container_setup="",
     python_env_tarball=None,
     shared_archive_name=None,
@@ -1096,14 +1139,19 @@ def write_submit_files(
     sample_name="",
     run_name="",
     sizing_pilot_entries=0,
+    job_indices=None,
+    launch_dir=None,
 ):
     _warn_ignored_option(eos_sched, 'eos_sched')
-    submit_path = os.path.join(main_dir, "condor_submit.sub")
-    runscript_path = os.path.join(main_dir, "condor_runscript.sh")
+    config_file = config_file or _config_io.job_config_path(Path(main_dir) / "job_0").name
+    launch_dir = launch_dir or main_dir
+    submit_path = os.path.join(launch_dir, "condor_submit.sub")
+    runscript_path = os.path.join(launch_dir, "condor_runscript.sh")
 
     submit_extra_transfer_files = list(extra_transfer_files) if extra_transfer_files else []
+    submit_extra_transfer_files.append(_package_worker_yaml(launch_dir))
     inner_script_name = "condor_runscript_inner.sh"
-    inner_runscript_path = os.path.join(main_dir, inner_script_name)
+    inner_runscript_path = os.path.join(launch_dir, inner_script_name)
 
     if container_setup:
         submit_extra_transfer_files.append(inner_runscript_path)
@@ -1154,6 +1202,8 @@ def write_submit_files(
                 container_image=(container_setup or "").strip(),
                 sample_name=sample_name,
                 run_name=run_name,
+                job_indices=job_indices,
+                runscript_path=runscript_path,
             )
         )
     return submit_path

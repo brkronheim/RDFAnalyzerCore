@@ -159,7 +159,8 @@ struct Config {
 // Config loading functions
 // ===========================================================================
 
-/// Load STXS configuration from a text-format bin config file.
+/// Load a YAML sequence of {analysis_bin, label, fine_categories} mappings.
+/// The legacy text reader also accepts bin definitions.
 /// The bin config file has one line per analysis bin:
 ///   <bin_number> <label> <fine_cat1,fine_cat2,...>
 /// Comments (lines starting with #) and inline comments are supported.
@@ -169,17 +170,12 @@ Config loadConfig(const std::string &binConfigPath,
                   const std::string &fineBranch,
                   bool enabled);
 
-/// Load rows: <fine_category> <pt_bin> <jet_pt_bin> <scale_bin> <acceptance_fallback_0_or_1>.
+/// Load YAML records with fine_category, pt_bin, jet_pt_bin, scale_bin and acceptance_fallback.
+/// Legacy rows: <fine_category> <pt_bin> <jet_pt_bin> <scale_bin> <acceptance_fallback_0_or_1>.
 /// Unmapped categories receive unity migration weights. Indices must be positive.
 void loadMigrationBinConfig(const std::string &path, Config &config);
 
-/// Load the full STXS configuration from a YAML file (preferred for genericity).
-/// The YAML file specifies:
-///   - enabled, bin_config, aux_directory
-///   - branches (coarse, fine, analysis_coarse, analysis_fine)
-///   - acceptance_weights: list of {process, channel, up: {file, hist}, down: {file, hist}}
-///   - migration_weights: list of {production_mode, ...histogram specs...}
-///   - signal_process_rules: list of {keyword, process_id}
+/// Reserved historical entry point. Throws for unsupported combined documents.
 Config loadConfigFromYaml(const std::string &yamlConfigPath);
 
 // ===========================================================================

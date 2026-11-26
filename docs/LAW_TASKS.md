@@ -1,9 +1,10 @@
 # LAW Task System Reference
 
-> **Quick start**: See [`core/python/law/README.md`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/README.md) for environment setup
-> and an introduction to the broader batch-submission workflows.  This document
-> is a detailed reference for the analysis-specific tasks defined in
-> [`core/python/law/analysis_tasks.py`](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/analysis_tasks.py) and their supporting modules.
+These adapters support existing LAW campaigns. New campaigns use the
+[Snakemake workflow](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md). Current preparation
+writes YAML. Archived workers may still contain `submit_config.txt`.
+
+This reference covers campaigns submitted under LAW and analysis wrappers that still import its tasks. Continue monitoring those jobs with their original controller. To start a new production or resume from completed products, use the [Snakemake workflow](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md). Historical task setup is documented in the [LAW compatibility guide](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/core/python/law/README.md).
 
 ---
 
@@ -54,6 +55,8 @@ YAML manifest:
 | Manifest-aware fits | `ManifestFitTask` | run Combine or lightweight analysis fits on manifest datacards |
 
 Most analysis tasks live in `core/python/law/analysis_tasks.py`; merge tasks live in `core/python/law/merge_tasks.py`.
+The [Snakemake downstream workflow](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md#downstream-analysis)
+uses these same manifest merge, plotting, datacard, and fit implementations.
 They are invoked with the standard LAW command:
 
 ```bash
@@ -100,8 +103,8 @@ Supporting modules:
 |--------|---------|
 | `core/python/law/branch_map_policy.py` | Multi-dimensional branch map generation |
 | `core/python/law/workflow_executors.py` | Dask distributed execution back-end |
-| `core/python/law/failure_handler.py` | Smart retry logic with failure classification |
-| `core/python/law/performance_recorder.py` | Wall-time, RSS and throughput metrics |
+| `core/python/rdfproduction/retry.py` | Smart retry logic with failure classification |
+| `core/python/rdfproduction/performance.py` | Wall-time, RSS and throughput metrics |
 
 ---
 
@@ -130,10 +133,10 @@ available on both tasks.
 
 ### `--submit-config` *(str, required)*
 
-Path to the `submit_config.txt` template file.  The task reads this file,
+Path to the `submit_config.yaml` template file.  The task reads this file,
 overrides the dataset-specific keys automatically, copies referenced auxiliary
-files (`.txt`, `.yaml`) into the per-job directory, and writes a finalised
-`submit_config.txt` for the executable.
+files into the per-job directory and writes a
+`submit_config.yaml` for the executable.
 
 Keys overridden automatically per dataset:
 
@@ -157,7 +160,7 @@ All other keys in the template are forwarded verbatim.
 Path to the compiled analysis executable.  The executable is invoked as:
 
 ```bash
-<exe> submit_config.txt
+<exe> submit_config.yaml
 ```
 
 from inside the per-job directory.  The path is resolved to an absolute path
@@ -301,7 +304,7 @@ skimRun_<name>/
 │   └── test_passed.txt         ← RunSkimTestJob success marker
 ├── jobs/
 │   └── <dataset_name>/
-│       └── submit_config.txt  ← per-dataset config written by the task
+│       └── submit_config.yaml  ← per-dataset config written by the task
 ├── outputs/
 │   └── <dataset_name>/
 │       ├── skim.root           ← skimmed event tree
@@ -317,7 +320,7 @@ are partitioned beneath each dataset:
 
 ```text
 skimRun_<name>/
-├── jobs/<dataset_name>/job_<i>/submit_config.txt
+├── jobs/<dataset_name>/job_<i>/submit_config.yaml
 ├── outputs/<dataset_name>/job_<i>/{skim.root,meta.root}
 └── job_outputs/
     ├── <dataset_name>_b<branch>.done
@@ -349,14 +352,14 @@ LAW behaviour is preserved.
 ```bash
 # Standard mode with pre-flight test (default)
 law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+    --submit-config analyses/myAnalysis/cfg/skim_config.yaml \
     --exe build/analyses/myAnalysis/myanalysis \
     --name mySkimRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml
 
 # Skip the pre-flight test
 law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+    --submit-config analyses/myAnalysis/cfg/skim_config.yaml \
     --exe build/analyses/myAnalysis/myanalysis \
     --name mySkimRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
@@ -364,7 +367,7 @@ law run SkimTask \
 
 # Automatic chain: GetRucioFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask
 law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+    --submit-config analyses/myAnalysis/cfg/skim_config.yaml \
     --exe build/analyses/myAnalysis/myanalysis \
     --name mySkimRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
@@ -372,7 +375,7 @@ law run SkimTask \
 
 # Override the file-list task name when it differs from --name
 law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+    --submit-config analyses/myAnalysis/cfg/skim_config.yaml \
     --exe build/analyses/myAnalysis/myanalysis \
     --name mySkimRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
@@ -380,7 +383,7 @@ law run SkimTask \
 
 # Same task, different executor: delegate to concrete per-dataset HTCondor submission
 law run SkimTask \
-        --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+        --submit-config analyses/myAnalysis/cfg/skim_config.yaml \
         --exe build/analyses/myAnalysis/myanalysis \
         --name mySkimRun \
         --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
@@ -532,7 +535,7 @@ When `--skim-name` is set for a standard manifest-mode skim,
 histRun_<name>/
 ├── jobs/
 │   └── <dataset_name>/
-│       └── submit_config.txt
+│       └── submit_config.yaml
 ├── outputs/
 │   └── <dataset_name>/
 │       └── (histogram ROOT files written by the executable)
@@ -547,7 +550,7 @@ histRun_<name>/
 
 ```bash
 law run HistFillTask \
-    --submit-config analyses/myAnalysis/cfg/hist_config.txt \
+    --submit-config analyses/myAnalysis/cfg/hist_config.yaml \
     --exe build/analyses/myAnalysis/myanalysis \
     --name myHistRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml
@@ -557,7 +560,7 @@ law run HistFillTask \
 
 ```bash
 law run HistFillTask \
-    --submit-config analyses/myAnalysis/cfg/hist_config.txt \
+    --submit-config analyses/myAnalysis/cfg/hist_config.yaml \
     --exe build/analyses/myAnalysis/myanalysis \
     --name myHistRun \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
@@ -636,7 +639,7 @@ groups:
 
 Each key under `meta_files` is the `sampleName` embedded in the histogram
 name by `CounterService`.  This must exactly match the `sample` / `type` key
-used in the `submit_config.txt` during the analysis run that produced the meta
+used in the `submit_config.yaml` during the analysis run that produced the meta
 ROOT file.
 
 ### Output: `stitchWeights_<name>/stitch_weights.json`
@@ -663,7 +666,7 @@ sf = cset["wjets_ht"].evaluate("wjets_ht_0", int(stitch_id))
 
 **C++ (CorrectionManager):**
 
-In `submit_config.txt`, point `correctionlibConfig` at the JSON file and
+In `submit_config.yaml`, point `correctionlibConfig` at the JSON file and
 call `CorrectionManager::evaluate("wjets_ht", sample_name, stitch_id)`.
 
 ### Example Command
@@ -911,7 +914,7 @@ class MyTask(MyMixin, DaskWorkflow):
 
 ## 8. Failure Handling
 
-Source: `core/python/law/failure_handler.py`
+Source: `core/python/rdfproduction/retry.py`
 
 The failure handler module provides smart retry logic that classifies each
 exception into a category and applies a per-category retry policy with
@@ -1040,7 +1043,7 @@ Key methods:
 
 ## 9. Performance Recording
 
-Source: `core/python/law/performance_recorder.py`
+Source: `core/python/rdfproduction/performance.py`
 
 ### `PerformanceRecorder` Context Manager
 
@@ -1110,7 +1113,7 @@ Writes a JSON file to `path` (parent directories created automatically):
 
 #### `estimate_job_input_bytes(job_dir) → int`
 
-Reads `submit_config.txt` inside `job_dir` and sums the sizes of all locally
+Reads `submit_config.yaml` inside `job_dir` and sums the sizes of all locally
 accessible files listed under `fileList`.  Remote XRootD paths are skipped.
 Returns `0` if the config is absent or all files are remote.
 
@@ -1136,8 +1139,8 @@ This example shows a full end-to-end LAW workflow: skim pass → histogram fill
 ```
 analyses/myAnalysis/
 ├── cfg/
-│   ├── skim_config.txt        ← submit_config.txt template for skim pass
-│   ├── hist_config.txt        ← submit_config.txt template for hist fill
+│   ├── skim_config.yaml        ← submit_config.yaml template for skim pass
+│   ├── hist_config.yaml        ← submit_config.yaml template for hist fill
 │   ├── datasets.yaml          ← dataset manifest
 │   └── stitch_config.yaml     ← stitching derivation config
 build/
@@ -1155,7 +1158,7 @@ source core/python/law/env.sh
 
 ```bash
 law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+    --submit-config analyses/myAnalysis/cfg/skim_config.yaml \
     --exe build/analyses/myAnalysis/myanalysis \
     --name v1 \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
@@ -1169,7 +1172,7 @@ not re-processed on subsequent runs.
 
 ```bash
 law run HistFillTask \
-    --submit-config analyses/myAnalysis/cfg/hist_config.txt \
+    --submit-config analyses/myAnalysis/cfg/hist_config.yaml \
     --exe build/analyses/myAnalysis/myanalysis \
     --name v1 \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
@@ -1196,7 +1199,7 @@ Replace `--workflow local` with `--workflow dask` for any task:
 
 ```bash
 law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/skim_config.txt \
+    --submit-config analyses/myAnalysis/cfg/skim_config.yaml \
     --exe build/analyses/myAnalysis/myanalysis \
     --name v1 \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \

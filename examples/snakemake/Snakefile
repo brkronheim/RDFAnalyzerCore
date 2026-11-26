@@ -1,0 +1,283 @@
+import re
+import sys
+import json
+from pathlib import Path
+
+
+workflow_dir = Path(workflow.basedir).resolve()
+core_python = workflow_dir.parents[1] / "core/python"
+if not (core_python / "rdfproduction").is_dir():
+    core_python = workflow_dir.parents[2] / "python"
+if str(core_python) not in sys.path:
+    sys.path.insert(0, str(core_python))
+
+from rdfproduction.campaign import describe_campaign, era_artifacts, execution_slots, inspect_campaign, preflight_campaign, publish_plan
+
+campaign = describe_campaign(config)
+inspection = inspect_campaign(campaign)
+era_specs = campaign["era_specs"]
+output_root = campaign["output_root"]
+stitching = None
+execution_specs = {era: str(path) for era, path in era_specs.items()}
+if "stitching" in config:
+    from rdfproduction.stitching import describe_stitching, stitching_artifacts
+
+    stitching = describe_stitching(config["stitching"], campaign, inspection)
+    stitch_artifacts = stitching_artifacts(output_root, "{era}")
+    application_spec = str(stitch_artifacts["application_spec"])
+    weights = str(stitch_artifacts["weights"])
+    cross_sections = str(stitch_artifacts["cross_sections"])
+    validation_report = str(stitch_artifacts["validation"])
+    execution_specs = {era: application_spec.format(era=era) for era in era_specs}
+    counter_artifacts = era_artifacts(stitching["source"]["output_root"], "{era}")
+condor_eras = [era for era, record in inspection["eras"].items()
+               if record["inspection"].get("backend", "htcondor") == "htcondor"]
+plan_path = str(campaign["plan_path"])
+preflight_path = str(campaign["preflight_path"])
+generated_specs = [str(path) for path in campaign["generated"].values()]
+artifacts = {key: str(path) for key, path in era_artifacts(output_root, "{era}").items()}
+prepared = artifacts["prepared"]
+smoke_receipt = artifacts["smoke"]
+submitted = artifacts["submitted"]
+output_index = artifacts["output_index"]
+merge_receipt = artifacts["merge_receipt"]
+plot_report = artifacts["plot_report"]
+python = config.get("python", sys.executable)
+verify_options = ["--storage"] if config.get("verify_storage", False) else []
+workflow_root = str(core_python)
+retry_limit = config.get("condor_retry_limit")
+allow_partial = config.get("condor_allow_partial", False)
+if retry_limit is not None and (type(retry_limit) is not int or retry_limit < 0):
+    raise ValueError("condor_retry_limit must be a nonnegative integer")
+if type(allow_partial) is not bool:
+    raise ValueError("condor_allow_partial must be a boolean")
+condor_completion = (["--retry-limit", str(retry_limit)] if retry_limit is not None else [])
+if allow_partial:
+    condor_completion.append("--allow-partial")
+if "condor_runs" not in workflow.global_resources:
+    workflow.register_resource("condor_runs", campaign["max_parallel_eras"])
+
+campaign_plotting = True
+
+
+def preparation_inputs(wildcards):
+    if inspection["eras"][wildcards.era]["inspection"]["task_parameters"]["sizing_pilots"]:
+        return []
+    return [prepared.format(era=wildcards.era)]
+
+
+def execution_threads(plan, era):
+    return execution_slots(plan["eras"][era]["inspection"])
+
+
+downstream = {}
+refill_plans = {}
+downstream_uses_production = True
+if "downstream" in config:
+    from rdfproduction.downstream import check_refill_settings, describe_downstream, downstream_targets
+    from rdfproduction.campaign import validate_run_ownership
+    from rdfproduction.controller import _check_build_recipes
+    from rdfproduction.specs import inspect_spec
+
+    downstream = describe_downstream(config["downstream"], era_specs)
+    if any("saved_production" in settings for settings in downstream.values()):
+        raise ValueError("Use DownstreamSnakefile to start from saved_production without planning a campaign")
+    refill_plans = {era: inspect_spec(settings["refill"]) for era, settings in downstream.items()
+                    if "refill" in settings}
+    owners = {f"{era} production": record["inspection"] for era, record in inspection["eras"].items()}
+    if stitching:
+        owners.update({f"{era} counters": record["inspection"]
+                       for era, record in stitching["source_plan"]["eras"].items()})
+    owners.update({f"{era} refill": plan for era, plan in refill_plans.items()})
+    validate_run_ownership(owners)
+    _check_build_recipes(owners.values())
+    for era, plan in refill_plans.items():
+        check_refill_settings(plan["task_parameters"], inspection["eras"][era]["inspection"]["task_parameters"])
+
+joint = None
+if "joint_fit" in config:
+    from rdfproduction.joint_fit import describe_joint_fit, joint_targets
+
+    joint = describe_joint_fit(config["joint_fit"], downstream, output_root)
+
+wildcard_constraints:
+    era="(?:" + "|".join(re.escape(era) for era in era_specs) + ")"
+
+resource_scopes:
+    condor_runs="global"
+
+localrules: plan_campaign, validate_runtimes, prepare_era, smoke_era, submit_era, execute_era, verify
+
+rule all:
+    input:
+        expand(merge_receipt, era=era_specs),
+        lambda w: plot_products if "plotting" in config else [],
+        expand(validation_report, era=era_specs) if stitching else [],
+        downstream_targets(downstream, output_root) if downstream else [],
+        joint_targets(joint, output_root) if joint else []
+
+rule plan:
+    input:
+        plan_path,
+        [str(stitching["source"]["plan_path"])] if stitching else []
+
+rule preflight:
+    input:
+        str(stitching["source"]["preflight_path"]) if stitching else preflight_path
+
+rule prepare:
+    input:
+        expand(str(counter_artifacts["prepared"]) if stitching else prepared, era=era_specs)
+
+rule smoke:
+    input:
+        expand(str(counter_artifacts["smoke"]) if stitching else smoke_receipt, era=era_specs)
+
+rule submit:
+    input:
+        expand(submitted, era=condor_eras)
+
+rule production:
+    input:
+        expand(output_index, era=era_specs)
+
+rule verify:
+    input:
+        indexes=expand(output_index, era=era_specs),
+        receipts=expand(merge_receipt, era=era_specs)
+    params:
+        python=python,
+        core=workflow_root,
+        verify_options=verify_options
+    log:
+        str(output_root / "logs" / "verify.log")
+    shell:
+        r"""
+        mkdir -p -- "$(dirname -- {log:q})"
+        export PYTHONPATH={params.core:q}"${{PYTHONPATH:+:$PYTHONPATH}}"
+        (
+            indexes=({input.indexes:q})
+            receipts=({input.receipts:q})
+            for i in "${{!indexes[@]}}"; do
+                {params.python:q} -m rdf_production verify --output-index "${{indexes[i]}}" \
+                    --merge-receipt "${{receipts[i]}}" {params.verify_options:q}
+            done
+        ) 2>&1 | tee {log:q}
+        """
+
+rule plan_campaign:
+    input:
+        [str(path) for path in campaign["inputs"]]
+    output:
+        plan=plan_path,
+        specs=generated_specs
+    params:
+        plan_id=inspection["plan_id"]
+    run:
+        publish_plan(campaign)
+
+rule validate_runtimes:
+    input:
+        plan=plan_path,
+        specs=list(execution_specs.values())
+    output:
+        preflight_path
+    params:
+        python=python
+    log:
+        str(output_root / "logs" / "preflight.log")
+    run:
+        preflight_campaign(campaign, python=params.python, log=log[0],
+                           specifications=list(input.specs))
+
+rule prepare_era:
+    input:
+        spec=lambda wildcards: execution_specs[wildcards.era],
+        ready=preflight_path
+    output:
+        prepared
+    params:
+        python=python,
+        core=workflow_root
+    log:
+        str(output_root / "{era}" / "logs" / "prepare.log")
+    shell:
+        "PYTHONPATH={params.core:q}\"${{PYTHONPATH:+:$PYTHONPATH}}\" "
+        "{params.python:q} -m production_campaign prepare {input.spec:q} --receipt {output:q} "
+        "2>&1 | tee {log:q}"
+
+rule smoke_era:
+    input:
+        spec=lambda wildcards: execution_specs[wildcards.era],
+        ready=preflight_path,
+        prepared=prepared
+    output:
+        smoke_receipt
+    params:
+        python=python,
+        core=workflow_root
+    log:
+        str(output_root / "{era}" / "logs" / "smoke.log")
+    shell:
+        "PYTHONPATH={params.core:q}\"${{PYTHONPATH:+:$PYTHONPATH}}\" "
+        "{params.python:q} -m production_campaign smoke {input.spec:q} --receipt {output:q} "
+        "2>&1 | tee {log:q}"
+
+rule execute_era:
+    input:
+        spec=lambda wildcards: execution_specs[wildcards.era],
+        ready=preflight_path,
+        prepared=preparation_inputs
+    output:
+        output_index
+    params:
+        python=python,
+        core=workflow_root,
+        completion=lambda wildcards: condor_completion if wildcards.era in condor_eras else []
+    threads:
+        lambda wildcards: execution_threads(inspection, wildcards.era)
+    resources:
+        condor_runs=lambda wildcards: int(wildcards.era in condor_eras)
+    log:
+        str(output_root / "{era}" / "logs" / "production.log")
+    shell:
+        "PYTHONPATH={params.core:q}\"${{PYTHONPATH:+:$PYTHONPATH}}\" "
+        "{params.python:q} -m rdf_production execute {input.spec:q} --output-index {output:q} "
+        "--local-workers {threads} {params.completion:q} "
+        "2>&1 | tee {log:q}"
+
+rule submit_era:
+    input:
+        spec=lambda wildcards: execution_specs[wildcards.era],
+        ready=preflight_path,
+        prepared=preparation_inputs
+    output:
+        submitted
+    params:
+        python=python,
+        core=workflow_root
+    resources:
+        condor_runs=1
+    log:
+        str(output_root / "{era}" / "logs" / "submit.log")
+    shell:
+        "PYTHONPATH={params.core:q}\"${{PYTHONPATH:+:$PYTHONPATH}}\" "
+        "{params.python:q} -m production_campaign submit {input.spec:q} --receipt {output:q} "
+        "2>&1 | tee {log:q}"
+
+merge_eras = era_specs
+merge_index = output_index
+merge_resources = campaign
+include: "merge.smk"
+
+if "plotting" in config:
+    include: "plotting.smk"
+
+if stitching:
+    include: "stitching.smk"
+
+if downstream:
+    include: "downstream.smk"
+
+if joint:
+    include: "joint.smk"

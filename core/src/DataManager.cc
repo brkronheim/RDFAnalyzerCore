@@ -1,3 +1,6 @@
+#include "PreFilterRegistration.h"
+#include "ConfigBoolean.h"
+#include <unordered_set>
 #include <api/IConfigurationProvider.h>
 #include <algorithm>
 #include <cmath>
@@ -268,7 +271,18 @@ ROOT::RDF::RNode defineSmallVectorColumn(
  * @brief Construct a new DataManager object
  * @param configProvider Reference to the configuration provider
  */
+namespace {
+std::string optionalSetting(const IConfigurationProvider& config, const std::string& key) {
+  const auto& values = config.getConfigMap();
+  return values.find(key) == values.end() ? std::string{} : config.get(key);
+}
+}
+
 DataManager::DataManager(const IConfigurationProvider &configProvider)
+    : DataManager(configProvider, {}) {}
+
+DataManager::DataManager(const IConfigurationProvider &configProvider,
+                         const std::vector<FriendTreeSpec> &friends)
     : chain_vec_m(makeTChain(configProvider)), df_m(ROOT::RDataFrame(0)) {
 
     // The config-backed constructor is for real input data. Do not silently
@@ -312,20 +326,30 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
 
     // Attach friend trees (from friendConfig) BEFORE wrapping in RDataFrame
     // so that all friend branches are visible to the RDataFrame at creation.
-    const std::string friendConfigFile = configProvider.get("friendConfig");
-    if (!friendConfigFile.empty() &&
-        std::filesystem::exists(configProvider.resolveConfigPath(friendConfigFile))) {
-      registerFriendTrees(configProvider);
+    std::vector<FriendTreeSpec> sourceFriends;
+    const auto &settings = configProvider.getConfigMap();
+    const auto configured = settings.find("friendConfig");
+    if (configured != settings.end() && !configured->second.empty()) {
+      sourceFriends = parseFriendTreeConfig(configProvider.resolveConfigPath(configured->second));
+    }
+    sourceFriends.insert(sourceFriends.end(), friends.begin(), friends.end());
+    std::unordered_set<std::string> friendAliases;
+    for (const auto &spec : sourceFriends) {
+      if (spec.alias.empty() || !friendAliases.insert(spec.alias).second) {
+        throw std::invalid_argument("DataManager: friend aliases must be nonempty and unique: '" +
+                                    spec.alias + "'");
+      }
+      attachSourceFriend(spec);
     }
 
     df_m = ROOT::RDataFrame(*chain_vec_m[0]);
 
     // Apply optional entry-range restriction.
-    // Written by law tasks when partition='entry_range' is selected.
+    // Worker partitions specify an inclusive begin and exclusive end.
     // Both keys must be present. Legacy filter mode ignores a lone bound;
     // opt-in source mode rejects it. Entry-range workers use one RDF thread.
-    const std::string firstEntryStr = configProvider.get("firstEntry");
-    const std::string lastEntryStr  = configProvider.get("lastEntry");
+    const std::string firstEntryStr = optionalSetting(configProvider, "firstEntry");
+    const std::string lastEntryStr  = optionalSetting(configProvider, "lastEntry");
     const auto modeSetting=configProvider.getConfigMap().find("entryRangeMode");
     const std::string rangeMode=modeSetting==configProvider.getConfigMap().end() ? "filter":modeSetting->second;
     if(rangeMode!="filter" && rangeMode!="source")
@@ -371,7 +395,7 @@ DataManager::DataManager(const IConfigurationProvider &configProvider)
 
     // Display a progress bar depending on batch status and ROOT version
   #if defined(HAS_ROOT_PROGRESS_BAR)
-    const auto batch = configProvider.get("batch");
+    const auto batch = optionalSetting(configProvider, "batch");
     const bool remoteJob = isRemoteCondorJob();
     if (!remoteJob && !isEnabledFlag(batch) && !batch.empty()) {
       ROOT::RDF::Experimental::AddProgressBar(df_m);
@@ -631,7 +655,7 @@ void DataManager::defineVectorImpl(std::string name,
 
 
 void DataManager::registerConstants(const IConfigurationProvider &configProvider, const std::string& floatConfigKey, const std::string& intConfigKey) {
-  std::string floatFile = configProvider.get(floatConfigKey);
+  std::string floatFile = optionalSetting(configProvider, floatConfigKey);
   if (!floatFile.empty()) {
     floatFile = configProvider.resolveConfigPath(floatFile);
   }
@@ -642,7 +666,7 @@ void DataManager::registerConstants(const IConfigurationProvider &configProvider
       defineConstant(pair.first, val);
     }
   }
-  std::string intFile = configProvider.get(intConfigKey);
+  std::string intFile = optionalSetting(configProvider, intConfigKey);
   if (!intFile.empty()) {
     intFile = configProvider.resolveConfigPath(intFile);
   }
@@ -657,7 +681,8 @@ void DataManager::registerConstants(const IConfigurationProvider &configProvider
 
 void DataManager::registerAliases(const IConfigurationProvider &configProvider, const std::string& aliasConfigKey) {
   auto aliasConfig = configProvider.parseMultiKeyConfig(
-      configProvider.get(aliasConfigKey) , {"existingName", "newName"});
+      optionalSetting(configProvider, aliasConfigKey) , {"existingName", "newName"});
+  if (aliasConfig.empty()) return;
   const auto columnNames = df_m.GetColumnNames();
   for (const auto &entryKeys : aliasConfig) {
     const auto& existing = entryKeys.at("existingName");
@@ -672,217 +697,82 @@ void DataManager::registerAliases(const IConfigurationProvider &configProvider, 
 }
 
 void DataManager::registerOptionalBranches(
-    const IConfigurationProvider &configProvider, const std::string& optionalBranchesConfigKey) {
-  const auto aliasConfig = configProvider.parseMultiKeyConfig(
-      configProvider.get(optionalBranchesConfigKey), {"name", "type", "default"});
-  std::cout << "Optional branches config: " << optionalBranchesConfigKey << std::endl;
-
-#if defined(HAS_DEFAULT_VALUE_FOR)
-  // Precompute existing columns to avoid calling DefaultValueFor on missing
-  // columns (which would throw). If a column does not exist, create it via
-  // saveVar which safely defines a per-sample constant.
-  const auto existingColumns = df_m.GetColumnNames();
-  std::unordered_set<std::string> existingSet(existingColumns.begin(), existingColumns.end());
-  for (const auto &entryKeys : aliasConfig) {
-    const int varType = std::stoi(entryKeys.at("type"));
-    const auto defaultValStr = entryKeys.at("default");
-    const auto varName = entryKeys.at("name");
-    const Bool_t defaultBool = defaultValStr == "1" ||
-                               defaultValStr == "true" ||
-                               defaultValStr == "True";
-    const bool columnExists = existingSet.find(varName) != existingSet.end();
-    if (columnExists) {
-      switch (varType) {
-      case 0:
-        df_m = df_m.DefaultValueFor<UInt_t>(varName, std::stoul(defaultValStr));
-        break;
-      case 1:
-        df_m = df_m.DefaultValueFor<Int_t>(varName, std::stoi(defaultValStr));
-        break;
-      case 2:
-        df_m = df_m.DefaultValueFor<UShort_t>(varName, std::stoul(defaultValStr));
-        break;
-      case 3:
-        df_m = df_m.DefaultValueFor<Short_t>(varName, std::stoi(defaultValStr));
-        break;
-      case 4:
-        df_m = df_m.DefaultValueFor<UChar_t>(varName, UChar_t(std::stoul(defaultValStr)));
-        break;
-      case 5:
-        df_m = df_m.DefaultValueFor<Char_t>(varName, Char_t(std::stoi(defaultValStr)));
-        break;
-      case 6:
-        df_m = df_m.DefaultValueFor<Float_t>(varName, std::stof(defaultValStr));
-        break;
-      case 7:
-        df_m = df_m.DefaultValueFor<Double_t>(varName, std::stod(defaultValStr));
-        break;
-      case 8:
-        df_m = df_m.DefaultValueFor<Bool_t>(varName, defaultBool);
-        break;
-      case 10:
-        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UInt_t>>(varName, {static_cast<UInt_t>(std::stoul(defaultValStr))});
-        break;
-      case 11:
-        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Int_t>>(varName, {std::stoi(defaultValStr)});
-        break;
-      case 12:
-        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UShort_t>>(varName, {static_cast<UShort_t>(std::stoul(defaultValStr))});
-        break;
-      case 13:
-        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Short_t>>(varName, {static_cast<Short_t>(std::stoi(defaultValStr))});
-        break;
-      case 14:
-        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<UChar_t>>(varName, {UChar_t(std::stoul(defaultValStr))});
-        break;
-      case 15:
-        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Char_t>>(varName, {Char_t(std::stoi(defaultValStr))});
-        break;
-      case 16:
-        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Float_t>>(varName, {std::stof(defaultValStr)});
-        break;
-      case 17:
-        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Double_t>>(varName, {std::stod(defaultValStr)});
-        break;
-      case 18:
-        df_m = df_m.DefaultValueFor<ROOT::VecOps::RVec<Bool_t>>(varName, {defaultBool});
-        break;
-      }
-    } else {
-      // Column missing — define it via saveVar
-      switch (varType) {
-      case 0:
-        df_m = saveVar<UInt_t>(std::stoul(defaultValStr), varName, df_m);
-        break;
-      case 1:
-        df_m = saveVar<Int_t>(std::stoi(defaultValStr), varName, df_m);
-        break;
-      case 2:
-        df_m = saveVar<UShort_t>(static_cast<UShort_t>(std::stoul(defaultValStr)), varName, df_m);
-        break;
-      case 3:
-        df_m = saveVar<Short_t>(static_cast<Short_t>(std::stoi(defaultValStr)), varName, df_m);
-        break;
-      case 4:
-        df_m = saveVar<UChar_t>(UChar_t(std::stoul(defaultValStr)), varName, df_m);
-        break;
-      case 5:
-        df_m = saveVar<Char_t>(Char_t(std::stoi(defaultValStr)), varName, df_m);
-        break;
-      case 6:
-        df_m = saveVar<Float_t>(std::stof(defaultValStr), varName, df_m);
-        break;
-      case 7:
-        df_m = saveVar<Double_t>(std::stod(defaultValStr), varName, df_m);
-        break;
-      case 8:
-        df_m = saveVar<Bool_t>(defaultBool, varName, df_m);
-        break;
-      case 10:
-        df_m = saveVar<ROOT::VecOps::RVec<UInt_t>>(ROOT::VecOps::RVec<UInt_t>{static_cast<UInt_t>(std::stoul(defaultValStr))}, varName, df_m);
-        break;
-      case 11:
-        df_m = saveVar<ROOT::VecOps::RVec<Int_t>>(ROOT::VecOps::RVec<Int_t>{std::stoi(defaultValStr)}, varName, df_m);
-        break;
-      case 12:
-        df_m = saveVar<ROOT::VecOps::RVec<UShort_t>>(ROOT::VecOps::RVec<UShort_t>{static_cast<UShort_t>(std::stoul(defaultValStr))}, varName, df_m);
-        break;
-      case 13:
-        df_m = saveVar<ROOT::VecOps::RVec<Short_t>>(ROOT::VecOps::RVec<Short_t>{static_cast<Short_t>(std::stoi(defaultValStr))}, varName, df_m);
-        break;
-      case 14:
-        df_m = saveVar<ROOT::VecOps::RVec<UChar_t>>(ROOT::VecOps::RVec<UChar_t>{UChar_t(std::stoul(defaultValStr))}, varName, df_m);
-        break;
-      case 15:
-        df_m = saveVar<ROOT::VecOps::RVec<Char_t>>(ROOT::VecOps::RVec<Char_t>{Char_t(std::stoi(defaultValStr))}, varName, df_m);
-        break;
-      case 16:
-        df_m = saveVar<ROOT::VecOps::RVec<Float_t>>(ROOT::VecOps::RVec<Float_t>{std::stof(defaultValStr)}, varName, df_m);
-        break;
-      case 17:
-        df_m = saveVar<ROOT::VecOps::RVec<Double_t>>(ROOT::VecOps::RVec<Double_t>{std::stod(defaultValStr)}, varName, df_m);
-        break;
-      case 18:
-        df_m = saveVar<ROOT::VecOps::RVec<Bool_t>>(ROOT::VecOps::RVec<Bool_t>{defaultBool}, varName, df_m);
-        break;
-      }
+    const IConfigurationProvider &configProvider, const std::string& settingsKey) {
+  const auto recipe = optionalSetting(configProvider, settingsKey);
+  const auto entries = configProvider.parseMultiKeyConfig(recipe, {"name", "type", "default"});
+  if (entries.empty()) return;
+  const auto columns = df_m.GetColumnNames();
+  const std::unordered_set<std::string> existing(columns.begin(), columns.end());
+  for (const auto& entry : entries) {
+    const auto& name = entry.at("name");
+    const auto& token = entry.at("type");
+    const auto& value = entry.at("default");
+    const std::string context = settingsKey + " (" + recipe + "), branch '" + name + "': ";
+    int type;
+    try {
+      std::size_t used = 0;
+      type = std::stoi(token, &used);
+      if (used != token.size() || type < 0 || type == 9 || type > 18)
+        throw std::invalid_argument("type");
+    } catch (const std::exception&) {
+      throw std::invalid_argument(context + "unsupported type '" + token +
+                                  "' (expected 0-8 for scalars or 10-18 for vectors)");
     }
-  }
-#else
-  const auto columnNames = df_m.GetColumnNames();
-  std::unordered_set<std::string> columnSet;
-  for (auto &column : columnNames) {
-    columnSet.insert(column);
-  }
-  for (const auto &entryKeys : aliasConfig) {
-    std::cout << "Processing optional branch " << entryKeys.at("name") << std::endl;
-    if (columnSet.find(entryKeys.at("name")) == columnSet.end()) {
-      const int varType = std::stoi(entryKeys.at("type"));
-      const auto defaultValStr = entryKeys.at("default");
-      const auto varName = entryKeys.at("name");
-      const Bool_t defaultBool = defaultValStr == "1" ||
-                                 defaultValStr == "true" ||
-                                 defaultValStr == "True";
-      //std::cout << "Defining optional branch " << varName << " with default " << defaultValStr << " and type number " << varType << std::endl;
-      switch (varType) {
-      case 0:
-        df_m = saveVar<UInt_t>(std::stoul(defaultValStr), varName, df_m);
-        break;
-      case 1:
-        df_m = saveVar<Int_t>(std::stoi(defaultValStr), varName, df_m);
-        break;
-      case 2:
-        df_m = saveVar<UShort_t>(std::stoul(defaultValStr), varName, df_m);
-        break;
-      case 3:
-        df_m = saveVar<Short_t>(std::stoi(defaultValStr), varName, df_m);
-        break;
-      case 4:
-        df_m = saveVar<UChar_t>(UChar_t(std::stoul(defaultValStr)), varName, df_m);
-        break;
-      case 5:
-        df_m = saveVar<Char_t>(Char_t(std::stoi(defaultValStr)), varName, df_m);
-        break;
-      case 6:
-        df_m = saveVar<Float_t>(std::stof(defaultValStr), varName, df_m);
-        break;
-      case 7:
-        df_m = saveVar<Double_t>(std::stod(defaultValStr), varName, df_m);
-        break;
-      case 8:
-        df_m = saveVar<Bool_t>(defaultBool, varName, df_m);
-        break;
-      case 10:
-        df_m = saveVar<ROOT::VecOps::RVec<UInt_t>>(ROOT::VecOps::RVec<UInt_t>{static_cast<UInt_t>(std::stoul(defaultValStr))}, varName, df_m);
-        break;
-      case 11:
-        df_m = saveVar<ROOT::VecOps::RVec<Int_t>>(ROOT::VecOps::RVec<Int_t>{std::stoi(defaultValStr)}, varName, df_m);
-        break;
-      case 12:
-        df_m = saveVar<ROOT::VecOps::RVec<UShort_t>>(ROOT::VecOps::RVec<UShort_t>{static_cast<UShort_t>(std::stoul(defaultValStr))}, varName, df_m);
-        break;
-      case 13:
-        df_m =  saveVar<ROOT::VecOps::RVec<Short_t>>(ROOT::VecOps::RVec<Short_t>{static_cast<Short_t>(std::stoi(defaultValStr))}, varName, df_m);
-        break;
-      case 14:
-        df_m = saveVar<ROOT::VecOps::RVec<UChar_t>>(ROOT::VecOps::RVec<UChar_t>{UChar_t(std::stoul(defaultValStr))}, varName, df_m);
-        break;
-      case 15:
-        df_m = saveVar<ROOT::VecOps::RVec<Char_t>>(ROOT::VecOps::RVec<Char_t>{Char_t(std::stoi(defaultValStr))}, varName, df_m);
-        break;
-      case 16:
-        df_m = saveVar<ROOT::VecOps::RVec<Float_t>>(ROOT::VecOps::RVec<Float_t>{std::stof(defaultValStr)}, varName, df_m);
-        break;
-      case 17:
-        df_m = saveVar<ROOT::VecOps::RVec<Double_t>>(ROOT::VecOps::RVec<Double_t>{std::stod(defaultValStr)}, varName, df_m);
-        break;
-      case 18:
-        df_m = saveVar<ROOT::VecOps::RVec<Bool_t>>(ROOT::VecOps::RVec<Bool_t>{defaultBool}, varName, df_m);
-        break;
-      }
-    }
-  }
+    bool exists = existing.count(name);
+    const auto install = [&](auto fallback) {
+      if (exists) {
+#ifdef HAS_DEFAULT_VALUE_FOR
+        df_m = df_m.DefaultValueFor<decltype(fallback)>(name, fallback);
 #endif
+      } else {
+        df_m = saveVar(std::move(fallback), name, df_m);
+      }
+    };
+    // Each vector default is a one-element RVec, as in historical recipes.
+    const auto book = [&](auto scalar) {
+      if (type >= 10) install(ROOT::VecOps::RVec<decltype(scalar)>{scalar});
+      else install(scalar);
+    };
+    const auto integer = [&](auto exemplar) {
+      using T = decltype(exemplar);
+      std::size_t used = 0;
+      const auto v = std::stoll(value, &used);
+      if (used != value.size() || v < std::numeric_limits<T>::lowest() ||
+          v > static_cast<long long>(std::numeric_limits<T>::max()))
+        throw std::invalid_argument("expected a representable integer");
+      return static_cast<T>(v);
+    };
+    try {
+      std::size_t used = 0;
+      switch (type % 10) {
+        case 0: book(integer(UInt_t{})); break;
+        case 1: book(integer(Int_t{})); break;
+        case 2: book(integer(UShort_t{})); break;
+        case 3: book(integer(Short_t{})); break;
+        case 4: book(integer(UChar_t{})); break;
+        case 5: book(integer(Char_t{})); break;
+        case 6: {
+          const auto v = std::stof(value, &used);
+          if (used != value.size()) throw std::invalid_argument("expected a float");
+          book(v);
+          break;
+        }
+        case 7: {
+          const auto v = std::stod(value, &used);
+          if (used != value.size()) throw std::invalid_argument("expected a double");
+          book(v);
+          break;
+        }
+        case 8:
+          if (value.empty()) throw std::invalid_argument("expected a boolean");
+          book(rdf_config_detail::parseBooleanConfig(name, value, false));
+          break;
+      }
+    } catch (const std::exception& error) {
+      throw std::runtime_error(context + "cannot apply default '" + value +
+                               "' of type " + token + ": " + error.what());
+    }
+  }
 }
 
 /**
@@ -894,37 +784,36 @@ void DataManager::finalizeSetup(const IConfigurationProvider &configProvider,
                                 const std::string& intConfigKey,
                                 const std::string& aliasConfigKey,
                                 const std::string& optionalBranchesConfigKey) {
-  std::cout << "Finalizing setup" << std::endl;
-  const auto floatConfig = configProvider.get(floatConfigKey);
-  const auto intConfig = configProvider.get(intConfigKey);
-  if ((!floatConfig.empty() &&
-       std::filesystem::exists(configProvider.resolveConfigPath(floatConfig))) ||
-      (!intConfig.empty() &&
-       std::filesystem::exists(configProvider.resolveConfigPath(intConfig)))) {
-    std::cout << "Registering constants" << std::endl;
-    registerConstants(configProvider, floatConfigKey, intConfigKey);
-  }
-
-  const auto aliasConfig = configProvider.get(aliasConfigKey);
-  if (!aliasConfig.empty() &&
-      std::filesystem::exists(configProvider.resolveConfigPath(aliasConfig))) {
-    std::cout << "Registering aliases" << std::endl;
-    registerAliases(configProvider, aliasConfigKey);
-  }
-
-  const auto optionalBranchesConfig = configProvider.get(optionalBranchesConfigKey);
-  if (!optionalBranchesConfig.empty() &&
-      std::filesystem::exists(
-          configProvider.resolveConfigPath(optionalBranchesConfig))) {
-    std::cout << "Registering optional branches" << std::endl;
-    registerOptionalBranches(configProvider, optionalBranchesConfigKey);
-  }
+  // Omission disables the recipe. Check every explicit path before any recipe
+  // mutates the graph, including the two independently optional constant files.
+  const auto supplied = [&](const std::string& key) {
+    const auto value = optionalSetting(configProvider, key);
+    if (value.empty()) return false;
+    const auto path = configProvider.resolveConfigPath(value);
+    if (!std::filesystem::is_regular_file(path))
+      throw std::runtime_error("DataManager: configuration key '" + key +
+                               "' refers to a missing recipe file: " + path);
+    return true;
+  };
+  const bool floats = supplied(floatConfigKey);
+  const bool ints = supplied(intConfigKey);
+  const bool aliases = supplied(aliasConfigKey);
+  const bool branches = supplied(optionalBranchesConfigKey);
+  if (floats || ints) registerConstants(configProvider, floatConfigKey, intConfigKey);
+  if (aliases) registerAliases(configProvider, aliasConfigKey);
+  if (branches) registerOptionalBranches(configProvider, optionalBranchesConfigKey);
 }
 
 /**
  * @brief Attach a single friend tree specified by @p spec to the main TChain.
  */
-void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
+void DataManager::attachSourceFriend(const FriendTreeSpec &spec) {
+  if (spec.files.empty() && spec.directory.empty())
+    throw std::invalid_argument("Friend '" + spec.alias + "' needs fileList or directory at source construction");
+  if (spec.indexBranches.size() > 2 ||
+      std::any_of(spec.indexBranches.begin(), spec.indexBranches.end(),
+                  [](const std::string& name) { return name.empty(); }))
+    throw std::invalid_argument("Friend '" + spec.alias + "' accepts at most two nonempty indexBranches");
   // Suppress non-fatal ROOT warnings (e.g. missing dictionaries for CMSSW
   // residual objects in NanoAOD files) during friend file discovery.
   ROOTWarningGuard warningGuard;
@@ -942,12 +831,8 @@ void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
       std::cout << "[DataManager] Adding friend file: " << f << std::endl;
       friendChain->Add(f.c_str());
     }
-  } else if (!spec.directory.empty()) {
-    scan(*friendChain, spec.directory, spec.globs, spec.antiglobs);
   } else {
-    std::cerr << "[DataManager] Warning: friend tree '" << spec.alias
-              << "' has neither fileList nor directory; skipping." << std::endl;
-    return;
+    scan(*friendChain, spec.directory, spec.globs, spec.antiglobs);
   }
 
   const Long64_t nFriendEntries = friendChain->GetEntries();
@@ -965,7 +850,8 @@ void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
         spec.indexBranches.size() > 1 ? spec.indexBranches[1] : "0";
     std::cout << "[DataManager] Building index on '" << major << "' / '"
               << minor << "' for friend '" << spec.alias << "'" << std::endl;
-    friendChain->BuildIndex(major.c_str(), minor.c_str());
+    if (friendChain->BuildIndex(major.c_str(), minor.c_str()) < 0 || !friendChain->GetTreeIndex())
+      throw std::runtime_error("Cannot build friend index for '" + spec.alias + "' on " + major + ", " + minor);
   }
 
   if (!chain_vec_m.empty() && chain_vec_m[0]) {
@@ -984,47 +870,15 @@ void DataManager::attachFriendTree(const FriendTreeSpec &spec) {
   friend_chains_m.push_back(std::move(friendChain));
 }
 
-/**
- * @brief Attach friend trees or sidecar files declared in a YAML config file.
- */
-void DataManager::registerFriendTrees(
-    const IConfigurationProvider &configProvider,
-    const std::string &friendConfigKey) {
-  const std::string configuredFriendPath = configProvider.get(friendConfigKey);
-  if (configuredFriendPath.empty()) {
-    return;
-  }
-  const std::string friendConfigFile =
-      configProvider.resolveConfigPath(configuredFriendPath);
-  if (!std::filesystem::exists(friendConfigFile)) {
-    std::cerr << "[DataManager] Warning: friendConfig file '" << friendConfigFile
-              << "' not found; skipping friend tree registration." << std::endl;
-    return;
-  }
+void DataManager::registerFriendTrees(const IConfigurationProvider &, const std::string &) {
+  throw std::logic_error("DataManager::registerFriendTrees: the input source already exists. "
+                         "Set friendConfig before constructing the Analyzer/DataManager, or use "
+                         "DataManager(config, friends).");
+}
 
-  std::cout << "[DataManager] Loading friend tree config from '"
-            << friendConfigFile << "'" << std::endl;
-
-  const auto specs = parseFriendTreeConfig(friendConfigFile);
-  if (specs.empty()) {
-    std::cout << "[DataManager] No friend trees found in config." << std::endl;
-    return;
-  }
-
-  for (const auto &spec : specs) {
-    attachFriendTree(spec);
-  }
-
-  // Rebuild the RDataFrame so that friend branches are visible.
-  // This is a no-op when called from the constructor (the RDataFrame is
-  // rebuilt immediately after this method returns), but is required when
-  // registerFriendTrees is invoked programmatically after construction.
-  if (!chain_vec_m.empty() && chain_vec_m[0] &&
-      chain_vec_m[0]->GetEntries() > 0) {
-    df_m = ROOT::RDataFrame(*chain_vec_m[0]);
-    std::cout << "[DataManager] RDataFrame rebuilt after attaching "
-              << specs.size() << " friend tree(s)." << std::endl;
-  }
+void DataManager::attachFriendTree(const FriendTreeSpec &) {
+  throw std::logic_error("DataManager::attachFriendTree: the input source already exists. "
+                         "Pass FriendTreeSpec values to DataManager(config, friends) at construction.");
 }
 
 // Add virtual destructor for DataManager
@@ -1032,3 +886,7 @@ DataManager::~DataManager() = default;
 
 // Add out-of-line definition for IDataFrameProvider virtual destructor
 IDataFrameProvider::~IDataFrameProvider() = default;
+
+void IDataFrameProvider::notifyBeforeFilter() {
+  rdf::detail::PreFilterRegistration::notify(*this);
+}

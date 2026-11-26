@@ -27,7 +27,7 @@ Read only the skill relevant to the changed contract, then inspect its source an
 | Kinematic fitter and CUDA path | [Kinematic fits](../rdfanalyzer-kinematic-fit/SKILL.md) |
 | STXS columns and acceptance/migration derivation | [STXS](../rdfanalyzer-stxs/SKILL.md) |
 | Sinks, counters, reports, provenance and versioned merging | [Outputs](../rdfanalyzer-outputs/SKILL.md) |
-| LAW/Condor/Dask/discovery, staging and monitors | [Production](../rdfanalyzer-production/SKILL.md) |
+| Snakemake, legacy LAW, Condor/Dask/discovery, staging and monitors | [Production](../rdfanalyzer-production/SKILL.md) |
 | ROOT chains, InputCache, XrdAdaptor/read performance | [Input I/O](../rdfanalyzer-input-io/SKILL.md) |
 | Cards, nuisance groups and fit tooling | [Statistics](../rdfanalyzer-statistics/SKILL.md) |
 | Python authoring, pybind11 and native runtime | [Python](../rdfanalyzer-python/SKILL.md) |
@@ -41,7 +41,7 @@ For logging, exceptions and local failure tracing, read [diagnostics](references
 - `core/interface/` contains public C++ interfaces and headers. Treat these as the API contract.
 - `core/src/` implements the central `Analyzer`, configuration, data, output, and systematic behavior.
 - `core/plugins/` contains optional managers; CMS-specific corrections and weights are under `extensions/cms/plugins/cms/`.
-- `core/python/` contains Python bindings and workflow/submission code; `core/python/law/` owns LAW task graphs.
+- [`core/python/`](../../../core/python/README.md) contains the bindings, analysis authoring APIs, and shared services. `core/python/rdfproduction/` owns the production implementation and [the Snakemake rules](../../../examples/snakemake/README.md) define new campaigns. `core/python/law/` retains legacy task names and existing run support.
 - `core/tests/` contains C++ and Python tests. `core/extern/` is vendored dependency code; avoid editing it unless the requested change is specifically there.
 - `analyses/` holds analysis-specific code and is not the place for reusable framework behavior.
 
@@ -81,7 +81,7 @@ ROOT, CMS environments, optional dependencies, and external services can limit w
 
 ## Maintain the skill map
 
-When a task adds a plugin, LAW task/runtime module, or changes a documented contract, update its focused skill/reference and the relevant entry in [components.yaml](references/components.yaml). Keep source ownership and decision-changing constraints in one place; route to existing skills instead of copying their instructions. Use paths relative to each Markdown file and keep optional analysis guidance separate from framework guarantees. Avoid embedding dated production state, hard-coded saved fit results, or live credentials.
+When a task adds a plugin, Snakemake stage or compatibility module, or changes a documented contract, update its focused skill/reference and the relevant entry in [components.yaml](references/components.yaml). Keep source ownership and decision-changing constraints in one place; route to existing skills instead of copying their instructions. Use paths relative to each Markdown file and keep optional analysis guidance separate from framework guarantees. Avoid embedding dated production state, hard-coded saved fit results, or live credentials.
 
 Run the repository-local checker after changing the skill tree:
 

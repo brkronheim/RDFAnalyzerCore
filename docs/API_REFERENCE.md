@@ -58,12 +58,12 @@ Analyzer(std::unique_ptr<IConfigurationProvider> configProvider,
 **Example**:
 ```cpp
 // Simple construction
-Analyzer analyzer("config.txt");
+Analyzer analyzer("config.yaml");
 
 // With custom plugins
 std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins;
 plugins["custom"] = std::make_shared<MyPlugin>(...);
-Analyzer analyzer("config.txt", std::move(plugins));
+Analyzer analyzer("config.yaml", std::move(plugins));
 ```
 
 ### Variable Definition
@@ -106,6 +106,22 @@ analyzer.Define("pt_gev_systematic", [](float pt) { return pt / 1000.0; }, {"pt"
 // pt_gev_systematic_jesDown from the mapped
 // input columns; the callable receives only the listed input values.
 ```
+
+#### DefineChecked
+
+C++ analysis code can require exclusive ownership of the nominal column and all propagated physical column names. Include `CheckedDefine.h` from the Analyzer SDK.
+
+```cpp
+#include <CheckedDefine.h>
+
+rdf::DefineChecked(analyzer, "pair_mass_gev",
+                   [](float mass) { return mass / 1000.f; },
+                   {"pair_mass_mev"}, "dilepton selection");
+```
+
+The optional last argument identifies the analysis stage or plugin in an error. An existing nominal column, an existing varied column (including explicitly registered external names), or two requests for the same physical name cause `std::invalid_argument` before any output or registration from the call is attached. Diagnostics identify the requested inputs and the nominal or variation label. The function returns the Analyzer pointer on success and uses ordinary systematic propagation. All checks run during graph construction.
+
+Existing C++ `Define` preserves first-definition behavior and supports intentionally external variation producers. Python's `define` and `define_nominal` already reject an existing nominal name. Python's propagated expression path retains support for external physical variation columns.
 
 #### DefineNominal
 
@@ -301,23 +317,23 @@ virtual std::unordered_map<std::string, std::string>
     parsePairBasedConfig(const std::string& configFile) const = 0;
 ```
 
-Parse a config file with key=value pairs.
+Read a YAML mapping of named settings.
 
 **Example**:
 {% raw %}
 ```cpp
-// For file with: "const1=1.0\nconst2=2.0"
-auto pairs = config->parsePairBasedConfig("constants.txt");
+// For a YAML mapping: {const1: 1.0, const2: 2.0}
+auto pairs = config->parsePairBasedConfig("constants.yaml");
 // Returns: {{"const1", "1.0"}, {"const2", "2.0"}}
 ```
 {% endraw %}
 
-Parse a config file with multi-key lines (plugin configs). It returns a vector of unordered maps, one per parsed entry.
+Read a YAML sequence of plugin records. The result contains one map for each record containing the required keys.
 
 **Example**:
 {% raw %}
 ```cpp
-// For file with: "file=model.onnx name=score inputVariables=pt,eta runVar=has_jets"
+// For a YAML record: - {file: model.onnx, name: score, inputVariables: "pt,eta", runVar: has_jets}
 auto configs = config->parseMultiKeyConfig(
     config->get("onnxConfig"),
     {"file", "name", "inputVariables", "runVar"});
@@ -890,21 +906,21 @@ Systematic behavior:
 
 Typical config keys:
 
-```text
-correctedJetCollectionConfig=cfg/corrected_jets.txt
-correctedElectronCollectionConfig=cfg/corrected_electrons.txt
-correctedMuonCollectionConfig=cfg/corrected_muons.txt
+```yaml
+correctedJetCollectionConfig: cfg/corrected_jets.yaml
+correctedElectronCollectionConfig: cfg/corrected_electrons.yaml
+correctedMuonCollectionConfig: cfg/corrected_muons.yaml
 ```
 
-Pair-based config files may also include:
+The configuration mapping can also reference an ordered correction workflow.
 
-```text
-workflowConfig=cfg/corrected_jets_workflow.txt
+```yaml
+workflowConfig: cfg/corrected_jets_workflow.yaml
 ```
 
-When present, `workflowConfig` is parsed as a multi-entry config whose rows are
-executed in order during `setupFromConfigFile()`. Each row must define
-`type=...`. Optional `sample=mc|data|all` gates a row on the current sample
+When present, `workflowConfig` is parsed as a YAML sequence whose records are
+executed in order during `setupFromConfigFile()`. Each record must define
+`type`. The optional `sample` field (`mc`, `data`, or `all`) gates a record on the current sample
 class, inferred from the top-level `type` / `primaryDataset` config. Values of
 the form `${key}` resolve against top-level config keys and corrected-wrapper
 spec values like `${correctedPtColumn}` and `${outputCollection}`.
@@ -988,17 +1004,21 @@ Performs kinematic fitting using mass, scalar-pT, angular-separation, Cartesian 
 
 #### Configuration
 
-Set `kinematicFitConfig` in the main config. Each line in the referenced file
+Set `kinematicFitConfig` in the main config. Each entry in the referenced YAML sequence
 defines one fit using required `name`, `particles`, and `constraints` fields.
 Particle specs use `label:ptCol:etaCol:phiCol:massCol:type[:collectionIndex]`;
 constraint indices are zero-based. Mass values and widths are in GeV.
 
-```
+```yaml
 # main config
-kinematicFitConfig=cfg/kinematic_fits.txt
+kinematicFitConfig: cfg/kinematic_fits.yaml
+```
 
-# cfg/kinematic_fits.txt: a two-lepton Z-mass fit
-name=dileptonFit particles=mu1:mu1_pt:mu1_eta:mu1_phi:mu1_mass:lepton,mu2:mu2_pt:mu2_eta:mu2_phi:mu2_mass:lepton constraints=0+1:91.2:2.495
+```yaml
+# cfg/kinematic_fits.yaml: a two-lepton Z-mass fit
+- name: dileptonFit
+  particles: mu1:mu1_pt:mu1_eta:mu1_phi:mu1_mass:lepton,mu2:mu2_pt:mu2_eta:mu2_phi:mu2_mass:lepton
+  constraints: 0+1:91.2:2.495
 ```
 
 **Configuration Parameters**:
@@ -1077,18 +1097,18 @@ Filters data events based on run/luminosity-section validity from CMS golden JSO
 
 Create a file listing paths to golden JSON files:
 
-```
-# golden_json_files.txt
-cfg/Cert_2022.json
-cfg/Cert_2023.json
+```yaml
+# golden_json_files.yaml
+- cfg/Cert_2022.json
+- cfg/Cert_2023.json
 ```
 
 Reference this file in your main configuration:
 
-```
-# config.txt
-type=data
-goldenJsonConfig=cfg/golden_json_files.txt
+```yaml
+# config.yaml
+type: data
+goldenJsonConfig: cfg/golden_json_files.yaml
 ```
 
 #### Methods
@@ -1281,7 +1301,7 @@ roles are complementary:
 
 | Mechanism | Purpose |
 |-----------|---------|
-| `counterWeightBranch` in cfg.txt | Accumulate sum-of-weights for normalisation |
+| `counterWeightBranch` in cfg.yaml | Accumulate sum-of-weights for normalisation |
 | `wm.addScaleFactor("genWeight", "genWeight")` | Include generator weight in the per-event weight product |
 
 Both should reference the same branch for the analysis to be consistent. For
@@ -2225,7 +2245,7 @@ public:
 
 **Example**:
 ```cpp
-auto config = ManagerFactory::createConfigurationManager("config.txt");
+auto config = ManagerFactory::createConfigurationManager("config.yaml");
 auto dataManager = ManagerFactory::createDataManager(*config);
 auto sysMgr = ManagerFactory::createSystematicManager();
 ```

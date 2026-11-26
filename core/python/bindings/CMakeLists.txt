@@ -43,6 +43,7 @@ install(TARGETS rdfanalyzer
 include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/InstallPythonAuthoring.cmake")
 rdf_install_python_authoring(COMPONENT Python)
 rdf_install_python_controller(COMPONENT PythonController)
+rdf_install_snakemake_controller()
 if(ONNXRUNTIME_LIB_DIR)
     include("${PROJECT_SOURCE_DIR}/cmake/InstallOnnxRuntime.cmake")
     rdf_install_onnx_runtime(COMPONENT Python)

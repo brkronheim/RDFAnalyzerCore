@@ -29,8 +29,13 @@ windows; successful buffers can also be shared with the per-URL handoff cache.
 windows drain before an error propagates or destination buffers return to the
 caller. Logical cache priority is independent of completion order. Future-file
 reads and backup copies leave 16 MiB and the second per-site slot for demand
-reads; active ROOT asynchronous prefetch retains demand priority. The default
-backup delay is `xrdReadHedgeDelayMs=50` (0 restores immediate racing).
+reads; active ROOT asynchronous prefetch retains demand priority. With the default
+`xrdReadPolicy: adaptive`, an uncached window starts on one site. A measured
+stall can trigger a second full read, subject to the shared budget and a cap
+of two concurrent rescued windows per process. A known failure permits a
+replacement immediately. Only `xrdReadPolicy: legacy` uses the fixed 50 ms
+delay and the optional exploration payload. See the read policy section of the
+adaptor guide for the exact thresholds and diagnostic counters.
 `treeCacheOpenAheadFiles=2` retains at most two future transports without
 additional trees or payload warmups; 0 disables early transport opens. This
 requires the sequential next-file warmup path and is disabled under IMT.

@@ -9,7 +9,7 @@
 
 For absent EOS output, inspect the staged proxy and exact `xrdcp` stderr as well as worker exit. Certificate warnings alone do not prove authentication failure. An explicit destination `No space left on device`/ENOSPC error requires storage capacity/quota remediation; more splitting/retries will repeat the upload failure. Local scratch and remote destination capacity are different checks.
 
-For XRootD reads, inspect original/selected URL and current [input backend](../../rdfanalyzer-input-io/SKILL.md). Distinguish transient replica failures from deterministic bad input/schema or runtime-library problems. Inspect retry classification/splitting in [analysis_tasks.py](../../../../core/python/law/analysis_tasks.py) and [failure_handler.py](../../../../core/python/law/failure_handler.py) rather than assuming all failures merit more attempts.
+For XRootD reads, inspect original/selected URL and current [input backend](../../rdfanalyzer-input-io/SKILL.md). Distinguish transient replica failures from deterministic bad input/schema or runtime-library problems. Inspect retry classification/splitting in [analysis_tasks.py](../../../../core/python/law/analysis_tasks.py) and [retry.py](../../../../core/python/rdfproduction/retry.py) rather than assuming all failures merit more attempts.
 
 ## Complete an authorized recovery
 

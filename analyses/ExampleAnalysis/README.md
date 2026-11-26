@@ -21,7 +21,7 @@ The analysis source does not explicitly define or register systematic variations
 - `cfg.yaml` specifies remote EOS input files, tree names, thread count, constant and histogram configuration files, and output settings.
 - `floats.yaml` defines `normScale` and the currently unused `sampleNorm` constant; `ints.yaml` defines an unused `type` constant.
 - `histograms.yaml` defines `ZBosonMass`, `LeadingMuonPt`, and `SubleadingMuonPt`, all weighted by `normScale`.
-- `output.txt` lists the `ZBosonMass` branch for a skim, but the current config sets `enableSkim: false`, so `an.run()` does not write an event tree. Set `enableSkim: true` only when a skim is intended.
+- `output.yaml` lists the `ZBosonMass` branch for a skim, but the current config sets `enableSkim: false`, so `an.run()` does not write an event tree. Set `enableSkim: true` only when a skim is intended.
 
 The histogram manager writes ROOT histograms to the metadata output channel. Because `cfg.yaml` has no explicit `metaFile`, the output sink derives the path by adding `_meta` before the `saveFile` extension. The configured `saveFile` is `Output/ZMuMuL.root`, so histogram output is `Output/ZMuMuL_meta.root`.
 

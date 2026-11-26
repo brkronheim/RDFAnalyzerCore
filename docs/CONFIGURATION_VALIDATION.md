@@ -19,7 +19,7 @@ The tool lives in `core/python/validate_config.py` and supports two independent 
 ## CLI Usage
 
 ```
-python core/python/validate_config.py --config path/to/submit_config.txt [--mode {auto,nano,opendata}]
+python core/python/validate_config.py --config path/to/submit_config.yaml [--mode {auto,nano,opendata}]
 python core/python/validate_config.py --analysis-config path/to/analysis.yaml
 ```
 
@@ -52,7 +52,7 @@ Config validation OK
 ```
 Config validation failed:
 - Missing required key 'sampleConfig' in submit config
-- File not found for 'floatConfig': /path/to/float_config.txt
+- File not found for 'floatConfig': /path/to/float_config.yaml
 ```
 
 ---
@@ -65,7 +65,7 @@ Validates a `key=value` text file used to configure the snapshot / analysis subm
 
 ```python
 from validate_config import validate_submit_config
-errors, warnings = validate_submit_config("configs/submit_config.txt", mode="nano")
+errors, warnings = validate_submit_config("configs/submit_config.yaml", mode="nano")
 ```
 
 **Returns** `(errors: list[str], warnings: list[str])`.  
@@ -109,7 +109,7 @@ The sample config (pointed to by `sampleConfig`) is validated according to its f
 - **YAML (`.yaml` / `.yml`)** – loaded via `DatasetManifest.load_yaml()` and then mode-specific field checks are applied (see below). This is the preferred format for new workflows.
 - **Text (any other extension)** – parsed as `key=value` entries and mode-specific checks are applied.
 
-> **Note:** Legacy text sample configs are deprecated and supported only for backward compatibility. New workflows should use YAML manifests and the explicit compatibility helper `core/python/rucio_discovery.py:load_legacy_sample_config()` only when necessary.
+> **Note:** Legacy text sample configs are deprecated and supported only for backward compatibility. Use YAML manifests for new workflows. `core/python/sample_config.py` contains the reader for archived sample files.
 
 #### Mode detection
 
@@ -190,7 +190,7 @@ Validates the `nuisance_groups` list.  Each entry must be a dict with at minimum
 
 ### `validate_histogram_config_file(path)`
 
-Validates a whitespace-separated histogram configuration text file.  Each non-comment, non-blank line is treated as a histogram entry.
+Validates a YAML sequence of histogram definitions, one mapping per histogram. Archived whitespace-separated record files are also accepted.
 
 **Required keys per entry:**
 
@@ -217,7 +217,7 @@ Validates the `friend_trees` list.  Each entry must be a dict with:
 | `globs` / `antiglobs` | Optional lists |
 | `index_branches` / `indexBranches` | Optional lists |
 
-A warning is issued when an entry has neither a `files`/`fileList` source nor a `directory`.  Unknown keys generate a warning.
+Provide a nonempty file list or directory for each friend. An empty `friends: []` sequence is valid. Index matching accepts one or two branch names. An omitted or empty index list selects sequential matching. Unknown fields, duplicate aliases, conflicting spellings of a field, and malformed lists are configuration errors.
 
 ---
 
@@ -276,7 +276,7 @@ print("Analysis config is valid.")
 
 # --- Submit config ---
 try:
-    errors, warnings = validate_submit_config("configs/submit_config.txt", mode="nano")
+    errors, warnings = validate_submit_config("configs/submit_config.yaml", mode="nano")
 except ValidationError as exc:
     print(f"File not found: {exc}")
     raise SystemExit(1)
@@ -326,10 +326,10 @@ nuisance_groups:
       - DATACARD
 
 # ------------------------------------------------------------------
-# histogram_config – path to a whitespace-separated histogram spec
+# histogram_config – path to a YAML sequence of histogram definitions
 # (resolved relative to the directory containing this YAML file)
 # ------------------------------------------------------------------
-histogram_config: histograms.txt
+histogram_config: histograms.yaml
 
 # ------------------------------------------------------------------
 # friend_trees – sidecar ROOT trees merged at runtime
@@ -359,7 +359,7 @@ plugins:
     weight_variations: []
 
   NDHistogramManager:
-    histogram_config: histograms.txt
+    histogram_config: histograms.yaml
     output_file: histograms.root
     region_aware: true
 

@@ -214,13 +214,13 @@ std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins;
 plugins["histogramManager"] = std::make_shared<NDHistogramManager>(config);
 plugins["regionManager"] = std::make_shared<RegionManager>();
 
-Analyzer analyzer("config.txt", std::move(plugins));
+Analyzer analyzer("config.yaml", std::move(plugins));
 ```
 
 ### Incremental Registration
 
 ```cpp
-Analyzer analyzer("config.txt");
+Analyzer analyzer("config.yaml");
 
 analyzer.addPlugin("histogramManager",
     std::make_unique<NDHistogramManager>(analyzer.getConfigurationProvider()));

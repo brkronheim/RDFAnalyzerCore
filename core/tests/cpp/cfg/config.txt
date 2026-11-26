@@ -12,12 +12,12 @@ globs=root,test
 
 saveConfig=cfg/output.txt # Config file with output branches
 
-bdtConfig=cfg/bdts.txt # Config file with bdts
+bdtConfig=cfg/bdts.yaml # Config file with bdts
 correctionConfig=cfg/correction.txt # Config file with corrections
-triggerConfig=cfg/triggers.txt # Config file with triggers
+triggerConfig=cfg/triggers.yaml # Config file with triggers
 
-floatConfig=cfg/floats.txt # Config file with floats to load into DF
-intConfig=cfg/ints.txt # Config file with integers to load into DF
+floatConfig=cfg/floats.yaml # Config file with floats to load into DF
+intConfig=cfg/ints.yaml # Config file with integers to load into DF
 
-optionalBranchesConfig=cfg/optionalBranches.txt # Config file with info on branches which may not exist
-aliasConfig=cfg/alias.txt # Config file with aliases
+optionalBranchesConfig=cfg/optionalBranches.yaml # Config file with info on branches which may not exist
+aliasConfig=cfg/alias.yaml # Config file with aliases

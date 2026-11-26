@@ -121,17 +121,27 @@ int main(int argc, char **argv) {
 }
 ```
 
-**Configuration** (`config.txt`):
-```
-fileList=data.root
-saveFile=output_data.root
-histogramConfig=cfg/histograms.txt
+**Configuration** (`config.yaml`):
+```yaml
+fileList: data.root
+saveFile: output_data.root
+histogramConfig: cfg/histograms.yaml
 ```
 
-**Histogram Configuration** (`cfg/histograms.txt`):
-```
-name=mT variable=mT weight=event_weight bins=20 lowerBound=0.0 upperBound=500.0
-name=nJets variable=nJets weight=event_weight bins=10 lowerBound=0 upperBound=10
+**Histogram Configuration** (`cfg/histograms.yaml`):
+```yaml
+- name: mT
+  variable: mT
+  weight: event_weight
+  bins: 20
+  lowerBound: 0.0
+  upperBound: 500.0
+- name: nJets
+  variable: nJets
+  weight: event_weight
+  bins: 10
+  lowerBound: 0
+  upperBound: 10
 ```
 
 **Run the analysis**:

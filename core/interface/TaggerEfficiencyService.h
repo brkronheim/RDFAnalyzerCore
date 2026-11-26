@@ -14,9 +14,6 @@
 //   2. "working_point" mode — bin by WP category (0 = fail all, 1 = pass
 //      loose, 2 = pass medium, ...) using a TaggerWorkingPointManager.
 //
-//   Optional flavor splitting adds a per-flavour axis (e.g. b/c/light/other
-//   using Jet_hadronFlavour or a configurable flavour branch).
-//
 // Configuration (YAML file specified by `taggerEfficiencyConfig` key):
 //
 //   tagger_efficiency:
@@ -29,17 +26,14 @@
 //       channelVariable: "analysis_channel"
 //       channelBins: 3
 //       channelLabels: ["2L", "1L", "0L"]
-//       flavorSplit: "Jet_hadronFlavour"     # optional
 //
 //     - mode: "working_point"
 //       taggerColumn: "Jet_btagB"
 //       weightColumn: "weight_nominal"
-//       taggerManagerRole: "btagManager"
 //       workingPoints: ["loose", "medium", "tight"]
 //       channelVariable: "analysis_channel"
 //       channelBins: 3
 //       channelLabels: ["2L", "1L", "0L"]
-//       flavorSplit: "Jet_hadronFlavour"     # optional
 //
 // Inline config keys (alternative to YAML file):
 //   enableTaggerEfficiency: "true"
@@ -52,8 +46,6 @@
 //   taggerEfficiencyChannelVariable: "analysis_channel"
 //   taggerEfficiencyChannelBins: 3
 //   taggerEfficiencyChannelRegions: "2L,1L,0L"
-//   taggerEfficiencyFlavorSplit: "Jet_hadronFlavour"   # optional
-//   taggerEfficiencyWPManagerRole: "btagManager"
 //   taggerEfficiencyWorkingPoints: "loose,medium,tight"
 //
 // Service lifecycle:
@@ -163,7 +155,7 @@ private:
   /// YAML config path (if used).
   std::string yamlConfigPath_m;
 
-  /// Inline config values (used if YAML is not provided).
+  /// Retained inline-storage fields preserve the layout of existing binary clients.
   std::string inlineMode_m = "histogram";
   std::string inlineTaggerColumns_m;
   std::string inlineWeightColumn_m = "weight_nominal";

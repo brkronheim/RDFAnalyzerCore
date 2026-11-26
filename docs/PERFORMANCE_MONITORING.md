@@ -16,8 +16,8 @@ RSS to measure the resulting memory savings.
 
 Two complementary systems work together:
 
-- **`PerformanceRecorder`** (in `core/python/law/performance_recorder.py`) – a context manager that measures wall-clock time, peak subprocess RSS and data throughput, writing the results to a `.perf.json` sidecar file co-located with the branch output.
-- **Failure handler** (in `core/python/law/failure_handler.py`) – classifies each exception into a `FailureCategory`, consults a per-category `RetryPolicy`, and accumulates all failure events in a `DiagnosticSummary` that is printed at the end of the run.
+- **`PerformanceRecorder`** (in `core/python/rdfproduction/performance.py`) – a context manager that measures wall-clock time, peak subprocess RSS and data throughput, writing the results to a `.perf.json` sidecar file co-located with the branch output.
+- **Failure handler** (in `core/python/rdfproduction/retry.py`) – classifies each exception into a `FailureCategory`, consults a per-category `RetryPolicy`, and accumulates all failure events in a `DiagnosticSummary` that is printed at the end of the run.
 
 Both systems are integrated transparently into `DaskWorkflowProxy` (`core/python/law/workflow_executors.py`).  Task authors typically do not need to call them directly.
 
@@ -96,14 +96,14 @@ Write metrics to `path` as a pretty-printed JSON file.  Parent directories are c
 
 ### `estimate_job_input_bytes(job_dir)`
 
-Estimate the total size of input ROOT files for a prepared job by reading the `fileList` key from `submit_config.txt` inside `job_dir`.  Remote XRootD paths (not accessible on the local filesystem) are skipped.
+Estimate the total size of input ROOT files for a prepared job by reading the `fileList` key from `submit_config.yaml` inside `job_dir`. Archived jobs may use `submit_config.txt`.  Remote XRootD paths (not accessible on the local filesystem) are skipped.
 
 ```python
 from performance_recorder import estimate_job_input_bytes
 total = estimate_job_input_bytes("/eos/cms/store/user/me/jobs/job_3")
 ```
 
-Returns `0` when `submit_config.txt` is absent, malformed, or all files are remote.
+Returns `0` when the job configuration is absent or malformed, or all files are remote.
 
 ### `perf_path_for(output_path)`
 

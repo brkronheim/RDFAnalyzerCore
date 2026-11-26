@@ -1,11 +1,13 @@
 ---
 name: rdfanalyzer-production
-description: Trace, prepare, or diagnose RDFAnalyzerCore LAW task families, scheduler/environment setup, HTCondor/Dask, discovery, staging, stitching, retries, and merge workflows.
+description: Trace, prepare, or diagnose RDFAnalyzerCore Snakemake campaigns, legacy LAW tasks, scheduler/environment setup, HTCondor/Dask, discovery, staging, stitching, retries, and merge workflows.
 ---
 
 # Production workflows and diagnosis
 
-Choose the relevant detail:
+For new campaigns, start with the [Snakemake workflows and stage targets](../../../examples/snakemake/README.md). Follow their rules into [the production services](../../../core/python/rdfproduction/). Use the standalone downstream workflow for completed inputs. Keep active jobs under their original controller.
+
+For legacy jobs and site-specific wrappers:
 
 - [LAW environment and packaging](references/law-environment.md): task registration, scheduler setup, imports, backend/runtime staging.
 - [LAW task families](references/law-tasks.md): concrete task routes, parameters, dependency and completion contracts.
@@ -16,7 +18,7 @@ Choose the relevant detail:
 
 ## Establish the workflow before acting
 
-Start from the analysis wrapper and follow delegated scripts/tasks and CLI defaults into [analysis_tasks.py](../../../core/python/law/analysis_tasks.py), [submission_backend.py](../../../core/python/submission_backend.py), and the generated job bundle. The separate [production_manager.py](../../../core/python/production_manager.py) / [production_monitor.py](../../../core/python/production_monitor.py) workflow has its own state and commands; identify which system owns the run.
+For a LAW-owned run, start from the analysis wrapper and follow delegated scripts/tasks and CLI defaults into [analysis_tasks.py](../../../core/python/law/analysis_tasks.py), [submission_backend.py](../../../core/python/submission_backend.py), and the generated job bundle. The separate [production_manager.py](../../../core/python/production_manager.py) / [production_monitor.py](../../../core/python/production_monitor.py) workflow has its own state and commands; identify which system owns the run.
 
 A request to diagnose permits inspection, not an unrelated cancellation, resubmission, monitor restart, or output cleanup. When submission/recovery is requested, complete the authorized staging and bounded verification, then submit only within that scope. Preserve run names, state, and existing outputs when resuming. Do not treat a local rebuild as deployment to prepared workers.
 

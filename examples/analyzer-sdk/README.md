@@ -14,20 +14,19 @@ cmake -S /path/to/prefix/share/rdfanalyzer/examples/analyzer-sdk \
   -B /tmp/analyzer-example -DCMAKE_PREFIX_PATH=/path/to/prefix
 cmake --build /tmp/analyzer-example --parallel 1
 /tmp/analyzer-example/analyzer-onboarding
-/tmp/analyzer-example/analyzer-onboarding --run analysis.txt /tmp/cpp-result.json
+/tmp/analyzer-example/analyzer-onboarding --run analysis.yaml /tmp/cpp-result.json
 ```
 
-The text configuration contains the actual ROOT URLs directly, not a file-list
-filename:
+The YAML configuration lists the ROOT inputs directly.
 
-```text
-fileList=/absolute/path/input.root
-treeList=Events
-enableSkim=false
-enableSystematics=false
-enableCounters=true
-batch=true
-metaFile=/tmp/example-metadata.root
+```yaml
+fileList: [/absolute/path/input.root]
+treeList: Events
+enableSkim: false
+enableSystematics: false
+enableCounters: true
+batch: true
+metaFile: /tmp/example-metadata.root
 ```
 
 Python steering uses the same compiled executable. Install the independent
@@ -35,9 +34,9 @@ PythonController component and add `PREFIX/python` to `PYTHONPATH`:
 
 ```bash
 python steer.py --executable /tmp/analyzer-example/analyzer-onboarding \
-  --config analysis.txt --output /tmp/steered-result.json
+  --config analysis.yaml --output /tmp/steered-result.json
 python steer.py --executable /tmp/analyzer-example/analyzer-onboarding \
-  --config analysis.txt --output /tmp/steered-result.json --run --logs /tmp/steering-logs
+  --config analysis.yaml --output /tmp/steered-result.json --run --logs /tmp/steering-logs
 ```
 
 For Python-authored physics, `physics.py` contains the actual custom functions.

@@ -35,6 +35,12 @@ def test_refresh_patches_collector_after_other_heredocs(stage_in):
     assert patch_probe_functions(patched) == patched
 
 
+def test_refresh_preserves_submitted_text_worker():
+    script = "run_helper_python - << 'XRDPY'\ncfg_path = 'submit_config.txt'\ndef select_best_url():\n    pass\nXRDPY"
+    with pytest.raises(ValueError, match="Archived worker.*YAML retry"):
+        patch_probe_functions(script)
+
+
 def test_refresh_preserves_payloads_and_keeps_rollback_copy(tmp_path):
     run = tmp_path / "run"
     shared = run / "shared_inputs"

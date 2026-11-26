@@ -218,15 +218,6 @@ void StxsManager::initialize() {
   // -----------------------------------------------------------------------
   // 3. Construct stxs::Manager
   // -----------------------------------------------------------------------
-  // Rebuild config with all specs loaded
-  if (hasBinConfig) {
-    config = stxs::loadConfig(binConfigPath_m, auxDirectoryPath_m,
-                              coarseBranch_m, fineBranch_m, true);
-  }
-  // Note: In a full implementation, the YAML specs would be merged into
-  // the config here. For the initial implementation, we rely on the
-  // loadConfigFromYaml path or direct config construction.
-
   if (!migrationBinConfigPath_m.empty()) {
     stxs::loadMigrationBinConfig(migrationBinConfigPath_m, config);
   }
@@ -489,34 +480,16 @@ void StxsManager::registerWithWeightManager() {
 // ===========================================================================
 
 void StxsManager::loadAcceptanceSpecsFromYaml(const std::string &path) {
-  if (!ctx_m) {
-    return;
-  }
-  ctx_m->logger.log(
-      ILogger::Level::Debug,
-      "StxsManager: loading acceptance specs from " + path);
-  // TODO: Implement YAML parsing when the framework's YAML adapter is
-  // available in the plugin context. For now, acceptanceSpecs must be
-  // populated via the stxsAcceptanceSpecs config or directly in the
-  // stxs::Config before constructing the stxs::Manager.
+  throw std::runtime_error("stxsAcceptanceSpecs is unsupported: " + path +
+                           ". Supply this field through stxs::Config.");
 }
 
 void StxsManager::loadMigrationSpecsFromYaml(const std::string &path) {
-  if (!ctx_m) {
-    return;
-  }
-  ctx_m->logger.log(
-      ILogger::Level::Debug,
-      "StxsManager: loading migration specs from " + path);
-  // TODO: Implement YAML parsing.
+  throw std::runtime_error("stxsMigrationSpecs is unsupported: " + path +
+                           ". Supply this field through stxs::Config.");
 }
 
 void StxsManager::loadSignalProcessRulesFromYaml(const std::string &path) {
-  if (!ctx_m) {
-    return;
-  }
-  ctx_m->logger.log(
-      ILogger::Level::Debug,
-      "StxsManager: loading signal process rules from " + path);
-  // TODO: Implement YAML parsing.
+  throw std::runtime_error("stxsSignalProcessRules is unsupported: " + path +
+                           ". Supply this field through stxs::Config.");
 }

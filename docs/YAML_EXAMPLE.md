@@ -9,7 +9,7 @@ directory=data
 saveFile=output/results.root
 saveDirectory=output/
 saveTree=Events
-threads=-1
+threads=1
 antiglobs=output.root,hists.root
 globs=root,test
 saveConfig=cfg/output.txt
@@ -27,15 +27,15 @@ directory: data
 saveFile: output/results.root
 saveDirectory: output/
 saveTree: Events
-threads: "-1"
-antiglobs: output.root,hists.root
-globs: root,test
+threads: 1
+antiglobs: [output.root, hists.root]
+globs: [root, test]
 saveConfig: cfg/output.yaml
-bdtConfig: cfg/bdts.txt
+bdtConfig: cfg/bdts.yaml
 correctionConfig: cfg/corrections.yaml
-triggerConfig: cfg/triggers.txt
-floatConfig: cfg/floats.txt
-intConfig: cfg/ints.txt
+triggerConfig: cfg/triggers.yaml
+floatConfig: cfg/floats.yaml
+intConfig: cfg/ints.yaml
 ```
 
 ## Vector Config Example
@@ -125,36 +125,14 @@ config['threads'] = '4'
 write_config(config, "config.yaml")
 ```
 
-### Generate Submission Files
-Submission file generation is now handled through the LAW workflow and YAML-first manifest handling. The legacy script `core/python/generateSubmissionFilesNANO.py` has been removed.
+### Convert existing files
 
-## Benefits of YAML
+Run the supplied converter once for each legacy input. Choose the kind according to the consuming plugin. The converter preserves scalar values and leaves source files in place. Update references in the main YAML to point at the converted files.
 
-1. **More readable**: Hierarchical structure is clearer
-2. **Better for complex configs**: Easier to see relationships
-3. **Comments**: Can add descriptive comments anywhere
-4. **Type preservation**: Numbers and strings are properly typed
-5. **Lists and nested structures**: Native support for complex data
-
-## Conversion Script
-
-You can create a simple script to convert existing configs:
-
-```python
-#!/usr/bin/env python3
-import sys
-from submission_backend import read_config, write_config
-
-if len(sys.argv) != 3:
-    print("Usage: convert_config.py input.txt output.yaml")
-    sys.exit(1)
-
-config = read_config(sys.argv[1])
-write_config(config, sys.argv[2])
-print(f"Converted {sys.argv[1]} to {sys.argv[2]}")
-```
-
-Usage:
 ```bash
-python convert_config.py config.txt config.yaml
+python core/python/convert_config.py config.txt config.yaml
+python core/python/convert_config.py --kind records cfg/corrections.txt cfg/corrections.yaml
+python core/python/convert_config.py --kind list cfg/output.txt cfg/output.yaml
 ```
+
+Use the Snakemake production workflow to generate worker configurations. Each generated job receives a YAML configuration. See the [Snakemake guide](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md) and the [native YAML reference](YAML_CONFIG_SUPPORT.md).

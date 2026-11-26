@@ -106,7 +106,7 @@ execution identities when controls are unused; explicit profile/seed contents
 are hashed. Test both prep and fallback branch maps, stitching forwarding,
 cached-group precedence, and half-open retry coverage when changing this path.
 
-For a requested command, resolve task parameters, their `significant` settings, `requires`/`workflow_requires`, branch maps, output targets, overridden `complete`, and `run`. Read [branch_map_policy.py](../../../../core/python/law/branch_map_policy.py) and [partition_utils.py](../../../../core/python/law/partition_utils.py) for the actual partition strategy. A parameter marked nonsignificant can change behavior without changing task identity. Confirm the existing artifact/config before reusing a run name.
+For a requested command, resolve task parameters, their `significant` settings, `requires`/`workflow_requires`, branch maps, output targets, overridden `complete`, and `run`. Read [branch_map_policy.py](../../../../core/python/law/branch_map_policy.py) and [partitioning.py](../../../../core/python/rdfproduction/partitioning.py) for the actual partition strategy. A parameter marked nonsignificant can change behavior without changing task identity. Confirm the existing artifact/config before reusing a run name.
 
 For discovery, distinguish upstream run name and file-list artifacts from a skim run. Inspect redirector precedence and dataset selection in the chosen discovery module; do not run fresh remote discovery to diagnose an existing local bundle unless needed by the request.
 

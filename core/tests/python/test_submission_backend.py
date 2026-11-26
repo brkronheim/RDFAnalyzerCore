@@ -31,6 +31,10 @@ def test_generate_condor_submit_exports_condor_proc_env(tmp_path):
     )
     assert 'environment = "CONDOR_PROC=$(Process)' in sub
     assert "CONDOR_CLUSTER=$(Cluster)" in sub
+    assert (
+        'transfer_output_remaps = "submit_config.runtime.yaml='
+        f'{tmp_path}/condor_logs/returned_$(Cluster)_$(Process)_submit_config.runtime.yaml"'
+    ) in sub
 
 
 def test_generate_condor_submit_sets_singularity_image(tmp_path):
@@ -141,13 +145,13 @@ def test_generate_condor_runscript_shared_archive_materializes_cfg_runtime():
         root_setup="",
         x509loc="x509",
         shared_archive_name="shared_inputs.tar.gz",
-        runtime_config_relpath="cfg/submit_config.txt",
+        runtime_config_relpath="cfg/submit_config.txt", config_file="submit_config.txt",
     )
     assert 'tar -xzf "shared_inputs.tar.gz"' in script
-    assert 'cp -f submit_config.txt cfg/submit_config.txt' in script
+    assert 'cp -f submit_config.runtime.yaml cfg/submit_config.runtime.yaml' in script
     assert 'chmod +x "myexe"' in script
     assert 'export LD_LIBRARY_PATH="$PWD:${LD_LIBRARY_PATH:-}"' in script
-    assert './myexe cfg/submit_config.txt' in script
+    assert './myexe cfg/submit_config.runtime.yaml' in script
     assert 'export X509_USER_PROXY=x509' in script
 
 
@@ -160,7 +164,7 @@ def test_runscript_uses_preserved_host_python_for_helpers():
     )
     assert 'RDF_HELPER_PYTHON="$(command -v python3 || command -v python || true)"' in script
     assert 'run_helper_python() {' in script
-    assert 'env -u PYTHONHOME LD_LIBRARY_PATH="${RDF_ORIG_LD_LIBRARY_PATH:-}" "$helper" "$@"' in script
+    assert 'env -u PYTHONHOME PYTHONPATH="$helper_path" LD_LIBRARY_PATH="${RDF_ORIG_LD_LIBRARY_PATH:-}" "$helper" "$@"' in script
     assert "run_helper_python - << 'RDFINPUT'" in script
 
 
@@ -204,7 +208,7 @@ def _run_input_block(tmp_path, monkeypatch, stage_in=False, yaml_config=False, f
     block = backend.stage_inputs_block(config_file=str(path)) if stage_in else backend.xrootd_optimize_block(str(path))
     code = block.split("<< 'RDFINPUT'\n", 1)[1].rsplit('\nRDFINPUT', 1)[0]
     exec(compile(code, '<worker-input>', 'exec'), {})
-    actual = backend.read_config(str(path))
+    actual = backend.read_config(backend._config_io.runtime_yaml_path(path))
     return actual, calls
 
 
@@ -244,7 +248,7 @@ def test_generated_workers_have_no_redirector_probe_processes(stage_in):
     assert 'probe_via_root_macro' not in script
     assert 'ThreadPoolExecutor' not in script
     assert 'site_redirectors.json' not in script
-    assert './myexe cfg/custom.txt' in script
+    assert './myexe cfg/custom.runtime.yaml' in script
     subprocess.run(['bash', '-n'], input=script, text=True, check=True)
 
 
@@ -267,8 +271,10 @@ def test_worker_preserves_inherited_affinity_and_limits_thread_pools(tmp_path, c
         'pathlib.Path("cpu.json").write_text(json.dumps(dict('
         'affinity=sorted(os.sched_getaffinity(0)), thread=sorted(seen), child=json.loads(child), '
         'omp=os.environ["OMP_NUM_THREADS"], blas=os.environ["OPENBLAS_NUM_THREADS"])))\n')
+    from core.python.submission_backend import _package_worker_yaml
+    _package_worker_yaml(tmp_path)
     (tmp_path / 'submit_config.txt').write_text('fileList=local.root\nthreads=1\n')
-    script = generate_condor_runscript('myexe', False, False, '', request_cpus=cpus)
+    script = generate_condor_runscript('myexe', False, False, '', request_cpus=cpus, config_file="submit_config.txt")
     # Setup/staging must retain the same inherited placement as the analysis.
     script = script.replace('stage_in_start=$(date +%s)',
         "run_helper_python -c 'import os; print(len(os.sched_getaffinity(0)))' > setup_cpus.txt\n"
@@ -290,8 +296,10 @@ def test_worker_preserves_inherited_affinity_and_limits_thread_pools(tmp_path, c
 def test_worker_cpu_launcher_preserves_analysis_failure(tmp_path):
     import subprocess
     (tmp_path / 'myexe').write_text('#!/bin/sh\nexit 23\n')
+    from core.python.submission_backend import _package_worker_yaml
+    _package_worker_yaml(tmp_path)
     (tmp_path / 'submit_config.txt').write_text('fileList=local.root\n')
-    script = generate_condor_runscript('myexe', False, False, '')
+    script = generate_condor_runscript('myexe', False, False, '', config_file="submit_config.txt")
     result = subprocess.run(['bash'], input=script, cwd=tmp_path,
                             text=True, capture_output=True)
     assert result.returncode == 23
@@ -308,12 +316,110 @@ def test_worker_executes_with_materialized_runtime_config(tmp_path, monkeypatch,
     fake.write_text('#!' + sys.executable + '\nimport pathlib, sys\n'
                     'pathlib.Path("consumed.txt").write_text(pathlib.Path(sys.argv[1]).read_text())\n')
     (tmp_path / 'local.root').write_bytes(b'local input fixture')
+    from core.python.submission_backend import _package_worker_yaml
+    _package_worker_yaml(tmp_path)
     (tmp_path / 'submit_config.txt').write_text('fileList=' + str(tmp_path / 'local.root') + '\nthreads=1\n')
     script = generate_condor_runscript('myexe', stage_in, False, '',
-                                      runtime_config_relpath='cfg/submit_config.txt')
+                                      runtime_config_relpath='cfg/submit_config.txt', config_file="submit_config.txt")
     subprocess.run(['bash'], input=script, text=True, check=True, capture_output=True)
-    consumed = (tmp_path / 'consumed.txt').read_text()
-    assert 'threads=1' in consumed
-    assert ('fileList=input_0.root' if stage_in else str(tmp_path / 'local.root')) in consumed
+    import yaml
+    consumed = yaml.safe_load((tmp_path / 'consumed.txt').read_text())
+    assert consumed['threads'] == '1'
+    assert consumed['fileList'] == ('input_0.root' if stage_in else str(tmp_path / 'local.root'))
     if stage_in:
         assert (tmp_path / 'input_0.root').read_bytes() == b'local input fixture'
+
+
+def test_condor_yaml_reader_runs_with_an_isolated_worker_python(tmp_path):
+    import subprocess
+    import sys
+    from submission_backend import write_submit_files
+
+    submit = write_submit_files(str(tmp_path), 1, "analysis", False, False, "")
+    archive = tmp_path / "rdf_worker_yaml.zip"
+    assert archive.is_file()
+    from pathlib import Path
+    assert str(archive) in Path(submit).read_text()
+    script = ("import sys; sys.path.insert(0, sys.argv[1]); import yaml; "
+              "assert '.zip/' in yaml.__file__; "
+              "assert yaml.safe_load('sample: Muon') == {'sample': 'Muon'}")
+    subprocess.run([sys.executable, "-I", "-S", "-c", script, str(archive)], check=True)
+
+
+@pytest.mark.parametrize(("config_name", "with_template"), [
+    ("submit_config.yaml", False), ("submit_config.txt", True), ("job_config.txt", False),
+])
+def test_public_single_job_retry_transfers_runnable_yaml(tmp_path, config_name, with_template):
+    from pathlib import Path
+    import re
+    import shutil
+    import subprocess
+    from unittest.mock import patch
+    from native_config_io import read_config
+    from rdfproduction.transport import _submit_single_job
+
+    job = tmp_path / "job_7"
+    shared = tmp_path / "shared_inputs"
+    job.mkdir()
+    shared.mkdir()
+    worker = shared / "worker"
+    worker.write_text('#!/bin/sh\ncp "$1" observed.yaml\n')
+    worker.chmod(0o755)
+    receipt = job / config_name
+    suffix = receipt.suffix
+    separator = "=" if suffix == ".txt" else ": "
+    source_files = {}
+    for name, contents in {
+        config_name: "\n".join(k + separator + v for k, v in [
+            ("xrdReadPolicy", "legacy"), ("floatConfig", "weights" + suffix),
+            ("intConfig", "numbers" + suffix), ("threads", "1")]) + "\n",
+        "weights" + suffix: "scale" + separator + "0.21\n",
+        "numbers" + suffix: "era" + separator + "0012\n",
+    }.items():
+        path = job / name
+        path.write_text(contents)
+        source_files[path] = path.read_bytes()
+    launcher = tmp_path / "condor_runscript.sh"
+    launcher.write_text(generate_condor_runscript("worker", False, False, "",
+                        shared_dir_name="shared_inputs", config_file=config_name))
+    launcher.chmod(0o755)
+    source_files[launcher] = launcher.read_bytes()
+    if with_template:
+        template = tmp_path / "condor_submit.sub"
+        template.write_text(generate_condor_submit(str(tmp_path), 8, "worker",
+                            shared_dir_name="shared_inputs", config_file=config_name))
+        source_files[template] = template.read_bytes()
+        (job / "site_redirectors.json").write_text("{}")
+    with patch("rdfproduction.jobs.condor_files.subprocess.run",
+               return_value=subprocess.CompletedProcess([], 0, "submitted to cluster 42.")) as submit:
+        assert _submit_single_job(7, str(tmp_path), "worker", None, False, 4900, 2300,
+                                  "shared_inputs", {}) == "42"
+    command = submit.call_args.args[0]
+    assert command[0] == "condor_submit"
+    descriptor = Path(command[1]).read_text()
+    assert 'CONDOR_PROC=7 ' in descriptor
+    assert 'returned_$(Cluster)_$(Process)_' in descriptor
+    assert "queue 1" in descriptor
+    matches = re.search(r'(?im)^transfer_input_files\s*=\s*(.*)$', descriptor)
+    inputs = [Path(p) for p in matches[1].split(",")]
+    assert all(path.exists() for path in inputs)
+    assert len({p.name for p in inputs}) == len(inputs)
+    assert {p.name for p in inputs} == {
+        receipt.with_suffix(".yaml").name, "shared_inputs", "rdf_worker_yaml.zip",
+        *({"site_redirectors.json"} if with_template else set()),
+        *({"floats.yaml", "ints.yaml"} if suffix == ".txt" else {"weights.yaml", "numbers.yaml"}),
+    }
+    actual_launcher = Path(re.search(r'(?im)^executable\s*=\s*(.*)$', descriptor)[1].strip())
+    sandbox = tmp_path / "worker-sandbox"
+    sandbox.mkdir()
+    for path in inputs:
+        if path.is_dir():
+            shutil.copytree(path, sandbox / path.name)
+        else:
+            shutil.copy2(path, sandbox / path.name)
+    subprocess.run(["bash", str(actual_launcher)], cwd=sandbox, check=True, capture_output=True)
+    observed = read_config(sandbox / "observed.yaml")
+    assert observed["xrdReadPolicy"] == "legacy"
+    assert read_config(sandbox / observed["intConfig"]) == {"era": "0012"}
+    assert read_config(sandbox / observed["floatConfig"]) == {"scale": "0.21"}
+    assert all(path.read_bytes() == data for path, data in source_files.items())

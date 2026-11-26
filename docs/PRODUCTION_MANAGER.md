@@ -1,5 +1,7 @@
 # Production Manager Guide
 
+For new productions and independent stages, follow the [Snakemake workflow guide](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md). The commands below describe existing production-manager and LAW-owned runs. Keep their state and scheduler IDs with the controller that submitted them.
+
 The Production Manager provides a unified, cohesive system for managing batch analysis productions in RDFAnalyzerCore. It handles job generation, submission, monitoring, validation, and failure recovery with state persistence to support resilient operations.
 
 ## Table of Contents
@@ -168,13 +170,13 @@ Law tasks for CMS combine statistical analysis:
 ```bash
 # Discover files via Rucio
 law run GetRucioFileList \
-    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
     --name myRun --x509 /tmp/x509 --exe build/bin/myanalysis
 
 # Run skim jobs using the discovered Rucio file lists
 law run SkimTask \
     --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
     --name mySkimRun \
     --file-source rucio \
     --file-source-name myRun \
@@ -219,7 +221,7 @@ Law automatically manages task dependencies. For example, `SkimTask` can depend 
 ```bash
 law run SkimTask \
     --dataset-manifest cfg/datasets.yaml \
-    --submit-config cfg/submit_config.txt \
+    --submit-config cfg/submit_config.yaml \
     --name mySkimRun \
     --file-source rucio --file-source-name myRun
 ```

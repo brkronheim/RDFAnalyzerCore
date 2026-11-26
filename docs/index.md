@@ -103,6 +103,12 @@ New to RDFAnalyzerCore? Start here:
   - Corrected full-object collection plugins
   - Minimal-code analysis integration
 
+### Reusable analysis operations
+
+[Source, friend and output contracts](SOURCE_AND_OUTPUT_CONTRACTS.md) explains configuration and migration.
+
+[Analysis function catalog](FUNCTION_CATALOG.md) — find matching C++ and Python operations by task.
+
 ### Batch Processing & Performance
 
 - **[LAW Tasks](LAW_TASKS.md)** - Luigi/LAW workflow task reference
@@ -150,12 +156,12 @@ New to RDFAnalyzerCore? Start here:
 
 RDFAnalyzerCore separates configuration from code:
 
-```
-# config.txt
-fileList=data.root
-saveFile=output.root
-threads=-1
-onnxConfig=cfg/onnx_models.txt
+```yaml
+# config.yaml
+fileList: data.root
+saveFile: output.root
+threads: -1
+onnxConfig: cfg/onnx_models.yaml
 ```
 
 Same binary, different configs = different analyses. Version control your configs with Git for reproducibility.

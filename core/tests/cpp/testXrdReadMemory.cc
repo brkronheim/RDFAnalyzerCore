@@ -8,6 +8,135 @@
 #include <unistd.h>
 
 namespace rdf::xrd {
+TEST(XrdReadMemory, AdaptiveRescueUsesSiteLatencyWindowSizeAndDeadline) {
+  const detail::SiteRank cold{}, warm{40., true, true, false}, prior{100., false, false, true};
+  using namespace std::chrono_literals;
+  EXPECT_EQ(backupDelay(XrdReadPolicy::Adaptive, 50, cold, 32, 120), 1000ms);
+  EXPECT_EQ(backupDelay(XrdReadPolicy::Adaptive, 50, warm, 256 * 1024, 120), 250ms);
+  EXPECT_EQ(backupDelay(XrdReadPolicy::Adaptive, 50, prior, 256 * 1024, 120), 300ms);
+  EXPECT_EQ(backupDelay(XrdReadPolicy::Adaptive, 50, warm, 1024 * 1024, 120), 480ms);
+  EXPECT_EQ(backupDelay(XrdReadPolicy::Adaptive, 750, warm, 32, 120), 750ms);
+  EXPECT_EQ(backupDelay(XrdReadPolicy::Adaptive, 1000, prior, 8 * 1024 * 1024, 1), 500ms);
+  EXPECT_EQ(backupDelay(XrdReadPolicy::Adaptive, 50, prior, 8 * 1024 * 1024, 120), 4000ms);
+  EXPECT_EQ(backupDelay(XrdReadPolicy::Legacy, 50, warm, 8 * 1024 * 1024, 1), 50ms);
+  EXPECT_EQ(backupDelay(XrdReadPolicy::Legacy, 0, cold, 32, 120), 0ms);
+}
+
+TEST(XrdReadMemory, AdaptiveHedgeCapIncludesLatePrimariesAcrossFiles) {
+  std::vector<std::shared_ptr<detail::ReadRaceState>> windows;
+  for (unsigned i = 0; i < 3; ++i) windows.push_back(std::make_shared<detail::ReadRaceState>());
+  ASSERT_TRUE(windows[0]->admitAdaptiveHedge());
+  ASSERT_TRUE(windows[0]->admitAdaptiveHedge());
+  ASSERT_TRUE(windows[1]->admitAdaptiveHedge());
+  EXPECT_FALSE(windows[2]->admitAdaptiveHedge());
+  auto pendingPrimary = windows[0];
+  windows[0].reset();
+  EXPECT_FALSE(windows[2]->admitAdaptiveHedge());
+  pendingPrimary.reset();
+  EXPECT_TRUE(windows[2]->admitAdaptiveHedge());
+}
+
+TEST(XrdReadMemory, ConcurrentFileRacesHoldHedgePermitsUntilCallbacksDrain) {
+  constexpr unsigned files = 12;
+  std::vector<std::shared_ptr<detail::ReadRaceState>> windows(files);
+  std::vector<std::future<bool>> readers;
+  std::promise<void> release;
+  auto start = release.get_future().share();
+  for (auto &window : windows) {
+    window = std::make_shared<detail::ReadRaceState>();
+    readers.push_back(std::async(std::launch::async, [window, start] {
+      start.wait();
+      return window->admitAdaptiveHedge();
+    }));
+  }
+  release.set_value();
+  unsigned admitted = 0;
+  for (auto &reader : readers) if (reader.get()) ++admitted;
+  EXPECT_EQ(admitted, kMaxAdaptiveHedgesPerProcess);
+  EXPECT_EQ(liveAdaptiveRaces.load(), admitted);
+  windows.clear();
+  EXPECT_EQ(liveAdaptiveRaces.load(), 0U);
+}
+
+TEST(XrdReadMemory, FailedSubmissionReturnsForegroundAndBackgroundSiteSlots) {
+  const std::string site("slot-scope-test");
+  try {
+    FullReadSlot reserved(site, true);
+    ASSERT_TRUE(reserved);
+    EXPECT_FALSE(static_cast<bool>(FullReadSlot(site, true)));
+    // A failed speculative submission can coexist with real demand.
+    FullReadSlot demand(site, false);
+    ASSERT_TRUE(demand);
+    throw std::bad_alloc();
+  } catch (const std::bad_alloc &) {
+  }
+  EXPECT_TRUE(static_cast<bool>(FullReadSlot(site, true)));
+}
+
+TEST(XrdInitialOpen, LateStandbyCallbackClosesTransportWhenManagerHasGone) {
+  char path[] = "/tmp/rdf-xrd-standby-close-XXXXXX";
+  const int fd = mkstemp(path);
+  ASSERT_GE(fd, 0);
+  close(fd);
+  auto remove = std::shared_ptr<const char>(path, [](const char *name) { unlink(name); });
+  const std::string url = "file://" + std::string(path);
+  auto file = std::make_shared<XrdCl::File>();
+  auto status = file->Open(url, XrdCl::OpenFlags::Read);
+  ASSERT_TRUE(status.IsOK());
+  std::weak_ptr<XrdCl::File> transport = file;
+  detail::InitialOperation operation(detail::kStandbyMetadataLimit);
+  ASSERT_TRUE(operation.acquired);
+  auto *callback = new XrdSourceManager::ProbeHandler({}, std::move(file),
+      openTrace(url, 1, 1, "replica"), std::move(operation));
+  callback->HandleResponse(new XrdCl::XRootDStatus(status), nullptr);
+  EXPECT_EQ(detail::initialOperations.load(), 0U);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!transport.expired() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  EXPECT_TRUE(transport.expired());
+}
+
+TEST(XrdInitialOpen, StandbyOpensLeaveMetadataCapacityForRecovery) {
+  std::vector<std::unique_ptr<detail::InitialOperation>> callbacks;
+  for (unsigned n = 0; n < detail::kStandbyMetadataLimit; ++n) {
+    auto token = std::make_unique<detail::InitialOperation>(detail::kStandbyMetadataLimit);
+    ASSERT_TRUE(token->acquired);
+    callbacks.push_back(std::move(token));
+  }
+  EXPECT_FALSE(detail::InitialOperation(detail::kStandbyMetadataLimit).acquired);
+  detail::InitialOperation recovery;
+  ASSERT_TRUE(recovery.acquired);
+  callbacks.clear();
+  EXPECT_TRUE(detail::InitialOperation(detail::kStandbyMetadataLimit).acquired);
+}
+
+TEST(XrdReadMemory, FailedReadBetweenSchedulingAndWaitWakesImmediately) {
+  detail::ReadRaceState race;
+  const auto observed = race.completions();
+  ASSERT_FALSE(race.complete(0, false, "local", "/failure-test", "file:///test", 10.));
+  const auto start = std::chrono::steady_clock::now();
+  race.waitForChange(std::chrono::seconds(1), observed);
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(250));
+}
+
+TEST(XrdReadMemory, TrafficDistinguishesSuccessfulCopiesFromShortResponses) {
+  ReadTraffic traffic;
+  traffic.beginFull(512, false);
+  traffic.beginFull(512, true);
+  traffic.finishFull(true, true, 512);
+  traffic.finishFull(true, false, 512);
+  traffic.beginFull(512, false);
+  traffic.finishFull(false, false, 20);
+  EXPECT_EQ(traffic.fullRequests.load(), 3u);
+  EXPECT_EQ(traffic.outstanding.load(), 0u);
+  EXPECT_EQ(traffic.peakOutstanding.load(), 2u);
+  EXPECT_EQ(traffic.winningBytes.load(), 512u);
+  EXPECT_EQ(traffic.losingBytes.load(), 512u);
+  EXPECT_EQ(traffic.errorBytes.load(), 20u);
+  EXPECT_EQ(traffic.requestedFullBytes.load(), 1536u);
+  EXPECT_EQ(traffic.requestedHedgeBytes.load(), 512u);
+}
+
 TEST(XrdReadMemory, SerialPipelineUsesCallingThread) {
   const auto caller = std::this_thread::get_id();
   std::vector<int> windows{0, 1, 2};
@@ -91,7 +220,7 @@ TEST(XrdReadMemory, OutOfOrderWindowsPreserveEarliestHandoffData) {
 }
 
 TEST(XrdReadMemory, CompletedReadDoesNotLoseNotificationBeforeWait) {
-  ReadRaceState race;
+  detail::ReadRaceState race;
   ASSERT_TRUE(race.complete(0, true, "local", "/notification-test", "file:///test", 1.));
   const auto start = std::chrono::steady_clock::now();
   race.waitForChange(std::chrono::seconds(1));
@@ -467,14 +596,14 @@ TEST(XrdEndpointCooldown, OpenLoserIsSkippedImmediatelyThenRetriedWhenAlternativ
 TEST(XrdEndpointCooldown, FullReadWinnerCoolsPendingLoserAndSoleSourceCanRecover) {
   const std::string slow="cooldown-read-slow.example:1094";
   const std::string fast="cooldown-read-fast.example:1094";
-  ReadRaceState race;
+  detail::ReadRaceState race;
   ASSERT_TRUE(race.registerEndpoints(0,{slow}));
   ASSERT_TRUE(race.registerEndpoints(1,{fast}));
   EXPECT_TRUE(race.complete(1,true,"fast","/f","root://file//f",10));
   EXPECT_TRUE(detail::endpointCooldown().active(slow)); // Before its callback.
   EXPECT_FALSE(race.registerEndpoints(2,{"late-copy.example:1094"}));
   EXPECT_FALSE(race.complete(0,true,"slow","/f","root://file//f",100));
-  ReadRaceState only;
+  detail::ReadRaceState only;
   ASSERT_TRUE(only.registerEndpoints(0,{slow}));
   EXPECT_TRUE(only.complete(0,true,"slow","/f","root://file//f",10));
   EXPECT_FALSE(detail::endpointCooldown().active(slow));

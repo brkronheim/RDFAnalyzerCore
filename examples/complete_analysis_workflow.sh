@@ -47,9 +47,9 @@ echo "  Processing samples to produce histograms..."
 # Replace these with your actual analysis configurations
 if [ -f "$ANALYSIS_EXE" ]; then
     # Uncomment and modify for real analysis:
-    # $ANALYSIS_EXE config_data.txt
-    # $ANALYSIS_EXE config_signal.txt
-    # $ANALYSIS_EXE config_background.txt
+    # $ANALYSIS_EXE config_data.yaml
+    # $ANALYSIS_EXE config_signal.yaml
+    # $ANALYSIS_EXE config_background.yaml
     echo "  [Skipping - modify script with your analysis executable and configs]"
 else
     echo -e "${RED}  Warning: Analysis executable not found at $ANALYSIS_EXE${NC}"

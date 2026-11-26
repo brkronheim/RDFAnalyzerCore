@@ -311,7 +311,7 @@ The ROOT files are written using `uproot` and are fully compatible with CMS comb
 
 1. **Run your RDFAnalyzer analysis** to produce ROOT files with histograms:
 ```bash
-./myanalysis config.txt
+./myanalysis config.yaml
 # Outputs: signal.root, ttbar.root, wjets.root, data.root
 ```
 
@@ -553,7 +553,7 @@ cmake --build build -j$(nproc)
 
 # 2. Run analysis (produces ROOT files with histograms)
 cd build/analyses/MyAnalysis
-./myanalysis config.txt
+./myanalysis config.yaml
 # Outputs: signal.root, ttbar.root, wjets.root, data.root
 
 # 3. Generate datacards

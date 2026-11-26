@@ -19,7 +19,7 @@ except ImportError:
             sys.path.insert(0, _candidate)
     import yaml  # will re-raise if still not found
 
-from submission_backend import read_config
+from native_config_io import read_config, load_yaml_document
 from dataset_manifest import DatasetManifest, FriendTreeConfig
 from output_schema import RegionDefinition, validate_region_hierarchy, NuisanceGroupDefinition, NUISANCE_GROUP_TYPES, NUISANCE_GROUP_OUTPUT_USAGES
 
@@ -274,9 +274,8 @@ def _validate_histogram_config_yaml(
     warnings: List[str] = []
 
     try:
-        with open(path) as fh:
-            data = yaml.safe_load(fh)
-    except yaml.YAMLError as exc:
+        data = load_yaml_document(path, typed=True)
+    except ValueError as exc:
         errors.append(f"Failed to parse YAML histogram config: {exc}")
         return errors, warnings
 
@@ -532,9 +531,6 @@ def validate_nuisance_groups_config(
 # Friend/sidecar tree config validator
 # ---------------------------------------------------------------------------
 
-#: Required keys in each friend tree definition dict.
-_FRIEND_REQUIRED_KEYS = ["alias"]
-
 #: All recognised keys in a friend tree definition.
 _FRIEND_KNOWN_KEYS = {
     "alias", "tree_name",
@@ -585,55 +581,40 @@ def validate_friend_config(
             )
             continue
 
-        # Required keys
-        for req in _FRIEND_REQUIRED_KEYS:
-            if req not in item:
-                errors.append(f"{entry_ctx}: missing required key '{req}'")
-
-        alias = item.get("alias", "")
-
-        # Duplicate alias detection
-        if alias:
-            if alias in seen_aliases:
-                errors.append(
-                    f"{entry_ctx}: Duplicate friend tree alias '{alias}' "
-                    f"(first seen at index {seen_aliases[alias]})"
-                )
-            else:
-                seen_aliases[alias] = i
-
-        # Must have at least one file source (files/fileList or directory)
-        has_files = bool(item.get("files") or item.get("fileList"))
-        has_directory = bool(item.get("directory"))
-        if not has_files and not has_directory:
-            warnings.append(
-                f"{entry_ctx} (alias '{alias}'): no file source specified; "
-                "provide 'files' or 'directory'"
+        alias = item.get("alias")
+        if not isinstance(alias, str) or not alias.strip():
+            errors.append(f"{entry_ctx}: 'alias' must be a nonempty string")
+        elif alias in seen_aliases:
+            errors.append(
+                f"{entry_ctx}: Duplicate friend tree alias '{alias}' "
+                f"(first seen at index {seen_aliases[alias]})"
             )
+        else:
+            seen_aliases[alias] = i
 
-        # Validate list fields
-        for list_key in ("files", "fileList", "globs", "antiglobs",
-                         "index_branches", "indexBranches"):
-            val = item.get(list_key)
-            if val is not None and not isinstance(val, list):
-                errors.append(
-                    f"{entry_ctx} (alias '{alias}'): '{list_key}' must be a list"
-                )
+        for manifest_key, native_key in (("files", "fileList"), ("tree_name", "treeName"),
+                                         ("index_branches", "indexBranches")):
+            if manifest_key in item and native_key in item:
+                errors.append(f"{entry_ctx}: duplicate field '{native_key}' (also '{manifest_key}')")
+        if not (item.get("files") or item.get("fileList") or item.get("directory")):
+            errors.append(f"{entry_ctx}: provide a nonempty files/fileList or directory")
 
-        # Validate string fields
-        for str_key in ("alias", "tree_name", "treeName", "directory"):
-            val = item.get(str_key)
-            if val is not None and not isinstance(val, str):
-                errors.append(
-                    f"{entry_ctx}: '{str_key}' must be a string"
-                )
-
-        # Unknown key warnings
-        for k in item:
-            if k not in _FRIEND_KNOWN_KEYS:
-                warnings.append(
-                    f"{entry_ctx} (alias '{alias}'): unknown key '{k}'"
-                )
+        for key, value in item.items():
+            field = f"{entry_ctx}.{key}"
+            if key not in _FRIEND_KNOWN_KEYS:
+                errors.append(f"{field}: unknown friend field")
+            elif key in ("tree_name", "treeName", "directory"):
+                if key == "directory" and value is None:
+                    continue  # Omitted directory in serialized manifests
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"{field}: expected a nonempty string")
+            elif key != "alias":
+                if not isinstance(value, list):
+                    errors.append(f"{field}: expected a list of strings")
+                elif any(not isinstance(v, str) or not v.strip() for v in value):
+                    errors.append(f"{field}: expected nonempty string items")
+                elif key in ("index_branches", "indexBranches") and len(value) > 2:
+                    errors.append(f"{field}: expected up to two branches for ROOT BuildIndex")
 
     return errors, warnings
 
@@ -739,6 +720,7 @@ _ANALYSIS_CONFIG_KNOWN_KEYS = {
     "regions",
     "nuisance_groups",
     "histogram_config",
+    "friends",
     "friend_trees",
     "plugins",
     "derivations",
@@ -761,7 +743,7 @@ def validate_analysis_config(
         :class:`~output_schema.NuisanceGroupDefinition` schema.
 
     ``histogram_config``
-        Path to a histogram text-format configuration file.  The path is
+        Path to a histogram configuration file.  The path is
         resolved relative to the directory containing the analysis config.
         The file is parsed and each entry is validated.
 
@@ -797,9 +779,8 @@ def validate_analysis_config(
         raise ValidationError(f"Analysis config file not found: {config_path}")
 
     try:
-        with open(config_path) as fh:
-            data = yaml.safe_load(fh)
-    except yaml.YAMLError as exc:
+        data = load_yaml_document(config_path, typed=True)
+    except ValueError as exc:
         errors.append(f"Failed to parse analysis config YAML: {exc}")
         return errors, warnings
 
@@ -863,6 +844,8 @@ def validate_analysis_config(
             f"[{source_context}] Both 'friend_trees' and 'friends' keys are present; "
             "only 'friend_trees' will be validated – remove the duplicate key"
         )
+    if "friends" in data and "friend_trees" in data:
+        errors.append(f"{source_context}: duplicate friends / friend_trees sequence")
     for key in ("friend_trees", "friends"):
         if key in data:
             errs, warns = validate_friend_config(data[key], source_context)
@@ -898,24 +881,8 @@ def _resolve_path(base_config_path: str, value: str) -> str:
 
 
 def _parse_sample_config(sample_config_path: str):
-    entries = []
-    with open(sample_config_path) as file:
-        for idx, line in enumerate(file, start=1):
-            raw = line
-            line = line.split("#")[0].strip()
-            if not line:
-                continue
-            parts = line.split()
-            entry = {}
-            for part in parts:
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    entry[k.strip()] = v.strip()
-            if entry:
-                entry["__line__"] = idx
-                entry["__raw__"] = raw.strip()
-                entries.append(entry)
-    return entries
+    from sample_config import legacy_sample_records
+    return [dict(entry, __line__=lineno) for lineno, entry in legacy_sample_records(sample_config_path)]
 
 
 def _is_float(val: str) -> bool:
@@ -1113,7 +1080,10 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
     if not os.path.exists(config_path):
         raise ValidationError(f"Config file not found: {config_path}")
 
-    cfg = read_config(config_path)
+    try:
+        cfg = read_config(config_path)
+    except ValueError as exc:
+        return [str(exc)], warnings
 
     # 'saveConfig' is optional: when missing, we will warn and snapshot will save the full dataframe.
     required_keys = ["sampleConfig", "saveDirectory", "saveTree"]
@@ -1159,7 +1129,10 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
                     f"Sample config '{sample_config}' uses legacy text format. "
                     "Consider migrating to YAML dataset manifest (.yaml) for better tooling support."
                 )
-                entries = _parse_sample_config(sample_config_path)
+                try:
+                    entries = _parse_sample_config(sample_config_path)
+                except ValueError as exc:
+                    return [*errors, str(exc)], warnings
                 has_recids = any("recids" in e for e in entries)
                 mode_local = mode.lower()
                 if mode_local == "auto":

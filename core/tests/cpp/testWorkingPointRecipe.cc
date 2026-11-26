@@ -29,7 +29,7 @@ struct FakeTaggerManager {
 TEST(WorkingPointRecipe, DefineConstantColumnsWritesFallbackValues) {
   ChangeToTestSourceDir();
 
-  Analyzer analyzer("cfg/test_data_config.txt");
+  Analyzer analyzer("cfg/test_data_config.yaml");
   rdfanalysis::weights::defineConstantColumns(
       analyzer, {"w_nominal", "w_up", "w_down"}, 1.0f);
 

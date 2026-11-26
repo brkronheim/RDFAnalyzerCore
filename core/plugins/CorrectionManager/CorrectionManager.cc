@@ -1,3 +1,4 @@
+#include <detail/CorrectionEvaluation.h>
 #include <set>
 #include <CorrectionManager.h>
 #include <ArrayValidation.h>
@@ -7,12 +8,11 @@
 #include <api/IDataFrameProvider.h>
 #include <api/ILogger.h>
 #include <api/ISystematicManager.h>
+#include <experimental/DeferredRdfDefine.h>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <iomanip>
 #include <limits>
-#include <mutex>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
@@ -24,7 +24,7 @@
 
 namespace {
 
-using CorrectionValue = std::variant<int, double, std::string>;
+using rdf::detail::CorrectionValue;
 
 template <typename Evaluate>
 void defineSlotCorrection(IDataFrameProvider &provider, ISystematicManager &systematics,
@@ -170,94 +170,9 @@ void populateCorrectionValues(std::vector<CorrectionValue> &values,
   }
 }
 
-struct CorrectionScratch {
-  std::vector<CorrectionValue> values;
-  correction::CompoundCorrection::Workspace compound;
-};
-
+using rdf::detail::CorrectionScratch;
+using rdf::detail::safeEvaluate;
 using CorrectionSlots = std::vector<CorrectionScratch>;
-
-double evaluateWithScratch(const correction::Correction::Ref &correction, CorrectionScratch &scratch) {
-  return correction->evaluate(scratch.values);
-}
-
-double evaluateWithScratch(const correction::CompoundCorrection::Ref &correction, CorrectionScratch &scratch) {
-  return correction->evaluate_with_workspace(scratch.values, scratch.compound);
-}
-
-/// Evaluate a correction with safe fallback for out-of-range inputs.
-///
-/// Attempts `correction->evaluate(values)` and returns the result. Out-of-range
-/// bin lookups return the fallback value. Depending on the Correctionlib
-/// version, these are reported as either std::out_of_range or a runtime_error
-/// whose message begins with "Index below/above bounds in". No range exception
-/// propagates to the caller. Every std::out_of_range fallback is reported to
-/// stderr, including runtime_error range failures and missing category keys.
-///
-/// For any other exception type the evaluation is still re-thrown as a
-/// `std::runtime_error` with a descriptive message, since those indicate
-/// genuine problems (corrupt files, schema mismatches, etc.).
-template <typename Output = Float_t, typename CorrectionRef>
-Output safeEvaluate(const CorrectionRef &correction,
-                     CorrectionScratch &scratch,
-                     Output fallback = Output(1)) {
-  const auto &values = scratch.values;
-  const auto reportFallback = [&](const char *type, const std::exception &error) {
-    std::ostringstream warning;
-    warning << std::setprecision(17)
-            << "Warning: CorrectionManager: " << type << " evaluating correction '"
-            << correction->name() << "': " << error.what()
-            << "; using fallback " << fallback << " for inputs [";
-    for (std::size_t i = 0; i < values.size(); ++i) {
-      if (i) warning << ", ";
-      std::visit([&warning](const auto &value) { warning << value; }, values[i]);
-    }
-    warning << "] (";
-    for (std::size_t i = 0; i < correction->inputs().size(); ++i) {
-      if (i) warning << ", ";
-      warning << correction->inputs()[i].name();
-    }
-    warning << ")\n";
-    // Emit complete records even when RDF evaluates corrections on many slots.
-    static std::mutex warningMutex;
-    const std::lock_guard<std::mutex> lock(warningMutex);
-    std::cerr << warning.str();
-  };
-  try {
-    const auto result = evaluateWithScratch(correction, scratch);
-    if (!std::isfinite(result) || std::abs(result) > std::numeric_limits<Output>::max())
-      throw std::runtime_error("non-finite or unrepresentable correction result");
-    return result;
-  } catch (const std::out_of_range &e) {
-    // Preserve the neutral fallback, but report every failure: correctionlib
-    // also uses this exception for missing string/category keys, which can
-    // indicate a configuration error rather than an expected numeric range.
-    reportFallback("std::out_of_range", e);
-    return fallback;
-  } catch (const std::runtime_error &e) {
-    // The bundled Correctionlib throws runtime_error (rather than
-    // out_of_range) for Binning/MultiBinning nodes configured with
-    // flow: "error". Keep only those known range failures neutral; other
-    // runtime errors still indicate a broken payload or schema mismatch.
-    const std::string_view message(e.what());
-    if (message.rfind("Index below bounds in ", 0) == 0 ||
-        message.rfind("Index above bounds in ", 0) == 0) {
-      reportFallback("range error", e);
-      return fallback;
-    }
-    throw std::runtime_error(
-        std::string("Error evaluating correction '") + correction->name() +
-        "': " + e.what() +
-        ". This indicates a genuine problem (corrupt file, schema "
-        "mismatch, or missing correction) and should be investigated.");
-  } catch (const std::exception &e) {
-    throw std::runtime_error(
-        std::string("Error evaluating correction '") + correction->name() +
-        "': " + e.what() +
-        ". This indicates a genuine problem (corrupt file, schema "
-        "mismatch, or missing correction) and should be investigated.");
-  }
-}
 
 template <typename Output, typename CorrectionRef>
 Output evaluateScalarCorrection(const CorrectionRef &correction,
@@ -656,23 +571,68 @@ void CorrectionManager::applyConditionalCorrections(
       dataManager_m->DefineVector(packed, resolved, "double", *systematicManager_m);
     else
       dataManager_m->DefineVectorNominal(packed, resolved, "double", *systematicManager_m);
+    const auto &settings = configManager_m->getConfigMap();
+    const auto deferred = settings.find("correctionDeferInactiveInputs");
+    const bool deferInputs = deferred != settings.end() && deferred->second == "true";
+    std::shared_ptr<const correction::BinnedVariationGroup> binGroup;
+    const auto reuse = settings.find("correctionReuseBinnedLookups");
+    if constexpr (std::is_same_v<std::decay_t<decltype(correction)>, correction::Correction::Ref>) {
+      if (reuse != settings.end() && reuse->second == "true")
+        binGroup = correction::BinnedVariationGroup::prepare(correction, arguments);
+    }
+    std::shared_ptr<std::vector<correction::BinnedVariationGroup::Workspace>> binSlots;
+    if (binGroup) {
+      binSlots = std::make_shared<std::vector<correction::BinnedVariationGroup::Workspace>>(df.GetNSlots());
+      std::cout << "CorrectionManager: shared binned variation lookup for '" << name << "'\n";
+    }
     for (std::size_t i = 0; i < arguments.size(); ++i) {
       const auto bookOutput = [&](auto outputTag) {
         using Output = decltype(outputTag);
         const auto slots = std::make_shared<CorrectionSlots>(df.GetNSlots());
-        const auto evaluate = [correction, kinds, strings = arguments[i], prepareInputs, slots](
-            unsigned slot, const ROOT::VecOps::RVec<double> &values, bool active) -> Output {
-          if (!active) return Output(1);
+        const auto evaluateActive = [correction, kinds, strings = arguments[i], prepareInputs, slots,
+                                     binGroup, binSlots, i](unsigned slot, const ROOT::RVecD &values) -> Output {
+          const auto evaluate = [&](const ROOT::RVecD &coordinates) -> Output {
+            if (binGroup) {
+              // Keep the original fallback, warning, and output-range semantics.
+              try {
+                const auto value = binGroup->evaluate(i, coordinates.data(), coordinates.size(), (*binSlots)[slot]);
+                if (std::isfinite(value) && std::abs(value) <= std::numeric_limits<Output>::max())
+                  return static_cast<Output>(value);
+              } catch (const std::out_of_range &) {
+              } catch (const std::runtime_error &) {
+              }
+            }
+            return evaluateScalarCorrection<Output>(correction, strings, kinds, coordinates, (*slots)[slot]);
+          };
           if (!prepareInputs)
-            return evaluateScalarCorrection<Output>(correction, strings, kinds, values, (*slots)[slot]);
+            return evaluate(values);
           auto prepared = values;
           prepareInputs(prepared);
           if (prepared.size() != values.size())
             throw std::runtime_error("CorrectionManager: conditional input preparation changed input count");
-          return evaluateScalarCorrection<Output>(correction, strings, kinds, prepared, (*slots)[slot]);
+          return evaluate(prepared);
         };
-        defineSlotCorrection(*dataManager_m, *systematicManager_m, outputs[i], evaluate,
-                             {packed, condition}, propagate.empty() || propagate[i]);
+        const bool propagateOutput = propagate.empty() || propagate[i];
+        if (!deferInputs) {
+          defineSlotCorrection(*dataManager_m, *systematicManager_m, outputs[i],
+              [evaluateActive](unsigned slot, const ROOT::RVecD &values, bool active) {
+                return active ? evaluateActive(slot, values) : Output(1);
+              }, {packed, condition}, propagateOutput);
+          return;
+        }
+        auto node = dataManager_m->getDataFrame();
+        if (node.HasColumn(outputs[i])) return;
+        const auto bookDeferred = [evaluateActive](ROOT::RDF::RNode current, const std::string &out,
+                                                   const std::vector<std::string> &columns) {
+          return rdf::experimental::defineDeferred(current, out,
+              [evaluateActive](unsigned slot, const rdf::experimental::DeferredInputs &input) {
+                return input.get<bool>(0) ? evaluateActive(slot, input.get<ROOT::RVecD>(1)) : Output(1);
+              }, columns, {&typeid(bool), &typeid(ROOT::RVecD)});
+        };
+        const std::vector<std::string> columns{condition, packed};
+        dataManager_m->setDataFrame(propagateOutput
+            ? rdf::detail::defineWithVariations(node, outputs[i], columns, *systematicManager_m, bookDeferred)
+            : bookDeferred(node, outputs[i], columns));
       };
       if (scalarDoubleOutput(*configManager_m)) bookOutput(double{});
       else bookOutput(Float_t{});

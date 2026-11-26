@@ -26,7 +26,7 @@ Use the [project map](../rdfanalyzer-analysis-projects/SKILL.md) for checkout-sp
 | Particle constraints and CPU/GPU reconstruction fits | [Kinematic fits](../rdfanalyzer-kinematic-fit/SKILL.md) |
 | STXS classification and acceptance/migration derivation | [STXS](../rdfanalyzer-stxs/SKILL.md) |
 | Skim/meta output, reports, provenance and artifact manifests | [Outputs](../rdfanalyzer-outputs/SKILL.md) |
-| Wrappers, LAW, Condor/Dask, staging and recovery | [Production](../rdfanalyzer-production/SKILL.md) |
+| Snakemake stages, existing wrappers, Condor/Dask, staging and recovery | [Production](../rdfanalyzer-production/SKILL.md) |
 | Remote file opening, caches and read throughput | [Input I/O](../rdfanalyzer-input-io/SKILL.md) |
 | Datacards, nuisance policy and saved fit audits | [Statistics](../rdfanalyzer-statistics/SKILL.md) |
 | Python analysis authoring and native wrappers | [Python](../rdfanalyzer-python/SKILL.md) |
@@ -66,4 +66,4 @@ definition idempotence is not a producer-consistency check.
 
 Before editing, check framework status and the analysis directory's Git root, HEAD, and status independently; `analyses/*` is ignored at the framework root. Before running, check the executable target, input files, data/MC mode, payloads, normalization, path resolution, and output destinations. Build the relevant target and use a small local sample when one is available. Do not assume `run()` writes a skim: verify `enableSkim` and the registered output actions. If behavior changes, update matching analysis docs/configs and add a meaningful regression test when the project has a test harness.
 
-For a framework capability missing from the analysis API, also read `rdfanalyzer-development` and keep the reusable change in the framework. For batch workflows, follow that analysis's actual task graph and the generic [LAW Tasks](../../../docs/LAW_TASKS.md) and [Batch Submission](../../../docs/BATCH_SUBMISSION.md) references. Keep discovery, remote jobs, retries, and shared-storage writes within the user's requested execution scope; a diagnosis alone does not authorize recovery actions.
+For a framework capability missing from the analysis API, also read `rdfanalyzer-development` and keep the reusable change in the framework. For batch work, start with the [Snakemake stage guide](../../../examples/snakemake/README.md). Trace the analysis wrapper to identify the controller that owns existing jobs. Use the [LAW task reference](../../../docs/LAW_TASKS.md) when that controller is LAW.

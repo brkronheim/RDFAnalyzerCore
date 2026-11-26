@@ -2,6 +2,13 @@
 
 Read [analysis_tasks.py](../../../../core/python/law/analysis_tasks.py), [STITCHING](../../../../docs/STITCHING.md), and the analysis's configured counter/weight definitions. Search for the exact classes `StitchingDerivationTask`, `StitchingApplySubmitJobs`, `StitchingApplyMonitorJobs`, `StitchingApplyTask`, and `StitchingValidationTask`; the shorter name `StitchDerivationTask` is not a task class.
 
+The [Snakemake composition](../../../../examples/snakemake/README.md#two-pass-stitching)
+uses [stitching.py](../../../../core/python/rdfproduction/stitching.py)
+to pass the verified ROOT files to the same derivation and validation logic.
+It binds the generated correction to the application spec after derivation
+and tracks the passes under separate run names. Inspect the two indexes for
+exact terminal partition paths after a split.
+
 ## Resolve both event passes
 
 `StitchingDerivationTask` reads `--stitch-config` groups with explicit `meta_files` or declarative sample selections. With `source_skim_name` it requires a source `SkimTask`; inspect the forwarded submit config, executable, manifest, file-source, partition and runtime options. `--name` namespaces `stitchWeights_<name>` beneath the module's resolved workspace.

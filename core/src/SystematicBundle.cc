@@ -73,12 +73,10 @@ resolveVariationLabels(ISystematicManager &sysMgr, IDataFrameProvider &dataMgr, 
 bool hasUsableSystematicColumns(IDataFrameProvider &dataMgr, ISystematicManager &sysMgr,
                                  const std::string &variable, const std::vector<std::string> &variationLabels) {
   auto df = dataMgr.getDataFrame();
-  const auto existingColumns = df.GetColumnNames();
-  std::unordered_set<std::string> colSet(existingColumns.begin(), existingColumns.end());
   for (const auto &label : variationLabels) {
     if (label == "Nominal") continue;
-    if (!sysMgr.isVariableAffectedBySystematic(variable, label)) continue;
-    if (colSet.count(sysMgr.getVariationColumnName(variable, label))) return true;
+    const auto column = sysMgr.getVariationColumnName(variable, label);
+    if (column != variable && df.HasColumn(column)) return true;
   }
   return false;
 }
@@ -217,7 +215,7 @@ defineSelectionMaskBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMg
     if (colSet.count(colName)) {
       resolvedCols.push_back(colName);
       spec.resolvedColumnNames.push_back(colName);
-    } else if (!sysMgr.isVariableAffectedBySystematic(selectionColumn, label)) {
+    } else if (colName == selectionColumn) {
       resolvedCols.push_back(selectionColumn);
       spec.resolvedColumnNames.push_back(selectionColumn);
     } else {

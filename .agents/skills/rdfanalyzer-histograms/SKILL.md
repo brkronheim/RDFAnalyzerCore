@@ -42,7 +42,9 @@ with double sumw2, dense separate arrays and ROOT-compatible axis lookup.
 `histogramBoostSparseBackend` selects `map` or `flat` sparse containers. Test
 cancellations and exact edges before switching backends. Double-precision
 Boost-selected variable-width observables use the ROOT action. Set
-`RDF_HISTOGRAM_PROFILE=1` for storage/finalization measurements.
+`RDF_HISTOGRAM_PROFILE=1` for storage/finalization measurements and aggregate
+booked/final action counts, Boost dense-equivalent bytes, sampled sparse
+allocator totals and occupied output bins.
 Metadata saving warns once per histogram if slot-local counting allocators
 show sparse Boost storage exceeding the equivalent dense arrays. The retained
 samples cover pre-merge and slot-merge allocations, including nodes/buckets;

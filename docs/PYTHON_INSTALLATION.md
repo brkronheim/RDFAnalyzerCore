@@ -1,5 +1,7 @@
 # Install and check Python authoring
 
+For production stages, install the language-free [SnakemakeController component](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md#install-a-relocatable-workflow-controller).
+
 For Python orchestration of prebuilt C++ executables, the separate
 [`PythonController` installation](COMPILED_CPP_WORKFLOWS.md#build-and-install-the-controller)
 needs no ROOT, pybind11 or compiler. It includes controller/result IDE signatures

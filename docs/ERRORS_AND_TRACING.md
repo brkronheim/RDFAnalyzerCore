@@ -119,7 +119,7 @@ analyzer.getSystematicManager().registerSystematic("jes", {"jet_pt"});
 
 ```python
 # Python
-analyzer = rdfanalyzer.Analyzer('config.txt')
+analyzer = rdfanalyzer.Analyzer('config.yaml')
 analyzer.registerSystematic('jes', ['jet_pt'])
 ```
 
@@ -147,7 +147,7 @@ Missing required key 'sampleConfig'
 
 **Solution:**
 ```bash
-python core/python/validate_config.py --config config.txt
+python core/python/validate_config.py --config config.yaml
 ```
 
 Run validation before running analysis.
@@ -229,11 +229,11 @@ Config validation failed: File not found for 'floatConfig'
 **Solution:**
 ```bash
 # Ensure file exists
-ls cfg/float_config.txt
+ls cfg/float_config.yaml
 
 # Check path is relative to config file
 cd /path/to/analysis
-python core/python/validate_config.py --config cfg/config.txt
+python core/python/validate_config.py --config cfg/config.yaml
 ```
 
 ## Debugging Tips
@@ -245,7 +245,7 @@ import rdfanalyzer
 import sys
 
 # Set verbosity
-analyzer = rdfanalyzer.Analyzer('config.txt')
+analyzer = rdfanalyzer.Analyzer('config.yaml')
 analyzer.verbosityLevel = 2  # Higher = more verbose
 ```
 
@@ -266,7 +266,7 @@ print(ROOT.gInterpreter().getNumCommands())
 ### Validate Config Before Run
 
 ```bash
-python core/python/validate_config.py --config config.txt
+python core/python/validate_config.py --config config.yaml
 ```
 
 ### Check Build
@@ -306,7 +306,7 @@ If you encounter an error not listed here:
 
 ```python
 try:
-    analyzer = rdfanalyzer.Analyzer('config.txt')
+    analyzer = rdfanalyzer.Analyzer('config.yaml')
     analyzer.Define('x', 'pt > 25.0', ['pt'])
     analyzer.run()
 except RuntimeError as e:

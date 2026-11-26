@@ -1,4 +1,4 @@
 interface:
   display_name: "Production workflows and diagnosis"
-  short_description: "Trace LAW tasks, runtime staging and recovery"
-  default_prompt: "Use $rdfanalyzer-production to trace the selected LAW task family, environment, dependency chain, staged runtime and worker evidence."
+  short_description: "Trace Snakemake stages, runtimes and recovery"
+  default_prompt: "Use $rdfanalyzer-production to trace the Snakemake targets, saved inputs, staged runtime and worker evidence, or the legacy controller owning an existing campaign."

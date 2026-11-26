@@ -58,6 +58,9 @@ def patch_probe_functions(script):
                         and isinstance(node.args[0], ast.Constant)):
                     config = node.args[0].value
                     break
+        if Path(config).suffix not in {".yaml", ".yml"}:
+            raise ValueError(f"Archived worker reads {config!r}. Keep its submitted launcher intact; "
+                             "use a YAML retry or prepare a new campaign before refreshing worker helpers.")
         generator = stage_inputs_block if stage_in else xrootd_optimize_block
         replacement = generator(config_file=config).strip('\n')
         script = script[:match.start()] + replacement + script[match.end():]

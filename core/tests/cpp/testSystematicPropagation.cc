@@ -1,4 +1,5 @@
 #include <analyzer.h>
+#include <CheckedDefine.h>
 #include <DataManager.h>
 #include <SystematicManager.h>
 #include <test_util.h>
@@ -40,7 +41,7 @@ protected:
     auto dataMgr = std::make_unique<DataManager>(5);
 
     // Set up dummy ConfigurationManager
-    auto configMgr = std::make_unique<ConfigurationManager>("cfg/test_data_config_minimal.txt");
+    auto configMgr = std::make_unique<ConfigurationManager>("cfg/test_data_config_minimal.yaml");
 
     // Set up dummy CorrectionManager
     auto corrMgr = std::make_shared<CorrectionManager>(*configMgr);
@@ -497,6 +498,48 @@ TEST(VariationDefinitionPreflight, SharedIdenticalRequestsUseOneComputation) {
   EXPECT_EQ(calls, 4u); // Only the demanded shared producer, once per entry.
 }
 
+TEST(VariationDefinitionPreflight, DistinguishesBareExplicitLabelFromPairedDirections) {
+  ROOT::RDataFrame source(1);
+  ROOT::RDF::RNode df = source.Define("jet", [] { return 10; })
+      .Define("jet_scaleUp", [] { return 11; })
+      .Define("jet_scaleDown", [] { return 9; })
+      .Define("weight", [] { return 2; })
+      .Define("weight_alternate", [] { return 3; });
+  SystematicManager sm;
+  sm.registerSystematic("scale", {"jet"});
+  sm.registerVariationColumn("weight", "scale", "weight_alternate");
+  EXPECT_EQ(sm.getVariationColumnName("jet", "scale"), "jet");
+  df = rdf::detail::defineWithVariations(df, "weighted", {"jet", "weight"}, sm,
+      [](ROOT::RDF::RNode node, const std::string &name, const auto &inputs) {
+        return node.Define(name, [](int jet, int weight) { return jet * weight; }, inputs);
+      });
+  auto nominal = df.Take<int>("weighted");
+  auto up = df.Take<int>("weighted_scaleUp");
+  auto down = df.Take<int>("weighted_scaleDown");
+  auto replica = df.Take<int>("weighted_scale");
+  EXPECT_EQ(nominal->front(), 20);
+  EXPECT_EQ(up->front(), 22);
+  EXPECT_EQ(down->front(), 18);
+  EXPECT_EQ(replica->front(), 30);
+}
+
+TEST(VariationDefinitionPreflight, DistinctOutputsKeepStatefulCallableInvocations) {
+  DataManager data(4);
+  SystematicManager sm;
+  data.DefineNominal("x", [] { return 1; });
+  data.DefineNominal("shared_input", [] { return 2; });
+  sm.registerVariationColumn("x", "replicaA", "shared_input");
+  sm.registerVariationColumn("x", "replicaB", "shared_input");
+  unsigned calls = 0;
+  data.Define("sample", [&calls](int value) { ++calls; return value; }, {"x"}, sm);
+  auto df = data.getDataFrame();
+  auto a = df.Sum<int>("sample_replicaA");
+  auto b = df.Sum<int>("sample_replicaB");
+  EXPECT_EQ(*a, 8);
+  EXPECT_EQ(*b, 8);
+  EXPECT_EQ(calls, 8u);
+}
+
 TEST(VariationDefinitionPreflight, PreexistingExplicitProducerKeepsLegacyBehavior) {
   ROOT::RDataFrame frame(1);
   ROOT::RDF::RNode df = frame.Define("input", [] { return 1.f; })
@@ -513,4 +556,68 @@ TEST(VariationDefinitionPreflight, PreexistingExplicitProducerKeepsLegacyBehavio
   EXPECT_EQ(sm.getVariationColumnName("result", "pdfA"), "calibrated");
   EXPECT_FLOAT_EQ(df.Take<float>("calibrated").GetValue()[0], 42.f);
   EXPECT_FLOAT_EQ(df.Take<float>("result").GetValue()[0], 2.f);
+}
+
+TEST_F(SystematicPropagationTest, CheckedDefinitionRejectsNominalAndBooksFreshOutputs) {
+  auto twice = [](int n) { return 2 * n; };
+  rdf::DefineChecked(*analyzer, "checked_input", [] { return 4; });
+  analyzer->DefineNominal("checked_shift", [] { return 7; });
+  auto &sm = analyzer->getSystematicManager();
+  sm.registerVariationColumn("checked_input", "replica", "checked_shift");
+  ASSERT_EQ(rdf::DefineChecked(*analyzer, "checked_weight", twice, {"checked_input"}),
+            analyzer.get());
+  try {
+    rdf::DefineChecked(*analyzer, "checked_weight", twice, {"checked_shift"}, "selection");
+    FAIL() << "expected nominal collision";
+  } catch (const std::invalid_argument &e) {
+    const std::string message = e.what();
+    for (auto word : {"nominal", "checked_weight", "checked_shift", "selection"})
+      EXPECT_NE(message.find(word), std::string::npos) << message;
+  }
+  auto df = analyzer->getDataFrameProvider().getDataFrame();
+  auto nominal = df.Take<int>("checked_weight");
+  auto varied = df.Take<int>("checked_weight_replica");
+  EXPECT_EQ(nominal->front(), 8);
+  EXPECT_EQ(varied->front(), 14);
+}
+
+TEST_F(SystematicPropagationTest, CheckedDefinitionRejectsExternalMappedOutputBeforeBooking) {
+  auto twice = [](int n) { return 2 * n; };
+  for (auto name : {"input_x", "input_x_shapeUp", "input_x_shapeDown", "external_shift"})
+    analyzer->DefineNominal(name, [] { return 5; });
+  auto &sm = analyzer->getSystematicManager();
+  sm.registerSystematic("shape", {"input_x"});
+  sm.registerVariationColumn("input_x", "replica", "input_x_shapeUp");
+  sm.registerVariationColumn("value_x", "replica", "external_shift");
+  try {
+    rdf::DefineChecked(*analyzer, "value_x", twice, {"input_x"}, "jet calibration");
+    FAIL() << "expected physical collision";
+  } catch (const std::invalid_argument &e) {
+    const std::string message = e.what();
+    for (auto word : {"external_shift", "replica", "input_x_shapeUp", "jet calibration"})
+      EXPECT_NE(message.find(word), std::string::npos) << message;
+  }
+  auto df = analyzer->getDataFrameProvider().getDataFrame();
+  EXPECT_FALSE(df.HasColumn("value_x"));
+  EXPECT_FALSE(df.HasColumn("value_x_shapeUp"));
+  EXPECT_FALSE(df.HasColumn("value_x_shapeDown"));
+  EXPECT_FALSE(sm.isVariableAffectedBySystematic("value_x", "shapeUp"));
+  EXPECT_EQ(sm.getVariationColumnName("value_x", "replica"), "external_shift");
+  // An analysis explicitly opting into external ownership can still use Define.
+  analyzer->Define("value_x", twice, {"input_x"});
+  EXPECT_EQ(analyzer->getDataFrameProvider().getDataFrame().Take<int>("external_shift")->front(), 5);
+}
+
+TEST_F(SystematicPropagationTest, CheckedDefinitionRejectsSharedRequestedOutput) {
+  analyzer->DefineNominal("checked_base", [] { return 1; });
+  analyzer->DefineNominal("checked_alt", [] { return 2; });
+  auto &sm = analyzer->getSystematicManager();
+  for (auto label : {"replicaA", "replicaB"}) {
+    sm.registerVariationColumn("checked_base", label, "checked_alt");
+    sm.registerVariationColumn("checked_score", label, "shared_physical_score");
+  }
+  EXPECT_THROW(rdf::DefineChecked(*analyzer, "checked_score", [](int n) { return n; },
+                                  {"checked_base"}), std::invalid_argument);
+  EXPECT_FALSE(analyzer->getDataFrameProvider().getDataFrame().HasColumn("checked_score"));
+  EXPECT_FALSE(analyzer->getDataFrameProvider().getDataFrame().HasColumn("shared_physical_score"));
 }

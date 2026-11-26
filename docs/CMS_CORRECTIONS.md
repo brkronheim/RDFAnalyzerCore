@@ -287,24 +287,24 @@ systematic propagation for later derived quantities.
 
 ### Config format
 
-Each wrapper uses a small pair-based config file:
+Each wrapper uses a YAML mapping of column names and correction settings.
 
-```text
-ptColumn=Jet_pt
-etaColumn=Jet_eta
-phiColumn=Jet_phi
-massColumn=Jet_mass
-metPtColumn=PuppiMET_pt
-metPhiColumn=PuppiMET_phi
-rawFactorColumn=Jet_rawFactor
-jerGenJetPtColumn=Jet_genMatchedPt
-jerRhoColumn=fixedGridRhoFastjetAll
-jerEventColumn=event
-correctedPtColumn=Jet_pt_corr_nominal
-correctedMassColumn=Jet_mass_corr_nominal
-outputCollection=CorrectedJets
-variationMapColumn=CorrectedJets_variations
-workflowConfig=cfg/corrected_jets_workflow.txt
+```yaml
+ptColumn: Jet_pt
+etaColumn: Jet_eta
+phiColumn: Jet_phi
+massColumn: Jet_mass
+metPtColumn: PuppiMET_pt
+metPhiColumn: PuppiMET_phi
+rawFactorColumn: Jet_rawFactor
+jerGenJetPtColumn: Jet_genMatchedPt
+jerRhoColumn: fixedGridRhoFastjetAll
+jerEventColumn: event
+correctedPtColumn: Jet_pt_corr_nominal
+correctedMassColumn: Jet_mass_corr_nominal
+outputCollection: CorrectedJets
+variationMapColumn: CorrectedJets_variations
+workflowConfig: cfg/corrected_jets_workflow.yaml
 ```
 
 If `inputCollection` is omitted, the plugin auto-builds one from
@@ -393,20 +393,20 @@ Example compact electron workflow:
 
 ```yaml
 - type: registerCorrection
-    sample: mc
-    name: analysis_electron_smear
-    file: ${analysisElectronScaleSmearingFile}
-    correctionName: ${analysisElectronSmearingCorrection}
-    inputVariables: Electron_pt,Electron_r9,Electron_scEta
+  sample: mc
+  name: analysis_electron_smear
+  file: ${analysisElectronScaleSmearingFile}
+  correctionName: ${analysisElectronSmearingCorrection}
+  inputVariables: Electron_pt,Electron_r9,Electron_scEta
 - type: applyResolutionSmearingSystematic
-    sample: mc
-    correction: analysis_electron_smear
-    systematicName: electron_smear
+  sample: mc
+  correction: analysis_electron_smear
+  systematicName: electron_smear
 - type: applyRelativePtUncertaintySystematic
-    sample: mc
-    correction: analysis_electron_smear
-    stringArgs: escale
-    systematicName: electron_scale
+  sample: mc
+  correction: analysis_electron_smear
+  stringArgs: escale
+  systematicName: electron_scale
 ```
 
 ### Systematic behavior

@@ -115,23 +115,30 @@ def rewrite_references(value, replacements):
 
 
 def compile_config_bundle(template, destination, *, asset_keys, overrides=None,
-                          metadata=None, reuse=False):
+                          metadata=None, reuse=False, asset_kinds=None):
     """Compile a YAML submit template and its declared file dependencies.
 
     ``asset_keys`` describes the analysis's top-level file-valued keys. Nested
     YAML ``file`` fields and text ``file=`` tokens declare further dependencies.
-    Data input lists and output locations are not guessed from their suffixes.
+    Pass asset_kinds={key: kind} for a custom
+    configuration key whose archived inputs need conversion. Raw payloads are
+    copied byte for byte. Data inputs and outputs are not inferred from suffixes.
     """
-    import re
-    import shlex
-    import yaml
 
     template = Path(template).resolve()
-    config = yaml.safe_load(template.read_text())
+    from native_config_io import load_yaml_document, read_config, legacy_aux_kind, read_legacy_aux, write_config_yaml
+    config = read_config(template) if template.suffix not in {".yaml", ".yml"} else load_yaml_document(template)
     if not isinstance(config, dict):
         raise BundleError(f"submit template must be a mapping: {template}")
     config.update(overrides or {})
-    sources, dependencies = set(), {}
+    asset_keys = tuple(asset_keys)
+    asset_kinds = dict(asset_kinds or {})
+    for key, kind in asset_kinds.items():
+        if key not in asset_keys or kind not in {"mapping", "records", "list", "samples", "stxs_bins", "stxs_migration"}:
+            raise BundleError(f"Unsupported asset kind {key}={kind!r}; declare an asset key and its document shape")
+    asset_kinds = {key: kind for key, kind in asset_kinds.items() if config.get(key)}
+
+    sources, dependencies, yaml_documents = set(), {}, {}
     # Text model recipes can already use the worker's cfg/<name> spelling.
     # Resolve it only through an explicitly declared top-level asset.
     worker_aliases = {}
@@ -142,7 +149,7 @@ def compile_config_bundle(template, destination, *, asset_keys, overrides=None,
             if candidate.is_file():
                 worker_aliases.setdefault("cfg/" + candidate.name, set()).add(candidate.resolve())
 
-    def resolve(value, parent):
+    def resolve(value, parent, config_key=None):
         path = Path(value).expanduser()
         path = (parent / path).resolve() if not path.is_absolute() else path.resolve()
         if not path.is_file() and value in worker_aliases:
@@ -156,7 +163,7 @@ def compile_config_bundle(template, destination, *, asset_keys, overrides=None,
                 path = bundle / value
         if not path.is_file():
             raise BundleError(f"missing declared asset {value!r} relative to {parent}")
-        visit(path)
+        visit(path, config_key)
         return str(path)
 
     def nested(node, parent):
@@ -167,27 +174,26 @@ def compile_config_bundle(template, destination, *, asset_keys, overrides=None,
             return [nested(item, parent) for item in node]
         return node
 
-    def visit(path):
+    def visit(path, config_key):
         if path in sources:
             return
         sources.add(path)
         if path.suffix in {".yaml", ".yml"}:
-            dependencies[path] = nested(yaml.safe_load(path.read_text()), path.parent)
-        elif path.suffix == ".txt":
-            # ONNX/fit text grammars use whitespace-separated key=value tokens.
-            text = path.read_text()
-            replacements = {}
-            for line in text.splitlines():
-                for token in shlex.split(line, comments=True):
-                    if token.startswith("file="):
-                        value = token[5:]
-                        replacements[value] = resolve(value, path.parent)
-            dependencies[path] = (text, replacements)
+            kind = asset_kinds.get(config_key) or legacy_aux_kind(config_key, path.with_suffix(".txt"))
+            original = load_yaml_document(path, typed=kind is None or kind == "samples")
+            yaml_documents[path] = original
+            dependencies[path] = nested(original, path.parent)
+        elif path.suffix in {".txt", ".cfg"}:
+            kind = asset_kinds.get(config_key) or legacy_aux_kind(config_key, path)
+            if kind:
+                dependencies[path] = nested(read_legacy_aux(path, kind), path.parent)
+            elif config_key and config_key.endswith("Config"):
+                raise BundleError(f"{path}: custom text configuration for {config_key}; declare its asset_kinds entry or convert it to YAML before sealing")
 
     for key in asset_keys:
         if config.get(key):
-            config[key] = resolve(config[key], template.parent)
-    request_id = content_digest({"config": config,
+            config[key] = resolve(config[key], template.parent, key)
+    request_id = content_digest({"config": config, **({"asset_kinds": asset_kinds} if asset_kinds else {}),
         "sources": {str(path): file_digest(path) for path in sorted(sources)}})
     if Path(destination).exists() and reuse:
         record = verify_bundle(destination)
@@ -196,21 +202,21 @@ def compile_config_bundle(template, destination, *, asset_keys, overrides=None,
         return record
     with atomic_directory(destination) as root:
         assets = snapshot_assets(root, sources)
+        for source in dependencies:
+            if source.suffix in {".txt", ".cfg"}:
+                copied = root / assets[str(source)]
+                value_path = copied.with_name(copied.name + ".yaml")
+                assets[str(source)] = str(value_path.relative_to(root))
+                copied.unlink()
         for source, value in dependencies.items():
-            target = root / assets[str(source)]
-            if isinstance(value, tuple):
-                text, refs = value
-                for old, absolute in refs.items():
-                    text = re.sub(r"(?<=file=)" + re.escape(old) + r"(?=\s|$)",
-                                  assets[absolute], text)
-                target.write_text(text)
-            else:
-                target.write_text(yaml.safe_dump(rewrite_references(value, assets), sort_keys=False))
+            rewritten = rewrite_references(value, assets)
+            if source not in yaml_documents or rewritten != yaml_documents[source]:
+                write_config_yaml(rewritten, root / assets[str(source)])
         config = rewrite_references(config, assets)
         if config.get("sampleConfig") in assets.values():
             shutil.copy2(root / config["sampleConfig"], root / "dataset_manifest.yaml")
             config["sampleConfig"] = "dataset_manifest.yaml"
-        (root / "submit_config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
+        write_config_yaml(config, root / "submit_config.yaml")
         seal_bundle(root, metadata={**(metadata or {}), "request_id": request_id}, assets=assets,
                     entrypoints={"submit_config": "submit_config.yaml",
                                  **({"datasets": config["sampleConfig"]}
@@ -345,12 +351,20 @@ def derived_artifact(*, kind, parents, configuration, files):
     return {**record, "artifact_id": content_digest(record)}
 
 
-def verify_artifact(path):
+def load_artifact_receipt(path):
+    """Check the receipt's identity without opening its products."""
     record = json.loads(Path(path).read_text())
+    if not isinstance(record, dict) or not isinstance(record.get("files"), dict):
+        raise BundleError(f"invalid derived artifact receipt: {path}")
     identity = dict(record)
     artifact_id = identity.pop("artifact_id", None)
     if record.get("schema") != "rdf-derived-artifact-v1" or content_digest(identity) != artifact_id:
         raise BundleError(f"invalid derived artifact identity: {path}")
+    return record
+
+
+def verify_artifact(path):
+    record = load_artifact_receipt(path)
     for source, expected in record["files"].items():
         if not Path(source).is_file() or file_digest(source) != expected:
             raise BundleError(f"derived artifact input missing or changed: {source}")

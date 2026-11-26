@@ -25,9 +25,9 @@ Usage
   law run FullAnalysisDAG \\
       --name myRun \\
       --exe build/analyses/myAnalysis/myanalysis \\
-      --submit-config analyses/myAnalysis/cfg/skim_config.txt \\
+      --submit-config analyses/myAnalysis/cfg/skim_config.yaml \\
       --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \\
-      --hist-config analyses/myAnalysis/cfg/hist_config.txt \\
+      --hist-config analyses/myAnalysis/cfg/hist_config.yaml \\
       --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \\
       --plot-config analyses/myAnalysis/cfg/plots.json \\
       --fitting-backend analysis
@@ -60,7 +60,7 @@ for _p in (_HERE, _CORE_PYTHON):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from performance_recorder import PerformanceRecorder  # noqa: E402
+from rdfproduction.performance import PerformanceRecorder  # noqa: E402
 from combine_tasks import ManifestDatacardTask, ManifestFitTask  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
@@ -113,7 +113,7 @@ class FullAnalysisDAG(law.Task):
     exe:
         Path to the analysis executable (used by SkimTask / HistFillTask).
     submit_config:
-        Path to the submit_config.txt template (SkimTask / HistFillTask).
+        Path to the submit_config.yaml template (SkimTask / HistFillTask).
     dataset_manifest:
         Path to the dataset manifest YAML (SkimTask / HistFillTask).
     file_source:
@@ -173,7 +173,7 @@ class FullAnalysisDAG(law.Task):
     )
     submit_config = luigi.Parameter(
         default="",
-        description="Path to submit_config.txt template (SkimTask / HistFillTask).",
+        description="Path to submit_config.yaml template (SkimTask / HistFillTask).",
     )
     dataset_manifest = luigi.Parameter(
         default="",

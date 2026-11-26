@@ -1,3 +1,4 @@
+#include "ConfigBoolean.h"
 #include <RootOutputSink.h>
 #include <api/IConfigurationProvider.h>
 #include <api/IDataFrameProvider.h>
@@ -44,36 +45,12 @@ static std::string makeMetaFileName(const std::string& saveFile) {
 }
 
 static bool isGlobPattern(const std::string& val) {
-  return val.find('*') != std::string::npos || val.find('?') != std::string::npos;
+  return val.find_first_of("*?[") != std::string::npos;
 }
 
-static bool parseBooleanConfig(const std::string& key, const std::string& value,
-                               bool defaultValue) {
-  if (value.empty()) {
-    return defaultValue;
-  }
-
-  std::string normalized;
-  normalized.reserve(value.size());
-  for (const unsigned char character : value) {
-    normalized.push_back(static_cast<char>(std::tolower(character)));
-  }
-
-  if (normalized == "1" || normalized == "true" || normalized == "yes" ||
-      normalized == "on") {
-    return true;
-  }
-  if (normalized == "0" || normalized == "false" || normalized == "no" ||
-      normalized == "off") {
-    return false;
-  }
-
-  throw std::invalid_argument("RootOutputSink: invalid boolean value '" + value +
-                              "' for configuration key '" + key + "'.");
-}
 
 static std::vector<std::string> parseSaveColumns(const IConfigurationProvider& configProvider,
-                                                  const std::vector<std::string>& availableColumns) {
+                                                  ROOT::RDF::RNode df) {
   const auto& configMap = configProvider.getConfigMap();
   auto it = configMap.find("saveConfig");
   if (it == configMap.end()) {
@@ -84,35 +61,33 @@ static std::vector<std::string> parseSaveColumns(const IConfigurationProvider& c
   std::unordered_set<std::string> seen;
   const auto saveVectorInit = configProvider.parseVectorConfig(it->second);
 
-  // Quick check: if there's a single "*" entry, return all columns.
-  if (saveVectorInit.size() == 1) {
-    std::string single = saveVectorInit[0];
-    single = single.substr(0, single.find(" "));
-    if (single == "*") {
-      saveVector.reserve(availableColumns.size());
-      for (const auto& col : availableColumns) {
-        if (seen.insert(col).second) {
-          saveVector.push_back(col);
-        }
-      }
-      return saveVector;
-    }
-  }
-
+  if (saveVectorInit.size() == 1 && saveVectorInit.front().substr(0, saveVectorInit.front().find(' ')) == "*")
+    return SnapshotColumnView(df).canonicalColumns();
+  const auto availableColumns = df.GetColumnNames();
   for (auto val : saveVectorInit) {
     val = val.substr(0, val.find(" "));
     if (val.empty()) {
       continue;
     }
     if (isGlobPattern(val)) {
+      bool matched = false;
       for (const auto& col : availableColumns) {
-        if (fnmatch(val.c_str(), col.c_str(), 0) == 0 && seen.insert(col).second) {
-          saveVector.push_back(col);
+        if (fnmatch(val.c_str(), col.c_str(), 0) == 0) {
+          matched = true;
+          if (seen.insert(col).second) saveVector.push_back(col);
         }
+      }
+      if (!matched) {
+        throw std::invalid_argument("saveConfig '" + it->second + "': pattern '" + val +
+                                    "' matches no columns. Check the input schema and defined columns.");
       }
     } else if (seen.insert(val).second) {
       saveVector.push_back(val);
     }
+  }
+  if (saveVector.empty()) {
+    throw std::invalid_argument("saveConfig '" + it->second +
+                                "' contains no columns. Use '*' explicitly for a full snapshot.");
   }
   return saveVector;
 }
@@ -240,58 +215,23 @@ void RootOutputSink::writeDataFrame(ROOT::RDF::RNode& df,
     throw std::runtime_error("RootOutputSink: outputFile is empty");
   }
 
-  // Resolve columns while the cache is cold. Full snapshots also canonicalize
-  // aliases; subsequent writes reuse the cached column list.
-  if (!columnsCached_) {
-    cachedColumns_ = parseSaveColumns(configProvider, df.GetColumnNames());
-    const auto save=configMap.find("saveConfig");
-    if(save!=configMap.end()) {
-      const auto patterns=configProvider.parseVectorConfig(save->second);
-      if(patterns.size()==1 && patterns.front().substr(0,patterns.front().find(' '))=="*")
-        cachedColumns_=SnapshotColumnView(df).canonicalColumns();
-    }
-    const auto skimSystematicsIt = configMap.find("skimSystematics");
-    const bool includeSystematics =
-        channel == OutputChannel::Skim &&
-        skimSystematicsIt != configMap.end() &&
-        parseBooleanConfig("skimSystematics", skimSystematicsIt->second, false);
-    if (includeSystematics) {
-      expandSystematicColumns(cachedColumns_, systematicManager);
-    }
-    columnsCached_ = true;
-  }
-
-  if (cachedColumns_.empty() && configMap.find("saveConfig") == configMap.end()) {
+  auto columns = parseSaveColumns(configProvider, df);
+  const auto skimSystematics = configMap.find("skimSystematics");
+  if (channel == OutputChannel::Skim && skimSystematics != configMap.end() &&
+      rdf_config_detail::parseBooleanConfig("skimSystematics", skimSystematics->second, false))
+    expandSystematicColumns(columns, systematicManager);
+  if (columns.empty() && configMap.find("saveConfig") == configMap.end())
     std::cout << "Warning: No 'saveConfig' provided. Snapshotting full dataframe." << std::endl;
-  }
-
-  OutputSpec spec{outputFile, saveTree, cachedColumns_};
+  OutputSpec spec{outputFile, saveTree, std::move(columns)};
   writeSnapshot(df, spec, snapshotOptions(channel == OutputChannel::Skim ? &configProvider : nullptr));
 }
 
 std::string RootOutputSink::resolveOutputFile(const IConfigurationProvider& configProvider,
                                               OutputChannel channel) {
-  // Return cached path if already resolved for this channel.
-  if (channel == OutputChannel::Skim && !cachedSkimFile_.empty()) {
-    return cachedSkimFile_;
-  }
-  if (channel == OutputChannel::Meta && !cachedMetaFile_.empty()) {
-    return cachedMetaFile_;
-  }
-
-  std::string result;
   if (channel == OutputChannel::Meta) {
-    std::string metaFile = configProvider.get("metaFile");
-    if (!metaFile.empty()) {
-      result = metaFile;
-    } else {
-      const std::string saveFile = configProvider.get("saveFile");
-      result = makeMetaFileName(saveFile);
-    }
-    cachedMetaFile_ = result;
-  } else {
-    result = configProvider.get("saveFile");
-    cachedSkimFile_ = result;
+    const auto meta = configProvider.get("metaFile");
+    if (!meta.empty()) return meta;
+    return makeMetaFileName(configProvider.get("saveFile"));
   }
-  return result;
+  return configProvider.get("saveFile");
 }

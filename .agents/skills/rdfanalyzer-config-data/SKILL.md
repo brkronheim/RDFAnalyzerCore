@@ -1,6 +1,6 @@
 ---
 name: rdfanalyzer-config-data
-description: Trace or change RDFAnalyzerCore text/YAML configuration, input dataframes, numeric constants, aliases, optional branches, friend trees, and dataset manifests.
+description: Trace or change RDFAnalyzerCore YAML configuration and legacy text migration, input dataframes, numeric constants, aliases, optional branches, friend trees, and dataset manifests.
 ---
 
 # Configuration and input columns
@@ -8,6 +8,8 @@ description: Trace or change RDFAnalyzerCore text/YAML configuration, input data
 ## Resolve the configuration actually consumed
 
 Start with the analysis constructor and generated job config. Read [IConfigurationProvider](../../../core/interface/api/IConfigurationProvider.h), [ConfigurationManager](../../../core/src/ConfigurationManager.cc), [TextConfigAdapter](../../../core/src/TextConfigAdapter.cc), and [YamlConfigAdapter](../../../core/src/YamlConfigAdapter.cc). The filename extension and adapter select parsing; do not assume a YAML mapping is interchangeable with a plugin's sequence of records. `get()` can return an empty string for an absent key; validate required values where they are consumed.
+
+Write new configs in YAML. For mapping, record-list, column-list and sample-manifest conversion, follow [the migration guide](../../../docs/YAML_CONFIG_SUPPORT.md). Reuse [native_config_io](../../../core/python/native_config_io.py) for native file I/O in Python and keep sealed-job digests tied to the original bytes.
 
 Trace `resolveConfigPath` at each load site. Main-config-relative resolution and process-working-directory resolution matter for staging. Current [DataManager.cc](../../../core/src/DataManager.cc) resolves constant-file paths with `resolveConfigPath`; older prose in [CONFIG_REFERENCE](../../../docs/CONFIG_REFERENCE.md) describes a direct existence check. Follow the executable implementation and report the discrepancy if it affects a run. Likewise inspect the input tree fallback in code rather than assuming documentation defaults.
 

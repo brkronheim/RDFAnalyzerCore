@@ -31,7 +31,7 @@ protected:
   void SetUp() override {
     ROOT::DisableImplicitMT();
     ChangeToTestSourceDir();
-    std::string configFile = "cfg/test_data_config_minimal.txt";
+    std::string configFile = "cfg/test_data_config_minimal.yaml";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     dataManager = std::make_unique<DataManager>(1);
     systematicManager = std::make_unique<SystematicManager>();
@@ -385,7 +385,7 @@ TEST_F(NDHistogramManagerConfigTest, SetupFromConfigFileNoHistogramConfig) {
 
 TEST_F(NDHistogramManagerConfigTest, SetupFromConfigFileWithHistogramConfig) {
   // Add histogram config to the configuration
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   
   // Setup should parse the config file without errors
   EXPECT_NO_THROW(histogramManager->setupFromConfigFile());
@@ -411,7 +411,7 @@ TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsWithConfig) {
   dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
   
   // Set histogram config and load it
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
   
   // Book the histograms
@@ -449,7 +449,7 @@ TEST_F(NDHistogramManagerConfigTest, HistogramSystematicsCanBeDisabled) {
        "SystematicCounter_weightDown"},
       "Float_t", *systematicManager);
 
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   configManager->set("histogramSystematics", "false");
   histogramManager->setupFromConfigFile();
   histogramManager->bookConfigHistograms();
@@ -484,7 +484,7 @@ TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsWithDefaults) {
   dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
   
   // Set histogram config
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
   
   // Book the histograms
@@ -515,7 +515,7 @@ TEST_F(NDHistogramManagerConfigTest, ConfigHistogramsRespectFilters) {
   dataManager->Filter(passFunc, {"pass_filter"});
   
   // Set histogram config and load it
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
   
   // Book histograms after filter
@@ -545,7 +545,7 @@ TEST_F(NDHistogramManagerConfigTest, ConfigHistogramsWorkWithSystematics) {
   dataManager->Define("var1_TestSyst", []() { return 5.5f; }, {}, *systematicManager);
   
   // Set histogram config
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
   
   // Book histograms
@@ -586,7 +586,7 @@ TEST_F(NDHistogramManagerConfigTest, MissingRequiredFieldsSkipped) {
 
 TEST_F(NDHistogramManagerConfigTest, BookingWithoutVariablesDefinedThrows) {
   // Set histogram config but don't define the required variables
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
   
   // Booking throws a meaningful exception (not a crash/segfault) when required
@@ -609,7 +609,7 @@ TEST_F(NDHistogramManagerConfigTest, MultipleBookCallsWork) {
   dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
   
   // Set histogram config
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
   
   // Get initial histogram count
@@ -644,7 +644,7 @@ TEST_F(NDHistogramManagerConfigTest, BoostBackendBooking) {
 
   // Select the Boost.Histogram backend
   configManager->set("histogramBackend", "boost");
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
 
   // Book the histograms using the Boost backend
@@ -670,7 +670,7 @@ TEST_F(NDHistogramManagerConfigTest, BoostBackendFunctionallyEquivalentToRoot) {
   dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
   dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
 
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
 
   // Book with the explicitly selected ROOT backend.
   configManager->set("histogramBackend", "root");
@@ -680,8 +680,8 @@ TEST_F(NDHistogramManagerConfigTest, BoostBackendFunctionallyEquivalentToRoot) {
 
   // Use a completely fresh config/manager for the Boost backend to avoid
   // duplicate-key errors (ConfigurationManager::set() throws on overwrite).
-  auto boostConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
-  boostConfig->set("histogramConfig", "cfg/test_histograms.txt");
+  auto boostConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
+  boostConfig->set("histogramConfig", "cfg/test_histograms.yaml");
   boostConfig->set("histogramBackend", "boost");
 
   auto boostManager = std::make_unique<NDHistogramManager>(*boostConfig);
@@ -741,7 +741,7 @@ TEST_F(NDHistogramManagerConfigTest, DefaultBoostUsesRootFloatCancellationArithm
 
 TEST_F(NDHistogramManagerConfigTest, DenseMemoryLimitRejectsInvalidValues) {
   for (const auto *value : {"-1", "1.5", "64MiB", "18446744073709551615"}) {
-    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
     config->set("histogramDenseLimitMiB", value);
     NDHistogramManager manager(*config);
     ManagerContext context{*config, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
@@ -795,7 +795,7 @@ TEST_F(NDHistogramManagerConfigTest, BoostFloatSupportsVariableEdgesAtExactBound
 
 TEST_F(NDHistogramManagerConfigTest, ZeroDenseMemoryLimitIsSupportedForBothBackends) {
   for (const auto *backend : {"root", "boost"}) {
-    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
     config->set("histogramDenseLimitMiB", "0");
     config->set("histogramBackend", backend);
     NDHistogramManager manager(*config);
@@ -897,7 +897,7 @@ TEST_F(NDHistogramManagerConfigTest, RootBackendAutoSelectsDense) {
 
   configManager->set("histogramBackend", "root");
   configManager->set("histogramDenseLimitMiB", "64");
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
   EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
 
@@ -957,7 +957,7 @@ TEST_F(NDHistogramManagerConfigTest, AutoDetectSystematicsOnBookConfigHistograms
   dataManager->Define("controlRegion",  []() { return 1.5f; }, {}, *systematicManager);
   dataManager->Define("sampleCategory", []() { return 2.5f; }, {}, *systematicManager);
 
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
 
   EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
@@ -1043,7 +1043,7 @@ TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsWithBoundRegionManager)
   regionManager.declareRegion("signal", "pass_signal", "presel");
 
   histogramManager->bindToRegionManager(&regionManager);
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
 
   EXPECT_NO_THROW(histogramManager->bookConfigHistograms());
@@ -1059,14 +1059,12 @@ TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsWithBoundRegionManager)
 // ---------------------------------------------------------------------------
 
 TEST_F(NDHistogramManagerConfigTest, YamlHistogramConfigParsedFromTextMainConfig) {
-  // The main config is a TEXT file (cfg/test_data_config_minimal.txt).
-  // The histogram config is a YAML file (cfg/test_histograms.yaml).
-  // The framework must auto-detect the YAML format from the file extension
-  // and parse it correctly even though the main config uses TextConfigAdapter.
-  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
-
-  // Setup should parse the YAML config file without errors
-  EXPECT_NO_THROW(histogramManager->setupFromConfigFile());
+  ConfigurationManager legacy("cfg/config.txt");
+  legacy.set("histogramConfig", "cfg/test_histograms.yaml");
+  NDHistogramManager manager(legacy);
+  ManagerContext context{legacy, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+  manager.setContext(context);
+  EXPECT_NO_THROW(manager.setupFromConfigFile());
 }
 
 TEST_F(NDHistogramManagerConfigTest, HistogramYamlParsesSevenChannelRegions) {
@@ -1095,7 +1093,7 @@ TEST_F(NDHistogramManagerConfigTest, HistogramYamlParsesSevenChannelRegions) {
 TEST_F(NDHistogramManagerConfigTest, YamlHistogramConfigProducesSameResultAsText) {
   // Parse both the text and YAML histogram configs and verify they produce
   // identical histogram definitions.
-  auto configManagerText = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+  auto configManagerText = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
   auto histManagerText = std::make_unique<NDHistogramManager>(*configManagerText);
   ManagerContext ctxText{*configManagerText, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
   histManagerText->setContext(ctxText);
@@ -1136,7 +1134,7 @@ TEST_F(NDHistogramManagerConfigTest, BookConfigHistogramsTrackedForSaveHists) {
   dataManager->Define("controlRegion", []() { return 1.5f; }, {}, *systematicManager);
   dataManager->Define("sampleCategory",[]() { return 2.5f; }, {}, *systematicManager);
 
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
   histogramManager->bookConfigHistograms();
 
@@ -1204,7 +1202,7 @@ int main(int argc, char **argv) {
 }
 
 TEST_F(NDHistogramManagerConfigTest, ExcludedDiagnosticsDoNotRequireTheirColumns) {
-  configManager->set("histogramConfig", "cfg/test_histograms.txt");
+  configManager->set("histogramConfig", "cfg/test_histograms.yaml");
   histogramManager->setupFromConfigFile();
   dataManager->Define("var1", []() { return 5.f; }, {}, *systematicManager);
   dataManager->Define("w1", []() { return 1.f; }, {}, *systematicManager);

@@ -165,6 +165,29 @@ def test_bad_semantic_exception_policy_fails_before_io(tmp_path, policy):
                          semantic_config_compatibility=policy)
 
 
+def test_reviewed_executable_replay_preserves_leaf_and_requires_exact_job(tmp_path):
+    inputs = [job(tmp_path / "a.root", 1), job(tmp_path / "b.root", 2)]
+    records = [load_metadata_records(path)[0] for path in inputs]
+    original, replay = "a" * 64, "b" * 64
+    key = "run.expected_executable_sha256"
+    records[0]["provenance"][key] = original
+    records[1]["provenance"][key] = replay
+    rule = {"sample": "sample", "original": original, "replay": replay}
+    policy = {"schema_version": 1, "reason": "Validated replacement",
+              "samples": {}, "executable_replays": {records[1]["id"]: rule}}
+    with pytest.raises(ValueError, match="Incompatible framework"):
+        build_bundle(records)
+    for replays in ({"different_job": rule}, {records[1]["id"]: {**rule, "sample": "other"}}):
+        with pytest.raises(ValueError, match="Incompatible framework"):
+            build_bundle(records, semantic_config_compatibility={**policy, "executable_replays": replays})
+    merged = build_bundle(records, semantic_config_compatibility=policy)
+    assert merged["semantic_config_compatibility"] == policy
+    assert {r["provenance"][key] for r in expand_bundle(merged)} == {original, replay}
+    records[1]["provenance"]["framework.git_hash"] = "different-build"
+    with pytest.raises(ValueError, match="Incompatible framework"):
+        build_bundle(records, semantic_config_compatibility=policy)
+
+
 def test_duplicate_jobs_and_retries_rejected(tmp_path):
     first = job(tmp_path/"a.root", 1)
     retry = job(tmp_path/"retry.root", 1)

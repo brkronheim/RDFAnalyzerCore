@@ -70,6 +70,10 @@ _SKIP_CLIB  = "correctionlib not available"
 # Helper: write a minimal YAML dataset manifest
 # ===========================================================================
 
+import production_jobs
+from rdfproduction import stitching_derivation, stitching_validation
+
+
 def _write_manifest(tmpdir: str, datasets: list) -> str:
     import yaml
     path = os.path.join(tmpdir, "datasets.yaml")
@@ -142,7 +146,7 @@ class TestWriteJobConfig(unittest.TestCase):
                 os.path.join(tmpdir, "out"),
                 stage_shared_inputs_locally=False,
             )
-            prepared = mod.read_config(os.path.join(job_dir, "submit_config.txt"))
+            prepared = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
             self.assertEqual({key: prepared[key] for key in settings}, settings)
 
             runtime_dir, _ = mod._materialize_file_source_runtime_job(
@@ -150,8 +154,8 @@ class TestWriteJobConfig(unittest.TestCase):
                 exe_relpath="analysis_exe",
             )
             try:
-                runtime = mod.read_config(
-                    os.path.join(runtime_dir, "cfg", "submit_config.txt")
+                runtime = production_jobs.read_config(
+                    os.path.join(runtime_dir, "cfg", "submit_config.yaml")
                 )
                 self.assertEqual({key: runtime[key] for key in settings}, settings)
             finally:
@@ -175,16 +179,10 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            cfg_path = os.path.join(job_dir, "submit_config.txt")
+            cfg_path = os.path.join(job_dir, "submit_config.yaml")
             self.assertTrue(os.path.exists(cfg_path))
 
-            cfg = {}
-            with open(cfg_path) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(cfg_path)
 
             self.assertEqual(cfg["fileList"], "f1.root,f2.root")
             self.assertEqual(cfg["sample"], "ttbar")
@@ -211,13 +209,7 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
             # Ensure the DAS path is preserved when no explicit files are provided.
             self.assertEqual(cfg["fileList"], dataset.das)
 
@@ -244,8 +236,8 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            self.assertTrue(os.path.exists(os.path.join(job_dir, "floats.txt")))
-            self.assertTrue(os.path.exists(os.path.join(job_dir, "ints.txt")))
+            self.assertEqual(mod.read_config(Path(job_dir, "floats.yaml")), {"normScale": "1.0"})
+            self.assertEqual(mod.read_config(Path(job_dir, "ints.yaml")), {"type": "1"})
 
     def test_staging_rejects_missing_config_inputs(self):
         mod = self._import()
@@ -282,7 +274,7 @@ class TestWriteJobConfig(unittest.TestCase):
                     "intConfig": "cfg/two/constants.txt",
                 },
             )
-            with self.assertRaisesRegex(ValueError, "both stage as 'constants.txt'"):
+            with self.assertRaisesRegex(ValueError, "both stage as 'constants.yaml'"):
                 mod._write_job_config(
                     os.path.join(tmpdir, "job"),
                     template,
@@ -315,12 +307,7 @@ class TestWriteJobConfig(unittest.TestCase):
                 },
             )
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    if "=" in line:
-                        key, value = line.strip().split("=", 1)
-                        cfg[key] = value
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(cfg["stitchMode"], "correctionlib")
             self.assertEqual(cfg["stitchWeights"], "stitch_weights.json")
@@ -351,12 +338,7 @@ class TestWriteJobConfig(unittest.TestCase):
                 stage_shared_inputs_locally=False,
             )
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    if "=" in line:
-                        key, value = line.strip().split("=", 1)
-                        cfg[key] = value
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(
                 cfg["vhRegressedJetJercFile"], os.path.join("cfg", payload_name)
@@ -406,13 +388,7 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(job_dir, "dataset_manifest.yaml")))
             self.assertTrue(os.path.exists(os.path.join(job_dir, "floats.yaml")))
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(cfg["sampleConfig"], "dataset_manifest.yaml")
             self.assertEqual(cfg["floatConfig"], "floats.yaml")
@@ -451,13 +427,7 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(job_dir, "dataset_manifest.yaml")))
             self.assertTrue(os.path.exists(os.path.join(job_dir, "floats.yaml")))
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(cfg["sampleConfig"], "dataset_manifest.yaml")
             self.assertEqual(cfg["floatConfig"], "floats.yaml")
@@ -479,13 +449,7 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertNotIn("counterWeightBranch", cfg)
 
@@ -502,7 +466,7 @@ class TestWriteJobConfig(unittest.TestCase):
                 "genWeightNominalColumn=genWeight_nominal\n"
                 "saveFile=test.root\n"
             )
-            config = mod.read_config(config_path)
+            config = production_jobs.read_config(config_path)
             mod._remove_mc_generator_config_for_data(config)
 
             self.assertEqual(config["dtype"], "data")
@@ -621,13 +585,7 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(cfg["sample"], "dy0j")
             self.assertEqual(cfg["name"], "dy0j")
@@ -667,13 +625,7 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(cfg["ptcut"], "150")
             self.assertEqual(cfg["sample_label"], "z2nu")
@@ -698,12 +650,7 @@ class TestWriteJobConfig(unittest.TestCase):
                 manifest_lumi=109.0,
             )
 
-            config = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    if "=" in line:
-                        key, value = line.strip().split("=", 1)
-                        config[key] = value
+            config = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(config["lumi"], "109.0")
 
@@ -728,12 +675,7 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            config = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    if "=" in line:
-                        key, value = line.strip().split("=", 1)
-                        config[key] = value
+            config = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertNotIn("counterWeightBranch", config)
             self.assertNotIn("genWeightBaseWeightColumn", config)
@@ -754,18 +696,11 @@ class TestWriteJobConfig(unittest.TestCase):
                 "sample=test\n"
             )
 
-            mod._rewrite_job_output_destinations(
-                cfg_path,
-                "/eos/user/b/test/sample",
-            )
-
-            cfg = {}
-            with open(cfg_path) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            original = Path(cfg_path).read_bytes()
+            target = mod._rewrite_job_output_destinations(cfg_path, "/eos/user/b/test/sample")
+            self.assertEqual(Path(cfg_path).read_bytes(), original)
+            self.assertEqual(target.suffix, ".yaml")
+            cfg = mod.read_config(target)
 
             self.assertEqual(cfg["saveDirectory"], "/eos/user/b/test/sample")
             self.assertEqual(cfg["saveFile"], "/eos/user/b/test/sample/output_0.root")
@@ -853,13 +788,7 @@ class TestWriteJobConfig(unittest.TestCase):
                 extra_overrides={"fileList": "/my/skim.root"},
             )
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
             self.assertEqual(cfg["fileList"], "/my/skim.root")
 
     def test_shared_config_layout_without_local_staging(self):
@@ -903,13 +832,7 @@ class TestWriteJobConfig(unittest.TestCase):
                 "payload\n",
             )
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
             self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
 
     def test_repeated_layout_pass_accepts_root_and_nested_staged_payloads(self):
@@ -949,15 +872,15 @@ class TestWriteJobConfig(unittest.TestCase):
                 stage_shared_inputs_locally=False,
             )
 
-            job_config = mod.read_config(os.path.join(job_dir, "submit_config.txt"))
-            self.assertEqual(job_config["saveConfig"], "cfg/vh_skim_branches.txt")
+            job_config = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
+            self.assertEqual(job_config["saveConfig"], "cfg/vh_skim_branches.yaml")
             self.assertEqual(
                 job_config["btagEfficiencyFileVJets"],
                 "cfg/VJets_btag_efficiencies.json",
             )
 
             mod._ensure_local_analysis_runtime_layout(template, job_config, job_dir)
-            self.assertTrue(Path(job_dir, "cfg", root_payload.name).is_file())
+            self.assertTrue(Path(job_dir, "cfg", root_payload.with_suffix(".yaml").name).is_file())
             self.assertTrue(Path(job_dir, "cfg", nested_payload.name).is_file())
 
 
@@ -996,11 +919,11 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                 }]}))
                 with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
                         patch.object(task, "publish_message"), \
-                        patch("analysis_tasks._condor_q_ads", side_effect=[{0: {"JobStatus": 5}}, {}]), \
-                        patch("analysis_tasks._condor_rm_job", return_value=False) as remove, \
-                        patch("analysis_tasks._condor_history_exit", return_value={}), \
-                        patch("analysis_tasks._output_file_info_batch", return_value={meta: {}}), \
-                        patch("analysis_tasks._skim_job_output_errors", return_value=errors) as integrity, \
+                        patch("rdfproduction.transport.condor_q_ads", side_effect=[{0: {"JobStatus": 5}}, {}]), \
+                        patch("rdfproduction.transport.condor_rm_job", return_value=False) as remove, \
+                        patch("rdfproduction.transport.condor_history_exit", return_value={}), \
+                        patch("rdfproduction.jobs.output_validation._output_file_info_batch", return_value={meta: {}}), \
+                        patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=errors) as integrity, \
                         patch.object(task, "_update_site_rankings"), \
                         patch.object(task, "_update_job_sizing"):
                     task.run()
@@ -1043,12 +966,12 @@ class TestSkimOutputMonitoring(unittest.TestCase):
             normalization = Path(task._run_dir, "normalization.json")
             with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
                     patch.object(task, "publish_message"), \
-                    patch("analysis_tasks._condor_q_ads", return_value={}), \
-                    patch("analysis_tasks._condor_history_exit", return_value={0: 0}), \
-                    patch("analysis_tasks._output_files_exist_batch", return_value={meta: True}), \
-                    patch("analysis_tasks._skim_job_output_errors") as integrity, \
-                    patch("analysis_tasks._shared_read_weight_sum") as raw_counter, \
-                    patch("analysis_tasks._shared_read_weight_sign_sum") as sign_counter:
+                    patch("rdfproduction.transport.condor_q_ads", return_value={}), \
+                    patch("rdfproduction.transport.condor_history_exit", return_value={0: 0}), \
+                    patch("rdfproduction.jobs.output_validation._output_files_exist_batch", return_value={meta: True}), \
+                    patch("rdfproduction.jobs.output_validation._skim_job_output_errors") as integrity, \
+                    patch("derivation_correctionlib._read_weight_sum") as raw_counter, \
+                    patch("derivation_correctionlib._read_weight_sign_sum") as sign_counter:
                 task.run()
                 self.assertTrue(task.complete())
                 self.assertFalse(normalization.exists())
@@ -1107,15 +1030,15 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                     }}))
                     with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
                             patch.object(task, "publish_message"), \
-                            patch("analysis_tasks._condor_q_ads", return_value={}), \
-                            patch("analysis_tasks._condor_history_exit", return_value={1: 0, 2: 0}), \
-                            patch("analysis_tasks._output_files_exist_batch", return_value=outputs) as stat, \
-                            patch("analysis_tasks._output_file_info_batch", return_value={
+                            patch("rdfproduction.transport.condor_q_ads", return_value={}), \
+                            patch("rdfproduction.transport.condor_history_exit", return_value={1: 0, 2: 0}), \
+                            patch("rdfproduction.jobs.output_validation._output_files_exist_batch", return_value=outputs) as stat, \
+                            patch("rdfproduction.jobs.output_validation._output_file_info_batch", return_value={
                                 path: {} if present else None for path, present in outputs.items()
                             }) as info, \
-                            patch("analysis_tasks._skim_job_output_errors", return_value=["bad ROOT"]) as integrity, \
-                            patch("analysis_tasks._shared_read_weight_sum") as raw_counter, \
-                            patch("analysis_tasks._shared_read_weight_sign_sum") as sign_counter:
+                            patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=["bad ROOT"]) as integrity, \
+                            patch("derivation_correctionlib._read_weight_sum") as raw_counter, \
+                            patch("derivation_correctionlib._read_weight_sign_sum") as sign_counter:
                         task.run()
                     jobs = task._load_state()["datasets"]["sample"]["jobs"]
                     self.assertEqual(jobs["2"]["status"], "perm_fail")
@@ -1278,7 +1201,7 @@ class TestSkimOutputMonitoring(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             meta_path = os.path.join(tmpdir, "meta.root")
             Path(meta_path).write_bytes(b"metadata")
-            with patch("analysis_tasks._root_file_tree_error", return_value=None) as check:
+            with patch("rdfproduction.jobs.output_validation._root_file_tree_error", return_value=None) as check:
                 errors = analysis_tasks._skim_job_output_errors(
                     dataset_name="sample",
                     dtype="data",
@@ -1297,10 +1220,10 @@ class TestSkimOutputMonitoring(unittest.TestCase):
             meta_path = os.path.join(tmpdir, "meta.root")
             Path(skim_path).write_bytes(b"mock root")
             Path(meta_path).write_bytes(b"mock root")
-            with patch("analysis_tasks._root_file_tree_error", return_value=None), \
-                    patch("analysis_tasks._shared_read_weight_sum", return_value=10.0), \
+            with patch("rdfproduction.jobs.output_validation._root_file_tree_error", return_value=None), \
+                    patch("derivation_correctionlib._read_weight_sum", return_value=10.0), \
                     patch(
-                        "analysis_tasks._shared_read_weight_sign_sum",
+                        "derivation_correctionlib._read_weight_sign_sum",
                         side_effect=RuntimeError("missing counter histogram"),
                     ):
                 errors = analysis_tasks._skim_job_output_errors(
@@ -1358,9 +1281,9 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                     "input",
                     return_value=law_mod.LocalFileTarget(submitted_path),
                 ), patch(
-                    "analysis_tasks._condor_q_ads", return_value={}
+                    "rdfproduction.transport.condor_q_ads", return_value={}
                 ), patch(
-                    "analysis_tasks._condor_history_exit", return_value={0: 0}
+                    "rdfproduction.transport.condor_history_exit", return_value={0: 0}
                 ), patch.object(task, "publish_message"):
                     task.run()
 
@@ -1409,11 +1332,11 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                     return {"status": "updated", "datasets": 1, "cache": "/tmp/test-sizing-cache"}
                 with patch.object(analysis_tasks.MonitorSkimJobs, "_run_dir", property(lambda self: str(run_dir))), \
                      patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
-                     patch("analysis_tasks._condor_q_ads", return_value={}), \
-                     patch("analysis_tasks._condor_history_exit", return_value={0: 0}), \
-                     patch("analysis_tasks._update_xrd_site_rankings", side_effect=update) as updater, \
+                     patch("rdfproduction.transport.condor_q_ads", return_value={}), \
+                     patch("rdfproduction.transport.condor_history_exit", return_value={0: 0}), \
+                     patch("xrd_site_rankings.update_after_run", side_effect=update) as updater, \
                      patch.object(task, "_sizing_selection", return_value={"context": {"workload": "w", "origin": "o"}}), \
-                     patch("analysis_tasks._update_job_sizing", side_effect=update_sizing) as sizing_updater, \
+                     patch("job_sizing.update_sizing_after_run", side_effect=update_sizing) as sizing_updater, \
                      patch.object(task, "publish_message"):
                     task.run()
                     receipt = run_dir / "xrd_site_rankings_update.json"
@@ -1463,11 +1386,11 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                         "tree_name": "Events",
                     }}}},
                 }))
-                with patch("analysis_tasks._skim_job_output_errors", return_value=[]):
+                with patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=[]):
                     self.assertTrue(task.complete())
 
                     with patch(
-                        "analysis_tasks._skim_job_output_errors",
+                        "rdfproduction.jobs.output_validation._skim_job_output_errors",
                         return_value=["corrupt ROOT"],
                     ) as integrity:
                         # Unchanged artifacts reuse the prior integrity receipt.
@@ -1476,7 +1399,7 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                         Path(meta_path).write_bytes(b"changed ROOT output")
                         self.assertFalse(task.complete())
                     exists_task = task.clone(output_validation="exists")
-                    with patch("analysis_tasks._skim_job_output_errors") as integrity:
+                    with patch("rdfproduction.jobs.output_validation._skim_job_output_errors") as integrity:
                         self.assertTrue(exists_task.complete())
                         integrity.assert_not_called()
                         Path(meta_path).unlink()
@@ -1519,15 +1442,23 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                 "datasets": {"sample": {"jobs": {"0": {"status": "done",
                     "save": str(skim), "meta": str(meta), "tree_name": "Events"}}}},
             }))
-            self.assertTrue(task.complete())
-            skim.unlink()
-            self.assertFalse(task.complete())
-            write_skim("WrongTree")
-            self.assertFalse(task.complete())
-            write_skim()
-            self.assertTrue(task.complete())
-            meta.write_bytes(b"corrupted after successful monitoring")
-            self.assertFalse(task.complete())
+            ambient = Path(tmpdir, "working_directory")
+            ambient.mkdir()
+            (ambient / "submit_config.txt").write_text("enableSkim=false\n")
+            previous_directory = Path.cwd()
+            try:
+                os.chdir(ambient)
+                self.assertTrue(task.complete())
+                skim.unlink()
+                self.assertFalse(task.complete())
+                write_skim("WrongTree")
+                self.assertFalse(task.complete())
+                write_skim()
+                self.assertTrue(task.complete())
+                meta.write_bytes(b"corrupted after successful monitoring")
+                self.assertFalse(task.complete())
+            finally:
+                os.chdir(previous_directory)
 
     def test_monitor_rejects_corrupt_output_despite_successful_worker_exit(self):
         import analysis_tasks
@@ -1556,9 +1487,9 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                 "submission_dir": str(submission),
             }]}))
             with patch.object(task, "input", return_value=law.LocalFileTarget(str(submitted))), \
-                    patch.object(analysis_tasks, "_condor_q_ads", return_value={}), \
-                    patch.object(analysis_tasks, "_condor_history_exit", return_value={0: 0}), \
-                    patch.object(analysis_tasks, "_submit_single_skim_job") as submit:
+                    patch("rdfproduction.transport.condor_q_ads", return_value={}), \
+                    patch("rdfproduction.transport.condor_history_exit", return_value={0: 0}), \
+                    patch("rdfproduction.jobs.condor_files._submit_single_skim_job") as submit:
                 task.run()
             submit.assert_not_called()
             state = json.loads(Path(task._state_file).read_text())
@@ -1589,13 +1520,9 @@ class TestSkimOutputMonitoring(unittest.TestCase):
                 })
             )
 
-            with patch.object(
-                analysis_tasks,
-                "_shared_read_weight_sum",
+            with patch("derivation_correctionlib._read_weight_sum",
                 side_effect=AssertionError("counter read during planning"),
-            ), patch.object(
-                analysis_tasks,
-                "_shared_read_weight_sign_sum",
+            ), patch("derivation_correctionlib._read_weight_sign_sum",
                 side_effect=AssertionError("counter read during planning"),
             ):
                 plans = analysis_tasks._plan_file_source_jobs(
@@ -1621,8 +1548,8 @@ class TestRunSkimTestJob(unittest.TestCase):
         import analysis_tasks
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patch.object(analysis_tasks, "WORKSPACE", tmpdir), \
-                patch.object(analysis_tasks, "_collect_skim_shared_libs", return_value={}), \
-                patch.object(analysis_tasks, "_run_analysis_job", return_value="done:test"):
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}), \
+                patch("rdfproduction.executors._run_analysis_job", return_value="done:test"):
             executable = Path(tmpdir, "analysis")
             executable.write_text("#!/bin/sh\nexit 0\n")
             executable.chmod(0o755)
@@ -1659,8 +1586,8 @@ class TestRunSkimTestJob(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patch.object(analysis_tasks, "WORKSPACE", tmpdir), \
-                patch.object(analysis_tasks, "_collect_skim_shared_libs", return_value={}), \
-                patch.object(analysis_tasks, "_run_analysis_job", return_value="done:test"):
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}), \
+                patch("rdfproduction.executors._run_analysis_job", return_value="done:test"):
             executable = Path(tmpdir, "analysis")
             executable.write_text("#!/bin/sh\nexit 0\n")
             executable.chmod(0o755)
@@ -1710,7 +1637,7 @@ class TestRunSkimTestJob(unittest.TestCase):
                 lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
             )
             try:
-                with patch("analysis_tasks._run_analysis_job", return_value="done:test") as mock_run:
+                with patch("rdfproduction.executors._run_analysis_job", return_value="done:test") as mock_run:
                     task.run()
 
                 self.assertEqual(mock_run.call_count, 1)
@@ -1954,8 +1881,8 @@ class TestSkimTask(unittest.TestCase):
                     Path(os.path.join(out_dir, "meta.root")).write_bytes(b"mock root")
                     return "done:mock"
 
-                with patch("analysis_tasks._run_prepared_skim_job", side_effect=fake_runner), \
-                        patch("analysis_tasks._skim_job_output_errors", return_value=[]):
+                with patch("rdfproduction.jobs.staging._run_prepared_skim_job", side_effect=fake_runner), \
+                        patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=[]):
                     func, args, _kwargs = task.get_dask_work(0, branch_data)
                     result = func(*args)
 
@@ -1972,7 +1899,7 @@ class TestSkimTask(unittest.TestCase):
                 ):
                     Path(task.output().path).parent.mkdir(parents=True, exist_ok=True)
                     Path(task.output().path).write_text("status=done\n")
-                    with patch("analysis_tasks._skim_job_output_errors", return_value=[]):
+                    with patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=[]):
                         self.assertTrue(task.complete())
             finally:
                 analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
@@ -2197,13 +2124,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 self.assertTrue(os.path.exists(os.path.join(test_dir, "cfg", "dataset_manifest.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(test_dir, "cfg", "floats.yaml")))
 
-                cfg = {}
-                with open(os.path.join(test_dir, "submit_config.txt")) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            k, v = line.split("=", 1)
-                            cfg[k] = v
+                cfg = production_jobs.read_config(os.path.join(test_dir, "submit_config.yaml"))
 
                 self.assertEqual(cfg["sampleConfig"], "cfg/dataset_manifest.yaml")
                 self.assertEqual(cfg["floatConfig"], "cfg/floats.yaml")
@@ -2216,7 +2137,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patch.object(analysis_tasks, "WORKSPACE", tmpdir), \
-                patch.object(analysis_tasks, "_collect_skim_shared_libs", return_value={}):
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}):
             executable = Path(tmpdir, "analysis")
             executable.write_text("#!/bin/sh\nexit 0\n")
             executable.chmod(0o755)
@@ -2346,20 +2267,14 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
             )
             try:
-                with patch("analysis_tasks._collect_skim_shared_libs", return_value={}):
+                with patch("rdfproduction.transport.collect_local_shared_libs", return_value={}):
                     task._run_impl()
 
                 job_dir = os.path.join(tmpdir, "skimRun_myRun", "jobs", "sample")
                 self.assertTrue(os.path.exists(os.path.join(job_dir, "cfg", "corrections.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(job_dir, "aux", "payload.json.gz")))
 
-                cfg = {}
-                with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            key, value = line.split("=", 1)
-                            cfg[key] = value
+                cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
                 self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
             finally:
                 analysis_tasks.PrepareSkimJobs._run_dir = property(orig_run_dir)
@@ -2417,8 +2332,8 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     "last_entry": 0,
                     "site_redirectors": {},
                 }]
-                with patch("analysis_tasks._collect_skim_shared_libs", return_value={}), patch(
-                    "analysis_tasks._plan_file_source_jobs", return_value=plan
+                with patch("rdfproduction.transport.collect_local_shared_libs", return_value={}), patch(
+                    "rdfproduction.jobs.job_config._plan_file_source_jobs", return_value=plan
                 ):
                     task._run_impl()
 
@@ -2426,13 +2341,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 self.assertTrue(os.path.exists(os.path.join(job_dir, "cfg", "corrections.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(job_dir, "aux", "payload.json.gz")))
 
-                cfg = {}
-                with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            key, value = line.split("=", 1)
-                            cfg[key] = value
+                cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
                 self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
             finally:
                 analysis_tasks.PrepareSkimJobs._run_dir = property(orig_run_dir)
@@ -2478,7 +2387,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
             )
             try:
-                with patch("analysis_tasks._collect_skim_shared_libs", return_value={}):
+                with patch("rdfproduction.transport.collect_local_shared_libs", return_value={}):
                     task._run_impl()
 
                 shared_dir = os.path.join(tmpdir, "skimRun_myRun", "shared_inputs")
@@ -2491,15 +2400,9 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     "skimRun_myRun",
                     "jobs",
                     "sample",
-                    "submit_config.txt",
+                    "submit_config.yaml",
                 )
-                cfg = {}
-                with open(job_cfg) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            k, v = line.split("=", 1)
-                            cfg[k] = v
+                cfg = production_jobs.read_config(job_cfg)
 
                 self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
                 self.assertFalse(os.path.exists(os.path.join(shared_dir, "aux")))
@@ -2549,7 +2452,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
             )
             try:
                 self.assertTrue(os.path.exists(os.path.join(runtime_dir, "cfg", "corrections.yaml")))
-                self.assertTrue(os.path.exists(os.path.join(runtime_dir, "cfg", "submit_config.txt")))
+                self.assertTrue(os.path.exists(os.path.join(runtime_dir, "cfg", "submit_config.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(runtime_dir, "aux", "shared.json.gz")))
                 self.assertEqual(runtime_exe, os.path.join(runtime_dir, "exe"))
 
@@ -2593,12 +2496,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     self.assertTrue(os.path.exists(os.path.join(runtime_dir, "input_0.root")))
                     self.assertTrue(os.path.exists(os.path.join(runtime_dir, "input_1.root")))
 
-                    cfg = {}
-                    with open(os.path.join(runtime_dir, "cfg", "submit_config.txt")) as fh:
-                        for line in fh:
-                            if "=" in line:
-                                key, value = line.strip().split("=", 1)
-                                cfg[key] = value
+                    cfg = analysis_tasks.read_config(os.path.join(runtime_dir, "cfg", "submit_config.yaml"))
                     self.assertEqual(cfg["fileList"], "input_0.root,input_1.root")
                 finally:
                     shutil.rmtree(runtime_dir, ignore_errors=True)
@@ -2634,12 +2532,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     exe_relpath="exe",
                 )
                 try:
-                    cfg = {}
-                    with open(os.path.join(runtime_dir, "cfg", "submit_config.txt")) as fh:
-                        for line in fh:
-                            if "=" in line:
-                                key, value = line.strip().split("=", 1)
-                                cfg[key] = value
+                    cfg = analysis_tasks.read_config(os.path.join(runtime_dir, "cfg", "submit_config.yaml"))
                     self.assertEqual(cfg["fileList"], "root://server/file0.root")
                 finally:
                     shutil.rmtree(runtime_dir, ignore_errors=True)
@@ -2681,12 +2574,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     source_config_path=os.path.join(job_dir, "submit_config.txt"),
                 )
                 try:
-                    cfg = {}
-                    with open(os.path.join(runtime_dir, "cfg", "submit_config.txt")) as fh:
-                        for line in fh:
-                            if "=" in line:
-                                key, value = line.strip().split("=", 1)
-                                cfg[key] = value
+                    cfg = analysis_tasks.read_config(os.path.join(runtime_dir, "cfg", "submit_config.yaml"))
                     self.assertEqual(cfg["sample"], "prepared_job")
                     self.assertEqual(cfg["counterIntWeightBranch"], "type")
                     self.assertNotEqual(cfg["sample"], "wrong_cwd_file")
@@ -2945,22 +2833,19 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(os.path.join(submit_dir, "job_0", "stitch_weights.json"))
             )
-            self.assertIn(
-                "stitchWeights=stitch_weights.json",
-                Path(os.path.join(submit_dir, "job_0", "submit_config.txt")).read_text(),
-            )
+            self.assertEqual(analysis_tasks.read_config(Path(submit_dir, "job_0", "submit_config.yaml"))["stitchWeights"], "stitch_weights.json")
             self.assertNotIn("job_$(Process)/stitch_weights.json", Path(submit_path).read_text())
 
-            job0_cfg = Path(os.path.join(submit_dir, "job_0", "submit_config.txt")).read_text()
-            self.assertIn("saveDirectory=/eos/user/t/test/myRun/sample", job0_cfg)
-            self.assertIn("saveFile=/eos/user/t/test/myRun/sample/output_0.root", job0_cfg)
-            self.assertIn("metaFile=/eos/user/t/test/myRun/sample/meta_0.root", job0_cfg)
+            job0_cfg = analysis_tasks.read_config(Path(submit_dir, "job_0", "submit_config.yaml"))
+            self.assertEqual(job0_cfg["saveDirectory"], "/eos/user/t/test/myRun/sample")
+            self.assertEqual(job0_cfg["saveFile"], "/eos/user/t/test/myRun/sample/output_0.root")
+            self.assertEqual(job0_cfg["metaFile"], "/eos/user/t/test/myRun/sample/meta_0.root")
 
             submit_text = Path(submit_path).read_text()
             self.assertIn('+JobBatchName = "sample [myRun]"', submit_text)
             self.assertIn('+RDFSample = "sample"', submit_text)
             self.assertIn('+RDFRun = "myRun"', submit_text)
-            self.assertIn("job_$(Process)/submit_config.txt", submit_text)
+            self.assertIn("job_$(Process)/submit_config.yaml", submit_text)
             self.assertIn(os.path.join(run_dir, "shared_inputs.tar.gz"), submit_text)
             self.assertNotIn("job_$(Process)/myanalysis", submit_text)
             self.assertNotIn(f"transfer_input_files = {os.path.join(submit_dir, 'shared_inputs')}\n", submit_text)
@@ -2973,8 +2858,8 @@ class TestPrepareSkimJobs(unittest.TestCase):
 
             runscript_text = Path(runscript_path).read_text()
             self.assertIn('tar -xzf "shared_inputs.tar.gz"', runscript_text)
-            self.assertIn('cp -f submit_config.txt cfg/submit_config.txt', runscript_text)
-            self.assertIn('./myanalysis cfg/submit_config.txt', runscript_text)
+            self.assertIn('cp -f submit_config.yaml cfg/submit_config.yaml', runscript_text)
+            self.assertIn('./myanalysis cfg/submit_config.yaml', runscript_text)
             self.assertIn('chmod +x "myanalysis"', runscript_text)
             self.assertIn('__orig_saveFile', runscript_text)
             self.assertIn('__orig_metaFile', runscript_text)
@@ -3112,7 +2997,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
             job_dir = os.path.join(submit_dir, "job_7")
             shared_inputs = os.path.join(tmpdir, "shared_inputs.tar.gz")
             Path(job_dir).mkdir(parents=True)
-            Path(os.path.join(job_dir, "submit_config.txt")).write_text("saveFile=out.root\n")
+            Path(os.path.join(job_dir, "submit_config.yaml")).write_text("saveFile: out.root\n")
             Path(shared_inputs).write_text("archive")
 
             Path(os.path.join(submit_dir, "condor_submit.sub")).write_text(
@@ -3124,7 +3009,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                         '+RDFRun = "myRun"',
                         f"Executable = {submit_dir}/condor_runscript.sh",
                         "transfer_input_files = "
-                        f"{submit_dir}/job_$(Process)/submit_config.txt,"
+                        f"{submit_dir}/job_$(Process)/submit_config.yaml,"
                         f"{submit_dir}/job_$(Process)/site_redirectors.json,"
                         f"{shared_inputs},"
                         f"{submit_dir}/condor_runscript_inner.sh",
@@ -3167,7 +3052,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertIn('+JobBatchName = "sample [myRun]"', resub_text)
             self.assertIn('+RDFSample = "sample"', resub_text)
             self.assertIn('+RDFRun = "myRun"', resub_text)
-            self.assertIn(f"{submit_dir}/job_7/submit_config.txt", resub_text)
+            self.assertIn(f"{submit_dir}/job_7/submit_config.yaml", resub_text)
             self.assertIn(f"{submit_dir}/job_7/site_redirectors.json", resub_text)
             self.assertIn('environment = "CONDOR_PROC=7 CONDOR_CLUSTER=$(Cluster)"', resub_text)
             self.assertIn("+RequestMemory=3000", resub_text)
@@ -3188,8 +3073,8 @@ class TestPrepareSkimJobs(unittest.TestCase):
         dataset_state = {"submission_dir": "/tmp/submission", "jobs": {}}
         job_state = {"status": "submitted", "retries": 0, "cluster": "123", "proc": 7}
 
-        with patch.object(analysis_tasks, "_submit_single_skim_job", return_value=None), \
-                patch.object(analysis_tasks, "_validate_staged_skim_executable"), \
+        with patch("rdfproduction.jobs.condor_files._submit_single_skim_job", return_value=None), \
+                patch("rdfproduction.jobs.staging._validate_staged_skim_executable"), \
                 patch.object(task, "publish_message"):
             task._try_resubmit(
                 "sample",
@@ -3263,8 +3148,8 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 submissions.append(kwargs)
                 return str(100 + len(submissions))
 
-            with patch.object(analysis_tasks, "_submit_single_skim_job", side_effect=fake_submit), \
-                    patch.object(analysis_tasks, "_validate_staged_skim_executable"), \
+            with patch("rdfproduction.jobs.condor_files._submit_single_skim_job", side_effect=fake_submit), \
+                    patch("rdfproduction.jobs.staging._validate_staged_skim_executable"), \
                     patch.object(task, "publish_message"):
                 task._try_resubmit(
                     "sample",
@@ -3299,7 +3184,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
         eos_path = "/store/user/test/sample/output_0.root"
         local_path = "/tmp/nonexistent-local-output.root"
 
-        with patch("analysis_tasks._eos_files_exist_batch_util", return_value={eos_path: True}) as eos_batch:
+        with patch("rdfproduction.transport.eos_files_exist_batch", return_value={eos_path: True}) as eos_batch:
             result = analysis_tasks._output_files_exist_batch([eos_path, local_path])
 
         eos_batch.assert_called_once_with([eos_path])
@@ -3408,12 +3293,12 @@ class TestCondorRuntimeMonitor(unittest.TestCase):
                                "RemoteWallClockTime": 0}
                     with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
                             patch.object(task, "publish_message") as messages, \
-                            patch.object(analysis_tasks, "_condor_q_ads", side_effect=[{0: live_ad}, {}]), \
-                            patch.object(analysis_tasks, "_condor_history_exit", side_effect=[{}, {0: 0}]), \
-                            patch.object(analysis_tasks, "_condor_rm_job", side_effect=remove) as rm, \
-                            patch.object(analysis_tasks, "_submit_single_skim_job", side_effect=submit) as retry, \
-                            patch.object(analysis_tasks, "_validate_staged_skim_executable"), \
-                            patch.object(analysis_tasks, "_output_files_exist_batch", return_value={meta: True}), \
+                            patch("rdfproduction.transport.condor_q_ads", side_effect=[{0: live_ad}, {}]), \
+                            patch("rdfproduction.transport.condor_history_exit", side_effect=[{}, {0: 0}]), \
+                            patch("rdfproduction.transport.condor_rm_job", side_effect=remove) as rm, \
+                            patch("rdfproduction.jobs.condor_files._submit_single_skim_job", side_effect=submit) as retry, \
+                            patch("rdfproduction.jobs.staging._validate_staged_skim_executable"), \
+                            patch("rdfproduction.jobs.output_validation._output_files_exist_batch", return_value={meta: True}), \
                             patch.object(analysis_tasks.time, "sleep"):
                         task.run()
 
@@ -3554,17 +3439,12 @@ class TestHistFillTask(unittest.TestCase):
                 self.assertEqual(run_job.call_args.kwargs.get("stream_output"),
                                  analysis_tasks._stream_analysis_output())
 
-                # Verify that the job submit_config.txt uses skim.root
+                # Verify that the job submit_config.yaml uses skim.root
                 job_cfg = {}
                 cfg_path = os.path.join(
-                    tmpdir, "histRun_myHistRun", "jobs", "wjets", "submit_config.txt"
+                    tmpdir, "histRun_myHistRun", "jobs", "wjets", "submit_config.yaml"
                 )
-                with open(cfg_path) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            k, v = line.split("=", 1)
-                            job_cfg[k] = v
+                job_cfg = production_jobs.read_config(cfg_path)
                 self.assertEqual(job_cfg["fileList"], skim_file)
             finally:
                 analysis_tasks.HistFillTask._run_dir = property(orig_run)
@@ -3641,7 +3521,7 @@ class TestHistFillTask(unittest.TestCase):
             try:
                 with patch.object(type(task), "branch_data", new_callable=PropertyMock,
                                   return_value=entry):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         task.run()
 
@@ -3805,7 +3685,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
             for p in meta_files.values():
                 Path(p).write_text("")
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 result = mod._derive_stitch_weights("grp", meta_files)
 
@@ -3832,7 +3712,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 files["s1_job0"]: [70.0, 50.0],
             }
             with patch.object(
-                mod,
+                stitching_derivation,
                 "_read_intweight_sign_hist",
                 side_effect=lambda path, sample: values[path],
             ):
@@ -3861,7 +3741,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
         }
 
         with patch.object(
-            mod,
+            stitching_derivation,
             "_read_intweight_sign_hist",
             side_effect=self._mock_read(sample_values),
         ):
@@ -3888,7 +3768,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 Path(p).write_text("")
                 meta_files[name] = p
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 result = mod._derive_stitch_weights("grp", meta_files)
 
@@ -3915,7 +3795,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 Path(path).write_text("")
                 meta_files[name] = path
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 result = mod._derive_stitch_weights("grp", meta_files)
 
@@ -3931,7 +3811,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
             meta_file = os.path.join(tmpdir, "inclusive.root")
             Path(meta_file).write_text("")
             with patch.object(
-                mod,
+                stitching_derivation,
                 "_read_intweight_sign_hist",
                 return_value=[1.0, 3.0, 6.0],
             ):
@@ -4050,7 +3930,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 values[sample_name] = [float(index == 0), float(index != 0)]
 
             with patch.object(
-                mod,
+                stitching_derivation,
                 "_read_intweight_sign_hist",
                 side_effect=lambda path, sample: values[sample],
             ):
@@ -4075,7 +3955,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
             meta_file = os.path.join(tmpdir, "inclusive.root")
             Path(meta_file).write_text("")
             with patch.object(
-                mod,
+                stitching_derivation,
                 "_read_intweight_sign_hist",
                 return_value=[-1.0, 3.0, 6.0],
             ):
@@ -4103,7 +3983,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 second: [3.0, 4.0],
             }
             with patch.object(
-                mod,
+                stitching_derivation,
                 "_read_intweight_sign_hist",
                 side_effect=lambda path, sample: values[path],
             ):
@@ -4122,7 +4002,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
         mod = self._import()
         meta_file = "root://eosuser.cern.ch//eos/test/inclusive.root"
         with patch.object(
-            mod,
+            stitching_derivation,
             "_read_intweight_sign_hist",
             return_value=[1.0, 3.0],
         ):
@@ -4224,7 +4104,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 Path(p).write_text("")
                 meta_files[name] = p
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 result = mod._derive_stitch_weights("grp", meta_files)
 
@@ -4244,7 +4124,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 Path(p).write_text("")
                 meta_files[name] = p
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 with self.assertRaises(RuntimeError) as ctx:
                     mod._derive_stitch_weights("grp", meta_files)
@@ -4275,7 +4155,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 Path(p).write_text("")
                 meta_files[name] = p
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 result = mod._derive_stitch_weights("grp", meta_files)
 
@@ -4401,6 +4281,49 @@ class TestStitchingDerivationTask(unittest.TestCase):
         expected = os.path.join(analysis_tasks.WORKSPACE, "stitchWeights_run1")
         self.assertEqual(task._output_dir, expected)
 
+    def test_explicit_anchor_fractions_preserve_flavor_cross_sections(self):
+        import json
+        import yaml
+
+        counts = {
+            "electron": [400.0, 100.0, 0.0, 0.0],
+            "muon": [0.0, 0.0, 300.0, 0.0],
+            "tau": [0.0, 0.0, 0.0, 200.0],
+        }
+        fractions = {sample: 1 / 3 for sample in counts}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            files = {sample: str(root / f"{sample}.root") for sample in counts}
+            for path in files.values():
+                Path(path).touch()
+            group = {
+                "cross_section_era": "run3_24",
+                "inclusive_sample": list(counts),
+                "inclusive_cross_section_pb": 300.0,
+                "meta_files": files,
+            }
+            config = root / "stitch.yaml"
+            task = stitching_derivation.StitchingDerivation("fractions", str(config))
+            with patch.object(
+                stitching_derivation, "_read_intweight_sign_hist",
+                side_effect=lambda path, sample: counts[sample],
+            ):
+                config.write_text(yaml.safe_dump({"groups": {"DY": group}}))
+                task.derive(output_dir=root / "pooled")
+                group["inclusive_sample_fractions"] = {"run3_24": fractions}
+                config.write_text(yaml.safe_dump({"groups": {"DY": group}}))
+                task.derive(output_dir=root / "assigned")
+
+            pooled = json.loads((root / "pooled/stitch_cross_sections.json").read_text())
+            assigned = json.loads((root / "assigned/stitch_cross_sections.json").read_text())
+            self.assertEqual(pooled["groups"]["DY"]["binned_cross_sections_pb"], [120, 30, 90, 60])
+            self.assertEqual(assigned["groups"]["DY"]["binned_cross_sections_pb"], [80, 20, 100, 100])
+            self.assertEqual(assigned["groups"]["DY"]["inclusive_sample_fractions"], fractions)
+            self.assertEqual(
+                (root / "pooled/stitch_weights.json").read_bytes(),
+                (root / "assigned/stitch_weights.json").read_bytes(),
+            )
+
     def test_declarative_group_discovers_all_source_meta_files(self):
         import analysis_tasks
         import yaml
@@ -4433,8 +4356,8 @@ class TestStitchingDerivationTask(unittest.TestCase):
             with open(stitch_config_path, "w") as fh:
                 yaml.safe_dump({"groups": {"group_a": {"select": {"group": "group_a"}}}}, fh)
 
-            original_workspace = analysis_tasks.WORKSPACE
-            analysis_tasks.WORKSPACE = tmpdir
+            original_workspace = stitching_derivation.WORKSPACE
+            stitching_derivation.WORKSPACE = tmpdir
             try:
                 result = analysis_tasks._resolve_stitch_meta_files(
                     "group_a",
@@ -4444,7 +4367,7 @@ class TestStitchingDerivationTask(unittest.TestCase):
                     source_dataset_manifest=manifest_path,
                 )
             finally:
-                analysis_tasks.WORKSPACE = original_workspace
+                stitching_derivation.WORKSPACE = original_workspace
 
             self.assertEqual(set(result), {"sample_a", "sample_b"})
             self.assertEqual(len(result["sample_a"]), 2)
@@ -4620,7 +4543,7 @@ class TestStitchingDerivationTask(unittest.TestCase):
                 # Provide fake sign-count data via mocked reader
                 fake_values = {"s0": [30.0, 10.0, 0.0], "s1": [70.0, 90.0, 0.0]}
                 with patch.object(
-                    analysis_tasks,
+                    stitching_derivation,
                     "_read_intweight_sign_hist",
                     side_effect=lambda f, s: fake_values[s],
                 ):
@@ -4738,11 +4661,11 @@ class TestStitchingValidationTask(unittest.TestCase):
             meta_file = os.path.join(tmpdir, "sample.root")
             Path(meta_file).write_text("")
             with patch.object(
-                analysis_tasks,
+                stitching_derivation,
                 "_read_intweight_sign_hist",
                 return_value=[2.0, -1.0, 0.0],
             ), patch.object(
-                analysis_tasks,
+                stitching_derivation,
                 "_read_weight_sign_sum",
                 return_value=5.0,
             ):
@@ -4765,7 +4688,7 @@ class TestStitchingValidationTask(unittest.TestCase):
             meta_file = os.path.join(tmpdir, "sample.root")
             Path(meta_file).write_text("")
             with patch.object(
-                analysis_tasks,
+                stitching_derivation,
                 "_read_intweight_sign_hist",
                 return_value=[100.0, 1.0, -2.0, 1.0],
             ):
@@ -4811,7 +4734,7 @@ class TestStitchingValidationTask(unittest.TestCase):
             Path(meta_file).write_text("")
             bin_cross_sections = [float(index + 1) for index in range(21)]
             with patch.object(
-                analysis_tasks,
+                stitching_derivation,
                 "_read_intweight_sign_hist",
                 return_value=np.ones(21),
             ):
@@ -5028,14 +4951,14 @@ class TestStitchingValidationTask(unittest.TestCase):
                 "metaFile=/eos/user/test/meta_0.root\n"
             )
 
-            original_workspace = analysis_tasks.WORKSPACE
-            analysis_tasks.WORKSPACE = tmpdir
+            original_workspace = stitching_derivation.WORKSPACE
+            stitching_derivation.WORKSPACE = tmpdir
             try:
                 resolved = analysis_tasks._stitch_output_meta_files(
                     "applyRun", manifest_path
                 )
             finally:
-                analysis_tasks.WORKSPACE = original_workspace
+                stitching_derivation.WORKSPACE = original_workspace
 
         self.assertEqual(
             resolved,
@@ -5059,8 +4982,8 @@ class TestStitchingValidationTask(unittest.TestCase):
                 "perm_failed_jobs=sample_a:2\n"
             )
 
-            original_workspace = analysis_tasks.WORKSPACE
-            analysis_tasks.WORKSPACE = tmpdir
+            original_workspace = stitching_derivation.WORKSPACE
+            stitching_derivation.WORKSPACE = tmpdir
             try:
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -5071,7 +4994,7 @@ class TestStitchingValidationTask(unittest.TestCase):
                         manifest_path,
                     )
             finally:
-                analysis_tasks.WORKSPACE = original_workspace
+                stitching_derivation.WORKSPACE = original_workspace
 
     def test_validates_all_partitioned_meta_files(self):
         import analysis_tasks
@@ -5215,18 +5138,18 @@ class TestStitchingValidationTask(unittest.TestCase):
                 "stitchRun2PtBins_WtoLNu=0,100,130,220,250,280\n"
             )
 
-            original_workspace = analysis_tasks.WORKSPACE
-            analysis_tasks.WORKSPACE = tmpdir
+            original_workspace = stitching_derivation.WORKSPACE
+            stitching_derivation.WORKSPACE = tmpdir
             try:
                 with (
                     patch.dict(sys.modules, {"uproot": fake_uproot}),
                     patch.object(
-                        analysis_tasks,
+                        stitching_derivation,
                         "_read_intweight_sign_hist",
                         return_value=[1.0, 2.0],
                     ),
                     patch.object(
-                        analysis_tasks,
+                        stitching_derivation,
                         "_read_weight_sign_sum",
                         return_value=3.0,
                     ),
@@ -5243,7 +5166,7 @@ class TestStitchingValidationTask(unittest.TestCase):
                 with open(task.output().path) as fh:
                     report = json.load(fh)
             finally:
-                analysis_tasks.WORKSPACE = original_workspace
+                stitching_derivation.WORKSPACE = original_workspace
 
             self.assertEqual(report["samples"], 2)
             self.assertEqual(report["meta_files"], 3)
@@ -5520,7 +5443,7 @@ class TestSkimTaskCacheProducer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job") as run_job:
                         task.run()
 
@@ -5576,7 +5499,7 @@ class TestSkimTaskCacheProducer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         task.run()
 
@@ -5649,7 +5572,7 @@ class TestSkimTaskCacheProducer(unittest.TestCase):
                         "analysis_tasks.check_cache_validity",
                         return_value=ArtifactResolutionStatus.COMPATIBLE,
                     ), patch(
-                        "analysis_tasks._skim_job_output_errors",
+                        "rdfproduction.jobs.output_validation._skim_job_output_errors",
                         return_value=[],
                     ):
                         result = task.complete()
@@ -5832,7 +5755,7 @@ class TestHistFillTaskCacheConsumer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         with patch(
                             "analysis_tasks.check_cache_validity",
@@ -5884,7 +5807,7 @@ class TestHistFillTaskCacheConsumer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         with patch(
                             "analysis_tasks.check_cache_validity",
@@ -5936,7 +5859,7 @@ class TestHistFillTaskCacheConsumer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         with patch(
                             "analysis_tasks.check_cache_validity",
@@ -6020,7 +5943,7 @@ class TestEventBudgetPlanning(unittest.TestCase):
         from job_sizing import update_sizing_after_run
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(analysis_tasks, 'WORKSPACE', tmp), \
-                patch.object(analysis_tasks, '_collect_skim_shared_libs', return_value={}), \
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}), \
                 patch.dict(os.environ, {'RDF_JOB_SIZING_CACHE': str(Path(tmp, 'cache')),
                                         'RDF_JOB_SIZING_ORIGIN': 'test-pool', 'RDF_JOB_SIZING_AUTO_UPDATE': '1'}):
             exe = Path(tmp, 'analysis');exe.write_text('#!/bin/sh\nexit 0\n');exe.chmod(0o755)
@@ -6036,7 +5959,7 @@ class TestEventBudgetPlanning(unittest.TestCase):
             with patch('job_sizing.cached_sizing', side_effect=AssertionError('preview reads mutable cache')):
                 self.assertEqual(len(preview.create_branch_map()), 1)
             self.assertFalse(Path(first._run_dir, 'job_sizing_selection.json').exists())
-            with patch.object(analysis_tasks, '_query_tree_entries', side_effect=AssertionError('cold run queries')):
+            with patch("rdfproduction.partitioning._query_tree_entries", side_effect=AssertionError('cold run queries')):
                 first._run_impl()
             self.assertEqual(len(json.loads(Path(first.output().path).read_text())), 1)
             logs = Path(first._run_dir, 'condor_submissions/sample/condor_logs');logs.mkdir(parents=True)
@@ -6052,7 +5975,7 @@ class TestEventBudgetPlanning(unittest.TestCase):
             result = update_sizing_after_run(first._run_dir, first._sizing_selection()['context'])
             self.assertEqual(result['datasets'], 1)
             second = analysis_tasks.PrepareSkimJobs(name='second', **options)
-            with patch.object(analysis_tasks, '_query_tree_entries', side_effect=AssertionError('cached counts queried')):
+            with patch("rdfproduction.partitioning._query_tree_entries", side_effect=AssertionError('cached counts queried')):
                 second._run_impl()
             self.assertEqual(second._sizing_selection()['source'], 'learned')
             prepared = json.loads(Path(second.output().path).read_text())
@@ -6075,12 +5998,12 @@ class TestEventBudgetPlanning(unittest.TestCase):
             kwargs = dict(dataset_manifest_path=manifest, file_list_dir=str(discovery),
                           files_per_job=2, entries_per_job=10, jobs_dir=str(Path(tmp, 'jobs')),
                           outputs_dir=str(Path(tmp, 'out')), partition='auto')
-            with patch.object(analysis_tasks, '_query_tree_entries', side_effect=AssertionError('cold run must not query')):
+            with patch("rdfproduction.partitioning._query_tree_entries", side_effect=AssertionError('cold run must not query')):
                 self.assertEqual(len(analysis_tasks._plan_file_source_jobs(**kwargs)), 2)
             cache = EntryCache(Path(tmp, 'cache.json'));cache.put(url, 25);cache.save()
             profile = Path(tmp, 'profile.json')
             profile.write_text(json.dumps({'schema_version': 1, 'datasets': {'trained': {'entries_per_job': 10}}}))
-            with patch.object(analysis_tasks, '_query_tree_entries', side_effect=AssertionError('unknown dataset must not query')):
+            with patch("rdfproduction.partitioning._query_tree_entries", side_effect=AssertionError('unknown dataset must not query')):
                 plans = analysis_tasks._plan_file_source_jobs(**kwargs, partition_profile=str(profile),
                                                               input_metadata_cache=str(cache.path))
             self.assertEqual(len(plans), 4)
@@ -6104,7 +6027,7 @@ class TestEventBudgetPlanning(unittest.TestCase):
                         input_metadata_cache=str(metadata.path))
             parts=analysis_tasks._plan_file_source_jobs(partition='file',**kwargs)
             self.assertEqual([p['files'] for p in parts],files)
-            with patch.object(analysis_tasks,'_query_tree_entries',side_effect=AssertionError('unexpected requery')):
+            with patch("rdfproduction.partitioning._query_tree_entries",side_effect=AssertionError('unexpected requery')):
                 parts=analysis_tasks._plan_file_source_jobs(partition='events',**kwargs)
             self.assertEqual([p['files'] for p in parts],[','.join(files[:2]),files[2],files[2],files[2]])
             self.assertEqual([(p['first_entry'],p['last_entry']) for p in parts[1:]],[(0,100),(100,200),(200,250)])
@@ -6123,7 +6046,8 @@ class TestEventBudgetPlanning(unittest.TestCase):
             self.assertTrue(all(p['files']==['a.root','b.root'] for p in parts))
             for i,part in enumerate(parts):
                 result=analysis_tasks._prepare_split_skim_job(str(job),tmp,0,1,i,part['files'],part['first_entry'],part['last_entry'])
-                cfg=analysis_tasks.read_config(str(Path(result['dir'],'submit_config.txt')))
+                self.assertFalse(Path(result['dir'], 'submit_config.txt').exists())
+                cfg=analysis_tasks.read_config(str(Path(result['dir'],'submit_config.yaml')))
                 self.assertEqual(cfg['firstEntry'],str(part['first_entry']))
                 self.assertEqual(cfg['lastEntry'],str(part['last_entry']))
                 self.assertEqual(cfg['entryRangeMode'],'source')
@@ -6160,7 +6084,7 @@ class TestSkimSizingPilots(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         patches = [patch.object(analysis_tasks, 'WORKSPACE', str(self.root)),
-                   patch.object(analysis_tasks, '_collect_skim_shared_libs', return_value={}),
+                   patch("rdfproduction.transport.collect_local_shared_libs", return_value={}),
                    patch.dict(os.environ, {'RDF_JOB_SIZING_CACHE': str(self.root/'cache'),
                                             'RDF_JOB_SIZING_ORIGIN': 'test', 'RDF_JOB_SIZING_AUTO_UPDATE': '1'})]
         for p in patches:

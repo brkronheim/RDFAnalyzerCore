@@ -10,7 +10,7 @@ It assumes the input dataframe contains `jet_pt`, `jet_pt_jesUp`,
 #include "NDHistogramManager.h"
 
 int main() {
-  Analyzer analyzer("config.txt");
+  Analyzer analyzer("config.yaml");
   auto histograms = NDHistogramManager::create(analyzer);
 
   auto& systematics = analyzer.getSystematicManager();

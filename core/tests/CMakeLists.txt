@@ -127,6 +127,7 @@ macro(add_python_unittest _test_name _file_stem)
 endmacro()
 
 add_python_unittest(PythonAnalysisConfigValidationTest test_analysis_config_validation)
+add_python_unittest(PythonBenchmarkWorkerTest         test_benchmark_worker)
 add_python_unittest(PythonCppWrapperTest               test_cpp_wrapper)
 add_python_unittest(PythonDatacardGeneratorTest        test_datacard_generator)
 add_python_unittest(PythonDatasetManifestTest          test_dataset_manifest)
@@ -140,7 +141,7 @@ add_python_unittest(PythonProductionManagerTest        test_production_manager)
 add_python_unittest(PythonRegionSchemaTest             test_region_schema)
 add_python_unittest(PythonReproducibilityReportTest    test_reproducibility_report)
 add_python_unittest(PythonSubmissionBackendTest        test_submission_backend)
-set_property(TEST PythonOptionalExtensionsTest PythonSubmissionBackendTest
+set_property(TEST PythonBenchmarkWorkerTest PythonOptionalExtensionsTest PythonSubmissionBackendTest
     APPEND PROPERTY ENVIRONMENT "${_EXEC_TMPDIR}")
 add_python_unittest(PythonRefreshXRootDRuntimeTest      test_refresh_xrootd_runtime)
 add_python_unittest(PythonStitchingPlottingTest        test_stitching_plotting)
@@ -159,7 +160,8 @@ add_python_unittest(PythonAnalysisPreflightTest test_analysis_preflight)
 add_python_unittest(PythonYamlConfigTest               test_yaml_config)
 
 # These suites use unittest and do not need pytest or ROOT Python bindings.
-foreach(_suite IN ITEMS run_bundle analysis_inputs)
+foreach(_suite IN ITEMS run_bundle analysis_inputs condor_submission rdf_production verified_outputs
+        production_build production_python production_campaign production_downstream production_discovery)
     add_test(NAME Shared_${_suite} COMMAND ${_PYTHON_EXECUTABLE} -m unittest
         discover -s ${_TEST_DIR}/python -p test_${_suite}.py -q)
     set_tests_properties(Shared_${_suite} PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")

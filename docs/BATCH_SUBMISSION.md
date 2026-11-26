@@ -1,10 +1,7 @@
 # HTCondor Batch Submission Guide
 
-This guide explains how to submit RDFAnalyzerCore analyses to HTCondor using
-the **law-based workflows** in `core/python/law/`. All batch submission is
-managed through [law](https://github.com/riga/law) (Luigi Analysis Workflow),
-which provides dependency tracking, automatic resubmission, and restart-safe
-monitoring.
+RDFAnalyzerCore stages, submits, monitors, and validates HTCondor production.
+Use the [Snakemake workflows](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md) to start campaigns or consume completed products. Keep running LAW campaigns under the controller that submitted them. The [legacy LAW section](#legacy-law-workflows) documents the older task and monitoring interfaces.
 
 Generated workers also carry an immutable, origin-scoped XRootD ranking
 snapshot, preferring the learned user cache over the experiment provider seed.
@@ -19,7 +16,8 @@ regenerate scripts to deploy these changes; existing production is untouched.
 
 ## Table of Contents
 
-- [Overview](#overview)
+- [Standalone production stages](#standalone-production-stages)
+- [Legacy LAW workflows](#legacy-law-workflows)
 - [Quick Start](#quick-start)
 - [Prerequisites](#prerequisites)
 - [Environment Setup](#environment-setup)
@@ -35,10 +33,149 @@ regenerate scripts to deploy these changes; existing production is untouched.
 
 ---
 
-## Overview
+## Standalone production stages
 
-RDFAnalyzerCore provides one primary skim submission workflow with pluggable
-file-discovery backends:
+Use a [Snakemake campaign](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md#configure-a-campaign)
+to select eras from a sealed collection and share their runtime and submission
+settings. It generates one spec per era and assigns each a distinct run name
+and remote output directory. For a standalone run, write the YAML spec
+directly. Paths in an explicit spec resolve relative to that spec.
+Use `requirements-snakemake.txt` for a controller environment with the
+shared batch services and Snakemake. The `rdf_production` CLI also runs directly.
+Set `backend: local` to run every prepared partition on the current host
+with the same verified output index. Local runs write under
+`skimRun_<name>/outputs/` and do not take a Condor output destination or
+Condor sizing pilots. See the [Snakemake local-production guide](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md#local-production).
+Set `backend: dask` to use the Dask executor on a local cluster or an
+existing scheduler with a shared filesystem. See the
+[Dask production guide](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md#dask-production).
+
+```yaml
+version: 1
+name: vjets_pilot_2022_preEE
+exe: runtime/vjet_njetpt
+submit_config: 2022_preEE/bundle/analysis.yaml
+dataset_manifest: 2022_preEE/bundle/datasets.yaml
+options:
+  file_source: rucio
+  files_per_job: 4
+  x509: credentials/x509
+  output_directory: root://eosuser.cern.ch//eos/user/u/user/vjets_pilot_2022_preEE
+```
+
+From the checkout, use the configured Python/ROOT and Condor environment.
+`inspect` verifies the sealed bundle and describes the runtime offline.
+`preflight` builds and validates the runtime. It accepts multiple specs
+and builds a shared CMake target once. `prepare` can run discovery and
+stage workers. `submit` returns when the scheduler has accepted the jobs.
+`execute` submits or resumes the run, then publishes an output index after
+full integrity and partition checks. Use `smoke` to run a local job against
+one input per available data and MC sample type before submitting. It requires
+the default `make_test_job: true` and a spec without Condor sizing pilots.
+
+```bash
+export PYTHONPATH="$PWD/core/python${PYTHONPATH:+:$PYTHONPATH}"
+python -m rdf_production inspect campaign/2022_preEE.yaml --format json
+python -m rdf_production preflight campaign/2022_preEE.yaml
+python -m rdf_production prepare campaign/2022_preEE.yaml
+python -m rdf_production smoke campaign/2022_preEE.yaml
+python -m rdf_production submit campaign/2022_preEE.yaml
+python -m rdf_production execute campaign/2022_preEE.yaml --output-index results/2022_preEE/index.json
+python -m rdf_production status skimRun_vjets_pilot_2022_preEE
+python -m rdf_production verify --output-index results/2022_preEE/index.json
+```
+
+`status` reports the recorded runtime, stage artifacts and their timestamps.
+`verify` checks local evidence, including an optional `--merge-receipt`.
+Add `--storage` to compare the recorded file signatures with XRootD.
+Keep the spec, bundle and validated runtime at their recorded paths and
+repeat `execute` from the same submit environment to resume.
+The pilot uses the default local Condor scheduler, a fresh controller-owned
+run directory, and the integrity policy with file signatures available at the
+stage-out endpoint. The `x509` setting is a path to the credential. Current
+preflight and staging policy still applies. Set `root_setup` to the worker
+setup script for the executable's ROOT release. For an executable built with
+ROOT 6.42.00-rc1, set `RDF_CVMFS_ROOT_RELEASE=6.42.00-rc1` inside that script
+so the setting also reaches workers. This release reports `6.41.99` through
+`root-config --version`.
+
+### C++ runtime
+
+For a C++ campaign, point `exe` at the output of a named CMake target and
+include a `build` object in the spec. CMake paths are relative to the spec
+and the configure options are passed as separate arguments.
+
+```json
+{
+  "source_directory": "/path/to/RDFAnalyzerCore",
+  "build_directory": "runtime/build",
+  "target": "vjet_njetpt",
+  "parallel": 4,
+  "configure_args": [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DRDF_ANALYSES=vjet-njetpt",
+    "-DRDF_REQUIRED_EXTENSIONS=cms"
+  ]
+}
+```
+
+Preflight checks that CMake reports the requested executable for this target,
+checks the executable and its dynamic linkage, and records a digest for
+staging. When the target links to ROOT and `ROOTSYS` is set, it also checks
+that linkage against the selected installation. Set `ctest_regex` to require
+matching CTest tests to pass and use `test_targets` to build any separate test
+executables first. Use `inputs` to declare additional build inputs, such as
+headers or toolchain files outside the CMake target inventory. Give a changed
+runtime a new run name. An `exe` alone uses an existing prebuilt executable.
+
+### Python runtime
+
+A Python spec uses `python` with an `entrypoint` and optional `modules`
+mapping from paths inside the archive to local source paths. The worker
+receives the staged job config as the first argument. Code that uses the
+framework binding can construct `rdfanalyzer.Analyzer(sys.argv[1])`.
+Preflight checks the sources and stages a deterministic executable Python
+archive. Set `options.python_env` to a worker environment archive to ship
+additional dependencies. Use `options.root_setup` when the Python code imports
+PyROOT or uses a native binding that depends on ROOT. Create a worker archive
+with `bash core/python/setup_python_env.sh`.
+
+### CMS discovery, splitting, and monitoring
+
+`file_source: "rucio"` uses the CMS extension's discovery provider. It accepts
+the manifest's explicit file inventory or queries the Rucio catalogue for
+datasets with a DAS path. With a file source, `partition: "auto"` uses matching
+learned sizing when available and falls back to file grouping for unmeasured
+datasets. To calibrate before production, set `sizing_pilots: true` and run
+`execute`. It accepts `sizing_pilot_parallel`, `sizing_pilot_prefix_entries`,
+`sizing_pilot_target_seconds`, and `sizing_pilot_safety_factor`. Pilots require
+a file source, `threads=1`, and partition mode `auto`, `events`, or
+`entry_range`. The `prepare` command stays submission-free by rejecting specs
+that request Condor sizing pilots. See [job sizing](JOB_SIZING.md) for the
+planning and calibration policies.
+
+With the XRootD adaptor enabled, workers check read quality and report site
+measurements. After verified completion, look for
+`xrd_site_rankings_update.json` and `job_sizing_update.json` in the run
+directory. The [XRootD ranking settings](xrd-adaptor.md#historical-site-preferences-and-open-attempt-logging)
+also apply to Snakemake runs.
+
+Initial dataset-level submission writes `submission_journal.json` beside
+`submitted.json`. A pending journal entry means Condor acceptance is
+uncertain. Resume adopts the exact cluster only when matching owner and
+submission IDs cover the expected processes across queue and history.
+Unresolved entries require investigation on the original scheduler. Adaptive
+split retries currently use the existing monitor handoff.
+
+Consume the output index with `python -m rdf_production merge`. Use
+`--output-index`, `--destination`, and `--receipt` to specify the verified
+input, merge directory, and downstream receipt. The existing `partial_merge`
+command also supports previews of a running campaign. Use the output-index
+path for production merges requiring full coverage.
+
+## Legacy LAW workflows
+
+Existing LAW campaigns and external analysis wrappers use the following modules. These commands describe the compatibility workflow.
 
 | Workflow Layer | Primary Module | Notes |
 |----------------|----------------|-------|
@@ -96,7 +233,7 @@ law index
 # 3. Run the primary Rucio-backed skim workflow (PrepareSkimJobs →
 #    BuildSkimSubmission → SubmitSkimJobs are run automatically as dependencies)
 law run MonitorSkimJobs --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun \
   --file-source rucio \
@@ -216,8 +353,8 @@ The automatically chained discovery task uses `sampleConfig` from the submit
 config. The primary `SkimTask` still receives its typed dataset manifest via
 `--dataset-manifest`:
 
-```
-sampleConfig=analyses/myAnalysis/cfg/samples.yaml
+```yaml
+sampleConfig: analyses/myAnalysis/cfg/samples.yaml
 ```
 
 #### DEPRECATED: Legacy key=value text format
@@ -261,7 +398,7 @@ name=wjets das=/WJetsToLNu.../NANOAODSIM     xsec=61526.7 type=1 norm=1.0 kfac=1
 ```bash
 # Run the full primary sequence (law resolves dependencies automatically)
 law run MonitorSkimJobs --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/samples.yaml \
   --name myRun22 \
   --file-source rucio \
@@ -278,7 +415,7 @@ To run only up to the submission file generation (without submitting):
 
 ```bash
 law run BuildSkimSubmission --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/samples.yaml \
   --name myRun22 --x509 x509 \
   --file-source rucio \
@@ -355,7 +492,7 @@ name=ZEE   das=SMZee_1 type=11 xsec=1.0 norm=1.0
 
 ```bash
 law run MonitorSkimJobs --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/opendata_manifest.yaml \
   --name openDataRun \
   --file-source opendata \
@@ -368,7 +505,7 @@ To run only up to submission file generation:
 
 ```bash
 law run BuildSkimSubmission --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/opendata_manifest.yaml \
   --name openDataRun \
   --file-source opendata \
@@ -487,7 +624,7 @@ The script stages packages with `pip install --target`. It selects a binding fro
 
 ```bash
 law run MonitorSkimJobs --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --file-source rucio \
   --name myRun --x509 x509 \
@@ -513,8 +650,9 @@ export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
 After this, your analysis can use any packaged module:
 
 ```python
+import sys
 import rdfanalyzer
-analyzer = rdfanalyzer.Analyzer("submit_config.txt")
+analyzer = rdfanalyzer.Analyzer(sys.argv[1])
 # ... use Python bindings as usual
 ```
 
@@ -522,25 +660,25 @@ analyzer = rdfanalyzer.Analyzer("submit_config.txt")
 
 ## Configuration File Format
 
-### Submit config (`submit_config.txt`)
+### Submit configuration (`submit_config.yaml`)
 
-```
-saveDirectory=/eos/user/u/username/output
-sampleConfig=config/samples.yaml
+```yaml
+saveDirectory: /eos/user/u/username/output
+sampleConfig: config/samples.yaml
 
 # Optional plugin configs copied to every job
-bdtConfig=config/bdts.txt
-onnxConfig=config/onnx_models.txt
+bdtConfig: config/bdts.yaml
+onnxConfig: config/onnx_models.yaml
 ```
 
 ### Main config file
 
-```
-saveDirectory=/eos/user/u/username/output
-saveTree=Events
-treeList=Events
-enableCounters=true
-enableSkim=true
+```yaml
+saveDirectory: /eos/user/u/username/output
+saveTree: Events
+treeList: Events
+enableCounters: true
+enableSkim: true
 ```
 
 Set `enableSkim=true` for skim submissions. The framework writes the event
@@ -638,7 +776,7 @@ Copy input files to the worker node before running the analysis:
 ```
 
 When enabled, input XRootD URLs are xrdcp'd to local disk on the worker.
-The `submit_config.txt` for each job stores the original URLs in
+The worker configuration (`submit_config.yaml`, or an archived `submit_config.txt` source) stores the original URLs in
 `__orig_fileList` and uses local filenames (`input_0.root`, …) for the
 analysis.
 
@@ -741,7 +879,7 @@ voms-proxy-init -voms cms -rfc --valid 168:0
 
 ```bash
 ls -la skimRun_myRun/jobs/sample/job_0/
-cat skimRun_myRun/jobs/sample/job_0/submit_config.txt
+cat skimRun_myRun/jobs/sample/job_0/submit_config.yaml
 cat skimRun_myRun/condor_submissions/sample/condor_runscript.sh
 ```
 

@@ -39,7 +39,7 @@ protected:
   void SetUp() override {
     ChangeToTestSourceDir();
     config = ManagerFactory::createConfigurationManager(
-        "cfg/test_data_config_minimal.txt");
+        "cfg/test_data_config_minimal.yaml");
     systematicManager = std::make_unique<SystematicManager>();
     logger = std::make_unique<DefaultLogger>();
     skimSink = std::make_unique<NullOutputSink>();

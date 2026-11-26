@@ -1,3 +1,4 @@
+#include "test_workspace.h"
 /**
  * @file testProvenanceService.cc
  * @brief Unit tests for ProvenanceService – verifies that provenance metadata
@@ -30,9 +31,9 @@ namespace {
 std::string writeMinimalConfig(const std::string& cfgPath,
                                 const std::string& metaPath) {
     std::ofstream out(cfgPath);
-    out << "sample=ProvenanceTest\n";
-    out << "metaFile=" << metaPath << "\n";
-    out << "fileList=\n";
+    out << "sample: ProvenanceTest\n";
+    out << "metaFile: " << metaPath << "\n";
+    out << "fileList: []\n";
     out.close();
     return cfgPath;
 }
@@ -46,8 +47,8 @@ protected:
 
     void SetUp() override {
         const std::string base =
-            std::string(TEST_SOURCE_DIR) + "/aux/provenance_test_";
-        cfgPath  = base + "config.txt";
+            testWorkspacePath().string() + "/aux/provenance_test_";
+        cfgPath  = base + "config.yaml";
         metaPath = base + "meta.root";
         cleanup();
     }
@@ -78,7 +79,7 @@ TEST_F(ProvenanceServiceTest, ConfiguredGitSnapshotAvoidsSubprocessAndIsRecorded
     writeMinimalConfig(cfgPath, metaPath);
     const std::string revision(40, 'a');
     { std::ofstream config(cfgPath, std::ios::app);
-      config << "metadataAnalysisGitHash=" << revision << "\nmetadataAnalysisGitDirty=true\n"; }
+      config << "metadataAnalysisGitHash: " << revision << "\nmetadataAnalysisGitDirty: true\n"; }
     ConfigurationManager config(cfgPath);
     DataManager data(3);
     SystematicManager systematics;
@@ -103,10 +104,10 @@ TEST_F(ProvenanceServiceTest, ConfiguredGitSnapshotAvoidsSubprocessAndIsRecorded
 }
 
 TEST_F(ProvenanceServiceTest, RejectsIncompleteOrMalformedGitSnapshot) {
-    for (const auto &settings : {std::string("metadataAnalysisGitHash=")+std::string(40, 'a')+"\n",
-          std::string("metadataAnalysisGitDirty=true\n"),
-          std::string("metadataAnalysisGitHash=invalid\nmetadataAnalysisGitDirty=true\n"),
-          std::string("metadataAnalysisGitHash=")+std::string(40, 'a')+"\nmetadataAnalysisGitDirty=yes\n"}) {
+    for (const auto &settings : {std::string("metadataAnalysisGitHash: ")+std::string(40, 'a')+"\n",
+          std::string("metadataAnalysisGitDirty: true\n"),
+          std::string("metadataAnalysisGitHash: invalid\nmetadataAnalysisGitDirty: true\n"),
+          std::string("metadataAnalysisGitHash: ")+std::string(40, 'a')+"\nmetadataAnalysisGitDirty: yes\n"}) {
         writeMinimalConfig(cfgPath, metaPath);
         { std::ofstream config(cfgPath, std::ios::app); config << settings; }
         ConfigurationManager config(cfgPath);
@@ -131,7 +132,7 @@ TEST_F(ProvenanceServiceTest, GitSnapshotChangesFullConfigHashButNotSemanticHash
     for (char digit : {'a', 'b'}) {
         writeMinimalConfig(cfgPath, metaPath);
         { std::ofstream config(cfgPath, std::ios::app);
-          config << "metadataAnalysisGitHash=" << std::string(40, digit) << "\nmetadataAnalysisGitDirty=true\n"; }
+          config << "metadataAnalysisGitHash: " << std::string(40, digit) << "\nmetadataAnalysisGitDirty: true\n"; }
         ConfigurationManager config(cfgPath);
         ManagerContext context{config, data, systematics, logger, skim, meta};
         ProvenanceService service;
@@ -275,8 +276,8 @@ TEST_F(ProvenanceServiceTest, GracefulWhenNoMetaOutputConfigured) {
     // returns "" and ProvenanceService skips writing gracefully.
     {
         std::ofstream out(cfgPath);
-        out << "sample=NoOutput\n";
-        out << "fileList=\n";
+        out << "sample: NoOutput\n";
+        out << "fileList: []\n";
     }
 
     ConfigurationManager config(cfgPath);
@@ -394,7 +395,7 @@ TEST_F(ProvenanceServiceTest, SemanticConfigIgnoresOnlyJobRouting) {
     writeMinimalConfig(cfgPath, metaPath + ".other");
     {
         std::ofstream append(cfgPath, std::ios::app);
-        append << "metadataJobId=other-job\nmetadataAttemptId=retry\n";
+        append << "metadataJobId: other-job\nmetadataAttemptId: retry\n";
     }
     ConfigurationManager secondConfig(cfgPath);
     ManagerContext secondContext{secondConfig, data, systematic, logger, skim, meta};

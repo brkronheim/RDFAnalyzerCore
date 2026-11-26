@@ -1,0 +1,27 @@
+name: Snakemake production
+on: [push, pull_request]
+jobs:
+  stages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements-snakemake.txt
+            requirements-workflow.txt
+      - run: python -m pip install -r requirements-snakemake.txt
+      - name: Install and relocate the standalone workflow controller
+        run: |
+          cmake -S core/python/controller -B "$RUNNER_TEMP/controller-build"
+          cmake --install "$RUNNER_TEMP/controller-build" --prefix "$RUNNER_TEMP/initial" --component SnakemakeController
+          mv "$RUNNER_TEMP/initial" "$RUNNER_TEMP/relocated"
+      - name: Verify independent installation and stage contracts
+        env:
+          PYTHONPATH: ${{ runner.temp }}/relocated/python:${{ github.workspace }}/core/tests/python
+          RDF_SNAKEMAKE_TEST_PREFIX: ${{ runner.temp }}/relocated
+        run: |
+          python -c "from importlib.metadata import distributions; installed = {d.metadata['Name'].lower() for d in distributions()}; assert installed.isdisjoint({'law', 'luigi'})"
+          python -m unittest -v test_production_discovery test_production_downstream test_production_campaign test_snakemake_stages test_controller_install test_rdf_production test_verified_outputs

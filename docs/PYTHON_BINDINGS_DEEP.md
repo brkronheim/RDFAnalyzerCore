@@ -17,18 +17,18 @@ import numpy as np
 
 # Define a numba-compiled function with explicit types
 @numba.cfunc("float64(float64, float64)")
-def compute_delta_r(pt, eta):
-    return np.sqrt((pt - eta) ** 2)
+def absolute_difference(a, b):
+    return abs(a - b)
 
 # Get the function pointer
 func_ptr = ctypes.cast(
-    compute_delta_r.address,
+    absolute_difference.address,
     ctypes.c_void_p
 ).value
 
 # Define in analyzer
 analyzer.DefineFromPointer(
-    "delta_r",
+    "absolute_difference",
     func_ptr,
     "double(double, double)",  # Return type + signature
     ["jet_pt", "jet_eta"]  # Input columns
@@ -69,50 +69,15 @@ analyzer.DefineFromVector(
 
 ### DefineFromVector vs DefineFromPointer
 
-**DefineFromVector** (preferred):
-- Copies data if needed
-- Handles memory management
-- Simpler API
+Use `Analysis.define_constant_vector(name, array)` for a graph-owned, read-only constant on every event. It copies a one-dimensional array once while booking. The source array may then be released, resized or modified. The extra memory equals the size of the contiguous copy.
 
-```python
-import numpy as np
+The low-level vector method borrows a contiguous array. Keep its owner alive and its address, dtype and contents stable until the last event loop that reads it. Assign the array to a variable that outlives graph construction.
 
-# Create numpy array
-weights = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    weights = np.ascontiguousarray([1, 2, 3], dtype=np.float64)
+    analyzer.DefineFromVector("weights", weights.ctypes.data, weights.size, "double")
+    analyzer.save()
 
-# Pass to analyzer
-analyzer.DefineFromVector(
-    "weight",
-    weights.ctypes.data,
-    len(weights),
-    "double"
-)
-```
-
-**DefineFromPointer** (advanced):
-- Zero-copy (faster for large arrays)
-- You manage memory
-- Requires type signature
-
-```python
-# For large arrays or shared memory
-analyzer.DefineFromPointer(
-    "large_array",
-    large_array.ctypes.data,
-    len(large_array),
-    "double(double)",  # double(double) - return type (double) and signature
-    ["input_col"]
-)
-```
-
-### When to Use Which
-
-| Use Case | DefineFromVector | DefineFromPointer |
-|----------|-----------------|------------------|
-| Small arrays (<10k elements) | ✅ Preferred | ⚠️ Possible |
-| Large arrays (>1M elements) | ⚠️ Memory copy | ✅ Preferred |
-| Shared memory | ❌ No | ✅ Yes |
-| Complex types | ✅ Handles conversion | ⚠️ Manual casting |
+The pointer accepted by DefineFromPointer is a compiled *function address*. Pass the matching C++ signature and column names. Keep its compiled owner alive through execution. Passing a data buffer as a function pointer can crash the process.
 
 ## 3. Systematic Variations
 
@@ -269,7 +234,7 @@ numba.config.FORCEobjmode = True
 1. **Import at module level**: Compile numba functions once
 2. **Use type hints**: Document expected types
 3. **Handle edge cases**: Check for empty arrays
-4. **Memory management**: Use DefineFromVector for temporary data
+4. **Memory management**: Keep each borrowed buffer alive through execution
 5. **Validation**: Test numba functions before passing to analyzer
 
 ```python
@@ -288,7 +253,7 @@ import ctypes
 import numpy as np
 
 # Setup
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Numba function for custom delta_R calculation
 @numba.cfunc("float64(float64, float64)")
@@ -302,7 +267,7 @@ func_ptr = ctypes.cast(
 
 # Define with numba
 analyzer.DefineFromPointer(
-    "delta_r",
+    "absolute_difference",
     func_ptr,
     "double(double, double)",
     ["jet_eta_1", "jet_eta_2"]

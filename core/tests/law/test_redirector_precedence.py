@@ -36,5 +36,5 @@ def test_write_job_config_prefers_explicit_redirector(tmp_path):
         output_dir=str(output_dir),
     )
 
-    cfg = read_config(str(job_dir / "submit_config.txt"))
+    cfg = read_config(str(job_dir / "submit_config.yaml"))
     assert cfg["fileList"].startswith("root://cmsxrootd.fnal.gov/")

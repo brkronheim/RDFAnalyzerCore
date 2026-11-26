@@ -14,6 +14,7 @@ target_include_directories(StxsManager PUBLIC
 )
 
 target_link_libraries(StxsManager PUBLIC
+    yaml-cpp
     ROOT::Core
     ROOT::Hist
     ROOT::ROOTDataFrame

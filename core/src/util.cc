@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <ROOT/RDFHelpers.hxx>
@@ -33,11 +34,15 @@
 
 #include <dirent.h>
 
-#include <yaml-cpp/yaml.h>
+#include "ConfigDocument.h"
 
 #include <functions.h>
 #include <plots.h>
 #include <util.h>
+
+namespace rdf_config_detail {
+FriendTreeSpec makeDefaultFriendTreeSpec();
+}
 
 // TODO: idealy these will be absorbed into the manager classes
 
@@ -358,7 +363,12 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
   const auto probeSeconds = integer("xrdSourceProbeIntervalSeconds", 5, 300);
   const auto cacheMB = integer("xrdPrefetchCacheMB", 32, 131072);
   const auto preferredSiteBand = integer("xrdPreferredSiteBandPercent", 20, 100);
-  const auto explorationShare = integer("xrdExplorationSharePercent", 10, 50);
+  const auto readPolicy = setting("xrdReadPolicy");
+  if (!readPolicy.empty() && readPolicy != "adaptive" && readPolicy != "legacy")
+    throw std::runtime_error("Invalid xrdReadPolicy '" + readPolicy + "' (expected adaptive or legacy).");
+  const bool adaptive = readPolicy != "legacy";
+  const auto configuredExploration = integer("xrdExplorationSharePercent", 10, 50);
+  const auto explorationShare = adaptive ? 0U : configuredExploration;
   const auto maxReadSources = integer("xrdMaxReadSources", 2, 2);
   if (maxReadSources == 0)
     throw std::runtime_error(
@@ -381,9 +391,11 @@ static void setupROOTInputBackend(const IConfigurationProvider &configProvider) 
   if (!depth) throw std::runtime_error("xrdReadPipelineDepth must be 1 to 4");
   const auto hedgeMs = integer("xrdReadHedgeDelayMs", 50, 1000);
   const auto diagnostics = integer("xrdReadDiagnostics", 0, 1);
-  rdf::xrd::configureXrdReadScheduling(depth, hedgeMs, diagnostics != 0);
+  rdf::xrd::configureXrdReadScheduling(depth, hedgeMs, diagnostics != 0,
+      adaptive ? rdf::xrd::XrdReadPolicy::Adaptive : rdf::xrd::XrdReadPolicy::Legacy);
   rdf::xrd::registerXrdAdaptor();
-  std::cout << "ROOT input backend: XrdAdaptor (source probe interval="
+  std::cout << "ROOT input backend: XrdAdaptor (read policy=" << (adaptive ? "adaptive" : "legacy")
+            << ", source probe interval="
             << probeSeconds << " s, handoff cache=" << cacheMB
             << " MiB, preferred-site band=" << preferredSiteBand
             << "% with 10% hysteresis, exploration sample budget="
@@ -526,70 +538,66 @@ makeTChain(const IConfigurationProvider &configProvider) {
  */
 std::vector<FriendTreeSpec>
 parseFriendTreeConfig(const std::string &configFile) {
+  const auto root = rdf_config_detail::loadDocument(configFile);
+  if (!root.IsMap()) throw std::runtime_error(configFile + ": expected a mapping with a 'friends' sequence");
+  YAML::Node friends(YAML::NodeType::Undefined);
+  for (const auto &kv : root) {
+    if (!kv.first.IsScalar()) throw std::runtime_error(configFile + ": expected a scalar field name");
+    const auto key = kv.first.Scalar();
+    if (key != "friends" && key != "friend_trees") continue;
+    if (friends.IsDefined()) throw std::runtime_error(configFile + ": duplicate 'friends' sequence");
+    friends = kv.second;
+  }
+  if (!friends.IsDefined() || !friends.IsSequence())
+    throw std::runtime_error(configFile + ": 'friends' must be a sequence (use [] for no friends)");
+
   std::vector<FriendTreeSpec> specs;
+  std::unordered_set<std::string> aliases;
+  for (const auto &entry : friends) {
+    const auto context = configFile + ": friends[" + std::to_string(specs.size()) + "]";
+    if (!entry.IsMap()) throw std::runtime_error(context + ": expected a mapping");
+    auto spec = rdf_config_detail::makeDefaultFriendTreeSpec();
+    std::unordered_set<std::string> keys;
+    for (const auto &kv : entry) {
+      if (!kv.first.IsScalar()) throw std::runtime_error(context + ": expected a scalar field name");
+      auto key = kv.first.Scalar();
+      if (key == "files") key = "fileList";
+      if (key == "tree_name") key = "treeName";
+      if (key == "index_branches") key = "indexBranches";
+      const auto field = context + "." + key;
+      if (!keys.insert(key).second) throw std::runtime_error(field + ": duplicate field");
 
-  YAML::Node root;
-  try {
-    root = YAML::LoadFile(configFile);
-  } catch (const YAML::Exception &e) {
-    throw std::runtime_error("Error parsing friend tree config '" + configFile +
-                             "': " + e.what());
-  }
-
-  auto friendsNode = root["friends"];
-  if (!friendsNode || !friendsNode.IsSequence()) {
-    return specs;
-  }
-
-  for (const auto &entry : friendsNode) {
-    if (!entry.IsMap()) {
-      continue;
-    }
-    if (!entry["alias"]) {
-      std::cerr << "Warning: friend tree entry missing required 'alias' field; skipping."
-                << std::endl;
-      continue;
-    }
-
-    FriendTreeSpec spec;
-    spec.alias = entry["alias"].as<std::string>();
-
-    if (entry["treeName"]) {
-      spec.treeName = entry["treeName"].as<std::string>();
-    }
-
-    if (entry["fileList"] && entry["fileList"].IsSequence()) {
-      for (const auto &f : entry["fileList"]) {
-        spec.files.push_back(f.as<std::string>());
+      const auto &value = kv.second;
+      if (key == "directory" && value.IsNull()) continue; // Optional in serialized dataset manifests
+      const auto scalar = [&](const YAML::Node &node) {
+        if (!node.IsScalar() || node.Scalar().find_first_not_of(" \t\n\r") == std::string::npos)
+          throw std::runtime_error(field + ": expected a nonempty string");
+        return node.Scalar();
+      };
+      if (key == "alias") spec.alias = scalar(value);
+      else if (key == "treeName") spec.treeName = scalar(value);
+      else if (key == "directory") spec.directory = scalar(value);
+      else {
+        std::vector<std::string> *items = nullptr;
+        if (key == "fileList") items = &spec.files;
+        else if (key == "globs") items = &spec.globs;
+        else if (key == "antiglobs") items = &spec.antiglobs;
+        else if (key == "indexBranches") items = &spec.indexBranches;
+        else throw std::runtime_error(field + ": unknown friend field");
+        if (!value.IsSequence()) throw std::runtime_error(field + ": expected a sequence of strings");
+        items->clear();
+        for (const auto &item : value) items->push_back(scalar(item));
       }
     }
 
-    if (entry["directory"]) {
-      spec.directory = entry["directory"].as<std::string>();
-    }
-
-    if (entry["globs"] && entry["globs"].IsSequence()) {
-      spec.globs.clear();
-      for (const auto &g : entry["globs"]) {
-        spec.globs.push_back(g.as<std::string>());
-      }
-    }
-
-    if (entry["antiglobs"] && entry["antiglobs"].IsSequence()) {
-      spec.antiglobs.clear();
-      for (const auto &g : entry["antiglobs"]) {
-        spec.antiglobs.push_back(g.as<std::string>());
-      }
-    }
-
-    if (entry["indexBranches"] && entry["indexBranches"].IsSequence()) {
-      for (const auto &b : entry["indexBranches"]) {
-        spec.indexBranches.push_back(b.as<std::string>());
-      }
-    }
-
+    if (spec.alias.empty()) throw std::runtime_error(context + ": missing required alias");
+    if (!aliases.insert(spec.alias).second)
+      throw std::runtime_error(context + ": duplicate alias '" + spec.alias + "'");
+    if (spec.files.empty() && spec.directory.empty())
+      throw std::runtime_error(context + ": provide a nonempty fileList or directory");
+    if (spec.indexBranches.size() > 2)
+      throw std::runtime_error(context + ".indexBranches: expected up to two branches for ROOT BuildIndex");
     specs.push_back(std::move(spec));
   }
-
   return specs;
 }

@@ -88,8 +88,10 @@ def main(argv=None):
                     raise ValueError('Native BDT config grammar requires a temporary directory without whitespace; set TMPDIR')
                 model = work/'toy_bdt.txt'
                 shutil.copyfile(Path(__file__).with_name('toy_bdt.txt'), model)
-                models = work/'models.txt'
-                models.write_text(f'file={model} name=score inputVariables=ml_feature runVar=run_model\n')
+                models = work/'models.yaml'
+                import yaml
+                models.write_text(yaml.safe_dump([dict(file=str(model), name='score',
+                    inputVariables='ml_feature', runVar='run_model')]))
                 from rdfanalysis import Analysis
                 analysis = build(Analysis(config(args.input, args.output, models)))
                 analysis.run(); document = analysis.result().as_dict()

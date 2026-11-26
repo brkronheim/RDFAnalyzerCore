@@ -39,7 +39,7 @@ protected:
   void SetUp() override {
     ChangeToTestSourceDir();
     config = ManagerFactory::createConfigurationManager(
-        "cfg/test_data_config_minimal.txt");
+        "cfg/test_data_config_minimal.yaml");
     systematicManager = std::make_unique<SystematicManager>();
     logger = std::make_unique<DefaultLogger>();
     skimSink = std::make_unique<NullOutputSink>();
@@ -111,6 +111,31 @@ TEST_F(CutflowManagerTest, EmptyCutsProduceEmptyResults) {
 TEST_F(CutflowManagerTest, AddCutWithoutContextThrows) {
   CutflowManager mgr;
   EXPECT_THROW(mgr.addCut("x", "pass_x"), std::runtime_error);
+}
+
+TEST_F(CutflowManagerTest, RepeatedColumnsAndInterleavedUserFilter) {
+  DataManager dm(8);
+  auto mgr = makeMgr(dm);
+  dm.Define("even", [](ULong64_t i) { return i % 2 == 0; },
+            {"rdfentry_"}, *systematicManager);
+  dm.Define("belowFour", [](ULong64_t i) { return i < 4; },
+            {"rdfentry_"}, *systematicManager);
+  mgr->addCut("first", "even");
+  dm.Filter([](ULong64_t i) { return i != 2; }, {"rdfentry_"});
+  mgr->addCut("second", "belowFour");
+  mgr->addCut("repeated", "even");
+  mgr->execute();
+  mgr->finalize();
+  const auto &sequential = mgr->getCutflowCounts();
+  const auto &without = mgr->getNMinusOneCounts();
+  ASSERT_EQ(sequential.size(), 3u);
+  ASSERT_EQ(without.size(), 3u);
+  EXPECT_EQ(sequential[0].second, 4u);
+  EXPECT_EQ(sequential[1].second, 1u);
+  EXPECT_EQ(sequential[2].second, 1u);
+  EXPECT_EQ(without[0].second, 2u);
+  EXPECT_EQ(without[1].second, 4u);
+  EXPECT_EQ(without[2].second, 2u);
 }
 
 // ---------------------------------------------------------------------------

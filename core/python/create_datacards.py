@@ -189,7 +189,7 @@ class Histogram1D:
 class DatacardGenerator:
     """Generates CMS combine datacards and ROOT files from analysis outputs."""
     
-    def __init__(self, config_file: str):
+    def __init__(self, config_file: str, *, output_dir=None, strict_inputs=False):
         """
         Initialize the datacard generator.
         
@@ -199,7 +199,8 @@ class DatacardGenerator:
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
         
-        self.output_dir = self.config.get('output_dir', 'datacards')
+        self.output_dir = output_dir if output_dir is not None else self.config.get('output_dir', 'datacards')
+        self.strict_inputs = strict_inputs
         self.input_files = self.config.get('input_files', {})
         self.control_regions = self.config.get('control_regions', {})
         self.processes = self.config.get('processes', {})
@@ -237,7 +238,9 @@ class DatacardGenerator:
         
         for sample_name, file_info in self.input_files.items():
             file_path = file_info.get('path')
-            if not os.path.exists(file_path):
+            if not file_path or (not str(file_path).startswith("root://") and not os.path.exists(file_path)):
+                if self.strict_inputs:
+                    raise FileNotFoundError(f"Missing input file {file_path} for sample {sample_name}")
                 print(f"Warning: File {file_path} not found for sample {sample_name}")
                 continue
             
@@ -252,6 +255,8 @@ class DatacardGenerator:
                     # Read histograms from file
                     self._read_histograms_from_file(root_file, sample_name)
             except Exception as e:
+                if self.strict_inputs:
+                    raise ValueError(f"Failed to read {file_path} for sample {sample_name}: {e}") from e
                 print(f"Error reading file {file_path}: {e}")
                 continue
     

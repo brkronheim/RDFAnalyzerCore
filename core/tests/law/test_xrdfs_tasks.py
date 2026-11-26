@@ -21,11 +21,12 @@ def test_xrdfs_list_files_returns_matching_roots(monkeypatch):
             self.stdout = stdout
             self.stderr = ""
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, check):
         return FakeCompletedProcess(
             returncode=0,
             stdout="""
             drwxr-xr-x  2 root root 4096 Jan 1 12:00 /eos/foo/bar
+            -rw-r--r--  1 root root 100 Jan 1 12:01 /eos/foo/bar/.sys.v#.event1.root
             -rw-r--r--  1 root root 123 Jan 1 12:01 /eos/foo/bar/event1.root
             -rw-r--r--  1 root root 456 Jan 1 12:02 /eos/foo/bar/event2.root
             """,

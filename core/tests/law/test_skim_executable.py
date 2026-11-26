@@ -13,13 +13,16 @@ sys.path[:0] = [str(ROOT / "core/python"), str(ROOT / "core/python/law")]
 import analysis_tasks as mod
 
 
+import production_jobs
+
+
 class ExecutableSubmissionTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         for mock in (patch.object(mod, "WORKSPACE", temporary.name),
-                     patch.object(mod, "_collect_skim_shared_libs", return_value={})):
+                     patch("rdfproduction.transport.collect_local_shared_libs", return_value={})):
             mock.start()
             self.addCleanup(mock.stop)
         self.executable = self.root / "analysis"
@@ -94,6 +97,7 @@ class ExecutableSubmissionTests(unittest.TestCase):
         build._run_impl()
         task = mod.SubmitSkimJobs(**self.args)
         with patch.object(task, "input", return_value={"build": build.output()}), \
+                patch("condor_submission._submission_context", return_value={"owner": "test"}), \
                 patch.object(mod.subprocess, "run") as submit:
             self._change_binary_preserving_stat()
             with self.assertRaisesRegex(RuntimeError, "SHA-256 differs"):
@@ -103,7 +107,7 @@ class ExecutableSubmissionTests(unittest.TestCase):
 
             self.prep._run_impl()
             submit.return_value = mod.subprocess.CompletedProcess([], 0,
-                stdout="1 job(s) submitted to cluster 12345.\n")
+                stdout="12345.0 - 12345.0\n")
             task.run()
             submit.assert_called_once()
             self.assertEqual(submit.call_args.args[0][0], "condor_submit")
@@ -114,7 +118,7 @@ class ExecutableSubmissionTests(unittest.TestCase):
         task = mod.MonitorSkimJobs(**self.args)
         self._change_binary_preserving_stat()
         state = {"status": "submitted", "retries": 0, "cluster": "123", "proc": 0}
-        with patch.object(mod, "_submit_single_skim_job") as retry:
+        with patch("rdfproduction.jobs.condor_files._submit_single_skim_job") as retry:
             with self.assertRaisesRegex(RuntimeError, "SHA-256 differs"):
                 task._try_resubmit("sample", 0, {}, state, "failed")
             retry.assert_not_called()

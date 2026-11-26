@@ -52,7 +52,7 @@ class SkimPublication(unittest.TestCase):
                 def copy_group(destination, sources):
                     shutil.copyfile(sources[0], destination)
 
-                with patch("merge_tasks._run_hadd", side_effect=copy_group):
+                with patch("rdfproduction.manifest_merge._run_hadd", side_effect=copy_group):
                     write_inputs(1)
                     task.run()
                     self.assertTrue(task.complete())
@@ -64,7 +64,7 @@ class SkimPublication(unittest.TestCase):
                         self.assertTrue(task.complete())
                         self.assertEqual(generations(), [1, 1])
                     else:
-                        with patch("merge_tasks.os.replace", side_effect=inject):
+                        with patch("rdfproduction.manifest_merge.os.replace", side_effect=inject):
                             with self.assertRaisesRegex(OSError, "injected publication"):
                                 task.run()
                         self.assertFalse(manifest.exists())

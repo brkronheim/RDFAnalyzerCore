@@ -43,7 +43,7 @@ The project is a dimuon example over ATLAS PHYSLITE inputs. It is intentionally 
 | `analyses/ExampleAnalysis/cfg.yaml` | Input file URLs, tree names, threading, constants/config paths, skim settings, and save path |
 | `analyses/ExampleAnalysis/floats.yaml` and `ints.yaml` | Constant columns loaded by the data manager after its working-directory existence check |
 | `analyses/ExampleAnalysis/histograms.yaml` | Three one-dimensional histogram definitions, their ranges, and `normScale` weights |
-| `analyses/ExampleAnalysis/output.txt` | Branch list used only if skim writing is enabled |
+| `analyses/ExampleAnalysis/output.yaml` | Branch list used only if skim writing is enabled |
 
 The source implements this sequence:
 

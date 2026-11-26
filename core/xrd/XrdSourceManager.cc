@@ -28,6 +28,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -45,11 +46,70 @@ constexpr std::size_t kMaxPrefetchEntries = 4096;
 constexpr std::uint64_t kMaxExplorationBytesPerRead = 2ULL * 1024 * 1024;
 // Permit one active-file and one lookahead-file full read to share a site.
 constexpr unsigned kMaxFullReadsPerSite = 2;
+// Small concurrent windows can consume few payload bytes but still multiply
+// transport work across many files. Reserve this limit only for stall rescues.
+constexpr unsigned kMaxAdaptiveHedgesPerProcess = 2;
+constexpr double kQualityReferenceBytes = 256. * 1024.;
+constexpr double kAdaptiveStallMultiplier = 3.;
+constexpr unsigned kColdStallMs = 1000;
+constexpr unsigned kMinimumStallMs = 250;
+constexpr unsigned kMaximumStallMs = 4000;
+constexpr auto kPendingReadPoll = std::chrono::milliseconds(50);
+constexpr auto kSlotPoll = std::chrono::milliseconds(5);
+std::atomic<unsigned> liveAdaptiveRaces{0};
 std::atomic<std::uint64_t> nextManagerId{1};
 thread_local bool backgroundRead = false;
 std::atomic<unsigned> pipelineDepth{2};
 std::atomic<unsigned> hedgeDelayMs{50};
 std::atomic<bool> readDiagnostics{false};
+std::atomic<XrdReadPolicy> readPolicy{XrdReadPolicy::Adaptive};
+
+// The quality estimator uses milliseconds per 256 KiB for large reads and
+// response latency for smaller ones. Keep headroom for ordinary jitter and
+// start a rescue within half of even the shortest XrdCl request timeout.
+std::chrono::milliseconds backupDelay(XrdReadPolicy policy, unsigned floorMs,
+    const detail::SiteRank &site, std::uint64_t bytes, unsigned timeoutSeconds) {
+  if (policy == XrdReadPolicy::Legacy) return std::chrono::milliseconds(floorMs);
+  const double units = std::max(1., static_cast<double>(bytes) / kQualityReferenceBytes);
+  const double estimate = (site.enoughMeasurements || site.hasPrior)
+      ? kAdaptiveStallMultiplier * site.qualityMs * units : kColdStallMs;
+  const double minimum = std::max(kMinimumStallMs, floorMs);
+  const double maximum = std::min(kMaximumStallMs, timeoutSeconds * 1000 / 2);
+  return std::chrono::milliseconds(static_cast<unsigned>(
+      std::clamp(estimate, static_cast<double>(std::min(minimum, maximum)), maximum)));
+}
+
+struct ReadTraffic {
+  std::atomic<std::uint64_t> primaryOpens{0}, replicaOpens{0};
+  std::atomic<std::uint64_t> fullRequests{0}, hedgeRequests{0}, replacements{0};
+  std::atomic<std::uint64_t> hedgeWins{0}, replacementWins{0};
+  std::atomic<std::uint64_t> outstanding{0}, peakOutstanding{0};
+  std::atomic<std::uint64_t> requestedFullBytes{0}, requestedHedgeBytes{0};
+  std::atomic<std::uint64_t> foregroundCalls{0}, foregroundMicroseconds{0};
+  std::atomic<std::uint64_t> winningBytes{0}, losingBytes{0};
+  std::atomic<std::uint64_t> sampleBytes{0}, errorBytes{0}, handoffBytes{0};
+
+  void beginFull(std::uint64_t bytes, bool hedge) {
+    requestedFullBytes += bytes;
+    if (hedge) requestedHedgeBytes += bytes;
+    ++fullRequests;
+    const auto active = ++outstanding;
+    auto peak = peakOutstanding.load();
+    while (peak < active && !peakOutstanding.compare_exchange_weak(peak, active)) {}
+  }
+
+  void finishFull(bool success, bool won, std::uint64_t bytes) {
+    if (!success) errorBytes += bytes;
+    else if (won) winningBytes += bytes;
+    else losingBytes += bytes;
+    --outstanding;
+  }
+};
+
+ReadTraffic &readTraffic() {
+  static auto *traffic = new ReadTraffic;
+  return *traffic;
+}
 
 detail::ReadMemoryBudget &readMemoryBudget() {
   // XrdCl callbacks may still own reservations during static teardown.
@@ -98,7 +158,7 @@ GlobalSettings &settings() {
 unsigned explorationSharePercent() {
   auto &global = settings();
   std::lock_guard<std::mutex> lock(global.mutex);
-  return global.explorationSharePercent;
+  return readPolicy.load() == XrdReadPolicy::Legacy ? global.explorationSharePercent : 0U;
 }
 
 unsigned maxReadSources() {
@@ -113,11 +173,6 @@ unsigned preferredSiteBandPercent() {
   return global.preferredSiteBandPercent;
 }
 
-struct CacheEntry {
-  std::shared_ptr<std::vector<char>> data;
-  std::uint64_t use = 0;
-};
-
 std::mutex &registryMutex() {
   static std::mutex value;
   return value;
@@ -127,7 +182,9 @@ std::map<std::string, std::weak_ptr<void>> &cacheRegistry() {
   static std::map<std::string, std::weak_ptr<void>> value;
   return value;
 }
+} // namespace
 
+namespace detail {
 class VectorReadWaiter final : public XrdCl::ResponseHandler {
 public:
   explicit VectorReadWaiter(std::uint64_t expected) : expected_(expected) {}
@@ -148,6 +205,7 @@ public:
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      completedBytes_ = bytes;
       ok_ = ownedStatus && ownedStatus->IsOK() && bytes == expected_;
       done_ = true;
     }
@@ -160,15 +218,19 @@ public:
   }
 
   bool ok() const { return ok_; }
+  std::uint64_t completedBytes() const { return completedBytes_; }
 
 private:
   const std::uint64_t expected_;
+  std::uint64_t completedBytes_ = 0;
   mutable std::mutex mutex_;
   std::condition_variable condition_;
   bool done_ = false;
   bool ok_ = false;
 };
+} // namespace detail
 
+namespace {
 std::string hostnameOnly(const std::string &server) {
   const auto colon = server.rfind(':');
   if (colon == std::string::npos || colon == 0 || colon + 1 == server.size())
@@ -478,7 +540,7 @@ public:
     // quality sample.
     const double sampleMs = success && bytes > 0
                                 ? std::max(1.0, seconds * 1000.0 *
-                                                  std::min(1.0, kReferenceBytes /
+                                                  std::min(1.0, kQualityReferenceBytes /
                                                                     static_cast<double>(bytes)))
                                 : kPoorQualityMs;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -533,6 +595,23 @@ public:
       bool preferred = false;
       bool blacklisted = false;
     };
+    const auto &traffic = readTraffic();
+    const auto won = traffic.winningBytes.load(), lost = traffic.losingBytes.load();
+    const auto failed = traffic.errorBytes.load();
+    std::ostringstream metrics;
+    metrics << "[XrdAdaptor] read-traffic process=1 primary_opens=" << traffic.primaryOpens
+            << " replica_opens=" << traffic.replicaOpens << " full_requests=" << traffic.fullRequests
+            << " stall_hedges=" << traffic.hedgeRequests << " hedge_wins=" << traffic.hedgeWins
+            << " replacements=" << traffic.replacements << " replacement_wins=" << traffic.replacementWins
+            << " full_outstanding=" << traffic.outstanding << " peak_full_outstanding=" << traffic.peakOutstanding
+            << " full_requested_bytes=" << traffic.requestedFullBytes
+            << " hedge_requested_bytes=" << traffic.requestedHedgeBytes
+            << " full_completed_bytes=" << (won + lost + failed) << " winning_bytes=" << won
+            << " losing_bytes=" << lost << " failed_response_bytes=" << failed
+            << " foreground_read_calls=" << traffic.foregroundCalls
+            << " foreground_read_us=" << traffic.foregroundMicroseconds
+            << " exploration_bytes=" << traffic.sampleBytes << " handoff_hit_bytes=" << traffic.handoffBytes;
+    logLine(metrics.str(), LogLevel::Always);
     std::vector<Row> rows;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -591,7 +670,6 @@ public:
   }
 
 private:
-  static constexpr double kReferenceBytes = 256.0 * 1024.0;
   static constexpr double kPoorQualityMs = 5130.0;
   static constexpr std::uint64_t kMinimumSuccessfulSamples = 3;
   static constexpr std::uint64_t kMinimumSuccessfulBytes =
@@ -738,15 +816,17 @@ public:
   }
 
   void HandleResponse(XrdCl::XRootDStatus *status,
-                      XrdCl::AnyObject *) override {
+                      XrdCl::AnyObject *response) override {
     delete status;
+    delete response;
     delete this;
   }
 
   void HandleResponseWithHosts(XrdCl::XRootDStatus *status,
-                               XrdCl::AnyObject *,
+                               XrdCl::AnyObject *response,
                                XrdCl::HostList *hosts) override {
     delete status;
+    delete response;
     delete hosts;
     delete this;
   }
@@ -758,11 +838,32 @@ private:
 void closeAsync(std::shared_ptr<XrdCl::File> file) {
   if (file) new DelayedClose(std::move(file));
 }
+} // namespace
 
+namespace detail {
 class ReadRaceState {
 public:
   static constexpr std::size_t kNoWinner =
       std::numeric_limits<std::size_t>::max();
+
+  ~ReadRaceState() {
+    if (holdsAdaptiveSlot_) --liveAdaptiveRaces;
+  }
+
+  // Only the scheduling thread admits new attempts. Every pending callback
+  // owns this state until completion, including a slow primary beaten by its
+  // backup. Thus the cross-file limit also covers late losing transfers.
+  bool admitAdaptiveHedge() {
+    if (holdsAdaptiveSlot_) return true;
+    auto live = liveAdaptiveRaces.load();
+    while (live < kMaxAdaptiveHedgesPerProcess) {
+      if (liveAdaptiveRaces.compare_exchange_weak(live, live + 1)) {
+        holdsAdaptiveSlot_ = true;
+        return true;
+      }
+    }
+    return false;
+  }
 
   bool registerEndpoints(std::size_t attempt, const std::vector<std::string> &endpoints) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -831,9 +932,17 @@ public:
     return result != results_.end() && result->second;
   }
 
+  std::size_t completions() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return results_.size();
+  }
+
   void waitForChange(std::chrono::milliseconds duration) {
+    waitForChange(duration, completions());
+  }
+
+  void waitForChange(std::chrono::milliseconds duration, std::size_t completed) {
     std::unique_lock<std::mutex> lock(mutex_);
-    const auto completed = results_.size();
     // A callback can win between the caller's winner check and this wait.
     // Preserve that notification instead of sleeping an extra 5--50 ms/window.
     condition_.wait_for(lock, duration, [this, completed] {
@@ -853,8 +962,11 @@ private:
   std::map<std::size_t, std::vector<std::string>> endpoints_;
   std::vector<QualitySample> qualitySamples_;
   std::size_t winner_ = kNoWinner;
+  bool holdsAdaptiveSlot_ = false;
 };
+} // namespace detail
 
+namespace {
 class VectorReadCallback final : public XrdCl::ResponseHandler {
 public:
   using Completion = std::function<void(bool, std::uint64_t)>;
@@ -903,17 +1015,33 @@ struct XrdSourceManager::Source {
   std::atomic<bool> failed{false};
 };
 
+namespace {
+class FullReadSlot {
+public:
+  FullReadSlot(const std::string &site, bool background) : site_(site) {
+    if (!SiteQualityMonitor::instance().beginFullRead(site_, background)) site_.clear();
+  }
+  FullReadSlot(const FullReadSlot &) = delete;
+  FullReadSlot &operator=(const FullReadSlot &) = delete;
+  FullReadSlot(FullReadSlot &&other) noexcept { site_.swap(other.site_); }
+  ~FullReadSlot() { if (!site_.empty()) SiteQualityMonitor::instance().endFullRead(site_); }
+  explicit operator bool() const { return !site_.empty(); }
+private:
+  std::string site_;
+};
+} // namespace
+
 struct XrdSourceManager::PendingRead {
   std::shared_ptr<Source> source;
-  std::vector<std::unique_ptr<VectorReadWaiter>> waiters;
+  std::vector<std::unique_ptr<detail::VectorReadWaiter>> waiters;
   std::unique_ptr<detail::ReadMemoryBudget::Reservation> memory;
   std::vector<std::shared_ptr<std::vector<char>>> ownedBuffers;
-  std::shared_ptr<ReadRaceState> race;
+  std::shared_ptr<detail::ReadRaceState> race;
   std::chrono::steady_clock::time_point started;
   std::size_t sourceIndex = 0;
-  std::uint64_t bytes = 0;
+  bool hedgeAttempt = false;
   bool allQueued = true;
-  std::string slotKey;
+  std::optional<FullReadSlot> slot;
   std::uint64_t expectedBytes = 0;
   std::size_t remainingBatches = 0;
   bool batchSuccess = true;
@@ -952,6 +1080,10 @@ struct XrdSourceManager::PendingRead {
     logSiteDecision(source->site, url, health);
     const bool won = race->complete(sourceIndex, finalSuccess, source->site,
                                     fileKey, url, health.qualityMs);
+    auto& traffic = readTraffic();
+    if (won && hedgeAttempt) ++traffic.hedgeWins;
+    else if (won && sourceIndex > 0) ++traffic.replacementWins;
+    traffic.finishFull(finalSuccess, won, totalBytes);
     if (!won) {
       // Every batch has completed, so XrdCl no longer writes these buffers.
       // Keep the small timing/result record, not a full failed/losing copy.
@@ -961,7 +1093,7 @@ struct XrdSourceManager::PendingRead {
     std::ostringstream result;
     result << std::fixed << std::setprecision(3)
            << "[XrdAdaptor] full read result handle=" << managerId
-           << " role=" << role << " site=" << source->site << " server="
+           << " window=" << windowId << " role=" << role << " site=" << source->site << " server="
            << (source->server.empty() ? "<unknown>" : source->server)
            << " status=" << (finalSuccess ? "ok" : "failed")
            << " winner=" << (won ? "yes" : "no")
@@ -969,13 +1101,14 @@ struct XrdSourceManager::PendingRead {
            << " quality_ms=" << health.qualityMs << " data_used="
            << (won ? "yes" : "no");
     logLine(result.str(), finalSuccess ? LogLevel::Info : LogLevel::Error);
-    monitor.endFullRead(slotKey);
+    slot.reset();
   }
 
   std::string fileKey;
   std::string url;
   std::string role;
   std::uint64_t managerId = 0;
+  std::uint64_t windowId = 0;
 };
 
 class XrdSourceManager::ExplorationReadHandler final
@@ -1033,6 +1166,7 @@ private:
       }
     }
 
+    readTraffic().sampleBytes += bytes;
     std::ostringstream result;
     result << std::fixed << std::setprecision(3)
            << "[XrdAdaptor] exploration sample handle=" << managerId_
@@ -1060,8 +1194,10 @@ private:
 class XrdSourceManager::ProbeHandler final : public XrdCl::ResponseHandler {
 public:
   ProbeHandler(std::weak_ptr<XrdSourceManager> manager,
-               std::shared_ptr<XrdCl::File> file, detail::OpenTrace trace)
-      : manager_(std::move(manager)), file_(std::move(file)), trace_(std::move(trace)) {}
+               std::shared_ptr<XrdCl::File> file, detail::OpenTrace trace,
+               detail::InitialOperation operation)
+      : manager_(std::move(manager)), file_(std::move(file)), trace_(std::move(trace)),
+        operation_(std::move(operation)) {}
 
   void HandleResponse(XrdCl::XRootDStatus *status,
                       XrdCl::AnyObject *response) override {
@@ -1091,9 +1227,15 @@ private:
   std::weak_ptr<XrdSourceManager> manager_;
   std::shared_ptr<XrdCl::File> file_;
   detail::OpenTrace trace_;
+  detail::InitialOperation operation_;
 };
 
 struct XrdSourceManager::PrefetchCache {
+  struct CacheEntry {
+    std::shared_ptr<std::vector<char>> data;
+    std::uint64_t use = 0;
+  };
+
   explicit PrefetchCache(std::size_t maxBytes) : limit(maxBytes) {}
 
   bool copy(std::uint64_t offset, std::uint32_t length, char *destination) {
@@ -1187,6 +1329,10 @@ BackgroundReadScope::BackgroundReadScope(bool background) : previous_(background
 bool isBackgroundRead() { return backgroundRead; }
 BackgroundReadScope::~BackgroundReadScope() { backgroundRead = previous_; }
 void configureXrdReadScheduling(unsigned depth, unsigned delay, bool diagnostics) {
+  configureXrdReadScheduling(depth, delay, diagnostics, XrdReadPolicy::Legacy);
+}
+void configureXrdReadScheduling(unsigned depth, unsigned delay, bool diagnostics, XrdReadPolicy policy) {
+  readPolicy = policy;
   pipelineDepth = std::clamp(depth, 1U, 4U);
   hedgeDelayMs = std::min(delay, 1000U);
   readDiagnostics = diagnostics;
@@ -1326,6 +1472,7 @@ XrdSourceManager::XrdSourceManager(std::string url,
             " server=" +
             (primary->server.empty() ? "<unknown>" : primary->server));
   }
+  ++readTraffic().primaryOpens;
   sources_.push_back(std::move(primary));
   const auto &openedPrimary = sources_.front();
   logLine("[XrdAdaptor] source handle=" + std::to_string(instanceId_) +
@@ -1343,6 +1490,7 @@ void XrdSourceManager::startDiscovery() {
       3U, maxReadSources() + (explorationShare > 0 ? 1U : 0U));
   std::vector<std::string> tried;
   std::string locatedCandidate;
+  std::optional<detail::InitialOperation> operation;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     sources_.erase(std::remove_if(sources_.begin(), sources_.end(),
@@ -1362,6 +1510,14 @@ void XrdSourceManager::startDiscovery() {
         sources_.size() >= kMaxSourcesPerFile ||
         std::chrono::steady_clock::now() < nextProbeAt_ || triedHosts_.empty())
       return;
+    // Standby opens share the metadata budget with initial lookup/open.
+    // Leave capacity for demand when several files open at the same time.
+    operation.emplace(healthySites.empty() ? detail::kMaxMetadataOperations :
+                                            detail::kStandbyMetadataLimit);
+    if (!operation->acquired) {
+      nextProbeAt_ = std::chrono::steady_clock::now() + kPendingReadPoll;
+      return;
+    }
     probeInFlight_ = true;
     tried = triedHosts_;
     bool healthyAvailable = !healthySites.empty();
@@ -1409,7 +1565,7 @@ void XrdSourceManager::startDiscovery() {
   const auto candidateUrl = locatedCandidate.empty() ? appendOpaque(url_, opaque) : locatedCandidate;
   auto trace = openTrace(candidateUrl, instanceId_, ++probeSequence_, "replica");
   trace.begin();
-  auto *handler = new ProbeHandler(weak_from_this(), file, trace);
+  auto *handler = new ProbeHandler(weak_from_this(), file, trace, std::move(*operation));
   const auto status = file->Open(candidateUrl, XrdCl::OpenFlags::Read,
                                  XrdCl::Access::None, handler,
                                  static_cast<std::uint16_t>(openTimeoutSeconds_));
@@ -1574,6 +1730,7 @@ bool XrdSourceManager::completeProbe(
         SiteQualityMonitor::instance().isPoorForFile(site, fileKey_);
   }
 
+  if (status && status->IsOK()) ++readTraffic().replicaOpens;
   bool added = false;
   bool alreadyActive = false;
   bool blacklistedFallbackAvailable = false;
@@ -1696,7 +1853,7 @@ std::unique_ptr<XrdSourceManager::PendingRead> XrdSourceManager::submit(
       chunks.emplace_back(ranges[i].offset, ranges[i].length, ranges[i].buffer);
       expected += ranges[i].length;
     }
-    auto waiter = std::make_unique<VectorReadWaiter>(expected);
+    auto waiter = std::make_unique<detail::VectorReadWaiter>(expected);
     const auto status = source->file->VectorRead(
         chunks, nullptr, waiter.get(),
         static_cast<std::uint16_t>(readTimeoutSeconds_));
@@ -1708,7 +1865,6 @@ std::unique_ptr<XrdSourceManager::PendingRead> XrdSourceManager::submit(
       continue;
     }
     pending->waiters.push_back(std::move(waiter));
-    pending->bytes += expected;
   }
   return pending;
 }
@@ -1716,11 +1872,12 @@ std::unique_ptr<XrdSourceManager::PendingRead> XrdSourceManager::submit(
 bool XrdSourceManager::finish(PendingRead &pending, std::uint64_t &bytes,
                               double &seconds) {
   bool success = pending.allQueued;
+  bytes = 0;
   for (auto &waiter : pending.waiters) {
     waiter->wait();
     success = success && waiter->ok();
+    bytes += waiter->completedBytes();
   }
-  bytes = pending.bytes;
   seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           pending.started)
                 .count();
@@ -1829,11 +1986,23 @@ bool XrdSourceManager::readv(const std::vector<ReadRange> &ranges, bool prefetch
   constexpr auto stride = kMaxChunksPerRequest + detail::ReadMemoryBudget::kWindow / kReadChunkBytes + 1;
   const auto base = cache->reserveUses(windows.size() * stride) - windows.size() * stride;
   const bool background = backgroundRead;
-  return detail::runReadWindows(windows, pipelineDepth.load(),
+  // One timing per synchronous logical call, spanning all pipelined windows.
+  // Parallel callers overlap; this sum cannot be subtracted from worker wall.
+  const bool foreground = !prefetch && !background;
+  const auto started = foreground ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
+  const bool success = detail::runReadWindows(windows, pipelineDepth.load(),
       [&](const auto &part, std::size_t i) {
         return readvWindow(part, prefetch, background,
                            base + i * stride + 1);
       });
+  if (foreground) {
+    auto &traffic = readTraffic();
+    ++traffic.foregroundCalls;
+    traffic.foregroundMicroseconds += std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - started).count();
+  }
+  return success;
 }
 
 bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
@@ -1918,6 +2087,7 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
     logLine(timingLog.str(), failed ? LogLevel::Error : LogLevel::Info);
   };
 
+  readTraffic().handoffBytes += handoffBytes;
   if (pieces.empty()) {
     if (handoffBytes > 0) {
       std::ostringstream cacheLog;
@@ -1957,6 +2127,7 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
     logReadTiming("no-source", active);
     return false;
   }
+  const auto policy = readPolicy.load();
   const auto fullReadSiteLimit = maxReadSources();
   const auto candidateSiteLimit =
       std::min(3U, fullReadSiteLimit + (explorationSharePercent() > 0 ? 1U : 0U));
@@ -1973,16 +2144,17 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
     const auto host = hostnameOnly(source->server);
     return host.empty() ? source->server : host;
   };
-  const auto race = std::make_shared<ReadRaceState>();
+  const auto race = std::make_shared<detail::ReadRaceState>();
   std::vector<std::shared_ptr<PendingRead>> fullAttempts;
   std::unordered_set<std::string> attemptedSites;
   std::vector<std::shared_ptr<Source>> readSources;
   std::vector<std::shared_ptr<Source>> explorationSources;
   bool explorationScheduled = false;
 
-  std::uint64_t slotDeferrals = 0, budgetDeferrals = 0;
-  const auto launchFullRead = [&](const std::shared_ptr<Source> &source) {
-    if (race->winner() != ReadRaceState::kNoWinner) return false;
+  std::uint64_t slotDeferrals = 0, budgetDeferrals = 0, hedgeDeferrals = 0;
+  auto nextBackupAt = std::chrono::steady_clock::time_point::max();
+  const auto launchFullRead = [&](const std::shared_ptr<Source> &source, bool hedge) {
+    if (race->winner() != detail::ReadRaceState::kNoWinner) return false;
     if (!source || source->failed.load()) return false;
     // A different pipeline window can cool an endpoint after sources() took
     // its snapshot. Recheck immediately before issuing a speculative copy.
@@ -1991,8 +2163,11 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
         })) return false;
     const auto key = sourceKey(source);
     if (key.empty() || attemptedSites.count(key)) return false;
-    const bool speculative = background || !fullAttempts.empty();
-    if (!siteMonitor.beginFullRead(key, speculative)) {
+    // Hard-error replacement serves demand and must be able to use its reserved slot.
+    const bool speculative = background ||
+        (policy == XrdReadPolicy::Legacy ? !fullAttempts.empty() : hedge);
+    FullReadSlot slot(key, speculative);
+    if (!slot) {
       ++slotDeferrals;
       bool reportLimit = false;
       {
@@ -2014,7 +2189,10 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
     auto memory = readMemoryBudget().tryReserve(networkBytes, speculative);
     if (!memory) {
       ++budgetDeferrals;
-      siteMonitor.endFullRead(key);
+      return false;
+    }
+    if (hedge && policy == XrdReadPolicy::Adaptive && !race->admitAdaptiveHedge()) {
+      ++hedgeDeferrals;
       return false;
     }
     auto attempt = std::make_shared<PendingRead>();
@@ -2022,20 +2200,21 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
     attempt->source = source;
     attempt->race = race;
     attempt->sourceIndex = fullAttempts.size();
+    attempt->hedgeAttempt = hedge;
     attempt->started = std::chrono::steady_clock::now();
-    attempt->slotKey = key;
+    attempt->slot.emplace(std::move(slot));
     attempt->expectedBytes = networkBytes;
     attempt->remainingBatches =
         (pieces.size() + kMaxChunksPerRequest - 1) / kMaxChunksPerRequest;
     attempt->fileKey = fileKey_;
     attempt->url = url_;
     attempt->managerId = instanceId_;
+    attempt->windowId = requestSequence;
     attempt->role = fullAttempts.empty()
                         ? "full-read-1"
                         : (fullAttempts.size() == 1 ? "full-read-2"
                                                     : "full-read-replacement");
     if (!race->registerEndpoints(attempt->sourceIndex, {source->server, source->requestedUrl})) {
-      siteMonitor.endFullRead(key);
       return false;
     }
     attempt->ownedBuffers.reserve(pieces.size());
@@ -2044,12 +2223,22 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
           std::make_shared<std::vector<char>>(piece.range.length));
     attemptedSites.insert(key);
     readSources.push_back(source);
+    auto &traffic = readTraffic();
+    if (hedge) ++traffic.hedgeRequests;
+    else if (!fullAttempts.empty()) ++traffic.replacements;
+    traffic.beginFull(networkBytes, hedge);
+    const auto delay = backupDelay(policy, hedgeDelayMs.load(),
+        policy == XrdReadPolicy::Legacy ? detail::SiteRank{} : siteMonitor.snapshot(source->site),
+        networkBytes, readTimeoutSeconds_);
+    nextBackupAt = attempt->started + delay;
     fullAttempts.push_back(attempt);
 
     std::ostringstream queued;
     queued << "[XrdAdaptor] full read queued handle=" << instanceId_
-           << " role=" << attempt->role << " site=" << source->site
+           << " window=" << requestSequence << " role=" << attempt->role << " site=" << source->site
            << " server=" << source->server << " bytes=" << networkBytes
+           << " policy=" << (policy == XrdReadPolicy::Adaptive ? "adaptive" : "legacy")
+           << " hedge=" << hedge << " backup_delay_ms=" << delay.count()
            << " async=1 data_buffer=private";
     logLine(queued.str());
 
@@ -2137,15 +2326,17 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
   // If only one site is known, keep its request asynchronous while discovery
   // runs so a second site can join the race before the primary finishes.
   for (const auto &source : active) {
-    if (fullAttempts.size() >= fullReadSiteLimit ||
-        (!fullAttempts.empty() && hedgeDelayMs.load() > 0)) break;
-    launchFullRead(source);
+    const auto pending = fullReadCount();
+    if (pending >= fullReadSiteLimit ||
+        (pending && std::chrono::steady_clock::now() < nextBackupAt)) break;
+    launchFullRead(source, pending > 0);
   }
   scheduleExploration(active);
 
   const auto discoveryDeadline = std::chrono::steady_clock::now() +
                                  std::chrono::seconds(30);
-  while (race->winner() == ReadRaceState::kNoWinner) {
+  while (race->winner() == detail::ReadRaceState::kNoWinner) {
+    const auto observedCompletions = race->completions();
     active = sources();
     if (active.empty() && std::chrono::steady_clock::now() >= discoveryDeadline)
       active = sources(true);
@@ -2154,42 +2345,42 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
     // frees a slot for the next quality-ranked replica; a slow losing request
     // keeps its slot until its timing callback completes.
     for (const auto &source : active) {
-      if (fullReadCount() >= fullReadSiteLimit) break;
-      if (fullReadCount() > 0 && !fullAttempts.empty() &&
-          std::chrono::steady_clock::now() - fullAttempts.front()->started <
-              std::chrono::milliseconds(hedgeDelayMs.load())) break;
-      launchFullRead(source);
+      const auto pending = fullReadCount();
+      if (pending >= fullReadSiteLimit ||
+          (pending && std::chrono::steady_clock::now() < nextBackupAt)) break;
+      launchFullRead(source, pending > 0);
     }
     scheduleExploration(active);
-    if (race->winner() != ReadRaceState::kNoWinner) break;
+    if (race->winner() != detail::ReadRaceState::kNoWinner) break;
 
-    if (stopped_) break;
+    if (stopped_) return false;
     if (active.empty() && std::chrono::steady_clock::now() >= discoveryDeadline &&
         fullAttempts.empty())
       break;
 
-    if (fullReadCount() == 0 && active.empty() &&
-        (probeIntervalSeconds_ == 0 ||
-         std::chrono::steady_clock::now() >= discoveryDeadline))
-      break;
+    if (fullReadCount() == 0 &&
+        (probeIntervalSeconds_ == 0 || std::chrono::steady_clock::now() >= discoveryDeadline) &&
+        std::none_of(active.begin(), active.end(), [&](const auto &source) {
+          return !attemptedSites.count(sourceKey(source));
+        })) break;
 
     startDiscovery();
     // A different reader releasing a site/budget slot cannot signal this
     // race. Avoid adding a 50 ms stall to every small window in that case.
-    const auto wait = fullReadCount() == 0 && !active.empty() ? 5 : 50;
-    race->waitForChange(std::chrono::milliseconds(wait));
+    const auto wait = fullReadCount() == 0 && !active.empty() ? kSlotPoll : kPendingReadPoll;
+    race->waitForChange(wait, observedCompletions);
   }
 
   // Once the read has won, do not launch another full copy solely for timing.
   // Keep bounded exploration samples; already in-flight losing reads drain
   // normally and continue to supply quality measurements.
-  if (race->winner() != ReadRaceState::kNoWinner) {
+  if (race->winner() != detail::ReadRaceState::kNoWinner) {
     active = sources();
     scheduleExploration(active);
   }
 
   auto winningAttempt = race->winner();
-  if (winningAttempt == ReadRaceState::kNoWinner) {
+  if (winningAttempt == detail::ReadRaceState::kNoWinner) {
     std::vector<std::shared_ptr<Source>> fallbacks = sources();
     if (fallbacks.empty()) fallbacks = sources(true);
     auto fallback = std::find_if(
@@ -2198,20 +2389,28 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
                  !source->failed.load();
         });
     if (fallback != fallbacks.end()) {
-      if (prefetch) {
-        while (!(retryMemory = readMemoryBudget().tryReserve(networkBytes))) {
-          if (stopped_) return false;
-          race->waitForChange(std::chrono::milliseconds(50));
-        }
+      // A last-resort endpoint can appear just as discovery times out. Give
+      // its synchronous replacement the same site and payload reservations
+      // as an ordinary attempt, including lower priority for future files.
+      const auto site = sourceKey(*fallback);
+      while (!siteMonitor.beginFullRead(site, background)) {
+        if (stopped_) return false;
+        race->waitForChange(kSlotPoll);
+      }
+      struct SiteRelease {
+        SiteQualityMonitor &monitor;
+        const std::string &site;
+        ~SiteRelease() { monitor.endFullRead(site); }
+      } releaseSite{siteMonitor, site};
+      while (!(retryMemory = readMemoryBudget().tryReserve(networkBytes, background))) {
+        if (stopped_) return false;
+        race->waitForChange(kSlotPoll);
       }
       std::vector<ReadRange> retryRanges;
       retryRanges.reserve(pieces.size());
       for (auto &piece : pieces) {
-        if (prefetch) {
-          piece.owned = std::make_shared<std::vector<char>>(piece.range.length);
-          piece.range.buffer = piece.owned->data();
-        }
-        retryRanges.push_back(piece.range);
+        piece.owned = std::make_shared<std::vector<char>>(piece.range.length);
+        retryRanges.push_back({piece.range.offset, piece.range.length, piece.owned->data()});
       }
       logLine("[XrdAdaptor] full read retry handle=" +
               std::to_string(instanceId_) + " site=" + (*fallback)->site +
@@ -2219,8 +2418,12 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
               std::to_string(networkBytes));
       std::uint64_t retryBytes = 0;
       double retrySeconds = 0;
-      const auto retryOk = issue(*fallback, retryRanges, retryBytes,
-                                 retrySeconds);
+      auto &traffic = readTraffic();
+      ++traffic.replacements;
+      traffic.beginFull(networkBytes, false);
+      const auto retryOk = issue(*fallback, retryRanges, retryBytes, retrySeconds);
+      if (retryOk) ++traffic.replacementWins;
+      traffic.finishFull(retryOk, retryOk, retryBytes);
       const auto retryHealth = siteMonitor.observe(
           (*fallback)->site, fileKey_, retryOk, retryBytes, retrySeconds);
       logSiteDecision((*fallback)->site, url_, retryHealth);
@@ -2235,15 +2438,18 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
         logReadTiming("retry-failed", readSources);
         return false;
       }
+      if (!prefetch) {
+        for (const auto &piece : pieces)
+          std::memcpy(piece.range.buffer, piece.owned->data(), piece.range.length);
+      }
       readSources.push_back(*fallback);
-      winningAttempt = ReadRaceState::kNoWinner;
     } else {
       logReadTiming("all-replicas-failed", readSources);
       return false;
     }
   }
 
-  if (winningAttempt != ReadRaceState::kNoWinner) {
+  if (winningAttempt != detail::ReadRaceState::kNoWinner) {
     const auto winner = std::find_if(
         fullAttempts.begin(), fullAttempts.end(), [&](const auto &attempt) {
           return attempt->sourceIndex == winningAttempt;
@@ -2285,11 +2491,12 @@ bool XrdSourceManager::readvWindow(const std::vector<ReadRange> &ranges,
       handoffStoredBytes += piece->range.length;
     }
   }
-  if (slotDeferrals || budgetDeferrals) {
+  if (slotDeferrals || budgetDeferrals || hedgeDeferrals) {
     std::ostringstream contention;
     contention << "[XrdAdaptor] read scheduling handle=" << instanceId_
                << " background=" << background << " slot_deferrals=" << slotDeferrals
-               << " budget_deferrals=" << budgetDeferrals;
+               << " budget_deferrals=" << budgetDeferrals
+               << " hedge_limit_deferrals=" << hedgeDeferrals;
     logLine(contention.str());
   }
   logReadTiming("ok", readSources);

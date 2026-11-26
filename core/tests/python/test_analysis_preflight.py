@@ -175,3 +175,40 @@ class TestDatasetManifestValidation:
         assert not result.passed
         assert any("Duplicate" in c["detail"] for c in result.checks)
 
+
+
+def test_stxs_yaml_matches_converted_rows_and_reports_bad_category(tmp_path):
+    from native_config_io import read_legacy_aux, read_stxs_table, write_config_yaml
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    old = cfg / "bins.txt"
+    old.write_text("1 signal -10,0,2 # accepted input categories\n")
+    new = cfg / "bins.yaml"
+    rows = read_legacy_aux(old, "stxs_bins")
+    write_config_yaml(rows, new)
+    assert read_stxs_table(new, "stxs_bins") == [{"analysis_bin": 1, "label": "signal", "fine_categories": [-10, 0, 2]}]
+    preflight = AnalysisPreflight(str(tmp_path))
+    preflight.check_stxs_bin_config("cfg/bins.yaml")
+    assert preflight.result.passed
+    new.write_text("- {analysis_bin: 1, label: signal, fine_categories: [2, bad]}\n")
+    preflight.check_stxs_bin_config("cfg/bins.yaml")
+    assert not preflight.result.passed
+    assert "bad" in preflight.result.checks[-1]["detail"]
+    assert str(new) in preflight.result.checks[-1]["detail"]
+
+
+def test_stxs_migration_acceptance_roundtrip(tmp_path):
+    import pytest
+    from native_config_io import read_legacy_aux, read_stxs_table, write_config_yaml
+
+    source = tmp_path / "historical.txt"
+    source.write_text("71 1 2 3 0\n72 4 5 6 1\n")
+    rows = read_legacy_aux(source, "stxs_migration")
+    target = tmp_path / "migration.yaml"
+    write_config_yaml(rows, target)
+    assert read_stxs_table(target, "stxs_migration") == rows
+    assert [row["acceptance_fallback"] for row in rows] == [False, True]
+    source.write_text("71 1 2 3 0\n71 4 5 6 0")
+    with pytest.raises(ValueError, match="duplicate migration category 71"):
+        read_legacy_aux(source, "stxs_migration")

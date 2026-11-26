@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -250,6 +251,17 @@ def validate_semantic_config_compatibility(policy):
             or any(not isinstance(h, str) or not h for h in hashes)
             or len(set(hashes)) != len(hashes)):
             raise ValueError(f"Invalid semantic config compatibility hashes for {sample!r}")
+    replays = policy.get("executable_replays", {})
+    if not isinstance(replays, dict):
+        raise ValueError("Invalid executable replay policy")
+    for job_id, replay in replays.items():
+        if (not isinstance(job_id, str) or not job_id or not isinstance(replay, dict)
+            or set(replay) != {"sample", "original", "replay"}
+            or not isinstance(replay["sample"], str) or not replay["sample"]
+            or any(not isinstance(replay[k], str) or not re.fullmatch("[0-9a-f]{64}", replay[k])
+                   for k in ("original", "replay"))
+            or replay["original"] == replay["replay"]):
+            raise ValueError(f"Invalid executable replay policy for {job_id!r}")
 
 
 def load_semantic_config_compatibility(path):
@@ -263,7 +275,8 @@ def build_bundle(records, *, semantic_config_compatibility=None):
         raise ValueError("No metadata records")
     validate_semantic_config_compatibility(semantic_config_compatibility)
     allowed = semantic_config_compatibility["samples"] if semantic_config_compatibility is not None else {}
-    used_exceptions = {}
+    replays = semantic_config_compatibility.get("executable_replays", {}) if semantic_config_compatibility else {}
+    used_exceptions, used_replays = {}, {}
     definitions, jobs, seen, scopes = {}, [], set(), {}
     build_reference = None
     semantic_configs = {}
@@ -286,6 +299,14 @@ def build_bundle(records, *, semantic_config_compatibility=None):
                                    "root.registry_input_bindings_before",
                                    "root.registry_input_bindings_after"})
                  or k == "run.expected_executable_sha256"}
+        scope = record["sample"]
+        replay = replays.get(record["id"])
+        executable_key = "run.expected_executable_sha256"
+        if replay is not None and scope == replay["sample"] and build.get(executable_key) == replay["replay"]:
+            # Compare against the original only for this exact logical job.
+            # The actual replay digest remains in the leaf provenance.
+            build[executable_key] = replay["original"]
+            used_replays[record["id"]] = replay
         if build:
             if build_reference is not None and build_reference != build:
                 raise ValueError("Incompatible framework/extension builds in merge group")
@@ -293,7 +314,6 @@ def build_bundle(records, *, semantic_config_compatibility=None):
         config = {k: v for k, v in prov.items() if k.endswith(".config_hash")}
         invariant = {"build": build, "plugins": config, "regions": record["regions"],
                      "normalizations": record["normalizations"]}
-        scope = record["sample"]
         if prov.get("config.semantic_hash"):
             previous = semantic_configs.setdefault(scope, prov["config.semantic_hash"])
             if previous != prov["config.semantic_hash"]:
@@ -323,12 +343,13 @@ def build_bundle(records, *, semantic_config_compatibility=None):
     result = {"format": FORMAT, "schema_version": 1, "n_inputs": len(jobs),
               "definitions": definitions, "jobs": jobs,
               "weight_audits": reduce_audits(records)}
-    if used_exceptions:
-        # Keep original leaf hashes and the explicit exception as portable evidence.
+    if used_exceptions or used_replays:
         # Subsequent merges must independently supply the policy again.
         result["semantic_config_compatibility"] = {
             "schema_version": 1, "reason": semantic_config_compatibility["reason"],
             "samples": used_exceptions}
+        if used_replays:
+            result["semantic_config_compatibility"]["executable_replays"] = used_replays
     # Enforce an exactly reversible representation, including missing fields.
     assert sorted(expand_bundle(result), key=lambda r: r["id"]) == sorted(records, key=lambda r: r["id"])
     return result
@@ -620,7 +641,7 @@ def main():
     parser.add_argument("--extract-histograms", action="store_true")
     parser.add_argument("--nominal-only", action="store_true")
     parser.add_argument("--semantic-config-compatibility", type=Path,
-                        help="JSON policy allowing only reviewed sample/semantic-hash combinations")
+                        help="JSON policy allowing reviewed semantic hashes and exact executable replays")
     args = parser.parse_args()
     def extract(path):
         from extract_nd_histograms import extract_nd_histograms

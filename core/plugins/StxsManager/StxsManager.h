@@ -21,8 +21,8 @@
 //
 // Configuration (read from global config map in setupFromConfigFile()):
 //   stxsEnabled: "true|false" (default: false)
-//   stxsMigrationBinConfig: "cfg/migration_bins.txt" (optional explicit histogram mapping)
-//   stxsBinConfig: "cfg/stxs_bins.txt"
+//   stxsMigrationBinConfig: "cfg/migration_bins.yaml" (optional explicit histogram mapping)
+//   stxsBinConfig: "cfg/stxs_bins.yaml"
 //   stxsAuxDirectory: "aux/stxs"
 //   stxsCoarseBranch: "HTXS_stage1_1_cat_pTjet30GeV"
 //   stxsFineBranch: "HTXS_stage1_1_fine_cat_pTjet30GeV"
@@ -34,9 +34,7 @@
 //   stxsGroupName: "signal"
 //   stxsSignalProcessId: "4" (alternative: direct integer ID)
 //   stxsProductionModeId: "2" (alternative: direct integer ID, auto-derived if absent)
-//   stxsSignalProcessRules: "cfg/stxs_signal_process_rules.yaml" (optional)
-//   stxsAcceptanceSpecs: "cfg/stxs_acceptance.yaml" (optional YAML)
-//   stxsMigrationSpecs: "cfg/stxs_migration.yaml" (optional YAML)
+//   Programmatic stxs::Config clients can supply signal rules and histogram specs.
 //   stxsNBins: "12" (number of analysis bins for auto-booked histograms)
 //   stxsHistogramLow: "0.0"
 //   stxsHistogramHigh: "12.0"

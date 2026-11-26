@@ -273,7 +273,7 @@ class TestRunHadd(unittest.TestCase):
 
     def test_calls_hadd_with_correct_args(self):
         mod = self._import()
-        with patch.object(mod, "_find_hadd", return_value="/usr/bin/hadd"), \
+        with patch("rdfproduction.manifest_merge._find_hadd", return_value="/usr/bin/hadd"), \
              patch("subprocess.run") as mock_run, \
              tempfile.TemporaryDirectory() as tmpdir:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -289,7 +289,7 @@ class TestRunHadd(unittest.TestCase):
 
     def test_raises_on_nonzero_exit(self):
         mod = self._import()
-        with patch.object(mod, "_find_hadd", return_value="/usr/bin/hadd"), \
+        with patch("rdfproduction.manifest_merge._find_hadd", return_value="/usr/bin/hadd"), \
              patch("subprocess.run") as mock_run, \
              tempfile.TemporaryDirectory() as tmpdir:
             mock_run.return_value = MagicMock(returncode=1, stderr="hadd: error")
@@ -298,7 +298,7 @@ class TestRunHadd(unittest.TestCase):
 
     def test_creates_parent_directories(self):
         mod = self._import()
-        with patch.object(mod, "_find_hadd", return_value="/usr/bin/hadd"), \
+        with patch("rdfproduction.manifest_merge._find_hadd", return_value="/usr/bin/hadd"), \
              patch("subprocess.run") as mock_run, \
              tempfile.TemporaryDirectory() as tmpdir:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -551,7 +551,7 @@ class TestMergeSkimsTask(unittest.TestCase):
             )
 
             # Mock hadd so we don't need ROOT; mock publish_message
-            with patch.object(mod, "_run_hadd") as mock_hadd, \
+            with patch("rdfproduction.manifest_merge._run_hadd") as mock_hadd, \
                  patch.object(task, "publish_message", return_value=None):
                 # Make hadd appear to create the output file
                 def fake_hadd(out_path, in_paths):
@@ -626,8 +626,8 @@ class TestMergeHistogramsTask(unittest.TestCase):
                 Path(os.path.join(job_dir, "histograms.root")).touch()
 
             task = mod.MergeHistograms(name="r", input_dir=tmpdir, output_dir=out_dir)
-            with patch.object(mod, "merge_root_files") as mock_hadd, \
-                 patch.object(mod, "read_embedded_histogram_schema", return_value=None), \
+            with patch("rdfproduction.manifest_merge.merge_root_files") as mock_hadd, \
+                 patch("rdfproduction.manifest_merge.read_embedded_histogram_schema", return_value=None), \
                  patch.object(task, "publish_message", return_value=None):
                 def fake_hadd(out_path, in_paths, **kwargs):
                     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -672,8 +672,8 @@ class TestMergeHistogramsTask(unittest.TestCase):
                     root_file["__rdf_histogram_schema_v1"] = json.dumps(schema)
 
             task = mod.MergeHistograms(name="r", input_dir=tmpdir, output_dir=out_dir)
-            with patch.object(mod, "merge_root_files") as mock_hadd, \
-                 patch.object(mod, "extract_nd_histograms") as mock_extract, \
+            with patch("rdfproduction.manifest_merge.merge_root_files") as mock_hadd, \
+                 patch("rdfproduction.manifest_merge.extract_nd_histograms") as mock_extract, \
                  patch.object(task, "publish_message", return_value=None):
                 def fake_hadd(out_path, in_paths, **kwargs):
                     with uproot.recreate(out_path) as root_file:
@@ -717,7 +717,7 @@ class TestMergeCutflowsTask(unittest.TestCase):
                 Path(os.path.join(job_dir, "cutflow.root")).touch()
 
             task = mod.MergeCutflows(name="r", input_dir=tmpdir, output_dir=out_dir)
-            with patch.object(mod, "merge_root_files") as mock_hadd, \
+            with patch("rdfproduction.manifest_merge.merge_root_files") as mock_hadd, \
                  patch.object(task, "publish_message", return_value=None):
                 def fake_hadd(out_path, in_paths, **kwargs):
                     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -736,12 +736,11 @@ class TestMergeMetadataTask(unittest.TestCase):
     """Tests for MergeMetadata task construction and run logic."""
 
     def setUp(self):
-        import merge_tasks
         from metadata_io import _normalize_record
         def fake_records(path):
             return [_normalize_record({"format": "rdf-job-metadata", "schema_version": 1,
                                        "provenance": {}}, path)]
-        patcher = patch.object(merge_tasks, "load_metadata_records", side_effect=fake_records)
+        patcher = patch("rdfproduction.manifest_merge.load_metadata_records", side_effect=fake_records)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -898,6 +897,15 @@ class TestMergeAllTask(unittest.TestCase):
             self.assertIn("MergeHistograms", task_types)
             self.assertIn("MergeCutflows", task_types)
             self.assertIn("MergeMetadata", task_types)
+
+    def test_refill_metadata_glob_only_changes_the_provenance_task(self):
+        mod = self._import()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_full_manifest(os.path.join(tmpdir, "refill", "job_0"))
+            task = mod.MergeAll(name="r", input_dir=tmpdir, metadata_manifest_glob="refill/**/*.yaml")
+            requirements = {type(req).__name__: req for req in task.requires()}
+            self.assertEqual(requirements["MergeMetadata"].manifest_glob, "refill/**/*.yaml")
+            self.assertEqual(requirements["MergeSkims"].manifest_glob, task.manifest_glob)
 
     def test_skips_skim_when_no_skim_schema(self):
         """MergeAll does not require MergeSkims when no skim schema exists."""

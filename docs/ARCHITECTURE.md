@@ -578,7 +578,7 @@ analyzer.run();  // Triggers event loop
 
 ```cpp
 // 1. User creates Analyzer
-Analyzer analyzer("config.txt");
+Analyzer analyzer("config.yaml");
 
 // Inside Analyzer constructor:
 //   a. Create ConfigurationManager
@@ -867,7 +867,7 @@ Test individual managers in isolation:
 
 ```cpp
 TEST(OnnxManagerTest, ModelLoading) {
-    ConfigurationManager config("test_config.txt");
+    ConfigurationManager config("test_config.yaml");
     OnnxManager mgr(config);
     EXPECT_NO_THROW(mgr.getModel("test_model"));
 }
@@ -879,7 +879,7 @@ Test full analysis workflows:
 
 ```cpp
 TEST(AnalyzerTest, EndToEnd) {
-    Analyzer analyzer("test_analysis.txt");
+    Analyzer analyzer("test_analysis.yaml");
     analyzer.Define(...);
     analyzer.Filter(...);
     EXPECT_NO_THROW(analyzer.run());

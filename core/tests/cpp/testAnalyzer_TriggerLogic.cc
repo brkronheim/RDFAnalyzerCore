@@ -24,8 +24,8 @@ class AnalyzerTriggerLogicTest : public ::testing::Test {
 protected:
     void SetUp() override {
         ChangeToTestSourceDir();
-        // Use the test_data_config.txt and triggers.txt for config
-        configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+        // Use the test_data_config.yaml and triggers.yaml for config
+        configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
         dataManager = ManagerFactory::createDataManager(*configManager);
         
             triggerManager = std::make_unique<TriggerManager>(*configManager);
@@ -62,7 +62,7 @@ std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> makeTestPlug
 
 TEST_F(AnalyzerTriggerLogicTest, DataTriggersAndVetoes) {
     // Set up Analyzer for a data sample
-    auto config1 = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+    auto config1 = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
     auto data1 = ManagerFactory::createDataManager(*config1);
     auto bdt1 = std::make_unique<BDTManager>(*config1);
     auto corr1 = std::make_unique<CorrectionManager>(*config1);
@@ -99,7 +99,7 @@ TEST_F(AnalyzerTriggerLogicTest, DataTriggersAndVetoes) {
     EXPECT_EQ(result.GetValue(), 2UL);
 
     // Now set a veto to true, should fail
-    auto config2 = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+    auto config2 = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
     auto data2 = ManagerFactory::createDataManager(*config2);
     auto bdt2 = std::make_unique<BDTManager>(*config2);
     auto corr2 = std::make_unique<CorrectionManager>(*config2);
@@ -136,7 +136,7 @@ TEST_F(AnalyzerTriggerLogicTest, DataTriggersAndVetoes) {
 
 TEST_F(AnalyzerTriggerLogicTest, MCTriggers) {
     // Set up Analyzer for MC (no group for sample type)
-    auto config3 = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+    auto config3 = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
     auto data3 = ManagerFactory::createDataManager(*config3);
     auto bdt3 = std::make_unique<BDTManager>(*config3);
     auto corr3 = std::make_unique<CorrectionManager>(*config3);

@@ -135,3 +135,63 @@ class RunBundleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_historical_opaque_recipe_keeps_sealed_asset_paths(tmp_path):
+    from rdfproduction.jobs.staging import _ensure_local_analysis_runtime_layout
+    source = tmp_path / "old"
+    assets = source / "assets"
+    assets.mkdir(parents=True)
+    payload = assets / "123_weights.json"
+    payload.write_bytes(b'{"weight":1}')
+    recipe = assets / "456_custom.txt"
+    raw = b"custom file=assets/123_weights.json\n"
+    recipe.write_bytes(raw)
+    main = source / "submit_config.yaml"
+    main.write_text("modelConfig: assets/456_custom.txt\n")
+    files = {"/original/weights.json": "assets/123_weights.json", "/original/custom.txt": "assets/456_custom.txt"}
+    seal_bundle(source, assets=files, entrypoints={"submit_config": "submit_config.yaml"})
+    job = tmp_path / "job"
+    _ensure_local_analysis_runtime_layout(str(main), {"modelConfig": "assets/456_custom.txt"}, str(job))
+    assert (job / "cfg" / recipe.name).read_bytes() == raw
+    for base in (job, job / "cfg"):
+        assert (base / "assets" / payload.name).read_bytes() == payload.read_bytes()
+    verify_bundle(source)
+
+
+def test_unchanged_domain_yaml_keeps_its_exact_bytes_in_bundle_and_job(tmp_path):
+    from rdfproduction.jobs.staging import _ensure_local_analysis_runtime_layout
+    recipe = tmp_path / "recoil.yaml"
+    original = b"# recoil calibration, hashed by analysis\ncoefficients: [1.250, 0.000]\n"
+    recipe.write_bytes(original)
+    main = tmp_path / "submit.yaml"
+    main.write_text("recoilFile: recoil.yaml\n")
+    bundle = tmp_path / "bundle"
+    record = compile_config_bundle(main, bundle, asset_keys=["recoilFile"])
+    relative = record["assets"][str(recipe)]
+    assert (bundle / relative).read_bytes() == original
+    job = tmp_path / "job"
+    _ensure_local_analysis_runtime_layout(str(bundle / "submit_config.yaml"),
+                                         {"recoilFile": relative}, str(job))
+    assert (job / "cfg" / Path(relative).name).read_bytes() == original
+
+def test_extension_can_declare_native_config_shape(tmp_path):
+    import yaml
+    (tmp_path / "fit.txt").write_text("name=zee constraint=91.2\n")
+    main = tmp_path / "worker.yaml"
+    main.write_text("electronFitConfig: fit.txt\n")
+    bundle = tmp_path / "bundle"
+    record = compile_config_bundle(main, bundle, asset_keys=["electronFitConfig"],
+                                   asset_kinds={"electronFitConfig": "records"})
+    path = bundle / record["assets"][str(tmp_path / "fit.txt")]
+    assert path.suffix == ".yaml"
+    assert yaml.safe_load(path.read_bytes()) == [{"name": "zee", "constraint": "91.2"}]
+
+def test_absent_optional_asset_schema_preserves_prior_bundle_identity(tmp_path):
+    main = tmp_path / "worker.yaml"
+    main.write_text("threads: 1\n")
+    bundle = tmp_path / "bundle"
+    old = compile_config_bundle(main, bundle, asset_keys=["optionalFit"])
+    same = compile_config_bundle(main, bundle, asset_keys=["optionalFit"],
+                                 asset_kinds={"optionalFit": "records"}, reuse=True)
+    assert same["bundle_id"] == old["bundle_id"]

@@ -15,6 +15,8 @@
 #include <TObjString.h>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
@@ -881,11 +883,8 @@ static bool HasSystematicColumns(
     if (syst == "Nominal") {
       continue;
     }
-    if (!systematicManager_m->isVariableAffectedBySystematic(variable, syst)) {
-      continue;
-    }
     const std::string columnName = systematicManager_m->getVariationColumnName(variable, syst);
-    if (cache.Has(columnName)) {
+    if (columnName != variable && cache.Has(columnName)) {
       return true;
     }
   }
@@ -2155,7 +2154,51 @@ void NDHistogramManager::initialize() {
             << std::endl;
 }
 
+void NDHistogramManager::reportStorageProfile(bool finalized) const {
+  if (!std::getenv("RDF_HISTOGRAM_PROFILE")) return;
+  // Some configurations have many very large dense-equivalent histograms.
+  auto accumulate = [](std::size_t &total, std::size_t bytes) {
+    total += std::min(bytes, std::numeric_limits<std::size_t>::max() - total);
+  };
+  std::size_t boostActions = 0, denseActions = 0, equivalent = 0, dense = 0;
+  std::size_t sparseSamples = 0, ready = 0, occupied = 0;
+  for (std::size_t i = 0; i < histMemoryUsage_m.size(); ++i) {
+    const auto &usage = histMemoryUsage_m[i];
+    if (!usage) continue; // ROOT actions have no Boost allocator counters.
+    ++boostActions;
+    accumulate(equivalent, usage->denseBytes);
+    if (usage->sparse) {
+      if (finalized && i < histos_m.size() && histos_m[i].IsReady())
+        accumulate(sparseSamples, usage->sparseBytes);
+    } else {
+      ++denseActions;
+      accumulate(dense, usage->denseBytes);
+    }
+  }
+  if (finalized) {
+    for (auto result : histos_m) {
+      if (!result.IsReady()) continue;
+      ++ready;
+      accumulate(occupied, static_cast<std::size_t>(result->GetNbins()));
+    }
+  }
+  std::fprintf(stderr,
+      "histogram summary: phase=%s actions=%zu boost_actions=%zu boost_dense_actions=%zu"
+      " boost_dense_equivalent_bytes=%zu boost_dense_selected_bytes=%zu",
+      finalized ? "final" : "booked", histos_m.size(), boostActions, denseActions,
+      equivalent, dense);
+  if (finalized)
+    std::fprintf(stderr, " ready_actions=%zu occupied_output_bins=%zu boost_sparse_sample_sum_bytes=%zu",
+                 ready, occupied, sparseSamples);
+  std::fputc('\n', stderr);
+}
+
+void NDHistogramManager::execute() {
+  reportStorageProfile(false);
+}
+
 void NDHistogramManager::reportMetadata() {
+  reportStorageProfile(true);
   if (!logger_m) return;
   logger_m->log(ILogger::Level::Info,
                 "NDHistogramManager: " +

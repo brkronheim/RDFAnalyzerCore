@@ -228,7 +228,8 @@ class AnalysisPreflight:
 
 
     def check_stxs_bin_config(self, bin_config_rel_path: str) -> None:
-        """Validate the STXS bin mapping file (stxs_bins.txt)."""
+        """Validate the native STXS bin mapping and check for gaps."""
+        from native_config_io import read_stxs_table
         if bin_config_rel_path.startswith("cfg/"):
             full_path = resolve_asset_path(str(self.analysis_dir), bin_config_rel_path)
         else:
@@ -237,37 +238,13 @@ class AnalysisPreflight:
             self.result.fail("STXS bin config", f"File not found: {full_path}")
             return
 
-        bins: List[Dict] = []
-        errors: List[str] = []
-        with open(full_path) as f:
-            for lineno, line in enumerate(f, start=1):
-                line = line.split("#")[0].strip()
-                if not line:
-                    continue
-                parts = line.split()
-                if len(parts) < 3:
-                    errors.append(f"Line {lineno}: expected '<bin> <label> <categories>', got {len(parts)} tokens")
-                    continue
-                try:
-                    bin_num = int(parts[0])
-                except ValueError:
-                    errors.append(f"Line {lineno}: bin number '{parts[0]}' is not an integer")
-                    continue
-                label = parts[1]
-                categories = [int(c) for c in parts[2].split(",") if c.strip().isdigit()]
-                bins.append({"num": bin_num, "label": label, "categories": categories})
-
-        if errors:
-            for err in errors:
-                self.result.fail("STXS bin config", err)
+        try:
+            bins = read_stxs_table(full_path, "stxs_bins")
+        except (OSError, ValueError) as exc:
+            self.result.fail("STXS bin config", str(exc))
             return
 
-        if not bins:
-            self.result.fail("STXS bin config", "No valid bin entries found")
-            return
-
-        # Check for gap or duplicate bins
-        bin_nums = sorted(set(b["num"] for b in bins))
+        bin_nums = sorted({row["analysis_bin"] for row in bins})
         expected = list(range(1, len(bin_nums) + 1))
         if bin_nums != expected:
             actual_set = set(bin_nums)

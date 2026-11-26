@@ -409,6 +409,14 @@ def run_combine(card_info: dict[str, Any], output_dir: Path,
 
 
 
+def combine_failed(returncode, log_text):
+    """Detect Combine failures that can leave a ROOT file and a zero exit status."""
+    return bool(returncode or re.search(
+        r"MultiDimFit failed|Caught exception|Initial minimization failed|Error when running the combination",
+        log_text,
+    ))
+
+
 def run_standard_combine(card, output_dir, *, asimov=False, executable=None,
                          method="MultiDimFit", options=()):
     """Run a standard card with a free common r, retaining fresh native artifacts."""
@@ -430,7 +438,7 @@ def run_standard_combine(card, output_dir, *, asimov=False, executable=None,
                                   stderr=subprocess.STDOUT, check=False)
         log_text = log.read_text(errors="replace")
         artifacts = list(Path(stage).glob("*.root"))
-        if proc.returncode or not artifacts or re.search(r"MultiDimFit failed|Caught exception|Initial minimization failed", log_text):
+        if not artifacts or combine_failed(proc.returncode, log_text):
             raise FitError(f"Combine failed (exit {proc.returncode}); see {log}")
         targets = []
         for artifact in artifacts:

@@ -51,7 +51,7 @@ protected:
     ChangeToTestSourceDir();
     
     // Create a simple configuration without sofieConfig
-    configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
     systematicManager = std::make_unique<SystematicManager>();
     dataManager = std::make_unique<DataManager>(2);
     
@@ -91,9 +91,21 @@ protected:
 };
 
 // Construction
+TEST_F(SofieManagerTest, YamlConfigProvidesFeaturesAndGateBeforeFunctionRegistration) {
+  configManager->set("sofieConfig", "cfg/sofie_models.yaml");
+  SofieManager manager(*configManager);
+  EXPECT_EQ(manager.getModelFeatures("test_sofie"), (std::vector<std::string>{"feature1", "feature2", "feature3"}));
+  EXPECT_EQ(manager.getRunVar("test_sofie"), "run_number");
+}
+
+TEST_F(SofieManagerTest, ExplicitMissingRecipeFailsDuringSetup) {
+  configManager->set("sofieConfig", "cfg/nonexistent_sofie_recipe.yaml");
+  EXPECT_THROW((void)SofieManager(*configManager), std::runtime_error);
+}
+
 TEST_F(SofieManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
-    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
     auto manager = std::make_unique<SofieManager>(*config);
   });
 }
@@ -305,7 +317,7 @@ TEST_F(SofieManagerTest, ThreadSafetyWithROOTImplicitMT) {
 // Test manual registration
 TEST_F(SofieManagerTest, ManualRegistration) {
   // Create a fresh manager
-  auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+  auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
   auto manager = std::make_unique<SofieManager>(*config);
   
   // Manually register a model

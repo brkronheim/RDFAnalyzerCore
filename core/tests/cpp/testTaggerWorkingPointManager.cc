@@ -52,7 +52,7 @@ protected:
   void SetUp() override {
     ChangeToTestSourceDir();
     config = ManagerFactory::createConfigurationManager(
-        "cfg/test_data_config_minimal.txt");
+        "cfg/test_data_config_minimal.yaml");
     systematicManager = std::make_unique<SystematicManager>();
     logger = std::make_unique<DefaultLogger>();
     skimSink = std::make_unique<NullOutputSink>();
@@ -156,6 +156,18 @@ TEST_F(TaggerWorkingPointManagerTest, SetTaggerColumnEmptyThrows) {
 // ---------------------------------------------------------------------------
 // addWorkingPoint validation
 // ---------------------------------------------------------------------------
+
+TEST_F(TaggerWorkingPointManagerTest, LoadWorkingPointAndSystematicRecordsFromYaml) {
+  config->set("taggerConfig", "cfg/test_tagger_config.yaml");
+  DataManager data(1);
+  auto manager = makeMgr(data);
+  EXPECT_EQ(manager->getTaggerColumns(), (std::vector<std::string>{"Jet_btagDeepFlavB"}));
+  const auto &points = manager->getWorkingPoints();
+  ASSERT_EQ(points.size(), 3u);
+  EXPECT_EQ(points[1].name, "medium");
+  EXPECT_EQ(points[1].thresholds, (std::vector<float>{0.3033f}));
+  EXPECT_EQ(manager->getSystematicSources("standard"), (std::vector<std::string>{"hf", "lf", "hfstats1"}));
+}
 
 TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointsInOrder) {
   TaggerWorkingPointManager mgr;

@@ -33,7 +33,7 @@ Usage
 
     law run SkimTask \\
         --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \\
-        --submit-config analyses/myAnalysis/cfg/skim_config.txt \\
+        --submit-config analyses/myAnalysis/cfg/skim_config.yaml \\
         --name mySkimRun \\
         --file-source xrdfs --file-source-name myRun \\
         --exe build/bin/myanalysis
@@ -41,13 +41,10 @@ Usage
 
 from __future__ import annotations
 
-import fnmatch
 import json
-import logging
 import os
-import subprocess
+import subprocess  # re-exported for compatibility with patched callers
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import luigi  # type: ignore
@@ -65,129 +62,13 @@ for _p in (_HERE, _CORE_PYTHON):
         sys.path.insert(0, _p)
 
 from submission_backend import ensure_xrootd_redirector  # noqa: E402
-from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
+from rdfproduction.performance import PerformanceRecorder, perf_path_for  # noqa: E402
+from rdfproduction.discovery import _should_ignore_xrdfs_entry, xrdfs_list_files  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 
 
-# ---------------------------------------------------------------------------
-# Low-level XRootD helpers
-# ---------------------------------------------------------------------------
-
-
-def _should_ignore_xrdfs_entry(path: str) -> bool:
-    """Return ``True`` for EOS bookkeeping entries that should be skipped."""
-    base = os.path.basename(path.rstrip("/"))
-    return base.startswith(".sys.")
-
-
-def xrdfs_list_files(
-    server: str,
-    remote_path: str,
-    pattern: str = "*.root",
-    recursive: bool = True,
-    timeout: int = 60,
-    max_workers: int = 8,
-) -> list[str]:
-    """Discover files on an XRootD server using ``xrdfs ls``.
-
-    Directory listings are performed in parallel using a
-    :class:`~concurrent.futures.ThreadPoolExecutor` BFS traversal, which is
-    substantially faster than sequential recursion for deep trees.
-
-    Parameters
-    ----------
-    server:
-        XRootD server URL, e.g. ``root://eosuser.cern.ch/``.
-    remote_path:
-        Remote directory path to search, e.g. ``/eos/user/a/alice/ntuples/``.
-    pattern:
-        Glob-style filename pattern matched against the basename only.
-    recursive:
-        When ``True``, recursively descend into sub-directories.
-    timeout:
-        Per-``xrdfs ls`` call timeout in seconds.
-    max_workers:
-        Maximum parallel ``xrdfs ls`` threads per BFS level.
-
-    Returns
-    -------
-    list[str]
-        Sorted list of ``root://{server}/{path}`` URLs for matching files.
-    """
-
-    def _ls_single_dir(path: str) -> tuple[list[str], list[str]]:
-        """List one directory; return (files, subdirs)."""
-        try:
-            result = subprocess.run(
-                ["xrdfs", server, "ls", "-l", path],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            logging.warning("xrdfs ls failed for %s: %s", path, exc)
-            return [], []
-
-        if result.returncode != 0:
-            logging.warning(
-                "xrdfs ls returned %d for %s: %s",
-                result.returncode,
-                path,
-                result.stderr.strip(),
-            )
-            return [], []
-
-        files: list[str] = []
-        subdirs: list[str] = []
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if not parts:
-                continue
-            entry = parts[-1]
-            if not entry.startswith("/"):
-                continue
-            if _should_ignore_xrdfs_entry(entry):
-                continue
-            if line.startswith("d") or (len(parts) > 4 and parts[0].startswith("d")):
-                subdirs.append(entry)
-            elif fnmatch.fnmatch(os.path.basename(entry), pattern):
-                files.append(entry)
-        return files, subdirs
-
-    all_files: list[str] = []
-    queue: list[str] = [remote_path]
-
-    while queue:
-        workers = min(len(queue), max_workers)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_dir = {
-                executor.submit(_ls_single_dir, d): d for d in queue
-            }
-            next_queue: list[str] = []
-            for fut in as_completed(future_to_dir):
-                try:
-                    files, subdirs = fut.result()
-                except Exception as exc:
-                    logging.warning(
-                        "xrdfs listing failed for %s: %s",
-                        future_to_dir[fut],
-                        exc,
-                    )
-                    files, subdirs = [], []
-                all_files.extend(files)
-                if recursive:
-                    next_queue.extend(subdirs)
-        queue = next_queue
-
-    # The second slash makes the exported path absolute for XRootD servers.
-    return [
-        f"{server.rstrip('/')}//{p.lstrip('/')}"
-        for p in sorted(all_files)
-    ]
-
-
-# Keep the private-name alias used by older code
+# Keep the private alias used by older callers.
 _xrdfs_list_files = xrdfs_list_files
 
 

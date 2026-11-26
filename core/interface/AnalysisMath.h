@@ -1,12 +1,64 @@
 #pragma once
 
 #include <ROOT/RVec.hxx>
+#include <Math/Vector4D.h>
+#include "ArrayValidation.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 namespace rdf {
+
+/// Signed first minus second azimuth in radians, in [-pi, pi).
+/// Nonfinite inputs produce NaN. Both pi ties map to -pi.
+inline double signedDeltaPhi(double first, double second) {
+  constexpr double pi = 3.14159265358979323846;
+  const double delta = std::remainder(first - second, 2. * pi);
+  return delta == pi ? -pi : delta;
+}
+
+inline double absDeltaPhi(double first, double second) {
+  return std::abs(signedDeltaPhi(first, second));
+}
+
+inline double deltaR2(double eta1, double phi1, double eta2, double phi2) {
+  const double deta = eta1 - eta2;
+  const double dphi = signedDeltaPhi(phi1, phi2);
+  return deta * deta + dphi * dphi;
+}
+
+/// Retrieve one four-vector from aligned collection columns. A missing index or
+/// an inconsistent input schema raises a diagnostic before accessing the arrays.
+template <class Pt, class Eta, class Phi, class Mass>
+ROOT::Math::PtEtaPhiMVector indexedPtEtaPhiM(
+    const Pt& pt, const Eta& eta, const Phi& phi, const Mass& mass, int index) {
+  requireAlignedSizes("indexedPtEtaPhiM", pt.size(),
+                      {{"eta", eta.size()}, {"phi", phi.size()}, {"mass", mass.size()}});
+  const auto i = checkedIndex("indexedPtEtaPhiM", index, pt.size());
+  return {pt[i], eta[i], phi[i], mass[i]};
+}
+
+/// Sum (px, py) in source order with double precision. Empty selections give
+/// (0, 0). Only selected objects must have finite phi and finite nonnegative pt.
+template <class Mask, class Pt, class Phi>
+std::pair<double, double> selectedTransverseSum(const Mask& mask, const Pt& pt,
+                                                const Phi& phi) {
+  requireAlignedSizes("selectedTransverseSum", mask.size(),
+                      {{"pt", pt.size()}, {"phi", phi.size()}});
+  double px = 0., py = 0.;
+  for (std::size_t i = 0; i < mask.size(); ++i) {
+    if (!mask[i]) continue;
+    const double momentum = pt[i], angle = phi[i];
+    if (!std::isfinite(momentum) || momentum < 0. || !std::isfinite(angle))
+      throw std::runtime_error("selectedTransverseSum: invalid pt or phi at index " +
+                               std::to_string(i));
+    px += momentum * std::cos(angle);
+    py += momentum * std::sin(angle);
+  }
+  return {px, py};
+}
 
 inline float transverseVectorPt(float firstPt, float firstPhi, float secondPt, float secondPhi) {
   return std::hypot(firstPt*std::cos(firstPhi)+secondPt*std::cos(secondPhi),

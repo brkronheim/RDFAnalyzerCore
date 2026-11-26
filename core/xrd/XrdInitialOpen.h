@@ -16,15 +16,20 @@ namespace rdf::xrd::detail {
 // Requests own their transports until callback completion, even if the caller
 // has already used a winner or reached its deadline. Bound those late owners
 // across active files and lookahead, not just within an individual lookup.
+inline constexpr unsigned kMaxMetadataOperations = 32;
+inline constexpr unsigned kStandbyMetadataLimit = 4;
 inline std::atomic<unsigned> initialOperations{0};
 struct InitialOperation {
   bool acquired = false;
-  InitialOperation() {
+  explicit InitialOperation(unsigned limit = kMaxMetadataOperations) {
     auto n = initialOperations.load();
-    while (n < 32) {
+    while (n < limit) {
       if (initialOperations.compare_exchange_weak(n, n + 1)) { acquired = true; break; }
     }
   }
+  InitialOperation(const InitialOperation &) = delete;
+  InitialOperation &operator=(const InitialOperation &) = delete;
+  InitialOperation(InitialOperation &&other) noexcept : acquired(other.acquired) { other.acquired = false; }
   ~InitialOperation() { if (acquired) --initialOperations; }
 };
 

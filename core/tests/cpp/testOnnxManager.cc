@@ -27,7 +27,7 @@ class OnnxManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
     ChangeToTestSourceDir();
-    std::string configFile = "cfg/test_data_config.txt";
+    std::string configFile = "cfg/test_data_config.yaml";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     systematicManager = std::make_unique<SystematicManager>();
     dataManager = std::make_unique<DataManager>(2);
@@ -65,7 +65,7 @@ protected:
 // Construction
 TEST_F(OnnxManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
-    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
     auto manager = std::make_unique<OnnxManager>(*config);
   });
 }

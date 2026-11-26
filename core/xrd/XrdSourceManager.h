@@ -30,6 +30,9 @@ private:
   bool previous_;
 };
 bool isBackgroundRead();
+enum class XrdReadPolicy { Adaptive, Legacy };
+void configureXrdReadScheduling(unsigned pipelineDepth, unsigned hedgeDelayMs,
+                                bool diagnostics, XrdReadPolicy policy);
 void configureXrdReadScheduling(unsigned pipelineDepth, unsigned hedgeDelayMs,
                                 bool diagnostics = false);
 // Empty file/origin use RDF_XRD_SITE_RANKING_FILE / RDF_XRD_SITE_ORIGIN.

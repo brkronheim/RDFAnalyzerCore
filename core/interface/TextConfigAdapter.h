@@ -5,7 +5,7 @@
 #include <string_view>
 
 /**
- * @brief Default text-based configuration adapter (current behavior).
+ * @brief Compatibility decoder for historical native text configuration. Prefer YAML for new files.
  */
 class TextConfigAdapter : public IConfigAdapter {
 public:

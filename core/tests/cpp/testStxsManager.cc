@@ -1,3 +1,4 @@
+#include "test_workspace.h"
 #include "stxs/Manager.h"
 #include "StxsColumns.h"
 #include <gtest/gtest.h>
@@ -11,11 +12,26 @@ class StxsTest : public ::testing::Test {
 protected:
   std::filesystem::path dir;
   void SetUp() override {
-    dir = std::filesystem::path(TEST_BINARY_DIR) / "stxs-generic-test";
+    dir = testWorkspacePath() / "stxs-generic-test";
     std::filesystem::create_directories(dir);
   }
   void TearDown() override { std::filesystem::remove_all(dir); }
 };
+
+TEST_F(StxsTest, LoadYamlBinAndMigrationTables) {
+  auto path = dir / "bins.yaml";
+  std::ofstream(path) << "- analysis_bin: 3\n  label: signal region\n  fine_categories: [71, 72]\n";
+  auto config = stxs::loadConfig(path.string(), dir.string(), "coarse", "fine", true);
+  EXPECT_EQ(config.analysisBinLabels.at(3), "signal region");
+  EXPECT_EQ(config.fineCategoryToAnalysisBin.at(72), 3);
+  auto migration = dir / "migration.yaml";
+  std::ofstream(migration) << "- {fine_category: 71, pt_bin: 1, jet_pt_bin: 2, scale_bin: 3, acceptance_fallback: true}\n";
+  stxs::loadMigrationBinConfig(migration.string(), config);
+  EXPECT_TRUE(config.migrationBins.at(71).useAcceptanceFallback);
+  std::ofstream(migration) << "- {fine_category: 71, pt_bin: 1}\n";
+  EXPECT_THROW(stxs::loadMigrationBinConfig(migration.string(), config), std::runtime_error);
+  EXPECT_EQ(config.migrationBins.at(71).jetPtBin, 2);
+}
 
 TEST_F(StxsTest, GenericCategoryMappingAndConfiguredFallback) {
   {

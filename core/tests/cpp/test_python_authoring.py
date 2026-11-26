@@ -56,9 +56,181 @@ class ConfigurationTests(unittest.TestCase):
             path.write_text("files: [input.root]\noutput: out.root\nthreds: 4\n")
             with self.assertRaisesRegex(ValueError, "threds"):
                 AnalysisConfig.from_file(path)
+            path.write_text("fileList: [input.root]\nsaveFile: out.root\n")
+            with self.assertRaisesRegex(ValueError, "rdfanalyzer.Analyzer"):
+                AnalysisConfig.from_file(path)
 
 
 class AuthoringTests(unittest.TestCase):
+    def test_native_yaml_path_preserves_relative_assets(self):
+        import ROOT
+        import rdfanalyzer
+        import yaml
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "input.root"
+            ROOT.RDataFrame(3).Define("event", "int(rdfentry_)").Snapshot("Events", str(source))
+            (directory / "constants.yaml").write_text("constant_from_file: 7\n")
+            main = directory / "worker.yaml"
+            metadata = directory / "metadata.root"
+            main.write_text(yaml.safe_dump({"fileList": [str(source)], "treeList": ["Events"],
+                "saveFile": str(directory / "out.root"), "metaFile": str(metadata),
+                "enableSkim": "false", "threads": 1, "intConfig": "constants.yaml",
+                "sample": "native_yaml"}))
+            analyzer = rdfanalyzer.Analyzer(str(main))
+            self.assertEqual(analyzer.getConfigMap()["intConfig"], "constants.yaml")
+            self.assertEqual(analyzer.getConfigMap()["sample"], "native_yaml")
+            analyzer.define("constant_double", "double(constant_from_file)", ["constant_from_file"])
+            analyzer.book_sum("constant_total", "constant_double")
+            analyzer.run()
+            self.assertEqual(analyzer.sums["constant_total"], 21.)
+            self.assertEqual(analyzer.event_loops, 1)
+            self.assertTrue(metadata.is_file())
+
+    def test_inclusive_metadata_and_skim_selections_share_one_loop(self):
+        import ROOT
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "events.root"
+            ROOT.RDataFrame(6).Define("code", "int(rdfentry_)").Define("w", "2.f").Snapshot(
+                "Events", str(source), ["code", "w"])
+            for with_filter in (False, True):
+                with self.subTest(with_filter=with_filter):
+                    config = AnalysisConfig([str(source)], str(directory / f"out{with_filter}.root"),
+                        threads=1, save_columns=("code",), options={
+                            "sample": "fixture", "enableCounters": "yes", "counterIntWeightBranch": "code",
+                            "enableTaggerEfficiency": "true", "taggerEfficiencyColumns": "code",
+                            "taggerEfficiencyWeight": "w", "skimFilter": "code % 2 == 0"})
+                    analysis = Analysis(config)
+                    if with_filter:
+                        analysis.filter("later", "code >= 2", ["code"])
+                    analysis.count("selected").run()
+                    self.assertEqual(analysis.counts["selected"], 4 if with_filter else 6)
+                    self.assertEqual(analysis.native.event_loops, 1)
+                    with ROOT.TFile.Open(config.output) as skim:
+                        tree = skim.Get("Events")
+                        self.assertEqual([e.code for e in tree], [2, 4] if with_filter else [0, 2, 4])
+                    with ROOT.TFile.Open(config.native_config()["metaFile"]) as meta:
+                        hist = meta.Get("taggerEff_code_fixture")
+                        self.assertEqual(hist.Integral(0, hist.GetNbinsX()+1), 12.)
+                        self.assertEqual(meta.Get("counter_intWeightSum_fixture").GetEntries(), 6.)
+
+    def test_working_point_yaml_reads_per_object_category_column(self):
+        import ROOT
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "input.root"
+            ROOT.RDataFrame(1).Define("dummy", "1").Snapshot("Events", str(source), ["dummy"])
+            settings = directory / "efficiency.yaml"
+            settings.write_text("tagger_efficiency:\n  - mode: working_point\n    taggerColumn: tag\n"
+                                "    weightColumn: w\n    workingPoints: [loose, tight]\n")
+            config = AnalysisConfig([str(source)], str(directory / "skim.root"), skim=False,
+                                    threads=1, options={"enableTaggerEfficiency": "true",
+                                                       "taggerEfficiencyConfig": str(settings), "sample": "jets"})
+            analysis = Analysis(config)
+            analysis.define("tag_wp_category", "ROOT::RVecI{0, 1, 2, 2}")
+            analysis.define("w", "0.5")
+            analysis.run()
+            with ROOT.TFile.Open(config.native_config()["metaFile"]) as meta:
+                hist = meta.Get("taggerEffWP_tag_jets")
+                self.assertEqual([hist.GetBinContent(i) for i in (1, 2, 3)], [.5, .5, 1.])
+            self.assertEqual(analysis.native.event_loops, 1)
+
+    def test_masked_transverse_sum_propagates_shifted_input(self):
+        import ROOT
+        from rdfkinematics import selected_transverse_sum
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            source = directory / "input.root"
+            ROOT.RDataFrame(1).Define("dummy", "1").Snapshot("Events", str(source), ["dummy"])
+            analysis = Analysis(AnalysisConfig([str(source)], str(directory / "out.root"),
+                                               threads=1, skim=False))
+            with self.assertRaisesRegex(ValueError, r"input column 'dummy\+1'"):
+                analysis.native._define_compiled("invalid", "std::abs", ["dummy+1"], False)
+            analysis.define("mask", "ROOT::RVecI{1, 0}")
+            analysis.define("angle", "ROOT::RVecD{0., 0.}")
+            for name, value in (("pt", 5), ("pt_hi", 7), ("pt_lo", 3)):
+                analysis.define(name, f"ROOT::RVecD{{{value}., 99.}}")
+            analysis.register_variation_pair("pt", "scale", "pt_hi", "pt_lo")
+            selected_transverse_sum(analysis, "momentum", "mask", "pt", "angle")
+            analysis.define("px", "momentum.first", ["momentum"])
+            for column in ("px", "px_scaleUp", "px_scaleDown"):
+                analysis.sum(column, column)
+            analysis.run()
+            self.assertEqual(analysis.result().as_dict()["sums"],
+                             {"px": 5., "px_scaleUp": 7., "px_scaleDown": 3.})
+            self.assertEqual(analysis.native.event_loops, 1)
+
+    def test_tagger_schema_graph_guards_and_angular_variations(self):
+        from array import array
+        import ROOT
+        from rdfkinematics import signed_delta_phi
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.root"
+            output = ROOT.TFile(str(source), "RECREATE")
+            tree = ROOT.TTree("Events", "Events")
+            values = {key: array("d", [v]) for key, v in
+                      {"phi": 1., "up": 2., "down": -1., "ref": 0., "w": 2., "channel": 1.}.items()}
+            for key, buffer in values.items():
+                tree.Branch(key, buffer, key + "/D")
+            tree.Fill()
+            tree.Write()
+            output.Close()
+            spec = root / "tagger.yaml"
+            config = AnalysisConfig([str(source)], str(root/"out.root"), threads=1, skim=False,
+                options={"enableTaggerEfficiency": "true", "taggerEfficiencyConfig": str(spec), "sample": "test"})
+            spec.write_text("tagger_efficiency:\n  - taggerColumn: phi\n    flavorSplit: flavor\n")
+            with self.assertRaisesRegex((RuntimeError, ValueError), "entry 1.*flavorSplit"):
+                Analysis(config)
+            spec.write_text("tagger_efficiency: [{taggerColumn: phi}]\n---\ntag: ignored\n")
+            with self.assertRaisesRegex((RuntimeError, ValueError), "one YAML document"):
+                Analysis(config)
+            spec.write_text("tagger_efficiency:\n  - taggerColumn: phi\n    weightColumn: w\n"
+                            "    channelVariable: channel\n    channelBins: 1\n    channelLabels: [signal]\n")
+            invalid_counter = Analysis(AnalysisConfig([str(source)], str(root / "bad.root"),
+                threads=1, skim=False, options={"enableCounters": "on", "counterIntWeightBranch": "code",
+                                                "counterIntWeightBranchNBins": "20x"}))
+            invalid_counter.define("code", "1")
+            with self.assertRaisesRegex(ValueError, "counterIntWeightBranchNBins"):
+                invalid_counter.run()
+            analysis = Analysis(config)
+            import rdfanalyzer
+            types = rdfanalyzer.core_plugin_types()
+            self.assertIn("regions", types["RegionManager"])
+            self.assertIn("hist", types["NDHistogramManager"])
+            with self.assertRaises(ValueError) as error:
+                analysis.native.AddPlugin("bad", "missing_example")
+            self.assertTrue(all(name in str(error.exception) for name in types))
+            analysis.native.AddPlugin("region_test", "RegIOns")
+            analysis.native.SetupPlugin("region_test")
+            analysis.register_variation_pair("phi", "scale", "up", "down")
+            signed_delta_phi(analysis, "dphi", "phi", "ref")
+            import numpy as np
+            original = np.arange(8, dtype=np.int32)
+            analysis.define_constant_vector("constant", original[::2])
+            original[:] = 100
+            analysis.define("constant_total", "double(ROOT::VecOps::Sum(constant))", ["constant"])
+            analysis.sum("constant_total", "constant_total")
+            with self.assertRaisesRegex(ValueError, "one-dimensional"):
+                analysis.define_constant_vector("bad_shape", np.ones((2, 3)))
+            with self.assertRaisesRegex(ValueError, "dtype"):
+                analysis.define_constant_vector("bad_type", np.array([True]))
+            for column in ("dphi", "dphi_scaleUp", "dphi_scaleDown"):
+                analysis.sum(column, column)
+            analysis.run()
+            self.assertEqual(analysis.result().as_dict()["sums"],
+                             {"dphi": 1., "dphi_scaleUp": 2., "dphi_scaleDown": -1., "constant_total": 12.})
+            self.assertEqual(analysis.native.event_loops, 1)
+            with ROOT.TFile.Open(config.native_config()["metaFile"]) as metadata:
+                hist = metadata.Get("taggerEff_phi_test")
+                self.assertEqual(hist.GetYaxis().GetBinLabel(1), "signal")
+                self.assertEqual(hist.GetSumOfWeights() + hist.GetBinContent(hist.GetNbinsX()+1, 1), 2.)
+            for change in (lambda: analysis.native.AddPlugin("late", "RegionManager"),
+                           lambda: analysis.native.registerSystematic("late", ["phi"])):
+                with self.assertRaisesRegex(RuntimeError, "before run"):
+                    change()
+
     @unittest.skipUnless(importlib.util.find_spec('numba'), 'optional Numba is not installed')
     def test_systematic_inference_tutorial_signed_shapes_and_native_bdt(self):
         # Queued native gate; the lightweight provider suite never invokes it.

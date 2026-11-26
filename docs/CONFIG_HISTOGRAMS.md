@@ -6,7 +6,7 @@ This feature allows histograms to be defined in a configuration file and automat
 
 ## Configuration File Format
 
-The file extension selects the parser. Text files (`.txt`) use one histogram definition per line with `key=value` fields. YAML files (`.yaml` or `.yml`) use a sequence of mappings, as in `analyses/ExampleAnalysis/histograms.yaml`.
+Use a YAML sequence of mappings, as in `analyses/ExampleAnalysis/histograms.yaml`. To convert an existing text recipe, use the [record-list converter](YAML_CONFIG_SUPPORT.md).
 
 ### Required Fields
 
@@ -39,20 +39,7 @@ The file extension selects the parser. Text files (`.txt`) use one histogram def
 
 ## Example Configuration File
 
-Text format (`histograms.txt`):
-
-```txt
-# Simple 1D histogram
-name=pt_hist variable=jet_pt weight=event_weight bins=50 lowerBound=0.0 upperBound=500.0 label=Jet pT [GeV] suffix=jets
-
-# Histogram with channel separation
-name=eta_hist variable=jet_eta weight=event_weight bins=40 lowerBound=-5.0 upperBound=5.0 channelVariable=channel channelBins=2 channelLowerBound=0.0 channelUpperBound=2.0 channelRegions=ee,mumu suffix=dilep
-
-# Full N-dimensional histogram with all separations
-name=mass_hist variable=dimuon_mass weight=event_weight bins=60 lowerBound=70.0 upperBound=110.0 channelVariable=channel channelBins=2 channelLowerBound=0.0 channelUpperBound=2.0 channelRegions=signal,control controlRegionVariable=region controlRegionBins=3 controlRegionLowerBound=0.0 controlRegionUpperBound=3.0 controlRegionRegions=SR,CR1,CR2 sampleCategoryVariable=sample sampleCategoryBins=2 sampleCategoryLowerBound=0.0 sampleCategoryUpperBound=2.0 sampleCategoryRegions=data,MC suffix=analysis
-```
-
-Equivalent YAML format (`histograms.yaml`):
+Use a sequence of histogram mappings in `histograms.yaml`.
 
 ```yaml
 - name: pt_hist
@@ -73,7 +60,7 @@ Equivalent YAML format (`histograms.yaml`):
 #include <NDHistogramManager.h>
 
 // Create analyzer with config file
-auto analyzer = Analyzer("config.txt");
+auto analyzer = Analyzer("config.yaml");
 
 // Add NDHistogramManager plugin
 auto histManager = std::make_unique<NDHistogramManager>(analyzer.getConfigurationProvider());
@@ -82,10 +69,10 @@ analyzer.addPlugin("histogramManager", std::move(histManager));
 
 ### Configuration File Reference
 
-In your main config file (e.g., `config.txt`), add:
+Reference the histogram file from the main YAML mapping.
 
-```txt
-histogramConfig=histograms.txt
+```yaml
+histogramConfig: histograms.yaml
 ```
 
 ### Define Variables and Apply Filters
@@ -126,7 +113,7 @@ analyzer.run();
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <config.txt>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <config.yaml>" << std::endl;
         return 1;
     }
 
@@ -299,7 +286,15 @@ to retain the former expanded layout. `--nominal-only` still performs schema
 postprocessing and nominal TH1 extraction; it cannot be combined with an
 explicit `--sparse-only`.
 
-Set `RDF_HISTOGRAM_PROFILE=1` for per-action storage/finalization diagnostics.
+Set `RDF_HISTOGRAM_PROFILE=1` for per-action storage/finalization diagnostics
+and two `histogram summary` lines. The booked summary counts actions, reports
+the equivalent bytes for storing **all Boost actions** as dense arrays, and
+shows the dense bytes actually selected across slots. The final summary adds
+completed actions, occupied output bins and the sum of sparse Boost allocator
+samples. Each sparse action contributes its largest sample from pre-merge or
+slot merging. The sum can combine peaks at different times. ROOT-native
+actions count toward the action and occupied-bin totals, but only Boost
+actions contribute to byte estimates. Use worker peak RSS for total memory.
 See `benchmarks/histogram_lifecycle_20261030/REPORT.md` for the measured vjet
 tradeoffs and reproduction commands.
 

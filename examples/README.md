@@ -113,7 +113,7 @@ Before running these examples, ensure you have:
 Demonstrates using C++ expressions as strings (ROOT JIT compilation).
 
 ```bash
-python examples/example_string_expressions.py config.txt
+python examples/example_string_expressions.py config.yaml
 ```
 
 **Features:**
@@ -129,7 +129,7 @@ python examples/example_string_expressions.py config.txt
 Demonstrates using numba-compiled Python functions.
 
 ```bash
-python examples/example_numba_functions.py config.txt
+python examples/example_numba_functions.py config.yaml
 ```
 
 **Features:**
@@ -145,7 +145,7 @@ python examples/example_numba_functions.py config.txt
 Demonstrates passing numpy arrays via pointer + size.
 
 ```bash
-python examples/example_numpy_arrays.py config.txt
+python examples/example_numpy_arrays.py config.yaml
 ```
 
 **Features:**
@@ -161,7 +161,7 @@ python examples/example_numpy_arrays.py config.txt
 Demonstrates constructing `HistInfo` and `SelectionInfo` in Python and booking/saving ND histograms via the histogram plugin.
 
 ```bash
-python examples/example_hist_booking.py config.txt
+python examples/example_hist_booking.py config.yaml
 ```
 
 **Features:**
@@ -173,12 +173,11 @@ python examples/example_hist_booking.py config.txt
 
 All examples require a configuration file. Minimum example:
 
-```
-# config.txt
-fileList=data.root
-saveFile=output.root
-threads=-1
-saveConfig=output_branches.txt
+```yaml
+# config.yaml
+fileList: [data.root]
+saveFile: output.root
+threads: -1
 ```
 
 For more details, see the [Configuration Reference](../docs/CONFIG_REFERENCE.md).

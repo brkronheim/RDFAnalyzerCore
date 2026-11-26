@@ -1,0 +1,16 @@
+{
+  "assets": {},
+  "bundle_id": "8703772a3d8618c993515ddd17575b8f2691c57ed4ce9497012b94f5087fa014",
+  "entrypoints": {
+    "datasets": "dataset_manifest.yaml",
+    "submit_config": "submit_config.yaml"
+  },
+  "files": {
+    "dataset_manifest.yaml": "76b6e4975753c741f7c993a549171d2ace826e2c3ed0d721586821dbd0ed4d96",
+    "submit_config.yaml": "c08d8867782be251c252eb662379b585aae24387548c7ce8c7b0a40a29ef127b"
+  },
+  "metadata": {
+    "purpose": "offline Snakemake demonstration"
+  },
+  "schema": "rdf-run-bundle-v1"
+}

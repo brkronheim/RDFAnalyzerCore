@@ -8,14 +8,14 @@ sample groups and cross sections.
 ## Setup and Build
 
 The stitching workflow requires ROOT, the Core C++ library, the analysis
-executable, and the LAW Python dependencies. On the supported CVMFS host:
+executable, and the Snakemake production controller. On the supported CVMFS host:
 
 ```bash
 cd RDFAnalyzerCore
 source env.sh
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-production.txt
+pip install -r requirements-snakemake.txt
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -25,8 +25,6 @@ cmake -S . -B build \
   -DONNXRUNTIME_USE_CUDA=OFF \
   -DUSE_CUDA=OFF
 cmake --build build --target vjetStitch testVjetStitch -j"$(nproc)"
-source core/python/law/env.sh
-law index
 ```
 
 `source build.sh` performs the same environment setup and a complete build.
@@ -126,6 +124,14 @@ inclusive_cross_sections:
     run3_24: 100.0
 ```
 
+For independently generated anchors with known shares of the total cross
+section, set `groups.<name>.inclusive_sample_fractions.<era>` to a mapping
+from each inclusive sample name to its share. The fractions must be finite,
+positive, and sum to one. The derivation normalizes each anchor's signed
+distribution to its assigned share before summing the bins, and records the
+fractions in the cross-section report. Stitch correction factors still use
+the per-bin signed event counts.
+
 Core does not provide process-specific cross-section defaults. If an inclusive
 anchor or cross section is not configured, the correction factors can still be
 derived, but the cross-section report needed for normalized comparison plots
@@ -168,7 +174,19 @@ comparison image per process/year/observable, for example
 inclusive anchor collection against the sum of all normalized stitched
 samples. The report also records active-bin normalization and excluded bins.
 
-## LAW Workflow
+## Snakemake workflow
+
+Compose a counter campaign and an application campaign with the
+[Snakemake stitching configuration](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md#two-pass-stitching).
+The campaigns can choose local, Dask, or HTCondor independently. The workflow
+derives weights from the verified counter output index and stages them into
+the application pass after derivation. Validation uses the verified
+application output index. Use `stitch_counters`, `stitch_weights`, or
+`stitch` to request a particular milestone.
+
+## Historical LAW workflow
+
+These commands and text filenames describe existing LAW campaigns. For a new stitching campaign, use the Snakemake workflow above.
 
 `StitchingApplyTask` runs the counter pass, derivation, and application pass in
 one dependency graph. A direct local example is:
@@ -180,7 +198,7 @@ law run StitchingApplyTask \
   --local-scheduler \
   --workers 1 \
   --workflow local \
-  --submit-config analyses/rdfAnalyzerStitch/cfg/cfg_22.txt \
+  --submit-config analyses/rdfAnalyzerStitch/cfg/cfg_22.yaml \
   --stitch-config analyses/rdfAnalyzerStitch/cfg/stitch_config.yaml \
   --dataset-manifest analyses/rdfAnalyzerStitch/cfg/samples_22.yaml \
   --exe build/analyses/rdfAnalyzerStitch/vjetStitch \
@@ -195,7 +213,7 @@ law run StitchingDerivationTask \
   --stitch-config analyses/rdfAnalyzerStitch/cfg/stitch_config.yaml \
   --name vjetStitch22 \
   --source-skim-name vjetStitch22_counts \
-  --source-submit-config analyses/rdfAnalyzerStitch/cfg/cfg_22.txt \
+  --source-submit-config analyses/rdfAnalyzerStitch/cfg/cfg_22.yaml \
   --source-exe build/analyses/rdfAnalyzerStitch/vjetStitch \
   --source-dataset-manifest analyses/rdfAnalyzerStitch/cfg/samples_22.yaml
 ```
@@ -208,7 +226,7 @@ law run StitchingValidationTask \
   --local-scheduler \
   --name vjetStitch22 \
   --stitch-config analyses/rdfAnalyzerStitch/cfg/stitch_config.yaml \
-  --submit-config analyses/rdfAnalyzerStitch/cfg/cfg_22.txt \
+  --submit-config analyses/rdfAnalyzerStitch/cfg/cfg_22.yaml \
   --dataset-manifest analyses/rdfAnalyzerStitch/cfg/samples_22.yaml
 ```
 

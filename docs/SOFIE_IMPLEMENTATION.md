@@ -132,11 +132,13 @@ or compute a replica summary for the scalar score column. See
 ## Optional model metadata
 
 Manual registration is sufficient. To declare model metadata in a separate
-file, set `sofieConfig=cfg/sofie_models.txt` in the main configuration and
-include a record such as the following.
+file, set `sofieConfig: cfg/sofie_models.yaml` in the main configuration and
+include a record such as the following. An explicitly configured file must exist and each entry must provide a model name, feature list and gate.
 
-```text
-name=classifier inputVariables=jet_pt,jet_eta,jet_phi,jet_mass runVar=has_jet
+```yaml
+- name: classifier
+  inputVariables: jet_pt,jet_eta,jet_phi,jet_mass
+  runVar: has_jet
 ```
 
 Keep the record and registration consistent. Earlier entries for a model name
@@ -183,3 +185,5 @@ with [ONNX Runtime](ONNX_IMPLEMENTATION.md).
 
 See the [configuration reference](CONFIG_REFERENCE.md#sofie-manager-configuration)
 and [C++ API reference](API_REFERENCE.md#sofiemanager) for framework details.
+
+An omitted `sofieConfig` permits programmatic registration alone. An explicit recipe must be readable and each model record must provide nonempty `name`, `inputVariables` and `runVar` fields.

@@ -65,9 +65,15 @@ analyzer.bookConfigHistograms();
 analyzer.run();
 ```
 
-Config file format (`histograms.txt`):
-```
-name=pt_hist variable=jet_pt weight=event_weight bins=50 lowerBound=0.0 upperBound=500.0
+Histogram definition in `histograms.yaml`
+
+```yaml
+- name: pt_hist
+  variable: jet_pt
+  weight: event_weight
+  bins: 50
+  lowerBound: 0.0
+  upperBound: 500.0
 ```
 
 ## Installing
@@ -93,7 +99,9 @@ cd analyses/ExampleAnalysis
 ### Core C++ Backbone
 
 - **[Architecture](docs/ARCHITECTURE.md)** - Core manager wiring, plugin lifecycle, and execution flow
+- **[Python source map](core/python/README.md)** - Analysis authoring, production workflows, and shared Python services
 - **[API Reference](docs/API_REFERENCE.md)** - Canonical `Analyzer` and interface APIs
+- [Analysis function catalog](docs/FUNCTION_CATALOG.md) covers native operations for C++ and Python, including object lookup, angular distances and selected momentum sums.
 - **[Plugin Development](docs/PLUGIN_DEVELOPMENT.md)** - Implementing C++ plugins via `IPluggableManager`
 - **[Doxygen Guide](docs/DOXYGEN_GUIDE.md)** - C++ documentation standards for headers and interfaces
 
@@ -101,6 +109,9 @@ cd analyses/ExampleAnalysis
 
 - **[Getting Started](docs/GETTING_STARTED.md)** - Installation and first steps
 - **[Configuration Reference](docs/CONFIG_REFERENCE.md)** - Complete config file documentation
+- Create YAML configurations and convert historical text jobs with the [YAML schema and migration guide](docs/YAML_CONFIG_SUPPORT.md).
+- Configure friends, inclusive actions and explicit skim selections using the [source and output contracts](docs/SOURCE_AND_OUTPUT_CONTRACTS.md).
+- Select an XRootD read policy and interpret its transfer counters in the [adaptor guide](docs/xrd-adaptor.md).
 - **[Generic Stitching](docs/STITCHING.md)** - Reusable counters, binning, and validation
 - **[Agent analysis walkthrough](docs/ANALYSIS_WALKTHROUGH.md)** - How to trace an RDFAnalyzer analysis, with ExampleAnalysis as a compact illustration
 - **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Building analyses step-by-step
@@ -147,7 +158,9 @@ The docs are intentionally layered: `GETTING_STARTED` and `ANALYSIS_GUIDE` show 
 - Python 3.8+
 - Initialize the pybind11 submodule for the CMake build. Install the [Python authoring requirements](requirements-python.txt) in the interpreter matched to ROOT for NumPy arrays and Numba callbacks.
 
-**For LAW / Luigi workflows:**
+**For Snakemake production:** Install `requirements-snakemake.txt`. The [workflow guide](examples/snakemake/README.md) describes controller setup and worker dependencies.
+
+**For legacy LAW / Luigi workflows:**
 - Create and activate the repository-local virtualenv, then install the production requirements: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements-production.txt`
 - After that, `source core/python/law/env.sh` will reuse `.venv` automatically when it exists.
 - `xrdfs` must be available on `PATH` for XRootD file discovery workflows.
@@ -227,14 +240,14 @@ Configuration files hold I/O and performance settings, plugin settings, and outp
 - Analysis-local registries can also live in YAML when they are primarily data. The [`ExampleAnalysis`](analyses/ExampleAnalysis/README.md) directory demonstrates how an analysis config references constants and histogram definitions; see the [walkthrough](docs/ANALYSIS_WALKTHROUGH.md) for a source-first trace of its behavior.
 
 **Example**:
-```
+```yaml
 # Main config
 # fileList supports glob patterns (wildcards) for input files, e.g.:
-fileList=/eos/user/b/bkronhei/lawmc/Zto2Nu_150pt_NANOGEN_22/nano/nano_*.root
-saveFile=output.root
-threads=-1
-bdtConfig=cfg/bdts.txt
-onnxConfig=cfg/onnx_models.txt
+fileList: /data/samples/nano_*.root
+saveFile: output.root
+threads: -1
+bdtConfig: cfg/bdts.yaml
+onnxConfig: cfg/onnx_models.yaml
 ```
 
 See [Configuration Reference](docs/CONFIG_REFERENCE.md) for complete documentation, including details on glob/wildcard support for fileList.
@@ -353,7 +366,7 @@ source build.sh
 
 # Run
 cd build/analyses/MyAnalysis
-./myanalysis config.txt
+./myanalysis config.yaml
 ```
 
 **Requirements for analysis repositories**:
@@ -447,16 +460,15 @@ int main(int argc, char **argv) {
 }
 ```
 
-**Configuration** (`config.txt`):
-```
+**Configuration** (`config.yaml`):
+```yaml
 # fileList can be a comma-separated list or a glob pattern:
-fileList=data1.root,data2.root
-# or
-fileList=/eos/user/b/bkronhei/lawmc/Zto2Nu_150pt_NANOGEN_22/nano/nano_*.root
-saveFile=output.root
-threads=-1
-onnxConfig=cfg/onnx_models.txt
-saveConfig=cfg/output_branches.txt
+fileList: data1.root,data2.root
+# A glob can also be supplied, e.g. /data/samples/nano_*.root
+saveFile: output.root
+threads: -1
+onnxConfig: cfg/onnx_models.yaml
+saveConfig: cfg/output_branches.yaml
 ```
 
 See [Analysis Guide](docs/ANALYSIS_GUIDE.md) for complete examples.
@@ -469,7 +481,7 @@ The framework can also be used from Python with high performance:
 import rdfanalyzer
 
 # Create analyzer from config file
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Define variables using C++ expressions (ROOT JIT)
 analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
@@ -572,49 +584,18 @@ Features:
 - [Systematics Example](docs/DATACARD_SYSTEMATICS_EXAMPLE.md) for creating histograms with systematic variations
 - [Combine Integration](docs/COMBINE_INTEGRATION.md) for complete statistical analysis workflow
 
-### Production Manager
+### Production with Snakemake
 
-Unified production management system for batch analyses.
-
-Legacy compatibility submission scripts have been removed. New production workflows should use LAW discovery tasks to generate job configs and `core/python/production_monitor.py` / `core/python/production_manager.py` for submission, monitoring, validation, and resubmission.
-
-Recommended workflow:
+Install `requirements-snakemake.txt` in the controller environment. Configure one or more eras, then select a stage and preview the jobs before execution.
 
 ```bash
-# Discover files via Rucio and build job configs
-law run GetRucioFileList --submit-config analyses/myAnalysis/cfg/submit_config.txt --name myRun
-law run SkimTask --submit-config analyses/myAnalysis/cfg/submit_config.txt --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml --name mySkimRun --file-source rucio --file-source-name myRun --exe build/analyses/MyAnalysis/myanalysis
-
-# Monitor and validate
-python core/python/production_monitor.py monitor --name mySkimRun
-python core/python/production_monitor.py validate --name mySkimRun
-python core/python/production_monitor.py resubmit --name mySkimRun
+snakemake -s examples/snakemake/Snakefile --configfile campaign.yaml --cores 4 --dry-run production
+snakemake -s examples/snakemake/Snakefile --configfile campaign.yaml --cores 4 production
 ```
 
-Features:
-- Unified job lifecycle management (generation, submission, monitoring, validation)
-- State persistence (resilient to connection failures)
-- Real-time progress monitoring
-- Automatic output validation
-- Failure recovery and resubmission
-- HTCondor and DASK backend support
-- Works in AFS/EOS storage areas
+Local, Dask and HTCondor workers share the partition planner and verified output index. For completed inputs, use `examples/snakemake/DownstreamSnakefile` to run plotting, datacards, fits or diagnostics independently. The [Snakemake guide](examples/snakemake/README.md) covers stage targets, saved products, site settings and examples.
 
-**See**: [Production Manager Guide](docs/PRODUCTION_MANAGER.md) for complete documentation.
-
-### HTCondor Submission
-
-Legacy batch submission scripts have been removed. Batch submission now uses LAW discovery tasks and the production manager toolchain.
-
-Features:
-- Rucio-based dataset discovery via LAW
-- Open Data discovery via LAW tasks
-- Automatic input/output staging
-- XRootD support
-- Shared executable staging
-- Configuration validation
-
-**See**: [Batch Submission Guide](docs/BATCH_SUBMISSION.md) for complete documentation.
+Existing LAW campaigns remain under their original controller through completion. Follow the [batch compatibility guide](docs/BATCH_SUBMISSION.md#legacy-law-workflows) for those runs.
 
 ### Custom ROOT Dictionaries
 

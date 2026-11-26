@@ -36,7 +36,7 @@ def example_basic_usage():
         name="example_production",
         work_dir=Path("example_production_work"),
         exe_path=Path("./my_analyzer"),  # Path to your analysis executable
-        base_config="example_config.txt",  # Base configuration file
+        base_config="example_config.yaml",  # Base configuration file
         output_dir=Path("example_outputs"),
         backend="htcondor",
         stage_inputs=False,
@@ -96,7 +96,7 @@ def example_monitoring():
         name="example_production",
         work_dir=Path("example_production_work"),
         exe_path=Path("./my_analyzer"),
-        base_config="example_config.txt",
+        base_config="example_config.yaml",
         output_dir=Path("example_outputs"),
     )
     
@@ -128,7 +128,7 @@ def example_validation_and_recovery():
         name="example_production",
         work_dir=Path("example_production_work"),
         exe_path=Path("./my_analyzer"),
-        base_config="example_config.txt",
+        base_config="example_config.yaml",
         output_dir=Path("example_outputs"),
     )
     
@@ -169,7 +169,7 @@ def example_advanced_api():
         name="advanced_production",
         work_dir=Path("advanced_production_work"),
         exe_path=Path("./my_analyzer"),
-        base_config="config.txt",
+        base_config="config.yaml",
         output_dir=Path("advanced_outputs"),
         backend="dask",  # Use DASK backend
         stage_inputs=True,

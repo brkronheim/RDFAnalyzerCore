@@ -3,6 +3,12 @@
 # Gather all source files in this directory
 file(GLOB CORE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/*.cc")
 
+# The installed SDK historically exported both implicit FriendTreeSpec constructors.
+# Retain the out-of-line definitions in this setup-only translation unit.
+set_property(SOURCE FriendTreeSpec.cc APPEND PROPERTY COMPILE_OPTIONS
+    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-fno-inline>"
+    "$<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-Xclang;-mno-constructor-aliases>")
+
 add_library(core STATIC ${CORE_SRC})
 if(TARGET RDFMimalloc)
     target_sources(core INTERFACE "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:$<TARGET_OBJECTS:RDFMimalloc>>")

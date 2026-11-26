@@ -26,7 +26,7 @@ protected:
   void SetUp() override {
     ROOT::DisableImplicitMT();
     ChangeToTestSourceDir();
-    std::string configFile = "cfg/test_data_config_minimal.txt";
+    std::string configFile = "cfg/test_data_config_minimal.yaml";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     dataManager = std::make_unique<DataManager>(1);
     systematicManager = std::make_unique<SystematicManager>();
@@ -65,7 +65,7 @@ protected:
 };
 
 TEST_F(NDHistogramManagerTest, ConstructorCreatesValidManager) {
-  auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+  auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
   EXPECT_NO_THROW({
     auto manager = std::make_unique<NDHistogramManager>(*config);
     ASSERT_NE(manager, nullptr);
@@ -783,7 +783,7 @@ TEST_F(NDHistogramManagerTest, CollectionTransportReusePreservesIndependentRootO
     for (const bool shapes : {false, true}) {
       for (const bool share : {false, true}) {
       SCOPED_TRACE(std::string(backend) + (shapes ? " shapes" : " nominal") + (share ? " reuse" : " ordinary"));
-      auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+      auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
       cfg->set("histogramBackend", backend);
       cfg->set("histogramSystematics", shapes ? "true" : "false");
       cfg->set("histogramShareCollectionTransport", share ? "true" : "false");
@@ -1039,7 +1039,7 @@ TEST_F(NDHistogramManagerTest, PerSlotCollectionsPreserveIndependentRootOracle) 
       for (const bool objectWeights : {false, true}) {
         SCOPED_TRACE(std::string(backend) + (dense ? " dense" : " sparse") +
                      (objectWeights ? " object weights " : " scalar weights ") + sparse);
-        auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+        auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
         cfg->set("histogramBackend", backend);
         cfg->set("histogramBoostPrecision", objectWeights ? "double" : "float");
         cfg->set("histogramBoostSparseBackend", sparse);
@@ -1155,7 +1155,7 @@ TEST_F(NDHistogramManagerTest, PerSlotCollectionsPreserveSlotOwnershipUnderImpli
   ROOT::EnableImplicitMT(2);
   ASSERT_GE(ROOT::GetThreadPoolSize(), 2u);
   for (const auto& backend : {"root", "boost"}) {
-    auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
     cfg->set("histogramBackend", backend);
     cfg->set("histogramCollectionLayout", "per-slot");
     cfg->set("histogramSystematics", "true");
@@ -1214,7 +1214,7 @@ TEST_F(NDHistogramManagerTest, PerSlotCollectionsPreserveSlotOwnershipUnderImpli
 TEST_F(NDHistogramManagerTest, PerSlotCollectionsKeepCancellationVarianceAndWhollyEmptyOutput) {
   for (const auto& backend : {"root", "boost"}) {
     for (const bool allEmpty : {false, true}) {
-      auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+      auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
       cfg->set("histogramBackend", backend);
       cfg->set("histogramCollectionLayout", "per-slot");
       cfg->set("histogramSystematics", "true");

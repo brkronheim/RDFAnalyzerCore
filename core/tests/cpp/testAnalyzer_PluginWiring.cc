@@ -117,7 +117,7 @@ std::unique_ptr<Analyzer> makeProbeAnalyzer(
     std::unique_ptr<IDataFrameProvider> data,
     std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins = {}) {
     auto config = std::make_unique<ConfigurationManager>(
-        std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.txt");
+        std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.yaml");
     return std::make_unique<Analyzer>(
         std::move(config), std::move(data), std::move(plugins),
         std::make_unique<SystematicManager>(), std::make_unique<DefaultLogger>(),
@@ -130,7 +130,7 @@ TEST(AnalyzerPluginWiring, AddPluginAfterConfigCtor) {
     ChangeToTestSourceDir();
 
     // Use the lightweight test config for speed and determinism
-    std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.txt";
+    std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.yaml";
     Analyzer analyzer(cfgPath);
 
     // Use the helper to create, register, and get the plugin as shared_ptr
@@ -146,7 +146,7 @@ TEST(AnalyzerPluginWiring, SkimUsesDataFrameUpdatedByPluginExecute) {
     ChangeToTestSourceDir();
 
     auto config = std::make_unique<ConfigurationManager>(
-        std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.txt");
+        std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.yaml");
     config->set("enableSkim", "true");
     config->set("skimFilter", "plugin_output == 0");
 
@@ -175,7 +175,7 @@ TEST(AnalyzerPluginWiring, ConfigCanDisableSystematicPropagation) {
     ChangeToTestSourceDir();
 
     auto config = std::make_unique<ConfigurationManager>(
-        std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.txt");
+        std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.yaml");
     config->set("enableSystematics", "false");
 
     Analyzer analyzer(std::move(config),

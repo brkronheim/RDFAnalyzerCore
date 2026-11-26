@@ -344,8 +344,7 @@ class DatasetEntry:
 
     def to_legacy_dict(self) -> Dict[str, str]:
         """Return a ``{key: str}`` dict with all non-``None`` values converted to
-        strings.  Used when writing legacy on-disk ``submit_config.txt`` job
-        configs or emitting per-job float/int config files.
+        strings for lowering sample metadata into native job settings.
         """
         d: Dict[str, str] = {"name": self.name}
 
@@ -468,7 +467,11 @@ class DatasetManifest:
         whitelist: Optional[List[str]] = None,
         blacklist: Optional[List[str]] = None,
         lumi_by_year: Optional[Dict[int, float]] = None,
+        base_dirs: Optional[List[str]] = None,
+        record_ids: Optional[List[str]] = None,
     ) -> None:
+        self.base_dirs = list(base_dirs or [])
+        self.record_ids = list(record_ids or [])
         self.datasets: List[DatasetEntry] = datasets or []
         self.lumi: float = lumi
         self.whitelist: List[str] = whitelist or []
@@ -557,8 +560,8 @@ class DatasetManifest:
         path : str
             Path to the YAML manifest file.
         """
-        with open(path) as fh:
-            raw = yaml.safe_load(fh)
+        from native_config_io import load_yaml_document
+        raw = load_yaml_document(path, typed=True)
 
         if not isinstance(raw, dict):
             raise ValueError(
@@ -589,6 +592,8 @@ class DatasetManifest:
             whitelist=whitelist,
             blacklist=blacklist,
             lumi_by_year=lumi_by_year,
+            base_dirs=raw.get("base_dirs"),
+            record_ids=[str(value) for value in raw.get("record_ids", [])],
         )
 
         # Structural YAML checks above catch malformed fields; this second pass
@@ -605,25 +610,26 @@ class DatasetManifest:
 
         return manifest
 
-    def save_yaml(self, path: str) -> None:
-        """Serialise the manifest to a YAML file.
-
-        Parameters
-        ----------
-        path : str
-            Destination file path (created / overwritten).
-        """
+    def as_yaml_document(self) -> Dict[str, Any]:
+        """Build the YAML representation, including optional dataset discovery settings."""
         raw: Dict[str, Any] = {
             "lumi": self.lumi,
             "whitelist": self.whitelist,
             "blacklist": self.blacklist,
             "datasets": [e.to_dict() for e in self.datasets],
         }
+        if self.record_ids:
+            raw["record_ids"] = self.record_ids
+        if self.base_dirs:
+            raw["base_dirs"] = self.base_dirs
         if self.lumi_by_year:
             raw["lumi_by_year"] = dict(self.lumi_by_year)
+        return raw
+
+    def save_yaml(self, path: str) -> None:
+        from native_config_io import write_config_yaml
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        with open(path, "w") as fh:
-            yaml.dump(raw, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        write_config_yaml(self.as_yaml_document(), path)
 
     # ------------------------------------------------------------------ query
 
@@ -824,7 +830,7 @@ class DatasetManifest:
 
 def _validate_manifest_yaml(raw: Dict[str, Any], path: str) -> None:
     """Validate the top-level YAML manifest schema and dataset structure."""
-    allowed_top_keys = {"lumi", "lumi_by_year", "whitelist", "blacklist", "datasets"}
+    allowed_top_keys = {"record_ids", "base_dirs", "lumi", "lumi_by_year", "whitelist", "blacklist", "datasets"}
     extra_top_keys = set(raw) - allowed_top_keys
     if extra_top_keys:
         raise ValueError(
@@ -839,6 +845,14 @@ def _validate_manifest_yaml(raw: Dict[str, Any], path: str) -> None:
         raise ValueError(
             f"Dataset manifest '{path}' 'datasets' field must be a YAML sequence."
         )
+
+    if "record_ids" in raw and (not isinstance(raw["record_ids"], list) or
+            any(not str(item).isdigit() for item in raw["record_ids"])):
+        raise ValueError(f"{path}: record_ids must be a list of Open Data record numbers")
+
+    if "base_dirs" in raw and (not isinstance(raw["base_dirs"], list)
+                               or not all(isinstance(item, str) for item in raw["base_dirs"])):
+        raise ValueError(f"{path}: base_dirs must be a list of directory paths")
 
     if "whitelist" in raw and raw["whitelist"] is not None:
         if not isinstance(raw["whitelist"], list) or any(not isinstance(item, str) for item in raw["whitelist"]):
@@ -1019,5 +1033,9 @@ def _entry_from_legacy_kv(kv: Dict[str, str]) -> DatasetEntry:
         files=[f for f in kv.get("fileList", "").split(",") if f],
         parent=kv.get("parent"),
         site=kv.get("site"),
-        extra={},
+        extra={k: v for k, v in kv.items() if k not in {
+            "name", "year", "era", "campaign", "process", "group", "stitch_id", "sample_type",
+            "type", "dtype", "xsec", "filterEfficiency", "kfac", "extraScale", "norm",
+            "energy", "genWeightMode", "das", "fileList", "parent", "site",
+        }},
     )

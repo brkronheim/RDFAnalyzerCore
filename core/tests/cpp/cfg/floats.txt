@@ -1,3 +1,0 @@
-float1=1.5
-float2=2.7
-float3=3.14 

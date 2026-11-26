@@ -47,14 +47,14 @@ MyAnalysis/
 ├── CMakeLists.txt           # Build configuration
 ├── analysis.cc              # Main analysis code
 ├── cfg/                     # Configuration directory
-│   ├── main_config.txt     # Main configuration
-│   ├── output.txt          # Branches to save
-│   ├── floats.txt          # Constant columns used by weights
-│   ├── histograms.txt      # Histogram definitions
-│   ├── bdts.txt           # BDT models (optional)
-│   ├── onnx_models.txt    # Neural networks (optional)
-│   ├── corrections.txt     # Scale factors (optional)
-│   └── triggers.txt        # Trigger configuration (optional)
+│   ├── main_config.yaml     # Main configuration
+│   ├── output.yaml          # Branches to save
+│   ├── floats.yaml          # Constant columns used by weights
+│   ├── histograms.yaml      # Histogram definitions
+│   ├── bdts.yaml           # BDT models (optional)
+│   ├── onnx_models.yaml    # Neural networks (optional)
+│   ├── corrections.yaml     # Scale factors (optional)
+│   └── triggers.yaml        # Trigger configuration (optional)
 ├── aux/                     # Auxiliary files
 │   ├── models/             # ML models
 │   └── corrections/        # Correction files
@@ -98,35 +98,35 @@ set_target_properties(myanalysis PROPERTIES
 
 ### Step 3: Create Main Configuration File
 
-Create `cfg/main_config.txt`:
+Create `cfg/main_config.yaml`:
 
-```
+```yaml
 # ============== Input/Output ==============
-fileList=/path/to/data.root
-saveFile=output/myanalysis.root
-metaFile=output/histograms.root
-saveTree=Events
-enableSkim=true
-saveConfig=cfg/output.txt
-floatConfig=cfg/floats.txt
-histogramConfig=cfg/histograms.txt
+fileList: /path/to/data.root
+saveFile: output/myanalysis.root
+metaFile: output/histograms.root
+saveTree: Events
+enableSkim: true
+saveConfig: cfg/output.yaml
+floatConfig: cfg/floats.yaml
+histogramConfig: cfg/histograms.yaml
 
 # ============== Performance ==============
-threads=-1
-batch=false
+threads: -1
+batch: false
 # Optional ROOT input settings for remote TTree files:
-# treeCacheSizeMB=64
-# treeCacheLearnEntries=10
-# treeCachePrefill=0
-# treeCacheAsyncPrefetch=1
-# treeCacheAsyncOpenNext=1
+# treeCacheSizeMB: 64
+# treeCacheLearnEntries: 10
+# treeCachePrefill: 0
+# treeCacheAsyncPrefetch: 1
+# treeCacheAsyncOpenNext: 1
 
 # ============== Plugin configuration paths ==============
 # Referencing a plugin config does not construct the plugin. Create and
 # register each plugin in analysis.cc when the analysis uses it.
-# onnxConfig=cfg/onnx_models.txt
-# correctionConfig=cfg/corrections.txt
-# triggerConfig=cfg/triggers.txt
+# onnxConfig: cfg/onnx_models.yaml
+# correctionConfig: cfg/corrections.yaml
+# triggerConfig: cfg/triggers.yaml
 ```
 
 For remote reads, `treeCacheSizeMB` sets a fixed cache size in MiB per ROOT
@@ -150,32 +150,50 @@ the current one. It is single-threaded and opt-in; it does not preload the next
 file's event data.
 
 LAW's `PrepareSkimJobs` copies these keys from the submit config template into
-each job's `submit_config.txt`, including its test job. Its worker setup copies
+each job's `submit_config.yaml`, including its test job. Its worker setup copies
 that per-job config into the runtime sandbox, where the executable applies the
 settings before opening input files.
 
 ### Step 4: Create Output Branch Configuration
 
-Create `cfg/output.txt` listing columns defined by this analysis that should be kept in the skim:
+Create `cfg/output.yaml` listing columns defined by this analysis that should be kept in the skim:
 
-```
-ZBosonMass
-LeadingMuonPt
-SubleadingMuonPt
-```
-
-Create `cfg/floats.txt` with a constant weight column:
-
-```text
-normScale=1.0
+```yaml
+- ZBosonMass
+- LeadingMuonPt
+- SubleadingMuonPt
 ```
 
-Create `cfg/histograms.txt` with one histogram definition per line:
+Create `cfg/floats.yaml` with a constant weight column:
 
-```text
-name=ZBosonMass variable=ZBosonMass weight=normScale bins=60 lowerBound=70 upperBound=110 label=Z Boson Mass [GeV]
-name=LeadingMuonPt variable=LeadingMuonPt weight=normScale bins=50 lowerBound=20 upperBound=150 label=Leading Muon pT [GeV]
-name=SubleadingMuonPt variable=SubleadingMuonPt weight=normScale bins=50 lowerBound=20 upperBound=150 label=Subleading Muon pT [GeV]
+```yaml
+normScale: 1.0
+```
+
+Create `cfg/histograms.yaml` with a YAML mapping for each histogram.
+
+```yaml
+- name: ZBosonMass
+  variable: ZBosonMass
+  weight: normScale
+  bins: 60
+  lowerBound: 70
+  upperBound: 110
+  label: Z Boson Mass [GeV]
+- name: LeadingMuonPt
+  variable: LeadingMuonPt
+  weight: normScale
+  bins: 50
+  lowerBound: 20
+  upperBound: 150
+  label: Leading Muon pT [GeV]
+- name: SubleadingMuonPt
+  variable: SubleadingMuonPt
+  weight: normScale
+  bins: 50
+  lowerBound: 20
+  upperBound: 150
+  label: Subleading Muon pT [GeV]
 ```
 
 ### Step 5: Write Analysis Code
@@ -202,8 +220,8 @@ int main(int argc, char **argv) {
     auto histManager = NDHistogramManager::create(analyzer);
 
     // Define your analysis variables and cuts here
-    // They must include the columns referenced by cfg/histograms.txt and
-    // cfg/output.txt; see the sections below for examples.
+    // They must include the columns referenced by cfg/histograms.yaml and
+    // cfg/output.yaml; see the sections below for examples.
 
     analyzer.bookConfigHistograms();
 
@@ -221,7 +239,7 @@ int main(int argc, char **argv) {
 cd ../..
 source build.sh
 cd analyses/MyAnalysis
-../../build/analyses/MyAnalysis/myanalysis cfg/main_config.txt
+../../build/analyses/MyAnalysis/myanalysis cfg/main_config.yaml
 ```
 
 Run from the analysis source directory so relative input/output paths and constant-file existence checks use the expected working directory.
@@ -236,7 +254,7 @@ Configuration files hold I/O, output, and manager settings; analysis code define
 
 ```cpp
 // Configuration is loaded by the Analyzer constructor
-Analyzer analyzer("cfg/main_config.txt");
+Analyzer analyzer("cfg/main_config.yaml");
 ```
 
 The Analyzer constructor:
@@ -440,14 +458,17 @@ ONNX models provide a standard format for ML models from any framework.
 
 #### 1. Configure ONNX Models
 
-Create `cfg/onnx_models.txt`:
-```
-file=aux/models/classifier.onnx name=ml_score inputVariables=jet_pt,jet_eta,jet_btag runVar=has_jets
+Create `cfg/onnx_models.yaml`:
+```yaml
+- file: aux/models/classifier.onnx
+  name: ml_score
+  inputVariables: jet_pt,jet_eta,jet_btag
+  runVar: has_jets
 ```
 
 Add to main config:
-```
-onnxConfig=cfg/onnx_models.txt
+```yaml
+onnxConfig: cfg/onnx_models.yaml
 ```
 
 #### 2. Define Input Features
@@ -519,9 +540,12 @@ analyzer.Define("is_qcd_jet",
 
 Similar to ONNX but for FastForest BDT files:
 
-Create `cfg/bdts.txt`:
-```
-file=aux/bdts/signal_bdt.txt name=bdt_score inputVariables=var1,var2,var3 runVar=pass_presel
+Create `cfg/bdts.yaml`:
+```yaml
+- file: aux/bdts/signal_bdt.txt
+  name: bdt_score
+  inputVariables: var1,var2,var3
+  runVar: pass_presel
 ```
 
 ```cpp
@@ -590,15 +614,21 @@ CorrectionManager applies corrections using the correctionlib format.
 
 #### 1. Configure Corrections
 
-Create `cfg/corrections.txt`:
-```
-file=aux/corrections/muon_sf.json correctionName=NUM_TightID_DEN_TrackerMuons name=muon_id_sf inputVariables=muon_pt,muon_eta
-file=aux/corrections/muon_sf.json correctionName=NUM_TightRelIso_DEN_TightIDandIPCut name=muon_iso_sf inputVariables=muon_pt,muon_eta
+Create `cfg/corrections.yaml`:
+```yaml
+- file: aux/corrections/muon_sf.json
+  correctionName: NUM_TightID_DEN_TrackerMuons
+  name: muon_id_sf
+  inputVariables: muon_pt,muon_eta
+- file: aux/corrections/muon_sf.json
+  correctionName: NUM_TightRelIso_DEN_TightIDandIPCut
+  name: muon_iso_sf
+  inputVariables: muon_pt,muon_eta
 ```
 
 Add to main config:
-```
-correctionConfig=cfg/corrections.txt
+```yaml
+correctionConfig: cfg/corrections.yaml
 ```
 
 #### 2. Apply Corrections
@@ -1193,7 +1223,7 @@ for (const auto& entry : wm->getAuditEntries()) {
 #include <WeightManager.h>
 
 void myAnalysis() {
-    Analyzer analyzer("config.txt");
+    Analyzer analyzer("config.yaml");
 
     // Creates and registers the manager under "weightManager".
     auto wm = WeightManager::create(analyzer);
@@ -1443,7 +1473,7 @@ for (const auto& [name, count] : cfm->getRegionCutflowCounts("signal")) {
 #include <CutflowManager.h>
 
 void myAnalysis() {
-    Analyzer analyzer("config.txt");
+    Analyzer analyzer("config.yaml");
 
     // Factories register the default roles "regionManager" and
     // "cutflowManager".
@@ -1641,8 +1671,11 @@ analyzer.Define("run_expensive_model",
 ```
 
 In config:
-```
-file=model.onnx name=ml_score inputVariables=features runVar=run_expensive_model
+```yaml
+- file: model.onnx
+  name: ml_score
+  inputVariables: features
+  runVar: run_expensive_model
 ```
 
 ### Chaining Analyses
@@ -1655,7 +1688,7 @@ analyzer1.run();   // Writes a skim only if enableSkim is true in the config
 
 // Second analysis: load skim
 // In config: fileList=skim_output.root
-Analyzer analyzer2("second_analysis_config.txt");
+Analyzer analyzer2("second_analysis_config.yaml");
 analyzer2.Define(...);  // Further processing
 analyzer2.run();
 ```
@@ -1700,7 +1733,9 @@ analyzer.Define(...);
 
 ### Using Helper Functions
 
-Create reusable helper functions:
+For object lookup, angular separation, selected transverse momentum and matching, see the [analysis function catalog](FUNCTION_CATALOG.md).
+
+For an analysis-specific calculation, define a reusable helper.
 
 ```cpp
 // In a header file
@@ -1721,17 +1756,22 @@ the main event tree without merging the files.  The framework adds friend
 TChains to the main chain before the RDataFrame is created, so all friend
 branches are immediately accessible by name.
 
-### Configuration via submit_config.txt
+### Friend configuration at source construction
 
-Add one `friendTreeConfig` line per friend tree:
+Set `friendConfig: cfg/friends.yaml` in the main analysis YAML before constructing the analyzer. In `friends.yaml`, list the named friend sources and their input files.
 
+```yaml
+friends:
+  - alias: calib
+    treeName: Events
+    directory: /data/calib_files
+    globs: [.root]
+  - alias: pileup
+    treeName: Events
+    fileList: [/data/pileup/pu_weights.root]
 ```
-friendTreeConfig: calib,Events,/data/calib_files/*.root
-friendTreeConfig: pileup,Events,/data/pileup/pu_weights.root
-```
 
-The format is `alias,treeName,fileGlob`.  The alias is used to access friend
-branches (e.g. `calib.pt`).
+Read a branch using its alias, for example `calib.pt`. Late registration raises an error.
 
 ### Configuration via dataset_manifest.yaml
 
@@ -1856,7 +1896,7 @@ Leave `index_branches` empty for position-based (sequential) matching.
 
 - **Understand internals**: See [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Add custom features**: See [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md)
-- **Deploy to batch**: Use HTCondor submission scripts in `core/python/`
+- Run local or HTCondor production through the [Snakemake workflow](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md).
 - **Configuration reference**: See [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)
 
 Happy analyzing!

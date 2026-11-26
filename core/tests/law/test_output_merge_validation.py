@@ -57,8 +57,8 @@ class MergeValidation(unittest.TestCase):
             manifest.save_yaml(path)
             (Path(path).parent / manifest.histograms.output_file).touch()
             task = MergeHistograms(name="test", input_dir=str(inputs), output_dir=directory)
-            with patch("merge_tasks.read_embedded_histogram_schema", return_value=None), \
-                    patch("merge_tasks._find_hadd"), patch("merge_tasks.merge_root_files"), \
+            with patch("rdfproduction.manifest_merge.read_embedded_histogram_schema", return_value=None), \
+                    patch("rdfproduction.manifest_merge._find_hadd"), patch("rdfproduction.manifest_merge.merge_root_files"), \
                     patch.object(task, "publish_message") as messages:
                 task.run()
             messages.assert_any_call("Pre-merge coverage prediction: 1 systematic "
@@ -74,7 +74,7 @@ class MergeValidation(unittest.TestCase):
             manifest.coverage_report = {"selected": "invalid"}
             manifest.save_yaml(path)
             task = MergeSkims(name="test", input_dir=str(inputs), output_dir=directory)
-            with patch("merge_tasks._run_hadd") as hadd:
+            with patch("rdfproduction.manifest_merge._run_hadd") as hadd:
                 with self.assertRaisesRegex(MergeInputValidationError, "non-numeric"):
                     task.run()
                 hadd.assert_not_called()
@@ -98,7 +98,7 @@ class MergeValidation(unittest.TestCase):
                 if Path(destination).name == "b.root":
                     raise RuntimeError("injected failure")
 
-            with patch("merge_tasks._run_hadd", side_effect=failing_hadd):
+            with patch("rdfproduction.manifest_merge._run_hadd", side_effect=failing_hadd):
                 with self.assertRaisesRegex(RuntimeError, "injected failure"):
                     task.run()
             self.assertEqual(sorted(p.name for p in output.iterdir()), ["a.root", "b.root"])

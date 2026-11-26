@@ -134,9 +134,9 @@ PhysicsObjectCollection goodMuons(pt, eta, phi, mass, mask);
 // Jet overlap removal — built-in ΔR cleaning
 auto goodJets = preJets.removeOverlap(goodMuons, 0.4f);
 
-// Dimuon pair via combinatoric helper
-auto pairs = makePairs(goodMuons);   // ObjectPair: {p4, first, second}
-float mZ   = pairs[0].p4.M();       // dimuon invariant mass
+// The first pair is sufficient for both selection and the mass histogram.
+float mZ = goodMuons.size() >= 2
+    ? static_cast<float>((goodMuons.at(0) + goodMuons.at(1)).M()) : -1.f;
 ```
 
 ### CutflowManager Plugin
@@ -145,7 +145,8 @@ float mZ   = pairs[0].p4.M();       // dimuon invariant mass
 // All booleans defined BEFORE first addCut() (base node for N-1)
 an.Define("hasTwoMuons",     hasExactlyTwoMuons, {"goodMuons"});
 an.Define("hasOppositeSign", hasOppositeSign,    {"goodMuons","Muon_charge"});
-an.Define("inMassWindow",    inMassWindow,       {"goodMuons"});
+an.Define("DimuonMass",      dimuonMass,         {"goodMuons"});
+an.Define("inMassWindow",    inMassWindow,       {"DimuonMass"});
 
 auto cfm = an.getPlugin<CutflowManager>("cutflowManager");
 cfm->addCut("DimuonPair",   "hasTwoMuons");      // applies filter + tracks N-1
@@ -565,7 +566,7 @@ Then add one `Define` in `analysis.cc`:
 ```cpp
 an.Define("DimuonRapidity",
     [](const PhysicsObjectCollection &m) {
-        return (Float_t)makePairs(m)[0].p4.Rapidity();
+        return static_cast<Float_t>((m.at(0) + m.at(1)).Rapidity());
     }, {"goodMuons"});
 ```
 

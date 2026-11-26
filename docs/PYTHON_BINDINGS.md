@@ -41,7 +41,7 @@ Use `Define` and `Filter` for expression strings and `DefineVector` for a contig
 ### Plugin and framework control
 
 ```python
-analyzer.setConfig("onnxConfig", "cfg/onnx_models.txt")
+analyzer.setConfig("onnxConfig", "cfg/onnx_models.yaml")
 analyzer.AddPlugin("onnx", "OnnxManager")
 analyzer.applyAllOnnxModels("onnx")
 ```
@@ -110,7 +110,7 @@ The most straightforward approach - write C++ expressions as strings that ROOT w
 import rdfanalyzer
 
 # Create analyzer from config file
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Define variables using C++ expressions
 analyzer.DefineJIT("pt_gev", "pt / 1000.0", ["pt"])
@@ -171,7 +171,7 @@ convert_ptr = ctypes.cast(convert_to_gev.address, ctypes.c_void_p).value
 delta_r_ptr = ctypes.cast(compute_delta_r.address, ctypes.c_void_p).value
 
 # Create analyzer
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Use function pointers
 analyzer.DefineFromPointer("pt_gev", convert_ptr, 
@@ -221,7 +221,7 @@ event_weights = np.array([1.0, 1.2, 0.8, 1.1, 0.9], dtype=np.float32)
 scale_factors = np.array([1.05, 1.05, 1.05, 1.05, 1.05], dtype=np.float64)
 
 # Create analyzer
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Define from arrays
 analyzer.DefineFromVector("event_weight",
@@ -266,7 +266,7 @@ The Python bindings expose full plugin lifecycle and action APIs, allowing you t
 ```python
 import rdfanalyzer
 
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Add individual plugins
 analyzer.AddPlugin("onnx", "OnnxManager")
@@ -281,7 +281,7 @@ analyzer.AddDefaultPlugins()
 
 ```python
 # Apply all ONNX models from config
-analyzer.setConfig("onnxConfig", "cfg/onnx_models.txt")
+analyzer.setConfig("onnxConfig", "cfg/onnx_models.yaml")
 analyzer.AddPlugin("onnx", "OnnxManager")
 analyzer.SetupPlugin("onnx")
 analyzer.applyAllOnnxModels("onnx")
@@ -298,7 +298,7 @@ features = analyzer.getOnnxModelFeatures("onnx", "model_name")
 
 ```python
 # Apply all BDT models from config
-analyzer.setConfig("bdtConfig", "cfg/bdts.txt")
+analyzer.setConfig("bdtConfig", "cfg/bdts.yaml")
 analyzer.AddPlugin("bdt", "BDTManager")
 analyzer.SetupPlugin("bdt")
 analyzer.applyAllBDTs("bdt")
@@ -315,7 +315,7 @@ features = analyzer.getBDTFeatures("bdt", "bdt_name")
 
 ```python
 # Apply corrections
-analyzer.setConfig("correctionConfig", "cfg/corrections.txt")
+analyzer.setConfig("correctionConfig", "cfg/corrections.yaml")
 analyzer.AddPlugin("correction", "CorrectionManager")
 analyzer.SetupPlugin("correction")
 
@@ -330,7 +330,7 @@ features = analyzer.getCorrectionFeatures("correction", "muon_sf")
 
 ```python
 # Setup trigger management
-analyzer.setConfig("triggerConfig", "cfg/triggers.txt")
+analyzer.setConfig("triggerConfig", "cfg/triggers.yaml")
 analyzer.AddPlugin("trigger", "TriggerManager")
 analyzer.SetupPlugin("trigger")
 
@@ -539,12 +539,12 @@ class Analyzer:
 
 Python bindings use the same configuration files as the C++ framework:
 
-```
-# config.txt
-fileList=data1.root,data2.root
-saveFile=output.root
-threads=-1
-saveConfig=output_branches.txt
+```yaml
+# config.yaml
+fileList: data1.root,data2.root
+saveFile: output.root
+threads: -1
+saveConfig: output_branches.yaml
 ```
 
 See the [Configuration Reference](CONFIG_REFERENCE.md) for complete documentation.

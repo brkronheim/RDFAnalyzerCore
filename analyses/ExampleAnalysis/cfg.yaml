@@ -15,7 +15,7 @@ treeList: CollectionTree,POOLCollectionTree
 # A single reader is a good initial setting for remote PHYSLITE files.
 threads: "1"
 antiglobs: output.root,hists.root
-saveConfig: output.txt
+saveConfig: output.yaml
 saveFile: Output/ZMuMuL.root
 enableSkim: false
 fileList: >-

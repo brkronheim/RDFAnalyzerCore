@@ -377,7 +377,7 @@ protected:
   void SetUp() override {
     ChangeToTestSourceDir();
     configManager = ManagerFactory::createConfigurationManager(
-        "cfg/test_data_config.txt");
+        "cfg/test_data_config.yaml");
     fitManager = std::make_unique<KinematicFitManager>(*configManager);
 
     systematicManager = std::make_unique<SystematicManager>();
@@ -456,7 +456,7 @@ protected:
 
 TEST_F(KinematicFitManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
-    auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+    auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
     auto mgr = std::make_unique<KinematicFitManager>(*cfg);
   });
 }
@@ -513,7 +513,7 @@ TEST_F(KinematicFitManagerTest, Type_ReturnsCorrectString) {
 
 TEST_F(KinematicFitManagerTest, ApplyFit_WithoutContext_Throws) {
   // Manager with no context set
-  auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+  auto cfg = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
   auto mgr = std::make_unique<KinematicFitManager>(*cfg);
   EXPECT_THROW(mgr->applyFit("zhFit"), std::runtime_error);
 }
@@ -1088,10 +1088,10 @@ TEST_F(KinematicFitManagerTest, GetFitConfig_DefaultUseGpuIsFalse) {
 }
 
 TEST_F(KinematicFitManagerTest, ParseUseGpu_TrueValue_SetsFlagCorrectly) {
-  // Load cfg/test_gpu_config.txt which has kinematicFitConfig pointing to
-  // cfg/kinematic_fit_gpu.txt — a single fit with useGPU=true.
+  // Load cfg/test_gpu_config.yaml which has kinematicFitConfig pointing to
+  // cfg/kinematic_fit_gpu.yaml — a single fit with useGPU=true.
   auto gpuCfgMgr = ManagerFactory::createConfigurationManager(
-      "cfg/test_gpu_config.txt");
+      "cfg/test_gpu_config.yaml");
   KinematicFitManager gpuMgr(*gpuCfgMgr);
 
   const auto names = gpuMgr.getAllFitNames();
@@ -1108,12 +1108,12 @@ TEST_F(KinematicFitManagerTest, ParseUseGpu_FalseIsDefaultInStruct) {
 }
 
 TEST_F(KinematicFitManagerTest, ParseUseGpu_InvalidValue_Throws) {
-  // cfg/test_gpu_invalid_config.txt points to a fit config that has
+  // cfg/test_gpu_invalid_config.yaml points to a fit config that has
   // useGPU=yes, which is not a valid boolean value.  Construction must throw.
   EXPECT_THROW(
       {
         auto mgr = ManagerFactory::createConfigurationManager(
-            "cfg/test_gpu_invalid_config.txt");
+            "cfg/test_gpu_invalid_config.yaml");
         KinematicFitManager km(*mgr);
       },
       std::runtime_error);
@@ -1128,7 +1128,7 @@ TEST_F(KinematicFitManagerTest, ApplyFit_UseGpuTrue_WithoutCuda_Throws) {
   defineParticleColumns();
 
   auto gpuCfgMgr = ManagerFactory::createConfigurationManager(
-      "cfg/test_gpu_config.txt");
+      "cfg/test_gpu_config.yaml");
   KinematicFitManager gpuMgr(*gpuCfgMgr);
 
   // Wire up the context so applyFit can proceed as far as the GPU check.

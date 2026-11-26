@@ -1,331 +1,61 @@
-# Performance Tuning and Optimization
+# Measuring and tuning an RDFAnalyzer job
 
-## Overview
+## Measure event processing
 
-This guide covers techniques for maximizing analysis speed in RDFAnalyzerCore.
+Use the same executable, ROOT build, input files, entry range, variation list, thread count and requested outputs in each comparison. Compare local reads separately from remote reads. Record the event population and output parity before interpreting rates.
 
-## 1. Framework-Level Optimizations
+From a build-matched environment, measure the full process with its normal entry point.
 
-### Thread Management
-
-**ROOT ImplicitMT:**
-```bash
-# Config file
-threads=-1  # Auto-detect all cores
-# or
-threads=32  # Explicit core count
+```sh
+/usr/bin/time -v ./analysis analysis.yaml
 ```
 
-**Best Practices:**
-- Use `-1` for auto-detection
-- Avoid oversubscription (threads > physical cores)
-- Test with 1, 2, 4, 8 threads to find optimal
+Record input events per elapsed second, user and system CPU seconds, peak resident set size, selected events, output bytes and RDF loop count. Benchmark both run orders and repeat. A short process can spend more time opening inputs or compiling expressions than evaluating events.
 
-### Lazy Evaluation
+For a paired comparison of two builds, run the full worker with the same
+staged configuration. Pass the independently verified number of input entries,
+including entries rejected by cuts. Use a new output directory and point
+`--cwd` at the original working directory if the job uses relative input paths.
 
-**RDataFrame Optimization:**
-```cpp
-// Define variables before filters
-analyzer.Define("jet_pt", computePt, {"jet_px", "jet_py"});
-analyzer.Filter("quality", isGood, {"jet_quality"});
-
-// Keep chains short
-// Avoid: Filter(Filter(Filter(...)))
-// Prefer: Filter(name, func, {"col1", "col2", "col3"})
+```sh
+python scripts/benchmark_worker.py /staged/job/worker.yaml \
+  --variant baseline=/build/before/analysis --variant candidate=/build/after/analysis \
+  --events 281121 --repeats 3 --output /tmp/worker-comparison --check-products
 ```
 
-### Memory Management
+The script alternates the binaries in fresh processes and records wall time,
+CPU time and peak RSS. `--check-products` compares metadata and skim products
+after the timed runs. Use deterministic entry order for exact skim comparisons.
 
-**Avoid Memory Spills:**
+To time a lazy RDF graph independently, materialize an action consuming the computed column. A Count alone may skip an unused Define.
+
 ```python
-# Python - use DefineFromVector for large arrays
-# Use DefineFromPointer only for zero-copy needs
+from time import perf_counter
+import ROOT
 
-# C++ - ensure vectors don't reallocate
-reserveVectors();
+start = perf_counter()
+df = ROOT.RDataFrame(1_000_000).Define("value", "double(rdfentry_) * 2")
+total = df.Sum("value")
+booked = perf_counter()
+assert total.GetValue() == 999_999_000_000
+finished = perf_counter()
+print("booking s", booked - start, "execution s", finished - booked,
+      "events/s", 1_000_000 / (finished - booked), "loops", df.GetNRuns())
 ```
 
-**Histogram Memory:**
-```cpp
-// Book histograms after all defines/filters
-analyzer.bookConfigHistograms();
+With the Analyzer Python interface, book all counts, sums, histograms and the skim before calling `analysis.run()`. Inspect `analysis.native.event_loops` afterwards. Retain the owner of any buffer passed to `DefineFromVector` through execution. `DefineFromPointer` accepts a compiled function address.
 
-// Use NDHistogramManager for efficiency
-analyzer.addPlugin("hist", histManager);
-```
+## Choose the next experiment
 
-## 2. Python-Specific Optimizations
+| Observation | Comparison to run |
+|---|---|
+| High setup time | Separate library loading, input discovery, expression JIT and graph booking. Repeat with a process-cold input and a warmed file cache. |
+| CPU-bound event loop | Profile the worker on real event multiplicities. Share repeatedly demanded columns, count predicate evaluations and inspect costly inputs consumed only by a small fraction of accepted events. Preserve selection semantics for every variation. |
+| High memory with many slots | Compare identical outputs with one slot and the intended worker slot count. Record histogram axes, action count, variations, nonempty bins and peak RSS. Include file finalization. |
+| Slow remote reads | Compare the same source staged locally, logging ROOT reads and transferred bytes in each case. A different compression codec changes CPU as well as storage traffic. |
+| Large skims | Set `saveConfig` to a YAML column list. Record output size, selected entry identities and write CPU for each compression setting. |
+| Python analysis appears slower | Compare the same graph and inputs in C++ and Python. Time startup, booking, first materialization and output separately. Compiled column functions run inside ROOT for both interfaces. |
 
-### Numba vs ROOT JIT
+Production worker slots should fit the scheduler CPU and memory allocation. Scale one workload at a time and compare whole-worker throughput. Validate exact counts and integer branches, histogram contents including flow bins, sum of weights squared, and agreed floating-point tolerances.
 
-**When to use Numba:**
-- Type-specific operations (bitwise, custom math)
-- Performance-critical paths
-- Repeated function calls
-
-**When to use ROOT JIT:**
-- Complex ROOT functions (TMath, vectors)
-- Simple arithmetic
-- Rapid prototyping
-
-**Benchmark:**
-```python
-import time
-import numba
-import ctypes
-
-@numba.cfunc("float64(float64)")
-def numba_func(x):
-    return x * 2.0
-
-# ROOT JIT (Define)
-t0 = time.time()
-analyzer.Define('method1', 'x * 2.0', ['x'])
-print(f'ROOT JIT: {time.time() - t0:.4f}s')
-
-# Numba (DefineFromPointer)
-t0 = time.time()
-analyzer.DefineFromPointer('method2', ctypes.cast(numba_func.address, ctypes.c_void_p).value, 'double(double)', ['x'])
-print(f'Numba: {time.time() - t0:.4f}s')
-```
-
-### Numba Optimization
-
-**Compilation caching:**
-```python
-# Define numba functions at module level, not inside loops
-@numba.cfunc("float64(float64)")
-def to_gev(pt):
-    return pt / 1000.0
-
-# Use in multiple places
-for event in events:
-    analyzer.DefineFromPointer('pt_gev', func_ptr, 'double(double)', ['pt'])
-```
-
-**Type stability:**
-```python
-# Use explicit types
-@numba.cfunc("float64(float64, float64)")
-def delta_r(eta1, eta2):
-    return np.sqrt((eta1 - eta2) ** 2)
-```
-
-### Memory Layout
-
-**NumPy arrays:**
-```python
-# Use C-contiguous arrays
-data = np.ascontiguousarray(data)
-
-# Ensure right dtype
-weights = weights.astype(np.float64)
-```
-
-**Batch processing:**
-```python
-# Process in chunks if memory limited
-for i in range(0, len(data), chunk_size):
-    chunk = data[i:i+chunk_size]
-    # Process chunk
-```
-
-## 3. Algorithm Optimizations
-
-### Systematic Variations
-
-**Efficient Systematic Application:**
-```cpp
-// Register each systematic family once, before defining affected columns.
-auto& sysMgr = analyzer.getSystematicManager();
-sysMgr.registerSystematic("jes", {"jet_pt"});
-
-// The dataframe must provide jet_pt and its jet_pt_jesUp/Down inputs.
-// Analyzer::Define applies this common correction to each input column.
-analyzer.Define("corrected_pt",
-    [](float pt) { return pt * 1.02f; },
-    {"jet_pt"});
-```
-
-Register systematic families during graph setup, outside event-processing
-loops. Variation labels are generated as `<family>Up` and `<family>Down`.
-
-### Histogram Booking
-
-**Batch Booking:**
-```cpp
-// Book multiple histograms efficiently
-analyzer.bookConfigHistograms();
-
-// Or use NDHistogramManager
-auto histMgr = std::make_unique<NDHistogramManager>(analyzer.getConfigurationProvider());
-analyzer.addPlugin("histogramManager", std::move(histMgr));
-```
-
-## 4. Input/Output Optimizations
-
-### Reading Input
-
-**TChain Optimization:**
-```cpp
-// Use treeList to specify exact trees
-cmake -S . -B build -DtreeList="Events;JetTree"
-
-// Or use friend trees
-// Don't read unnecessary branches
-```
-
-**Compression:**
-```bash
-# Use compressed ROOT files when possible
-# ROOT6 supports LZ4, ZSTD compression
-```
-
-### Writing Output
-
-**Skim Optimization:**
-```cpp
-// Enable skim only if needed
-cfg.txt: enableSkim=true
-
-// Use saveConfig to reduce output
-cfg.txt: saveConfig=cfg/output_branches.txt
-```
-
-**Histogram Output:**
-```cpp
-// Book after all defines
-analyzer.bookConfigHistograms();
-
-// For region-aware booking, bind the histogram manager to a configured RegionManager
-// histManager->bindToRegionManager(regionManager);
-```
-
-## 5. Profiling
-
-### Tools
-
-**ROOT Profiling:**
-```cpp
-// Enable progress bar
-analyzer.SetProgress(true);
-
-// Check event rate
-std::cout << nEvents / totalTime << " events/sec";
-```
-
-**Python Profiling:**
-```python
-import cProfile, pstats
-
-profile = cProfile.Profile()
-profile.enable()
-analyzer.run()
-profile.disable()
-
-stats = pstats.Stats(profile)
-stats.sort_stats('cumulative')
-stats.print_stats(20)  # Top 20 functions
-```
-
-**System Profiling:**
-```bash
-# Linux perf
-top -d 1
-htop
-```
-
-### Checkpoints
-
-**Monitor Memory:**
-```bash
-watch -n 1 "ps aux | grep python"
-```
-
-**Check Disk I/O:**
-```bash
-iostat -x 1
-```
-
-## 6. Best Practices Checklist
-
-**Before Running:**
-- [ ] Validate config: `python core/python/validate_config.py --config config.txt`
-- [ ] Set threads: `threads=-1` in config
-- [ ] Check Python path: `import sys; sys.path.insert(0, 'build/python')`
-- [ ] Verify ROOT: `source env.sh`
-
-**During Execution:**
-- [ ] Monitor progress: check ROOT progress bar
-- [ ] Check event rate: should be consistent
-- [ ] Watch memory: use top/htop
-- [ ] Log errors: use analyzer.verbosityLevel > 0
-
-**Optimization Priority:**
-1. **Fastest wins**: Use ROOT JIT for simple math
-2. **Memory wins**: Use DefineFromVector over DefineFromPointer
-3. **Thread wins**: Enable ImplicitMT (threads=-1)
-4. **Input wins**: Use compressed ROOT files
-5. **Output wins**: Use saveConfig for skim
-
-## 7. Common Bottlenecks
-
-### I/O Bottleneck
-
-**Symptoms:** Slow event loop, disk thrashing
-
-**Solutions:**
-- Use compressed ROOT files (LZ4, ZSTD)
-- Increase disk cache: `ulimit -v` (Linux)
-- Use local XRootD instead of remote
-- Read multiple files: `fileList=file1.root,file2.root`
-
-### CPU Bottleneck
-
-**Symptoms:** Single core usage, high CPU% but low events/sec
-
-**Solutions:**
-- Increase threads: `threads=-1`
-- Check for I/O bound code
-- Use vector operations
-- Check for cache misses (large arrays)
-
-### Memory Bottleneck
-
-**Symptoms:** OOM kills, slow processing
-
-**Solutions:**
-- Use DefineFromVector (copies) vs DefineFromPointer (zero-copy but requires lifetime)
-- Check histogram memory
-- Use region-aware histograms
-- Process in chunks
-
-## 8. Advanced Techniques
-
-### Custom Memory Pool
-
-For repeated allocations:
-```cpp
-// Use ROOT's TObject with pools
-// or custom pools for large arrays
-```
-
-### Async I/O
-
-```cpp
-// Use ROOT's async I/O if available
-// or custom buffering
-```
-
-### SIMD Optimization
-
-```cpp
-// Use __builtin_popcount for bit counting
-// or intrinsics for vector math
-```
-
----
-
-**See Also:**
-- [Architecture](./ARCHITECTURE.md)
-- [Python Bindings Deep Dive](./PYTHON_BINDINGS_DEEP.md)
+[Monitoring](PERFORMANCE_MONITORING.md) · [Python binding ownership](PYTHON_BINDINGS_DEEP.md) · [Reusable native functions](FUNCTION_CATALOG.md)

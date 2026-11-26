@@ -161,13 +161,7 @@ public:
   template <typename F>
   Analyzer *Filter(std::string name, F f,
                   const std::vector<std::string> &columns = {}) {
-    if (!preFilterNotified_m) {
-      auto df = dataFrameProvider_m->getDataFrame();
-      for (auto& service : services_m) {
-        service->onPreFilter(df);
-      }
-      preFilterNotified_m = true;
-    }
+    bookPreFilterActions();
 
     const std::string filterLabel = name;
 
@@ -532,12 +526,16 @@ public:
    */
   IConfigurationProvider &getConfigurationProvider() const { return *configProvider_m; }
 
+  /// Book inclusive service actions once, after their input columns exist.
+  /// For raw RNode filtering, call this before replacing the active dataframe.
+  void bookPreFilterActions();
+
   /**
    * @brief Inject task-level provenance metadata.
    *
    * Stores a key-value pair that is contributed to the ProvenanceService at
    * finalize time under the namespace "task.<key>".  This allows workflow
-   * orchestration layers (e.g. LAW tasks) to attach task-specific information
+   * orchestration layers (e.g. Snakemake rules) to attach task-specific information
    * (job ID, dataset query hash, submission timestamp, etc.) to the provenance
    * record without bypassing the provenance interface.
    *

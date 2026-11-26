@@ -151,6 +151,9 @@ public:
    */
   void initialize() override;
 
+  /// Emit pre-loop aggregate storage estimates when histogram profiling is enabled.
+  void execute() override;
+
   /**
    * @brief Metadata hook: reports booked histogram counts to the logger.
    */
@@ -286,6 +289,7 @@ private:
   /**
    * @brief Vector of histogram result pointers.
    */
+  void reportStorageProfile(bool finalized) const;
   std::vector<ROOT::RDF::RNode> histNodes_m;
   std::vector<ROOT::RDF::RResultPtr<THnSparseF>> histos_m;
   std::vector<std::shared_ptr<const rdfhistogram::StorageMemoryUsage>> histMemoryUsage_m;

@@ -285,7 +285,7 @@ class TestDatasetManifestQuery:
 
 
     def test_job_config_receives_explicit_full_generator_weight_mode(self, tmp_path):
-        analysis_tasks = pytest.importorskip("analysis_tasks")
+        import production_jobs as analysis_tasks
         dataset = DatasetEntry(name="full_sample", generator_weight_mode="full")
         metadata = analysis_tasks._dataset_job_metadata(dataset)
         assert metadata["genWeightMode"] == "full"
@@ -298,7 +298,7 @@ class TestDatasetManifestQuery:
             str(job_dir), str(template), dataset, str(output_dir)
         )
         written_config = analysis_tasks.read_config(
-            str(job_dir / "submit_config.txt")
+            str(job_dir / "submit_config.yaml")
         )
         assert written_config["genWeightMode"] == "full"
 
@@ -308,7 +308,7 @@ class TestDatasetManifestQuery:
             str(data_job_dir), str(template), data_dataset, str(output_dir)
         )
         data_config = analysis_tasks.read_config(
-            str(data_job_dir / "submit_config.txt")
+            str(data_job_dir / "submit_config.yaml")
         )
         assert "genWeightMode" not in data_config
 

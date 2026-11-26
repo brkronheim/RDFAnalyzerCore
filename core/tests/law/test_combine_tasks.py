@@ -1055,6 +1055,15 @@ class TestParseDatacardShapes(unittest.TestCase):
         self.assertIsNone(shapes_file)
         self.assertEqual(bkg_hists, [])
 
+    def test_generated_wildcard_card_resolves_data_and_named_process_shapes(self):
+        mod = self._import()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            card = Path(tmpdir) / "datacard_SR.txt"
+            card.write_text("shapes * SR shapes_SR.root $PROCESS $PROCESS_$SYSTEMATIC\n"
+                            "process signal background\nprocess 0 1\n")
+            self.assertEqual(mod._parse_datacard_shapes(str(card)),
+                             (str(card.parent / "shapes_SR.root"), "data_obs", ["signal", "background"]))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -33,7 +33,7 @@ protected:
   void SetUp() override {
     ChangeToTestSourceDir();
     config = ManagerFactory::createConfigurationManager(
-        "cfg/test_data_config_minimal.txt");
+        "cfg/test_data_config_minimal.yaml");
     systematicManager = std::make_unique<SystematicManager>();
     logger = std::make_unique<DefaultLogger>();
     skimSink = std::make_unique<NullOutputSink>();
@@ -175,7 +175,7 @@ TEST_F(GenWeightManagerTest,
        SignAndFullModesUseNegativeWeightsAndKeepVariationRateChanges) {
   for (const std::string mode : {"sign", "full"}) {
     auto modeConfig = ManagerFactory::createConfigurationManager(
-        "cfg/test_data_config_minimal.txt");
+        "cfg/test_data_config_minimal.yaml");
     modeConfig->set("genWeightMode", mode);
     modeConfig->set("genWeightEnableLheScale", "false");
     modeConfig->set("genWeightEnablePdf", "false");

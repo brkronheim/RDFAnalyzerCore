@@ -47,10 +47,10 @@ def main():
     # Check if config file is provided
     if len(sys.argv) != 2:
         print("Usage: python example_numba_functions.py <config_file>")
-        print("\nExample config file (cfg.txt):")
-        print("  fileList=data.root")
-        print("  saveFile=output.root")
-        print("  threads=-1")
+        print("\nExample config file (cfg.yaml):")
+        print("  fileList: data.root")
+        print("  saveFile: output.root")
+        print("  threads: -1")
         return 1
     
     config_file = sys.argv[1]

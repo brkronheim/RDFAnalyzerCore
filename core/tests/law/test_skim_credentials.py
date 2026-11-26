@@ -11,6 +11,9 @@ sys.path[:0] = [str(ROOT / "core/python"), str(ROOT / "core/python/law")]
 import analysis_tasks as mod
 
 
+import production_jobs
+
+
 def _result(seconds):
     return mod.subprocess.CompletedProcess([], 0, stdout=f"{seconds}\n")
 
@@ -81,7 +84,7 @@ class ProxySubmissionTests(unittest.TestCase):
     def test_preparation_checks_copied_proxy_and_aborts_before_archive(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(mod, "WORKSPACE", tmp), \
-                patch.object(mod, "_collect_skim_shared_libs", return_value={}):
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}):
             executable = Path(tmp, "analysis")
             executable.write_text("#!/bin/sh\nexit 0\n")
             proxy = Path(tmp, "source_proxy")
@@ -107,7 +110,7 @@ class ProxySubmissionTests(unittest.TestCase):
     def test_renewed_source_invalidates_cached_preparation(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(mod, "WORKSPACE", tmp), \
-                patch.object(mod, "_collect_skim_shared_libs", return_value={}):
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}):
             executable = Path(tmp, "analysis")
             executable.write_text("#!/bin/sh\nexit 0\n")
             config = Path(tmp, "submit_config.txt")
@@ -153,8 +156,11 @@ class ProxySubmissionTests(unittest.TestCase):
                 def command_result(command, **kwargs):
                     if command[0] == "voms-proxy-info":
                         return _result(seconds)
-                    return mod.subprocess.CompletedProcess(command, 0,
-                        stdout="1 job(s) submitted to cluster 12345.\n")
+                    responses = {
+                        "condor_config_val": "FULL_HOSTNAME = schedd.example.test\n",
+                        "condor_submit": "12345.0 - 12345.0\n",
+                    }
+                    return mod.subprocess.CompletedProcess(command, 0, stdout=responses[command[0]])
 
                 with self.subTest(seconds=seconds), \
                         patch.object(task, "input", return_value={"build": {
@@ -164,7 +170,7 @@ class ProxySubmissionTests(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, "at least 48 hours"):
                             task.run()
                         self.assertFalse(Path(task.output().path).exists())
-                        with patch.object(mod, "_submit_single_skim_job") as retry:
+                        with patch("rdfproduction.jobs.condor_files._submit_single_skim_job") as retry:
                             with self.assertRaisesRegex(RuntimeError, "at least 48 hours"):
                                 monitor._try_resubmit("sample", 0, {}, state, "failed")
                             retry.assert_not_called()

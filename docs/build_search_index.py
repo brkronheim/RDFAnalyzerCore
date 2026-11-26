@@ -33,7 +33,8 @@ def plain_text(text: str) -> str:
     text = re.sub(r"^---.*?---\s*", "", text, flags=re.S)
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
     text = re.sub(r"!\[[^\]]*\]\([^\)]+\)", "", text)
-    text = re.sub(r"[`*_>{}\-\[\]]", "", text)
+    # Underscores inside public Python identifiers must remain searchable verbatim.
+    text = re.sub(r"[`*>{}\-\[\]]", "", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 

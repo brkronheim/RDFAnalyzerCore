@@ -16,7 +16,7 @@ class SystematicBundleTest : public ::testing::Test {
 protected:
   void SetUp() override {
     ChangeToTestSourceDir();
-    configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
     systematicManager = std::make_unique<SystematicManager>();
     dataManager = std::make_unique<DataManager>(4);
   }
@@ -284,6 +284,30 @@ TEST_F(SystematicBundleTest,
   EXPECT_FALSE((*result)[1][0]);
   EXPECT_FALSE((*result)[1][1]);
   EXPECT_FALSE((*result)[1][2]);
+}
+
+TEST_F(SystematicBundleTest, ExplicitMaskSharesOnlyTheUpAxisOfAPairedFamily) {
+  registerSystematic("shape", {"other"});
+  defineBool("sel", [](ULong64_t) { return false; });
+  defineBool("independent_up", [](ULong64_t) { return true; });
+  systematicManager->registerVariationColumn("sel", "shapeUp", "independent_up");
+  EXPECT_TRUE(systematicManager->isVariableAffectedBySystematic("sel", "shapeUp"));
+  EXPECT_FALSE(systematicManager->isVariableAffectedBySystematic("sel", "shapeDown"));
+  EXPECT_EQ(systematicManager->getVariablesForSystematic("shapeUp"),
+            (std::set<std::string>{"other", "sel"}));
+  const auto labels = systematicManager->getVariationLabels();
+  const bool hasSyst = hasUsableSystematicColumns(*dataManager, *systematicManager,
+                                                   "sel", labels);
+  ASSERT_TRUE(hasSyst);
+  const auto mask = defineSelectionMaskBundle(*dataManager, *systematicManager,
+                                               "sel", labels, "mask", hasSyst);
+  EXPECT_EQ(mask.resolvedColumnNames,
+            (std::vector<std::string>{"sel", "independent_up", "sel"}));
+  auto values = dataManager->getDataFrame().Take<ROOT::RVec<bool>>("mask");
+  ASSERT_EQ(values->front().size(), 3u);
+  EXPECT_FALSE(values->front()[0]);
+  EXPECT_TRUE(values->front()[1]);
+  EXPECT_FALSE(values->front()[2]);
 }
 
 TEST_F(SystematicBundleTest, FanOutMultiOutput) {

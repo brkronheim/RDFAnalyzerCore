@@ -1,0 +1,89 @@
+name: Controlled AGC performance
+
+# A manual job on a prepared runner: dataset/model paths are runner-local.
+# Routine PR correctness remains in CI Build. No shared-host timing gate.
+on:
+  workflow_dispatch:
+    inputs:
+      agc_checkout:
+        description: Absolute path to the prepared AGC analysis Git checkout on this runner
+        required: true
+        type: string
+      root_release:
+        description: CVMFS ROOT release matching the prepared Python environments
+        default: '6.40.04'
+        type: string
+      cms_inputs:
+        description: Absolute CMS input manifest on the prepared runner
+        required: true
+        type: string
+      reference:
+        description: Pinned AGC v2.0.0 checkout
+        required: true
+        type: string
+      models:
+        description: Verified exported BDT assets
+        required: true
+        type: string
+      python:
+        description: ROOT ABI compatible modern Coffea and Numba interpreter
+        required: true
+        type: string
+      pocket_python:
+        description: Isolated released PocketCoffea interpreter
+        required: true
+        type: string
+      cpu:
+        description: One available CPU (affinity does not reserve its physical core)
+        default: '48'
+        type: string
+
+concurrency:
+  group: controlled-agc-performance
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 240
+    env:
+      AGC_CHECKOUT: ${{ inputs.agc_checkout }}
+      RDF_CVMFS_ROOT_RELEASE: ${{ inputs.root_release }}
+      AGC_INPUTS: ${{ inputs.cms_inputs }}
+      AGC_REFERENCE: ${{ inputs.reference }}
+      AGC_MODELS: ${{ inputs.models }}
+      AGC_PYTHON: ${{ inputs.python }}
+      AGC_POCKET_PYTHON: ${{ inputs.pocket_python }}
+      AGC_CPU: ${{ inputs.cpu }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Stage the analysis from the prepared runner
+        run: |
+          git clone --no-local --no-checkout -- "$AGC_CHECKOUT" analyses/AGC
+          git -C analyses/AGC checkout --detach "$(git -C "$AGC_CHECKOUT" rev-parse HEAD)"
+          test -f analyses/AGC/benchmarks/run_suite.py
+      - name: Build explicit benchmark targets
+        run: |
+          source env.sh
+          cmake -S . -B build -DRDF_ANALYSES=AGC -DPython3_EXECUTABLE="$AGC_PYTHON" \
+            -DUSE_CUDA=OFF -DONNXRUNTIME_USE_CUDA=OFF
+          cmake --build build --target rdfanalyzer rdf-agc-integrated rdf-agc-simple -j2
+      - name: Run validated fresh-worker matrix
+        run: |
+          source env.sh
+          "$AGC_PYTHON" analyses/AGC/benchmarks/run_suite.py run \
+            --cases integrated systematics pocket --cms-inputs "$AGC_INPUTS" \
+            --reference "$AGC_REFERENCE" --models "$AGC_MODELS" \
+            --python "$AGC_PYTHON" --pocket-python "$AGC_POCKET_PYTHON" \
+            --chunksizes 500000 1000000 2000000 --cpu "$AGC_CPU" --repeats 3 \
+            --output "$RUNNER_TEMP/agc-results-$GITHUB_RUN_ID"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agc-results-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/agc-results-${{ github.run_id }}/**/*.json
+            ${{ runner.temp }}/agc-results-${{ github.run_id }}/**/*.log
+          if-no-files-found: warn

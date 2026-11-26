@@ -15,7 +15,7 @@ def _columns(mapping, required):
 
 def _declare():
     import ROOT
-    for path in [Path(__file__).resolve().parents[1]/'interface',Path(__file__).resolve().parents[1]/'include/rdfanalyzer']:
+    for path in [Path(__file__).resolve().parent,Path(__file__).resolve().parents[1]/'interface',Path(__file__).resolve().parents[1]/'include/rdfanalyzer']:
         if (path/'TagAndProbe.h').is_file():ROOT.gInterpreter.AddIncludePath(str(path));break
     if not ROOT.gInterpreter.Declare('#include "TagAndProbe.h"'):
         raise RuntimeError('TagAndProbe.h is not available to ROOT')

@@ -41,7 +41,7 @@ class DataManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
     ChangeToTestSourceDir();
-    std::string configFile = "cfg/test_data_config_minimal.txt";
+    std::string configFile = "cfg/test_data_config_minimal.yaml";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     dataManager = ManagerFactory::createDataManager(*configManager);
     systematicManager = std::make_unique<SystematicManager>();
@@ -57,7 +57,7 @@ protected:
  */
 TEST_F(DataManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
-    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
     auto manager = ManagerFactory::createDataManager(*config);
   });
 }
@@ -270,7 +270,7 @@ TEST_F(DataManagerTest, ConfigurationManagerIntegration) {
  * @brief Test memory management for DataManager
  */
 TEST_F(DataManagerTest, MemoryManagement) {
-  auto localConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+  auto localConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
   auto localManager = ManagerFactory::createDataManager(*localConfig);
   EXPECT_TRUE(localManager != nullptr);
 }
@@ -296,7 +296,7 @@ TEST_F(DataManagerTest, TemplateMethodVariations) {
  */
 TEST_F(DataManagerTest, SetDataFrameUpdatesNode) {
   // Create a new DataManager with a different config
-  auto altConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+  auto altConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
   auto altManager = ManagerFactory::createDataManager(*altConfig);
   // Define a column in the alternate manager
   altManager->Define("alt_col", []() { return 99; }, {}, *systematicManager);
@@ -766,8 +766,8 @@ TEST(SystematicManagerCanonicalNameTest, CanonicalBranchNameIsSystematicCounter)
  */
 TEST_F(DataManagerTest, RegisterConstantsCreatesColumns) {
   auto dm = dynamic_cast<DataManager*>(dataManager.get());
-  configManager->set("floatConfigDM", "cfg/floats.txt");
-  configManager->set("intConfigDM", "cfg/ints.txt");
+  configManager->set("floatConfigDM", "cfg/floats.yaml");
+  configManager->set("intConfigDM", "cfg/ints.yaml");
   dm->registerConstants(*configManager, "floatConfigDM", "intConfigDM");
   auto df = dataManager->getDataFrame();
   auto colNames = df.GetColumnNames();
@@ -784,7 +784,7 @@ TEST_F(DataManagerTest, RegisterAliasesCreatesAliasColumns) {
   std::cout << "Getting data manager" << std::endl;
   auto dm = dynamic_cast<DataManager*>(dataManager.get());
   std::cout << "Setting alias config" << std::endl;
-  configManager->set("aliasConfigDM", "cfg/alias.txt");
+  configManager->set("aliasConfigDM", "cfg/alias.yaml");
   std::cout << "Defining existing column" << std::endl;
   dataManager->Define("existing_col", []() { return 11; }, {}, *systematicManager);
   std::cout << "Registering aliases" << std::endl;
@@ -802,7 +802,7 @@ TEST_F(DataManagerTest, RegisterAliasesCreatesAliasColumns) {
  */
 TEST_F(DataManagerTest, RegisterOptionalBranchesCreatesOptionalColumns) {
   auto dm = dynamic_cast<DataManager*>(dataManager.get());
-  configManager->set("optionalBranchesConfigDM", "cfg/optionalBranches.txt");
+  configManager->set("optionalBranchesConfigDM", "cfg/optionalBranches.yaml");
   dm->registerOptionalBranches(*configManager, "optionalBranchesConfigDM");
   auto df = dataManager->getDataFrame();
   auto colNames = df.GetColumnNames();
@@ -817,10 +817,10 @@ TEST_F(DataManagerTest, RegisterOptionalBranchesCreatesOptionalColumns) {
 TEST_F(DataManagerTest, FinalizeSetupRegistersAll) {
   auto dm = dynamic_cast<DataManager*>(dataManager.get());
   dataManager->Define("existing_col", []() { return 1.0; }, {}, *systematicManager);
-  configManager->set("floatConfigDM", "cfg/floats.txt");
-  configManager->set("intConfigDM", "cfg/ints.txt");
-  configManager->set("aliasConfigDM", "cfg/alias.txt");
-  configManager->set("optionalBranchesConfigDM", "cfg/optionalBranches.txt");
+  configManager->set("floatConfigDM", "cfg/floats.yaml");
+  configManager->set("intConfigDM", "cfg/ints.yaml");
+  configManager->set("aliasConfigDM", "cfg/alias.yaml");
+  configManager->set("optionalBranchesConfigDM", "cfg/optionalBranches.yaml");
   dm->finalizeSetup(*configManager, "floatConfigDM", "intConfigDM", "aliasConfigDM", "optionalBranchesConfigDM");
   auto df = dataManager->getDataFrame();
   auto colNames = df.GetColumnNames();
@@ -868,7 +868,7 @@ TEST(FriendTreeConfigTest, ParseValidConfig) {
 }
 
 /**
- * @brief Test parseFriendTreeConfig returns empty list for missing file
+ * @brief Test parseFriendTreeConfig reports a missing file
  */
 TEST(FriendTreeConfigTest, MissingFileThrows) {
   EXPECT_THROW({
@@ -876,68 +876,166 @@ TEST(FriendTreeConfigTest, MissingFileThrows) {
   }, std::runtime_error);
 }
 
-/**
- * @brief Test registerFriendTrees is a no-op when friendConfig key is absent
- */
-TEST_F(DataManagerTest, RegisterFriendTreesNoOpWhenKeyAbsent) {
-  EXPECT_NO_THROW({
-    auto dm = dynamic_cast<DataManager*>(dataManager.get());
-    dm->registerFriendTrees(*configManager, "nonExistentFriendConfig");
-  });
+TEST(FriendTreeConfigTest, AcceptsEmptyListsAndManifestSpellings) {
+  const auto path = std::filesystem::temp_directory_path() /
+      ("rdf-empty-friends-" + std::to_string(getpid()) + ".yaml");
+  std::ofstream(path) << "friends: []\n";
+  EXPECT_TRUE(parseFriendTreeConfig(path.string()).empty());
+  std::ofstream(path) << "format_version: 1\nfriend_trees:\n"
+      "  - {alias: side, tree_name: Other, files: [a.root], directory: null, index_branches: []}\n"
+      "  - {alias: idx, directory: /inputs, files: [], globs: [], antiglobs: [], index_branches: [event]}\n";
+  const auto specs = parseFriendTreeConfig(path.string());
+  ASSERT_EQ(specs.size(), 2u);
+  EXPECT_EQ(specs[0].treeName, "Other");
+  EXPECT_EQ(specs[0].files, (std::vector<std::string>{"a.root"}));
+  EXPECT_TRUE(specs[0].indexBranches.empty());
+  EXPECT_TRUE(specs[1].globs.empty());
+  EXPECT_TRUE(specs[1].antiglobs.empty());
+  EXPECT_EQ(specs[1].indexBranches, (std::vector<std::string>{"event"}));
+  std::filesystem::remove(path);
 }
 
-/**
- * @brief Test registerFriendTrees is a no-op when the config file does not exist
- */
-TEST_F(DataManagerTest, RegisterFriendTreesNoOpWhenFileMissing) {
-  configManager->set("friendConfig", "/nonexistent/friends.yaml");
-  EXPECT_NO_THROW({
-    auto dm = dynamic_cast<DataManager*>(dataManager.get());
-    dm->registerFriendTrees(*configManager);
-  });
+TEST(FriendTreeConfigTest, InvalidDocumentsIdentifyTheFileAndField) {
+  const auto path = std::filesystem::temp_directory_path() /
+      ("rdf-invalid-friends-" + std::to_string(getpid()) + ".yaml");
+  const std::vector<std::pair<std::string, std::string>> cases = {
+      {"frends: []", "friends"}, {"friends: {}", "sequence"},
+      {"friends: []\n---\nfriends: []", "one YAML document"},
+      {"friends: []\nfriend_trees: []", "duplicate"},
+      {"friends: [5]", "friends[0]"}, {"friends: [{}]", "alias"},
+      {"friends: [{alias: a}]", "fileList or directory"},
+      {"friends: [{alias: a, fileList: wrong.root}]", "friends[0].fileList"},
+      {"friends: [{alias: a, fileList: [null]}]", "nonempty string"},
+      {"friends: [{alias: a, treeName: [], directory: /a}]", "friends[0].treeName"},
+      {"friends: [{alias: a, directory: /a, indexBranhes: [run]}]", "indexBranhes"},
+      {"friends: [{alias: a, directory: /a, indexBranches: [a, b, c]}]", "indexBranches"},
+      {"friends: [{alias: a, alias: b, directory: /a}]", "duplicate field"},
+      {"friends: [{alias: a, files: [], fileList: [a.root]}]", "duplicate field"},
+      {"friends: [{alias: a, directory: /x}, {alias: a, directory: /y}]", "duplicate alias"},
+  };
+  for (const auto &[document, diagnostic] : cases) {
+    SCOPED_TRACE(document);
+    std::ofstream(path) << document;
+    try {
+      parseFriendTreeConfig(path.string());
+      ADD_FAILURE() << "Malformed friend configuration accepted";
+    } catch (const std::runtime_error &error) {
+      const std::string message = error.what();
+      EXPECT_NE(message.find(path.string()), std::string::npos);
+      EXPECT_NE(message.find(diagnostic), std::string::npos) << message;
+    }
+  }
+  std::filesystem::remove(path);
 }
 
-/**
- * @brief Test registerFriendTrees parses a real config without crashing
- *
- * The referenced friend files do not exist, so no entries are read, but the
- * parsing and attachment logic should complete without throwing.
- */
-TEST_F(DataManagerTest, RegisterFriendTreesParsesConfigGracefully) {
-  ChangeToTestSourceDir();
-  configManager->set("friendConfig", "cfg/test_friend_config.yaml");
-  EXPECT_NO_THROW({
-    auto dm = dynamic_cast<DataManager*>(dataManager.get());
-    dm->registerFriendTrees(*configManager);
-  });
-}
-
-/**
- * @brief Test attachFriendTree with missing files logs a warning but does not throw
- */
-TEST_F(DataManagerTest, AttachFriendTreeMissingFilesDoesNotThrow) {
+TEST_F(DataManagerTest, LateFriendsFailBeforeChangingTheGraph) {
+  auto& data = dynamic_cast<DataManager&>(*dataManager);
+  auto selected = data.getDataFrame()
+      .Define("prepared", [] { return 17; })
+      .Filter([](ULong64_t entry) { return entry > 0; }, {"rdfentry_"});
+  data.setDataFrame(selected);
+  auto before = selected.Count();
   FriendTreeSpec spec;
-  spec.alias = "test_friend";
-  spec.treeName = "Events";
-  spec.files = {"/nonexistent/file.root"};
-  EXPECT_NO_THROW({
-    auto dm = dynamic_cast<DataManager*>(dataManager.get());
-    dm->attachFriendTree(spec);
-  });
+  spec.alias = "late";
+  EXPECT_THROW(data.attachFriendTree(spec), std::logic_error);
+  EXPECT_THROW(data.registerFriendTrees(*configManager), std::logic_error);
+  auto after = data.getDataFrame();
+  EXPECT_TRUE(after.HasColumn("prepared"));
+  EXPECT_EQ(*after.Count(), *before);
+  EXPECT_EQ(*before, 0u);
 }
 
-/**
- * @brief Test attachFriendTree with no files and no directory skips gracefully
- */
-TEST_F(DataManagerTest, AttachFriendTreeNoSourceSkipsGracefully) {
-  FriendTreeSpec spec;
-  spec.alias = "empty_friend";
-  spec.treeName = "Events";
-  // No files, no directory
-  EXPECT_NO_THROW({
-    auto dm = dynamic_cast<DataManager*>(dataManager.get());
-    dm->attachFriendTree(spec);
-  });
+TEST_F(DataManagerTest, ProgrammaticFriendsAreAvailableAtSourceConstruction) {
+  const auto directory = std::filesystem::temp_directory_path() /
+      ("rdf-friends-" + std::to_string(getpid()));
+  std::filesystem::create_directories(directory);
+  std::vector<std::string> inputs;
+  FriendTreeSpec sequential, indexed;
+  sequential.alias = "side";
+  indexed.alias = "matched";
+  indexed.indexBranches = {"event"};
+  for (int part = 0; part < 2; ++part) {
+    for (const std::string role : {"main", "side", "matched"}) {
+      auto path = directory / (role + std::to_string(part) + ".root");
+      TFile file(path.c_str(), "RECREATE");
+      TTree tree("Events", "Events");
+      int event = 0, value = 0;
+      tree.Branch("event", &event);
+      tree.Branch("value", &value);
+      for (int i = 0; i < 3; ++i) {
+        event = 3 * part + (role == "matched" ? 2 - i : i);
+        value = event + 10;
+        tree.Fill();
+      }
+      tree.Write();
+      if (role == "main") inputs.push_back(path.string());
+      else if (role == "side") sequential.files.push_back(path.string());
+      else indexed.files.push_back(path.string());
+    }
+  }
+  const auto configFile = directory / "analysis.yaml";
+  {
+    std::ofstream yaml(configFile);
+    yaml << "fileList: [" << inputs[0] << ", " << inputs[1] << "]"
+         << "\ntreeList: Events\nthreads: 1\nfirstEntry: 2\nlastEntry: 5\n";
+  }
+  ConfigurationManager source(configFile.string());
+  {
+    DataManager manager(source, {sequential, indexed});
+    auto df = manager.getDataFrame();
+    auto left = df.Take<int>("side.value");
+    auto right = df.Take<int>("matched.value");
+    EXPECT_EQ(*left, (std::vector<int>{12, 13, 14}));
+    EXPECT_EQ(*right, *left);
+    EXPECT_EQ(df.GetNRuns(), 1u);
+  }
+  auto invalid = indexed;
+  invalid.indexBranches = {"event", "event", "event"};
+  EXPECT_THROW(DataManager(source, {invalid}), std::invalid_argument);
+  invalid.indexBranches = {"no_such_event_column"};
+  EXPECT_THROW(DataManager(source, {invalid}), std::runtime_error);
+  std::filesystem::remove_all(directory);
+}
+
+TEST(DataManagerConfigTest, OptionalBranchDefaultsHaveCheckedTypesAndRanges) {
+  const auto directory = std::filesystem::temp_directory_path() /
+      ("rdf-optional-types-" + std::to_string(getpid()));
+  std::filesystem::create_directories(directory);
+  const auto recipe = directory / "optional.yaml";
+  const auto settings = directory / "main.yaml";
+  std::ofstream(settings) << "optionalBranchesConfig: optional.yaml\n";
+  ConfigurationManager config(settings.string());
+  {
+    DataManager data(1);
+    try {
+      data.finalizeSetup(config);
+      FAIL() << "accepted an explicit missing recipe";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("optionalBranchesConfig"), std::string::npos);
+      EXPECT_NE(std::string(error.what()).find(recipe.string()), std::string::npos);
+    }
+  }
+  for (const auto& item : std::vector<std::pair<std::string, std::string>>{
+      {"9", "1"}, {"1x", "3"}, {"14", "-1"}, {"4", "256"},
+      {"3", "123x"}, {"6", "1.5kg"}, {"18", "unknown"}}) {
+    std::ofstream(recipe) << "- {name: extra, type: '" << item.first
+                          << "', default: '" << item.second << "'}\n";
+    DataManager data(1);
+    try {
+      data.finalizeSetup(config);
+      FAIL() << "accepted " << item.first << ", " << item.second;
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what()).find("extra"), std::string::npos);
+      EXPECT_NE(std::string(error.what()).find("optional.yaml"), std::string::npos);
+    }
+  }
+  std::ofstream(recipe) << "- {name: flag, type: 8, default: YES}\n"
+                           "- {name: bytes, type: 14, default: 255}\n";
+  DataManager data(1);
+  data.finalizeSetup(config);
+  auto df = data.getDataFrame();
+  EXPECT_EQ(df.Filter("flag && bytes.size() == 1 && bytes[0] == 255").Count().GetValue(), 1u);
+  std::filesystem::remove_all(directory);
 }
 
 TEST(DataManagerConfigTest, RelativeAuxiliaryPathsResolveFromMainConfigDirectory) {
@@ -949,23 +1047,23 @@ TEST(DataManagerConfigTest, RelativeAuxiliaryPathsResolveFromMainConfigDirectory
   std::filesystem::create_directories(workingDir);
 
   {
-    std::ofstream(configDir / "floats.txt") << "mass=125.0\n";
-    std::ofstream(configDir / "ints.txt") << "count=7\n";
-    std::ofstream(configDir / "aliases.txt")
-        << "existingName=source newName=source_alias\n";
-    std::ofstream(configDir / "optional.txt")
-        << "name=optional_branch type=1 default=42\n";
-    std::ofstream(tempRoot / "submit.txt")
-        << "floatConfig=cfg/floats.txt\n"
-        << "intConfig=cfg/ints.txt\n"
-        << "aliasConfig=cfg/aliases.txt\n"
-        << "optionalBranchesConfig=cfg/optional.txt\n";
+    std::ofstream(configDir / "floats.yaml") << "mass: 125.0\n";
+    std::ofstream(configDir / "ints.yaml") << "count: 7\n";
+    std::ofstream(configDir / "aliases.yaml")
+        << "- {existingName: source, newName: source_alias}\n";
+    std::ofstream(configDir / "optional.yaml")
+        << "- {name: optional_branch, type: 1, default: 42}\n";
+    std::ofstream(tempRoot / "submit.yaml")
+        << "floatConfig: cfg/floats.yaml\n"
+        << "intConfig: cfg/ints.yaml\n"
+        << "aliasConfig: cfg/aliases.yaml\n"
+        << "optionalBranchesConfig: cfg/optional.yaml\n";
   }
 
   const auto oldWorkingDir = std::filesystem::current_path();
   std::filesystem::current_path(workingDir);
   {
-    ConfigurationManager config((tempRoot / "submit.txt").string());
+    ConfigurationManager config((tempRoot / "submit.yaml").string());
     DataManager data(2);
     SystematicManager systematics;
     data.Define("source", []() { return 3.0; }, {}, systematics);

@@ -5,8 +5,8 @@
 # Bootstrap script executed on every HTCondor worker node before LAW runs the
 # branch task.  Customize this file for your site's software environment.
 #
-# LAW automatically transfers this file together with the job payload when
-# SkimTask or RunOpenDataJobs is submitted with --workflow htcondor.
+# Site-maintained LAW workflows can explicitly select this template. Snakemake
+# uses the staged worker from rdfproduction and does not call this script.
 #
 # This template handles the most common CMS/ATLAS use cases:
 #   1. Unpacking a Python environment tarball (core/python/law/setup_python_env.sh output)

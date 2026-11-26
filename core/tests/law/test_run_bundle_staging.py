@@ -13,6 +13,9 @@ import analysis_tasks
 from dataset_manifest import DatasetEntry
 
 
+import production_jobs
+
+
 class ArchiveExtractionTests(unittest.TestCase):
     def test_extracts_ordinary_config(self):
         import tarfile
@@ -81,6 +84,7 @@ class BundleStagingTests(unittest.TestCase):
             config = workspace / "submit.yaml"
             config.write_text("enableSkim: false\n")
             with patch.object(analysis_tasks, "WORKSPACE", str(workspace)), \
+                    patch("rdfproduction.jobs.staging.REPOSITORY_ROOT", workspace), \
                     patch("ingestion_utils.subprocess.check_output", return_value=dependencies):
                 task = analysis_tasks.PrepareSkimJobs(
                     name="external_onnx", exe=str(executable), submit_config=str(config),
@@ -137,7 +141,7 @@ class BundleStagingTests(unittest.TestCase):
             root = Path(tmp)
             (root/"payload.json").write_text('{"calibration": 3}')
             (root/"trigger.yaml").write_text('- file: payload.json\n')
-            (root/"model.txt").write_text('model file=payload.json\n')
+            (root/"model.txt").write_text('name=model file=payload.json\n')
             (root/"datasets.yaml").write_text(
                 'lumi: 1\ndatasets:\n'
                 '- {name: data, dtype: data, files: [input.root]}\n'
@@ -145,17 +149,17 @@ class BundleStagingTests(unittest.TestCase):
                 '- {name: mc2, dtype: mc, files: [input.root]}\n')
             (root/"submit.yaml").write_text(
                 'sampleConfig: datasets.yaml\ntriggerConfig: trigger.yaml\n'
-                'modelConfig: model.txt\nenableSkim: false\n')
+                'bdtConfig: model.txt\nenableSkim: false\n')
             bundle = root/"bundle"
             compile_config_bundle(root/"submit.yaml", bundle,
-                                  asset_keys=["sampleConfig", "triggerConfig", "modelConfig"])
+                                  asset_keys=["sampleConfig", "triggerConfig", "bdtConfig"])
             template = str(bundle/"submit_config.yaml")
             executable = root/"analysis"
             executable.write_text('#!/bin/sh\nexit 0\n')
             executable.chmod(0o755)
             with patch.object(analysis_tasks, "WORKSPACE", str(root)), \
-                 patch.object(analysis_tasks, "_collect_skim_shared_libs", return_value={}), \
-                 patch.object(analysis_tasks, "_rewrite_staged_analysis_config",
+                 patch("rdfproduction.transport.collect_local_shared_libs", return_value={}), \
+                 patch("rdfproduction.jobs.staging._rewrite_staged_analysis_config",
                               wraps=analysis_tasks._rewrite_staged_analysis_config) as rewrite:
                 task = analysis_tasks.PrepareSkimJobs(name="cached", exe=str(executable),
                     submit_config=template, dataset_manifest=str(bundle/"dataset_manifest.yaml"),
@@ -173,15 +177,15 @@ class BundleStagingTests(unittest.TestCase):
                 manifest = analysis_tasks.DatasetManifest.load(str(bundle/"dataset_manifest.yaml"))
                 for dataset in manifest.datasets:
                     job = root/"skimRun_cached/jobs"/dataset.name
-                    config = read_config(str(job/"submit_config.txt"))
+                    config = read_config(str(job/"submit_config.yaml"))
                     before = {path.name: path.read_bytes() for path in (job/"cfg").iterdir()}
                     self.assertEqual(before, archived)
                     # Re-run the uncached writer at the same paths to compare
                     # complete config and payload bytes, including metadata.
-                    config_bytes = (job/"submit_config.txt").read_bytes()
+                    config_bytes = (job/"submit_config.yaml").read_bytes()
                     _write_job_config(str(job), template, dataset, config["saveDirectory"],
                                       extra_overrides=config, stage_shared_inputs_locally=False)
-                    self.assertEqual(config_bytes, (job/"submit_config.txt").read_bytes())
+                    self.assertEqual(config_bytes, (job/"submit_config.yaml").read_bytes())
                     self.assertEqual(before, {p.name: p.read_bytes() for p in (job/"cfg").iterdir()})
                     trigger = yaml.safe_load((job/config["triggerConfig"]).read_text())
                     self.assertTrue((job/trigger[0]["file"]).is_file())
@@ -203,7 +207,7 @@ class BundleStagingTests(unittest.TestCase):
             executable.write_text('#!/bin/sh\nexit 0\n')
             executable.chmod(0o755)
             with patch.object(analysis_tasks,"WORKSPACE",str(root)), \
-                 patch.object(analysis_tasks,"_collect_skim_shared_libs",return_value={}):
+                 patch("rdfproduction.transport.collect_local_shared_libs",return_value={}):
                 task=analysis_tasks.PrepareSkimJobs(name="sealed",exe=str(executable),
                     submit_config=str(bundle/"submit_config.yaml"),
                     dataset_manifest=str(bundle/"dataset_manifest.yaml"),make_test_job=False)
@@ -227,7 +231,7 @@ class BundleStagingTests(unittest.TestCase):
             job = root/"job"
             _write_job_config(str(job), str(bundle/"submit_config.yaml"),
                 DatasetEntry(name="sample", files=["input.root"], dtype="mc"), str(root/"output"))
-            config = read_config(str(job/"submit_config.txt"))
+            config = read_config(str(job/"submit_config.yaml"))
             self.assertEqual(config["runBundleId"],verify_bundle(bundle)["bundle_id"])
             triggers = yaml.safe_load((job/config["triggerConfig"]).read_text())
             self.assertTrue((job/triggers[0]["file"]).is_file())
@@ -238,7 +242,7 @@ class BundleStagingTests(unittest.TestCase):
             _write_job_config(str(second), str(bundle/"submit_config.yaml"),
                 DatasetEntry(name="sample", files=["input.root"], dtype="mc"), str(root/"output"),
                 stage_shared_inputs_locally=False)
-            worker_config=read_config(str(second/"submit_config.txt"))
+            worker_config=read_config(str(second/"submit_config.yaml"))
             nested=yaml.safe_load((second/worker_config["triggerConfig"]).read_text())
             self.assertTrue((second/nested[0]["file"]).is_file())
             verify_bundle(bundle)

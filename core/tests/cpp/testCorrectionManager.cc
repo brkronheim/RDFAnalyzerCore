@@ -46,20 +46,11 @@ protected:
   /**
    * @brief Set up the test fixture
    *
-   * Copies the correction configuration file to the working directory and
-   * creates ConfigurationManager and CorrectionManager instances for testing.
+   * Creates ConfigurationManager and CorrectionManager instances for testing.
    */
   void SetUp() override {
     ChangeToTestSourceDir();
-    // Ensure correctionlibConfig (multi-key format) is available in the working directory
-    std::string src = "cfg/correction.txt";
-    std::string dst = "correctionlibConfig";
-    std::ifstream srcFile(src, std::ios::binary);
-    std::ofstream dstFile(dst, std::ios::binary);
-    dstFile << srcFile.rdbuf();
-    srcFile.close();
-    dstFile.close();
-    std::string configFile = "cfg/test_data_config_minimal.txt";
+    std::string configFile = "cfg/test_data_config_minimal.yaml";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     systematicManager = std::make_unique<SystematicManager>();
     dataManager = std::make_unique<DataManager>(2);
@@ -1366,6 +1357,50 @@ TEST_F(CorrectionManagerTest, ConditionalCorrectionSkipsInactiveInvalidInputsAnd
   EXPECT_FLOAT_EQ(nominal[0], 1.f);
   EXPECT_FLOAT_EQ(up[0], .1f);
   EXPECT_FLOAT_EQ(weightOnly[0], 1.f);
+}
+
+TEST_F(CorrectionManagerTest, DeferredConditionalCorrectionPullsOnlyTheActivePhysicalInputs) {
+  configManager->set("correctionDeferInactiveInputs", "true");
+  dataManager->DefineNominal("float_arg", [](ULong64_t entry) {
+    if (entry != 0) throw std::runtime_error("inactive nominal coordinate was evaluated");
+    return .5;
+  }, {"rdfentry_"});
+  dataManager->DefineNominal("shape_input", [](ULong64_t entry) {
+    if (entry != 1) throw std::runtime_error("inactive shifted coordinate was evaluated");
+    return 1.5;
+  }, {"rdfentry_"});
+  dataManager->DefineNominal("int_arg", [] { return 1; });
+  dataManager->DefineNominal("active", [](ULong64_t entry) { return entry == 0; }, {"rdfentry_"});
+  dataManager->DefineNominal("activeUp", [](ULong64_t entry) { return entry == 1; }, {"rdfentry_"});
+  systematicManager->registerVariationColumns("active", "shape", "activeUp", "active");
+  systematicManager->registerVariationColumns("float_arg", "shape", "shape_input", "float_arg");
+  correctionManager->applyConditionalCorrection("test_correction", {"A"}, {}, "active", "deferred");
+  auto df = dataManager->getDataFrame();
+  auto nominal = df.Take<float>("deferred");
+  auto shifted = df.Take<float>("deferred_shapeUp");
+  EXPECT_EQ(*nominal, (std::vector<float>{.1f, 1.f}));
+  EXPECT_EQ(*shifted, (std::vector<float>{1.f, .2f}));
+  EXPECT_EQ(df.GetNRuns(), 1u);
+}
+
+TEST(CorrectionBinnedVariations, ReusesAClampedLookupAcrossFixedCategoryOutputs) {
+  const auto correction = correction::CorrectionSet::from_string(R"({
+    "schema_version":2,"corrections":[{"name":"table","version":1,
+    "inputs":[{"name":"x","type":"real"},{"name":"variation","type":"string"}],
+    "output":{"name":"out","type":"real"},
+    "data":{"nodetype":"binning","input":"x","edges":[0.0,1.0,2.0],"flow":"clamp","content":[
+      {"nodetype":"category","input":"variation","content":[{"key":"nominal","value":1.1},{"key":"up","value":1.2}]},
+      {"nodetype":"category","input":"variation","content":[{"key":"nominal","value":2.1},{"key":"up","value":2.2}]}
+    ]}}]})")->at("table");
+  using Group = correction::BinnedVariationGroup;
+  const auto group = Group::prepare(correction, {{"nominal"}, {"up"}});
+  ASSERT_TRUE(group);
+  EXPECT_FALSE(Group::prepare(correction, {{"nominal"}, {"undefined"}}));
+  Group::Workspace workspace;
+  for (double coordinate : {-1., 0., std::nextafter(1., 0.), 1., 2., 3., .25}) {
+    EXPECT_EQ(group->evaluate(1, &coordinate, 1, workspace), correction->evaluate({coordinate, "up"}));
+    EXPECT_EQ(group->evaluate(0, &coordinate, 1, workspace), correction->evaluate({coordinate, "nominal"}));
+  }
 }
 
 TEST_F(CorrectionManagerTest, SelectedBatchSharesPacksAndRefreshesReadersAfterRedefine) {

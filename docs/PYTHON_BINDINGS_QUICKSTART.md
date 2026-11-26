@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path("build/python").resolve()))
 import rdfanalyzer
 
 # Create analyzer
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Define variable (ROOT JIT)
 analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])

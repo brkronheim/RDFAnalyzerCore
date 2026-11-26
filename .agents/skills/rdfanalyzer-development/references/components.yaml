@@ -56,6 +56,46 @@ components:
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/controller.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/campaign.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/stitching.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/stitching.md
+- path: core/python/rdfproduction/downstream.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/statistical_inference/diagnostic_plots.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/build.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/python_runtime.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/artifacts.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/condor_submission.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/output_index.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
 - path: core/python/analysis_inputs.py
   kind: component
   skill: rdfanalyzer-production
@@ -524,7 +564,7 @@ components:
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-environment.md
-- path: core/python/law/ingestion_utils.py
+- path: core/python/rdfproduction/transport.py
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-environment.md
@@ -552,7 +592,7 @@ components:
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-tasks.md
-- path: core/python/law/partition_utils.py
+- path: core/python/rdfproduction/partitioning.py
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-tasks.md
@@ -564,11 +604,11 @@ components:
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-tasks.md
-- path: core/python/law/failure_handler.py
+- path: core/python/rdfproduction/retry.py
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-tasks.md
-- path: core/python/law/performance_recorder.py
+- path: core/python/rdfproduction/performance.py
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-tasks.md
@@ -576,6 +616,10 @@ components:
   kind: component
   skill: rdfanalyzer-production
   reference: rdfanalyzer-production/references/law-tasks.md
+- path: core/python/rdfproduction/filelist_manifest.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
 - path: core/python/law/build_manifest_from_filelist_dir.py
   kind: component
   skill: rdfanalyzer-production
@@ -744,6 +788,104 @@ components:
   kind: component
   skill: rdfanalyzer-development
   reference: rdfanalyzer-development/references/diagnostics.md
+
+- path: core/python/rdfproduction/jobs/run.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/discovery.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/executors.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/stitching_validation.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/joint_fit.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/manifest_merge.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/manifest_plotting.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/statistical_inference/manifest_fits.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/setup_python_env.sh
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/cli.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/specs.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/staging.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/job_config.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/prepare.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/submit.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/monitor.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/smoke.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/pilots.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/branches.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/condor_files.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/provenance.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/output_validation.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/jobs/paths.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+- path: core/python/rdfproduction/stitching_derivation.py
+  kind: component
+  skill: rdfanalyzer-production
+  reference: rdfanalyzer-production/references/task-graph.md
+
 law_tasks:
 - module: core/python/law/analysis_tasks.py
   class: PrepareSkimJobs

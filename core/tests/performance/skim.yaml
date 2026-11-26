@@ -1,0 +1,8 @@
+# Stage a Run 3 NanoAOD MC file as input.root in the worker's --cwd.
+fileList: input.root
+treeList: Events
+saveTree: Events
+enableSkim: true
+saveConfig: skim_columns.yaml
+threads: '1'
+batch: 'False'

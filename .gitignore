@@ -38,14 +38,26 @@ aux/Run3/*
 aux/Run2/*
 docs/doxygen/*
 analyses/*
+!/analyses/ExampleAnalysis/
+/analyses/ExampleAnalysis/*
+!/analyses/ExampleAnalysis/*.yaml
 !/analyses/CMS_Run2016_DoubleMuon/
 /analyses/CMS_Run2016_DoubleMuon/*
 !/analyses/CMS_Run2016_DoubleMuon/rdf-dependencies.cmake
 core/python/law/index
 skimRun*/
+.skimRun_*.rdf-production.lock
+.snakemake/
+manifestFileList_*/
+run_*/
+benchmarks/*
+audits/*
+cmssw/
 mergeRun*/
 rucioFileList*/
 xrdfsFileList*/
+stitchValidation*/
+experiments/*
 
 AGENTS/
 /.venv/

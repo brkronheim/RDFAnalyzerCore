@@ -1,4 +1,5 @@
 """Standalone paired pilot driver, embedded in Condor workers (standard library)."""
+from native_config_io import read_config, write_config
 import json
 import os
 from pathlib import Path
@@ -20,8 +21,8 @@ def run_measurement(executable, config_path, base, label, entries=None):
             if config.get(key):
                 p = Path(config[key])
                 config[key] = str(p.with_name('pilot_prefix_' + p.name))
-    path = config_path.with_name('pilot_' + label + '.txt')
-    path.write_text(''.join(k + '=' + str(v) + '\n' for k, v in config.items()))
+    path = config_path.with_name('pilot_' + label + '.yaml')
+    write_config(config, path)
     out = Path('pilot_' + label + '.stdout')
     err = Path('pilot_' + label + '.stderr')
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -53,12 +54,7 @@ def run_measurement(executable, config_path, base, label, entries=None):
 def main():
     executable, source, prefix = sys.argv[1:]
     path = Path(source)
-    config = {}
-    for line in path.read_text().splitlines():
-        line = line.split('#', 1)[0]
-        if '=' in line:
-            key, value = line.split('=', 1)
-            config[key.strip()] = value.strip()
+    config = read_config(path)
     if len([v for v in config.get('fileList', '').split(',') if v.strip()]) != 1:
         raise RuntimeError('Sizing pilots require exactly one file')
     short = run_measurement(executable, path, config, 'prefix', int(prefix))

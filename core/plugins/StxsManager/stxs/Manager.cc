@@ -7,6 +7,7 @@
 
 #include "stxs/Manager.h"
 
+#include <yaml-cpp/yaml.h>
 #include <TFile.h>
 #include <TH1.h>
 
@@ -109,6 +110,25 @@ std::string acceptanceKey(int processId, int channelId) {
   return std::to_string(processId) + ":" + std::to_string(channelId);
 }
 
+bool isYaml(const std::string &path) {
+  const auto ext = std::filesystem::path(path).extension();
+  return ext == ".yaml" || ext == ".yml";
+}
+
+YAML::Node loadTable(const std::string &path) {
+  auto document = YAML::LoadFile(path);
+  if (!document.IsSequence() || document.size() == 0)
+    throw std::runtime_error(path + ": expected a nonempty sequence of STXS bin mappings");
+  return document;
+}
+
+void addBin(Config &config, BinDefinition definition) {
+  config.analysisBinLabels[definition.analysisBin] = definition.label;
+  for (int category : definition.fineCategories)
+    config.fineCategoryToAnalysisBin[category] = definition.analysisBin;
+  config.bins.push_back(std::move(definition));
+}
+
 } // anonymous namespace
 
 // ===========================================================================
@@ -134,6 +154,21 @@ Config loadConfig(const std::string &binConfigPath,
     return config;
   }
 
+  if (isYaml(binConfigPath)) {
+    try {
+      for (const auto &row : loadTable(binConfigPath)) {
+        BinDefinition bin{row["analysis_bin"].as<int>(), row["label"].as<std::string>(),
+                          row["fine_categories"].as<std::vector<int>>()};
+        if (bin.label.empty() || bin.fineCategories.empty())
+          throw std::runtime_error(binConfigPath + ": bin label and fine_categories must be nonempty");
+        addBin(config, std::move(bin));
+      }
+    } catch (const YAML::Exception &error) {
+      throw std::runtime_error(binConfigPath + ": expected analysis_bin, label and fine_categories: " + error.what());
+    }
+    return config;
+  }
+
   std::ifstream input(binConfigPath);
   if (!input) {
     throw std::runtime_error("stxs::Manager: could not open STXS bin config '" +
@@ -155,11 +190,7 @@ Config loadConfig(const std::string &binConfigPath,
           "'. Expected '<bin> <label> <fine1,fine2,...>'.");
     }
     definition.fineCategories = parseCategoryList(categoryList);
-    config.analysisBinLabels[definition.analysisBin] = definition.label;
-    for (const int fineCategory : definition.fineCategories) {
-      config.fineCategoryToAnalysisBin[fineCategory] = definition.analysisBin;
-    }
-    config.bins.push_back(std::move(definition));
+    addBin(config, std::move(definition));
   }
 
   if (config.bins.empty()) {
@@ -176,11 +207,30 @@ Config loadConfig(const std::string &binConfigPath,
 // ===========================================================================
 
 void loadMigrationBinConfig(const std::string &path, Config &config) {
+  std::unordered_map<int, MigrationBin> bins;
+  auto add = [&](int category, const MigrationBin &bin) {
+    if (category <= 0 || bin.ptBin <= 0 || bin.jetPtBin <= 0 || bin.scaleBin <= 0)
+      throw std::runtime_error(path + ": migration category and bin indices must be positive");
+    if (!bins.emplace(category, bin).second)
+      throw std::runtime_error(path + ": duplicate migration category " + std::to_string(category));
+  };
+  if (isYaml(path)) {
+    try {
+      for (const auto &row : loadTable(path)) {
+        const int category = row["fine_category"].as<int>();
+        add(category, {row["pt_bin"].as<int>(), row["jet_pt_bin"].as<int>(),
+                       row["scale_bin"].as<int>(), row["acceptance_fallback"].as<bool>()});
+      }
+    } catch (const YAML::Exception &error) {
+      throw std::runtime_error(path + ": invalid STXS migration bin fields: " + error.what());
+    }
+    config.migrationBins = std::move(bins);
+    return;
+  }
   std::ifstream input(path);
   if (!input) {
     throw std::runtime_error("stxs::Manager: cannot open migration bin config '" + path + "'.");
   }
-  std::unordered_map<int, MigrationBin> bins;
   std::string line;
   while (std::getline(input, line)) {
     line = trimCopy(line.substr(0, line.find('#')));
@@ -195,9 +245,7 @@ void loadMigrationBinConfig(const std::string &path, Config &config) {
       throw std::runtime_error("stxs::Manager: invalid migration bin row '" + line + "'.");
     }
     bin.useAcceptanceFallback = fallback != 0;
-    if (!bins.emplace(category, bin).second) {
-      throw std::runtime_error("stxs::Manager: duplicate migration category in '" + path + "'.");
-    }
+    add(category, bin);
   }
   if (bins.empty()) {
     throw std::runtime_error("stxs::Manager: migration bin config is empty: '" + path + "'.");
@@ -206,13 +254,9 @@ void loadMigrationBinConfig(const std::string &path, Config &config) {
 }
 
 Config loadConfigFromYaml(const std::string &yamlConfigPath) {
-  // TODO: Implement YAML parsing using the framework's YAML config adapter.
-  // For now, this returns a default Config and logs a warning.
-  // The YAML loading will be implemented when the framework's YAML support
-  // is integrated with the plugin lifecycle.
-  Config config;
-  config.enabled = false;
-  return config;
+  throw std::runtime_error(yamlConfigPath +
+      ": the combined STXS document is unsupported. Configure stxsBinConfig and "
+      "stxsMigrationBinConfig in the analysis YAML, or construct stxs::Config directly.");
 }
 
 // ===========================================================================

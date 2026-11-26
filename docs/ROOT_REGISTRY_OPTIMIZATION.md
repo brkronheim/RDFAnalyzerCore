@@ -28,14 +28,14 @@ handling. `RDF_ROOT_READER_OPTIMIZATION` accepts `AUTO` (default), `ON` or
 | 6.42.00-rc1 (reports 6.41.99) | Yes | Yes | Yes |
 
 The native build uses the exact release and header fingerprints in
-[the ABI manifest](../core/root_compat/native_abis.tsv). Unlisted versions use
+[the ABI manifest](https://github.com/brkronheim/RDFAnalyzerCore/blob/dev/core/root_compat/native_abis.tsv). Unlisted versions use
 ordinary ROOT under `AUTO`. On 6.30.12 the registry implementation differs, so
 explicitly requesting registry pruning with `ON` gives a configuration error.
 
 For a native executable with only the reader optimization, configure with
 `-DRDF_ROOT_READER_OPTIMIZATION=ON -DRDF_ROOT_REGISTRY_OPTIMIZATION=OFF`.
 Building against stock ROOT needs no source changes to ROOT. For a custom
-ROOT build, the [source-patch matrix and instructions](../core/root_compat/patches/README.md)
+ROOT build, the [source-patch matrix and instructions](https://github.com/brkronheim/RDFAnalyzerCore/blob/dev/core/root_compat/patches/README.md)
 also cover the earlier column-name optimization. That patch avoids copying a
 data source's column list during graph booking. It is applied when building
 ROOT from source. Patched installations have different header fingerprints and

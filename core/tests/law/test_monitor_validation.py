@@ -10,6 +10,8 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT / "core/python/law"), str(ROOT / "core/python")]
 
+import production_jobs
+
 from ingestion_utils import eos_file_info_batch, eos_files_exist_batch, eos_file_exists
 
 
@@ -96,9 +98,9 @@ class TestValidationReceipts(unittest.TestCase):
             for role in ("save", "meta"):
                 self.signatures[info[role]] = dict(size=100, mtime="2026-11-09 12:00:00")
         self.addCleanup(patch.stopall)
-        self.batch = patch.object(tasks, "_output_file_info_batch", side_effect=lambda paths:
+        self.batch = patch("rdfproduction.jobs.output_validation._output_file_info_batch", side_effect=lambda paths:
             {p: self.signatures.get(p) for p in paths}).start()
-        self.validate = patch.object(tasks, "_skim_job_output_errors", return_value=[]).start()
+        self.validate = patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=[]).start()
         patch.object(self.task, "publish_message").start()
 
     def check(self):
@@ -141,8 +143,8 @@ class TestValidationReceipts(unittest.TestCase):
             "submission_dir": str(self.root), "cluster_id": "123"}]}))
         self.task.poll_interval = 0
         with patch.object(self.task, "input", return_value=law.LocalFileTarget(str(submitted))), \
-             patch.object(tasks, "_condor_q_ads", side_effect=[{1: {"JobStatus": 2}}, {}]), \
-             patch.object(tasks, "_condor_history_exit", side_effect=[{0: 0}, {0: 0, 1: 0}]), \
+             patch("rdfproduction.transport.condor_q_ads", side_effect=[{1: {"JobStatus": 2}}, {}]), \
+             patch("rdfproduction.transport.condor_history_exit", side_effect=[{0: 0}, {0: 0, 1: 0}]), \
              patch.object(self.task, "_update_site_rankings"), \
              patch.object(self.task, "_update_job_sizing"):
             self.task.run()
@@ -208,7 +210,7 @@ class TestValidationReceipts(unittest.TestCase):
 
     def test_exists_policy_never_populates_integrity_receipts(self):
         self.task.output_validation = "exists"
-        with patch.object(tasks, "_output_files_exist_batch", return_value={
+        with patch("rdfproduction.jobs.output_validation._output_files_exist_batch", return_value={
                 path: True for path in self.signatures}):
             self.assertFalse(any(self.check().values()))
         self.assertEqual(self.task._read_validation_cache(), {})

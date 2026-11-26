@@ -2,6 +2,7 @@
 
 ## Quick Links
 
+- [Snakemake production and completed products](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md) - Campaign, skim, merge, plot, fit and restart targets
 - **[Architecture](./ARCHITECTURE.md)** - Core C++ architecture and manager lifecycle
 - **[API Reference](./API_REFERENCE.md)** - Canonical C++ API surface
 - **[Getting Started](./GETTING_STARTED.md)** - Installation and first steps

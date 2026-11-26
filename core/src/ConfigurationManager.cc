@@ -1,4 +1,5 @@
 #include <ConfigurationManager.h>
+#include "ConfigDocument.h"
 #include <TextConfigAdapter.h>
 #include <YamlConfigAdapter.h>
 #include <stdexcept>
@@ -22,21 +23,15 @@ namespace {
  * @brief Construct a new ConfigurationManager object
  * @param configFile Path to the configuration file
  */
-ConfigurationManager::ConfigurationManager(const std::string &configFile) {
-  // Auto-detect format based on file extension
-  if (endsWith(configFile, ".yaml") || endsWith(configFile, ".yml")) {
-    adapter_m = std::make_shared<YamlConfigAdapter>();
-  } else {
-    adapter_m = std::make_shared<TextConfigAdapter>();
-  }
-  processTopLevelConfig(configFile);
-}
+ConfigurationManager::ConfigurationManager(const std::string &configFile)
+    : ConfigurationManager(configFile, nullptr) {}
 
 ConfigurationManager::ConfigurationManager(const std::string &configFile,
                                            std::shared_ptr<IConfigAdapter> adapter)
     : adapter_m(std::move(adapter)) {
   if (!adapter_m) {
-    adapter_m = std::make_shared<TextConfigAdapter>();
+    if (isYamlFile(configFile)) adapter_m = std::make_shared<YamlConfigAdapter>();
+    else adapter_m = std::make_shared<TextConfigAdapter>();
   }
   processTopLevelConfig(configFile);
 }
@@ -277,8 +272,18 @@ std::vector<std::string>
 ConfigurationManager::getList(const std::string &key,
                               const std::vector<std::string> &defaultValue,
                               const std::string &delimiter) const {
-  if (configMap_m.find(key) != configMap_m.end()) {
-    return splitString(configMap_m.at(key), delimiter);
+  auto found = configMap_m.find(key);
+  if (found != configMap_m.end()) {
+    const auto &value = found->second;
+    if (!rdf_config_detail::isSourceList(key) && isYamlFile(configFile_m) &&
+        value.size() >= 2 && value.front() == '[' && value.back() == ']') {
+      try {
+        return rdf_config_detail::strings(YAML::Load(value), configFile_m + ": " + key);
+      } catch (const YAML::Exception &error) {
+        throw std::runtime_error(configFile_m + ": " + key + ": " + error.what());
+      }
+    }
+    return splitString(value, delimiter);
   }
   return defaultValue;
 }

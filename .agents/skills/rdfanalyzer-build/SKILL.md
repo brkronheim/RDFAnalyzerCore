@@ -53,7 +53,7 @@ cmake --build build --target <affected-target> -j<available-cpus>
 ctest --test-dir build -R '<registered-test-pattern>' --output-on-failure
 ```
 
-Replace placeholders with targets and available resources. Read [test CMake](../../../core/tests/cpp/CMakeLists.txt) and [LAW CMake](../../../core/python/law/CMakeLists.txt) for environment and names. Python unit suites are under `core/tests/python` and `core/tests/law`; select files relevant to the change and use the matching interpreter/virtualenv. Generated-config or plugin wiring changes need an execution that actually consumes that config, not just compilation.
+Replace placeholders with targets and available resources. Read [test CMake](../../../core/tests/cpp/CMakeLists.txt) and [framework test registration](../../../core/tests/CMakeLists.txt) for environment and names. Python unit suites are under `core/tests/python` and `core/tests/law`; select files relevant to the change and use the matching interpreter/virtualenv. Generated-config or plugin wiring changes need an execution that actually consumes that config, not just compilation.
 
 For performance work, choose a representative bounded workload and record baseline/result timing plus numerical agreement. [PERFORMANCE_TUNING](../../../docs/PERFORMANCE_TUNING.md), [PERFORMANCE_MONITORING](../../../docs/PERFORMANCE_MONITORING.md), and [MEMORY_MODEL](../../../docs/MEMORY_MODEL.md) help locate existing instrumentation. Distinguish configure/build, synthetic tests, event runs, and staged worker validation in the result.
 

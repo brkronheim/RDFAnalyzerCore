@@ -117,11 +117,14 @@ def update_after_run(run_dir, *, seed=None, min_jobs=5):
     """
     if os.environ.get("RDF_XRD_SITE_RANKING_AUTO_UPDATE", "1").lower() in {"0", "false", "no", "off"}:
         return dict(status="disabled")
-    if os.environ.get("RDF_XRD_SITE_RANKING_FILE") == "none":
+    explicit = os.environ.get("RDF_XRD_SITE_RANKING_FILE")
+    if explicit == "none":
         return dict(status="disabled")
     cache = ranking_cache_path()
     if cache is None:
         return dict(status="disabled")
+    if explicit and Path(explicit).expanduser().resolve() == cache.resolve():
+        return dict(status="disabled", reason="the learning cache is explicitly pinned")
     run = Path(run_dir).resolve()
     logs = sorted(run.glob("condor_submissions/*/condor_logs/*out"))
     # No persistent cache side effects for local/non-Xrd jobs, empty campaigns,
@@ -166,7 +169,9 @@ def update_after_run(run_dir, *, seed=None, min_jobs=5):
         _atomic_json(registry_path, registry)
         return dict(status="updated", cache=str(cache), fingerprint=fingerprint,
                     input_logs=report["input_logs"], completed_runs=len(recent),
-                    site_groups=len(report["sites"]), rejected_logs=report["rejected_logs"])
+                    site_groups=len(report["sites"]), site_rows_changed=report["site_rows_changed"],
+                    minimum_jobs_per_site=report["minimum_jobs_per_site"],
+                    rejected_logs=report["rejected_logs"])
 
 
 def condor_context(path):
@@ -241,6 +246,7 @@ def observations(path, origin_override=None):
 
 def build(paths, output, *, base=None, origin=None, min_jobs=5):
     sites, aliases, endpoints = read_snapshot(base) if base else ({}, {}, {})
+    previous_sites = sites.copy()
     groups, open_groups = collections.defaultdict(list), collections.defaultdict(list)
     errors, hosts = [], collections.defaultdict(set)
     def update_site(key, value):
@@ -333,10 +339,13 @@ def build(paths, output, *, base=None, origin=None, min_jobs=5):
     with tempfile.NamedTemporaryFile(mode="w", dir=target.parent, prefix=target.name + ".", delete=False) as stream:
         stream.write("\n".join(lines) + "\n")
         temporary = Path(stream.name)
-    read_snapshot(temporary)
+    published_sites, _, _ = read_snapshot(temporary)
     temporary.replace(target)
     report = dict(schema=1, generated_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
                   input_logs=len(unique), rejected_logs=errors, sites=evidence,
+                  site_rows_changed=sum(previous_sites.get(key) != value
+                                        for key, value in published_sites.items()),
+                  minimum_jobs_per_site=min_jobs,
                   note="Priors are origin scoped and exclude inherited synthetic measurements")
     target.with_suffix(target.suffix + ".json").write_text(json.dumps(report, indent=2) + "\n")
     return report

@@ -3,14 +3,7 @@
 
 #include "api/IOutputSink.h"
 
-/**
- * @brief ROOT-based output sink for writing skims.
- *
- * The config-based writeDataFrame() overload resolves output files and columns
- * using the configuration provider.  Resolved file paths and column lists are
- * cached per OutputChannel so that repeated calls (should not happen in normal
- * single-run usage) avoid redundant lookups and GetColumnNames() calls.
- */
+/** ROOT snapshot sink. Paths and columns are resolved per request. */
 class RootOutputSink : public IOutputSink {
 public:
   void writeDataFrame(ROOT::RDF::RNode& df, const OutputSpec& spec) override;
@@ -22,14 +15,11 @@ public:
                                 OutputChannel channel) override;
 
 private:
-  // Cached resolved file paths per channel.
+  // Reserved for binary compatibility.
   std::string cachedSkimFile_;
   std::string cachedMetaFile_;
 
-  // Cache for column names resolved from saveConfig and, when
-  // skimSystematics=true, their registered systematic variations.
-  // Invalidated each time writeDataFrame(config, ...) is called with a
-  // different dataframe — but in practice it's called at most once.
+  // Reserved for binary compatibility with previously compiled output sinks.
   std::vector<std::string> cachedColumns_;
   bool columnsCached_ = false;
 };

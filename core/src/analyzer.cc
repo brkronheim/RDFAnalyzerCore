@@ -1,3 +1,5 @@
+#include "ConfigBoolean.h"
+#include "PreFilterRegistration.h"
 #include <analyzer.h>
 #include <ManagerFactory.h>
 #include <ConfigurationManager.h>
@@ -109,30 +111,6 @@ static std::vector<std::string> orderedPluginBatch(
     return order;
 }
 
-static bool parseBooleanConfig(const std::string &key, const std::string &value,
-                               bool defaultValue) {
-    if (value.empty()) {
-        return defaultValue;
-    }
-
-    std::string normalized;
-    normalized.reserve(value.size());
-    for (const unsigned char character : value) {
-        normalized.push_back(static_cast<char>(std::tolower(character)));
-    }
-
-    if (normalized == "1" || normalized == "true" || normalized == "yes" ||
-        normalized == "on") {
-        return true;
-    }
-    if (normalized == "0" || normalized == "false" || normalized == "no" ||
-        normalized == "off") {
-        return false;
-    }
-
-    throw std::invalid_argument("Analyzer: invalid boolean value '" + value +
-                                "' for configuration key '" + key + "'.");
-}
 
 static void configureSystematics(const IConfigurationProvider &config,
                                  ISystematicManager &systematics) {
@@ -140,7 +118,7 @@ static void configureSystematics(const IConfigurationProvider &config,
     const auto it = configMap.find("enableSystematics");
     const bool enabled = it == configMap.end()
                              ? true
-                             : parseBooleanConfig("enableSystematics", it->second, true);
+                             : rdf_config_detail::parseBooleanConfig("enableSystematics", it->second, true);
     systematics.setEnabled(enabled);
 }
 
@@ -265,51 +243,8 @@ void Analyzer::initialize() {
 */
 
 void Analyzer::wirePluginManagers() {
-    // Validate + topological sort + lifecycle hooks all in one pass.
-    // Dependency validation.
-    for (auto& [role, plugin] : plugins) {
-        if (!plugin) continue;
-        for (const auto& dep : plugin->getDependencies()) {
-            if (plugins.find(dep) == plugins.end()) {
-                throw std::runtime_error(
-                    "Plugin '" + role + "' declares dependency '" + dep +
-                    "' which is not registered.");
-            }
-        }
-    }
-
-    // Topological sort via Kahn's algorithm.
-    std::unordered_map<std::string, int> inDegree;
-    std::unordered_map<std::string, std::vector<std::string>> dependents;
-    for (auto& [role, plugin] : plugins) {
-        if (!inDegree.count(role)) inDegree[role] = 0;
-        if (!plugin) continue;
-        for (const auto& dep : plugin->getDependencies()) {
-            inDegree[role]++;
-            dependents[dep].push_back(role);
-        }
-    }
-
-    std::set<std::string> ready;
-    for (auto& [role, deg] : inDegree) {
-        if (deg == 0) ready.insert(role);
-    }
-
-    std::vector<std::string> order;
-    while (!ready.empty()) {
-        const std::string cur = *ready.begin();
-        ready.erase(ready.begin());
-        order.push_back(cur);
-        for (const auto& dep : dependents[cur]) {
-            if (--inDegree[dep] == 0) ready.insert(dep);
-        }
-    }
-
-    if (order.size() != plugins.size()) {
-        throw std::runtime_error(
-            "Analyzer: circular dependency detected among registered plugins.");
-    }
-    pluginOrder_m = order;
+    reorderPlugins();
+    const auto order = pluginOrder_m;
 
     // setContext + setupFromConfigFile in topological order.
     for (const auto& role : order) {
@@ -443,6 +378,13 @@ Analyzer *Analyzer::addPlugins(std::unordered_map<std::string, std::unique_ptr<I
     return addPlugins(std::move(sharedPlugins));
 }
 
+void Analyzer::bookPreFilterActions() {
+    if (preFilterNotified_m) return;
+    auto df = dataFrameProvider_m->getDataFrame();
+    for (auto& service : services_m) service->onPreFilter(df);
+    preFilterNotified_m = true;
+}
+
 void Analyzer::initializeServices(ManagerContext& ctx) {
     // ProvenanceService: always enabled. Plugin provenance entries are
     // registered after wirePluginManagers() returns.
@@ -457,8 +399,7 @@ void Analyzer::initializeServices(ManagerContext& ctx) {
     const auto& configMap = configProvider_m->getConfigMap();
     auto it = configMap.find("enableCounters");
     if (it != configMap.end()) {
-        const auto& val = it->second;
-        const bool enabled = (val == "1" || val == "true" || val == "True");
+        const bool enabled = rdf_config_detail::parseBooleanConfig("enableCounters", it->second, false);
         if (enabled) {
             auto service = std::make_unique<CounterService>();
             service->initialize(ctx);
@@ -469,13 +410,16 @@ void Analyzer::initializeServices(ManagerContext& ctx) {
     // TaggerEfficiencyService: enabled via enableTaggerEfficiency config key.
     auto teIt = configMap.find("enableTaggerEfficiency");
     if (teIt != configMap.end()) {
-        const auto& val = teIt->second;
-        const bool enabled = (val == "1" || val == "true" || val == "True");
+        const bool enabled = rdf_config_detail::parseBooleanConfig("enableTaggerEfficiency", teIt->second, false);
         if (enabled) {
             auto service = std::make_unique<TaggerEfficiencyService>();
             service->initialize(ctx);
             services_m.emplace_back(std::move(service));
         }
+    }
+    if (!services_m.empty()) {
+        services_m.emplace_back(std::make_unique<rdf::detail::PreFilterRegistration>(
+            ctx.data, [this] { bookPreFilterActions(); }));
     }
 }
 
@@ -500,6 +444,8 @@ Analyzer *Analyzer::bookConfigHistograms() {
     auto histogramManager = findPlugin<NDHistogramManager>("histogramManager");
     if (histogramManager) {
         histogramManager->bookConfigHistograms();
+    } else {
+        logger_m->log(ILogger::Level::Warn, "bookConfigHistograms: register an NDHistogramManager under 'histogramManager' to book configured histograms.");
     }
     return this;
 }
@@ -510,8 +456,10 @@ Analyzer *Analyzer::bookCounterIntHistogram(const std::string& branch, int nBins
     for (auto& service : services_m) {
         if (auto* cs = dynamic_cast<CounterService*>(service.get())) {
             cs->bookIntWeightHistogram(df, branch, nBins, low, high);
+            return this;
         }
     }
+    logger_m->log(ILogger::Level::Warn, "bookCounterIntHistogram: set enableCounters: true before constructing the Analyzer to book '" + branch + "'.");
     return this;
 }
 
@@ -580,6 +528,11 @@ Analyzer *Analyzer::run() {
     }
     eventLoopTriggered_m = true;
 
+    const auto& cfgMap = configProvider_m->getConfigMap();
+    const auto skim = cfgMap.find("enableSkim");
+    const bool skimEnabled = skim != cfgMap.end() &&
+        rdf_config_detail::parseBooleanConfig("enableSkim", skim->second, false);
+
     // Pre-execution hook
     for (const auto& role : pluginOrder_m) {
         auto it = plugins.find(role);
@@ -588,30 +541,19 @@ Analyzer *Analyzer::run() {
         }
     }
 
+    bookPreFilterActions();
+
     // execute() hooks may extend the dataframe through IDataFrameProvider.
     // Capture the current node only after all hooks have run so the skim and
     // service finalizers see the complete graph.
     auto df = dataFrameProvider_m->getDataFrame();
 
-    // Conditionally write a skim when enableSkim=1/true/True is set in config
-    const auto& cfgMap = configProvider_m->getConfigMap();
-    const auto skimIt = cfgMap.find("enableSkim");
-    if (skimIt != cfgMap.end()) {
-        const auto& val = skimIt->second;
-        if (val == "1" || val == "true" || val == "True") {
-            // Keep the skim selection on the output branch only. Histogram
-            // actions continue to use the full analysis dataframe, while a
-            // configured RDataFrame expression can restrict the events that
-            // are written to the skim.
-            const auto skimFilterIt = cfgMap.find("skimFilter");
-            if (skimFilterIt != cfgMap.end() && !skimFilterIt->second.empty()) {
-                df = df.Filter(skimFilterIt->second, "ConfiguredSkimFilter");
-            }
-            skimSink_m->writeDataFrame(df,
-                                       *configProvider_m,
-                                       systematicManager_m.get(),
-                                       OutputChannel::Skim);
-        }
+    if (skimEnabled) {
+        // This selection belongs to the snapshot only; histograms retain their booked nodes.
+        const auto skimFilter = cfgMap.find("skimFilter");
+        if (skimFilter != cfgMap.end() && !skimFilter->second.empty())
+            df = df.Filter(skimFilter->second, "ConfiguredSkimFilter");
+        skimSink_m->writeDataFrame(df, *configProvider_m, systematicManager_m.get(), OutputChannel::Skim);
     }
 
     // Save ND histograms (uses internally tracked histInfo / regionNames)

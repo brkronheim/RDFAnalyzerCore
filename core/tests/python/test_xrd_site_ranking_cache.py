@@ -31,11 +31,16 @@ def test_small_completed_runs_accumulate_and_replay_is_idempotent(tmp_path, monk
     a, b = tmp_path / "run-a", tmp_path / "run-b"
     returned_logs(a, 100, [40, 50])
     returned_logs(b, 200, [60, 70, 80])
-    assert update_after_run(a)["status"] == "updated"
+    first = update_after_run(a)
+    assert first["status"] == "updated"
+    assert first["site_groups"] == 1
+    assert first["site_rows_changed"] == 0
+    assert first["minimum_jobs_per_site"] == 5
     assert read_snapshot(cache)[0] == {}  # Two jobs do not meet five-job support.
     result = update_after_run(b)
     sites, _, _ = read_snapshot(cache)
     assert result["completed_runs"] == 2
+    assert result["site_rows_changed"] == 1
     assert sites["cluster-a", "storage"]["quality_ms"] == 60
     assert sites["cluster-a", "storage"]["jobs"] == 5
     before = cache.read_bytes(), cache.stat().st_mtime_ns
@@ -80,3 +85,19 @@ def test_non_xrd_runs_and_opt_out_do_not_create_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("RDF_XRD_SITE_RANKING_AUTO_UPDATE", "0")
     assert update_after_run(run)["status"] == "disabled"
     assert not cache.parent.exists()
+
+
+def test_explicit_pin_at_cache_path_is_immutable(tmp_path, monkeypatch):
+    cache = setup_cache(tmp_path, monkeypatch)
+    cache.parent.mkdir()
+    original = MAGIC + "\nsite cluster-a storage 80 5 100000\n"
+    cache.write_text(original)
+    alias = tmp_path / "pinned.tsv"
+    alias.symlink_to(cache)
+    monkeypatch.setenv("RDF_XRD_SITE_RANKING_FILE", str(alias))
+    run = tmp_path / "run"
+    returned_logs(run, 100, [40] * 5)
+    assert submission_ranking_source() == str(alias)
+    assert update_after_run(run)["status"] == "disabled"
+    assert cache.read_text() == original
+    assert not cache.with_suffix(".tsv.runs.json").exists()

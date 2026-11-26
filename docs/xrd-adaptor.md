@@ -5,16 +5,11 @@ default. The build option `RDF_ENABLE_XRD_ADAPTOR` is ON by default. Set
 `rootInputBackend: root` to select ROOT's normal `TFile` reader for a job, or
 configure with `-DRDF_ENABLE_XRD_ADAPTOR=OFF` to build without the adaptor.
 When the adaptor is built and `rootInputBackend` is omitted, the framework
-selects it automatically. The backend starts a second XrdCl connection as soon
-as the primary file opens, retries source discovery at the configured interval,
-and discovers up to three distinct replica sites.
-For each read window it starts the best available quality-ranked site, then
-permits a second full copy after a short hedge delay or a failure. The first
-successful response supplies ROOT's buffers;
-the other full read drains in the background for site timing. An untested
-third site can receive a bounded asynchronous exploration sample.
-After a read wins, the adaptor does not start another full copy solely to
-collect timing data. Already running losing requests still drain safely.
+selects it automatically. The default adaptive read policy opens a ranked primary and can discover a standby.
+For each missing read window one site supplies payload. A hard error permits an
+immediate replacement. A request that exceeds the stall deadline can race one
+other site when `xrdMaxReadSources: 2`. The standby normally costs an open and
+metadata, with no second payload stream for a healthy window.
 Overlapping ROOT file objects for the same URL share a live transport, while
 keeping their own file cursors; closing one does not stop its peers.
 
@@ -53,11 +48,12 @@ rootInputBackend: xrd-adaptor
 xrdSourceProbeIntervalSeconds: 5
 xrdPrefetchCacheMB: 32
 xrdPreferredSiteBandPercent: 20
-xrdExplorationSharePercent: 10
+xrdExplorationSharePercent: 10  # legacy policy only
 xrdMaxReadSources: 2
 xrdReadTimeoutSeconds: 120
 xrdOpenTimeoutSeconds: 30
 xrdReadPipelineDepth: 2
+xrdReadPolicy: adaptive
 xrdReadHedgeDelayMs: 50
 xrdReadDiagnostics: 0
 xrdSiteRankingFile: auto
@@ -89,8 +85,14 @@ open/stat attempts, with a 100 ms backup delay. The first successful open **and
 stat** wins. The candidate phase has an eight-second caller deadline, bounded
 by `xrdOpenTimeoutSeconds`. Late callbacks own and close their transports;
 the winning caller never waits for losing connections. Across files/lookahead,
-at most 32 discovery/open operations can remain outstanding. Existing global
-open/retry routing remains the fallback when discovery or candidates fail.
+at most 32 ranked metadata operations and standby opens can remain outstanding.
+Proactive standby opens use that pool only below four outstanding operations.
+A file that has lost all healthy sources may use the full pool to discover a
+replacement. A deferred attempt retains its candidate and can retry after
+50 ms. Dropping a file owner during an open lets the callback close an unused
+transport and release its pool entry. The cap excludes ordinary global fallback
+opens and XrdCl internal redirects. Existing global open/retry routing remains
+the fallback when discovery or candidates fail.
 Located candidates also seed ordinary replica discovery after the initial open.
 
 Library-level environment controls work with existing analysis executables:
@@ -219,8 +221,9 @@ archives, loose transfers and container workers need no extension checkout or
 submit-side file. Already prepared/running scripts remain unchanged. This
 mechanism performs no worker redirector preflight scans or WAN probes.
 
-After `MonitorSkimJobs` verifies every job in a LAW Condor production (including
-the inherited stitching monitor), it automatically refines the user cache.
+After `MonitorSkimJobs` verifies every job in a Condor production (including
+the Snakemake batch stage and the inherited stitching monitor), it
+automatically refines the user cache.
 The default path is `$XDG_CACHE_HOME/rdfanalyzer/xrd_site_rankings.tsv`, or
 `~/.cache/rdfanalyzer/xrd_site_rankings.tsv` when `XDG_CACHE_HOME` is unset.
 Future generated workers use this snapshot automatically. The bundled CMS seed
@@ -237,12 +240,17 @@ snapshot replacement prevent simultaneous monitors from losing each other's
 origin profiles. Replayed updates do not add historical pseudo-observations.
 
 Each successful production records the update result in
-`xrd_site_rankings_update.json` in its run directory. Cache errors produce a
+`xrd_site_rankings_update.json` in its run directory. The updated receipt
+reports the observed `site_groups` across available registered runs, the
+number of `site_rows_changed` in the published snapshot, and the
+`minimum_jobs_per_site` evidence threshold. A small run may update the
+cache and registry while leaving all site quality rows at their existing
+values. Cache errors produce a
 warning/receipt without invalidating verified physics outputs. Completion
 checks are read-only; existing completed targets are not backfilled or rerun.
 Runs with no site measurements leave the user cache untouched. This completion
-hook applies to newly started LAW Condor skim/stitching monitors, not standalone
-executables or unrelated LAW plotting/fitting tasks.
+hook runs in newly started Condor skim and stitching monitors, including
+ones launched by `rdf_production execute`.
 
 Controls:
 
@@ -332,11 +340,44 @@ demand priority. Background and backup requests cannot allocate the last
 These are non-preemptive limits: requests already submitted must drain safely.
 This reserves capacity for active reads without increasing the payload budget.
 
-`xrdReadHedgeDelayMs` controls when a second full replica read joins a pending
-read (0 through 1000 ms, default 50). A failed first read permits immediate
-replacement. Zero restores immediate racing. Successful reads do not launch a
-late backup just to collect timings. Already submitted losing requests retain
-their buffers and reservations until their callbacks finish.
+#### Read policy
+
+`xrdReadPolicy: adaptive` applies to scalar reads, vector reads and ROOT
+prefetch. Each uncached window starts one primary read. A known failed attempt
+frees its slot immediately. For a still-pending attempt the stall deadline in
+milliseconds is three times the site's rolling 256 KiB latency estimate,
+multiplied by `max(1, window_bytes / 262144)`. This uses qualifying live
+measurements or a configured site prior. Without either, the initial deadline
+is 1000 ms. The lower bound is the larger of 250 ms and `xrdReadHedgeDelayMs`.
+The upper bound is the smaller of 4000 ms and half the request timeout and takes
+precedence over the lower bound. Scheduling checks run at most 50 ms apart
+when a read is pending. A known alternate becomes eligible once that deadline
+passes. A failed first read can use the next source without waiting for the
+stall deadline. At most two adaptive stall hedges can run concurrently across
+all files and sites in one process. A rescue retains its slot until outstanding
+callbacks release the window, including a primary beaten by its backup. This
+limit covers tiny metadata windows too.
+Failed-attempt replacement remains eligible when both rescue slots are occupied.
+Background reads retain their lower budget and per-site priority on failure.
+Adaptive reads skip exploration payloads.
+
+The deadline measures elapsed time. A healthy transfer can cross it on a
+congested link. At 64 Mbit/s an 8 MiB window already needs about 1.05 s
+at line rate, before contention or protocol overhead. The cold 1 s deadline
+can send a duplicate in that case. Per-site, memory, and rescue limits apply
+inside one worker process. Separate workers on the same node do not share a
+budget or exchange endpoint scores. For a site canary compare aggregate useful
+throughput, losing bytes, worker latency tails and confirmed output parity
+using representative concurrency. See [measuring and tuning an RDFAnalyzer job](PERFORMANCE_TUNING.md)
+for the full-worker comparison command.
+
+`xrdReadPolicy: legacy` restores fixed-delay hedging (50 ms by default),
+including immediate racing when `xrdReadHedgeDelayMs: 0`, plus the configured
+exploration share. Both policies validate complete callback byte counts, take
+only the first successful complete response, and retain buffers for outstanding
+losers. Their open/ranking/cooldown and timeout policies are shared. A one-site
+limit forbids a concurrent full backup in either mode, preserving sequential
+fallback. `xrdReadHedgeDelayMs` accepts 0–1000.
 
 `treeCacheOpenAheadFiles` opens and retains transports up to two files ahead
 by default (0 through 4; 0 disables these additional opens). This applies only
@@ -368,6 +409,40 @@ the timeout is applied to each site request, not to the complete `LoadTree`
 call.
 Under ROOT implicit multithreading, the next-file warmup is disabled because
 this lookahead currently assumes one sequential chain reader.
+
+Compare the final process-wide `[XrdAdaptor] read-traffic` line across matched
+runs. `primary_opens` counts successfully initialized main transports and
+`replica_opens` counts successful discovery opens (including already known
+endpoints). `full_requests` counts submitted full attempts, `stall_hedges`
+counts concurrent backup attempts, and `replacements` counts retries after
+failure. `full_completed_bytes` is the sum of winning, successful losing and
+failed-response payload bytes from XrdCl callbacks. Exploration bytes and
+handoff-cache hits are recorded separately. These counters exclude transport
+headers, retransmissions and ROOT-managed cache hits. Inspect `full_outstanding`
+at shutdown for pending completions. `full_requested_bytes` counts the full
+payload requested by all admitted attempts, including requests rejected by
+the transport. `hedge_requested_bytes` is its concurrent-backup subset.
+A late callback after the final snapshot can leave completed bytes lower than
+requested. A successful prefetch winner can still go unused by the event loop.
+The `hedge_wins` and `replacement_wins` counts identify which secondary
+requests supplied the accepted response. A win alone does not quantify time saved.
+`foreground_read_calls` and `foreground_read_us` count and time synchronous
+demand calls at the logical read boundary around all their windows, including
+cache lookup and copying. They exclude asynchronous prefetch, future-file
+warmup, and work inside ROOT. Durations can overlap across readers and slots.
+`peak_full_outstanding` includes all
+process windows and files. Overlapping independent windows can be outstanding
+on multiple sites even when each window has one healthy payload source.
+Per-request diagnostics include the handle, endpoint, request size, role and
+rescue deadline. Initial open attempts and catalog lookups are recorded
+separately in open diagnostics.
+
+A site canary should run both policies on identical files and entry ranges,
+including single and chained input, with a warm primary, an unknown primary,
+a slow primary, and a failed primary. Check event IDs, counters, outputs,
+useful/redundant bytes, active slot CPU and wall time, peak RSS and tail read
+latency. Record the actual origin, endpoints and concurrent worker count.
+Compare skims and histogram-only jobs separately, including warmup when used.
 
 The XrdAdaptor log identifies each source-manager handle and its primary data
 server. Replica-probe lines show the hosts excluded from the next redirector
@@ -423,7 +498,7 @@ most once per file handle and site. Discovery continues while a primary read
 is pending, allowing a newly found second site to join the race before the
 primary finishes.
 
-When a third distinct, healthy site has insufficient measurements, it receives
+Under the legacy read policy, when a third distinct, healthy site has insufficient measurements, it receives
 a duplicate sample up to `xrdExplorationSharePercent` of the request and capped
 at 2 MiB per vectored read (default 10%). Samples use separate buffers and
 complete asynchronously. They use whole 512 KiB chunks, so small reads may not
@@ -432,9 +507,9 @@ share to zero to disable sampling. If both full reads fail, another discovered
 source is promoted to a full retry.
 
 `xrdMaxReadSources` controls the number of full-read sites; it accepts `1` or
-`2` and defaults to `2`. With the default exploration share, discovery also
+`2` and defaults to `2`. With the legacy policy and default exploration share, discovery also
 keeps a third distinct site available for samples. Set `xrdMaxReadSources: 1`
-to use a single full read; an untested second site can still receive samples.
+to use a single full read. In legacy mode an untested second site can still receive samples.
 Set `xrdExplorationSharePercent: 0` to disable the third-site sample. These
 settings do not affect the initial ROOT file-open redirect.
 

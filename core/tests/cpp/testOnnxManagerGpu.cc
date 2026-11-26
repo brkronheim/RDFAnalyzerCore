@@ -64,7 +64,7 @@ protected:
 
 TEST_F(OnnxManagerGpuIntegrationTest, GpuConfiguredModelReportsCudaEnabled) {
   auto config = ManagerFactory::createConfigurationManager(
-      "cfg/test_onnx_gpu_config.txt");
+      "cfg/test_onnx_gpu_config.yaml");
 
   try {
     OnnxManager manager(*config);
@@ -84,8 +84,8 @@ TEST_F(OnnxManagerGpuIntegrationTest, GpuConfiguredModelReportsCudaEnabled) {
 }
 
 TEST_F(OnnxManagerGpuIntegrationTest, GpuInferenceMatchesCpuReference) {
-  auto cpuConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
-  auto gpuConfig = ManagerFactory::createConfigurationManager("cfg/test_onnx_gpu_config.txt");
+  auto cpuConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
+  auto gpuConfig = ManagerFactory::createConfigurationManager("cfg/test_onnx_gpu_config.yaml");
 
   auto cpuSystematics = std::make_unique<SystematicManager>();
   auto gpuSystematics = std::make_unique<SystematicManager>();
@@ -130,7 +130,7 @@ TEST_F(OnnxManagerGpuIntegrationTest, GpuInferenceMatchesCpuReference) {
 
 TEST_F(OnnxManagerGpuIntegrationTest, NegativeCudaDeviceIdIsRejected) {
   auto invalidConfig = ManagerFactory::createConfigurationManager(
-      "cfg/test_onnx_gpu_invalid_device_config.txt");
+      "cfg/test_onnx_gpu_invalid_device_config.yaml");
   EXPECT_THROW({ OnnxManager manager(*invalidConfig); }, std::runtime_error);
 }
 

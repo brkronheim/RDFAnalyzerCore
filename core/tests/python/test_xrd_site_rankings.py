@@ -78,13 +78,15 @@ def test_worker_ships_immutable_snapshot_and_uses_worker_origin(tmp_path, monkey
     source = tmp_path / "source.tsv"
     payload = MAGIC + "\nsite cluster-a t2_example 40 5 100000\n"
     source.write_text(payload)
-    script = generate_condor_runscript("myexe", False, False, "", site_ranking_file=source)
+    script = generate_condor_runscript("myexe", False, False, "", site_ranking_file=source, config_file="submit_config.yaml")
     source.unlink()  # The worker cannot depend on submit-host paths.
     fake = tmp_path / "myexe"
     fake.write_text("#!" + sys.executable + "\nimport os, pathlib\n"
         "pathlib.Path('consumed.tsv').write_bytes(pathlib.Path(os.environ['RDF_XRD_SITE_RANKING_FILE']).read_bytes())\n"
         "pathlib.Path('origin.txt').write_text(os.environ['RDF_XRD_SITE_ORIGIN'])\n")
-    (tmp_path / "submit_config.txt").write_text("fileList=local.root\nthreads=1\n")
+    from submission_backend import _package_worker_yaml
+    _package_worker_yaml(tmp_path)
+    (tmp_path / "submit_config.yaml").write_text("fileList: local.root\nthreads: 1\n")
     ad = tmp_path / "machine.ad"
     ad.write_text('Machine = "worker-name.privnet"\nName = "slot1@worker-name.privnet"\n')
     env = dict(os.environ, GLIDEIN_CMSSite=site_tag, _CONDOR_MACHINE_AD=str(ad))

@@ -124,7 +124,7 @@ dirty status as unknown.
 
 For already-produced files, `metadata_io.py`, `partial_merge.py`, and the vjet
 `mergeResults.sh` wrapper accept `--semantic-config-compatibility FILE`. This
-explicit JSON policy relaxes only semantic hash equality for the listed sample
+explicit JSON policy can relax semantic hash equality for the listed sample
 and exact hashes, after the operator has verified that the differing effective
 configurations are equivalent for the analysis (for example, cache sizes):
 
@@ -133,7 +133,14 @@ configurations are equivalent for the analysis (for example, cache sizes):
  "samples": {"dataset_name": ["original_semantic_hash", "retry_semantic_hash"]}}
 ```
 
-The default remains strict. Unlisted samples/hashes, build differences, plugin
+A reviewed replay can also specify an `executable_replays` mapping keyed by
+the normalized job record's `id`. Each entry supplies `sample`, `original`,
+and `replay`. The last two values are the original and replay executable
+SHA-256 digests. The comparison accepts the replay digest only for the
+specified job and sample. The leaf record retains its actual digest.
+List any related semantic hash change in `samples` separately.
+
+The default remains strict. Unlisted samples/hashes, other build differences, plugin
 definitions, normalizations, duplicate jobs, histogram inventories and axes
 retain their checks. Original per-job hashes are preserved; used exceptions and
 their reason are embedded in the digest-protected metadata sidecar, and partial

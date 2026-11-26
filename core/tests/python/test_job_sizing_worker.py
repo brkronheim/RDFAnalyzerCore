@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]/'python'))
-from submission_backend import generate_condor_runscript
+from submission_backend import generate_condor_runscript, write_submit_files
 
 
 class PilotWorkerTest(unittest.TestCase):
@@ -20,19 +20,20 @@ class PilotWorkerTest(unittest.TestCase):
             exe.write_text('#!' + sys.executable + '\n' + r'''
 from pathlib import Path
 import sys
-cfg=dict(l.split('=',1) for l in Path(sys.argv[1]).read_text().splitlines() if '=' in l)
+import yaml
+cfg=yaml.safe_load(Path(sys.argv[1]).read_text())
 n=min(1234,int(cfg.get('lastEntry',1234)))
 print('CounterService: sample=sample entries='+str(n))
 print('Done!')
 Path(cfg['metaFile']).write_text(str(n))
 ''')
             exe.chmod(0o755)
-            (root/'submit_config.txt').write_text('fileList=input.root\nsample=sample\nmetaFile=meta.root\nthreads=1\n')
+            (root/'submit_config.yaml').write_text('fileList: input.root\nsample: sample\nmetaFile: meta.root\nthreads: 1\n')
             # Verify the exact embedded launcher, including argument rewriting
             # and the inherited CPU environment, rather than only the driver API.
             with patch.dict(os.environ, {'RDF_XRD_SITE_RANKING_FILE': 'none'}):
-                script = generate_condor_runscript('analysis', False, False, '', sizing_pilot_entries=100,
-                                                   site_ranking_file='none')
+                write_submit_files(str(root), 1, 'analysis', False, False, '', sizing_pilot_entries=100)
+                script = (root/'condor_runscript.sh').read_text()
                 ordinary = generate_condor_runscript('analysis', False, False, '', site_ranking_file='none')
                 self.assertNotIn('RDF_JOB_SIZING_PILOT=', ordinary)
             (root/'worker.sh').write_text(script)

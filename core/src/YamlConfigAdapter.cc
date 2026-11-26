@@ -1,161 +1,114 @@
 #include <YamlConfigAdapter.h>
-#include <yaml-cpp/yaml.h>
-#include <fstream>
+#include "ConfigDocument.h"
+#include <algorithm>
 #include <stdexcept>
 
 namespace {
+std::string location(const std::string &source, const YAML::Node &node) {
+  const auto mark = node.Mark();
+  return mark.is_null() ? source : source + ":" + std::to_string(mark.line + 1);
+}
 
-std::string serializeConfigNode(const YAML::Node &node) {
-  if (!node) {
-    return "";
-  }
-
-  if (node.IsScalar()) {
-    return node.as<std::string>();
-  }
-
-  if (node.IsSequence()) {
-    // Build flow-style [item1, item2, ...] representation manually.
-    // Relying on YAML::Emitter << YAML::Flow is not reliable across yaml-cpp
-    // versions when nodes were parsed in block style.
-    std::string result = "[";
-    bool first = true;
-    for (const auto& item : node) {
-      if (!first) result += ", ";
-      result += item.as<std::string>();
-      first = false;
+std::string serialize(const YAML::Node &value, const std::string &key, const std::string &source) {
+  if (value.IsNull()) return "";
+  if (value.IsScalar()) return value.Scalar();
+  if (value.IsSequence() && rdf_config_detail::isSourceList(key)) {
+    // These native settings are also consumed as comma-separated strings by worker tools.
+    std::string csv;
+    for (const auto &item : value) {
+      if (!item.IsScalar() || item.Scalar().find(',') != std::string::npos)
+        throw std::runtime_error(location(source, item) + ": " + key +
+                                 " requires scalar items without embedded commas");
+      if (item.Scalar().empty()) continue;
+      if (!csv.empty()) csv += ',';
+      csv += item.Scalar();
     }
-    return result + "]";
+    return csv;
   }
-
   YAML::Emitter emitter;
-  emitter << YAML::Flow << node;
-  if (!emitter.good()) {
-    throw std::runtime_error("Failed to serialize non-scalar YAML config value");
+  if (value.IsSequence() &&
+      std::all_of(value.begin(), value.end(), [](const auto &item) { return item.IsScalar(); })) {
+    // Preserve items containing commas, quotes or YAML punctuation for getList().
+    emitter << YAML::Flow << YAML::BeginSeq;
+    for (const auto &item : value) emitter << item.Scalar();
+    emitter << YAML::EndSeq;
+  } else {
+    emitter << YAML::Flow << value;
   }
-
+  if (!emitter.good()) throw std::runtime_error(source + ": " + emitter.GetLastError());
   return emitter.c_str();
 }
 
-} // namespace
-
-std::string_view YamlConfigAdapter::trim(std::string_view s) const {
-  size_t first = s.find_first_not_of(" \t\n\r");
-  size_t last = s.find_last_not_of(" \t\n\r");
-  if (first == std::string_view::npos || last == std::string_view::npos) {
-    return {};
-  }
-  return s.substr(first, last - first + 1);
+std::string_view trimmed(std::string_view text) {
+  const auto first = text.find_first_not_of(" \t\n\r");
+  if (first == std::string_view::npos) return {};
+  return text.substr(first, text.find_last_not_of(" \t\n\r") - first + 1);
+}
 }
 
-std::unordered_map<std::string, std::string>
-YamlConfigAdapter::parsePairBasedConfig(const std::string &configFile) const {
-  std::unordered_map<std::string, std::string> configMap;
-  
+namespace rdf_config_detail {
+YAML::Node loadDocument(const std::string &source) {
   try {
-    YAML::Node config = YAML::LoadFile(configFile);
-    
-    if (!config.IsMap()) {
-      throw std::runtime_error(
-          "Error: Configuration file " + configFile +
-          " is not a valid YAML map.");
-    }
-    
-    for (const auto& kv : config) {
-      std::string key = kv.first.as<std::string>();
-      std::string value = serializeConfigNode(kv.second);
-      
-      if (configMap.find(key) != configMap.end()) {
-        throw std::runtime_error(
-            "Error: Key " + key + " already exists in config " + configFile +
-            ". Do not use the same key twice in the same config.");
-      }
-      configMap.emplace(key, value);
-    }
-  } catch (const YAML::Exception& e) {
-    throw std::runtime_error("Error parsing YAML file " + configFile + ": " + e.what());
+    auto docs = YAML::LoadAllFromFile(source);
+    if (docs.size() != 1)
+      throw std::runtime_error(source + ": expected exactly one YAML document");
+    return docs.front();
+  } catch (const YAML::Exception &error) {
+    throw std::runtime_error(source + ": " + error.what());
   }
-  
-  return configMap;
 }
 
-std::vector<std::unordered_map<std::string, std::string>>
-YamlConfigAdapter::parseMultiKeyConfig(
-    const std::string &configFile,
-    const std::vector<std::string> &requiredEntryKeys) const {
-  std::vector<std::unordered_map<std::string, std::string>> parsedConfig;
-  
-  try {
-    YAML::Node config = YAML::LoadFile(configFile);
-    
-    if (!config.IsSequence()) {
-      throw std::runtime_error(
-          "Error: Configuration file " + configFile +
-          " is not a valid YAML sequence for multi-key config.");
-    }
-    
-    for (const auto& entry : config) {
-      if (!entry.IsMap()) {
-        continue;
-      }
-      
-      std::unordered_map<std::string, std::string> entryKeys;
-      for (const auto& kv : entry) {
-        std::string key = kv.first.as<std::string>();
-        std::string value = serializeConfigNode(kv.second);
-        
-        if (entryKeys.find(key) != entryKeys.end()) {
-          throw std::runtime_error(
-              "Error: Key " + key + " already exists in entry in config " +
-              configFile +
-              ". Do not use the same key twice in the same entry.");
-        }
-        entryKeys[key] = value;
-      }
-      
-      // Check if all required keys are present
-      bool allEntryKeysFound = true;
-      for (const auto &entryKey : requiredEntryKeys) {
-        if (entryKeys.find(entryKey) == entryKeys.end()) {
-          allEntryKeysFound = false;
-          break;
-        }
-      }
-      
-      if (allEntryKeysFound) {
-        parsedConfig.push_back(entryKeys);
-      }
-    }
-  } catch (const YAML::Exception& e) {
-    throw std::runtime_error("Error parsing YAML file " + configFile + ": " + e.what());
+ConfigMap mapping(const YAML::Node &node, const std::string &source) {
+  if (!node.IsMap()) throw std::runtime_error(location(source, node) + ": expected a YAML mapping");
+  ConfigMap values;
+  for (const auto &kv : node) {
+    if (!kv.first.IsScalar() || kv.first.Scalar().empty())
+      throw std::runtime_error(location(source, kv.first) + ": expected a nonempty scalar key");
+    const auto &key = kv.first.Scalar();
+    if (!values.emplace(key, serialize(kv.second, key, source)).second)
+      throw std::runtime_error(location(source, kv.first) + ": duplicate key '" + key + "'");
   }
-  
-  return parsedConfig;
+  return values;
 }
 
-std::vector<std::string>
-YamlConfigAdapter::parseVectorConfig(const std::string &configFile) const {
-  std::vector<std::string> configVector;
-  
-  try {
-    YAML::Node config = YAML::LoadFile(configFile);
-    
-    if (!config.IsSequence()) {
-      throw std::runtime_error(
-          "Error: Configuration file " + configFile +
-          " is not a valid YAML sequence for vector config.");
-    }
-    
-    for (const auto& item : config) {
-      std::string value = item.as<std::string>();
-      std::string_view trimmed = trim(value);
-      if (!trimmed.empty()) {
-        configVector.emplace_back(trimmed);
-      }
-    }
-  } catch (const YAML::Exception& e) {
-    throw std::runtime_error("Error parsing YAML file " + configFile + ": " + e.what());
+std::vector<ConfigMap> records(const YAML::Node &node, const std::string &source,
+                               const std::vector<std::string> &required) {
+  if (!node.IsSequence()) throw std::runtime_error(location(source, node) + ": expected a sequence of mappings");
+  std::vector<ConfigMap> result;
+  for (const auto &entry : node) {
+    auto values = mapping(entry, source);
+    // Callers select record types in heterogeneous plugin configuration files by key.
+    if (std::all_of(required.begin(), required.end(), [&](const auto &key) { return values.count(key); }))
+      result.emplace_back(std::move(values));
   }
-  
-  return configVector;
+  return result;
+}
+
+std::vector<std::string> strings(const YAML::Node &node, const std::string &source) {
+  if (!node.IsSequence()) throw std::runtime_error(location(source, node) + ": expected a sequence of strings");
+  std::vector<std::string> result;
+  for (const auto &item : node) {
+    if (!item.IsScalar()) throw std::runtime_error(location(source, item) + ": expected a scalar list item");
+    auto value = trimmed(item.Scalar());
+    if (!value.empty()) result.emplace_back(value);
+  }
+  return result;
+}
+}
+
+std::string_view YamlConfigAdapter::trim(std::string_view value) const {
+  return trimmed(value);
+}
+
+rdf_config_detail::ConfigMap YamlConfigAdapter::parsePairBasedConfig(const std::string &file) const {
+  return rdf_config_detail::mapping(rdf_config_detail::loadDocument(file), file);
+}
+
+std::vector<rdf_config_detail::ConfigMap> YamlConfigAdapter::parseMultiKeyConfig(
+    const std::string &file, const std::vector<std::string> &required) const {
+  return rdf_config_detail::records(rdf_config_detail::loadDocument(file), file, required);
+}
+
+std::vector<std::string> YamlConfigAdapter::parseVectorConfig(const std::string &file) const {
+  return rdf_config_detail::strings(rdf_config_detail::loadDocument(file), file);
 }

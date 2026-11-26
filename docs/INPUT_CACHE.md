@@ -99,6 +99,14 @@ Ordinary RDF operations, including string expressions and raw RNodes, do not
 need this call. No static analysis can discover hidden I/O in arbitrary C++
 callables. In-memory frames have no input cache.
 
+The experimental source-first tile executor declares its decoded payload
+branches and their collection counters on each physical tree. It adds them
+to the existing cache before the reader ends learning when the cache is
+already installed. If the reader creates the cache during setup, the executor
+adds the branches immediately afterward. This also applies to borrowed
+collections, whether their inputs arrive as decoded spans or read-only RVecs.
+The executor leaves the configured cache size and input compression alone.
+
 TChain itself transfers the cache and rebinds physical branch pointers when
 changing files. The policy preserves ROOT's notification chain, applies
 `TFileCacheRead::SetEnablePrefetching` to each current cache, and translates a
