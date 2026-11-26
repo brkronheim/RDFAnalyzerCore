@@ -43,9 +43,10 @@ TEST_F(YamlConfigSetup, ParseMultiKeyYamlConfigWorks) {
   auto mapVector = config->parseMultiKeyConfig(
       correctionConfigFile,
       {"file", "correctionName", "name", "inputVariables"});
-  ASSERT_EQ(mapVector.size(), 2);
+  ASSERT_EQ(mapVector.size(), 3);
+  EXPECT_EQ(mapVector.at(1).at("name"), "test_correction_range_error");
   auto map1 = mapVector.at(0);
-  auto map2 = mapVector.at(1);
+  auto map2 = mapVector.at(2);
   EXPECT_EQ(map1.at("file"), "aux/correction.json");
   EXPECT_EQ(map1.at("correctionName"), "test_correction");
   EXPECT_EQ(map1.at("name"), "test_correction");
@@ -95,4 +96,42 @@ TEST(ConfigurationManagerConsistency, YamlAndTextProduceSameResults) {
   EXPECT_EQ(yamlConfig.get("saveFile"), textConfig.get("saveFile"));
   EXPECT_EQ(yamlConfig.get("threads"), textConfig.get("threads"));
   EXPECT_EQ(yamlConfig.get("globs"), textConfig.get("globs"));
+}
+
+TEST(ConfigurationManagerYamlConversion, ScalarsSequencesAndMappingsAreFlattened) {
+  ChangeToTestSourceDir();
+  ConfigurationManager config("cfg/yaml_conversion.yaml");
+  EXPECT_EQ(config.get("scalar"), "quoted scalar");
+  EXPECT_EQ(config.get("enabled"), "true");
+  EXPECT_EQ(config.get("labels"), "[alpha, beta]");
+  EXPECT_EQ(config.get("mapping"), "{mode: fast, flags: [x, y]}");
+}
+
+TEST(ConfigurationManagerAutoDetection, NullAdapterUsesFileExtension) {
+  ChangeToTestSourceDir();
+  ConfigurationManager config("cfg/config.yaml", nullptr);
+  EXPECT_EQ(config.get("threads"), "-1");
+}
+
+TEST_F(YamlConfigSetup, MalformedRecordReportsFileAndLine) {
+  const auto file = std::filesystem::temp_directory_path() / "rdf_invalid_record.yaml";
+  std::ofstream(file) << "- name: first\n- invalid-record\n";
+  try {
+    config->parseMultiKeyConfig(file.string(), {});
+    ADD_FAILURE() << "Expected malformed record to fail";
+  } catch (const std::runtime_error &error) {
+    EXPECT_NE(std::string(error.what()).find(file.string() + ":2"), std::string::npos);
+  }
+  std::filesystem::remove(file);
+}
+
+TEST(ConfigurationManagerYamlConversion, NativeYamlListsAreUsableBySourcesAndCustomAccessors) {
+  ChangeToTestSourceDir();
+  ConfigurationManager config("cfg/yaml_lists.yaml");
+  EXPECT_EQ(config.get("unset"), "");
+  EXPECT_EQ(config.get("fileList"), "/tmp/a.root,/tmp/b.root");
+  EXPECT_EQ(config.getList("fileList"), (std::vector<std::string>{"/tmp/a.root", "/tmp/b.root"}));
+  EXPECT_EQ(config.getList("treeList"), (std::vector<std::string>{"Events"}));
+  EXPECT_EQ(config.getList("antiglobs"), (std::vector<std::string>{}));
+  EXPECT_EQ(config.getList("custom"), (std::vector<std::string>{"a,b", "b: c"}));
 }

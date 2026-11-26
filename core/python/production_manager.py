@@ -113,6 +113,41 @@ class ProductionConfig:
             self.state_file = self.work_dir / "production_state.json"
 
 
+def _copy_native_asset(key, source, directory):
+    from native_config_io import legacy_aux_kind, read_legacy_aux, write_config
+    kind = legacy_aux_kind(key, source)
+    target = directory / source.name
+    if kind:
+        target = target.with_suffix(".yaml")
+        write_config(read_legacy_aux(source, kind), target)
+    else:
+        shutil.copy2(source, target)
+    return target
+
+
+def _stage_yaml_corrections(path, job_dir, resolve):
+    from native_config_io import read_config_records, write_config_yaml, runtime_yaml_path
+    records = read_config_records(path, strict_legacy=True)
+    if not isinstance(records, list):
+        raise ValueError(f"{path}: correctionConfig must contain a list of mappings")
+    for number, record in enumerate(records, 1):
+        if not isinstance(record, dict):
+            raise ValueError(f"{path}: correction entry {number} must be a mapping")
+        value = record.get("file")
+        if not value:
+            continue
+        source = resolve(value) or resolve(value.removeprefix("aux/"))
+        if not source or not source.is_file():
+            raise ValueError(f"{path}: missing correction payload {value!r} in entry {number}")
+        target = job_dir / source.name
+        if target.resolve() != source.resolve():
+            shutil.copy2(source, target)
+        record["file"] = target.name
+    target = runtime_yaml_path(path)
+    write_config_yaml(records, target)
+    return target.name
+
+
 class ProductionManager:
     """
     Main production manager class.
@@ -235,12 +270,6 @@ class ProductionManager:
                     return candidate.resolve()
             return None
 
-        def _copy_file_to_job(src: Path, job_dir: Path) -> Path:
-            dst = job_dir / src.name
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dst))
-            return dst
-
         def _copy_aux_payload(job_dir: Path) -> None:
             analysis_aux_dir = base_config_dir.parent / "aux"
             if analysis_aux_dir.exists() and analysis_aux_dir.is_dir():
@@ -265,31 +294,15 @@ class ProductionManager:
             if not corr_cfg_src or not corr_cfg_src.exists():
                 return
 
-            try:
-                with open(corr_cfg_src, 'r') as corr_file:
-                    for line in corr_file:
-                        line = line.split('#', 1)[0].strip()
-                        if not line:
-                            continue
-                        match = re.search(r'(^|\s)file=([^\s]+)', line)
-                        if not match:
-                            continue
-                        rel_data_path = match.group(2).strip()
-                        src_data = _resolve_path(rel_data_path)
-                        if src_data is None and rel_data_path.startswith('aux/'):
-                            src_data = _resolve_path(rel_data_path[len('aux/'):])
-                        if src_data and src_data.exists() and src_data.is_file():
-                            # Keep correction payloads available as top-level files
-                            # in job directories / worker scratch.
-                            dst_data = job_dir / src_data.name
-                            shutil.copy2(str(src_data), str(dst_data))
-
-                            # Also stage in shared aux using basename for transfer.
-                            shared_data = shared_aux_dir / src_data.name
-                            shared_data.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(str(src_data), str(shared_data))
-            except Exception:
-                pass
+            from native_config_io import read_config_records
+            for entry in read_config_records(corr_cfg_src):
+                value = entry.get("file")
+                if not value:
+                    continue
+                src = _resolve_path(value) or _resolve_path(value.removeprefix("aux/"))
+                if src and src.is_file():
+                    shutil.copy2(src, job_dir / src.name)
+                    shutil.copy2(src, shared_aux_dir / src.name)
 
         def _rewrite_correction_config_to_top_level(job_dir: Path, cfg_name: str) -> None:
             if not cfg_name:
@@ -298,37 +311,7 @@ class ProductionManager:
             if not corr_cfg_path.exists() or not corr_cfg_path.is_file():
                 return
 
-            try:
-                lines_out = []
-                with open(corr_cfg_path, 'r') as corr_file:
-                    for raw_line in corr_file:
-                        line = raw_line.rstrip('\n')
-                        if not line.strip() or line.lstrip().startswith('#'):
-                            lines_out.append(raw_line)
-                            continue
-
-                        def _replace_file_ref(match: re.Match) -> str:
-                            prefix = match.group(1)
-                            value = match.group(2).strip()
-                            src_data = _resolve_path(value)
-                            if src_data is None and value.startswith('aux/'):
-                                src_data = _resolve_path(value[len('aux/'):])
-                            if src_data and src_data.exists() and src_data.is_file():
-                                dst = job_dir / src_data.name
-                                try:
-                                    shutil.copy2(str(src_data), str(dst))
-                                except Exception:
-                                    pass
-                                return f"{prefix}file={src_data.name}"
-                            return f"{prefix}file={os.path.basename(value)}"
-
-                        rewritten = re.sub(r'(^|\s)file=([^\s#]+)', _replace_file_ref, line)
-                        lines_out.append(rewritten + '\n')
-
-                with open(corr_cfg_path, 'w') as corr_file:
-                    corr_file.writelines(lines_out)
-            except Exception:
-                pass
+            return _stage_yaml_corrections(corr_cfg_path, job_dir, _resolve_path)
 
         for i, (file_list, extra_config) in enumerate(zip(file_lists, job_configs)):
             job_id = len(self.jobs)
@@ -338,7 +321,8 @@ class ProductionManager:
             job_dir.mkdir(parents=True, exist_ok=True)
             
             # Generate job config
-            config_path = job_dir / "job_config.txt"
+            config_name = "job_config.yaml"
+            config_path = job_dir / config_name
             # include the Condor process id (which equals job_id) in the remote filenames
             # so uploaded EOS paths contain the process for easy tracing.
             output_path = self.config.output_dir / f"output_{job_id}_{job_id}.root"
@@ -372,16 +356,6 @@ class ProductionManager:
                     return True
                 return False
 
-            # If base config already names the float/int file, reuse that basename
-            # (strip any directory components so per-job files live inside the job dir)
-            float_filename = os.path.basename(base_config.get('floatConfig', 'floats.txt'))
-            int_filename = os.path.basename(base_config.get('intConfig', 'ints.txt'))
-
-            # If the base config references an existing float/int file (absolute or
-            # relative to the base-config directory), copy its contents into the
-            # per-job file so job folders always contain concrete `floats.txt` and
-            # `ints.txt` entries. This preserves lines and will be merged with any
-            # inline extra_config content later.
             # Copy general referenced config files into job folder and relink to basename
             for cfg_key, cfg_value in list(base_config.items()):
                 if cfg_key in ('floatConfig', 'intConfig'):
@@ -392,72 +366,31 @@ class ProductionManager:
                     continue
                 src_cfg = _resolve_path(cfg_value)
                 if src_cfg and src_cfg.exists() and src_cfg.is_file():
-                    copied_cfg = _copy_file_to_job(src_cfg, job_dir)
+                    copied_cfg = _copy_native_asset(cfg_key, src_cfg, job_dir)
                     base_config[cfg_key] = copied_cfg.name
 
-            def _merge_lines_into_file(target_path: Path, lines: list[str]) -> None:
-                existing = []
-                if target_path.exists():
-                    with open(target_path, 'r') as _f:
-                        existing = [l.rstrip('\n') for l in _f if l.rstrip('\n')]
-                seen = set(existing)
-                merged = list(existing)
-                for ln in lines:
-                    if ln in seen:
-                        continue
-                    seen.add(ln)
-                    merged.append(ln)
-                with open(target_path, 'w') as _f:
-                    for ln in merged:
-                        _f.write(ln + '\n')
-
-            def _materialize_config_key(key: str, default_name: str) -> Optional[Path]:
-                if key not in base_config:
-                    return None
-                config_value = base_config.get(key, '')
-                config_path = _resolve_path(str(config_value))
-                if config_path and config_path.exists() and config_path.is_file():
-                    dst = _copy_file_to_job(config_path, job_dir)
-                    base_config[key] = dst.name
-                    return dst
-                return None
-
-            def _process_extra_config(key: str, default_name: str) -> None:
-                if key not in extra_config:
-                    return
-                target_path = job_dir / default_name
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                value = extra_config[key]
-                if _is_inline_content(value):
-                    lines = [ln for ln in str(value).splitlines() if ln.strip()]
-                    _merge_lines_into_file(target_path, lines)
-                    base_config[key] = target_path.name
-                    return
-
-                src = _resolve_path(str(value))
-                if src and src.exists() and src.is_file():
-                    copied = _copy_file_to_job(src, job_dir)
-                    base_config[key] = copied.name
-                else:
-                    base_config[key] = str(value)
-
-            # Pre-populate per-job config files from base config sources.
-            float_path = _materialize_config_key('floatConfig', float_filename)
-            if float_path is None:
-                float_path = job_dir / float_filename
-                float_path.parent.mkdir(parents=True, exist_ok=True)
-                if float_path.exists():
-                    float_path = float_path
-
-            int_path = _materialize_config_key('intConfig', int_filename)
-            if int_path is None:
-                int_path = job_dir / int_filename
-                int_path.parent.mkdir(parents=True, exist_ok=True)
-                if int_path.exists():
-                    int_path = int_path
-
-            _process_extra_config('floatConfig', float_filename)
-            _process_extra_config('intConfig', int_filename)
+            from native_config_io import parse_config_text
+            for key, stem in (("floatConfig", "floats"), ("intConfig", "ints")):
+                values = {}
+                base_value = base_config.get(key)
+                if base_value:
+                    source = _resolve_path(base_value)
+                    if not source or not source.is_file():
+                        raise ValueError(f"{base_config_path}: {key} references missing file {base_value!r}")
+                    values.update(read_config(source))
+                extra = extra_config.get(key)
+                if isinstance(extra, dict):
+                    values.update({str(k): str(v) for k, v in extra.items()})
+                elif isinstance(extra, str) and _is_inline_content(extra):
+                    values.update(parse_config_text(extra.splitlines(), f"job {job_id} {key}"))
+                elif extra:
+                    source = _resolve_path(str(extra))
+                    if not source or not source.is_file():
+                        raise ValueError(f"job {job_id}: {key} references missing file {extra!r}")
+                    values = read_config(source)
+                target = job_dir / (stem + config_path.suffix)
+                write_config(values, target)
+                base_config[key] = target.name
 
             # Merge any remaining keys from extra_config (e.g. 'type')
             for k, v in extra_config.items():
@@ -466,7 +399,9 @@ class ProductionManager:
                 base_config[k] = str(v)
 
             _copy_aux_payload(job_dir)
-            _rewrite_correction_config_to_top_level(job_dir, base_config.get('correctionConfig', ''))
+            correction_name = _rewrite_correction_config_to_top_level(job_dir, base_config.get("correctionConfig", ""))
+            if correction_name:
+                base_config["correctionConfig"] = correction_name
 
             write_config(base_config, str(config_path))
             
@@ -598,19 +533,15 @@ class ProductionManager:
             for p in sorted(lib_dir.iterdir()):
                 if p.is_file():
                     shutil.copy2(str(p), str(target_lib_dir / p.name))
-        # Copy any auxiliary files referenced in the base config
-        try:
-            base_cfg = read_config(self.config.base_config)
-            copy_list = get_copy_file_list(base_cfg)
-            base_dir = os.path.dirname(self.config.base_config)
-            for fname in copy_list:
-                # resolve relative to base_config dir
-                src = Path(fname) if os.path.isabs(fname) else Path(base_dir) / fname
-                if src.exists():
-                    shutil.copy2(str(src), str(test_dir / src.name))
-        except Exception:
-            # Not critical; continue without copy
-            pass
+        # Baseline assets can live outside the per-job directory. Per-job
+        # versions below take precedence when they carry dataset overrides.
+        base_cfg = read_config(self.config.base_config)
+        base_inputs = set(get_copy_file_list(base_cfg))
+        for key, fname in base_cfg.items():
+            if fname in base_inputs:
+                source = Path(self.config.base_config).resolve().parent / fname
+                if source.is_file():
+                    _copy_native_asset(key, source, test_dir)
 
         # Copy configured x509 proxy into the test directory (if provided)
         if self.config.x509:
@@ -624,26 +555,17 @@ class ProductionManager:
         # Ensure referenced config files are available in test dir
         job_dir = job_config_path.parent
 
-        for cfg_name in get_copy_file_list(job_cfg):
-            cfg_base = os.path.basename(cfg_name)
-            try:
-                src_cfg = job_dir / cfg_base
-                if src_cfg.exists() and src_cfg.is_file():
-                    shutil.copy2(str(src_cfg), str(test_dir / cfg_base))
-            except Exception:
+        test_cfg = dict(job_cfg)
+        inputs = set(get_copy_file_list(job_cfg))
+        copied = {job_config_path.name}
+        for key, name in job_cfg.items():
+            if name not in inputs:
                 continue
-
-        # Ensure float/int config files are available in test dir
-        float_cfg = job_cfg.get('floatConfig', 'floats.txt')
-        int_cfg = job_cfg.get('intConfig', 'ints.txt')
-        # job_cfg entries are usually basenames placed in job directory
-        for cfg_name in (float_cfg, int_cfg):
-            try:
-                src = job_dir / cfg_name
-                if src.exists():
-                    shutil.copy2(str(src), str(test_dir / src.name))
-            except Exception:
-                continue
+            source = job_dir / Path(name).name
+            if source.is_file():
+                target = _copy_native_asset(key, source, test_dir)
+                test_cfg[key] = target.name
+                copied.add(source.name)
 
         # Copy aux payload if present in job/shared inputs
         try:
@@ -658,11 +580,9 @@ class ProductionManager:
             pass
 
         # Build test submit_config (based on job_cfg)
-        test_cfg = dict(job_cfg)
-
         # Copy all remaining local config files for robustness
         for p in job_dir.iterdir():
-            if p.is_file() and p.suffix.lower() in ('.txt', '.yaml', '.yml'):
+            if p.is_file() and p.name not in copied and p.suffix.lower() in ('.txt', '.yaml', '.yml'):
                 shutil.copy2(str(p), str(test_dir / p.name))
 
         test_cfg['fileList'] = first_file or job_cfg.get('fileList', '')
@@ -672,15 +592,13 @@ class ProductionManager:
         test_cfg['metaFile'] = 'test_output_meta.root'
 
         # Ensure float/int references are basenames in test dir
-        test_cfg['floatConfig'] = os.path.basename(float_cfg)
-        test_cfg['intConfig'] = os.path.basename(int_cfg)
 
         # Normalize all config references to local top-level files in test_job
         for cfg_key in ('sampleConfig', 'saveConfig', 'correctionConfig', 'floatConfig', 'intConfig'):
             if cfg_key in test_cfg and test_cfg[cfg_key]:
                 test_cfg[cfg_key] = os.path.basename(test_cfg[cfg_key])
 
-        write_config(test_cfg, str(test_dir / 'submit_config.txt'))
+        write_config(test_cfg, str(test_dir / 'submit_config.yaml'))
 
         logger.info(f"Created local test job at: {test_dir}")
         return test_dir
@@ -837,21 +755,27 @@ class ProductionManager:
         shared_dir = self.config.work_dir / 'shared_inputs'
         shared_dir.mkdir(parents=True, exist_ok=True)
 
-        def _normalize_job_correction_config(job_dir: Path) -> None:
-            job_cfg_path = job_dir / "job_config.txt"
-            if not job_cfg_path.exists() or not job_cfg_path.is_file():
-                return
-            try:
-                job_cfg = read_config(str(job_cfg_path))
-            except Exception:
-                return
+        config_names = {Path(self.jobs[job_id].config_path).name for job_id in job_ids}
+        archive_mode = config_names != {"job_config.yaml"} or any(
+            Path(read_config(self.jobs[job_id].config_path).get(key, "")).suffix == ".txt"
+            for job_id in job_ids for key in ("floatConfig", "intConfig", "correctionConfig")
+        )
+        config_name = "job_config.runtime.yaml" if archive_mode else "job_config.yaml"
 
-            corr_cfg_name = os.path.basename(job_cfg.get('correctionConfig', ''))
-            if not corr_cfg_name:
-                return
+        def _normalize_job_config(job_dir: Path, source: Path) -> None:
+            from native_config_io import read_config, write_config
+            job_cfg = read_config(source)
+            for key, stem in (("floatConfig", "floats"), ("intConfig", "ints")):
+                old = job_dir / job_cfg.get(key, stem + ".txt")
+                if archive_mode:
+                    if key in job_cfg and not old.is_file():
+                        raise ValueError(f"{source}: missing {key} input {old}")
+                    name = stem + ".runtime.yaml"
+                    write_config(read_config(old) if old.is_file() else {}, job_dir / name)
+                    job_cfg[key] = name
+
+            corr_cfg_name = os.path.basename(job_cfg.get("correctionConfig", ""))
             corr_cfg_path = job_dir / corr_cfg_name
-            if not corr_cfg_path.exists() or not corr_cfg_path.is_file():
-                return
 
             def _resolve_corr_payload(value: str) -> Optional[Path]:
                 candidates = [
@@ -881,76 +805,10 @@ class ProductionManager:
                         pass
                 return None
 
-            try:
-                rewritten_lines = []
-                with open(corr_cfg_path, 'r') as corr_file:
-                    for raw_line in corr_file:
-                        line = raw_line.rstrip('\n')
-                        if not line.strip() or line.lstrip().startswith('#'):
-                            rewritten_lines.append(raw_line)
-                            continue
-
-                        def _replace_file_ref(match: re.Match) -> str:
-                            prefix = match.group(1)
-                            value = match.group(2).strip()
-                            src = _resolve_corr_payload(value)
-                            if src is not None:
-                                dst = job_dir / src.name
-                                try:
-                                    shutil.copy2(str(src), str(dst))
-                                except Exception:
-                                    pass
-                                return f"{prefix}file={src.name}"
-                            return f"{prefix}file={os.path.basename(value)}"
-
-                        rewritten = re.sub(r'(^|\s)file=([^\s#]+)', _replace_file_ref, line)
-                        rewritten_lines.append(rewritten + '\n')
-
-                with open(corr_cfg_path, 'w') as corr_file:
-                    corr_file.writelines(rewritten_lines)
-            except Exception:
-                return
-
-            # Ensure every `file=` payload reference exists at job top-level.
-            try:
-                shared_aux_root = self.config.work_dir / 'shared_inputs' / 'aux'
-                with open(corr_cfg_path, 'r') as corr_file:
-                    for raw_line in corr_file:
-                        line = raw_line.split('#', 1)[0].strip()
-                        if not line:
-                            continue
-                        match = re.search(r'(^|\s)file=([^\s#]+)', line)
-                        if not match:
-                            continue
-                        fname = os.path.basename(match.group(2).strip())
-                        if not fname:
-                            continue
-                        dst = job_dir / fname
-                        if dst.exists() and dst.is_file():
-                            continue
-
-                        src = None
-                        if shared_aux_root.exists() and shared_aux_root.is_dir():
-                            try:
-                                for candidate in shared_aux_root.rglob(fname):
-                                    if candidate.exists() and candidate.is_file():
-                                        src = candidate
-                                        break
-                            except OSError:
-                                src = None
-
-                        if src is None:
-                            repo_candidate = repo_root / fname
-                            if repo_candidate.exists() and repo_candidate.is_file():
-                                src = repo_candidate
-
-                        if src is not None:
-                            try:
-                                shutil.copy2(str(src), str(dst))
-                            except Exception:
-                                pass
-            except Exception:
-                pass
+            if corr_cfg_name and corr_cfg_path.is_file():
+                job_cfg["correctionConfig"] = _stage_yaml_corrections(corr_cfg_path, job_dir, _resolve_corr_payload)
+            if archive_mode or job_cfg != read_config(source):
+                write_config(job_cfg, job_dir / config_name)
 
         for job_id in job_ids:
             job_dir = self.config.work_dir / f"job_{job_id}"
@@ -958,43 +816,12 @@ class ProductionManager:
                 continue
 
             legacy_aux = job_dir / 'aux'
-            if legacy_aux.exists() and legacy_aux.is_dir():
+            if not archive_mode and legacy_aux.exists() and legacy_aux.is_dir():
                 shutil.rmtree(legacy_aux, ignore_errors=True)
 
-            _normalize_job_correction_config(job_dir)
-
-            # Safety net: ensure corrections.txt file payloads exist at top-level.
-            corr_cfg_path = job_dir / 'corrections.txt'
-            shared_aux_root = self.config.work_dir / 'shared_inputs' / 'aux'
-            if corr_cfg_path.exists() and corr_cfg_path.is_file() and shared_aux_root.exists() and shared_aux_root.is_dir():
-                try:
-                    with open(corr_cfg_path, 'r') as corr_file:
-                        for raw_line in corr_file:
-                            line = raw_line.split('#', 1)[0].strip()
-                            if not line:
-                                continue
-                            m = re.search(r'(^|\s)file=([^\s#]+)', line)
-                            if not m:
-                                continue
-                            fname = os.path.basename(m.group(2).strip())
-                            if not fname:
-                                continue
-                            dst = job_dir / fname
-                            if dst.exists() and dst.is_file():
-                                continue
-                            src = None
-                            for candidate in shared_aux_root.rglob(fname):
-                                if candidate.exists() and candidate.is_file():
-                                    src = candidate
-                                    break
-                            if src is not None:
-                                shutil.copy2(str(src), str(dst))
-                except Exception:
-                    pass
-
-            # Move/copy all non-unique job files into shared_inputs.
-            # Keep only job_config.txt, floats.txt, and ints.txt as per-job files.
-            keep_per_job = {'job_config.txt', 'floats.txt', 'ints.txt'}
+            original = Path(self.jobs[job_id].config_path)
+            _normalize_job_config(job_dir, original)
+            keep_per_job = {config_name, original.name, 'floats.runtime.yaml', 'ints.runtime.yaml', 'floats.yaml', 'ints.yaml', 'floats.txt', 'ints.txt'}
             try:
                 for job_file in sorted(job_dir.iterdir()):
                     if not job_file.exists() or not job_file.is_file():
@@ -1006,13 +833,20 @@ class ProductionManager:
                     if not shared_file.exists() or shared_file.stat().st_mtime != job_file.stat().st_mtime or shared_file.stat().st_size != job_file.stat().st_size:
                         shutil.copy2(str(job_file), str(shared_file))
                     try:
-                        job_file.unlink()
+                        if not archive_mode:
+                            job_file.unlink()
                     except OSError:
                         pass
             except Exception:
                 pass
 
         # Generate condor submission files
+        launch_dir = None
+        if (self.config.work_dir / "condor_submit.sub").is_file():
+            import tempfile
+            retries = self.config.work_dir / "resubmissions"
+            retries.mkdir(exist_ok=True)
+            launch_dir = tempfile.mkdtemp(prefix="submit-", dir=retries)
         submit_path = write_submit_files(
             str(self.config.work_dir.absolute()),
             len(job_ids),
@@ -1022,9 +856,11 @@ class ProductionManager:
             self.config.root_setup,
             x509loc=str(self.config.x509) if self.config.x509 else None,
             max_runtime=self.config.max_runtime,
-            config_file="job_config.txt",
+            config_file=config_name,
             eos_sched=self.config.eos_sched,
             shared_dir_name="shared_inputs",
+            job_indices=job_ids if job_ids != list(range(len(job_ids))) else None,
+            launch_dir=launch_dir,
         )
         
         if dry_run:
@@ -1049,13 +885,13 @@ class ProductionManager:
                             
             # Update job statuses
             submit_time = time.time()
-            for job_id in job_ids:
+            for proc_id, job_id in enumerate(job_ids):
                 job = self.jobs[job_id]
                 job.status = JobStatus.SUBMITTED
                 job.submit_time = submit_time
                 job.attempts += 1
                 if cluster_id:
-                    job.condor_job_id = f"{cluster_id}.{job_id}"
+                    job.condor_job_id = f"{cluster_id}.{proc_id}"
                     
             self._save_state()
             logger.info(f"Submitted {len(job_ids)} jobs (cluster {cluster_id})")
@@ -1429,10 +1265,6 @@ class ProductionManager:
             
         logger.info(f"Resubmitting {len(failed_job_ids)} failed jobs")
         
-        # Reset status to created so they'll be submitted
-        for job_id in failed_job_ids:
-            self.jobs[job_id].status = JobStatus.CREATED
-            
         return self.submit_jobs(failed_job_ids)
         
     def cleanup(self, keep_outputs: bool = True) -> None:
@@ -1539,7 +1371,7 @@ def main():
     # Execute command
     if args.command == "create":
         logger.error("Create command requires custom implementation")
-        logger.error("Use 'law run GetRucioFileList' / 'law run SkimTask' to create productions.")
+        logger.error("Use the Snakemake campaign (examples/snakemake/Snakefile) to create a production.")
         sys.exit(1)
         
     elif args.command == "submit":

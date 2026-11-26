@@ -1,5 +1,8 @@
 # CMS Combine Integration
 
+For shared Combine/Rabbit fit execution, CUDA setup, and the vjet polynomial
+adapter, see [Combine and Rabbit statistical backends](RABBIT_INTEGRATION.md).
+
 This guide explains how to use RDFAnalyzerCore with CMS Combine for statistical analysis, limit setting, and fits.
 
 ## Overview
@@ -17,7 +20,7 @@ RDFAnalyzerCore provides a complete workflow from analysis to statistical infere
 
 - ROOT 6.30+ with Python bindings
 - CMake 3.19+
-- Python 3.8+ with PyYAML
+- ROOT-matched Python with PyYAML and pandas
 - Git
 
 ### Build Options
@@ -49,21 +52,21 @@ cmake -S . -B build \
 ### Building
 
 ```bash
-# Clone the repository
-git clone https://github.com/brkronheim/RDFAnalyzerCore.git
-cd RDFAnalyzerCore
-
-# Setup ROOT environment
+# From a checkout, activate the ROOT environment and initialize the core submodules.
 source env.sh
+git submodule update --init --recursive -- core/extern
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt pandas
 
-# Configure with Combine support
-cmake -S . -B build \
-    -DBUILD_COMBINE=ON \
-    -DBUILD_COMBINE_HARVESTER=ON
-
-# Build (this will take several minutes)
-cmake --build build -j$(nproc)
+# Configure and build both tools.
+cmake -S . -B build -DBUILD_COMBINE=ON -DBUILD_COMBINE_HARVESTER=ON
+cmake --build build --parallel "$(nproc)"
 ```
+
+Set the library, Python, and executable paths in the
+[standalone Combine setup](BUILD_WITH_COMBINE.md#usage) before running the
+commands below.
 
 After building, Combine and CombineHarvester will be available at:
 - **Combine**: `build/external/HiggsAnalysis/CombinedLimit/`
@@ -112,23 +115,33 @@ int main(int argc, char **argv) {
     analyzer.bookConfigHistograms();
     
     // Save outputs
-    analyzer.save();
+    analyzer.run();
     
     return 0;
 }
 ```
 
-**Configuration** (`config.txt`):
-```
-fileList=data.root
-saveFile=output_data.root
-histogramConfig=cfg/histograms.txt
+**Configuration** (`config.yaml`):
+```yaml
+fileList: data.root
+saveFile: output_data.root
+histogramConfig: cfg/histograms.yaml
 ```
 
-**Histogram Configuration** (`cfg/histograms.txt`):
-```
-name=mT variable=mT weight=event_weight bins=20 lowerBound=0.0 upperBound=500.0
-name=nJets variable=nJets weight=event_weight bins=10 lowerBound=0 upperBound=10
+**Histogram Configuration** (`cfg/histograms.yaml`):
+```yaml
+- name: mT
+  variable: mT
+  weight: event_weight
+  bins: 20
+  lowerBound: 0.0
+  upperBound: 500.0
+- name: nJets
+  variable: nJets
+  weight: event_weight
+  bins: 10
+  lowerBound: 0
+  upperBound: 10
 ```
 
 **Run the analysis**:

@@ -23,6 +23,7 @@ jet_pt_min: 30.0
 jet_eta_max: 2.5
 jet_dR_clean: 0.4
 
-# Z mass window boundaries used by the mass-window cut and histograms
+# Reference values in GeV. The cut in analysis.cc and the bin edges in
+# histograms.yaml each set these bounds directly.
 zpeak_mass_lo: 70.0
 zpeak_mass_hi: 110.0

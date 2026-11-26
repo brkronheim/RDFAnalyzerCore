@@ -15,11 +15,19 @@
 #include <SystematicManager.h>
 #include <ROOT/TThreadExecutor.hxx>
 
+/**
+ * @file testOnnxManager.cc
+ *
+ * Scalar and vector-valued feature columns are both supported. Scalar
+ * columns contribute one element to the packed ONNX input, while vector
+ * columns are appended in order.
+ */
+
 class OnnxManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
     ChangeToTestSourceDir();
-    std::string configFile = "cfg/test_data_config.txt";
+    std::string configFile = "cfg/test_data_config.yaml";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     systematicManager = std::make_unique<SystematicManager>();
     dataManager = std::make_unique<DataManager>(2);
@@ -57,7 +65,7 @@ protected:
 // Construction
 TEST_F(OnnxManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
-    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
     auto manager = std::make_unique<OnnxManager>(*config);
   });
 }
@@ -320,6 +328,24 @@ TEST_F(OnnxManagerTest, GetInputOutputNames) {
   EXPECT_EQ(outputNames.size(), 2);
   EXPECT_EQ(outputNames[0], "output_sum");
   EXPECT_EQ(outputNames[1], "output_product");
+}
+
+TEST_F(OnnxManagerTest, GetOutputShapesAndElementCounts) {
+  const auto &outputShapes = onnxManager->getModelOutputShapes("test_model_multi");
+  const auto &outputElementCounts = onnxManager->getModelOutputElementCounts("test_model_multi");
+
+  ASSERT_EQ(outputShapes.size(), 2);
+  ASSERT_EQ(outputElementCounts.size(), 2);
+
+  EXPECT_FALSE(outputShapes[0].empty());
+  EXPECT_FALSE(outputShapes[1].empty());
+  EXPECT_EQ(outputElementCounts[0], 1);
+  EXPECT_EQ(outputElementCounts[1], 1);
+}
+
+TEST_F(OnnxManagerTest, GetOutputShapesAndElementCounts_Invalid) {
+  EXPECT_THROW(onnxManager->getModelOutputShapes("nonexistent_model"), std::runtime_error);
+  EXPECT_THROW(onnxManager->getModelOutputElementCounts("nonexistent_model"), std::runtime_error);
 }
 
 /**

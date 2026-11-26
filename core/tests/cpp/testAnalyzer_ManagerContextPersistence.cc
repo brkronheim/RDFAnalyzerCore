@@ -11,14 +11,17 @@
 #include <string>
 
 namespace {
-static std::string writeConfig(const std::string& path, const std::string& metaFile) {
+static std::string writeConfig(const std::string& path,
+                               const std::string& metaFile,
+                               const std::string& skimFile) {
   std::ofstream out(path);
-  out << "enableCounters=true\n";
-  out << "metaFile=" << metaFile << "\n";
-  out << "sample=TestSample\n";
-  out << "fileList=test_data_minimal/dummy.root\n";
-  out << "saveTree=Events\n";
-  out << "saveFile=test_analyzer_managercontext_skim.root\n";
+  out << "enableCounters: true\n";
+  out << "enableSkim: true\n";
+  out << "metaFile: " << metaFile << "\n";
+  out << "sample: TestSample\n";
+  out << "fileList: test_data_minimal/dummy.root\n";
+  out << "saveTree: Events\n";
+  out << "saveFile: " << skimFile << "\n";
   out.close();
   return path;
 }
@@ -27,15 +30,15 @@ static std::string writeConfig(const std::string& path, const std::string& metaF
 TEST(AnalyzerManagerContextPersistence, CounterServiceCtxOutlivesCaller) {
   ChangeToTestSourceDir();
 
-  const std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/aux/test_analyzer_managercontext_config.txt";
-  const std::string metaPath = std::string(TEST_SOURCE_DIR) + "/aux/test_analyzer_managercontext_meta.root";
-  const std::string skimPath = std::string(TEST_SOURCE_DIR) + "/test_analyzer_managercontext_skim.root";
+  const std::string cfgPath = testWorkspacePath().string() + "/test_analyzer_managercontext_config.yaml";
+  const std::string metaPath = testWorkspacePath().string() + "/test_analyzer_managercontext_meta.root";
+  const std::string skimPath = testWorkspacePath().string() + "/test_analyzer_managercontext_skim.root";
 
   std::remove(cfgPath.c_str());
   std::remove(metaPath.c_str());
   std::remove(skimPath.c_str());
 
-  writeConfig(cfgPath, metaPath);
+  writeConfig(cfgPath, metaPath, skimPath);
 
   Analyzer analyzer(cfgPath);
 
@@ -44,7 +47,7 @@ TEST(AnalyzerManagerContextPersistence, CounterServiceCtxOutlivesCaller) {
   analyzer.Filter("keep_event", [](bool keepEvent) { return keepEvent; }, {"keep_event"});
 
   // If Analyzer had passed a temporary ManagerContext to services, this would crash
-  EXPECT_NO_THROW(analyzer.save());
+  EXPECT_NO_THROW(analyzer.run());
 
   TFile skimFile(skimPath.c_str(), "READ");
   ASSERT_FALSE(skimFile.IsZombie());

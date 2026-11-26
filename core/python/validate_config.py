@@ -1,11 +1,25 @@
 import argparse
+import math
 import os
+import re
+import sys
+import struct
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
+# Ensure yaml is available (LCG Python 3.12 may need system site-packages)
+try:
+    import yaml
+except ImportError:
+    for _candidate in [
+        "/usr/lib64/python3.9/site-packages",
+        "/usr/lib/python3.9/site-packages",
+    ]:
+        if os.path.isdir(_candidate) and _candidate not in sys.path:
+            sys.path.insert(0, _candidate)
+    import yaml  # will re-raise if still not found
 
-from submission_backend import read_config
+from native_config_io import read_config, load_yaml_document
 from dataset_manifest import DatasetManifest, FriendTreeConfig
 from output_schema import RegionDefinition, validate_region_hierarchy, NuisanceGroupDefinition, NUISANCE_GROUP_TYPES, NUISANCE_GROUP_OUTPUT_USAGES
 
@@ -65,6 +79,23 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "optional_keys": ["corrections"],
         "key_types": {"corrections": list},
     },
+    "DerivationManager": {
+        "required_keys": [],
+        "optional_keys": [
+            "enabled",
+            "mode",
+            "stitching",
+            "taggerEfficiencies",
+            "stxs",
+        ],
+        "key_types": {
+            "enabled": bool,
+            "mode": str,
+            "stitching": dict,
+            "taggerEfficiencies": dict,
+            "stxs": dict,
+        },
+    },
     "BDTManager": {
         "required_keys": [],
         "optional_keys": ["models"],
@@ -85,11 +116,6 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "optional_keys": ["triggers"],
         "key_types": {"triggers": list},
     },
-    "GoldenJsonManager": {
-        "required_keys": [],
-        "optional_keys": ["json_files"],
-        "key_types": {"json_files": list},
-    },
     "KinematicFitManager": {
         "required_keys": [],
         "optional_keys": ["fits"],
@@ -99,25 +125,6 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         "required_keys": [],
         "optional_keys": ["objects"],
         "key_types": {"objects": list},
-    },
-    "JetEnergyScaleManager": {
-        "required_keys": [],
-        "optional_keys": [
-            "jet_columns",
-            "met_columns",
-            "raw_factor_column",
-            "corrections",
-            "systematic_sets",
-            "variations",
-        ],
-        "key_types": {
-            "jet_columns": dict,
-            "met_columns": dict,
-            "raw_factor_column": str,
-            "corrections": list,
-            "systematic_sets": dict,
-            "variations": list,
-        },
     },
     "TaggerWorkingPointManager": {
         "required_keys": [],
@@ -145,6 +152,15 @@ _KNOWN_PLUGINS: Dict[str, Dict[str, Any]] = {
         },
     },
 }
+
+# Optional providers extend validation without introducing mandatory imports.
+if __package__:
+    from .optional_extensions import load_extension_services as _load_extension_services
+else:
+    from optional_extensions import load_extension_services as _load_extension_services
+for _extension_schemas in _load_extension_services("config_schemas"):
+    _KNOWN_PLUGINS.update(_extension_schemas.PLUGIN_SCHEMAS)
+
 
 
 # ---------------------------------------------------------------------------
@@ -258,9 +274,8 @@ def _validate_histogram_config_yaml(
     warnings: List[str] = []
 
     try:
-        with open(path) as fh:
-            data = yaml.safe_load(fh)
-    except yaml.YAMLError as exc:
+        data = load_yaml_document(path, typed=True)
+    except ValueError as exc:
         errors.append(f"Failed to parse YAML histogram config: {exc}")
         return errors, warnings
 
@@ -516,9 +531,6 @@ def validate_nuisance_groups_config(
 # Friend/sidecar tree config validator
 # ---------------------------------------------------------------------------
 
-#: Required keys in each friend tree definition dict.
-_FRIEND_REQUIRED_KEYS = ["alias"]
-
 #: All recognised keys in a friend tree definition.
 _FRIEND_KNOWN_KEYS = {
     "alias", "tree_name",
@@ -569,55 +581,40 @@ def validate_friend_config(
             )
             continue
 
-        # Required keys
-        for req in _FRIEND_REQUIRED_KEYS:
-            if req not in item:
-                errors.append(f"{entry_ctx}: missing required key '{req}'")
-
-        alias = item.get("alias", "")
-
-        # Duplicate alias detection
-        if alias:
-            if alias in seen_aliases:
-                errors.append(
-                    f"{entry_ctx}: Duplicate friend tree alias '{alias}' "
-                    f"(first seen at index {seen_aliases[alias]})"
-                )
-            else:
-                seen_aliases[alias] = i
-
-        # Must have at least one file source (files/fileList or directory)
-        has_files = bool(item.get("files") or item.get("fileList"))
-        has_directory = bool(item.get("directory"))
-        if not has_files and not has_directory:
-            warnings.append(
-                f"{entry_ctx} (alias '{alias}'): no file source specified; "
-                "provide 'files' or 'directory'"
+        alias = item.get("alias")
+        if not isinstance(alias, str) or not alias.strip():
+            errors.append(f"{entry_ctx}: 'alias' must be a nonempty string")
+        elif alias in seen_aliases:
+            errors.append(
+                f"{entry_ctx}: Duplicate friend tree alias '{alias}' "
+                f"(first seen at index {seen_aliases[alias]})"
             )
+        else:
+            seen_aliases[alias] = i
 
-        # Validate list fields
-        for list_key in ("files", "fileList", "globs", "antiglobs",
-                         "index_branches", "indexBranches"):
-            val = item.get(list_key)
-            if val is not None and not isinstance(val, list):
-                errors.append(
-                    f"{entry_ctx} (alias '{alias}'): '{list_key}' must be a list"
-                )
+        for manifest_key, native_key in (("files", "fileList"), ("tree_name", "treeName"),
+                                         ("index_branches", "indexBranches")):
+            if manifest_key in item and native_key in item:
+                errors.append(f"{entry_ctx}: duplicate field '{native_key}' (also '{manifest_key}')")
+        if not (item.get("files") or item.get("fileList") or item.get("directory")):
+            errors.append(f"{entry_ctx}: provide a nonempty files/fileList or directory")
 
-        # Validate string fields
-        for str_key in ("alias", "tree_name", "treeName", "directory"):
-            val = item.get(str_key)
-            if val is not None and not isinstance(val, str):
-                errors.append(
-                    f"{entry_ctx}: '{str_key}' must be a string"
-                )
-
-        # Unknown key warnings
-        for k in item:
-            if k not in _FRIEND_KNOWN_KEYS:
-                warnings.append(
-                    f"{entry_ctx} (alias '{alias}'): unknown key '{k}'"
-                )
+        for key, value in item.items():
+            field = f"{entry_ctx}.{key}"
+            if key not in _FRIEND_KNOWN_KEYS:
+                errors.append(f"{field}: unknown friend field")
+            elif key in ("tree_name", "treeName", "directory"):
+                if key == "directory" and value is None:
+                    continue  # Omitted directory in serialized manifests
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"{field}: expected a nonempty string")
+            elif key != "alias":
+                if not isinstance(value, list):
+                    errors.append(f"{field}: expected a list of strings")
+                elif any(not isinstance(v, str) or not v.strip() for v in value):
+                    errors.append(f"{field}: expected nonempty string items")
+                elif key in ("index_branches", "indexBranches") and len(value) > 2:
+                    errors.append(f"{field}: expected up to two branches for ROOT BuildIndex")
 
     return errors, warnings
 
@@ -723,8 +720,10 @@ _ANALYSIS_CONFIG_KNOWN_KEYS = {
     "regions",
     "nuisance_groups",
     "histogram_config",
+    "friends",
     "friend_trees",
     "plugins",
+    "derivations",
 }
 
 
@@ -744,7 +743,7 @@ def validate_analysis_config(
         :class:`~output_schema.NuisanceGroupDefinition` schema.
 
     ``histogram_config``
-        Path to a histogram text-format configuration file.  The path is
+        Path to a histogram configuration file.  The path is
         resolved relative to the directory containing the analysis config.
         The file is parsed and each entry is validated.
 
@@ -780,9 +779,8 @@ def validate_analysis_config(
         raise ValidationError(f"Analysis config file not found: {config_path}")
 
     try:
-        with open(config_path) as fh:
-            data = yaml.safe_load(fh)
-    except yaml.YAMLError as exc:
+        data = load_yaml_document(config_path, typed=True)
+    except ValueError as exc:
         errors.append(f"Failed to parse analysis config YAML: {exc}")
         return errors, warnings
 
@@ -846,6 +844,8 @@ def validate_analysis_config(
             f"[{source_context}] Both 'friend_trees' and 'friends' keys are present; "
             "only 'friend_trees' will be validated – remove the duplicate key"
         )
+    if "friends" in data and "friend_trees" in data:
+        errors.append(f"{source_context}: duplicate friends / friend_trees sequence")
     for key in ("friend_trees", "friends"):
         if key in data:
             errs, warns = validate_friend_config(data[key], source_context)
@@ -856,6 +856,14 @@ def validate_analysis_config(
     # --------------------------------------------------------------- plugins
     if "plugins" in data:
         errs, warns = validate_plugin_config(data["plugins"], source_context)
+        errors.extend(errs)
+        warnings.extend(warns)
+
+    # ------------------------------------------------------------ derivations
+    if "derivations" in data:
+        errs, warns = validate_plugin_config(
+            {"DerivationManager": data["derivations"]}, source_context
+        )
         errors.extend(errs)
         warnings.extend(warns)
 
@@ -873,24 +881,8 @@ def _resolve_path(base_config_path: str, value: str) -> str:
 
 
 def _parse_sample_config(sample_config_path: str):
-    entries = []
-    with open(sample_config_path) as file:
-        for idx, line in enumerate(file, start=1):
-            raw = line
-            line = line.split("#")[0].strip()
-            if not line:
-                continue
-            parts = line.split()
-            entry = {}
-            for part in parts:
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    entry[k.strip()] = v.strip()
-            if entry:
-                entry["__line__"] = idx
-                entry["__raw__"] = raw.strip()
-                entries.append(entry)
-    return entries
+    from sample_config import legacy_sample_records
+    return [dict(entry, __line__=lineno) for lineno, entry in legacy_sample_records(sample_config_path)]
 
 
 def _is_float(val: str) -> bool:
@@ -907,6 +899,70 @@ def _is_int(val: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _parse_cpp_int(value: str) -> Optional[int]:
+    """Parse the signed decimal token accepted by C++ ``std::stoi``."""
+    token = value.strip()
+    if not re.fullmatch(r"[+-]?[0-9]+", token):
+        return None
+    parsed = int(token, 10)
+    if parsed < -(2 ** 31) or parsed > (2 ** 31 - 1):
+        return None
+    return parsed
+
+
+def _parse_cpp_float(value: str) -> Optional[float]:
+    """Parse a complete ``std::stof``-style value representable as a float."""
+    token = value.strip()
+    lower = token.lower()
+    if re.fullmatch(r"[+-]?nan(?:\([a-z0-9_]*\))?", lower):
+        return None
+    if re.fullmatch(r"[+-]?inf(?:inity)?", lower):
+        return None
+
+    try:
+        if re.fullmatch(
+            r"[+-]?0[xX](?:(?:[0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?)|(?:\.[0-9a-fA-F]+))[pP][+-]?[0-9]+",
+            token,
+        ):
+            parsed = float.fromhex(token)
+        else:
+            if not re.fullmatch(
+                r"[+-]?(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)",
+                token,
+            ):
+                return None
+            parsed = float(token)
+        if not math.isfinite(parsed):
+            return None
+        converted = struct.unpack("f", struct.pack("f", parsed))[0]
+        # std::stof reports ERANGE for overflow and non-zero subnormal results.
+        if not math.isfinite(converted) or (converted == 0.0 and parsed != 0.0):
+            return None
+        if converted != 0.0 and abs(converted) < 1.1754943508222875e-38:
+            return None
+        return converted
+    except (OverflowError, ValueError, struct.error):
+        return None
+
+
+def _validate_constant_file(config_key: str, path: str, errors: List[str]) -> None:
+    """Validate constant values before C++ registers them as dataframe columns."""
+    try:
+        entries = read_config(path)
+    except Exception as exc:
+        errors.append(f"Could not read '{config_key}' file '{path}': {exc}")
+        return
+
+    parser = _parse_cpp_float if config_key == "floatConfig" else _parse_cpp_int
+    expected = "a complete finite float value" if config_key == "floatConfig" else "a complete signed 32-bit integer"
+    for name, value in entries.items():
+        if parser(value) is None:
+            errors.append(
+                f"Invalid value in '{config_key}' file '{path}' for '{name}': "
+                f"{value!r}; expected {expected}"
+            )
 
 
 def _validate_yaml_sample_config(sample_config_path: str, mode: str = "auto"):
@@ -1024,7 +1080,10 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
     if not os.path.exists(config_path):
         raise ValidationError(f"Config file not found: {config_path}")
 
-    cfg = read_config(config_path)
+    try:
+        cfg = read_config(config_path)
+    except ValueError as exc:
+        return [str(exc)], warnings
 
     # 'saveConfig' is optional: when missing, we will warn and snapshot will save the full dataframe.
     required_keys = ["sampleConfig", "saveDirectory", "saveTree"]
@@ -1038,6 +1097,8 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
             p = _resolve_path(config_path, cfg[key])
             if not os.path.exists(p):
                 errors.append(f"File not found for '{key}': {p}")
+            elif key in {"floatConfig", "intConfig"}:
+                _validate_constant_file(key, p, errors)
 
     # saveConfig is optional; if provided, warn if the referenced file doesn't exist
     if "saveConfig" in cfg and cfg["saveConfig"].strip():
@@ -1048,7 +1109,7 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
     # threads validation (optional)
     if "threads" in cfg and cfg["threads"].strip():
         threads_val = cfg["threads"].strip().lower()
-        if threads_val not in {"auto", "max"} and not _is_int(threads_val):
+        if threads_val not in {"auto", "max"} and _parse_cpp_int(threads_val) is None:
             errors.append("Invalid 'threads' value (expected int, 'auto', or 'max')")
 
     sample_config = cfg.get("sampleConfig", "")
@@ -1068,7 +1129,10 @@ def validate_submit_config(config_path: str, mode: str = "auto"):
                     f"Sample config '{sample_config}' uses legacy text format. "
                     "Consider migrating to YAML dataset manifest (.yaml) for better tooling support."
                 )
-                entries = _parse_sample_config(sample_config_path)
+                try:
+                    entries = _parse_sample_config(sample_config_path)
+                except ValueError as exc:
+                    return [*errors, str(exc)], warnings
                 has_recids = any("recids" in e for e in entries)
                 mode_local = mode.lower()
                 if mode_local == "auto":
@@ -1143,6 +1207,7 @@ def main():
         default="auto",
         help="Validation mode for submit config (auto detects from sample config)",
     )
+
     args = parser.parse_args()
 
     try:

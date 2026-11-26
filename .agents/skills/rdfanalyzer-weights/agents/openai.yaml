@@ -1,0 +1,4 @@
+interface:
+  display_name: "Event weights and normalization"
+  short_description: "Event weights and normalization"
+  default_prompt: "Use $rdfanalyzer-weights to trace the final event-weight product, generator conventions, normalization, and varied components."

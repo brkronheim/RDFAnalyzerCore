@@ -1,7 +1,7 @@
 # =============================================================================
 # zpeak_workspace.yaml — workspace configuration for the Z→μμ peak fit
 #
-# This file drives the AnalyticWorkspaceFitTask (law/combine_tasks.py).
+# This file drives the AnalyticWorkspaceFitTask (core/python/law/combine_tasks.py).
 # It specifies:
 #   - The observable (dimuon mass range)
 #   - The signal PDF type and initial parameter values
@@ -10,7 +10,7 @@
 #
 # Swap signal/background models by editing the `pdf` fields — no code changes
 # are required.  For the full list of supported PDFs see the docstring for
-# AnalyticWorkspaceFitTask in law/combine_tasks.py.
+# AnalyticWorkspaceFitTask in core/python/law/combine_tasks.py.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -19,8 +19,8 @@
 observable:
   name:  mass
   title: "m_{#mu#mu} [GeV]"
-  lo:    60.0
-  hi:    120.0
+  lo:    70.0
+  hi:    110.0
 
 # ---------------------------------------------------------------------------
 # Signal PDF: Voigtian (Breit-Wigner ⊗ Gaussian resolution)
@@ -69,9 +69,9 @@ background:
 # ---------------------------------------------------------------------------
 # Channels
 #
-# Each entry maps a histogram name (as stored in the output ROOT file under
-# the "histograms/" TDirectory) to a channel identifier used in the Combine
-# datacard.  The optional `label` field is used for plot titles.
+# Each entry maps a nominal TH1 name in the extracted file to a channel.
+# The Combine card prefixes the channel ID with ch_. The optional label
+# is used for plot titles.
 #
 # Add or remove jet-bin channels here; no C++ or Python code changes needed.
 # ---------------------------------------------------------------------------
@@ -86,8 +86,17 @@ channels:
 
   - name:      2j
     histogram: DimuonMass_2j
-    label:     "≥2 jets"
+    label:     "2 jets"
 
   - name:      ge3j
     histogram: DimuonMass_ge3j
     label:     "≥3 jets"
+
+# Illustrative in-window yields at r=1 and at unit background scale.
+# Replace the signal references with independent predictions for the data
+# and luminosity being fitted. Each background rate has its own free scale.
+combine_rates:
+  0j:   {signal: 12000, background: 1000}
+  1j:   {signal:  3600, background:  400}
+  2j:   {signal:  1000, background:  150}
+  ge3j: {signal:   250, background:   40}

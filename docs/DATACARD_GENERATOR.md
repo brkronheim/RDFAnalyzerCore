@@ -225,8 +225,10 @@ The script reads ROOT files produced by RDFAnalyzerCore analyses using `uproot`.
 
 - **TH1 histograms**: Standard 1D histograms (TH1F, TH1D, etc.)
 
-**Note**: Only 1D histograms are supported. THnSparse and multi-dimensional histograms are not supported.
-Ensure your analysis outputs 1D histograms for the observables specified in your datacard configuration.
+**Note**: Only 1D histograms are supported. RDFAnalyzerCore's merge task adds
+these 1D histograms after hadding the per-job `THnSparseF` arrays. For a manual
+merge, run `python core/python/extract_nd_histograms.py merged.root` before
+pointing the datacard configuration at the merged file.
 
 ### Histogram Naming
 
@@ -309,7 +311,7 @@ The ROOT files are written using `uproot` and are fully compatible with CMS comb
 
 1. **Run your RDFAnalyzer analysis** to produce ROOT files with histograms:
 ```bash
-./myanalysis config.txt
+./myanalysis config.yaml
 # Outputs: signal.root, ttbar.root, wjets.root, data.root
 ```
 
@@ -433,7 +435,7 @@ See [DATACARD_SYSTEMATICS_EXAMPLE.md](DATACARD_SYSTEMATICS_EXAMPLE.md) for compr
 
 4. **Run and save**:
 ```cpp
-analyzer.save();
+analyzer.run();
 ```
 
 The output ROOT file can then be used as input to the datacard generator.
@@ -551,7 +553,7 @@ cmake --build build -j$(nproc)
 
 # 2. Run analysis (produces ROOT files with histograms)
 cd build/analyses/MyAnalysis
-./myanalysis config.txt
+./myanalysis config.yaml
 # Outputs: signal.root, ttbar.root, wjets.root, data.root
 
 # 3. Generate datacards

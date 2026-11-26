@@ -52,7 +52,7 @@ protected:
   void SetUp() override {
     ChangeToTestSourceDir();
     config = ManagerFactory::createConfigurationManager(
-        "cfg/test_data_config_minimal.txt");
+        "cfg/test_data_config_minimal.yaml");
     systematicManager = std::make_unique<SystematicManager>();
     logger = std::make_unique<DefaultLogger>();
     skimSink = std::make_unique<NullOutputSink>();
@@ -156,6 +156,18 @@ TEST_F(TaggerWorkingPointManagerTest, SetTaggerColumnEmptyThrows) {
 // ---------------------------------------------------------------------------
 // addWorkingPoint validation
 // ---------------------------------------------------------------------------
+
+TEST_F(TaggerWorkingPointManagerTest, LoadWorkingPointAndSystematicRecordsFromYaml) {
+  config->set("taggerConfig", "cfg/test_tagger_config.yaml");
+  DataManager data(1);
+  auto manager = makeMgr(data);
+  EXPECT_EQ(manager->getTaggerColumns(), (std::vector<std::string>{"Jet_btagDeepFlavB"}));
+  const auto &points = manager->getWorkingPoints();
+  ASSERT_EQ(points.size(), 3u);
+  EXPECT_EQ(points[1].name, "medium");
+  EXPECT_EQ(points[1].thresholds, (std::vector<float>{0.3033f}));
+  EXPECT_EQ(manager->getSystematicSources("standard"), (std::vector<std::string>{"hf", "lf", "hfstats1"}));
+}
 
 TEST_F(TaggerWorkingPointManagerTest, AddWorkingPointsInOrder) {
   TaggerWorkingPointManager mgr;
@@ -524,6 +536,58 @@ TEST_F(TaggerWorkingPointManagerTest, FixedWPWeightSingleWorkingPointPassAndFail
   EXPECT_FLOAT_EQ(result[1], (1.0f - 1.10f * 0.60f) / (1.0f - 0.60f));
 }
 
+TEST_F(TaggerWorkingPointManagerTest,
+       FixedWPWeightMultipliesOnlyObjectsInInputCollection) {
+  auto dm = std::make_unique<DataManager>(1);
+  auto mgr = makeMgr(*dm);
+
+  mgr->setObjectColumns("Jet_pt", "Jet_eta", "Jet_phi", "Jet_mass");
+  mgr->setTaggerColumn("Jet_btag");
+  mgr->addWorkingPoint("L", 0.30f);
+  mgr->setInputObjectCollection("goodJets");
+
+  dm->Define(
+      "goodJets",
+      [](ULong64_t) -> PhysicsObjectCollection {
+        const ROOT::VecOps::RVec<Float_t> pt{40.f, 50.f, 60.f};
+        const ROOT::VecOps::RVec<Float_t> eta{0.f, 0.f, 0.f};
+        const ROOT::VecOps::RVec<Float_t> phi{0.f, 0.f, 0.f};
+        const ROOT::VecOps::RVec<Float_t> mass{0.f, 0.f, 0.f};
+        const ROOT::VecOps::RVec<bool> good{true, false, true};
+        return PhysicsObjectCollection(pt, eta, phi, mass, good);
+      },
+      {"rdfentry_"}, *systematicManager);
+  dm->Define(
+      "Jet_btag",
+      [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> {
+        return {0.40f, 0.90f, 0.10f};
+      },
+      {"rdfentry_"}, *systematicManager);
+  dm->Define(
+      "sf_L",
+      [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> {
+        return {1.10f, 1.10f, 1.10f};
+      },
+      {"rdfentry_"}, *systematicManager);
+  dm->Define(
+      "eff_L",
+      [](ULong64_t) -> ROOT::VecOps::RVec<Float_t> {
+        return {0.60f, 0.60f, 0.60f};
+      },
+      {"rdfentry_"}, *systematicManager);
+
+  mgr->defineFixedWorkingPointWeight({"sf_L"}, {"eff_L"},
+                                     "fixed_wp_weight");
+  mgr->execute();
+
+  auto result = dm->getDataFrame().Take<Float_t>("fixed_wp_weight").GetValue();
+  ASSERT_EQ(result.size(), 1u);
+  const float taggedJetFactor = 1.10f;
+  const float untaggedJetFactor =
+      (1.0f - 1.10f * 0.60f) / (1.0f - 0.60f);
+  EXPECT_FLOAT_EQ(result[0], taggedJetFactor * untaggedJetFactor);
+}
+
 TEST_F(TaggerWorkingPointManagerTest, FixedWPWeightIntermediateCategoryUsesBTVFormula) {
   auto dm = std::make_unique<DataManager>(1);
   auto mgr = makeMgr(*dm);
@@ -555,6 +619,67 @@ TEST_F(TaggerWorkingPointManagerTest, FixedWPWeightIntermediateCategoryUsesBTVFo
   EXPECT_FLOAT_EQ(result[0], expected);
 }
 
+TEST_F(TaggerWorkingPointManagerTest, FixedWPWeightsKeepObjectAndWorkingPointOrderingAcrossNuisances) {
+  auto dm = std::make_unique<DataManager>(2);
+  auto mgr = makeMgr(*dm);
+  mgr->setTaggerColumns({"score1", "score2"});
+  mgr->addWorkingPoint("L", std::vector<float>{0.2f, 0.3f});
+  mgr->addWorkingPoint("M", std::vector<float>{0.6f, 0.7f});
+  mgr->setInputObjectCollection("jets");
+  auto df = dm->getDataFrame();
+  // Original index 1 is excluded. Index 0 fails, 2 passes L, 3 passes M.
+  df = df.Define("jets", [](ULong64_t e) {
+    return PhysicsObjectCollection(
+        ROOT::VecOps::RVec<float>(4, 50), ROOT::VecOps::RVec<float>(4, 0),
+        ROOT::VecOps::RVec<float>(4, 0), ROOT::VecOps::RVec<float>(4, 0),
+        e == 0 ? ROOT::VecOps::RVec<bool>{true, false, true, true}
+               : ROOT::VecOps::RVec<bool>(4, false));
+  }, {"rdfentry_"});
+  df = df.Define("score1", [] { return ROOT::VecOps::RVec<float>{0.1, 0.9, 0.4, 0.9}; });
+  df = df.Define("score2", [] { return ROOT::VecOps::RVec<float>{0.9, 0.9, 0.5, 0.9}; });
+  df = df.Define("sfL", [] { return ROOT::VecOps::RVec<float>{1.1, 1, 1.05, 1.2}; });
+  df = df.Define("sfM", [] { return ROOT::VecOps::RVec<float>{0.9, 1, 0.95, 0.8}; });
+  df = df.Define("sfLUp", [] { return ROOT::VecOps::RVec<float>{1.2, 1, 1.1, 1.3}; });
+  df = df.Define("sfMUp", [] { return ROOT::VecOps::RVec<float>{1, 1, 1, 0.9}; });
+  df = df.Define("effL", [] { return ROOT::VecOps::RVec<float>{0.6, 0.5, 0.7, 0.8}; });
+  df = df.Define("effM", [] { return ROOT::VecOps::RVec<float>{0.2, 0.1, 0.4, 0.5}; });
+  dm->setDataFrame(df);
+  mgr->defineFixedWorkingPointWeight({"sfL", "sfM"}, {"effL", "effM"}, "central");
+  mgr->defineFixedWorkingPointWeight({"sfLUp", "sfMUp"}, {"effL", "effM"}, "up");
+  mgr->execute();
+  const auto central = dm->getDataFrame().Take<float>("central").GetValue();
+  const auto up = dm->getDataFrame().Take<float>("up").GetValue();
+  EXPECT_FLOAT_EQ(central[0], ((1.f - 1.1f * .6f) / (1.f - .6f)) *
+                  ((1.05f * .7f - .95f * .4f) / (.7f - .4f)) * .8f);
+  EXPECT_FLOAT_EQ(up[0], ((1.f - 1.2f * .6f) / (1.f - .6f)) *
+                  ((1.1f * .7f - 1.f * .4f) / (.7f - .4f)) * .9f);
+  EXPECT_FLOAT_EQ(central[1], 1.f);
+  EXPECT_FLOAT_EQ(up[1], 1.f);
+}
+
+TEST_F(TaggerWorkingPointManagerTest, MultiScoreAndFixedWPRejectMisalignedEmptyArrays) {
+  for (const auto &bad : {"score2", "sfM", "effM"}) {
+    auto dm = std::make_unique<DataManager>(1);
+    auto mgr = makeMgr(*dm);
+    mgr->setTaggerColumns({"score1", "score2"});
+    mgr->addWorkingPoint("L", std::vector<float>{.2f, .3f});
+    mgr->addWorkingPoint("M", std::vector<float>{.6f, .7f});
+    mgr->setInputObjectCollection("jets");
+    defineCollectionColumn(*dm, "jets", 50.f);
+    auto df = dm->getDataFrame();
+    for (const auto &column : {"score1", "score2", "sfL", "sfM", "effL", "effM"}) {
+      const bool empty = std::string(column) == bad;
+      df = df.Define(column, [empty] {
+        return empty ? ROOT::VecOps::RVec<float>{} : ROOT::VecOps::RVec<float>{.5f};
+      });
+    }
+    dm->setDataFrame(df);
+    mgr->defineFixedWorkingPointWeight({"sfL", "sfM"}, {"effL", "effM"}, "weight");
+    mgr->execute();
+    EXPECT_THROW(dm->getDataFrame().Take<float>("weight").GetValue(), std::runtime_error) << bad;
+  }
+}
+
 TEST_F(TaggerWorkingPointManagerTest,
        FixedWPWeightNegativeIntermediateNumeratorFallsBackToUnity) {
   auto dm = std::make_unique<DataManager>(1);
@@ -581,7 +706,11 @@ TEST_F(TaggerWorkingPointManagerTest,
                                      "fixed_wp_weight");
   mgr->execute();
 
+  testing::internal::CaptureStderr();
   auto result = dm->getDataFrame().Take<Float_t>("fixed_wp_weight").GetValue();
+  const auto warnings = testing::internal::GetCapturedStderr();
+  EXPECT_NE(warnings.find("fixed_wp_weight"), std::string::npos);
+  EXPECT_NE(warnings.find("using fallback 1"), std::string::npos);
   ASSERT_EQ(result.size(), 1u);
   EXPECT_FLOAT_EQ(result[0], 1.0f);
 }
@@ -1078,4 +1207,23 @@ TEST_F(TaggerWorkingPointManagerTest,
 
   // defineNominalWeight just records the column name — must not throw.
   EXPECT_NO_THROW(wm.defineNominalWeight("weight_nominal"));
+}
+
+TEST_F(TaggerWorkingPointManagerTest, SelectedJetWithoutScaleFactorThrows) {
+  for (const bool fixed : {false, true}) {
+    DataManager dm(1);
+    auto mgr = makeMgr(dm);
+    mgr->setObjectColumns("pt", "eta", "phi", "mass");
+    mgr->setTaggerColumn("score");
+    mgr->addWorkingPoint("T", .5f);
+    mgr->setInputObjectCollection("jets");
+    defineCollectionColumn(dm, "jets", 50.f);
+    defineRVecColumn(dm, "score", .8f);
+    defineRVecColumn(dm, "eff", .5f);
+    dm.DefineNominal("sf", [] { return ROOT::VecOps::RVec<float>{}; });
+    if (fixed) mgr->defineFixedWorkingPointWeight({"sf"}, {"eff"}, "weight");
+    else mgr->addVariation("testSF", "sf", "sf", "weight", "weight");
+    mgr->execute();
+    EXPECT_THROW(dm.getDataFrame().Take<float>("weight").GetValue(), std::runtime_error);
+  }
 }

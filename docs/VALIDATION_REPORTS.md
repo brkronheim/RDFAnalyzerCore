@@ -17,15 +17,15 @@ the Python modules `core/python/validation_report.py` and
 2. [ValidationReport Overview](#2-validationreport-overview)
 3. [Report Entry Types](#3-report-entry-types)
 4. [ValidationReport Class](#4-validationreport-class)
-5. [generate_report_from_manifest()](#5-generate_report_from_manifest)
-6. [CLI Usage — validation_report.py](#6-cli-usage--validation_reportpy)
+5. [Generate report from manifest](#5-generate-report-from-manifest)
+6. [Validation report CLI usage](#6-validation-report-cli-usage)
 
 **Part B: ReproducibilityReport**
 
 7. [ReproducibilityReport Overview](#7-reproducibilityreport-overview)
 8. [Provenance Sections](#8-provenance-sections)
 9. [ReproducibilityReport Class](#9-reproducibilityreport-class)
-10. [CLI Usage — reproducibility_report.py](#10-cli-usage--reproducibility_reportpy)
+10. [Reproducibility report CLI usage](#10-reproducibility-report-cli-usage)
 11. [Integration with ProvenanceService](#11-integration-with-provenanceservice)
 12. [Usage Examples](#12-usage-examples)
 
@@ -455,7 +455,7 @@ Returns `True` when the report contains any warning-level finding:
 
 ---
 
-## 5. `generate_report_from_manifest()`
+## 5. Generate report from manifest
 
 ```python
 def generate_report_from_manifest(
@@ -502,7 +502,7 @@ checks whether `"region"` is in `known_regions` and appends the result.
 
 ---
 
-## 6. CLI Usage — `validation_report.py`
+## 6. Validation report CLI usage
 
 The module provides a CLI entry point that generates a validation report from an
 `OutputManifest` YAML file.
@@ -562,8 +562,8 @@ structured, provenance-driven record of all information needed to reproduce or
 cross-check an analysis run.
 
 Provenance data is collected at C++ analysis time by the `ProvenanceService` and
-written as `TNamed` objects into a `provenance` TDirectory inside the meta ROOT
-output file.  The Python module reads this data via **uproot** and organises the
+written as one compact `__rdf_job_metadata_v1` document in the meta ROOT
+output file. Legacy directories remain readable; see [metadata contracts](METADATA.md).  The Python module reads this data via **uproot** and organises the
 flat `{key: value}` map into logical sections.
 
 **What is captured:**
@@ -629,13 +629,15 @@ Keys under `config.*` (stored as-is) and `filelist.*` namespaces (prefixed with
 | Provenance key      | Appears as            | Description |
 |---------------------|-----------------------|-------------|
 | `config.hash`       | `hash`                | Deterministic hash of the full configuration map. |
-| `filelist.hash`     | `filelist_hash`       | Hash of the file-list file. |
+| `filelist.hash`     | `filelist_hash`       | Hash of a cheap fingerprint for the file-list reference. |
 | `filelist.path`     | `filelist_path`       | Path to the file-list file. |
 
 ### `file_hashes` property
 
-Keys under the `file.hash.*` namespace.  Each entry maps an auxiliary input
-filename to its MD5 digest.
+Keys under the `file.hash.*` namespace. Each entry maps an auxiliary input
+filename to the MD5 digest of a cheap file-reference fingerprint. Local files
+use path, size, and modification time; remote or non-stat'able paths fall back
+to the path or URI string.
 
 ```
 file.hash.weights.root  →  "d41d8cd98f00b204e9800998ecf8427e"
@@ -731,11 +733,12 @@ class ReproducibilityReport:
 
 #### `load_provenance_from_root(meta_root_path: str) → Dict[str, str]`
 
-Reads the `provenance` TDirectory from a ROOT meta file using **uproot**.  Each
-`TNamed` object in the directory contributes one entry: the TNamed name is the key,
-the TNamed title is the value.  Raises `FileNotFoundError` if the file does not
-exist and `ImportError` if uproot is not installed.  Returns an empty dict if the
-`"provenance"` directory is absent.
+Reads legacy or compact ROOT metadata using **uproot**. Merged files yield
+only provenance values shared by every job; `load_provenance_records_from_root`
+returns the complete identified records. The report CLI retains a factored
+`metadata_bundle` in JSON/YAML output. Missing files/sidecars, bad digests and
+unsupported versions raise errors. A file with no provenance yields an empty
+map. See [metadata storage and reduction](METADATA.md).
 
 #### `build_report_from_provenance(provenance, timestamp=None) → ReproducibilityReport`
 
@@ -744,7 +747,7 @@ with other `build_report_from_*` helpers in the framework.
 
 ---
 
-## 10. CLI Usage — `reproducibility_report.py`
+## 10. Reproducibility report CLI usage
 
 ```
 usage: reproducibility_report.py [-h] [--load-yaml FILE] [--load-json FILE]
@@ -794,8 +797,9 @@ python reproducibility_report.py --load-yaml reports/repro.yaml
 ## 11. Integration with ProvenanceService
 
 The C++ `ProvenanceService` (in the framework core) collects provenance entries
-at analysis runtime and writes them into the meta ROOT output file as `TNamed`
-objects inside a `provenance` TDirectory.
+at analysis runtime and writes a compact versioned job document. Typed plugin
+definitions and audits are collected after finalization. The readers also
+accept legacy `TNamed` directories and merged sidecar references.
 
 Entries are written with the flat namespaced key convention:
 

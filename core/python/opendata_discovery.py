@@ -26,22 +26,12 @@ import json
 import os
 import shutil
 import subprocess
-import sys
-from pathlib import Path
-
 import requests
 
-# ---------------------------------------------------------------------------
-# Make dataset_manifest importable regardless of invocation path
-# ---------------------------------------------------------------------------
-_HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parents[1]
-_LAW_DIR = _REPO_ROOT / "law"
-
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
-
-from dataset_manifest import DatasetEntry, DatasetManifest  # noqa: E402
+if __package__:
+    from .dataset_manifest import DatasetManifest
+else:
+    from dataset_manifest import DatasetManifest
 
 # Default XRootD redirector for CERN Open Data EOS files
 OPENDATA_REDIRECTOR = "root://eospublic.cern.ch/"
@@ -122,16 +112,17 @@ def load_file_indices(recid):
     )
 
 
-def process_metadata(recid, sample_names, redirector: str = OPENDATA_REDIRECTOR):
+def process_metadata(recid, sample_names=None, redirector: str = OPENDATA_REDIRECTOR):
     """Return ``{sample_name: [uri, ...]}`` for the given *recid*.
 
     Parameters
     ----------
     recid : int or str
         CERN Open Data record ID.
-    sample_names : dict[str, str]
+    sample_names : dict[str, str] or None
         Mapping from Open Data key (as stored in ``_file_indices``) to the
-        analysis sample name used in the manifest.
+        analysis sample name used in the manifest. When None, retain all
+        files grouped by their original metadata key.
     redirector : str
         XRootD redirector prefix to prepend to bare EOS paths.
 
@@ -140,7 +131,10 @@ def process_metadata(recid, sample_names, redirector: str = OPENDATA_REDIRECTOR)
     dict[str, list[str]]
         Per-sample list of XRootD URIs.
     """
-    from submission_backend import ensure_xrootd_redirector  # lazy import
+    if __package__:
+        from .submission_backend import ensure_xrootd_redirector
+    else:
+        from submission_backend import ensure_xrootd_redirector
 
     result = load_file_indices(recid)
     file_dict: dict[str, list[str]] = {}
@@ -148,9 +142,9 @@ def process_metadata(recid, sample_names, redirector: str = OPENDATA_REDIRECTOR)
         for data in entry.get("files", []):
             uri = ensure_xrootd_redirector(data["uri"], redirector)
             key = data["key"].split("_file_index")[0]
-            if key not in sample_names:
+            if sample_names is not None and key not in sample_names:
                 continue
-            mapped = sample_names[key]
+            mapped = key if sample_names is None else sample_names[key]
             file_dict.setdefault(mapped, []).append(uri)
     return file_dict
 
@@ -189,7 +183,7 @@ def parse_opendata_config(config_file: str):
 
     manifest = DatasetManifest.load_yaml(config_file)
     samples = {entry.name: entry for entry in manifest.datasets}
-    recids: list[str] = []
+    recids = list(dict.fromkeys(manifest.record_ids))
     for entry in manifest.datasets:
         if entry.files:
             # Explicit file list – no Open Data API lookup needed.

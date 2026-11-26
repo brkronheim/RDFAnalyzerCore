@@ -11,7 +11,10 @@
 #define FUNCTIONS_H_INCLUDED
 
 #include <algorithm>
+#include <cmath>
 #include <numeric>
+#include <stdexcept>
+#include <type_traits>
 
 #include <Math/Math.h>
 #include <Math/Vector4D.h>
@@ -129,6 +132,65 @@ template <typename T> ROOT::VecOps::RVec<T> defineVector(T val1) {
   return (ROOT::VecOps::RVec<T>({val1}));
 }
 
+/**
+ * @brief Creates an empty RVec of the requested type.
+ * @tparam T Element type
+ * @return Empty vector
+ */
+template <typename T> ROOT::VecOps::RVec<T> defineEmptyVector() {
+  return ROOT::VecOps::RVec<T>{};
+}
+
+/**
+ * @brief Casts a scalar value into a single-element RVec.
+ * @tparam T Output element type
+ * @tparam U Input scalar type
+ * @param value Input value
+ * @return Single-element vector containing the cast value
+ */
+template <typename T, typename U>
+ROOT::VecOps::RVec<T> castValueToVector(const U &value) {
+  return ROOT::VecOps::RVec<T>{static_cast<T>(value)};
+}
+
+/**
+ * @brief Appends a scalar value to an existing vector after casting.
+ * @tparam T Output element type
+ * @tparam U Input scalar type
+ * @param existing Existing vector
+ * @param value Input scalar value
+ * @return New vector with value appended
+ */
+template <typename T, typename U>
+ROOT::VecOps::RVec<T> appendScalarCastToVector(
+    const ROOT::VecOps::RVec<T> &existing, const U &value) {
+  ROOT::VecOps::RVec<T> out;
+  out.reserve(existing.size() + 1U);
+  out.insert(out.end(), existing.begin(), existing.end());
+  out.emplace_back(static_cast<T>(value));
+  return out;
+}
+
+/**
+ * @brief Concatenates an existing vector with another vector after casting.
+ * @tparam T Output element type
+ * @tparam U Input element type
+ * @param existing Existing vector
+ * @param values Vector to append
+ * @return Concatenated vector with cast elements
+ */
+template <typename T, typename U>
+ROOT::VecOps::RVec<T> concatenateCastRVec(
+    const ROOT::VecOps::RVec<T> &existing,
+    const ROOT::VecOps::RVec<U> &values) {
+  ROOT::VecOps::RVec<T> out;
+  out.reserve(existing.size() + values.size());
+  out.insert(out.end(), existing.begin(), existing.end());
+  std::transform(values.begin(), values.end(), std::back_inserter(out),
+                 [](const U &value) { return static_cast<T>(value); });
+  return out;
+}
+
 // =========================
 // Vector Operations
 // =========================
@@ -151,6 +213,11 @@ T fixedIndexVector(ROOT::VecOps::RVec<T> &vector) {
 
 /**
  * @brief Selects the indices of the top N largest values in a vector.
+ * Floating-point NaNs rank after all numeric values. Ties have unspecified
+ * order, so any tied index may occupy the last selected rank.
+ * @note Earlier versions returned every sorted index when the input exceeded N.
+ * Callers needing that full ranking should sort an index vector over the entire
+ * input. The result here always has N entries and is empty for N = 0.
  * @tparam T Type of the vector elements
  * @tparam size Number of top elements to select
  * @param vector Input vector
@@ -161,11 +228,16 @@ ROOT::VecOps::RVec<Int_t> selectTop(ROOT::VecOps::RVec<T> &vector) {
   ROOT::VecOps::RVec<Int_t> indexVector(vector.size());
   std::iota(indexVector.begin(), indexVector.end(), 0); // Initializing
 
-  std::sort(indexVector.begin(), indexVector.end(),
-            [&](Int_t i, Int_t j) { return vector[i] > vector[j]; });
-  while (indexVector.size() < size) {
-    indexVector.push_back(-1);
-  }
+  const auto count = std::min<std::size_t>(size, vector.size());
+  std::partial_sort(indexVector.begin(), indexVector.begin() + count,
+                    indexVector.end(),
+                    [&](Int_t i, Int_t j) {
+                      if constexpr (std::is_floating_point_v<T>) {
+                        if (std::isnan(vector[j])) return !std::isnan(vector[i]);
+                      }
+                      return vector[i] > vector[j];
+                    });
+  indexVector.resize(size, -1);
   return (indexVector);
 }
 
@@ -191,12 +263,16 @@ T indexVector(ROOT::VecOps::RVec<T> &vector, S index) {
  * vectors.
  * @tparam T Type of the vector elements
  * @param val1 First input vector
- * @param val2 Second input vector
- * @return Vector of element-wise maxima
+ * @param val2 Second input vector. Elements beyond val1.size() are ignored.
+ * @return Vector of val1.size() element-wise maxima, empty when val1 is empty.
+ * @throws std::invalid_argument if val2.size() is smaller than val1.size().
  */
 template <typename T>
 ROOT::VecOps::RVec<T> maximumVector(ROOT::VecOps::RVec<T> &val1,
                                     ROOT::VecOps::RVec<T> &val2) {
+  if (val2.size() < val1.size()) {
+    throw std::invalid_argument("maximumVector requires a second input at least as long as the first");
+  }
   ROOT::VecOps::RVec<T> maxVec(val1.size());
   for (long unsigned int i = 0; i < val1.size(); i++) {
     maxVec[i] = std::max(val1[i], val2[i]);
@@ -235,7 +311,10 @@ ROOT::VecOps::RVec<T> addToVector(ROOT::VecOps::RVec<T> vec, T newVal) {
 
 /**
  * @brief Flattens a mix of scalar and vector arguments into a single contiguous RVec<Double_t>.
- * Scalars are broadcast to match the length of the longest vector among the arguments.
+ * If any input collection is empty, the event contributes zero rows and the
+ * result is empty, even when other inputs contain values. Otherwise scalars
+ * broadcast to every row and shorter collections repeat their last element
+ * up to the length of the longest collection.
  *
  * @tparam Args Types of the arguments (scalar or vector-like)
  * @param args Arguments to flatten
@@ -245,14 +324,15 @@ template <typename... Args>
 ROOT::VecOps::RVec<Double_t> FlattenRVec(const Args &... args) {
   using ROOT::VecOps::RVec;
   std::size_t nFills = 1U;
+  bool hasEmptyInput = false;
   auto updateSize = [&](auto const &arg) {
-    if constexpr (std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
-      // scalar
-    } else {
+    if constexpr (!std::is_arithmetic_v<std::decay_t<decltype(arg)>>) {
+      hasEmptyInput = hasEmptyInput || arg.size() == 0;
       nFills = std::max<std::size_t>(nFills, arg.size());
     }
   };
   (updateSize(args), ...);
+  if (hasEmptyInput) return {};
   const std::size_t stride = sizeof...(Args);
   RVec<Double_t> out;
   out.reserve(nFills * stride);
@@ -272,7 +352,10 @@ ROOT::VecOps::RVec<Double_t> FlattenRVec(const Args &... args) {
 
 /**
  * @brief Flattens a mix of scalar and vector arguments into a single contiguous RVec<T>.
- * Scalars are broadcast to match the length of the longest vector among the arguments.
+ * If any input collection is empty, the event contributes zero rows and the
+ * result is empty, even when other inputs contain values. Otherwise scalars
+ * broadcast to every row and shorter collections repeat their last element
+ * up to the length of the longest collection.
  * The result is cast to the requested type T.
  *
  * @tparam T Output type for the RVec
@@ -540,11 +623,11 @@ inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPxPyPzMVecto
 
 
 /**
- * @brief Returns a ROOT LorentzVector (PxPyPzM) from components.
- * @param px x-component of momentum
- * @param py y-component of momentum
- * @param pz z-component of momentum
- * @param M  mass
+ * @brief Converts transverse momentum, pseudorapidity, azimuth and mass to a Cartesian Lorentz vector.
+ * @param pt Transverse momentum
+ * @param eta Pseudorapidity
+ * @param phi Azimuthal angle
+ * @param mass Mass
  * @return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>
  */
 inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPtEtaPhiMVector(Float_t pt, Float_t eta, Float_t phi, Float_t mass) {
@@ -572,11 +655,11 @@ inline ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>> getPxPyPzMVecto
 }
 
 /**
- * @brief Returns a ROOT LorentzVector (PxPyPzM) from vector components at a given index.
- * @param px Vector of px values
- * @param py Vector of py values
- * @param pz Vector of pz values
- * @param M  Vector of mass values
+ * @brief Converts the transverse momentum, pseudorapidity, azimuth and mass at an index to a Cartesian Lorentz vector.
+ * @param pt Vector of transverse momenta
+ * @param eta Vector of pseudorapidities
+ * @param phi Vector of azimuthal angles
+ * @param mass Vector of masses
  * @param index Index to access
  * @return ROOT::Math::LorentzVector<ROOT::Math::PxPyPzM4D<Float_t>>
  */

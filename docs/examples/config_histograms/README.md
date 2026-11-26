@@ -5,8 +5,8 @@ This example demonstrates how to use config-driven histograms in an analysis.
 ## Files
 
 - `analysis.cc`: Main analysis code
-- `cfg.txt`: Main configuration file
-- `histograms.txt`: Histogram definitions
+- `cfg.yaml`: Main configuration file
+- `histograms.yaml`: Histogram definitions
 - `CMakeLists.txt`: Build configuration
 
 ## Running the Example
@@ -19,7 +19,7 @@ cmake ..
 make
 
 # Run
-./ExampleAnalysisConfigHistograms ../cfg.txt
+./ExampleAnalysisConfigHistograms ../cfg.yaml
 ```
 
 ## Key Points
@@ -30,11 +30,11 @@ make
 
 3. **Call bookConfigHistograms()**: This triggers the booking of all histograms defined in the config file. Call it after all defines and filters.
 
-4. **Histogram config file**: The `histogramConfig` parameter in `cfg.txt` points to the histogram definitions file.
+4. **Histogram config file**: The `histogramConfig` parameter in `cfg.yaml` points to the histogram definitions file.
 
 ## Histogram Configuration
 
-The `histograms.txt` file contains histogram definitions with various options:
+The `histograms.yaml` file contains histogram definitions with various options:
 
 - **Simple histogram**: Only required fields
 - **Labeled histogram**: Includes custom axis label

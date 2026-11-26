@@ -16,12 +16,14 @@ Behavior:
   `--no-double-runtime` flag to opt out of this behavior.
 - Calls `condor_submit` on the per-job submit file so only that single process
   is queued.
-- Validates that job_<N>/submit_config.txt exists before submitting.
+- Checks each job directory for its YAML worker config or a historical text input.
 
 This is non-destructive and intended for interactive use.
 """
 
 from __future__ import annotations
+from native_config_io import job_config_path
+from pathlib import Path
 import argparse
 import os
 import re
@@ -30,6 +32,8 @@ import subprocess
 import sys
 import tempfile
 from typing import List
+
+from submission_backend import ensure_condor_machine_exclusion, materialize_retry_submit
 
 
 def parse_job_list(s: str) -> List[int]:
@@ -54,10 +58,15 @@ def load_submit_template(submit_path: str) -> str:
 def make_per_job_submit(template: str, job_index: int, double_maxruntime: bool = True) -> str:
     # replace job_$(Process)/ with job_<N>/ for any occurrence
     s = template
+    s = s.replace('$(RDFJobIndex)', str(job_index))
     s = s.replace('job_$(Process)/', f'job_{job_index}/')
 
     # if transfer_input_files contains $(Process) elsewhere, also replace
-    s = s.replace('$(Process)', str(job_index))
+    s = ''.join(
+        line if line.lstrip().lower().startswith(('transfer_output_remaps', 'output', 'error', 'log'))
+        else line.replace('$(Process)', str(job_index))
+        for line in s.splitlines(keepends=True)
+    )
 
     # change the queue line to submit only 1 job
     s = re.sub(r'(?m)^[ \t]*queue\b.*$', 'queue 1', s)
@@ -72,11 +81,11 @@ def make_per_job_submit(template: str, job_index: int, double_maxruntime: bool =
         if replaced:
             # keep behavior explicit: only modify when a +MaxRuntime line exists
             pass
-    return s
+    return ensure_condor_machine_exclusion(s)
 
 
 def ensure_job_dir_has_submit_config(main_dir: str, job_index: int) -> bool:
-    p = os.path.join(main_dir, f'job_{job_index}', 'submit_config.txt')
+    p = str(job_config_path(os.path.join(main_dir, f'job_{job_index}'), include_manager=True))
     return os.path.exists(p)
 
 
@@ -124,7 +133,7 @@ def main(argv: List[str] | None = None) -> int:
 
     missing = [i for i in job_indices if not ensure_job_dir_has_submit_config(submit_dir, i)]
     if missing:
-        print(f"Warning: the following job dirs are missing submit_config.txt and will be skipped: {missing}")
+        print(f"Warning: the following job dirs have no prepared worker configuration and will be skipped: {missing}")
         job_indices = [i for i in job_indices if i not in missing]
     if not job_indices:
         print("No valid jobs to resubmit")
@@ -140,6 +149,9 @@ def main(argv: List[str] | None = None) -> int:
     rc_sum = 0
     for idx in job_indices:
         per_job = make_per_job_submit(template, idx, double_maxruntime=(not args.no_double_runtime))
+        if not args.dry_run:
+            config = job_config_path(Path(submit_dir) / f"job_{idx}", include_manager=True)
+            per_job = materialize_retry_submit(per_job, submit_dir, config)
         rc = submit_temp_file(per_job, dry_run=args.dry_run)
         rc_sum += (rc != 0)
 

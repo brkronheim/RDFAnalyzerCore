@@ -1,0 +1,4 @@
+- file: test_bdt.json
+  name: test_bdt
+  features: feature1,feature2,feature3
+  runVar: run_number

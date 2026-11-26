@@ -1,0 +1,4 @@
+interface:
+  display_name: "Datacards and fits"
+  short_description: "Work with datacards and fits"
+  default_prompt: "Use $rdfanalyzer-statistics to audit the final card, shapes, nuisance policy, binning, and saved fit metadata."

@@ -18,6 +18,15 @@
 class SystematicManager : public ISystematicManager {
 public:
   /**
+   * @brief Enable or disable all systematic registration and propagation.
+   *
+   * Disabling also clears registrations made before the toggle so the manager
+   * cannot expose a partially systematic graph.
+   */
+  void setEnabled(bool enabled) override;
+  bool isEnabled() const override;
+
+  /**
    * @brief Register a systematic and its affected variables
    * @param syst Name of the systematic
    * @param affectedVariables Set of affected variable names
@@ -30,26 +39,42 @@ public:
                                 const std::string &upColumn,
                                 const std::string &downColumn) override;
 
+    void registerVariationColumn(const std::string &variable,
+                                                             const std::string &variationLabel,
+                                                             const std::string &column) override;
+
   /**
    * @brief Get the set of all registered systematics
    * @return Reference to the set of systematic names
    */
   const std::set<std::string> &getSystematics() const override;
 
+  std::vector<std::string> getExplicitVariationLabels() const override;
+  std::vector<std::string> getExplicitVariationLabelsForVariable(
+      const std::string &variable) const override;
+  std::vector<std::string> getVariationLabels() const override;
+  void registerSelectionMaskColumn(const std::string &variationLabel,
+                                   const std::string &column) override;
+  std::string getSelectionMaskColumn(
+      const std::string &variationLabel) const override;
+  bool hasSelectionMasks() const override;
+
   /**
    * @brief Get the set of variables affected by a given systematic
    * @param syst Name of the systematic
-   * @return Reference to the set of variable names
+   * @return Set of variable names
    */
-  const std::set<std::string> &
+  std::set<std::string>
   getVariablesForSystematic(const std::string &syst) const override;
+  bool isVariableAffectedBySystematic(const std::string &variable,
+                                      const std::string &syst) const override;
 
   /**
    * @brief Get the set of systematics affecting a given variable
    * @param var Name of the variable
-   * @return Reference to the set of systematic names
+   * @return Set of systematic names
    */
-  const std::set<std::string> &
+  std::set<std::string>
   getSystematicsForVariable(const std::string &var) const override;
 
   /**
@@ -87,6 +112,7 @@ public:
                                      const std::string &syst) const override;
 
 private:
+  bool enabled_m = true;
   std::set<std::string> systematics_m;
   std::unordered_map<std::string, std::set<std::string>>
       systematicToVariableMap_m;
@@ -94,10 +120,17 @@ private:
       variableToSystematicMap_m;
   std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
       variationColumnMap_m;
+  std::set<std::string> explicitVariationLabels_m;
+  std::unordered_map<std::string, std::set<std::string>>
+      explicitVariationToVariableMap_m;
+  std::unordered_map<std::string, std::set<std::string>>
+      variableToExplicitVariationMap_m;
   /// Per-branchName cache: maps each materialized branchName to its systList.
   /// Enables multiple callers to safely share or isolate counter namespaces.
   std::unordered_map<std::string, std::vector<std::string>>
       materializedSystLists_m;
+  /// Cumulative Analyzer::Filter decision columns keyed by exact axis label.
+  std::unordered_map<std::string, std::string> selectionMaskColumns_m;
 };
 
 #endif // SYSTEMATICMANAGER_H_INCLUDED

@@ -1,0 +1,4 @@
+interface:
+  display_name: "ROOT input, caches, and XRootD"
+  short_description: "ROOT input, caches, and XRootD"
+  default_prompt: "Use $rdfanalyzer-input-io to diagnose the actual ROOT input backend, cache behavior, and XRootD read evidence."

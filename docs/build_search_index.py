@@ -14,7 +14,7 @@ MARKDOWN_EXTENSIONS = {".md", ".markdown"}
 def slugify_path(path: Path) -> str:
     rel = path.relative_to(ROOT)
     parts = [p for p in rel.parts]
-    if parts[-1].lower() == "index.md":
+    if parts[-1] == "index.md":
         parts[-1] = "index.html"
     else:
         parts[-1] = parts[-1].rsplit(".", 1)[0] + ".html"
@@ -33,7 +33,8 @@ def plain_text(text: str) -> str:
     text = re.sub(r"^---.*?---\s*", "", text, flags=re.S)
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
     text = re.sub(r"!\[[^\]]*\]\([^\)]+\)", "", text)
-    text = re.sub(r"[`*_>{}\-\[\]]", "", text)
+    # Underscores inside public Python identifiers must remain searchable verbatim.
+    text = re.sub(r"[`*>{}\-\[\]]", "", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 

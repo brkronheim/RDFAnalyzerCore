@@ -85,18 +85,25 @@ void CutflowManager::execute() {
     cutflowCountResults_m.push_back(filtered.Count());
   }
 
-  // N-1 counts:
-  //   For cut i, apply every cut except i starting from the base node.
-  nMinusOneCountResults_m.clear();
-  for (std::size_t i = 0; i < cuts_m.size(); ++i) {
-    ROOT::RDF::RNode nMinus1Df = baseDf;
-    for (std::size_t j = 0; j < cuts_m.size(); ++j) {
-      if (j != i) {
-        nMinus1Df = nMinus1Df.Filter(passBoolCut, {cuts_m[j].column});
-      }
+  // Each N-1 branch inherits the already-booked prefix before its omitted
+  // cut. Evaluate the remaining predicates in their original order. Global
+  // sequential counts above retain any intervening user-defined filters.
+  using Counts = std::vector<ROOT::RDF::RResultPtr<ULong64_t>>;
+  auto bookFromBase = [&](ROOT::RDF::RNode prefix, Counts &nMinusOne,
+                          Counts *sequential) {
+    for (std::size_t i = 0; i < cuts_m.size(); ++i) {
+      auto branch = prefix;
+      for (std::size_t j = i + 1; j < cuts_m.size(); ++j)
+        branch = branch.Filter(passBoolCut, {cuts_m[j].column});
+      nMinusOne.push_back(branch.Count());
+      if (sequential || i + 1 < cuts_m.size())
+        prefix = prefix.Filter(passBoolCut, {cuts_m[i].column});
+      if (sequential)
+        sequential->push_back(prefix.Count());
     }
-    nMinusOneCountResults_m.push_back(nMinus1Df.Count());
-  }
+  };
+  nMinusOneCountResults_m.clear();
+  bookFromBase(baseDf, nMinusOneCountResults_m, nullptr);
 
   // -------------------------------------------------------------------------
   // Per-region count bookings (all on the same computation graph → single pass)
@@ -112,24 +119,7 @@ void CutflowManager::execute() {
     // Total events in this region (before any cut).
     pending.totalCount = regionDf.Count();
 
-    // Sequential cutflow on the region DF.
-    // Apply each cut in turn, starting from the region's (already filtered) DF.
-    ROOT::RDF::RNode accumulated = regionDf;
-    for (const auto &cut : cuts_m) {
-      accumulated = accumulated.Filter(passBoolCut, {cut.column});
-      pending.cutflowCounts.push_back(accumulated.Count());
-    }
-
-    // N-1 counts on the region DF.
-    for (std::size_t i = 0; i < cuts_m.size(); ++i) {
-      ROOT::RDF::RNode nMinus1 = regionDf;
-      for (std::size_t j = 0; j < cuts_m.size(); ++j) {
-        if (j != i) {
-          nMinus1 = nMinus1.Filter(passBoolCut, {cuts_m[j].column});
-        }
-      }
-      pending.nMinusOneCounts.push_back(nMinus1.Count());
-    }
+    bookFromBase(regionDf, pending.nMinusOneCounts, &pending.cutflowCounts);
 
     regionPending_m.emplace(regionName, std::move(pending));
   }

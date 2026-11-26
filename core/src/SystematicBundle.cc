@@ -1,4 +1,5 @@
 #include <SystematicBundle.h>
+#include <RDFColumnPacker.h>
 #include <api/IDataFrameProvider.h>
 #include <api/ISystematicManager.h>
 #include <ROOT/RVec.hxx>
@@ -72,12 +73,10 @@ resolveVariationLabels(ISystematicManager &sysMgr, IDataFrameProvider &dataMgr, 
 bool hasUsableSystematicColumns(IDataFrameProvider &dataMgr, ISystematicManager &sysMgr,
                                  const std::string &variable, const std::vector<std::string> &variationLabels) {
   auto df = dataMgr.getDataFrame();
-  const auto existingColumns = df.GetColumnNames();
-  std::unordered_set<std::string> colSet(existingColumns.begin(), existingColumns.end());
   for (const auto &label : variationLabels) {
     if (label == "Nominal") continue;
-    if (!sysMgr.isVariableAffectedBySystematic(variable, label)) continue;
-    if (colSet.count(sysMgr.getVariationColumnName(variable, label))) return true;
+    const auto column = sysMgr.getVariationColumnName(variable, label);
+    if (column != variable && df.HasColumn(column)) return true;
   }
   return false;
 }
@@ -102,7 +101,8 @@ defineScalarBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMgr,
   spec.hasSystematics = hasSystematics;
   spec.layout = SystematicBundleLayout::VariationMajor;
   spec.resolvedColumnNames = resolveVariationColumns(sysMgr, baseVariable, variationLabels);
-  dataMgr.DefineVector(bundleColumnName, spec.resolvedColumnNames, "Float_t", sysMgr);
+  dataMgr.DefineVectorNominal(bundleColumnName, spec.resolvedColumnNames,
+                              "Float_t", sysMgr);
   return spec;
 }
 
@@ -132,7 +132,7 @@ definePackedInputBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMgr,
   const std::size_t nFeatures = inputFeatures.size();
   const std::size_t nVariations = variationLabels.size();
   if (nFeatures == 0 || nVariations == 0) {
-    dataMgr.DefineVector(bundleColumnName, {}, "Float_t", sysMgr);
+    dataMgr.DefineVectorNominal(bundleColumnName, {}, "Float_t", sysMgr);
     return spec;
   }
   const auto existingCols = [&]() {
@@ -140,81 +140,49 @@ definePackedInputBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMgr,
     const auto cols = f.GetColumnNames();
     return std::unordered_set<std::string>(cols.begin(), cols.end());
   }();
-  std::vector<std::vector<std::string>> varColumns(nVariations);
   for (std::size_t v = 0; v < nVariations; ++v) {
-    auto &cols = varColumns[v];
-    cols.reserve(nFeatures);
     for (const auto &feat : inputFeatures) {
       const std::string resolved = sysMgr.getVariationColumnName(feat, variationLabels[v]);
-      cols.push_back(existingCols.count(resolved) ? resolved : sysMgr.getVariationColumnName(feat, "Nominal"));
-      spec.resolvedColumnNames.push_back(cols.back());
+      spec.resolvedColumnNames.push_back(
+          existingCols.count(resolved) ? resolved : sysMgr.getVariationColumnName(feat, "Nominal"));
     }
-  }
-  std::vector<std::string> varBundleNames;
-  varBundleNames.reserve(nVariations);
-  for (std::size_t v = 0; v < nVariations; ++v) {
-    const auto &cols = varColumns[v];
-    if (cols.empty()) continue;
-    const std::string varName = bundleColumnName + "_v" + std::to_string(v);
-    auto df = dataMgr.getDataFrame();
-    if (nFeatures == 1) {
-      std::string colType = df.GetColumnType(cols[0]);
-      if (colType.find("RVec") != std::string::npos) {
-        df = df.Define(varName, [](const ROOT::VecOps::RVec<float> &x) -> ROOT::VecOps::RVec<float> { return x; }, {cols[0]});
-      } else {
-        df = df.Define(varName, [](Float_t a) -> ROOT::VecOps::RVec<float> { return {a}; }, {cols[0]});
-      }
-    } else {
-      bool anyRVec = false;
-      for (const auto &c : cols) { if (df.GetColumnType(c).find("RVec") != std::string::npos) anyRVec = true; }
-      if (anyRVec) throw std::runtime_error("Multi-feature packing with vector-valued columns not supported.");
-      const std::string step1 = varName + "_s1";
-      df = df.Define(step1, [](Float_t a) -> ROOT::VecOps::RVec<float> { return {a}; }, {cols[0]});
-      std::string current = step1;
-      for (std::size_t ci = 1; ci < nFeatures; ++ci) {
-        const std::string stepName = (ci + 1 == nFeatures) ? varName : varName + "_s" + std::to_string(ci + 1);
-        df = df.Define(stepName, [](const ROOT::VecOps::RVec<float> &existing, Float_t nextVal) -> ROOT::VecOps::RVec<float> {
-          ROOT::VecOps::RVec<float> out(existing.size() + 1);
-          std::copy(existing.begin(), existing.end(), out.begin());
-          out.back() = nextVal;
-          return out;
-        }, {current, cols[ci]});
-        current = stepName;
-      }
-    }
-    dataMgr.setDataFrame(df);
-    varBundleNames.push_back(varName);
   }
   auto df = dataMgr.getDataFrame();
-  if (nVariations == 1) {
-    df = df.Define(bundleColumnName, [](const ROOT::VecOps::RVec<float> &vb0) -> ROOT::VecOps::RVec<float> { return vb0; }, {varBundleNames[0]});
-  } else if (nVariations == 2) {
-    df = df.Define(bundleColumnName, [](const ROOT::VecOps::RVec<float> &vb0, const ROOT::VecOps::RVec<float> &vb1) -> ROOT::VecOps::RVec<float> {
-      ROOT::VecOps::RVec<float> out(vb0.size() + vb1.size());
-      std::copy(vb0.begin(), vb0.end(), out.begin());
-      std::copy(vb1.begin(), vb1.end(), out.begin() + vb0.size());
-      return out;
-    }, {varBundleNames[0], varBundleNames[1]});
-  } else if (nVariations == 3) {
-    df = df.Define(bundleColumnName, [](const ROOT::VecOps::RVec<float> &vb0, const ROOT::VecOps::RVec<float> &vb1, const ROOT::VecOps::RVec<float> &vb2) -> ROOT::VecOps::RVec<float> {
-      ROOT::VecOps::RVec<float> out(vb0.size() + vb1.size() + vb2.size());
-      auto *p = std::copy(vb0.begin(), vb0.end(), out.begin());
-      p = std::copy(vb1.begin(), vb1.end(), p);
-      std::copy(vb2.begin(), vb2.end(), p);
-      return out;
-    }, {varBundleNames[0], varBundleNames[1], varBundleNames[2]});
+  bool anyVector = false;
+  bool allVector = true;
+  for (const auto &column : spec.resolvedColumnNames) {
+    const bool vector = rdfcolumnpacker::isRVecColumnType(df.GetColumnType(column));
+    anyVector |= vector;
+    allVector &= vector;
+  }
+  if (nFeatures > 1 && anyVector)
+    throw std::runtime_error("Multi-feature packing with vector-valued columns not supported.");
+
+  if (!anyVector || allVector) {
+    // Scalar features are already listed in variation-major order. A single
+    // feature containing an RVec is concatenated in that same order, including
+    // empty or unequal-length variation arrays (the existing public contract).
+    df = rdfcolumnpacker::definePackedVector(
+        df, bundleColumnName, spec.resolvedColumnNames, "Float_t",
+        anyVector ? rdfcolumnpacker::PackingLayout::Concatenate
+                  : rdfcolumnpacker::PackingLayout::Scalars);
   } else {
-    std::string current = varBundleNames[0];
-    for (std::size_t v = 1; v < nVariations; ++v) {
-      const std::string nextName = (v + 1 == nVariations) ? bundleColumnName : bundleColumnName + "_tmp_" + std::to_string(v);
-      df = df.Define(nextName, [](const ROOT::VecOps::RVec<float> &a, const ROOT::VecOps::RVec<float> &b) -> ROOT::VecOps::RVec<float> {
-        ROOT::VecOps::RVec<float> out(a.size() + b.size());
-        std::copy(a.begin(), a.end(), out.begin());
-        std::copy(b.begin(), b.end(), out.begin() + a.size());
-        return out;
-      }, {current, varBundleNames[v]});
-      current = nextName;
+    // Retain the single-feature scalar/vector mixture accepted by the old
+    // per-variation implementation, without a growing concatenation chain.
+    std::vector<std::string> packs;
+    for (std::size_t v = 0; v < nVariations; ++v) {
+      const auto name = bundleColumnName + "_v" + std::to_string(v);
+      const auto &column = spec.resolvedColumnNames[v];
+      df = rdfcolumnpacker::definePackedVector(
+          df, name, {column}, "Float_t",
+          rdfcolumnpacker::isRVecColumnType(df.GetColumnType(column))
+              ? rdfcolumnpacker::PackingLayout::Concatenate
+              : rdfcolumnpacker::PackingLayout::Scalars);
+      packs.push_back(name);
     }
+    df = rdfcolumnpacker::definePackedVector(
+        df, bundleColumnName, packs, "Float_t",
+        rdfcolumnpacker::PackingLayout::Concatenate);
   }
   dataMgr.setDataFrame(df);
   return spec;
@@ -232,7 +200,8 @@ defineSelectionMaskBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMg
   spec.selectionMaskColumnName = bundleColumnName;
   if (!hasSystematics) {
     const std::vector<std::string> broadcastCols(variationLabels.size(), selectionColumn);
-    dataMgr.DefineVector(bundleColumnName, broadcastCols, "Bool_t", sysMgr);
+    dataMgr.DefineVectorNominal(bundleColumnName, broadcastCols, "Bool_t",
+                                sysMgr);
     spec.resolvedColumnNames = broadcastCols;
     return spec;
   }
@@ -246,7 +215,7 @@ defineSelectionMaskBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMg
     if (colSet.count(colName)) {
       resolvedCols.push_back(colName);
       spec.resolvedColumnNames.push_back(colName);
-    } else if (!sysMgr.isVariableAffectedBySystematic(selectionColumn, label)) {
+    } else if (colName == selectionColumn) {
       resolvedCols.push_back(selectionColumn);
       spec.resolvedColumnNames.push_back(selectionColumn);
     } else {
@@ -254,7 +223,7 @@ defineSelectionMaskBundle(IDataFrameProvider &dataMgr, ISystematicManager &sysMg
                                "' has systematic variation '" + label + "' but column '" + colName + "' not found.");
     }
   }
-  dataMgr.DefineVector(bundleColumnName, resolvedCols, "Bool_t", sysMgr);
+  dataMgr.DefineVectorNominal(bundleColumnName, resolvedCols, "Bool_t", sysMgr);
   return spec;
 }
 

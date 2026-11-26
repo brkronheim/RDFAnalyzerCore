@@ -1,0 +1,11 @@
+---
+layout: default
+---
+<nav aria-label="Documentation">
+  {% for item in site.nav_links %}
+    <a href="{{ item.url | relative_url }}"{% if page.url == item.url %} aria-current="page"{% endif %}>{{ item.title | escape }}</a>
+    {% unless forloop.last %}<span aria-hidden="true"> · </span>{% endunless %}
+  {% endfor %}
+</nav>
+
+{{ content }}

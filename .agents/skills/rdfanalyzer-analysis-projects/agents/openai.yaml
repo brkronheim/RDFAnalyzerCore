@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analysis project navigation"
+  short_description: "Analysis project navigation"
+  default_prompt: "Use $rdfanalyzer-analysis-projects to find the entry points and focused references for the requested analysis project."

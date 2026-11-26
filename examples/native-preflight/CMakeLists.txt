@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.16)
+project(RDFNativePreflightExample LANGUAGES CXX)
+find_package(ROOT REQUIRED COMPONENTS ROOTDataFrame RIO Tree)
+add_library(native_preflight_inspection STATIC inspection.cc)
+target_compile_features(native_preflight_inspection PUBLIC cxx_std_17)
+target_include_directories(native_preflight_inspection PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../core/interface")
+target_link_libraries(native_preflight_inspection PRIVATE ROOT::ROOTDataFrame ROOT::RIO ROOT::Tree)
+add_executable(rdf-native-preflight main.cc)
+target_link_libraries(rdf-native-preflight PRIVATE native_preflight_inspection)

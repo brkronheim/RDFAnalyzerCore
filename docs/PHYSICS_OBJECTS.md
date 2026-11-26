@@ -14,7 +14,7 @@
 6. [Sub-Collection Filtering](#6-sub-collection-filtering)
 7. [Correction Application](#7-correction-application)
 8. [Combinatorics](#8-combinatorics)
-9. [TypedPhysicsObjectCollection\<T\>](#9-typedphysicsobjectcollectiont)
+9. [Typed physics object collections](#9-typed-physics-object-collections)
 10. [PhysicsObjectVariationMap](#10-physicsobjectvariationmap)
 11. [Complete C++ Examples](#11-complete-c-examples)
 12. [JetEnergyScaleManager Integration](#12-jetenergyscalemanager-integration)
@@ -475,7 +475,7 @@ auto diJetMasses = df.Define("diJetMass", [](
 
 ---
 
-## 9. TypedPhysicsObjectCollection\<T\>
+## 9. Typed physics object collections
 
 ```cpp
 template <typename ObjectType>

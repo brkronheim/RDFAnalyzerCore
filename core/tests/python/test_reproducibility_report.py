@@ -535,6 +535,9 @@ def test_load_provenance_from_root_missing_provenance_dir(tmp_path, monkeypatch)
     class FakeTNamed:
         def __init__(self, title):
             self.title = title
+            self.classname = "TNamed"
+        def member(self, name):
+            return self.title
 
     class FakeRootFile:
         def __enter__(self):
@@ -545,8 +548,10 @@ def test_load_provenance_from_root_missing_provenance_dir(tmp_path, monkeypatch)
             return False  # no 'provenance' key
         def __getitem__(self, name):
             raise KeyError(name)
-        def keys(self):
+        def keys(self, **kwargs):
             return []
+        def classnames(self, **kwargs):
+            return {}
 
     class FakeUproot:
         @staticmethod
@@ -567,6 +572,9 @@ def test_load_provenance_from_root_happy_path(tmp_path, monkeypatch):
     class FakeTNamed:
         def __init__(self, title):
             self.title = title
+            self.classname = "TNamed"
+        def member(self, name):
+            return self.title
 
     class FakeProvDir:
         def keys(self):
@@ -586,9 +594,15 @@ def test_load_provenance_from_root_happy_path(tmp_path, monkeypatch):
             pass
         def __contains__(self, name):
             return name == "provenance"
+        def keys(self, **kwargs):
+            return ["provenance/" + k for k in FakeProvDir().keys()]
+        def classnames(self, **kwargs):
+            return {k.rsplit(";", 1)[0]: "TNamed" for k in self.keys()}
         def __getitem__(self, name):
             if name == "provenance":
                 return FakeProvDir()
+            if name.startswith("provenance/"):
+                return FakeProvDir()[name.split("/", 1)[1]]
             raise KeyError(name)
 
     class FakeUproot:

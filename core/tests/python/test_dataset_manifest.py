@@ -22,7 +22,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from dataset_manifest import DatasetEntry, DatasetManifest, FriendTreeConfig
+from dataset_manifest import (
+    DatasetEntry,
+    DatasetManifest,
+    FriendTreeConfig,
+    select_generator_weight_denominator,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +47,27 @@ class TestDatasetEntry:
         assert e.xsec is None
         assert e.year is None
         assert e.parent is None
+        assert e.generator_weight_mode == "sign"
+
+    def test_generator_weight_mode_round_trips_and_defaults_to_sign(self):
+        default_entry = DatasetEntry.from_dict({"name": "default"})
+        full_entry = DatasetEntry.from_dict(
+            {"name": "full", "generator_weight_mode": "FULL"}
+        )
+        full_legacy = DatasetEntry.from_legacy_dict(
+            {"name": "full", "genWeightMode": "full"}
+        )
+
+        assert default_entry.generator_weight_mode == "sign"
+        assert full_entry.generator_weight_mode == "full"
+        assert DatasetEntry.from_dict(full_entry.to_dict()).generator_weight_mode == "full"
+        assert full_entry.to_legacy_dict()["genWeightMode"] == "full"
+        assert full_legacy.generator_weight_mode == "full"
+
+    @pytest.mark.parametrize("mode", ["typo", "", None, 1])
+    def test_generator_weight_mode_rejects_invalid_values(self, mode):
+        with pytest.raises(ValueError, match="generator_weight_mode must be 'sign' or 'full'"):
+            DatasetEntry(name="bad", generator_weight_mode=mode)
 
     def test_full_construction(self):
         e = DatasetEntry(
@@ -156,7 +182,7 @@ class TestDatasetEntry:
         assert e2.dtype == e.dtype
         assert e2.extra == e.extra
 
-    def test_from_dict_ignores_unknown_keys(self):
+    def test_from_dict_promotes_unknown_keys_to_extra(self):
         d = {
             "name": "s",
             "dtype": "data",
@@ -165,6 +191,7 @@ class TestDatasetEntry:
         e = DatasetEntry.from_dict(d)
         assert e.name == "s"
         assert e.dtype == "data"
+        assert e.extra["unknown_future_field"] == "value"
 
     def test_from_dict_preserves_extra_metadata(self):
         d = {
@@ -221,6 +248,69 @@ class TestDatasetManifestQuery:
             DatasetEntry("data_2022D",     year=2022, dtype="data",  era="D",          group="data_2022"),
             DatasetEntry("ttbar_skim",     year=2022, dtype="mc",   process="ttbar",  parent="ttbar_2022"),
         ])
+
+
+    def test_selects_denominator_for_each_mode_with_negative_events(self):
+        # The synthetic generator weights are [-2, 1, 4], so the raw sum is 3
+        # while the sum of signs is 1.
+        assert select_generator_weight_denominator("sign", 3.0, 1.0) == 1.0
+        assert select_generator_weight_denominator("full", 3.0, 1.0) == 3.0
+
+    @pytest.mark.parametrize(
+        ("mode", "sum_weights", "sum_sign_weights", "selected"),
+        [
+            ("sign", 5.0, 0.0, "sum_sign_weights"),
+            ("sign", 5.0, -2.0, "sum_sign_weights"),
+            ("sign", 5.0, float("nan"), "sum_sign_weights"),
+            ("sign", 5.0, float("inf"), "sum_sign_weights"),
+            ("full", 0.0, 5.0, "sum_weights"),
+            ("full", -2.0, 5.0, "sum_weights"),
+            ("full", float("nan"), 5.0, "sum_weights"),
+            ("full", float("inf"), 5.0, "sum_weights"),
+        ],
+    )
+    def test_rejects_invalid_selected_denominator_without_fallback(
+        self, mode, sum_weights, sum_sign_weights, selected
+    ):
+        with pytest.raises(ValueError, match=selected) as exc:
+            select_generator_weight_denominator(
+                mode,
+                sum_weights,
+                sum_sign_weights,
+                dataset_name="mc_negative_weights",
+            )
+        assert "must be finite and strictly positive" in str(exc.value)
+        assert "No fallback" in str(exc.value)
+
+
+
+    def test_job_config_receives_explicit_full_generator_weight_mode(self, tmp_path):
+        import production_jobs as analysis_tasks
+        dataset = DatasetEntry(name="full_sample", generator_weight_mode="full")
+        metadata = analysis_tasks._dataset_job_metadata(dataset)
+        assert metadata["genWeightMode"] == "full"
+
+        template = tmp_path / "submit_config.txt"
+        template.write_text("enableCounters=true\n")
+        job_dir = tmp_path / "job"
+        output_dir = tmp_path / "output"
+        analysis_tasks._write_job_config(
+            str(job_dir), str(template), dataset, str(output_dir)
+        )
+        written_config = analysis_tasks.read_config(
+            str(job_dir / "submit_config.yaml")
+        )
+        assert written_config["genWeightMode"] == "full"
+
+        data_dataset = DatasetEntry(name="data_sample", dtype="data")
+        data_job_dir = tmp_path / "data_job"
+        analysis_tasks._write_job_config(
+            str(data_job_dir), str(template), data_dataset, str(output_dir)
+        )
+        data_config = analysis_tasks.read_config(
+            str(data_job_dir / "submit_config.yaml")
+        )
+        assert "genWeightMode" not in data_config
 
     def test_query_by_year(self):
         m = self._make_manifest()
@@ -327,6 +417,7 @@ class TestDatasetManifestYAML:
                 process: ttbar
                 group: ttbar
                 dtype: mc
+                generator_weight_mode: full
                 das: /TTto2L2Nu/Run3/NANO
                 xsec: 98.34
                 filter_efficiency: 1.0
@@ -353,6 +444,7 @@ class TestDatasetManifestYAML:
         assert ttbar.year == 2022
         assert ttbar.xsec == 98.34
         assert ttbar.das == "/TTto2L2Nu/Run3/NANO"
+        assert ttbar.generator_weight_mode == "full"
 
     def test_save_and_reload_yaml(self, tmp_path):
         original = DatasetManifest(
@@ -364,6 +456,7 @@ class TestDatasetManifestYAML:
                     xsec=1000.0,
                     stitch_id=0,
                     dtype="mc",
+                    generator_weight_mode="full",
                     das="/WtoLNu/Run3/NANO",
                 )
             ],
@@ -382,6 +475,7 @@ class TestDatasetManifestYAML:
         assert e.name == "wjets_0"
         assert e.stitch_id == 0
         assert e.xsec == 1000.0
+        assert e.generator_weight_mode == "full"
 
     def test_load_auto_detect_yaml(self, tmp_path):
         path = self._make_yaml(tmp_path)
@@ -406,16 +500,28 @@ class TestDatasetManifestYAML:
         with pytest.raises(ValueError, match="unknown top-level keys"):
             DatasetManifest.load_yaml(str(p))
 
-    def test_load_yaml_rejects_unknown_dataset_keys(self, tmp_path):
-        p = tmp_path / "bad_dataset.yaml"
+    def test_load_yaml_rejects_invalid_generator_weight_mode(self, tmp_path):
+        p = tmp_path / "bad_weight_mode.yaml"
+        p.write_text(textwrap.dedent("""\
+            datasets:
+              - name: ttbar
+                dtype: mc
+                generator_weight_mode: magnitude
+        """))
+        with pytest.raises(ValueError, match="ttbar.*generator_weight_mode"):
+            DatasetManifest.load_yaml(str(p))
+
+    def test_load_yaml_promotes_unknown_dataset_keys_to_extra(self, tmp_path):
+        p = tmp_path / "dataset_extra.yaml"
         p.write_text(textwrap.dedent("""\
             datasets:
               - name: ttbar_2022
                 dtype: mc
                 unsupportedField: yes
         """))
-        with pytest.raises(ValueError, match="unknown keys"):
-            DatasetManifest.load_yaml(str(p))
+        m = DatasetManifest.load_yaml(str(p))
+        assert len(m.datasets) == 1
+        assert m.datasets[0].extra["unsupportedField"] is True
 
     def test_load_yaml_rejects_invalid_dtype(self, tmp_path):
         p = tmp_path / "bad_dtype.yaml"
@@ -426,6 +532,39 @@ class TestDatasetManifestYAML:
         """))
         with pytest.raises(ValueError, match="invalid dtype"):
             DatasetManifest.load_yaml(str(p))
+
+    def test_load_yaml_rejects_duplicate_dataset_names(self, tmp_path):
+        p = tmp_path / "duplicate_names.yaml"
+        p.write_text(textwrap.dedent("""\
+            datasets:
+              - name: sample
+              - name: sample
+        """))
+        with pytest.raises(ValueError, match="Duplicate dataset name"):
+            DatasetManifest.load_yaml(str(p))
+
+    def test_load_yaml_rejects_missing_parent(self, tmp_path):
+        p = tmp_path / "missing_parent.yaml"
+        p.write_text(textwrap.dedent("""\
+            datasets:
+              - name: child
+                parent: missing
+        """))
+        with pytest.raises(ValueError, match="parent 'missing' not found"):
+            DatasetManifest.load_yaml(str(p))
+
+    def test_load_yaml_warns_for_unused_luminosity_year(self, tmp_path):
+        p = tmp_path / "unused_lumi_year.yaml"
+        p.write_text(textwrap.dedent("""\
+            lumi_by_year:
+              2099: 1.0
+            datasets:
+              - name: sample
+                year: 2022
+        """))
+        with pytest.warns(UserWarning, match="lumi_by_year contains year 2099"):
+            manifest = DatasetManifest.load_yaml(str(p))
+        assert manifest.by_name("sample") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +709,8 @@ class TestDatasetManifestLumiByYear:
         )
         path = str(tmp_path / "manifest.yaml")
         original.save_yaml(path)
-        loaded = DatasetManifest.load_yaml(path)
+        with pytest.warns(UserWarning, match="lumi_by_year contains year 2023"):
+            loaded = DatasetManifest.load_yaml(path)
         assert loaded.lumi == 100.0
         assert loaded.lumi_by_year == {2022: 38.01, 2023: 27.01}
         assert loaded.lumi_for(year=2022) == 38.01

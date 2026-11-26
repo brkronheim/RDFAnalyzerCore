@@ -10,18 +10,20 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 
 class Analyzer;
 
 // Forward declaration to avoid circular includes.
 class RegionManager;
+struct NDHistogramColumnCacheState;
 
 /**
  * @class NDHistogramManager
  * @brief Manages booking, storage, and saving of N-dimensional histograms.
  *
  * This manager encapsulates the logic for creating, storing, and writing
- * N-dimensional histograms (THnSparseD) using ROOT's RDataFrame. It is designed
+ * N-dimensional histograms (THnSparseF) using ROOT's RDataFrame. It is designed
  * to be used by the Analyzer class and centralizes all histogram-related
  * operations. It is registered through the pluggable-manager API used by Analyzer.
  *
@@ -79,7 +81,7 @@ public:
       std::string suffix=""); 
     
   /**
-   * @brief Save histograms to file
+   * @brief Save mergeable N-dimensional histograms and their extraction schema.
    * @param fullHistList Vector of vectors of histogram info objects
    * @param allRegionNames Vector of vectors of region name vectors
    */
@@ -92,15 +94,17 @@ public:
    * @param infos Vector of histogram info objects
    * @param selection Vector of selection info objects
    * @param suffix Suffix to append to histogram names
+   * @param nominalOnly Book only the nominal slice, preserving other bookings.
    * @param allRegionNames Vector of region name vectors
    */
   void bookND(std::vector<histInfo> &infos,
               std::vector<selectionInfo> &selection,
               const std::string &suffix,
-              std::vector<std::vector<std::string>> &allRegionNames);
+              std::vector<std::vector<std::string>> &allRegionNames,
+              bool nominalOnly = false);
 
   /**
-   * @brief Save histograms to file (wrapper for analyzer compatibility)
+   * @brief Save mergeable N-dimensional histograms (wrapper for analyzer compatibility)
    * @param fullHistList Vector of vectors of histogram info objects
    * @param allRegionNames Vector of vectors of region name vectors
    */
@@ -108,7 +112,7 @@ public:
                  std::vector<std::vector<std::string>> &allRegionNames);
 
   /**
-   * @brief Save all histograms booked via bookND without supplying lists again.
+   * @brief Save all booked histograms and their extraction schema.
    *
    * Histogram metadata and region names are accumulated internally each time
    * bookND() is called. This overload replays that stored information so the
@@ -147,6 +151,9 @@ public:
    */
   void initialize() override;
 
+  /// Emit pre-loop aggregate storage estimates when histogram profiling is enabled.
+  void execute() override;
+
   /**
    * @brief Metadata hook: reports booked histogram counts to the logger.
    */
@@ -157,7 +164,7 @@ public:
    * 
    * This method books all histograms that were loaded from the config file
    * during setupFromConfigFile(). It should be called after all filters and
-   * defines have been applied to the dataframe, typically right before save().
+   * defines have been applied to the dataframe, typically before run().
    *
    * When a RegionManager has been bound via bindToRegionManager(), each
    * configured histogram is booked with an additional *region axis* encoded
@@ -165,7 +172,8 @@ public:
    * covers all declared regions, keeping the output compact and the event
    * loop to a single execution.
    */
-  void bookConfigHistograms();
+  // Exclusions are logical config names and are applied before any booking.
+  void bookConfigHistograms(const std::vector<std::string> &excludedNames = {});
 
   /**
    * @brief Bind this manager to a RegionManager for automatic region-aware
@@ -198,7 +206,9 @@ public:
     int bins;
     float lowerBound;
     float upperBound;
+    std::vector<Double_t> binEdges;
     std::string suffix;
+    bool nominalOnly = false; // Keep one nominal slice for this config histogram.
     std::string channelVariable;
     int channelBins;
     float channelLowerBound;
@@ -233,13 +243,22 @@ public:
   }
 
 private:
+  // Reuse identical packs within one booking call. Reset between calls so
+  // intervening Redefine operations cannot bind a new histogram to old values.
+  std::unordered_map<std::string, std::string> axisPackCache_m;
+  void SaveHistsImpl(std::vector<std::vector<histInfo>> &fullHistList,
+                     std::vector<std::vector<std::string>> &allRegionNames,
+                     const IConfigurationProvider &configProvider,
+                     bool useBookedAxisLabels);
+
   void BookSingleHistogramWithSystList(histInfo &info,
                                        selectionInfo &&sampleCategoryInfo,
                                        selectionInfo &&controlRegionInfo,
                                        selectionInfo &&channelInfo,
                                        std::string suffix,
                                        const std::vector<std::string> &systList,
-                                       const std::string &baseRefVector = "");
+                                      const std::string &baseRefVector = "",
+                                      NDHistogramColumnCacheState *columnCache = nullptr);
 
   /**
    * @brief Automatically detect and register systematic variations from the
@@ -270,8 +289,13 @@ private:
   /**
    * @brief Vector of histogram result pointers.
    */
+  void reportStorageProfile(bool finalized) const;
   std::vector<ROOT::RDF::RNode> histNodes_m;
   std::vector<ROOT::RDF::RResultPtr<THnSparseF>> histos_m;
+  std::vector<std::shared_ptr<const rdfhistogram::StorageMemoryUsage>> histMemoryUsage_m;
+  std::vector<bool> histMemoryWarningReported_m;
+  // Axis labels captured per booked sparse histogram for merge-safe export.
+  std::vector<std::vector<std::vector<std::string>>> histRegionNames_m;
   std::vector<HistogramConfig> configHistograms_m;
   // Accumulated metadata from each bookND() call — used by the no-args saveHists()
   std::vector<std::vector<histInfo>> trackedHistInfos_m;
@@ -282,11 +306,14 @@ private:
   ILogger* logger_m = nullptr;
   IOutputSink* skimSink_m = nullptr;
   IOutputSink* metaSink_m = nullptr;
-  bool countersFinalized_m = false;
-  std::string histogramBackend_m = "root";
+  std::string histogramBackend_m = "boost";
+  std::size_t histogramDenseLimitBytes_m = 0;
+  bool histogramBoostFloatContents_m = true;
+  std::string histogramBoostSparseBackend_m = "map";
+  bool histogramSystematics_m = true;
   RegionManager* regionManager_m = nullptr;
 };
 
 
 
-#endif // NDHISTOGRAMMANAGER_H_INCLUDED 
+#endif // NDHISTOGRAMMANAGER_H_INCLUDED

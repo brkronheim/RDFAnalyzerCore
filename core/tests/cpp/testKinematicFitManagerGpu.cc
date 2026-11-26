@@ -46,8 +46,8 @@ ManagerContext MakeContext(IConfigurationProvider &config,
 TEST(KinematicFitManagerGpuIntegrationTest, GpuFitMatchesCpuReference) {
   ChangeToTestSourceDir();
 
-  auto cpuConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
-  auto gpuConfig = ManagerFactory::createConfigurationManager("cfg/test_gpu_config.txt");
+  auto cpuConfig = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
+  auto gpuConfig = ManagerFactory::createConfigurationManager("cfg/test_gpu_config.yaml");
   auto cpuManager = std::make_unique<KinematicFitManager>(*cpuConfig);
   auto gpuManager = std::make_unique<KinematicFitManager>(*gpuConfig);
 

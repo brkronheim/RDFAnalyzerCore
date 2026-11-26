@@ -1,5 +1,10 @@
 # Configuration Validation
 
+Compiled C++ analyses can also use the optional standard-library
+[native settings and validation reports](NATIVE_SETTINGS_AND_VALIDATION.md).
+That configuration-only helper emits the existing native option map and shared
+JSON diagnostics; the broader validators below retain their existing behavior.
+
 RDFAnalyzerCore ships a configuration validation tool that catches mis-spelled keys, missing files, bad numeric values and structural inconsistencies **before** a long analysis run starts.  Fixing problems early avoids silent data-quality issues and wasted CPU time on the grid.
 
 The tool lives in `core/python/validate_config.py` and supports two independent validation modes:
@@ -14,7 +19,7 @@ The tool lives in `core/python/validate_config.py` and supports two independent 
 ## CLI Usage
 
 ```
-python core/python/validate_config.py --config path/to/submit_config.txt [--mode {auto,nano,opendata}]
+python core/python/validate_config.py --config path/to/submit_config.yaml [--mode {auto,nano,opendata}]
 python core/python/validate_config.py --analysis-config path/to/analysis.yaml
 ```
 
@@ -34,6 +39,7 @@ The two modes are mutually exclusive; exactly one of `--config` or `--analysis-c
 |------|---------|
 | `0` | Validation passed (warnings may still be printed). |
 | `1` | One or more errors were found, or the config file was not found. |
+| `2` | Invalid command-line arguments, including omitted or conflicting input flags. |
 
 ### Example output
 
@@ -46,7 +52,7 @@ Config validation OK
 ```
 Config validation failed:
 - Missing required key 'sampleConfig' in submit config
-- File not found for 'floatConfig': /path/to/float_config.txt
+- File not found for 'floatConfig': /path/to/float_config.yaml
 ```
 
 ---
@@ -59,7 +65,7 @@ Validates a `key=value` text file used to configure the snapshot / analysis subm
 
 ```python
 from validate_config import validate_submit_config
-errors, warnings = validate_submit_config("configs/submit_config.txt", mode="nano")
+errors, warnings = validate_submit_config("configs/submit_config.yaml", mode="nano")
 ```
 
 **Returns** `(errors: list[str], warnings: list[str])`.  
@@ -94,6 +100,8 @@ Paths are resolved relative to the parent directory of the submit config file.
 
 When `threads` is present its value must be an integer, the string `auto`, or the string `max`; anything else is an error.
 
+The C++ runtime applies the same validation when it reads the analysis config, so skipping this preflight does not silently turn a malformed value into an all-cores job.
+
 ### Sample config validation
 
 The sample config (pointed to by `sampleConfig`) is validated according to its format.
@@ -101,7 +109,7 @@ The sample config (pointed to by `sampleConfig`) is validated according to its f
 - **YAML (`.yaml` / `.yml`)** – loaded via `DatasetManifest.load_yaml()` and then mode-specific field checks are applied (see below). This is the preferred format for new workflows.
 - **Text (any other extension)** – parsed as `key=value` entries and mode-specific checks are applied.
 
-> **Note:** Legacy text sample configs are deprecated and supported only for backward compatibility. New workflows should use YAML manifests and the explicit compatibility helper `core/python/rucio_discovery.py:load_legacy_sample_config()` only when necessary.
+> **Note:** Legacy text sample configs are deprecated and supported only for backward compatibility. Use YAML manifests for new workflows. `core/python/sample_config.py` contains the reader for archived sample files.
 
 #### Mode detection
 
@@ -182,7 +190,7 @@ Validates the `nuisance_groups` list.  Each entry must be a dict with at minimum
 
 ### `validate_histogram_config_file(path)`
 
-Validates a whitespace-separated histogram configuration text file.  Each non-comment, non-blank line is treated as a histogram entry.
+Validates a YAML sequence of histogram definitions, one mapping per histogram. Archived whitespace-separated record files are also accepted.
 
 **Required keys per entry:**
 
@@ -209,7 +217,7 @@ Validates the `friend_trees` list.  Each entry must be a dict with:
 | `globs` / `antiglobs` | Optional lists |
 | `index_branches` / `indexBranches` | Optional lists |
 
-A warning is issued when an entry has neither a `files`/`fileList` source nor a `directory`.  Unknown keys generate a warning.
+Provide a nonempty file list or directory for each friend. An empty `friends: []` sequence is valid. Index matching accepts one or two branch names. An omitted or empty index list selects sequential matching. Unknown fields, duplicate aliases, conflicting spellings of a field, and malformed lists are configuration errors.
 
 ---
 
@@ -268,7 +276,7 @@ print("Analysis config is valid.")
 
 # --- Submit config ---
 try:
-    errors, warnings = validate_submit_config("configs/submit_config.txt", mode="nano")
+    errors, warnings = validate_submit_config("configs/submit_config.yaml", mode="nano")
 except ValidationError as exc:
     print(f"File not found: {exc}")
     raise SystemExit(1)
@@ -318,10 +326,10 @@ nuisance_groups:
       - DATACARD
 
 # ------------------------------------------------------------------
-# histogram_config – path to a whitespace-separated histogram spec
+# histogram_config – path to a YAML sequence of histogram definitions
 # (resolved relative to the directory containing this YAML file)
 # ------------------------------------------------------------------
-histogram_config: histograms.txt
+histogram_config: histograms.yaml
 
 # ------------------------------------------------------------------
 # friend_trees – sidecar ROOT trees merged at runtime
@@ -351,7 +359,7 @@ plugins:
     weight_variations: []
 
   NDHistogramManager:
-    histogram_config: histograms.txt
+    histogram_config: histograms.yaml
     output_file: histograms.root
     region_aware: true
 

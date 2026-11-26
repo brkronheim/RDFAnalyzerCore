@@ -19,15 +19,48 @@
 #include <ROOT/RDFHelpers.hxx>
 #include <ROOT/RDataFrame.hxx>
 #include <TChain.h>
+#include <TError.h>
 
 #include <api/IConfigurationProvider.h>
 
 #include <plots.h>
 
 /**
+ * @brief RAII guard that temporarily suppresses ROOT non-fatal warnings.
+ *
+ * Saves the current gErrorIgnoreLevel and raises it to kError so that
+ * kWarning-level messages (e.g. "no dictionary for class ..." when opening
+ * NanoAOD files that contain residual CMSSW objects) are silenced. The
+ * original level is restored when the guard goes out of scope.
+ *
+ * Example usage:
+ * @code
+ *   {
+ *     ROOTWarningGuard guard;
+ *     chain->Add("file.root");  // dictionary warnings suppressed
+ *   }
+ * @endcode
+ */
+class ROOTWarningGuard {
+public:
+  ROOTWarningGuard() : fSavedLevel(gErrorIgnoreLevel) {
+    gErrorIgnoreLevel = kError;
+  }
+  ~ROOTWarningGuard() { gErrorIgnoreLevel = fSavedLevel; }
+  // Non-copyable, non-movable
+  ROOTWarningGuard(const ROOTWarningGuard &) = delete;
+  ROOTWarningGuard &operator=(const ROOTWarningGuard &) = delete;
+  ROOTWarningGuard(ROOTWarningGuard &&) = delete;
+  ROOTWarningGuard &operator=(ROOTWarningGuard &&) = delete;
+
+private:
+  Int_t fSavedLevel;
+};
+
+/**
  * @brief Specification for a single friend tree or sidecar input.
  *
- * Used by DataManager::registerFriendTrees() to attach additional columns from
+ * Passed to DataManager at source construction to attach additional columns from
  * separate ROOT files to the main TChain before the RDataFrame is created.
  * Supports both explicit file lists (local paths or XRootD URLs) and
  * directory-based file discovery with glob/antiglob patterns.
@@ -39,7 +72,7 @@
  *     fileList:
  *       - /path/to/calib.root
  *       - root://server.cern.ch//path/to/remote.root
- *     indexBranches: [run, luminosityBlock, event]
+ *     indexBranches: [run, event]
  * @endcode
  */
 struct FriendTreeSpec {
@@ -76,9 +109,8 @@ struct FriendTreeSpec {
  * ``antiglobs``, ``indexBranches``.
  *
  * @param configFile Path to the YAML configuration file.
- * @return Vector of parsed FriendTreeSpec objects (empty if file is missing
- *         or contains no ``friends`` key).
- * @throws std::runtime_error if the file cannot be parsed as valid YAML.
+ * @return Parsed specs in source order. An explicit ``friends: []`` returns an empty vector.
+ * @throws std::runtime_error on unreadable files, invalid YAML or invalid friend definitions.
  */
 std::vector<FriendTreeSpec>
 parseFriendTreeConfig(const std::string &configFile);

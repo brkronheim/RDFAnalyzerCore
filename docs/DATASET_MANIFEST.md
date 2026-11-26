@@ -14,7 +14,7 @@ The dataset manifest is the primary metadata registry for HEP dataset samples in
 - Derived dataset lineage via `parent` references
 - Friend tree / sidecar attachments for extra branches from separate ROOT files
 
-Analyses and LAW tasks query datasets through this metadata model rather than relying solely on flat file lists, enabling reproducible and auditable dataset selection.
+Analyses and Snakemake production stages use this metadata model to select datasets. Legacy sample conversion preserves `prefix_cern` directories in `base_dirs` and explicit Open Data discovery IDs in `record_ids`.
 
 ---
 

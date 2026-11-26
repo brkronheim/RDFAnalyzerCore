@@ -1,0 +1,5 @@
+fileList: [/tmp/a.root, /tmp/b.root]
+treeList: [Events]
+antiglobs: []
+custom: ["a,b", "b: c"]
+unset: null

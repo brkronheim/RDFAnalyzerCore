@@ -26,7 +26,7 @@ Workflow
   ManifestFitTask  (Task)
       → requires ManifestDatacardTask (or accepts an explicit datacard dir / path)
       → supports Combine-based fits and a lightweight analysis-defined fitting backend
-      → fitting_backend choices: "combine" (default) or "analysis" (histogram-based chi2)
+      → fitting_backend choices: "combine" (default), "rabbit" (CPU/CUDA), or "analysis" (histogram-based chi2)
       → output: <workspace>/manifestDatacard_<name>/fit_results/
 
   AnalyticWorkspaceFitTask  (Task)
@@ -39,8 +39,8 @@ Workflow
       → supported background PDFs: exponential, polynomial, chebychev, bernstein
       → parameters marked shared:true use a common name across channels so that
           Combine ties them together in the simultaneous combined fit
-      → builds per-channel RooWorkspaces, writes Combine datacards (analytic shapes
-          via rate -1), runs combine -M <method> for each channel and for the
+      → builds per-channel RooWorkspaces, writes analytic-shape Combine datacards,
+          runs combine -M <method> for each channel and for the
           combined simultaneous fit
       → output: <workspace>/analyticFit_<name>/
 
@@ -85,7 +85,7 @@ Usage
       --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \\
       --histogram-file output/dimuon_zpeak.root \\
       --method FitDiagnostics \\
-      --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
+      --combine-options "--saveShapes --saveNormalizations"
 """
 
 from __future__ import annotations
@@ -96,13 +96,10 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import luigi  # type: ignore
 import law  # type: ignore
-import yaml
 
 # ---------------------------------------------------------------------------
 # Make sure core/python is importable regardless of how the script is invoked
@@ -114,86 +111,39 @@ if _CORE_PYTHON not in sys.path:
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
-from output_schema import OutputManifest  # noqa: E402
+from rdfproduction.performance import PerformanceRecorder  # noqa: E402
+from output_schema import OutputManifest  # noqa: E402, F401
+
+from statistical_inference.manifest_fits import (  # noqa: E402, F401
+    _AnalyticWorkspaceOperations,
+    _ManifestDatacardOperations,
+    _ManifestFitOperations,
+    _COMBINE_SEARCH_PATHS,
+    _find_combine as _locate_combine,
+    _find_histogram_in_file,
+    _load_manifest,
+    _derive_available_variations,
+    _resolve_manifest_histogram_file,
+    _collect_config_sample_names,
+    _load_dataset_manifest_sample_names,
+    _load_manifest_sample_names,
+    _build_manifest_region_config,
+    _prepare_manifest_datacard_config,
+    _make_roo_var,
+    _build_signal_pdf,
+    _build_background_pdf,
+    _build_analytic_workspace,
+    _write_analytic_datacard,
+    _write_analytic_combined_datacard,
+    _parse_datacard_shapes,
+    _chi2_fit_uproot,
+)
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 
-# Default search locations for the combine binary
-_COMBINE_SEARCH_PATHS = [
-    os.path.join(WORKSPACE, "build", "external", "HiggsAnalysis", "CombinedLimit", "exe", "combine"),
-    "combine",  # system PATH
-]
-
-
-def _find_histogram_in_file(root_file, hist_name: str):
-    """Find a histogram by name in common analysis output layouts."""
-    import ROOT  # type: ignore
-
-    candidate_paths = [
-        f"histograms/{hist_name}",
-        f"Default_Default/Default/{hist_name}",
-        hist_name,
-    ]
-    for hist_path in candidate_paths:
-        hist = root_file.Get(hist_path)
-        if hist and hist.InheritsFrom("TH1"):
-            return hist, hist_path
-
-    def _walk(directory, prefix=""):
-        for key in directory.GetListOfKeys():
-            name = key.GetName()
-            obj = key.ReadObj()
-            obj_path = f"{prefix}/{name}" if prefix else name
-            if obj.InheritsFrom("TH1") and name == hist_name:
-                return obj, obj_path
-            if obj.InheritsFrom("TDirectory"):
-                found_hist, found_path = _walk(obj, obj_path)
-                if found_hist:
-                    return found_hist, found_path
-        return None, None
-
-    return _walk(root_file)
-
-
 def _find_combine(combine_exe: str = "") -> str:
-    """Return the path to the combine binary.
+    return _locate_combine(combine_exe, search_paths=_COMBINE_SEARCH_PATHS)
 
-    Searches in:
-    1. ``combine_exe`` parameter (if non-empty).
-    2. The build directory: build/external/HiggsAnalysis/CombinedLimit/exe/combine.
-    3. System PATH.
-
-    Raises RuntimeError if not found.
-    """
-    if combine_exe:
-        if os.path.isfile(combine_exe) and os.access(combine_exe, os.X_OK):
-            return combine_exe
-        raise RuntimeError(
-            f"Specified combine executable not found or not executable: {combine_exe!r}"
-        )
-
-    for candidate in _COMBINE_SEARCH_PATHS:
-        if os.path.isabs(candidate):
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-        else:
-            # Relative → check via shutil.which (portable, no subprocess)
-            found = shutil.which(candidate)
-            if found:
-                return found
-
-    raise RuntimeError(
-        "CMS Combine binary not found.  Either:\n"
-        "  1. Build with Combine support: cmake -S . -B build -DBUILD_COMBINE=ON && cmake --build build\n"
-        "  2. Source a CMSSW environment that provides `combine`\n"
-        "  3. Pass --combine-exe /path/to/combine explicitly"
-    )
-
-
-# ===========================================================================
-# Shared parameter mixin
-# ===========================================================================
 
 class CombineMixin:
     """Parameters shared by CreateDatacard and RunCombine."""
@@ -228,10 +178,6 @@ class CombineMixin:
     def _results_dir(self) -> str:
         return os.path.join(self._run_dir, "combine_results")
 
-
-# ===========================================================================
-# Task 1 – CreateDatacard
-# ===========================================================================
 
 class CreateDatacard(CombineMixin, law.Task):
     """
@@ -300,10 +246,6 @@ class CreateDatacard(CombineMixin, law.Task):
         )
 
 
-# ===========================================================================
-# Task 2 – RunCombine
-# ===========================================================================
-
 class RunCombine(CombineMixin, law.Task):
     """
     Run CMS Combine fits on the datacards produced by CreateDatacard.
@@ -345,7 +287,7 @@ class RunCombine(CombineMixin, law.Task):
         default="",
         description=(
             "Path to the combine binary.  If empty, the task searches in "
-            "build/external/HiggsAnalysis/CombinedLimit/exe/combine and then "
+            "build/external/HiggsAnalysis/CombinedLimit/bin/combine, then legacy exe/combine and then "
             "in the system PATH."
         ),
     )
@@ -451,239 +393,7 @@ class RunCombine(CombineMixin, law.Task):
         )
 
 
-# ===========================================================================
-# Shared helpers for manifest-aware tasks
-# ===========================================================================
-
-
-def _load_manifest(manifest_path: str) -> "OutputManifest":
-    """Load an :class:`OutputManifest` from *manifest_path*.
-
-    Raises
-    ------
-    RuntimeError
-        If the path does not exist or the manifest cannot be parsed.
-    """
-    if not os.path.exists(manifest_path):
-        raise RuntimeError(
-            f"Manifest file not found: {manifest_path!r}.  "
-            "Run MergeAll (or MergeHistograms + MergeMetadata) first."
-        )
-    try:
-        return OutputManifest.load_yaml(manifest_path)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"Failed to load manifest from {manifest_path!r}: {exc}"
-        ) from exc
-
-
-def _derive_available_variations(manifest: "OutputManifest") -> Dict[str, List[str]]:
-    """Derive a ``{systematic_base → [variant_names]}`` map from the manifest.
-
-    The available variations are inferred from the histogram names stored in
-    :attr:`OutputManifest.histograms`.  A histogram named ``h_jesUp`` is
-    assumed to be an Up variation of ``jes``; ``h_jesDown`` is the Down
-    variation.  The base name is extracted by stripping the ``Up`` / ``Down``
-    suffix (case-insensitive).
-
-    Parameters
-    ----------
-    manifest:
-        The merged :class:`OutputManifest` whose histogram names are inspected.
-
-    Returns
-    -------
-    dict[str, list[str]]
-        Mapping of base systematic name → list of observed variant histogram names.
-        For example ``{"jes": ["h_jesUp", "h_jesDown"]}``.
-    """
-    if manifest.histograms is None or not manifest.histograms.histogram_names:
-        return {}
-
-    variations: Dict[str, List[str]] = {}
-    for name in manifest.histograms.histogram_names:
-        lower = name.lower()
-        for suffix in ("up", "down"):
-            if lower.endswith(suffix):
-                base = name[:-len(suffix)]
-                # Normalise base: strip trailing underscore / dash
-                base = base.rstrip("_-")
-                if not base:
-                    continue
-                variations.setdefault(base, []).append(name)
-                break
-    return variations
-
-
-def _resolve_manifest_histogram_file(
-    manifest: "OutputManifest", manifest_path: str
-) -> str:
-    """Return the absolute merged histogram ROOT path referenced by *manifest*."""
-    if manifest.histograms is None or not manifest.histograms.output_file:
-        raise RuntimeError(
-            "ManifestDatacardTask requires a manifest with a 'histograms.output_file' entry."
-        )
-
-    hist_path = manifest.histograms.output_file
-    if os.path.isabs(hist_path):
-        return hist_path
-    return os.path.abspath(os.path.join(os.path.dirname(manifest_path), hist_path))
-
-
-def _collect_config_sample_names(config: Dict[str, object]) -> List[str]:
-    """Extract the sample aliases referenced by a datacard config."""
-    sample_names: List[str] = []
-    seen: set[str] = set()
-
-    for process_name, process_cfg in (config.get("processes") or {}).items():
-        if not isinstance(process_cfg, dict):
-            continue
-        samples = process_cfg.get("samples")
-        if isinstance(samples, list) and samples:
-            for sample in samples:
-                if isinstance(sample, str) and sample and sample not in seen:
-                    sample_names.append(sample)
-                    seen.add(sample)
-        elif isinstance(process_name, str) and process_name and process_name not in seen:
-            sample_names.append(process_name)
-            seen.add(process_name)
-
-    for combo_cfg in (config.get("sample_combinations") or {}).values():
-        if not isinstance(combo_cfg, dict):
-            continue
-        for sample in combo_cfg.get("samples", []):
-            if isinstance(sample, str) and sample and sample not in seen:
-                sample_names.append(sample)
-                seen.add(sample)
-
-    return sample_names
-
-
-def _load_dataset_manifest_sample_names(dataset_manifest_path: str) -> List[str]:
-    """Load dataset names from a dataset manifest for implicit input-file mapping."""
-    from dataset_manifest import DatasetManifest  # noqa: E402
-
-    manifest = DatasetManifest.load(dataset_manifest_path)
-    return [entry.name for entry in manifest.datasets if entry.name]
-
-
-def _load_manifest_sample_names(manifest: "OutputManifest") -> List[str]:
-    """Extract available sample aliases from enriched histogram metadata."""
-    if manifest.histograms is None:
-        return []
-
-    sample_names: List[str] = []
-    seen: set[str] = set()
-    for sample_name in (manifest.histograms.sample_metadata or {}).keys():
-        if isinstance(sample_name, str) and sample_name and sample_name not in seen:
-            sample_names.append(sample_name)
-            seen.add(sample_name)
-    return sample_names
-
-
-def _build_manifest_region_config(
-    manifest_defaults: Dict[str, object],
-    region_name: str,
-) -> Dict[str, object]:
-    """Create a control-region config block from manifest defaults."""
-    region_cfg = dict(manifest_defaults)
-    region_cfg.pop("region_names", None)
-    region_cfg.pop("region_overrides", None)
-    overrides = manifest_defaults.get("region_overrides", {})
-    if isinstance(overrides, dict) and isinstance(overrides.get(region_name), dict):
-        region_cfg.update(overrides[region_name])
-    return region_cfg
-
-
-def _prepare_manifest_datacard_config(
-    config_file: str,
-    manifest: "OutputManifest",
-    manifest_path: str,
-    target_region: str = "",
-    dataset_manifest_path: str = "",
-) -> str:
-    """Create a temporary datacard YAML adapted to a merged manifest.
-
-    The helper fills in missing ``input_files`` from the merged histogram file,
-    optionally synthesizes region definitions from a ``manifest_defaults`` block,
-    and restricts multi-region configs to the requested region.
-    """
-    with open(config_file, "r") as fh:
-        config = yaml.safe_load(fh) or {}
-
-    if not isinstance(config, dict):
-        raise RuntimeError(
-            f"Datacard configuration must contain a YAML mapping at the top level: {config_file!r}"
-        )
-
-    hist_file = _resolve_manifest_histogram_file(manifest, manifest_path)
-
-    if not config.get("input_files"):
-        sample_names = _collect_config_sample_names(config)
-        if not sample_names:
-            sample_names = _load_manifest_sample_names(manifest)
-        if not sample_names and dataset_manifest_path:
-            sample_names = _load_dataset_manifest_sample_names(dataset_manifest_path)
-        if not sample_names:
-            sample_names = ["merged"]
-        config["input_files"] = {
-            sample_name: {"path": hist_file} for sample_name in sample_names
-        }
-
-    if (
-        not config.get("sample_combinations")
-        and manifest.histograms is not None
-        and manifest.histograms.sample_combinations
-    ):
-        config["sample_combinations"] = {
-            combo_name: dict(combo_cfg)
-            for combo_name, combo_cfg in manifest.histograms.sample_combinations.items()
-        }
-
-    if (
-        not config.get("processes")
-        and manifest.histograms is not None
-        and manifest.histograms.processes
-    ):
-        config["processes"] = {
-            process_name: dict(process_cfg)
-            for process_name, process_cfg in manifest.histograms.processes.items()
-        }
-
-    control_regions = config.get("control_regions")
-    manifest_defaults = config.get("manifest_defaults")
-    if (not control_regions) and isinstance(manifest_defaults, dict):
-        region_names = [target_region] if target_region else [r.name for r in manifest.regions if r.name]
-        if not region_names:
-            region_names = list(manifest_defaults.get("region_names", [])) or ["combined"]
-        config["control_regions"] = {
-            region_name: _build_manifest_region_config(manifest_defaults, region_name)
-            for region_name in region_names
-        }
-        control_regions = config["control_regions"]
-
-    if target_region:
-        if isinstance(control_regions, dict) and target_region in control_regions:
-            config["control_regions"] = {target_region: control_regions[target_region]}
-        elif isinstance(manifest_defaults, dict):
-            config["control_regions"] = {
-                target_region: _build_manifest_region_config(manifest_defaults, target_region)
-            }
-
-    handle = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", prefix="manifest_datacard_", delete=False
-    )
-    with handle:
-        yaml.safe_dump(config, handle, sort_keys=False)
-    return handle.name
-
-
-# ===========================================================================
-# Task 3 – ManifestDatacardTask
-# ===========================================================================
-
-
-class ManifestDatacardTask(CombineMixin, law.Task):
+class ManifestDatacardTask(CombineMixin, _ManifestDatacardOperations, law.Task):
     """Manifest-aware datacard creation from merged histogram outputs.
 
     Unlike :class:`CreateDatacard`, which reads ROOT files from a plain YAML
@@ -741,10 +451,11 @@ class ManifestDatacardTask(CombineMixin, law.Task):
             "Default: False (issues are logged as warnings)."
         ),
     )
+    output_dir = luigi.Parameter(default="", description="Override the manifest datacard output directory.")
 
     @property
     def _manifest_datacard_dir(self) -> str:
-        return os.path.join(WORKSPACE, f"manifestDatacard_{self.name}", "datacards")
+        return self.output_dir or os.path.join(WORKSPACE, f"manifestDatacard_{self.name}", "datacards")
 
     @property
     def _manifest_fit_dir(self) -> str:
@@ -755,184 +466,25 @@ class ManifestDatacardTask(CombineMixin, law.Task):
             return None
         from merge_tasks import MergeAll  # noqa: E402
 
-        return MergeAll.req(self, input_dir=self.merge_input_dir)
+        return MergeAll.req(self, input_dir=self.merge_input_dir, output_dir="")
 
     def output(self):
         return law.LocalDirectoryTarget(self._manifest_datacard_dir)
 
-    def _validate_nuisance_coverage(self, manifest: "OutputManifest") -> None:
-        """Validate nuisance group coverage against available variations.
 
-        Compares each declared ``NuisanceGroupDefinition`` in the manifest
-        against the available histogram-based variation names derived from
-        :func:`_derive_available_variations`.
-
-        Parameters
-        ----------
-        manifest:
-            Merged manifest to validate.
-
-        Raises
-        ------
-        RuntimeError
-            If ``--strict-coverage`` is set and any coverage issues are found.
-        """
-        if not manifest.nuisance_groups:
-            self.publish_message("No nuisance groups declared in manifest; skipping coverage validation.")
-            return
-
-        try:
-            from nuisance_groups import NuisanceGroup, NuisanceGroupRegistry  # noqa: E402
-        except ImportError:
-            self.publish_message(
-                "WARNING: nuisance_groups module not available; skipping coverage validation."
-            )
-            return
-
-        available = _derive_available_variations(manifest)
-        self.publish_message(
-            f"Coverage validation: {len(manifest.nuisance_groups)} nuisance group(s), "
-            f"{len(available)} detected variation base(s): {sorted(available.keys())}"
-        )
-
-        registry_groups = [
-            NuisanceGroup(
-                name=ng.name,
-                group_type=ng.group_type,
-                systematics=list(ng.systematics),
-                processes=list(ng.processes),
-                regions=list(ng.regions),
-                output_usage=list(ng.output_usage),
-            )
-            for ng in manifest.nuisance_groups
-        ]
-        registry = NuisanceGroupRegistry(groups=registry_groups)
-        issues = registry.validate_coverage(available)
-
-        if not issues:
-            self.publish_message("Nuisance coverage validation passed: all systematics have up+down coverage.")
-            return
-
-        lines = ["Nuisance coverage issues detected:"]
-        for issue in issues:
-            lines.append(f"  [{issue.severity.value.upper()}] {issue.message}")
-        report = "\n".join(lines)
-
-        error_count = sum(1 for i in issues if i.severity.value == "error")
-        if self.strict_coverage and error_count:
-            raise RuntimeError(
-                report + f"\n{error_count} coverage error(s) found with --strict-coverage enabled."
-            )
-        self.publish_message(report)
-
-    def run(self):
-        config_file = os.path.abspath(self.datacard_config)
-        if not os.path.exists(config_file):
-            raise RuntimeError(
-                f"Datacard configuration file not found: {config_file!r}"
-            )
-
-        manifest = _load_manifest(self.manifest_path)
-
-        self._validate_nuisance_coverage(manifest)
-
-        region_names: List[str] = [r.name for r in manifest.regions if r.name]
-        self.publish_message(
-            f"Manifest regions: {region_names or ['(none – single combined datacard)']}"
-        )
-
-        try:
-            from create_datacards import DatacardGenerator  # noqa: E402
-        except ImportError as exc:
-            raise RuntimeError(
-                "Cannot import create_datacards from core/python. "
-                "Ensure core/python and core/python/law are on PYTHONPATH (source core/python/law/env.sh)."
-            ) from exc
-
-        out_dir = self._manifest_datacard_dir
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-
-        provenance = {
-            "task": "ManifestDatacardTask",
-            "name": self.name,
-            "manifest_path": self.manifest_path,
-            "dataset_manifest": self.dataset_manifest or None,
-            "manifest_framework_hash": manifest.framework_hash,
-            "manifest_user_repo_hash": manifest.user_repo_hash,
-            "regions": region_names,
-            "n_nuisance_groups": len(manifest.nuisance_groups),
-        }
-
-        generated_configs: List[str] = []
-        with PerformanceRecorder("ManifestDatacardTask") as rec:
-            if region_names:
-                for region in region_names:
-                    region_out_dir = os.path.join(out_dir, region)
-                    Path(region_out_dir).mkdir(parents=True, exist_ok=True)
-                    generated_config = _prepare_manifest_datacard_config(
-                        config_file,
-                        manifest,
-                        self.manifest_path,
-                        target_region=region,
-                        dataset_manifest_path=self.dataset_manifest,
-                    )
-                    generated_configs.append(generated_config)
-                    generator = DatacardGenerator(generated_config)
-                    generator.output_dir = region_out_dir
-                    self.publish_message(
-                        f"Generating datacard for region '{region}' in {region_out_dir}"
-                    )
-                    generator.run()
-            else:
-                generated_config = _prepare_manifest_datacard_config(
-                    config_file,
-                    manifest,
-                    self.manifest_path,
-                    dataset_manifest_path=self.dataset_manifest,
-                )
-                generated_configs.append(generated_config)
-                generator = DatacardGenerator(generated_config)
-                generator.output_dir = out_dir
-                self.publish_message(f"Generating combined datacard in {out_dir}")
-                generator.run()
-
-        for generated_config in generated_configs:
-            try:
-                os.unlink(generated_config)
-            except OSError:
-                pass
-
-        rec.save(os.path.join(out_dir, "manifest_datacard.perf.json"))
-
-        # Write provenance record
-        prov_path = os.path.join(out_dir, "provenance.json")
-        with open(prov_path, "w") as fh:
-            json.dump(provenance, fh, indent=2)
-
-        datacards = list(Path(out_dir).glob("**/*.txt"))
-        if not datacards:
-            raise RuntimeError(
-                f"Datacard generation completed but no .txt files were found "
-                f"under {out_dir!r}.  Check the YAML config."
-            )
-        self.publish_message(
-            f"ManifestDatacardTask: {len(datacards)} datacard(s) written under {out_dir}."
-        )
-
-
-# ===========================================================================
-# Task 4 – ManifestFitTask
-# ===========================================================================
-
-
-class ManifestFitTask(CombineMixin, law.Task):
+class ManifestFitTask(CombineMixin, _ManifestFitOperations, law.Task):
     """Fit task that consumes datacards produced by :class:`ManifestDatacardTask`.
 
-    Supports two fitting backends selectable via ``--fitting-backend``:
+    Supports three fitting backends selectable via ``--fitting-backend``:
 
     ``combine`` (default)
         Invokes the CMS Combine binary for the chosen statistical method
         (``--method``).  Requires Combine to be installed or built locally.
+
+    ``rabbit``
+        Native binned profile-likelihood fits in a dedicated Python runtime,
+        with explicit CPU/GPU selection and multi-GPU bin sharding. Consumes
+        unique-channel cards jointly. ``method`` is Combine-specific.
 
     ``analysis``
         A lightweight, analysis-defined histogram-based fitting backend that
@@ -956,10 +508,22 @@ class ManifestFitTask(CombineMixin, law.Task):
         default="combine",
         description=(
             "Fitting backend to use.  Choices: 'combine' (default, requires "
-            "the CMS Combine binary) or 'analysis' (lightweight histogram-based "
+            "the CMS Combine binary), 'rabbit' (native CPU/CUDA fits), or 'analysis' (lightweight histogram-based "
             "chi2 fit, no external dependencies)."
         ),
     )
+    rabbit_python = luigi.Parameter(default="", description="Dedicated Rabbit CPU/CUDA Python interpreter.")
+    rabbit_device = luigi.ChoiceParameter(default="gpu", choices=("cpu", "gpu"))
+    rabbit_devices = luigi.Parameter(default="", description="Comma-separated GPU indices.")
+    rabbit_n_devices = luigi.IntParameter(default=1)
+    rabbit_mc_stat = luigi.ChoiceParameter(default="card", choices=("card", "none", "lite", "full"))
+    rabbit_likelihood = luigi.ChoiceParameter(default="native", choices=("native", "combine"))
+    rabbit_covariance = luigi.ChoiceParameter(default="auto", choices=("auto", "analytic", "combine"))
+    rabbit_zero_shape_policy = luigi.ChoiceParameter(default="error", choices=("error", "native"))
+    rabbit_hvp_batch = luigi.IntParameter(default=0, description="Hessian-vector directions per batch; zero uses Rabbit's default.")
+    fit_dataset = luigi.ChoiceParameter(default="observed", choices=("asimov", "observed"))
+    strict_coverage = luigi.BoolParameter(default=False)
+    output_dir = luigi.Parameter(default="", description="Override the manifest fit output directory.")
     method = luigi.Parameter(
         default="AsymptoticLimits",
         description=(
@@ -1011,186 +575,40 @@ class ManifestFitTask(CombineMixin, law.Task):
                 self,
                 manifest_path=self.manifest_path,
                 merge_input_dir=self.merge_input_dir,
+                strict_coverage=self.strict_coverage,
+                output_dir="",
             )
         return None
 
     def output(self):
         out_dir = self._manifest_fit_dir
+        if self.fitting_backend.lower() == "rabbit":
+            return law.LocalFileTarget(str(self._rabbit_completion_path))
         return law.LocalDirectoryTarget(out_dir)
-
     @property
     def _manifest_datacard_dir(self) -> str:
         return os.path.join(WORKSPACE, f"manifestDatacard_{self.name}", "datacards")
 
     @property
     def _manifest_fit_dir(self) -> str:
-        return os.path.join(WORKSPACE, f"manifestDatacard_{self.name}", "fit_results")
+        return self.output_dir or os.path.join(WORKSPACE, f"manifestDatacard_{self.name}", "fit_results")
+    @property
+    def _completion_id(self) -> str:
+        return self.task_id
 
-    def _collect_datacards(self) -> List[str]:
-        search_dir = self.datacard_dir if self.datacard_dir else self._manifest_datacard_dir
-        cards = sorted(Path(search_dir).glob("**/*.txt"))
-        if not cards:
-            raise RuntimeError(
-                f"No .txt datacard files found under {search_dir!r}.  "
-                "Run ManifestDatacardTask first or pass --datacard-dir."
-            )
-        return [str(c) for c in cards]
-
-    # ------------------------------------------------------------------
-    # Combine-based fitting
-    # ------------------------------------------------------------------
-
-    def _run_combine_fits(self, datacards: List[str], out_dir: str) -> bool:
-        """Run Combine for each datacard.  Returns True if all succeeded."""
-        combine_bin = _find_combine(self.combine_exe)
-        self.publish_message(f"Using combine binary: {combine_bin}")
-        extra_opts = shlex.split(self.combine_options) if self.combine_options else []
-
-        all_ok = True
-        for datacard in datacards:
-            tag = Path(datacard).stem.replace("datacard_", "")
-            cmd = [combine_bin, "-M", self.method, datacard, "-n", f"_{tag}"] + extra_opts
-            self.publish_message("Running: " + " ".join(cmd))
-            log_path = os.path.join(out_dir, f"combine_{tag}.log")
-            with open(log_path, "w") as log_fh:
-                result = subprocess.run(
-                    cmd, stdout=log_fh, stderr=subprocess.STDOUT, cwd=out_dir
-                )
-            if result.returncode != 0:
-                self.publish_message(
-                    f"ERROR: combine failed for {datacard!r} (exit {result.returncode}).  "
-                    f"See log: {log_path}"
-                )
-                all_ok = False
-            else:
-                self.publish_message(f"Combine finished for {tag}.  Log: {log_path}")
-        return all_ok
-
-    # ------------------------------------------------------------------
-    # Analysis-defined fitting backend
-    # ------------------------------------------------------------------
-
-    def _run_analysis_fits(self, datacards: List[str], out_dir: str) -> bool:
-        """Lightweight histogram-based chi2 fit.
-
-        Reads shape ROOT files referenced in each datacard (if they exist and
-        uproot is available), computes a simple χ² between the data histogram
-        and the sum of background histograms for each bin, and writes results
-        as JSON.  When uproot is unavailable or no shapes file is found, a
-        stub result is written to keep the DAG runnable.
-
-        Supports both histogram-based and function-based entries in the shapes
-        ROOT file: if the ROOT object is a TH1 its bin contents are summed
-        directly; otherwise (e.g. TF1 or TGraph) the integral is used.
-
-        Returns True (always succeeds – individual per-card results capture
-        any per-card errors).
-        """
-        results = []
-        for datacard in datacards:
-            tag = Path(datacard).stem
-            result: Dict[str, object] = {"datacard": datacard, "tag": tag}
-            try:
-                result.update(self._fit_single_card(datacard))
-            except Exception as exc:  # noqa: BLE001
-                result["status"] = "error"
-                result["error"] = str(exc)
-            results.append(result)
-
-        summary_path = os.path.join(out_dir, "analysis_fit_results.json")
-        with open(summary_path, "w") as fh:
-            json.dump(results, fh, indent=2)
-        self.publish_message(f"Analysis fit results written to: {summary_path}")
-        return True
-
-    def _fit_single_card(self, datacard_path: str) -> Dict[str, object]:
-        """Perform a simple chi2 fit for one datacard.
-
-        Parses the datacard for the associated shapes ROOT file, then reads
-        data and background histograms.  Returns a dict with chi2, ndof, and
-        per-process integrals.
-        """
-        shapes_file, data_hist_name, bkg_hist_names = _parse_datacard_shapes(datacard_path)
-        if not shapes_file or not os.path.exists(shapes_file):
-            return {
-                "status": "no_shapes",
-                "message": f"No shapes ROOT file found for {datacard_path!r}.",
-            }
-
-        try:
-            import uproot  # type: ignore
-            return _chi2_fit_uproot(shapes_file, data_hist_name, bkg_hist_names)
-        except ImportError:
-            pass
-
-        return {
-            "status": "stub",
-            "message": (
-                "uproot not available; chi2 fit skipped.  "
-                "Install uproot for histogram-based fits."
-            ),
-        }
-
-    def run(self):
-        out_dir = self._manifest_fit_dir
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-
-        datacards = self._collect_datacards()
-        self.publish_message(
-            f"ManifestFitTask[backend={self.fitting_backend}]: "
-            f"{len(datacards)} datacard(s)."
-        )
-
-        backend = self.fitting_backend.lower()
-        if backend not in ("combine", "analysis"):
-            raise RuntimeError(
-                f"Unknown fitting_backend {self.fitting_backend!r}.  "
-                "Choose 'combine' or 'analysis'."
-            )
-
-        provenance = {
-            "task": "ManifestFitTask",
-            "name": self.name,
-            "fitting_backend": backend,
-            "method": self.method if backend == "combine" else None,
-            "n_datacards": len(datacards),
-            "manifest_path": self.manifest_path or None,
-        }
-
-        with PerformanceRecorder(f"ManifestFitTask[{backend}]") as rec:
-            if backend == "combine":
-                all_ok = self._run_combine_fits(datacards, out_dir)
-            else:
-                all_ok = self._run_analysis_fits(datacards, out_dir)
-
-        rec.save(os.path.join(out_dir, "manifest_fit.perf.json"))
-
-        prov_path = os.path.join(out_dir, "provenance.json")
-        with open(prov_path, "w") as fh:
-            json.dump(provenance, fh, indent=2)
-
-        if not all_ok:
-            raise RuntimeError(
-                f"One or more fits failed.  Check logs in {out_dir!r}."
-            )
-
-        self.publish_message(
-            f"ManifestFitTask complete.  Results in: {out_dir}"
-        )
+    def complete(self):
+        if self.fitting_backend.lower() == "rabbit":
+            return self._verify_rabbit_result()
+        return super().complete()
 
 
-# ===========================================================================
-# Task 5 – AnalyticWorkspaceFitTask
-# ===========================================================================
-
-
-class AnalyticWorkspaceFitTask(law.Task):
+class AnalyticWorkspaceFitTask(_AnalyticWorkspaceOperations, law.Task):
     """Generic analytic PDF workspace fit driven by a YAML config.
 
     Reads per-channel histograms from an analysis ROOT file (produced by an
     ``analysis.cc`` run), builds per-channel RooFit workspaces using fully
     configurable analytic signal + background PDFs, generates CMS Combine
-    datacards with analytic shapes (``rate -1``), and runs
+    datacards with analytic shapes, and runs
     ``combine -M <method>`` for every channel and for a combined simultaneous
     fit across all channels.
 
@@ -1254,7 +672,10 @@ class AnalyticWorkspaceFitTask(law.Task):
     Workspace config YAML format
     ----------------------------
     See ``analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml`` for a
-    fully-annotated example.
+    fully annotated example. The optional ``combine_rates`` mapping supplies
+    reference signal and background yields for each channel. These cards use
+    Combine's common signal-strength POI and a separate free background scale
+    per channel. All configured channels are required when rates are supplied.
 
     Outputs
     -------
@@ -1278,7 +699,7 @@ class AnalyticWorkspaceFitTask(law.Task):
             --workspace-config analyses/CMS_Run2016_DoubleMuon/zpeak_workspace.yaml \\
             --histogram-file output/dimuon_zpeak.root \\
             --method FitDiagnostics \\
-            --combine-options "--saveShapes --floatAllNuisances --saveNormalizations"
+            --combine-options "--saveShapes --saveNormalizations"
 
         # J/ψ → μμ Gaussian+Chebyshev fit — just swap the workspace config
         law run AnalyticWorkspaceFitTask \\
@@ -1326,11 +747,10 @@ class AnalyticWorkspaceFitTask(law.Task):
         ),
     )
     combine_options = luigi.Parameter(
-        default="--saveShapes --floatAllNuisances --saveNormalizations",
+        default="--saveShapes --saveNormalizations",
         description=(
             "Extra command-line options forwarded verbatim to every combine "
-            "invocation.  Default: --saveShapes --floatAllNuisances "
-            "--saveNormalizations."
+            "invocation.  Default: --saveShapes --saveNormalizations."
         ),
     )
     skip_fit = luigi.BoolParameter(
@@ -1341,704 +761,11 @@ class AnalyticWorkspaceFitTask(law.Task):
             "when Combine is not installed.  Default: False."
         ),
     )
+    output_dir = luigi.Parameter(default="", description="Override the analytic workspace output directory.")
 
     @property
     def _out_dir(self) -> str:
-        return os.path.join(WORKSPACE, f"analyticFit_{self.name}")
+        return self.output_dir or os.path.join(WORKSPACE, f"analyticFit_{self.name}")
 
     def output(self):
         return law.LocalDirectoryTarget(self._out_dir)
-
-    def run(self):
-        try:
-            import yaml  # noqa: F401
-        except ImportError as exc:
-            raise RuntimeError(
-                "PyYAML is required by AnalyticWorkspaceFitTask. "
-                "Install it with: pip install pyyaml"
-            ) from exc
-        import yaml
-
-        out_dir = self._out_dir
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-
-        # ---- Load workspace config ----------------------------------------
-        config_path = os.path.abspath(self.workspace_config)
-        if not os.path.exists(config_path):
-            raise RuntimeError(
-                f"Workspace config not found: {config_path!r}"
-            )
-        with open(config_path) as fh:
-            ws_cfg = yaml.safe_load(fh)
-
-        # ---- Open analysis ROOT file --------------------------------------
-        try:
-            import ROOT  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError(
-                "PyROOT (ROOT Python bindings) is required.  "
-                "Source a ROOT environment: source env.sh"
-            ) from exc
-
-        ROOT.gROOT.SetBatch(True)
-        ROOT.RooMsgService.instance().setGlobalKillBelow(ROOT.RooFit.WARNING)
-
-        hist_path = os.path.abspath(self.histogram_file)
-        root_file = ROOT.TFile.Open(hist_path, "READ")
-        if not root_file or root_file.IsZombie():
-            raise RuntimeError(
-                f"Cannot open histogram file: {hist_path!r}"
-            )
-
-        active_channels: List[str] = []
-
-        with PerformanceRecorder("AnalyticWorkspaceFitTask") as rec:
-            # ---- Build workspace + datacard per channel -------------------
-            for ch_cfg in ws_cfg.get("channels", []):
-                channel = ch_cfg["name"]
-                hist_name = ch_cfg["histogram"]
-                label = ch_cfg.get("label", channel)
-
-                hist, hist_obj_path = _find_histogram_in_file(root_file, hist_name)
-                if not hist or hist.IsZombie():
-                    self.publish_message(
-                        f"WARNING: histogram '{hist_name}' not "
-                        f"found in {hist_path!r}; skipping channel '{channel}'."
-                    )
-                    continue
-
-                hist.SetDirectory(0)
-                n_obs = hist.Integral()
-                if n_obs < 10:
-                    self.publish_message(
-                        f"WARNING: channel '{channel}' ({label}) has only "
-                        f"{n_obs:.0f} events; skipping."
-                    )
-                    continue
-
-                self.publish_message(
-                    f"Building workspace for '{channel}' ({label}): "
-                    f"{n_obs:.0f} events"
-                )
-                self.publish_message(f"  Histogram : {hist_obj_path}")
-
-                ws = _build_analytic_workspace(ws_cfg, hist, channel)
-                ws_path = os.path.join(out_dir, f"ws_{channel}.root")
-                ws_file = ROOT.TFile(ws_path, "RECREATE")
-                ws.Write()
-                ws_file.Close()
-
-                card_path = _write_analytic_datacard(channel, n_obs, ws_path, out_dir)
-                active_channels.append(channel)
-                self.publish_message(f"  Workspace : {ws_path}")
-                self.publish_message(f"  Datacard  : {card_path}")
-
-            root_file.Close()
-
-            if not active_channels:
-                raise RuntimeError(
-                    "No channels with sufficient statistics were found.  "
-                    "Check that the histogram file contains the expected "
-                    "keys and that each channel has at least 10 events."
-                )
-
-            # ---- Combined simultaneous-fit datacard ----------------------
-            combined_card = _write_analytic_combined_datacard(
-                active_channels, out_dir
-            )
-            self.publish_message(f"Combined datacard: {combined_card}")
-
-        rec.save(os.path.join(out_dir, "analytic_fit.perf.json"))
-
-        # ---- Provenance --------------------------------------------------
-        prov = {
-            "task": "AnalyticWorkspaceFitTask",
-            "name": self.name,
-            "workspace_config": config_path,
-            "histogram_file": hist_path,
-            "method": self.method,
-            "channels": active_channels,
-            "skip_fit": self.skip_fit,
-        }
-        with open(os.path.join(out_dir, "provenance.json"), "w") as fh:
-            json.dump(prov, fh, indent=2)
-
-        if self.skip_fit:
-            self.publish_message(
-                "--skip-fit set: skipping combine invocations.  "
-                f"Datacards available in {out_dir!r}."
-            )
-            return
-
-        # ---- Locate combine binary ---------------------------------------
-        try:
-            combine_bin = _find_combine(self.combine_exe)
-        except RuntimeError as exc:
-            self.publish_message(
-                f"WARNING: {exc}  "
-                "Skipping fits — datacards and workspaces are available in "
-                f"{out_dir!r}.  Re-run with Combine installed or pass "
-                "--skip-fit to suppress this warning."
-            )
-            return
-
-        extra_opts = shlex.split(self.combine_options) if self.combine_options else []
-        all_ok = True
-
-        all_cards = (
-            [os.path.join(out_dir, f"datacard_{ch}.txt") for ch in active_channels]
-            + [combined_card]
-        )
-        for card_path in all_cards:
-            tag = Path(card_path).stem.replace("datacard_", "")
-            cmd = [combine_bin, "-M", self.method, card_path, "-n", f"_{tag}"] + extra_opts
-            log_path = os.path.join(out_dir, f"combine_{tag}.log")
-            self.publish_message("Running: " + " ".join(cmd))
-            with open(log_path, "w") as log_fh:
-                result = subprocess.run(
-                    cmd, stdout=log_fh, stderr=subprocess.STDOUT, cwd=out_dir
-                )
-            if result.returncode != 0:
-                self.publish_message(
-                    f"ERROR: combine failed for '{tag}' "
-                    f"(exit {result.returncode}).  Log: {log_path}"
-                )
-                all_ok = False
-            else:
-                self.publish_message(
-                    f"Fit complete: '{tag}'.  Log: {log_path}"
-                )
-
-        if not all_ok:
-            raise RuntimeError(
-                f"One or more combine fits failed.  See logs in {out_dir!r}."
-            )
-
-        self.publish_message(
-            f"AnalyticWorkspaceFitTask complete.  Results in: {out_dir}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Helpers for AnalyticWorkspaceFitTask
-# ---------------------------------------------------------------------------
-
-
-def _make_roo_var(
-    par_name: str,
-    par_cfg: dict,
-    channel: str,
-) -> "ROOT.RooRealVar":
-    """Create a RooRealVar from a parameter config dict.
-
-    If ``par_cfg['shared']`` is ``True`` the variable name is ``par_name``
-    (no channel suffix) so that Combine ties it across channels in the
-    combined fit.  Otherwise the name is ``par_name_<channel>``.
-
-    Parameters
-    ----------
-    par_name:
-        Logical parameter name (e.g. ``"mean"``, ``"decay"``).
-    par_cfg:
-        Dict with keys ``init``, optionally ``min``, ``max``, ``fixed``,
-        ``title``, ``shared``.
-    channel:
-        Channel identifier appended as a suffix when ``shared`` is False.
-    """
-    import ROOT  # type: ignore
-
-    shared = par_cfg.get("shared", False)
-    var_name = par_name if shared else f"{par_name}_{channel}"
-    title = par_cfg.get("title", var_name)
-    init = float(par_cfg.get("init", 0.0))
-
-    if par_cfg.get("fixed", False):
-        var = ROOT.RooRealVar(var_name, title, init)
-        var.setConstant(True)
-    else:
-        lo = float(par_cfg.get("min", init - abs(init) - 1.0))
-        hi = float(par_cfg.get("max", init + abs(init) + 1.0))
-        var = ROOT.RooRealVar(var_name, title, init, lo, hi)
-
-    return var
-
-
-def _build_signal_pdf(
-    sig_cfg: dict,
-    obs: "ROOT.RooRealVar",
-    channel: str,
-) -> "tuple[ROOT.RooAbsPdf, list]":
-    """Build the signal PDF and its parameters for one channel.
-
-    Returns ``(pdf, [parameter, ...])`` where all objects are owned by the
-    caller until imported into a RooWorkspace.
-
-    Supported ``sig_cfg['pdf']`` values:
-        ``voigtian``, ``gaussian``, ``crystalball``,
-        ``double_gaussian``, ``breit_wigner``.
-    """
-    import ROOT  # type: ignore
-
-    pdf_type = sig_cfg["pdf"].lower()
-    params = sig_cfg.get("parameters", {})
-
-    if pdf_type == "voigtian":
-        mean  = _make_roo_var("mean",  params.get("mean",  {"init": 91.2}), channel)
-        width = _make_roo_var("width", params.get("width", {"init": 2.495, "fixed": True}), channel)
-        sigma = _make_roo_var("sigma", params.get("sigma", {"init": 2.0, "min": 0.1, "max": 10.0}), channel)
-        pdf = ROOT.RooVoigtian(
-            f"sig_{channel}", f"Voigtian signal ({channel})",
-            obs, mean, width, sigma,
-        )
-        return pdf, [mean, width, sigma]
-
-    if pdf_type == "gaussian":
-        mean  = _make_roo_var("mean",  params.get("mean",  {"init": 0.0}), channel)
-        sigma = _make_roo_var("sigma", params.get("sigma", {"init": 1.0, "min": 0.01, "max": 20.0}), channel)
-        pdf = ROOT.RooGaussian(
-            f"sig_{channel}", f"Gaussian signal ({channel})",
-            obs, mean, sigma,
-        )
-        return pdf, [mean, sigma]
-
-    if pdf_type == "crystalball":
-        mean  = _make_roo_var("mean",  params.get("mean",  {"init": 0.0}), channel)
-        sigma = _make_roo_var("sigma", params.get("sigma", {"init": 1.0, "min": 0.01, "max": 20.0}), channel)
-        alpha = _make_roo_var("alpha", params.get("alpha", {"init": 1.5, "min": 0.1, "max": 10.0}), channel)
-        n_par = _make_roo_var("n",     params.get("n",     {"init": 2.0, "min": 0.1, "max": 100.0}), channel)
-        pdf = ROOT.RooCBShape(
-            f"sig_{channel}", f"Crystal Ball signal ({channel})",
-            obs, mean, sigma, alpha, n_par,
-        )
-        return pdf, [mean, sigma, alpha, n_par]
-
-    if pdf_type == "double_gaussian":
-        mean   = _make_roo_var("mean",   params.get("mean",   {"init": 0.0}), channel)
-        sigma1 = _make_roo_var("sigma1", params.get("sigma1", {"init": 1.0, "min": 0.01, "max": 10.0}), channel)
-        sigma2 = _make_roo_var("sigma2", params.get("sigma2", {"init": 3.0, "min": 0.01, "max": 20.0}), channel)
-        frac   = _make_roo_var("frac",   params.get("frac",   {"init": 0.7, "min": 0.01, "max": 0.99}), channel)
-        g1 = ROOT.RooGaussian(f"sig_g1_{channel}", f"Gaussian 1 ({channel})", obs, mean, sigma1)
-        g2 = ROOT.RooGaussian(f"sig_g2_{channel}", f"Gaussian 2 ({channel})", obs, mean, sigma2)
-        pdf = ROOT.RooAddPdf(
-            f"sig_{channel}", f"Double Gaussian signal ({channel})",
-            ROOT.RooArgList(g1, g2), ROOT.RooArgList(frac),
-        )
-        return pdf, [mean, sigma1, sigma2, frac]
-
-    if pdf_type == "breit_wigner":
-        mean  = _make_roo_var("mean",  params.get("mean",  {"init": 91.2}), channel)
-        width = _make_roo_var("width", params.get("width", {"init": 2.495}), channel)
-        pdf = ROOT.RooBreitWigner(
-            f"sig_{channel}", f"Breit-Wigner signal ({channel})",
-            obs, mean, width,
-        )
-        return pdf, [mean, width]
-
-    raise RuntimeError(
-        f"Unknown signal PDF type {pdf_type!r}.  "
-        "Supported: voigtian, gaussian, crystalball, double_gaussian, breit_wigner."
-    )
-
-
-def _build_background_pdf(
-    bkg_cfg: dict,
-    obs: "ROOT.RooRealVar",
-    channel: str,
-) -> "tuple[ROOT.RooAbsPdf, list]":
-    """Build the background PDF and its parameters for one channel.
-
-    Returns ``(pdf, [parameter, ...])`` where all objects are owned by the
-    caller until imported into a RooWorkspace.
-
-    Supported ``bkg_cfg['pdf']`` values:
-        ``exponential``, ``polynomial``, ``chebychev``, ``bernstein``.
-    """
-    import ROOT  # type: ignore
-
-    pdf_type = bkg_cfg["pdf"].lower()
-    params = bkg_cfg.get("parameters", {})
-
-    if pdf_type == "exponential":
-        decay = _make_roo_var(
-            "decay",
-            params.get("decay", {"init": -0.05, "min": -10.0, "max": -1e-4}),
-            channel,
-        )
-        pdf = ROOT.RooExponential(
-            f"bkg_{channel}", f"Exponential background ({channel})",
-            obs, decay,
-        )
-        return pdf, [decay]
-
-    # Polynomial-family helpers: build a list of coefficient RooRealVars.
-    def _coef_vars(key_prefix: str, n_coefs: int, default_cfg: dict) -> List:
-        cvars = []
-        for i in range(n_coefs):
-            key = f"{key_prefix}{i}"
-            c = _make_roo_var(key, params.get(key, default_cfg), channel)
-            cvars.append(c)
-        return cvars
-
-    if pdf_type == "polynomial":
-        order = int(bkg_cfg.get("order", max(1, len(params))))
-        cvars = _coef_vars("c", order, {"init": 0.0, "min": -100.0, "max": 100.0})
-        coef_list = ROOT.RooArgList()
-        for c in cvars:
-            coef_list.add(c)
-        pdf = ROOT.RooPolynomial(
-            f"bkg_{channel}", f"Polynomial background ({channel})",
-            obs, coef_list,
-        )
-        return pdf, cvars
-
-    if pdf_type in ("chebychev", "chebyshev"):
-        order = int(bkg_cfg.get("order", max(1, len(params))))
-        cvars = _coef_vars("a", order, {"init": 0.0, "min": -10.0, "max": 10.0})
-        coef_list = ROOT.RooArgList()
-        for c in cvars:
-            coef_list.add(c)
-        pdf = ROOT.RooChebychev(
-            f"bkg_{channel}", f"Chebyshev background ({channel})",
-            obs, coef_list,
-        )
-        return pdf, cvars
-
-    if pdf_type == "bernstein":
-        order = int(bkg_cfg.get("order", max(1, len(params))))
-        # Bernstein of degree N has N+1 coefficients (b0 … bN)
-        cvars = _coef_vars("b", order + 1, {"init": 0.5, "min": 0.0, "max": 1.0})
-        coef_list = ROOT.RooArgList()
-        for c in cvars:
-            coef_list.add(c)
-        pdf = ROOT.RooBernstein(
-            f"bkg_{channel}", f"Bernstein background ({channel})",
-            obs, coef_list,
-        )
-        return pdf, cvars
-
-    raise RuntimeError(
-        f"Unknown background PDF type {pdf_type!r}.  "
-        "Supported: exponential, polynomial, chebychev, bernstein."
-    )
-
-
-def _build_analytic_workspace(
-    ws_cfg: dict,
-    hist: "ROOT.TH1",
-    channel: str,
-) -> "ROOT.RooWorkspace":
-    """Build a complete RooWorkspace for one channel from a workspace config.
-
-    The workspace contains:
-
-    - ``mass`` (or the configured observable name): range [lo, hi]
-    - All signal PDF parameters (names depend on ``shared`` flag)
-    - All background PDF parameters
-    - ``sig_<channel>``: signal PDF
-    - ``bkg_<channel>``: background PDF
-    - ``nsig_<channel>``, ``nbkg_<channel>``: freely floating extended yields
-    - ``model_<channel>``: extended ``RooAddPdf(sig, bkg)``
-    - ``data_obs_<channel>``: ``RooDataHist`` from the input histogram
-
-    Parameters
-    ----------
-    ws_cfg:
-        Parsed workspace config dict.
-    hist:
-        TH1 histogram for this channel (already detached from the ROOT file
-        via ``SetDirectory(0)``).
-    channel:
-        Channel identifier string (e.g. ``"0j"``).
-    """
-    import ROOT  # type: ignore
-
-    obs_cfg = ws_cfg["observable"]
-    obs_name = obs_cfg.get("name", "mass")
-    obs_title = obs_cfg.get("title", obs_name)
-    obs_lo = float(obs_cfg["lo"])
-    obs_hi = float(obs_cfg["hi"])
-    n_obs = hist.Integral()
-
-    ws = ROOT.RooWorkspace(f"ws_{channel}")
-    obs = ROOT.RooRealVar(obs_name, obs_title, obs_lo, obs_hi)
-
-    sig_pdf, sig_pars = _build_signal_pdf(ws_cfg["signal"], obs, channel)
-    bkg_pdf, bkg_pars = _build_background_pdf(ws_cfg["background"], obs, channel)
-
-    nsig = ROOT.RooRealVar(f"nsig_{channel}", "Signal yield",
-                           0.85 * n_obs, 0.0, 1.5 * n_obs + 10.0)
-    nbkg = ROOT.RooRealVar(f"nbkg_{channel}", "Background yield",
-                           0.15 * n_obs, 0.0, 0.5 * n_obs + 10.0)
-    model = ROOT.RooAddPdf(
-        f"model_{channel}", "Signal + Background",
-        ROOT.RooArgList(sig_pdf, bkg_pdf),
-        ROOT.RooArgList(nsig, nbkg),
-    )
-    dh = ROOT.RooDataHist(
-        f"data_obs_{channel}", "Observed data",
-        ROOT.RooArgList(obs), hist,
-    )
-
-    _imp = getattr(ws, "import")
-    _imp(obs)
-    for par in sig_pars + bkg_pars:
-        _imp(par)
-    _imp(sig_pdf, ROOT.RooFit.RecycleConflictNodes())
-    _imp(bkg_pdf, ROOT.RooFit.RecycleConflictNodes())
-    _imp(nsig)
-    _imp(nbkg)
-    _imp(model, ROOT.RooFit.RecycleConflictNodes())
-    _imp(dh)
-
-    return ws
-
-
-def _write_analytic_datacard(
-    channel: str,
-    n_obs: float,
-    ws_path: str,
-    out_dir: str,
-) -> str:
-    """Write a CMS Combine datacard that references a RooWorkspace for shapes.
-
-    Uses ``rate -1`` so that Combine reads signal and background yields from
-    the extended PDFs (``nsig_<channel>``, ``nbkg_<channel>``) in the workspace.
-
-    The workspace naming conventions assumed here match those produced by
-    :func:`_build_analytic_workspace`.
-
-    Parameters
-    ----------
-    channel:
-        Channel identifier (e.g. ``"0j"``).
-    n_obs:
-        Observed event count (written to the ``observation`` line).
-    ws_path:
-        Absolute path to the workspace ROOT file.
-    out_dir:
-        Directory where the datacard ``.txt`` file is written.
-
-    Returns
-    -------
-    str
-        Absolute path of the written datacard file.
-    """
-    ws_name = f"ws_{channel}"
-    lines = [
-        f"# CMS Combine datacard — channel: {channel}",
-        f"# Generated by AnalyticWorkspaceFitTask (law/combine_tasks.py)",
-        "imax 1   # 1 channel",
-        "jmax 1   # 1 background process",
-        "kmax 0   # shape parameters float freely in the workspace",
-        "-" * 72,
-        f"shapes sig       {channel}  {ws_path}  {ws_name}:sig_{channel}",
-        f"shapes bkg       {channel}  {ws_path}  {ws_name}:bkg_{channel}",
-        f"shapes data_obs  {channel}  {ws_path}  {ws_name}:data_obs_{channel}",
-        "-" * 72,
-        f"bin          {channel}",
-        f"observation  {n_obs:.0f}",
-        "-" * 72,
-        f"bin          {channel}    {channel}",
-        "process      sig          bkg",
-        "process      0            1",
-        "# rate -1: yields (nsig, nbkg) are read from workspace extended PDFs",
-        "rate         -1           -1",
-        "-" * 72,
-        "# All shape parameters (mean, sigma, decay, …) float in the workspace.",
-        "# Shared parameters (same name across channels) are tied by Combine",
-        "# in the simultaneous combined fit.",
-    ]
-    card_path = os.path.join(out_dir, f"datacard_{channel}.txt")
-    with open(card_path, "w") as fh:
-        fh.write("\n".join(lines) + "\n")
-    return card_path
-
-
-def _write_analytic_combined_datacard(
-    channels: List[str],
-    out_dir: str,
-) -> str:
-    """Write a combined Combine datacard for simultaneous multi-channel fitting.
-
-    All per-channel workspace files must already exist in ``out_dir``.  The
-    combined card references them by absolute path and lists each channel's
-    signal, background, and data shapes.
-
-    Combine automatically correlates parameters with the same name across
-    channels — so shared parameters (e.g. Z mass ``mean``, resolution
-    ``sigma``) are tied while per-channel parameters (e.g. ``decay_0j``) are
-    independent.
-
-    Parameters
-    ----------
-    channels:
-        Ordered list of channel names for which workspaces and individual
-        datacards have already been written.
-    out_dir:
-        Directory where the combined datacard is written.
-
-    Returns
-    -------
-    str
-        Absolute path of the written combined datacard file.
-    """
-    n = len(channels)
-    lines = [
-        "# CMS Combine combined datacard — simultaneous fit across all channels",
-        "# Channels: " + ", ".join(channels),
-        f"# Generated by AnalyticWorkspaceFitTask (law/combine_tasks.py)",
-        f"imax {n}   # {n} channel(s)",
-        "jmax 1    # 1 background process",
-        "kmax 0    # shape parameters float freely in each workspace",
-        "-" * 72,
-    ]
-    for ch in channels:
-        ws_path = os.path.join(out_dir, f"ws_{ch}.root")
-        lines += [
-            f"shapes sig       {ch}  {ws_path}  ws_{ch}:sig_{ch}",
-            f"shapes bkg       {ch}  {ws_path}  ws_{ch}:bkg_{ch}",
-            f"shapes data_obs  {ch}  {ws_path}  ws_{ch}:data_obs_{ch}",
-        ]
-    lines += [
-        "-" * 72,
-        "bin          " + "    ".join(channels),
-        "observation  " + "    ".join(["-1"] * n),
-        "-" * 72,
-        "bin     " + "    ".join(f"{c}    {c}" for c in channels),
-        "process " + "    ".join("sig      bkg" for _ in channels),
-        "process " + "    ".join("0        1"   for _ in channels),
-        "# rate -1: yields read from workspace extended PDFs per channel",
-        "rate    " + "    ".join("-1       -1"  for _ in channels),
-        "-" * 72,
-        "# Parameters with the same name across channels are tied by Combine.",
-        "# Use 'shared: true' in the workspace config for universal parameters",
-        "# (e.g. resonance mass, detector resolution) and 'shared: false' for",
-        "# per-channel parameters (e.g. background slope).",
-    ]
-    card_path = os.path.join(out_dir, "datacard_combined.txt")
-    with open(card_path, "w") as fh:
-        fh.write("\n".join(lines) + "\n")
-    return card_path
-
-
-# ---------------------------------------------------------------------------
-# Helpers for analysis-defined fitting (ManifestFitTask)
-# ---------------------------------------------------------------------------
-
-
-def _parse_datacard_shapes(datacard_path: str):
-    """Extract the shapes ROOT file, data histogram name, and background names
-    from a CMS Combine datacard text file.
-
-    Returns a tuple ``(shapes_file, data_hist_name, bkg_hist_names)`` where
-    each element may be ``None`` / empty when not found.
-    """
-    shapes_file: Optional[str] = None
-    data_hist: Optional[str] = None
-    bkg_hists: List[str] = []
-
-    datacard_dir = os.path.dirname(os.path.abspath(datacard_path))
-    try:
-        with open(datacard_path) as fh:
-            lines = fh.readlines()
-    except OSError:
-        return None, None, []
-
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split()
-        if parts[0].lower() == "shapes" and len(parts) >= 4:
-            process_name = parts[1]
-            root_file = parts[3]
-            if not os.path.isabs(root_file):
-                root_file = os.path.join(datacard_dir, root_file)
-            if not shapes_file:
-                shapes_file = root_file
-            hist_pattern = parts[4] if len(parts) > 4 else ""
-            hist_name = hist_pattern.replace("$PROCESS", process_name).replace("$SYSTEMATIC", "nominal")
-            if process_name.lower() == "data_obs":
-                data_hist = hist_name or process_name
-            elif process_name != "*":
-                bkg_hists.append(hist_name or process_name)
-
-    return shapes_file, data_hist, bkg_hists
-
-
-def _chi2_fit_uproot(
-    shapes_file: str,
-    data_hist_name: Optional[str],
-    bkg_hist_names: List[str],
-) -> Dict[str, object]:
-    """Compute chi2 between data and sum-of-backgrounds using uproot.
-
-    Supports histogram-based ROOT objects (TH1x variants).  For non-histogram
-    objects (e.g. TF1, TGraph) the integral of the object is used as the
-    bin-by-bin expectation.
-
-    Parameters
-    ----------
-    shapes_file:
-        Path to the ROOT shapes file.
-    data_hist_name:
-        Name of the data histogram inside the file.
-    bkg_hist_names:
-        Names of background (signal + background) histograms.
-
-    Returns
-    -------
-    dict
-        Keys: ``status``, ``chi2``, ``ndof``, ``process_integrals``.
-    """
-    import uproot  # type: ignore
-    import math
-
-    with uproot.open(shapes_file) as f:
-        keys = [k.split(";")[0] for k in f.keys()]
-
-        def _integral(name: str) -> Optional[float]:
-            """Return the total integral of a ROOT object, if readable."""
-            if name not in keys:
-                return None
-            obj = f[name]
-            # TH1-like objects expose .values()
-            if hasattr(obj, "values"):
-                vals = obj.values()
-                try:
-                    return float(sum(vals))
-                except Exception:  # noqa: BLE001
-                    return None
-            return None
-
-        process_integrals: Dict[str, Optional[float]] = {}
-        bkg_total = 0.0
-        for name in bkg_hist_names:
-            integral = _integral(name)
-            process_integrals[name] = integral
-            if integral is not None:
-                bkg_total += integral
-
-        data_integral = _integral(data_hist_name) if data_hist_name else None
-        process_integrals["data_obs"] = data_integral
-
-        if data_integral is None or bkg_total == 0.0:
-            return {
-                "status": "incomplete",
-                "message": "Data or background histogram missing/empty.",
-                "process_integrals": process_integrals,
-            }
-
-        # Simple one-bin chi2: chi2 = (data - bkg)^2 / bkg
-        chi2 = (data_integral - bkg_total) ** 2 / bkg_total
-        ndof = max(1, len([v for v in process_integrals.values() if v is not None]) - 1)
-
-        return {
-            "status": "ok",
-            "chi2": chi2,
-            "ndof": ndof,
-            "chi2_per_ndof": chi2 / ndof if ndof else None,
-            "data_integral": data_integral,
-            "bkg_total": bkg_total,
-            "process_integrals": process_integrals,
-        }

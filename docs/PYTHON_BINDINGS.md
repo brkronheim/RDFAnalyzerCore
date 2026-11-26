@@ -1,5 +1,10 @@
 # Python Bindings for RDFAnalyzerCore
 
+For new analyses, start with the [typed Python authoring interface](PYTHON_AUTHORING.md).
+The native bindings documented here remain the plugin/expert API. Python
+definitions now infer dependencies and propagate paired and explicit variations
+through the shared C++ planner; duplicate output names raise `ValueError`.
+
 This document describes the Python bindings for the RDFAnalyzerCore framework, allowing you to use the high-performance C++ framework from Python with the convenience and prototyping speed of Python.
 
 ## Overview
@@ -31,12 +36,12 @@ analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
 analyzer.Filter("pt_cut", "pt_gev > 20.0", ["pt_gev"])
 ```
 
-**Deprecated Aliases**: `DefineJIT`, `FilterJIT`, `DefineFromVector` remain available for backward compatibility but prefer using `Define` and `Filter` directly.
+Use `Define` and `Filter` for expression strings and `DefineVector` for a contiguous array. The corresponding compatibility names are `DefineJIT`, `FilterJIT`, and `DefineFromVector`.
 
 ### Plugin and framework control
 
 ```python
-analyzer.setConfig("onnxConfig", "cfg/onnx_models.txt")
+analyzer.setConfig("onnxConfig", "cfg/onnx_models.yaml")
 analyzer.AddPlugin("onnx", "OnnxManager")
 analyzer.applyAllOnnxModels("onnx")
 ```
@@ -105,7 +110,7 @@ The most straightforward approach - write C++ expressions as strings that ROOT w
 import rdfanalyzer
 
 # Create analyzer from config file
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Define variables using C++ expressions
 analyzer.DefineJIT("pt_gev", "pt / 1000.0", ["pt"])
@@ -121,7 +126,7 @@ analyzer.DefineJIT("n_high_pt_jets", "Sum(high_pt_jets)", ["high_pt_jets"])
 analyzer.FilterJIT("pt_cut", "pt_gev > 20.0", ["pt_gev"])
 analyzer.FilterJIT("jet_selection", "n_high_pt_jets >= 4", ["n_high_pt_jets"])
 
-# Save results
+# Save results through the Python wrapper (calls C++ Analyzer::run())
 analyzer.save()
 ```
 
@@ -166,7 +171,7 @@ convert_ptr = ctypes.cast(convert_to_gev.address, ctypes.c_void_p).value
 delta_r_ptr = ctypes.cast(compute_delta_r.address, ctypes.c_void_p).value
 
 # Create analyzer
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Use function pointers
 analyzer.DefineFromPointer("pt_gev", convert_ptr, 
@@ -203,7 +208,7 @@ Pass numpy arrays to the analyzer via pointer and size.
 - Easy integration with existing numpy workflows
 - Useful for pre-computed weights or corrections
 - Direct memory access (no copying)
-- Support for any numeric dtype
+- Support for the element types listed below
 
 **Example:**
 
@@ -216,7 +221,7 @@ event_weights = np.array([1.0, 1.2, 0.8, 1.1, 0.9], dtype=np.float32)
 scale_factors = np.array([1.05, 1.05, 1.05, 1.05, 1.05], dtype=np.float64)
 
 # Create analyzer
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Define from arrays
 analyzer.DefineFromVector("event_weight",
@@ -229,8 +234,8 @@ analyzer.DefineFromVector("scale_factor",
                           len(scale_factors),
                           "double")
 
-# Use in expressions
-analyzer.DefineJIT("weighted_pt", "pt * event_weight", 
+# For scalar pt, this produces one weighted pt per table element.
+analyzer.DefineJIT("weighted_pt", "pt * event_weight",
                    ["pt", "event_weight"])
 
 analyzer.save()
@@ -239,7 +244,7 @@ analyzer.save()
 **Important notes:**
 - Arrays must remain in memory during analysis (don't let them go out of scope)
 - The analyzer stores pointers, not copies
-- Ensure array size matches the number of events
+- Each event receives the whole vector. Its length is the number of array elements.
 
 **Supported dtypes:**
 
@@ -261,7 +266,7 @@ The Python bindings expose full plugin lifecycle and action APIs, allowing you t
 ```python
 import rdfanalyzer
 
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Add individual plugins
 analyzer.AddPlugin("onnx", "OnnxManager")
@@ -276,7 +281,7 @@ analyzer.AddDefaultPlugins()
 
 ```python
 # Apply all ONNX models from config
-analyzer.setConfig("onnxConfig", "cfg/onnx_models.txt")
+analyzer.setConfig("onnxConfig", "cfg/onnx_models.yaml")
 analyzer.AddPlugin("onnx", "OnnxManager")
 analyzer.SetupPlugin("onnx")
 analyzer.applyAllOnnxModels("onnx")
@@ -293,7 +298,7 @@ features = analyzer.getOnnxModelFeatures("onnx", "model_name")
 
 ```python
 # Apply all BDT models from config
-analyzer.setConfig("bdtConfig", "cfg/bdts.txt")
+analyzer.setConfig("bdtConfig", "cfg/bdts.yaml")
 analyzer.AddPlugin("bdt", "BDTManager")
 analyzer.SetupPlugin("bdt")
 analyzer.applyAllBDTs("bdt")
@@ -310,7 +315,7 @@ features = analyzer.getBDTFeatures("bdt", "bdt_name")
 
 ```python
 # Apply corrections
-analyzer.setConfig("correctionConfig", "cfg/corrections.txt")
+analyzer.setConfig("correctionConfig", "cfg/corrections.yaml")
 analyzer.AddPlugin("correction", "CorrectionManager")
 analyzer.SetupPlugin("correction")
 
@@ -325,7 +330,7 @@ features = analyzer.getCorrectionFeatures("correction", "muon_sf")
 
 ```python
 # Setup trigger management
-analyzer.setConfig("triggerConfig", "cfg/triggers.txt")
+analyzer.setConfig("triggerConfig", "cfg/triggers.yaml")
 analyzer.AddPlugin("trigger", "TriggerManager")
 analyzer.SetupPlugin("trigger")
 
@@ -340,21 +345,16 @@ vetoes = analyzer.getVetoes("trigger", "group_name")
 
 ### SOFIE Manager
 
-```python
-# Apply SOFIE models
-analyzer.setConfig("sofieConfig", "cfg/sofie_models.txt")
-analyzer.AddPlugin("sofie", "SofieManager")
-analyzer.SetupPlugin("sofie")
+Generate the header separately in Python with the standalone `sofie`
+package. Compile and register the inference callable in C++ as shown in the
+[SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md).
 
-# Apply all SOFIE models
-analyzer.applyAllSofieModels("sofie")
-
-# Apply specific model
-analyzer.applySofieModel("sofie", "model_name")
-
-# Get model names
-model_names = analyzer.getSofieModelNames("sofie")
-```
+The bindings expose `applySofieModel(role, model_name)`,
+`applyAllSofieModels(role)` and `getSofieModelNames(role)`. The apply methods
+require a manager role with the C++ callables already registered.
+`AddPlugin` and `SetupPlugin` can create the manager and load metadata, but
+the bindings expose no SOFIE callable registration method. For Python-only
+analysis authoring with runtime model loading, see [ONNX](ONNX_IMPLEMENTATION.md).
 
 ### Histogram Manager
 
@@ -371,70 +371,45 @@ region_names = analyzer.bookNDHistograms("hist", [h], [s], "nominal")
 
 ### PlottingUtility
 
-The `PlottingUtility` class provides Python bindings for creating ROOT stack plots directly from Python with the full C++ plotting functionality.
+`PlottingUtility` renders stacks, overlays, response heatmaps, and configurable
+ratio/pull/signal panels in C++. Use a persistent session for repeated plots:
 
 ```python
-import rdfanalyzer
+import rdfanalyzer as rdf
 
-# Configure a process (sample)
-proc = rdfanalyzer.PlotProcessConfig()
-proc.directory = "signal"
-proc.histogramName = "pt"
-proc.legendLabel = "Signal MC"
-proc.color = 2
-proc.normalizationHistogram = "counter_weightSum_signal"
-
-# Create plot request
-req = rdfanalyzer.PlotRequest()
-req.metaFile = "meta.root"
-req.outputFile = "pt.pdf"
-req.xAxisTitle = "p_{T} [GeV]"
-req.yAxisTitle = "Events"
-req.logY = False
-req.drawRatio = True
-req.processes = [proc]
-
-# Generate plot
-result = rdfanalyzer.PlottingUtility().makeStackPlot(req)
-assert result.success, result.message
-```
-
-**Features**:
-- Stack plots with data/MC ratio panels
-- Log-y scale support via `logY` parameter
-- Automatic normalization using `normalizationHistogram`
-- PCA-based systematic envelopes
-- Parallel batch plotting support
-
-**Configuration Classes**:
-
-- `PlotProcessConfig`: Configures a single process (sample) in the plot
-  - `directory`: Directory in ROOT file containing histograms
-  - `histogramName`: Name of histogram to plot
-  - `legendLabel`: Label for legend entry
-  - `color`: ROOT color code
-  - `normalizationHistogram`: Histogram name for normalization (optional)
-
-- `PlotRequest`: Complete plot configuration
-  - `metaFile`: Input ROOT file with histograms
-  - `outputFile`: Output plot file (PDF, PNG, etc.)
-  - `xAxisTitle`, `yAxisTitle`: Axis labels
-  - `logY`: Logarithmic y-axis (default: False)
-  - `drawRatio`: Draw data/MC ratio panel (default: False)
-  - `processes`: List of `PlotProcessConfig` objects
-
-**Batch Plotting**:
-
-```python
-# Generate multiple plots in parallel
-requests = [req1, req2, req3, ...]
-for req in requests:
-    result = rdfanalyzer.PlottingUtility().makeStackPlot(req)
+requests = rdf.PlottingUtility.readRequests("plots.yaml")
+options = rdf.PlotBatchOptions()
+options.workers = 4
+session = rdf.PlotSession(options)
+results = session.renderBatch(requests)
+for result in results:
     if not result.success:
-        print(f"Failed: {result.message}")
+        raise RuntimeError(result.message)
+print(session.stats().drawableObjects)
 ```
 
-See [Production Manager Guide](PRODUCTION_MANAGER.md) for integration with Law workflow tasks.
+CMS headers and inside legends are the defaults. Select `PlotExperiment.ATLAS`,
+`LHCb`, `ALICE`, or `Custom` and set `experimentExtra` for other header styles.
+`style.legendInside = False` selects an outside legend. Fonts, labels, panel
+bounds, and input-array/file options use the same API as C++ and the compiled CLI.
+
+`makeStackPlot(request)` and `makeStackPlots(requests, parallel=False)` remain
+available. The batch wrapper reuses one session; `parallel=True` enables bounded
+input preparation while graphics remain serialized. Python's GIL is released
+around rendering. Sessions must be called on their constructing thread.
+
+### Sparse histogram I/O
+
+`rdf.read_sparse_bins(file, key)` reads allocated `THnSparse` entries into
+NumPy coordinate, content, and sumw2 arrays. `rdf.project_sparse_bins(...)`
+instead applies per-axis bin maps and accumulates directly into a dense output
+array; map entries of `-1` exclude bins. The projection runs in C++ with the
+GIL released and can omit sumw2 reads when only contents are needed. These
+helpers are intended for bulk histogram adapters that need to avoid a Python
+call and tuple allocation for every sparse bin.
+
+See [Physics Plotting](PLOTTING.md) for configuration examples, systematic and
+normalization policies, allocation/resource limits, and LAW integration.
 
 ## API Reference
 
@@ -564,12 +539,12 @@ class Analyzer:
 
 Python bindings use the same configuration files as the C++ framework:
 
-```
-# config.txt
-fileList=data1.root,data2.root
-saveFile=output.root
-threads=-1
-saveConfig=output_branches.txt
+```yaml
+# config.yaml
+fileList: data1.root,data2.root
+saveFile: output.root
+threads: -1
+saveConfig: output_branches.yaml
 ```
 
 See the [Configuration Reference](CONFIG_REFERENCE.md) for complete documentation.
@@ -577,17 +552,25 @@ See the [Configuration Reference](CONFIG_REFERENCE.md) for complete documentatio
 ## Performance Considerations
 
 ### String-based expressions (DefineJIT)
+
 - **Compilation overhead**: First call may be slow (~seconds) while ROOT compiles
 - **Runtime performance**: Good C++ performance after compilation
 - **Caching**: ROOT caches compiled functions
 - **Best for**: Complex expressions, vector operations, one-time definitions
 
 ### Numba function pointers (DefineFromPointer)
-- **Compilation overhead**: Numba compiles on first function call (milliseconds)
-- **Runtime performance**: Compiled to native code
+
+- **Compilation overhead**: Depends on the kernel, signature and runtime;
+  `DefineFromPointer` expects an already valid function pointer. Measure Numba
+  registration and deferred ROOT JIT separately from event processing.
+- **Runtime performance**: A native function pointer executes compiled code.
+  The higher-level `Analysis.define_numba` uses ROOT's bridge, whose selected
+  wrapper and vector-return allocation/copy costs need separate inspection;
+  see [bridge diagnostics](NUMBA_BRIDGES.md).
 - **Best for**: Custom algorithms, physics calculations, reusable functions
 
 ### Numpy arrays (DefineFromVector)
+
 - **Memory overhead**: Minimal (uses pointers, no deep copying)
 - **Runtime performance**: Direct memory access
 - **Best for**: Pre-computed weights, lookup tables, corrections
@@ -606,11 +589,24 @@ Complete examples are available in the `examples/` directory:
 
 2. **Plugin access**: Plugin managers ARE exposed to Python with full lifecycle and action APIs. See "Plugin Management" section for details on using `AddPlugin()`, `applyAllOnnxModels()`, `applyAllBDTs()`, `applyCorrection()`, and other plugin methods.
 
-3. **Memory management**: When using DefineFromVector, ensure arrays remain in memory during analysis. The analyzer stores pointers, not copies.
+3. **Memory management**: `DefineFromVector` captures a borrowed address in the lazy RDataFrame graph; it does not copy or retain the NumPy owner. Keep the array alive, unchanged, correctly typed, contiguous, and aligned until `save()` returns. `DefineFromPointer` has the same lifetime rule for the native function and any code library that owns it. Null addresses and signature/column arity mismatches are rejected before graph construction, but arbitrary pointer validity and dataframe type compatibility cannot be checked safely by this API.
 
 4. **ROOT environment**: Requires proper ROOT environment setup. Source `env.sh` or `thisroot.sh` before running Python scripts.
 
-5. **Systematic variations**: Currently handled automatically for DefineJIT. Not yet implemented for DefineFromPointer or DefineFromVector.
+5. **Systematic variations**: Expressions and native function pointers propagate
+paired and explicitly registered input variations. Constant pointer-vector inputs
+have no event-column dependencies and therefore do not create variations by
+themselves. Use `define_nominal` for intentionally terminal definitions.
+
+6. **Python threads**: `save()` and its `run()` alias are synchronous. The current
+binding source releases the GIL around `Analyzer::run()` and reacquires it for
+completion/error bookkeeping, so other Python threads can progress. Wrapper
+graph-construction and guarded inspection methods reject access during execution;
+this does not make arbitrary sharing of the analysis thread-safe. Older built
+modules may differ from current source. Numba registration can also select a
+ctypes callback fallback, which can reacquire the GIL; use the optional
+[bridge diagnostics](NUMBA_BRIDGES.md) to inspect registration rather than infer
+callback behavior from the Python authoring syntax.
 
 ## Troubleshooting
 
@@ -652,7 +648,7 @@ def func(x):
 ### Segmentation faults
 
 Common causes:
-- Numpy array went out of scope (use DefineFromVector)
+- NumPy array went out of scope before the lazy graph finished reading it
 - Invalid function pointer (check numba function signature)
 - Incorrect C++ signature in DefineFromPointer
 

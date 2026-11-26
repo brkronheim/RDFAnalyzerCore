@@ -5,20 +5,30 @@
 #include <api/IPluggableManager.h>
 #include <DataManager.h>
 #include <NDHistogramManager.h>
+#include <RDFColumnPacker.h>
 #include <RegionManager.h>
 #include <CounterService.h>
 #include <TFile.h>
+#include <TList.h>
 #include <TH1F.h>
 #include <THnSparse.h>
+#include <TObjString.h>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
+#include <functional>
 #include <util.h>
 #include <plots.h>
 #include <string>
 #include <vector>
 #include <sstream>
+#include <iomanip>
+#include <array>
+#include <limits>
 
 /**
  * @brief Construct a new NDHistogramManager object
@@ -29,40 +39,588 @@ void NDHistogramManager::bindToRegionManager(RegionManager *rm) {
   regionManager_m = rm;
 }
 
+struct NDHistogramColumnCacheState {
+  std::unordered_set<std::string> names;
+  std::unordered_map<std::string, std::string> types;
+  bool initialized = false;
+};
+
 struct ColumnCache {
   ROOT::RDF::RNode& df;
-  std::vector<std::string> names;
-  std::unordered_map<std::string, std::string> types;
+  NDHistogramColumnCacheState local;
+  NDHistogramColumnCacheState& state;
 
-  explicit ColumnCache(ROOT::RDF::RNode& node)
-      : df(node), names(node.GetColumnNames()) {}
-
-  bool Has(const std::string& name) const {
-    return std::find(names.begin(), names.end(), name) != names.end();
+  explicit ColumnCache(ROOT::RDF::RNode& node,
+                       NDHistogramColumnCacheState* shared = nullptr)
+      : df(node), state(shared ? *shared : local) {
+    if (!state.initialized) {
+      const auto columnNames = df.GetColumnNames();
+      state.names.insert(columnNames.begin(), columnNames.end());
+      state.initialized = true;
+    }
   }
 
-  void Refresh() {
-    names = df.GetColumnNames();
-    types.clear();
+  bool Has(const std::string& name) const {
+    return state.names.find(name) != state.names.end();
+  }
+
+  // Booking only appends Defines. Keep existing types and register the known
+  // new output instead of sorting/copying the entire graph after every Define.
+  void Added(const std::string& name) {
+    state.names.insert(name);
   }
 
   std::string GetType(const std::string& name) {
-    auto it = types.find(name);
-    if (it != types.end()) {
+    auto it = state.types.find(name);
+    if (it != state.types.end()) {
       return it->second;
     }
     auto type = df.GetColumnType(name);
-    types.emplace(name, type);
+    state.types.emplace(name, type);
     return type;
   }
 };
 
+namespace {
+
+std::string jsonEscape(const std::string &value) {
+  std::ostringstream escaped;
+  for (const unsigned char c : value) {
+    switch (c) {
+    case '"': escaped << "\\\""; break;
+    case '\\': escaped << "\\\\"; break;
+    case '\b': escaped << "\\b"; break;
+    case '\f': escaped << "\\f"; break;
+    case '\n': escaped << "\\n"; break;
+    case '\r': escaped << "\\r"; break;
+    case '\t': escaped << "\\t"; break;
+    default:
+      if (c < 0x20) {
+        escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                << static_cast<int>(c) << std::dec;
+      } else {
+        escaped << static_cast<char>(c);
+      }
+    }
+  }
+  return escaped.str();
+}
+
+std::vector<Double_t> getAxisEdges(const TAxis &axis) {
+  std::vector<Double_t> edges(static_cast<std::size_t>(axis.GetNbins()) + 1);
+  for (Int_t bin = 1; bin <= axis.GetNbins() + 1; ++bin) {
+    edges[static_cast<std::size_t>(bin - 1)] = axis.GetBinLowEdge(bin);
+  }
+  return edges;
+}
+
+void appendJsonStringArray(std::ostringstream &json,
+                           const std::vector<std::string> &values) {
+  json << '[';
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i != 0) json << ',';
+    json << '"' << jsonEscape(values[i]) << '"';
+  }
+  json << ']';
+}
+
+void appendJsonDoubleArray(std::ostringstream &json,
+                           const std::vector<Double_t> &values) {
+  json << '[';
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i != 0) json << ',';
+    json << std::setprecision(17) << values[i];
+  }
+  json << ']';
+}
+
+enum class NDHistogramTypeToken {
+  Bool,
+  Float,
+  Double,
+  Int,
+  UInt,
+  Short,
+  UShort,
+  Char,
+  UChar,
+  Long64,
+  ULong64,
+  Unsupported,
+};
+
+std::string removeNDHistogramTypeWhitespace(std::string value) {
+  value.erase(std::remove_if(value.begin(), value.end(),
+                             [](unsigned char c) { return std::isspace(c) != 0; }),
+              value.end());
+  return value;
+}
+
+bool isNDHistogramRVecType(const std::string &columnType) {
+  return columnType.find("RVec<") != std::string::npos;
+}
+
+std::string extractNDHistogramRVecElementType(const std::string &columnType) {
+  const auto rvecPos = columnType.find("RVec<");
+  if (rvecPos == std::string::npos) {
+    return columnType;
+  }
+
+  const auto start = columnType.find('<', rvecPos);
+  const auto end = columnType.rfind('>');
+  if (start == std::string::npos || end == std::string::npos || end <= start + 1) {
+    return columnType;
+  }
+  return columnType.substr(start + 1, end - start - 1);
+}
+
+NDHistogramTypeToken tokenizeNDHistogramType(const std::string &typeName) {
+  const auto normalized = removeNDHistogramTypeWhitespace(typeName);
+
+  if (normalized == "Bool_t" || normalized == "bool") {
+    return NDHistogramTypeToken::Bool;
+  }
+  if (normalized == "Float_t" || normalized == "float") {
+    return NDHistogramTypeToken::Float;
+  }
+  if (normalized == "Double_t" || normalized == "double") {
+    return NDHistogramTypeToken::Double;
+  }
+  if (normalized == "Int_t" || normalized == "int") {
+    return NDHistogramTypeToken::Int;
+  }
+  if (normalized == "UInt_t" || normalized == "unsignedint") {
+    return NDHistogramTypeToken::UInt;
+  }
+  if (normalized == "Short_t" || normalized == "short") {
+    return NDHistogramTypeToken::Short;
+  }
+  if (normalized == "UShort_t" || normalized == "unsignedshort") {
+    return NDHistogramTypeToken::UShort;
+  }
+  if (normalized == "Char_t" || normalized == "char") {
+    return NDHistogramTypeToken::Char;
+  }
+  if (normalized == "UChar_t" || normalized == "unsignedchar") {
+    return NDHistogramTypeToken::UChar;
+  }
+  if (normalized == "Long64_t" || normalized == "longlong") {
+    return NDHistogramTypeToken::Long64;
+  }
+  if (normalized == "ULong64_t" || normalized == "unsignedlonglong") {
+    return NDHistogramTypeToken::ULong64;
+  }
+
+  return NDHistogramTypeToken::Unsupported;
+}
+
+std::string buildScalarBroadcastExpression(const std::string &referenceColumn,
+                                           const std::string &scalarColumn) {
+  return "ROOT::VecOps::RVec<Float_t>(" + referenceColumn +
+         ".size(), static_cast<Float_t>(" + scalarColumn + "))";
+}
+
+std::string buildRegionMembershipBoolExpression(
+    const std::vector<std::string> &filterChain) {
+  std::string expr = filterChain[0];
+  for (std::size_t index = 1; index < filterChain.size(); ++index) {
+    expr += " && " + filterChain[index];
+  }
+  return "static_cast<bool>(" + expr + ")";
+}
+
+template <typename ReferenceT, typename ScalarT>
+ROOT::VecOps::RVec<Float_t> broadcastScalarToReference(
+    const ROOT::VecOps::RVec<ReferenceT> &reference, ScalarT value) {
+  return ROOT::VecOps::RVec<Float_t>(reference.size(),
+                                     static_cast<Float_t>(value));
+}
+
+template <typename ReferenceT, typename ScalarT>
+ROOT::RDF::RNode defineBroadcastFloatVector(ROOT::RDF::RNode df,
+                                            const std::string &name,
+                                            const std::string &referenceColumn,
+                                            const std::string &scalarColumn) {
+  return df.Define(
+      name,
+      [](const ROOT::VecOps::RVec<ReferenceT> &reference,
+         ScalarT value) -> ROOT::VecOps::RVec<Float_t> {
+        return broadcastScalarToReference(reference, value);
+      },
+      {referenceColumn, scalarColumn});
+}
+
+template <typename ScalarT>
+ROOT::RDF::RNode defineSystematicBroadcastFloatVector(
+    ROOT::RDF::RNode df, const std::string &name,
+    const std::string &referenceColumn, const std::string &scalarColumn,
+    std::size_t systematicSlots) {
+  return df.Define(
+      name,
+      [systematicSlots](const ROOT::VecOps::RVec<Float_t> &reference,
+                        ScalarT value) -> ROOT::VecOps::RVec<Float_t> {
+        if (systematicSlots == 0 || reference.size() % systematicSlots != 0) {
+          throw std::runtime_error(
+              "NDHistogramManager: base fill vector is not divisible by its "
+              "systematic slot count");
+        }
+        return ROOT::VecOps::RVec<Float_t>(
+            reference.size() / systematicSlots, static_cast<Float_t>(value));
+      },
+      {referenceColumn, scalarColumn});
+}
+
+ROOT::RDF::RNode dispatchSystematicBroadcastFloatVector(
+    ROOT::RDF::RNode df, const std::string &name,
+    const std::string &referenceColumn, const std::string &scalarColumn,
+    NDHistogramTypeToken scalarType, std::size_t systematicSlots) {
+  switch (scalarType) {
+  case NDHistogramTypeToken::Bool:
+    return defineSystematicBroadcastFloatVector<Bool_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Float:
+    return defineSystematicBroadcastFloatVector<Float_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Double:
+    return defineSystematicBroadcastFloatVector<Double_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Int:
+    return defineSystematicBroadcastFloatVector<Int_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::UInt:
+    return defineSystematicBroadcastFloatVector<UInt_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Short:
+    return defineSystematicBroadcastFloatVector<Short_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::UShort:
+    return defineSystematicBroadcastFloatVector<UShort_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Char:
+    return defineSystematicBroadcastFloatVector<Char_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::UChar:
+    return defineSystematicBroadcastFloatVector<UChar_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Long64:
+    return defineSystematicBroadcastFloatVector<Long64_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::ULong64:
+    return defineSystematicBroadcastFloatVector<ULong64_t>(
+        df, name, referenceColumn, scalarColumn, systematicSlots);
+  case NDHistogramTypeToken::Unsupported:
+    throw std::runtime_error(
+        "NDHistogramManager: unsupported scalar type in systematic broadcast path");
+  }
+
+  throw std::runtime_error(
+      "NDHistogramManager: unreachable systematic broadcast dispatch");
+}
+
+template <typename ReferenceT>
+ROOT::RDF::RNode dispatchBroadcastFloatVectorByScalar(
+    ROOT::RDF::RNode df, const std::string &name,
+    const std::string &referenceColumn, const std::string &scalarColumn,
+    NDHistogramTypeToken scalarType) {
+  switch (scalarType) {
+  case NDHistogramTypeToken::Bool:
+    return defineBroadcastFloatVector<ReferenceT, Bool_t>(df, name, referenceColumn,
+                                                          scalarColumn);
+  case NDHistogramTypeToken::Float:
+    return defineBroadcastFloatVector<ReferenceT, Float_t>(df, name, referenceColumn,
+                                                           scalarColumn);
+  case NDHistogramTypeToken::Double:
+    return defineBroadcastFloatVector<ReferenceT, Double_t>(df, name, referenceColumn,
+                                                            scalarColumn);
+  case NDHistogramTypeToken::Int:
+    return defineBroadcastFloatVector<ReferenceT, Int_t>(df, name, referenceColumn,
+                                                         scalarColumn);
+  case NDHistogramTypeToken::UInt:
+    return defineBroadcastFloatVector<ReferenceT, UInt_t>(df, name, referenceColumn,
+                                                          scalarColumn);
+  case NDHistogramTypeToken::Short:
+    return defineBroadcastFloatVector<ReferenceT, Short_t>(df, name, referenceColumn,
+                                                           scalarColumn);
+  case NDHistogramTypeToken::UShort:
+    return defineBroadcastFloatVector<ReferenceT, UShort_t>(df, name, referenceColumn,
+                                                            scalarColumn);
+  case NDHistogramTypeToken::Char:
+    return defineBroadcastFloatVector<ReferenceT, Char_t>(df, name, referenceColumn,
+                                                          scalarColumn);
+  case NDHistogramTypeToken::UChar:
+    return defineBroadcastFloatVector<ReferenceT, UChar_t>(df, name, referenceColumn,
+                                                           scalarColumn);
+  case NDHistogramTypeToken::Long64:
+    return defineBroadcastFloatVector<ReferenceT, Long64_t>(df, name, referenceColumn,
+                                                            scalarColumn);
+  case NDHistogramTypeToken::ULong64:
+    return defineBroadcastFloatVector<ReferenceT, ULong64_t>(df, name,
+                                                             referenceColumn,
+                                                             scalarColumn);
+  case NDHistogramTypeToken::Unsupported:
+    throw std::runtime_error("NDHistogramManager: unsupported scalar type in compiled broadcast path");
+  }
+
+  throw std::runtime_error("NDHistogramManager: unreachable scalar broadcast dispatch");
+}
+
+ROOT::RDF::RNode dispatchBroadcastFloatVector(
+    ROOT::RDF::RNode df, const std::string &name,
+    const std::string &referenceColumn, NDHistogramTypeToken referenceType,
+    const std::string &scalarColumn, NDHistogramTypeToken scalarType) {
+  switch (referenceType) {
+  case NDHistogramTypeToken::Bool:
+    return dispatchBroadcastFloatVectorByScalar<Bool_t>(df, name, referenceColumn,
+                                                        scalarColumn, scalarType);
+  case NDHistogramTypeToken::Float:
+    return dispatchBroadcastFloatVectorByScalar<Float_t>(df, name, referenceColumn,
+                                                         scalarColumn, scalarType);
+  case NDHistogramTypeToken::Double:
+    return dispatchBroadcastFloatVectorByScalar<Double_t>(df, name, referenceColumn,
+                                                          scalarColumn, scalarType);
+  case NDHistogramTypeToken::Int:
+    return dispatchBroadcastFloatVectorByScalar<Int_t>(df, name, referenceColumn,
+                                                       scalarColumn, scalarType);
+  case NDHistogramTypeToken::UInt:
+    return dispatchBroadcastFloatVectorByScalar<UInt_t>(df, name, referenceColumn,
+                                                        scalarColumn, scalarType);
+  case NDHistogramTypeToken::Short:
+    return dispatchBroadcastFloatVectorByScalar<Short_t>(df, name, referenceColumn,
+                                                         scalarColumn, scalarType);
+  case NDHistogramTypeToken::UShort:
+    return dispatchBroadcastFloatVectorByScalar<UShort_t>(df, name, referenceColumn,
+                                                          scalarColumn, scalarType);
+  case NDHistogramTypeToken::Char:
+    return dispatchBroadcastFloatVectorByScalar<Char_t>(df, name, referenceColumn,
+                                                        scalarColumn, scalarType);
+  case NDHistogramTypeToken::UChar:
+    return dispatchBroadcastFloatVectorByScalar<UChar_t>(df, name, referenceColumn,
+                                                         scalarColumn, scalarType);
+  case NDHistogramTypeToken::Long64:
+    return dispatchBroadcastFloatVectorByScalar<Long64_t>(df, name, referenceColumn,
+                                                          scalarColumn, scalarType);
+  case NDHistogramTypeToken::ULong64:
+    return dispatchBroadcastFloatVectorByScalar<ULong64_t>(df, name,
+                                                           referenceColumn,
+                                                           scalarColumn,
+                                                           scalarType);
+  case NDHistogramTypeToken::Unsupported:
+    throw std::runtime_error("NDHistogramManager: unsupported reference vector type in compiled broadcast path");
+  }
+
+  throw std::runtime_error("NDHistogramManager: unreachable reference broadcast dispatch");
+}
+
+
+} // namespace
+
 // Helper function to handle per-axis logic for varVector and DefineVector
+namespace {
+
+// This adapter is deliberately private and opt-in. The fixed-layout actions,
+// their dispatch and public histFillInfo contract remain unchanged. Each view
+// adopts read-only RDF storage only for the duration of the delegate call.
+template <class Action>
+class PerSlotHistogramAction final
+    : public ROOT::Detail::RDF::RActionImpl<PerSlotHistogramAction<Action>> {
+  using FloatVector = ROOT::VecOps::RVec<Float_t>;
+  using CountVector = ROOT::VecOps::RVec<ULong64_t>;
+  histFillInfo info_;
+  Action action_;
+  std::array<bool, 5> collections_;
+  std::string context_;
+
+  static histFillInfo slotInfo(histFillInfo info,
+                               const std::array<bool, 5>& collections) {
+    info.hasSystematic = false;
+    info.channel_hasSystematic = info.controlRegion_hasSystematic = false;
+    info.sampleCategory_hasSystematic = info.weight_hasSystematic = false;
+    info.hasMultiFill = true;
+    info.weight_hasMultiFill = collections[1];
+    info.sampleCategory_hasMultiFill = collections[2];
+    info.controlRegion_hasMultiFill = collections[3];
+    info.channel_hasMultiFill = collections[4];
+    info.systematic_hasMultiFill = false;
+    return info;
+  }
+
+public:
+  using Result_t = THnSparseF;
+  PerSlotHistogramAction(histFillInfo info, std::array<bool, 5> collections)
+      : info_(slotInfo(info, collections)), action_(info_),
+        collections_(collections), context_(info.name) {}
+  PerSlotHistogramAction(PerSlotHistogramAction&&) = default;
+  std::shared_ptr<Result_t> GetResultPtr() const { return action_.GetResultPtr(); }
+  auto GetStorageMemoryUsage() const { return action_.GetStorageMemoryUsage(); }
+  void Initialize() { action_.Initialize(); }
+  void InitTask(TTreeReader* reader, int slot) { action_.InitTask(reader, slot); }
+  void Finalize() { action_.Finalize(); }
+  std::string GetActionName() const { return "PerSlot" + action_.GetActionName(); }
+
+  void Exec(unsigned int worker, const FloatVector& values,
+            const FloatVector& weights, const FloatVector& systematics,
+            const ROOT::VecOps::RVec<Bool_t>& mask,
+            const FloatVector& samples, const FloatVector& controls,
+            const FloatVector& channels, const CountVector& counts) {
+    const std::size_t slots = systematics.size();
+    const std::array<const FloatVector*, 5> axes{
+        &values, &weights, &samples, &controls, &channels};
+    const std::array<const char*, 5> names{
+        "observable", "weight", "sample", "control", "channel"};
+    auto fail = [&](const std::string& reason) {
+      throw std::invalid_argument("NDHistogramManager per-slot '" + context_ + "': " + reason);
+    };
+    if (mask.size() != slots || counts.size() != 5 * slots)
+      fail("invalid mask/count layout");
+    // Validate every slot, including rejected/empty ones, before any fill.
+    // A length-one object array is not a scalar broadcast.
+    for (std::size_t a = 0; a < axes.size(); ++a) {
+      std::size_t total = 0;
+      for (std::size_t s = 0; s < slots; ++s) {
+        const auto count = counts[a * slots + s];
+        if (count > static_cast<ULong64_t>(std::numeric_limits<Int_t>::max()))
+          fail(std::string(names[a]) + " slot too large for native fill counters");
+        if (collections_[a] ? count != counts[s] : count != 1)
+          fail(std::string(names[a]) + " length mismatch at systematic slot " +
+               std::to_string(s) + ": got " + std::to_string(count) +
+               ", expected " + std::to_string(collections_[a] ? counts[s] : 1));
+        if (count > axes[a]->size() - total)
+          fail(std::string(names[a]) + " count exceeds packed input length");
+        total += static_cast<std::size_t>(count);
+      }
+      if (total != axes[a]->size())
+        fail(std::string(names[a]) + " count does not cover packed input");
+    }
+    std::array<std::size_t, 5> offsets{};
+    const ROOT::VecOps::RVec<Int_t> fills{1}; // unused by the multi/no-systematic delegate
+    for (std::size_t s = 0; s < slots; ++s) {
+      if (counts[s] && mask[s]) {
+        auto view = [&](std::size_t a) {
+          return FloatVector(const_cast<Float_t*>(axes[a]->data()) + offsets[a],
+                             static_cast<std::size_t>(counts[a * slots + s]));
+        };
+        const auto x = view(0), w = view(1), sample = view(2);
+        const auto control = view(3), channel = view(4);
+        const FloatVector systematic(const_cast<Float_t*>(systematics.data()) + s, 1);
+        const ROOT::VecOps::RVec<Bool_t> accepted{true};
+        action_.Exec(worker, x, w, systematic, accepted, sample, control, channel, fills);
+      }
+      for (std::size_t a = 0; a < axes.size(); ++a)
+        offsets[a] += static_cast<std::size_t>(counts[a * slots + s]);
+    }
+  }
+};
+
+template <typename T>
+ROOT::RDF::RNode defineCollectionSize(ROOT::RDF::RNode df,
+                                    const std::string& name,
+                                    const std::string& column) {
+  return df.Define(name, [](const ROOT::VecOps::RVec<T>& values) {
+    return static_cast<ULong64_t>(values.size());
+  }, {column});
+}
+
+ROOT::RDF::RNode defineCollectionSize(ROOT::RDF::RNode df,
+                                    const std::string& name,
+                                    const std::string& column,
+                                    rdfcolumnpacker::InputTypeToken type) {
+  using Token = rdfcolumnpacker::InputTypeToken;
+#define RDF_ND_COUNT_CASE(token, type) case Token::token: return defineCollectionSize<type>(df, name, column)
+  switch (type) {
+    RDF_ND_COUNT_CASE(Bool, Bool_t);
+    RDF_ND_COUNT_CASE(Float, Float_t);
+    RDF_ND_COUNT_CASE(Double, Double_t);
+    RDF_ND_COUNT_CASE(Int, Int_t);
+    RDF_ND_COUNT_CASE(UInt, UInt_t);
+    RDF_ND_COUNT_CASE(Short, Short_t);
+    RDF_ND_COUNT_CASE(UShort, UShort_t);
+    RDF_ND_COUNT_CASE(Char, Char_t);
+    RDF_ND_COUNT_CASE(UChar, UChar_t);
+    RDF_ND_COUNT_CASE(Long64, Long64_t);
+    RDF_ND_COUNT_CASE(ULong64, ULong64_t);
+    default: throw std::invalid_argument("NDHistogramManager per-slot: unsupported collection type");
+  }
+#undef RDF_ND_COUNT_CASE
+}
+
+// Return five packed axes followed by their axis-major per-slot lengths.
+// Signatures contain actual resolved columns in label order. The caller's
+// cache is cleared at every public booking boundary.
+std::pair<std::vector<std::string>, std::array<bool, 5>> buildPerSlotInputs(
+    ROOT::RDF::RNode& df, ColumnCache& cache,
+    std::unordered_map<std::string, std::string>& packed,
+    ISystematicManager* systematics, const std::array<std::string, 5>& axes,
+    const std::vector<std::string>& labels, const std::string& tag) {
+  std::array<std::vector<std::string>, 5> columns;
+  std::array<bool, 5> collections{};
+  std::vector<std::string> sizeColumns;
+  // Complete validation before constructing any transport Defines.
+  for (std::size_t a = 0; a < axes.size(); ++a) {
+    for (const auto& label : labels) {
+      auto column = systematics->getVariationColumnName(axes[a], label);
+      if (!cache.Has(column)) column = axes[a];
+      const auto type = cache.GetType(column);
+      const bool collection = rdfcolumnpacker::isRVecColumnType(type);
+      const auto token = rdfcolumnpacker::tokenizeInputType(
+          collection ? rdfcolumnpacker::extractRVecElementType(type) : type);
+      if (token == rdfcolumnpacker::InputTypeToken::Unsupported)
+        throw std::invalid_argument("NDHistogramManager per-slot: unsupported numeric input '" + column + "'");
+      if (!columns[a].empty() && collection != collections[a])
+        throw std::invalid_argument("NDHistogramManager per-slot: scalar/collection kind changes for '" + axes[a] + "'");
+      collections[a] = collection;
+      columns[a].push_back(column);
+    }
+  }
+  auto pack = [&](const std::vector<std::string>& inputs, const std::string& kind,
+                  const std::string& target, rdfcolumnpacker::PackingLayout layout) {
+    std::string signature = "per-slot:" + kind + ":";
+    for (const auto& c : inputs) signature += std::to_string(c.size()) + ":" + c;
+    const auto existing = packed.find(signature);
+    if (existing != packed.end()) return existing->second;
+    const auto name = "__nd_slot_" + tag + "_" + kind + "_" + std::to_string(packed.size());
+    df = rdfcolumnpacker::definePackedVector(df, name, inputs, target, layout);
+    cache.Added(name);
+    packed.emplace(signature, name);
+    return name;
+  };
+  std::vector<std::string> result;
+  for (std::size_t a = 0; a < axes.size(); ++a) {
+    for (const auto& column : columns[a]) {
+      const auto signature = collections[a] ? "per-slot-size:" + column : "per-slot-scalar-size";
+      auto existing = packed.find(signature);
+      if (existing == packed.end()) {
+        const auto name = "__nd_slot_" + tag + "_size_" + std::to_string(sizeColumns.size());
+        if (collections[a]) {
+          const auto token = rdfcolumnpacker::tokenizeInputType(
+              rdfcolumnpacker::extractRVecElementType(cache.GetType(column)));
+          df = defineCollectionSize(df, name, column, token);
+        } else {
+          df = df.DefinePerSample(name, [](unsigned int, const ROOT::RDF::RSampleInfo&) {
+            return ULong64_t{1};
+          });
+        }
+        cache.Added(name);
+        existing = packed.emplace(signature, name).first;
+      }
+      sizeColumns.push_back(existing->second);
+    }
+    // Kind is layout/type, not axis role, so identical inputs can share packs.
+    result.push_back(pack(columns[a], collections[a] ? "collections" : "scalars", "Float_t",
+        collections[a] ? rdfcolumnpacker::PackingLayout::Concatenate
+                       : rdfcolumnpacker::PackingLayout::Scalars));
+  }
+  result.push_back(pack(sizeColumns, "counts", "ULong64_t", rdfcolumnpacker::PackingLayout::Scalars));
+  return {result, collections};
+}
+
+} // namespace
+
 static void HandleAxisVarVector(
     ROOT::RDF::RNode& df,
     IDataFrameProvider* dataManager_m,
     ISystematicManager* systematicManager_m,
     ColumnCache& cache,
+    std::unordered_map<std::string, std::string>& packedColumns,
     const std::string& variable,
     bool hasSystematic,
     bool hasMultiFill,
@@ -70,7 +628,8 @@ static void HandleAxisVarVector(
     std::vector<std::string>& varVector,
     bool isWeight=false,
     std::vector<std::string> baseVariables={},
-    const std::string& uniqueTag=std::string()) {
+    const std::string& uniqueTag=std::string(),
+    bool shareCollectionTransport=false) {
 
     const std::string refVector = baseVariables.empty() ? std::string() : baseVariables.front();
     const std::string tagSuffix = uniqueTag.empty() ? std::string() : "_" + uniqueTag;
@@ -82,13 +641,35 @@ static void HandleAxisVarVector(
       if (colType.find("RVec") != std::string::npos) {
         return column;
       }
+      // Reuse only the exact scalar/reference pair in this booking call.
+      // Histogram names do not change a broadcast's values or multiplicity.
+      const auto signature = shareCollectionTransport
+          ? "broadcast:" + std::to_string(column.size()) + ":" +
+                column + std::to_string(refVector.size()) + ":" + refVector
+          : std::string();
+      if (shareCollectionTransport) {
+        const auto existing = packedColumns.find(signature);
+        if (existing != packedColumns.end()) return existing->second;
+      }
       const std::string expandedName = column + "_FillRVec_" + refVector + tagSuffix;
       if (!cache.Has(expandedName)) {
-        const std::string expr = "ROOT::VecOps::RVec<Float_t>(" + refVector + ".size(), static_cast<Float_t>(" + column + "))";
-        df = df.Define(expandedName, expr);
+        const std::string refType = cache.GetType(refVector);
+        const auto refToken =
+            tokenizeNDHistogramType(extractNDHistogramRVecElementType(refType));
+        const auto colToken = tokenizeNDHistogramType(colType);
+        const bool useFallback = refToken == NDHistogramTypeToken::Unsupported ||
+                                 colToken == NDHistogramTypeToken::Unsupported;
+        if (useFallback) {
+          df = df.Define(expandedName,
+                         buildScalarBroadcastExpression(refVector, column));
+        } else {
+          df = dispatchBroadcastFloatVector(df, expandedName, refVector, refToken,
+                                            column, colToken);
+        }
         dataManager_m->setDataFrame(df);
-        cache.Refresh();
+        cache.Added(expandedName);
       }
+      if (shareCollectionTransport) packedColumns.emplace(signature, expandedName);
       return expandedName;
     };
 
@@ -96,18 +677,81 @@ static void HandleAxisVarVector(
         std::vector<std::string> systematicVariations;
         for (const auto& syst : allSystematics) {
         std::string columnName = systematicManager_m->getVariationColumnName(variable, syst);
-        if (!refVector.empty()) {
-          columnName = ensureExpandedVector(columnName);
+        // A registered family can lack one or more columns in a particular
+        // input. When filters force systematic packing for otherwise nominal
+        // histogram axes, repeat the available nominal value for that slot.
+        if (!cache.Has(columnName)) {
+          columnName = variable;
+        }
+        if (!isWeight && !refVector.empty()) {
+          const std::string columnType = cache.GetType(columnName);
+          if (columnType.find("RVec") == std::string::npos) {
+            const auto signature = shareCollectionTransport
+                ? "systematic-broadcast:" + std::to_string(columnName.size()) + ":" + columnName +
+                      std::to_string(refVector.size()) + ":" + refVector + ":" +
+                      std::to_string(allSystematics.size())
+                : std::string();
+            if (shareCollectionTransport) {
+              const auto existing = packedColumns.find(signature);
+              if (existing != packedColumns.end()) {
+                systematicVariations.push_back(existing->second);
+                continue;
+              }
+            }
+            const std::string expandedName =
+                columnName + "_FillRVecPerSyst_" + refVector + "_" +
+                std::to_string(allSystematics.size()) + tagSuffix;
+            if (!cache.Has(expandedName)) {
+              const auto scalarToken = tokenizeNDHistogramType(columnType);
+              if (scalarToken == NDHistogramTypeToken::Unsupported) {
+                df = df.Define(
+                    expandedName,
+                    "ROOT::VecOps::RVec<Float_t>(" + refVector + ".size() / " +
+                        std::to_string(allSystematics.size()) +
+                        ", static_cast<Float_t>(" + columnName + "))");
+              } else {
+                df = dispatchSystematicBroadcastFloatVector(
+                    df, expandedName, refVector, columnName, scalarToken,
+                    allSystematics.size());
+              }
+              dataManager_m->setDataFrame(df);
+              cache.Added(expandedName);
+            }
+            if (shareCollectionTransport) packedColumns.emplace(signature, expandedName);
+            columnName = expandedName;
+          }
         }
         systematicVariations.push_back(columnName);
         }
-        const std::string systVectorName = variable + "_systVector" + tagSuffix;
-        if (!cache.Has(systVectorName)) {
-            dataManager_m->DefineVector(systVectorName, systematicVariations, "Float_t", *systematicManager_m);
-          df = dataManager_m->getDataFrame();
-          cache.Refresh();
+        // A nominal-only RVec<float> axis already has exactly the transport
+        // type/layout consumed by the action. Book its existing reader rather
+        // than materializing an identical vector in an extra Define.
+        if (systematicVariations.size() == 1) {
+          const auto type = cache.GetType(systematicVariations.front());
+          if (type.find("RVec") != std::string::npos &&
+              tokenizeNDHistogramType(extractNDHistogramRVecElementType(type)) ==
+                  NDHistogramTypeToken::Float) {
+            varVector.push_back(systematicVariations.front());
+            return;
+          }
         }
-        varVector.push_back(systVectorName);
+        std::string signature;
+        for (const auto &column : systematicVariations)
+          signature += std::to_string(column.size()) + ":" + column;
+        const auto packed = packedColumns.find(signature);
+        if (packed != packedColumns.end()) {
+          varVector.push_back(packed->second);
+        } else {
+          const std::string systVectorName = variable + "_systVector" + tagSuffix;
+          if (!cache.Has(systVectorName)) {
+            dataManager_m->DefineVectorNominal(systVectorName, systematicVariations,
+                                              "Float_t", *systematicManager_m);
+            df = dataManager_m->getDataFrame();
+            cache.Added(systVectorName);
+          }
+          packedColumns.emplace(std::move(signature), systVectorName);
+          varVector.push_back(systVectorName);
+        }
     } else {
         if (hasMultiFill) {
             const std::string colType = cache.GetType(variable);
@@ -122,12 +766,20 @@ static void HandleAxisVarVector(
         if (!refVector.empty()) {
           varVector.push_back(ensureExpandedVector(variable));
         } else {
+          const std::string signature = "scalar:" + variable;
+          const auto packed = packedColumns.find(signature);
+          if (packed != packedColumns.end()) {
+            varVector.push_back(packed->second);
+            return;
+          }
           const std::string rvecName = variable + "_RVec" + tagSuffix;
           if (!cache.Has(rvecName)) {
-            dataManager_m->DefineVector(rvecName, {variable}, "Float_t", *systematicManager_m);
+            dataManager_m->DefineVectorNominal(rvecName, {variable}, "Float_t",
+                                               *systematicManager_m);
             df = dataManager_m->getDataFrame();
-            cache.Refresh();
+            cache.Added(rvecName);
           }
+          packedColumns.emplace(signature, rvecName);
           varVector.push_back(rvecName);
         }
         }
@@ -141,9 +793,6 @@ static std::string buildSystematicVector(
     const std::vector<std::string>& systList,
     ColumnCache& cache) {
   const std::string baseName = "SystematicCounter";
-  std::vector<std::string> systBranches;
-  systBranches.reserve(systList.size());
-
   bool definedAny = false;
   for (size_t i = 0; i < systList.size(); ++i) {
     const auto &syst = systList[i];
@@ -155,29 +804,74 @@ static std::string buildSystematicVector(
           [index](unsigned int, const ROOT::RDF::RSampleInfo) -> float {
             return index;
           });
+      cache.Added(branchName);
       definedAny = true;
     }
   }
   if (definedAny) {
     df = dataManager_m->getDataFrame();
-    cache.Refresh();
   }
 
-  for (const auto& syst : systList) {
-    if (syst == "Nominal") {
-      systBranches.push_back(baseName);
-    } else {
-      systBranches.push_back(baseName + "_" + syst);
-    }
-  }
-
-  const std::string systVectorName = baseName + "_systVector";
+  // A nominal-only booking must not reuse a previously materialised full
+  // systematic vector: its longer size would be inconsistent with the
+  // one-bin systematic axis.  Keep a dedicated vector for the nominal case.
+  const bool nominalOnly =
+      systList.size() == 1 && systList.front() == "Nominal";
+  const std::string systVectorName =
+      nominalOnly ? baseName + "_nominal_systVector"
+                  : baseName + "_systVector";
   if (!cache.Has(systVectorName)) {
-    dataManager_m->DefineVector(systVectorName, systBranches, "Float_t", *systematicManager_m);
-    df = dataManager_m->getDataFrame();
-    cache.Refresh();
+    // These values are slot indices, independent of the event. Avoid a
+    // chain of vector appends and column readers for a constant bundle.
+    ROOT::VecOps::RVec<Float_t> indices(systList.size());
+    for (std::size_t i = 0; i < indices.size(); ++i) indices[i] = i;
+    df = df.Define(systVectorName, [indices]() { return indices; });
+    dataManager_m->setDataFrame(df);
+    cache.Added(systVectorName);
   }
   return systVectorName;
+}
+
+static std::string buildSelectionMaskVector(
+    ROOT::RDF::RNode& df,
+    IDataFrameProvider* dataManager_m,
+    ISystematicManager* systematicManager_m,
+    const std::vector<std::string>& systList,
+    ColumnCache& cache) {
+  const std::string defaultMaskName = "__rdf_filter_mask_default_true";
+  if (!cache.Has(defaultMaskName)) {
+    df = df.Define(defaultMaskName, []() -> Bool_t { return true; });
+    dataManager_m->setDataFrame(df);
+    cache.Added(defaultMaskName);
+  }
+
+  std::vector<std::string> maskColumns;
+  maskColumns.reserve(systList.size());
+  for (const auto& label : systList) {
+    const auto registeredMask =
+        systematicManager_m->getSelectionMaskColumn(label);
+    maskColumns.push_back(!registeredMask.empty() && cache.Has(registeredMask)
+                              ? registeredMask
+                              : defaultMaskName);
+  }
+
+  std::string signature;
+  for (const auto& label : systList) {
+    signature += std::to_string(label.size()) + ":" + label;
+  }
+  // Equal label lists can refer to new cumulative masks after another filter.
+  for (const auto &column : maskColumns)
+    signature += std::to_string(column.size()) + ":" + column;
+  const std::string vectorName =
+      "__rdf_filter_mask_systVector_" +
+      std::to_string(std::hash<std::string>{}(signature));
+  if (!cache.Has(vectorName)) {
+    dataManager_m->DefineVectorNominal(vectorName, maskColumns, "Bool_t",
+                                       *systematicManager_m);
+    df = dataManager_m->getDataFrame();
+    cache.Added(vectorName);
+  }
+  return vectorName;
 }
 
 static bool HasSystematicColumns(
@@ -189,11 +883,8 @@ static bool HasSystematicColumns(
     if (syst == "Nominal") {
       continue;
     }
-    if (!systematicManager_m->isVariableAffectedBySystematic(variable, syst)) {
-      continue;
-    }
     const std::string columnName = systematicManager_m->getVariationColumnName(variable, syst);
-    if (cache.Has(columnName)) {
+    if (columnName != variable && cache.Has(columnName)) {
       return true;
     }
   }
@@ -262,13 +953,17 @@ void NDHistogramManager::BookSingleHistogram(
     selectionInfo &&channelInfo, // selection info (variable, bins, lowerBound, upperBound)
     std::string suffix){ // suffix to append to histogram names
 
+  axisPackCache_m.clear();
   if (dataManager_m == nullptr) {
     throw std::runtime_error("NDHistogramManager::BookSingleHistogram: DataManager not set");
   }
 
-  ensureSystematicsAutoRegistered();
-  const std::vector<std::string> systList =
-      systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  std::vector<std::string> systList{"Nominal"};
+  if (histogramSystematics_m) {
+    ensureSystematicsAutoRegistered();
+    systList =
+        systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  }
   BookSingleHistogramWithSystList(info,
                                   std::move(sampleCategoryInfo),
                                   std::move(controlRegionInfo),
@@ -284,7 +979,8 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
     selectionInfo &&channelInfo,
     std::string suffix,
     const std::vector<std::string> &systList,
-    const std::string &baseRefVector) {
+    const std::string &baseRefVector,
+    NDHistogramColumnCacheState *columnCache) {
 
   // get the dataframe
   if(dataManager_m == nullptr) {
@@ -292,10 +988,33 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   }
 
   ROOT::RDF::RNode df = dataManager_m->getDataFrame();
-  ColumnCache cache(df);
+  ColumnCache cache(df, columnCache);
+  // Keep the transport candidate opt-in until representative sustained
+  // controls establish its performance. This affects graph setup only.
+  bool shareCollectionTransport = false;
+  bool perSlotCollections = false;
+  if (configManager_m) {
+    const auto &settings = configManager_m->getConfigMap();
+    const auto setting = settings.find("histogramShareCollectionTransport");
+    if (setting != settings.end()) {
+      if (setting->second != "true" && setting->second != "false")
+        throw std::invalid_argument("histogramShareCollectionTransport must be true or false");
+      shareCollectionTransport = setting->second == "true";
+    }
+    const auto layout = settings.find("histogramCollectionLayout");
+    if (layout != settings.end()) {
+      if (layout->second != "fixed" && layout->second != "per-slot")
+        throw std::invalid_argument("histogramCollectionLayout must be fixed or per-slot");
+      perSlotCollections = layout->second == "per-slot";
+    }
+  }
 
   // set the basic information
   histFillInfo fillInfo = histFillInfo();
+  fillInfo.forceSparse = info.forceSparse();
+  fillInfo.denseMemoryLimitBytes = histogramDenseLimitBytes_m;
+  fillInfo.boostFloatContents = histogramBoostFloatContents_m;
+  fillInfo.boostSparseBackend = histogramBoostSparseBackend_m;
 
   fillInfo.name = info.name() + "_" + suffix;
   fillInfo.title = info.name() + " " + suffix;
@@ -304,12 +1023,16 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   fillInfo.nbins = {channelInfo.bins(), controlRegionInfo.bins(), sampleCategoryInfo.bins(), 1, info.bins()};
   fillInfo.xmin = {channelInfo.lowerBound(), controlRegionInfo.lowerBound(), sampleCategoryInfo.lowerBound(), 0.0, info.lowerBound()};
   fillInfo.xmax = {channelInfo.upperBound(), controlRegionInfo.upperBound(), sampleCategoryInfo.upperBound(), 1.0, info.upperBound()};
+  fillInfo.binEdges.resize(fillInfo.dim);
+  if (!info.binEdges().empty()) {
+    fillInfo.binEdges[4] = info.binEdges();
+  }
 
   // define zero vector if needed
   if(!cache.Has("zero__")) {
     dataManager_m->Define("zero__", []() -> Float_t { return 0.0f; }, {}, *systematicManager_m);
     df = dataManager_m->getDataFrame();
-    cache.Refresh();
+    cache.Added("zero__");
   }
 
 
@@ -339,6 +1062,28 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
     fillInfo.hasMultiFill = true;
   }
 
+  // The histogram variable is the fill axis too. Mark vector-valued input so
+  // the action selects a multi-fill path when another axis introduces
+  // systematics (or when this is a nominal-only multi-fill histogram).
+  const std::string histogramVariableType = cache.GetType(info.variable());
+  bool baseAxisHasMultiFill =
+      histogramVariableType.find("RVec") != std::string::npos;
+  if (fillInfo.hasSystematic) {
+    for (const auto &systematic : systList) {
+      const auto variationColumn =
+          systematicManager_m->getVariationColumnName(info.variable(),
+                                                       systematic);
+      if (cache.Has(variationColumn) &&
+          cache.GetType(variationColumn).find("RVec") != std::string::npos) {
+        baseAxisHasMultiFill = true;
+        break;
+      }
+    }
+  }
+  if (baseAxisHasMultiFill) {
+    fillInfo.hasMultiFill = true;
+  }
+
   // determine if the variables have systematic variations
   if(systematicManager_m->getSystematicsForVariable(channelInfo.variable()).size() > 0 &&
      HasSystematicColumns(cache, systematicManager_m, channelInfo.variable(), systList)) {
@@ -364,6 +1109,29 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
     fillInfo.hasSystematic = true;
   }
 
+  // Scalar axes can broadcast through the action's existing zero-stride
+  // counters. Collection axes retain the expanded transport so per-object
+  // slots stay aligned, including variation-dependent multiplicities.
+  const bool hasSelectionMasks = systematicManager_m->hasSelectionMasks();
+  if (fillInfo.hasSystematic || hasSelectionMasks) {
+    if (fillInfo.hasMultiFill || !baseRefVector.empty()) {
+      fillInfo.channel_hasSystematic = true;
+      fillInfo.controlRegion_hasSystematic = true;
+      fillInfo.sampleCategory_hasSystematic = true;
+      fillInfo.weight_hasSystematic = true;
+    }
+    fillInfo.hasSystematic = true;
+  }
+
+  // When the observable has multiple fills, the systematic packing above
+  // expands each category axis to one value per fill in each systematic slot.
+  // Advance those axis vectors with the base value vector inside a slot.
+  if (fillInfo.hasSystematic && baseAxisHasMultiFill) {
+    fillInfo.channel_hasMultiFill = true;
+    fillInfo.controlRegion_hasMultiFill = true;
+    fillInfo.sampleCategory_hasMultiFill = true;
+  }
+
   // For now, we don't support multi-fill for systematic variations
   fillInfo.systematic_hasMultiFill = false;
   
@@ -378,35 +1146,122 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   // But we will set the weights to 0 for the non-systematic variations
   std::vector<std::string> usedSystematics(systList.begin(), systList.end());
 
-  // Build column vectors in the order expected by THnMulti::Exec:
-  // baseValues, baseWeights, systematic, sampleCategory, controlRegion, channel, nFills
+  if (perSlotCollections) {
+    // Scalar graphs retain their original actions, but a variation must not
+    // silently turn a scalar axis into a collection on that fallback path.
+    if (!baseAxisHasMultiFill) {
+      for (const auto& axis : {info.variable(), info.weight(), sampleCategoryInfo.variable(),
+                              controlRegionInfo.variable(), channelInfo.variable()}) {
+        const bool collection = rdfcolumnpacker::isRVecColumnType(cache.GetType(axis));
+        for (const auto& label : usedSystematics) {
+          auto column = systematicManager_m->getVariationColumnName(axis, label);
+          if (!cache.Has(column)) column = axis;
+          if (rdfcolumnpacker::isRVecColumnType(cache.GetType(column)) != collection)
+            throw std::invalid_argument("NDHistogramManager per-slot: scalar/collection kind changes for '" + axis + "'");
+        }
+      }
+    }
+    if (!baseRefVector.empty() || (!baseAxisHasMultiFill && fillInfo.hasMultiFill))
+      throw std::invalid_argument(
+          "NDHistogramManager per-slot: collection observable required; implicit region/object expansion is unsupported");
+    if (baseAxisHasMultiFill) {
+      auto inputs = buildPerSlotInputs(df, cache, axisPackCache_m, systematicManager_m,
+          {info.variable(), info.weight(), sampleCategoryInfo.variable(),
+           controlRegionInfo.variable(), channelInfo.variable()}, usedSystematics, uniqueTag);
+      if (!inputs.second[0])
+        throw std::invalid_argument("NDHistogramManager per-slot: observable must remain a collection in every slot");
+      dataManager_m->setDataFrame(df);
+      const auto systematic = buildSystematicVector(df, dataManager_m, systematicManager_m, systList, cache);
+      const auto mask = buildSelectionMaskVector(df, dataManager_m, systematicManager_m, systList, cache);
+      const auto& columns = inputs.first;
+      const std::vector<std::string> transport{
+          columns[0], columns[1], systematic, mask, columns[2], columns[3], columns[4], columns[5]};
+      df = dataManager_m->getDataFrame();
+      if (histogramBackend_m == "boost" && (info.binEdges().empty() || histogramBoostFloatContents_m)) {
+        PerSlotHistogramAction<BHnMulti> action(fillInfo, inputs.second);
+        auto memory = action.GetStorageMemoryUsage();
+        histos_m.push_back(df.Book<
+            ROOT::VecOps::RVec<Float_t>, ROOT::VecOps::RVec<Float_t>,
+            ROOT::VecOps::RVec<Float_t>, ROOT::VecOps::RVec<Bool_t>,
+            ROOT::VecOps::RVec<Float_t>, ROOT::VecOps::RVec<Float_t>,
+            ROOT::VecOps::RVec<Float_t>, ROOT::VecOps::RVec<ULong64_t>>(
+            std::move(action), transport));
+        histMemoryUsage_m.push_back(std::move(memory));
+      } else {
+        PerSlotHistogramAction<THnMulti> action(fillInfo, inputs.second);
+        histos_m.push_back(df.Book<
+            ROOT::VecOps::RVec<Float_t>, ROOT::VecOps::RVec<Float_t>,
+            ROOT::VecOps::RVec<Float_t>, ROOT::VecOps::RVec<Bool_t>,
+            ROOT::VecOps::RVec<Float_t>, ROOT::VecOps::RVec<Float_t>,
+            ROOT::VecOps::RVec<Float_t>, ROOT::VecOps::RVec<ULong64_t>>(
+            std::move(action), transport));
+        histMemoryUsage_m.push_back(nullptr);
+      }
+      histMemoryWarningReported_m.push_back(false);
+      histRegionNames_m.push_back({channelInfo.regions(), controlRegionInfo.regions(),
+                                  sampleCategoryInfo.regions(), systList});
+      histNodes_m.push_back(df);
+      return;
+    }
+  }
+
+  // Build columns in the order expected by THnMulti::Exec and BHnMulti::Exec:
+  // base values, weights, systematic indices, selection mask, sample category,
+  // control region, channel, and per-systematic fill counts.
   //
   // When baseRefVector is non-empty (region-aware booking), scalar base
   // variables and their systematic variations are expanded to match the size
   // of the reference (the region membership RVec) so that multi-fill works
   // correctly without an extra event-loop pass.
   std::vector<std::string> baseValsVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.variable(),
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, info.variable(),
                       fillInfo.hasSystematic, fillInfo.hasMultiFill, usedSystematics,
                       baseValsVec, false,
                       baseRefVector.empty() ? std::vector<std::string>{}
                                             : std::vector<std::string>{baseRefVector},
-                      uniqueTag);
+                      uniqueTag, shareCollectionTransport);
+  const std::vector<std::string> fillReference =
+      baseAxisHasMultiFill || !baseRefVector.empty()
+          ? std::vector<std::string>{baseValsVec.front()}
+          : std::vector<std::string>{};
   std::vector<std::string> baseWeightsVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, info.weight(), fillInfo.weight_hasSystematic, fillInfo.weight_hasMultiFill, usedSystematics, baseWeightsVec, true, {baseValsVec.front()}, uniqueTag);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, info.weight(), fillInfo.weight_hasSystematic, fillInfo.weight_hasMultiFill, usedSystematics, baseWeightsVec, true, fillReference, uniqueTag, shareCollectionTransport);
 
   const std::string systVectorName = buildSystematicVector(df, dataManager_m, systematicManager_m, systList, cache);
+  const std::string selectionMaskVectorName =
+      buildSelectionMaskVector(df, dataManager_m, systematicManager_m, systList,
+                              cache);
 
   std::vector<std::string> sampleCategoryVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, sampleCategoryInfo.variable(), fillInfo.sampleCategory_hasSystematic, fillInfo.sampleCategory_hasMultiFill, usedSystematics, sampleCategoryVec, false, {baseValsVec.front()}, uniqueTag);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, sampleCategoryInfo.variable(), fillInfo.sampleCategory_hasSystematic, fillInfo.sampleCategory_hasMultiFill, usedSystematics, sampleCategoryVec, false, fillReference, uniqueTag, shareCollectionTransport);
   std::vector<std::string> controlRegionVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, controlRegionInfo.variable(), fillInfo.controlRegion_hasSystematic, fillInfo.controlRegion_hasMultiFill, usedSystematics, controlRegionVec, false, {baseValsVec.front()}, uniqueTag);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, controlRegionInfo.variable(), fillInfo.controlRegion_hasSystematic, fillInfo.controlRegion_hasMultiFill, usedSystematics, controlRegionVec, false, fillReference, uniqueTag, shareCollectionTransport);
   std::vector<std::string> channelVec;
-  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, channelInfo.variable(), fillInfo.channel_hasSystematic, fillInfo.channel_hasMultiFill, usedSystematics, channelVec, false, {baseValsVec.front()}, uniqueTag);
+  HandleAxisVarVector(df, dataManager_m, systematicManager_m, cache, axisPackCache_m, channelInfo.variable(), fillInfo.channel_hasSystematic, fillInfo.channel_hasMultiFill, usedSystematics, channelVec, false, fillReference, uniqueTag, shareCollectionTransport);
 
-  const std::string nFillsName = "SystematicCounter_nFills_" + baseValsVec.front() + "_" + uniqueTag;
+  const bool scalarFills = !fillInfo.hasMultiFill && baseRefVector.empty();
+  std::string nFillsName = scalarFills
+      ? "SystematicCounter_nFills_constant_" + std::to_string(systList.size())
+      : "SystematicCounter_nFills_" + baseValsVec.front() + "_" + uniqueTag;
+  // Collection counts depend on the actual packed values and systematic
+  // layout, not on a histogram's name/binning. Never infer equal lengths
+  // between distinct collection columns or reuse across public booking calls.
+  std::string fillSignature;
+  if (!scalarFills && shareCollectionTransport) {
+    fillSignature = "fill-count:" +
+        std::to_string(baseValsVec.front().size()) + ":" + baseValsVec.front() +
+        std::to_string(systVectorName.size()) + ":" + systVectorName;
+    const auto existing = axisPackCache_m.find(fillSignature);
+    if (existing != axisPackCache_m.end()) nFillsName = existing->second;
+  }
   if (!cache.Has(nFillsName)) {
-    dataManager_m->Define(
+    if (scalarFills) {
+      const ROOT::VecOps::RVec<Int_t> fills(systList.size(), 1);
+      df = df.DefinePerSample(nFillsName,
+          [fills](unsigned int, const ROOT::RDF::RSampleInfo&) { return fills; });
+      dataManager_m->setDataFrame(df);
+    } else {
+      dataManager_m->DefineNominal(
         nFillsName,
         [](const ROOT::VecOps::RVec<Float_t>& baseVals,
            const ROOT::VecOps::RVec<Float_t>& systVals) -> ROOT::VecOps::RVec<Int_t> {
@@ -421,16 +1276,19 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
           }
           return out;
         },
-        {baseValsVec.front(), systVectorName},
-        *systematicManager_m);
+        {baseValsVec.front(), systVectorName});
+    }
       df = dataManager_m->getDataFrame();
-      cache.Refresh();
+      cache.Added(nFillsName);
   }
+  if (!scalarFills && shareCollectionTransport)
+    axisPackCache_m.emplace(fillSignature, nFillsName);
 
   varVector = {
     baseValsVec.front(),
     baseWeightsVec.front(),
     systVectorName,
+    selectionMaskVectorName,
     sampleCategoryVec.front(),
     controlRegionVec.front(),
     channelVec.front(),
@@ -446,36 +1304,48 @@ void NDHistogramManager::BookSingleHistogramWithSystList(
   }
 
   df = dataManager_m->getDataFrame();
-  if (histogramBackend_m == "boost") {
+  // Double Boost uses regular axes; its variable-width observables retain
+  // the ROOT fallback. Float Boost supports both through ROOT-compatible axes.
+  if (histogramBackend_m == "boost" && (info.binEdges().empty() || histogramBoostFloatContents_m)) {
     BHnMulti tempModel(fillInfo);
+    auto memoryUsage = tempModel.GetStorageMemoryUsage();
     histos_m.push_back(df.Book<
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Bool_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Int_t>>(
       std::move(tempModel), varVector));
+    histMemoryUsage_m.push_back(std::move(memoryUsage));
   } else {
     THnMulti tempModel(fillInfo);
     histos_m.push_back(df.Book<
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
+      ROOT::VecOps::RVec<Bool_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Float_t>,
       ROOT::VecOps::RVec<Int_t>>(
       std::move(tempModel), varVector));
+    histMemoryUsage_m.push_back(nullptr);
   }
+  histMemoryWarningReported_m.push_back(false);
+  histRegionNames_m.push_back({channelInfo.regions(), controlRegionInfo.regions(),
+                               sampleCategoryInfo.regions(), systList});
   histNodes_m.push_back(df);
 }
 
 void NDHistogramManager::bookND(std::vector<histInfo> &infos,
                                 std::vector<selectionInfo> &selection,
                                 const std::string &suffix,
-                                std::vector<std::vector<std::string>> &allRegionNames) {
+                                std::vector<std::vector<std::string>> &allRegionNames,
+                                bool nominalOnly) {
+  axisPackCache_m.clear();
   if (!dataManager_m || !systematicManager_m) {
     throw std::runtime_error("NDHistogramManager: DataManager or SystematicManager not set");
   }
@@ -502,10 +1372,13 @@ void NDHistogramManager::bookND(std::vector<histInfo> &infos,
 
   // Auto-detect systematic variations from dataframe columns before building
   // the syst list for the first time.
-  ensureSystematicsAutoRegistered();
-
-  // Append systematic axis info if not already appended
-  const std::vector<std::string> systList = systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  // Append systematic axis info if not already appended.
+  std::vector<std::string> systList{"Nominal"};
+  if (histogramSystematics_m && !nominalOnly) {
+    ensureSystematicsAutoRegistered();
+    systList =
+        systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  }
   if (allRegionNames.size() > 3) {
     for (size_t i = 3; i < allRegionNames.size(); ++i) {
       normalizedRegionNames.emplace_back(allRegionNames[i]);
@@ -522,13 +1395,15 @@ void NDHistogramManager::bookND(std::vector<histInfo> &infos,
 
   histos_m.reserve(histos_m.size() + infos.size());
 
+  NDHistogramColumnCacheState columnCache;
   for (auto &info : infos) {
     BookSingleHistogramWithSystList(info,
                                     selectionInfo(sampleInfo),
                                     selectionInfo(controlInfo),
                                     selectionInfo(channelInfo),
                                     suffix,
-                                    systList);
+                                    systList, "", &columnCache);
+    histRegionNames_m.back() = normalizedRegionNames;
   }
 }
 
@@ -539,18 +1414,7 @@ void NDHistogramManager::saveHists() {
   if (trackedHistInfos_m.empty()) {
     return;
   }
-  SaveHists(trackedHistInfos_m, trackedRegionNames_m, *configManager_m);
-
-  if (countersFinalized_m || !logger_m || !skimSink_m || !metaSink_m) {
-    return;
-  }
-  const auto& configMap = configManager_m->getConfigMap();
-  auto cit = configMap.find("enableCounters");
-  if (cit == configMap.end()) { return; }
-  const auto& val = cit->second;
-  if (val == "1" || val == "true" || val == "True") {
-    countersFinalized_m = true;
-  }
+  SaveHistsImpl(trackedHistInfos_m, trackedRegionNames_m, *configManager_m, true);
 }
 
 void NDHistogramManager::saveHists(std::vector<std::vector<histInfo>> &fullHistList,
@@ -559,32 +1423,20 @@ void NDHistogramManager::saveHists(std::vector<std::vector<histInfo>> &fullHistL
     throw std::runtime_error("NDHistogramManager: ConfigurationManager not set");
   }
   SaveHists(fullHistList, allRegionNames, *configManager_m);
-
-  if (countersFinalized_m || !logger_m || !skimSink_m || !metaSink_m) {
-    return;
-  }
-
-  const auto& configMap = configManager_m->getConfigMap();
-  auto it = configMap.find("enableCounters");
-  if (it == configMap.end()) {
-    return;
-  }
-  const auto& val = it->second;
-  const bool enabled = (val == "1" || val == "true" || val == "True");
-  if (!enabled) {
-    return;
-  }
-
-  // Counters are enabled globally and managed by Analyzer. Do not run a local
-  // CounterService here (that would cause duplicate counting); mark counters
-  // as finalized for this manager so subsequent calls are no-ops.
-  countersFinalized_m = true;
 }
 
 void NDHistogramManager::SaveHists(
     std::vector<std::vector<histInfo>> &fullHistList,
     std::vector<std::vector<std::string>> &allRegionNames,
     const IConfigurationProvider &configProvider) {
+  SaveHistsImpl(fullHistList, allRegionNames, configProvider, false);
+}
+
+void NDHistogramManager::SaveHistsImpl(
+    std::vector<std::vector<histInfo>> &fullHistList,
+    std::vector<std::vector<std::string>> &allRegionNames,
+    const IConfigurationProvider &configProvider,
+    bool useBookedAxisLabels) {
   std::string fileName;
   if (metaSink_m) {
     fileName = metaSink_m->resolveOutputFile(configProvider, OutputChannel::Meta);
@@ -599,119 +1451,145 @@ void NDHistogramManager::SaveHists(
   std::vector<std::string> allNames;
   std::vector<std::string> allVariables;
   std::vector<std::string> allLabels;
-  std::vector<int> allBins;
-  std::vector<float> allLowerBounds;
-  std::vector<float> allUpperBounds;
   for (auto const &histList : fullHistList) {
     for (auto const &info : histList) {
       //std::cout << "Storing histogram: " << info.name() << std::endl;
       allNames.push_back(info.name());
       allVariables.push_back(info.variable());
       allLabels.push_back(info.label());
-      allBins.push_back(info.bins());
-      allLowerBounds.push_back(info.lowerBound());
-      allUpperBounds.push_back(info.upperBound());
     }
   }
 
   // Open the meta file for update so we don't clobber histograms (e.g. counters)
   // written by Analyzer/CounterService earlier.
   TFile saveFile(fileName.c_str(), "UPDATE");
-
-  std::vector<Int_t> commonAxisSize = {};
-  for (const auto &regionNameList : allRegionNames) {
-    commonAxisSize.push_back(regionNameList.size());
+  if (saveFile.IsZombie() || !saveFile.IsOpen() || !saveFile.IsWritable()) {
+    throw std::runtime_error("Cannot open histogram output for update: " + fileName);
+  }
+  // An interrupted first write can leave a header-only file. ROOT accepts
+  // this in UPDATE mode without marking it zombie, but mkdir/TKey then
+  // dereferences the missing first free segment (also in ROOT 6.36).
+  // Refuse the update before triggering RDF, and avoid rewriting the damaged
+  // file during stack unwinding so it remains available for inspection.
+  if (!saveFile.GetListOfFree() || saveFile.GetListOfFree()->IsEmpty()) {
+    saveFile.SetWritable(false);
+    throw std::runtime_error(
+        "Histogram output has no free-segment table (possibly an interrupted "
+        "previous write): " + fileName +
+        ". Preserve or move this file before rerunning with a fresh output path.");
   }
 
-  int histIndex = 0;
-  std::unordered_map<std::string, TH1F> histMap;
-  std::unordered_set<std::string> dirSet;
-  std::cout << "Processing " << histos_m.size() << " histograms for saving..." << std::endl;
-  for (auto &histo_m : histos_m) {
-    auto hist = histo_m.GetPtr();
-    const Int_t currentHistogramSize = hist->GetNbins();
+  constexpr const char *kHistogramSchemaKey = "__rdf_histogram_schema_v1";
+  constexpr const char *kHistogramDirectory = "nd_histograms_v1";
+  static const std::vector<std::string> axisRoles = {
+      "channel", "control", "sample", "systematic", "observable"};
+
+  TDirectory *ndDirectory = saveFile.GetDirectory(kHistogramDirectory);
+  if (!ndDirectory) {
+    ndDirectory = saveFile.mkdir(kHistogramDirectory);
+  }
+  if (!ndDirectory) {
+    throw std::runtime_error("Cannot create N-dimensional histogram directory in " +
+                             fileName);
+  }
+
+  std::ostringstream schema;
+  schema << "{\"schema_version\":1,\"directory\":\""
+         << kHistogramDirectory << "\",\"histograms\":[";
+
+  std::cout << "Writing " << histos_m.size()
+            << " N-dimensional histograms for merging..." << std::endl;
+  for (std::size_t histIndex = 0; histIndex < histos_m.size(); ++histIndex) {
+    if (histIndex >= allNames.size() || histIndex >= allVariables.size() ||
+        histIndex >= allLabels.size()) {
+      throw std::runtime_error(
+          "NDHistogramManager: booked histogram list does not match save metadata");
+    }
+
+    auto hist = histos_m[histIndex].GetPtr();
+    if (!hist) {
+      throw std::runtime_error("NDHistogramManager: booked histogram result is null");
+    }
+
     const Int_t dim = hist->GetNdimensions();
-    std::vector<Int_t> indices(dim);
-      
-    std::string histName = allNames[histIndex];
-    //std::cout << "Processing histogram name: " << histName << std::endl;
-    for (int i = 0; i < currentHistogramSize; i++) {
-      Float_t content = hist->GetBinContent(i, indices.data());
-      if (content == 0) {
-        continue;
-      }
-      Float_t error = hist->GetBinError2(i);
-
-      std::string dirName = "";
-      const Int_t regionAxes = std::min(static_cast<Int_t>(allRegionNames.size()), dim - 1);
-      const Int_t size = regionAxes - 2;
-      for (int j = 0; j < size; j++) {
-        if (indices[j] > 0 && j < static_cast<Int_t>(allRegionNames.size()) &&
-            indices[j] - 1 < static_cast<Int_t>(allRegionNames[j].size())) {
-          dirName += allRegionNames[j][indices[j] - 1] + "/";
-        }
-      }
-
-      if (regionAxes - 2 >= 0 &&
-          regionAxes - 2 < static_cast<Int_t>(allRegionNames.size()) &&
-          indices[regionAxes - 2] > 0 &&
-          indices[regionAxes - 2] - 1 < static_cast<Int_t>(allRegionNames[regionAxes - 2].size())) {
-        dirName += allRegionNames[regionAxes - 2][indices[regionAxes - 2] - 1];
-      }
-
-      
-      
-      if (regionAxes - 1 >= 0 &&
-          regionAxes - 1 < static_cast<Int_t>(allRegionNames.size()) &&
-          indices[regionAxes - 1] > 0 &&
-          indices[regionAxes - 1] - 1 < static_cast<Int_t>(allRegionNames[regionAxes - 1].size())) {
-        if (allRegionNames[regionAxes - 1][indices[regionAxes - 1] - 1] != "Nominal") {
-          histName += "_" + allRegionNames[regionAxes - 1][indices[regionAxes - 1] - 1];
-        }
-      }
-
-      if (histMap.count(dirName + "/" + histName) == 0) {
-        // std::cout << "Booking histogram: " << dirName + "/" + histName << std::endl;
-        histMap[dirName + "/" + histName] =
-            TH1F(histName.c_str(),
-                 (allNames[histIndex] + ";" + allNames[histIndex] +
-                  ";Counts").c_str(),
-                 allBins[histIndex], allLowerBounds[histIndex],
-                 allUpperBounds[histIndex]);
-        dirSet.emplace(dirName);
-      }
-
-      const Int_t valueAxisIndex = regionAxes;
-      if (valueAxisIndex < dim) {
-        // std::cout << "Booking histogram: " << dirName + "/" + histName << std::endl;
-        histMap[dirName + "/" + histName].SetBinContent(
-          indices[valueAxisIndex], content);
-        histMap[dirName + "/" + histName].SetBinError(
-          indices[valueAxisIndex], std::sqrt(error));
-        }
+    if (dim < 2) {
+      throw std::runtime_error(
+          "NDHistogramManager: expected an observable axis and at least one category axis");
     }
+    const std::string objectKey = hist->GetName();
+    const std::string logicalName = allNames[histIndex];
+    if (histIndex < histMemoryUsage_m.size() && histMemoryUsage_m[histIndex] &&
+        !histMemoryWarningReported_m[histIndex]) {
+      const auto &memory = *histMemoryUsage_m[histIndex];
+      if (memory.sparse && memory.sparseBytes > memory.denseBytes) {
+        std::ostringstream warning;
+        warning << "NDHistogramManager WARNING: saving histogram '" << objectKey
+                << "' to meta file '" << fileName << "': Boost " << memory.storage
+                << " accumulator allocations observed during finalization ("
+                << memory.sparseBytes << " bytes) exceed the estimated dense arrays ("
+                << memory.denseBytes << " bytes across " << memory.slots
+                << " RDF slots). Consider increasing histogramDenseLimitMiB to allow dense storage. "
+                << "This compares accumulator allocations, not process RSS or ROOT output storage.";
+        if (logger_m) logger_m->log(ILogger::Level::Warn, warning.str());
+        else std::cerr << warning.str() << std::endl;
+        histMemoryWarningReported_m[histIndex] = true;
+      }
+    }
+    const auto &histogramRegionNames =
+        useBookedAxisLabels && histIndex < histRegionNames_m.size() &&
+                !histRegionNames_m[histIndex].empty()
+            ? histRegionNames_m[histIndex]
+            : allRegionNames;
 
-    histIndex++;
+    if (histIndex != 0) schema << ',';
+    schema << "{\"key\":\"" << jsonEscape(objectKey)
+           << "\",\"name\":\"" << jsonEscape(logicalName)
+           << "\",\"variable\":\"" << jsonEscape(allVariables[histIndex])
+           << "\",\"label\":\"" << jsonEscape(allLabels[histIndex])
+           << "\",\"axes\":[";
+
+    for (Int_t axisIndex = 0; axisIndex < dim; ++axisIndex) {
+      if (axisIndex != 0) schema << ',';
+      TAxis *axis = hist->GetAxis(axisIndex);
+      const std::string role =
+          axisIndex < static_cast<Int_t>(axisRoles.size())
+              ? axisRoles[static_cast<std::size_t>(axisIndex)]
+              : "axis_" + std::to_string(axisIndex);
+      axis->SetTitle(role.c_str());
+
+      std::vector<std::string> labels;
+      if (axisIndex < dim - 1 &&
+          axisIndex < static_cast<Int_t>(histogramRegionNames.size())) {
+        labels = histogramRegionNames[static_cast<std::size_t>(axisIndex)];
+      }
+      const auto nLabels = std::min(
+          labels.size(), static_cast<std::size_t>(axis->GetNbins()));
+      for (std::size_t labelIndex = 0; labelIndex < nLabels; ++labelIndex) {
+        axis->SetBinLabel(static_cast<Int_t>(labelIndex + 1),
+                          labels[labelIndex].c_str());
+      }
+      labels.resize(nLabels);
+
+      schema << "{\"role\":\"" << jsonEscape(role)
+             << "\",\"bins\":" << axis->GetNbins()
+             << ",\"labels\":";
+      appendJsonStringArray(schema, labels);
+      schema << ",\"edges\":";
+      appendJsonDoubleArray(schema, getAxisEdges(*axis));
+      schema << '}';
+    }
+    schema << "]}";
+
+    ndDirectory->cd();
+    hist->SetTitle(logicalName.c_str());
+    hist->Write(objectKey.c_str(), TObject::kOverwrite);
   }
 
-  for (const auto &dirName : dirSet) {
-    std::string newDir(dirName);
-    if (newDir.find('/') != std::string::npos) {
-      newDir[newDir.find('/')] = '_';
-    }
-    saveFile.cd();
-    if (!newDir.empty()) {
-      saveFile.mkdir(newDir.c_str());
-      saveFile.cd(newDir.c_str());
-    }
-    for (auto &pair : histMap) {
-      //std::cout << "Saving histogram: " << pair.first << std::endl;
-      if (pair.first.rfind(dirName + "/", 0) == 0) {
-        pair.second.Write();
-      }
-    }
-    saveFile.cd();
-  }
+  schema << "]}";
+  saveFile.cd();
+  TObjString schemaObject(schema.str().c_str());
+  schemaObject.Write(kHistogramSchemaKey, TObject::kOverwrite);
+  saveFile.Flush();
 }
 
 
@@ -730,7 +1608,12 @@ NDHistogramManager::GetHistos() {
  */
 void NDHistogramManager::Clear() {
   histos_m.clear();
+  histMemoryUsage_m.clear();
+  histMemoryWarningReported_m.clear();
   histNodes_m.clear();
+  histRegionNames_m.clear();
+  trackedHistInfos_m.clear();
+  trackedRegionNames_m.clear();
 }
 
 /**
@@ -741,15 +1624,71 @@ void NDHistogramManager::setupFromConfigFile() {
     throw std::runtime_error("NDHistogramManager: ConfigManager not set");
   }
 
-  // Read optional histogram backend selection (default: "root", option: "boost")
+  // Histogram systematic variations are enabled by default for backwards
+  // compatibility.  Analyses that only want nominal plots can explicitly set
+  // histogramSystematics: false without changing their central event weights.
+  const std::string histogramSystematics =
+      configManager_m->get("histogramSystematics");
+  histogramSystematics_m = true;
+  if (!histogramSystematics.empty()) {
+    std::string normalized = histogramSystematics;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (normalized == "true" || normalized == "1" || normalized == "yes") {
+      histogramSystematics_m = true;
+    } else if (normalized == "false" || normalized == "0" ||
+               normalized == "no") {
+      histogramSystematics_m = false;
+    } else {
+      throw std::runtime_error(
+          "NDHistogramManager: invalid histogramSystematics value '" +
+          histogramSystematics + "'. Valid values are true or false.");
+    }
+  }
+
+  // Default to ROOT-compatible float Boost with sparse accumulation.
   const std::string backend = configManager_m->get("histogramBackend");
   if (!backend.empty()) {
     if (backend != "root" && backend != "boost") {
       throw std::runtime_error(
           "NDHistogramManager: invalid histogramBackend '" + backend +
-          "'. Valid values are 'root' (default) or 'boost'.");
+          "'. Valid values are 'root' or 'boost' (default).");
     }
     histogramBackend_m = backend;
+  }
+
+  const auto denseLimit = configManager_m->get("histogramDenseLimitMiB");
+  if (!denseLimit.empty()) {
+    std::size_t consumed = 0;
+    unsigned long long mib = 0;
+    try {
+      if (denseLimit.find_first_not_of("0123456789") != std::string::npos)
+        throw std::invalid_argument("not an unsigned integer");
+      mib = std::stoull(denseLimit, &consumed);
+      if (consumed != denseLimit.size() ||
+          mib > std::numeric_limits<std::size_t>::max() / (1024ULL * 1024))
+        throw std::out_of_range("dense limit overflow");
+    } catch (const std::exception &) {
+      throw std::runtime_error("NDHistogramManager: histogramDenseLimitMiB must be a non-negative integer in range");
+    }
+    histogramDenseLimitBytes_m = static_cast<std::size_t>(mib) * 1024 * 1024;
+  }
+  const auto &configMap = configManager_m->getConfigMap();
+  if (const auto precision = configMap.find("histogramBoostPrecision"); precision != configMap.end()) {
+    if (precision->second != "float" && precision->second != "double")
+      throw std::runtime_error("NDHistogramManager: histogramBoostPrecision must be float or double");
+    histogramBoostFloatContents_m = precision->second == "float";
+  }
+  if (const auto storage = configMap.find("histogramBoostSparseBackend"); storage != configMap.end()) {
+    if (storage->second != "map" && storage->second != "flat")
+      throw std::runtime_error("NDHistogramManager: histogramBoostSparseBackend must be map or flat");
+#ifndef RDF_HAS_BOOST_FLAT_HISTOGRAM_STORAGE
+    if (storage->second == "flat")
+      throw std::runtime_error("NDHistogramManager: flat sparse storage is unavailable in this Boost build");
+#endif
+    histogramBoostSparseBackend_m = storage->second;
   }
 
   // Parse histogram configuration if present
@@ -765,7 +1704,7 @@ void NDHistogramManager::setupFromConfigFile() {
   try {
     // Parse the histogram configuration file
     // Required keys: name, variable, weight, bins, lowerBound, upperBound
-    // Optional keys: label, suffix, channelVariable, channelBins, channelLowerBound, channelUpperBound, 
+    // Optional keys: label, suffix, binningRanges, channelVariable, channelBins, channelLowerBound, channelUpperBound,
     //                channelRegions, controlRegionVariable, controlRegionBins, controlRegionLowerBound,
     //                controlRegionUpperBound, controlRegionRegions, sampleCategoryVariable, 
     //                sampleCategoryBins, sampleCategoryLowerBound, sampleCategoryUpperBound, sampleCategoryRegions
@@ -778,6 +1717,12 @@ void NDHistogramManager::setupFromConfigFile() {
     for (const auto &entry : histogramEntries) {
       HistogramConfig config;
       config.name = entry.at("name");
+      const auto nominalOnly = entry.find("nominalOnly");
+      if (nominalOnly != entry.end()) {
+        if (nominalOnly->second != "true" && nominalOnly->second != "false")
+          throw std::runtime_error("NDHistogramManager: nominalOnly must be true or false: " + config.name);
+        config.nominalOnly = nominalOnly->second == "true";
+      }
       config.variable = entry.at("variable");
       config.weight = entry.at("weight");
       config.bins = std::stoi(entry.at("bins"));
@@ -785,6 +1730,50 @@ void NDHistogramManager::setupFromConfigFile() {
       config.upperBound = std::stof(entry.at("upperBound"));
 
       // Optional fields
+      auto binningRangesIt = entry.find("binningRanges");
+      if (binningRangesIt != entry.end()) {
+        const auto ranges =
+            configManager_m->splitString(binningRangesIt->second, ";");
+        for (const auto &range : ranges) {
+          const auto parts = configManager_m->splitString(range, ":");
+          if (parts.size() != 3) {
+            throw std::runtime_error(
+                "NDHistogramManager: binningRanges for histogram '" +
+                config.name +
+                "' must contain semicolon-separated min:max:nbins ranges");
+          }
+          const Double_t lower = std::stod(parts[0]);
+          const Double_t upper = std::stod(parts[1]);
+          const Int_t nBins = std::stoi(parts[2]);
+          if (!std::isfinite(lower) || !std::isfinite(upper) ||
+              lower >= upper || nBins <= 0) {
+            throw std::runtime_error(
+                "NDHistogramManager: invalid binning range for histogram '" +
+                config.name + "'");
+          }
+          if (config.binEdges.empty()) {
+            config.binEdges.push_back(lower);
+          } else if (std::abs(config.binEdges.back() - lower) > 1.0e-9) {
+            throw std::runtime_error(
+                "NDHistogramManager: binningRanges for histogram '" +
+                config.name + "' must be contiguous and ordered");
+          }
+          for (Int_t bin = 1; bin <= nBins; ++bin) {
+            config.binEdges.push_back(
+                lower + (upper - lower) * static_cast<Double_t>(bin) / nBins);
+          }
+        }
+        if (config.binEdges.size() !=
+                static_cast<std::size_t>(config.bins + 1) ||
+            std::abs(config.binEdges.front() - config.lowerBound) > 1.0e-6 ||
+            std::abs(config.binEdges.back() - config.upperBound) > 1.0e-6) {
+          throw std::runtime_error(
+              "NDHistogramManager: binningRanges for histogram '" +
+              config.name +
+              "' must match bins, lowerBound, and upperBound");
+        }
+      }
+
       auto labelIt = entry.find("label");
       config.label = (labelIt != entry.end()) ? labelIt->second : config.variable;
 
@@ -929,13 +1918,27 @@ std::string NDHistogramManager::ensureRegionMembershipColumn() {
     }
 
     const auto chain = regionManager_m->getFilterChain(name);
-    std::string expr = chain[0];
-    for (std::size_t j = 1; j < chain.size(); ++j) {
-      expr += " && " + chain[j];
+    if (chain.empty())
+      throw std::runtime_error("NDHistogramManager: empty region filter chain");
+    bool useFallback = false;
+    for (const auto &filterColumn : chain) {
+      const std::string filterType = dataManager_m->getDataFrame().GetColumnType(filterColumn);
+      if (isNDHistogramRVecType(filterType)) {
+        useFallback = true;
+        break;
+      }
+      const auto token = tokenizeNDHistogramType(filterType);
+      if (token == NDHistogramTypeToken::Unsupported) {
+        useFallback = true;
+        break;
+      }
     }
-    // Wrap as bool cast to be safe with different column types.
-    expr = "static_cast<bool>(" + expr + ")";
-    df = df.Define(boolCol, expr);
+
+    if (useFallback) {
+      df = df.Define(boolCol, buildRegionMembershipBoolExpression(chain));
+    } else {
+      df = rdfcolumnpacker::defineScalarAll(df, boolCol, chain);
+    }
     dataManager_m->setDataFrame(df);
   }
 
@@ -953,18 +1956,21 @@ std::string NDHistogramManager::ensureRegionMembershipColumn() {
       continue;
     }
 
-    const std::string expr =
-        "static_cast<float>(" + boolColNames[i] + ") * " +
-        std::to_string(static_cast<float>(i + 1)) + "f";
-    df = df.Define(idxCol, expr);
+    const float regionIndex = static_cast<float>(i + 1);
+    df = df.Define(
+        idxCol,
+        [regionIndex](bool inRegion) {
+          return inRegion ? regionIndex : 0.0f;
+        },
+        {boolColNames[i]});
     dataManager_m->setDataFrame(df);
   }
 
   // Step 3: Use DefineVector to pack the per-region float indices into a
   //         single RVec<Float_t>.  DataManager::DefineVector builds a compact
   //         brace-initializer expression for scalar inputs – no JIT overhead.
-  dataManager_m->DefineVector(kMembershipCol, idxColNames, "Float_t",
-                               *systematicManager_m);
+  dataManager_m->DefineVectorNominal(kMembershipCol, idxColNames, "Float_t",
+                                     *systematicManager_m);
   return kMembershipCol;
 }
 
@@ -975,7 +1981,21 @@ std::string NDHistogramManager::ensureRegionMembershipColumn() {
  * single large THnSparse with an additional region axis.  All bookings are
  * lazy, so the event loop runs exactly once.
  */
-void NDHistogramManager::bookConfigHistograms() {
+void NDHistogramManager::bookConfigHistograms(
+    const std::vector<std::string> &excludedNames) {
+  axisPackCache_m.clear();
+  if (!excludedNames.empty()) {
+    if (!histos_m.empty()) {
+      throw std::runtime_error("NDHistogramManager: exclude config histograms before booking");
+    }
+    configHistograms_m.erase(
+        std::remove_if(configHistograms_m.begin(), configHistograms_m.end(),
+                       [&](const HistogramConfig &entry) {
+                         return std::find(excludedNames.begin(), excludedNames.end(),
+                                          entry.name) != excludedNames.end();
+                       }),
+        configHistograms_m.end());
+  }
   if (configHistograms_m.empty()) {
     return;
   }
@@ -1007,15 +2027,21 @@ void NDHistogramManager::bookConfigHistograms() {
 
   // Auto-detect systematic variations from dataframe columns before the syst
   // list is built for the first time.
-  ensureSystematicsAutoRegistered();
+  std::vector<std::string> systList{"Nominal"};
+  if (histogramSystematics_m) {
+    ensureSystematicsAutoRegistered();
+    systList =
+        systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
+  }
 
-  const std::vector<std::string> systList =
-      systematicManager_m->makeSystList("SystematicCounter", *dataManager_m);
-
+  NDHistogramColumnCacheState columnCache;
   for (const auto &config : configHistograms_m) {
+    const auto &histogramSysts = config.nominalOnly
+        ? std::vector<std::string>{"Nominal"} : systList;
     histInfo info(config.name.c_str(), config.variable.c_str(),
                   config.label.c_str(), config.weight.c_str(),
-                  config.bins, config.lowerBound, config.upperBound);
+                  config.bins, config.lowerBound, config.upperBound,
+                  config.binEdges);
 
     if (nRegions > 0) {
       // Region-aware path: override the channel axis with the region
@@ -1046,8 +2072,8 @@ void NDHistogramManager::bookConfigHistograms() {
                                       std::move(controlRegionInfo),
                                       std::move(regionChannelInfo),
                                       config.suffix,
-                                      systList,
-                                      membershipCol);
+                                      histogramSysts,
+                                      membershipCol, &columnCache);
     } else {
       // Standard (non-region) path: existing behaviour unchanged.
       selectionInfo channelInfo(config.channelVariable, config.channelBins,
@@ -1068,7 +2094,7 @@ void NDHistogramManager::bookConfigHistograms() {
                                       std::move(controlRegionInfo),
                                       std::move(channelInfo),
                                       config.suffix,
-                                      systList);
+                                      histogramSysts, "", &columnCache);
     }
   }
 
@@ -1081,7 +2107,8 @@ void NDHistogramManager::bookConfigHistograms() {
   for (const auto& config : configHistograms_m) {
     configBatch.emplace_back(config.name.c_str(), config.variable.c_str(),
                               config.label.c_str(), config.weight.c_str(),
-                              config.bins, config.lowerBound, config.upperBound);
+                              config.bins, config.lowerBound, config.upperBound,
+                              config.binEdges);
   }
   if (!configBatch.empty()) {
     trackedHistInfos_m.push_back(std::move(configBatch));
@@ -1127,7 +2154,51 @@ void NDHistogramManager::initialize() {
             << std::endl;
 }
 
+void NDHistogramManager::reportStorageProfile(bool finalized) const {
+  if (!std::getenv("RDF_HISTOGRAM_PROFILE")) return;
+  // Some configurations have many very large dense-equivalent histograms.
+  auto accumulate = [](std::size_t &total, std::size_t bytes) {
+    total += std::min(bytes, std::numeric_limits<std::size_t>::max() - total);
+  };
+  std::size_t boostActions = 0, denseActions = 0, equivalent = 0, dense = 0;
+  std::size_t sparseSamples = 0, ready = 0, occupied = 0;
+  for (std::size_t i = 0; i < histMemoryUsage_m.size(); ++i) {
+    const auto &usage = histMemoryUsage_m[i];
+    if (!usage) continue; // ROOT actions have no Boost allocator counters.
+    ++boostActions;
+    accumulate(equivalent, usage->denseBytes);
+    if (usage->sparse) {
+      if (finalized && i < histos_m.size() && histos_m[i].IsReady())
+        accumulate(sparseSamples, usage->sparseBytes);
+    } else {
+      ++denseActions;
+      accumulate(dense, usage->denseBytes);
+    }
+  }
+  if (finalized) {
+    for (auto result : histos_m) {
+      if (!result.IsReady()) continue;
+      ++ready;
+      accumulate(occupied, static_cast<std::size_t>(result->GetNbins()));
+    }
+  }
+  std::fprintf(stderr,
+      "histogram summary: phase=%s actions=%zu boost_actions=%zu boost_dense_actions=%zu"
+      " boost_dense_equivalent_bytes=%zu boost_dense_selected_bytes=%zu",
+      finalized ? "final" : "booked", histos_m.size(), boostActions, denseActions,
+      equivalent, dense);
+  if (finalized)
+    std::fprintf(stderr, " ready_actions=%zu occupied_output_bins=%zu boost_sparse_sample_sum_bytes=%zu",
+                 ready, occupied, sparseSamples);
+  std::fputc('\n', stderr);
+}
+
+void NDHistogramManager::execute() {
+  reportStorageProfile(false);
+}
+
 void NDHistogramManager::reportMetadata() {
+  reportStorageProfile(true);
   if (!logger_m) return;
   logger_m->log(ILogger::Level::Info,
                 "NDHistogramManager: " +

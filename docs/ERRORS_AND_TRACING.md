@@ -103,29 +103,29 @@ analyzer.DefineFromVector('weight', weights.ctypes.data, len(weights), 'double')
 # Or ensure array lives long enough
 weights = np.array([1.0, 2.0])
 analyzer.DefineFromPointer('weight', weights.ctypes.data, len(weights), 'double')
-# Ensure 'weights' stays in scope until analyzer.save() or analyzer.run()
+# Ensure 'weights' stays in scope until analyzer.run() or analyzer.run()
 ```
 
-### 5. Systematic Variations Errors
+### 5. Registering Systematic Variations
 
-**Error:**
-```
-AttributeError: 'NoneType' object has no attribute 'registerSystematic'
-```
+Register a systematic family with the nominal columns it affects. The C++
+accessor returns a reference, and the Python wrapper exposes the same
+family-and-columns contract:
 
-**Cause:** Not initializing SystematicManager
-
-**Solution:**
 ```cpp
 // C++
-analyzer.getSystematicManager()->registerSystematic("jes_up");
+analyzer.getSystematicManager().registerSystematic("jes", {"jet_pt"});
 ```
 
 ```python
 # Python
-analyzer = rdfanalyzer.Analyzer('config.txt')
-analyzer.registerSystematic('jes_up', ['jet_pt'])
+analyzer = rdfanalyzer.Analyzer('config.yaml')
+analyzer.registerSystematic('jes', ['jet_pt'])
 ```
+
+The family name is `jes`; the framework derives the `jesUp` and `jesDown`
+variation labels. Define the affected input columns before filters or other
+actions that should use those variations.
 ### 6. Configuration Errors
 
 **Error:**
@@ -147,7 +147,7 @@ Missing required key 'sampleConfig'
 
 **Solution:**
 ```bash
-python core/python/validate_config.py --config config.txt
+python core/python/validate_config.py --config config.yaml
 ```
 
 Run validation before running analysis.
@@ -229,11 +229,11 @@ Config validation failed: File not found for 'floatConfig'
 **Solution:**
 ```bash
 # Ensure file exists
-ls cfg/float_config.txt
+ls cfg/float_config.yaml
 
 # Check path is relative to config file
 cd /path/to/analysis
-python core/python/validate_config.py --config cfg/config.txt
+python core/python/validate_config.py --config cfg/config.yaml
 ```
 
 ## Debugging Tips
@@ -245,7 +245,7 @@ import rdfanalyzer
 import sys
 
 # Set verbosity
-analyzer = rdfanalyzer.Analyzer('config.txt')
+analyzer = rdfanalyzer.Analyzer('config.yaml')
 analyzer.verbosityLevel = 2  # Higher = more verbose
 ```
 
@@ -266,7 +266,7 @@ print(ROOT.gInterpreter().getNumCommands())
 ### Validate Config Before Run
 
 ```bash
-python core/python/validate_config.py --config config.txt
+python core/python/validate_config.py --config config.yaml
 ```
 
 ### Check Build
@@ -306,9 +306,9 @@ If you encounter an error not listed here:
 
 ```python
 try:
-    analyzer = rdfanalyzer.Analyzer('config.txt')
+    analyzer = rdfanalyzer.Analyzer('config.yaml')
     analyzer.Define('x', 'pt > 25.0', ['pt'])
-    analyzer.save()
+    analyzer.run()
 except RuntimeError as e:
     print(f"Analysis error: {e}")
     sys.exit(1)

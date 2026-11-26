@@ -31,6 +31,10 @@ public:
    * @param configProvider Reference to the configuration provider
    */
   DataManager(const IConfigurationProvider &configProvider);
+  /// Supply programmatic friends in addition to those in friendConfig.
+  /// Each alias must be unique across both sources.
+  DataManager(const IConfigurationProvider &configProvider,
+              const std::vector<FriendTreeSpec> &friends);
 
   /**
    * @brief Construct a new DataManager object for testing with an in-memory RDataFrame
@@ -44,16 +48,30 @@ public:
    */
   ROOT::RDF::RNode getDataFrame() override;
   void setDataFrame(const ROOT::RDF::RNode &node) override;
+  void markInputDependenciesIncomplete(const std::string &reason) override;
 
   /**
-   * @brief Get the main TChain pointer
-   * @return Pointer to the main TChain
+   * @brief Get the main TChain reference
+   * @return Reference to the main TChain
+   *
+   * The returned reference is valid for the lifetime of this DataManager.
    */
-  TChain *getChain() const;
+  TChain &getChain() const;
 
 
   /**
-   * @brief Define a vector variable in the dataframe. If all columns are scalars, creates a vector from them. If all columns are RVecs, concatenates and casts them to the target type. Mixed types are not supported and will throw an error at runtime. Uses a JIT lambda for type deduction and concatenation.
+   * @brief Define a vector variable in the dataframe.
+   *
+   * If all input columns are scalars, creates a vector from them. If all input
+   * columns are RVecs, concatenates and casts them to the target type. Mixed
+   * scalar/RVec input is rejected. Multi-input packing queries RDF input types
+   * and uses a cached typed JIT callable with one output Define and no packing
+   * helper columns. Common zero-/one-input cases use native compiled callables.
+   * For each registered paired systematic affecting an input, also defines
+   * ``name_<systematic>Up`` and ``name_<systematic>Down`` with only the
+   * affected inputs shifted, then registers ``name`` as affected by that
+   * systematic so later derived definitions can propagate it. Explicit output
+   * column mappings already registered for ``name`` are honored.
    * @param name Name of the variable
    * @param columns Input columns (scalars or vectors)
    * @param type Data type (default: Float_t)
@@ -65,16 +83,16 @@ public:
                     ISystematicManager &systematicManager) override;
 
   /**
-   * @brief Filter the dataframe
-   * @param f Filter function
-   * @param columns Input columns
+   * @brief Define a vector from already-resolved nominal or packed inputs.
+   *
+   * Unlike DefineVector(), this does not create additional Up/Down outputs.
+   * It is intended for framework helper bundles whose input ordering already
+   * encodes the variations.
    */
-
-  /**
-   * @brief Define a per-sample variable in the dataframe
-   * @param name Name of the variable
-   * @param f Function to define the variable
-   */
+  void DefineVectorNominal(std::string name,
+                           const std::vector<std::string> &columns,
+                           std::string type,
+                           ISystematicManager &systematicManager) override;
 
   /**
    * @brief Template function to define a constant value for all samples
@@ -91,78 +109,33 @@ public:
   }
 
   /**
-   * @brief Redefine a variable in the dataframe
-   * @param name Name of the variable
-   * @param f Function to redefine the variable
-   * @param columns Input columns
-   */
-
-  /**
    * @brief Register constant variables from configuration
    * @param configProvider Reference to the configuration provider
-   * @param configKey The key in the configuration for the constants file (default: "floatConfig")
+   * @param floatConfigKey Configuration key for the floating-point constants file
+   * @param intConfigKey Configuration key for the integer constants file
    */
   void registerConstants(const IConfigurationProvider &configProvider, const std::string& floatConfigKey = "floatConfig", const std::string& intConfigKey = "intConfig");
 
   /**
    * @brief Register aliases from configuration
    * @param configProvider Reference to the configuration provider
-   * @param configKey The key in the configuration for the alias file (default: "aliasConfig")
+   * @param aliasConfigKey Configuration key for the alias file
    */
   void registerAliases(const IConfigurationProvider &configProvider, const std::string& aliasConfigKey = "aliasConfig");
 
   /**
    * @brief Register optional branches from configuration
    * @param configProvider Reference to the configuration provider
-   * @param configKey The key in the configuration for the optional branches file (default: "optionalBranchesConfig")
+   * @param optionalBranchesConfigKey Configuration key for the optional branches file
    */
   void registerOptionalBranches(const IConfigurationProvider &configProvider, const std::string& optionalBranchesConfigKey = "optionalBranchesConfig");
 
-  /**
-   * @brief Attach friend trees or sidecar files declared in a YAML config.
-   *
-   * Reads the config file referenced by @p friendConfigKey from
-   * @p configProvider, parses each ``FriendTreeSpec`` entry, and attaches the
-   * corresponding TChain as a named friend of the main chain.  After all
-   * friends are attached the internal RDataFrame is rebuilt from the main
-   * chain so that the new columns are immediately accessible.
-   *
-   * This method can be called before or after construction.  When called after
-   * the DataManager has already been built (e.g. programmatically in analysis
-   * code) it must be invoked *before* any ``Define`` / ``Filter`` operations,
-   * because the RDataFrame is recreated internally.
-   *
-   * Supported config keys per friend entry (see FriendTreeSpec):
-   *   - ``alias``         – name used to prefix friend branches (required)
-   *   - ``treeName``      – TTree name inside the friend files (default: "Events")
-   *   - ``fileList``      – YAML sequence of file paths / XRootD URLs
-   *   - ``directory``     – directory to scan (alternative to fileList)
-   *   - ``globs``         – include patterns for directory scan
-   *   - ``antiglobs``     – exclude patterns for directory scan
-   *   - ``indexBranches`` – branch names for index-based event matching
-   *
-   * @param configProvider Reference to the configuration provider.
-   * @param friendConfigKey Config key that maps to the YAML file path
-   *                        (default: ``"friendConfig"``).
-   */
+  /// Legacy entry points retained for ABI compatibility. Friends must be supplied
+  /// at construction, before ROOT creates the source and any action captures it.
+  [[deprecated("Use friendConfig or DataManager(config, friends) at construction")]]
   void registerFriendTrees(const IConfigurationProvider &configProvider,
                            const std::string &friendConfigKey = "friendConfig");
-
-  /**
-   * @brief Attach a single friend tree to the main TChain.
-   *
-   * Creates a new TChain from the specification in @p spec, optionally builds
-   * an event-matching index, and registers it as a named friend of the main
-   * chain.  Ownership of the new TChain is retained internally so that the
-   * main chain's pointer remains valid for the lifetime of this DataManager.
-   *
-   * @note After calling this method you should recreate the RDataFrame (e.g.
-   *       by calling registerFriendTrees which does so automatically) before
-   *       the event loop starts, otherwise the new friend branches will not be
-   *       visible to the existing RDataFrame node.
-   *
-   * @param spec Description of the friend tree to attach.
-   */
+  [[deprecated("Pass FriendTreeSpec values to DataManager(config, friends)")]]
   void attachFriendTree(const FriendTreeSpec &spec);
 
   /**
@@ -182,6 +155,13 @@ public:
   virtual ~DataManager();
 
 private:
+  void attachSourceFriend(const FriendTreeSpec &spec);
+  void defineVectorImpl(std::string name,
+                        const std::vector<std::string> &columns,
+                        std::string type,
+                        ISystematicManager &systematicManager,
+                        bool propagateSystematics);
+
   /// Owns TChain objects attached as ROOT friend trees.
   /// Must be declared before chain_vec_m so that friend chains are destroyed
   /// AFTER the main TChain (C++ destroys members in reverse declaration order).

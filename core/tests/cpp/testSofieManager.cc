@@ -15,6 +15,26 @@
 #include <SystematicManager.h>
 #include <ROOT/TThreadExecutor.hxx>
 
+#ifdef RDF_TEST_SOFIE_BLAS
+// Exercise the same LP64 Fortran symbol used by generated CPU sessions.
+// This executable links only the ordinary framework and GoogleTest targets.
+extern "C" void sgemm_(const char*, const char*, const int*, const int*, const int*,
+                       const float*, const float*, const int*, const float*, const int*,
+                       const float*, float*, const int*);
+
+TEST(SofieLinkageTest, GeneratedGemmResolvesThroughFramework) {
+  const char normal = 'N';
+  const int rows = 1, cols = 1, inner = 2;
+  const float alpha = 1.f, beta = 0.f;
+  const float features[] = {2.f, 3.f};
+  const float weights[] = {5.f, 7.f};
+  float score = 0.f;
+  sgemm_(&normal, &normal, &rows, &cols, &inner, &alpha,
+         features, &rows, weights, &inner, &beta, &score, &rows);
+  EXPECT_FLOAT_EQ(score, 31.f);
+}
+#endif
+
 // Mock SOFIE inference function for testing
 std::vector<float> mockSofieInference(const std::vector<float>& input) {
   // Simple mock: return sum of inputs
@@ -31,7 +51,7 @@ protected:
     ChangeToTestSourceDir();
     
     // Create a simple configuration without sofieConfig
-    configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    configManager = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
     systematicManager = std::make_unique<SystematicManager>();
     dataManager = std::make_unique<DataManager>(2);
     
@@ -71,9 +91,21 @@ protected:
 };
 
 // Construction
+TEST_F(SofieManagerTest, YamlConfigProvidesFeaturesAndGateBeforeFunctionRegistration) {
+  configManager->set("sofieConfig", "cfg/sofie_models.yaml");
+  SofieManager manager(*configManager);
+  EXPECT_EQ(manager.getModelFeatures("test_sofie"), (std::vector<std::string>{"feature1", "feature2", "feature3"}));
+  EXPECT_EQ(manager.getRunVar("test_sofie"), "run_number");
+}
+
+TEST_F(SofieManagerTest, ExplicitMissingRecipeFailsDuringSetup) {
+  configManager->set("sofieConfig", "cfg/nonexistent_sofie_recipe.yaml");
+  EXPECT_THROW((void)SofieManager(*configManager), std::runtime_error);
+}
+
 TEST_F(SofieManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
-    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
     auto manager = std::make_unique<SofieManager>(*config);
   });
 }
@@ -285,7 +317,7 @@ TEST_F(SofieManagerTest, ThreadSafetyWithROOTImplicitMT) {
 // Test manual registration
 TEST_F(SofieManagerTest, ManualRegistration) {
   // Create a fresh manager
-  auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.txt");
+  auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config_minimal.yaml");
   auto manager = std::make_unique<SofieManager>(*config);
   
   // Manually register a model

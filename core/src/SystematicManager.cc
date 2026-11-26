@@ -32,6 +32,9 @@ std::string normalizeSystematicName(const std::string &syst) {
  */
 void SystematicManager::registerSystematic(
     const std::string &syst, const std::set<std::string> &affectedVariables) {
+  if (!enabled_m) {
+    return;
+  }
   const std::string normalizedSyst = normalizeSystematicName(syst);
   for (const auto &var : affectedVariables) {
     systematicToVariableMap_m[normalizedSyst].insert(var);
@@ -40,9 +43,36 @@ void SystematicManager::registerSystematic(
   systematics_m.insert(normalizedSyst);
 }
 
+void SystematicManager::setEnabled(bool enabled) {
+  if (enabled_m == enabled) {
+    return;
+  }
+
+  enabled_m = enabled;
+  if (!enabled_m) {
+    // Do not leave a partially systematic graph visible after disabling the
+    // manager.  The config-driven toggle is applied before analysis setup,
+    // while clearing here also makes the public API safe to use directly.
+    systematics_m.clear();
+    systematicToVariableMap_m.clear();
+    variableToSystematicMap_m.clear();
+    variationColumnMap_m.clear();
+    explicitVariationLabels_m.clear();
+    explicitVariationToVariableMap_m.clear();
+    variableToExplicitVariationMap_m.clear();
+    materializedSystLists_m.clear();
+    selectionMaskColumns_m.clear();
+  }
+}
+
+bool SystematicManager::isEnabled() const { return enabled_m; }
+
 void SystematicManager::registerVariationColumns(
     const std::string &variable, const std::string &systematicName,
     const std::string &upColumn, const std::string &downColumn) {
+  if (!enabled_m) {
+    return;
+  }
   if (variable.empty() || systematicName.empty() || upColumn.empty() ||
       downColumn.empty()) {
     return;
@@ -54,6 +84,22 @@ void SystematicManager::registerVariationColumns(
   variationColumnMap_m[variable][normalizedSyst + "Down"] = downColumn;
 }
 
+void SystematicManager::registerVariationColumn(
+    const std::string &variable, const std::string &variationLabel,
+    const std::string &column) {
+  if (!enabled_m) {
+    return;
+  }
+  if (variable.empty() || variationLabel.empty() || column.empty()) {
+    return;
+  }
+
+  explicitVariationLabels_m.insert(variationLabel);
+  explicitVariationToVariableMap_m[variationLabel].insert(variable);
+  variableToExplicitVariationMap_m[variable].insert(variationLabel);
+  variationColumnMap_m[variable][variationLabel] = column;
+}
+
 /**
  * @brief Get the set of all registered systematics
  * @return Reference to the set of systematic names
@@ -62,28 +108,124 @@ const std::set<std::string> &SystematicManager::getSystematics() const {
   return systematics_m;
 }
 
+std::vector<std::string> SystematicManager::getExplicitVariationLabels() const {
+  if (!enabled_m) {
+    return {};
+  }
+  return {explicitVariationLabels_m.begin(), explicitVariationLabels_m.end()};
+}
+
+std::vector<std::string> SystematicManager::getExplicitVariationLabelsForVariable(
+    const std::string &variable) const {
+  if (!enabled_m) {
+    return {};
+  }
+  const auto it = variableToExplicitVariationMap_m.find(variable);
+  if (it == variableToExplicitVariationMap_m.end()) {
+    return {};
+  }
+  return {it->second.begin(), it->second.end()};
+}
+
+std::vector<std::string> SystematicManager::getVariationLabels() const {
+  std::vector<std::string> labels{"Nominal"};
+  if (!enabled_m) {
+    return labels;
+  }
+  labels.reserve(1 + systematics_m.size() * 2 + explicitVariationLabels_m.size());
+  for (const auto &systematic : systematics_m) {
+    labels.push_back(systematic + "Up");
+    labels.push_back(systematic + "Down");
+  }
+  std::set<std::string> seen(labels.begin(), labels.end());
+  for (const auto &label : explicitVariationLabels_m)
+    if (seen.insert(label).second) labels.push_back(label);
+  return labels;
+}
+
+void SystematicManager::registerSelectionMaskColumn(
+    const std::string &variationLabel, const std::string &column) {
+  // The nominal mask is part of ordinary filtering, not a systematic
+  // variation, so it remains available in nominal-only mode.
+  if (!enabled_m && variationLabel != "Nominal") {
+    return;
+  }
+  if (variationLabel.empty() || column.empty()) {
+    return;
+  }
+  selectionMaskColumns_m[variationLabel] = column;
+}
+
+std::string SystematicManager::getSelectionMaskColumn(
+    const std::string &variationLabel) const {
+  const auto exact = selectionMaskColumns_m.find(variationLabel);
+  if (exact != selectionMaskColumns_m.end()) {
+    return exact->second;
+  }
+  const auto nominal = selectionMaskColumns_m.find("Nominal");
+  return nominal == selectionMaskColumns_m.end() ? std::string()
+                                                  : nominal->second;
+}
+
+bool SystematicManager::hasSelectionMasks() const {
+  return selectionMaskColumns_m.find("Nominal") != selectionMaskColumns_m.end();
+}
+
 /**
  * @brief Get the set of variables affected by a given systematic
  * @param syst Name of the systematic
- * @return Reference to the set of variable names
+ * @return Set of variable names
  */
-const std::set<std::string> &
+std::set<std::string>
 SystematicManager::getVariablesForSystematic(const std::string &syst) const {
-  static const std::set<std::string> empty;
-  auto it = systematicToVariableMap_m.find(normalizeSystematicName(syst));
-  return it != systematicToVariableMap_m.end() ? it->second : empty;
+  const auto familyName = normalizeSystematicName(syst);
+  const auto family = systematicToVariableMap_m.find(familyName);
+  // Bare family queries are used to expand skim branches to Up and Down.
+  if (family != systematicToVariableMap_m.end() && familyName == syst)
+    return family->second;
+  const auto exact = explicitVariationToVariableMap_m.find(syst);
+  if (family == systematicToVariableMap_m.end())
+    return exact == explicitVariationToVariableMap_m.end()
+        ? std::set<std::string>{} : exact->second;
+  auto variables = family->second;
+  if (exact != explicitVariationToVariableMap_m.end())
+    variables.insert(exact->second.begin(), exact->second.end());
+  return variables;
+}
+
+bool SystematicManager::isVariableAffectedBySystematic(
+    const std::string &variable, const std::string &syst) const {
+  const auto familyName = normalizeSystematicName(syst);
+  const auto family = systematicToVariableMap_m.find(familyName);
+  if (family != systematicToVariableMap_m.end()) {
+    if (family->second.count(variable)) return true;
+    if (familyName == syst) return false;
+  }
+  const auto label = explicitVariationToVariableMap_m.find(syst);
+  return label != explicitVariationToVariableMap_m.end() && label->second.count(variable) != 0;
 }
 
 /**
  * @brief Get the set of systematics affecting a given variable
  * @param var Name of the variable
- * @return Reference to the set of systematic names
+ * @return Set of systematic names
  */
-const std::set<std::string> &
+std::set<std::string>
 SystematicManager::getSystematicsForVariable(const std::string &var) const {
-  static const std::set<std::string> empty;
   auto it = variableToSystematicMap_m.find(var);
-  return it != variableToSystematicMap_m.end() ? it->second : empty;
+  if (it != variableToSystematicMap_m.end()) {
+    auto result = it->second;
+    auto explicitIt = variableToExplicitVariationMap_m.find(var);
+    if (explicitIt != variableToExplicitVariationMap_m.end()) {
+      result.insert(explicitIt->second.begin(), explicitIt->second.end());
+    }
+    return result;
+  }
+  auto explicitIt = variableToExplicitVariationMap_m.find(var);
+  if (explicitIt != variableToExplicitVariationMap_m.end()) {
+    return explicitIt->second;
+  }
+  return {};
 }
 
 std::string SystematicManager::getVariationColumnName(
@@ -96,7 +238,14 @@ std::string SystematicManager::getVariationColumnName(
     }
   }
 
-  if (isVariableAffectedBySystematic(variable, syst)) {
+  // A bare family name is also a legal independent axis label. Once that
+  // label exists, only its exact registrations above affect its axis entry.
+  // The paired shifts still resolve independently as familyUp/familyDown.
+  const auto families = variableToSystematicMap_m.find(variable);
+  if (families == variableToSystematicMap_m.end()) return variable;
+  if (explicitVariationLabels_m.count(syst) && systematics_m.count(syst))
+    return variable;
+  if (families->second.count(normalizeSystematicName(syst))) {
     return variable + "_" + syst;
   }
   return variable;
@@ -138,8 +287,38 @@ void SystematicManager::registerExistingSystematics(
 SystematicValidationResult SystematicManager::autoRegisterSystematics(
     const std::vector<std::string> &columnNames) {
 
-  const std::unordered_set<std::string> colSet(columnNames.begin(), columnNames.end());
   SystematicValidationResult result;
+  if (!enabled_m) {
+    return result;
+  }
+  const std::unordered_set<std::string> colSet(columnNames.begin(), columnNames.end());
+
+  // A nuisance may itself contain underscores (e.g. Absolute_2024).
+  // Prefer the longest explicitly registered suffix, then the longest
+  // existing base column. Only use the legacy last-underscore split when
+  // neither source can disambiguate the name.
+  const auto splitVariation = [&](const std::string &prefix) {
+    std::size_t split = std::string::npos;
+    std::size_t longestSuffix = 0;
+    for (const auto &syst : systematics_m) {
+      const std::string suffix = "_" + syst;
+      if (suffix.size() < prefix.size() && endsWith(prefix, suffix) &&
+          suffix.size() > longestSuffix) {
+        split = prefix.size() - suffix.size();
+        longestSuffix = suffix.size();
+      }
+    }
+    if (split == std::string::npos) {
+      for (auto pos = prefix.rfind('_'); pos != std::string::npos;
+           pos = pos == 0 ? std::string::npos : prefix.rfind('_', pos - 1)) {
+        if (colSet.count(prefix.substr(0, pos))) {
+          split = pos;
+          break;
+        }
+      }
+    }
+    return split == std::string::npos ? prefix.rfind('_') : split;
+  };
 
   // Track (baseVar, systName) keys we have already processed to avoid
   // reporting or registering the same pair twice.
@@ -157,14 +336,14 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
 
     // prefix = "baseVar_systName"
     const std::string prefix = col.substr(0, col.size() - kUpLen);
-    const std::size_t lastUnderscore = prefix.rfind('_');
+    const std::size_t lastUnderscore = splitVariation(prefix);
     if (lastUnderscore == std::string::npos || lastUnderscore == 0) {
       continue;
     }
 
     const std::string baseVar  = prefix.substr(0, lastUnderscore);
     const std::string systName = prefix.substr(lastUnderscore + 1);
-    if (baseVar.empty() || systName.empty()) {
+    if (baseVar.empty() || systName.empty() || !colSet.count(baseVar)) {
       continue;
     }
 
@@ -194,14 +373,14 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
     }
 
     const std::string prefix = col.substr(0, col.size() - kDownLen);
-    const std::size_t lastUnderscore = prefix.rfind('_');
+    const std::size_t lastUnderscore = splitVariation(prefix);
     if (lastUnderscore == std::string::npos || lastUnderscore == 0) {
       continue;
     }
 
     const std::string baseVar  = prefix.substr(0, lastUnderscore);
     const std::string systName = prefix.substr(lastUnderscore + 1);
-    if (baseVar.empty() || systName.empty()) {
+    if (baseVar.empty() || systName.empty() || !colSet.count(baseVar)) {
       continue;
     }
 
@@ -238,11 +417,7 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
    }
 
    // Build the variation list from the currently registered systematics.
-   std::vector<std::string> systList = {"Nominal"};
-   for (const auto &syst : getSystematics()) {
-     systList.push_back(syst + "Up");
-     systList.push_back(syst + "Down");
-   }
+   std::vector<std::string> systList = getVariationLabels();
 
    // Define integer counter columns for this branchName namespace.
    // Columns that already exist in the dataframe are silently skipped.
@@ -263,15 +438,9 @@ SystematicValidationResult SystematicManager::autoRegisterSystematics(
      columnSet.insert(name);
    };
 
-   int var = 0;
-   ensureColumn(branchName, var);
-
-   for (const auto &syst : getSystematics()) {
-     var++;
-     ensureColumn(branchName + "_" + syst + "Up", var);
-     var++;
-     ensureColumn(branchName + "_" + syst + "Down", var);
-   }
+   for (std::size_t i = 0; i < systList.size(); ++i)
+     ensureColumn(i == 0 ? branchName : branchName + "_" + systList[i],
+                  static_cast<int>(i));
 
    // Cache the list for this branchName so future calls are no-ops.
    materializedSystLists_m[branchName] = systList;

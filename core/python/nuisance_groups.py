@@ -533,6 +533,8 @@ class NuisanceGroupRegistry:
         -------
         NuisanceGroupRegistry
         """
+        if "nuisance_groups" in config:
+            return cls.from_dict({"groups": config["nuisance_groups"]})
         if "groups" in config:
             return cls.from_dict(config)
 

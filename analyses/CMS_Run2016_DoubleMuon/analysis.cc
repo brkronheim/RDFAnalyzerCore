@@ -13,7 +13,7 @@
  *
  * - **TriggerManager** plugin for config-driven trigger selection.
  * - **PhysicsObjectCollection** for muon and jet object management, including
- *   built-in ΔR overlap removal (removeOverlap) and pair building (makePairs).
+ *   built-in ΔR overlap removal (removeOverlap) and indexed four-vectors.
  * - **CutflowManager** plugin for sequential cutflow and N-1 tables.
  * - **NDHistogramManager** plugin for config-driven histogram booking.
  * - **YAML configuration** (cfg.yaml and all subconfigs) as the sole format.
@@ -27,9 +27,8 @@
  *
  * ## Build & run
  *
- *   cmake -S . -B build && cmake --build build -j$(nproc)
- *   cd build/analyses/CMS_Run2016_DoubleMuon
- *   ./analysis ../../../analyses/CMS_Run2016_DoubleMuon/cfg.yaml
+ *   See README.md for CMS extension setup, the cms_doublemu_analysis target,
+ *   local output directory and nominal histogram extraction.
  */
 
 #include "analyzer.h"
@@ -125,13 +124,14 @@ bool hasOppositeSign(const PhysicsObjectCollection &muons,
     return charge[muons.index(0)] * charge[muons.index(1)] < 0;
 }
 
-// Dimuon invariant mass in the Z peak window [70, 110] GeV.
-// Guard for size < 2 is required for the N-1 computation.
-bool inMassWindow(const PhysicsObjectCollection &muons) {
-    if (muons.size() < 2) return false;
-    const auto pairs = makePairs(muons);
-    const float m = static_cast<float>(pairs[0].p4.M());
-    return m > 70.0f && m < 110.0f;
+// N-1 counts can request this column before the two-muon cut.
+Float_t dimuonMass(const PhysicsObjectCollection &muons) {
+    if (muons.size() < 2) return -1.f;
+    return static_cast<Float_t>((muons.at(0) + muons.at(1)).M());
+}
+
+bool inMassWindow(Float_t mass) {
+    return mass > 70.0f && mass < 110.0f;
 }
 
 // ============================================================================
@@ -140,11 +140,6 @@ bool inMassWindow(const PhysicsObjectCollection &muons) {
 // At this point every event has exactly two opposite-sign tight muons in
 // the Z mass window, so no guards are needed.
 // ============================================================================
-
-// Dimuon invariant mass [GeV] using PhysicsObjectCollection::makePairs
-Float_t dimuonMass(const PhysicsObjectCollection &muons) {
-    return static_cast<Float_t>(makePairs(muons)[0].p4.M());
-}
 
 // Leading muon pT [GeV]
 Float_t leadMuPt(const PhysicsObjectCollection &muons) {
@@ -257,7 +252,8 @@ int main(int argc, char **argv) {
     // Event-level cut booleans (evaluated with guards for safety)
     an.Define("hasTwoMuons",     hasExactlyTwoMuons, {"goodMuons"});
     an.Define("hasOppositeSign", hasOppositeSign,    {"goodMuons", "Muon_charge"});
-    an.Define("inMassWindow",    inMassWindow,       {"goodMuons"});
+    an.Define("DimuonMass",      dimuonMass,         {"goodMuons"});
+    an.Define("inMassWindow",    inMassWindow,       {"DimuonMass"});
 
     // -----------------------------------------------------------------------
     // 5. Register analysis cuts with CutflowManager.
@@ -276,9 +272,6 @@ int main(int argc, char **argv) {
     // 6. Derived quantities (computed after all cuts; exactly 2 OS muons
     //    in [70, 110] GeV guaranteed at this point).
     // -----------------------------------------------------------------------
-
-    // Dimuon invariant mass [GeV] via PhysicsObjectCollection makePairs()
-    an.Define("DimuonMass", dimuonMass, {"goodMuons"});
 
     // Individual muon kinematics
     an.Define("LeadMuPt",  leadMuPt,  {"goodMuons"});
@@ -325,7 +318,7 @@ int main(int argc, char **argv) {
     //    skimmed tree, which was the source of the CI failure when histo
     //    verification was performed.
     //      - Skimmed event tree  → saveFile in cfg.yaml
-    //      - Histograms          → histograms/ directory of the meta file
+    //      - Histograms          → nd_histograms_v1/ in the meta file
     //      - Cutflow tables      → cutflow, cutflow_nminus1 histograms
     // -----------------------------------------------------------------------
     an.run();

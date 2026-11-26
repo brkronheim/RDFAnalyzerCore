@@ -1,5 +1,13 @@
 import os
-from core.python.submission_backend import ensure_xrootd_redirector, generate_condor_submit, generate_condor_runscript, stage_outputs_blocks
+
+import pytest
+from core.python.submission_backend import ensure_xrootd_redirector, generate_condor_submit, generate_condor_runscript, get_copy_file_list, stage_outputs_blocks
+
+
+def test_get_copy_file_list_includes_onnx_payloads():
+    assert get_copy_file_list({"model": "cfg/model_even_train.onnx"}) == [
+        "cfg/model_even_train.onnx"
+    ]
 
 
 def test_ensure_xrootd_redirector_preserves_absolute_local_paths():
@@ -23,6 +31,10 @@ def test_generate_condor_submit_exports_condor_proc_env(tmp_path):
     )
     assert 'environment = "CONDOR_PROC=$(Process)' in sub
     assert "CONDOR_CLUSTER=$(Cluster)" in sub
+    assert (
+        'transfer_output_remaps = "submit_config.runtime.yaml='
+        f'{tmp_path}/condor_logs/returned_$(Cluster)_$(Process)_submit_config.runtime.yaml"'
+    ) in sub
 
 
 def test_generate_condor_submit_sets_singularity_image(tmp_path):
@@ -47,16 +59,30 @@ def test_generate_condor_submit_sets_want_os(tmp_path):
     assert 'MY.WantOS = "el8"' in sub
 
 
-def test_generate_condor_submit_sets_x86_v2_requirements(tmp_path):
+def test_generate_condor_submit_sets_x86_v2_requirements(tmp_path, monkeypatch):
+    monkeypatch.delenv("RDF_CONDOR_EXTRA_BLOCKED_HOSTS", raising=False)
     sub = generate_condor_submit(
         main_dir=str(tmp_path),
         jobs=1,
         exe_relpath="bin/fakeexe",
         config_file="submit_config.txt",
     )
-    assert 'requirements = (TARGET.Arch =?= "X86_64")' in sub
+    assert 'requirements =' in sub
+    assert '(TARGET.Arch =?= "X86_64")' in sub
     assert 'TARGET.Microarch =!= UNDEFINED' in sub
     assert 'TARGET.Has_sse4_1 =?= True' in sub
+    assert 'TARGET.Machine != "hepcms-henrietta.privnet"' in sub
+    assert 'TARGET.Machine != "hepcms-namenode.privnet"' in sub
+
+    monkeypatch.setenv("RDF_CONDOR_EXTRA_BLOCKED_HOSTS", "")
+    sub = generate_condor_submit(
+        main_dir=str(tmp_path),
+        jobs=1,
+        exe_relpath="bin/fakeexe",
+        config_file="submit_config.txt",
+    )
+    assert 'TARGET.Machine != "hepcms-henrietta.privnet"' in sub
+    assert 'TARGET.Machine != "hepcms-namenode.privnet"' not in sub
 
 
 def test_stage_outputs_preblock_contains_condor_proc_handling():
@@ -64,11 +90,14 @@ def test_stage_outputs_preblock_contains_condor_proc_handling():
     # ensure pre-block reads CONDOR_PROC and will append process id to filenames
     assert "CONDOR_PROC" in pre
     assert "_proc" not in pre  # we don't hardcode a literal suffix, but proc-aware logic exists
-    assert "check_output_endpoint(cfg.get(\"__orig_saveFile\", \"\"))" in pre
-    assert "check_output_endpoint(cfg.get(\"__orig_metaFile\", \"\"))" in pre
+    # Remote EOS checks are deferred until stage-out so a slow endpoint does
+    # not prevent the analysis executable from running.
+    assert "check_output_endpoint" not in pre
+    assert "xrdfs" not in pre
     assert "ensure_output_endpoint_ready" in post
     assert "verify_remote_file" in post
-    assert 'xrdfs_ok(host_url, "stat", eos_dir)' in post
+    assert 'xrdfs_ok(host_url, "mkdir", "-p", eos_dir)' in post
+    assert 'xrdfs_ok(host_url, "stat", eos_dir)' not in post
     assert 'xrdfs_ok(host_url, "stat", remote_path)' in post
     assert 'XRDCP_TIMEOUT_FLOOR' in post
 
@@ -116,13 +145,13 @@ def test_generate_condor_runscript_shared_archive_materializes_cfg_runtime():
         root_setup="",
         x509loc="x509",
         shared_archive_name="shared_inputs.tar.gz",
-        runtime_config_relpath="cfg/submit_config.txt",
+        runtime_config_relpath="cfg/submit_config.txt", config_file="submit_config.txt",
     )
     assert 'tar -xzf "shared_inputs.tar.gz"' in script
-    assert 'cp -f submit_config.txt cfg/submit_config.txt' in script
+    assert 'cp -f submit_config.runtime.yaml cfg/submit_config.runtime.yaml' in script
     assert 'chmod +x "myexe"' in script
     assert 'export LD_LIBRARY_PATH="$PWD:${LD_LIBRARY_PATH:-}"' in script
-    assert './myexe cfg/submit_config.txt' in script
+    assert './myexe cfg/submit_config.runtime.yaml' in script
     assert 'export X509_USER_PROXY=x509' in script
 
 
@@ -135,8 +164,8 @@ def test_runscript_uses_preserved_host_python_for_helpers():
     )
     assert 'RDF_HELPER_PYTHON="$(command -v python3 || command -v python || true)"' in script
     assert 'run_helper_python() {' in script
-    assert 'env -u PYTHONHOME LD_LIBRARY_PATH="${RDF_ORIG_LD_LIBRARY_PATH:-}" "$helper" "$@"' in script
-    assert "run_helper_python - << 'XRDPY'" in script
+    assert 'env -u PYTHONHOME PYTHONPATH="$helper_path" LD_LIBRARY_PATH="${RDF_ORIG_LD_LIBRARY_PATH:-}" "$helper" "$@"' in script
+    assert "run_helper_python - << 'RDFINPUT'" in script
 
 
 def test_runscript_relaxes_ulimit_commands_in_root_setup():
@@ -150,192 +179,247 @@ def test_runscript_relaxes_ulimit_commands_in_root_setup():
     assert "export FOO=bar" in script
 
 
-def test_runscript_includes_xrootd_optimize_when_no_stage_in():
-    """When stage_inputs=False, the runscript must include the XRootD
-    optimisation block that probes and selects the fastest redirector."""
-    script = generate_condor_runscript(
-        exe_relpath="myexe",
-        stage_inputs=False,
-        stage_outputs=False,
-        root_setup="",
-    )
-    assert "Optimizing XRootD redirectors" in script
-    assert "xrd-opt" in script
-    assert "SITE_REDIRECTOR_MARKER" in script
-    assert "detect_local_site" in script
-    # Must use ROOT macro, not pyxrootd
-    assert "probe_via_root_macro" in script
-    assert "probe_via_pyxrootd" not in script
-    assert "probe_via_subprocess" not in script
+def _run_input_block(tmp_path, monkeypatch, stage_in=False, yaml_config=False, failures=0):
+    import subprocess
+    import yaml
+    from core.python import submission_backend as backend
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(backend._io_policy, "GLOBAL_REDIRECTOR", "root://cms-xrd-global.cern.ch")
+    monkeypatch.setattr(backend._io_policy, "PUBLIC_STORAGE_PREFIXES", ("/store/mc/", "/store/data/"))
+    monkeypatch.setattr(backend._io_policy, "SITE_REDIRECTOR_MARKER", "/store/test/xrootd/")
+    path = tmp_path / ("input.yaml" if yaml_config else "input.txt")
+    values = ["root://site//store/test/xrootd/T2_Site/store/mc/a.root?tried=bad&token=keep",
+              "root://old//store/data/b.root", "root://private//store/user/me/c.root",
+              "/store/mc/d.root", "/tmp/local.root", "https://other/file.root"]
+    cfg = dict(fileList=values if yaml_config else ','.join(values),
+               enableSystematics=True if yaml_config else 'true', saveFile='keep.root')
+    if yaml_config:
+        path.write_text(yaml.safe_dump(cfg))
+    else:
+        path.write_text(''.join('{}={}\n'.format(k, v) for k, v in cfg.items()))
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command[0] == 'xrdcp'
+        if len(calls) <= failures:
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 0)
+    monkeypatch.setattr(subprocess, 'run', run)
+    block = backend.stage_inputs_block(config_file=str(path)) if stage_in else backend.xrootd_optimize_block(str(path))
+    code = block.split("<< 'RDFINPUT'\n", 1)[1].rsplit('\nRDFINPUT', 1)[0]
+    exec(compile(code, '<worker-input>', 'exec'), {})
+    actual = backend.read_config(backend._config_io.runtime_yaml_path(path))
+    return actual, calls
 
 
-def test_runscript_excludes_xrootd_optimize_when_stage_in():
-    """When stage_inputs=True, files are staged locally so no XRootD
-    optimisation is needed and the block must be absent."""
-    script = generate_condor_runscript(
-        exe_relpath="myexe",
-        stage_inputs=True,
-        stage_outputs=False,
-        root_setup="",
-    )
-    assert "Optimizing XRootD redirectors" not in script
-    # Stage-in block must be present instead
-    assert "Staging input files" in script
+@pytest.mark.parametrize('yaml_config', [False, True])
+def test_worker_routes_public_inputs_globally_without_probes(tmp_path, monkeypatch, yaml_config):
+    actual, calls = _run_input_block(tmp_path, monkeypatch, yaml_config=yaml_config)
+    assert calls == []
+    assert actual['fileList'].split(',') == [
+        'root://cms-xrd-global.cern.ch//store/mc/a.root?token=keep',
+        'root://cms-xrd-global.cern.ch//store/data/b.root',
+        'root://private//store/user/me/c.root',
+        'root://cms-xrd-global.cern.ch//store/mc/d.root',
+        '/tmp/local.root', 'https://other/file.root']
+    assert actual['enableSystematics'] == 'true'
+    assert actual['saveFile'] == 'keep.root'
 
 
-def test_stage_in_uses_site_selection():
-    """The stage-in block must probe redirectors in parallel and pick the best."""
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "rank_redirectors_parallel" in block
-    assert "filter_site_redirectors" in block
-    assert "ThreadPoolExecutor" in block
+def test_stage_in_retries_global_endpoint_without_probing(tmp_path, monkeypatch):
+    actual, calls = _run_input_block(tmp_path, monkeypatch, stage_in=True, failures=2)
+    assert actual['fileList'] == ','.join('input_{}.root'.format(i) for i in range(6))
+    assert len(calls) == 8
+    assert all(cmd[-2] == 'root://cms-xrd-global.cern.ch//store/mc/a.root?token=keep' for cmd in calls[:3])
+    assert actual['saveFile'] == 'keep.root'
 
 
-def test_stage_in_probe_bytes_is_1mb():
-    """Stage-in probing should use 1 MiB (not tiny 32 KiB)."""
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "1 * 1024 * 1024" in block
+def test_failed_stage_in_preserves_original_input_config(tmp_path, monkeypatch):
+    import subprocess
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_input_block(tmp_path, monkeypatch, stage_in=True, failures=100)
+    assert 'input_0.root' not in (tmp_path / 'input.txt').read_text()
 
 
-def test_stage_in_uses_60s_timeout():
-    """Each xrdcp copy in stage-in must use a 60-second timeout."""
-    from core.python.submission_backend import stage_inputs_block
+@pytest.mark.parametrize('stage_in', [False, True])
+def test_generated_workers_have_no_redirector_probe_processes(stage_in):
+    import subprocess
+    script = generate_condor_runscript('myexe', stage_in, False, '', runtime_config_relpath='cfg/custom.txt')
+    assert 'probe_via_root_macro' not in script
+    assert 'ThreadPoolExecutor' not in script
+    assert 'site_redirectors.json' not in script
+    assert './myexe cfg/custom.runtime.yaml' in script
+    subprocess.run(['bash', '-n'], input=script, text=True, check=True)
+
+
+@pytest.mark.parametrize('cpus,site_cpus', [(1, None), (1, 1), (2, None), (2, 2), (2, 1)])
+def test_worker_preserves_inherited_affinity_and_limits_thread_pools(tmp_path, cpus, site_cpus):
+    import json
+    import subprocess
+    import sys
+    if len(os.sched_getaffinity(0)) < cpus:
+        pytest.skip('Insufficient CPUs in the test allocation')
+    exe = tmp_path / 'myexe'
+    exe.write_text(
+        '#!' + sys.executable + '\n'
+        'import json, os, pathlib, subprocess, sys, threading\n'
+        'seen = []\n'
+        't = threading.Thread(target=lambda: seen.extend(os.sched_getaffinity(0)))\n'
+        't.start(); t.join()\n'
+        'child = subprocess.check_output([sys.executable, "-c", '
+        '"import os, json; print(json.dumps(sorted(os.sched_getaffinity(0))))"], text=True)\n'
+        'pathlib.Path("cpu.json").write_text(json.dumps(dict('
+        'affinity=sorted(os.sched_getaffinity(0)), thread=sorted(seen), child=json.loads(child), '
+        'omp=os.environ["OMP_NUM_THREADS"], blas=os.environ["OPENBLAS_NUM_THREADS"])))\n')
+    from core.python.submission_backend import _package_worker_yaml
+    _package_worker_yaml(tmp_path)
+    (tmp_path / 'submit_config.txt').write_text('fileList=local.root\nthreads=1\n')
+    script = generate_condor_runscript('myexe', False, False, '', request_cpus=cpus, config_file="submit_config.txt")
+    # Setup/staging must retain the same inherited placement as the analysis.
+    script = script.replace('stage_in_start=$(date +%s)',
+        "run_helper_python -c 'import os; print(len(os.sched_getaffinity(0)))' > setup_cpus.txt\n"
+        'stage_in_start=$(date +%s)')
+    env = dict(os.environ, OPENBLAS_NUM_THREADS='64', OMP_NUM_THREADS='64')
+    site_affinity = set(sorted(os.sched_getaffinity(0))[:site_cpus])
+    subprocess.run(['bash'], input=script, cwd=tmp_path, env=env,
+                   text=True, check=True, capture_output=True,
+                   preexec_fn=(lambda: os.sched_setaffinity(0, site_affinity)) if site_cpus else None)
+    result = json.loads((tmp_path / 'cpu.json').read_text())
+    expected = sorted(site_affinity if site_cpus else os.sched_getaffinity(0))
+    assert result['affinity'] == expected
+    assert result['thread'] == result['affinity']
+    assert result['child'] == expected
+    assert result['omp'] == result['blas'] == str(cpus)
+    assert int((tmp_path / 'setup_cpus.txt').read_text()) == len(expected)
+
+
+def test_worker_cpu_launcher_preserves_analysis_failure(tmp_path):
+    import subprocess
+    (tmp_path / 'myexe').write_text('#!/bin/sh\nexit 23\n')
+    from core.python.submission_backend import _package_worker_yaml
+    _package_worker_yaml(tmp_path)
+    (tmp_path / 'submit_config.txt').write_text('fileList=local.root\n')
+    script = generate_condor_runscript('myexe', False, False, '', config_file="submit_config.txt")
+    result = subprocess.run(['bash'], input=script, cwd=tmp_path,
+                            text=True, capture_output=True)
+    assert result.returncode == 23
+
+
+@pytest.mark.parametrize('stage_in', [False, True])
+def test_worker_executes_with_materialized_runtime_config(tmp_path, monkeypatch, stage_in):
+    import subprocess
+    import sys
+    from pathlib import Path
+    monkeypatch.chdir(tmp_path)
+    # The fake analysis consumes the actual config passed by the complete worker.
+    fake = tmp_path / 'myexe'
+    fake.write_text('#!' + sys.executable + '\nimport pathlib, sys\n'
+                    'pathlib.Path("consumed.txt").write_text(pathlib.Path(sys.argv[1]).read_text())\n')
+    (tmp_path / 'local.root').write_bytes(b'local input fixture')
+    from core.python.submission_backend import _package_worker_yaml
+    _package_worker_yaml(tmp_path)
+    (tmp_path / 'submit_config.txt').write_text('fileList=' + str(tmp_path / 'local.root') + '\nthreads=1\n')
+    script = generate_condor_runscript('myexe', stage_in, False, '',
+                                      runtime_config_relpath='cfg/submit_config.txt', config_file="submit_config.txt")
+    subprocess.run(['bash'], input=script, text=True, check=True, capture_output=True)
+    import yaml
+    consumed = yaml.safe_load((tmp_path / 'consumed.txt').read_text())
+    assert consumed['threads'] == '1'
+    assert consumed['fileList'] == ('input_0.root' if stage_in else str(tmp_path / 'local.root'))
+    if stage_in:
+        assert (tmp_path / 'input_0.root').read_bytes() == b'local input fixture'
+
+
+def test_condor_yaml_reader_runs_with_an_isolated_worker_python(tmp_path):
+    import subprocess
+    import sys
+    from submission_backend import write_submit_files
+
+    submit = write_submit_files(str(tmp_path), 1, "analysis", False, False, "")
+    archive = tmp_path / "rdf_worker_yaml.zip"
+    assert archive.is_file()
+    from pathlib import Path
+    assert str(archive) in Path(submit).read_text()
+    script = ("import sys; sys.path.insert(0, sys.argv[1]); import yaml; "
+              "assert '.zip/' in yaml.__file__; "
+              "assert yaml.safe_load('sample: Muon') == {'sample': 'Muon'}")
+    subprocess.run([sys.executable, "-I", "-S", "-c", script, str(archive)], check=True)
+
+
+@pytest.mark.parametrize(("config_name", "with_template"), [
+    ("submit_config.yaml", False), ("submit_config.txt", True), ("job_config.txt", False),
+])
+def test_public_single_job_retry_transfers_runnable_yaml(tmp_path, config_name, with_template):
+    from pathlib import Path
     import re
-    block = stage_inputs_block()
-    m = re.search(r"STAGE_COPY_TIMEOUT\s*=\s*(\d+)", block)
-    assert m is not None, "STAGE_COPY_TIMEOUT not found in stage_inputs_block"
-    assert int(m.group(1)) == 60
+    import shutil
+    import subprocess
+    from unittest.mock import patch
+    from native_config_io import read_config
+    from rdfproduction.transport import _submit_single_job
 
-
-def test_stage_in_caps_retries_at_3():
-    """Stage-in must cap total attempts at 3 per file."""
-    from core.python.submission_backend import stage_inputs_block
-    import re
-    block = stage_inputs_block()
-    m = re.search(r"MAX_ATTEMPTS\s*=\s*(\d+)", block)
-    assert m is not None, "MAX_ATTEMPTS not found in stage_inputs_block"
-    assert int(m.group(1)) == 3
-
-
-def test_stage_in_uses_only_site_specific_redirectors():
-    """Stage-in must rank and retry only site-specific redirectors."""
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "SITE_REDIRECTOR_MARKER" in block
-    assert "GLOBAL_REDIRECTOR" not in block
-    assert "build_url(extract_lfn(url), GLOBAL_REDIRECTOR)" not in block
-
-
-def test_stage_in_uses_root_macro():
-    """Stage-in probing must use the ROOT macro (not pyxrootd)."""
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "probe_via_root_macro" in block
-    assert "probe_via_pyxrootd" not in block
-
-
-def test_runscript_xrootd_optimize_uses_correct_config_file():
-    """The XRootD optimisation block must reference the custom config file."""
-    script = generate_condor_runscript(
-        exe_relpath="myexe",
-        stage_inputs=False,
-        stage_outputs=False,
-        root_setup="",
-        config_file="cfg/my_config.txt",
-    )
-    assert "cfg/my_config.txt" in script
-
-
-def test_runscript_xrootd_optimize_uses_runtime_config_relpath():
-    script = generate_condor_runscript(
-        exe_relpath="myexe",
-        stage_inputs=False,
-        stage_outputs=False,
-        root_setup="",
-        config_file="submit_config.txt",
-        runtime_config_relpath="cfg/submit_config.txt",
-    )
-    assert 'cfg_path = "cfg/submit_config.txt"' in script
-    assert './myexe cfg/submit_config.txt' in script
-
-
-def test_xrootd_optimize_block_includes_blacklist():
-    """Blacklisted sites passed to xrootd_optimize_block must appear in the
-    generated script so the worker node can skip them."""
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block(blacklisted_sites=["T2_Bad_Site", "bad-host.cern.ch"])
-    assert "T2_Bad_Site" in block
-    assert "bad-host.cern.ch" in block
-
-
-def test_xrootd_optimize_block_uses_short_timeout():
-    """The probe timeout in the worker-side script must be <= 10 s."""
-    from core.python.submission_backend import xrootd_optimize_block
-    import re
-    block = xrootd_optimize_block()
-    m = re.search(r"PROBE_TIMEOUT\s*=\s*(\d+(?:\.\d+)?)", block)
-    assert m is not None, "PROBE_TIMEOUT not found in generated block"
-    assert float(m.group(1)) <= 10.0, f"PROBE_TIMEOUT too large: {m.group(1)}"
-
-
-def test_xrootd_optimize_block_reads_runtime_blacklist():
-    """The generated script must read the xrdBlacklist key from the config."""
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert "xrdBlacklist" in block
-
-
-def test_xrootd_optimize_block_filters_site_specific_redirectors():
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert "filter_site_redirectors" in block
-    assert "SITE_REDIRECTOR_MARKER" in block
-
-
-def test_stage_in_block_filters_site_specific_redirectors():
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "filter_site_redirectors" in block
-    assert "SITE_REDIRECTOR_MARKER" in block
-
-
-def test_stage_in_block_accepts_direct_pfn_candidates():
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert "is_direct_xrootd_candidate" in block
-    assert "GENERIC_REDIRECTOR_HOSTS" in block
-    assert "candidate_url" in block
-
-
-def test_stage_in_block_fails_job_when_any_redirector_selection_fails():
-    from core.python.submission_backend import stage_inputs_block
-    block = stage_inputs_block()
-    assert 'redirector_failures = []' in block
-    assert 'sys.exit(42)' in block
-    assert 'raise RuntimeError(f"all probes failed for {lfn}")' in block
-    assert 'using original URL' not in block
-
-
-def test_xrootd_optimize_block_uses_root_probe_only():
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert "probe_via_subprocess" not in block
-    assert "probe_via_root_macro" in block
-
-
-def test_xrootd_optimize_block_accepts_direct_pfn_candidates():
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert "is_direct_xrootd_candidate" in block
-    assert "GENERIC_REDIRECTOR_HOSTS" in block
-    assert "candidate_url" in block
-
-
-def test_xrootd_optimize_block_fails_job_when_any_redirector_selection_fails():
-    from core.python.submission_backend import xrootd_optimize_block
-    block = xrootd_optimize_block()
-    assert 'redirector_failures = []' in block
-    assert 'sys.exit(42)' in block
-    assert 'raise RuntimeError(f"all probes failed for {lfn}")' in block
+    job = tmp_path / "job_7"
+    shared = tmp_path / "shared_inputs"
+    job.mkdir()
+    shared.mkdir()
+    worker = shared / "worker"
+    worker.write_text('#!/bin/sh\ncp "$1" observed.yaml\n')
+    worker.chmod(0o755)
+    receipt = job / config_name
+    suffix = receipt.suffix
+    separator = "=" if suffix == ".txt" else ": "
+    source_files = {}
+    for name, contents in {
+        config_name: "\n".join(k + separator + v for k, v in [
+            ("xrdReadPolicy", "legacy"), ("floatConfig", "weights" + suffix),
+            ("intConfig", "numbers" + suffix), ("threads", "1")]) + "\n",
+        "weights" + suffix: "scale" + separator + "0.21\n",
+        "numbers" + suffix: "era" + separator + "0012\n",
+    }.items():
+        path = job / name
+        path.write_text(contents)
+        source_files[path] = path.read_bytes()
+    launcher = tmp_path / "condor_runscript.sh"
+    launcher.write_text(generate_condor_runscript("worker", False, False, "",
+                        shared_dir_name="shared_inputs", config_file=config_name))
+    launcher.chmod(0o755)
+    source_files[launcher] = launcher.read_bytes()
+    if with_template:
+        template = tmp_path / "condor_submit.sub"
+        template.write_text(generate_condor_submit(str(tmp_path), 8, "worker",
+                            shared_dir_name="shared_inputs", config_file=config_name))
+        source_files[template] = template.read_bytes()
+        (job / "site_redirectors.json").write_text("{}")
+    with patch("rdfproduction.jobs.condor_files.subprocess.run",
+               return_value=subprocess.CompletedProcess([], 0, "submitted to cluster 42.")) as submit:
+        assert _submit_single_job(7, str(tmp_path), "worker", None, False, 4900, 2300,
+                                  "shared_inputs", {}) == "42"
+    command = submit.call_args.args[0]
+    assert command[0] == "condor_submit"
+    descriptor = Path(command[1]).read_text()
+    assert 'CONDOR_PROC=7 ' in descriptor
+    assert 'returned_$(Cluster)_$(Process)_' in descriptor
+    assert "queue 1" in descriptor
+    matches = re.search(r'(?im)^transfer_input_files\s*=\s*(.*)$', descriptor)
+    inputs = [Path(p) for p in matches[1].split(",")]
+    assert all(path.exists() for path in inputs)
+    assert len({p.name for p in inputs}) == len(inputs)
+    assert {p.name for p in inputs} == {
+        receipt.with_suffix(".yaml").name, "shared_inputs", "rdf_worker_yaml.zip",
+        *({"site_redirectors.json"} if with_template else set()),
+        *({"floats.yaml", "ints.yaml"} if suffix == ".txt" else {"weights.yaml", "numbers.yaml"}),
+    }
+    actual_launcher = Path(re.search(r'(?im)^executable\s*=\s*(.*)$', descriptor)[1].strip())
+    sandbox = tmp_path / "worker-sandbox"
+    sandbox.mkdir()
+    for path in inputs:
+        if path.is_dir():
+            shutil.copytree(path, sandbox / path.name)
+        else:
+            shutil.copy2(path, sandbox / path.name)
+    subprocess.run(["bash", str(actual_launcher)], cwd=sandbox, check=True, capture_output=True)
+    observed = read_config(sandbox / "observed.yaml")
+    assert observed["xrdReadPolicy"] == "legacy"
+    assert read_config(sandbox / observed["intConfig"]) == {"era": "0012"}
+    assert read_config(sandbox / observed["floatConfig"]) == {"scale": "0.21"}
+    assert all(path.read_bytes() == data for path, data in source_files.items())

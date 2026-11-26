@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model inference"
+  short_description: "Work with model inference"
+  default_prompt: "Use $rdfanalyzer-inference to trace the model inputs, backend configuration, explicit application, and consumed prediction columns."

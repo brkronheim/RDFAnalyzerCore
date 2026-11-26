@@ -36,8 +36,10 @@ int main(int argc, char **argv) {
     // This should be called after all Define and Filter operations
     analyzer.bookConfigHistograms();
 
-    // Execute the dataframe and save histograms
-    analyzer.save();
+    // run() triggers the event loop exactly once: writes a skim when
+    // enableSkim=1 is in the config, and saves all histograms booked on
+    // the NDHistogramManager.
+    analyzer.run();
 
     return 0;
 }

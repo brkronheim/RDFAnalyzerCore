@@ -1,0 +1,4 @@
+output_root: demo-results
+eras:
+  2022_preEE: examples/snakemake/fixtures/2022_preEE.yaml
+  "2024": examples/snakemake/fixtures/2024.yaml

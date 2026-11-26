@@ -1,0 +1,22 @@
+--- a/tree/dataframe/inc/ROOT/RDF/RDefineBase.hxx
++++ b/tree/dataframe/inc/ROOT/RDF/RDefineBase.hxx
+@@ -54,4 +54,9 @@
+                RLoopManager &lm, const ColumnNames_t &columnNames, const std::string &variationName = "nominal");
+ 
++   bool HasCurrentEntry(unsigned int slot, Long64_t entry) const
++   {
++      return entry >= 0 && entry == fLastCheckedEntry[slot * RDFInternal::CacheLineStep<Long64_t>()];
++   }
++
+    RDefineBase &operator=(const RDefineBase &) = delete;
+    RDefineBase &operator=(RDefineBase &&) = delete;
+--- a/tree/dataframe/inc/ROOT/RDF/RDefineReader.hxx
++++ b/tree/dataframe/inc/ROOT/RDF/RDefineReader.hxx
+@@ -38,5 +38,6 @@
+    void *GetImpl(Long64_t entry) final
+    {
+-      fDefine.Update(fSlot, entry);
++      if (!fDefine.HasCurrentEntry(fSlot, entry))
++         fDefine.Update(fSlot, entry);
+       return fValuePtr;
+    }

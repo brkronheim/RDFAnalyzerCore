@@ -1,3 +1,4 @@
+#include "test_workspace.h"
 /**
  * @file testProvenanceService.cc
  * @brief Unit tests for ProvenanceService – verifies that provenance metadata
@@ -16,9 +17,12 @@
 
 #include <TDirectory.h>
 #include <TFile.h>
-#include <TNamed.h>
+#include <TObjString.h>
+#include <yaml-cpp/yaml.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -27,9 +31,9 @@ namespace {
 std::string writeMinimalConfig(const std::string& cfgPath,
                                 const std::string& metaPath) {
     std::ofstream out(cfgPath);
-    out << "sample=ProvenanceTest\n";
-    out << "metaFile=" << metaPath << "\n";
-    out << "fileList=\n";
+    out << "sample: ProvenanceTest\n";
+    out << "metaFile: " << metaPath << "\n";
+    out << "fileList: []\n";
     out.close();
     return cfgPath;
 }
@@ -43,8 +47,8 @@ protected:
 
     void SetUp() override {
         const std::string base =
-            std::string(TEST_SOURCE_DIR) + "/aux/provenance_test_";
-        cfgPath  = base + "config.txt";
+            testWorkspacePath().string() + "/aux/provenance_test_";
+        cfgPath  = base + "config.yaml";
         metaPath = base + "meta.root";
         cleanup();
     }
@@ -54,6 +58,90 @@ protected:
         std::remove(metaPath.c_str());
     }
 };
+
+TEST_F(ProvenanceServiceTest, ConfiguredGitSnapshotAvoidsSubprocessAndIsRecorded) {
+    namespace fs = std::filesystem;
+    const auto directory = fs::path(cfgPath + ".git-probe");
+    fs::create_directories(directory);
+    const auto executable = directory / "git";
+    { std::ofstream script(executable); script << "#!/bin/sh\nprintf called >> \"${0}.called\"\nexit 1\n"; }
+    fs::permissions(executable, fs::perms::owner_all);
+    const char *old = std::getenv("PATH");
+    const bool hadPath = old != nullptr;
+    const std::string previous = old ? old : "";
+    struct Restore {
+        bool hadPath;
+        std::string path;
+        fs::path directory;
+        ~Restore() { if (hadPath) setenv("PATH", path.c_str(), 1); else unsetenv("PATH"); fs::remove_all(directory); }
+    } restore{hadPath, previous, directory};
+    setenv("PATH", (directory.string()+":"+previous).c_str(), 1);
+    writeMinimalConfig(cfgPath, metaPath);
+    const std::string revision(40, 'a');
+    { std::ofstream config(cfgPath, std::ios::app);
+      config << "metadataAnalysisGitHash: " << revision << "\nmetadataAnalysisGitDirty: true\n"; }
+    ConfigurationManager config(cfgPath);
+    DataManager data(3);
+    SystematicManager systematics;
+    DefaultLogger logger;
+    NullOutputSink skim;
+    RootOutputSink meta;
+    ManagerContext context{config, data, systematics, logger, skim, meta};
+    ProvenanceService service;
+    service.initialize(context);
+    const auto &values = service.getProvenance();
+    EXPECT_EQ(values.at("analysis.git_hash"), revision);
+    EXPECT_EQ(values.at("analysis.git_dirty"), "true");
+    EXPECT_EQ(values.at("analysis.git_source"), "configured-snapshot");
+    EXPECT_FALSE(fs::exists(executable.string()+".called"));
+    auto node = data.getDataFrame();
+    service.finalize(node);
+    TFile output(metaPath.c_str(), "READ");
+    auto *object = dynamic_cast<TObjString*>(output.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["provenance"]["analysis.git_source"].as<std::string>(), "configured-snapshot");
+}
+
+TEST_F(ProvenanceServiceTest, RejectsIncompleteOrMalformedGitSnapshot) {
+    for (const auto &settings : {std::string("metadataAnalysisGitHash: ")+std::string(40, 'a')+"\n",
+          std::string("metadataAnalysisGitDirty: true\n"),
+          std::string("metadataAnalysisGitHash: invalid\nmetadataAnalysisGitDirty: true\n"),
+          std::string("metadataAnalysisGitHash: ")+std::string(40, 'a')+"\nmetadataAnalysisGitDirty: yes\n"}) {
+        writeMinimalConfig(cfgPath, metaPath);
+        { std::ofstream config(cfgPath, std::ios::app); config << settings; }
+        ConfigurationManager config(cfgPath);
+        DataManager data(3);
+        SystematicManager systematics;
+        DefaultLogger logger;
+        NullOutputSink skim;
+        RootOutputSink meta;
+        ManagerContext context{config, data, systematics, logger, skim, meta};
+        ProvenanceService service;
+        EXPECT_THROW(service.initialize(context), std::runtime_error) << settings;
+    }
+}
+
+TEST_F(ProvenanceServiceTest, GitSnapshotChangesFullConfigHashButNotSemanticHash) {
+    DataManager data(3);
+    SystematicManager systematics;
+    DefaultLogger logger;
+    NullOutputSink skim;
+    RootOutputSink meta;
+    std::string semanticHash, fullHash;
+    for (char digit : {'a', 'b'}) {
+        writeMinimalConfig(cfgPath, metaPath);
+        { std::ofstream config(cfgPath, std::ios::app);
+          config << "metadataAnalysisGitHash: " << std::string(40, digit) << "\nmetadataAnalysisGitDirty: true\n"; }
+        ConfigurationManager config(cfgPath);
+        ManagerContext context{config, data, systematics, logger, skim, meta};
+        ProvenanceService service;
+        service.initialize(context);
+        const auto &values = service.getProvenance();
+        if (digit == 'a') { semanticHash = values.at("config.semantic_hash"); fullHash = values.at("config.hash"); }
+        else { EXPECT_EQ(values.at("config.semantic_hash"), semanticHash); EXPECT_NE(values.at("config.hash"), fullHash); }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Test: required provenance keys are present and non-empty in the output file
@@ -81,25 +169,29 @@ TEST_F(ProvenanceServiceTest, RequiredKeysWrittenToMetaFile) {
     TFile f(metaPath.c_str(), "READ");
     ASSERT_FALSE(f.IsZombie()) << "Meta output file was not created";
 
-    TDirectory* provDir = dynamic_cast<TDirectory*>(f.Get("provenance"));
-    ASSERT_NE(provDir, nullptr)
-        << "'provenance' directory missing from meta file";
-
+    auto* object = dynamic_cast<TObjString*>(f.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["schema_version"].as<int>(), 1);
+    EXPECT_EQ(f.Get("provenance"), nullptr);
+    const auto provenance = document["provenance"];
     // Check mandatory keys are present and non-empty
     const std::vector<std::string> requiredKeys = {
         "framework.git_hash",
         "framework.build_timestamp",
         "framework.compiler",
         "root.version",
+        "root.registry_optimization",
+        "root.registry_definitions",
+        "root.registry_input_bindings_before",
+        "root.registry_input_bindings_after",
         "config.hash",
         "executor.num_threads",
     };
 
     for (const auto& key : requiredKeys) {
-        auto* obj = dynamic_cast<TNamed*>(provDir->Get(key.c_str()));
-        ASSERT_NE(obj, nullptr) << "Missing provenance key: " << key;
-        EXPECT_FALSE(std::string(obj->GetTitle()).empty())
-            << "Provenance key has empty value: " << key;
+        ASSERT_TRUE(provenance[key]) << "Missing provenance key: " << key;
+        EXPECT_FALSE(provenance[key].as<std::string>().empty());
     }
 
     f.Close();
@@ -132,16 +224,11 @@ TEST_F(ProvenanceServiceTest, AddEntryStoresCustomValues) {
     TFile f(metaPath.c_str(), "READ");
     ASSERT_FALSE(f.IsZombie());
 
-    auto* provDir = dynamic_cast<TDirectory*>(f.Get("provenance"));
-    ASSERT_NE(provDir, nullptr);
-
-    auto* pluginEntry = dynamic_cast<TNamed*>(provDir->Get("plugin.myPlugin"));
-    ASSERT_NE(pluginEntry, nullptr);
-    EXPECT_EQ(std::string(pluginEntry->GetTitle()), "MyPluginType");
-
-    auto* customEntry = dynamic_cast<TNamed*>(provDir->Get("custom.key"));
-    ASSERT_NE(customEntry, nullptr);
-    EXPECT_EQ(std::string(customEntry->GetTitle()), "hello_world");
+    auto* object = dynamic_cast<TObjString*>(f.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["provenance"]["plugin.myPlugin"].as<std::string>(), "MyPluginType");
+    EXPECT_EQ(document["provenance"]["custom.key"].as<std::string>(), "hello_world");
 
     f.Close();
 }
@@ -189,8 +276,8 @@ TEST_F(ProvenanceServiceTest, GracefulWhenNoMetaOutputConfigured) {
     // returns "" and ProvenanceService skips writing gracefully.
     {
         std::ofstream out(cfgPath);
-        out << "sample=NoOutput\n";
-        out << "fileList=\n";
+        out << "sample: NoOutput\n";
+        out << "fileList: []\n";
     }
 
     ConfigurationManager config(cfgPath);
@@ -262,4 +349,76 @@ TEST_F(ProvenanceServiceTest, RecordDatasetManifestProvenance) {
 
     auto df = dataManager.getDataFrame();
     svc.finalize(df);
+}
+
+TEST_F(ProvenanceServiceTest, TypedMetadataWrittenOnceWithEscaping) {
+    writeMinimalConfig(cfgPath, metaPath);
+    ConfigurationManager config(cfgPath);
+    DataManager dataManager(3);
+    SystematicManager systematicManager;
+    DefaultLogger logger;
+    NullOutputSink skimSink;
+    RootOutputSink metaSink;
+    ManagerContext ctx{config, dataManager, systematicManager, logger, skimSink, metaSink};
+    ProvenanceService svc;
+    svc.initialize(ctx);
+    svc.addEntry("quoted", "a\"b\\c\n");
+    rdf::OutputMetadata metadata;
+    metadata.regions["signal"] = "pass:preselection";
+    metadata.normalizations["weight_norm_total"] = 2.5;
+    metadata.weightAudits["weight_audit_w"] = {5, 1, 0, 14., -1., 5.};
+    svc.addOutputMetadata(metadata);
+    auto df = dataManager.getDataFrame();
+    svc.finalize(df);
+    svc.finalize(df);
+    TFile f(metaPath.c_str(), "READ");
+    auto* object = dynamic_cast<TObjString*>(f.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["provenance"]["quoted"].as<std::string>(), "a\"b\\c\n");
+    EXPECT_EQ(document["weight_audits"]["weight_audit_w"]["n"].as<int>(), 5);
+    EXPECT_EQ(document["normalizations"]["weight_norm_total"].as<double>(), 2.5);
+    EXPECT_EQ(f.GetListOfKeys()->GetSize(), 1);
+}
+
+TEST_F(ProvenanceServiceTest, SemanticConfigIgnoresOnlyJobRouting) {
+    writeMinimalConfig(cfgPath, metaPath);
+    ConfigurationManager firstConfig(cfgPath);
+    DataManager data(1);
+    SystematicManager systematic;
+    DefaultLogger logger;
+    NullOutputSink skim;
+    RootOutputSink meta;
+    ManagerContext firstContext{firstConfig, data, systematic, logger, skim, meta};
+    ProvenanceService first;
+    first.initialize(firstContext);
+    writeMinimalConfig(cfgPath, metaPath + ".other");
+    {
+        std::ofstream append(cfgPath, std::ios::app);
+        append << "metadataJobId: other-job\nmetadataAttemptId: retry\n";
+    }
+    ConfigurationManager secondConfig(cfgPath);
+    ManagerContext secondContext{secondConfig, data, systematic, logger, skim, meta};
+    ProvenanceService second;
+    second.initialize(secondContext);
+    EXPECT_EQ(first.getProvenance().at("config.semantic_hash"),
+              second.getProvenance().at("config.semantic_hash"));
+    EXPECT_NE(first.getProvenance().at("config.hash"),
+              second.getProvenance().at("config.hash"));
+}
+
+TEST_F(ProvenanceServiceTest, ConfiguredMetadataWriteFailureIsFatal) {
+    writeMinimalConfig(cfgPath, metaPath);
+    { std::ofstream corrupt(metaPath); corrupt << "not a ROOT file"; }
+    ConfigurationManager config(cfgPath);
+    DataManager data(1);
+    SystematicManager systematic;
+    DefaultLogger logger;
+    NullOutputSink skim;
+    RootOutputSink meta;
+    ManagerContext context{config, data, systematic, logger, skim, meta};
+    ProvenanceService service;
+    service.initialize(context);
+    auto df = data.getDataFrame();
+    EXPECT_THROW(service.finalize(df), std::runtime_error);
 }

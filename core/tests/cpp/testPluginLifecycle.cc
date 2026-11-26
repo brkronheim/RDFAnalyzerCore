@@ -3,10 +3,25 @@
 #include <api/IPluggableManager.h>
 #include <api/ManagerContext.h>
 #include <analyzer.h>
+#include <ConfigurationManager.h>
+#include <DataManager.h>
+#include <DefaultLogger.h>
+#include <NullOutputSink.h>
+#include <SystematicManager.h>
+#include <RootOutputSink.h>
+#include <WeightManager.h>
+#include <RegionManager.h>
+#include <TFile.h>
+#include <TObjString.h>
+#include <yaml-cpp/yaml.h>
+#include <filesystem>
+#include <fstream>
 
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -67,8 +82,20 @@ private:
 // Helper: build a minimal Analyzer using the small test_data_config
 // ---------------------------------------------------------------------------
 static std::string exampleCfg() {
-    // test_data_config.txt lives under core/test/cfg relative to source dir
-    return std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.txt";
+    // The test configuration lives under cfg in the native test source directory.
+    return std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config.yaml";
+}
+
+static std::unique_ptr<Analyzer> makeTestAnalyzer(
+    std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins = {}) {
+    return std::make_unique<Analyzer>(
+        std::make_unique<ConfigurationManager>(exampleCfg()),
+        std::make_unique<DataManager>(1),
+        std::move(plugins),
+        std::make_unique<SystematicManager>(),
+        std::make_unique<DefaultLogger>(),
+        std::make_unique<NullOutputSink>(),
+        std::make_unique<NullOutputSink>());
 }
 
 // ---------------------------------------------------------------------------
@@ -108,10 +135,10 @@ TEST(PluginLifecycle, AdvertisedColumnsAreReturned) {
 // ---------------------------------------------------------------------------
 TEST(PluginLifecycle, HooksCalledInOrder_SetupThenInitialize) {
     CallLog log;
-    Analyzer analyzer(exampleCfg());
+    auto analyzer = makeTestAnalyzer();
 
     auto plugin = std::make_unique<MockPlugin>("P", log);
-    analyzer.addPlugin("p", std::move(plugin));
+    analyzer->addPlugin("p", std::move(plugin));
 
     // After addPlugin the setup + initialize hooks must have been called
     const auto& c = log.calls;
@@ -136,7 +163,7 @@ TEST(PluginLifecycle, DependencyInitializedBeforeDependent) {
                                                        std::vector<std::string>{"base"});
 
     // Should not throw
-    ASSERT_NO_THROW(Analyzer(exampleCfg(), std::move(plugins)));
+    ASSERT_NO_THROW(makeTestAnalyzer(std::move(plugins)));
 
     const auto& c = log.calls;
     auto it_base    = std::find(c.begin(), c.end(), "Base::initialize");
@@ -156,10 +183,10 @@ TEST(PluginLifecycle, DependencyExecutedBeforeDependentDuringRun) {
     plugins["derived"] = std::make_shared<MockPlugin>("Derived", log,
                                                         std::vector<std::string>{"base"});
 
-    Analyzer analyzer(exampleCfg(), std::move(plugins));
+    auto analyzer = makeTestAnalyzer(std::move(plugins));
     log.calls.clear();
 
-    ASSERT_NO_THROW(analyzer.run());
+    ASSERT_NO_THROW(analyzer->run());
 
     const auto& c = log.calls;
     auto it_base = std::find(c.begin(), c.end(), "Base::execute");
@@ -171,6 +198,56 @@ TEST(PluginLifecycle, DependencyExecutedBeforeDependentDuringRun) {
         << "Base must execute before Derived";
 }
 
+TEST(PluginLifecycle, AddPluginsResolvesDependenciesInDeterministicOrder) {
+    CallLog log;
+    auto analyzer = makeTestAnalyzer();
+
+    std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins;
+    plugins.emplace("z_derived", std::make_shared<MockPlugin>(
+        "Derived", log, std::vector<std::string>{"a_base"}));
+    plugins.emplace("m_independent", std::make_shared<MockPlugin>(
+        "Independent", log));
+    plugins.emplace("a_base", std::make_shared<MockPlugin>("Base", log));
+
+    ASSERT_NO_THROW(analyzer->addPlugins(std::move(plugins)));
+
+    std::vector<std::string> initialized;
+    for (const auto& call : log.calls) {
+        if (call.find("::initialize") != std::string::npos) {
+            initialized.push_back(call);
+        }
+    }
+    EXPECT_EQ(initialized, (std::vector<std::string>{
+        "Base::initialize",
+        "Independent::initialize",
+        "Derived::initialize"}));
+}
+
+TEST(PluginLifecycle, DuplicateRoleIsRejectedWithoutReinitializingExistingPlugin) {
+    CallLog log;
+    auto analyzer = makeTestAnalyzer();
+
+    analyzer->addPlugin("shared", std::make_unique<MockPlugin>("First", log));
+    auto duplicate = std::make_unique<MockPlugin>("Second", log);
+
+    EXPECT_THROW(analyzer->addPlugin("shared", std::move(duplicate)),
+                 std::runtime_error);
+    EXPECT_EQ(std::count(log.calls.begin(), log.calls.end(), "First::initialize"), 1);
+    EXPECT_EQ(std::count(log.calls.begin(), log.calls.end(), "Second::initialize"), 0);
+}
+
+TEST(PluginLifecycle, InvalidBulkDependenciesFailBeforeInitializingBatch) {
+    CallLog log;
+    auto analyzer = makeTestAnalyzer();
+    std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins;
+    plugins.emplace("orphan", std::make_shared<MockPlugin>(
+        "Orphan", log, std::vector<std::string>{"missing"}));
+
+    EXPECT_THROW(analyzer->addPlugins(std::move(plugins)), std::runtime_error);
+    EXPECT_TRUE(log.calls.empty());
+    EXPECT_EQ(analyzer->findPlugin<MockPlugin>("orphan"), nullptr);
+}
+
 // ---------------------------------------------------------------------------
 // 5. Missing dependency throws at construction / addPlugin time
 // ---------------------------------------------------------------------------
@@ -180,16 +257,16 @@ TEST(PluginLifecycle, MissingDependencyThrows_AtConstruction) {
     plugins["orphan"] = std::make_shared<MockPlugin>("Orphan", log,
                                                       std::vector<std::string>{"missing"});
 
-    EXPECT_THROW(Analyzer(exampleCfg(), std::move(plugins)), std::runtime_error);
+    EXPECT_THROW(makeTestAnalyzer(std::move(plugins)), std::runtime_error);
 }
 
 TEST(PluginLifecycle, MissingDependencyThrows_AtAddPlugin) {
     CallLog log;
-    Analyzer analyzer(exampleCfg());
+    auto analyzer = makeTestAnalyzer();
 
     auto plugin = std::make_unique<MockPlugin>("Orphan", log,
                                                std::vector<std::string>{"missing"});
-    EXPECT_THROW(analyzer.addPlugin("orphan", std::move(plugin)), std::runtime_error);
+    EXPECT_THROW(analyzer->addPlugin("orphan", std::move(plugin)), std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +278,7 @@ TEST(PluginLifecycle, CircularDependencyThrows) {
     plugins["a"] = std::make_shared<MockPlugin>("A", log, std::vector<std::string>{"b"});
     plugins["b"] = std::make_shared<MockPlugin>("B", log, std::vector<std::string>{"a"});
 
-    EXPECT_THROW(Analyzer(exampleCfg(), std::move(plugins)), std::runtime_error);
+    EXPECT_THROW(makeTestAnalyzer(std::move(plugins)), std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,11 +332,54 @@ TEST(PluginLifecycle, OverriddenCollectProvenanceEntriesReturnsEntries) {
 // ---------------------------------------------------------------------------
 TEST(PluginLifecycle, SetTaskMetadataStoresEntries) {
     // Just verify chaining and no crash (no ROOT output in this unit test)
-    Analyzer analyzer(exampleCfg());
-    Analyzer* ret = analyzer.setTaskMetadata("job_id", "42");
-    EXPECT_EQ(ret, &analyzer) << "setTaskMetadata() must return this for chaining";
+    auto analyzer = makeTestAnalyzer();
+    Analyzer* ret = analyzer->setTaskMetadata("job_id", "42");
+    EXPECT_EQ(ret, analyzer.get()) << "setTaskMetadata() must return this for chaining";
 
     // Double-call should overwrite
-    analyzer.setTaskMetadata("job_id", "99");
+    analyzer->setTaskMetadata("job_id", "99");
     // No assertion on the stored value here; integration tests cover writing
+}
+
+TEST(PluginLifecycle, AnalyzerWritesOneDocumentAfterPluginFinalizers) {
+    char pattern[] = "/tmp/rdf_metadata_analyzer_XXXXXX";
+    const auto* directory = mkdtemp(pattern);
+    ASSERT_NE(directory, nullptr);
+    const auto base = std::filesystem::path(directory);
+    const auto cfg = base / "config.txt";
+    const auto meta = base / "meta.root";
+    {
+        std::ofstream out(cfg);
+        out << "sample=synthetic\nmetaFile=" << meta.string()
+            << "\nenableCounters=true\n";
+    }
+    auto data = std::make_unique<DataManager>(5);
+    auto systematics = std::make_unique<SystematicManager>();
+    data->Define("sf", [](ULong64_t i) { return double(i)-2.; },
+                 {"rdfentry_"}, *systematics);
+    data->Define("pass", [](ULong64_t) { return true; },
+                 {"rdfentry_"}, *systematics);
+    auto weights = std::make_shared<WeightManager>();
+    auto regions = std::make_shared<RegionManager>();
+    std::unordered_map<std::string, std::shared_ptr<IPluggableManager>> plugins{
+        {"weights", weights}, {"regions", regions}};
+    Analyzer analyzer(std::make_unique<ConfigurationManager>(cfg.string()),
+                      std::move(data), std::move(plugins), std::move(systematics),
+                      std::make_unique<DefaultLogger>(),
+                      std::make_unique<NullOutputSink>(), std::make_unique<RootOutputSink>());
+    weights->addScaleFactor("sf", "sf");
+    weights->defineNominalWeight("weight");
+    regions->declareRegion("signal", "pass");
+    analyzer.run();
+    TFile file(meta.c_str(), "READ");
+    auto* object = dynamic_cast<TObjString*>(file.Get(rdf::jobMetadataKey));
+    ASSERT_NE(object, nullptr);
+    const auto document = YAML::Load(object->GetString().Data());
+    EXPECT_EQ(document["weight_audits"]["weight_audit_weight"]["n"].as<int>(), 5);
+    EXPECT_EQ(document["weight_audits"]["weight_audit_weight"]["n_negative"].as<int>(), 2);
+    EXPECT_EQ(document["regions"]["signal"].as<std::string>(), "pass");
+    EXPECT_EQ(file.Get("weight_audit_weight"), nullptr);
+    EXPECT_EQ(file.Get("regions"), nullptr);
+    file.Close();
+    std::filesystem::remove_all(base);
 }

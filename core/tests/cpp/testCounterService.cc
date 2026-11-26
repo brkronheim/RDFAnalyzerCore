@@ -1,3 +1,4 @@
+#include "test_workspace.h"
 #include <gtest/gtest.h>
 
 #include <ConfigurationManager.h>
@@ -19,20 +20,20 @@
 namespace {
 std::string writeConfig(const std::string& path, const std::string& metaFile) {
   std::ofstream out(path);
-  out << "enableCounters=true\n";
-  out << "counterWeightBranch=genWeight\n";
-  out << "counterIntWeightBranch=intCode\n";
-  out << "metaFile=" << metaFile << "\n";
-  out << "sample=TestSample\n";
-  out << "fileList=\n";  // Empty fileList to satisfy DataManager requirement
+  out << "enableCounters: true\n";
+  out << "counterWeightBranch: genWeight\n";
+  out << "counterIntWeightBranch: intCode\n";
+  out << "metaFile: " << metaFile << "\n";
+  out << "sample: TestSample\n";
+  out << "fileList: []\n";  // Empty fileList to satisfy DataManager requirement
   out.close();
   return path;
 }
 }
 
 TEST(CounterServiceTest, UsesPreFilterDataFrameForIntWeightHistogram) {
-  const std::string cfgPath = std::string(TEST_SOURCE_DIR) + "/aux/test_counter_config.txt";
-  const std::string metaPath = std::string(TEST_SOURCE_DIR) + "/aux/test_counter_meta.root";
+  const std::string cfgPath = testWorkspacePath().string() + "/aux/test_counter_config.yaml";
+  const std::string metaPath = testWorkspacePath().string() + "/aux/test_counter_meta.root";
 
   std::remove(cfgPath.c_str());
   std::remove(metaPath.c_str());
@@ -92,14 +93,14 @@ TEST(CounterServiceTest, UsesPreFilterDataFrameForIntWeightHistogram) {
 // collectProvenanceEntries() – returns service runtime settings
 // ---------------------------------------------------------------------------
 TEST(CounterServiceTest, CollectProvenanceEntriesContainsSampleName) {
-  const std::string cfgPath  = std::string(TEST_SOURCE_DIR) + "/aux/counter_prov_cfg.txt";
-  const std::string metaPath = std::string(TEST_SOURCE_DIR) + "/aux/counter_prov_meta.root";
+  const std::string cfgPath  = testWorkspacePath().string() + "/aux/counter_prov_cfg.yaml";
+  const std::string metaPath = testWorkspacePath().string() + "/aux/counter_prov_meta.root";
 
   {
     std::ofstream out(cfgPath);
-    out << "sample=MySample\n";
-    out << "metaFile=" << metaPath << "\n";
-    out << "fileList=\n";
+    out << "sample: MySample\n";
+    out << "metaFile: " << metaPath << "\n";
+    out << "fileList: []\n";
   }
 
   ConfigurationManager config(cfgPath);
@@ -134,15 +135,15 @@ TEST(CounterServiceTest, CollectProvenanceEntriesContainsSampleName) {
 }
 
 TEST(CounterServiceTest, FallsBackToStitchIdWhenSampleMissing) {
-  const std::string cfgPath  = std::string(TEST_SOURCE_DIR) + "/aux/counter_stitch_cfg.txt";
-  const std::string metaPath = std::string(TEST_SOURCE_DIR) + "/aux/counter_stitch_meta.root";
+  const std::string cfgPath  = testWorkspacePath().string() + "/aux/counter_stitch_cfg.yaml";
+  const std::string metaPath = testWorkspacePath().string() + "/aux/counter_stitch_meta.root";
 
   {
     std::ofstream out(cfgPath);
-    out << "stitch_id=7\n";
-    out << "dtype=mc\n";
-    out << "metaFile=" << metaPath << "\n";
-    out << "fileList=\n";
+    out << "stitch_id: 7\n";
+    out << "dtype: mc\n";
+    out << "metaFile: " << metaPath << "\n";
+    out << "fileList: []\n";
   }
 
   ConfigurationManager config(cfgPath);

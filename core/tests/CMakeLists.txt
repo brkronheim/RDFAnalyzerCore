@@ -14,19 +14,34 @@ if(DEFINED ENV{VIRTUAL_ENV})
     endif()
 endif()
 
-if(NOT DEFINED _PYTHON_EXECUTABLE AND DEFINED Python3_EXECUTABLE)
+if("${_PYTHON_EXECUTABLE}" STREQUAL "" AND DEFINED Python3_EXECUTABLE)
     set(_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
 endif()
 
-if(NOT DEFINED _PYTHON_EXECUTABLE)
+if("${_PYTHON_EXECUTABLE}" STREQUAL "" AND DEFINED Python_EXECUTABLE)
+    # pybind11's FindPython module may already have selected the interpreter
+    # even when CMake's separate FindPython3 module has not.
+    set(_PYTHON_EXECUTABLE "${Python_EXECUTABLE}")
+endif()
+
+if("${_PYTHON_EXECUTABLE}" STREQUAL "")
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_FOUND)
         set(_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
     endif()
 endif()
 
-if(NOT DEFINED _PYTHON_EXECUTABLE OR _PYTHON_EXECUTABLE STREQUAL "")
+if("${_PYTHON_EXECUTABLE}" STREQUAL "")
     message(STATUS "Python3 not found; skipping Python test registration.")
+    return()
+endif()
+
+# A user-supplied Python3_EXECUTABLE can be relative (for example
+# .venv/bin/python). CTest runs from the build directory, so make it absolute.
+get_filename_component(_PYTHON_EXECUTABLE "${_PYTHON_EXECUTABLE}" ABSOLUTE
+    BASE_DIR "${CMAKE_SOURCE_DIR}")
+if(NOT EXISTS "${_PYTHON_EXECUTABLE}")
+    message(STATUS "Python interpreter '${_PYTHON_EXECUTABLE}' does not exist; skipping Python test registration.")
     return()
 endif()
 
@@ -34,15 +49,22 @@ set(_LAW_DIR  "${CMAKE_SOURCE_DIR}/core/python/law")
 set(_CORE_PY  "${CMAKE_SOURCE_DIR}/core/python")
 set(_TEST_DIR "${CMAKE_SOURCE_DIR}/core/tests")
 
+add_test(NAME NativeValidationReportInteropTest
+    COMMAND "${_PYTHON_EXECUTABLE}" "${_TEST_DIR}/native_authoring/test_interop.py" -v)
+set_tests_properties(NativeValidationReportInteropTest PROPERTIES
+    ENVIRONMENT "RDF_COMMON_SETTINGS_FIXTURE=$<TARGET_FILE:testCommonSettings>;RDF_NATIVE_PREFLIGHT_FIXTURE=$<TARGET_FILE:testNativePreflight>")
+
+add_test(NAME NativeRunResultInteropTest
+    COMMAND "${_PYTHON_EXECUTABLE}" "${_TEST_DIR}/native_authoring/test_run_result_interop.py" -v)
+set_tests_properties(NativeRunResultInteropTest PROPERTIES
+    ENVIRONMENT "RDF_RUN_RESULT_FIXTURE=$<TARGET_FILE:testRunResult>")
+
 # Add the repository source root so imports like `core.python.submission_backend`
 # can resolve when CTest runs from the build directory.
 set(_PYTHONPATH "${CMAKE_SOURCE_DIR}:${_LAW_DIR}:${_CORE_PY}:$ENV{PYTHONPATH}")
 
-# Several tests invoke _run_analysis_job() which creates shell scripts in a
-# temporary directory and then exec()s them.  If the system /tmp is mounted
-# noexec (common in hardened CI environments), those scripts fail with exit 126.
-# Point TMPDIR at a directory inside the build tree which is guaranteed to be
-# on an exec-capable filesystem.
+# Tests that execute temporary scripts or compiled fixtures need an
+# executable filesystem. Use the build tree when the system /tmp is noexec.
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tmp")
 set(_EXEC_TMPDIR "TMPDIR=${CMAKE_BINARY_DIR}/tmp")
 
@@ -59,17 +81,17 @@ set(_EXEC_TESTS
 macro(add_law_unittest _test_name _file_stem)
     add_test(
         NAME    ${_test_name}
-        COMMAND ${_PYTHON_EXECUTABLE} ${_TEST_DIR}/law/${_file_stem}.py
+        COMMAND ${_PYTHON_EXECUTABLE} -m pytest -q -p no:cacheprovider ${_TEST_DIR}/law/${_file_stem}.py
     )
     # Check if this test needs the TMPDIR override
     list(FIND _EXEC_TESTS "${_test_name}" _idx)
     if(_idx GREATER_EQUAL 0)
         set_tests_properties(${_test_name} PROPERTIES
-            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${_EXEC_TMPDIR}"
+            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${_EXEC_TMPDIR};${RDF_EXTENSION_TEST_ENVIRONMENT}"
         )
     else()
         set_tests_properties(${_test_name} PROPERTIES
-            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}"
+            ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${RDF_EXTENSION_TEST_ENVIRONMENT}"
         )
     endif()
 endmacro()
@@ -81,47 +103,126 @@ add_law_unittest(LawCombineTasksTest        test_combine_tasks)
 add_law_unittest(LawDagTasksTest            test_dag_tasks)
 add_law_unittest(LawExecutorParityTest      test_executor_parity)
 add_law_unittest(LawFailureHandlerTest      test_failure_handler)
+add_law_unittest(LawIngestionUtilsTest      test_ingestion_utils)
 add_law_unittest(LawMergeTasksTest          test_merge_tasks)
 add_law_unittest(LawManifestPlotTasksTest   test_manifest_plot_tasks)
-add_law_unittest(LawRucioTasksTest          test_rucio_tasks)
 add_law_unittest(LawOpenDataTasksTest       test_opendata_tasks)
 add_law_unittest(LawPlotTasksTest             test_plot_tasks)
 add_law_unittest(LawPerformanceRecorderTest test_performance_recorder)
 add_law_unittest(LawPartitionUtilsTest      test_partition_utils)
+add_law_unittest(LawRedirectorPrecedenceTest test_redirector_precedence)
 add_law_unittest(LawXRootDTasksTest         test_xrdfs_tasks)
 add_law_unittest(LawWorkflowExecutorsTest   test_workflow_executors)
 
-# Python framework tests (from core/python, now in core/tests/python)
-# These are registered as generic Python tests without special TMPDIR handling
+# Python framework tests (from core/python, now in core/tests/python).
+# Run through pytest so assertion-style tests are actually collected.
 macro(add_python_unittest _test_name _file_stem)
     add_test(
         NAME    ${_test_name}
-        COMMAND ${_PYTHON_EXECUTABLE} ${_TEST_DIR}/python/${_file_stem}.py
+        COMMAND ${_PYTHON_EXECUTABLE} -m pytest -q -p no:cacheprovider ${_TEST_DIR}/python/${_file_stem}.py
     )
     set_tests_properties(${_test_name} PROPERTIES
-        ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}"
+        ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${RDF_EXTENSION_TEST_ENVIRONMENT}"
     )
 endmacro()
 
 add_python_unittest(PythonAnalysisConfigValidationTest test_analysis_config_validation)
+add_python_unittest(PythonBenchmarkWorkerTest         test_benchmark_worker)
 add_python_unittest(PythonCppWrapperTest               test_cpp_wrapper)
 add_python_unittest(PythonDatacardGeneratorTest        test_datacard_generator)
 add_python_unittest(PythonDatasetManifestTest          test_dataset_manifest)
+add_python_unittest(PythonFilelistManifestBuilderTest  test_filelist_manifest_builder)
 add_python_unittest(PythonNuisanceGroupsTest           test_nuisance_groups)
 add_python_unittest(PythonOutputSchemaTest             test_output_schema)
+add_python_unittest(PythonMetadataIOTest               test_metadata_io)
+set_tests_properties(PythonMetadataIOTest PROPERTIES SKIP_RETURN_CODE 5)
+add_python_unittest(PythonOptionalExtensionsTest       test_optional_extensions)
 add_python_unittest(PythonProductionManagerTest        test_production_manager)
 add_python_unittest(PythonRegionSchemaTest             test_region_schema)
 add_python_unittest(PythonReproducibilityReportTest    test_reproducibility_report)
 add_python_unittest(PythonSubmissionBackendTest        test_submission_backend)
+add_python_unittest(PythonRefreshXRootDRuntimeTest      test_refresh_xrootd_runtime)
+add_python_unittest(PythonStitchingPlottingTest        test_stitching_plotting)
 add_python_unittest(PythonUprootDatacardTest           test_uproot_datacard)
 add_python_unittest(PythonValidateConfigTest           test_validate_config)
 add_python_unittest(PythonValidationReportTest         test_validation_report)
 add_python_unittest(PythonVariationOrchestratorTest    test_variation_orchestrator)
 add_python_unittest(PythonVersionInfoTest             test_version_info)
 add_python_unittest(PythonProductionMonitorTest       test_production_monitor)
-add_python_unittest(PythonRucioDiscoveryTest           test_rucio_discovery)
 add_python_unittest(PythonOpenDataDiscoveryTest        test_opendata_discovery)
 add_python_unittest(PythonConvertConfigTest            test_convert_config)
 add_python_unittest(PythonResubmitJobsTest             test_resubmit_jobs)
 add_python_unittest(PythonValidateDatacardGeneratorTest test_validate_datacard_generator)
+add_python_unittest(PythonSampleManifestConversionTest test_sample_manifest_conversion)
+add_python_unittest(PythonAnalysisPreflightTest test_analysis_preflight)
 add_python_unittest(PythonYamlConfigTest               test_yaml_config)
+
+# These suites use unittest and do not need pytest or ROOT Python bindings.
+foreach(_suite IN ITEMS run_bundle analysis_inputs condor_submission rdf_production verified_outputs
+        production_build production_python production_campaign production_downstream production_discovery)
+    add_test(NAME Shared_${_suite} COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+        discover -s ${_TEST_DIR}/python -p test_${_suite}.py -q)
+    set_tests_properties(Shared_${_suite} PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+endforeach()
+set_property(TEST PythonBenchmarkWorkerTest PythonOptionalExtensionsTest PythonSubmissionBackendTest
+    PythonYamlConfigTest Shared_rdf_production Shared_production_build Shared_production_python
+    APPEND PROPERTY ENVIRONMENT "${_EXEC_TMPDIR}")
+foreach(_suite IN ITEMS output_merge_validation skim_publication)
+    add_test(NAME Law_${_suite} COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+        discover -s ${_TEST_DIR}/law -p test_${_suite}.py -v)
+    set_tests_properties(Law_${_suite} PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+endforeach()
+add_test(NAME Shared_BundleStaging COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/law -p test_run_bundle_staging.py -q)
+set_tests_properties(Shared_BundleStaging PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonCompiledWorkflowTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfworkflow.py -v)
+set_tests_properties(PythonCompiledWorkflowTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${_EXEC_TMPDIR}")
+add_test(NAME PythonBuildIdentityTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfbuildidentity.py -v)
+set_tests_properties(PythonBuildIdentityTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH};${_EXEC_TMPDIR}")
+add_test(NAME PythonTypedSettingsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfsettings.py -v)
+set_tests_properties(PythonTypedSettingsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonDeclarationConfigTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfdeclarations.py -v)
+set_tests_properties(PythonDeclarationConfigTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonVariableAxisConfigTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_variable_axes.py -v)
+set_tests_properties(PythonVariableAxisConfigTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonColumnReferencesTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfcolumns.py)
+set_tests_properties(PythonColumnReferencesTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonModuleContractsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfmodules.py -v)
+set_tests_properties(PythonModuleContractsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonProviderValidationTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfvalidation.py -v)
+set_tests_properties(PythonProviderValidationTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonInputSchemaContractsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfschema.py -v)
+set_tests_properties(PythonInputSchemaContractsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonRunResultsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_rdfresults.py -v)
+set_tests_properties(PythonRunResultsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonCliResultsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_cli_results.py -v)
+set_tests_properties(PythonCliResultsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonRecordedCommandResultsTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_recorded_command_results.py -v)
+set_tests_properties(PythonRecordedCommandResultsTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonRuntimeCapabilitiesTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_runtime_capabilities.py -v)
+set_tests_properties(PythonRuntimeCapabilitiesTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonControllerInstallTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_controller_install.py -v)
+set_tests_properties(PythonControllerInstallTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonAuthoringTypingTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_authoring_typing.py -v)
+set_tests_properties(PythonAuthoringTypingTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonProviderTypingTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_provider_typing.py -v)
+set_tests_properties(PythonProviderTypingTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
+add_test(NAME PythonCommandProgressTest COMMAND ${_PYTHON_EXECUTABLE} -m unittest
+    discover -s ${_TEST_DIR}/python -p test_command_progress.py -v)
+set_tests_properties(PythonCommandProgressTest PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")

@@ -1,8 +1,8 @@
 # JetEnergyScaleManager Reference
 
 > **Plugin class**: `JetEnergyScaleManager`
-> **Header**: `core/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
-> **Source**: `core/plugins/JetEnergyScaleManager/JetEnergyScaleManager.cc`
+> **Header**: `extensions/cms/plugins/JetEnergyScaleManager/JetEnergyScaleManager.h`
+> **Source**: `extensions/cms/plugins/JetEnergyScaleManager/JetEnergyScaleManager.cc`
 
 ---
 
@@ -41,6 +41,7 @@ the framework's systematic-variation infrastructure.
 | Apply scale-factor correction | `applyCorrection(inputPt, sfCol, outputPt)` |
 | Apply correctionlib correction | `applyCorrectionlib(cm, name, args, inputPt, outputPt)` |
 | Apply JER smearing | `applyJERSmearing(cm, resolution, scaleFactor, inputPt, outputPt)` |
+| Restrict stochastic JER by eta | `setJERGenMatchedOnlyEtaRange(minAbsEta, maxAbsEta)` |
 | Register named CMS source sets | `registerSystematicSources(setName, sources)` |
 | Apply entire source set at once | `applySystematicSet(cm, name, setName, inputPt, prefix)` |
 | Type-1 MET propagation | `propagateMET(basePt, basePhi, nomPt, varPt, outPt, outPhi)` |
@@ -50,6 +51,16 @@ the framework's systematic-variation infrastructure.
 | Register up/down variation | `addVariation(name, upPt, downPt)` |
 
 ### Design philosophy
+
+The optional gen-matched-only eta interval suppresses stochastic JER while
+retaining the matched scaling method. Bounds use `[minAbsEta,maxAbsEta)`;
+`(0,0)` disables the restriction. Each scheduled JER step captures the current
+interval, so several policies can share an event loop and deterministic draws.
+The policy affects pT and mass together and is recorded in manager provenance.
+The CMS workflow's `jerGenMatchedOnlyInHE` flag selects `[2.5,3)` for AK4 jets
+in 2022-24, including `CorrT1METJet` when rebuilding PUPPI Type-1 MET.
+`compareHeJerPolicies` requires ordinary hybrid nominal and enabled JER
+variations, and exposes HE-policy alternatives on the explicit variation axis.
 
 All configuration calls (e.g. `removeExistingCorrections`, `applyCorrection`,
 `defineCollectionOutput`) are **deferred**: they register work to be done when
@@ -308,6 +319,11 @@ This method is intended for payloads where:
 - unmatched jets require stochastic smearing
 
 The output smearing is reproducible because the random seed is derived from the event id and jet index.
+Finite negative hybrid factors are truncated to zero, setting both corrected
+pT and mass to zero. Nonfinite factors raise an error. New output provenance
+records `jer_smearing_policy=hybrid-nonnegative-v2`; earlier outputs may retain
+the historical nonpositive-to-unity fallback and require reprocessing to change
+their jet momenta and MET.
 
 ---
 
@@ -878,7 +894,7 @@ int main(int argc, char** argv) {
     nhm->bookHistogram("dijetMass",    "dijetMass",    "event_weight", 50, 0, 1000);
     nhm->bookHistogram("dijetMassUp",  "dijetMass_TotalUp", "event_weight", 50, 0, 1000);
 
-    analyzer.save();
+    analyzer.run();
     return 0;
 }
 ```
@@ -894,7 +910,7 @@ JetEnergyScaleManager();   // default-constructible
 ```
 
 Register with the framework via `Analyzer::registerPlugin()` before calling
-`Analyzer::save()`.
+`Analyzer::run()`.
 
 ### Configuration (call before execute)
 

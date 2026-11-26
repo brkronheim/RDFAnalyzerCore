@@ -1,4 +1,5 @@
 #include <BDTManager.h>
+#include <atomic>
 #include <test_util.h>
 #include <ConfigurationManager.h>
 #include <DataManager.h>
@@ -10,6 +11,8 @@
 #include <string>
 #include <unistd.h>
 #include <vector>
+#include <filesystem>
+#include <fstream>
 #include <ManagerFactory.h>
 #include <DefaultLogger.h>
 #include <NullOutputSink.h>
@@ -21,7 +24,7 @@ class BDTManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
     ChangeToTestSourceDir();
-    std::string configFile = "cfg/test_data_config.txt";
+    std::string configFile = "cfg/test_data_config.yaml";
     configManager = ManagerFactory::createConfigurationManager(configFile);
     systematicManager = std::make_unique<SystematicManager>();
     dataManager = std::make_unique<DataManager>(2);
@@ -58,9 +61,107 @@ protected:
 // Construction
 TEST_F(BDTManagerTest, ConstructorCreatesValidManager) {
   EXPECT_NO_THROW({
-    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.txt");
+    auto config = ManagerFactory::createConfigurationManager("cfg/test_data_config.yaml");
     auto manager = std::make_unique<BDTManager>(*config);
   });
+}
+
+TEST_F(BDTManagerTest, LifecycleReusesLoadedModelAfterSourceIsRemoved) {
+  char pattern[] = "/tmp/rdf_bdt_loaded_XXXXXX";
+  const auto created = mkdtemp(pattern);
+  ASSERT_NE(created, nullptr);
+  struct Directory {
+    std::filesystem::path path;
+    ~Directory() { std::filesystem::remove_all(path); }
+  } directory{created};
+  const auto model = directory.path / "model.txt";
+  const auto models = directory.path / "models.txt";
+  const auto settings = directory.path / "config.txt";
+  std::filesystem::copy_file("aux/test_bdt.txt", model);
+  { std::ofstream file(models);
+    file << "file=" << model.string()
+         << " name=cached inputVariables=feature1,feature2,feature3 runVar=run_number\n"; }
+  { std::ofstream file(settings); file << "bdtConfig=" << models.string() << '\n'; }
+  ConfigurationManager config(settings.string());
+  BDTManager manager(config);
+  const auto loaded = manager.getBDT("cached");
+  std::filesystem::remove(model);
+  ManagerContext context{config, *dataManager, *systematicManager, *logger, *skimSink, *metaSink};
+  manager.setContext(context);
+  EXPECT_NO_THROW(manager.setupFromConfigFile());
+  EXPECT_EQ(manager.getBDT("cached"), loaded);
+  const float features[] = {0, 2, 3};
+  EXPECT_TRUE(std::isfinite((*manager.getBDT("cached"))(features)));
+}
+
+TEST_F(BDTManagerTest, ApplyAllPreservesFeatureOrderGatingAndExplicitVariations) {
+  char pattern[] = "/tmp/rdf_bdt_shared_XXXXXX";
+  const auto created = mkdtemp(pattern);
+  ASSERT_NE(created, nullptr);
+  struct Directory { std::filesystem::path path; ~Directory() { std::filesystem::remove_all(path); } } directory{created};
+  const auto models = directory.path / "models.txt", settings = directory.path / "config.txt";
+  { std::ofstream file(models);
+    for (const auto &name : {"a", "b", "c"})
+      file << "file=" << std::filesystem::absolute("aux/test_bdt.txt").string() << " name=" << name
+           << " inputVariables=" << (std::string(name) == "c" ? "feature3,feature2,feature1" : "feature1,feature2,feature3")
+           << " runVar=" << (std::string(name) == "b" ? "gate_b" : "gate_a") << '\n'; }
+  for (const bool combined : {false, true}) for (const bool variedGate : {false, true}) {
+    DataManager data(4);
+    SystematicManager systematics;
+    { std::ofstream file(settings); file << "bdtConfig=" << models.string() << '\n'
+        << "bdtCombineModels=" << (combined ? "true" : "false") << '\n'; }
+    ConfigurationManager config(settings.string());
+    BDTManager manager(config);
+    auto node = data.getDataFrame()
+        .Define("feature1", [](ULong64_t i) { return float(i); }, {"rdfentry_"})
+        .Define("feature2", [] { return 2.f; }).Define("feature3", [] { return 3.f; })
+        .Define("feature1_JESUp", [] { return 1.f; }).Define("feature1_JESDown", [] { return 0.f; })
+        .Define("feature1_custom", [] { return 1.f; })
+        .Define("gate_a", [](ULong64_t i) { return i == 0 || i == 2; }, {"rdfentry_"})
+        .Define("gate_b", [](ULong64_t i) { return i == 1 || i == 2; }, {"rdfentry_"});
+    if (variedGate) node = node.Define("gate_a_shifted", [] { return false; });
+    data.setDataFrame(node);
+    systematics.registerSystematic("JES", {"feature1"});
+    systematics.registerVariationColumn("feature1", "custom", "feature1_custom");
+    if (variedGate) systematics.registerVariationColumn("gate_a", "gateVariation", "gate_a_shifted");
+    ManagerContext context{config, data, systematics, *logger, *skimSink, *metaSink};
+    manager.setContext(context);
+    manager.applyAllBDTs();
+    node = data.getDataFrame();
+    int packedDefines = 0;
+    for (const auto &name : node.GetDefinedColumnNames())
+      if (name.rfind("input_", 0) == 0) ++packedDefines;
+    EXPECT_EQ(packedDefines, 12); // three models, each nominal + three variations
+    auto a = node.Take<float>("a"), b = node.Take<float>("b"), c = node.Take<float>("c");
+    auto up = node.Take<float>(systematics.getVariationColumnName("a", "JESUp"));
+    auto down = node.Take<float>(systematics.getVariationColumnName("a", "JESDown"));
+    auto custom = node.Take<float>(systematics.getVariationColumnName("a", "custom"));
+    const auto sigmoid = [](float x) { return 1.f/(1.f+std::exp(-x)); };
+    EXPECT_NEAR(a->at(0), sigmoid(.6f), 1e-6);
+    EXPECT_EQ(a->at(1), -1.f);
+    EXPECT_EQ(b->at(0), -1.f);
+    EXPECT_NEAR(a->at(2), sigmoid(1.4f), 1e-6);
+    EXPECT_NEAR(b->at(2), sigmoid(1.4f), 1e-6);
+    EXPECT_EQ(a->at(3), -1.f);
+    EXPECT_EQ(b->at(3), -1.f);
+    EXPECT_NEAR(b->at(1), sigmoid(1.4f), 1e-6);
+    // The text model maps named features to the configured order. Its prediction
+    // remains the same, while the exposed packed column must retain that order.
+    EXPECT_NEAR(c->at(0), sigmoid(.6f), 1e-6);
+    auto ordered = node.Take<ROOT::VecOps::RVec<float>>("input_c");
+    ASSERT_EQ(ordered->at(0).size(), 3);
+    EXPECT_FLOAT_EQ(ordered->at(0)[0], 3.f);
+    EXPECT_FLOAT_EQ(ordered->at(0)[1], 2.f);
+    EXPECT_FLOAT_EQ(ordered->at(0)[2], 0.f);
+    EXPECT_NEAR(up->at(0), sigmoid(1.4f), 1e-6);
+    EXPECT_NEAR(down->at(0), sigmoid(.6f), 1e-6);
+    EXPECT_EQ(custom->at(0), up->at(0));
+    if (variedGate) {
+      EXPECT_EQ(systematics.getVariationColumnName("b", "gateVariation"), "b");
+      auto shifted = node.Take<float>(systematics.getVariationColumnName("a", "gateVariation"));
+      for (const auto score : *shifted) EXPECT_EQ(score, -1.f);
+    }
+  }
 }
 
 // BDT retrieval
@@ -261,4 +362,126 @@ TEST_F(BDTManagerTest, LifecycleOrderViaSetupThenInitialize) {
   bdtManager->setupFromConfigFile();
   EXPECT_NO_THROW(bdtManager->initialize());
   EXPECT_FALSE(bdtManager->getAllBDTNames().empty());
+}
+
+TEST_F(BDTManagerTest, FlatRowsCollectionInferencePreservesOrderGatesAndVariations) {
+  // Earlier tests can leave IMT enabled; Take ordering is unspecified under IMT.
+  ROOT::DisableImplicitMT();
+  char pattern[] = "/tmp/rdf_bdt_rows_XXXXXX";
+  const auto created = mkdtemp(pattern);
+  ASSERT_NE(created, nullptr);
+  const std::filesystem::path directory(created);
+  const auto models = directory/"models.txt", configPath = directory/"config.txt";
+  { std::ofstream out(models); out << "file=" << std::filesystem::absolute("aux/test_bdt.txt").string()
+      << " name=rows inputVariables=feature1,feature2,feature3 runVar=gate\n"; }
+  { std::ofstream out(configPath); out << "bdtConfig=" << models.string()
+      << "\nbdtInputLayout=flatRows\nbdtCombineModels=true\n"; }
+  ConfigurationManager config(configPath.string());
+  BDTManager manager(config);
+  DataManager data(4);
+  SystematicManager systematics;
+  auto node = data.getDataFrame()
+      .Define("input_rows", [](ULong64_t i) {
+        return i == 2 ? ROOT::VecOps::RVec<float>{} : ROOT::VecOps::RVec<float>{0,2,3,1,2,3};
+      }, {"rdfentry_"})
+      .Define("shift_rows", [](const ROOT::VecOps::RVec<float>& values) {
+        auto result = values; if (!result.empty()) result[0] = 1; return result;
+      }, {"input_rows"})
+      .Define("gate", [](ULong64_t i) { return i != 1; }, {"rdfentry_"})
+      .Define("shift_gate", [] { return true; });
+  data.setDataFrame(node);
+  systematics.registerVariationColumn("input_rows", "objectShift", "shift_rows");
+  systematics.registerVariationColumn("gate", "gateShift", "shift_gate");
+  ManagerContext context{config, data, systematics, *logger, *skimSink, *metaSink};
+  manager.setContext(context);
+  manager.applyAllBDTs();
+  node = data.getDataFrame();
+  auto nominal = node.Take<ROOT::VecOps::RVec<float>>("rows");
+  auto shifted = node.Take<ROOT::VecOps::RVec<float>>(systematics.getVariationColumnName("rows", "objectShift"));
+  auto gated = node.Take<ROOT::VecOps::RVec<float>>(systematics.getVariationColumnName("rows", "gateShift"));
+  const auto model = manager.getBDT("rows");
+  const float first[]{0,2,3}, second[]{1,2,3};
+  const auto sigmoid = [&](const float* values) {return 1./(1.+std::exp(-(*model)(values)));};
+  ASSERT_EQ(nominal->at(0).size(), 2);
+  EXPECT_NEAR(nominal->at(0)[0], sigmoid(first), 1e-7);
+  EXPECT_NEAR(nominal->at(0)[1], sigmoid(second), 1e-7);
+  EXPECT_EQ(nominal->at(1)[0], -1.f);
+  EXPECT_EQ(nominal->at(1)[1], -1.f);
+  EXPECT_TRUE(nominal->at(2).empty());
+  EXPECT_NEAR(shifted->at(0)[0], sigmoid(second), 1e-7);
+  EXPECT_NEAR(gated->at(1)[0], sigmoid(first), 1e-7);
+  std::filesystem::remove_all(directory);
+}
+
+TEST_F(BDTManagerTest, FlatRowsRejectsMalformedDimensionsAndMissingPack) {
+  char pattern[] = "/tmp/rdf_bdt_badrows_XXXXXX";
+  const auto created = mkdtemp(pattern);
+  ASSERT_NE(created, nullptr);
+  const std::filesystem::path directory(created);
+  const auto models = directory/"models.txt", configPath = directory/"config.txt";
+  { std::ofstream out(models); out << "file=" << std::filesystem::absolute("aux/test_bdt.txt").string()
+      << " name=rows inputVariables=feature1,feature2,feature3 runVar=gate\n"; }
+  { std::ofstream out(configPath); out << "bdtConfig=" << models.string() << "\nbdtInputLayout=flatRows\n"; }
+  ConfigurationManager config(configPath.string());
+  BDTManager manager(config);
+  DataManager data(1);
+  SystematicManager systematics;
+  auto node = data.getDataFrame().Define("gate", [] {return false;});
+  data.setDataFrame(node);
+  ManagerContext context{config, data, systematics, *logger, *skimSink, *metaSink};
+  manager.setContext(context);
+  EXPECT_THROW(manager.applyAllBDTs(), std::runtime_error);
+  node = node.Define("input_rows", [] {return ROOT::VecOps::RVec<float>{1,2};});
+  data.setDataFrame(node);
+  manager.applyAllBDTs();
+  auto values = data.getDataFrame().Take<ROOT::VecOps::RVec<float>>("rows");
+  EXPECT_THROW(values.GetValue(), std::runtime_error);
+  std::filesystem::remove_all(directory);
+}
+
+TEST_F(BDTManagerTest, SharedFlatRowsUseOneInputAndPropagateFeaturesWithIndependentGates) {
+  ROOT::DisableImplicitMT();
+  char pattern[]="/tmp/rdf_bdt_shared_XXXXXX";
+  const auto created=mkdtemp(pattern);ASSERT_NE(created,nullptr);
+  const std::filesystem::path directory(created);
+  const auto models=directory/"models.txt",configuration=directory/"config.txt";
+  {std::ofstream out(models);for(const auto name:{"a","b"})out<<"file="<<std::filesystem::absolute("aux/test_bdt.txt").string()
+    <<" name="<<name<<" inputVariables=feature1,feature2,feature3 runVar=gate_"<<name<<"\n";}
+  {std::ofstream out(configuration);out<<"bdtConfig="<<models.string()<<"\nbdtInputLayout=flatRows\nbdtFlatRowsInputColumn=shared_rows\n";}
+  ConfigurationManager config(configuration.string());BDTManager manager(config);
+  DataManager data(4);SystematicManager systematics;
+  auto calls=std::make_shared<std::atomic<unsigned>>(0);
+  auto node=data.getDataFrame()
+    .Define("shared_rows",[calls]{calls->fetch_add(1);return ROOT::VecOps::RVec<float>{0,2,3,1,2,3};})
+    .Define("shifted_rows",[]{return ROOT::VecOps::RVec<float>{1,2,3,0,2,3};})
+    .Define("gate_a",[](ULong64_t i){return i%2==0;},{"rdfentry_"})
+    .Define("gate_b",[](ULong64_t i){return i%2!=0;},{"rdfentry_"});
+  data.setDataFrame(node);systematics.registerVariationColumn("shared_rows","shape","shifted_rows");
+  ManagerContext context{config,data,systematics,*logger,*skimSink,*metaSink};manager.setContext(context);
+  manager.applyAllBDTs();node=data.getDataFrame();
+  EXPECT_FALSE(node.HasColumn("input_a"));EXPECT_FALSE(node.HasColumn("input_b"));
+  auto a=node.Take<ROOT::VecOps::RVec<float>>("a");auto b=node.Take<ROOT::VecOps::RVec<float>>("b");
+  auto up=node.Take<ROOT::VecOps::RVec<float>>(systematics.getVariationColumnName("a","shape"));
+  EXPECT_EQ(a->at(1)[0],-1.f);EXPECT_EQ(b->at(0)[0],-1.f);
+  EXPECT_FLOAT_EQ(a->at(0)[0],b->at(1)[0]);
+  EXPECT_FLOAT_EQ(up->at(0)[0],a->at(0)[1]);
+  EXPECT_FLOAT_EQ(up->at(0)[1],a->at(0)[0]);
+  EXPECT_EQ(calls->load(),4u);
+  std::filesystem::remove_all(directory);
+}
+
+TEST_F(BDTManagerTest, SharedFlatRowsRejectDifferentFeatureOrdering) {
+  char pattern[]="/tmp/rdf_bdt_shared_order_XXXXXX";
+  const auto created=mkdtemp(pattern);ASSERT_NE(created,nullptr);
+  const std::filesystem::path directory(created);
+  const auto models=directory/"models.txt",configuration=directory/"config.txt";
+  {std::ofstream out(models);const auto file=std::filesystem::absolute("aux/test_bdt.txt").string();
+    out<<"file="<<file<<" name=a inputVariables=feature1,feature2,feature3 runVar=gate\n";
+    out<<"file="<<file<<" name=b inputVariables=feature2,feature1,feature3 runVar=gate\n";}
+  {std::ofstream out(configuration);out<<"bdtConfig="<<models.string()<<"\nbdtInputLayout=flatRows\nbdtFlatRowsInputColumn=shared\n";}
+  ConfigurationManager config(configuration.string());BDTManager manager(config);
+  DataManager data(1);SystematicManager systematics;
+  ManagerContext context{config,data,systematics,*logger,*skimSink,*metaSink};manager.setContext(context);
+  EXPECT_THROW(manager.applyAllBDTs(),std::invalid_argument);
+  std::filesystem::remove_all(directory);
 }

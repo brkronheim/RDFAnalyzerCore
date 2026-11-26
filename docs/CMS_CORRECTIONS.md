@@ -1,5 +1,19 @@
 # CMS Correction Stack
 
+> **Note:** This document describes the **generic correction manager patterns** — how
+> the `CorrectionManager`, `JetEnergyScaleManager`, `ElectronEnergyScaleManager`, etc.
+> work at the framework level.  For the **CMS-specific convenience functions** that
+> wire these managers up for standard CMS analysis years (payload paths, flags,
+> column names), see:
+> - [`extensions/cms/plugins/cms/README.md`](https://gitlab.cern.ch/bkronhei/RDFAnalyzerCMS/-/blob/505e81b28e5ec39bf6761c7a151e6d18dd98850f/plugins/cms/README.md) — implementation status matrix
+> - [`docs/CMS_STANDARD_STACK.md`](CMS_STANDARD_STACK.md) — user recipe with call order and flags
+>
+> Key distinction: photon energy scale is available through the generic
+> `PhotonEnergyScaleManager` framework plugin but is **not** centrally wired by
+> `CmsCorrections` — only photon ID/CSEV scale factors are part of the default
+> CMS stack (via `defineCmsPhotonScaleFactors()`).  Analyses needing photon
+> energy corrections should configure them directly using the patterns below.
+
 This guide documents the current RDFAnalyzerCore workflow for CMS correctionlib payloads and the object-energy managers built on top of it. The goal is to keep analysis code short while still exposing the full correction content from the JSON payloads shipped with the analysis.
 
 ## Overview
@@ -77,6 +91,19 @@ cm->applyCorrection(
     {},
     "pileup_weight_nominal");
 ```
+
+### Conditional scalar batches
+
+For gated scalar variants, `applyConditionalCorrections` shares one numeric
+input pack. Its overload with a final
+`std::function<void(ROOT::VecOps::RVec<double>&)>` can prepare those inputs
+inside evaluation, avoiding separate preparation columns and their systematic
+copies. Preparation runs only after the condition passes, on a private copy;
+it must preserve numeric input order/count and support concurrent RDF slots.
+Nominal outputs follow numeric-input and condition variations independently.
+The per-output propagation flags still allow weight-only variations at nominal
+kinematics. Raw input columns are evaluated by RDF even for inactive events;
+the gate skips preparation and correctionlib evaluation.
 
 ### Vector application
 
@@ -157,7 +184,6 @@ Many JME payloads store JES sources as separate correction names rather than a s
 - evaluate the up/down scale factors with `CorrectionManager`
 - feed those scale factors into `JetEnergyScaleManager::applyCorrection(...)`
 
-This is the pattern used by the updated VHqq analysis.
 
 ## ElectronEnergyScaleManager and ObjectEnergyManagerBase
 
@@ -197,7 +223,7 @@ electronEnergyManager->applyResolutionSmearing(
 
 ### Run 3 electron payload pattern
 
-The Run 3 electron payloads used by VHqq expose:
+The supported Run 3 electron payloads expose:
 
 - `SmearAndSyst` as a regular correction
 - `Scale` as a compound correction
@@ -255,30 +281,30 @@ The systematic contract is now the same for jets, leptons, taus, and photons:
     branch or collection name and automatically receive derived
     `..._systUp` and `..._systDown` outputs
 
-This is what allows analyses like VHqq to write selection code directly against
+This is what allows analyses to write selection code directly against
 `CorrectedJets`, `CorrectedElectrons`, and `CorrectedMuons` while still getting
 systematic propagation for later derived quantities.
 
 ### Config format
 
-Each wrapper uses a small pair-based config file:
+Each wrapper uses a YAML mapping of column names and correction settings.
 
-```text
-ptColumn=Jet_pt
-etaColumn=Jet_eta
-phiColumn=Jet_phi
-massColumn=Jet_mass
-metPtColumn=PuppiMET_pt
-metPhiColumn=PuppiMET_phi
-rawFactorColumn=Jet_rawFactor
-jerGenJetPtColumn=Jet_genMatchedPt
-jerRhoColumn=fixedGridRhoFastjetAll
-jerEventColumn=event
-correctedPtColumn=Jet_pt_corr_nominal
-correctedMassColumn=Jet_mass_corr_nominal
-outputCollection=CorrectedJets
-variationMapColumn=CorrectedJets_variations
-workflowConfig=cfg/corrected_jets_workflow.txt
+```yaml
+ptColumn: Jet_pt
+etaColumn: Jet_eta
+phiColumn: Jet_phi
+massColumn: Jet_mass
+metPtColumn: PuppiMET_pt
+metPhiColumn: PuppiMET_phi
+rawFactorColumn: Jet_rawFactor
+jerGenJetPtColumn: Jet_genMatchedPt
+jerRhoColumn: fixedGridRhoFastjetAll
+jerEventColumn: event
+correctedPtColumn: Jet_pt_corr_nominal
+correctedMassColumn: Jet_mass_corr_nominal
+outputCollection: CorrectedJets
+variationMapColumn: CorrectedJets_variations
+workflowConfig: cfg/corrected_jets_workflow.yaml
 ```
 
 If `inputCollection` is omitted, the plugin auto-builds one from
@@ -337,8 +363,8 @@ Common compact actions:
     Applies a single correctionlib up/down systematic pair, registers the
     variation, and optionally propagates both shifts to MET.
 - `applyIndexedCorrectionlibVariations`
-    Expands indexed config slots such as `vhqqJesSlot1...vhqqJesSlot12` into the
-    repeated register/apply/addVariation/propagateMET sequence used by VHqq JES.
+    Expands indexed config slots such as `analysisJesSlot1...analysisJesSlot12` into the
+    repeated register/apply/addVariation/propagateMET sequence used for JES.
 
 Compact actions now support implicit defaults so workflow rows can stay short:
 
@@ -367,20 +393,20 @@ Example compact electron workflow:
 
 ```yaml
 - type: registerCorrection
-    sample: mc
-    name: vhqq_electron_smear
-    file: ${vhqqElectronScaleSmearingFile}
-    correctionName: ${vhqqElectronSmearingCorrection}
-    inputVariables: Electron_pt,Electron_r9,Electron_scEta
+  sample: mc
+  name: analysis_electron_smear
+  file: ${analysisElectronScaleSmearingFile}
+  correctionName: ${analysisElectronSmearingCorrection}
+  inputVariables: Electron_pt,Electron_r9,Electron_scEta
 - type: applyResolutionSmearingSystematic
-    sample: mc
-    correction: vhqq_electron_smear
-    systematicName: electron_smear
+  sample: mc
+  correction: analysis_electron_smear
+  systematicName: electron_smear
 - type: applyRelativePtUncertaintySystematic
-    sample: mc
-    correction: vhqq_electron_smear
-    stringArgs: escale
-    systematicName: electron_scale
+  sample: mc
+  correction: analysis_electron_smear
+  stringArgs: escale
+  systematicName: electron_scale
 ```
 
 ### Systematic behavior
@@ -409,60 +435,11 @@ underlying variation defines both `upMassColumn` and `downMassColumn`.
 Previously, varied collections updated only `pt`, which was insufficient for
 physics-object consumers operating directly on four-vectors.
 
-### VHqq usage
+### Consuming corrected collections
 
-The VHqq RDF analysis now configures:
-
-- `CorrectedJets`
-- `CorrectedElectrons`
-- `CorrectedMuons`
-
-and uses those corrected collections directly in the lepton and jet selection
-helpers. This reduces branch-level boilerplate while keeping the existing
-candidate-building logic intact.
-
-### VHqq JES mode switch
-
-The VHqq corrected-jet workflow is now driven from
-`analyses/VHbbcc/VHqqRDF/cfg/corrected_jets_workflow.txt`, and the number of
-JES families it activates is controlled from
-`analyses/VHbbcc/VHqqRDF/cfg/cfg.yaml` with:
-
-```yaml
-jesSystematicsMode: "single"
-```
-
-Supported values are:
-
-- `single`
-    Activates only the base `jes_total` family.
-- `full`
-    Activates the year-aware VHqq JES source list from
-    `VHqqConfig.cc`.
-
-In practice:
-
-- `single` produces one JES family and two directional collection/branch
-    variations: `...jes_totalUp` and `...jes_totalDown`.
-- `full` expands to the full VHqq source list for the chosen year, which is
-    currently the `recommendedJesSources(...)` list in `VHqqConfig.cc`.
-    For Run 2 and Run 3 years in this analysis, that is typically about 12 JES
-    families, which means about 24 up/down directional variations.
-
-To switch VHqq from the base single-JES setup to the fuller source set, change
-only the top-level config value:
-
-```yaml
-jesSystematicsMode: "full"
-```
-
-No C++ changes are needed for that switch. The analysis populates the
-year-dependent source names into the corrected-jet workflow placeholders before
-the plugins are constructed, and the corrected wrapper replays the corresponding
-workflow rows automatically.
-
-If you want to change which sources are included in `full`, update
-`recommendedJesSources(...)` in `analyses/VHbbcc/VHqqRDF/VHqqConfig.cc`.
+Select the corrected jet, electron and muon collections explicitly in the
+analysis. Configure its supported JES sources through the workflow input;
+channel selection and source-list policy belong to the analysis.
 
 ## MuonRochesterManager
 
@@ -535,7 +512,7 @@ When possible, keep user code split like this:
 3. Analysis logic
    Only references the final nominal and shifted columns.
 
-That separation is what allows the VHqq analysis to use more CMS payload content without embedding correctionlib-specific logic directly in the physics code.
+That separation is what allows an analysis to use more CMS payload content without embedding correctionlib-specific logic directly in the physics code.
 
 ## Related documentation
 

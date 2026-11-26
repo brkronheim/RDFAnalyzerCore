@@ -3,7 +3,6 @@
 
 #include <set>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 class IDataFrameProvider;
@@ -38,6 +37,22 @@ struct SystematicValidationResult {
 class ISystematicManager {
 public:
     virtual ~ISystematicManager() = default;
+
+    /**
+     * @brief Enable or disable systematic propagation.
+     *
+     * The framework-wide configuration key `enableSystematics` controls this
+     * for the built-in manager.  Disabled managers remain nominal-only: new
+     * registrations are ignored and no variation columns or selection masks
+     * are materialized.
+     *
+     * The default implementation is a no-op so existing third-party
+     * ISystematicManager implementations remain source compatible.
+     */
+    virtual void setEnabled(bool enabled) { (void)enabled; }
+
+    /** @brief Return whether systematic propagation is enabled. */
+    virtual bool isEnabled() const { return true; }
 
     /**
      * @brief Canonical branch name used for systematic counter columns.
@@ -76,24 +91,70 @@ public:
                                           const std::string &downColumn) = 0;
 
     /**
+     * @brief Register an explicit variation label and column for a variable.
+     *
+     * This supports non-paired variations such as PDF replicas or individual
+     * LHE scale points that should appear directly on the histogram systematic
+     * axis instead of being expanded into Up/Down pairs.
+     *
+     * @param variable        Nominal/base variable name.
+     * @param variationLabel  Exact label to use on the systematic axis.
+     * @param column          Column name to use for this variation.
+     */
+    virtual void registerVariationColumn(const std::string &variable,
+                                         const std::string &variationLabel,
+                                         const std::string &column) = 0;
+
+    /**
      * @brief Get the set of all registered systematics
      * @return Reference to the set of systematic names
      */
     virtual const std::set<std::string> &getSystematics() const = 0;
 
     /**
+     * @brief Get explicitly registered, non-paired variation labels.
+     *
+     * These labels are used for variations such as PDF replicas.  The default
+     * keeps existing third-party implementations source compatible.
+     */
+    virtual std::vector<std::string> getExplicitVariationLabels() const {
+        return {};
+    }
+
+    /**
+     * @brief Return explicit, non-paired labels registered for one variable.
+     *
+     * The default implementation filters the global labels through
+     * getSystematicsForVariable(). Managers that allow a paired family and an
+     * explicit label with the same name on different variables should
+     * override this method to preserve that distinction.
+     */
+    virtual std::vector<std::string> getExplicitVariationLabelsForVariable(
+        const std::string &variable) const {
+        const auto labels = getExplicitVariationLabels();
+        const auto registered = getSystematicsForVariable(variable);
+        std::vector<std::string> result;
+        for (const auto &label : labels) {
+            if (registered.count(label) != 0) {
+                result.push_back(label);
+            }
+        }
+        return result;
+    }
+
+    /**
      * @brief Get the set of variables affected by a given systematic
      * @param syst Name of the systematic
      * @return Reference to the set of variable names
      */
-    virtual const std::set<std::string> &getVariablesForSystematic(const std::string &syst) const = 0;
+    virtual std::set<std::string> getVariablesForSystematic(const std::string &syst) const = 0;
 
     /**
      * @brief Get the set of systematics affecting a given variable
      * @param var Name of the variable
-     * @return Reference to the set of systematic names
+     * @return Set of systematic names
      */
-    virtual const std::set<std::string> &getSystematicsForVariable(const std::string &var) const = 0;
+    virtual std::set<std::string> getSystematicsForVariable(const std::string &var) const = 0;
 
     /**
      * @brief Register existing systematics from configuration
@@ -189,6 +250,51 @@ public:
         }
         return variable;
     }
+
+    /**
+     * @brief Return the ordered labels represented by the systematic axis.
+     *
+     * Nominal is first, followed by paired Up/Down labels and explicit labels.
+     * Exact labels shared by paired and explicit registrations appear once.
+     * This default supports managers that only implement paired systematics.
+     */
+    virtual std::vector<std::string> getVariationLabels() const {
+        std::vector<std::string> labels{"Nominal"};
+        for (const auto &systematic : getSystematics()) {
+            labels.push_back(systematic + "Up");
+            labels.push_back(systematic + "Down");
+        }
+        const auto explicitLabels = getExplicitVariationLabels();
+        std::set<std::string> seen(labels.begin(), labels.end());
+        for (const auto &label : explicitLabels)
+            if (seen.insert(label).second) labels.push_back(label);
+        return labels;
+    }
+
+    /**
+     * @brief Register the cumulative event-selection mask for a variation.
+     *
+     * The default methods are no-ops for source compatibility. Custom
+     * systematic managers used with Analyzer::Filter must override this
+     * storage API; Analyzer checks that each mask registration succeeded.
+     */
+    virtual void registerSelectionMaskColumn(const std::string &variationLabel,
+                                             const std::string &column) {
+        (void)variationLabel;
+        (void)column;
+    }
+
+    /**
+     * @brief Get the mask column for a variation, falling back to nominal.
+     */
+    virtual std::string getSelectionMaskColumn(
+        const std::string &variationLabel) const {
+        (void)variationLabel;
+        return {};
+    }
+
+    /** @brief Whether any cumulative selection mask has been registered. */
+    virtual bool hasSelectionMasks() const { return false; }
 };
 
-#endif // ISYSTEMATICMANAGER_H_INCLUDED 
+#endif // ISYSTEMATICMANAGER_H_INCLUDED

@@ -8,12 +8,13 @@
  *  - The object's index in the original full collection.
  *
  * It also provides:
- *  - A generic @ref getValue helper that maps a full-collection feature branch
- *    to values for the selected objects only.
- *  - @ref cacheFeature / @ref getCachedFeature for storing and retrieving
- *    arbitrary per-collection derived quantities by name.
- *  - @ref removeOverlap to veto objects within a given ΔR of another
- *    collection.
+ *  - @ref PhysicsObjectCollection::getValue "getValue" maps a full-collection
+ *    feature branch to values for the selected objects only.
+ *  - @ref PhysicsObjectCollection::cacheFeature "cacheFeature" and
+ *    @ref PhysicsObjectCollection::getCachedFeature "getCachedFeature" store
+ *    and retrieve arbitrary per-collection derived quantities by name.
+ *  - @ref PhysicsObjectCollection::removeOverlap "removeOverlap" vetoes
+ *    objects within a given ΔR of another collection.
  *
  * Combinatoric helpers (@ref makePairs, @ref makeCrossPairs,
  * @ref makeTriplets) build pairs and triplets with their combined 4-vectors.

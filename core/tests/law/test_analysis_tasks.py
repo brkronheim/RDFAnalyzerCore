@@ -24,6 +24,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -68,6 +69,10 @@ _SKIP_CLIB  = "correctionlib not available"
 # ===========================================================================
 # Helper: write a minimal YAML dataset manifest
 # ===========================================================================
+
+import production_jobs
+from rdfproduction import stitching_derivation, stitching_validation
+
 
 def _write_manifest(tmpdir: str, datasets: list) -> str:
     import yaml
@@ -118,6 +123,44 @@ class TestWriteJobConfig(unittest.TestCase):
         import analysis_tasks
         return analysis_tasks
 
+    def test_root_io_settings_reach_prepared_and_runtime_configs(self):
+        """ROOT I/O options survive LAW job preparation and sandbox copying."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        settings = {
+            "treeCacheSizeMB": "64",
+            "treeCacheLearnEntries": "7",
+            "treeCachePrefill": "0",
+            "treeCacheAsyncPrefetch": "1",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir, settings)
+            job_dir = os.path.join(tmpdir, "job")
+            shared_dir = os.path.join(tmpdir, "shared")
+            os.mkdir(shared_dir)
+            Path(shared_dir, "analysis_exe").write_text("dummy executable")
+            mod._write_job_config(
+                job_dir, template,
+                DatasetEntry(name="sample", files=["input.root"], dtype="data"),
+                os.path.join(tmpdir, "out"),
+                stage_shared_inputs_locally=False,
+            )
+            prepared = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
+            self.assertEqual({key: prepared[key] for key in settings}, settings)
+
+            runtime_dir, _ = mod._materialize_file_source_runtime_job(
+                shared_dir=shared_dir, source_job_dir=job_dir,
+                exe_relpath="analysis_exe",
+            )
+            try:
+                runtime = production_jobs.read_config(
+                    os.path.join(runtime_dir, "cfg", "submit_config.yaml")
+                )
+                self.assertEqual({key: runtime[key] for key in settings}, settings)
+            finally:
+                shutil.rmtree(runtime_dir)
+
     def test_basic_overrides(self):
         """fileList, saveFile, metaFile, sample and type are injected."""
         mod = self._import()
@@ -136,16 +179,10 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            cfg_path = os.path.join(job_dir, "submit_config.txt")
+            cfg_path = os.path.join(job_dir, "submit_config.yaml")
             self.assertTrue(os.path.exists(cfg_path))
 
-            cfg = {}
-            with open(cfg_path) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(cfg_path)
 
             self.assertEqual(cfg["fileList"], "f1.root,f2.root")
             self.assertEqual(cfg["sample"], "ttbar")
@@ -172,13 +209,7 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
             # Ensure the DAS path is preserved when no explicit files are provided.
             self.assertEqual(cfg["fileList"], dataset.das)
 
@@ -205,8 +236,125 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            self.assertTrue(os.path.exists(os.path.join(job_dir, "floats.txt")))
-            self.assertTrue(os.path.exists(os.path.join(job_dir, "ints.txt")))
+            self.assertEqual(mod.read_config(Path(job_dir, "floats.yaml")), {"normScale": "1.0"})
+            self.assertEqual(mod.read_config(Path(job_dir, "ints.yaml")), {"type": "1"})
+
+    def test_staging_rejects_missing_config_inputs(self):
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_dir = os.path.join(tmpdir, "analysis", "cfg")
+            Path(template_dir).mkdir(parents=True)
+            template = _write_submit_config_template(
+                template_dir, extra={"floatConfig": "cfg/missing.txt"}
+            )
+            with self.assertRaisesRegex(FileNotFoundError, "cfg/missing.txt"):
+                mod._write_job_config(
+                    os.path.join(tmpdir, "job"),
+                    template,
+                    DatasetEntry(name="sample", files=["input.root"], dtype="mc"),
+                    os.path.join(tmpdir, "out"),
+                )
+
+    def test_staging_rejects_duplicate_basenames(self):
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_dir = os.path.join(tmpdir, "analysis", "cfg")
+            Path(os.path.join(cfg_dir, "one")).mkdir(parents=True)
+            Path(os.path.join(cfg_dir, "two")).mkdir(parents=True)
+            Path(os.path.join(cfg_dir, "one", "constants.txt")).write_text("a=1\n")
+            Path(os.path.join(cfg_dir, "two", "constants.txt")).write_text("b=2\n")
+            template = _write_submit_config_template(
+                cfg_dir,
+                extra={
+                    "floatConfig": "cfg/one/constants.txt",
+                    "intConfig": "cfg/two/constants.txt",
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "both stage as 'constants.yaml'"):
+                mod._write_job_config(
+                    os.path.join(tmpdir, "job"),
+                    template,
+                    DatasetEntry(name="sample", files=["input.root"], dtype="mc"),
+                    os.path.join(tmpdir, "out"),
+                )
+
+    def test_stitching_json_override_is_staged(self):
+        """A generated stitching JSON override is copied and rewritten."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            weights_path = os.path.join(tmpdir, "stitch_weights.json")
+            Path(weights_path).write_text("{}")
+            template = _write_submit_config_template(tmpdir)
+            dataset = DatasetEntry(name="sample", files=["f.root"], dtype="mc")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(
+                job_dir,
+                template,
+                dataset,
+                out_dir,
+                extra_overrides={
+                    "stitchMode": "correctionlib",
+                    "stitchWeights": weights_path,
+                },
+            )
+
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
+
+            self.assertEqual(cfg["stitchMode"], "correctionlib")
+            self.assertEqual(cfg["stitchWeights"], "stitch_weights.json")
+            self.assertTrue(os.path.exists(os.path.join(job_dir, "stitch_weights.json")))
+
+    def test_compressed_json_payload_is_staged_and_rewritten_for_shared_inputs(self):
+        """Compressed correction payloads point to their staged cfg/ copy."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload_name = "regJet_jerc.json.gz"
+            Path(os.path.join(tmpdir, payload_name)).write_bytes(b"payload")
+            template = _write_submit_config_template(
+                tmpdir,
+                extra={"vhRegressedJetJercFile": payload_name},
+            )
+            dataset = DatasetEntry(name="sample", files=["f.root"], dtype="mc")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(
+                job_dir,
+                template,
+                dataset,
+                out_dir,
+                stage_shared_inputs_locally=False,
+            )
+
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
+
+            self.assertEqual(
+                cfg["vhRegressedJetJercFile"], os.path.join("cfg", payload_name)
+            )
+            self.assertTrue(os.path.isfile(os.path.join(job_dir, "cfg", payload_name)))
+
+            import tarfile
+
+            bundle_path = mod._bundle_analysis_config_files(
+                template,
+                {"vhRegressedJetJercFile": payload_name},
+                job_dir,
+            )
+            self.assertIsNotNone(bundle_path)
+            with tarfile.open(bundle_path, "r:gz") as bundle:
+                self.assertIn(os.path.join("cfg", payload_name), bundle.getnames())
 
     def test_auxiliary_files_resolve_from_analysis_root(self):
         """cfg/... references are resolved relative to the analysis root."""
@@ -240,13 +388,7 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(job_dir, "dataset_manifest.yaml")))
             self.assertTrue(os.path.exists(os.path.join(job_dir, "floats.yaml")))
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(cfg["sampleConfig"], "dataset_manifest.yaml")
             self.assertEqual(cfg["floatConfig"], "floats.yaml")
@@ -285,13 +427,7 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(job_dir, "dataset_manifest.yaml")))
             self.assertTrue(os.path.exists(os.path.join(job_dir, "floats.yaml")))
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(cfg["sampleConfig"], "dataset_manifest.yaml")
             self.assertEqual(cfg["floatConfig"], "floats.yaml")
@@ -313,15 +449,112 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertNotIn("counterWeightBranch", cfg)
+
+    def test_existing_data_test_job_drops_stale_generator_settings(self):
+        """A reused file-source test job is sanitized before execution."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "submit_config.txt")
+            Path(config_path).write_text(
+                "dtype=data\n"
+                "counterWeightBranch=genWeight\n"
+                "genWeightBaseWeightColumn=genWeight\n"
+                "genWeightNominalColumn=genWeight_nominal\n"
+                "saveFile=test.root\n"
+            )
+            config = production_jobs.read_config(config_path)
+            mod._remove_mc_generator_config_for_data(config)
+
+            self.assertEqual(config["dtype"], "data")
+            self.assertNotIn("counterWeightBranch", config)
+            self.assertNotIn("genWeightBaseWeightColumn", config)
+            self.assertNotIn("genWeightNominalColumn", config)
+
+    def test_site_redirector_test_url_uses_bare_lfn(self):
+        """Site-specific replicas receive one separator before the LFN."""
+        mod = self._import()
+        calls = []
+
+        def select_best_url(url, redirectors):
+            calls.append((url, redirectors))
+            return url
+
+        fake_selector = types.SimpleNamespace(select_best_url=select_best_url)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            redirector_path = os.path.join(tmpdir, "site_redirectors.json")
+            with open(redirector_path, "w") as fh:
+                json.dump(
+                    {
+                        "/store/data/file.root": [
+                            "root://xrootd-cms.infn.it//store/test/xrootd/T1_US_FNAL/"
+                        ]
+                    },
+                    fh,
+                )
+
+            with patch.dict(sys.modules, {"xrootd_site_selector": fake_selector}), patch.object(
+                mod._io_policy, "SITE_REDIRECTOR_MARKER", "/store/test/xrootd/"
+            ):
+                result = mod._select_test_input_url(
+                    "root://cms-xrd-global.cern.ch//store/data/file.root",
+                    tmpdir,
+                )
+
+        self.assertEqual(calls[0][0], "/store/data/file.root")
+        self.assertEqual(
+            result,
+            "root://xrootd-cms.infn.it//store/test/xrootd/T1_US_FNAL/store/data/file.root",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "site_redirectors.json"), "w") as fh:
+                json.dump(
+                    {"/store/data/file.root": ["root://cms-xrd-global.cern.ch/"]},
+                    fh,
+                )
+            with patch.dict(sys.modules, {"xrootd_site_selector": fake_selector}), patch.object(
+                mod._io_policy, "SITE_REDIRECTOR_MARKER", "/store/test/xrootd/"
+            ):
+                generic_result = mod._select_test_input_url(
+                    "root://old.example//store/data/file.root",
+                    tmpdir,
+                )
+
+        self.assertEqual(
+            generic_result,
+            "root://cms-xrd-global.cern.ch//store/data/file.root",
+        )
+
+    def test_explicit_redirector_skips_test_job_site_selection(self):
+        """A configured redirector is used directly by the preflight job."""
+        mod = self._import()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(os.path.join(tmpdir, "submit_config.txt")).write_text(
+                "xrootdRedirector=root://cms-xrd-global.cern.ch/\n"
+            )
+            with patch.dict(
+                sys.modules,
+                {
+                    "xrootd_site_selector": types.SimpleNamespace(
+                        select_best_url=lambda *_args, **_kwargs: self.fail(
+                            "site selection should be skipped"
+                        )
+                    )
+                },
+            ):
+                result = mod._select_test_input_url(
+                    "root://old.example//store/data/file.root",
+                    tmpdir,
+                )
+
+        self.assertEqual(
+            result,
+            "root://cms-xrd-global.cern.ch//store/data/file.root",
+        )
 
     def test_manifest_metadata_is_injected_into_job_config(self):
         """Per-job configs include scalar dataset-manifest metadata and numeric type."""
@@ -352,13 +585,7 @@ class TestWriteJobConfig(unittest.TestCase):
 
             mod._write_job_config(job_dir, template, dataset, out_dir)
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
 
             self.assertEqual(cfg["sample"], "dy0j")
             self.assertEqual(cfg["name"], "dy0j")
@@ -379,6 +606,81 @@ class TestWriteJobConfig(unittest.TestCase):
             self.assertEqual(cfg["norm"], "12345.0")
             self.assertEqual(cfg["parent"], "parent_sample")
 
+    def test_manifest_extra_metadata_is_injected_into_job_config(self):
+        """Per-job configs include DatasetEntry.extra key/value pairs such as ptcut."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir)
+            dataset = DatasetEntry(
+                name="dy0j",
+                files=["f.root"],
+                dtype="mc",
+                extra={"ptcut": 150, "sample_label": "z2nu"},
+            )
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(job_dir, template, dataset, out_dir)
+
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
+
+            self.assertEqual(cfg["ptcut"], "150")
+            self.assertEqual(cfg["sample_label"], "z2nu")
+
+    def test_manifest_lumi_is_injected_into_job_config(self):
+        """The per-job luminosity can be supplied from the manifest container."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(tmpdir, extra={"lumi": "1.0"})
+            dataset = DatasetEntry(name="mc", files=["f.root"], dtype="mc")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(
+                job_dir,
+                template,
+                dataset,
+                out_dir,
+                manifest_lumi=109.0,
+            )
+
+            config = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
+
+            self.assertEqual(config["lumi"], "109.0")
+
+    def test_data_job_removes_all_generator_weight_settings(self):
+        """Data jobs do not carry MC-only generator-weight configuration."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = _write_submit_config_template(
+                tmpdir,
+                extra={
+                    "counterWeightBranch": "genWeight",
+                    "genWeightBaseWeightColumn": "genWeight",
+                    "genWeightPdfBranch": "LHEPdfWeight",
+                },
+            )
+            dataset = DatasetEntry(name="data", files=["f.root"], dtype="data")
+            job_dir = os.path.join(tmpdir, "job")
+            out_dir = os.path.join(tmpdir, "out")
+            Path(job_dir).mkdir()
+
+            mod._write_job_config(job_dir, template, dataset, out_dir)
+
+            config = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
+
+            self.assertNotIn("counterWeightBranch", config)
+            self.assertNotIn("genWeightBaseWeightColumn", config)
+            self.assertNotIn("genWeightPdfBranch", config)
+
     def test_rewrite_job_output_destinations(self):
         """Concrete skim jobs can rewrite their final save targets independently."""
         mod = self._import()
@@ -394,23 +696,41 @@ class TestWriteJobConfig(unittest.TestCase):
                 "sample=test\n"
             )
 
-            mod._rewrite_job_output_destinations(
-                cfg_path,
-                "/eos/user/b/test/sample",
-            )
-
-            cfg = {}
-            with open(cfg_path) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            original = Path(cfg_path).read_bytes()
+            target = mod._rewrite_job_output_destinations(cfg_path, "/eos/user/b/test/sample")
+            self.assertEqual(Path(cfg_path).read_bytes(), original)
+            self.assertEqual(target.suffix, ".yaml")
+            cfg = mod.read_config(target)
 
             self.assertEqual(cfg["saveDirectory"], "/eos/user/b/test/sample")
             self.assertEqual(cfg["saveFile"], "/eos/user/b/test/sample/output_0.root")
             self.assertEqual(cfg["metaFile"], "/eos/user/b/test/sample/meta_0.root")
             self.assertEqual(cfg["sample"], "test")
+
+    def test_output_destination_override(self):
+        """An explicit output directory takes precedence over the template."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = os.path.join(tmpdir, "cfg.yaml")
+            Path(template).write_text("saveDirectory: template-output\n")
+
+            self.assertEqual(
+                mod._resolve_output_destination_base(
+                    template,
+                    {"saveDirectory": "template-output"},
+                    "/eos/user/b/test/vh",
+                ),
+                "/eos/user/b/test/vh",
+            )
+            self.assertEqual(
+                mod._resolve_output_destination_base(
+                    template,
+                    {"saveDirectory": "template-output"},
+                    "root://eosuser.cern.ch//eos/user/b/test/vh",
+                ),
+                "root://eosuser.cern.ch//eos/user/b/test/vh",
+            )
 
     def test_aux_directory_is_copied_and_rewritten(self):
         """Copied YAML payloads reference the staged aux/ directory."""
@@ -468,17 +788,11 @@ class TestWriteJobConfig(unittest.TestCase):
                 extra_overrides={"fileList": "/my/skim.root"},
             )
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
             self.assertEqual(cfg["fileList"], "/my/skim.root")
 
     def test_shared_config_layout_without_local_staging(self):
-        """File-source job configs keep cfg/ references and avoid local payload copies."""
+        """Shared configs use cfg/ references and lightweight local aux links."""
         mod = self._import()
         from dataset_manifest import DatasetEntry
 
@@ -512,21 +826,789 @@ class TestWriteJobConfig(unittest.TestCase):
             )
 
             self.assertFalse(os.path.exists(os.path.join(job_dir, "corrections.yaml")))
-            self.assertFalse(os.path.exists(os.path.join(job_dir, "aux")))
+            self.assertTrue(os.path.islink(os.path.join(job_dir, "aux")))
+            self.assertEqual(
+                Path(job_dir, "aux", "muon_scalesmearing.json.gz").read_text(),
+                "payload\n",
+            )
 
-            cfg = {}
-            with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k] = v
+            cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
             self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
+
+    def test_repeated_layout_pass_accepts_root_and_nested_staged_payloads(self):
+        """A second layout pass accepts payloads already materialized under cfg/."""
+        mod = self._import()
+        from dataset_manifest import DatasetEntry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            analysis_dir = os.path.join(tmpdir, "analysis")
+            Path(analysis_dir).mkdir(parents=True)
+            root_payload = Path(analysis_dir, "vh_skim_branches.txt")
+            root_payload.write_text("event\n")
+            nested_payload = Path(
+                analysis_dir,
+                "taggerEfficiences",
+                "final",
+                "VJets_btag_efficiencies.json",
+            )
+            nested_payload.parent.mkdir(parents=True)
+            nested_payload.write_text("{}\n")
+
+            template = _write_submit_config_template(
+                analysis_dir,
+                extra={
+                    "saveConfig": "vh_skim_branches.txt",
+                    "btagEfficiencyFileVJets": (
+                        "taggerEfficiences/final/VJets_btag_efficiencies.json"
+                    ),
+                },
+            )
+            job_dir = os.path.join(tmpdir, "job")
+            mod._write_job_config(
+                job_dir,
+                template,
+                DatasetEntry(name="sample", files=["input.root"], dtype="mc"),
+                os.path.join(tmpdir, "out"),
+                stage_shared_inputs_locally=False,
+            )
+
+            job_config = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
+            self.assertEqual(job_config["saveConfig"], "cfg/vh_skim_branches.yaml")
+            self.assertEqual(
+                job_config["btagEfficiencyFileVJets"],
+                "cfg/VJets_btag_efficiencies.json",
+            )
+
+            mod._ensure_local_analysis_runtime_layout(template, job_config, job_dir)
+            self.assertTrue(Path(job_dir, "cfg", root_payload.with_suffix(".yaml").name).is_file())
+            self.assertTrue(Path(job_dir, "cfg", nested_payload.name).is_file())
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestSkimOutputMonitoring(unittest.TestCase):
+    """Tests for skim output validation without deferred sample accounting."""
+
+    def test_expired_history_event_log_still_requires_integrity(self):
+        import analysis_tasks
+        import law as law_mod
+
+        for exit_code, errors in [(0, []), (0, ["bad ROOT"]), (2, [])]:
+            with self.subTest(exit_code=exit_code, errors=errors), tempfile.TemporaryDirectory() as tmpdir, \
+                    patch.object(analysis_tasks, "WORKSPACE", tmpdir):
+                manifest = _write_manifest(tmpdir, [{
+                    "name": "sample", "files": ["input.root"], "dtype": "mc",
+                }])
+                template = _write_submit_config_template(tmpdir, {"enableSkim": "false"})
+                task = analysis_tasks.MonitorSkimJobs(
+                    exe="/fake/exe", submit_config=template, dataset_manifest=manifest,
+                    name="expired_history", output_validation="integrity",
+                    max_retries=0, poll_interval=0,
+                )
+                submission = Path(task._run_dir, "condor_submissions", "sample")
+                job = submission / "job_0";job.mkdir(parents=True)
+                meta = "root://storage.example/sample/meta_0.root"
+                (job / "submit_config.txt").write_text(f"enableSkim=false\nmetaFile={meta}\n")
+                logs = submission / "condor_logs";logs.mkdir()
+                event_log = logs / "log_123.log"
+                event_log.write_text("005 (123.000.000) 2026-11-16 10:00:00 Job terminated.\n"
+                                     f"\t(1) Normal termination (return value {exit_code})\n...\n")
+                submitted = Path(tmpdir, "submitted.json")
+                submitted.write_text(json.dumps({"datasets": [{
+                    "dataset_name": "sample", "submission_dir": str(submission),
+                    "cluster_id": "123", "shared_transfer_files": [],
+                }]}))
+                with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
+                        patch.object(task, "publish_message"), \
+                        patch("rdfproduction.transport.condor_q_ads", side_effect=[{0: {"JobStatus": 5}}, {}]), \
+                        patch("rdfproduction.transport.condor_rm_job", return_value=False) as remove, \
+                        patch("rdfproduction.transport.condor_history_exit", return_value={}), \
+                        patch("rdfproduction.jobs.output_validation._output_file_info_batch", return_value={meta: {}}), \
+                        patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=errors) as integrity, \
+                        patch.object(task, "_update_site_rankings"), \
+                        patch.object(task, "_update_job_sizing"):
+                    task.run()
+                state = task._load_state()["datasets"]["sample"]["jobs"]["0"]
+                self.assertEqual(state["status"], "perm_fail" if errors or exit_code else "done")
+                self.assertEqual(state["completion_evidence"]["path"], str(event_log))
+                self.assertEqual(state["completion_evidence"]["exit_code"], exit_code)
+                remove.assert_called_once_with("123", 0)
+                if exit_code:
+                    integrity.assert_not_called()
+                else:
+                    integrity.assert_called_once()
+
+    def test_successful_mc_monitor_finishes_without_sample_counter_collection(self):
+        import analysis_tasks
+        import law as law_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir):
+            manifest = _write_manifest(tmpdir, [{
+                "name": "sample", "files": ["input.root"], "dtype": "mc",
+            }])
+            template = _write_submit_config_template(tmpdir, {"enableSkim": "false"})
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe", submit_config=template, dataset_manifest=manifest,
+                name="no_collection", output_validation="exists", poll_interval=0,
+            )
+            submission = Path(task._run_dir, "condor_submissions", "sample")
+            job = submission / "job_0"
+            job.mkdir(parents=True)
+            meta = "root://storage.example/sample/meta_0.root"
+            (job / "submit_config.txt").write_text(
+                f"enableSkim=false\nmetaFile={meta}\n"
+            )
+            submitted = Path(tmpdir, "submitted.json")
+            submitted.write_text(json.dumps({"datasets": [{
+                "dataset_name": "sample", "submission_dir": str(submission),
+                "cluster_id": "123", "shared_transfer_files": [],
+            }]}))
+            normalization = Path(task._run_dir, "normalization.json")
+            with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
+                    patch.object(task, "publish_message"), \
+                    patch("rdfproduction.transport.condor_q_ads", return_value={}), \
+                    patch("rdfproduction.transport.condor_history_exit", return_value={0: 0}), \
+                    patch("rdfproduction.jobs.output_validation._output_files_exist_batch", return_value={meta: True}), \
+                    patch("rdfproduction.jobs.output_validation._skim_job_output_errors") as integrity, \
+                    patch("derivation_correctionlib._read_weight_sum") as raw_counter, \
+                    patch("derivation_correctionlib._read_weight_sign_sum") as sign_counter:
+                task.run()
+                self.assertTrue(task.complete())
+                self.assertFalse(normalization.exists())
+                # Old runs may retain this unused artifact, including invalid JSON.
+                normalization.write_text("obsolete normalization")
+                self.assertTrue(task.complete())
+                self.assertEqual(normalization.read_text(), "obsolete normalization")
+                integrity.assert_not_called()
+                raw_counter.assert_not_called()
+                sign_counter.assert_not_called()
+
+                for summary in ("done\n", "done=0\nperm_fail=1\ntotal=1\n",
+                                "done=2\nperm_fail=0\ntotal=2\n"):
+                    Path(task.output().path).write_text(summary)
+                    self.assertFalse(task.complete())
+
+    def test_monitor_exists_mode_skips_root_reads_for_new_and_done_jobs(self):
+        import analysis_tasks
+        import law as law_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir, "skimRun_exists")
+            submission_dir = run_dir / "condor_submissions/sample"
+            outputs = {}
+            for idx in range(3):
+                job_dir = submission_dir / f"job_{idx}"
+                job_dir.mkdir(parents=True)
+                meta = f"/eos/user/t/test/sample/meta_{idx}.root"
+                (job_dir / "submit_config.txt").write_text(
+                    f"enableSkim=false\nmetaFile={meta}\n"
+                )
+                outputs[meta] = idx != 2
+            manifest = _write_manifest(tmpdir, [{
+                "name": "sample", "files": ["input.root"], "dtype": "mc", "xsec": 1.0,
+            }])
+            submitted = Path(tmpdir, "submitted.json")
+            submitted.write_text(json.dumps({"datasets": [{
+                "dataset_name": "sample", "submission_dir": str(submission_dir),
+                "cluster_id": "123", "shared_transfer_files": [],
+            }]}))
+            for mode in ("exists", "integrity"):
+                with self.subTest(mode=mode), patch.object(
+                    analysis_tasks.MonitorSkimJobs, "_run_dir",
+                    new_callable=lambda: property(lambda self: str(run_dir)),
+                ):
+                    task = analysis_tasks.MonitorSkimJobs(
+                        exe="/fake/exe", submit_config="submit_config.txt",
+                        dataset_manifest=manifest, name=f"verification_{mode}",
+                        output_validation=mode, max_retries=0, poll_interval=0,
+                    )
+                    # A previously completed output must use the same policy.
+                    Path(task._state_file).write_text(json.dumps({"datasets": {
+                        "sample": {"jobs": {"0": {
+                            "status": "done", "cluster": "123", "proc": 0, "retries": 0,
+                        }}},
+                    }}))
+                    with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
+                            patch.object(task, "publish_message"), \
+                            patch("rdfproduction.transport.condor_q_ads", return_value={}), \
+                            patch("rdfproduction.transport.condor_history_exit", return_value={1: 0, 2: 0}), \
+                            patch("rdfproduction.jobs.output_validation._output_files_exist_batch", return_value=outputs) as stat, \
+                            patch("rdfproduction.jobs.output_validation._output_file_info_batch", return_value={
+                                path: {} if present else None for path, present in outputs.items()
+                            }) as info, \
+                            patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=["bad ROOT"]) as integrity, \
+                            patch("derivation_correctionlib._read_weight_sum") as raw_counter, \
+                            patch("derivation_correctionlib._read_weight_sign_sum") as sign_counter:
+                        task.run()
+                    jobs = task._load_state()["datasets"]["sample"]["jobs"]
+                    self.assertEqual(jobs["2"]["status"], "perm_fail")
+                    for idx in ("0", "1"):
+                        self.assertEqual(jobs[idx]["status"], "done" if mode == "exists" else "perm_fail")
+                    (stat if mode == "exists" else info).assert_called_once()
+                    self.assertEqual(integrity.call_count, 0 if mode == "exists" else 2)
+                    raw_counter.assert_not_called()
+                    sign_counter.assert_not_called()
+
+    def test_output_validation_policy_reaches_delegated_monitor(self):
+        import analysis_tasks
+
+        identities = []
+        for mode in ("exists", "integrity"):
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe", submit_config="submit_config.txt",
+                dataset_manifest="datasets.yaml", name="policy",
+                workflow="htcondor", output_validation=mode,
+            )
+            identities.append(task.task_id)
+            self.assertEqual(task.htcondor_delegate_task().output_validation, mode)
+        self.assertEqual(identities[0], identities[1])
+
+    def test_monitor_state_is_atomically_replaced(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe", submit_config="submit_config.txt",
+                dataset_manifest="datasets.yaml", name="atomic",
+            )
+            original_run_dir = analysis_tasks.MonitorSkimJobs._run_dir.fget
+            analysis_tasks.MonitorSkimJobs._run_dir = property(lambda self: tmpdir)
+            try:
+                task._save_state({"datasets": {"sample": {"jobs": {}}}})
+                with open(task._state_file) as fh:
+                    self.assertEqual(json.load(fh)["datasets"].keys(), {"sample"})
+                self.assertEqual(
+                    [name for name in os.listdir(tmpdir) if name.startswith(".monitor_state.")],
+                    [],
+                )
+            finally:
+                analysis_tasks.MonitorSkimJobs._run_dir = property(original_run_dir)
+
+    def test_monitor_state_write_failure_preserves_previous_file(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe", submit_config="submit_config.txt",
+                dataset_manifest="datasets.yaml", name="atomic_failure",
+            )
+            original_run_dir = analysis_tasks.MonitorSkimJobs._run_dir.fget
+            analysis_tasks.MonitorSkimJobs._run_dir = property(lambda self: tmpdir)
+            try:
+                task._save_state({"datasets": {"old": {}}})
+                with patch("analysis_tasks.json.dump", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        task._save_state({"datasets": {"new": {}}})
+                with open(task._state_file) as fh:
+                    self.assertEqual(json.load(fh)["datasets"].keys(), {"old"})
+                self.assertEqual(
+                    [name for name in os.listdir(tmpdir) if name.startswith(".monitor_state.")],
+                    [],
+                )
+            finally:
+                analysis_tasks.MonitorSkimJobs._run_dir = property(original_run_dir)
+
+    def test_corrupt_monitor_state_fails_closed(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe", submit_config="submit_config.txt",
+                dataset_manifest="datasets.yaml", name="corrupt_state",
+            )
+            original_run_dir = analysis_tasks.MonitorSkimJobs._run_dir.fget
+            analysis_tasks.MonitorSkimJobs._run_dir = property(lambda self: tmpdir)
+            try:
+                Path(task._state_file).write_text('{"datasets":')
+                with self.assertRaisesRegex(RuntimeError, "Cannot read monitor state"):
+                    task._load_state()
+                Path(task._state_file).write_text('{"datasets": []}')
+                with self.assertRaisesRegex(RuntimeError, "invalid structure"):
+                    task._load_state()
+            finally:
+                analysis_tasks.MonitorSkimJobs._run_dir = property(original_run_dir)
+
+    def test_output_validator_rejects_absent_empty_unreadable_and_partial_artifacts(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skim_path = os.path.join(tmpdir, "skim.root")
+            meta_path = os.path.join(tmpdir, "meta.root")
+
+            errors = analysis_tasks._skim_job_output_errors(
+                dataset_name="sample",
+                dtype="data",
+                save_path=skim_path,
+                meta_path=meta_path,
+            )
+            self.assertEqual(len(errors), 2)
+            self.assertTrue(all("absent" in error for error in errors))
+
+            Path(skim_path).touch()
+            Path(meta_path).write_bytes(b"root")
+            errors = analysis_tasks._skim_job_output_errors(
+                dataset_name="sample",
+                dtype="data",
+                save_path=skim_path,
+                meta_path=meta_path,
+            )
+            self.assertTrue(any("empty" in error for error in errors))
+
+            class FakeTree:
+                classname = "TTree"
+
+            class FakeRootFile:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def __getitem__(self, name):
+                    if name != "Events":
+                        raise KeyError(name)
+                    return FakeTree()
+
+                def keys(self):
+                    return ["metadata"]
+
+            fake_uproot = types.SimpleNamespace(open=lambda _path: FakeRootFile())
+            with patch.dict(sys.modules, {"uproot": fake_uproot, "ROOT": None}):
+                # One readable skim with no metadata is still a partial result.
+                errors = analysis_tasks._skim_job_output_errors(
+                    dataset_name="sample",
+                    dtype="data",
+                    save_path=meta_path,
+                    meta_path=os.path.join(tmpdir, "missing_meta.root"),
+                )
+                self.assertEqual(len(errors), 1)
+                self.assertIn("metadata output", errors[0])
+
+                Path(skim_path).write_bytes(b"nonempty")
+                fake_uproot.open = lambda _path: (_ for _ in ()).throw(OSError("truncated ROOT"))
+                errors = analysis_tasks._skim_job_output_errors(
+                    dataset_name="sample",
+                    dtype="data",
+                    save_path=skim_path,
+                    meta_path=meta_path,
+                )
+                self.assertEqual(len(errors), 2)
+                self.assertTrue(all("truncated ROOT" in error for error in errors))
+
+    def test_output_validator_allows_disabled_skim(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_path = os.path.join(tmpdir, "meta.root")
+            Path(meta_path).write_bytes(b"metadata")
+            with patch("rdfproduction.jobs.output_validation._root_file_tree_error", return_value=None) as check:
+                errors = analysis_tasks._skim_job_output_errors(
+                    dataset_name="sample",
+                    dtype="data",
+                    save_path=os.path.join(tmpdir, "skim.root"),
+                    meta_path=meta_path,
+                    require_skim=False,
+                )
+            self.assertEqual(errors, [])
+            check.assert_called_once_with(meta_path, None)
+
+    def test_mc_output_validation_requires_both_normalization_counters(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skim_path = os.path.join(tmpdir, "skim.root")
+            meta_path = os.path.join(tmpdir, "meta.root")
+            Path(skim_path).write_bytes(b"mock root")
+            Path(meta_path).write_bytes(b"mock root")
+            with patch("rdfproduction.jobs.output_validation._root_file_tree_error", return_value=None), \
+                    patch("derivation_correctionlib._read_weight_sum", return_value=10.0), \
+                    patch(
+                        "derivation_correctionlib._read_weight_sign_sum",
+                        side_effect=RuntimeError("missing counter histogram"),
+                    ):
+                errors = analysis_tasks._skim_job_output_errors(
+                    dataset_name="sample",
+                    dtype="mc",
+                    save_path=skim_path,
+                    meta_path=meta_path,
+                )
+            self.assertEqual(len(errors), 1)
+            self.assertIn("generator-weight sign counter", errors[0])
+
+    def test_monitor_run_does_not_mark_partial_successful_condor_job_done(self):
+        import analysis_tasks
+        import law as law_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_partial")
+            submission_dir = os.path.join(run_dir, "condor_submissions", "sample")
+            job_dir = os.path.join(submission_dir, "job_0")
+            Path(job_dir).mkdir(parents=True)
+            save_path = os.path.join(run_dir, "outputs", "sample", "skim.root")
+            meta_path = os.path.join(run_dir, "outputs", "sample", "meta.root")
+            Path(os.path.dirname(save_path)).mkdir(parents=True)
+            # Reproduce a successful Condor exit with only one of its two outputs.
+            Path(save_path).write_bytes(b"partial skim")
+            Path(os.path.join(job_dir, "submit_config.txt")).write_text(
+                f"saveFile={save_path}\nmetaFile={meta_path}\nsaveTree=Events\n"
+            )
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["input.root"], "dtype": "data"}],
+            )
+            submitted_path = os.path.join(tmpdir, "submitted.json")
+            Path(submitted_path).write_text(
+                json.dumps({"datasets": [{
+                    "dataset_name": "sample",
+                    "submission_dir": submission_dir,
+                    "cluster_id": "123",
+                    "shared_transfer_files": [],
+                }]})
+            )
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe",
+                submit_config="submit_config.txt",
+                dataset_manifest=manifest_path,
+                name="partial",
+                max_retries=0,
+                poll_interval=0,
+            )
+            original_run_dir = analysis_tasks.MonitorSkimJobs._run_dir.fget
+            analysis_tasks.MonitorSkimJobs._run_dir = property(lambda self: run_dir)
+            try:
+                with patch.object(
+                    task,
+                    "input",
+                    return_value=law_mod.LocalFileTarget(submitted_path),
+                ), patch(
+                    "rdfproduction.transport.condor_q_ads", return_value={}
+                ), patch(
+                    "rdfproduction.transport.condor_history_exit", return_value={0: 0}
+                ), patch.object(task, "publish_message"):
+                    task.run()
+
+                state = task._load_state()
+                self.assertEqual(
+                    state["datasets"]["sample"]["jobs"]["0"]["status"],
+                    "perm_fail",
+                )
+                self.assertFalse(task.complete())
+            finally:
+                analysis_tasks.MonitorSkimJobs._run_dir = property(original_run_dir)
+
+    def test_monitor_updates_rankings_after_verified_success_and_keeps_cache_errors_nonfatal(self):
+        import analysis_tasks
+        import law as law_mod
+
+        for condition in ("success", "missing_output", "cache_error"):
+            with self.subTest(condition=condition), tempfile.TemporaryDirectory() as tmpdir:
+                run_dir = Path(tmpdir) / "skimRun_ranking"
+                submission = run_dir / "condor_submissions/sample"
+                job = submission / "job_0"
+                job.mkdir(parents=True)
+                skim, meta = run_dir / "skim.root", run_dir / "meta.root"
+                skim.write_bytes(b"root")
+                if condition != "missing_output":
+                    meta.write_bytes(b"root")
+                (job / "submit_config.txt").write_text(f"saveFile={skim}\nmetaFile={meta}\nsaveTree=Events\n")
+                manifest = _write_manifest(tmpdir, [{"name": "sample", "dtype": "data", "files": ["input.root"]}])
+                submitted = Path(tmpdir) / "submitted.json"
+                submitted.write_text(json.dumps({"datasets": [{"dataset_name": "sample",
+                    "submission_dir": str(submission), "cluster_id": "123", "shared_transfer_files": []}]}))
+                task = analysis_tasks.MonitorSkimJobs(exe="/fake/exe", submit_config="submit_config.txt",
+                    dataset_manifest=manifest, name="ranking", max_retries=0, poll_interval=0,
+                    output_validation="exists")
+                def update(*args, **kwargs):
+                    self.assertFalse(Path(task.output().path).exists())
+                    self.assertTrue(all(j["status"] == "done" for ds in task._load_state()["datasets"].values()
+                                        for j in ds["jobs"].values()))
+                    if condition == "cache_error":
+                        raise OSError("read-only cache")
+                    return {"status": "updated", "completed_runs": 1, "cache": "/tmp/test-ranking-cache"}
+                def update_sizing(*args, **kwargs):
+                    self.assertFalse(Path(task.output().path).exists())
+                    if condition == "cache_error":
+                        raise OSError("read-only sizing cache")
+                    return {"status": "updated", "datasets": 1, "cache": "/tmp/test-sizing-cache"}
+                with patch.object(analysis_tasks.MonitorSkimJobs, "_run_dir", property(lambda self: str(run_dir))), \
+                     patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
+                     patch("rdfproduction.transport.condor_q_ads", return_value={}), \
+                     patch("rdfproduction.transport.condor_history_exit", return_value={0: 0}), \
+                     patch("xrd_site_rankings.update_after_run", side_effect=update) as updater, \
+                     patch.object(task, "_sizing_selection", return_value={"context": {"workload": "w", "origin": "o"}}), \
+                     patch("job_sizing.update_sizing_after_run", side_effect=update_sizing) as sizing_updater, \
+                     patch.object(task, "publish_message"):
+                    task.run()
+                    receipt = run_dir / "xrd_site_rankings_update.json"
+                    if condition == "missing_output":
+                        updater.assert_not_called()
+                        sizing_updater.assert_not_called()
+                        self.assertFalse(receipt.exists())
+                        self.assertFalse(task.complete())
+                    else:
+                        updater.assert_called_once()
+                        sizing_updater.assert_called_once()
+                        self.assertTrue(task.complete())
+                        self.assertEqual(json.loads(receipt.read_text())["status"],
+                                         "error" if condition == "cache_error" else "updated")
+                        self.assertEqual(json.loads((run_dir / "job_sizing_update.json").read_text())["status"],
+                                         "error" if condition == "cache_error" else "updated")
+
+    def test_monitor_complete_rechecks_artifacts_without_normalization(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = os.path.join(tmpdir, "skimRun_verified")
+            Path(run_dir).mkdir()
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["input.root"], "dtype": "data"}],
+            )
+            save_path = os.path.join(tmpdir, "skim.root")
+            meta_path = os.path.join(tmpdir, "meta.root")
+            Path(save_path).write_bytes(b"root")
+            Path(meta_path).write_bytes(b"root")
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe",
+                submit_config="submit_config.txt",
+                dataset_manifest=manifest_path,
+                name="verified",
+            )
+            original_run_dir = analysis_tasks.MonitorSkimJobs._run_dir.fget
+            analysis_tasks.MonitorSkimJobs._run_dir = property(lambda self: run_dir)
+            try:
+                Path(task.output().path).write_text("done=1\nperm_fail=0\ntotal=1\n")
+                Path(task._state_file).write_text(json.dumps({
+                    "datasets": {"sample": {"jobs": {"0": {
+                        "status": "done",
+                        "save": save_path,
+                        "meta": meta_path,
+                        "tree_name": "Events",
+                    }}}},
+                }))
+                with patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=[]):
+                    self.assertTrue(task.complete())
+
+                    with patch(
+                        "rdfproduction.jobs.output_validation._skim_job_output_errors",
+                        return_value=["corrupt ROOT"],
+                    ) as integrity:
+                        # Unchanged artifacts reuse the prior integrity receipt.
+                        self.assertTrue(task.complete())
+                        integrity.assert_not_called()
+                        Path(meta_path).write_bytes(b"changed ROOT output")
+                        self.assertFalse(task.complete())
+                    exists_task = task.clone(output_validation="exists")
+                    with patch("rdfproduction.jobs.output_validation._skim_job_output_errors") as integrity:
+                        self.assertTrue(exists_task.complete())
+                        integrity.assert_not_called()
+                        Path(meta_path).unlink()
+                        self.assertFalse(exists_task.complete())
+            finally:
+                analysis_tasks.MonitorSkimJobs._run_dir = property(original_run_dir)
+
+
+    def test_monitor_rejects_corruption_after_successful_completion(self):
+        import analysis_tasks
+        try:
+            import numpy as np
+            import uproot
+        except ImportError:
+            self.skipTest("uproot and numpy required for ROOT artifact validation")
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir):
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
+            template = _write_submit_config_template(tmpdir)
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe", submit_config=template,
+                dataset_manifest=manifest, name="validated",
+            )
+            Path(task._run_dir).mkdir()
+            skim, meta = Path(tmpdir, "skim.root"), Path(tmpdir, "meta.root")
+
+            def write_skim(tree="Events"):
+                with uproot.recreate(skim) as handle:
+                    handle.mktree(tree, {"value": "float64"})
+                    handle[tree].extend({"value": np.array([1.])})
+
+            write_skim()
+            with uproot.recreate(meta) as handle:
+                handle["counter"] = (np.array([1.]), np.array([0., 1.]))
+            Path(task.output().path).write_text("done=1\nperm_fail=0\ntotal=1\n")
+            Path(task._state_file).write_text(json.dumps({
+                "datasets": {"sample": {"jobs": {"0": {"status": "done",
+                    "save": str(skim), "meta": str(meta), "tree_name": "Events"}}}},
+            }))
+            ambient = Path(tmpdir, "working_directory")
+            ambient.mkdir()
+            (ambient / "submit_config.txt").write_text("enableSkim=false\n")
+            previous_directory = Path.cwd()
+            try:
+                os.chdir(ambient)
+                self.assertTrue(task.complete())
+                skim.unlink()
+                self.assertFalse(task.complete())
+                write_skim("WrongTree")
+                self.assertFalse(task.complete())
+                write_skim()
+                self.assertTrue(task.complete())
+                meta.write_bytes(b"corrupted after successful monitoring")
+                self.assertFalse(task.complete())
+            finally:
+                os.chdir(previous_directory)
+
+    def test_monitor_rejects_corrupt_output_despite_successful_worker_exit(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir):
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
+            template = _write_submit_config_template(tmpdir, {"enableSkim": "false"})
+            task = analysis_tasks.MonitorSkimJobs(
+                exe="/fake/exe", submit_config=template, dataset_manifest=manifest,
+                name="corrupt_worker", max_retries=0,
+            )
+            submission = Path(task._run_dir, "condor_submissions", "sample")
+            job = submission / "job_0"
+            job.mkdir(parents=True)
+            meta = Path(tmpdir, "meta.root")
+            meta.write_bytes(b"truncated ROOT output")
+            (job / "submit_config.txt").write_text(
+                f"metaFile={meta}\nenableSkim=false\n"
+            )
+            submitted = Path(tmpdir, "submitted.json")
+            submitted.write_text(json.dumps({"datasets": [{
+                "dataset_name": "sample", "cluster_id": "123",
+                "submission_dir": str(submission),
+            }]}))
+            with patch.object(task, "input", return_value=law.LocalFileTarget(str(submitted))), \
+                    patch("rdfproduction.transport.condor_q_ads", return_value={}), \
+                    patch("rdfproduction.transport.condor_history_exit", return_value={0: 0}), \
+                    patch("rdfproduction.jobs.condor_files._submit_single_skim_job") as submit:
+                task.run()
+            submit.assert_not_called()
+            state = json.loads(Path(task._state_file).read_text())
+            self.assertEqual(state["datasets"]["sample"]["jobs"]["0"]["status"], "perm_fail")
+            self.assertIn("done=0", Path(task.output().path).read_text())
+            self.assertFalse(task.complete())
+
+    def test_file_source_planning_does_not_read_weight_counters(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{
+                    "name": "mc",
+                    "dtype": "mc",
+                    "year": 2024,
+                    "xsec": 2.0,
+                    "files": ["root://server/file.root"],
+                }],
+            )
+            file_list_dir = os.path.join(tmpdir, "files")
+            Path(file_list_dir).mkdir()
+            Path(os.path.join(file_list_dir, "mc.json")).write_text(
+                json.dumps({
+                    "sample": "mc",
+                    "files": ["root://server/file.root"],
+                })
+            )
+
+            with patch("derivation_correctionlib._read_weight_sum",
+                side_effect=AssertionError("counter read during planning"),
+            ), patch("derivation_correctionlib._read_weight_sign_sum",
+                side_effect=AssertionError("counter read during planning"),
+            ):
+                plans = analysis_tasks._plan_file_source_jobs(
+                    dataset_manifest_path=manifest_path,
+                    file_list_dir=file_list_dir,
+                    partition="file",
+                    files_per_job=1,
+                    entries_per_job=0,
+                    jobs_dir=os.path.join(tmpdir, "jobs"),
+                    outputs_dir=os.path.join(tmpdir, "outputs"),
+                )
+
+            self.assertEqual(len(plans), 1)
+            self.assertEqual(plans[0]["lumi"], 1.0)
+
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
 class TestRunSkimTestJob(unittest.TestCase):
     """Tests for the local pre-flight skim test job."""
+
+    def test_setup_changes_invalidate_passing_preflight(self):
+        import analysis_tasks
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir), \
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}), \
+                patch("rdfproduction.executors._run_analysis_job", return_value="done:test"):
+            executable = Path(tmpdir, "analysis")
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            setup = Path(tmpdir, "env.sh")
+            setup.write_text("export PRESET=first\n")
+            template = _write_submit_config_template(tmpdir)
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
+            task = analysis_tasks.RunSkimTestJob(exe=str(executable),
+                submit_config=template, dataset_manifest=manifest,
+                root_setup=str(setup), name="changedSetup")
+            task.run()
+            self.assertTrue(task.complete())
+            setup.write_text("export PRESET=second\n")
+            self.assertFalse(task.complete())
+            task.run()
+            self.assertTrue(task.complete())
+
+    def test_stream_output_obeys_generic_precedence_and_legacy_alias(self):
+        import analysis_tasks
+
+        for environment, expected in (
+            ({}, False),
+            ({"RDF_VERBOSE": "true"}, True),
+            ({"RDF_VH_VERBOSE": "1"}, True),
+            ({"RDF_VERBOSE": "0", "RDF_VH_VERBOSE": "1"}, False),
+        ):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(analysis_tasks._stream_analysis_output(), expected)
+
+    def test_complete_invalidates_marker_for_a_different_executable(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir), \
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}), \
+                patch("rdfproduction.executors._run_analysis_job", return_value="done:test"):
+            executable = Path(tmpdir, "analysis")
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            template = _write_submit_config_template(tmpdir)
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
+            task = analysis_tasks.RunSkimTestJob(
+                exe=str(executable), submit_config=template,
+                dataset_manifest=manifest, name="changedExe",
+            )
+            task.run()
+            self.assertTrue(task.complete())
+            marker = Path(task.output().path).read_bytes()
+            executable.write_text("#!/bin/sh\nexit 123\n")
+            self.assertFalse(task.complete())
+            shutil.copy2(executable, Path(task._test_job_dir, task._exe_relpath))
+            self.assertFalse(task.complete())
+            self.assertEqual(Path(task.output().path).read_bytes(), marker)
+            task.run()
+            self.assertTrue(task.complete())
 
     def test_run_ignores_container_setup(self):
         import analysis_tasks
@@ -555,7 +1637,7 @@ class TestRunSkimTestJob(unittest.TestCase):
                 lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
             )
             try:
-                with patch("analysis_tasks._run_analysis_job", return_value="done:test") as mock_run:
+                with patch("rdfproduction.executors._run_analysis_job", return_value="done:test") as mock_run:
                     task.run()
 
                 self.assertEqual(mock_run.call_count, 1)
@@ -715,8 +1797,8 @@ class TestSkimTask(unittest.TestCase):
         self.assertIn("prep", req)
         self.assertIsInstance(req["prep"], analysis_tasks.PrepareSkimJobs)
 
-    def test_get_dask_work_uses_prepared_job_runner_for_dict_branch(self):
-        """Dict-style branch metadata dispatches through _run_prepared_skim_job."""
+    def test_get_dask_work_wraps_prepared_job_with_output_contract(self):
+        """Dask runs must validate artifacts and write a cache sidecar before marking done."""
         import analysis_tasks
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -745,14 +1827,180 @@ class TestSkimTask(unittest.TestCase):
                         "out_dir": os.path.join(run_dir, "outputs", "sample"),
                     },
                 )
-                self.assertIs(func, analysis_tasks._run_prepared_skim_job)
-                self.assertEqual(args[0], shared_dir)
-                self.assertEqual(args[1], job_dir)
-                self.assertEqual(args[5], os.path.join(job_dir, "submit_config.txt"))
-                self.assertEqual(args[6], os.path.join(run_dir, "shared_inputs.tar.gz"))
+                self.assertIs(func, analysis_tasks._run_skim_job_with_output_contract)
+                self.assertIs(args[0], analysis_tasks._run_prepared_skim_job)
+                self.assertEqual(args[1][0], shared_dir)
+                self.assertEqual(args[1][1], job_dir)
+                self.assertEqual(args[1][5], os.path.join(job_dir, "submit_config.txt"))
+                self.assertEqual(args[1][6], os.path.join(run_dir, "shared_inputs.tar.gz"))
+                self.assertEqual(args[3], "/fake/manifest.yaml")
+                self.assertEqual(args[5], "sample")
+                self.assertEqual(args[6], os.path.join(run_dir, "outputs", "sample", "skim.root"))
+                self.assertEqual(args[7], os.path.join(run_dir, "outputs", "sample", "meta.root"))
+                self.assertTrue(args[9])
                 self.assertEqual(kwargs, {})
             finally:
                 analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_dask_runner_writes_cache_sidecar_before_completion_marker(self):
+        import analysis_tasks
+        from output_schema import read_cache_sidecar
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["input.root"], "dtype": "data"}],
+            )
+            template = _write_submit_config_template(tmpdir)
+            run_dir = os.path.join(tmpdir, "skimRun_dask")
+            job_dir = os.path.join(run_dir, "jobs", "sample", "job_0")
+            out_dir = os.path.join(run_dir, "outputs", "sample")
+            Path(job_dir).mkdir(parents=True)
+            Path(out_dir).mkdir(parents=True)
+            config_path = os.path.join(job_dir, "submit_config.txt")
+            Path(config_path).write_text("saveTree=Events\nenableSkim=true\n")
+            branch_data = {
+                "dataset_name": "sample",
+                "job_dir": job_dir,
+                "config_path": config_path,
+                "out_dir": out_dir,
+            }
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="dask",
+                branch=0,
+            )
+            orig_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
+            try:
+                def fake_runner(*_args, **_kwargs):
+                    Path(os.path.join(out_dir, "skim.root")).write_bytes(b"mock root")
+                    Path(os.path.join(out_dir, "meta.root")).write_bytes(b"mock root")
+                    return "done:mock"
+
+                with patch("rdfproduction.jobs.staging._run_prepared_skim_job", side_effect=fake_runner), \
+                        patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=[]):
+                    func, args, _kwargs = task.get_dask_work(0, branch_data)
+                    result = func(*args)
+
+                self.assertEqual(result, "done:mock")
+                cached = read_cache_sidecar(os.path.join(out_dir, "skim.root"))
+                self.assertEqual(
+                    cached.manifest.intermediate_artifacts[0].output_file,
+                    os.path.join(out_dir, "skim.root"),
+                )
+
+                with patch.object(
+                    type(task), "branch_data", new_callable=PropertyMock,
+                    return_value=branch_data,
+                ):
+                    Path(task.output().path).parent.mkdir(parents=True, exist_ok=True)
+                    Path(task.output().path).write_text("status=done\n")
+                    with patch("rdfproduction.jobs.output_validation._skim_job_output_errors", return_value=[]):
+                        self.assertTrue(task.complete())
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
+
+    def test_dask_runner_rejects_incomplete_outputs_before_sidecar(self):
+        import analysis_tasks
+        from output_schema import CACHE_SIDECAR_SUFFIX
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["input.root"], "dtype": "data"}],
+            )
+            template = _write_submit_config_template(tmpdir)
+            out_dir = os.path.join(tmpdir, "outputs", "sample")
+            Path(out_dir).mkdir(parents=True)
+            skim_file = os.path.join(out_dir, "skim.root")
+
+            def fake_runner(*_args, **_kwargs):
+                Path(skim_file).write_bytes(b"mock root")
+                return "done:partial"
+
+            with self.assertRaisesRegex(RuntimeError, "metadata output"):
+                analysis_tasks._run_skim_job_with_output_contract(
+                    fake_runner,
+                    [],
+                    {},
+                    manifest_path,
+                    template,
+                    "sample",
+                    skim_file,
+                    os.path.join(out_dir, "meta.root"),
+                    "Events",
+                    True,
+                )
+            self.assertFalse(os.path.exists(skim_file + CACHE_SIDECAR_SUFFIX))
+
+    def test_root_output_validator_reads_synthetic_tree_and_rejects_corruption(self):
+        import analysis_tasks
+
+        try:
+            import uproot
+        except ImportError:
+            self.skipTest("uproot is required for the synthetic ROOT fixture")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            valid_path = os.path.join(tmpdir, "valid.root")
+            corrupt_path = os.path.join(tmpdir, "corrupt.root")
+            with uproot.recreate(valid_path) as root_file:
+                root_file.mktree("Events", {"run": "int32"})
+            Path(corrupt_path).write_bytes(b"not a ROOT file")
+
+            self.assertIsNone(analysis_tasks._root_file_tree_error(valid_path, "Events"))
+            self.assertIn(
+                "cannot validate ROOT tree",
+                analysis_tasks._root_file_tree_error(corrupt_path, "Events"),
+            )
+
+    def test_skim_task_complete_removes_marker_for_partial_outputs(self):
+        import analysis_tasks
+        from unittest.mock import PropertyMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample", "files": ["input.root"], "dtype": "data"}],
+            )
+            template = _write_submit_config_template(tmpdir)
+            run_dir = os.path.join(tmpdir, "skimRun_partial")
+            out_dir = os.path.join(run_dir, "outputs", "sample")
+            config_path = os.path.join(tmpdir, "job", "submit_config.txt")
+            Path(out_dir).mkdir(parents=True)
+            Path(os.path.dirname(config_path)).mkdir(parents=True)
+            Path(config_path).write_text("saveTree=Events\nenableSkim=true\n")
+            Path(os.path.join(out_dir, "skim.root")).write_bytes(b"partial")
+            branch_data = {
+                "dataset_name": "sample",
+                "job_dir": os.path.dirname(config_path),
+                "config_path": config_path,
+                "out_dir": out_dir,
+            }
+            task = analysis_tasks.SkimTask(
+                exe="/fake/exe",
+                submit_config=template,
+                dataset_manifest=manifest_path,
+                name="partial",
+                branch=0,
+            )
+            original_run_dir = analysis_tasks.SkimTask._run_dir.fget
+            analysis_tasks.SkimTask._run_dir = property(lambda self: run_dir)
+            try:
+                with patch.object(
+                    type(task), "branch_data", new_callable=PropertyMock,
+                    return_value=branch_data,
+                ):
+                    Path(task.output().path).parent.mkdir(parents=True, exist_ok=True)
+                    Path(task.output().path).write_text("status=done\n")
+                    self.assertFalse(task.complete())
+                    self.assertFalse(os.path.exists(task.output().path))
+            finally:
+                analysis_tasks.SkimTask._run_dir = property(original_run_dir)
 
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
@@ -761,7 +2009,6 @@ class TestPrepareSkimJobs(unittest.TestCase):
 
     def test_requires_get_rucio_file_list_automatically(self):
         import analysis_tasks
-        import rucio_tasks
 
         task = analysis_tasks.PrepareSkimJobs(
             exe="/fake/exe",
@@ -773,6 +2020,12 @@ class TestPrepareSkimJobs(unittest.TestCase):
             x509="/fake/x509",
         )
 
+        from optional_extensions import extension_source
+        if extension_source("cms") is None:
+            with self.assertRaisesRegex(ImportError, "disabled|unavailable"):
+                task.requires()
+            return
+        import rucio_tasks
         req = task.requires()
         self.assertIsInstance(req, rucio_tasks.GetRucioFileList)
         self.assertEqual(req.name, "skimDY2Jet")
@@ -850,25 +2103,60 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     }],
                 )
 
+                updated_exe = "#!/bin/sh\n# refreshed build\nexit 0\n"
+                Path(exe_path).write_text(updated_exe)
+                os.chmod(exe_path, 0o755)
+                task._create_test_job(
+                    exe_path,
+                    [{
+                        "dataset_name": "sample",
+                        "job_dir": first_job_dir,
+                        "out_dir": os.path.join(tmpdir, "out"),
+                    }],
+                )
+
                 test_dir = os.path.join(tmpdir, "skimRun_myRun", "test_job")
+                self.assertEqual(
+                    Path(test_dir, task._exe_relpath).read_text(), updated_exe
+                )
                 self.assertTrue(os.path.exists(os.path.join(test_dir, "dataset_manifest.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(test_dir, "floats.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(test_dir, "cfg", "dataset_manifest.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(test_dir, "cfg", "floats.yaml")))
 
-                cfg = {}
-                with open(os.path.join(test_dir, "submit_config.txt")) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            k, v = line.split("=", 1)
-                            cfg[k] = v
+                cfg = production_jobs.read_config(os.path.join(test_dir, "submit_config.yaml"))
 
                 self.assertEqual(cfg["sampleConfig"], "cfg/dataset_manifest.yaml")
                 self.assertEqual(cfg["floatConfig"], "cfg/floats.yaml")
                 self.assertEqual(cfg["fileList"], "root://server/file.root")
             finally:
                 analysis_tasks.PrepareSkimJobs._run_dir = property(orig_run_dir)
+
+    def test_complete_invalidates_stale_staged_executable(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(analysis_tasks, "WORKSPACE", tmpdir), \
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}):
+            executable = Path(tmpdir, "analysis")
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            template = _write_submit_config_template(tmpdir)
+            manifest = _write_manifest(tmpdir, [
+                {"name": "sample", "dtype": "data", "files": ["input.root"]},
+            ])
+            task = analysis_tasks.PrepareSkimJobs(
+                exe=str(executable), submit_config=template,
+                dataset_manifest=manifest, name="staleExe",
+            )
+            task._run_impl()
+            self.assertTrue(task.complete())
+            executable.write_text("#!/bin/sh\nexit 123\n")
+            self.assertFalse(task.complete())
+            task._run_impl()
+            self.assertTrue(task.complete())
+            Path(task._test_job_dir, task._exe_relpath).write_text("stale test executable")
+            self.assertFalse(task.complete())
 
     def test_create_test_job_copies_aux_directory(self):
         import analysis_tasks
@@ -979,20 +2267,14 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
             )
             try:
-                with patch("analysis_tasks._collect_skim_shared_libs", return_value={}):
+                with patch("rdfproduction.transport.collect_local_shared_libs", return_value={}):
                     task._run_impl()
 
                 job_dir = os.path.join(tmpdir, "skimRun_myRun", "jobs", "sample")
                 self.assertTrue(os.path.exists(os.path.join(job_dir, "cfg", "corrections.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(job_dir, "aux", "payload.json.gz")))
 
-                cfg = {}
-                with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            key, value = line.split("=", 1)
-                            cfg[key] = value
+                cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
                 self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
             finally:
                 analysis_tasks.PrepareSkimJobs._run_dir = property(orig_run_dir)
@@ -1050,8 +2332,8 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     "last_entry": 0,
                     "site_redirectors": {},
                 }]
-                with patch("analysis_tasks._collect_skim_shared_libs", return_value={}), patch(
-                    "analysis_tasks._plan_file_source_jobs", return_value=plan
+                with patch("rdfproduction.transport.collect_local_shared_libs", return_value={}), patch(
+                    "rdfproduction.jobs.job_config._plan_file_source_jobs", return_value=plan
                 ):
                     task._run_impl()
 
@@ -1059,13 +2341,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 self.assertTrue(os.path.exists(os.path.join(job_dir, "cfg", "corrections.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(job_dir, "aux", "payload.json.gz")))
 
-                cfg = {}
-                with open(os.path.join(job_dir, "submit_config.txt")) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            key, value = line.split("=", 1)
-                            cfg[key] = value
+                cfg = production_jobs.read_config(os.path.join(job_dir, "submit_config.yaml"))
                 self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
             finally:
                 analysis_tasks.PrepareSkimJobs._run_dir = property(orig_run_dir)
@@ -1111,7 +2387,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 lambda self: os.path.join(tmpdir, f"skimRun_{self.name}")
             )
             try:
-                with patch("analysis_tasks._collect_skim_shared_libs", return_value={}):
+                with patch("rdfproduction.transport.collect_local_shared_libs", return_value={}):
                     task._run_impl()
 
                 shared_dir = os.path.join(tmpdir, "skimRun_myRun", "shared_inputs")
@@ -1124,15 +2400,9 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     "skimRun_myRun",
                     "jobs",
                     "sample",
-                    "submit_config.txt",
+                    "submit_config.yaml",
                 )
-                cfg = {}
-                with open(job_cfg) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            k, v = line.split("=", 1)
-                            cfg[k] = v
+                cfg = production_jobs.read_config(job_cfg)
 
                 self.assertEqual(cfg["correctionConfig"], "cfg/corrections.yaml")
                 self.assertFalse(os.path.exists(os.path.join(shared_dir, "aux")))
@@ -1182,7 +2452,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
             )
             try:
                 self.assertTrue(os.path.exists(os.path.join(runtime_dir, "cfg", "corrections.yaml")))
-                self.assertTrue(os.path.exists(os.path.join(runtime_dir, "cfg", "submit_config.txt")))
+                self.assertTrue(os.path.exists(os.path.join(runtime_dir, "cfg", "submit_config.yaml")))
                 self.assertTrue(os.path.exists(os.path.join(runtime_dir, "aux", "shared.json.gz")))
                 self.assertEqual(runtime_exe, os.path.join(runtime_dir, "exe"))
 
@@ -1226,12 +2496,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     self.assertTrue(os.path.exists(os.path.join(runtime_dir, "input_0.root")))
                     self.assertTrue(os.path.exists(os.path.join(runtime_dir, "input_1.root")))
 
-                    cfg = {}
-                    with open(os.path.join(runtime_dir, "cfg", "submit_config.txt")) as fh:
-                        for line in fh:
-                            if "=" in line:
-                                key, value = line.strip().split("=", 1)
-                                cfg[key] = value
+                    cfg = analysis_tasks.read_config(os.path.join(runtime_dir, "cfg", "submit_config.yaml"))
                     self.assertEqual(cfg["fileList"], "input_0.root,input_1.root")
                 finally:
                     shutil.rmtree(runtime_dir, ignore_errors=True)
@@ -1267,12 +2532,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     exe_relpath="exe",
                 )
                 try:
-                    cfg = {}
-                    with open(os.path.join(runtime_dir, "cfg", "submit_config.txt")) as fh:
-                        for line in fh:
-                            if "=" in line:
-                                key, value = line.strip().split("=", 1)
-                                cfg[key] = value
+                    cfg = analysis_tasks.read_config(os.path.join(runtime_dir, "cfg", "submit_config.yaml"))
                     self.assertEqual(cfg["fileList"], "root://server/file0.root")
                 finally:
                     shutil.rmtree(runtime_dir, ignore_errors=True)
@@ -1314,12 +2574,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     source_config_path=os.path.join(job_dir, "submit_config.txt"),
                 )
                 try:
-                    cfg = {}
-                    with open(os.path.join(runtime_dir, "cfg", "submit_config.txt")) as fh:
-                        for line in fh:
-                            if "=" in line:
-                                key, value = line.strip().split("=", 1)
-                                cfg[key] = value
+                    cfg = analysis_tasks.read_config(os.path.join(runtime_dir, "cfg", "submit_config.yaml"))
                     self.assertEqual(cfg["sample"], "prepared_job")
                     self.assertEqual(cfg["counterIntWeightBranch"], "type")
                     self.assertNotEqual(cfg["sample"], "wrong_cwd_file")
@@ -1396,6 +2651,51 @@ class TestPrepareSkimJobs(unittest.TestCase):
             finally:
                 analysis_tasks.SkimTask._run_dir = property(orig_run_dir)
 
+    def test_monitor_reactivates_permanent_failures_without_resetting_done_jobs(self):
+        import analysis_tasks
+
+        task = analysis_tasks.MonitorSkimJobs(
+            submit_config="submit_config.txt",
+            exe="vjetStitch",
+            name="run",
+            dataset_manifest="datasets.yaml",
+        )
+        state = {
+            "datasets": {
+                "sample": {
+                    "jobs": {
+                        "0": {"status": "done", "retries": 0},
+                        "1": {"status": "perm_fail", "retries": 3},
+                        "2": {"status": "perm_fail", "retries": 50},
+                    }
+                }
+            }
+        }
+
+        self.assertEqual(task.max_retries, 50)
+        self.assertEqual(task._reactivate_retryable_failures(state), 1)
+        self.assertEqual(state["datasets"]["sample"]["jobs"]["0"]["status"], "done")
+        self.assertEqual(state["datasets"]["sample"]["jobs"]["1"]["status"], "submitted")
+        self.assertEqual(state["datasets"]["sample"]["jobs"]["2"]["status"], "perm_fail")
+
+    def test_stitching_apply_forwards_retry_limit_to_monitor(self):
+        import analysis_tasks
+
+        task = analysis_tasks.StitchingApplyTask(
+            exe="/fake/exe",
+            submit_config="submit_config.txt",
+            name="run",
+            dataset_manifest="datasets.yaml",
+            stitch_config="stitch_config.yaml",
+            workflow="htcondor",
+        )
+
+        delegate = MagicMock()
+        with patch.object(analysis_tasks.StitchingApplyMonitorJobs, "req", return_value=delegate) as req:
+            self.assertIs(task.htcondor_delegate_task(), delegate)
+
+        self.assertEqual(req.call_args.kwargs["max_retries"], 50)
+
     def test_htcondor_remote_helper_methods_are_disabled(self):
         import analysis_tasks
 
@@ -1442,8 +2742,11 @@ class TestPrepareSkimJobs(unittest.TestCase):
 
             exe_name = "myanalysis"
             Path(os.path.join(shared_dir, exe_name)).write_text("#!/bin/sh\nexit 0\n")
+            Path(os.path.join(tmpdir, exe_name)).write_text("#!/bin/sh\nexit 0\n")
             Path(os.path.join(shared_dir, "libexample.so")).write_text("fake-so")
             Path(os.path.join(shared_dir, "x509")).write_text("proxy")
+            weights_path = os.path.join(tmpdir, "derived_stitch_weights.json")
+            Path(weights_path).write_text("{\"corrections\": []}\n")
 
             cfg_src = os.path.join(tmpdir, "cfg")
             aux_src = os.path.join(tmpdir, "aux")
@@ -1464,6 +2767,11 @@ class TestPrepareSkimJobs(unittest.TestCase):
             job1 = os.path.join(jobs_dir, "job_1")
             Path(job0).mkdir()
             Path(job1).mkdir()
+            Path(os.path.join(job0, "cfg")).mkdir()
+            Path(os.path.join(job1, "cfg")).mkdir()
+            Path(job0, "weights.json").write_text("job-specific weights")
+            Path(os.path.join(job0, "cfg", "shared.yaml")).write_text("shared: true\n")
+            Path(os.path.join(job1, "cfg", "shared.yaml")).write_text("shared: true\n")
             Path(os.path.join(job0, "submit_config.txt")).write_text("saveFile=out0.root\nmetaFile=meta0.root\n")
             Path(os.path.join(job1, "submit_config.txt")).write_text("saveFile=out1.root\nmetaFile=meta1.root\n")
 
@@ -1480,19 +2788,23 @@ class TestPrepareSkimJobs(unittest.TestCase):
                 tmpdir,
                 [{"name": "sample", "files": ["root://server/file.root"], "dtype": "mc"}],
             )
-            submit_config = _write_submit_config_template(tmpdir, extra={"saveDirectory": "/tmp/out"})
+            submit_config = _write_submit_config_template(tmpdir, extra={"saveDirectory": "/eos/user/t/test/myRun"})
             task = analysis_tasks.BuildSkimSubmission(
                 exe=os.path.join(tmpdir, exe_name),
                 submit_config=submit_config,
                 dataset_manifest=manifest_path,
                 name="myRun",
                 file_source="rucio",
+                stitch_mode="correctionlib",
+                stitch_weights=weights_path,
             )
 
             orig_run_dir = analysis_tasks.BuildSkimSubmission._run_dir.fget
             analysis_tasks.BuildSkimSubmission._run_dir = property(lambda self: run_dir)
             try:
-                task._run_impl()
+                with patch("analysis_tasks.subprocess.run", return_value=
+                           analysis_tasks.subprocess.CompletedProcess([], 0, stdout="604800\n")):
+                    task._run_impl()
             finally:
                 analysis_tasks.BuildSkimSubmission._run_dir = property(orig_run_dir)
 
@@ -1510,14 +2822,30 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertTrue(os.path.isfile(runscript_path))
             self.assertTrue(os.path.isdir(os.path.join(submit_dir, "job_0")))
             self.assertTrue(os.path.isdir(os.path.join(submit_dir, "job_1")))
+            self.assertFalse(os.path.exists(os.path.join(submit_dir, "job_0", "cfg")))
+            self.assertFalse(os.path.exists(os.path.join(submit_dir, "job_1", "cfg")))
+            self.assertFalse(
+                os.path.exists(os.path.join(submit_dir, "job_0", "shared.yaml"))
+            )
+            self.assertEqual(Path(submit_dir, "job_0", "weights.json").read_text(), "job-specific weights")
+            with tarfile.open(os.path.join(run_dir, "shared_inputs.tar.gz"), "r:gz") as archive:
+                self.assertIn("stitch_weights.json", archive.getnames())
+            self.assertFalse(
+                os.path.exists(os.path.join(submit_dir, "job_0", "stitch_weights.json"))
+            )
+            self.assertEqual(analysis_tasks.read_config(Path(submit_dir, "job_0", "submit_config.yaml"))["stitchWeights"], "stitch_weights.json")
+            self.assertNotIn("job_$(Process)/stitch_weights.json", Path(submit_path).read_text())
 
-            job0_cfg = Path(os.path.join(submit_dir, "job_0", "submit_config.txt")).read_text()
-            self.assertIn("saveDirectory=/tmp/out/sample", job0_cfg)
-            self.assertIn("saveFile=/tmp/out/sample/output_0.root", job0_cfg)
-            self.assertIn("metaFile=/tmp/out/sample/meta_0.root", job0_cfg)
+            job0_cfg = analysis_tasks.read_config(Path(submit_dir, "job_0", "submit_config.yaml"))
+            self.assertEqual(job0_cfg["saveDirectory"], "/eos/user/t/test/myRun/sample")
+            self.assertEqual(job0_cfg["saveFile"], "/eos/user/t/test/myRun/sample/output_0.root")
+            self.assertEqual(job0_cfg["metaFile"], "/eos/user/t/test/myRun/sample/meta_0.root")
 
             submit_text = Path(submit_path).read_text()
-            self.assertIn("job_$(Process)/submit_config.txt", submit_text)
+            self.assertIn('+JobBatchName = "sample [myRun]"', submit_text)
+            self.assertIn('+RDFSample = "sample"', submit_text)
+            self.assertIn('+RDFRun = "myRun"', submit_text)
+            self.assertIn("job_$(Process)/submit_config.yaml", submit_text)
             self.assertIn(os.path.join(run_dir, "shared_inputs.tar.gz"), submit_text)
             self.assertNotIn("job_$(Process)/myanalysis", submit_text)
             self.assertNotIn(f"transfer_input_files = {os.path.join(submit_dir, 'shared_inputs')}\n", submit_text)
@@ -1530,8 +2858,8 @@ class TestPrepareSkimJobs(unittest.TestCase):
 
             runscript_text = Path(runscript_path).read_text()
             self.assertIn('tar -xzf "shared_inputs.tar.gz"', runscript_text)
-            self.assertIn('cp -f submit_config.txt cfg/submit_config.txt', runscript_text)
-            self.assertIn('./myanalysis cfg/submit_config.txt', runscript_text)
+            self.assertIn('cp -f submit_config.yaml cfg/submit_config.yaml', runscript_text)
+            self.assertIn('./myanalysis cfg/submit_config.yaml', runscript_text)
             self.assertIn('chmod +x "myanalysis"', runscript_text)
             self.assertIn('__orig_saveFile', runscript_text)
             self.assertIn('__orig_metaFile', runscript_text)
@@ -1562,6 +2890,65 @@ class TestPrepareSkimJobs(unittest.TestCase):
                     jobs_dir=os.path.join(tmpdir, "jobs"),
                     outputs_dir=os.path.join(tmpdir, "outputs"),
                 )
+
+    def test_file_source_planning_ignores_foreign_data_and_empty_foreign_payloads(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = _write_manifest(tmpdir, [{
+                "name": "DATA_current", "dtype": "data", "year": 2024,
+                "files": ["a.root", "b.root"],
+            }])
+            cache = Path(tmpdir, "cache")
+            cache.mkdir()
+            for name, payload in {
+                "DATA_current": {"files": ["a.root", "b.root"], "groups": ["a.root,b.root"]},
+                "DATA_other_era": {"files": ["foreign.root"], "groups": ["foreign.root"]},
+                "empty_other_era": {"files": []},
+            }.items():
+                (cache / f"{name}.json").write_text(json.dumps({"sample": name, **payload}))
+            plans = analysis_tasks._plan_file_source_jobs(
+                dataset_manifest_path=manifest, file_list_dir=str(cache),
+                partition="file_group", files_per_job=1, entries_per_job=0,
+                jobs_dir=str(Path(tmpdir, "jobs")), outputs_dir=str(Path(tmpdir, "outputs")))
+            self.assertEqual(len(plans), 2)
+            self.assertEqual(plans[0]["dataset_name"], "DATA_current")
+            self.assertEqual(plans[0]["dtype"], "data")
+            self.assertEqual([p["files"] for p in plans], ["a.root", "b.root"])
+            self.assertEqual(plans[0]["lumi"], 1.)
+            self.assertFalse(Path(tmpdir, "jobs").exists())
+
+    def test_file_source_planning_requires_every_manifest_dataset(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = _write_manifest(tmpdir, [
+                {"name": "present", "dtype": "mc", "files": ["a.root"]},
+                {"name": "missing", "dtype": "data", "files": ["b.root"]},
+            ])
+            cache = Path(tmpdir, "cache")
+            cache.mkdir()
+            (cache / "present.json").write_text(json.dumps({"sample": "present", "files": ["a.root"]}))
+            with self.assertRaisesRegex(RuntimeError, "missing payloads.*missing"):
+                analysis_tasks._plan_file_source_jobs(
+                    dataset_manifest_path=manifest, file_list_dir=str(cache),
+                    partition="file_group", files_per_job=20, entries_per_job=0,
+                    jobs_dir=str(Path(tmpdir, "jobs")), outputs_dir=str(Path(tmpdir, "outputs")))
+
+    def test_file_source_planning_rejects_duplicate_requested_payloads(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = _write_manifest(tmpdir, [{"name": "sample", "dtype": "mc", "files": ["a.root"]}])
+            cache = Path(tmpdir, "cache")
+            cache.mkdir()
+            for name in ("first", "second"):
+                (cache / f"{name}.json").write_text(json.dumps({"sample": "sample", "files": ["a.root"]}))
+            with self.assertRaisesRegex(RuntimeError, "Duplicate.*sample"):
+                analysis_tasks._plan_file_source_jobs(
+                    dataset_manifest_path=manifest, file_list_dir=str(cache),
+                    partition="file_group", files_per_job=20, entries_per_job=0,
+                    jobs_dir=str(Path(tmpdir, "jobs")), outputs_dir=str(Path(tmpdir, "outputs")))
 
     def test_monitor_skim_jobs_discovers_save_and_meta_outputs(self):
         import analysis_tasks
@@ -1610,16 +2997,19 @@ class TestPrepareSkimJobs(unittest.TestCase):
             job_dir = os.path.join(submit_dir, "job_7")
             shared_inputs = os.path.join(tmpdir, "shared_inputs.tar.gz")
             Path(job_dir).mkdir(parents=True)
-            Path(os.path.join(job_dir, "submit_config.txt")).write_text("saveFile=out.root\n")
+            Path(os.path.join(job_dir, "submit_config.yaml")).write_text("saveFile: out.root\n")
             Path(shared_inputs).write_text("archive")
 
             Path(os.path.join(submit_dir, "condor_submit.sub")).write_text(
                 "\n".join(
                     [
                         "universe = vanilla",
+                        '+JobBatchName = "sample [myRun]"',
+                        '+RDFSample = "sample"',
+                        '+RDFRun = "myRun"',
                         f"Executable = {submit_dir}/condor_runscript.sh",
                         "transfer_input_files = "
-                        f"{submit_dir}/job_$(Process)/submit_config.txt,"
+                        f"{submit_dir}/job_$(Process)/submit_config.yaml,"
                         f"{submit_dir}/job_$(Process)/site_redirectors.json,"
                         f"{shared_inputs},"
                         f"{submit_dir}/condor_runscript_inner.sh",
@@ -1627,7 +3017,7 @@ class TestPrepareSkimJobs(unittest.TestCase):
                         'MY.SingularityImage = "/cvmfs/unpacked.cern.ch/example/image:latest"',
                         'MY.WantOS = "el9"',
                         "+RequestMemory=2000",
-                        "+MaxRuntime=3600",
+                        "+MaxRuntime=7200",
                         f"Output = {submit_dir}/condor_logs/log_$(Cluster)_$(Process).stdout",
                         f"Error = {submit_dir}/condor_logs/log_$(Cluster)_$(Process).stderr",
                         f"Log = {submit_dir}/condor_logs/log_$(Cluster).log",
@@ -1659,7 +3049,10 @@ class TestPrepareSkimJobs(unittest.TestCase):
             ).read_text()
             self.assertIn('MY.SingularityImage = "/cvmfs/unpacked.cern.ch/example/image:latest"', resub_text)
             self.assertIn('MY.WantOS = "el9"', resub_text)
-            self.assertIn(f"{submit_dir}/job_7/submit_config.txt", resub_text)
+            self.assertIn('+JobBatchName = "sample [myRun]"', resub_text)
+            self.assertIn('+RDFSample = "sample"', resub_text)
+            self.assertIn('+RDFRun = "myRun"', resub_text)
+            self.assertIn(f"{submit_dir}/job_7/submit_config.yaml", resub_text)
             self.assertIn(f"{submit_dir}/job_7/site_redirectors.json", resub_text)
             self.assertIn('environment = "CONDOR_PROC=7 CONDOR_CLUSTER=$(Cluster)"', resub_text)
             self.assertIn("+RequestMemory=3000", resub_text)
@@ -1668,13 +3061,130 @@ class TestPrepareSkimJobs(unittest.TestCase):
             self.assertIn(f"Log = {submit_dir}/condor_logs/resub_7.log", resub_text)
             self.assertRegex(resub_text, r"(?m)^queue 1$")
 
+    def test_monitor_keeps_failed_retry_submission_retryable(self):
+        import analysis_tasks
+
+        task = analysis_tasks.MonitorSkimJobs(
+            submit_config="submit_config.txt",
+            exe="vjetStitch",
+            name="run",
+            dataset_manifest="datasets.yaml",
+        )
+        dataset_state = {"submission_dir": "/tmp/submission", "jobs": {}}
+        job_state = {"status": "submitted", "retries": 0, "cluster": "123", "proc": 7}
+
+        with patch("rdfproduction.jobs.condor_files._submit_single_skim_job", return_value=None), \
+                patch("rdfproduction.jobs.staging._validate_staged_skim_executable"), \
+                patch.object(task, "publish_message"):
+            task._try_resubmit(
+                "sample",
+                7,
+                dataset_state,
+                job_state,
+                reason="exit code 1",
+            )
+
+        self.assertEqual(job_state["status"], "submitted")
+        self.assertEqual(job_state["retries"], 0)
+
+    def test_condor_job_exceeded_runtime_uses_strict_150_percent_threshold(self):
+        import analysis_tasks
+
+        self.assertFalse(
+            analysis_tasks._condor_job_exceeded_runtime(
+                {"MaxRuntime": 100, "RemoteWallClockTime": 150}
+            )
+        )
+        self.assertTrue(
+            analysis_tasks._condor_job_exceeded_runtime(
+                {"MaxRuntime": 100, "RemoteWallClockTime": 151}
+            )
+        )
+        self.assertTrue(
+            analysis_tasks._condor_job_exceeded_runtime(
+                {"RemoteWallClockTime": 151},
+                fallback_max_runtime=100,
+            )
+        )
+
+    def test_monitor_splits_multi_file_retry_into_two_jobs(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            submission_dir = os.path.join(tmpdir, "submission")
+            source_job_dir = os.path.join(submission_dir, "job_7")
+            Path(source_job_dir).mkdir(parents=True)
+            save_path = os.path.join(tmpdir, "output.root")
+            meta_path = os.path.join(tmpdir, "meta.root")
+            Path(os.path.join(source_job_dir, "submit_config.txt")).write_text(
+                "fileList=root://server/a.root,root://server/b.root,root://server/c.root\n"
+                f"saveFile={save_path}\n"
+                f"metaFile={meta_path}\n"
+            )
+
+            task = analysis_tasks.MonitorSkimJobs(
+                submit_config="submit_config.txt",
+                exe="vjetStitch",
+                name="run",
+                dataset_manifest="datasets.yaml",
+            )
+            dataset_state = {
+                "submission_dir": submission_dir,
+                "shared_transfer_files": [],
+                "jobs": {"7": {}},
+            }
+            job_state = {"status": "submitted", "retries": 0, "cluster": "123", "proc": 7}
+            job_state["completion_evidence"] = {"cluster": "123", "exit_code": 2}
+            job_info = {
+                7: {
+                    "dir": source_job_dir,
+                    "save": save_path,
+                    "meta": meta_path,
+                }
+            }
+            submissions = []
+
+            def fake_submit(*args, **kwargs):
+                submissions.append(kwargs)
+                return str(100 + len(submissions))
+
+            with patch("rdfproduction.jobs.condor_files._submit_single_skim_job", side_effect=fake_submit), \
+                    patch("rdfproduction.jobs.staging._validate_staged_skim_executable"), \
+                    patch.object(task, "publish_message"):
+                task._try_resubmit(
+                    "sample",
+                    7,
+                    dataset_state,
+                    job_state,
+                    reason="runtime exceeded",
+                    job_info=job_info,
+                )
+
+            self.assertEqual(len(submissions), 2)
+            self.assertEqual(
+                [
+                    analysis_tasks._skim_job_file_list(item["source_job_dir"])
+                    for item in submissions
+                ],
+                [
+                    ["root://server/a.root", "root://server/b.root"],
+                    ["root://server/c.root"],
+                ],
+            )
+            self.assertNotIn("completion_evidence", job_state)
+            self.assertEqual(job_state["cluster"], "101")
+            self.assertEqual(job_info[8]["save"], f"{tmpdir}/output_part1.root")
+            self.assertEqual(job_info[8]["meta"], f"{tmpdir}/meta_part1.root")
+            self.assertEqual(dataset_state["jobs"]["8"]["cluster"], "102")
+            self.assertEqual(job_state["retries"], 1)
+
     def test_output_files_exist_batch_uses_xrootd_for_eos_like_paths(self):
         import analysis_tasks
 
         eos_path = "/store/user/test/sample/output_0.root"
         local_path = "/tmp/nonexistent-local-output.root"
 
-        with patch("analysis_tasks._eos_files_exist_batch_util", return_value={eos_path: True}) as eos_batch:
+        with patch("rdfproduction.transport.eos_files_exist_batch", return_value={eos_path: True}) as eos_batch:
             result = analysis_tasks._output_files_exist_batch([eos_path, local_path])
 
         eos_batch.assert_called_once_with([eos_path])
@@ -1685,6 +3195,126 @@ class TestPrepareSkimJobs(unittest.TestCase):
 # ===========================================================================
 # HistFillTask
 # ===========================================================================
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestCondorRuntimeMonitor(unittest.TestCase):
+    def test_current_attempt_runtime_and_fallbacks(self):
+        import analysis_tasks
+
+        cases = [
+            # A stale or absent wall-clock counter must not hide an overrun.
+            ({"JobCurrentStartDate": 1000, "ServerTime": 1151,
+              "RemoteWallClockTime": 0}, True),
+            ({"JobCurrentStartDate": 1000, "ServerTime": 1150}, False),
+            # Previous attempts and time queued must not penalize a fresh run.
+            ({"JobCurrentStartDate": 1140, "ServerTime": 1151,
+              "JobStartDate": 1, "QDate": 1, "RemoteWallClockTime": 10000}, False),
+            ({"EnteredCurrentStatus": 1000, "ServerTime": 1151}, True),
+            ({"JobCurrentStartDate": 1000}, True),  # local clock fallback
+            ({"JobCurrentStartDate": 1200, "ServerTime": 1151}, False),
+            ({"RemoteWallClockTime": 151}, True),
+            ({}, False),
+            ({"RemoteWallClockTime": "undefined"}, False),
+            ({"RemoteWallClockTime": float("inf")}, False),
+        ]
+        with patch.object(analysis_tasks.time, "time", return_value=1151):
+            for fields, expected in cases:
+                with self.subTest(fields=fields):
+                    self.assertEqual(
+                        analysis_tasks._condor_job_exceeded_runtime(
+                            {"MaxRuntime": 100, **fields}
+                        ),
+                        expected,
+                    )
+            for limit in (None, 0, -1):
+                with self.subTest(fallback_limit=limit):
+                    self.assertTrue(analysis_tasks._condor_job_exceeded_runtime(
+                        {"MaxRuntime": limit, "JobCurrentStartDate": 1000},
+                        fallback_max_runtime=100,
+                    ))
+            for limit in ("undefined", float("nan"), float("inf")):
+                with self.subTest(invalid_limit=limit):
+                    self.assertFalse(analysis_tasks._condor_job_exceeded_runtime(
+                        {"MaxRuntime": limit, "JobCurrentStartDate": 1000},
+                    ))
+
+    def test_monitor_removes_overlong_job_before_retrying(self):
+        import analysis_tasks
+        import law as law_mod
+
+        cases = [
+            (2, 151, True, True),
+            (2, 150, True, False),
+            (2, 151, False, False),
+            (1, 151, True, False),  # idle jobs are never evicted for runtime
+        ]
+        for status, elapsed, removal_succeeds, expect_retry in cases:
+            with self.subTest(status=status, elapsed=elapsed, removed=removal_succeeds), \
+                    tempfile.TemporaryDirectory() as tmpdir:
+                run_dir = Path(tmpdir, "skimRun_runtime")
+                submission_dir = run_dir / "condor_submissions/sample"
+                job_dir = submission_dir / "job_0"
+                job_dir.mkdir(parents=True)
+                meta = str(run_dir / "meta.root")
+                (job_dir / "submit_config.txt").write_text(
+                    f"enableSkim=false\nfileList=input.root\nmetaFile={meta}\n"
+                )
+                manifest = _write_manifest(tmpdir, [{
+                    "name": "sample", "files": ["input.root"], "dtype": "data",
+                }])
+                submitted = Path(tmpdir, "submitted.json")
+                submitted.write_text(json.dumps({"datasets": [{
+                    "dataset_name": "sample", "submission_dir": str(submission_dir),
+                    "cluster_id": "123", "shared_transfer_files": [],
+                }]}))
+                events = []
+
+                def remove(cluster, proc):
+                    events.append(("remove", cluster, proc))
+                    return removal_succeeds
+
+                def submit(*args, **kwargs):
+                    events.append(("submit",))
+                    return "456"
+
+                with patch.object(
+                    analysis_tasks.MonitorSkimJobs, "_run_dir",
+                    new_callable=lambda: property(lambda self: str(run_dir)),
+                ):
+                    task = analysis_tasks.MonitorSkimJobs(
+                        exe="/fake/exe", submit_config="submit_config.txt",
+                        dataset_manifest=manifest, name="runtime",
+                        output_validation="exists", max_retries=1, poll_interval=0,
+                    )
+                    # Default task max-runtime is 7200; the job's ad must win.
+                    live_ad = {"JobStatus": status, "MaxRuntime": 100,
+                               "JobCurrentStartDate": 1000,
+                               "ServerTime": 1000 + elapsed,
+                               "RemoteWallClockTime": 0}
+                    with patch.object(task, "input", return_value=law_mod.LocalFileTarget(str(submitted))), \
+                            patch.object(task, "publish_message") as messages, \
+                            patch("rdfproduction.transport.condor_q_ads", side_effect=[{0: live_ad}, {}]), \
+                            patch("rdfproduction.transport.condor_history_exit", side_effect=[{}, {0: 0}]), \
+                            patch("rdfproduction.transport.condor_rm_job", side_effect=remove) as rm, \
+                            patch("rdfproduction.jobs.condor_files._submit_single_skim_job", side_effect=submit) as retry, \
+                            patch("rdfproduction.jobs.staging._validate_staged_skim_executable"), \
+                            patch("rdfproduction.jobs.output_validation._output_files_exist_batch", return_value={meta: True}), \
+                            patch.object(analysis_tasks.time, "sleep"):
+                        task.run()
+
+                    job = task._load_state()["datasets"]["sample"]["jobs"]["0"]
+                    self.assertEqual(job["status"], "done")
+                    self.assertEqual(job["retries"], int(expect_retry))
+                    self.assertEqual(job["cluster"], "456" if expect_retry else "123")
+                    self.assertEqual(rm.call_count, int(status == 2 and elapsed > 150))
+                    self.assertEqual(retry.call_count, int(expect_retry))
+                    if expect_retry:
+                        self.assertEqual(events, [("remove", "123", 0), ("submit",)])
+                        self.assertTrue(any(
+                            "151.0s > 1.5 * 100.0s" in str(call)
+                            for call in messages.call_args_list
+                        ))
+
 
 @unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
 class TestHistFillTask(unittest.TestCase):
@@ -1806,19 +3436,15 @@ class TestHistFillTask(unittest.TestCase):
                         task.run()
 
                 self.assertTrue(run_job.called)
-                self.assertTrue(run_job.call_args.kwargs.get("stream_output"))
+                self.assertEqual(run_job.call_args.kwargs.get("stream_output"),
+                                 analysis_tasks._stream_analysis_output())
 
-                # Verify that the job submit_config.txt uses skim.root
+                # Verify that the job submit_config.yaml uses skim.root
                 job_cfg = {}
                 cfg_path = os.path.join(
-                    tmpdir, "histRun_myHistRun", "jobs", "wjets", "submit_config.txt"
+                    tmpdir, "histRun_myHistRun", "jobs", "wjets", "submit_config.yaml"
                 )
-                with open(cfg_path) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if "=" in line:
-                            k, v = line.split("=", 1)
-                            job_cfg[k] = v
+                job_cfg = production_jobs.read_config(cfg_path)
                 self.assertEqual(job_cfg["fileList"], skim_file)
             finally:
                 analysis_tasks.HistFillTask._run_dir = property(orig_run)
@@ -1841,7 +3467,7 @@ class TestHistFillTask(unittest.TestCase):
 
             histogram_cfg = os.path.join(tmpdir, "histograms.txt")
             Path(histogram_cfg).write_text(
-                "name=vhbb_dnn variable=score weight=weight bins=20 lowerBound=0 upperBound=1 "
+                "name=analysis_score variable=score weight=weight bins=20 lowerBound=0 upperBound=1 "
                 "channelVariable=channel channelBins=2 channelLowerBound=0 channelUpperBound=2 "
                 "channelRegions=Zll,Wln controlRegionVariable=region controlRegionBins=2 "
                 "controlRegionLowerBound=0 controlRegionUpperBound=2 "
@@ -1895,7 +3521,7 @@ class TestHistFillTask(unittest.TestCase):
             try:
                 with patch.object(type(task), "branch_data", new_callable=PropertyMock,
                                   return_value=entry):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         task.run()
 
@@ -1957,6 +3583,27 @@ class TestReadIntweightSignHist(unittest.TestCase):
             result = mod._read_intweight_sign_hist("/fake/meta.root", "sampleA")
 
         self.assertEqual(result, fake_values)
+
+    def test_weight_sign_sum_uproot_success(self):
+        """Returns the all-event signed total from the scalar counter."""
+        mod = self._import()
+
+        mock_hist = MagicMock()
+        mock_hist.values.return_value = __import__("numpy").array([7.0])
+
+        mock_file = MagicMock()
+        mock_file.keys.return_value = ["counter_weightSignSum_sampleA;1"]
+        mock_file.__getitem__ = MagicMock(return_value=mock_hist)
+        mock_file.__enter__ = MagicMock(return_value=mock_file)
+        mock_file.__exit__ = MagicMock(return_value=False)
+
+        mock_uproot = MagicMock()
+        mock_uproot.open.return_value = mock_file
+
+        with patch.dict(sys.modules, {"uproot": mock_uproot}):
+            result = mod._read_weight_sign_sum("/fake/meta.root", "sampleA")
+
+        self.assertEqual(result, 7.0)
 
     def test_histogram_not_found_raises(self):
         """RuntimeError is raised when the expected histogram is absent."""
@@ -2038,13 +3685,71 @@ class TestDeriveStitchWeights(unittest.TestCase):
             for p in meta_files.values():
                 Path(p).write_text("")
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 result = mod._derive_stitch_weights("grp", meta_files)
 
         import numpy as np
         np.testing.assert_allclose(result["s0"], [0.3, 0.1, 0.6], atol=1e-10)
         np.testing.assert_allclose(result["s1"], [0.7, 0.9, 0.4], atol=1e-10)
+
+    def test_formula_aggregates_partitioned_meta_files(self):
+        """Signed counters are summed when one sample has multiple jobs."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = {
+                "s0_job0": os.path.join(tmpdir, "s0_job0.root"),
+                "s0_job1": os.path.join(tmpdir, "s0_job1.root"),
+                "s1_job0": os.path.join(tmpdir, "s1_job0.root"),
+            }
+            for path in files.values():
+                Path(path).write_text("")
+
+            values = {
+                files["s0_job0"]: [10.0, 20.0],
+                files["s0_job1"]: [20.0, 30.0],
+                files["s1_job0"]: [70.0, 50.0],
+            }
+            with patch.object(
+                stitching_derivation,
+                "_read_intweight_sign_hist",
+                side_effect=lambda path, sample: values[path],
+            ):
+                result = mod._derive_stitch_weights(
+                    "grp",
+                    {
+                        "s0": [files["s0_job0"], files["s0_job1"]],
+                        "s1": files["s1_job0"],
+                    },
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result["s0"], [0.3, 0.5], atol=1e-10)
+        np.testing.assert_allclose(result["s1"], [0.7, 0.5], atol=1e-10)
+
+    def test_formula_accepts_remote_meta_files(self):
+        """Remote metadata paths are passed to the histogram reader."""
+        mod = self._import()
+        sample_values = {
+            "s0": [30.0, 10.0],
+            "s1": [70.0, 90.0],
+        }
+        meta_files = {
+            name: f"root://eosuser.cern.ch//eos/test/{name}.root"
+            for name in sample_values
+        }
+
+        with patch.object(
+            stitching_derivation,
+            "_read_intweight_sign_hist",
+            side_effect=self._mock_read(sample_values),
+        ):
+            result = mod._derive_stitch_weights("grp", meta_files)
+
+        import numpy as np
+        np.testing.assert_allclose(result["s0"], [0.3, 0.1], atol=1e-10)
+        np.testing.assert_allclose(result["s1"], [0.7, 0.9], atol=1e-10)
 
     def test_formula_sum_to_one(self):
         """Scale factors in each bin sum to 1 (or 0 when total = 0)."""
@@ -2063,7 +3768,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 Path(p).write_text("")
                 meta_files[name] = p
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 result = mod._derive_stitch_weights("grp", meta_files)
 
@@ -2074,6 +3779,317 @@ class TestDeriveStitchWeights(unittest.TestCase):
         self.assertAlmostEqual(col_sums[0], 1.0, places=10)
         self.assertAlmostEqual(col_sums[1], 0.0, places=10)
         self.assertAlmostEqual(col_sums[2], 1.0, places=10)
+
+    def test_negative_signed_bins_are_zeroed(self):
+        """Negative net signed bins contribute zero to fractions."""
+        mod = self._import()
+
+        sample_values = {
+            "s0": [-10.0, 30.0],
+            "s1": [20.0, -5.0],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_files = {}
+            for name in sample_values:
+                path = os.path.join(tmpdir, f"{name}.root")
+                Path(path).write_text("")
+                meta_files[name] = path
+
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
+                              side_effect=self._mock_read(sample_values)):
+                result = mod._derive_stitch_weights("grp", meta_files)
+
+        import numpy as np
+        np.testing.assert_allclose(result["s0"], [0.0, 1.0])
+        np.testing.assert_allclose(result["s1"], [1.0, 0.0])
+
+    def test_cross_sections_use_inclusive_signed_bin_fractions(self):
+        """Inclusive cross sections are split by the inclusive counter."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_file = os.path.join(tmpdir, "inclusive.root")
+            Path(meta_file).write_text("")
+            with patch.object(
+                stitching_derivation,
+                "_read_intweight_sign_hist",
+                return_value=[1.0, 3.0, 6.0],
+            ):
+                result = mod._derive_stitch_cross_sections(
+                    "wjets",
+                    {"inclusive": meta_file},
+                    "inclusive",
+                    1000.0,
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [100.0, 300.0, 600.0])
+
+    def test_resolver_combines_flavor_inclusive_samples(self):
+        """Run 3 2024 DY uses its three flavor-inclusive samples together."""
+        mod = self._import()
+
+        result = mod._resolve_stitch_inclusive_sample(
+            "DYto2L",
+            {
+                "inclusive_samples": {
+                    "run3_24": [
+                        "DYto2E-2Jets_FxFx",
+                        "DYto2Mu-2Jets_FxFx",
+                        "DYto2Tau-2Jets_FxFx",
+                    ]
+                }
+            },
+            [
+                "DYto2E-2Jets_FxFx",
+                "DYto2Mu-2Jets_FxFx",
+                "DYto2Tau-2Jets_FxFx",
+            ],
+            "run3_24",
+        )
+
+        w_result = mod._resolve_stitch_inclusive_sample(
+            "WtoLNu",
+            {
+                "inclusive_samples": {
+                    "run3_24": [
+                        "WtoENu-2Jets_FxFx",
+                        "WtoMuNu-2Jets_FxFx",
+                        "WtoTauNu-2Jets_FxFx",
+                    ]
+                }
+            },
+            [
+                "WtoENu-2Jets_FxFx",
+                "WtoMuNu-2Jets_FxFx",
+                "WtoTauNu-2Jets_FxFx",
+            ],
+            "run3_24",
+        )
+
+        self.assertEqual(
+            result,
+            [
+                "DYto2E-2Jets_FxFx",
+                "DYto2Mu-2Jets_FxFx",
+                "DYto2Tau-2Jets_FxFx",
+            ],
+        )
+        self.assertEqual(
+            w_result,
+            [
+                "WtoENu-2Jets_FxFx",
+                "WtoMuNu-2Jets_FxFx",
+                "WtoTauNu-2Jets_FxFx",
+            ],
+        )
+
+    def test_resolver_combines_nested_orthogonal_inclusive_samples(self):
+        """Inclusive anchors can be split across more than one axis."""
+        mod = self._import()
+        samples = [
+            "inclusive_e_0j",
+            "inclusive_e_1j",
+            "inclusive_mu_0j",
+            "inclusive_mu_1j",
+        ]
+
+        result = mod._resolve_stitch_inclusive_sample(
+            "generic_group",
+            {
+                "inclusive_samples": {
+                    "run3_24": [
+                        ["inclusive_e_0j", "inclusive_e_1j"],
+                        ["inclusive_mu_0j", "inclusive_mu_1j"],
+                    ]
+                }
+            },
+            samples,
+            "run3_24",
+        )
+
+        self.assertEqual(result, samples)
+
+    def test_cross_sections_combine_flavor_inclusive_counters(self):
+        """Cross sections aggregate the three flavor-inclusive counters."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_files = {}
+            values = {}
+            for index, sample_name in enumerate(
+                (
+                    "DYto2E-2Jets_FxFx",
+                    "DYto2Mu-2Jets_FxFx",
+                    "DYto2Tau-2Jets_FxFx",
+                )
+            ):
+                meta_file = os.path.join(tmpdir, f"{index}.root")
+                Path(meta_file).write_text("")
+                meta_files[sample_name] = meta_file
+                values[sample_name] = [float(index == 0), float(index != 0)]
+
+            with patch.object(
+                stitching_derivation,
+                "_read_intweight_sign_hist",
+                side_effect=lambda path, sample: values[sample],
+            ):
+                result = mod._derive_stitch_cross_sections(
+                    "DYto2L",
+                    meta_files,
+                    [
+                        ["DYto2E-2Jets_FxFx"],
+                        ["DYto2Mu-2Jets_FxFx", "DYto2Tau-2Jets_FxFx"],
+                    ],
+                    300.0,
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [100.0, 200.0])
+
+    def test_cross_sections_zero_negative_inclusive_bins(self):
+        """Negative net inclusive bins receive zero physical cross section."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_file = os.path.join(tmpdir, "inclusive.root")
+            Path(meta_file).write_text("")
+            with patch.object(
+                stitching_derivation,
+                "_read_intweight_sign_hist",
+                return_value=[-1.0, 3.0, 6.0],
+            ):
+                result = mod._derive_stitch_cross_sections(
+                    "wjets",
+                    {"inclusive": meta_file},
+                    "inclusive",
+                    1000.0,
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [0.0, 333.3333333333333, 666.6666666666666])
+
+    def test_cross_sections_aggregate_partitioned_inclusive_meta_files(self):
+        """Inclusive counters are summed across all source jobs."""
+        mod = self._import()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = os.path.join(tmpdir, "inclusive_job0.root")
+            second = os.path.join(tmpdir, "inclusive_job1.root")
+            Path(first).write_text("")
+            Path(second).write_text("")
+            values = {
+                first: [1.0, 2.0],
+                second: [3.0, 4.0],
+            }
+            with patch.object(
+                stitching_derivation,
+                "_read_intweight_sign_hist",
+                side_effect=lambda path, sample: values[path],
+            ):
+                result = mod._derive_stitch_cross_sections(
+                    "dy",
+                    {"inclusive": [first, second]},
+                    "inclusive",
+                    1000.0,
+                )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [400.0, 600.0])
+
+    def test_cross_sections_accept_remote_meta_files(self):
+        """Remote inclusive metadata paths are passed to the histogram reader."""
+        mod = self._import()
+        meta_file = "root://eosuser.cern.ch//eos/test/inclusive.root"
+        with patch.object(
+            stitching_derivation,
+            "_read_intweight_sign_hist",
+            return_value=[1.0, 3.0],
+        ):
+            result = mod._derive_stitch_cross_sections(
+                "wjets",
+                {"inclusive": meta_file},
+                "inclusive",
+                1000.0,
+            )
+
+        import numpy as np
+        np.testing.assert_allclose(result, [250.0, 750.0])
+
+    def test_cross_sections_require_explicit_group_configuration(self):
+        """Core does not provide process-specific cross-section defaults."""
+        mod = self._import()
+
+        self.assertEqual(
+            mod._resolve_stitch_inclusive_cross_section(
+                "DYto2L", {}, {}, "run2"
+            ),
+            None,
+        )
+        self.assertEqual(
+            mod._resolve_stitch_inclusive_cross_section(
+                "WtoLNu", {}, {}, "run2"
+            ),
+            None,
+        )
+        self.assertEqual(
+            mod._resolve_stitch_inclusive_cross_section(
+                "generic_group",
+                {},
+                {"inclusive_cross_sections": {
+                    "generic_group": {"run3_22_23": 123.0}
+                }},
+                "run3_22_23",
+            ),
+            123.0,
+        )
+
+    def test_cross_section_era_aliases_are_normalized(self):
+        """Human-readable era aliases map to independent derivation eras."""
+        mod = self._import()
+
+        self.assertEqual(
+            mod._resolve_stitch_cross_section_era(
+                {"cross_section_era": "22/23"}, []
+            ),
+            "run3_22_23",
+        )
+        self.assertEqual(
+            mod._resolve_stitch_cross_section_era(
+                {"cross_section_era": "24"}, []
+            ),
+            "run3_24",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = os.path.join(tmpdir, "samples.yaml")
+            Path(manifest_path).write_text(
+                "datasets:\n  - name: sample24\n    year: 24\n"
+            )
+            self.assertEqual(
+                mod._resolve_stitch_cross_section_era(
+                    {},
+                    ["sample24"],
+                    source_dataset_manifest=manifest_path,
+                ),
+                "run3_24",
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = os.path.join(tmpdir, "mixed_samples.yaml")
+            Path(manifest_path).write_text(
+                "datasets:\n"
+                "  - name: sample18\n"
+                "    year: 18\n"
+                "  - name: sample22\n"
+                "    year: 22\n"
+            )
+            with self.assertRaises(RuntimeError):
+                mod._resolve_stitch_cross_section_era(
+                    {},
+                    ["sample18", "sample22"],
+                    source_dataset_manifest=manifest_path,
+                )
 
     def test_division_by_zero_guard(self):
         """Bins where all C_m(k) = 0 receive scale factor 0.0."""
@@ -2088,7 +4104,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 Path(p).write_text("")
                 meta_files[name] = p
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 result = mod._derive_stitch_weights("grp", meta_files)
 
@@ -2108,7 +4124,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 Path(p).write_text("")
                 meta_files[name] = p
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 with self.assertRaises(RuntimeError) as ctx:
                     mod._derive_stitch_weights("grp", meta_files)
@@ -2139,7 +4155,7 @@ class TestDeriveStitchWeights(unittest.TestCase):
                 Path(p).write_text("")
                 meta_files[name] = p
 
-            with patch.object(mod, "_read_intweight_sign_hist",
+            with patch.object(stitching_derivation, "_read_intweight_sign_hist",
                               side_effect=self._mock_read(sample_values)):
                 result = mod._derive_stitch_weights("grp", meta_files)
 
@@ -2265,6 +4281,189 @@ class TestStitchingDerivationTask(unittest.TestCase):
         expected = os.path.join(analysis_tasks.WORKSPACE, "stitchWeights_run1")
         self.assertEqual(task._output_dir, expected)
 
+    def test_explicit_anchor_fractions_preserve_flavor_cross_sections(self):
+        import json
+        import yaml
+
+        counts = {
+            "electron": [400.0, 100.0, 0.0, 0.0],
+            "muon": [0.0, 0.0, 300.0, 0.0],
+            "tau": [0.0, 0.0, 0.0, 200.0],
+        }
+        fractions = {sample: 1 / 3 for sample in counts}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            files = {sample: str(root / f"{sample}.root") for sample in counts}
+            for path in files.values():
+                Path(path).touch()
+            group = {
+                "cross_section_era": "run3_24",
+                "inclusive_sample": list(counts),
+                "inclusive_cross_section_pb": 300.0,
+                "meta_files": files,
+            }
+            config = root / "stitch.yaml"
+            task = stitching_derivation.StitchingDerivation("fractions", str(config))
+            with patch.object(
+                stitching_derivation, "_read_intweight_sign_hist",
+                side_effect=lambda path, sample: counts[sample],
+            ):
+                config.write_text(yaml.safe_dump({"groups": {"DY": group}}))
+                task.derive(output_dir=root / "pooled")
+                group["inclusive_sample_fractions"] = {"run3_24": fractions}
+                config.write_text(yaml.safe_dump({"groups": {"DY": group}}))
+                task.derive(output_dir=root / "assigned")
+
+            pooled = json.loads((root / "pooled/stitch_cross_sections.json").read_text())
+            assigned = json.loads((root / "assigned/stitch_cross_sections.json").read_text())
+            self.assertEqual(pooled["groups"]["DY"]["binned_cross_sections_pb"], [120, 30, 90, 60])
+            self.assertEqual(assigned["groups"]["DY"]["binned_cross_sections_pb"], [80, 20, 100, 100])
+            self.assertEqual(assigned["groups"]["DY"]["inclusive_sample_fractions"], fractions)
+            self.assertEqual(
+                (root / "pooled/stitch_weights.json").read_bytes(),
+                (root / "assigned/stitch_weights.json").read_bytes(),
+            )
+
+    def test_declarative_group_discovers_all_source_meta_files(self):
+        import analysis_tasks
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = os.path.join(tmpdir, "skimRun_counts", "outputs")
+            Path(os.path.join(source_dir, "sample_a", "job_0")).mkdir(parents=True)
+            Path(os.path.join(source_dir, "sample_a", "job_1")).mkdir(parents=True)
+            Path(os.path.join(source_dir, "sample_b")).mkdir(parents=True)
+            for path in (
+                os.path.join(source_dir, "sample_a", "job_0", "meta.root"),
+                os.path.join(source_dir, "sample_a", "job_1", "meta.root"),
+                os.path.join(source_dir, "sample_b", "meta.root"),
+            ):
+                Path(path).write_text("")
+
+            manifest_path = os.path.join(tmpdir, "datasets.yaml")
+            with open(manifest_path, "w") as fh:
+                yaml.safe_dump(
+                    {
+                        "datasets": [
+                            {"name": "sample_a", "group": "group_a"},
+                            {"name": "sample_b", "group": "group_a"},
+                        ]
+                    },
+                    fh,
+                )
+
+            stitch_config_path = os.path.join(tmpdir, "stitch.yaml")
+            with open(stitch_config_path, "w") as fh:
+                yaml.safe_dump({"groups": {"group_a": {"select": {"group": "group_a"}}}}, fh)
+
+            original_workspace = stitching_derivation.WORKSPACE
+            stitching_derivation.WORKSPACE = tmpdir
+            try:
+                result = analysis_tasks._resolve_stitch_meta_files(
+                    "group_a",
+                    {"select": {"group": "group_a"}},
+                    stitch_config_path,
+                    source_skim_name="counts",
+                    source_dataset_manifest=manifest_path,
+                )
+            finally:
+                stitching_derivation.WORKSPACE = original_workspace
+
+            self.assertEqual(set(result), {"sample_a", "sample_b"})
+            self.assertEqual(len(result["sample_a"]), 2)
+            self.assertTrue(str(result["sample_b"]).endswith("meta.root"))
+
+    def test_apply_task_requires_derivation_and_stages_weights(self):
+        import analysis_tasks
+
+        task = analysis_tasks.StitchingApplyTask(
+            stitch_config="stitch.yaml",
+            submit_config="submit_config.txt",
+            exe="vjetStitch",
+            dataset_manifest="datasets.yaml",
+            name="applyRun",
+        )
+
+        requirements = task.requires()
+        if isinstance(requirements, list):
+            derivation_requirements = requirements
+        else:
+            derivation_requirements = list(requirements.values())
+        self.assertTrue(
+            any(
+                isinstance(item, analysis_tasks.StitchingDerivationTask)
+                for item in derivation_requirements
+            )
+        )
+        self.assertEqual(task.stitch_mode, "correctionlib")
+        self.assertEqual(
+            task.stitch_weights,
+            os.path.join(
+                analysis_tasks.WORKSPACE,
+                "stitchWeights_applyRun",
+                "stitch_weights.json",
+            ),
+        )
+
+    def test_apply_task_forwards_htcondor_to_counter_pass(self):
+        import analysis_tasks
+
+        task = analysis_tasks.StitchingApplyTask(
+            stitch_config="stitch.yaml",
+            submit_config="submit_config.txt",
+            exe="vjetStitch",
+            dataset_manifest="datasets.yaml",
+            name="applyRun",
+            workflow="htcondor",
+            file_source="rucio",
+            file_source_name="inputFiles",
+            sizing_target_seconds=2400,
+            sizing_pilot_target_seconds=900,
+            max_runtime=10800,
+        )
+
+        derivation = task.workflow_requires()["stitch_weights"]
+        counter_task = derivation.requires()
+
+        workflow_requirements = task.workflow_proxy.requires()
+        self.assertIn("delegate", workflow_requirements)
+        self.assertIs(
+            workflow_requirements["delegate"],
+            task.htcondor_delegate_task(),
+        )
+        self.assertIsInstance(
+            workflow_requirements["delegate"],
+            analysis_tasks.StitchingApplyMonitorJobs,
+        )
+        submit_task = workflow_requirements["delegate"].requires()
+        self.assertIsInstance(submit_task, analysis_tasks.StitchingApplySubmitJobs)
+        self.assertEqual(
+            submit_task.stitch_weights,
+            os.path.join(
+                analysis_tasks.WORKSPACE,
+                "stitchWeights_applyRun",
+                "stitch_weights.json",
+            ),
+        )
+        self.assertEqual(submit_task.stitch_mode, "correctionlib")
+        submit_requirements = submit_task.requires()
+        self.assertIsInstance(
+            submit_requirements["stitch_weights"],
+            analysis_tasks.StitchingDerivationTask,
+        )
+        self.assertIsInstance(
+            workflow_requirements["stitch_weights"],
+            analysis_tasks.StitchingDerivationTask,
+        )
+
+        self.assertEqual(counter_task.workflow, "htcondor")
+        self.assertEqual(counter_task.effective_workflow, "htcondor")
+        self.assertEqual(counter_task.file_source, "rucio")
+        self.assertEqual(counter_task.file_source_name, "inputFiles")
+        self.assertEqual(counter_task.sizing_target_seconds, 2400)
+        self.assertEqual(counter_task.sizing_pilot_target_seconds, 900)
+        self.assertEqual(counter_task.max_runtime, 10800)
+
     def test_missing_config_raises(self):
         """run() raises RuntimeError when the stitch config file is absent."""
         task = self._make_task(stitch_config="/nonexistent/stitch.yaml")
@@ -2317,7 +4516,16 @@ class TestStitchingDerivationTask(unittest.TestCase):
             stitch_cfg = os.path.join(tmpdir, "stitch.yaml")
             with open(stitch_cfg, "w") as fh:
                 yaml.dump(
-                    {"groups": {"wjets_ht": {"meta_files": {"s0": meta0, "s1": meta1}}}},
+                    {
+                        "groups": {
+                            "wjets_ht": {
+                                "meta_files": {"s0": meta0, "s1": meta1},
+                                "inclusive_sample": "s0",
+                                "cross_section_era": "run2",
+                                "inclusive_cross_section_pb": 1000.0,
+                            }
+                        }
+                    },
                     fh,
                 )
 
@@ -2335,7 +4543,7 @@ class TestStitchingDerivationTask(unittest.TestCase):
                 # Provide fake sign-count data via mocked reader
                 fake_values = {"s0": [30.0, 10.0, 0.0], "s1": [70.0, 90.0, 0.0]}
                 with patch.object(
-                    analysis_tasks,
+                    stitching_derivation,
                     "_read_intweight_sign_hist",
                     side_effect=lambda f, s: fake_values[s],
                 ):
@@ -2357,11 +4565,639 @@ class TestStitchingDerivationTask(unittest.TestCase):
                 sf_clamped = cset["wjets_ht"].evaluate("s0", 1)
                 self.assertAlmostEqual(sf_clamped, 0.1, places=10)
 
+                cross_sections_path = os.path.join(
+                    os.path.dirname(out_path), "stitch_cross_sections.json"
+                )
+                with open(cross_sections_path) as fh:
+                    cross_sections = json.load(fh)
+                derived = cross_sections["groups"]["wjets_ht"]
+                self.assertEqual(derived["era"], "run2")
+                self.assertEqual(derived["inclusive_sample"], "s0")
+                self.assertEqual(derived["inclusive_samples"], ["s0"])
+                self.assertAlmostEqual(
+                    derived["bin_fractions"][0], 0.75, places=10
+                )
+                self.assertAlmostEqual(
+                    derived["binned_cross_sections_pb"][1],
+                    1000.0 * 0.25,
+                    places=8,
+                )
+
             finally:
                 analysis_tasks.StitchingDerivationTask._output_dir = property(orig)
 
     def test_task_namespace(self):
         self.assertEqual(self._make_task().task_namespace, "")
+
+
+# ===========================================================================
+# StitchingValidationTask
+# ===========================================================================
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestStitchingValidationTask(unittest.TestCase):
+    """Tests for all-file stitching application validation."""
+
+    def test_optional_adapter_import_and_generic_defaults(self):
+        import analysis_tasks
+
+        adapter = types.ModuleType("test_stitching_adapter")
+        adapter.process_label = lambda group: "label_" + group
+        with patch.dict(sys.modules, {adapter.__name__: adapter}):
+            loaded = analysis_tasks._load_stitch_validation_adapter(adapter.__name__)
+            self.assertIs(loaded, adapter)
+            self.assertEqual(analysis_tasks._stitch_validation_process_label("group", loaded), "label_group")
+        self.assertIsNone(analysis_tasks._load_stitch_validation_adapter(""))
+        with self.assertRaisesRegex(RuntimeError, "Could not import stitching validation adapter"):
+            analysis_tasks._load_stitch_validation_adapter("missing_stitching_adapter_for_test")
+        self.assertEqual(analysis_tasks._stitch_validation_process_label("group A"), "group_A")
+        self.assertEqual(analysis_tasks._stitch_validation_year_set(None, "run2"), "run2")
+        self.assertEqual(analysis_tasks._stitch_validation_excluded_bins("sample", "group", {}, "", 21), set())
+
+    def test_validation_histogram_specs_are_configurable(self):
+        import analysis_tasks
+
+        default_specs = analysis_tasks._stitch_validation_histogram_specs({})
+        self.assertEqual(default_specs[0]["ratio_range"], [0.8, 1.2])
+
+        specs = analysis_tasks._stitch_validation_histogram_specs(
+            {
+                "validation": {
+                    "histograms": [
+                        {
+                            "name": "HT",
+                            "stitched_name": "HT_stitched",
+                            "label": "H_T [GeV]",
+                            "boundaries": [100, 250],
+                            "xlim": [0, 1000],
+                            "ratio_range": [0.8, 1.2],
+                        },
+                        {
+                            "name": "LHE_Vpt_fine",
+                            "stitched_name": "LHE_Vpt_fine_stitched",
+                            "label": "LHE VpT [GeV] (fine)",
+                            "boundaries": [],
+                            "xlim": [-5, 60],
+                        }
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(specs[0]["name"], "HT")
+        self.assertEqual(specs[0]["stitched_name"], "HT_stitched")
+        self.assertEqual(specs[0]["boundaries"], [100.0, 250.0])
+        self.assertEqual(specs[0]["xlim"], [0.0, 1000.0])
+        self.assertEqual(specs[0]["ratio_range"], [0.8, 1.2])
+        self.assertEqual(specs[1]["name"], "LHE_Vpt_fine")
+        self.assertEqual(specs[1]["stitched_name"], "LHE_Vpt_fine_stitched")
+        self.assertEqual(specs[1]["boundaries"], [])
+        self.assertEqual(specs[1]["xlim"], [-5.0, 60.0])
+
+    def test_sample_scale_uses_active_bin_cross_sections_and_signed_sum(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_file = os.path.join(tmpdir, "sample.root")
+            Path(meta_file).write_text("")
+            with patch.object(
+                stitching_derivation,
+                "_read_intweight_sign_hist",
+                return_value=[2.0, -1.0, 0.0],
+            ), patch.object(
+                stitching_derivation,
+                "_read_weight_sign_sum",
+                return_value=5.0,
+            ):
+                scale, cross_section, signed_sum = (
+                    analysis_tasks._stitch_validation_sample_scale(
+                        "sample",
+                        [meta_file],
+                        {"binned_cross_sections_pb": [10.0, 20.0, 30.0]},
+                    )
+                )
+
+        self.assertEqual(cross_section, 10.0)
+        self.assertEqual(signed_sum, 2.0)
+        self.assertEqual(scale, 5.0)
+
+    def test_sample_scale_requires_meaningful_positive_stitch_factors(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_file = os.path.join(tmpdir, "sample.root")
+            Path(meta_file).write_text("")
+            with patch.object(
+                stitching_derivation,
+                "_read_intweight_sign_hist",
+                return_value=[100.0, 1.0, -2.0, 1.0],
+            ):
+                scale, cross_section, signed_sum = (
+                    analysis_tasks._stitch_validation_sample_scale(
+                        "sample",
+                        [meta_file],
+                        {"binned_cross_sections_pb": [10.0, 20.0, 30.0, 40.0]},
+                        stitch_factors=[0.89, 4.4e-8, 0.5, 1e-6],
+                    )
+                )
+
+        self.assertEqual(cross_section, 10.0)
+        self.assertEqual(signed_sum, 100.0)
+        self.assertEqual(scale, 0.1)
+
+    def test_adapter_exclusions_are_used_for_sample_normalization(self):
+        import analysis_tasks
+        import numpy as np
+
+        validation_adapter = types.SimpleNamespace(
+            excluded_bins=MagicMock(return_value={0, 7, 14}),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            submit_config = os.path.join(tmpdir, "submit_config.txt")
+            Path(submit_config).write_text("")
+            excluded_bins = analysis_tasks._stitch_validation_excluded_bins(
+                "DYJetsToLL_LHEFilterPtZ-0To50_FxFx",
+                "DYto2L",
+                {"era": "run2"},
+                submit_config,
+                21,
+                validation_adapter,
+            )
+            self.assertEqual(excluded_bins, {0, 7, 14})
+            validation_adapter.excluded_bins.assert_called_once_with(
+                "DYJetsToLL_LHEFilterPtZ-0To50_FxFx", "DYto2L",
+                {"era": "run2"}, submit_config, 21,
+            )
+
+            meta_file = os.path.join(tmpdir, "sample.root")
+            Path(meta_file).write_text("")
+            bin_cross_sections = [float(index + 1) for index in range(21)]
+            with patch.object(
+                stitching_derivation,
+                "_read_intweight_sign_hist",
+                return_value=np.ones(21),
+            ):
+                _, sample_cross_section, signed_sum = (
+                    analysis_tasks._stitch_validation_sample_scale(
+                        "DYJetsToLL_LHEFilterPtZ-0To50_FxFx",
+                        [meta_file],
+                        {"binned_cross_sections_pb": bin_cross_sections},
+                        excluded_bins,
+                    )
+                )
+
+        self.assertEqual(signed_sum, 18.0)
+        self.assertEqual(sample_cross_section, 207.0)
+
+    def test_plot_normalization_removes_configured_weight_scale(self):
+        import analysis_tasks
+        from dataset_manifest import DatasetEntry
+
+        entry = DatasetEntry(
+            name="sample",
+            xsec=100.0,
+            kfac=1.2,
+            filter_efficiency=0.5,
+            extra_scale=2.0,
+        )
+
+        self.assertAlmostEqual(
+            analysis_tasks._stitch_validation_configured_weight_scale(entry),
+            120.0,
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_configured_weight_scale(None),
+            1.0,
+        )
+
+    def test_process_and_year_labels_are_separate(self):
+        import analysis_tasks
+        validation_adapter = types.SimpleNamespace(
+            process_label=lambda group: {"DYto2L": "DY", "WtoLNu": "W", "Zto2Nu": "Z"}[group],
+            year_set=lambda entry, era: {"run2": "UL", "run3_22_23": "22-23", "run3_24": "24"}[era],
+        )
+
+        self.assertEqual(
+            analysis_tasks._stitch_validation_process_label(
+                "DYto2L", validation_adapter
+            ),
+            "DY",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_process_label(
+                "WtoLNu", validation_adapter
+            ),
+            "W",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_process_label(
+                "Zto2Nu", validation_adapter
+            ),
+            "Z",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_year_set(
+                None, "run2", validation_adapter
+            ),
+            "UL",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_year_set(
+                None, "run3_22_23", validation_adapter
+            ),
+            "22-23",
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_year_set(
+                None, "run3_24", validation_adapter
+            ),
+            "24",
+        )
+
+    def test_plot_boundaries_and_ratio_use_variable_axes(self):
+        import analysis_tasks
+        import numpy as np
+        from stitching_plotting import ratio_with_uncertainty
+
+        validation_adapter = types.SimpleNamespace(
+            variable_boundaries=lambda variable, family, boundaries, by_process:
+                by_process.get(family, boundaries.get(variable, []))
+                if variable == "LHE_Vpt" else boundaries.get(variable, []),
+        )
+
+        boundaries = {
+            "LHE_Vpt": [50.0, 100.0],
+            "LHE_NpNLO": [1.0, 2.0, 3.0],
+        }
+        process_boundaries = {"w": [100.0, 250.0]}
+        self.assertEqual(
+            analysis_tasks._stitch_validation_variable_boundaries(
+                "LHE_Vpt", "w", boundaries, process_boundaries, validation_adapter
+            ),
+            [100.0, 250.0],
+        )
+        self.assertEqual(
+            analysis_tasks._stitch_validation_variable_boundaries(
+                "LHE_NpNLO", "w", boundaries, process_boundaries, validation_adapter
+            ),
+            [1.0, 2.0, 3.0],
+        )
+        np.testing.assert_allclose(
+            ratio_with_uncertainty(
+                np.array([2.0, 0.0, -4.0]),
+                np.array([1.0, 0.0, 2.0]),
+            )[0],
+            np.array([2.0, np.nan, -2.0]),
+            equal_nan=True,
+        )
+    def test_missing_application_output_raises(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample_a", "group": "group_a"}],
+            )
+            original_workspace = analysis_tasks.WORKSPACE
+            analysis_tasks.WORKSPACE = tmpdir
+            try:
+                task = analysis_tasks.StitchingValidationTask(
+                    name="applyRun",
+                    dataset_manifest=manifest_path,
+                )
+                with self.assertRaises(RuntimeError) as ctx:
+                    task.run()
+            finally:
+                analysis_tasks.WORKSPACE = original_workspace
+
+            self.assertIn("sample_a", str(ctx.exception))
+
+    def test_incomplete_validation_report_is_not_cached_as_complete(self):
+        import analysis_tasks
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stitch_config_path = Path(tmpdir) / "stitch.yaml"
+            with stitch_config_path.open("w") as fh:
+                yaml.safe_dump(
+                    {
+                        "validation": {
+                            "histograms": [
+                                {"name": "LHE_Vpt"},
+                                {"name": "LHE_Vpt_fine"},
+                                {"name": "LHE_NpNLO"},
+                            ]
+                        }
+                    },
+                    fh,
+                )
+            output_dir = Path(tmpdir) / "stitchValidation_applyRun"
+            output_dir.mkdir()
+            existing_plot = output_dir / "stitch_W_UL_LHE_Vpt_comparison.png"
+            existing_plot.write_text("")
+            (output_dir / "stitch_validation.json").write_text(
+                json.dumps({"plots": [str(existing_plot)]})
+            )
+
+            original_workspace = analysis_tasks.WORKSPACE
+            analysis_tasks.WORKSPACE = tmpdir
+            try:
+                task = analysis_tasks.StitchingValidationTask(
+                    name="applyRun",
+                    dataset_manifest="manifest.yaml",
+                    stitch_config=str(stitch_config_path),
+                )
+                self.assertFalse(task.complete())
+
+                fine_plot = output_dir / (
+                    "stitch_W_UL_LHE_Vpt_fine_comparison.png"
+                )
+                fine_plot.write_text("")
+                njet_plot = output_dir / "stitch_W_UL_LHE_NpNLO_comparison.png"
+                njet_plot.write_text("")
+                (output_dir / "stitch_validation.json").write_text(
+                    json.dumps(
+                        {
+                            "plots": [
+                                str(existing_plot),
+                                str(fine_plot),
+                                str(njet_plot),
+                            ]
+                        }
+                    )
+                )
+                self.assertTrue(task.complete())
+            finally:
+                analysis_tasks.WORKSPACE = original_workspace
+
+    def test_condor_stageout_metadata_is_discoverable(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample_a", "group": "group_a"}],
+            )
+            submission_dir = (
+                Path(tmpdir)
+                / "skimRun_applyRun"
+                / "condor_submissions"
+                / "sample_a"
+                / "job_0"
+            )
+            submission_dir.mkdir(parents=True)
+            (submission_dir / "submit_config.txt").write_text(
+                "metaFile=/eos/user/test/meta_0.root\n"
+            )
+
+            original_workspace = stitching_derivation.WORKSPACE
+            stitching_derivation.WORKSPACE = tmpdir
+            try:
+                resolved = analysis_tasks._stitch_output_meta_files(
+                    "applyRun", manifest_path
+                )
+            finally:
+                stitching_derivation.WORKSPACE = original_workspace
+
+        self.assertEqual(
+            resolved,
+            {"sample_a": ["root://eosuser.cern.ch//eos/user/test/meta_0.root"]},
+        )
+
+    def test_validation_rejects_permanently_failed_application_jobs(self):
+        import analysis_tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [{"name": "sample_a", "group": "group_a"}],
+            )
+            summary_path = Path(tmpdir) / "skimRun_applyRun" / "all_outputs_verified.txt"
+            summary_path.parent.mkdir(parents=True)
+            summary_path.write_text(
+                "done=3\n"
+                "perm_fail=1\n"
+                "total=4\n"
+                "perm_failed_jobs=sample_a:2\n"
+            )
+
+            original_workspace = stitching_derivation.WORKSPACE
+            stitching_derivation.WORKSPACE = tmpdir
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"1 permanently failed job\(s\).*sample_a:2",
+                ):
+                    analysis_tasks._stitch_output_meta_files(
+                        "applyRun",
+                        manifest_path,
+                    )
+            finally:
+                stitching_derivation.WORKSPACE = original_workspace
+
+    def test_validates_all_partitioned_meta_files(self):
+        import analysis_tasks
+        import yaml
+
+        class FakeHistogram:
+            def to_numpy(self, flow=False):
+                return ([1.0, 2.0], [0.0, 1.0, 2.0])
+
+        class FakeRootFile:
+            def __init__(self, sample_name):
+                self.sample_name = sample_name
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def keys(self, recursive=True):
+                return [
+                    f"counter_intWeightSignSum_{self.sample_name};1",
+                    f"counter_weightSignSum_{self.sample_name};1",
+                    "all_Default/LHE_Vpt;1",
+                    "all_Default/LHE_Vpt_stitched;1",
+                    "all_Default/LHE_Vpt_fine;1",
+                    "all_Default/LHE_Vpt_fine_stitched;1",
+                    "all_Default/LHE_NpNLO;1",
+                    "all_Default/LHE_NpNLO_stitched;1",
+                ]
+
+            def __getitem__(self, key):
+                return FakeHistogram()
+
+        def fake_open(path):
+            path_parts = Path(path).parts
+            sample_index = path_parts.index("outputs") + 1
+            return FakeRootFile(path_parts[sample_index])
+
+        fake_uproot = types.SimpleNamespace(open=fake_open)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = _write_manifest(
+                tmpdir,
+                [
+                    {"name": "sample_a", "group": "group_a", "xsec": 10.0},
+                    {"name": "sample_b", "group": "group_a"},
+                ],
+            )
+            output_dir = Path(tmpdir) / "skimRun_applyRun" / "outputs"
+            for path in (
+                output_dir / "sample_a" / "job_0" / "meta.root",
+                output_dir / "sample_a" / "job_1" / "meta.root",
+                output_dir / "sample_b" / "meta.root",
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+
+            weights_path = Path(tmpdir) / "stitch_weights.json"
+            weights_path.write_text(
+                json.dumps(
+                    {
+                        "corrections": [
+                            {
+                                "name": "group_a",
+                                "data": {
+                                    "nodetype": "category",
+                                    "content": [
+                                        {
+                                            "key": "sample_a",
+                                            "value": {
+                                                "nodetype": "binning",
+                                                "content": [1.0, 1.0],
+                                            },
+                                        },
+                                        {
+                                            "key": "sample_b",
+                                            "value": {
+                                                "nodetype": "binning",
+                                                "content": [1.0, 1.0],
+                                            },
+                                        },
+                                    ],
+                                },
+                            }
+                        ]
+                    }
+                )
+            )
+            stitch_config_path = Path(tmpdir) / "stitch.yaml"
+            with stitch_config_path.open("w") as fh:
+                yaml.safe_dump(
+                    {
+                        "validation": {
+                            "boundaries": {
+                                "LHE_Vpt": [100, 130, 220, 250, 280],
+                                "LHE_NpNLO": [1, 2, 3],
+                            },
+                            "histograms": [
+                                {
+                                    "name": "LHE_Vpt",
+                                    "stitched_name": "LHE_Vpt_stitched",
+                                    "label": "LHE VpT [GeV]",
+                                },
+                                {
+                                    "name": "LHE_Vpt_fine",
+                                    "stitched_name": "LHE_Vpt_fine_stitched",
+                                    "label": "LHE VpT [GeV] (fine)",
+                                    "boundaries": [],
+                                    "xlim": [-5, 60],
+                                },
+                                {
+                                    "name": "LHE_NpNLO",
+                                    "stitched_name": "LHE_NpNLO_stitched",
+                                    "label": "LHE NpNLO",
+                                },
+                            ],
+                        },
+                        "groups": {
+                            "group_a": {"select": {"group": "group_a"}}
+                        },
+                    },
+                    fh,
+                )
+            cross_sections_path = Path(tmpdir) / "stitch_cross_sections.json"
+            cross_sections_path.write_text(
+                json.dumps(
+                    {
+                        "groups": {
+                            "group_a": {
+                                "era": "run2",
+                                "inclusive_sample": "sample_a",
+                                "binned_cross_sections_pb": [10.0, 20.0],
+                            }
+                        }
+                    }
+                )
+            )
+            submit_config_path = Path(tmpdir) / "submit_config.txt"
+            submit_config_path.write_text(
+                "stitchRun2PtBins_WtoLNu=0,100,130,220,250,280\n"
+            )
+
+            original_workspace = stitching_derivation.WORKSPACE
+            stitching_derivation.WORKSPACE = tmpdir
+            try:
+                with (
+                    patch.dict(sys.modules, {"uproot": fake_uproot}),
+                    patch.object(
+                        stitching_derivation,
+                        "_read_intweight_sign_hist",
+                        return_value=[1.0, 2.0],
+                    ),
+                    patch.object(
+                        stitching_derivation,
+                        "_read_weight_sign_sum",
+                        return_value=3.0,
+                    ),
+                ):
+                    task = analysis_tasks.StitchingValidationTask(
+                        name="applyRun",
+                        dataset_manifest=manifest_path,
+                        stitch_config=str(stitch_config_path),
+                        stitch_weights=str(weights_path),
+                        stitch_cross_sections=str(cross_sections_path),
+                        submit_config=str(submit_config_path),
+                    )
+                    task.run()
+                with open(task.output().path) as fh:
+                    report = json.load(fh)
+            finally:
+                stitching_derivation.WORKSPACE = original_workspace
+
+            self.assertEqual(report["samples"], 2)
+            self.assertEqual(report["meta_files"], 3)
+            self.assertEqual(report["groups"], ["group_a"])
+            self.assertEqual(
+                report["plot_boundaries"]["LHE_Vpt"],
+                [100.0, 130.0, 220.0, 250.0, 280.0],
+            )
+            self.assertEqual(report["plot_boundaries"]["LHE_NpNLO"], [1.0, 2.0, 3.0])
+            self.assertEqual(len(report["plots"]), 3)
+            self.assertTrue(all(os.path.isfile(path) for path in report["plots"]))
+            self.assertTrue(
+                any(path.endswith("_LHE_Vpt_comparison.png") for path in report["plots"])
+            )
+            self.assertTrue(
+                any(
+                    path.endswith("_LHE_Vpt_fine_comparison.png")
+                    for path in report["plots"]
+                )
+            )
+            import matplotlib.image as mpimg
+
+            plot_image = mpimg.imread(report["plots"][0])
+            self.assertEqual(plot_image.shape[:2], (1650, 1500))
+            normalization = report["plot_normalization"]["group_a_run2"]["samples"]
+            self.assertEqual(normalization["sample_a"]["cross_section_pb"], 30.0)
+            self.assertEqual(normalization["sample_a"]["signed_event_sum"], 6.0)
+            self.assertEqual(normalization["sample_a"]["scale"], 0.5)
+            self.assertEqual(normalization["sample_a"]["configured_weight_scale"], 10.0)
+            self.assertTrue(normalization["sample_a"]["is_inclusive_sample"])
+            self.assertFalse(normalization["sample_b"]["is_inclusive_sample"])
 
 
 # ===========================================================================
@@ -2397,6 +5233,20 @@ class TestBuildTaskProvenance(unittest.TestCase):
             datetime.datetime.fromisoformat(prov.config_mtime)
         finally:
             os.unlink(path)
+
+    def test_referenced_stitch_weight_content_changes_task_config_hash(self):
+        mod = self._import()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "submit_config.txt")
+            weights_path = os.path.join(tmpdir, "weights.json")
+            Path(config_path).write_text("stitchWeights=weights.json\n")
+            Path(weights_path).write_text('{"version": 1}\n')
+            before = mod._build_task_provenance(submit_config_path=config_path)
+            Path(weights_path).write_text('{"version": 2}\n')
+            after = mod._build_task_provenance(submit_config_path=config_path)
+
+        self.assertEqual(before.config_mtime, after.config_mtime)
+        self.assertNotEqual(before.task_config_hash, after.task_config_hash)
 
     def test_config_mtime_none_for_missing_file(self):
         """config_mtime is None when submit_config_path does not exist."""
@@ -2444,6 +5294,21 @@ class TestBuildSkimManifest(unittest.TestCase):
     def _import(self):
         import analysis_tasks
         return analysis_tasks
+
+    def test_histogram_names_retain_root_directory_prefixes(self):
+        import analysis_tasks
+        import numpy as np
+        import uproot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_path = os.path.join(tmpdir, "nested.root")
+            with uproot.recreate(root_path) as root_file:
+                root_file["region_a/h_mass"] = (np.asarray([1.0, 2.0]), np.asarray([0.0, 1.0, 2.0]))
+
+            self.assertEqual(
+                analysis_tasks._read_root_histogram_names(root_path),
+                ["region_a/h_mass"],
+            )
 
     def test_returns_output_manifest(self):
         """_build_skim_manifest returns an OutputManifest."""
@@ -2578,12 +5443,13 @@ class TestSkimTaskCacheProducer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job") as run_job:
                         task.run()
 
                 self.assertTrue(run_job.called)
-                self.assertTrue(run_job.call_args.kwargs.get("stream_output"))
+                self.assertEqual(run_job.call_args.kwargs.get("stream_output"),
+                                 analysis_tasks._stream_analysis_output())
 
                 sidecar_path = skim_file + CACHE_SIDECAR_SUFFIX
                 self.assertTrue(
@@ -2633,7 +5499,7 @@ class TestSkimTaskCacheProducer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         task.run()
 
@@ -2705,6 +5571,9 @@ class TestSkimTaskCacheProducer(unittest.TestCase):
                     with patch(
                         "analysis_tasks.check_cache_validity",
                         return_value=ArtifactResolutionStatus.COMPATIBLE,
+                    ), patch(
+                        "rdfproduction.jobs.output_validation._skim_job_output_errors",
+                        return_value=[],
                     ):
                         result = task.complete()
 
@@ -2886,7 +5755,7 @@ class TestHistFillTaskCacheConsumer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         with patch(
                             "analysis_tasks.check_cache_validity",
@@ -2938,7 +5807,7 @@ class TestHistFillTaskCacheConsumer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         with patch(
                             "analysis_tasks.check_cache_validity",
@@ -2990,7 +5859,7 @@ class TestHistFillTaskCacheConsumer(unittest.TestCase):
                     type(task), "branch_data",
                     new_callable=PropertyMock, return_value=entry
                 ):
-                    with patch("analysis_tasks._run_analysis_job",
+                    with patch("rdfproduction.executors._run_analysis_job",
                                return_value="done:job"):
                         with patch(
                             "analysis_tasks.check_cache_validity",
@@ -3029,7 +5898,13 @@ class TestAnalysisTasksModule(unittest.TestCase):
 
     def test_tasks_defined(self):
         import analysis_tasks
-        for name in ("SkimTask", "HistFillTask", "StitchingDerivationTask"):
+        for name in (
+            "SkimTask",
+            "HistFillTask",
+            "StitchingDerivationTask",
+            "StitchingApplyTask",
+            "StitchingValidationTask",
+        ):
             self.assertTrue(hasattr(analysis_tasks, name), f"{name} not defined")
 
     def test_helpers_defined(self):
@@ -3039,6 +5914,8 @@ class TestAnalysisTasksModule(unittest.TestCase):
             "_read_intweight_sign_hist",
             "_derive_stitch_weights",
             "_build_correctionlib_cset",
+            "_stitch_output_meta_files",
+            "_validate_stitch_meta_file",
             "_build_task_provenance",
             "_build_skim_manifest",
         ):
@@ -3046,9 +5923,287 @@ class TestAnalysisTasksModule(unittest.TestCase):
 
     def test_task_namespaces(self):
         import analysis_tasks
-        for cls_name in ("SkimTask", "HistFillTask", "StitchingDerivationTask"):
+        for cls_name in (
+            "SkimTask",
+            "HistFillTask",
+            "StitchingDerivationTask",
+            "StitchingApplyTask",
+            "StitchingValidationTask",
+        ):
             cls = getattr(analysis_tasks, cls_name)
             self.assertEqual(cls.task_namespace, "")
+
+
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestEventBudgetPlanning(unittest.TestCase):
+    def test_preparation_automatically_reuses_learned_snapshot_and_stays_complete(self):
+        import analysis_tasks
+        from job_sizing import update_sizing_after_run
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(analysis_tasks, 'WORKSPACE', tmp), \
+                patch("rdfproduction.transport.collect_local_shared_libs", return_value={}), \
+                patch.dict(os.environ, {'RDF_JOB_SIZING_CACHE': str(Path(tmp, 'cache')),
+                                        'RDF_JOB_SIZING_ORIGIN': 'test-pool', 'RDF_JOB_SIZING_AUTO_UPDATE': '1'}):
+            exe = Path(tmp, 'analysis');exe.write_text('#!/bin/sh\nexit 0\n');exe.chmod(0o755)
+            config = _write_submit_config_template(tmp, {'threads': '1'})
+            manifest = _write_manifest(tmp, [{'name': 'sample', 'dtype': 'data'}])
+            options = dict(exe=str(exe), submit_config=config, dataset_manifest=manifest,
+                           make_test_job=False, file_source='xrdfs', file_source_name='inventory')
+            first = analysis_tasks.PrepareSkimJobs(name='first', **options)
+            discovery = Path(first._file_list_dir());discovery.mkdir()
+            url = 'root://a//store/f.root'
+            (discovery/'sample.json').write_text(json.dumps({'sample': 'sample', 'files': [url], 'groups': [url]}))
+            preview = analysis_tasks.SkimTask(name='first', **options)
+            with patch('job_sizing.cached_sizing', side_effect=AssertionError('preview reads mutable cache')):
+                self.assertEqual(len(preview.create_branch_map()), 1)
+            self.assertFalse(Path(first._run_dir, 'job_sizing_selection.json').exists())
+            with patch("rdfproduction.partitioning._query_tree_entries", side_effect=AssertionError('cold run queries')):
+                first._run_impl()
+            self.assertEqual(len(json.loads(Path(first.output().path).read_text())), 1)
+            logs = Path(first._run_dir, 'condor_submissions/sample/condor_logs');logs.mkdir(parents=True)
+            events = []
+            for proc in range(3):
+                (logs/f'log_100_{proc}.stdout').write_text(
+                    f'[InputCache] reading statistics reason=end tree=Events file_index=0 file={url} tree_entries=6000000\n'
+                    '[XrdAdaptor] context origin=test-pool execution_host=worker\n'
+                    'CounterService: sample=sample entries=200000\nAnalysis time: 210s\nDone!\n')
+                events.append(f'005 (100.{proc:03}.000) Job terminated.\n(1) Normal termination (return value 0)\n'
+                              'Usr 0 00:03:20, Sys 0 00:00:00 - Run Remote Usage\n...\n')
+            (logs/'jobs.log').write_text(''.join(events))
+            result = update_sizing_after_run(first._run_dir, first._sizing_selection()['context'])
+            self.assertEqual(result['datasets'], 1)
+            second = analysis_tasks.PrepareSkimJobs(name='second', **options)
+            with patch("rdfproduction.partitioning._query_tree_entries", side_effect=AssertionError('cached counts queried')):
+                second._run_impl()
+            self.assertEqual(second._sizing_selection()['source'], 'learned')
+            prepared = json.loads(Path(second.output().path).read_text())
+            bounds = [analysis_tasks.read_config(p['config_path']) for p in prepared]
+            self.assertEqual([(int(p['firstEntry']), int(p['lastEntry'])) for p in bounds],
+                             [(0, 3600000), (3600000, 6000000)])
+            with patch('job_sizing.cached_sizing', side_effect=AssertionError('complete reads mutable cache')):
+                self.assertTrue(second.complete())
+
+    def test_auto_uses_learned_rates_only_for_matching_datasets(self):
+        import analysis_tasks
+        from job_sizing import EntryCache
+        with tempfile.TemporaryDirectory() as tmp:
+            url = 'root://a//store/f.root'
+            manifest = _write_manifest(tmp, [{'name': 'trained', 'files': [url]},
+                                              {'name': 'unknown', 'files': ['root://a//store/unknown.root']}])
+            discovery = Path(tmp, 'discovery');discovery.mkdir()
+            for name, file in [('trained', url), ('unknown', 'root://a//store/unknown.root')]:
+                (discovery/(name+'.json')).write_text(json.dumps({'sample': name, 'files': [file], 'groups': [file]}))
+            kwargs = dict(dataset_manifest_path=manifest, file_list_dir=str(discovery),
+                          files_per_job=2, entries_per_job=10, jobs_dir=str(Path(tmp, 'jobs')),
+                          outputs_dir=str(Path(tmp, 'out')), partition='auto')
+            with patch("rdfproduction.partitioning._query_tree_entries", side_effect=AssertionError('cold run must not query')):
+                self.assertEqual(len(analysis_tasks._plan_file_source_jobs(**kwargs)), 2)
+            cache = EntryCache(Path(tmp, 'cache.json'));cache.put(url, 25);cache.save()
+            profile = Path(tmp, 'profile.json')
+            profile.write_text(json.dumps({'schema_version': 1, 'datasets': {'trained': {'entries_per_job': 10}}}))
+            with patch("rdfproduction.partitioning._query_tree_entries", side_effect=AssertionError('unknown dataset must not query')):
+                plans = analysis_tasks._plan_file_source_jobs(**kwargs, partition_profile=str(profile),
+                                                              input_metadata_cache=str(cache.path))
+            self.assertEqual(len(plans), 4)
+            self.assertEqual([(p['first_entry'], p['last_entry']) for p in plans if p['dataset_name']=='trained'],
+                             [(0, 10), (10, 20), (20, 25)])
+            self.assertEqual(len([p for p in plans if p['dataset_name']=='unknown']), 1)
+
+    def test_cached_groups_do_not_override_explicit_file_or_event_mode(self):
+        import analysis_tasks
+        from job_sizing import EntryCache
+        with tempfile.TemporaryDirectory() as tmp:
+            files=['root://a//store/a','root://a//store/b','root://a//store/c']
+            manifest=_write_manifest(tmp,[{'name':'DY','process':'DYJets','files':files}])
+            cache=Path(tmp,'discovery');cache.mkdir()
+            (cache/'DY.json').write_text(json.dumps({'sample':'DY','files':files,'groups':[','.join(files)]}))
+            metadata=EntryCache(Path(tmp,'entries.json'))
+            for url,n in zip(files,[40,30,250]):metadata.put(url,n)
+            metadata.save()
+            kwargs=dict(dataset_manifest_path=manifest,file_list_dir=str(cache),files_per_job=2,
+                        entries_per_job=100,jobs_dir=str(Path(tmp,'jobs')),outputs_dir=str(Path(tmp,'out')),
+                        input_metadata_cache=str(metadata.path))
+            parts=analysis_tasks._plan_file_source_jobs(partition='file',**kwargs)
+            self.assertEqual([p['files'] for p in parts],files)
+            with patch("rdfproduction.partitioning._query_tree_entries",side_effect=AssertionError('unexpected requery')):
+                parts=analysis_tasks._plan_file_source_jobs(partition='events',**kwargs)
+            self.assertEqual([p['files'] for p in parts],[','.join(files[:2]),files[2],files[2],files[2]])
+            self.assertEqual([(p['first_entry'],p['last_entry']) for p in parts[1:]],[(0,100),(100,200),(200,250)])
+            profile=Path(tmp,'profile.json')
+            profile.write_text(json.dumps({'schema_version':1,'rules':[{'process':'DYJets','entries_per_job':200}]}))
+            parts=analysis_tasks._plan_file_source_jobs(partition='events',partition_profile=str(profile),**kwargs)
+            self.assertEqual([(p['first_entry'],p['last_entry']) for p in parts[1:]],[(0,200),(200,250)])
+
+    def test_bounded_retry_preserves_chain_and_half_open_coverage(self):
+        import analysis_tasks
+        with tempfile.TemporaryDirectory() as tmp:
+            job=Path(tmp,'job');job.mkdir()
+            (job/'submit_config.txt').write_text('fileList=a.root,b.root\nfirstEntry=101\nlastEntry=202\nentryRangeMode=source\nmetaFile=/tmp/result.root\n')
+            parts=analysis_tasks._split_skim_partition(str(job))
+            self.assertEqual([(p['first_entry'],p['last_entry']) for p in parts],[(101,151),(151,202)])
+            self.assertTrue(all(p['files']==['a.root','b.root'] for p in parts))
+            for i,part in enumerate(parts):
+                result=analysis_tasks._prepare_split_skim_job(str(job),tmp,0,1,i,part['files'],part['first_entry'],part['last_entry'])
+                self.assertFalse(Path(result['dir'], 'submit_config.txt').exists())
+                cfg=analysis_tasks.read_config(str(Path(result['dir'],'submit_config.yaml')))
+                self.assertEqual(cfg['firstEntry'],str(part['first_entry']))
+                self.assertEqual(cfg['lastEntry'],str(part['last_entry']))
+                self.assertEqual(cfg['entryRangeMode'],'source')
+                self.assertIn(f'_part{i}',cfg['metaFile'])
+
+    def test_single_file_can_shrink_using_cached_metadata(self):
+        import analysis_tasks
+        from job_sizing import EntryCache
+        with tempfile.TemporaryDirectory() as tmp:
+            job=Path(tmp,'job');job.mkdir()
+            (job/'submit_config.txt').write_text('fileList=root://a//store/f.root\n')
+            cache=EntryCache(Path(tmp,'entries.json'));cache.put('root://a//store/f.root',9);cache.save()
+            parts=analysis_tasks._split_skim_partition(str(job),str(cache.path))
+            self.assertEqual([(p['first_entry'],p['last_entry']) for p in parts],[(0,4),(4,9)])
+
+    def test_lone_bound_does_not_drop_input_during_file_retry(self):
+        import analysis_tasks
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp)/'submit_config.txt').write_text('fileList=a,b\nlastEntry=10\n')
+            self.assertEqual(analysis_tasks._split_skim_partition(tmp),[{'files':['a']},{'files':['b']}])
+
+    def test_invalid_interval_does_not_turn_into_whole_file_retry(self):
+        import analysis_tasks
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp)/'submit_config.txt').write_text('fileList=a,b\nfirstEntry=20\nlastEntry=10\n')
+            with self.assertRaisesRegex(ValueError, 'increasing'):
+                analysis_tasks._split_skim_partition(tmp)
+
+
+@unittest.skipUnless(_LAW_AVAILABLE, _SKIP_LAW)
+class TestSkimSizingPilots(unittest.TestCase):
+    def setUp(self):
+        import analysis_tasks
+        self.tmp = tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        patches = [patch.object(analysis_tasks, 'WORKSPACE', str(self.root)),
+                   patch("rdfproduction.transport.collect_local_shared_libs", return_value={}),
+                   patch.dict(os.environ, {'RDF_JOB_SIZING_CACHE': str(self.root/'cache'),
+                                            'RDF_JOB_SIZING_ORIGIN': 'test', 'RDF_JOB_SIZING_AUTO_UPDATE': '1'})]
+        for p in patches:
+            p.start();self.addCleanup(p.stop)
+        exe = self.root/'analysis';exe.write_text('#!/bin/sh\nexit 0\n');exe.chmod(0o755)
+        self.config = _write_submit_config_template(str(self.root), {'threads': '1'})
+        self.names = ['known', 'a', 'b', 'c', 'd', 'e']
+        self.manifest = _write_manifest(str(self.root), [{'name': n, 'dtype': 'data'} for n in self.names])
+        profile = self.root/'known.json'
+        profile.write_text(json.dumps({'schema_version': 1, 'datasets': {'known': {'entries_per_job': 500000}}}))
+        self.options = dict(exe=str(exe), submit_config=self.config, dataset_manifest=self.manifest,
+                            name='pilots', file_source='xrdfs', partition_profile=str(profile),
+                            output_directory='root://example.test/production', make_test_job=False,
+                            sizing_pilots=True, sizing_pilot_parallel=2)
+        self.task = analysis_tasks.RunSkimSizingPilots(**self.options)
+        directory = Path(self.task._file_list_dir());directory.mkdir()
+        for name in self.names:
+            files = [f'root://global//store/{name}_b.root', f'root://global//store/{name}_a.root']
+            (directory/(name+'.json')).write_text(json.dumps({'sample': name, 'files': files, 'groups': [','.join(files)]}))
+
+    def returned(self, monitor, batch, cluster):
+        directory = Path(monitor._run_dir)
+        for proc, name in enumerate(batch['datasets']):
+            logs = directory/'condor_submissions'/name/'condor_logs';logs.mkdir(parents=True, exist_ok=True)
+            m = {'prefix': {'events': 10000, 'cpu_s': 30, 'wall_s': 80},
+                 'full': {'events': 100000, 'cpu_s': 210, 'wall_s': 350}}
+            (logs/f'log_{cluster}_{proc}.stdout').write_text(
+                f'[InputCache] reading statistics reason=end tree=Events file_index=0 '
+                f'file=root://global//store/{name}_a.root tree_entries=100000\n'
+                'RDF_JOB_SIZING_PILOT='+json.dumps(m)+'\nStage-in time: 2s\nStage-out time: 3s\n')
+            (logs/'events.log').write_text(f'005 ({cluster}.{proc:03}.000) Job terminated.\n'
+                '(1) Normal termination (return value 0)\nUsr 0 00:04:00, Sys 0 00:00:00 - Run Remote Usage\n...\n')
+
+    def test_batched_pilots_gate_preparation_and_measure_only_missing_datasets(self):
+        import analysis_tasks
+        from job_sizing import load_profile
+        main = analysis_tasks.PrepareSkimJobs(**self.options)
+        self.assertIsInstance(main.requires(), analysis_tasks.RunSkimSizingPilots)
+        plan = self.task._prepare_plan()
+        self.assertEqual([len(b['datasets']) for b in plan['batches']], [2, 2, 1])
+        self.assertEqual([n for b in plan['batches'] for n in b['datasets']], self.names[1:])
+        generator = self.task.run()
+        with patch.object(analysis_tasks.MonitorSkimJobs, 'complete', return_value=True):
+            for i, batch in enumerate(plan['batches']):
+                monitor = next(generator)
+                self.assertFalse(monitor.sizing_pilots)
+                self.assertTrue(monitor.sizing_pilot_child)
+                self.assertEqual(monitor.max_retries, 0)
+                self.assertEqual(monitor.file_source, '')
+                self.assertTrue(monitor.output_directory.startswith('root://example.test/production_sizing_pilots/'))
+                if i == 0:
+                    build = analysis_tasks.BuildSkimSubmission.req(monitor)
+                    prepare = build.requires()
+                    self.assertFalse(prepare.sizing_pilots)
+                    prepare._run_impl()
+                    build._run_impl()
+                    shipped = next(Path(monitor._run_dir).glob('condor_submissions/*/condor_runscript.sh'))
+                    self.assertIn('RDF_JOB_SIZING_PILOT=', shipped.read_text())
+                    submission = next(Path(monitor._run_dir).glob('condor_submissions/*/condor_submit.sub'))
+                    self.assertIn('+MaxRuntime=7200', submission.read_text())
+                manifest = analysis_tasks.DatasetManifest.load(batch['manifest'])
+                self.assertTrue(all(len(e.files)==1 and e.files[0].endswith('_a.root') for e in manifest.datasets))
+                self.assertFalse(Path(main._run_dir, 'job_sizing_selection.json').exists())
+                self.returned(monitor, batch, 100+i)
+            with self.assertRaises(StopIteration):
+                next(generator)
+        self.assertTrue(self.task.complete())
+        profile = load_profile(main._planning_profile())
+        self.assertEqual(profile['datasets']['known']['entries_per_job'], 500000)
+        self.assertAlmostEqual(profile['datasets']['a']['cpu_seconds_per_event'], .003)
+        self.assertAlmostEqual(profile['datasets']['a']['setup_seconds'], 82.5)
+        self.assertEqual(profile['datasets']['a']['target_runtime_seconds'], 1800)
+        self.assertEqual(main.max_runtime, 7200)
+        self.assertEqual(set(profile['datasets']), set(self.names))
+
+    def test_custom_targets_are_forwarded_and_independent_of_condor_runtime(self):
+        import analysis_tasks
+        from job_sizing import load_profile
+        task = analysis_tasks.RunSkimSizingPilots(**dict(self.options,
+            sizing_target_seconds=2400, sizing_pilot_target_seconds=900, max_runtime=10800))
+        plan = task._prepare_plan()
+        generator = task.run()
+        with patch.object(analysis_tasks.MonitorSkimJobs, 'complete', return_value=True):
+            for i, batch in enumerate(plan['batches']):
+                monitor = next(generator)
+                self.assertEqual(monitor.max_runtime, 10800)
+                self.assertEqual(monitor.sizing_target_seconds, 2400)
+                self.assertEqual(monitor.sizing_pilot_target_seconds, 900)
+                self.returned(monitor, batch, 200+i)
+            with self.assertRaises(StopIteration):
+                next(generator)
+        result = json.loads(Path(task.output().path).read_text())
+        profile = load_profile(result['profile'])
+        self.assertEqual(profile['datasets']['a']['target_runtime_seconds'], 900)
+        self.assertEqual(profile['datasets']['known']['entries_per_job'], 500000)
+
+    def test_failed_pilot_stops_before_main_profile_is_frozen(self):
+        generator = self.task.run();monitor = next(generator)
+        with patch.object(monitor, 'complete', return_value=False):
+            with self.assertRaisesRegex(RuntimeError, 'bulk preparation stopped'):
+                next(generator)
+        self.assertFalse(Path(self.task.output().path).exists())
+        self.assertFalse(Path(self.task._run_dir, 'job_sizing_selection.json').exists())
+
+    def test_already_profiled_datasets_do_not_submit_pilots(self):
+        import analysis_tasks
+        all_known = self.root/'all-known.json'
+        all_known.write_text(json.dumps({'schema_version': 1, 'defaults': {'entries_per_job': 1000}}))
+        task = analysis_tasks.RunSkimSizingPilots(**dict(self.options, partition_profile=str(all_known)))
+        generator = task.run()
+        with self.assertRaises(StopIteration):
+            next(generator)
+        self.assertEqual(json.loads(Path(task.output().path).read_text())['batches'], [])
+
+    def test_invalid_pilot_concurrency_fails_before_submission(self):
+        import analysis_tasks
+        task = analysis_tasks.RunSkimSizingPilots(**dict(self.options, sizing_pilot_parallel=0))
+        with self.assertRaisesRegex(ValueError, 'positive'):
+            task._prepare_plan()
 
 
 if __name__ == "__main__":

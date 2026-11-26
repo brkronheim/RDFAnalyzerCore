@@ -13,6 +13,7 @@ Key features
 - Preinstalled: ROOT (binary distribution), CMake, Boost, TBB, build-essential
 - Python 3.x + pip, with `numpy`, `numba`, and `pybind11` installed via pip
 - System libraries useful for building Python packages: OpenBLAS, LAPACK, gfortran
+- XRootD client headers and libraries for the default adaptor, plus GSL and xxHash for ROOT
 - GitHub Actions runner bundle included for convenience
 
 Why numpy/numba are included
@@ -20,23 +21,52 @@ Why numpy/numba are included
   DefineFromPointer integration). Installing them in the runner image avoids
   test-time network installs and ensures consistent test behavior.
 
-Build & run
+## Build and start the runners
 
-1. Build the image locally
+Run these commands from the repository root on the Docker host. Enable the
+system Docker service so it starts at boot, then check for existing runners.
 
-   docker build -t rdfanalyzer/gh-runner -f docker/gh-runner.Dockerfile .
+{% raw %}
+```bash
+sudo systemctl enable --now docker.service
+sudo docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+sudo docker build --pull -t gh-runner -f docker/gh-runner.Dockerfile docker
+```
+{% endraw %}
 
-2. Run the container (example)
+Set `GITHUB_PAT` to a token with repository Administration write permission
+before creating containers. Enter the token locally using `read` to keep it
+out of shell history. The launcher defaults to four runners. Pass the previous
+runner count explicitly if it differs.
 
-   docker run -d --name gh-runner \
-     -e GITHUB_PAT=<redacted> \
-     -e GITHUB_OWNER=<owner> \
-     -e GITHUB_REPO=<repo> \
-     --tmpfs /tmp \
-     --tmpfs /home/runner/_work:rw,uid=1000,gid=1000,exec \
-     rdfanalyzer/gh-runner
+```bash
+read -rsp 'GitHub runner PAT: ' GITHUB_PAT
+printf '\n'
+export GITHUB_PAT
+sudo --preserve-env=GITHUB_PAT bash docker/startupContainer.sh 4
+unset GITHUB_PAT
+```
 
-Notes
+To deploy the rebuilt image over existing `gh-runner-N` containers, confirm the
+runners are idle and pass `--force` before the count in the launcher command.
+This removes and recreates the matching containers. A regular launch updates
+the restart policy and starts existing matching containers.
+
+Docker's `always` restart policy brings the containers back at boot and after
+an ephemeral runner finishes a job. Each container requests a new registration
+token on startup, so its PAT must remain valid. Once started, check container
+logs and confirm the runners appear online in the repository's Actions settings.
+
+{% raw %}
+```bash
+systemctl is-enabled docker.service
+sudo docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' gh-runner-1
+sudo docker logs --tail 30 gh-runner-1
+```
+{% endraw %}
+
+## Image notes
+
 - The image installs `numpy` and `numba` via pip; using the Ubuntu-provided
   Python ensures the rest of the CI toolchain behaves like the runner host.
 - The Dockerfile sets `PYTHONPATH=$ROOTSYS/lib` so the system `python3` can

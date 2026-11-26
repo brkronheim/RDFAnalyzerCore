@@ -44,6 +44,9 @@ public:
    */
   std::string get(const std::string &key) const override;
 
+  /** Resolve a referenced file using CWD-first, main-config-directory fallback. */
+  std::string resolveConfigPath(const std::string &path) const override;
+
   /**
    * @brief Set a configuration value by key
    * @param key Configuration key
@@ -116,7 +119,6 @@ private:
 
   std::string_view trim(std::string_view s) const;
   void processTopLevelConfig(const std::string &configFile);
-  std::string resolveConfigPath(const std::string &path) const;
 };
 
 #endif // CONFIGURATIONMANAGER_H_INCLUDED

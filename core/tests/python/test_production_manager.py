@@ -150,7 +150,7 @@ class TestProductionManager(unittest.TestCase):
         for job_id in range(3):
             job_dir = self.work_dir / f"job_{job_id}"
             self.assertTrue(job_dir.exists())
-            self.assertTrue((job_dir / "job_config.txt").exists())
+            self.assertTrue((job_dir / "job_config.yaml").exists())
 
     def test_generated_remote_output_paths_include_process(self):
         """Remote (__orig_saveFile/__orig_metaFile) and manager job paths include process id suffix"""
@@ -161,10 +161,10 @@ class TestProductionManager(unittest.TestCase):
         self.assertTrue(job.output_path.endswith("output_0_0.root"))
         self.assertTrue(job.meta_output_path.endswith("output_0_meta_0.root"))
         # job_config on disk should contain the __orig_saveFile with the same suffix
-        cfg_text = (self.work_dir / 'job_0' / 'job_config.txt').read_text()
-        self.assertIn('__orig_saveFile=', cfg_text)
+        cfg_text = (self.work_dir / 'job_0' / 'job_config.yaml').read_text()
+        self.assertIn('__orig_saveFile:', cfg_text)
         self.assertIn('output_0_0.root', cfg_text)
-        self.assertIn('__orig_metaFile=', cfg_text)
+        self.assertIn('__orig_metaFile:', cfg_text)
         self.assertIn('output_0_meta_0.root', cfg_text)
 
     def test_generate_jobs_writes_float_int_files(self):
@@ -183,22 +183,24 @@ class TestProductionManager(unittest.TestCase):
 
         job_dir = self.work_dir / 'job_0'
         # floats.txt and ints.txt should exist and contain the provided lines
-        float_path = job_dir / 'floats.txt'
-        int_path = job_dir / 'ints.txt'
+        float_path = job_dir / 'floats.yaml'
+        int_path = job_dir / 'ints.yaml'
         self.assertTrue(float_path.exists(), 'floats.txt missing')
         self.assertTrue(int_path.exists(), 'ints.txt missing')
 
-        float_text = float_path.read_text().splitlines()
-        self.assertIn('normScale=3.14', float_text)
-        self.assertIn('sampleNorm=2.0', float_text)
+        from native_config_io import read_config
+        float_text = read_config(float_path)
+        self.assertEqual(float_text['normScale'], '3.14')
+        self.assertEqual(float_text['sampleNorm'], '2.0')
 
-        int_text = int_path.read_text().splitlines()
-        self.assertIn('type=42', int_text)
+        from native_config_io import read_config
+        int_text = read_config(int_path)
+        self.assertEqual(int_text['type'], '42')
 
-        # job_config.txt must reference the filenames (not embed the content)
-        cfg_text = (job_dir / 'job_config.txt').read_text()
-        self.assertIn('floatConfig=floats.txt', cfg_text)
-        self.assertIn('intConfig=ints.txt', cfg_text)
+        # job_config.yaml must reference the filenames (not embed the content)
+        cfg_text = (job_dir / 'job_config.yaml').read_text()
+        self.assertIn('floatConfig: floats.yaml', cfg_text)
+        self.assertIn('intConfig: ints.yaml', cfg_text)
 
     def test_generate_jobs_copies_base_float_and_int_files(self):
         """If the base config points to existing float/int files, they are copied into jobs."""
@@ -225,22 +227,24 @@ class TestProductionManager(unittest.TestCase):
         self.assertEqual(count, 1)
 
         job_dir = self.work_dir / 'job_0'
-        float_path = job_dir / 'floats.txt'
-        int_path = job_dir / 'ints.txt'
+        float_path = job_dir / 'floats.yaml'
+        int_path = job_dir / 'ints.yaml'
         self.assertTrue(float_path.exists(), 'floats.txt missing from job dir')
         self.assertTrue(int_path.exists(), 'ints.txt missing from job dir')
 
-        float_lines = float_path.read_text().splitlines()
-        self.assertIn('from_base=1.23', float_lines)
-        self.assertIn('sampleNorm=7.0', float_lines)
+        from native_config_io import read_config
+        float_lines = read_config(float_path)
+        self.assertEqual(float_lines['from_base'], '1.23')
+        self.assertEqual(float_lines['sampleNorm'], '7.0')
 
-        int_lines = int_path.read_text().splitlines()
-        self.assertIn('type=99', int_lines)
+        from native_config_io import read_config
+        int_lines = read_config(int_path)
+        self.assertEqual(int_lines['type'], '99')
 
-        # job_config.txt should reference the basename only
-        cfg_text = (job_dir / 'job_config.txt').read_text()
-        self.assertIn('floatConfig=floats.txt', cfg_text)
-        self.assertIn('intConfig=ints.txt', cfg_text)
+        # job_config.yaml should reference the basename only
+        cfg_text = (job_dir / 'job_config.yaml').read_text()
+        self.assertIn('floatConfig: floats.yaml', cfg_text)
+        self.assertIn('intConfig: ints.yaml', cfg_text)
             
     def test_state_persistence(self):
         """Test that state is saved and loaded correctly"""
@@ -375,11 +379,11 @@ class TestProductionManager(unittest.TestCase):
 
         test_dir = manager.create_test_job(0)
         self.assertTrue(test_dir.exists())
-        self.assertTrue((test_dir / 'submit_config.txt').exists())
+        self.assertTrue((test_dir / 'submit_config.yaml').exists())
 
         # Read the generated submit_config and assert it's a test config
         from submission_backend import read_config
-        cfg = read_config(str(test_dir / 'submit_config.txt'))
+        cfg = read_config(str(test_dir / 'submit_config.yaml'))
         self.assertEqual(cfg.get('batch'), 'False')
         self.assertEqual(cfg.get('threads'), '1')
         self.assertEqual(cfg.get('saveFile'), 'test_output.root')
@@ -468,6 +472,36 @@ class TestProductionManager(unittest.TestCase):
             # Should resubmit jobs 0 and 1 (both under 3 attempts)
             self.assertEqual(count, 2)
             
+    def test_sparse_retry_queues_selected_worker_and_records_actual_process(self):
+        manager = ProductionManager(self.config)
+        manager.generate_jobs(["a.root", "b.root", "c.root"])
+        self.assertEqual(manager._submit_htcondor([0, 1, 2], dry_run=True), 3)
+        original = self.work_dir / "condor_submit.sub"
+        original_script = self.work_dir / "condor_runscript.sh"
+        snapshots = [path.read_bytes() for path in [original, original_script]]
+        for job in manager.jobs.values():
+            job.status = JobStatus.VALIDATED
+        manager.jobs[2].status = JobStatus.FAILED
+        with patch("production_manager.subprocess.run") as run:
+            run.return_value.stdout = "1 job(s) submitted to cluster 42."
+            run.return_value.returncode = 0
+            self.assertEqual(manager.resubmit_failed(), 1)
+        executable, descriptor = run.call_args.args[0]
+        self.assertEqual(executable, "condor_submit")
+        self.assertNotEqual(Path(descriptor), original)
+        contents = Path(descriptor).read_text()
+        self.assertIn("queue RDFJobIndex in 2", contents)
+        self.assertIn("job_$(RDFJobIndex)/job_config.yaml", contents)
+        self.assertIn("CONDOR_PROC=$(RDFJobIndex)", contents)
+        self.assertIn("returned_$(Cluster)_$(Process)_job_config.yaml", contents)
+        transfers = next(line for line in contents.splitlines() if line.startswith("transfer_input_files"))
+        for source in transfers.partition("=")[2].strip().replace("$(RDFJobIndex)", "2").split(","):
+            self.assertTrue(Path(source).exists(), source)
+        self.assertEqual(manager.jobs[2].condor_job_id, "42.0")
+        self.assertEqual(manager.jobs[0].status, JobStatus.VALIDATED)
+        self.assertEqual(manager.jobs[1].status, JobStatus.VALIDATED)
+        self.assertEqual([path.read_bytes() for path in [original, original_script]], snapshots)
+
     def test_resubmit_respects_max_attempts(self):
         """Test that resubmit respects max attempts limit"""
         manager = ProductionManager(self.config)

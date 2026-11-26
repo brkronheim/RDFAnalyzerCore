@@ -2,6 +2,16 @@
 
 A powerful, config-driven framework for building physics analyses with ROOT RDataFrame.
 
+CMS support is an [optional separate checkout](docs/CMS_EXTENSION.md). Existing
+analyses continue to link `coreAll`; use `-DRDF_BUILD_EXTENSIONS=OFF` for a generic
+build. Combine and CombineHarvester integration remain available in core.
+
+[Run bundles](docs/RUN_BUNDLES.md) provide verified configuration snapshots,
+independent run collections, and shared execution/reduction identities.
+
+[Tag-and-probe helpers](docs/TAG_AND_PROBE.md) provide reusable denominator-pair
+sampling and trigger-object matching for compiled C++ and Python/RDataFrame.
+
 [![Documentation](https://img.shields.io/badge/docs-latest-blue.svg)](https://brkronheim.github.io/RDFAnalyzerCore/)
 [![ROOT](https://img.shields.io/badge/ROOT-6.30%2B-blue.svg)](https://root.cern/)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
@@ -19,6 +29,19 @@ RDFAnalyzerCore provides a core, analysis-agnostic framework for constructing an
 - **Statistical Analysis**: Optional CMS Combine integration for limit setting and fits
 
 ## Quick Start
+
+Choose the authoring path that fits your analysis:
+
+| Analysis code | Start here |
+|---|---|
+| Python with Numba kernels | [Installation and doctor](docs/PYTHON_INSTALLATION.md), then the [small installed tutorial](docs/PYTHON_TYPING_AND_TUTORIAL.md) |
+| Compiled C++, steered from Python | [Compiled workflow](docs/COMPILED_CPP_WORKFLOWS.md); the Python controller needs only the standard library |
+| Direct C++ executable | [Getting started](docs/GETTING_STARTED.md) and the existing Analyzer/manager APIs |
+
+All three paths retain native managers and explicit systematic choices. Python
+definitions and filters can be interleaved. Check the
+[compatibility table](docs/AUTHORING_COMPATIBILITY.md) before selecting optional
+batching or variable-axis features.
 
 ### NDHistogramManager
 Books and fills N-dimensional histograms with support for systematics, regions, and categories. Supports both manual histogram booking and config-driven histogram definitions.
@@ -38,26 +61,35 @@ analyzer.Filter("quality", isGood, {"jet_quality"});
 // Book histograms from config file (after all defines/filters)
 analyzer.bookConfigHistograms();
 
-// Save results
-analyzer.save();
+// Execute configured outputs
+analyzer.run();
 ```
 
-Config file format (`histograms.txt`):
-```
-name=pt_hist variable=jet_pt weight=event_weight bins=50 lowerBound=0.0 upperBound=500.0
+Histogram definition in `histograms.yaml`
+
+```yaml
+- name: pt_hist
+  variable: jet_pt
+  weight: event_weight
+  bins: 50
+  lowerBound: 0.0
+  upperBound: 500.0
 ```
 
 ## Installing
 Clone the repository:
 ```
-git clone git@github.com:brkronheim/RDFAnalyzerCore.git
+git clone --branch dev https://github.com/brkronheim/RDFAnalyzerCore.git
 cd RDFAnalyzerCore
-source env.sh  # On a CVMFS-backed host
-source build.sh
+source env.sh  # On a supported CVMFS-backed host
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt
+source build.sh -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 
-# Run example
-cd build/analyses/ExampleAnalysis
-./analysis cfg.yaml
+# Run the example from its source directory so relative config files resolve
+cd analyses/ExampleAnalysis
+../../build/analyses/ExampleAnalysis/analysis cfg.yaml
 ```
 
 **New to the framework?** Check out the [Getting Started Guide](docs/GETTING_STARTED.md).
@@ -67,7 +99,9 @@ cd build/analyses/ExampleAnalysis
 ### Core C++ Backbone
 
 - **[Architecture](docs/ARCHITECTURE.md)** - Core manager wiring, plugin lifecycle, and execution flow
+- **[Python source map](core/python/README.md)** - Analysis authoring, production workflows, and shared Python services
 - **[API Reference](docs/API_REFERENCE.md)** - Canonical `Analyzer` and interface APIs
+- [Analysis function catalog](docs/FUNCTION_CATALOG.md) covers native operations for C++ and Python, including object lookup, angular distances and selected momentum sums.
 - **[Plugin Development](docs/PLUGIN_DEVELOPMENT.md)** - Implementing C++ plugins via `IPluggableManager`
 - **[Doxygen Guide](docs/DOXYGEN_GUIDE.md)** - C++ documentation standards for headers and interfaces
 
@@ -75,8 +109,18 @@ cd build/analyses/ExampleAnalysis
 
 - **[Getting Started](docs/GETTING_STARTED.md)** - Installation and first steps
 - **[Configuration Reference](docs/CONFIG_REFERENCE.md)** - Complete config file documentation
+- Create YAML configurations and convert historical text jobs with the [YAML schema and migration guide](docs/YAML_CONFIG_SUPPORT.md).
+- Configure friends, inclusive actions and explicit skim selections using the [source and output contracts](docs/SOURCE_AND_OUTPUT_CONTRACTS.md).
+- Select an XRootD read policy and interpret its transfer counters in the [adaptor guide](docs/xrd-adaptor.md).
+- **[Generic Stitching](docs/STITCHING.md)** - Reusable counters, binning, and validation
+- **[Agent analysis walkthrough](docs/ANALYSIS_WALKTHROUGH.md)** - How to trace an RDFAnalyzer analysis, with ExampleAnalysis as a compact illustration
 - **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Building analyses step-by-step
 - **[Python Bindings](docs/PYTHON_BINDINGS.md)** - Using the framework from Python
+- **[Python Authoring](docs/PYTHON_AUTHORING.md)** - Typed settings and fluent analysis definitions
+- **[Compiled C++ with Python Steering](docs/COMPILED_CPP_WORKFLOWS.md)** - Lightweight local build/run control, artifact checks and file-backed logs
+- **[Authoring Compatibility](docs/AUTHORING_COMPATIBILITY.md)** - Runtime requirements, optional capabilities, migration and current acceptance
+- **[Installed typing checks](docs/PYRIGHT_ACCEPTANCE.md)** - Pinned Pyright client/tutorial acceptance and its limits
+- **[Checking an authoring installation](docs/AUTHORING_ACCEPTANCE.md)** - Capability checks and expected SDK example results
 - **[API Reference](docs/API_REFERENCE.md)** - Detailed API documentation
 
 ### Statistical Analysis
@@ -99,7 +143,7 @@ If you are reading docs for a specific role, start here:
 
 - **Developers (framework contributors)**: `docs/ARCHITECTURE.md`, `docs/API_REFERENCE.md`, `docs/PLUGIN_DEVELOPMENT.md`, `docs/DOXYGEN_GUIDE.md`
 - **Analyzers (analysis authors)**: `docs/GETTING_STARTED.md`, `docs/ANALYSIS_GUIDE.md`, `docs/CONFIG_REFERENCE.md`, `docs/CONFIG_HISTOGRAMS.md`, `docs/NUISANCE_GROUPS.md`
-- **Agents/automation tooling**: `docs/INDEX.md`, `docs/ERRORS_AND_TRACING.md`, `docs/CONFIGURATION_VALIDATION.md`, `docs/OUTPUT_SCHEMA.md`, `docs/VALIDATION_REPORTS.md`
+- **Agents/automation tooling**: [AGENTS.md](AGENTS.md), [analysis workflow skill](.agents/skills/rdfanalyzer-analysis/SKILL.md), [framework development skill](.agents/skills/rdfanalyzer-development/SKILL.md), and the [analysis walkthrough](docs/ANALYSIS_WALKTHROUGH.md); validation references are in `docs/INDEX.md`, `docs/CONFIGURATION_VALIDATION.md`, `docs/OUTPUT_SCHEMA.md`, and `docs/VALIDATION_REPORTS.md`.
 
 The docs are intentionally layered: `GETTING_STARTED` and `ANALYSIS_GUIDE` show workflow, while `API_REFERENCE` and headers in `core/interface/` are the source of truth for signatures and behavior.
 
@@ -112,11 +156,13 @@ The docs are intentionally layered: `GETTING_STARTED` and `ANALYSIS_GUIDE` show 
 
 **For Python bindings (optional):**
 - Python 3.8+
-- pybind11, numpy, numba (install with `pip install pybind11 numpy numba`)
+- Initialize the pybind11 submodule for the CMake build. Install the [Python authoring requirements](requirements-python.txt) in the interpreter matched to ROOT for NumPy arrays and Numba callbacks.
 
-**For LAW / Luigi workflows:**
+**For Snakemake production:** Install `requirements-snakemake.txt`. The [workflow guide](examples/snakemake/README.md) describes controller setup and worker dependencies.
+
+**For legacy LAW / Luigi workflows:**
 - Create and activate the repository-local virtualenv, then install the production requirements: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements-production.txt`
-- After that, `source law/env.sh` will reuse `.venv` automatically when it exists.
+- After that, `source core/python/law/env.sh` will reuse `.venv` automatically when it exists.
 - `xrdfs` must be available on `PATH` for XRootD file discovery workflows.
 
 **Self-hosted CI runner Dockerfile**
@@ -160,11 +206,10 @@ Manages ONNX machine learning models from any ML framework.
 - **See**: [ONNX Implementation Guide](docs/ONNX_IMPLEMENTATION.md)
 
 #### SofieManager
-Manages SOFIE (System for Optimized Fast Inference code Emit) models from ROOT TMVA.
-- Build-time compilation from ONNX for maximum performance
-- Zero runtime overhead (compiled C++ code)
-- Eliminates runtime model loading overhead compared to ONNX Runtime
-- Manual registration required (rebuild for model updates)
+Runs C++ inference generated by the standalone PyPI `sofie` package.
+- Generate a header from ONNX before building the analysis
+- Link the generated code with BLAS and deploy any separate weights
+- Register the callable in C++ and rebuild after model updates
 - **See**: [SOFIE Implementation Guide](docs/SOFIE_IMPLEMENTATION.md)
 
 #### CorrectionManager
@@ -187,23 +232,25 @@ Books and fills N-dimensional histograms.
 
 ### Configuration-Driven Design
 
-All framework behavior is controlled through text configuration files:
-- Main configuration: I/O, performance, plugin configs
-- Plugin configs: Model definitions, corrections, triggers
-- Output configs: Branch selection, histogram definitions
-- Analysis-local registries can also live in YAML when they are primarily data, such as the VHqq run-era payload and trigger map in `analyses/VHbbcc/VHqqRDF/cfg/year_settings.yaml`
+Configuration files hold I/O and performance settings, plugin settings, and output definitions. Analysis code defines physics behavior and constructs the managers it uses.
+
+- Main configuration: I/O, performance, and paths to manager configs
+- Plugin configs: Model definitions, corrections, trigger menus, and other manager data
+- Output configs: Branch selection and histogram definitions
+- Analysis-local registries can also live in YAML when they are primarily data. The [`ExampleAnalysis`](analyses/ExampleAnalysis/README.md) directory demonstrates how an analysis config references constants and histogram definitions; see the [walkthrough](docs/ANALYSIS_WALKTHROUGH.md) for a source-first trace of its behavior.
 
 **Example**:
-```
+```yaml
 # Main config
-fileList=data.root
-saveFile=output.root
-threads=-1
-bdtConfig=cfg/bdts.txt
-onnxConfig=cfg/onnx_models.txt
+# fileList supports glob patterns (wildcards) for input files, e.g.:
+fileList: /data/samples/nano_*.root
+saveFile: output.root
+threads: -1
+bdtConfig: cfg/bdts.yaml
+onnxConfig: cfg/onnx_models.yaml
 ```
 
-See [Configuration Reference](docs/CONFIG_REFERENCE.md) for complete documentation.
+See [Configuration Reference](docs/CONFIG_REFERENCE.md) for complete documentation, including details on glob/wildcard support for fileList.
 
 ## Installation and Building
 
@@ -211,28 +258,41 @@ See [Configuration Reference](docs/CONFIG_REFERENCE.md) for complete documentati
 
 ```bash
 # Clone repository
-git clone git@github.com:brkronheim/RDFAnalyzerCore.git
+git clone --branch dev https://github.com/brkronheim/RDFAnalyzerCore.git
 cd RDFAnalyzerCore
 
-# Setup environment
+# Set up ROOT and an ABI-matched Python environment
 source env.sh
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt
 
-# Build
-source build.sh
+# Initialize the core submodules and build
+source build.sh -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 ```
 
 ### Standalone ROOT Installation
 
-Ensure ROOT and CMake are available:
+See the [standalone ROOT instructions](docs/GETTING_STARTED.md#standalone-root-installation).
 
-```bash
-# Setup ROOT
-source <root-install>/bin/thisroot.sh
+### Build wrappers
 
-# Build
-cmake -S . -B build
-cmake --build build -j$(nproc)
-```
+All four wrappers build into the checkout's `build/` directory. They use the
+active ROOT environment when available and otherwise source `env.sh`. Extra
+CMake cache options override the wrapper defaults.
+
+| Script | Defaults |
+|---|---|
+| `build.sh` | CPU, tests enabled |
+| `buildFast.sh` | CPU, tests disabled |
+| `buildFastCombine.sh` | CPU with Combine and CombineHarvester, tests disabled |
+| `buildFull.sh` | CUDA, tests enabled. Enables Combine and CombineHarvester when the Combine repository is reachable. |
+
+For `buildFull.sh`, make a matching CUDA toolkit available through `PATH` or
+`CUDACXX`. GPU inference also requires the CUDA and cuDNN libraries supported by
+the [pinned ONNX Runtime package](docs/ONNX_IMPLEMENTATION.md#1-onnx-runtime-integration-cmake).
+Set `CMAKE_BUILD_PARALLEL_LEVEL` to override the default number of workers.
+Use direct CMake commands when building in a different directory.
 
 ### Build Options
 
@@ -273,35 +333,23 @@ See [Combine Integration Guide](docs/COMBINE_INTEGRATION.md) for complete statis
 
 ### Testing
 
-Create and activate a local Python virtual environment before running Python-focused tests. Use the same interpreter for both CTest and direct pytest runs when possible.
+From the repository root in the build environment, activate the same virtual
+environment used to configure CMake. Include the ROOT library directory so
+Python tests can import PyROOT.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-ci.txt pytest
-```
-
-Then run the full C++/Python suite through CTest:
-
-```bash
-cd build
-ctest --output-on-failure
-```
-
-Or run targeted suites directly from the canonical Python test directories:
 ```bash
 source .venv/bin/activate
-PYTHONPATH=core/python:core/python/law python -m pytest core/tests/python/ core/tests/law/ -q
+export PYTHONPATH="$ROOTSYS/lib${PYTHONPATH:+:$PYTHONPATH}"
+ctest --test-dir build --output-on-failure
 ```
 
-The C++ suite and Python binding smoke test now live under `core/tests/cpp/`.
+To run the Python and LAW test directories directly:
 
-If you rebuild or reconfigure after creating the virtual environment, prefer:
 ```bash
-cmake -S . -B build -DPython3_EXECUTABLE=.venv/bin/python
+PYTHONPATH="core/python:core/python/law:$PYTHONPATH" python -m pytest core/tests/python/ core/tests/law/ -q
 ```
 
-For a fast sanity check after edits, run `cd build && ctest --output-on-failure` and then `source .venv/bin/activate && PYTHONPATH=core/python:core/python/law python -m pytest core/tests/python/ core/tests/law/ -q`.
+The C++ suite and native Python binding smoke tests live under `core/tests/cpp/`.
 
 ## Adding Your Analysis
 
@@ -318,7 +366,7 @@ source build.sh
 
 # Run
 cd build/analyses/MyAnalysis
-./myanalysis config.txt
+./myanalysis config.yaml
 ```
 
 **Requirements for analysis repositories**:
@@ -376,6 +424,7 @@ Here's a minimal analysis using the framework:
 
 ```cpp
 #include <analyzer.h>
+#include <OnnxManager.h>
 
 int main(int argc, char **argv) {
     // Create analyzer from config file
@@ -400,11 +449,9 @@ int main(int argc, char **argv) {
         {"n_good_jets"}
     );
     
-    // Apply ML model (from config)
-    auto onnxMgr = analyzer.getPlugin<OnnxManager>("onnx");
-    if (onnxMgr) {
-        onnxMgr->applyAllModels();
-    }
+    // Register the optional ONNX manager, then apply configured models.
+    auto onnxMgr = OnnxManager::create(analyzer);
+    onnxMgr->applyAllModels();
     
     // Save outputs
     analyzer.run();
@@ -413,13 +460,15 @@ int main(int argc, char **argv) {
 }
 ```
 
-**Configuration** (`config.txt`):
-```
-fileList=data1.root,data2.root
-saveFile=output.root
-threads=-1
-onnxConfig=cfg/onnx_models.txt
-saveConfig=cfg/output_branches.txt
+**Configuration** (`config.yaml`):
+```yaml
+# fileList can be a comma-separated list or a glob pattern:
+fileList: data1.root,data2.root
+# A glob can also be supplied, e.g. /data/samples/nano_*.root
+saveFile: output.root
+threads: -1
+onnxConfig: cfg/onnx_models.yaml
+saveConfig: cfg/output_branches.yaml
 ```
 
 See [Analysis Guide](docs/ANALYSIS_GUIDE.md) for complete examples.
@@ -432,7 +481,7 @@ The framework can also be used from Python with high performance:
 import rdfanalyzer
 
 # Create analyzer from config file
-analyzer = rdfanalyzer.Analyzer("config.txt")
+analyzer = rdfanalyzer.Analyzer("config.yaml")
 
 # Define variables using C++ expressions (ROOT JIT)
 analyzer.Define("pt_gev", "pt / 1000.0", ["pt"])
@@ -452,7 +501,7 @@ analyzer.DefineFromPointer("pt_gev", func_ptr, "double(double)", ["pt"])
 
 # Apply filters and save
 analyzer.Filter("high_pt", "pt_gev > 25.0", ["pt_gev"])
-analyzer.save()
+analyzer.save()  # Python wrapper calls the C++ Analyzer::run()
 ```
 
 **Key Features:**
@@ -471,7 +520,7 @@ The framework supports multiple ML backends:
 
 - **ONNX**: Runtime evaluation of models from any framework (PyTorch, TensorFlow, scikit-learn)
 - **BDT**: FastForest-based boosted decision trees
-- **SOFIE**: Build-time compiled models for maximum performance
+- **SOFIE**: C++ inference generated with the standalone `sofie` package
 
 ### Plotting from Meta Output
 `PlottingUtility` can build compiled-ROOT stack plots directly from the meta output file. It supports:
@@ -487,27 +536,24 @@ All managers support:
 - Multi-output models
 - Thread-safe inference with ROOT ImplicitMT
 
-Execution entry points:
-- `save()` always writes the configured skim output and finalizes plugins/services.
-- `run()` conditionally writes skim output when `enableSkim=1|true|True`, saves ND histograms (if `histogramManager` is registered), and finalizes plugins/services.
+`Analyzer::run()` is the execution entry point. It writes a skim only when `enableSkim=1|true|True`, saves ND histograms when the `histogramManager` plugin is registered, and finalizes services/plugins and provenance.
 
 ### Systematic Uncertainties
 
 Built-in support for systematic variations:
 ```cpp
-sysMgr->registerSystematic("jes_up");
-sysMgr->registerSystematic("jes_down");
+auto& sysMgr = analyzer.getSystematicManager();
+sysMgr.registerSystematic("jes", {"jet_pt"});
 
 analyzer.Define("corrected_pt",
-    [](float pt, const std::string& sys) {
-        if (sys == "jes_up") return pt * 1.02;
-        if (sys == "jes_down") return pt * 0.98;
-        return pt;
-    },
-    {"jet_pt"},
-    sysMgr
+    [](float pt) { return pt * 1.02f; },
+    {"jet_pt"}
 );
 ```
+
+The manager maps conventional `jet_pt_jesUp` and `jet_pt_jesDown` input
+columns into varied definitions. The callable takes the input columns; it does
+not receive a systematic-name argument.
 
 Histograms automatically include systematic axes.
 
@@ -538,49 +584,18 @@ Features:
 - [Systematics Example](docs/DATACARD_SYSTEMATICS_EXAMPLE.md) for creating histograms with systematic variations
 - [Combine Integration](docs/COMBINE_INTEGRATION.md) for complete statistical analysis workflow
 
-### Production Manager
+### Production with Snakemake
 
-Unified production management system for batch analyses.
-
-Legacy compatibility submission scripts have been removed. New production workflows should use LAW discovery tasks to generate job configs and `core/python/production_monitor.py` / `core/python/production_manager.py` for submission, monitoring, validation, and resubmission.
-
-Recommended workflow:
+Install `requirements-snakemake.txt` in the controller environment. Configure one or more eras, then select a stage and preview the jobs before execution.
 
 ```bash
-# Discover files via Rucio and build job configs
-law run GetRucioFileList --submit-config analyses/myAnalysis/cfg/submit_config.txt --name myRun
-law run SkimTask --submit-config analyses/myAnalysis/cfg/submit_config.txt --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml --name mySkimRun --file-source rucio --file-source-name myRun --exe build/analyses/MyAnalysis/myanalysis
-
-# Monitor and validate
-python core/python/production_monitor.py monitor --name mySkimRun
-python core/python/production_monitor.py validate --name mySkimRun
-python core/python/production_monitor.py resubmit --name mySkimRun
+snakemake -s examples/snakemake/Snakefile --configfile campaign.yaml --cores 4 --dry-run production
+snakemake -s examples/snakemake/Snakefile --configfile campaign.yaml --cores 4 production
 ```
 
-Features:
-- Unified job lifecycle management (generation, submission, monitoring, validation)
-- State persistence (resilient to connection failures)
-- Real-time progress monitoring
-- Automatic output validation
-- Failure recovery and resubmission
-- HTCondor and DASK backend support
-- Works in AFS/EOS storage areas
+Local, Dask and HTCondor workers share the partition planner and verified output index. For completed inputs, use `examples/snakemake/DownstreamSnakefile` to run plotting, datacards, fits or diagnostics independently. The [Snakemake guide](examples/snakemake/README.md) covers stage targets, saved products, site settings and examples.
 
-**See**: [Production Manager Guide](docs/PRODUCTION_MANAGER.md) for complete documentation.
-
-### HTCondor Submission
-
-Legacy batch submission scripts have been removed. Batch submission now uses LAW discovery tasks and the production manager toolchain.
-
-Features:
-- Rucio-based dataset discovery via LAW
-- Open Data discovery via LAW tasks
-- Automatic input/output staging
-- XRootD support
-- Shared executable staging
-- Configuration validation
-
-**See**: [Batch Submission Guide](docs/BATCH_SUBMISSION.md) for complete documentation.
+Existing LAW campaigns remain under their original controller through completion. Follow the [batch compatibility guide](docs/BATCH_SUBMISSION.md#legacy-law-workflows) for those runs.
 
 ### Custom ROOT Dictionaries
 
@@ -615,7 +630,7 @@ For new plugins, see [Plugin Development Guide](docs/PLUGIN_DEVELOPMENT.md).
 
 ## License
 
-This project is licensed under the terms specified in the repository.
+RDFAnalyzerCore is distributed under the [MIT License](LICENSE). Third-party components retain their own licenses and notices.
 
 ## Acknowledgments
 

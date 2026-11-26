@@ -29,11 +29,11 @@ struct FakeTaggerManager {
 TEST(WorkingPointRecipe, DefineConstantColumnsWritesFallbackValues) {
   ChangeToTestSourceDir();
 
-  Analyzer analyzer("cfg/test_data_config.txt");
+  Analyzer analyzer("cfg/test_data_config.yaml");
   rdfanalysis::weights::defineConstantColumns(
       analyzer, {"w_nominal", "w_up", "w_down"}, 1.0f);
 
-  auto df = analyzer.getDF();
+  auto df = analyzer.getDataFrameUnsafe();
   auto nominal = df.Take<float>("w_nominal");
   auto up = df.Take<float>("w_up");
   auto down = df.Take<float>("w_down");

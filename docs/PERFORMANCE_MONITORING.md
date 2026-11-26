@@ -4,14 +4,20 @@ RDFAnalyzerCore automatically records execution metrics and classifies failures 
 
 For CPU hotspot analysis of direct RDF jobs, prefer Linux `perf` over ad hoc wall-time measurements. The framework has non-trivial startup overhead from configuration parsing, plugin setup, histogram booking, and RDataFrame graph construction, so sampling should target the steady-state event loop rather than process startup.
 
+Native builds with [audited ROOT headers](ROOT_REGISTRY_OPTIMIZATION.md) automatically compact each
+Define's private column registry. See [ROOT registry optimization](ROOT_REGISTRY_OPTIMIZATION.md)
+for support checks, output provenance and the per-process rollback switch.
+The recorded registry counters describe construction operations; use process
+RSS to measure the resulting memory savings.
+
 ---
 
 ## Overview
 
 Two complementary systems work together:
 
-- **`PerformanceRecorder`** (in `core/python/law/performance_recorder.py`) – a context manager that measures wall-clock time, peak subprocess RSS and data throughput, writing the results to a `.perf.json` sidecar file co-located with the branch output.
-- **Failure handler** (in `core/python/law/failure_handler.py`) – classifies each exception into a `FailureCategory`, consults a per-category `RetryPolicy`, and accumulates all failure events in a `DiagnosticSummary` that is printed at the end of the run.
+- **`PerformanceRecorder`** (in `core/python/rdfproduction/performance.py`) – a context manager that measures wall-clock time, peak subprocess RSS and data throughput, writing the results to a `.perf.json` sidecar file co-located with the branch output.
+- **Failure handler** (in `core/python/rdfproduction/retry.py`) – classifies each exception into a `FailureCategory`, consults a per-category `RetryPolicy`, and accumulates all failure events in a `DiagnosticSummary` that is printed at the end of the run.
 
 Both systems are integrated transparently into `DaskWorkflowProxy` (`core/python/law/workflow_executors.py`).  Task authors typically do not need to call them directly.
 
@@ -90,14 +96,14 @@ Write metrics to `path` as a pretty-printed JSON file.  Parent directories are c
 
 ### `estimate_job_input_bytes(job_dir)`
 
-Estimate the total size of input ROOT files for a prepared job by reading the `fileList` key from `submit_config.txt` inside `job_dir`.  Remote XRootD paths (not accessible on the local filesystem) are skipped.
+Estimate the total size of input ROOT files for a prepared job by reading the `fileList` key from `submit_config.yaml` inside `job_dir`. Archived jobs may use `submit_config.txt`.  Remote XRootD paths (not accessible on the local filesystem) are skipped.
 
 ```python
 from performance_recorder import estimate_job_input_bytes
 total = estimate_job_input_bytes("/eos/cms/store/user/me/jobs/job_3")
 ```
 
-Returns `0` when `submit_config.txt` is absent, malformed, or all files are remote.
+Returns `0` when the job configuration is absent or malformed, or all files are remote.
 
 ### `perf_path_for(output_path)`
 
@@ -197,24 +203,24 @@ This improves call stacks for RDFAnalyzerCore itself. It will not recover symbol
 Start the job in its own shell and log to a file:
 
 ```bash
-./build/analyses/VHbbcc/VHqqRDF/vhqq_analysis \
-    analyses/VHbbcc/VHqqRDF/cfg/local_2024_2mu_example.yaml \
-    > /tmp/vhqq_run.log 2>&1 &
-echo $! > /tmp/vhqq.pid
+./build/analyses/MyAnalysis/my_analysis \
+    analyses/MyAnalysis/cfg/local.yaml \
+    > /tmp/analysis_run.log 2>&1 &
+echo $! > /tmp/analysis.pid
 ```
 
 Wait until startup is over and the log shows progress lines from the event loop, then attach `perf`:
 
 ```bash
-perf record -F 99 -g -p "$(cat /tmp/vhqq.pid)" -o /tmp/vhqq.perf.data -- sleep 30
-perf report --stdio -i /tmp/vhqq.perf.data --sort comm,dso,symbol | head -n 120
+perf record -F 99 -g -p "$(cat /tmp/analysis.pid)" -o /tmp/analysis.perf.data -- sleep 30
+perf report --stdio -i /tmp/analysis.perf.data --sort comm,dso,symbol | head -n 120
 ```
 
 For top-level counters instead of samples:
 
 ```bash
 perf stat -e task-clock,cycles,instructions,branches,branch-misses,cache-misses \
-    -p "$(cat /tmp/vhqq.pid)" -- sleep 30
+    -p "$(cat /tmp/analysis.pid)" -- sleep 30
 ```
 
 ### RDFAnalyzerCore-specific guidance
@@ -226,18 +232,9 @@ perf stat -e task-clock,cycles,instructions,branches,branch-misses,cache-misses 
 
 ### Feature-toggle comparisons
 
-For profiling studies, expose analysis features through config switches instead of editing code between runs. In VHqqRDF, the DNN path supports:
-
-```yaml
-vhqqEnableDNN: "true"
-vhqqRunDNNOnlyInSignalRegion: "true"
-vhqqDnnDisabledValue: "-1.0"
-```
-
-- `vhqqEnableDNN=false` disables inference entirely and fills the score with `vhqqDnnDisabledValue`.
-- `vhqqRunDNNOnlyInSignalRegion=true` only runs inference for events that pass the reconstructed signal-region selection.
-
-This makes it straightforward to compare `perf` output with and without the model while keeping the same analysis graph and output schema.
+Compare expensive analysis features through analysis-owned configuration switches.
+Keep input events, threading, graph and output schema consistent across runs;
+record the selected configuration alongside the profiling results.
 
 ---
 

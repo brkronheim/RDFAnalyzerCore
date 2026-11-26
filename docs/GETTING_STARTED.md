@@ -18,65 +18,104 @@ This guide will help you get up and running with RDFAnalyzerCore quickly — fro
 ### 1. Clone the Repository
 
 ```bash
-git clone git@github.com:brkronheim/RDFAnalyzerCore.git
+git clone --branch dev https://github.com/brkronheim/RDFAnalyzerCore.git
 cd RDFAnalyzerCore
 ```
 
 ### 2. Set Up Environment
 
-On a CVMFS-backed HEP host such as lxplus, cmsconnect, or a site-managed analysis node:
+On a CVMFS-backed x86-64 EL9 host or in the matching container, run:
 ```bash
 source env.sh
 ```
 
 This script sets up ROOT and other required dependencies from CVMFS.
+The default is ROOT 6.42.00-rc1. See the [ROOT upgrade notes](ROOT_6_42_UPGRADE.md)
+for the version reported by ROOT, rebuild instructions and the stable override.
 
-If you are using a standalone ROOT installation instead, source that environment before building.
+For a machine without CVMFS, follow the [standalone ROOT build](#standalone-root-installation).
+
+Create the test environment before configuring CMake so the build and tests
+select the same Python interpreter.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt
+```
+
+To enable CMS, follow the [CMS extension setup](CMS_EXTENSION.md#download-and-build)
+for the SSH checkout and build commands.
 
 ### 3. Build the Framework
 
 ```bash
-source build.sh
+source build.sh -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 ```
 
 This will:
-- Configure CMake with the appropriate presets
+- Initialize the pinned core Git submodules recursively
+- Configure a Release build in `build/` with the defaults used by `build.sh`
 - Download ONNX Runtime automatically
 - Build the core framework
 - Discover and build any analyses in the `analyses/` directory
 
 The build artifacts will be placed in the `build/` directory.
 
-To verify your build, run:
+To run the registered tests from the repository root:
 
 ```bash
-cd build
-ctest --output-on-failure
+export PYTHONPATH="$ROOTSYS/lib${PYTHONPATH:+:$PYTHONPATH}"
+source test.sh
 ```
 
 ### 4. Run the Example Analysis
 
 ```bash
 cd analyses/ExampleAnalysis
-../../build/analyses/ExampleAnalysis/analysis cfg.txt
+../../build/analyses/ExampleAnalysis/analysis cfg.yaml
 ```
 
-This runs a Z→μμ analysis on ATLAS Open Data.
+This runs the Z→μμ example on ATLAS Open Data. Its configured inputs are remote EOS files, so you need XRootD access or must replace `fileList` in `cfg.yaml` with accessible ROOT files. The config sets `enableSkim: false`, so this run does not write an event tree to `saveFile`; `saveConfig: output.yaml` is used only if skim writing is enabled. The booked histograms are written to `Output/ZMuMuL_meta.root`, derived from `saveFile` because this config does not set `metaFile`.
+
+## Standalone ROOT Installation
+
+Use a standalone ROOT installation with matching Python, Boost and the XRootD
+development package. Set `XROOTD_ROOT` to the XRootD prefix if CMake cannot find it.
+
+```bash
+# Setup ROOT
+source /path/to/root/bin/thisroot.sh
+git submodule update --init --recursive -- core/extern
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-ci.txt
+
+cmake -S . -B build -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+cmake --build build -j$(nproc)
+```
 
 ## Understanding the Output
 
-The framework produces two types of output:
+`Analyzer::run()` executes registered plugin hooks and writes the outputs requested by the config and analysis:
 
-1. **Skim Output** (`saveFile`): Event-level ROOT file with selected branches
-2. **Metadata/Histogram Output** (`metaFile`): Histograms, counters, and analysis metadata
+- **Skim output** (`saveFile`): An event-level ROOT file is written only when `enableSkim` is set to `true`, `True`, or `1`. `saveConfig` controls its branches; without `saveConfig`, the full dataframe is snapshotted.
+- **Metadata output** (`metaFile`): Configured histogram managers and services write histograms, counters, and metadata here. If `metaFile` is omitted, the framework derives a sibling path by inserting `_meta` before the `saveFile` extension.
 
-Output locations are specified in your `cfg.txt` configuration file.
+Output locations and skim behavior are specified in the main configuration file.
 
 ---
 
 ## Your First Analysis — Complete Walkthrough
 
-This section walks you through creating a complete working analysis from scratch. The structure mirrors `analyses/ExampleAnalysis/`.
+This section walks you through creating a complete working analysis from scratch. It uses the same YAML document shapes as `analyses/ExampleAnalysis/`.
+
+Start this walkthrough from the repository root. If you just ran the example
+analysis in Quick Start, return from `analyses/ExampleAnalysis` first:
+
+```bash
+cd ../..
+```
 
 ### Step 1: Create Your Analysis Directory
 
@@ -116,51 +155,80 @@ target_link_libraries(myAnalysis
 
 > **Note**: Do not add a `cmake_minimum_required` or `project()` call — the top-level `CMakeLists.txt` handles that. Just define your target directly.
 
-### Step 3: Create the Main Config File (`cfg.txt`)
+### Step 3: Create the Main Config File (`cfg.yaml`)
 
-The config file tells the framework where to find input data, where to write output, and which plugins to activate.
+The config file tells the framework where to find input data and outputs and gives paths to configuration files used by the analysis or its plugins. Plugins themselves are constructed and registered by analysis code.
 
-```
-# cfg.txt — Main analysis configuration
-saveTree=Events
-threads=-1
-saveFile=output/skim.root
-fileList=/path/to/your/data.root
-histogramConfig=histograms.txt
+```yaml
+# cfg.yaml — Main analysis configuration
+saveTree: Events
+threads: -1
+saveFile: output/skim.root
+metaFile: output/meta.root
+enableSkim: true
+fileList: /path/to/your/data.root
+histogramConfig: histograms.yaml
+floatConfig: floats.yaml
 ```
 
 Key options:
 
 | Key | Description |
 |-----|-------------|
-| `fileList` | Comma-separated list of input ROOT files (supports `xrootd://` paths) |
-| `saveFile` | Output path for the event-level skim ROOT file |
+| `fileList` | Comma-separated list of input ROOT files (including `root://` URLs) |
+| `saveFile` | Output path for the event-level skim ROOT file when `enableSkim` is true |
+| `enableSkim` | Set to `true`, `True`, or `1` to write an event-level skim during `run()` |
+| `metaFile` | Optional output path for histograms and metadata; defaults to a sibling of `saveFile` with `_meta` before the extension |
 | `saveTree` | Name of the TTree to write in the skim file |
 | `threads` | Number of threads (`-1` = all available) |
 | `histogramConfig` | Path to the histogram definitions file |
+| `floatConfig` | Path to a file defining float constants used by analysis code or histogram weights |
 | `treeList` | Comma-separated list of input TTrees to process |
 | `antiglobs` | File patterns to exclude from auto-discovered file lists |
 
 For a complete reference, see [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md).
 
-### Step 4: Create the Histogram Configuration (`histograms.txt`)
+### Step 4: Create the Histogram Configuration (`histograms.yaml`)
 
-Each line defines one histogram using `key=value` pairs:
+Each mapping in the sequence defines one histogram.
 
-```
-# name=<id> variable=<column> weight=<weight_col> bins=<N> lowerBound=<lo> upperBound=<hi> label=<axis label>
+```yaml
 
-name=ZBosonMass     variable=ZBosonMass     weight=normScale bins=60 lowerBound=70.0  upperBound=110.0 label=Z Boson Mass [GeV]
-name=LeadingMuonPt  variable=LeadingMuonPt  weight=normScale bins=50 lowerBound=20.0  upperBound=150.0 label=Leading Muon p_{T} [GeV]
-name=SubleadingMuonPt variable=SubleadingMuonPt weight=normScale bins=50 lowerBound=20.0 upperBound=150.0 label=Subleading Muon p_{T} [GeV]
+- name: ZBosonMass
+  variable: ZBosonMass
+  weight: normScale
+  bins: 60
+  lowerBound: 70.0
+  upperBound: 110.0
+  label: Z Boson Mass [GeV]
+- name: LeadingMuonPt
+  variable: LeadingMuonPt
+  weight: normScale
+  bins: 50
+  lowerBound: 20.0
+  upperBound: 150.0
+  label: Leading Muon p_{T} [GeV]
+- name: SubleadingMuonPt
+  variable: SubleadingMuonPt
+  weight: normScale
+  bins: 50
+  lowerBound: 20.0
+  upperBound: 150.0
+  label: Subleading Muon p_{T} [GeV]
 ```
 
 - `variable` must match a column name defined via `Define()` (or present in the input TTree).
 - `weight` is an optional event-weight column (omit the field to use no weight).
 
+Because these histogram examples use `normScale` as a weight, create `floats.yaml` beside the config with a definition for that column:
+
+```yaml
+normScale: 1.0
+```
+
 ### Step 5: Write Your Analysis Code (`analysis.cc`)
 
-Below is a complete, self-contained example based on the real `ExampleAnalysis`. It selects Z→μμ candidates and books histograms using `NDHistogramManager`.
+Below is a complete, self-contained example following the selection and histogram-booking pattern in `ExampleAnalysis`. It uses the tutorial's YAML `cfg.yaml` and `histograms.yaml` files.
 
 ```cpp
 #include "analyzer.h"
@@ -223,14 +291,14 @@ Float_t getSubleadingMuonPt(ROOT::VecOps::RVec<Int_t> &goodMuons,
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-        std::cerr << "Usage: myAnalysis <cfg.txt>" << std::endl;
+        std::cerr << "Usage: myAnalysis <cfg.yaml>" << std::endl;
         return 1;
     }
 
     // 1. Create the Analyzer from your config file
     auto an = Analyzer(argv[1]);
 
-    // 2. Attach the NDHistogramManager plugin (reads histogramConfig from cfg.txt)
+    // 2. Attach the NDHistogramManager plugin (reads histogramConfig from cfg.yaml)
     auto histManager = std::make_unique<NDHistogramManager>(
         an.getConfigurationProvider());
     an.addPlugin("histogramManager", std::move(histManager));
@@ -259,11 +327,11 @@ int main(int argc, char **argv) {
       ->Define("LeadingMuonPt",   getLeadingMuonPt,   {"goodMuons", "AnalysisMuonsAuxDyn.pt"})
       ->Define("SubleadingMuonPt",getSubleadingMuonPt,{"goodMuons", "AnalysisMuonsAuxDyn.pt"});
 
-    // 4. Book histograms declared in histograms.txt
+    // 4. Book histograms declared in histograms.yaml
     an.bookConfigHistograms();
 
     // 5. Execute the dataframe and write all output
-    an.save();
+    an.run();
 
     return 0;
 }
@@ -273,18 +341,21 @@ int main(int argc, char **argv) {
 
 | Concept | What it does |
 |---------|-------------|
-| `Analyzer(argv[1])` | Reads `cfg.txt` and sets up the ROOT RDataFrame |
+| `Analyzer(argv[1])` | Reads `cfg.yaml` and sets up the ROOT RDataFrame |
 | `addPlugin(...)` | Attaches a plugin (e.g. `NDHistogramManager`) to the analysis |
 | `Define(name, func, cols)` | Creates a new derived column from existing branches |
 | `Filter(name, func, cols)` | Applies a boolean selection; events failing are dropped |
 | `bookConfigHistograms()` | Reads `histogramConfig` and books all histograms in one call |
-| `save()` | Triggers event loop execution and writes skim + histogram files |
+| `run()` | Runs plugin hooks, conditionally writes the skim, saves registered ND histograms, and finalizes services and provenance |
 
 ### Step 6: Build the Analysis
 
-From the repository root, run a full build. CMake will automatically discover your new analysis directory:
+The previous steps leave the shell in `analyses/MyFirstAnalysis`. Return to
+the repository root before running `build.sh`; CMake discovers your analysis
+directory during configuration:
 
 ```bash
+cd ../..
 source build.sh
 ```
 
@@ -296,26 +367,32 @@ For faster incremental rebuilds, you can skip the test suite:
 
 ### Step 7: Run the Analysis
 
-Always run the analysis executable from the directory containing `cfg.txt` so
-that relative paths in the config resolve correctly:
+Run from the analysis directory when your input or output paths are relative,
+so those paths resolve from the expected location. Referenced config files are
+resolved from the working directory when present, then from the main config's
+directory:
 
 ```bash
+# Return to the analysis directory so relative paths in cfg.yaml resolve there.
 cd analyses/MyFirstAnalysis
-../../build/analyses/MyFirstAnalysis/myAnalysis cfg.txt
+../../build/analyses/MyFirstAnalysis/myAnalysis cfg.yaml
 ```
 
-The executable always takes one argument: the path to `cfg.txt`.
+The executable always takes one argument: the path to `cfg.yaml`.
 
 ### Step 8: Examine the Output
 
-After a successful run you will find two ROOT files:
+With the example config above (`enableSkim=true` and an explicit `metaFile`),
+the run writes these ROOT files. The skim is written only when `enableSkim` is
+enabled, and histogram output requires a registered histogram manager with
+booked histograms:
 
 | File | Contents |
 |------|---------|
 | `output/skim.root` | Flat TTree (`Events`) with all saved branches for selected events |
-| `output/meta.root` (if configured) | Histograms, cutflow counter, and analysis metadata |
+| `output/meta.root` | Histograms and metadata/counters produced by configured managers and services |
 
-Open them with ROOT:
+Open the skim with ROOT when it was enabled:
 ```bash
 root -l output/skim.root
 # In the ROOT prompt:
@@ -333,34 +410,41 @@ A typical analysis uses up to four configuration files:
 analyses/MyFirstAnalysis/
 ├── analysis.cc        ← C++ analysis code
 ├── CMakeLists.txt     ← build target definition
-├── cfg.txt            ← main config (I/O paths, plugins, options)
-├── histograms.txt     ← histogram definitions (variable, bins, range)
+├── cfg.yaml            ← main config (I/O paths, plugins, options)
+├── histograms.yaml     ← histogram definitions (variable, bins, range)
+├── floats.yaml         ← float constants such as normScale
 └── datasets.yaml      ← (optional) dataset manifest for batch processing
 ```
 
-### `cfg.txt` — Main Configuration
+### `cfg.yaml` — Main Configuration
 
 Controls all runtime behaviour: input files, output paths, thread count, and which histogram/correction/ML config files to load.
 
-```
-saveTree=Events
-threads=-1
-saveFile=output/skim.root
-fileList=/path/to/file1.root,/path/to/file2.root
-histogramConfig=histograms.txt
+```yaml
+saveTree: Events
+threads: -1
+saveFile: output/skim.root
+fileList: /path/to/file1.root,/path/to/file2.root
+histogramConfig: histograms.yaml
 ```
 
-### `histograms.txt` — Histogram Definitions
+### `histograms.yaml` — Histogram Definitions
 
-One histogram per line, using `key=value` pairs:
+Each mapping in the sequence defines one histogram.
 
-```
-name=ZBosonMass variable=ZBosonMass weight=normScale bins=60 lowerBound=70.0 upperBound=110.0 label=Z Boson Mass [GeV]
+```yaml
+- name: ZBosonMass
+  variable: ZBosonMass
+  weight: normScale
+  bins: 60
+  lowerBound: 70.0
+  upperBound: 110.0
+  label: Z Boson Mass [GeV]
 ```
 
 ### `datasets.yaml` — Dataset Manifest (batch processing)
 
-Used by the LAW workflow manager to describe collections of datasets:
+Used by the production workflow to describe collections of datasets:
 
 ```yaml
 lumi: 59740.0
@@ -386,7 +470,7 @@ datasets:
    mkdir MyAnalysis && cd MyAnalysis
    ```
 
-2. **Add the four required files**: `CMakeLists.txt`, `cfg.txt`, `histograms.txt`, `analysis.cc`
+2. **Add the four required files**: `CMakeLists.txt`, `cfg.yaml`, `histograms.yaml`, `analysis.cc`
 
 3. **Build everything from the repo root**
    ```bash
@@ -397,7 +481,7 @@ datasets:
 4. **Run your analysis from the config directory**
    ```bash
    cd analyses/MyAnalysis
-   ../../build/analyses/MyAnalysis/myAnalysis cfg.txt
+   ../../build/analyses/MyAnalysis/myAnalysis cfg.yaml
    ```
 
 5. **Iterate**: Edit `analysis.cc`, then rebuild with `(cd build && make -j$(nproc))`
@@ -405,46 +489,24 @@ datasets:
 ### Incremental Development Tips
 
 - Rebuild incrementally with `(cd build && make -j$(nproc))` (faster than re-running `build.sh`).
-- Use `source cleanBuild.sh` when you add new files or change `CMakeLists.txt`.
-- Always run the executable from the analysis directory so relative paths in `cfg.txt` resolve correctly.
-- Set `threads=1` in `cfg.txt` while debugging to get deterministic output and cleaner stack traces.
-- Use `source buildTest.sh` to build and run the unit test suite.
+- From the repository root, use `source cleanBuild.sh` to remove `build/` and configure a clean build after major CMake changes.
+- Run from the analysis directory when your input/output paths are relative; referenced config files also fall back to the main config's directory.
+- Set `threads=1` in `cfg.yaml` while debugging to get deterministic output and cleaner stack traces.
+- From the repository root, use `source test.sh` to rerun the registered test suite.
 
 ---
 
 ## Running with Batch Processing
 
-Once your analysis works locally, scale it up to many datasets using the LAW workflow manager included in `core/python/law/`.
+Once your analysis works locally, create a Snakemake campaign for the datasets and executable you want to run. From the repository root you can first preview the tracked example.
 
-### Quick Batch Submission with `SkimTask`
+```bash
+snakemake --snakefile examples/snakemake/Snakefile \
+  --configfile examples/snakemake/fixtures/campaign.yaml \
+  --cores 2 --dry-run --printshellcmds
+```
 
-1. **Source the LAW environment**
-   ```bash
-   source core/python/law/env.sh
-   ```
-
-2. **Index available tasks**
-   ```bash
-   law index
-   ```
-
-3. **Submit your analysis as a batch job**
-   ```bash
-   law run SkimTask \
-     --exe ./build/analyses/MyFirstAnalysis/myAnalysis \
-     --name myRun \
-     --dataset-manifest analyses/MyFirstAnalysis/datasets.yaml \
-         --submit-config core/python/law/submit_config.txt \
-         --workflow htcondor
-   ```
-
-`SkimTask` is the common entrypoint across execution modes:
-
-- `--workflow local` runs branches locally.
-- `--workflow dask` sends prepared jobs to Dask workers.
-- `--workflow htcondor` delegates to the concrete skim submission chain and creates per-dataset Condor bundles under `skimRun_<name>/condor_submissions/`.
-
-For delegated HTCondor runs, submit-side logs live under each dataset bundle's `condor_logs/` directory. If a job is held during input transfer, you may only see the `.log` file because `stdout` and `stderr` are created only after the payload starts.
+The fixture uses a demonstration bundle. For production, configure your own executable, dataset manifest, analysis YAML and output locations using the [Snakemake workflow guide](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/examples/snakemake/README.md). It covers local, Dask and HTCondor execution and consuming existing products from an individual stage.
 
 ---
 
@@ -468,7 +530,7 @@ RDFAnalyzerCore/
 │           └── myAnalysis   ← your compiled executable
 ├── core/
 │   ├── python/
-│   │   └── law/         # LAW batch-processing workflow
+│   │   └── law/         # compatibility adapters for existing LAW campaigns
 ├── docs/                # Documentation
 ├── cmake/               # CMake helper modules
 └── README.md            # Main technical documentation
@@ -477,6 +539,10 @@ RDFAnalyzerCore/
 ---
 
 ## Common Issues
+
+For detailed diagnostics, see [Errors and Tracing](ERRORS_AND_TRACING.md),
+[Configuration Validation](CONFIGURATION_VALIDATION.md),
+[Output Schema](OUTPUT_SCHEMA.md), and [Batch Submission](BATCH_SUBMISSION.md).
 
 ### Build Fails with ROOT Not Found
 
@@ -489,18 +555,21 @@ source <root-install>/bin/thisroot.sh  # Standalone ROOT installation
 
 ### ONNX Runtime Download Fails
 
-The build automatically downloads ONNX Runtime from GitHub Releases. If this fails:
-- Check your internet connection and proxy settings
-- On restricted clusters, download manually and place in `core/extern/`
+The build downloads ONNX Runtime from GitHub Releases. If the build host cannot
+reach that service, download and extract the runtime separately, then configure
+CMake with `-DONNXRUNTIME_ROOT_DIR=/path/to/onnxruntime`. That directory must
+contain `include/` and `lib/` subdirectories.
 
 ### Analysis Not Found During Build
 
 Analyses are auto-discovered by CMake. Your analysis directory must:
 - Be located directly under `analyses/`
 - Contain a valid `CMakeLists.txt`
-- Be tracked by Git (committed, or registered via `.gitmodules` for submodules)
 
-Run `source cleanBuild.sh` to fully reconfigure and rebuild.
+Analysis directories are discovered when they are directly under `analyses/`
+and contain a `CMakeLists.txt`; Git tracking is not required. If you add or
+change CMake files, run `source cleanBuild.sh` from the repository root to
+remove the existing build tree and configure/build again.
 
 ### Segfault / Crash During Execution
 
@@ -627,7 +696,7 @@ jes->defineVariationCollections("goodJets_jec", "goodJets",
                                 "goodJets_variations");
 ```
 
-After `analyzer.save()` this creates:
+After `analyzer.run()` this creates:
 
 | Column | Description |
 |--------|-------------|
@@ -848,7 +917,7 @@ in the main analysis.
 - **Documentation**: See the `docs/` directory for detailed guides
 - **Working example**: `analyses/ExampleAnalysis/` is a complete, runnable reference
 - **Issues**: Open a GitHub issue if you encounter problems
-- **README**: [README.md](../README.md) has comprehensive technical documentation
+- **README**: [README.md](https://github.com/brkronheim/RDFAnalyzerCore/blob/main/README.md) has comprehensive technical documentation
 
 ---
 

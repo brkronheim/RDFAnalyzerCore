@@ -1,0 +1,90 @@
+--- a/tree/dataframe/inc/ROOT/RDF/RInterface.hxx
++++ b/tree/dataframe/inc/ROOT/RDF/RInterface.hxx
+@@ -546,5 +546,5 @@
+       // these checks must be done before jitting lest we throw exceptions in jitted code
+       RDFInternal::CheckForRedefinition(where, name, fColRegister,
+-                                        GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{});
++                                        GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns());
+ 
+       auto upcastNodeOnHeap = RDFInternal::MakeSharedOnHeap(RDFInternal::UpcastNode(fProxiedPtr));
+@@ -635,5 +635,5 @@
+       RDFInternal::CheckValidCppVarName(name, where);
+       RDFInternal::CheckForDefinition(where, name, fColRegister,
+-                                      GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{});
++                                      GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns());
+       RDFInternal::CheckForNoVariations(where, name, fColRegister);
+ 
+@@ -692,5 +692,5 @@
+       if (ROOT::Internal::RDF::GetDataSourceLabel(*this) == "EmptyDS")
+          RDFInternal::CheckForDefinition(where, column, fColRegister,
+-                                         GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{});
++                                         GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns());
+ 
+       // Declare return type to the interpreter, for future use by jitted actions
+@@ -751,5 +751,5 @@
+       RDFInternal::CheckValidCppVarName(name, "DefinePerSample");
+       RDFInternal::CheckForRedefinition("DefinePerSample", name, fColRegister,
+-                                        GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{});
++                                        GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns());
+ 
+       auto retTypeName = RDFInternal::TypeID2TypeName(typeid(RetType_t));
+@@ -813,5 +813,5 @@
+       // these checks must be done before jitting lest we throw exceptions in jitted code
+       RDFInternal::CheckForRedefinition("DefinePerSample", name, fColRegister,
+-                                        GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{});
++                                        GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns());
+ 
+       auto upcastNodeOnHeap = RDFInternal::MakeSharedOnHeap(RDFInternal::UpcastNode(fProxiedPtr));
+@@ -1233,5 +1233,5 @@
+ 
+       // Helper to find out if a name is a column
+-      auto &dsColumnNames = GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{};
++      auto &dsColumnNames = GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns();
+ 
+       constexpr auto where = "Alias";
+@@ -1658,5 +1658,5 @@
+    {
+       const auto definedColumns = fColRegister.GenerateColumnNames();
+-      const auto dsColumns = GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{};
++      const auto dsColumns = GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns();
+       // Ignore R_rdf_sizeof_* columns coming from datasources: we don't want to Snapshot those
+       ColumnNames_t dsColumnsWithoutSizeColumns;
+@@ -3322,4 +3322,10 @@
+ 
+ private:
++   static const ColumnNames_t &EmptyDSColumns()
++   {
++      static const ColumnNames_t empty;
++      return empty;
++   }
++
+    template <typename F, typename DefineType, typename RetType = typename TTraits::CallableTraits<F>::ret_type>
+    std::enable_if_t<std::is_default_constructible<RetType>::value, RInterface<Proxied, DS_t>>
+@@ -3329,8 +3335,8 @@
+          RDFInternal::CheckValidCppVarName(name, where);
+          RDFInternal::CheckForRedefinition(where, name, fColRegister,
+-                                           GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{});
++                                           GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns());
+       } else {
+          RDFInternal::CheckForDefinition(where, name, fColRegister,
+-                                         GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{});
++                                         GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns());
+          RDFInternal::CheckForNoVariations(where, name, fColRegister);
+       }
+@@ -3451,5 +3457,5 @@
+          RDFInternal::CheckValidCppVarName(colName, "Vary");
+          RDFInternal::CheckForDefinition("Vary", colName, fColRegister,
+-                                         GetDataSource() ? GetDataSource()->GetColumnNames() : ColumnNames_t{});
++                                         GetDataSource() ? GetDataSource()->GetColumnNames() : EmptyDSColumns());
+       }
+       RDFInternal::CheckValidCppVarName(variationName, "Vary");
+--- a/tree/dataframe/src/RDFInterfaceUtils.cxx
++++ b/tree/dataframe/src/RDFInterfaceUtils.cxx
+@@ -881,5 +881,6 @@
+ 
+    // Complain if there are still unknown columns at this point
+-   auto unknownColumns = FindUnknownColumns(selectedColumns, colRegister, ds ? ds->GetColumnNames() : ColumnNames_t{});
++   static const ColumnNames_t empty;
++   auto unknownColumns = FindUnknownColumns(selectedColumns, colRegister, ds ? ds->GetColumnNames() : empty);
+ 
+    if (!unknownColumns.empty()) {

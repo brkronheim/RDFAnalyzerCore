@@ -14,7 +14,47 @@ This document provides a complete reference for all configuration options in RDF
 
 The main configuration file controls the overall behavior of the framework. It's typically passed as a command-line argument to your analysis executable.
 
+### Correction and collection inference precision
+
+`correctionScalarOutputType=float|double` selects CorrectionManager scalar output
+precision (default `float`). `double` preserves correctionlib's returned precision
+for scalar, compound, batch and conditional scalar corrections. Vector corrections
+remain `RVec<float>`. Nonfinite or unrepresentable outputs still fail. Set this
+before booking corrections; existing columns retain their booked types.
+
+`bdtInputLayout=scalar|flatRows` selects BDTManager input layout (default `scalar`).
+`flatRows` consumes a predefined event-local `input_<model>` `RVec<float>` whose
+row width/order follows `inputVariables`, and returns one float score per row.
+Empty inputs are allowed and invalid dimensions fail. An inactive gate returns
+-1 for each row. Existing dependency propagation applies to the input and gate;
+scalar `bdtCombineModels` grouping is bypassed for collection input.
+With `flatRows`, optional `bdtFlatRowsInputColumn=<column>` lets multiple models
+consume one predefined matrix directly. `applyAllBDTs` requires identical ordered
+`inputVariables` when sharing; each model retains its own gate and output. The
+default per-model `input_<model>` path remains available.
+
+`persistPythonHistograms=true|false` controls standard Python TH1D persistence
+(default `false`). The typed frontend exposes `persist_histograms=True`. Slices
+are stored under `python_histograms/` in the metadata file during finalization,
+before canonical provenance is written. This namespace is replaced on a rerun;
+the histogram name supplies its relative path. NDHistogramManager retains its
+own format and namespace.
+
 ### Input/Output Configuration
+
+`firstEntry` and `lastEntry` restrict the primary input chain to the half-open
+global entry interval `[firstEntry,lastEntry)`. Use one RDF thread for partition
+workers. The default `entryRangeMode=filter` uses RDF `Range` and rejects bounds
+above its unsigned 32-bit limit. A lone bound retains the legacy ignored-range
+behavior; provide both bounds explicitly.
+
+`entryRangeMode=source` is an experimental, opt-in alternative which seeks the
+initial source directly, avoiding traversal of rejected prefix entries. It
+requires both bounds as nonnegative decimal integers, `lastEntry > firstEntry`,
+signed 64-bit bounds, disabled implicit multithreading, and ROOT 6.40.x or
+6.42.00-rc1. The internal ROOT hook is version-gated. Original `rdfentry_`
+identities are preserved, including cross-file ranges. This changes no public
+C++ signatures or production defaults.
 
 #### Required Options
 
@@ -30,15 +70,30 @@ The main configuration file controls the overall behavior of the framework. It's
 | `saveDirectory` | Path | (empty) | Local directory where intermediate outputs are saved |
 | `saveTree` | String | `Events` | Name of the output tree |
 | `treeList` | Comma-separated | `CollectionTree,POOLCollectionTree` | Tree names to search for in input files (tried in order) |
-| `metaFile` | Path | Same as `saveFile` | Separate file for histograms and metadata |
+| `metaFile` | Path | Derived from `saveFile` as `<stem>_meta.root` | Separate file for histograms and metadata |
 | `antiglobs` | Comma-separated | (empty) | Reject input files containing these strings |
 | `globs` | Comma-separated | (empty) | Accept only input files containing these strings |
+| `xrdSiteRankingFile` | Path, `auto`, `none` | `auto` | Origin-scoped historical source scores; `auto` reads `RDF_XRD_SITE_RANKING_FILE`. See [XrdAdaptor](xrd-adaptor.md#historical-site-preferences-and-open-attempt-logging). |
+| `xrdSiteOrigin` | String | Worker environment/hostname | Explicit execution network identity; overrides `RDF_XRD_SITE_ORIGIN`. |
+| `xrdSiteRankingMaxAgeDays` | Integer 0–365 | `30` | Age limit for historical scores; 0 disables priors. |
 
 ### Performance Configuration
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `threads` | Integer | `-1` | Number of ROOT ImplicitMT threads. `-1` = auto (all cores) |
+| `threads` | Integer, `auto`, or `max` | `-1` | Number of ROOT ImplicitMT threads. `1` disables implicit multithreading; values greater than `1` set the thread count; values less than or equal to `0`, `auto`, and `max` use all available cores. |
+
+The runtime rejects malformed values instead of silently switching to all
+available cores. When running on HTCondor, set `threads` no higher than the
+CPUs requested by the job.
+
+### Remote input
+
+For `rootInputBackend: xrd-adaptor`, `xrdReadPolicy: adaptive` starts with one
+payload read per cache window. A stalled primary can race a second site and a
+failed primary can be replaced. The framework may open a standby in advance.
+Select `xrdReadPolicy: legacy` to replay fixed-delay hedging and optional
+exploration. Settings are process-wide. [Source selection, thresholds and traffic counters](xrd-adaptor.md#read-policy)
 
 ### Batch Processing
 
@@ -48,78 +103,90 @@ The main configuration file controls the overall behavior of the framework. It's
 
 ### Output Branch Configuration
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `saveConfig` | Path | Configuration file listing branches to save in output tree |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `saveConfig` | Path | All columns | Configuration file listing branches to save in output tree |
+| `skimFilter` | RDataFrame expression | None | Optional event filter applied only when writing the skim; histogram actions use the unfiltered analysis graph |
+| `skimSystematics` | Boolean | `false` | When `true`, expand configured skim branches with their registered paired Up/Down systematic columns. This affects only skim output and does not enable framework systematics. |
+| `skimCompressionAlgorithm` | String | `zstd` | ROOT skim compression: `zstd`, `lzma`, `zlib`, or `lz4`. |
+| `skimCompressionLevel` | Integer | 5 | ROOT skim compression level, 0 through 9. Level 0 disables compression. Higher levels trade write CPU time for file size. |
 
-The `saveConfig` file contains one branch name per line. It also supports **glob patterns** for flexible column selection:
+For stronger lossless skim compression, set `skimCompressionAlgorithm=zstd`
+and `skimCompressionLevel=9`. These settings apply to the ROOT skim sink;
+metadata and histogram compression are unchanged. Existing frozen workers keep
+their staged executable and configuration.
 
+Use a YAML sequence for `saveConfig`. Exact names and shell-style wildcard patterns may be mixed.
+
+```yaml
+- event
+- 'Muon_*'
+- 'Electron_*'
+- '*_phi'
+- Jet_pt
 ```
-# Exact column names
-branch1
-branch2
-branch3
 
-# Glob patterns
-Muon_*           # All Muon columns
-Electron_*       # All Electron columns
-*_phi            # All phi columns
-Jet_pt           # Specific column
-Jet_eta          # Specific column
-```
+Each wildcard must match at least one dataframe column. Unmatched patterns, even alongside valid names, and an empty sequence raise errors before writing the skim. Overlapping patterns are deduplicated. An omitted saveConfig or a single quoted `'*'` requests all canonical columns. To retain an alias as the branch name, select it explicitly. Asking ROOT to snapshot both an alias and its target can produce a duplicate-column error.
 
-**Glob Pattern Behavior**:
-- Patterns with `*` or `?` are expanded against available DataFrame columns
-- Exact column names continue to work unchanged
-- Overlapping patterns are automatically deduplicated
-- Non-matching patterns are silently skipped (no error)
-- Mix exact names and glob patterns in the same file
+[Source and output contracts](SOURCE_AND_OUTPUT_CONTRACTS.md)
 
 ### Data Loading Helpers
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `floatConfig` | Path | Configuration file with float constants to define |
-| `intConfig` | Path | Configuration file with integer constants to define |
+| `floatConfig` | Path | Configuration file with float constants to define. `DataManager` checks this path relative to the process working directory before registering constants. |
+| `intConfig` | Path | Configuration file with integer constants to define. `DataManager` checks this path relative to the process working directory before registering constants. |
 | `aliasConfig` | Path | Configuration file with branch aliases |
-| `optionalBranchesConfig` | Path | Configuration file listing branches that may not exist in all inputs |
+| `optionalBranchesConfig` | Path | YAML sequence of `{name, type, default}` records for potentially missing branches. Codes 0–8 denote uint, int, ushort, short, uchar, char, float, double and bool respectively. Add 10 for a one-element vector fallback. Integer defaults must fit their type. Boolean values accept true/false, yes/no, on/off and 1/0. |
+
+An explicit float, integer, alias or optional-branch recipe must resolve to a regular
+file. Omit its configuration key to run without the recipe. An invalid optional-branch
+type or unrepresentable default names the recipe and column during graph setup.
+
+For other config files loaded through `ConfigurationManager`, a relative path is resolved from the process working directory if it exists there; otherwise it is resolved relative to the main config file. The constant-file existence check above is performed directly against the configured path by `DataManager`, so use a working-directory-relative or absolute path for `floatConfig` and `intConfig`.
 
 #### Float/Int Config Format
 
 These files define constants that are loaded as DataFrame columns:
-```
-constantName=value
-weight=1.0
-luminosity=139000.0
+```yaml
+weight: 1.0
+luminosity: 139000.0
 ```
 
 #### Alias Config Format
 
 Define short names for long branch names:
-```
-pt=leptons_pt
-eta=leptons_eta
+```yaml
+- existingName: leptons_pt
+  newName: pt
+- existingName: leptons_eta
+  newName: eta
 ```
 
 #### Optional Branches Config Format
 
-List branches that might not exist in all input files (prevents errors):
-```
-branch_that_might_be_missing
-another_optional_branch
+Supply a record for each optional branch. The type identifier and default value determine the fallback column.
+
+```yaml
+- name: optional_col
+  type: 1
+  default: 42
 ```
 
 ## Plugin Configurations
 
-Plugins are configured via separate files referenced from the main config.
+Plugins read settings from separate files referenced from the main config. Referencing a plugin config file does not construct or activate that plugin; the analysis must create and register each manager in C++.
 
 ### BDT Manager Configuration
 
-**Main config option**: `bdtConfig=path/to/bdts.txt`
+**Main config option**: `bdtConfig: path/to/bdts.yaml`
 
-**BDT config format** (one model per line):
-```
-file=path/to/model.txt name=output_column inputVariables=var1,var2,var3 runVar=condition_column
+**BDT config format** (one mapping per model):
+```yaml
+- file: path/to/model.txt
+  name: output_column
+  inputVariables: var1,var2,var3
+  runVar: condition_column
 ```
 
 **Parameters**:
@@ -129,18 +196,27 @@ file=path/to/model.txt name=output_column inputVariables=var1,var2,var3 runVar=c
 - `runVar`: Boolean column name; model runs only when this is true (outputs -1.0 when false)
 
 **Example**:
-```
-file=aux/bdt_signal.txt name=bdt_score inputVariables=jet_pt,jet_eta,jet_phi,jet_mass runVar=has_jet
-file=aux/bdt_background.txt name=bdt_bkg_score inputVariables=lep_pt,met runVar=pass_presel
+```yaml
+- file: aux/bdt_signal.txt
+  name: bdt_score
+  inputVariables: jet_pt,jet_eta,jet_phi,jet_mass
+  runVar: has_jet
+- file: aux/bdt_background.txt
+  name: bdt_bkg_score
+  inputVariables: lep_pt,met
+  runVar: pass_presel
 ```
 
 ### ONNX Manager Configuration
 
-**Main config option**: `onnxConfig=path/to/onnx_models.txt`
+**Main config option**: `onnxConfig: path/to/onnx_models.yaml`
 
-**ONNX config format** (one model per line):
-```
-file=path/to/model.onnx name=output_column inputVariables=var1,var2,var3 runVar=condition_column
+**ONNX config format** (one mapping per model):
+```yaml
+- file: path/to/model.onnx
+  name: output_column
+  inputVariables: var1,var2,var3
+  runVar: condition_column
 ```
 
 **Parameters**: Same as BDT Manager
@@ -148,47 +224,60 @@ file=path/to/model.onnx name=output_column inputVariables=var1,var2,var3 runVar=
 **Multi-Output Support**: Models with multiple outputs automatically create columns named `{name}_output0`, `{name}_output1`, etc.
 
 **Example**:
-```
-file=models/dnn_classifier.onnx name=dnn_score inputVariables=pt,eta,phi,mass,btag runVar=has_jets
-file=models/particle_transformer.onnx name=transformer inputVariables=jet_features runVar=pass_cuts
+```yaml
+- file: models/dnn_classifier.onnx
+  name: dnn_score
+  inputVariables: pt,eta,phi,mass,btag
+  runVar: has_jets
+- file: models/particle_transformer.onnx
+  name: transformer
+  inputVariables: jet_features
+  runVar: pass_cuts
 ```
 
 **Note**: ONNX models are loaded at construction but NOT automatically applied. You must call `applyModel()` or `applyAllModels()` after defining all input features.
 
 ### SOFIE Manager Configuration
 
-**Main config option**: `sofieConfig=path/to/sofie_models.txt`
+Optional main config entry `sofieConfig: path/to/sofie_models.yaml`.
 
-**SOFIE config format** (one model per line):
-```
-name=output_column inputVariables=var1,var2,var3 runVar=condition_column
-```
-
-**Parameters**: Same as ONNX/BDT but WITHOUT `file` (SOFIE models are compiled code, not runtime files)
-
-**Example**:
-```
-name=sofie_dnn inputVariables=pt,eta,phi,mass runVar=has_jet
-name=sofie_classifier inputVariables=lep_pt,met runVar=pass_selection
+**SOFIE config format** (one mapping per model):
+```yaml
+- name: output_column
+  inputVariables: var1,var2,var3
+  runVar: condition_column
 ```
 
-**Key Differences from ONNX/BDT**:
-- No `file` parameter (models compiled at build time)
-- Must manually register models via `registerModel()` in C++ code
-- Potentially faster inference (compiled code eliminates runtime overhead) but less flexible (rebuild required for updates)
+The record declares an output name, ordered input columns and a scalar bool
+gate. For example:
+```yaml
+- name: sofie_dnn
+  inputVariables: pt,eta,phi,mass
+  runVar: has_jet
+- name: sofie_classifier
+  inputVariables: lep_pt,met
+  runVar: pass_selection
+```
 
-**See**: [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for complete usage including:
-- Generating SOFIE C++ code from ONNX
-- Registering models in analysis code
-- When to use SOFIE vs ONNX
+The configuration has no `file` setting. Supply the generated inference
+callable with `registerModel()` in C++. Earlier feature and gate entries
+for a given name are retained during registration, so keep both declarations
+consistent. The generated session can read a separate weights file whose
+path is managed by the C++ wrapper.
+
+See the [SOFIE Implementation Guide](SOFIE_IMPLEMENTATION.md) for standalone
+PyPI generation, compilation and deployment.
 
 ### Correction Manager Configuration
 
-**Main config option**: `correctionConfig=path/to/corrections.txt`
+**Main config option**: `correctionConfig: path/to/corrections.yaml`
 
-**Correction config format** (one correction per line):
-```
-file=path/to/corrections.json correctionName=correction_key name=output_column inputVariables=var1,var2
+**Correction config format** (one mapping per correction):
+```yaml
+- file: path/to/corrections.json
+  correctionName: correction_key
+  name: output_column
+  inputVariables: var1,var2
 ```
 
 **Parameters**:
@@ -198,9 +287,15 @@ file=path/to/corrections.json correctionName=correction_key name=output_column i
 - `inputVariables`: Comma-separated list of input column names (order matters!)
 
 **Example**:
-```
-file=aux/scale_factors.json correctionName=muon_id_sf name=muon_sf inputVariables=muon_pt,muon_eta
-file=aux/scale_factors.json correctionName=electron_iso_sf name=electron_sf inputVariables=electron_pt,electron_eta
+```yaml
+- file: aux/scale_factors.json
+  correctionName: muon_id_sf
+  name: muon_sf
+  inputVariables: muon_pt,muon_eta
+- file: aux/scale_factors.json
+  correctionName: electron_iso_sf
+  name: electron_sf
+  inputVariables: electron_pt,electron_eta
 ```
 
 #### Applying corrections to a single object per event (`applyCorrection`)
@@ -238,9 +333,12 @@ event, with one scale factor for each object.
 
 **Full example** (config + analysis code):
 
-*corrections.txt*:
-```
-file=aux/jet_sf.json correctionName=jet_energy_scale name=jet_sf inputVariables=jet_pt,jet_eta
+*corrections.yaml*:
+```yaml
+- file: aux/jet_sf.json
+  correctionName: jet_energy_scale
+  name: jet_sf
+  inputVariables: jet_pt,jet_eta
 ```
 
 *Analysis code*:
@@ -265,26 +363,26 @@ the existing jet and object energy managers.
 
 **Main config options**:
 
-- `correctedJetCollectionConfig=path/to/corrected_jets.txt`
-- `correctedFatJetCollectionConfig=path/to/corrected_fatjets.txt`
-- `correctedElectronCollectionConfig=path/to/corrected_electrons.txt`
-- `correctedMuonCollectionConfig=path/to/corrected_muons.txt`
-- `correctedTauCollectionConfig=path/to/corrected_taus.txt`
-- `correctedPhotonCollectionConfig=path/to/corrected_photons.txt`
+- `correctedJetCollectionConfig: path/to/corrected_jets.yaml`
+- `correctedFatJetCollectionConfig: path/to/corrected_fatjets.yaml`
+- `correctedElectronCollectionConfig: path/to/corrected_electrons.yaml`
+- `correctedMuonCollectionConfig: path/to/corrected_muons.yaml`
+- `correctedTauCollectionConfig: path/to/corrected_taus.yaml`
+- `correctedPhotonCollectionConfig: path/to/corrected_photons.yaml`
 
 **Pair-based config format**:
 
-```text
-inputCollection=goodJets
-ptColumn=Jet_pt
-etaColumn=Jet_eta
-phiColumn=Jet_phi
-massColumn=Jet_mass
-correctedPtColumn=Jet_pt_corr_nominal
-correctedMassColumn=Jet_mass_corr_nominal
-outputCollection=CorrectedJets
-variationMapColumn=CorrectedJets_variations
-workflowConfig=cfg/corrected_jets_workflow.txt
+```yaml
+inputCollection: goodJets
+ptColumn: Jet_pt
+etaColumn: Jet_eta
+phiColumn: Jet_phi
+massColumn: Jet_mass
+correctedPtColumn: Jet_pt_corr_nominal
+correctedMassColumn: Jet_mass_corr_nominal
+outputCollection: CorrectedJets
+variationMapColumn: CorrectedJets_variations
+workflowConfig: cfg/corrected_jets_workflow.yaml
 ```
 
 **Parameters**:
@@ -319,14 +417,41 @@ workflowConfig=cfg/corrected_jets_workflow.txt
 
 **Workflow action examples**:
 
-```text
-type=setJetColumns ptColumn=Jet_pt etaColumn=Jet_eta phiColumn=Jet_phi massColumn=Jet_mass
-type=removeExistingCorrections rawFactorColumn=Jet_rawFactor sample=mc
-type=registerCorrection sample=mc name=vhqq_jec_nominal file=${jmeFile} correctionName=${jecCompoundCorrection} inputVariables=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
-type=applyCorrectionlib sample=mc correction=vhqq_jec_nominal inputPtColumn=Jet_pt_raw outputPtColumn=${correctedPtColumn} applyToMass=true inputMassColumn=Jet_mass_raw outputMassColumn=${correctedMassColumn} inputColumns=Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
-type=applyResolutionSmearingSystematic sample=mc correction=vhqq_electron_smear systematicName=electron_smear
-type=applyRelativePtUncertaintySystematic sample=mc correction=vhqq_electron_smear systematicName=electron_scale stringArgs=escale
-type=applyScaleResolutionSystematics jsonFile=${muonScaleResolutionFile}
+```yaml
+- type: setJetColumns
+  ptColumn: Jet_pt
+  etaColumn: Jet_eta
+  phiColumn: Jet_phi
+  massColumn: Jet_mass
+- type: removeExistingCorrections
+  rawFactorColumn: Jet_rawFactor
+  sample: mc
+- type: registerCorrection
+  sample: mc
+  name: analysis_jec_nominal
+  file: ${jmeFile}
+  correctionName: ${jecCompoundCorrection}
+  inputVariables: Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+- type: applyCorrectionlib
+  sample: mc
+  correction: analysis_jec_nominal
+  inputPtColumn: Jet_pt_raw
+  outputPtColumn: ${correctedPtColumn}
+  applyToMass: 'true'
+  inputMassColumn: Jet_mass_raw
+  outputMassColumn: ${correctedMassColumn}
+  inputColumns: Jet_area,Jet_eta,Jet_pt_raw,${rhoBranch}
+- type: applyResolutionSmearingSystematic
+  sample: mc
+  correction: analysis_electron_smear
+  systematicName: electron_smear
+- type: applyRelativePtUncertaintySystematic
+  sample: mc
+  correction: analysis_electron_smear
+  systematicName: electron_scale
+  stringArgs: escale
+- type: applyScaleResolutionSystematics
+  jsonFile: ${muonScaleResolutionFile}
 ```
 
 Compact actions support implicit defaults for common fields (input/output pt
@@ -343,11 +468,14 @@ Supported workflow action families:
 
 ### Trigger Manager Configuration
 
-**Main config option**: `triggerConfig=path/to/triggers.txt`
+**Main config option**: `triggerConfig: path/to/triggers.yaml`
 
-**Trigger config format** (one group per line):
-```
-name=group_name sample=sample_name triggers=trig1,trig2,trig3 triggerVetos=veto1,veto2
+**Trigger config format** (one mapping per group):
+```yaml
+- name: group_name
+  sample: sample_name
+  triggers: trig1,trig2,trig3
+  triggerVetos: veto1,veto2
 ```
 
 **Parameters**:
@@ -357,9 +485,15 @@ name=group_name sample=sample_name triggers=trig1,trig2,trig3 triggerVetos=veto1
 - `triggerVetos`: Comma-separated list of veto triggers (optional)
 
 **Example**:
-```
-name=single_muon sample=data triggers=HLT_Mu24,HLT_Mu27 triggerVetos=
-name=double_muon sample=mc triggers=HLT_Mu17_Mu8,HLT_Mu17_TkMu8 triggerVetos=HLT_Mu24,HLT_Mu27
+```yaml
+- name: single_muon
+  sample: data
+  triggers: HLT_Mu24,HLT_Mu27
+  triggerVetos: ''
+- name: double_muon
+  sample: mc
+  triggers: HLT_Mu17_Mu8,HLT_Mu17_TkMu8
+  triggerVetos: HLT_Mu24,HLT_Mu27
 ```
 
 The trigger logic: Event passes if ANY trigger fires AND NO veto trigger fires.
@@ -369,11 +503,11 @@ The trigger logic: Event passes if ANY trigger fires AND NO veto trigger fires.
 WeightManager is configured **programmatically** in your analysis C++ code. The plugin must be registered in the main config, but all weight components are declared at runtime via the API.
 
 **Main config entry**:
-```
+```yaml
 # WeightManager
 # Note: WeightManager is configured programmatically in your analysis code,
 # not via the config file. However, it must be registered as a plugin.
-WeightManager = WeightManager
+WeightManager: WeightManager
 ```
 
 **Registered programmatically in C++**:
@@ -405,11 +539,11 @@ After `analyzer->run()`, per-component audit statistics (sum, mean, min, max, ne
 RegionManager is configured **programmatically** in your analysis C++ code. Regions are declared via `declareRegion()` and do not use a config file.
 
 **Main config entry**:
-```
+```yaml
 # RegionManager
 # Note: RegionManager is configured programmatically in your analysis code.
 # Regions are declared using declareRegion() in your analysis.
-RegionManager = RegionManager
+RegionManager: RegionManager
 ```
 
 **Declared programmatically in C++**:
@@ -436,19 +570,19 @@ Child regions are strict subsets of their parent. `initialize()` validates the h
 Applies CMS data quality certification filters against one or more golden JSON files. The filter is **automatically skipped for MC samples** — it only activates when the config key `type=data`.
 
 **Main config options**:
-```
+```yaml
 # GoldenJsonManager - CMS data quality certification
-GoldenJsonManager = GoldenJsonManager
-goldenJsonConfig = /path/to/golden_json_list.txt
+GoldenJsonManager: GoldenJsonManager
+goldenJsonConfig: /path/to/golden_json_list.yaml
 ```
 
-**goldenJsonConfig**: Path to a text file listing golden JSON file paths, **one per line**. Lines beginning with `#` are treated as comments.
+**goldenJsonConfig**: Path to a YAML sequence of golden JSON file paths or a direct certification JSON payload.
 
-**Example golden JSON list file** (`golden_json_list.txt`):
-```
+**Example golden JSON list file** (`golden_json_list.yaml`):
+```yaml
 # CMS golden JSON files for Run2 UL
-/data/cert/Cert_271036-284044_13TeV_Legacy2016_Collisions16_JSON.txt
-/data/cert/Cert_294927-306462_13TeV_UL2017_Collisions17_JSON.txt
+- /data/cert/Cert_271036-284044_13TeV_Legacy2016_Collisions16_JSON.txt
+- /data/cert/Cert_294927-306462_13TeV_UL2017_Collisions17_JSON.txt
 ```
 
 **Golden JSON file format** (standard CMS format):
@@ -472,11 +606,11 @@ gjm->applyGoldenJson();
 CutflowManager cuts are registered **programmatically** in your analysis C++ code. Results are written automatically to the meta ROOT file after `analyzer->run()`.
 
 **Main config entry**:
-```
+```yaml
 # CutflowManager
 # Note: CutflowManager cuts are registered programmatically.
 # Results are written to the meta ROOT file automatically.
-CutflowManager = CutflowManager
+CutflowManager: CutflowManager
 ```
 
 **Registered programmatically in C++**:
@@ -504,9 +638,9 @@ cfm->bindToRegionManager(analyzer->getPlugin<RegionManager>("regions"));
 
 In addition to the text-based config file, RDFAnalyzerCore supports an **analysis YAML config** as a newer, structured alternative for specifying regions, nuisance groups, histogram configuration, friend trees, and plugin settings.
 
-**Main config option** (text config points to the YAML file):
-```
-analysisConfig=cfg/analysis.yaml
+**Main config option**
+```yaml
+analysisConfig: cfg/analysis.yaml
 ```
 
 **YAML config capabilities** (partial list):
@@ -540,27 +674,64 @@ The YAML config is validated at startup against a JSON Schema. See **[CONFIGURAT
 
 ## Advanced Configuration
 
+### Systematics
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enableSystematics` | Boolean | `true` | Enable systematic registration and propagation throughout the framework. Set to `false` for a nominal-only graph; registrations, varied definitions, varied selection masks, and systematic histogram axes are disabled. |
+
 ### Histogram Backend
 
 `NDHistogramManager` supports two histogram backends:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `histogramBackend` | String | `"root"` | Histogram backend: `"root"` (THnSparseF) or `"boost"` (Boost.Histogram) |
+| `histogramBackend` | String | `"boost"` | Histogram backend: `"root"` or `"boost"` (Boost.Histogram). Both persist THnSparseF. |
+| `histogramDenseLimitMiB` | Non-negative integer | `0` | Dense accumulator budget per histogram, summed over all RDF slots and including flow cells. Default `0` forces sparse accumulation. This is not a process-wide memory cap. |
+| `histogramBoostPrecision` | String | `"float"` | Boost contents: `"float"` for ROOT-compatible float contents with double sumw2 and ROOT bin lookup, or explicit `"double"` for double weighted sums. |
+| `histogramBoostSparseBackend` | String | `"map"` | Boost sparse container: `"map"` uses `std::unordered_map`; `"flat"` uses `boost::unordered_flat_map` when its header is available. |
+| `histogramSystematics` | Boolean | `true` | Enable histogram systematic variations and auto-detect complete `baseVariable_nameUp` / `baseVariable_nameDown` column pairs. Set to `false` for nominal-only histograms. |
+| `histogramShareCollectionTransport` | Boolean (`true` / `false`) | `false` | Experimental packed-histogram optimization: share scalar broadcasts and collection fill counts for exact matching input/reference columns within one booking call. No sharing across booking calls or unrelated collections. Sustained performance acceptance is deferred. |
 
-**ROOT backend** (`"root"`, default): stores histograms as `THnSparseF` objects in the meta ROOT output file.  This is compatible with all downstream tools and is the correct choice for most analyses.
+**ROOT backend** (`"root"`, explicit override): stores mergeable `THnSparseF` objects in
+the meta ROOT output file, including axis labels and exact bin edges. The
+manifest-driven merge task combines these objects with `hadd`, then writes the
+reconstructed `TH1F` objects alongside them for downstream plotting and
+datacard tools. For manual merges, run
+`python core/python/extract_nd_histograms.py merged.root` after `hadd`.
 
-**Boost.Histogram backend** (`"boost"`): stores histograms in-memory using Boost.Histogram during the event loop, then converts to ROOT format for output.  This can improve memory performance for analyses with very large numbers of histogram bins.
+**Boost.Histogram backend** (`"boost"`, default): stores histograms in-memory using
+Boost.Histogram during the event loop, then converts to the same mergeable
+`THnSparseF` format for output. Regular-axis histograms use dense weighted
+arrays or sparse weighted maps. With explicit double precision,
+variable-width observables use the ROOT action. The default float precision
+uses a custom accumulator with float contents and double sumw2, plus ROOT's
+axis lookup for both regular and variable bins. Dense float storage uses
+separate arrays (12 bytes per cell), avoiding structure padding. The explicit
+double option accumulates contents in double and rounds to float at export;
+negative-weight cancellations can therefore differ from ROOT.
 
+```yaml
+# Default: ROOT-compatible float arithmetic, sparse standard map
+histogramBackend: boost
+histogramBoostPrecision: float
+histogramBoostSparseBackend: map
+histogramDenseLimitMiB: 0
+
+# To restore ROOT accumulation with the former dense budget, instead use:
+# histogramBackend=root
+# histogramDenseLimitMiB=64
 ```
-# Use ROOT backend (default — compatible with all downstream tools including Combine)
-histogramBackend=root
 
-# Use Boost.Histogram backend (in-memory optimisation, same output format)
-histogramBackend=boost
-```
-
-Both backends produce the same output format and are fully interchangeable.
+Both backends produce the same output format. Both retain flow bins and
+double sumw2. Numerical agreement must be checked before changing a backend.
+Set `RDF_HISTOGRAM_PROFILE=1` to report each action's storage choice, estimated
+dense bytes, occupied output bins, and finalization CPU/wall time.
+At metadata save time, Boost sparse actions warn once per histogram when
+tracked container allocations observed during finalization exceed the dense
+array estimate across the same slots. The warning includes the file/histogram,
+both byte counts, and the dense-budget override. See
+[storage accounting and its limits](CONFIG_HISTOGRAMS.md#storage-selection-and-output).
 
 ### Counter Service
 
@@ -570,24 +741,58 @@ Track event counts and weight sums per sample.
 |--------|------|---------|-------------|
 | `enableCounters` | Boolean | `false` | Enable the CounterService |
 | `counterWeightBranch` | String | (empty) | Column name for per-event weights (e.g., `genWeight`) |
-| `counterIntWeightBranch` | String | (empty) | Column name for integer-valued weights (e.g., stitching codes) |
+| `counterIntWeightBranch` | String | (empty) | Column name for an integer event category (e.g., a stitching code) |
+| `counterIntWeightBranchNBins` | Integer | `10` | Number of bins for automatic integer-category booking |
+| `counterIntWeightBranchMin` | Number | `-0.5` | Lower edge for automatic integer-category booking |
+| `counterIntWeightBranchMax` | Number | `9.5` | Upper edge for automatic integer-category booking |
 
 **When enabled**, the CounterService logs:
 - Total entries per sample
 - Sum of `counterWeightBranch` (if set)
 - Sum of `counterIntWeightBranch` (if set)
 
-**For integer weights**, a histogram is written to the metadata file:
+**For integer categories**, a histogram is written to the metadata file:
 - Name: `counter_intWeightSum_<sample>`
 - X-axis: Integer values from `counterIntWeightBranch`
 - Bin content: Sum of `counterWeightBranch` for events with that integer value
+- Signed companion: `counter_intWeightSignSum_<sample>` with the signed event count
+
+The automatic booking defaults to integer IDs `0` through `9`. Configure the
+bin count and range when a classifier uses a different valid-ID range. An
+analysis that needs a custom underflow or invalid-event policy should define
+and filter its integer branch explicitly before calling
+`Analyzer::bookCounterIntHistogram`.
 
 **Example**:
+```yaml
+enableCounters: true
+counterWeightBranch: genWeight
+counterIntWeightBranch: stitchWeight
 ```
-enableCounters=true
-counterWeightBranch=genWeight
-counterIntWeightBranch=stitchWeight
-```
+
+### CMS generator-weight basis
+
+For MC datasets, the manifest field `generator_weight_mode` selects the raw
+generator-weight factor and normalization denominator. It defaults to `sign`:
+the event factor is `sign(genWeight)` and the denominator is
+`sum(sign(genWeight))`. Set it to `full` to use `genWeight` and
+`sum(genWeight)` instead. The LAW skim workflow writes the selected mode to
+`genWeightMode` in each MC job config. Downstream consumers calculate the
+normalization from the counters in their input files; skim monitoring does not
+collect a separate normalization result. Keep `counterWeightBranch=genWeight`
+when collecting these normalization counters so the selected totals use the
+generator-weight branch.
+
+`setupCmsGenWeights()` applies this basis to the nominal generator-weight
+column and its LHE, PDF, and parton-shower variations. Weight Up/Down columns
+use the same nominal sample normalization, so their yield changes are retained.
+Data jobs do not use this MC-only setting.
+
+`genWeightEnableIsr` and `genWeightEnableFsr` independently select the ISR and
+FSR pairs from `PSWeight`; both default to `true` and take effect when
+`genWeightEnablePs` is enabled. The ISR pair is `ps_isr2_fsr1` /
+`ps_isr0p5_fsr1`, and the FSR pair is `ps_isr1_fsr2` /
+`ps_isr1_fsr0p5`.
 
 ### Custom ROOT Dictionaries
 
@@ -607,39 +812,26 @@ The dictionary is built and linked into the core library automatically.
 
 ## Configuration File Format
 
-### General Format
+Use a YAML mapping for the main configuration and for scalar constants. YAML
+sequences represent collections of files or records. Comments begin with
+`#`. Quote leading wildcards, and use `true` or `false` for Boolean options.
 
-Configuration files use a simple `key=value` format:
-```
-key1=value1
-key2=value2
-```
-
-### Comments
-
-Lines starting with `#` are treated as comments:
-```
-# This is a comment
-saveFile=output.root  # This is also a comment
+```yaml
+saveFile: output.root
+fileList: [file1.root, file2.root]
+antiglobs: [temp, test, debug]
+enableSkim: true
 ```
 
-### Multi-Value Options
-
-Some options accept comma-separated values:
-```
-fileList=file1.root,file2.root,file3.root
-antiglobs=temp,test,debug
-```
-
-### Boolean Options
-
-Boolean values can be specified as:
-- `true`, `True`, `1`, `yes`, `Yes` → true
-- `false`, `False`, `0`, `no`, `No` → false
+See the [YAML migration guide](YAML_CONFIG_SUPPORT.md) for the schemas of
+referenced files, the conversion command, and compatibility with prepared jobs.
 
 ### Path Handling
 
-- Relative paths are resolved relative to the working directory
+- Relative paths used as configuration-file references are first checked relative to the working directory, then resolved relative to the main config file's directory if not found.
+- Input and output paths are generally passed through as written and are interpreted by their consumers; check the analysis working-directory convention when they are relative.
+- `DataManager` applies the same config-path resolution to referenced float and integer constant files.
+- Unless `metaFile` is set explicitly, the ROOT metadata/histogram path is derived from `saveFile` by inserting `_meta` before its extension (for example, `output.root` becomes `output_meta.root`).
 - XRootD URLs are supported for remote file access: `root://server//path/file.root`
 - EOS paths: `root://eospublic.cern.ch//eos/path/file.root`
 
@@ -647,75 +839,75 @@ Boolean values can be specified as:
 
 ### Minimal Configuration
 
-```
+```yaml
 # Input
-fileList=/data/input.root
+fileList: /data/input.root
 
 # Output
-saveFile=output.root
+saveFile: output.root
 
 # Basic settings
-threads=4
+threads: 4
 ```
 
 ### Full Analysis Configuration
 
-```
+```yaml
 # ============== I/O Configuration ==============
-fileList=root://xrootd.server//path/data1.root,root://xrootd.server//path/data2.root
-saveFile=output/analysis_output.root
-metaFile=output/histograms.root
-saveDirectory=temp/
-saveTree=Events
-treeList=CollectionTree,Events
+fileList: root://xrootd.server//path/data1.root,root://xrootd.server//path/data2.root
+saveFile: output/analysis_output.root
+metaFile: output/histograms.root
+saveDirectory: temp/
+saveTree: Events
+treeList: CollectionTree,Events
 
 # ============== Performance ==============
-threads=8
-batch=false
+threads: 8
+batch: false
 
 # ============== Output Selection ==============
-saveConfig=cfg/output_branches.txt
+saveConfig: cfg/output_branches.yaml
 
 # ============== Helpers ==============
-floatConfig=cfg/constants.txt
-intConfig=cfg/int_constants.txt
-aliasConfig=cfg/aliases.txt
-optionalBranchesConfig=cfg/optional.txt
+floatConfig: cfg/constants.yaml
+intConfig: cfg/int_constants.yaml
+aliasConfig: cfg/aliases.yaml
+optionalBranchesConfig: cfg/optional.yaml
 
 # ============== Plugins ==============
-bdtConfig=cfg/bdts.txt
-onnxConfig=cfg/onnx_models.txt
-correctionConfig=cfg/corrections.txt
-triggerConfig=cfg/triggers.txt
+bdtConfig: cfg/bdts.yaml
+onnxConfig: cfg/onnx_models.yaml
+correctionConfig: cfg/corrections.yaml
+triggerConfig: cfg/triggers.yaml
 
 # ============== Counters ==============
-enableCounters=true
-counterWeightBranch=genWeight
-counterIntWeightBranch=stitchCode
+enableCounters: true
+counterWeightBranch: genWeight
+counterIntWeightBranch: stitchCode
 
 # ============== File Filtering ==============
-antiglobs=test,debug,temp
-globs=DAOD,PHYSLITE
+antiglobs: test,debug,temp
+globs: DAOD,PHYSLITE
 ```
 
 ### HTCondor Batch Configuration
 
-```
+```yaml
 # Input from DAS/Rucio (one file per job)
-fileList=root://xrootd//path/input_%(jobnumber)s.root
+fileList: root://xrootd//path/input_%(jobnumber)s.root
 
 # Output to EOS
-saveFile=root://eosuser.cern.ch//eos/user/u/username/output_%(jobnumber)s.root
-metaFile=root://eosuser.cern.ch//eos/user/u/username/hists_%(jobnumber)s.root
+saveFile: root://eosuser.cern.ch//eos/user/u/username/output_%(jobnumber)s.root
+metaFile: root://eosuser.cern.ch//eos/user/u/username/hists_%(jobnumber)s.root
 
 # Batch mode (no progress bars)
-batch=true
-threads=-1
+batch: true
+threads: -1
 
 # Analysis config
-saveConfig=cfg/branches.txt
-bdtConfig=cfg/bdts.txt
-correctionConfig=cfg/corrections.txt
+saveConfig: cfg/branches.yaml
+bdtConfig: cfg/bdts.yaml
+correctionConfig: cfg/corrections.yaml
 ```
 
 ## Configuration Best Practices
@@ -748,7 +940,7 @@ std::cout << "saveFile: " << configProvider->get("saveFile") << std::endl;
 
 Ensure plugin config files exist and are readable:
 ```bash
-ls -l cfg/*.txt
+ls -l cfg/*.yaml
 ```
 
 ### Common mistakes
@@ -767,3 +959,8 @@ ls -l cfg/*.txt
 - [CONFIGURATION_VALIDATION.md](CONFIGURATION_VALIDATION.md) - YAML config schema and validation
 - [NUISANCE_GROUPS.md](NUISANCE_GROUPS.md) - Systematic nuisance group configuration
 - [PHYSICS_OBJECTS.md](PHYSICS_OBJECTS.md) - Physics object collection reference
+
+### Experimental conditional correction evaluation
+
+* `correctionDeferInactiveInputs: true` reads each conditional correction's activation column before requesting the numeric input pack. An inactive route returns the neutral correction weight of one.
+* `correctionReuseBinnedLookups: true` prepares compatible groups of conditional scalar corrections with fixed string arguments, identical one-dimensional binning at each level, and constant leaves. The group reuses the selected bin in a slot across outputs at identical coordinates. Other payloads are evaluated by the ordinary correction evaluator.

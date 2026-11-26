@@ -42,7 +42,10 @@ blacklist: []
 #   filter_efficiency – gen-level filter eff.   (float, default 1.0)
 #   kfac             – QCD k-factor             (float, default 1.0)
 #   extra_scale      – extra scale factor       (float, default 1.0)
-#   sum_weights      – sum of generator weights (float; computed at run-time if omitted)
+#   sum_weights      – optional raw generator-weight sum (float)
+#   generator_weight_mode – "sign" (default) uses sign(genWeight) in event
+#                           weights and sum(sign(genWeight)) for normalisation;
+#                           "full" uses raw genWeight for both.
 #
 # Type field:
 #   dtype  – "mc" (default) or "data"

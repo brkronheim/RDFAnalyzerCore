@@ -15,13 +15,18 @@
 #include <RtypesCore.h>
 #include <correction.h>
 #include <fastforest.h>
+#include <algorithm>
+#include <cstddef>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <ROOT/RDFHelpers.hxx>
 #include <ROOT/RDataFrame.hxx>
+#include <detail/SelectionFilters.h>
 
 
 #include <api/IConfigurationProvider.h>
@@ -89,6 +94,14 @@ public:
   Analyzer(std::string configFile,
            std::unordered_map<std::string, std::unique_ptr<IPluggableManager>>&& plugins);
 
+  // ManagerContext and injected plugin/service contexts are bound to this
+  // object's address, so moving an initialized Analyzer would leave dangling
+  // context pointers. Keep ownership stable for its full lifetime.
+  Analyzer(const Analyzer&) = delete;
+  Analyzer& operator=(const Analyzer&) = delete;
+  Analyzer(Analyzer&&) = delete;
+  Analyzer& operator=(Analyzer&&) = delete;
+
   /**
    * @brief Define a new variable in the dataframe. Systematics are handled automatically.
    * @tparam F Callable type for the variable definition
@@ -101,6 +114,18 @@ public:
   Analyzer *Define(std::string name, F f,
                   const std::vector<std::string> &columns = {}) {
     dataFrameProvider_m->Define(name, f, columns, getSystematicManager());
+    return this;
+  }
+
+  /**
+   * @brief Define exactly one column using the supplied input columns.
+   * No systematic expansion or registration occurs. Use for terminal,
+   * explicitly varied weights; ordinary Define retains automatic propagation.
+   */
+  template <typename F>
+  Analyzer *DefineNominal(std::string name, F f,
+                         const std::vector<std::string> &columns = {}) {
+    dataFrameProvider_m->DefineNominal(std::move(name), std::move(f), columns);
     return this;
   }
 
@@ -120,7 +145,13 @@ public:
   }
 
   /**
-   * @brief Define a filter (selection) in the dataframe. Systematics are handled automatically.
+   * @brief Define a filter (selection) in the dataframe.
+   *
+   * The predicate is evaluated for nominal and every registered variation.
+   * A cumulative boolean mask is retained for each variation, and an event is
+   * removed only when every variation fails its cumulative selection. The
+   * masks are also made available to histogram actions so failed variations
+   * do not receive histogram contributions from retained events.
    * @tparam F Callable type for the filter
    * @param name Name of the filter
    * @param f Callable to compute the filter
@@ -130,16 +161,128 @@ public:
   template <typename F>
   Analyzer *Filter(std::string name, F f,
                   const std::vector<std::string> &columns = {}) {
-    if (!preFilterNotified_m) {
-      auto df = dataFrameProvider_m->getDataFrame();
-      for (auto& service : services_m) {
-        service->onPreFilter(df);
-      }
-      preFilterNotified_m = true;
-    }
+    bookPreFilterActions();
+
+    const std::string filterLabel = name;
+
+    auto &systematics = getSystematicManager();
+    // File-backed analyses often register branch systematics lazily when
+    // histogramming starts. Discover conventional input pairs here as well,
+    // before defining the filter predicate, so migrated events are not lost.
+    auto inputDataFrame = dataFrameProvider_m->getDataFrame();
+    const auto inputColumnNames = inputDataFrame.GetColumnNames();
+    systematics.autoRegisterSystematics(
+        std::vector<std::string>(inputColumnNames.begin(), inputColumnNames.end()));
+
     name = "pass_" + name;
     Define(name, f, columns);
-    dataFrameProvider_m->Filter(passCut, {name});
+
+    // IDataFrameProvider::Define propagates paired systematics. Explicit
+    // labels (for example PDF replicas) use separate column registrations,
+    // so define those predicate columns here too.
+    auto df = dataFrameProvider_m->getDataFrame();
+    bool definedExplicitVariation = false;
+    for (const auto &label : systematics.getExplicitVariationLabels()) {
+      std::vector<std::string> variedColumns;
+      variedColumns.reserve(columns.size());
+      bool affected = false;
+      for (const auto &column : columns) {
+        const auto varied = systematics.getVariationColumnName(column, label);
+        affected = affected || varied != column;
+        variedColumns.push_back(varied);
+      }
+      if (!affected) {
+        continue;
+      }
+
+      auto availableColumns = df.GetColumnNames();
+      const auto mappedName = systematics.getVariationColumnName(name, label);
+      const std::string variedName = mappedName == name
+                                         ? name + "_" + label
+                                         : mappedName;
+      if (std::find(availableColumns.begin(), availableColumns.end(),
+                    variedName) == availableColumns.end()) {
+        df = df.Define(variedName, f, variedColumns);
+      }
+      systematics.registerVariationColumn(name, label, variedName);
+      definedExplicitVariation = true;
+    }
+    if (definedExplicitVariation) {
+      dataFrameProvider_m->setDataFrame(df);
+    }
+
+    auto variationLabels = systematics.getVariationLabels();
+    if (variationLabels.empty()) {
+      variationLabels.push_back("Nominal");
+    }
+    std::vector<std::string> previousMasks;
+    previousMasks.reserve(variationLabels.size());
+    for (const auto &label : variationLabels) {
+      // Resolve all prior masks before registering this filter's masks. A new
+      // label falls back to the previous nominal mask.
+      previousMasks.push_back(systematics.getSelectionMaskColumn(label));
+    }
+
+    df = dataFrameProvider_m->getDataFrame();
+    const auto availableColumns = df.GetColumnNames();
+    std::vector<std::string> cumulativeMasks;
+    cumulativeMasks.reserve(variationLabels.size());
+    std::unordered_map<std::string, std::string> maskByInputs;
+    for (std::size_t index = 0; index < variationLabels.size(); ++index) {
+      const auto &label = variationLabels[index];
+      std::string passColumn = label == "Nominal"
+                                   ? name
+                                   : systematics.getVariationColumnName(name, label);
+      if (std::find(availableColumns.begin(), availableColumns.end(), passColumn) ==
+          availableColumns.end()) {
+        passColumn = name;
+      }
+
+      const auto &previous = previousMasks[index];
+      const std::string key = std::to_string(previous.size()) + ":" +
+                              previous + passColumn;
+      auto cachedMask = maskByInputs.find(key);
+      std::string cumulative;
+      if (cachedMask != maskByInputs.end()) {
+        cumulative = cachedMask->second;
+      } else {
+        cumulative = "__rdf_filter_mask_" + std::to_string(filterCount_m) +
+                     "_" + std::to_string(maskByInputs.size());
+        if (previous.empty()) {
+          df = df.Define(cumulative, [](bool passed) { return passed; },
+                         {passColumn});
+        } else {
+          df = df.Define(
+              cumulative,
+              [](bool passedBefore, bool passedNow) {
+                return passedBefore && passedNow;
+              },
+              {previous, passColumn});
+        }
+        maskByInputs.emplace(key, cumulative);
+      }
+      cumulativeMasks.push_back(cumulative);
+      systematics.registerSelectionMaskColumn(label, cumulative);
+      if (systematics.getSelectionMaskColumn(label) != cumulative) {
+        throw std::logic_error(
+            "Analyzer::Filter requires the systematic manager to store "
+            "per-variation selection mask columns");
+      }
+    }
+
+    // Reuse masks without per-event packing. Common small unions use compiled
+    // callables so a native analysis does not need Cling for a boolean OR.
+    std::vector<std::string> uniqueMasks;
+    std::unordered_set<std::string> includedMasks;
+    for (const auto &mask : cumulativeMasks) {
+      if (!includedMasks.insert(mask).second) {
+        continue;
+      }
+      uniqueMasks.push_back(mask);
+    }
+    df = rdf::detail::filterAnyMask(df, uniqueMasks, filterLabel);
+    dataFrameProvider_m->setDataFrame(df);
+    ++filterCount_m;
     return this;
   }
 
@@ -166,13 +309,13 @@ public:
     auto storeVar = [var](unsigned int, const ROOT::RDF::RSampleInfo) -> T {
       return (var);
     };
-    std::cout << "Defining variable " << name << " to be " << var << std::endl;
+    //std::cout << "Defining variable " << name << " to be " << var << std::endl;
     dataFrameProvider_m->DefinePerSample(name, storeVar);
     return (this);
   }
 
   /**
-   * @brief Define a vector variable in the dataframe. Systematics are handled automatically.
+   * @brief Define a vector variable in the dataframe, including registered paired variations.
    * @param name Name of the variable
    * @param columns Input columns
    * @param type Data type (default: Float_t)
@@ -186,7 +329,7 @@ public:
    * @brief Book histograms defined in config file
    * 
    * This method should be called after all Define and Filter operations
-   * are complete, but before save(). It triggers the NDHistogramManager
+   * are complete, but before run(). It triggers the NDHistogramManager
    * to book all histograms that were loaded from the config file.
    * @return Pointer to this Analyzer (for chaining)
    */
@@ -196,7 +339,7 @@ public:
    * @brief Book an integer-branch counter histogram on the CounterService.
    *
    * Call this after the integer branch (e.g. a stitching code) has been defined
-   * via Define(), and before the event loop runs (before save()). The histogram
+   * via Define(), and before the event loop runs (before run()). The histogram
    * range must be known in advance. This forwards to CounterService and keeps
    * all result pointers alive so the event loop executes only once.
    *
@@ -210,21 +353,68 @@ public:
                                     double low, double high);
 
   /**
-   * @brief Save the configured branches to the output file and trigger the computation of the dataframe.
-   * @return Pointer to this Analyzer (for chaining)
+   * @brief Get the column names currently known to the dataframe.
+   *
+   * This is a safe alternative to getDataFrameUnsafe().GetColumnNames().
+   * It queries the dataframe's column metadata without triggering the
+   * event loop.
+   *
+   * @return A vector of column name strings.
    */
-  Analyzer *save();
+  std::vector<std::string> GetColumnNames();
+
+  /**
+   * @brief Check whether a column exists in the dataframe.
+   *
+   * Safe alternative to calling getDataFrameUnsafe() and then manually
+   * searching GetColumnNames().
+   *
+   * @param name The column name to look up.
+   * @return true if the column is known to the dataframe.
+   */
+  bool HasColumn(const std::string& name);
+
+  /**
+   * @brief Get the type string of a column.
+   *
+   * Safe alternative to getDataFrameUnsafe().GetColumnType(name).
+   *
+   * @param name The column name.
+   * @return The type string (e.g. "Float_t", "Int_t", "ROOT::VecOps::RVec<float>").
+   */
+  std::string GetColumnType(const std::string& name);
+
+  /**
+   * @brief Return the first column from @p candidates that exists in the dataframe.
+   *
+   * Iterates the candidate list in order and returns the first name that
+   * HasColumn(name) is true for.  If none match, returns an empty string.
+   *
+   * @param candidates Ordered list of candidate column names.
+   * @return The first matching column name, or an empty string.
+   */
+  std::string FirstAvailableColumn(const std::vector<std::string>& candidates);
 
   /**
    * @brief Unified run/save entry point.
    *
-   * Triggers the event loop exactly once. This method:
+   * Runs each booked lazy action through the configured dataframe graph.
+   * If no action has been booked, the call is a successful no-op and does not
+   * trigger ROOT's event loop. In either case, a successful call consumes the
+   * Analyzer's one-shot run lifecycle. A failed run is terminal for that
+   * Analyzer; cleanup and retry are not supported. This method:
    *  - Writes a skim only when @c enableSkim=1 (or @c true/@c True) is present in the config.
+   *    If @c skimFilter is present, it is applied as an RDataFrame filter to
+   *    the skim output only; histogram actions remain inclusive.
+   *    Skim systematic columns are omitted by default and are included only
+   *    when @c skimSystematics is enabled.
+   *  - Systematic propagation is enabled by default and can be disabled for
+   *    the entire framework with @c enableSystematics=false.
    *  - Saves all histograms booked on the NDHistogramManager (if one is registered).
    *  - Finalizes all analysis services (e.g. CounterService).
    *
-   * Use this instead of manually calling save() followed by a separate
-   * NDHistogramManager::saveHists() call.
+   * This is the single entry point for triggering computation.
+   * There is no separate save() — use run() for all cases.
    *
    * @return Pointer to this Analyzer (for chaining)
    */
@@ -232,9 +422,17 @@ public:
 
   /**
    * @brief Get the underlying RDataFrame node.
+   *
+   * @warning This returns a raw RNode and bypasses the Analyzer API.
+   *          Only use this if you need direct access to the dataframe for
+   *          advanced operations not supported by the Analyzer interface.
+   *          For standard use cases, prefer Define(), Filter(),
+   *          bookConfigHistograms(), and run() — they preserve systematic
+   *          expansion, provenance tracking, and consistent lifecycle.
+   *
    * @return The current RNode
    */
-  ROOT::RDF::RNode getDF();
+  ROOT::RDF::RNode getDataFrameUnsafe();
 
   /**
    * @brief Get a configuration value by key.
@@ -261,10 +459,35 @@ public:
    * @brief Get a plugin by role name and cast to the desired interface.
    * @tparam T Interface type to cast to
    * @param key Role name of the plugin
-   * @return Pointer to the plugin as T, or nullptr if not found or wrong type
+   * @return Pointer to the plugin as T
+   * @throws std::out_of_range if no plugin with that key is registered,
+   *         or std::bad_cast if the registered plugin cannot be cast to T.
    */
   template<typename T>
   std::shared_ptr<T> getPlugin(const std::string& key) const {
+    auto it = plugins.find(key);
+    if (it == plugins.end()) {
+      throw std::out_of_range("Plugin '" + key + "' not found. "
+          "Make sure the plugin is registered with addPlugin(\"" + key + "\", ...) "
+          "before calling getPlugin.");
+    }
+    auto cast = std::dynamic_pointer_cast<T>(it->second);
+    if (!cast) {
+      throw std::bad_cast();
+    }
+    return cast;
+  }
+
+  /**
+   * @brief Find a plugin by role name without throwing.
+   * @tparam T Interface type to cast to
+   * @param key Role name of the plugin
+   * @return Pointer to the plugin as T, or nullptr if not found or wrong type
+   *
+   * Use this when the plugin is optional.
+   */
+  template<typename T>
+  std::shared_ptr<T> findPlugin(const std::string& key) const noexcept {
     auto it = plugins.find(key);
     if (it != plugins.end()) {
       return std::dynamic_pointer_cast<T>(it->second);
@@ -303,16 +526,20 @@ public:
    */
   IConfigurationProvider &getConfigurationProvider() const { return *configProvider_m; }
 
+  /// Book inclusive service actions once, after their input columns exist.
+  /// For raw RNode filtering, call this before replacing the active dataframe.
+  void bookPreFilterActions();
+
   /**
    * @brief Inject task-level provenance metadata.
    *
    * Stores a key-value pair that is contributed to the ProvenanceService at
    * finalize time under the namespace "task.<key>".  This allows workflow
-   * orchestration layers (e.g. LAW tasks) to attach task-specific information
+   * orchestration layers (e.g. Snakemake rules) to attach task-specific information
    * (job ID, dataset query hash, submission timestamp, etc.) to the provenance
    * record without bypassing the provenance interface.
    *
-   * May be called at any time before save() / run().
+   * May be called at any time before run().
    *
    * @param key   Metadata key (will be stored as "task.<key>").
    * @param value Metadata value.
@@ -321,6 +548,9 @@ public:
   Analyzer *setTaskMetadata(const std::string& key, const std::string& value);
 
 private:
+  // Grant the Python binding wrappers access to the no-warning getDF().
+  friend class AnalyzerPythonWrapper;
+
   /**
    * @brief Verbosity level for logging and debug output (higher = more verbose)
    */
@@ -369,11 +599,11 @@ private:
    */
   std::vector<std::unique_ptr<IAnalysisService>> services_m;
   /**
-   * @brief Non-owning pointer to the ProvenanceService (owned by services_m).
-   * Kept separately so addPlugin() can register plugin provenance entries
-   * after initializeServices() has run.
+   * @brief Shared ownership of the ProvenanceService.
+   * Stored as shared_ptr (not in services_m) so that the pointer remains
+   * valid regardless of services_m mutations.
    */
-  ProvenanceService* provenanceService_m = nullptr;
+  std::shared_ptr<ProvenanceService> provenanceService_m;
   /**
    * @brief Task-level provenance metadata contributed via setTaskMetadata().
    * Entries are stored here until finalize time, then forwarded to the
@@ -381,6 +611,8 @@ private:
    */
   std::unordered_map<std::string, std::string> taskMetadata_m;
   bool preFilterNotified_m = false;
+  bool eventLoopTriggered_m = false;
+  std::size_t filterCount_m = 0;
   ///**
   // * @brief Initialize the analyzer with the provided dependencies
   // */
@@ -390,11 +622,15 @@ private:
    */
   void wirePluginManagers();
   void initializeServices(ManagerContext& ctx);
+  void reorderPlugins();
+  // No-warning accessor for internal use. External callers should use
+  // getDataFrameUnsafe() which prints a cautionary message.
+  ROOT::RDF::RNode getDF();
   /**
    * @brief Collect structured provenance contributions from all plugins and
    * services, inject task metadata, then finalize the ProvenanceService.
    *
-   * Called at the end of save() and run() to ensure all plugin/service
+   * Called at the end of run() to ensure all plugin/service
    * provenance contributions are captured before the provenance record is
    * written to disk.
    */

@@ -9,6 +9,8 @@
 #include <TH1D.h>
 #include <TObject.h>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -58,6 +60,8 @@ void CounterService::initialize(ManagerContext& ctx) {
 void CounterService::bookIntWeightHistogram(ROOT::RDF::RNode df,
                                             const std::string& branch,
                                             int nBins, double low, double high) {
+  if (nBins <= 0 || !std::isfinite(low) || !std::isfinite(high) || low >= high)
+    throw std::invalid_argument("Integer counter histogram requires positive bins and finite min < max for '" + branch + "'");
   if (filtersApplied_m) {
     const std::string msg =
         "CounterService: bookIntWeightHistogram('" + branch +
@@ -109,18 +113,16 @@ void CounterService::onPreFilter(ROOT::RDF::RNode& df) {
 
     if (ctx_m) {
       const auto& configMap = ctx_m->config.getConfigMap();
-      auto it_bins = configMap.find("counterIntWeightBranchNBins");
-      auto it_low  = configMap.find("counterIntWeightBranchMin");
-      auto it_high = configMap.find("counterIntWeightBranchMax");
-      if (it_bins != configMap.end()) {
-        try { nBins = std::stoi(it_bins->second); } catch (...) {}
-      }
-      if (it_low != configMap.end()) {
-        try { low = std::stod(it_low->second); } catch (...) {}
-      }
-      if (it_high != configMap.end()) {
-        try { high = std::stod(it_high->second); } catch (...) {}
-      }
+      auto read = [&](const char* key, auto& number) {
+        auto found = configMap.find(key);
+        if (found == configMap.end()) return;
+        std::istringstream input(found->second);
+        if (!(input >> number) || !(input >> std::ws).eof())
+          throw std::invalid_argument(std::string("Invalid numeric value '") + found->second + "' for " + key);
+      };
+      read("counterIntWeightBranchNBins", nBins);
+      read("counterIntWeightBranchMin", low);
+      read("counterIntWeightBranchMax", high);
     }
 
     bookIntWeightHistogram(df, intWeightBranch_m, nBins, low, high);
@@ -140,6 +142,10 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
   }
 
   unsigned long long selectedCountValue = countResult.GetValue();
+
+  if (std::getenv("RDF_ANALYZER_SUMMARY")) {
+    std::cout << "RDF_ANALYZER_EVENTS=" << selectedCountValue << std::endl;
+  }
 
   // compute elapsed time from initialize() -> finalize()
   double elapsed_s = 0.0;
@@ -212,7 +218,6 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
     // Write pre-booked int-weight histograms (booked via bookIntWeightHistogram)
     if (intWeightHistResult_m.has_value()) {
       auto histPtr = (*intWeightHistResult_m).GetPtr();
-      histPtr->SetDirectory(&outFile);
       histPtr->Write(histPtr->GetName(), TObject::kOverwrite);
       ctx_m->logger.log(ILogger::Level::Info,
                         "CounterService: wrote intWeightSum histogram '" +
@@ -220,7 +225,6 @@ void CounterService::finalize(ROOT::RDF::RNode& df) {
     }
     if (intWeightSignHistResult_m.has_value()) {
       auto signHistPtr = (*intWeightSignHistResult_m).GetPtr();
-      signHistPtr->SetDirectory(&outFile);
       signHistPtr->Write(signHistPtr->GetName(), TObject::kOverwrite);
       ctx_m->logger.log(ILogger::Level::Info,
                         "CounterService: wrote intWeightSignSum histogram '" +

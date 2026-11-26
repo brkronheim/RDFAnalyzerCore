@@ -1,0 +1,4 @@
+interface:
+  display_name: "Production workflows and diagnosis"
+  short_description: "Trace Snakemake stages, runtimes and recovery"
+  default_prompt: "Use $rdfanalyzer-production to trace the Snakemake targets, saved inputs, staged runtime and worker evidence, or the legacy controller owning an existing campaign."

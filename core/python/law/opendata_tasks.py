@@ -25,12 +25,12 @@ Usage
     source env.sh
 
     law run GetOpenDataFileList \\
-        --submit-config analyses/myAnalysis/cfg/submit_config.txt \\
+        --submit-config analyses/myAnalysis/cfg/submit_config.yaml \\
         --name myRun --exe build/bin/myanalysis
 
     law run SkimTask \\
         --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \\
-        --submit-config analyses/myAnalysis/cfg/skim_config.txt \\
+        --submit-config analyses/myAnalysis/cfg/skim_config.yaml \\
         --name mySkimRun \\
         --file-source opendata --file-source-name myRun \\
         --exe build/bin/myanalysis
@@ -68,7 +68,7 @@ from opendata_discovery import (  # noqa: E402
     process_metadata as _process_metadata,
     parse_opendata_config as _parse_opendata_config,
 )
-from performance_recorder import PerformanceRecorder, perf_path_for  # noqa: E402
+from rdfproduction.performance import PerformanceRecorder, perf_path_for  # noqa: E402
 
 WORKSPACE = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 

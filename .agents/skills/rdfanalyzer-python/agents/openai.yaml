@@ -1,0 +1,4 @@
+interface:
+  display_name: "Python bindings and tools"
+  short_description: "Write Python analyses and inspect native bindings"
+  default_prompt: "Use $rdfanalyzer-python to write or inspect this Python analysis, tracing expressions, arrays, native callbacks and the imported runtime."

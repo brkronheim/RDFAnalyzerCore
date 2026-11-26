@@ -1,4 +1,5 @@
 #include <TextConfigAdapter.h>
+#include "ConfigDocument.h"
 #include <fstream>
 #include <stdexcept>
 
@@ -46,98 +47,47 @@ TextConfigAdapter::splitString(std::string_view input,
   return splitStringVector;
 }
 
-std::unordered_map<std::string, std::string>
-TextConfigAdapter::parsePairBasedConfig(const std::string &configFile) const {
-  std::unordered_map<std::string, std::string> configMap;
-  std::ifstream file(configFile);
-  if (file.is_open()) {
-    std::string line;
-    while (std::getline(file, line)) {
-      auto [key, value] = parsePair(line, true);
-      if (!key.empty()) {
-        if (configMap.find(key) != configMap.end()) {
-          throw std::runtime_error(
-              "Error: Key " + key + " already exists in config " + configFile +
-              ". Do not use the same key twice in the same config.");
-        }
-        configMap.emplace(key, value);
-      }
-    }
-    file.close();
-  } else {
-    throw std::runtime_error("Error: Configuration file '" + configFile +
-                             "' could not be opened in parsePairBasedConfig.");
-  }
-  return configMap;
+namespace {
+std::ifstream openLegacy(const std::string &file) {
+  std::ifstream input(file);
+  if (!input) throw std::runtime_error("Error: Configuration file '" + file + "' could not be opened.");
+  return input;
+}
 }
 
-std::vector<std::unordered_map<std::string, std::string>>
-TextConfigAdapter::parseMultiKeyConfig(
-    const std::string &configFile,
-    const std::vector<std::string> &requiredEntryKeys) const {
-  std::vector<std::unordered_map<std::string, std::string>> parsedConfig;
-
-  std::ifstream file(configFile);
-  if (!file.is_open()) {
-    throw std::runtime_error("Error: Configuration file '" + configFile +
-                             "' could not be opened in parseMultiKeyConfig.");
-    return parsedConfig;
-  }
-
+rdf_config_detail::ConfigMap TextConfigAdapter::parsePairBasedConfig(const std::string &file) const {
+  auto input = openLegacy(file);
+  YAML::Node document(YAML::NodeType::Map);
   std::string line;
-  while (std::getline(file, line)) {
-    line = trim(line.substr(0, line.find("#")));
-    if (line.empty()) {
-      continue;
-    }
-
-    std::unordered_map<std::string, std::string> entryKeys;
-    auto splitEntry = splitString(line, " ");
-    for (auto &pair : splitEntry) {
-      auto [key, value] = parsePair(pair, false);
-      if (!key.empty() && !value.empty()) {
-        if (entryKeys.find(key) != entryKeys.end()) {
-          throw std::runtime_error(
-              "Error: Key " + key + " already exists in entry " + line +
-              " in config " + configFile +
-              ". Do not use the same key twice in the same entry.");
-        }
-        entryKeys[key] = value;
-      }
-    }
-
-    bool allEntryKeysFound = true;
-    for (const auto &entryKey : requiredEntryKeys) {
-      if (entryKeys.find(entryKey) == entryKeys.end()) {
-        allEntryKeysFound = false;
-        break;
-      }
-    }
-    if (allEntryKeysFound) {
-      parsedConfig.push_back(entryKeys);
-    }
+  while (std::getline(input, line)) {
+    auto [key, value] = parsePair(line, true);
+    if (!key.empty()) document.force_insert(key, value);
   }
-
-  file.close();
-  return parsedConfig;
+  return rdf_config_detail::mapping(document, file);
 }
 
-std::vector<std::string>
-TextConfigAdapter::parseVectorConfig(const std::string &configFile) const {
-  std::vector<std::string> configVector;
-  std::ifstream file(configFile);
-  if (file.is_open()) {
-    std::string line;
-    while (std::getline(file, line)) {
-      line = trim(line.substr(0, line.find("#")));
-      if (!line.empty()) {
-        configVector.push_back(line);
-      }
+std::vector<rdf_config_detail::ConfigMap> TextConfigAdapter::parseMultiKeyConfig(
+    const std::string &file, const std::vector<std::string> &required) const {
+  auto input = openLegacy(file);
+  YAML::Node document(YAML::NodeType::Sequence);
+  std::string line;
+  while (std::getline(input, line)) {
+    line = stripComment(line);
+    if (trim(line).empty()) continue;
+    YAML::Node entry(YAML::NodeType::Map);
+    for (const auto &field : splitString(line, " ")) {
+      auto [key, value] = parsePair(field, false);
+      if (!key.empty() && !value.empty()) entry.force_insert(key, value);
     }
-    file.close();
-  } else {
-    throw std::runtime_error("Error: Configuration file '" + configFile +
-                             "' could not be opened in parseVectorConfig.");
+    document.push_back(entry);
   }
-  return configVector;
+  return rdf_config_detail::records(document, file, required);
+}
+
+std::vector<std::string> TextConfigAdapter::parseVectorConfig(const std::string &file) const {
+  auto input = openLegacy(file);
+  YAML::Node document(YAML::NodeType::Sequence);
+  std::string line;
+  while (std::getline(input, line)) document.push_back(stripComment(line));
+  return rdf_config_detail::strings(document, file);
 }

@@ -452,10 +452,10 @@ class TestValidateFriendConfig:
         errors, _ = validate_friend_config(friends, "test.yaml")
         assert any("alias" in e for e in errors)
 
-    def test_no_file_source_is_warning(self):
+    def test_no_file_source_is_error(self):
         friends = [{"alias": "calib"}]
-        _, warnings = validate_friend_config(friends, "test.yaml")
-        assert any("file source" in w or "files" in w or "directory" in w for w in warnings)
+        errors, _ = validate_friend_config(friends, "test.yaml")
+        assert any("file source" in w or "files" in w or "directory" in w for w in errors)
 
     def test_duplicate_alias_is_error(self):
         friends = [
@@ -475,12 +475,23 @@ class TestValidateFriendConfig:
         errors, _ = validate_friend_config(friends, "test.yaml")
         assert any("alias" in e for e in errors)
 
-    def test_unknown_key_is_warning(self):
+    def test_unknown_key_is_error(self):
         friends = [
             {"alias": "calib", "files": ["/a.root"], "unknown_key": "val"}
         ]
-        _, warnings = validate_friend_config(friends, "test.yaml")
-        assert any("unknown_key" in w for w in warnings)
+        errors, _ = validate_friend_config(friends, "test.yaml")
+        assert any("unknown_key" in w for w in errors)
+
+    def test_invalid_nested_fields_have_context(self):
+        for fields, expected in [
+            ({"files": [""]}, "files"),
+            ({"alias": []}, "alias"),
+            ({"directory": 7}, "directory"),
+            ({"files": ["a"], "fileList": ["b"]}, "duplicate field"),
+            ({"indexBranches": ["run", "lumi", "event"]}, "indexBranches"),
+        ]:
+            errors, _ = validate_friend_config([{"alias": "f", "directory": "/data", **fields}], "job.yaml")
+            assert any(expected in e and "job.yaml" in e and "[0]" in e for e in errors)
 
     def test_camelcase_treename_accepted(self):
         """Accepts camelCase treeName (variant used in test_friend_config.yaml)."""

@@ -39,7 +39,7 @@ private:
 
 TEST(RootEnvironmentGuard, ThrowsOnMismatchedRootsys) {
   EnvGuard guard("ROOTSYS", "/tmp/invalid-root");
-  const std::string configPath = std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config_minimal.txt";
+  const std::string configPath = std::string(TEST_SOURCE_DIR) + "/cfg/test_data_config_minimal.yaml";
   ConfigurationManager config(configPath);
 
   EXPECT_THROW({

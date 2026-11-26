@@ -1,6 +1,7 @@
 #ifndef TEST_UTIL_H
 #define TEST_UTIL_H
 
+#include "test_workspace.h"
 #include <gtest/gtest.h>
 #include <unistd.h>
 #include <string>
@@ -25,18 +26,11 @@ inline void EnsureConsistentRootTestEnvironment() {
     setenv("ROOTSYS", rootPrefix.c_str(), 1);
 }
 
-/**
- * @brief Change to the test source directory using TEST_SOURCE_DIR macro.
- *        Creates minimal test input dirs/files if they are missing to make
- *        tests robust when run in a clean environment.
- *        Fails the test if the directory change is unsuccessful.
- */
+// Historical helper name retained for existing tests. Relative paths now resolve
+// inside a process-private copy of the test fixtures.
 inline void ChangeToTestSourceDir() {
     EnsureConsistentRootTestEnvironment();
-
-    if (chdir(TEST_SOURCE_DIR) != 0) {
-        FAIL() << "Failed to change directory to " << TEST_SOURCE_DIR;
-    }
+    std::filesystem::current_path(testWorkspacePath());
 
     // Ensure minimal test data directories exist and contain a small ROOT file.
     // test_data_minimal gets a single-event file (used by lightweight tests).

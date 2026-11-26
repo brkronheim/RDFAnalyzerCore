@@ -42,8 +42,8 @@ Key features:
   thresholds (e.g. loose / medium / tight).
 - **Multi-score WPs** — a WP can require passing thresholds on *multiple*
   discriminant scores simultaneously (e.g. CMS charm-tagging uses both CvsL and
-  CvsB; see [`setTaggerColumns`](#settaggercolumns) and the vector overload of
-  [`addWorkingPoint`](#addworkingpoint)).
+  CvsB; see [setting multiple tagger columns](#set-multiple-tagger-columns) and
+  the [multi-score working-point API](#add-working-points).
 - **WP category column** — per-object integer category (0 = fail all, …, N = pass all).
 - **Correctionlib SF application** — per-object SFs from a correctionlib payload
   reduced to per-event weight columns.
@@ -142,7 +142,7 @@ twm->defineVariationCollections("goodJets_bmedium", "goodJets_btag",
                                  "goodJets_btag_variations");
 ```
 
-After `analyzer.save()`:
+After `analyzer.run()`:
 
 | Column                        | Type                        | Description                                    |
 |-------------------------------|-----------------------------|------------------------------------------------|
@@ -254,6 +254,13 @@ recommendation and replaces that per-jet factor with unity.
 
 This method schedules exactly that fixed-WP event weight. The input vectors must
 be ordered exactly like the registered working points.
+
+With one working point, weights read the SF and efficiency arrays directly.
+Multiple working points use one aligned, object-major flat pack per distinct
+input list; identical efficiency inputs are shared across nuisance weights
+within `execute()`. Multi-score categories also use a flat aligned pack.
+Mismatched lengths within a pack and missing selected-object indices throw
+exceptions.
 
 ```cpp
 auto twm = analyzer.getPlugin<TaggerWorkingPointManager>("btagManager");
@@ -370,7 +377,7 @@ Declare a **single** per-object tagger discriminator score column
 twm->setTaggerColumn("Jet_btagDeepFlavB");
 ```
 
-### `setTaggerColumns(taggerScoreColumns)`
+### Set multiple tagger columns
 
 Declare **multiple** per-object tagger discriminator score columns for
 multi-score working points.  Each column must be `RVec<Float_t>`.  The column
@@ -384,7 +391,7 @@ ctwm->setTaggerColumns({"Jet_btagDeepFlavCvL", "Jet_btagDeepFlavCvB"});
 Throws:
 - `std::invalid_argument` if the list is empty or any element is empty.
 
-### `addWorkingPoint(name, threshold)` / `addWorkingPoint(name, thresholds)`
+### Add working points
 
 Register a named working point.
 
@@ -842,20 +849,31 @@ entirely optional and programmatic setup continues to work unchanged.
 
 ### Config file format
 
-Each line defines one setup block using space-separated `key=value` pairs:
+Each record in the YAML sequence defines a setup block. Comma-separated scalar fields retain the ordering expected by the plugin.
 
-```
+```yaml
 # Working-point block (1D — single tagger column)
-type=working_points taggerColumns=Jet_btagDeepFlavB wpNames=loose,medium,tight wpThresholds=0.0521,0.3033,0.7489
+- type: working_points
+  taggerColumns: Jet_btagDeepFlavB
+  wpNames: loose,medium,tight
+  wpThresholds: 0.0521,0.3033,0.7489
 
 # Working-point block (ND — multi-score, colon-separated thresholds)
-type=working_points taggerColumns=Jet_btagDeepFlavCvL,Jet_btagDeepFlavCvB wpNames=loose,medium,tight wpThresholds=0.042:0.135,0.108:0.285,0.274:0.605
+- type: working_points
+  taggerColumns: Jet_btagDeepFlavCvL,Jet_btagDeepFlavCvB
+  wpNames: loose,medium,tight
+  wpThresholds: 0.042:0.135,0.108:0.285,0.274:0.605
 
 # Correction block (stored for deferred application)
-type=correction correctionName=deepjet_sf stringArgs=central inputColumns=Jet_hadronFlavour,Jet_eta,Jet_pt,Jet_btagDeepFlavB
+- type: correction
+  correctionName: deepjet_sf
+  stringArgs: central
+  inputColumns: Jet_hadronFlavour,Jet_eta,Jet_pt,Jet_btagDeepFlavB
 
 # Systematics block
-type=systematics setName=standard sources=hf,lf,hfstats1,hfstats2,lfstats1,lfstats2,cferr1,cferr2
+- type: systematics
+  setName: standard
+  sources: hf,lf,hfstats1,hfstats2,lfstats1,lfstats2,cferr1,cferr2
 ```
 
 ### Role-based config key lookup
@@ -869,9 +887,9 @@ ctwm->setRole("ctag");  // looks for "ctagConfig"
 ```
 
 Then in the analysis config:
-```
-btagConfig=cfg/btag_config.txt
-ctagConfig=cfg/ctag_config.txt
+```yaml
+btagConfig: cfg/btag_config.yaml
+ctagConfig: cfg/ctag_config.yaml
 ```
 
 ### Applying deferred corrections

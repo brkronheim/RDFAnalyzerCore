@@ -247,6 +247,60 @@ class TestValidateSubmitConfigYamlRouting:
         assert any("Duplicate" in e for e in errors)
 
 
+class TestSubmitConfigNumericPreflight:
+    def _make_project(self, tmp_path):
+        (tmp_path / "jobs").mkdir()
+        (tmp_path / "cfg").mkdir()
+        (tmp_path / "samples.yaml").write_text("""\
+lumi: 59.7
+datasets:
+  - name: ttbar
+    dtype: mc
+    das: /TTto2L2Nu/Run3/NANO
+    xsec: 98.34
+    sum_weights: 500000.0
+""")
+        return tmp_path / "jobs" / "submit_config.txt"
+
+    def test_constant_preflight_requires_full_tokens_and_cpp_int_range(self, tmp_path):
+        config_path = self._make_project(tmp_path)
+        (tmp_path / "cfg" / "floats.txt").write_text(
+            "valid=1.25\npartial=12junk\noverflow=1e39\nnan=nan\ninfinity=inf\n"
+        )
+        (tmp_path / "cfg" / "ints.txt").write_text(
+            "valid=12\npartial=3.5\noverflow=2147483648\n"
+        )
+        config_path.write_text("""\
+sampleConfig=samples.yaml
+floatConfig=cfg/floats.txt
+intConfig=cfg/ints.txt
+saveDirectory=/tmp/out
+saveTree=Events
+""")
+
+        errors, _ = validate_submit_config(str(config_path), mode="nano")
+
+        assert any("partial" in error and "12junk" in error for error in errors)
+        assert any("overflow" in error and "1e39" in error for error in errors)
+        assert any("nan" in error and "'nan'" in error for error in errors)
+        assert any("infinity" in error and "'inf'" in error for error in errors)
+        assert any("partial" in error and "3.5" in error for error in errors)
+        assert any("overflow" in error and "2147483648" in error for error in errors)
+
+    def test_threads_must_fit_signed_cpp_int_range(self, tmp_path):
+        config_path = self._make_project(tmp_path)
+        config_path.write_text("""\
+sampleConfig=samples.yaml
+saveDirectory=/tmp/out
+saveTree=Events
+threads=2147483648
+""")
+
+        errors, _ = validate_submit_config(str(config_path), mode="nano")
+
+        assert any("threads" in error and "Invalid" in error for error in errors)
+
+
 class TestLoadSampleConfigLegacyCompatibility:
     """Verify the explicit legacy .txt compatibility adapter behavior."""
 
@@ -330,4 +384,3 @@ class TestParseOpendataConfig:
         """)
         samples, recids, lumi = _parse_opendata_config(str(path))
         assert lumi == 1.0  # default from DatasetManifest
-

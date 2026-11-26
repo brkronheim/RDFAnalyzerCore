@@ -1,0 +1,5 @@
+# Optional typed authoring and Numba kernels; use the matching ROOT Python.
+PyYAML>=6.0
+numpy>=1.24
+numba>=0.59
+cffi>=1.15

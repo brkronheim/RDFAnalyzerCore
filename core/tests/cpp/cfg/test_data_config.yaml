@@ -1,0 +1,17 @@
+directory: test_data
+saveFile: test_output.root
+saveDirectory: test_output/
+saveTree: Events
+threads: '1'
+antiglobs: output.root,hists.root
+globs: root,test
+saveConfig: cfg/output.yaml
+bdtConfig: cfg/bdts.yaml
+onnxConfig: cfg/onnx_models.yaml
+correctionConfig: cfg/correction.yaml
+triggerConfig: cfg/triggers.yaml
+kinematicFitConfig: cfg/kinematic_fit.yaml
+floatConfig: floats.yaml
+intConfig: ints.yaml
+optionalBranchesConfig: optionalBranches.yaml
+aliasConfig: alias.yaml

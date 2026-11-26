@@ -129,35 +129,28 @@ void SofieManager::registerModel(const std::string &name,
  * @param checkExisting If true, only add models that don't already exist
  */
 void SofieManager::parseModelConfig(const IConfigurationProvider &configProvider, bool checkExisting) {
-  // Try to get SOFIE config - it's optional
-  try {
-    const auto modelConfig = configProvider.parseMultiKeyConfig(
-        configProvider.get("sofieConfig"),
-        {"name", "inputVariables", "runVar"});
-    
-    // Store configuration information but don't load models
-    // Models must be registered manually via registerModel()
-    for (const auto &entryKeys : modelConfig) {
-      auto inputVariableVector =
-          configProvider.splitString(entryKeys.at("inputVariables"), ",");
-      
-      const auto& name = entryKeys.at("name");
-      const auto& runVar = entryKeys.at("runVar");
-      
-      // Store the expected features and runVar for this model
-      // The actual inference function will be registered later
-      if (!checkExisting || features_m.find(name) == features_m.end()) {
-        features_m.emplace(name, inputVariableVector);
-      }
-      if (!checkExisting || model_runVars_m.find(name) == model_runVars_m.end()) {
-        model_runVars_m.emplace(name, runVar);
-      }
+  const auto &settings = configProvider.getConfigMap();
+  const auto option = settings.find("sofieConfig");
+  if (option == settings.end() || option->second.empty()) return;
+
+  // Functions are registered by the analysis. A supplied recipe describes
+  // their expected feature order and run gate and must be readable at setup.
+  const auto models = configProvider.parseMultiKeyConfig(option->second, {});
+  std::size_t row = 0;
+  for (const auto &model : models) {
+    ++row;
+    for (const auto *key : {"name", "inputVariables", "runVar"}) {
+      if (!model.count(key) || model.at(key).empty())
+        throw std::runtime_error(option->second + ": SOFIE model " + std::to_string(row) +
+                                 " needs a nonempty '" + key + "'");
     }
-  } catch (const std::exception &e) {
-    // sofieConfig is optional - if not present, models can still be registered manually
-    // Exception is intentionally ignored as configuration file may not exist or may not
-    // contain sofieConfig entry, which is a valid use case for manual registration
+    const auto &name = model.at("name");
+    if (!checkExisting || features_m.find(name) == features_m.end())
+      features_m.emplace(name, configProvider.splitString(model.at("inputVariables"), ","));
+    if (!checkExisting || model_runVars_m.find(name) == model_runVars_m.end())
+      model_runVars_m.emplace(name, model.at("runVar"));
   }
+
 }
 
 /**

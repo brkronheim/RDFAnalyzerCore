@@ -10,6 +10,7 @@
 #include <ConfigurationManager.h>
 #include <test_util.h>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,7 @@ TEST_F(BaseConfigSetup, SplitStringEdgeCases) {
   EXPECT_EQ(config->splitString("root , test", ","), (std::vector<std::string>{"root", "test"}));
   EXPECT_EQ(config->splitString("root , test", " "), (std::vector<std::string>{"root", ",", "test"}));
   EXPECT_EQ(config->splitString("root , test", ":"), (std::vector<std::string>{"root , test"}));
+  EXPECT_THROW(config->splitString("a,b", ""), std::invalid_argument);
 }
 
 /**
@@ -126,4 +128,4 @@ TEST_F(BaseConfigSetup, UnicodeAndSpecialCharacterHandling) {
   EXPECT_EQ(splitUnicode, (std::vector<std::string>{"α", "β", "γ", "δ"}));
   auto splitEmoji = config->splitString("😀,😃,😄", ",");
   EXPECT_EQ(splitEmoji, (std::vector<std::string>{"😀", "😃", "😄"}));
-} 
+}

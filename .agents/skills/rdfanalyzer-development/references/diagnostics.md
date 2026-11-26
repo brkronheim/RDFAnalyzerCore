@@ -1,0 +1,13 @@
+# Framework diagnostics, logging, and exception evidence
+
+Use for local config/plugin/JIT/runtime failures and for changes to diagnostic behavior. For scheduler/worker attempts use [production diagnosis](../../rdfanalyzer-production/references/diagnosis.md); for linker/import failures use [build](../../rdfanalyzer-build/SKILL.md) or [Python](../../rdfanalyzer-python/SKILL.md).
+
+Identify the first concrete exception/error, the stage that produced it, the exact config/column/resource involved, and the caller that catches/translates it. Distinguish construction/config parsing, manager wiring/initialization, graph construction, JIT compilation, lazy event evaluation, output materialization and finalization. A failure surfacing in `run()` can originate in a previously booked lazy action.
+
+[ILogger](../../../../core/interface/api/ILogger.h) defines Trace/Debug/Info/Warn/Error levels injected through [ManagerContext](../../../../core/interface/api/ManagerContext.h). [DefaultLogger](../../../../core/interface/DefaultLogger.h) sends Warn/Error to stderr and the other levels to stdout, printing message text; it does not implement configurable level filtering or add structured context automatically. Some implementation paths write directly to streams/ROOT. Trace the actual emitter and redirection when matching a message to a worker log.
+
+[ERRORS_AND_TRACING](../../../../docs/ERRORS_AND_TRACING.md) contains troubleshooting examples. [ERROR_HANDLING](../../../../docs/ERROR_HANDLING.md) includes a proposed exception hierarchy explicitly marked as code to be created. Verify actual exception definitions and throw/catch sites; do not assume `ConfigError`/`PluginError` or suggested commands exist in the implemented API. Use the public interface and current tests as evidence for supported error behavior.
+
+For an error-message change, preserve useful resource/role/column names and actionable context while avoiding credentials. Keep fatal configuration errors distinct from intentionally supported fallbacks. Inspect whether an exception is caught and ignored, logged with a unity/default result, converted to a return code, or propagated. An emitted warning neither proves fatal failure nor demonstrates the requested feature ran.
+
+Reproduce with the smallest input/config that reaches the failing stage. Check the relevant configuration/error/wiring tests in [core/tests/cpp](../../../../core/tests/cpp), [Python wrapper tests](../../../../core/tests/python/test_cpp_wrapper.py), and worker/executor tests when the caller is production. Verify exception type/message and externally visible behavior where part of the contract; do not create tests that only freeze incidental wording.

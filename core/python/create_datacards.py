@@ -21,9 +21,10 @@ import argparse
 import yaml
 import os
 import sys
+import tempfile
 import numpy as np
 from collections import defaultdict
-from typing import Dict, List, Tuple, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union
 
 # Try to import required packages
 try:
@@ -46,7 +47,14 @@ except ImportError:  # pragma: no cover
 class Histogram1D:
     """Simple 1D histogram class for storing and manipulating histograms."""
     
-    def __init__(self, values: np.ndarray, edges: np.ndarray, name: str = ""):
+    def __init__(
+        self,
+        values: np.ndarray,
+        edges: np.ndarray,
+        name: str = "",
+        variances: Optional[np.ndarray] = None,
+        entries: Optional[float] = None,
+    ):
         """
         Initialize histogram.
         
@@ -54,13 +62,32 @@ class Histogram1D:
             values: Bin contents
             edges: Bin edges (len = len(values) + 1)
             name: Histogram name
+            variances: Bin variances. When omitted, use the default Poisson-like
+                variance convention for unweighted histogram contents.
+            entries: Original ROOT entry count, when available.
         """
         self.values = np.array(values, dtype=np.float64)
         self.edges = np.array(edges, dtype=np.float64)
         self.name = name
-        
+        self.variances = (
+            np.abs(self.values)
+            if variances is None
+            else np.array(variances, dtype=np.float64)
+        )
+        self.entries = entries
+
+        if self.values.ndim != 1 or self.edges.ndim != 1:
+            raise ValueError("histogram values and edges must be one-dimensional")
         if len(self.edges) != len(self.values) + 1:
             raise ValueError(f"edges must have length values + 1: {len(self.edges)} vs {len(self.values) + 1}")
+        if len(self.edges) < 2 or not np.all(np.isfinite(self.edges)):
+            raise ValueError("histogram edges must contain at least two finite values")
+        if np.any(np.diff(self.edges) <= 0):
+            raise ValueError("histogram edges must be strictly increasing")
+        if self.variances.ndim != 1 or self.variances.shape != self.values.shape:
+            raise ValueError("histogram variances must match the one-dimensional bin contents")
+        if not np.all(np.isfinite(self.variances)) or np.any(self.variances < 0):
+            raise ValueError("histogram variances must be finite and non-negative")
     
     def integral(self) -> float:
         """Get integral of histogram."""
@@ -71,16 +98,28 @@ class Histogram1D:
         if not np.allclose(self.edges, other.edges):
             raise ValueError("Cannot add histograms with different binning")
         self.values += other.values
+        self.variances += other.variances
+        if self.entries is not None and other.entries is not None:
+            self.entries += other.entries
+        else:
+            self.entries = None
         return self
     
     def scale(self, factor: float) -> 'Histogram1D':
         """Scale histogram by a factor (in-place)."""
         self.values *= factor
+        self.variances *= factor * factor
         return self
     
     def clone(self, name: str = "") -> 'Histogram1D':
         """Create a copy of this histogram."""
-        return Histogram1D(self.values.copy(), self.edges.copy(), name or self.name)
+        return Histogram1D(
+            self.values.copy(),
+            self.edges.copy(),
+            name or self.name,
+            self.variances.copy(),
+            self.entries,
+        )
     
     def rebin(self, factor: int) -> 'Histogram1D':
         """
@@ -92,16 +131,19 @@ class Histogram1D:
         Returns:
             New rebinned histogram
         """
+        if not isinstance(factor, int) or isinstance(factor, bool) or factor <= 0:
+            raise ValueError(f"Rebin factor must be a positive integer, got {factor!r}")
         if len(self.values) % factor != 0:
             raise ValueError(f"Number of bins ({len(self.values)}) must be divisible by factor ({factor})")
         
         new_values = self.values.reshape(-1, factor).sum(axis=1)
+        new_variances = self.variances.reshape(-1, factor).sum(axis=1)
         new_edges = self.edges[::factor]
         # Add the last edge
         if len(new_edges) == len(new_values):
             new_edges = np.append(new_edges, self.edges[-1])
         
-        return Histogram1D(new_values, new_edges, self.name)
+        return Histogram1D(new_values, new_edges, self.name, new_variances, self.entries)
     
     def rebin_variable(self, new_edges: np.ndarray) -> 'Histogram1D':
         """
@@ -113,31 +155,41 @@ class Histogram1D:
         Returns:
             New rebinned histogram
         """
-        new_values = np.zeros(len(new_edges) - 1)
-        
-        for i in range(len(new_edges) - 1):
-            low, high = new_edges[i], new_edges[i + 1]
-            
-            # Find bins that overlap with this new bin
-            for j in range(len(self.values)):
-                bin_low, bin_high = self.edges[j], self.edges[j + 1]
-                
-                # Calculate overlap
-                overlap_low = max(low, bin_low)
-                overlap_high = min(high, bin_high)
-                
-                if overlap_high > overlap_low:
-                    # Fraction of original bin that overlaps
-                    fraction = (overlap_high - overlap_low) / (bin_high - bin_low)
-                    new_values[i] += self.values[j] * fraction
-        
-        return Histogram1D(new_values, new_edges, self.name)
+        new_edges = np.asarray(new_edges, dtype=np.float64)
+        if new_edges.ndim != 1 or len(new_edges) < 2:
+            raise ValueError("Variable rebinning requires at least two one-dimensional edges")
+        if not np.all(np.isfinite(new_edges)) or np.any(np.diff(new_edges) <= 0):
+            raise ValueError("Variable rebin edges must be finite and strictly increasing")
+
+        edge_indices = np.searchsorted(self.edges, new_edges)
+        in_range = edge_indices < len(self.edges)
+        matches_source_edge = np.zeros(len(new_edges), dtype=bool)
+        matches_source_edge[in_range] = self.edges[edge_indices[in_range]] == new_edges[in_range]
+        if not np.all(matches_source_edge):
+            bad_edge = new_edges[np.flatnonzero(~matches_source_edge)[0]]
+            raise ValueError(
+                f"Variable rebin edge {bad_edge:g} is not an existing source bin edge; "
+                "rebinning cannot split source bins"
+            )
+
+        if np.any(np.diff(edge_indices) <= 0):
+            raise ValueError("Variable rebin edges must select at least one source bin per output bin")
+        new_values = np.array([
+            self.values[low:high].sum()
+            for low, high in zip(edge_indices[:-1], edge_indices[1:])
+        ])
+        new_variances = np.array([
+            self.variances[low:high].sum()
+            for low, high in zip(edge_indices[:-1], edge_indices[1:])
+        ])
+
+        return Histogram1D(new_values, new_edges, self.name, new_variances, self.entries)
 
 
 class DatacardGenerator:
     """Generates CMS combine datacards and ROOT files from analysis outputs."""
     
-    def __init__(self, config_file: str):
+    def __init__(self, config_file: str, *, output_dir=None, strict_inputs=False):
         """
         Initialize the datacard generator.
         
@@ -147,7 +199,8 @@ class DatacardGenerator:
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
         
-        self.output_dir = self.config.get('output_dir', 'datacards')
+        self.output_dir = output_dir if output_dir is not None else self.config.get('output_dir', 'datacards')
+        self.strict_inputs = strict_inputs
         self.input_files = self.config.get('input_files', {})
         self.control_regions = self.config.get('control_regions', {})
         self.processes = self.config.get('processes', {})
@@ -185,7 +238,9 @@ class DatacardGenerator:
         
         for sample_name, file_info in self.input_files.items():
             file_path = file_info.get('path')
-            if not os.path.exists(file_path):
+            if not file_path or (not str(file_path).startswith("root://") and not os.path.exists(file_path)):
+                if self.strict_inputs:
+                    raise FileNotFoundError(f"Missing input file {file_path} for sample {sample_name}")
                 print(f"Warning: File {file_path} not found for sample {sample_name}")
                 continue
             
@@ -200,6 +255,8 @@ class DatacardGenerator:
                     # Read histograms from file
                     self._read_histograms_from_file(root_file, sample_name)
             except Exception as e:
+                if self.strict_inputs:
+                    raise ValueError(f"Failed to read {file_path} for sample {sample_name}: {e}") from e
                 print(f"Error reading file {file_path}: {e}")
                 continue
     
@@ -229,9 +286,17 @@ class DatacardGenerator:
                     if len(obj.axes) == 1:
                         values = obj.values()
                         edges = obj.axis().edges()
+                        variances = obj.variances()
+                        entries = obj.member("fEntries")
                         
                         # Create Histogram1D object
-                        hist = Histogram1D(values, edges, full_name)
+                        hist = Histogram1D(
+                            values,
+                            edges,
+                            full_name,
+                            variances=variances,
+                            entries=float(entries),
+                        )
                         self.histograms[sample_name][full_name] = hist
                         
             except Exception as e:
@@ -423,7 +488,17 @@ class DatacardGenerator:
             region: Control region name
         """
         print(f"Generating datacard for region: {region}")
-        
+
+        root_filename = os.path.join(self.output_dir, f"shapes_{region}.root")
+        datacard_filename = os.path.join(self.output_dir, f"datacard_{region}.txt")
+        # Remove any previous pair before work begins. If regeneration fails,
+        # an old card/shapes pair must not remain available as a false success.
+        for output_path in (root_filename, datacard_filename):
+            try:
+                os.remove(output_path)
+            except FileNotFoundError:
+                pass
+
         region_config = self.control_regions[region]
         processes = region_config.get('processes', [])
         observable = region_config.get('observable')
@@ -442,15 +517,43 @@ class DatacardGenerator:
         if not process_hists:
             print(f"Warning: No histograms found for region {region}")
             return
+
+        data_process = region_config.get('data_process', 'data_obs')
+        data_hist = self.combine_samples(region, data_process)
+        if data_hist is None:
+            if data_process in self.input_files or data_process in self.processes:
+                raise ValueError(f"Missing observed histogram for {data_process} in {region}")
+            print(f"  No data sample configured for {region}; writing nominal pseudo-data")
+            for hist in process_hists.values():
+                if data_hist is None:
+                    data_hist = hist.clone('data_obs')
+                else:
+                    data_hist.add(hist)
+        process_hists[data_process] = data_hist
         
-        # Create ROOT file for combine using uproot
-        root_filename = os.path.join(self.output_dir, f"shapes_{region}.root")
-        self._write_root_file(root_filename, process_hists, region)
+        # Stage the matching ROOT shapes and card beside their final paths,
+        # then publish the shapes first and the card last as the completion
+        # marker consumed by downstream discovery.
+        with tempfile.TemporaryDirectory(prefix=".datacard_stage_", dir=self.output_dir) as stage_dir:
+            staged_root_filename = os.path.join(stage_dir, os.path.basename(root_filename))
+            staged_card_filename = os.path.join(stage_dir, os.path.basename(datacard_filename))
+            self._write_root_file(staged_root_filename, process_hists, region)
+            self._write_datacard_file(
+                staged_card_filename, region, process_hists, root_filename
+            )
+            try:
+                os.replace(staged_root_filename, root_filename)
+                os.replace(staged_card_filename, datacard_filename)
+            except OSError:
+                # Do not leave a half-published pair if either rename fails.
+                for output_path in (root_filename, datacard_filename):
+                    try:
+                        os.remove(output_path)
+                    except FileNotFoundError:
+                        pass
+                raise
+
         print(f"  Created ROOT file: {root_filename}")
-        
-        # Write datacard
-        datacard_filename = os.path.join(self.output_dir, f"datacard_{region}.txt")
-        self._write_datacard_file(datacard_filename, region, process_hists, root_filename)
         print(f"  Created datacard: {datacard_filename}")
     
     def _write_root_file(self, filename: str, process_hists: Dict[str, Histogram1D], region: str) -> None:
@@ -466,8 +569,12 @@ class DatacardGenerator:
         
         for process, hist in process_hists.items():
             # Write nominal histogram
-            hist_dict = self._histogram_to_uproot_dict(hist, process)
-            histograms_to_write[process] = hist_dict
+            is_data = process == self.control_regions[region].get('data_process', 'data_obs')
+            output_name = 'data_obs' if is_data else process
+            hist_dict = self._histogram_to_uproot_dict(hist, output_name)
+            histograms_to_write[output_name] = hist_dict
+            if is_data:
+                continue
             
             # Write systematic variations
             syst_hists = self._get_systematic_histograms(process, hist, region)
@@ -480,7 +587,7 @@ class DatacardGenerator:
             for name, hist_dict in histograms_to_write.items():
                 f[name] = hist_dict
     
-    def _histogram_to_uproot_dict(self, hist: Histogram1D, name: str) -> Tuple:
+    def _histogram_to_uproot_dict(self, hist: Histogram1D, name: str) -> Any:
         """
         Convert Histogram1D to format suitable for uproot writing.
         
@@ -489,10 +596,39 @@ class DatacardGenerator:
             name: Name for the histogram
             
         Returns:
-            Tuple suitable for uproot.recreate
+            Writable uproot TH1 object with visible-bin variances preserved
         """
-        # Return tuple: (values, edges)
-        return (hist.values, hist.edges)
+        # A (values, edges) tuple asks Uproot to infer variances from the bin
+        # contents. Build a TH1 explicitly so weighted-bin Sumw2 values survive
+        # conversion into the datacard shapes file.
+        identify = uproot.writing.identify
+        edges = np.asarray(hist.edges, dtype=np.float64)
+        values_with_flow = np.concatenate(([0.0], hist.values, [0.0]))
+        variances_with_flow = np.concatenate(([0.0], hist.variances, [0.0]))
+        centers = (edges[:-1] + edges[1:]) / 2.0
+        return identify.to_TH1x(
+            fName=name,
+            fTitle=hist.name,
+            data=values_with_flow,
+            fEntries=(
+                float(hist.entries)
+                if hist.entries is not None
+                else float(np.sum(hist.values))
+            ),
+            fTsumw=float(np.sum(hist.values)),
+            fTsumw2=float(np.sum(hist.variances)),
+            fTsumwx=float(np.dot(hist.values, centers)),
+            fTsumwx2=float(np.dot(hist.values, centers * centers)),
+            fSumw2=variances_with_flow,
+            fXaxis=identify.to_TAxis(
+                fName="xaxis",
+                fTitle="",
+                fNbins=len(hist.values),
+                fXmin=float(edges[0]),
+                fXmax=float(edges[-1]),
+                fXbins=edges,
+            ),
+        )
     
     def _get_systematic_histograms(self, process: str, nominal_hist: Histogram1D, region: str) -> Dict[str, Histogram1D]:
         """
@@ -520,13 +656,17 @@ class DatacardGenerator:
                 up_hist = self._get_systematic_from_files(process, region, syst_name, "Up")
                 down_hist = self._get_systematic_from_files(process, region, syst_name, "Down")
                 
-                # If not found in files, create placeholder variations
-                if up_hist is None or down_hist is None:
-                    variation = syst_config.get('variation', 0.1)
-                    up_hist = nominal_hist.clone(f"{process}_{syst_name}Up")
-                    up_hist.scale(1.0 + variation)
-                    down_hist = nominal_hist.clone(f"{process}_{syst_name}Down")
-                    down_hist.scale(1.0 - variation)
+                missing_directions = [
+                    direction
+                    for direction, variation_hist in (("Up", up_hist), ("Down", down_hist))
+                    if variation_hist is None
+                ]
+                if missing_directions:
+                    raise ValueError(
+                        f"Missing shape template for process '{process}', systematic "
+                        f"'{syst_name}', direction(s): {', '.join(missing_directions)} "
+                        f"in region '{region}'"
+                    )
                 
                 syst_hists[f"{syst_name}Up"] = up_hist
                 syst_hists[f"{syst_name}Down"] = down_hist
@@ -566,7 +706,11 @@ class DatacardGenerator:
             hist = self._get_histogram(sample, observable, region, systematic)
             
             if hist is None:
-                continue
+                raise ValueError(
+                    f"Missing shape template for process '{process}', systematic "
+                    f"'{syst_name}', direction '{direction}', sample '{sample}' "
+                    f"in region '{region}'"
+                )
             
             if combined_hist is None:
                 combined_hist = hist.clone()
@@ -698,7 +842,7 @@ class DatacardGenerator:
             f.write(f"# Observable: {region_config.get('observable')}\n")
             f.write("#" + "="*80 + "\n")
             f.write(f"imax 1  number of channels\n")
-            f.write(f"jmax {len(process_hists) - 1}  number of backgrounds\n")
+            f.write("jmax *  number of backgrounds\n")
             f.write(f"kmax *  number of nuisance parameters\n")
             f.write("#" + "-"*80 + "\n")
             
@@ -709,18 +853,13 @@ class DatacardGenerator:
             # Observations
             # Get data process
             data_process = region_config.get('data_process', 'data_obs')
-            if data_process in process_hists:
-                n_obs = int(process_hists[data_process].integral())
-            else:
-                # Sum all backgrounds as pseudo-data
-                n_obs = int(sum(h.integral() for h in process_hists.values()))
             
             f.write(f"bin          {region}\n")
-            f.write(f"observation  {n_obs}\n")
+            f.write("observation  -1\n")
             f.write("#" + "-"*80 + "\n")
             
             # Expected rates
-            processes = list(process_hists.keys())
+            processes = [name for name in process_hists if name != data_process]
             n_proc = len(processes)
             
             # Determine signal and background process IDs
@@ -762,7 +901,7 @@ class DatacardGenerator:
                 # Build systematic line
                 syst_values = []
                 for proc in processes:
-                    applies = syst_config.get('applies_to', {}).get(proc, True)
+                    applies = syst_name in self._get_systematics_for_process(proc, region)
                     if applies:
                         if syst_type == 'shape':
                             syst_values.append("1")
@@ -774,6 +913,10 @@ class DatacardGenerator:
                         syst_values.append("-")
                 
                 f.write(f"{syst_name:20s} {distribution:8s} " + "  ".join(syst_values) + "\n")
+
+            # Preserve template Sumw2 values above and let Combine add the
+            # corresponding bin-by-bin MC statistical nuisance parameters.
+            f.write("* autoMCStats 0 1\n")
             
             # Correlations (as comments for documentation)
             if 'correlations' in region_config:

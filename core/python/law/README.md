@@ -1,8 +1,8 @@
 # LAW Workflows for Batch Submission
 
-This folder contains the primary LAW task graph plus downstream workflow modules:
+Use the [Snakemake workflow](../../../examples/snakemake/README.md) for new campaigns and for work starting from completed products. This folder supports jobs already submitted under LAW and analysis wrappers that still import these task classes.
 
-- **[analysis_tasks.py](analysis_tasks.py)** – primary skim and histogram task graph for new work
+- **[analysis_tasks.py](analysis_tasks.py)** – skim and histogram tasks for LAW-owned campaigns
 - **[rucio_tasks.py](rucio_tasks.py)** – primary CMS dataset discovery tasks via Rucio
 - **[opendata_tasks.py](opendata_tasks.py)** – CERN Open Data Portal file discovery
 - **[xrdfs_tasks.py](xrdfs_tasks.py)** – XRootD directory listing for dataset discovery
@@ -21,6 +21,8 @@ integrate with their outputs.
   - [SkimTask](#skimtask)
   - [HistFillTask](#histfilltask)
   - [StitchingDerivationTask](#stitchingderivationtask)
+  - [StitchingApplyTask](#stitchingapplytask)
+  - [StitchingValidationTask](#stitchingvalidationtask)
 - [Prerequisites](#prerequisites)
 - [Environment Setup](#environment-setup)
 - [Rucio Workflow](#rucio-workflow)
@@ -41,8 +43,7 @@ integrate with their outputs.
 
 `analysis_tasks.py` provides the following LAW tasks for running the analysis
 framework **locally** (or dispatching to HTCondor/Dask).  They are simpler
-than the batch Rucio/OpenData workflows and are the recommended starting point
-for new analyses.  See [docs/LAW_TASKS.md](../../../docs/LAW_TASKS.md) for the
+than the batch Rucio/OpenData workflows for campaigns that already use the LAW controller.  See [docs/LAW_TASKS.md](../../../docs/LAW_TASKS.md) for the
 complete parameter reference.
 
 ```bash
@@ -56,20 +57,21 @@ Runs the analysis executable once per dataset entry defined in a dataset
 manifest YAML.  Each branch executes one dataset job and writes a `.done`
 marker file when finished.
 
-A **pre-flight local test job** (``RunSkimTestJob``) is run automatically
-before the full workflow is dispatched.  It executes the analysis on a single
-input file, catching runtime errors before potentially hundreds of jobs are
-submitted.  The test can be skipped with ``--no-make-test-job``.
+A **pre-flight local test** (``RunSkimTestJob``) is run automatically before
+the full workflow is dispatched. It executes one input file for each available
+data and MC sample type, catching sample-specific runtime errors before
+potentially hundreds of jobs are submitted. The test can be skipped with
+``--no-make-test-job``.
 
 **Parameters**
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--submit-config` | *(required)* | Path to `submit_config.txt` template |
+| `--submit-config` | *(required)* | Path to `submit_config.yaml` template |
 | `--exe` | *(required)* | Path to the compiled analysis executable |
 | `--name` | *(required)* | Run name; outputs go to `skimRun_<name>/` |
 | `--dataset-manifest` | *(required)* | Path to the YAML dataset manifest |
-| `--make-test-job` | `True` | Run a single-file test before full dispatch |
+| `--make-test-job` | `True` | Run one-file data and MC preflights for types present before full dispatch |
 | `--file-source` | `""` | File-list source: `""`, `rucio`, `opendata`, or `xrdfs` |
 | `--file-source-name` | `""` | Name matching a completed file-list task run |
 | `--num-workers` | auto | Thread-pool size for the local runner |
@@ -89,14 +91,14 @@ skimRun_<name>/
 ```bash
 # Standard mode: one branch per manifest entry, with pre-flight test
 law run SkimTask \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyAnalysis \
   --name myRun \
   --dataset-manifest datasets.yaml
 
 # Skip the pre-flight test
 law run SkimTask \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyAnalysis \
   --name myRun \
   --dataset-manifest datasets.yaml \
@@ -104,7 +106,7 @@ law run SkimTask \
 
 # File-source mode: prefer the primary Rucio backend
 law run SkimTask \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyAnalysis \
   --name myRun \
   --dataset-manifest datasets.yaml \
@@ -112,7 +114,7 @@ law run SkimTask \
 
 # XRDFS mode can chain automatically from GetXRDFSFileList
 law run SkimTask \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyAnalysis \
   --name myRun \
   --dataset-manifest datasets.yaml \
@@ -122,9 +124,9 @@ law run SkimTask \
 
 ### RunSkimTestJob
 
-Runs the analysis executable with a **single input file** to validate that the
-analysis compiles and runs without runtime errors before submitting the full
-workflow.  This task is required automatically by ``SkimTask`` when
+Runs the analysis executable with one input file for each available data and
+MC sample type to validate that both configurations work before submitting the
+full workflow. This task is required automatically by ``SkimTask`` when
 ``--make-test-job`` is set (the default).
 
 In **file-source mode** it uses the ``PrepareSkimJobs`` output directory. The
@@ -139,12 +141,19 @@ directory itself from the first dataset's first file.
 
 Creates per-job configuration directories and the shared ``shared_inputs/``
 directory (executable, libraries, x509 proxy) for use by ``SkimTask`` in
-file-source mode.
+file-source mode.  ``BuildSkimSubmission`` also creates one
+``shared_inputs.tar.gz`` archive per run containing the common executable,
+libraries, and configuration payloads; concrete Condor job directories keep
+only job-specific metadata and configuration.
 
 When ``--file-source xrdfs`` is set, ``PrepareSkimJobs`` automatically
 declares a LAW dependency on :class:`GetXRDFSFileList` so that the full chain
 ``GetXRDFSFileList → PrepareSkimJobs → RunSkimTestJob → SkimTask``
 runs automatically.
+
+Per-job configs and redirector maps are prepared concurrently, with a bounded
+pool of four threads by default. Set ``--prepare-workers 1`` for serial
+preparation or pass another positive value to tune filesystem concurrency.
 
 ### HistFillTask
 
@@ -164,14 +173,14 @@ input file list for each dataset job.
 ```bash
 # Standalone (no SkimTask dependency)
 law run HistFillTask \
-  --submit-config core/python/law/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyHistFill \
   --name myHist \
   --dataset-manifest datasets.yaml
 
 # Chained after SkimTask – inputs are taken from skimRun_myRun/outputs/
 law run HistFillTask \
-  --submit-config core/python/law/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --exe ./build/MyHistFill \
   --name myHist \
   --dataset-manifest datasets.yaml \
@@ -207,16 +216,60 @@ groups:
 Each key under `meta_files` is the `sampleName` used by `CounterService` when
 booking `counter_intWeightSignSum_{sampleName}` histograms.
 
+One sample can provide multiple metadata files, which is useful when a file
+source splits a dataset into several jobs:
+
+```yaml
+groups:
+  wjets_ht:
+    meta_files:
+      wjets_ht_0:
+        - skimRun_myRun/outputs/WJets_HT0/job_0/meta.root
+        - skimRun_myRun/outputs/WJets_HT0/job_1/meta.root
+      wjets_ht_1: skimRun_myRun/outputs/WJets_HT1/meta.root
+```
+
+When `StitchingDerivationTask` is given `--source-skim-name` and a dataset
+manifest, a group may instead use `samples` or a manifest `select` mapping.
+The task discovers all `meta.root` files below each selected sample and sums
+their counter histograms.
+
+An inclusive anchor can be one sample or a collection of samples. Use
+`inclusive_samples` for a flat or nested collection when the inclusive sample
+is split across orthogonal axes. A mapping can select different collections for
+different cross-section eras. Cross sections are configured by group in the
+same YAML; Core does not provide process-specific defaults.
+
+```yaml
+groups:
+  generic_group:
+    meta_files:
+      sample_a: outputs/sample_a/meta.root
+      sample_b: outputs/sample_b/meta.root
+    inclusive_samples:
+      run3_24:
+        - [sample_a, sample_b]
+inclusive_cross_sections:
+  generic_group:
+    run3_24: 100.0
+```
+
 **Output**: `stitchWeights_<name>/stitch_weights.json` — a
 [correctionlib](https://github.com/cms-nanoAOD/correctionlib) `CorrectionSet`
 with one `Correction` per stitching group.
+
+The same derivation writes
+`stitchWeights_<name>/stitch_cross_sections.json`. For each group with an
+inclusive anchor, it records the inclusive sample set, signed event fraction
+in each stitch bin, and corresponding binned cross section in pb. Manifest
+years select `run2`, `run3_22_23`, or `run3_24`; mixed eras are rejected.
 
 **Algorithm**: reads `counter_intWeightSignSum_*` histograms from each meta
 ROOT file, computes per-bin signed counts `C_n(k) = P_n(k) − N_n(k)`, and
 derives the scale factor:
 
 ```
-b_n(k) = C_n(k) / Σ_m C_m(k)
+b_n(k) = max(C_n(k), 0) / Σ_m max(C_m(k), 0)
 ```
 
 Usage from Python:
@@ -226,6 +279,51 @@ import correctionlib
 cset = correctionlib.CorrectionSet.from_file("stitchWeights_myStitch/stitch_weights.json")
 sf = cset["wjets_ht"].evaluate("wjets_ht_0", stitch_id)
 ```
+
+### StitchingApplyTask
+
+Runs the complete stitching cycle with the existing `SkimTask` executors:
+
+1. A counter pass named `<name>_counts` runs with `stitchMode=none`.
+2. `StitchingDerivationTask` writes `stitchWeights_<name>/stitch_weights.json`.
+3. The application pass runs as `<name>` with `stitchMode=correctionlib`,
+   staging the generated JSON into each job as `stitchWeights`.
+
+The derived cross-section report is used by `StitchingValidationTask` for
+plot normalization. Before applying that normalization, validation removes
+the per-dataset application weight scale (`xsec * kfac * filter_efficiency *
+extra_scale`) already present in the ROOT histograms. The application
+executable continues to use the scalar per-dataset factors from the manifest
+together with the derived binwise stitching factor.
+
+The task accepts the same file-source and executor parameters as `SkimTask`.
+Use `analyses/rdfAnalyzerStitch/README.md` for a complete command and the
+analysis-specific declarative group configuration.
+
+### StitchingValidationTask
+
+Validates a completed `StitchingApplyTask` run across every application
+metadata file, including all partitions of file-source jobs. It checks the
+derived correction JSON against the configured group names and verifies the
+signed counter plus stitched validation histograms in each `meta.root` file.
+When the application monitor reports permanently failed jobs in
+`skimRun_<name>/all_outputs_verified.txt`, validation stops before reading
+metadata; failed jobs must be repaired or rerun before producing plots.
+
+```bash
+law run StitchingValidationTask \
+  --name myStitch \
+  --stitch-config analyses/myAnalysis/cfg/stitch_config.yaml \
+  --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml
+```
+
+The report is written to
+`stitchValidation_<name>/stitch_validation.json`.
+
+By default, validation retains the existing V+jets histogram requirements.
+Other analyses can declare `validation.histograms` in the stitch YAML with a
+`name`, optional `stitched_name`, label, boundaries, x-axis limits, and ratio
+range. Those names drive both output validation and comparison plots.
 
 ---
 
@@ -262,7 +360,7 @@ across DAS entries** for speed.
 
 ```bash
 law run GetRucioFileList \
-  --submit-config cfg/submit_config.txt \
+  --submit-config cfg/submit_config.yaml \
   --name myFiles \
   --exe build/MyAnalysis \
   --x509 /tmp/x509 \
@@ -278,7 +376,7 @@ parallelized via LAW's `LocalWorkflow`).
 
 ```bash
 law run GetOpenDataFileList \
-  --submit-config cfg/opendata_config.txt \
+  --submit-config cfg/opendata_config.yaml \
   --name myFiles \
   --exe build/MyAnalysis \
   --workers 4
@@ -294,18 +392,20 @@ Each workflow is split into four law tasks that run in sequence:
 
 1. **Prepare\*Sample** *(LocalWorkflow)* – one branch per sample; discovers input
    files and creates per-job configuration directories.
-2. **Build\*Submission** *(Task)* – assembles the condor submission: copies the
-   executable, `aux/` directory, x509 proxy, and local shared libraries into
-   `shared_inputs/`; creates symlinks `job_0…job_{N-1}`; writes
-   `condor_submit.sub` and `condor_runscript.sh`.
+2. **Build\*Submission** *(Task)* – assembles the condor submission: packages
+   the executable, `aux/` directory, x509 proxy, local shared libraries, and
+   common configuration payloads into one `shared_inputs.tar.gz`; writes
+   per-job metadata, `condor_submit.sub`, and `condor_runscript.sh`.
 3. **Submit\*Jobs** *(Task)* – runs `condor_submit` and records the cluster ID.
 4. **Monitor\*Jobs** *(Task)* – blocking polling loop that verifies EOS outputs,
    resubmits held/failed jobs (up to `--max-retries` times), and writes
    `all_outputs_verified.txt` when every job is confirmed complete.
 
 Outputs are always staged to EOS after each job completes (stage-out is always
-active).  Stage-in (copying inputs to the worker node before running) is
-optional and controlled by `--stage-in`.
+active). The worker prepares the destination directory when staging begins,
+then relies on `xrdcp` and a remote file check; it does not probe EOS before
+starting the analysis. Stage-in (copying inputs to the worker node before
+running) is optional and controlled by `--stage-in`.
 
 ---
 
@@ -322,6 +422,25 @@ For NANO submissions, a valid VOMS proxy is also required:
 ```bash
 voms-proxy-init -voms cms -rfc --valid 168:0
 ```
+
+When `--x509` is supplied, `PrepareSkimJobs` requires the copied proxy to have
+at least **48 hours (172800 seconds)** of validity remaining. A missing or
+unreadable proxy, an unavailable `voms-proxy-info`, or insufficient validity
+stops preparation. `BuildSkimSubmission`, `SubmitSkimJobs`, and monitor retries
+check the staged credential again, reading `x509` from `shared_inputs.tar.gz`
+when that archive is used. Renewing the local source proxy alone does not
+refresh that archive: rerun `PrepareSkimJobs` to restage it before submitting.
+Changed source-proxy contents invalidate cached preparation automatically.
+
+The worker executable must match the current binary selected by `--exe`.
+Preparation completion, `BuildSkimSubmission`, `SubmitSkimJobs`, and monitor
+retries compare SHA-256 contents, checking the executable inside
+`shared_inputs.tar.gz` when present and the loose staged copy otherwise.
+A missing, unreadable, or mismatched executable blocks submission even when
+cached submission files exist or the archive has a newer timestamp. Restage
+with `PrepareSkimJobs`; sealed runs whose execution identity changes require
+a new run name. This compares built binaries; source changes require building
+the analysis first.
 
 For Open Data submissions, no proxy is needed (Open Data is public). The
 optional `cernopendata-client` speeds up metadata fetching:
@@ -354,7 +473,7 @@ law index
 
 ### Sample config format
 
-The preferred format for Rucio workflows is a YAML dataset manifest. This manifest is passed via `--dataset-manifest`, and any legacy `sampleConfig` reference in a `submit_config.txt` template should point to a YAML file rather than the old line-based text format.
+Rucio workflows accept a YAML dataset manifest through `--dataset-manifest`. A native worker template can refer to the same manifest with `sampleConfig`.
 
 ```yaml
 lumi: 59.7
@@ -384,7 +503,7 @@ Legacy flat text sample configs are still accepted for compatibility, but they a
 ```bash
 # 1. Discover files and create per-job directories (one branch per sample)
 law run PrepareSkimJobs --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun22 \
   --file-source rucio \
@@ -397,7 +516,7 @@ law run PrepareSkimJobs --workers 4 \
 
 # 2. Build condor submission files
 law run BuildSkimSubmission --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun22 \
   --file-source rucio \
@@ -410,7 +529,7 @@ law run BuildSkimSubmission --workers 1 \
 
 # 3. Submit jobs to HTCondor
 law run SubmitSkimJobs --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun22 \
   --file-source rucio \
@@ -423,7 +542,7 @@ law run SubmitSkimJobs --workers 1 \
 
 # 4. Monitor jobs (blocking; resubmits failed/held jobs automatically)
 law run MonitorSkimJobs --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
   --name myRun22 \
   --file-source rucio \
@@ -470,28 +589,28 @@ name=ZEE   das=SMZee_1 type=11 xsec=1.0 norm=1.0
 ```bash
 # 1. Discover files and create per-job directories
 law run PrepareOpenDataSample --workers 4 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --name openDataRun \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20
 
 # 2. Build condor submission files
 law run BuildOpenDataSubmission --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --name openDataRun \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20
 
 # 3. Submit jobs
 law run SubmitOpenDataJobs --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --name openDataRun \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20
 
 # 4. Monitor
 law run MonitorOpenDataJobs --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/opendata_config.txt \
+  --submit-config analyses/myAnalysis/cfg/opendata_config.yaml \
   --name openDataRun \
   --exe build/analyses/myAnalysis/myanalysis \
   --files 20
@@ -525,9 +644,9 @@ from analysis outputs and running statistical fits.
    `combineRun_<name>/combine_results/`.
 
 The YAML config format is documented in
-[docs/DATACARD_GENERATOR.md](../docs/DATACARD_GENERATOR.md).  An example
+[docs/DATACARD_GENERATOR.md](../../../docs/DATACARD_GENERATOR.md).  An example
 configuration is available at
-[core/python/example_datacard_config.yaml](../core/python/example_datacard_config.yaml).
+[core/python/example_datacard_config.yaml](../example_datacard_config.yaml).
 
 ### Prerequisites
 
@@ -635,7 +754,7 @@ GetOpenDataFileList (parallel, one branch per sample)
 PrepareSkimJobs    ─── depends on GetXRDFSFileList (automatic)
   │                   or on GetRucio/OpenDataFileList (run manually first)
    ▼
-RunSkimTestJob     ─── pre-flight: runs analysis on 1 file; blocks full dispatch
+RunSkimTestJob     ─── pre-flight: tests one data and one MC file when present
    │
    ▼
 
@@ -681,9 +800,9 @@ merge stage automatically:
 law run FullAnalysisDAG \
   --name myRun \
   --exe build/analyses/myAnalysis/myanalysis \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-  --hist-config analyses/myAnalysis/cfg/hist_config.txt \
+  --hist-config analyses/myAnalysis/cfg/hist_config.yaml \
   --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
   --fitting-backend analysis
 
@@ -691,9 +810,9 @@ law run FullAnalysisDAG \
 law run FullAnalysisDAG \
   --name myNanoRun \
   --exe build/analyses/myAnalysis/myanalysis \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --dataset-manifest analyses/myAnalysis/cfg/datasets.yaml \
-  --hist-config analyses/myAnalysis/cfg/hist_config.txt \
+  --hist-config analyses/myAnalysis/cfg/hist_config.yaml \
   --datacard-config analyses/myAnalysis/cfg/datacard_config.yaml \
   --file-source rucio
 ```
@@ -716,15 +835,19 @@ law run FullAnalysisDAG \
 The `NDHistogramManager` supports two backends (configured via `histogramBackend`
 in the analysis config):
 
-- **`root`** (default) — produces `THnSparseF` objects stored in ROOT files.
-  This format is required for `CreateDatacard` and all standard ROOT-based
-  downstream tools.
-- **`boost`** — uses Boost.Histogram during the event loop for reduced memory
-  usage; output is converted to ROOT format before writing, so it is fully
-  compatible with downstream tools including Combine.
+- **`root`** (explicit override) — produces `THnSparseF` objects stored in ROOT files.
+  Per-job files retain these arrays for direct `hadd` merging. The merge task
+  then adds reconstructed `TH1F` objects to the merged file, preserving
+  compatibility with `CreateDatacard` and standard ROOT-based downstream
+  tools.
+- **`boost`** (default) — uses float contents/double sumw2 in sparse standard
+  maps during the event loop; output is converted to the same sparse ROOT
+  format before writing. Metadata saving warns if tracked sparse allocations
+  exceed the equivalent dense-array estimate. A nonzero
+  `histogramDenseLimitMiB` enables dense accumulation within that budget.
 
-Both backends write identical output files; `histogramBackend` is purely an
-internal performance knob.  See [CONFIG_REFERENCE.md — Histogram Backend](../docs/CONFIG_REFERENCE.md#histogram-backend)
+For a manual merge, run `python core/python/extract_nd_histograms.py merged.root`
+after `hadd`.  See [CONFIG_REFERENCE.md — Histogram Backend](../../../docs/CONFIG_REFERENCE.md#histogram-backend)
 for configuration details.
 
 ---
@@ -749,7 +872,7 @@ These parameters apply to **both** NANO and Open Data workflows:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--max-retries` | `3` | Max resubmission attempts per failed job |
+| `--max-retries` | `50` | Max resubmission attempts per failed job |
 | `--poll-interval` | `120` | Seconds between condor_q polls |
 
 ---
@@ -780,7 +903,7 @@ Given a sample config with datasets `ttbar`, `wjets`, and `dy`:
 # Run each dataset independently (can be launched in parallel)
 for DS in ttbar wjets dy; do
   law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
     --name myRun22 \
     --dataset "$DS" \
     --x509 x509 \
@@ -795,7 +918,7 @@ Or submit all three as HTCondor workflow tasks simultaneously:
 ```bash
 for DS in ttbar wjets dy; do
   law run SkimTask \
-    --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+    --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
     --name myRun22 \
     --dataset "$DS" \
     --x509 x509 \
@@ -825,7 +948,7 @@ environment into a tarball and ship it with your jobs.
 ### Step 1: Set up the environment inside your container
 
 Run `setup_python_env.sh` **inside the same container** you plan to use on
-worker nodes.  This ensures binary compatibility.
+worker nodes, using the same Python, ROOT and native dependencies.
 
 ```bash
 # Example: using the cmssw-el9 container
@@ -840,8 +963,7 @@ The script:
 1. Creates a staging directory.
 2. Installs `law`, `luigi`, `requests`, and any `--extras` packages using
    `pip install --target` (no virtual-env activation needed).
-3. Copies `build/python/rdfanalyzer*.so` into the package directory (skip with
-   `--no-rdfanalyzer`).
+3. Copies a matching binding from `build/python/` when available. Override the directory with `RDFANALYZER_PYTHON_MODULE_DIR` or skip the lookup with `--no-rdfanalyzer`. A warning identifies a package-only archive when the binding is missing.
 4. Tars everything into `python_env.tar.gz`.
 
 ### Script options
@@ -857,7 +979,7 @@ The script:
 
 ```bash
 law run BuildSkimSubmission --workers 1 \
-  --submit-config analyses/myAnalysis/cfg/submit_config.txt \
+  --submit-config analyses/myAnalysis/cfg/submit_config.yaml \
   --name myRun --x509 x509 \
   --exe build/analyses/myAnalysis/myanalysis \
   --container-setup cmssw-el9 \
@@ -888,14 +1010,28 @@ export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
 
 - **Stage-out is always active**: output ROOT files are always xrdcp'd to EOS
   after each job; `__orig_saveFile` / `__orig_metaFile` in each job's
-  `submit_config.txt` record the final EOS destinations.
+  `submit_config.yaml` record the final EOS destinations.
 - **`root_setup` is a file path**: its contents are embedded verbatim into the
   inner runscript, not executed as a shell command.
 - **`container_setup`** is passed to the outer wrapper script and used to
   launch the inner runscript (e.g. `cmssw-el9 -- bash condor_runscript_inner.sh`).
 - **No OS-pinning** by default (`MY.WantOS` is not set).
+- **Blocked worker hosts and sites**: `hepcms-henrietta.privnet` remains
+  reserved, and `hepcms-namenode.privnet` is blocked by default. The default
+  machine veto patterns also exclude IFCA workers (`*.ifca.es`) and the
+  repeatedly failing hosts `node38-1`, `node38-3`, and `node38-5` at IIHE plus
+  `lwnac008.ihep.ac.cn` at IHEP. Other IIHE and IHEP workers remain eligible.
+  Set `RDF_CONDOR_EXTRA_BLOCKED_HOSTS` to a comma-separated list to replace
+  the extra exact-host list, or to an empty string to allow name-node to match
+  again. Set `RDF_CONDOR_BLOCKED_MACHINE_PATTERNS` to a comma-separated list
+  of case-insensitive regular expressions matched against `TARGET.Machine` to
+  replace the site/worker defaults; an empty value disables those patterns.
+  Reserved hosts remain excluded in all cases.
 - **Local shared libraries** required by the executable (resolved via `ldd` and
   located under the repository root) are automatically staged into `shared_inputs/`.
+  LAW also stages the configured external ONNX Runtime SONAME when it resolves
+  through the workspace's CMake link directory. See the
+  [worker ONNX Runtime configuration](../../../docs/BATCH_SUBMISSION.md#onnx-runtime-for-htcondor-workers).
 
 ---
 
@@ -908,6 +1044,16 @@ export LD_LIBRARY_PATH="$PWD/_python_env:${LD_LIBRARY_PATH:-}"
 3. For failed jobs (non-zero exit code): resubmit if `--max-retries` not reached.
 4. For completed jobs: verify the expected EOS output file exists via `xrdfs stat`.
 5. On completion, write `all_outputs_verified.txt`.
+
+`MonitorSkimJobs` also removes running jobs once the current execution exceeds
+150% of the job's Condor `MaxRuntime`, then retries them within `--max-retries`.
+This is enabled by default and checked every poll. It uses
+`ServerTime - JobCurrentStartDate` so stale cumulative wall-time counters do not
+hide a stuck execution or penalize a fresh restart. Missing scheduler time falls
+back to the local clock; missing start dates fall back to `EnteredCurrentStatus`,
+then `RemoteWallClockTime`. A missing or nonpositive `MaxRuntime` falls back to
+`--max-runtime`. A failed removal leaves the job tracked for the next poll and
+does not submit a duplicate.
 
 State is saved to `condorSub_{name}/monitor_state.json` after each poll cycle,
 so the task can be safely interrupted and restarted — it resumes from where it
@@ -960,7 +1106,7 @@ is `None` (no limit).
 > **Note**: multi-dimensional branching is an advanced feature intended for
 > large-scale grid productions.  For most analyses, the default
 > `dataset_only()` policy is sufficient.  See
-> [docs/LAW_TASKS.md](../docs/LAW_TASKS.md) for the full API reference.
+> [docs/LAW_TASKS.md](../../../docs/LAW_TASKS.md) for the full API reference.
 
 ### Dask Executor
 

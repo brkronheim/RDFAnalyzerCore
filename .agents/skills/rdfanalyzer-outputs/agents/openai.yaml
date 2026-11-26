@@ -1,0 +1,4 @@
+interface:
+  display_name: "Outputs, provenance, and artifact schemas"
+  short_description: "Trace output schemas, reports, provenance and merges"
+  default_prompt: "Use $rdfanalyzer-outputs to trace produced artifacts, report evidence, provenance and the requested merge contract."

@@ -1,0 +1,100 @@
+import json
+import re
+import sys
+from pathlib import Path
+
+
+workflow_dir = Path(workflow.basedir).resolve()
+core_python = workflow_dir.parents[1] / "core/python"
+if not (core_python / "rdfproduction").is_dir():
+    core_python = workflow_dir.parents[2] / "python"
+sys.path.insert(0, str(core_python))
+from rdfproduction.downstream import describe_downstream, downstream_targets, needs_manifest_merge
+from rdfproduction.campaign import era_artifacts, execution_slots, validate_run_ownership
+from rdfproduction.controller import _check_build_recipes
+from rdfproduction.downstream import check_refill_settings
+from rdfproduction.specs import inspect_spec
+from run_collection import isolated_name
+
+unknown = config.keys() - {"downstream", "joint_fit", "plotting", "output_root", "python", "max_parallel_eras",
+                           "merge_indexes", "metadata_merger", "nominal_only", "semantic_config_compatibility",
+                           "data_merge_threads", "hadd_jobs", "xrdcp_jobs"}
+if unknown:
+    raise ValueError("Unknown standalone workflow settings: " + ", ".join(sorted(map(str, unknown))))
+entries = config.get("downstream", {})
+downstream = describe_downstream(entries, map(str, entries) if isinstance(entries, dict) else ()) if entries else {}
+for era, settings in downstream.items():
+    isolated_name("downstream", era)
+    if "saved_production" not in settings and ("refill" in settings or (
+            needs_manifest_merge(settings) and "job_manifests" not in settings)):
+        raise ValueError(f"{era} needs saved inputs with the standalone downstream workflow")
+output_root = Path(config.get("output_root", "results")).resolve()
+python = config.get("python", sys.executable)
+workflow_root = str(core_python)
+campaign_plotting = False
+plot_report = str(era_artifacts(output_root, "{era}")["plot_report"])
+saved = {era: cfg["saved_production"] for era, cfg in downstream.items() if "saved_production" in cfg}
+downstream_uses_production = bool(saved)
+execution_specs = {era: source["spec"] for era, source in saved.items()}
+def output_index(wildcards):
+    return saved[wildcards.era]["index"]
+refill_plans = {era: inspect_spec(cfg["refill"]) for era, cfg in downstream.items() if "refill" in cfg}
+if refill_plans:
+    owners = {f"{era} source": inspect_spec(source["spec"]) for era, source in saved.items()}
+    for era, plan in refill_plans.items():
+        check_refill_settings(plan["task_parameters"], owners[f"{era} source"]["task_parameters"])
+        owners[f"{era} refill"] = plan
+    validate_run_ownership(owners)
+    _check_build_recipes(owners.values())
+limit = config.get("max_parallel_eras", 2)
+if type(limit) is not int or limit < 1:
+    raise ValueError("max_parallel_eras must be a positive integer")
+if "condor_runs" not in workflow.global_resources:
+    workflow.register_resource("condor_runs", limit)
+resource_scopes:
+    condor_runs="global"
+joint = None
+if "joint_fit" in config:
+    from rdfproduction.joint_fit import describe_joint_fit, joint_targets
+
+    joint = describe_joint_fit(config["joint_fit"], downstream, output_root)
+merge_indexes = config.get("merge_indexes", {})
+if not isinstance(merge_indexes, dict) or ("merge_indexes" in config and not merge_indexes):
+    raise ValueError("merge_indexes must map era names to completed output index files")
+merge_eras = {str(era): index for era, index in merge_indexes.items()}
+if len(merge_eras) != len(merge_indexes):
+    raise ValueError("merge_indexes requires distinct eras")
+for era, index in merge_eras.items():
+    isolated_name("merge", era)
+    if not isinstance(index, str) or not index.strip():
+        raise ValueError(f"merge_indexes.{era} must name an output index file")
+merge_resources = {key: config.get(key, default) for key, default in (
+    ("data_merge_threads", 1), ("hadd_jobs", 4), ("xrdcp_jobs", 4))}
+if any(type(value) is not int or value < 1 for value in merge_resources.values()):
+    raise ValueError("data_merge_threads, hadd_jobs and xrdcp_jobs must be positive integers")
+merge_receipt = str(era_artifacts(output_root, "{era}")["merge_receipt"])
+def merge_index(wildcards):
+    return merge_eras[wildcards.era]
+
+if not downstream and not joint and "plotting" not in config and not merge_eras:
+    raise ValueError("The standalone workflow requires downstream, plotting, merge_indexes or joint_fit")
+
+
+rule all:
+    input:
+        expand(merge_receipt, era=merge_eras),
+        downstream_targets(downstream, output_root),
+        joint_targets(joint, output_root) if joint else [],
+        lambda w: plot_products if "plotting" in config else []
+
+if downstream:
+    include: "downstream.smk"
+
+if joint:
+    include: "joint.smk"
+
+if "plotting" in config:
+    include: "plotting.smk"
+
+if merge_eras:
+    include: "merge.smk"

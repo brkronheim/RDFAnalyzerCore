@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "snakemake_demo_2022_preEE",
+  "exe": "/bin/false",
+  "submit_config": "demo-bundle/submit_config.yaml",
+  "dataset_manifest": "demo-bundle/dataset_manifest.yaml",
+  "options": {"output_directory": "root://example.invalid//demo/2022_preEE"}
+}
