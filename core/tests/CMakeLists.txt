@@ -141,8 +141,6 @@ add_python_unittest(PythonProductionManagerTest        test_production_manager)
 add_python_unittest(PythonRegionSchemaTest             test_region_schema)
 add_python_unittest(PythonReproducibilityReportTest    test_reproducibility_report)
 add_python_unittest(PythonSubmissionBackendTest        test_submission_backend)
-set_property(TEST PythonBenchmarkWorkerTest PythonOptionalExtensionsTest PythonSubmissionBackendTest
-    APPEND PROPERTY ENVIRONMENT "${_EXEC_TMPDIR}")
 add_python_unittest(PythonRefreshXRootDRuntimeTest      test_refresh_xrootd_runtime)
 add_python_unittest(PythonStitchingPlottingTest        test_stitching_plotting)
 add_python_unittest(PythonUprootDatacardTest           test_uproot_datacard)
@@ -166,6 +164,9 @@ foreach(_suite IN ITEMS run_bundle analysis_inputs condor_submission rdf_product
         discover -s ${_TEST_DIR}/python -p test_${_suite}.py -q)
     set_tests_properties(Shared_${_suite} PROPERTIES ENVIRONMENT "PYTHONPATH=${_PYTHONPATH}")
 endforeach()
+set_property(TEST PythonBenchmarkWorkerTest PythonOptionalExtensionsTest PythonSubmissionBackendTest
+    PythonYamlConfigTest Shared_rdf_production Shared_production_build Shared_production_python
+    APPEND PROPERTY ENVIRONMENT "${_EXEC_TMPDIR}")
 foreach(_suite IN ITEMS output_merge_validation skim_publication)
     add_test(NAME Law_${_suite} COMMAND ${_PYTHON_EXECUTABLE} -m unittest
         discover -s ${_TEST_DIR}/law -p test_${_suite}.py -v)

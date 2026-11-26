@@ -11,14 +11,19 @@ from condor_submission import submit_skim_batches
 
 class CondorSubmissionTests(unittest.TestCase):
     def setUp(self):
-        directory = self.enterContext(TemporaryDirectory())
-        self.directory = Path(directory)
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = Path(directory.name)
         self.manifest = self.directory / "submission_manifest.json"
         self.receipt = self.directory / "submitted.json"
         self.journal = self.directory / "submission_journal.json"
         self.context = {"owner": "researcher", "host": "submit.example", "condor": {}}
-        self.context_mock = self.enterContext(patch("condor_submission._submission_context", return_value=self.context))
-        self.run_tool = self.enterContext(patch("condor_submission.subprocess.run"))
+        context_patch = patch("condor_submission._submission_context", return_value=self.context)
+        self.context_mock = context_patch.start()
+        self.addCleanup(context_patch.stop)
+        run_patch = patch("condor_submission.subprocess.run")
+        self.run_tool = run_patch.start()
+        self.addCleanup(run_patch.stop)
         self.validate = Mock()
         self.publish = Mock()
         self.manifest.write_text(json.dumps({"datasets": [self._dataset("one", 1), self._dataset("two", 2)]}))
