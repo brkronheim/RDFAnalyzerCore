@@ -18,7 +18,7 @@ baseline failures recorded below remain separate from these targeted checks.
 
 ## Ownership follow-up
 
-The current CMS revision is pinned in `extensions/cms.lock.json`. It ships four
+The CMS revision used for this validation was pinned at the time. It shipped four
 CMS-owned skills and a standalone skill checker. `StxsManager` and its STXS skill
 belong to core; migration-bin mappings and category fallback policy are explicit
 analysis inputs. The default decay-channel input is `analysis_channel`, and
@@ -48,7 +48,7 @@ the historical extraction state; ownership and intentional default changes in
 this follow-up supersede that source snapshot.
 
 The CMS extension is a separate local Git repository at `extensions/cms`.
-Its tested revision is pinned in `extensions/cms.lock.json`. A complete,
+Its tested revision was pinned at the time of extraction. A complete,
 independently cloneable history is distributed in the ignored local artifact
 `extensions/RDFAnalyzerCMS.bundle`. No remote repository was created.
 

@@ -4,7 +4,7 @@ name: CMS DoubleMuon Analysis
 # This job builds the CMS Run2016G DoubleMuon analysis, runs the analysis
 # executable over a single public CMS Open Data NanoAOD file, and then builds
 # the analytic Z→μμ fit inputs (RooFit workspaces + Combine datacards).
-# The self-hosted runner needs the CVMFS environment and a CERN GitLab SSH key.
+# The self-hosted runner needs the CVMFS environment and access to the CERN GitLab CMS repository.
 #
 # To trigger:
 #   GitHub UI:  Actions → "CMS DoubleMuon Analysis (on request)" → Run workflow
@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       cms_repository:
-        description: "CMS extension Git URL (optional override of the pinned repository URL)"
+        description: "CMS extension Git URL (optional override of the default repository URL)"
         required: false
       threads:
         description: "Number of RDataFrame threads, auto, or max (default: 1)"

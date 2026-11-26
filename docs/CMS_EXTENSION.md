@@ -8,9 +8,8 @@ remain in RDFAnalyzerCore and do not require the CMS extension.
 ## Download and build
 
 The [CMS repository](https://gitlab.cern.ch/bkronhei/RDFAnalyzerCMS) is private.
-Register your SSH public key with a CERN GitLab account that has read access.
-The helper uses CERN GitLab SSH on port 7999 and checks out the commit pinned in
-`extensions/cms.lock.json`.
+Authenticate to CERN GitLab with an account that has read access.
+The fetch helper clones the `main` branch configured in `extensions/cms.lock.json`.
 
 From the core checkout on a supported CVMFS-backed machine:
 
@@ -23,9 +22,13 @@ python -m pip install -r requirements-ci.txt
 source build.sh -DRDF_REQUIRED_EXTENSIONS=cms -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 ```
 
-The helper verifies the revision of an existing checkout and preserves local
-work. Use `--repository` to select another authenticated SSH URL or an optional
-mirror. For direct CMake builds, run
+Run the helper again to fast-forward a clean `main` checkout from its `origin`.
+Use `--revision <commit>` for a reproducible checkout. An existing destination
+must already be at that commit when `--revision` is set. For a new checkout,
+`--repository` selects a mirror or another URL such as
+`ssh://git@gitlab.cern.ch:7999/bkronhei/RDFAnalyzerCMS.git`.
+
+For direct CMake builds, run
 `git submodule update --init --recursive -- core/extern` before configuring.
 For an external checkout, pass its path through `RDF_EXTENSION_PATHS` when sourcing `env.sh`, and pass
 `-DRDF_EXTENSION_PATHS=/path/to/RDFAnalyzerCMS` to CMake. The extension repository owns its tests.
