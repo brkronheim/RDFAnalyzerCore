@@ -287,6 +287,55 @@ def test_download_preserves_existing_directories(tmp_path):
     assert (destination / "user-work.txt").read_text() == "preserve me"
 
 
+def test_cms_fetch_tracks_main_and_preserves_local_work(tmp_path):
+    origin = tmp_path / "origin"
+    destination = tmp_path / "cms"
+    run("git", "init", "--initial-branch=main", str(origin), check=True)
+
+    def git(repo, *args):
+        return run("git", "-C", str(repo), *args, check=True).stdout.strip()
+
+    def commit(api):
+        (origin / "rdf-extension.json").write_text(json.dumps({"core_api_version": api}))
+        git(origin, "add", "rdf-extension.json")
+        git(origin, "-c", "user.name=CMS Fixture", "-c", "user.email=cms@example.test",
+            "commit", "--allow-empty", "-m", "Update CMS fixture")
+        return git(origin, "rev-parse", "HEAD")
+
+    initial = commit(1)
+    git(origin, "switch", "-c", "development")
+    commit(2)
+    fetch = (sys.executable, str(ROOT / "scripts/fetch_cms.py"), "--repository", str(origin))
+    result = run(*fetch, "--destination", str(destination))
+    assert result.returncode == 0, result.stderr
+    assert git(destination, "branch", "--show-current") == "main"
+    assert git(destination, "rev-parse", "HEAD") == initial
+
+    git(origin, "switch", "main")
+    updated = commit(1)
+    result = run(*fetch, "--destination", str(destination))
+    assert result.returncode == 0, result.stderr
+    assert git(destination, "rev-parse", "HEAD") == updated
+
+    commit(2)
+    local = destination / "user-work.txt"
+    local.write_text("preserve me")
+    result = run(*fetch, "--destination", str(destination))
+    assert result.returncode != 0 and "local changes" in result.stderr
+    assert local.read_text() == "preserve me"
+    local.unlink()
+    result = run(*fetch, "--destination", str(destination))
+    assert result.returncode != 0 and "incompatible framework API" in result.stderr
+    assert git(destination, "rev-parse", "HEAD") == updated
+
+    pinned = tmp_path / "pinned"
+    for _ in range(2):
+        result = run(*fetch, "--destination", str(pinned), "--revision", initial)
+        assert result.returncode == 0, result.stderr
+        assert git(pinned, "rev-parse", "HEAD") == initial
+        assert git(pinned, "branch", "--show-current") == ""
+
+
 def test_worker_scripts_embed_policy_without_extension_imports():
     from submission_backend import stage_inputs_block, xrootd_optimize_block
     for block in (stage_inputs_block(), xrootd_optimize_block()):
